@@ -15254,10 +15254,13 @@ export async function serverDuplicatePage(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<{ id: string; name: string }> {
-  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/duplicate/`, {
-    method: "POST",
-    headers: { cookie: sessionCookie },
-  });
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/pages/${pageId}/duplicate/`,
+    {
+      method: "POST",
+      headers: { cookie: sessionCookie },
+    }
+  );
   if (!res.ok) throw new Error(`[parity] page duplicate failed with HTTP ${res.status}.`);
   const payload = (await res.json()) as { id?: unknown; name?: unknown };
   if (typeof payload.id !== "string") throw new Error("[parity] page duplicate returned no id.");
@@ -16602,4 +16605,64 @@ export async function runsDeleteRunner(runnerId: string): Promise<void> {
       `Runner.objects.filter(pk=${JSON.stringify(runnerId)}).delete()\n` +
       `print("PARITY_RUNNER_GONE:1")\n`
   );
+}
+
+// --- Analytics shell oracle reads (NEWFRONT-375, ANL-001..004 + ANL-018). ---
+// Appended; existing helpers above are untouched per the shared contract.
+
+/** One raw analytics read: status plus parsed payload (null when unparsable). */
+export interface AnalyticsRawRead {
+  status: number;
+  payload: unknown;
+}
+
+/** Workspace display name read back from the API (ANL-002 title assertion). */
+export async function analyticsWorkspaceName(session: AuthedSession, slug: string): Promise<string> {
+  const res = await sessionFetch(session, "GET", `/api/workspaces/${slug}/`);
+  if (!res.ok) throw new Error(`[parity] workspace read failed with HTTP ${res.status}.`);
+  const ws = (await res.json()) as { name?: unknown };
+  if (typeof ws.name !== "string") throw new Error("[parity] workspace read carried no string name.");
+  return ws.name;
+}
+
+/**
+ * Raw headline-totals read for one analytics tab, optionally narrowed to a
+ * project subset (ANL-004 scoping, ANL-018 guest read). Mirrors the query the
+ * overview/work-items sections send: `tab` always, `project_ids` only when
+ * the picker holds a non-empty selection.
+ */
+export async function analyticsAdvanceTotalsRaw(
+  session: AuthedSession,
+  slug: string,
+  tab: "overview" | "work-items",
+  projectIds: string[] = []
+): Promise<AnalyticsRawRead> {
+  const params = new URLSearchParams({ tab });
+  if (projectIds.length > 0) params.set("project_ids", projectIds.join(","));
+  const res = await sessionFetch(session, "GET", `/api/workspaces/${slug}/advance-analytics?${params.toString()}`);
+  let payload: unknown = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}
+
+/**
+ * Raw project-create status (ANL-003 member/guest negative, ANL-018). The
+ * throwing create helper cannot express a refusal, so negatives read the
+ * status directly: 200/201 for admins and members, a refusal for guests.
+ */
+export async function analyticsProjectCreateStatus(
+  session: AuthedSession,
+  slug: string,
+  input: { name: string; identifier: string }
+): Promise<number> {
+  const res = await sessionFetch(session, "POST", `/api/workspaces/${slug}/projects/`, {
+    name: input.name,
+    identifier: input.identifier,
+    network: NETWORK.PUBLIC,
+  });
+  return res.status;
 }

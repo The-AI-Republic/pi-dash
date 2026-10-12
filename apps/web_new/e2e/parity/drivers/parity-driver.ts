@@ -7393,6 +7393,58 @@ export interface DeskSigninUpdateLink {
   modulesDragTimelineRowToSelf(name: string): Promise<void>;
   /** Whether the manual-sort warning toast shows. */
   modulesManualSortWarningVisible(): Promise<boolean>;
+
+  // ---------------------------------------------------------------------------
+  // Analytics shell, scoping, permissions (NEWFRONT-375, ANL-001..004 + ANL-018).
+  // The workspace analytics page: tab addressing, header breadcrumb, document
+  // title, no-project empty view, project picker, and guest gating.
+  // Appended; existing entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Open an analytics tab authenticated; resolves once tabs or the empty view settle. */
+  analyticsOpenTab(workspaceSlug: string, tabId: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Open the bare analytics address authenticated; resolves once the redirect settles. */
+  analyticsOpenRoot(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Current page path plus query (tab and redirect assertions). */
+  analyticsCurrentPath(): Promise<string>;
+  /** Tab trigger values in display order. */
+  analyticsTabIds(): Promise<string[]>;
+  /** Selected tab trigger value, or null when no trigger is selected. */
+  analyticsSelectedTab(): Promise<string | null>;
+  /** Click a tab trigger; resolves once the address carries it. */
+  analyticsSelectTab(tabId: string): Promise<void>;
+  /** Whether the named tab's panel content renders (false for unknown ids). */
+  analyticsPanelVisible(tabId: string): Promise<boolean>;
+  /** App-header breadcrumb texts in display order. */
+  analyticsBreadcrumb(): Promise<string[]>;
+  /** Document title of the current page. */
+  analyticsPageTitle(): Promise<string>;
+  /** No-project empty view facts, or null when the tabs view renders. */
+  analyticsEmptyFacts(): Promise<AnalyticsEmptyFacts | null>;
+  /** Click the empty view's project-creation action. */
+  analyticsEmptyCreateProject(): Promise<void>;
+  /** Labels of enabled project-creation controls on the current view (ANL-018 negative). */
+  analyticsCreateAffordances(): Promise<string[]>;
+  /** Project picker button label (all-projects, names, or the count summary). */
+  analyticsPickerLabel(): Promise<string>;
+  /** Open the project picker menu. */
+  analyticsPickerOpen(): Promise<void>;
+  /** Dismiss the project picker menu. */
+  analyticsPickerClose(): Promise<void>;
+  /** Visible picker option names in display order. */
+  analyticsPickerOptions(): Promise<string[]>;
+  /** Type into the picker search box. */
+  analyticsPickerSearch(text: string): Promise<void>;
+  /** Toggle one picker option by project name. */
+  analyticsPickerToggle(name: string): Promise<void>;
+  /** Names currently checked in the open picker. */
+  analyticsPickerChecked(): Promise<string[]>;
+  /** Start capturing analytics API reads (path plus query). */
+  analyticsStartRequestSpy(): Promise<void>;
+  /** Stop the analytics request spy. */
+  analyticsStopRequestSpy(): Promise<void>;
+  /** Analytics API reads captured since the spy started. */
+  analyticsSpyRequests(): Promise<AnalyticsApiRequest[]>;
 }
 
 /** Canonical filter-section keys for the intake list panel. */
@@ -8440,4 +8492,24 @@ export interface ApprovalCard {
   reason: string | null;
   expiry: string | null;
   payload: string;
+}
+
+/** No-project empty view facts (NEWFRONT-375, ANL-003). */
+export interface AnalyticsEmptyFacts {
+  /** Empty view heading. */
+  title: string;
+  /** Empty view supporting text. */
+  description: string;
+  /** Project-creation action label, or null when no action renders. */
+  actionLabel: string | null;
+  /** Whether the creation action renders disabled. */
+  actionDisabled: boolean;
+}
+
+/** One captured analytics API read (NEWFRONT-375, ANL-004). */
+export interface AnalyticsApiRequest {
+  /** Request path without query. */
+  path: string;
+  /** Raw query string without the leading `?`. */
+  query: string;
 }

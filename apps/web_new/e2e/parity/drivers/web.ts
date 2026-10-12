@@ -144,6 +144,8 @@ import type {
   PagesToolbarColorCounts,
   PagesToolbarColorPreview,
   PagesToolbarTooltip,
+  AnalyticsApiRequest,
+  AnalyticsEmptyFacts,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -39315,5 +39317,307 @@ export class WebDriver implements ParityDriver {
         JSON.stringify({ full_width: false, font_size: "large-font", font_style: "sans-serif", sticky_toolbar: sticky })
       );
     }, value);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Analytics shell, scoping, permissions (NEWFRONT-375, ANL-001..004 + ANL-018).
+  // Every selector below was observed on the running old app. The tab strip
+  // carries no per-trigger value attribute (Base-UI tabs), so trigger-to-tab
+  // pairing is derived once per page by clicking each trigger and reading
+  // the address slug — the address IS the tab id per ANL-001.
+  // ---------------------------------------------------------------------------
+
+  /** Trigger index to address-slug pairs in trigger order; derived lazily per page. */
+  private analyticsTabPairs: Array<{ index: number; slug: string }> | null = null;
+
+  private analyticsSlugFromPath(path: string): string | null {
+    const match = /\/analytics\/([^/?#]+)/.exec(path);
+    return match && match[1] ? match[1].replace(/\/+$/, "") : null;
+  }
+
+  private analyticsTriggers(): Locator {
+    return this.page.getByRole("tab");
+  }
+
+  /** Settle the analytics shell: tabs render, or the no-project empty view does. */
+  private async analyticsAwaitShell(): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () => {
+          if (document.querySelector("[role='tab']") !== null) return true;
+          const main = document.querySelector("main") ?? document.body;
+          return [...main.querySelectorAll("h3")].some((h) => (h.textContent ?? "").includes("No project"));
+        },
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics shell settled on neither tabs nor the empty view.");
+      });
+  }
+
+  async analyticsOpenTab(workspaceSlug: string, tabId: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    this.analyticsTabPairs = null;
+    await this.openAuthenticated(`/${workspaceSlug}/analytics/${tabId}`, cookies);
+    await this.analyticsAwaitShell();
+  }
+
+  async analyticsOpenRoot(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    this.analyticsTabPairs = null;
+    await this.openAuthenticated(`/${workspaceSlug}/analytics`, cookies);
+    await this.page.waitForURL("**/analytics/**", { timeout: WebDriver.WAIT_MS });
+    await this.analyticsAwaitShell();
+  }
+
+  async analyticsCurrentPath(): Promise<string> {
+    const url = new URL(this.page.url());
+    return `${url.pathname}${url.search}`;
+  }
+
+  /**
+   * Click each trigger in order and read the address slug it lands on, then
+   * restore the starting address. The pairing is stable for the page (two
+   * static tabs), so later calls reuse it. When the page started on an
+   * unknown tab id (no trigger selected), the pairing clicks would abandon
+   * that address, so the start URL is reloaded instead of click-restoring.
+   */
+  private async analyticsEnsureTabPairs(): Promise<Array<{ index: number; slug: string }>> {
+    if (this.analyticsTabPairs !== null) return this.analyticsTabPairs;
+    const count = await this.analyticsTriggers().count();
+    // Never cache the empty pairing: the strip may simply not have mounted
+    // yet (e.g. the empty view just gave way to the first project).
+    if (count === 0) return [];
+    const selectedBefore = await this.page.evaluate(() => {
+      const tabs = [...document.querySelectorAll("[role='tab']")];
+      return tabs.findIndex((t) => t.getAttribute("aria-selected") === "true");
+    });
+    const startUrl = this.page.url();
+    const pairs: Array<{ index: number; slug: string }> = [];
+    for (let index = 0; index < count; index += 1) {
+      await this.analyticsTriggers().nth(index).click({ timeout: WebDriver.WAIT_MS });
+      await this.page.waitForURL("**/analytics/**", { timeout: WebDriver.WAIT_MS });
+      const slug = this.analyticsSlugFromPath(new URL(this.page.url()).pathname);
+      if (slug === null) throw new Error("[parity] analytics tab click landed off the analytics route.");
+      pairs.push({ index, slug });
+    }
+    if (selectedBefore >= 0) {
+      await this.analyticsTriggers().nth(selectedBefore).click({ timeout: WebDriver.WAIT_MS });
+      await this.page.waitForURL("**/analytics/**", { timeout: WebDriver.WAIT_MS });
+    } else {
+      await this.page.goto(startUrl, { waitUntil: "domcontentloaded" });
+      await this.analyticsAwaitShell();
+    }
+    this.analyticsTabPairs = pairs;
+    return pairs;
+  }
+
+  async analyticsTabIds(): Promise<string[]> {
+    return (await this.analyticsEnsureTabPairs()).map((pair) => pair.slug);
+  }
+
+  async analyticsSelectedTab(): Promise<string | null> {
+    const anySelected = await this.page.evaluate(() => {
+      const tabs = [...document.querySelectorAll("[role='tab']")];
+      return tabs.some((t) => t.getAttribute("aria-selected") === "true");
+    });
+    if (!anySelected) return null;
+    return this.analyticsSlugFromPath(new URL(this.page.url()).pathname);
+  }
+
+  async analyticsSelectTab(tabId: string): Promise<void> {
+    const pairs = await this.analyticsEnsureTabPairs();
+    const pair = pairs.find((p) => p.slug === tabId);
+    if (!pair) throw new Error(`[parity] analytics has no tab addressed as ${JSON.stringify(tabId)}.`);
+    await this.analyticsTriggers().nth(pair.index).click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForURL(`**/analytics/${tabId}**`, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async analyticsPanelVisible(tabId: string): Promise<boolean> {
+    const pairs = await this.analyticsEnsureTabPairs();
+    const pair = pairs.find((p) => p.slug === tabId);
+    if (!pair) return false;
+    return this.page.evaluate((index) => {
+      const tabs = [...document.querySelectorAll("[role='tab']")];
+      const trigger = tabs[index];
+      const controls = trigger?.getAttribute("aria-controls");
+      if (!controls) return false;
+      const panel = document.getElementById(controls);
+      if (panel === null || (panel as HTMLElement).hidden) return false;
+      const style = window.getComputedStyle(panel);
+      return style.display !== "none" && style.visibility !== "hidden";
+    }, pair.index);
+  }
+
+  async analyticsBreadcrumb(): Promise<string[]> {
+    const text = await this.page.evaluate(() => {
+      const bar = document.querySelector("div.px-page-x.flex.h-11");
+      return ((bar?.textContent ?? "") as string).trim();
+    });
+    return text === "" ? [] : [text];
+  }
+
+  async analyticsPageTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async analyticsEmptyFacts(): Promise<AnalyticsEmptyFacts | null> {
+    const hasHeading = await this.page.evaluate(() => {
+      const main = document.querySelector("main") ?? document.body;
+      return [...main.querySelectorAll("h3")].some((h) => ((h.textContent ?? "") as string).includes("No project"));
+    });
+    if (!hasHeading) return null;
+    // The creation action mounts a beat after the heading; waiting keeps
+    // the read from racing it (the null-action path below is preserved for
+    // empty views that genuinely render no action).
+    await this.page
+      .getByRole("button", { name: /create a project/i })
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main") ?? document.body;
+      const heading = [...main.querySelectorAll("h3")].find((h) =>
+        ((h.textContent ?? "") as string).includes("No project")
+      );
+      if (!heading) return null;
+      const description =
+        [...main.querySelectorAll("p")].find((p) => ((p.textContent ?? "") as string).length > 0)?.textContent ?? "";
+      const action = [...main.querySelectorAll("button")].find((b) =>
+        /create a project/i.test((b.textContent ?? "") as string)
+      ) as HTMLButtonElement | undefined;
+      return {
+        title: ((heading.textContent ?? "") as string).trim(),
+        description: (description as string).trim(),
+        actionLabel: action ? ((action.textContent ?? "") as string).trim() : null,
+        actionDisabled: action ? action.disabled : false,
+      };
+    });
+  }
+
+  async analyticsEmptyCreateProject(): Promise<void> {
+    const main = this.page.locator("main");
+    const scope = (await main.count()) > 0 ? main : this.page;
+    await scope.getByRole("button", { name: /create a project/i }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async analyticsCreateAffordances(): Promise<string[]> {
+    return this.page.evaluate(() => {
+      const btns = [...document.querySelectorAll("button")].filter((b) =>
+        /create a project/i.test((b.textContent ?? "") as string)
+      );
+      return btns
+        .filter((b) => !(b as HTMLButtonElement).disabled)
+        .map((b) => ((b.textContent ?? "") as string).trim())
+        .filter((t) => t !== "");
+    });
+  }
+
+  /** The project picker button, scoped to the tab strip row. */
+  private analyticsPickerButton(): Locator {
+    return this.page.getByRole("tablist").locator("..").locator("button[aria-haspopup='listbox']");
+  }
+
+  async analyticsPickerLabel(): Promise<string> {
+    const btn = this.analyticsPickerButton();
+    await btn.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    return ((await btn.first().innerText({ timeout: WebDriver.WAIT_MS })) as string).trim();
+  }
+
+  async analyticsPickerOpen(): Promise<void> {
+    // The options portal mounts a zero-box listbox wrapper (its popper
+    // child carries the visible menu), so Playwright never calls it
+    // "visible": attached is the honest open signal, and the search box
+    // inside proves the menu is usable.
+    if ((await this.page.getByRole("listbox").count()) > 0) return;
+    await this.analyticsPickerButton().first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("listbox").waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    await this.page
+      .getByRole("listbox")
+      .getByPlaceholder("Search")
+      .waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async analyticsPickerClose(): Promise<void> {
+    // The menu's own button toggles it shut. Escape is not the closer
+    // here: the search box lives in a portal whose keystrokes never reach
+    // the custom close handler, so Escape-first would burn a full wait.
+    if ((await this.page.getByRole("listbox").count()) === 0) return;
+    await this.analyticsPickerButton().first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .waitForFunction(() => document.querySelectorAll("[role='listbox']").length === 0, {
+        timeout: WebDriver.WAIT_MS,
+      })
+      .catch(async () => {
+        await this.page.keyboard.press("Escape");
+        await this.page.waitForFunction(() => document.querySelectorAll("[role='listbox']").length === 0, {
+          timeout: WebDriver.WAIT_MS,
+        });
+      });
+  }
+
+  async analyticsPickerOptions(): Promise<string[]> {
+    return this.page.evaluate(() => {
+      const listbox = document.querySelector("[role='listbox']");
+      if (!listbox) return [];
+      return [...listbox.querySelectorAll("[role='option']")]
+        .map((o) => ((o.textContent ?? "") as string).trim())
+        .filter((t) => t !== "");
+    });
+  }
+
+  async analyticsPickerSearch(text: string): Promise<void> {
+    await this.analyticsPickerOpen();
+    await this.page.getByRole("listbox").getByPlaceholder("Search").fill(text, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async analyticsPickerToggle(name: string): Promise<void> {
+    await this.analyticsPickerOpen();
+    const clicked = await this.page.evaluate((target) => {
+      const listbox = document.querySelector("[role='listbox']");
+      if (!listbox) return false;
+      const option = [...listbox.querySelectorAll("[role='option']")].find(
+        (o) => ((o.textContent ?? "") as string).trim() === target
+      );
+      if (!option) return false;
+      (option as HTMLElement).click();
+      return true;
+    }, name);
+    if (!clicked) throw new Error(`[parity] analytics picker has no option named ${JSON.stringify(name)}.`);
+  }
+
+  async analyticsPickerChecked(): Promise<string[]> {
+    return this.page.evaluate(() => {
+      const listbox = document.querySelector("[role='listbox']");
+      if (!listbox) return [];
+      return [...listbox.querySelectorAll("[role='option']")]
+        .filter((o) => o.getAttribute("aria-selected") === "true")
+        .map((o) => ((o.textContent ?? "") as string).trim())
+        .filter((t) => t !== "");
+    });
+  }
+
+  private analyticsSpyHandler: ((request: { url(): string }) => void) | null = null;
+  private analyticsSpySeen: AnalyticsApiRequest[] = [];
+
+  async analyticsStartRequestSpy(): Promise<void> {
+    await this.analyticsStopRequestSpy();
+    this.analyticsSpySeen = [];
+    this.analyticsSpyHandler = (request: { url(): string }) => {
+      const raw = request.url();
+      if (!raw.includes("/advance-analytics")) return;
+      const parsed = new URL(raw);
+      this.analyticsSpySeen.push({ path: parsed.pathname, query: parsed.search.replace(/^\?/, "") });
+    };
+    this.page.on("request", this.analyticsSpyHandler as (request: never) => void);
+  }
+
+  async analyticsStopRequestSpy(): Promise<void> {
+    if (this.analyticsSpyHandler) {
+      this.page.off("request", this.analyticsSpyHandler as (request: never) => void);
+      this.analyticsSpyHandler = null;
+    }
+  }
+
+  async analyticsSpyRequests(): Promise<AnalyticsApiRequest[]> {
+    return [...this.analyticsSpySeen];
   }
 }

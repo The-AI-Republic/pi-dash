@@ -8,17 +8,42 @@
 // real stack.
 import { createServer, type Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { pagesLiveOracleBase, serverPageRecord } from "./api";
+import {
+  NETWORK,
+  analyticsAdvanceTotalsRaw,
+  analyticsProjectCreateStatus,
+  analyticsWorkspaceName,
+  pagesLiveOracleBase,
+  serverPageRecord,
+  type AuthedSession,
+} from "./api";
 
 let payload: Record<string, unknown>;
 let server: Server;
 let apiBase: string;
+/** Override the stub's status (analytics tests); defaults to the old 200. */
+let stubStatus: number;
+/** Serve this raw body instead of JSON(payload) (analytics tests). */
+let stubRaw: string | null;
+/** Requests the stub has served since the last reset (analytics tests). */
+let stubSeen: Array<{ method: string; url: string; body: string }>;
 
 beforeEach(async () => {
   payload = {};
-  server = createServer((_req, res) => {
-    res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify(payload));
+  stubStatus = 200;
+  stubRaw = null;
+  stubSeen = [];
+  server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk: Buffer) => {
+      body += chunk.toString("utf8");
+    });
+    req.on("end", () => {
+      stubSeen.push({ method: req.method ?? "", url: req.url ?? "", body });
+      res.statusCode = stubStatus;
+      res.setHeader("content-type", "application/json");
+      res.end(stubRaw ?? JSON.stringify(payload));
+    });
   });
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", () => resolve());
@@ -113,5 +138,102 @@ describe("pagesLiveOracleBase", () => {
     process.env["PARITY_NS"] = "257";
     process.env["PARITY_ORACLE_URL"] = "http://proxy:8080//";
     expect(pagesLiveOracleBase()).toBe("http://proxy:8080");
+  });
+});
+
+// Analytics shell oracle reads (NEWFRONT-375): request shaping and response
+// mapping against the stub, so the live specs only prove server behavior.
+function analyticsSession(): AuthedSession {
+  return {
+    email: "anl@example.com",
+    password: "pw",
+    userId: "user-1",
+    cookie: "session-id=s; csrftoken=c",
+    csrfToken: "c",
+    apiBase,
+  };
+}
+
+describe("analyticsWorkspaceName", () => {
+  it("reads the workspace display name", async () => {
+    payload = { name: "Anl WS" };
+    await expect(analyticsWorkspaceName(analyticsSession(), "anl-ws")).resolves.toBe("Anl WS");
+    expect(stubSeen).toHaveLength(1);
+    expect(stubSeen[0]?.method).toBe("GET");
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/anl-ws/");
+  });
+
+  it("throws when the workspace carries no string name", async () => {
+    payload = {};
+    await expect(analyticsWorkspaceName(analyticsSession(), "anl-ws")).rejects.toThrow(
+      "[parity] workspace read carried no string name."
+    );
+  });
+
+  it("throws when the workspace read fails", async () => {
+    stubStatus = 404;
+    await expect(analyticsWorkspaceName(analyticsSession(), "anl-ws")).rejects.toThrow(
+      "[parity] workspace read failed with HTTP 404."
+    );
+  });
+});
+
+describe("analyticsAdvanceTotalsRaw", () => {
+  it("sends tab without project_ids for the full workspace", async () => {
+    payload = { total_projects: { count: 2 } };
+    const read = await analyticsAdvanceTotalsRaw(analyticsSession(), "anl-ws", "overview");
+    expect(read.status).toBe(200);
+    expect(read.payload).toEqual({ total_projects: { count: 2 } });
+    expect(stubSeen).toHaveLength(1);
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.pathname).toBe("/api/workspaces/anl-ws/advance-analytics");
+    expect(url.searchParams.get("tab")).toBe("overview");
+    expect(url.searchParams.has("project_ids")).toBe(false);
+  });
+
+  it("comma-joins the picked projects into project_ids", async () => {
+    payload = { total_projects: { count: 1 } };
+    const read = await analyticsAdvanceTotalsRaw(analyticsSession(), "anl-ws", "work-items", ["a", "b"]);
+    expect(read.status).toBe(200);
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.searchParams.get("tab")).toBe("work-items");
+    expect(url.searchParams.get("project_ids")).toBe("a,b");
+  });
+
+  it("carries the status with a null payload when the body is unparsable", async () => {
+    stubStatus = 403;
+    stubRaw = "forbidden";
+    const read = await analyticsAdvanceTotalsRaw(analyticsSession(), "anl-ws", "overview");
+    expect(read.status).toBe(403);
+    expect(read.payload).toBeNull();
+  });
+});
+
+describe("analyticsProjectCreateStatus", () => {
+  it("posts the project form and returns the status", async () => {
+    stubStatus = 201;
+    payload = { id: "p1" };
+    const status = await analyticsProjectCreateStatus(analyticsSession(), "anl-ws", {
+      name: "Anl Made",
+      identifier: "ANL0101",
+    });
+    expect(status).toBe(201);
+    expect(stubSeen).toHaveLength(1);
+    expect(stubSeen[0]?.method).toBe("POST");
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/anl-ws/projects/");
+    expect(JSON.parse(stubSeen[0]?.body ?? "{}")).toEqual({
+      name: "Anl Made",
+      identifier: "ANL0101",
+      network: NETWORK.PUBLIC,
+    });
+  });
+
+  it("returns refusals instead of throwing", async () => {
+    stubStatus = 403;
+    const status = await analyticsProjectCreateStatus(analyticsSession(), "anl-ws", {
+      name: "Guest Try",
+      identifier: "GT0101",
+    });
+    expect(status).toBe(403);
   });
 });
