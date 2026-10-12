@@ -47,19 +47,20 @@ def queue_depth(queue: str = "celery") -> int:
         return message_count
 
 
-def drain_queue(queue: str = "celery", limit: int = 100) -> list:
+def drain_queue(queue: str = "celery", limit: int = 100, broker_url: str | None = None) -> list:
     """Consume up to ``limit`` pending messages from a broker queue (kombu).
 
     Used to observe fan-out (scan tasks enqueueing fire_* jobs) and to leave
     a clean queue behind. Returns the decoded (headers, body) pairs.
 
     Only run against a dedicated contract worker/queue: draining acks every
-    message it sees.
+    message it sees. ``broker_url`` (PIDASHCONV-823 write-replay: the
+    upstream Django's broker) overrides CELERY_BROKER_URL when given.
     """
     from kombu import Connection
 
     seen = []
-    with Connection(config.required(config.CELERY_BROKER_URL)) as conn:
+    with Connection(broker_url or config.required(config.CELERY_BROKER_URL)) as conn:
         queue_obj = conn.SimpleQueue(queue)
         try:
             for _ in range(limit):

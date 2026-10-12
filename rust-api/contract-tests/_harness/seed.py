@@ -1849,7 +1849,6 @@ class Seeder:
                 host_label,
                 hash_token(raw, self.secret_key),
                 token_fingerprint(raw),
-                host_label,
             ),
         )
         self._put("machine_token", token_id)

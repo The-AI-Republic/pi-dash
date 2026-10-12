@@ -1,0 +1,252 @@
+name: rust-api-replay
+
+# PIDASHCONV-823 (stage 8, V-04): write-replay proof. Restores one seeded
+# snapshot into two databases, replays the corpus (ordered write
+# requests) against Django and against Rust with all cutover flags on,
+# and compares status + body, database state, enqueued jobs, and sink
+# deliveries after every request. No workers, no beat: jobs accumulate
+# observably. Also gates corpus coverage (every write route covered or
+# listed with a reason).
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-replay.yml"
+  pull_request:
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-replay.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  replay:
+    name: write-replay corpus vs Django
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:15.7-alpine
+        env:
+          POSTGRES_USER: pi_dash
+          POSTGRES_PASSWORD: pi_dash
+          POSTGRES_DB: pi_dash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:3-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: pi_dash
+          RABBITMQ_DEFAULT_PASS: pi_dash
+          RABBITMQ_DEFAULT_VHOST: replay
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.test
+      SECRET_KEY: replay-ci-secret
+      # Same Fernet test key as rust-api-contract-tests.yml: the
+      # assistant corpus stores BYOK credentials through it, and the
+      # comparer decrypts both backends' ciphertext with it.
+      ASSISTANT_CRYPTO_BACKEND: fernet
+      ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # Cloud parity like the contract suite: the SSRF cases pin the guard.
+      ASSISTANT_BLOCK_PRIVATE_URLS: "True"
+      WEB_URL: http://localhost
+      APP_BASE_URL: http://localhost
+      API_KEY_RATE_LIMIT: 100000/minute
+      EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
+      EMAIL_HOST: 127.0.0.1
+      EMAIL_USE_TLS: "0"
+      EMAIL_USE_SSL: "0"
+      REPLAY_DJANGO_URL: http://127.0.0.1:8001
+      REPLAY_RUST_URL: http://127.0.0.1:8080
+      REPLAY_DJANGO_DB: postgresql://pi_dash:pi_dash@localhost:5432/replay_django
+      REPLAY_RUST_DB: postgresql://pi_dash:pi_dash@localhost:5432/replay_rust
+      REPLAY_TEMPLATE_DB: postgresql://pi_dash:pi_dash@localhost:5432/replay_template
+      REPLAY_UPSTREAM_BROKER_URL: redis://localhost:6379/12
+      CELERY_BROKER_URL: redis://localhost:6379/11
+      REPLAY_DJANGO_REDIS_URL: redis://localhost:6379/13
+      REPLAY_RUST_REDIS_URL: redis://localhost:6379/15
+      REPLAY_RUST_AMQP_URL: amqp://pi_dash:pi_dash@localhost:5672/replay
+      REPLAY_SNAPSHOT: /tmp/replay-snapshot.sql
+      REPLAY_DJANGO_WEBHOOK_BASE: http://127.0.0.1:18131
+      REPLAY_RUST_WEBHOOK_BASE: http://127.0.0.1:18132
+      REPLAY_DJANGO_SMTP_PORT: "11231"
+      REPLAY_RUST_SMTP_PORT: "11232"
+      # GitHub App secrets for the replay servers (identity keys come
+      # from the corpus DB seed). The webhook secret MUST equal
+      # _WEBHOOK_SECRET in replay/corpus/app_integrations.py — the
+      # corpus HMAC-signs webhook deliveries with it.
+      GITHUB_APP_PRIVATE_KEY: replay-dummy-private-key
+      GITHUB_APP_CLIENT_SECRET: replay-dummy-client-secret
+      GITHUB_APP_WEBHOOK_SECRET: replay-webhook-secret-b6
+      # Same inert dummy as the contract suite: with the key set the
+      # AI-assistant task legs reach the provider-error envelope (500)
+      # instead of the missing-key 400.
+      LLM_API_KEY: dummy-contract-key
+      # Object-store credentials for offline SigV4 presigning (same
+      # block as rust-api-contract-rust.yml): Django's S3Storage
+      # reads AWS_S3_BUCKET_NAME and presigned-POST mints 500
+      # without it. Deliberately NO endpoint URL and no LocalStack:
+      # the corpus only mints presigned URLs (blanked at compare),
+      # never performs live S3 I/O, and both backends presign
+      # offline from these same values.
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_S3_BUCKET_NAME: pi-dash-contract
+      AWS_STORAGE_BUCKET_NAME: pi-dash-contract
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.x"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements/base.txt
+            apps/api/requirements/test.txt
+            rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install postgres client (pg_dump/psql for snapshot restore)
+        run: |
+          which pg_dump psql || sudo apt-get install -y postgresql-client
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/test.txt
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Create replay databases
+        run: |
+          export PGPASSWORD=pi_dash
+          psql -h localhost -U pi_dash -d pi_dash -c "CREATE DATABASE replay_template;"
+          psql -h localhost -U pi_dash -d pi_dash -c "CREATE DATABASE replay_django;"
+          psql -h localhost -U pi_dash -d pi_dash -c "CREATE DATABASE replay_rust;"
+
+      - name: Migrate replay databases
+        working-directory: apps/api
+        run: |
+          DATABASE_URL="$REPLAY_TEMPLATE_DB" python manage.py migrate --no-input
+          DATABASE_URL="$REPLAY_DJANGO_DB" python manage.py migrate --no-input
+          DATABASE_URL="$REPLAY_RUST_DB" python manage.py migrate --no-input
+
+      - name: Seed template and dump snapshot
+        working-directory: rust-api/contract-tests
+        run: |
+          python -m replay.snapshot seed --database-url "$REPLAY_TEMPLATE_DB"
+          python -m replay.snapshot dump --database-url "$REPLAY_TEMPLATE_DB" --out "$REPLAY_SNAPSHOT"
+          ls -la "$REPLAY_SNAPSHOT"
+
+      - name: Build pidash-api binary
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Start Django-direct (:8001, replay_django DB)
+        working-directory: apps/api
+        run: |
+          DATABASE_URL="$REPLAY_DJANGO_DB" \
+          REDIS_URL="redis://localhost:6379/13" AMQP_URL="redis://localhost:6379/11" \
+          EMAIL_PORT="$REPLAY_DJANGO_SMTP_PORT" \
+          nohup python manage.py runserver 127.0.0.1:8001 --noreload \
+            > /tmp/replay-django-direct.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8001/ > /dev/null && break
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:8001/ > /dev/null
+
+      - name: Start Django-upstream (:8002, replay_rust DB)
+        working-directory: apps/api
+        run: |
+          DATABASE_URL="$REPLAY_RUST_DB" \
+          REDIS_URL="redis://localhost:6379/14" AMQP_URL="redis://localhost:6379/12" \
+          EMAIL_PORT="$REPLAY_RUST_SMTP_PORT" \
+          nohup python manage.py runserver 127.0.0.1:8002 --noreload \
+            > /tmp/replay-django-upstream.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8002/ > /dev/null && break
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:8002/ > /dev/null
+
+      - name: Start Rust (all flags on, :8080, replay_rust DB)
+        working-directory: rust-api
+        run: |
+          export DATABASE_URL="$REPLAY_RUST_DB"
+          export REDIS_URL="redis://localhost:6379/15"
+          export AMQP_URL="$REPLAY_RUST_AMQP_URL"
+          export PIDASH_DJANGO_UPSTREAM=http://127.0.0.1:8002
+          export PIDASH_RUST_WEB=1 PIDASH_RUST_APP=1 PIDASH_RUST_ASSISTANT=1
+          export PIDASH_RUST_LOOP=1 PIDASH_RUST_PROMPTING=1 PIDASH_RUST_SPACE=1
+          export PIDASH_RUST_LICENSE=1 PIDASH_RUST_RUNNER_WEB=1 PIDASH_RUST_API_V1=1
+          export PIDASH_RUST_RUNNER=1 PIDASH_RUST_AUTH=1
+          nohup ./target/debug/pidash-api serve --bind 127.0.0.1:8080 \
+            > /tmp/replay-rust.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:8080/healthz > /dev/null
+
+      - name: Corpus coverage check
+        run: >
+          python rust-api/contract-tests/replay/coverage.py check
+          --binary rust-api/target/debug/pidash-api
+
+      - name: Run write-replay corpus
+        working-directory: rust-api/contract-tests
+        # Same plugin dodge as the other live jobs: the API install puts
+        # pytest-django in this interpreter; replay never touches Django.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django replay/test_replay.py replay/test_meta.py -v
+
+      - name: Upload service logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-service-logs
+          path: |
+            /tmp/replay-django-direct.log
+            /tmp/replay-django-upstream.log
+            /tmp/replay-rust.log
