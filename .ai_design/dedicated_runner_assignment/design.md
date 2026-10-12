@@ -135,15 +135,15 @@ Every existing row satisfies every new constraint. HA-6 times the constraint val
 
 A runner `R` can be the dedicated runner of issue `X`, when user `U` makes the request, if all of the following hold:
 
-| #   | Rule                                                                                    | Error code                  |
-| --- | --------------------------------------------------------------------------------------- | --------------------------- |
-| E1  | `U` can use `R` (`can_use_runner`): today, `U` owns it. Otherwise `R` "does not exist". | `runner_not_found`          |
-| E2  | `R.pod.project_id == X.project_id` and the pod is not soft-deleted.                     | `runner_wrong_project`      |
-| E3  | If the request also names a pod, it is `R.pod`.                                         | `runner_pod_mismatch`       |
-| E4  | `R.status != revoked`.                                                                  | `runner_revoked`            |
-| E5  | `R.provisioning != desktop_bundled`.                                                    | `runner_desktop_bundled`    |
-| E6  | The executor after this request is `local_runner` (§8).                                 | `executor_not_local`        |
-| E7  | `R.owner` is the issue's creator or one of its current assignees.                       | `runner_owner_not_on_issue` |
+| #   | Rule                                                                                         | Error code                  |
+| --- | -------------------------------------------------------------------------------------------- | --------------------------- |
+| E1  | `U` can use `R` (`can_use_runner`): today, `U` owns it. Otherwise `R` "does not exist".      | `runner_not_found`          |
+| E2  | `R.pod.project_id == X.project_id` and the pod is not soft-deleted.                          | `runner_wrong_project`      |
+| E3  | If the request also names a pod, it is `R.pod`.                                              | `runner_pod_mismatch`       |
+| E4  | `R.status != revoked`.                                                                       | `runner_revoked`            |
+| E5  | `R.provisioning != desktop_bundled`.                                                         | `runner_desktop_bundled`    |
+| E6  | The executor after this request is `local_runner` (§8).                                      | `executor_not_local`        |
+| E7  | `R.owner` is the issue's creator or one of its current assignees.                            | `runner_owner_not_on_issue` |
 | E8  | The issue has no run that a runner holds; `QUEUED` and `PAUSED_AWAITING_INPUT` pass (§13.2). | `active_run_in_progress`    |
 
 E7 is `filter_runs_usable_by_runner` reduced to the clauses that hold for _every_ run of the issue. A tick run is created by the agent system user, so "the run's creator owns the runner" cannot be relied on. On issue creation the requester is the creator, so a user's own runner always passes E7. Combined with E1, in v1 a user dedicates an issue to **their own** runner, on an issue they created or are assigned to.
@@ -315,15 +315,15 @@ Runs already `ASSIGNED` or `RUNNING` on a runner that goes silent are not touche
 
 ## 12. User-chosen pin versus locality pin
 
-| Mechanism                                         | Locality pin                                                | Dedicated pin                                                                            |
-| ------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| Set when                                          | Parent's runner is online with a fresh heartbeat, same pod  | Issue has a dedicated runner, whatever its status                                        |
-| `release_pins_on_offline_runners`                 | Released after `RUNNER_OFFLINE_PIN_RELEASE_SECS` (as today) | **Not released** (§11)                                                                   |
-| `Runner.revoke()`                                 | Un-pinned (as today)                                        | Un-pinned, and the issue's assignment is cleared (§13)                                   |
-| Manual release endpoint                           | Un-pinned (as today)                                        | Un-pinned for this run only; assignment unchanged; says so (§12.2)                       |
-| `apply_run_resume_unavailable`                    | Re-queued without the pin (as today)                        | Re-queued **with** the pin (§9.3)                                                        |
-| `fresh_session`                                   | No pin                                                      | Pin kept (§9.2)                                                                          |
-| Runner pod move guard (`runner/views/runners.py`) | Blocks the move while the run is non-terminal (as today)    | Same                                                                                     |
+| Mechanism                                         | Locality pin                                                | Dedicated pin                                                      |
+| ------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------ |
+| Set when                                          | Parent's runner is online with a fresh heartbeat, same pod  | Issue has a dedicated runner, whatever its status                  |
+| `release_pins_on_offline_runners`                 | Released after `RUNNER_OFFLINE_PIN_RELEASE_SECS` (as today) | **Not released** (§11)                                             |
+| `Runner.revoke()`                                 | Un-pinned (as today)                                        | Un-pinned, and the issue's assignment is cleared (§13)             |
+| Manual release endpoint                           | Un-pinned (as today)                                        | Un-pinned for this run only; assignment unchanged; says so (§12.2) |
+| `apply_run_resume_unavailable`                    | Re-queued without the pin (as today)                        | Re-queued **with** the pin (§9.3)                                  |
+| `fresh_session`                                   | No pin                                                      | Pin kept (§9.2)                                                    |
+| Runner pod move guard (`runner/views/runners.py`) | Blocks the move while the run is non-terminal (as today)    | Same                                                               |
 
 ### 12.1 The sweep
 
@@ -348,17 +348,17 @@ To move the issue itself, change its runner (§13.2). The CLI and the MCP tools 
 
 Every row that clears the assignment calls `clear_dedicated_runner(issue, reason=…)`, which sets `assigned_runner = NULL`, leaves `assigned_pod` alone, writes an activity entry, and posts one system comment naming the runner and the reason.
 
-| Event                                                                  | Issue                                                                                   | Its queued run                                              | Its running run                         |
-| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------- | --------------------------------------- |
-| Runner revoked (any reason, including the owner losing membership)     | Cleared. Falls back to its pod.                                                         | Un-pinned, served by the pod (today's revoke behaviour)     | Cancelled (today)                       |
-| Runner deleted                                                         | Same; delete is revoke then delete. `SET_NULL` is the net.                              | Same                                                        | Same                                    |
-| Runner moved to another pod of the same project                        | Follows the runner: `assigned_pod` is updated to the new pod in the move's transaction. | Cannot exist: the move is refused while a run is bound (see below) | Cannot exist (same guard)        |
-| Issue's pod changed to another pod, no runner in the request           | Cleared.                                                                                | Cannot exist: pod changes are refused during an active run  | —                                       |
-| Issue's executor changed to `cloud_agent` / `managed_runner` / inherit | Cleared (§8).                                                                           | Cannot exist: same guard                                    | —                                       |
-| Issue moved to another project (`utils/issue_move.py`)                 | Cleared in the same `save(update_fields=…)` that resets `assigned_pod`.                 | Cancelled and replaced by the handoff run, unpinned (today) | Handoff as today                        |
-| Runner's owner removed from the issue's assignees (and is not creator) | Not cleared. The next run is bounced by preflight with a comment (§9.4).                | Failed by the sweep as stranded (§12.1)                     | Finishes                                |
-| Runner offline                                                         | Unchanged.                                                                              | Waits (§11)                                                 | `fail_runs_on_offline_runners` as today |
-| Sub-issue created under a dedicated issue                              | The child does **not** inherit. It gets the project default pod, like any new issue.    | —                                                           | —                                       |
+| Event                                                                  | Issue                                                                                   | Its queued run                                                     | Its running run                         |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------------- |
+| Runner revoked (any reason, including the owner losing membership)     | Cleared. Falls back to its pod.                                                         | Un-pinned, served by the pod (today's revoke behaviour)            | Cancelled (today)                       |
+| Runner deleted                                                         | Same; delete is revoke then delete. `SET_NULL` is the net.                              | Same                                                               | Same                                    |
+| Runner moved to another pod of the same project                        | Follows the runner: `assigned_pod` is updated to the new pod in the move's transaction. | Cannot exist: the move is refused while a run is bound (see below) | Cannot exist (same guard)               |
+| Issue's pod changed to another pod, no runner in the request           | Cleared.                                                                                | Cannot exist: pod changes are refused during an active run         | —                                       |
+| Issue's executor changed to `cloud_agent` / `managed_runner` / inherit | Cleared (§8).                                                                           | Cannot exist: same guard                                           | —                                       |
+| Issue moved to another project (`utils/issue_move.py`)                 | Cleared in the same `save(update_fields=…)` that resets `assigned_pod`.                 | Cancelled and replaced by the handoff run, unpinned (today)        | Handoff as today                        |
+| Runner's owner removed from the issue's assignees (and is not creator) | Not cleared. The next run is bounced by preflight with a comment (§9.4).                | Failed by the sweep as stranded (§12.1)                            | Finishes                                |
+| Runner offline                                                         | Unchanged.                                                                              | Waits (§11)                                                        | `fail_runs_on_offline_runners` as today |
+| Sub-issue created under a dedicated issue                              | The child does **not** inherit. It gets the project default pod, like any new issue.    | —                                                                  | —                                       |
 
 The runner-move guard (`runner/views/runners.py`) refuses a move while a non-terminal run has `runner` or `pinned_runner` set to the runner. A run released by hand (§12.2) is no longer pinned and may be queued or running elsewhere in the old pod, so the guard gains one clause: the move is also refused while any issue dedicated to the runner has a non-terminal run. Without it the move would change `assigned_pod` under an active run, which the issue-side guard forbids.
 
@@ -506,13 +506,13 @@ Neither is on `main`; neither is changed here. Follow-up issues are filed in the
 | Contract, both API surfaces      | Set, change, clear; every error code and shape; `assigned_runner_detail`; `assignable_for`; a pod-only issue serializes as before plus two null fields.                                                                                                                                                   | `tests/contract/app/`, `tests/contract/api/`                                      |
 | Pin resolver and phases          | One test per row of §9.2, including `fresh_session` keeping the pin and an offline runner still being pinned; stale assignment self-heals.                                                                                                                                                                | `tests/unit/orchestration/test_service.py`, `test_scheduling.py`                  |
 | Matcher                          | A dedicated run is never returned to another runner by `next_for_runner`, `next_queued_run_for_pod`, `drain_pod` or `drain_for_runner`; it goes to its runner even when another is idle and its own is busy; personal queue is FIFO across pin kinds. **Existing matcher and pin tests pass unmodified.** | `tests/unit/runner/test_matcher.py`, `test_drain_pod.py`                          |
-| Sweep and release                | Locality pins released as today; dedicated pins never released by the sweep, however long the runner is silent; stranded run failed; manual release leaves the assignment and reports it; `apply_run_resume_unavailable` keeps a dedicated pin.                                         | `tests/unit/runner/test_offline_runner_recovery.py`, `test_runs_views.py`         |
-| Lifecycle                        | One test per row of §13.1: revoke, delete, runner pod move (and its refusal while a dedicated issue has a run), issue pod change, executor change, project move, assignee removal.                                                                                                                                                                            | `test_revocation.py`, `test_runner_pod_move.py`, `test_issue_move_run_repoint.py` |
+| Sweep and release                | Locality pins released as today; dedicated pins never released by the sweep, however long the runner is silent; stranded run failed; manual release leaves the assignment and reports it; `apply_run_resume_unavailable` keeps a dedicated pin.                                                           | `tests/unit/runner/test_offline_runner_recovery.py`, `test_runs_views.py`         |
+| Lifecycle                        | One test per row of §13.1: revoke, delete, runner pod move (and its refusal while a dedicated issue has a run), issue pod change, executor change, project move, assignee removal.                                                                                                                        | `test_revocation.py`, `test_runner_pod_move.py`, `test_issue_move_run_repoint.py` |
 | Preflight and waiting state      | Bounce with the dedicated reason; creation-time offline comment posted once; `dispatch_wait` for each `reason`.                                                                                                                                                                                           | `tests/unit/orchestration/test_eligibility_preflight.py`                          |
 | Web                              | Option building, disabled states and reasons, tagged value round-trip, hydration of the selected runner, the waiting banner's actions.                                                                                                                                                                    | `apps/web/tests/issues/execution-target*.test.ts`                                 |
 | CLI                              | Argument mapping for `--runner`, `--clear-runner`, `--pod`; name resolution and ambiguity; error passthrough.                                                                                                                                                                                             | `runner/` unit tests                                                              |
 | MCP                              | The new inputs and outputs.                                                                                                                                                                                                                                                                               | private repo                                                                      |
-| End to end, two runners, one pod | The six scenarios in HA-6, with the offline scenario asserting the decision of §11 and the revoke scenario asserting the default of §13.1.                                                                                                                                                                 | HA-6                                                                              |
+| End to end, two runners, one pod | The six scenarios in HA-6, with the offline scenario asserting the decision of §11 and the revoke scenario asserting the default of §13.1.                                                                                                                                                                | HA-6                                                                              |
 
 ## 19. Rollout
 
@@ -542,14 +542,14 @@ Scope this design adds to the epics as first written: `--pod` on the CLI and `as
 
 ## 21. Decisions for a human to confirm
 
-| #   | Question                                                         | Default built into this design                                                                                  | Section |
-| --- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------- |
-| H-1 | Dedicated runner offline with a run queued                       | **Decided, not open** (project owner, 2026-10-12): wait, visibly; no automatic fallback, no timeout.            | §11     |
-| H-2 | Dedicated runner revoked or deleted                              | Clear the assignment, fall back to the pod, post a comment.                                                     | §13.1   |
-| H-3 | Dedicated work versus squad work on the same runner; queue limit | Dedicated runs go first; no cap; queue depth shown and warned.                                                  | §10     |
-| H-4 | Who may dedicate an issue to a runner                            | The runner's owner, on an issue they created or are assigned to. Otherwise rejected with a clear message.       | §7.1    |
-| H-5 | Rollout gate                                                     | A temporary operator setting, default off until HA-3 lands, removed one release after HA-6.                     | §19     |
-| H-6 | Showing a dedicated runner's name, status and owner on the issue | Shown to everyone who can see the issue.                                                                        | §14.1   |
+| #   | Question                                                         | Default built into this design                                                                            | Section |
+| --- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------- |
+| H-1 | Dedicated runner offline with a run queued                       | **Decided, not open** (project owner, 2026-10-12): wait, visibly; no automatic fallback, no timeout.      | §11     |
+| H-2 | Dedicated runner revoked or deleted                              | Clear the assignment, fall back to the pod, post a comment.                                               | §13.1   |
+| H-3 | Dedicated work versus squad work on the same runner; queue limit | Dedicated runs go first; no cap; queue depth shown and warned.                                            | §10     |
+| H-4 | Who may dedicate an issue to a runner                            | The runner's owner, on an issue they created or are assigned to. Otherwise rejected with a clear message. | §7.1    |
+| H-5 | Rollout gate                                                     | A temporary operator setting, default off until HA-3 lands, removed one release after HA-6.               | §19     |
+| H-6 | Showing a dedicated runner's name, status and owner on the issue | Shown to everyone who can see the issue.                                                                  | §14.1   |
 
 H-1 keeps its number so references to H-2 to H-6 stay stable; five decisions are open. The epics build against the defaults. A different answer to H-2 changes HA-3 only; H-3 changes HA-3 and HA-4; H-4 changes HA-2's validation only; H-5 and H-6 are a few lines each.
 
