@@ -1132,6 +1132,50 @@ def test_db_jsonb_nested_timestamps_blank_but_null_still_compares():
     assert compare.compare_db(dj_norm, rs_null_norm) != []
 
 
+def test_soft_delete_slug_blanks_epoch_suffix_only():
+    """workspaces.slug __epoch suffix blanks; prefix/live/garbage compare."""
+    import time
+
+    from . import compare
+
+    now = int(time.time())
+    ctx = compare.CompareContext()
+    dj = {"workspaces": [
+        {"id": "w", "slug": f"rp-wsa__{now - 1}", "name": "Acme Full"},
+        {"id": "l", "slug": "replay-ws", "name": "Replay WS"},
+    ]}
+    rs = {"workspaces": [
+        {"id": "w", "slug": f"rp-wsa__{now}", "name": "Acme Full"},
+        {"id": "l", "slug": "replay-ws", "name": "Replay WS"},
+    ]}
+    dj_norm = compare.normalise_snapshot(dj, "django", ctx)
+    rs_norm = compare.normalise_snapshot(rs, "rust", ctx)
+    assert compare.compare_db(dj_norm, rs_norm) == []
+    # The prefix still compares: a backend that deleted the wrong
+    # workspace still fails.
+    rs_wrong = {"workspaces": [
+        {"id": "w", "slug": f"rp-wsb__{now}", "name": "Acme Full"},
+        {"id": "l", "slug": "replay-ws", "name": "Replay WS"},
+    ]}
+    rs_wrong_norm = compare.normalise_snapshot(rs_wrong, "rust", ctx)
+    assert compare.compare_db(dj_norm, rs_wrong_norm) != []
+    # Live slugs without the suffix compare exactly.
+    rs_live = {"workspaces": [
+        {"id": "w", "slug": f"rp-wsa__{now}", "name": "Acme Full"},
+        {"id": "l", "slug": "replay-other", "name": "Replay WS"},
+    ]}
+    rs_live_norm = compare.normalise_snapshot(rs_live, "rust", ctx)
+    assert compare.compare_db(dj_norm, rs_live_norm) != []
+    # An implausible suffix (epoch 0, never a real deletion) stays raw
+    # and fails loudly instead of blanking.
+    dj_zero = {"workspaces": [
+        {"id": "w", "slug": "rp-wsa__0", "name": "Acme Full"},
+        {"id": "l", "slug": "replay-ws", "name": "Replay WS"},
+    ]}
+    dj_zero_norm = compare.normalise_snapshot(dj_zero, "django", ctx)
+    assert compare.compare_db(dj_zero_norm, rs_norm) != []
+
+
 def test_fernet_decrypt_round_trip_and_rejects_garbage():
     """License ciphertext decrypts under Django's key schedule only."""
     import base64
