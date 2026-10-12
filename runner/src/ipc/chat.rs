@@ -580,6 +580,22 @@ async fn drive_turn<S: ChatSink>(
                     *bridge_seq = bridge_seq.saturating_add(1);
                     match ev {
                         BridgeEvent::Raw { method, params, .. } => {
+                            if let Some((code, detail)) = gateway_refusal(&method, &params) {
+                                // The engine files a 402/401 under "stream
+                                // disconnected" and is about to re-send the
+                                // whole request, five times over. Its first
+                                // retry is ~200ms out, so the turn is stopped
+                                // here rather than by a round trip through the
+                                // client, and the retry notice is not
+                                // forwarded.
+                                bridge.interrupt().await.ok();
+                                return Ok(Response::ChatFailed {
+                                    chat_session_id,
+                                    code: code.into(),
+                                    detail: Some(detail),
+                                    failed_at: Utc::now(),
+                                });
+                            }
                             let kind = if is_assistant_text_delta(&method, &params) {
                                 "assistant_delta"
                             } else {
@@ -630,9 +646,20 @@ async fn drive_turn<S: ChatSink>(
                             break;
                         }
                         BridgeEvent::Failed { detail, .. } => {
+                            // An engine that gave up on its own (no retries
+                            // left, or none configured) reports the same
+                            // refusal as a bare string.
+                            let refusal = detail
+                                .as_deref()
+                                .and_then(gateway_status_text)
+                                .and_then(|(status, text)| Some((gateway_refusal_code(status)?, text)));
+                            let (code, detail) = match refusal {
+                                Some((code, text)) => (code, Some(text)),
+                                None => (CHAT_AGENT_FAILED, detail),
+                            };
                             return Ok(Response::ChatFailed {
                                 chat_session_id,
-                                code: "agent_failed".into(),
+                                code: code.into(),
                                 detail,
                                 failed_at: Utc::now(),
                             });
@@ -896,6 +923,60 @@ fn is_assistant_text_delta(method: &str, params: &serde_json::Value) -> bool {
             .and_then(|delta| delta.get("text"))
             .and_then(|value| value.as_str())
             .is_some()
+}
+
+const CHAT_AGENT_FAILED: &str = "agent_failed";
+/// `ChatFailed.code` for a model gateway that answered 402: the account has
+/// no credit left. The detail is the gateway's own sentence.
+const CHAT_MODEL_CREDIT_EXHAUSTED: &str = "model_credit_exhausted";
+/// `ChatFailed.code` for a model gateway that answered 401: the credential
+/// the engine holds is not accepted.
+const CHAT_MODEL_AUTH_FAILED: &str = "model_auth_failed";
+
+/// The `ChatFailed.code` for a gateway status that repeating the request
+/// cannot change, or `None` for one worth retrying.
+fn gateway_refusal_code(status: u64) -> Option<&'static str> {
+    match status {
+        401 => Some(CHAT_MODEL_AUTH_FAILED),
+        402 => Some(CHAT_MODEL_CREDIT_EXHAUSTED),
+        _ => None,
+    }
+}
+
+/// Split the engine's `unexpected status 402 Payment Required: <text>, url:
+/// <endpoint>, request id: <id>` into the status and the gateway's text.
+fn gateway_status_text(raw: &str) -> Option<(u64, String)> {
+    let rest = raw.split_once("unexpected status ")?.1;
+    let status = rest.get(..3)?.parse().ok()?;
+    let text = rest.split_once(": ").map_or("", |(_, text)| text);
+    let text = text.rsplit_once(", url: ").map_or(text, |(text, _)| text);
+    Some((status, text.trim().to_string()))
+}
+
+/// Recognise the engine's "I will retry" notice for a gateway answer that no
+/// retry can change, as `(ChatFailed code, gateway text)`.
+///
+/// The engine reports the HTTP status under `codexErrorInfo` (for example
+/// `{"responseStreamDisconnected": {"httpStatusCode": 402}}`) and the body in
+/// `additionalDetails`; `message` is only `Reconnecting... 1/5`.
+fn gateway_refusal(method: &str, params: &serde_json::Value) -> Option<(&'static str, String)> {
+    if method != "error" || params.get("willRetry").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let error = params.get("error")?;
+    let status = error
+        .get("codexErrorInfo")?
+        .as_object()?
+        .values()
+        .find_map(|info| info.get("httpStatusCode")?.as_u64())?;
+    let code = gateway_refusal_code(status)?;
+    let text = error
+        .get("additionalDetails")
+        .and_then(|v| v.as_str())
+        .and_then(gateway_status_text)
+        .map(|(_, text)| text)
+        .unwrap_or_default();
+    Some((code, text))
 }
 
 fn assistant_text_from_done_payload(payload: &serde_json::Value) -> Option<String> {
@@ -1205,6 +1286,243 @@ mod tests {
             })
             .collect();
         assert_eq!(deltas, ["NEW"], "frames: {:?}", sink.frames);
+    }
+
+    /// A fake app-server whose gateway answers `status` to the first turn: it
+    /// announces a retry the way the bundled engine does and, unless it is
+    /// interrupted first, goes on to announce a second one (`2/5`).
+    fn gateway_refusal_script(status: u16, body: &str) -> String {
+        let retry = |attempt: u8| {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "error",
+                "params": {
+                    "error": {
+                        "message": format!("Reconnecting... {attempt}/5"),
+                        "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": status}},
+                        "additionalDetails": format!(
+                            "unexpected status {status} {body}, url: https://gateway.test/v1/responses, request id: req_1"
+                        ),
+                    },
+                    "willRetry": true,
+                    "threadId": "th_refused",
+                    "turnId": "turn_1",
+                },
+            })
+        };
+        format!(
+            r#"
+            read -r _
+            printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{}}}}}}'
+            read -r _
+            read -r _
+            printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"threadId":"th_refused"}}}}'
+            read -r _
+            printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"turn":{{"id":"turn_1"}}}}}}'
+            printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/started","params":{{"threadId":"th_refused","turn":{{"id":"turn_1"}}}}}}'
+            printf '%s\n' '{first}'
+            read -r interrupt
+            case "$interrupt" in
+                *'"method":"turn/interrupt"'*'"turnId":"turn_1"'*)
+                    printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{}}}}'
+                    printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_refused","turn":{{"id":"turn_1","status":"interrupted"}}}}}}'
+                    read -r _
+                    printf '%s\n' '{{"jsonrpc":"2.0","id":5,"result":{{"turn":{{"id":"turn_2"}}}}}}'
+                    printf '%s\n' '{{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{{"text":"NEW"}}}}'
+                    printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_refused","turn":{{"id":"turn_2","status":"completed"}}}}}}'
+                    ;;
+                *)
+                    printf '%s\n' '{second}'
+                    ;;
+            esac
+            sleep 0.3
+        "#,
+            first = retry(1),
+            second = retry(2),
+        )
+    }
+
+    /// Drive one turn against `bridge` and return its terminal frame plus
+    /// everything streamed before it.
+    async fn run_turn(bridge: &mut AgentBridge, content: &str) -> (Response, Vec<Response>) {
+        let cfg = config();
+        let approvals = ApprovalRouter::new();
+        let cancel = Notify::new();
+        let mut sink = VecSink::default();
+        let (mut seq, mut started) = (0u64, true);
+        let terminal = tokio::time::timeout(
+            Duration::from_secs(3),
+            drive_turn(
+                DriveCtx {
+                    chat_session_id: Uuid::new_v4(),
+                    message_id: Uuid::new_v4(),
+                    content: content.into(),
+                    model: None,
+                    mode: ApprovalMode::Ask,
+                    runner_id: cfg.runner_id,
+                    config: &cfg,
+                    approvals: &approvals,
+                    workspace: &cfg.workspace.working_dir,
+                    cancel: &cancel,
+                },
+                bridge,
+                &mut seq,
+                &mut started,
+                &mut sink,
+            ),
+        )
+        .await
+        .expect("turn should not hang")
+        .expect("drive turn");
+        (terminal, sink.frames)
+    }
+
+    fn raw_methods(frames: &[Response]) -> Vec<String> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                Response::ChatEvent { payload, .. } => {
+                    payload["method"].as_str().map(str::to_owned)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn out_of_credit_stops_the_turn_before_the_engine_retries() {
+        let cfg = config();
+        let body = "Payment Required: Daily free quota used and LLM credit balance is insufficient; add credit or upgrade your plan.";
+        let mut bridge = fake_bridge(&gateway_refusal_script(402, body)).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+
+        let (terminal, frames) = run_turn(&mut bridge, "hello").await;
+        match terminal {
+            Response::ChatFailed { code, detail, .. } => {
+                assert_eq!(code, CHAT_MODEL_CREDIT_EXHAUSTED);
+                assert_eq!(
+                    detail.as_deref(),
+                    Some(
+                        "Daily free quota used and LLM credit balance is insufficient; add credit or upgrade your plan."
+                    ),
+                );
+            }
+            other => panic!("expected ChatFailed, got {other:?}"),
+        }
+        // Neither the retry notice nor its URL / request id reaches the client.
+        assert!(
+            !raw_methods(&frames).contains(&"error".to_string()),
+            "frames: {frames:?}"
+        );
+
+        // The engine was interrupted (the fake only answers a second turn if
+        // it was), and the stopped turn does not leak into the next one.
+        let (terminal, frames) = run_turn(&mut bridge, "again").await;
+        assert!(
+            matches!(&terminal, Response::ChatMessageCompleted { status, .. } if status == "completed"),
+            "second turn: {terminal:?} frames: {frames:?}"
+        );
+        assert!(
+            !raw_methods(&frames).contains(&"error".to_string()),
+            "frames: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_credential_stops_the_turn_as_an_auth_failure() {
+        let cfg = config();
+        let mut bridge =
+            fake_bridge(&gateway_refusal_script(401, "Unauthorized: Invalid JWT")).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+
+        let (terminal, frames) = run_turn(&mut bridge, "hello").await;
+        match terminal {
+            Response::ChatFailed { code, detail, .. } => {
+                assert_eq!(code, CHAT_MODEL_AUTH_FAILED);
+                assert_eq!(detail.as_deref(), Some("Invalid JWT"));
+            }
+            other => panic!("expected ChatFailed, got {other:?}"),
+        }
+        assert!(
+            !raw_methods(&frames).contains(&"error".to_string()),
+            "frames: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn only_refusals_the_engine_would_retry_in_vain_are_recognised() {
+        let notice = |status: u64, will_retry: bool| {
+            serde_json::json!({
+                "error": {
+                    "message": "Reconnecting... 1/5",
+                    "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": status}},
+                    "additionalDetails": format!("unexpected status {status} Whatever: body text, url: http://x/v1/responses"),
+                },
+                "willRetry": will_retry,
+            })
+        };
+        assert_eq!(
+            gateway_refusal("error", &notice(402, true)),
+            Some((CHAT_MODEL_CREDIT_EXHAUSTED, "body text".to_string()))
+        );
+        assert_eq!(
+            gateway_refusal("error", &notice(401, true)),
+            Some((CHAT_MODEL_AUTH_FAILED, "body text".to_string()))
+        );
+        // A server error or a rate limit may well succeed on retry.
+        assert_eq!(gateway_refusal("error", &notice(503, true)), None);
+        assert_eq!(gateway_refusal("error", &notice(429, true)), None);
+        // The terminal notice is the bridge's to turn into a failure.
+        assert_eq!(gateway_refusal("error", &notice(402, false)), None);
+        // A dropped stream carries no HTTP status at all.
+        let dropped = serde_json::json!({
+            "error": {
+                "message": "Reconnecting... 1/5",
+                "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": null}},
+                "additionalDetails": "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens",
+            },
+            "willRetry": true,
+        });
+        assert_eq!(gateway_refusal("error", &dropped), None);
+        assert_eq!(gateway_refusal("warning", &notice(402, true)), None);
+
+        assert_eq!(
+            gateway_status_text(
+                "unexpected status 402 Payment Required: add credit, url: https://g/v1/responses, request id: r1"
+            ),
+            Some((402, "add credit".to_string()))
+        );
+        assert_eq!(
+            gateway_status_text("stream disconnected before completion"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_the_engine_gave_up_on_keeps_its_code() {
+        // No retry notice at all: the engine fails the turn itself, as it does
+        // once its retries are spent.
+        let script = r#"
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read -r _
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_final"}}'
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","method":"error","params":{"error":{"message":"unexpected status 402 Payment Required: add credit, url: https://g/v1/responses","codexErrorInfo":"other"},"willRetry":false}}'
+            sleep 0.3
+        "#;
+        let cfg = config();
+        let mut bridge = fake_bridge(script).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+        let (terminal, _) = run_turn(&mut bridge, "hello").await;
+        match terminal {
+            Response::ChatFailed { code, detail, .. } => {
+                assert_eq!(code, CHAT_MODEL_CREDIT_EXHAUSTED);
+                assert_eq!(detail.as_deref(), Some("add credit"));
+            }
+            other => panic!("expected ChatFailed, got {other:?}"),
+        }
     }
 
     /// A fake app-server that warms, starts a turn, then requests a command

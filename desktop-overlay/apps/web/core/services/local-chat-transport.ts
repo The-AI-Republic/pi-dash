@@ -52,7 +52,13 @@ import type {
   TApprovalDecision,
   TApprovalMode,
 } from "@pi-dash/types";
-import { ensureChatRuntime, getAgentAccount, isDesktop } from "@/services/agent-runtime";
+import {
+  ensureChatRuntime,
+  getAgentAccount,
+  getModelTopUpUrl,
+  isDesktop,
+  refreshModelCredential,
+} from "@/services/agent-runtime";
 
 /** Synthetic runner id for the bundled built-in engine (see the picker seam). */
 export const BUILTIN_RUNNER_ID = "pidash-builtin";
@@ -146,6 +152,23 @@ interface FrameClosed {
   closed_at: string;
 }
 
+/**
+ * `chat_failed` codes the daemon sets when the model gateway refuses a request
+ * outright (`runner/src/ipc/chat.rs`). It stops the turn on the first refusal;
+ * `detail` is the gateway's own text.
+ */
+const MODEL_CREDIT_EXHAUSTED = "model_credit_exhausted";
+const MODEL_AUTH_FAILED = "model_auth_failed";
+
+const SIGN_IN_AGAIN =
+  "The model gateway did not accept this sign-in. Sign out and sign in again, then resend your message.";
+
+/** What the transcript says when a turn ends because the account has no credit. */
+function creditNote(detail: string | undefined, topUpUrl: string): string {
+  const text = detail?.trim() || "Your model credit has run out.";
+  return topUpUrl ? `${text}\nAdd credit: ${topUpUrl}` : text;
+}
+
 /** The chat-session id a frame belongs to, for routing to the right stream. */
 function frameSessionId(frame: ChatFrame): string {
   return frame.data.chat_session_id;
@@ -198,6 +221,27 @@ export interface TauriBridge {
    * slug — without it the host resolves a socket nothing is listening on.
    */
   workspaceSlug(): string;
+  /**
+   * Mint and store a new model credential, regardless of the current one's
+   * expiry. Rejects when none can be had (the Pi Dash session is gone).
+   */
+  refreshModelCredential(): Promise<void>;
+  /** Where the user adds model credit; empty when the server names no place. */
+  topUpUrl(): string;
+}
+
+/** A turn in flight: what was asked, so it can be submitted once more. */
+interface ActiveTurn {
+  /** The daemon message id of the current submission. */
+  messageId: string;
+  content: string;
+  /** Set once the turn has been resubmitted with a new model credential. */
+  authRetried: boolean;
+}
+
+interface FrameSubscriber {
+  onFrame(frame: ChatFrame): void;
+  onError(error: Error): void;
 }
 
 /**
@@ -369,35 +413,105 @@ export class LocalChatTransport implements ChatTransport {
   }
 
   /**
-   * Turns in flight, as session id → the daemon message id of the turn. The
-   * local store has no notion of an active turn, and `chat_send` resolves as
-   * soon as the turn is submitted, so without this the composer re-enabled
-   * mid-turn and a second send cut the first one off. Set on send, cleared by
-   * the turn's terminal frame or a transport error. In-memory: after a webview
-   * reload the host's own refusal of an overlapping `chat_send` is the backstop.
+   * Turns in flight, by session id. The local store has no notion of an active
+   * turn, and `chat_send` resolves as soon as the turn is submitted, so without
+   * this the composer re-enabled mid-turn and a second send cut the first one
+   * off. Set on send, cleared by the turn's terminal frame or a transport
+   * error. In-memory: after a webview reload the host's own refusal of an
+   * overlapping `chat_send` is the backstop.
    */
-  private readonly activeTurns = new Map<string, string>();
-  private turnWatchStarted = false;
+  private readonly activeTurns = new Map<string, ActiveTurn>();
+  private readonly subscribers = new Map<string, Set<FrameSubscriber>>();
+  private listening = false;
 
   /**
-   * Listen for turn ends for as long as the transport lives, not just while a
+   * Listen to the host for as long as the transport lives, not just while a
    * session is on screen: `subscribeChatEvents` unsubscribes when the user
    * switches session, and a turn that finishes meanwhile must still release
-   * its session.
+   * its session — or be retried, or leave its failure in the transcript.
    */
-  private watchTurnEnds(): void {
-    if (this.turnWatchStarted) return;
-    this.turnWatchStarted = true;
-    void this.bridge.listen<ChatFrame>(CHAT_FRAME_EVENT, (frame) => {
-      if (isTerminalFrame(frame)) this.activeTurns.delete(frameSessionId(frame));
-    });
-    void this.bridge.listen<{ chat_session_id: string }>(CHAT_ERROR_EVENT, (payload) => {
+  private listenToHost(): void {
+    if (this.listening) return;
+    this.listening = true;
+    void this.bridge.listen<ChatFrame>(CHAT_FRAME_EVENT, (frame) => this.routeFrame(frame));
+    void this.bridge.listen<{ chat_session_id: string; message: string }>(CHAT_ERROR_EVENT, (payload) => {
       this.activeTurns.delete(payload.chat_session_id);
+      const error = new Error(payload.message);
+      for (const subscriber of this.subscribers.get(payload.chat_session_id) ?? []) subscriber.onError(error);
     });
   }
 
+  private deliver(frame: ChatFrame): void {
+    for (const subscriber of this.subscribers.get(frameSessionId(frame)) ?? []) subscriber.onFrame(frame);
+  }
+
+  private routeFrame(frame: ChatFrame): void {
+    const sessionId = frameSessionId(frame);
+    const refusal = frame.result === "chat_failed" ? frame.data : null;
+    if (refusal?.code === MODEL_AUTH_FAILED) {
+      const turn = this.activeTurns.get(sessionId);
+      if (turn && !turn.authRetried) {
+        // Still the same turn as far as the page is concerned: it stays busy
+        // and hears nothing unless the second attempt fails too.
+        turn.authRetried = true;
+        void this.retryWithNewCredential(sessionId, turn, frame);
+        return;
+      }
+    }
+    // Release the session before the page hears about the turn's end: it
+    // refetches sessions on that event and must not read a stale turn.
+    if (isTerminalFrame(frame)) this.activeTurns.delete(sessionId);
+    if (refusal?.code === MODEL_CREDIT_EXHAUSTED) {
+      void this.failWithNote(frame, creditNote(refusal.detail, this.bridge.topUpUrl()));
+    } else if (refusal?.code === MODEL_AUTH_FAILED) {
+      void this.failWithNote(frame, SIGN_IN_AGAIN);
+    } else {
+      this.deliver(frame);
+    }
+  }
+
+  /**
+   * Put `note` in the transcript, then let the page hear that the turn failed.
+   * In that order because the page refetches history on the failure event, and
+   * history is the only place it reads the reason from.
+   */
+  private async failWithNote(frame: ChatFrame, note: string): Promise<void> {
+    await this.bridge
+      .invoke<StoredEvent>("chat_append_event", {
+        account: this.bridge.getAccount(),
+        sessionId: frameSessionId(frame),
+        event: { role: "system", content: note },
+      })
+      .catch(() => {});
+    this.deliver(frame);
+  }
+
+  /**
+   * The gateway refused the engine's credential: mint a new one and submit the
+   * turn again, once. The user's message is already in history. If no new
+   * credential can be had, the turn ends with the reason — a request to sign
+   * in — in the transcript.
+   */
+  private async retryWithNewCredential(sessionId: string, turn: ActiveTurn, refused: ChatFrame): Promise<void> {
+    try {
+      await this.bridge.refreshModelCredential();
+      // Closed, or failed over the transport, while the credential was minted.
+      if (this.activeTurns.get(sessionId) !== turn) return;
+      const session = await this.bridge.invoke<StoredSession | null>("chat_get_session", {
+        account: this.bridge.getAccount(),
+        sessionId,
+      });
+      turn.messageId = crypto.randomUUID();
+      await this.submitToDaemon(sessionId, turn.messageId, turn.content, session);
+    } catch (error) {
+      if (this.activeTurns.get(sessionId) !== turn) return;
+      this.activeTurns.delete(sessionId);
+      await this.failWithNote(refused, error instanceof Error && error.message ? error.message : SIGN_IN_AGAIN);
+    }
+  }
+
   private toChatSession(s: StoredSession, account: string): IAgentChatSession {
-    return storedSessionToChatSession(s, account, this.activeTurns.get(s.id) ?? null);
+    return storedSessionToChatSession(s, account, this.activeTurns.get(s.id)?.messageId ?? null);
   }
 
   // No `runner` selector is sent with any chat request. The daemon's selector
@@ -459,14 +573,14 @@ export class LocalChatTransport implements ChatTransport {
     if (this.activeTurns.has(sessionId)) {
       throw new Error("A response is still in progress. Wait for it to finish, or stop it first.");
     }
-    const messageId = crypto.randomUUID();
-    this.watchTurnEnds();
-    this.activeTurns.set(sessionId, messageId);
+    const turn: ActiveTurn = { messageId: crypto.randomUUID(), content, authRetried: false };
+    this.listenToHost();
+    this.activeTurns.set(sessionId, turn);
     try {
-      return await this.submitTurn(account, sessionId, messageId, content);
+      return await this.submitTurn(account, sessionId, turn.messageId, content);
     } catch (error) {
       // Nothing was submitted, so no terminal frame will ever release it.
-      if (this.activeTurns.get(sessionId) === messageId) this.activeTurns.delete(sessionId);
+      if (this.activeTurns.get(sessionId) === turn) this.activeTurns.delete(sessionId);
       throw error;
     }
   }
@@ -491,8 +605,20 @@ export class LocalChatTransport implements ChatTransport {
     // The daemon owns the engine, so it has to be up before the turn is
     // submitted. Idempotent once it is.
     await this.bridge.ensureRuntime();
-    // Streaming happens over `chat://frame`; the command returns once the turn
-    // has been submitted.
+    await this.submitToDaemon(sessionId, messageId, content, session);
+    return storedEventToMessage(stored);
+  }
+
+  /**
+   * Hand a turn to the daemon. Streaming happens over `chat://frame`; the
+   * command returns once the turn has been submitted.
+   */
+  private async submitToDaemon(
+    sessionId: string,
+    messageId: string,
+    content: string,
+    session: StoredSession | null
+  ): Promise<void> {
     await this.bridge.invoke<void>("chat_send", {
       workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
@@ -502,7 +628,6 @@ export class LocalChatTransport implements ChatTransport {
       mode: this.getApprovalMode(sessionId),
       localThreadId: session?.engine_thread_id ?? undefined,
     });
-    return storedEventToMessage(stored);
   }
 
   async warmChatSession(sessionId: string): Promise<{ ok: boolean; skipped?: string }> {
@@ -580,18 +705,8 @@ export class LocalChatTransport implements ChatTransport {
     // `assistant_message` is empty (the engine's done payload didn't carry text
     // under a key the daemon recognises) can still be persisted from the deltas.
     let assistantAccum = "";
-    let cancelled = false;
-    const unlisteners: Array<() => void> = [];
-    const track = (promise: Promise<() => void>) => {
-      void promise.then((unlisten) => (cancelled ? unlisten() : void unlisteners.push(unlisten)));
-    };
-
-    track(
-      this.bridge.listen<ChatFrame>(CHAT_FRAME_EVENT, (frame) => {
-        if (frameSessionId(frame) !== sessionId) return;
-        // Release the session before the page hears about the turn's end: it
-        // refetches sessions on that event and must not read a stale turn.
-        if (isTerminalFrame(frame)) this.activeTurns.delete(sessionId);
+    const subscriber: FrameSubscriber = {
+      onFrame: (frame) => {
         if (frame.result === "chat_message_started") {
           assistantAccum = "";
         } else if (frame.result === "chat_event" && frame.data.kind === "assistant_delta") {
@@ -614,19 +729,16 @@ export class LocalChatTransport implements ChatTransport {
         void this.persistFromFrame(account, sessionId, frame, "").catch(() => {});
         const event = translator.translate(frame);
         if (event) onEvent(event);
-      })
-    );
-    track(
-      this.bridge.listen<{ chat_session_id: string; message: string }>(CHAT_ERROR_EVENT, (payload) => {
-        if (payload.chat_session_id !== sessionId) return;
-        this.activeTurns.delete(sessionId);
-        onError?.(new Error(payload.message));
-      })
-    );
+      },
+      onError: (error) => onError?.(error),
+    };
+    this.listenToHost();
+    const subscribers = this.subscribers.get(sessionId) ?? new Set<FrameSubscriber>();
+    this.subscribers.set(sessionId, subscribers.add(subscriber));
 
     return () => {
-      cancelled = true;
-      for (const unlisten of unlisteners.splice(0)) unlisten();
+      subscribers.delete(subscriber);
+      if (!subscribers.size && this.subscribers.get(sessionId) === subscribers) this.subscribers.delete(sessionId);
     };
   }
 
@@ -683,6 +795,8 @@ function tauriBridge(): TauriBridge {
     // session stores.
     ensureRuntime: () => ensureChatRuntime(workspaceSlugFromLocation()),
     workspaceSlug: workspaceSlugFromLocation,
+    refreshModelCredential: () => refreshModelCredential(),
+    topUpUrl: () => getModelTopUpUrl(),
   };
 }
 
