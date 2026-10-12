@@ -5,7 +5,7 @@
 
 Today an issue is routed to a **pod**: any free runner in that squad takes the run. This doc adds a second mode: the issue is routed to **one dedicated runner**, chosen by a person, because of the machine, tools or access that runner has.
 
-Items marked **Needs human decision (H-n)** carry a default the epics can build against; §21 lists them in one place.
+Items marked **Needs human decision (H-n)** carry a default the epics can build against; §21 lists them in one place. The offline policy (§11) is not one of them: the project owner decided it on 2026-10-12.
 
 ---
 
@@ -144,7 +144,7 @@ A runner `R` can be the dedicated runner of issue `X`, when user `U` makes the r
 | E5  | `R.provisioning != desktop_bundled`.                                                    | `runner_desktop_bundled`    |
 | E6  | The executor after this request is `local_runner` (§8).                                 | `executor_not_local`        |
 | E7  | `R.owner` is the issue's creator or one of its current assignees.                       | `runner_owner_not_on_issue` |
-| E8  | The issue has no run past `QUEUED` (§13.2).                                             | `active_run_in_progress`    |
+| E8  | The issue has no run that a runner holds; `QUEUED` and `PAUSED_AWAITING_INPUT` pass (§13.2). | `active_run_in_progress`    |
 
 E7 is `filter_runs_usable_by_runner` reduced to the clauses that hold for _every_ run of the issue. A tick run is created by the agent system user, so "the run's creator owns the runner" cannot be relied on. On issue creation the requester is the creator, so a user's own runner always passes E7. Combined with E1, in v1 a user dedicates an issue to **their own** runner, on an issue they created or are assigned to.
 
@@ -297,13 +297,19 @@ The dedicated runner is offline and a run is queued for it. Options:
 | (b) Fall back to the pod after a timeout | Work keeps moving.                                                              | Runs the issue on a machine the user ruled out. It may fail, or succeed wrongly (wrong data, wrong credentials). |
 | (c) Per-issue choice                     | Lets the user say which of the two they meant.                                  | One more field and one more control on every surface, before there is evidence it is needed.                     |
 
-**Needs human decision (H-1). Default: (a), wait, with no automatic fallback, and make the wait loud.**
+**Decided by the project owner on 2026-10-12: (a). The issue stays assigned to its runner and the queued run stays queued for that runner. No automatic fallback to the pod and no timeout in v1.** This section says how to build it; it does not reopen the choice.
 
-- The run stays `QUEUED` and pinned. It is not failed and not released by any sweep. Waiting costs nothing but the one run (§10.3).
+- The run stays `QUEUED` and pinned. It is not failed and not released by any sweep (§12.1). Waiting costs nothing but the one run (§10.3).
 - The wait is announced: the creation-time comment (§9.4) and the `dispatch_wait` state on every surface (§14.3).
+- Only a person ends the wait: release the run, change or clear the issue's runner, or cancel the run (§10.3).
 - When the runner reconnects, session-open and the poll-ready path already call `drain_for_runner_by_id` (`runner/services/session_service.py`, `runner/views/sessions.py`), which serves the personal queue first. No new code.
-- An operator who wants (b) for the whole instance sets `DEDICATED_RUNNER_OFFLINE_FALLBACK_SECS` (default `0` = never). When it is greater than zero, the sweep in §12.1 releases a dedicated queued run whose runner has been silent that long, exactly as a manual release would, and posts a comment saying so. The issue's assignment is not changed, so the next run tries the dedicated runner again.
-- (c) is deferred. If it is wanted later it is one nullable field on `Issue` (`assigned_runner_fallback_secs`) read by the same sweep in place of the setting; nothing else in this design changes.
+
+(b) and (c) are not part of v1 and v1 adds no setting or field for them. Possible later additions, listed in §22:
+
+- (b) for a whole instance: an operator setting, a number of seconds after which the sweep releases a dedicated queued run exactly as a manual release would (§12.2) and posts a comment. The issue's assignment would not change.
+- (c): one nullable field on `Issue`, read by the same sweep.
+
+Neither needs a change to the model of this design; both reuse `pin_kind` and the release path.
 
 Runs already `ASSIGNED` or `RUNNING` on a runner that goes silent are not touched by this doc: `fail_runs_on_offline_runners` (`RUNNER_OFFLINE_RUN_FAIL_SECS`, 3600 s) fails them as today, and the next run is pinned to the dedicated runner again and waits.
 
@@ -312,7 +318,7 @@ Runs already `ASSIGNED` or `RUNNING` on a runner that goes silent are not touche
 | Mechanism                                         | Locality pin                                                | Dedicated pin                                                                            |
 | ------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | Set when                                          | Parent's runner is online with a fresh heartbeat, same pod  | Issue has a dedicated runner, whatever its status                                        |
-| `release_pins_on_offline_runners`                 | Released after `RUNNER_OFFLINE_PIN_RELEASE_SECS` (as today) | **Not released**, unless `DEDICATED_RUNNER_OFFLINE_FALLBACK_SECS > 0` and exceeded (§11) |
+| `release_pins_on_offline_runners`                 | Released after `RUNNER_OFFLINE_PIN_RELEASE_SECS` (as today) | **Not released** (§11)                                                                   |
 | `Runner.revoke()`                                 | Un-pinned (as today)                                        | Un-pinned, and the issue's assignment is cleared (§13)                                   |
 | Manual release endpoint                           | Un-pinned (as today)                                        | Un-pinned for this run only; assignment unchanged; says so (§12.2)                       |
 | `apply_run_resume_unavailable`                    | Re-queued without the pin (as today)                        | Re-queued **with** the pin (§9.3)                                                        |
@@ -321,10 +327,9 @@ Runs already `ASSIGNED` or `RUNNING` on a runner that goes silent are not touche
 
 ### 12.1 The sweep
 
-`release_pins_on_offline_runners` adds `pin_kind = "locality"` to its existing filter; that is the whole change for locality pins. A second pass in the same task handles dedicated queued runs:
+`release_pins_on_offline_runners` adds `pin_kind = "locality"` to its existing filter (and to the re-check under the row lock); that is the whole change for locality pins. No sweep releases a dedicated pin, however long its runner is silent (§11).
 
-1. Fallback: when `DEDICATED_RUNNER_OFFLINE_FALLBACK_SECS > 0` and the pinned runner has been silent longer than that, release the run (§12.2 semantics, actor = system) and post the comment.
-2. Stranded: when the pinned runner is online, heartbeat-fresh and idle, the run is older than one sweep interval, and `filter_runs_usable_by_runner` excludes it, fail the run with `dedicated_runner_not_permitted` (§9.4).
+A second pass in the same task handles one case for dedicated queued runs, and it is not an offline case. Stranded: when the pinned runner is online, heartbeat-fresh and idle, the run is older than one sweep interval, and `filter_runs_usable_by_runner` excludes it, fail the run with `dedicated_runner_not_permitted` (§9.4). The runner is there and will never take the run, so waiting cannot help.
 
 ### 12.2 Manual release
 
@@ -347,13 +352,15 @@ Every row that clears the assignment calls `clear_dedicated_runner(issue, reason
 | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------- | --------------------------------------- |
 | Runner revoked (any reason, including the owner losing membership)     | Cleared. Falls back to its pod.                                                         | Un-pinned, served by the pod (today's revoke behaviour)     | Cancelled (today)                       |
 | Runner deleted                                                         | Same; delete is revoke then delete. `SET_NULL` is the net.                              | Same                                                        | Same                                    |
-| Runner moved to another pod of the same project                        | Follows the runner: `assigned_pod` is updated to the new pod in the move's transaction. | Cannot exist: the move is refused while a run is bound      | Cannot exist (same guard)               |
+| Runner moved to another pod of the same project                        | Follows the runner: `assigned_pod` is updated to the new pod in the move's transaction. | Cannot exist: the move is refused while a run is bound (see below) | Cannot exist (same guard)        |
 | Issue's pod changed to another pod, no runner in the request           | Cleared.                                                                                | Cannot exist: pod changes are refused during an active run  | —                                       |
 | Issue's executor changed to `cloud_agent` / `managed_runner` / inherit | Cleared (§8).                                                                           | Cannot exist: same guard                                    | —                                       |
 | Issue moved to another project (`utils/issue_move.py`)                 | Cleared in the same `save(update_fields=…)` that resets `assigned_pod`.                 | Cancelled and replaced by the handoff run, unpinned (today) | Handoff as today                        |
 | Runner's owner removed from the issue's assignees (and is not creator) | Not cleared. The next run is bounced by preflight with a comment (§9.4).                | Failed by the sweep as stranded (§12.1)                     | Finishes                                |
 | Runner offline                                                         | Unchanged.                                                                              | Waits (§11)                                                 | `fail_runs_on_offline_runners` as today |
 | Sub-issue created under a dedicated issue                              | The child does **not** inherit. It gets the project default pod, like any new issue.    | —                                                           | —                                       |
+
+The runner-move guard (`runner/views/runners.py`) refuses a move while a non-terminal run has `runner` or `pinned_runner` set to the runner. A run released by hand (§12.2) is no longer pinned and may be queued or running elsewhere in the old pod, so the guard gains one clause: the move is also refused while any issue dedicated to the runner has a non-terminal run. Without it the move would change `assigned_pod` under an active run, which the issue-side guard forbids.
 
 **Needs human decision (H-2): the revoke row.** Default: fall back to the pod and say so. The runner is gone for good, so waiting cannot help, and Pi Dash's bias is to keep work moving. Alternative: fail the queued run and move the issue to Backlog so a person picks a new runner. The alternative is safer when the pod's other runners truly cannot do the work.
 
@@ -451,7 +458,7 @@ Computed, not stored. The run serializers (`AgentRunSerializer`, and `_serialize
 
 - `pidash_create_issue` / `pidash_update_issue` (private repo, `pi_dash_cloud/mcp/tools.py`): new optional inputs `assigned_runner` (UUID or name; `null` clears) and `assigned_pod` (UUID or name) — the pod input is added scope for the same reason as the CLI flag. `pidash_get_issue` returns both plus `assigned_runner_detail` and `dispatch_wait`.
 - `pidash_list_project_runners` (PDASHOSS01-246) gains `assignable_for`.
-- In-run cloud-agent tools (`apps/api/pi_dash/cloud_agent/tools.py`): the issue create and update tools accept `assigned_runner` and `assigned_pod` through the same service. The acting user is the run's creator, so E1 and E7 apply to that user.
+- In-run cloud-agent tools (`apps/api/pi_dash/cloud_agent/tools.py`): `pidash_create_project_issue`, the only tool there that writes issue fields today, accepts `assigned_runner` and `assigned_pod` through the same service. The acting user is the run's creator, so E1 and E7 apply to that user. An in-run update tool, if one is added later, uses the same service.
 
 ### 14.7 Issue activity
 
@@ -499,13 +506,13 @@ Neither is on `main`; neither is changed here. Follow-up issues are filed in the
 | Contract, both API surfaces      | Set, change, clear; every error code and shape; `assigned_runner_detail`; `assignable_for`; a pod-only issue serializes as before plus two null fields.                                                                                                                                                   | `tests/contract/app/`, `tests/contract/api/`                                      |
 | Pin resolver and phases          | One test per row of §9.2, including `fresh_session` keeping the pin and an offline runner still being pinned; stale assignment self-heals.                                                                                                                                                                | `tests/unit/orchestration/test_service.py`, `test_scheduling.py`                  |
 | Matcher                          | A dedicated run is never returned to another runner by `next_for_runner`, `next_queued_run_for_pod`, `drain_pod` or `drain_for_runner`; it goes to its runner even when another is idle and its own is busy; personal queue is FIFO across pin kinds. **Existing matcher and pin tests pass unmodified.** | `tests/unit/runner/test_matcher.py`, `test_drain_pod.py`                          |
-| Sweep and release                | Locality pins released as today; dedicated pins not released at default settings; released when the fallback setting is exceeded; stranded run failed; manual release leaves the assignment and reports it; `apply_run_resume_unavailable` keeps a dedicated pin.                                         | `tests/unit/runner/test_offline_runner_recovery.py`, `test_runs_views.py`         |
-| Lifecycle                        | One test per row of §13.1: revoke, delete, runner pod move, issue pod change, executor change, project move, assignee removal.                                                                                                                                                                            | `test_revocation.py`, `test_runner_pod_move.py`, `test_issue_move_run_repoint.py` |
+| Sweep and release                | Locality pins released as today; dedicated pins never released by the sweep, however long the runner is silent; stranded run failed; manual release leaves the assignment and reports it; `apply_run_resume_unavailable` keeps a dedicated pin.                                         | `tests/unit/runner/test_offline_runner_recovery.py`, `test_runs_views.py`         |
+| Lifecycle                        | One test per row of §13.1: revoke, delete, runner pod move (and its refusal while a dedicated issue has a run), issue pod change, executor change, project move, assignee removal.                                                                                                                                                                            | `test_revocation.py`, `test_runner_pod_move.py`, `test_issue_move_run_repoint.py` |
 | Preflight and waiting state      | Bounce with the dedicated reason; creation-time offline comment posted once; `dispatch_wait` for each `reason`.                                                                                                                                                                                           | `tests/unit/orchestration/test_eligibility_preflight.py`                          |
 | Web                              | Option building, disabled states and reasons, tagged value round-trip, hydration of the selected runner, the waiting banner's actions.                                                                                                                                                                    | `apps/web/tests/issues/execution-target*.test.ts`                                 |
 | CLI                              | Argument mapping for `--runner`, `--clear-runner`, `--pod`; name resolution and ambiguity; error passthrough.                                                                                                                                                                                             | `runner/` unit tests                                                              |
 | MCP                              | The new inputs and outputs.                                                                                                                                                                                                                                                                               | private repo                                                                      |
-| End to end, two runners, one pod | The six scenarios in HA-6, with the offline scenario asserting the default of §11 and the revoke scenario asserting the default of §13.1.                                                                                                                                                                 | HA-6                                                                              |
+| End to end, two runners, one pod | The six scenarios in HA-6, with the offline scenario asserting the decision of §11 and the revoke scenario asserting the default of §13.1.                                                                                                                                                                 | HA-6                                                                              |
 
 ## 19. Rollout
 
@@ -515,7 +522,7 @@ The schema is additive and NULL means "today", so the migrations ship at any tim
 
 - `DEDICATED_RUNNER_ASSIGNMENT_ENABLED` (settings, default `false`), in the style of `CLOUD_AGENT_ENABLED` and `MANAGED_RUNNER_ENABLED`. While false, a non-null `assigned_runner` is rejected with `dedicated_runner_disabled`, `assignable_for` reports every runner as not assignable with that code, and the web picker shows pods only. Clearing is always allowed.
 - HA-2 adds the setting. HA-3 to HA-5 are built and tested with it on. HA-6 flips the default to `true` once the end-to-end scenarios pass, and files the issue to delete the setting one release later.
-- Settings that stay: `DEDICATED_RUNNER_OFFLINE_FALLBACK_SECS` (default `0`, §11).
+- No other setting is added. In particular there is no offline-fallback setting in v1 (§11).
 - HA-6 runs both migrations against a copy of production data and records the lock time of the two constraint validations and the concurrent index build.
 - Rollback: set the switch to `false`. Existing assignments keep routing (dispatch reads the field regardless of the switch), so turning it off never strands a queued run; it only stops new choices.
 
@@ -531,24 +538,24 @@ The schema is additive and NULL means "today", so the migrations ship at any tim
 | HA-5 CLI, MCP, prompting    | §14.5, §14.6, §14.8                                                                     |
 | HA-6 tests, docs, rollout   | §18 (end to end), §19, the follow-ups of §15, §16 and §17                               |
 
-Scope this design adds to the epics as first written: `--pod` on the CLI and `assigned_pod` on the MCP tools (HA-5); activity tracking for `assigned_pod` (HA-2); `dispatch_wait` for locality pins as well (HA-3); re-pointing a queued run when the assignment changes (HA-2); the temporary setting (HA-2, HA-6). Scope it removes: a separate "list eligible runners" endpoint (a parameter on the existing list instead, §7.4); a separate CLI release command (§12.2).
+Scope this design adds to the epics as first written: `--pod` on the CLI and `assigned_pod` on the MCP tools (HA-5); activity tracking for `assigned_pod` (HA-2); `dispatch_wait` for locality pins as well (HA-3); the extra clause on the runner-move guard (HA-3, §13.1); re-pointing a queued run when the assignment changes (HA-2); the temporary setting (HA-2, HA-6). Scope it removes: a separate "list eligible runners" endpoint (a parameter on the existing list instead, §7.4); a separate CLI release command (§12.2).
 
 ## 21. Decisions for a human to confirm
 
 | #   | Question                                                         | Default built into this design                                                                                  | Section |
 | --- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------- |
-| H-1 | Dedicated runner offline with a run queued                       | Wait, visibly, with no automatic fallback. An instance setting can turn on fallback to the pod after N seconds. | §11     |
+| H-1 | Dedicated runner offline with a run queued                       | **Decided, not open** (project owner, 2026-10-12): wait, visibly; no automatic fallback, no timeout.            | §11     |
 | H-2 | Dedicated runner revoked or deleted                              | Clear the assignment, fall back to the pod, post a comment.                                                     | §13.1   |
 | H-3 | Dedicated work versus squad work on the same runner; queue limit | Dedicated runs go first; no cap; queue depth shown and warned.                                                  | §10     |
 | H-4 | Who may dedicate an issue to a runner                            | The runner's owner, on an issue they created or are assigned to. Otherwise rejected with a clear message.       | §7.1    |
 | H-5 | Rollout gate                                                     | A temporary operator setting, default off until HA-3 lands, removed one release after HA-6.                     | §19     |
 | H-6 | Showing a dedicated runner's name, status and owner on the issue | Shown to everyone who can see the issue.                                                                        | §14.1   |
 
-The epics build against the defaults. A different answer to H-1, H-2 or H-3 changes HA-3 only; H-4 changes HA-2's validation only; H-5 and H-6 are a few lines each.
+H-1 keeps its number so references to H-2 to H-6 stay stable; five decisions are open. The epics build against the defaults. A different answer to H-2 changes HA-3 only; H-3 changes HA-3 and HA-4; H-4 changes HA-2's validation only; H-5 and H-6 are a few lines each.
 
 ## 22. Deferred
 
-- Per-issue offline fallback (§11, option c).
+- Automatic fallback to the pod when the dedicated runner is offline: an instance-wide setting (§11, option b) or a per-issue choice (§11, option c).
 - A dedicated runner on scheduler bindings (§15).
 - Capability labels and routing by capability (§16).
 - Moving a waiting issue to a runner in another pod without cancelling the run (§13.2).
