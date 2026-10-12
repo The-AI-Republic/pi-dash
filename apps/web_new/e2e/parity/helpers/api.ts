@@ -16847,3 +16847,22 @@ export async function exportsPatchRecord(
   );
   if (!/^PARITY_EXPORT_PATCHED$/m.test(out)) throw new Error("[parity] export patch produced no confirmation.");
 }
+
+/**
+ * Fetch one user's profile activity export exactly as the profile download
+ * control does (NEWFRONT-382, EXP-022): the raw CSV text the server returns
+ * for `date`, so the oracle scenario can prove the saved file carries the
+ * server's bytes.
+ */
+export async function profileActivityExportCsv(
+  session: AuthedSession,
+  workspaceSlug: string,
+  userId: string,
+  date: string
+): Promise<string> {
+  const res = await sessionFetch(session, "POST", `/api/workspaces/${workspaceSlug}/user-activity/${userId}/export/`, {
+    date,
+  });
+  if (!res.ok) throw new Error(`[parity] profile activity export failed with HTTP ${res.status}.`);
+  return res.text();
+}
