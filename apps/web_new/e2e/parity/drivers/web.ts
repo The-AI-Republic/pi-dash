@@ -40865,6 +40865,299 @@ export class WebDriver implements ParityDriver {
     );
   }
 
+  async settingsShellOpen(workspaceSlug: string, projectId: string, tabHref: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}${tabHref}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.settingsShellWaitSettled(60_000);
+  }
+
+  /** Links whose href points into project settings (sidebar plus drawer copies). */
+  private settingsShellLinks() {
+    return this.page.locator('a[href*="/settings/projects/"]');
+  }
+
+  /** Labels of the currently visible settings links, in DOM order. */
+  private async settingsShellVisibleLinkLabels(): Promise<string[]> {
+    return this.settingsShellLinks().evaluateAll((links) =>
+      links
+        .filter((node) => {
+          const rect = (node as HTMLElement).getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        })
+        .map((node) => ((node as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim())
+        .filter((text) => text.length > 0)
+    );
+  }
+
+  /** Which settled state the settings area is in, or null while still loading. */
+  private async settingsShellState(): Promise<string | null> {
+    return this.page.evaluate(() => {
+      const visible = (node: Element | null): boolean => {
+        if (node === null) return false;
+        const rect = (node as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      // Denial and restriction render beside (or instead of) the sidebar,
+      // so they win over the link check: the refused members page keeps
+      // its sidebar links visible next to the denial heading.
+      const headings = Array.from(document.querySelectorAll("h1"));
+      if (headings.some((h) => visible(h) && /not authorized/i.test(h.textContent ?? ""))) return "denied";
+      const buttons = Array.from(document.querySelectorAll("button"));
+      if (buttons.some((b) => visible(b) && (b.textContent ?? "").trim() === "Join project")) return "restriction";
+      const body = document.body.innerText ?? "";
+      if (/don't have access to this Project/i.test(body)) return "restriction";
+      if (/project not found/i.test(body)) return "restriction";
+      if (/No projects yet/i.test(body)) return "guidance";
+      const links = Array.from(document.querySelectorAll('a[href*="/settings/projects/"]'));
+      if (links.some(visible)) return "shell";
+      return null;
+    });
+  }
+
+  /** Poll until the settings area rests on one settled state (shell, denial, restriction, guidance). */
+  private async settingsShellWaitSettled(timeoutMs: number): Promise<void> {
+    // The sidebar renders before the content gate resolves, so a gated
+    // tab reads "shell" for a beat before flipping to "denied": the state
+    // must rest unchanged for a quiet period before it counts as settled.
+    const deadline = Date.now() + timeoutMs;
+    let state: string | null = null;
+    let restSince = Date.now();
+    for (;;) {
+      const next = await this.settingsShellState();
+      if (next !== state) {
+        state = next;
+        restSince = Date.now();
+      } else if (state !== null && Date.now() - restSince >= 2000) {
+        return;
+      }
+      if (Date.now() >= deadline) throw new Error("[parity] settings shell never settled.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async settingsShellGroups(): Promise<string[]> {
+    // Group headings are short label-only divs beside the item links: they
+    // carry no anchor descendants, unlike the item labels wrapped in links.
+    const groups = await this.page.evaluate(() => {
+      const seen = new Set<string>();
+      const out: string[] = [];
+      document.querySelectorAll("div").forEach((div) => {
+        if (div.querySelector("a") !== null) return;
+        const rect = div.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        const text = (div.textContent ?? "").replace(/\s+/g, " ").trim();
+        if (!/^[A-Za-z][A-Za-z ]{2,23}$/.test(text)) return;
+        if (seen.has(text)) return;
+        seen.add(text);
+        out.push(text);
+      });
+      return out;
+    });
+    const known = new Set(["General", "Features", "Work structure", "Execution"]);
+    return groups.filter((g) => known.has(g));
+  }
+
+  async settingsShellItems(): Promise<string[]> {
+    return this.settingsShellVisibleLinkLabels();
+  }
+
+  async settingsShellActiveItem(): Promise<string | null> {
+    // The current tab carries the selected-background marker (same approach
+    // as the layout switcher's active-marker scan elsewhere in this driver).
+    const labels = await this.settingsShellLinks().evaluateAll((links) =>
+      links
+        .filter((node) => {
+          const rect = (node as HTMLElement).getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return false;
+          return ((node as HTMLElement).getAttribute("class") ?? "").includes("bg-layer-transparent-selected");
+        })
+        .map((node) => ((node as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim())
+    );
+    return labels[0] ?? null;
+  }
+
+  async settingsShellPath(): Promise<string> {
+    // The oracle serves every settings address with and without the
+    // trailing slash; the slash is incidental, so reads drop it.
+    const path = new URL(this.page.url()).pathname;
+    return path.length > 1 ? path.replace(/\/$/, "") : path;
+  }
+
+  async settingsShellDrawerTriggerVisible(): Promise<boolean> {
+    await this.page.setViewportSize({ width: 390, height: 844 });
+    const trigger = this.page.locator('[class*="md:hidden"]').getByRole("button").first();
+    try {
+      await trigger.waitFor({ timeout: 15_000 });
+    } catch {
+      return false;
+    }
+    return trigger.isVisible();
+  }
+
+  async settingsShellOpenDrawer(): Promise<void> {
+    await this.page.setViewportSize({ width: 390, height: 844 });
+    const before = await this.settingsShellVisibleLinkLabels();
+    await this.page.locator('[class*="md:hidden"]').getByRole("button").first().click({ timeout: 15_000 });
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const labels = await this.settingsShellVisibleLinkLabels();
+      if (labels.length > before.length) return;
+      if (Date.now() >= deadline) throw new Error("[parity] settings drawer never opened.");
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async settingsShellDrawerItems(): Promise<string[]> {
+    return this.settingsShellVisibleLinkLabels();
+  }
+
+  async settingsShellWideViewport(): Promise<void> {
+    await this.page.setViewportSize({ width: 1280, height: 800 });
+  }
+
+  async settingsShellDeniedVisible(): Promise<boolean> {
+    return (await this.settingsShellState()) === "denied";
+  }
+
+  async settingsShellRestrictionVisible(): Promise<boolean> {
+    return (await this.settingsShellState()) === "restriction";
+  }
+
+  async settingsShellRestrictionText(): Promise<string | null> {
+    const text = await this.page.evaluate(() => (document.body.innerText ?? "").replace(/\s+/g, " ").trim());
+    return text.length > 0 ? text.slice(0, 500) : null;
+  }
+
+  async settingsShellJoinVisible(): Promise<boolean> {
+    const join = this.page.getByRole("button", { name: "Join project" });
+    try {
+      await join.first().waitFor({ timeout: 10_000 });
+    } catch {
+      return false;
+    }
+    return join.first().isVisible();
+  }
+
+  async settingsShellJoin(): Promise<void> {
+    await this.page.getByRole("button", { name: "Join project" }).first().click({ timeout: 15_000 });
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const state = await this.settingsShellState();
+      if (state === "shell") return;
+      if (Date.now() >= deadline) throw new Error("[parity] settings shell never settled after join.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async settingsShellNoProjectsVisible(): Promise<boolean> {
+    return (await this.settingsShellState()) === "guidance";
+  }
+
+  async settingsShellGeneralFormVisible(): Promise<boolean> {
+    const boxes = this.page.getByRole("textbox");
+    try {
+      await boxes.first().waitFor({ timeout: 15_000 });
+    } catch {
+      return false;
+    }
+    return (await boxes.count()) > 0;
+  }
+
+  async settingsShellFillGeneralName(name: string): Promise<void> {
+    await this.page.getByRole("textbox").first().fill(name);
+  }
+
+  async settingsShellFollowItem(label: string): Promise<void> {
+    const from = new URL(this.page.url()).pathname;
+    const found = await this.page.evaluate((want) => {
+      const match = Array.from(document.querySelectorAll('a[href*="/settings/projects/"]')).find((node) => {
+        const rect = (node as HTMLElement).getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return false;
+        return ((node as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim() === want;
+      });
+      if (match === undefined) return false;
+      (match as HTMLElement).click();
+      return true;
+    }, label);
+    if (!found) throw new Error(`[parity] no visible settings item labelled ${label}.`);
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const now = new URL(this.page.url()).pathname;
+      if (now !== from && (await this.settingsShellState()) !== null) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] following settings item ${label} never settled.`);
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async settingsShellPressKeys(keys: string[]): Promise<{ dialogSeen: boolean; path: string }> {
+    let dialogSeen = false;
+    const handler = (): void => {
+      dialogSeen = true;
+    };
+    this.page.on("dialog", handler);
+    try {
+      for (const key of keys) await this.page.keyboard.press(key);
+      await this.page.waitForTimeout(500);
+    } finally {
+      this.page.off("dialog", handler);
+    }
+    return { dialogSeen, path: new URL(this.page.url()).pathname };
+  }
+
+  async settingsShellBulkExportImportVisible(): Promise<boolean> {
+    return (
+      (await this.page
+        .getByRole("button", { name: /bulk|export|import/i })
+        .evaluateAll(
+          (buttons) =>
+            buttons.filter((node) => {
+              const rect = (node as HTMLElement).getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            }).length
+        )
+        .catch(() => 0)) > 0
+    );
+  }
+
+  async settingsShellEditionGateVisible(): Promise<boolean> {
+    const text = await this.page.evaluate(() => (document.body.innerText ?? "").replace(/\s+/g, " ").trim());
+    return /upgrade to|cloud only|enterprise plan|contact sales|self-hosted only/i.test(text);
+  }
+
+  async settingsShellCountSockets(tabHrefs: string[], workspaceSlug: string, projectId: string): Promise<number> {
+    let count = 0;
+    const handler = (): void => {
+      count += 1;
+    };
+    this.page.on("websocket", handler);
+    try {
+      for (const href of tabHrefs) {
+        await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}${href}`);
+        await this.page.waitForLoadState("domcontentloaded");
+        await this.settingsShellWaitSettled(60_000);
+      }
+    } finally {
+      this.page.off("websocket", handler);
+    }
+    return count;
+  }
+
+  async settingsProjectsOpen(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.settingsShellWaitSettled(60_000);
+  }
+
+  async settingsShellOpenGuidanceCreate(): Promise<void> {
+    await this.page.getByRole("button", { name: "Start your first project" }).first().click({ timeout: 15_000 });
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      if (await this.isCreateProjectDialogVisible()) return;
+      if (Date.now() >= deadline) throw new Error("[parity] project creation never opened from guidance.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
   async reactionsArchivedCommentClusterVisible(cardText: string): Promise<boolean> {
     const card = this.commentCard(cardText).first();
     try {

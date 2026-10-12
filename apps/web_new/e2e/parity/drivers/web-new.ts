@@ -11911,4 +11911,80 @@ export class WebNewDriver implements ParityDriver {
   async delayNextPublishWrite(_ms: number): Promise<void> {
     return todo("delayNextPublishWrite");
   }
+
+  // --- Project-settings shell oracle (NEWFRONT-388, PSET-001/002/003/004/062/063).
+  // --- Throwing stubs per the shared driver contract; the new app implements
+  // --- them later.
+  async settingsShellOpen(_workspaceSlug: string, _projectId: string, _tabHref: string): Promise<void> {
+    return todo("settingsShellOpen");
+  }
+  async settingsShellGroups(): Promise<string[]> {
+    return todo("settingsShellGroups");
+  }
+  async settingsShellItems(): Promise<string[]> {
+    return todo("settingsShellItems");
+  }
+  async settingsShellActiveItem(): Promise<string | null> {
+    return todo("settingsShellActiveItem");
+  }
+  async settingsShellPath(): Promise<string> {
+    return todo("settingsShellPath");
+  }
+  async settingsShellDrawerTriggerVisible(): Promise<boolean> {
+    return todo("settingsShellDrawerTriggerVisible");
+  }
+  async settingsShellOpenDrawer(): Promise<void> {
+    return todo("settingsShellOpenDrawer");
+  }
+  async settingsShellDrawerItems(): Promise<string[]> {
+    return todo("settingsShellDrawerItems");
+  }
+  async settingsShellWideViewport(): Promise<void> {
+    return todo("settingsShellWideViewport");
+  }
+  async settingsShellDeniedVisible(): Promise<boolean> {
+    return todo("settingsShellDeniedVisible");
+  }
+  async settingsShellRestrictionVisible(): Promise<boolean> {
+    return todo("settingsShellRestrictionVisible");
+  }
+  async settingsShellRestrictionText(): Promise<string | null> {
+    return todo("settingsShellRestrictionText");
+  }
+  async settingsShellJoinVisible(): Promise<boolean> {
+    return todo("settingsShellJoinVisible");
+  }
+  async settingsShellJoin(): Promise<void> {
+    return todo("settingsShellJoin");
+  }
+  async settingsShellNoProjectsVisible(): Promise<boolean> {
+    return todo("settingsShellNoProjectsVisible");
+  }
+  async settingsShellGeneralFormVisible(): Promise<boolean> {
+    return todo("settingsShellGeneralFormVisible");
+  }
+  async settingsShellFillGeneralName(_name: string): Promise<void> {
+    return todo("settingsShellFillGeneralName");
+  }
+  async settingsShellFollowItem(_label: string): Promise<void> {
+    return todo("settingsShellFollowItem");
+  }
+  async settingsShellPressKeys(_keys: string[]): Promise<{ dialogSeen: boolean; path: string }> {
+    return todo("settingsShellPressKeys");
+  }
+  async settingsShellBulkExportImportVisible(): Promise<boolean> {
+    return todo("settingsShellBulkExportImportVisible");
+  }
+  async settingsShellEditionGateVisible(): Promise<boolean> {
+    return todo("settingsShellEditionGateVisible");
+  }
+  async settingsShellCountSockets(_tabHrefs: string[], _workspaceSlug: string, _projectId: string): Promise<number> {
+    return todo("settingsShellCountSockets");
+  }
+  async settingsProjectsOpen(_workspaceSlug: string): Promise<void> {
+    return todo("settingsProjectsOpen");
+  }
+  async settingsShellOpenGuidanceCreate(): Promise<void> {
+    return todo("settingsShellOpenGuidanceCreate");
+  }
 }
