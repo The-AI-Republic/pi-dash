@@ -95,6 +95,7 @@ use pidash_services::app_workspace::queries_core as core_q;
 use pidash_services::app_workspace::queries_profile as profile_q;
 use pidash_services::app_workspace::queries_user as user_q;
 use pidash_services::app_workspace::ser_account_token as ser;
+use pidash_services::user_settings::SettingsSchema;
 
 use crate::middleware::SessionHandle;
 use crate::serializer::render_datetime_in;
@@ -412,13 +413,32 @@ fn number_placeholders(sql: &str, order: &[&str]) -> String {
 /// (`core/user_settings.py:24`).
 pub const MAX_SETTINGS_PATCH_BYTES: usize = 4096;
 
-/// The namespaces this build recognises (`ee/user_settings.py:41`):
-/// CE declares none, so the bag stays empty and every write is
-/// rejected. Structured as data (not a hardcoded reject) so the
-/// validate/merge logic below stays a line-for-line port of
-/// `core/user_settings.py`.
-fn known_settings_schema() -> &'static [(&'static str, &'static [(&'static str, SettingDefault)])] {
-    &[]
+/// The schema [`validate_settings_patch`] checks against is the
+/// injectable seam, carried on [`AppState`] (`user_settings_schema`):
+/// CE keeps the empty default, so the bag stays empty and every write
+/// is rejected; the overlay installs its extended schema instead
+/// (`ee/user_settings.py`), and declaring a key is what makes it
+/// writable through the profile API. The validate/merge logic below
+/// stays a line-for-line port of `core/user_settings.py` either way.
+///
+/// Read the type declaration off one declared default value: a
+/// `null` default accepts any scalar, a number default dispatches on
+/// whether it is a float (`type(default)`, `_check_value`).
+fn setting_default_kind(default: &serde_json::Value) -> SettingDefault {
+    match default {
+        serde_json::Value::Null => SettingDefault::Null,
+        serde_json::Value::Bool(_) => SettingDefault::Bool,
+        serde_json::Value::Number(number) => {
+            if number.is_f64() {
+                SettingDefault::Float
+            } else {
+                SettingDefault::Int
+            }
+        }
+        serde_json::Value::String(_) => SettingDefault::Str,
+        serde_json::Value::Array(_) => SettingDefault::List,
+        serde_json::Value::Object(_) => SettingDefault::Dict,
+    }
 }
 
 /// A schema default doubling as the type declaration
@@ -501,17 +521,19 @@ fn is_json_int(value: &serde_json::Value) -> bool {
 /// Validate a client-supplied `settings` payload against the schema
 /// (`validate_settings_patch`, `core/user_settings.py:115-155`).
 /// Returns the accepted patch; raises the human-readable message on
-/// anything unrecognised.
+/// anything unrecognised. The caller supplies the schema — the
+/// endpoint reads it off [`AppState`] — so the overlay can declare its
+/// own namespaces without touching this port.
 fn validate_settings_patch(
+    schema: &SettingsSchema,
     patch: &serde_json::Value,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let serde_json::Value::Object(namespaces) = patch else {
         return Err("settings must be an object".to_owned());
     };
-    let schema = known_settings_schema();
     let mut accepted = serde_json::Map::with_capacity(namespaces.len());
     for (namespace, values) in namespaces {
-        let Some((_, keys)) = schema.iter().find(|(name, _)| *name == namespace) else {
+        let Some(keys) = schema.get(namespace) else {
             return Err(format!("unknown settings namespace: {namespace}"));
         };
         let serde_json::Value::Object(entries) = values else {
@@ -519,7 +541,7 @@ fn validate_settings_patch(
         };
         let mut unknown: Vec<&str> = entries
             .keys()
-            .filter(|key| !keys.iter().any(|(name, _)| name == key))
+            .filter(|key| !keys.contains_key(key.as_str()))
             .map(String::as_str)
             .collect();
         if !unknown.is_empty() {
@@ -530,11 +552,8 @@ fn validate_settings_patch(
             ));
         }
         for (key, value) in entries {
-            let (_, default) = keys
-                .iter()
-                .find(|(name, _)| *name == key)
-                .expect("key is known");
-            check_setting_value(namespace, key, value, *default)?;
+            let default = keys.get(key.as_str()).expect("key is known");
+            check_setting_value(namespace, key, value, setting_default_kind(default))?;
         }
         accepted.insert(
             namespace.clone(),
@@ -1796,9 +1815,11 @@ async fn patch_profile(
     let value = patch_body(&headers, &body)?;
     let object = patch_object(&value)?;
     let settings_patch = if let Some(settings) = object.get("settings") {
-        Some(validate_settings_patch(settings).map_err(|message| {
-            HandlerError::FieldErrors(serde_json::json!({"settings": [message]}).to_string())
-        })?)
+        Some(
+            validate_settings_patch(state.user_settings_schema(), settings).map_err(|message| {
+                HandlerError::FieldErrors(serde_json::json!({"settings": [message]}).to_string())
+            })?,
+        )
     } else {
         None
     };
@@ -2300,7 +2321,12 @@ async fn dashboard_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    use pidash_services::user_settings::{
+        base_settings_schema, extend_settings_schema, SettingsSchema,
+    };
 
     fn fixture(name: &str) -> serde_json::Value {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2638,37 +2664,180 @@ mod tests {
 
     #[test]
     fn settings_rejects_non_objects() {
+        let schema = base_settings_schema();
         assert_eq!(
-            validate_settings_patch(&json("[1]")).unwrap_err(),
+            validate_settings_patch(&schema, &json("[1]")).unwrap_err(),
             "settings must be an object"
         );
         assert_eq!(
-            validate_settings_patch(&json("null")).unwrap_err(),
+            validate_settings_patch(&schema, &json("null")).unwrap_err(),
             "settings must be an object"
         );
     }
 
     #[test]
     fn settings_rejects_every_namespace_in_ce() {
+        let schema = base_settings_schema();
         // Exact bytes pinned by the live contract
         // `test_profile_patch_unknown_settings_namespace_rejected`.
         assert_eq!(
-            validate_settings_patch(&json("{\"nope\":{\"k\":1}}")).unwrap_err(),
+            validate_settings_patch(&schema, &json("{\"nope\":{\"k\":1}}")).unwrap_err(),
             "unknown settings namespace: nope"
         );
         // The namespace check runs before the shape check.
         assert_eq!(
-            validate_settings_patch(&json("{\"nope\":1}")).unwrap_err(),
+            validate_settings_patch(&schema, &json("{\"nope\":1}")).unwrap_err(),
             "unknown settings namespace: nope"
         );
     }
 
     #[test]
     fn settings_accepts_empty_patch() {
+        let schema = base_settings_schema();
         assert_eq!(
-            validate_settings_patch(&json("{}")).unwrap(),
+            validate_settings_patch(&schema, &json("{}")).unwrap(),
             serde_json::Map::new()
         );
+    }
+
+    /// The cloud declaration (`ee/settings/user_settings.py`): the base
+    /// schema extended with `openhub.apps_enabled` (default `false`).
+    fn openhub_schema() -> SettingsSchema {
+        extend_settings_schema(
+            &base_settings_schema(),
+            &BTreeMap::from([(
+                "openhub".to_string(),
+                BTreeMap::from([("apps_enabled".to_string(), json("false"))]),
+            )]),
+        )
+        .expect("openhub extends the empty base")
+    }
+
+    #[test]
+    fn settings_ce_schema_rejects_openhub_write() {
+        // CE declares nothing, so the overlay key is refused — the
+        // pre-seam behavior, now through the injected empty schema.
+        assert_eq!(
+            validate_settings_patch(
+                &base_settings_schema(),
+                &json("{\"openhub\":{\"apps_enabled\":true}}")
+            )
+            .unwrap_err(),
+            "unknown settings namespace: openhub"
+        );
+    }
+
+    #[test]
+    fn settings_extended_schema_accepts_declared_keys() {
+        let schema = openhub_schema();
+        let accepted =
+            validate_settings_patch(&schema, &json("{\"openhub\":{\"apps_enabled\":true}}"))
+                .unwrap();
+        assert_eq!(
+            serde_json::Value::Object(accepted),
+            json("{\"openhub\":{\"apps_enabled\":true}}")
+        );
+        // An empty namespace patch stays accepted (no keys to dispute).
+        let accepted = validate_settings_patch(&schema, &json("{\"openhub\":{}}")).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(accepted),
+            json("{\"openhub\":{}}")
+        );
+    }
+
+    #[test]
+    fn settings_extended_schema_still_rejects_unknown() {
+        let schema = openhub_schema();
+        assert_eq!(
+            validate_settings_patch(&schema, &json("{\"nope\":{\"k\":1}}")).unwrap_err(),
+            "unknown settings namespace: nope"
+        );
+        assert_eq!(
+            validate_settings_patch(&schema, &json("{\"openhub\":{\"nope\":true}}")).unwrap_err(),
+            "unknown settings key(s) in openhub: nope"
+        );
+        assert_eq!(
+            validate_settings_patch(&schema, &json("{\"openhub\":true}")).unwrap_err(),
+            "settings.openhub must be an object"
+        );
+        assert_eq!(
+            validate_settings_patch(&schema, &json("{\"openhub\":{\"apps_enabled\":\"yes\"}}"))
+                .unwrap_err(),
+            "settings.openhub.apps_enabled must be of type bool"
+        );
+    }
+
+    #[test]
+    fn settings_declared_defaults_drive_type_checks() {
+        let schema: SettingsSchema = BTreeMap::from([(
+            "ns".to_string(),
+            BTreeMap::from([
+                ("count".to_string(), json("0")),
+                ("ratio".to_string(), json("1.5")),
+                ("name".to_string(), json("\"\"")),
+                ("tags".to_string(), json("[]")),
+                ("meta".to_string(), json("{}")),
+                ("anything".to_string(), json("null")),
+            ]),
+        )]);
+        // Matching values pass, including ints under float keys and
+        // scalars under null-defaulted keys.
+        for raw in [
+            "{\"ns\":{\"count\":3}}",
+            "{\"ns\":{\"ratio\":2}}",
+            "{\"ns\":{\"ratio\":2.5}}",
+            "{\"ns\":{\"name\":\"x\"}}",
+            "{\"ns\":{\"tags\":[1]}}",
+            "{\"ns\":{\"meta\":{\"a\":1}}}",
+            "{\"ns\":{\"anything\":1}}",
+            "{\"ns\":{\"anything\":\"x\"}}",
+        ] {
+            assert!(
+                validate_settings_patch(&schema, &json(raw)).is_ok(),
+                "patch {raw}"
+            );
+        }
+        // Mismatches fail naming the declared type.
+        for (raw, expected) in [
+            (
+                "{\"ns\":{\"count\":true}}",
+                "settings.ns.count must be of type int",
+            ),
+            (
+                "{\"ns\":{\"count\":1.5}}",
+                "settings.ns.count must be of type int",
+            ),
+            (
+                "{\"ns\":{\"ratio\":true}}",
+                "settings.ns.ratio must be of type float",
+            ),
+            (
+                "{\"ns\":{\"name\":1}}",
+                "settings.ns.name must be of type str",
+            ),
+            (
+                "{\"ns\":{\"tags\":{}}}",
+                "settings.ns.tags must be of type list",
+            ),
+            (
+                "{\"ns\":{\"meta\":[]}}",
+                "settings.ns.meta must be of type dict",
+            ),
+            (
+                "{\"ns\":{\"anything\":[]}}",
+                "settings.ns.anything must be a scalar",
+            ),
+            (
+                "{\"ns\":{\"anything\":{}}}",
+                "settings.ns.anything must be a scalar",
+            ),
+        ] {
+            assert_eq!(
+                validate_settings_patch(&schema, &json(raw)).unwrap_err(),
+                expected,
+                "patch {raw}"
+            );
+        }
     }
 
     #[test]
