@@ -42373,6 +42373,16 @@ export class WebDriver implements ParityDriver {
       .catch(() => {});
   }
 
+  async settingsMembersSortMarker(column: string): Promise<"ascending" | "descending" | "none"> {
+    // The active header carries a directional arrow beside the (always
+    // present) chevron: ArrowDownWideNarrow for ascending, ArrowUpNarrowWide
+    // for descending. Inactive headers show the chevron alone.
+    const header = this.page.locator("th", { hasText: column }).getByRole("button").first();
+    if ((await header.locator("svg.lucide-arrow-down-wide-narrow").count()) > 0) return "ascending";
+    if ((await header.locator("svg.lucide-arrow-up-narrow-wide").count()) > 0) return "descending";
+    return "none";
+  }
+
   /**
    * The open listbox popup (member, role and defaults pickers share it).
    * Headless UI renders the popup wrapper with zero size, so callers wait

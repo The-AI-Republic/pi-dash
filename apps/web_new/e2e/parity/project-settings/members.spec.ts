@@ -1,18 +1,20 @@
-// Copyright (c) Pi Dash contributors. All rights reserved.
-// License for this tree is pending the H-license decision (NEWFRONT-2,
-// owner: human). This placeholder grants no license and must be replaced
-// with the final header text by F-11 (NEWFRONT-22).
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
 // Oracle scenarios (NEWFRONT-391): project settings members tab — the
-// roster table with profile-linked avatars, client-side search, persisted
-// role filters and per-column sort, the admin multi-row invite dialog with
+// roster table with profile-linked avatars, client-side search,
+// session-persisted role filters and per-column sort, the admin multi-row
+// invite dialog with
 // per-row role caps, inline role edits under the stated exceptions, remove
 // versus leave confirmations, save-on-change project defaults, and the
 // loading/empty/failure states. Rows: PSET-018–027.
 //
 // Observed behavior notes: the table shows full name (avatar links to the
 // member profile), display name, email, role word and joining date;
-// project guests and workspace outsiders get the not-authorized view. The
-// invite dialog filters role options by the co-worker's workspace role
+// project guests and workspace outsiders get the not-authorized view. Sort
+// and filter choices persist per project across tab visits within the
+// session; a full reload resets them (NEWFRONT-409). The invite dialog
+// filters role options by the co-worker's workspace role
 // (workspace guests enter at guest only, workspace admins at admin only,
 // workspace members get the full map); there is no inviter-level cap in
 // the dialog or on the create endpoint (NEWFRONT-399). A workspace admin
@@ -176,6 +178,11 @@ test(
   async ({ driver, seed }) => {
     await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
     await driver.settingsMembersOpen(seed.workspaceSlug, seed.projectId);
+    // Default order before any sort: the reload step asserts the table
+    // returns to exactly this shape.
+    await expect.poll(() => driver.settingsMembersRows(), { timeout: 15_000 }).toHaveLength(3);
+    const defaultOrder = (await driver.settingsMembersRows()).map((r) => r.displayName);
+    expect(await driver.settingsMembersSortMarker("Display name")).toBe("none");
 
     await test.step("ascending orders display names A to Z", async () => {
       await driver.settingsMembersSortOpen("Display name");
@@ -186,6 +193,8 @@ test(
       await expect
         .poll(async () => (await driver.settingsMembersRows()).map((r) => r.displayName), { timeout: 15_000 })
         .toEqual(["Parity Guest", "Parity Mention", "Parity Oracle"]);
+      await expect.poll(() => driver.settingsMembersSortMarker("Display name"), { timeout: 15_000 }).toBe("ascending");
+      expect(await driver.settingsMembersSortMarker("Email")).toBe("none");
     });
 
     await test.step("descending reverses the order", async () => {
@@ -197,6 +206,7 @@ test(
       await expect
         .poll(async () => (await driver.settingsMembersRows()).map((r) => r.displayName), { timeout: 15_000 })
         .toEqual(["Parity Oracle", "Parity Mention", "Parity Guest"]);
+      await expect.poll(() => driver.settingsMembersSortMarker("Display name"), { timeout: 15_000 }).toBe("descending");
     });
 
     await test.step("the choice survives moving between tabs, then clears", async () => {
@@ -207,12 +217,31 @@ test(
       await expect
         .poll(async () => (await driver.settingsMembersRows()).map((r) => r.displayName), { timeout: 15_000 })
         .toEqual(["Parity Oracle", "Parity Mention", "Parity Guest"]);
+      await expect.poll(() => driver.settingsMembersSortMarker("Display name"), { timeout: 15_000 }).toBe("descending");
       await driver.settingsMembersSortOpen("Display name");
       const items = await driver.settingsMembersSortItems();
       const clear = items.find((t) => t.includes("Clear")) ?? "";
       expect(clear).not.toBe("");
       await driver.settingsMembersSortPick(clear);
       await expect.poll(() => driver.settingsMembersRows(), { timeout: 15_000 }).toHaveLength(3);
+      await expect.poll(() => driver.settingsMembersSortMarker("Display name"), { timeout: 15_000 }).toBe("none");
+    });
+
+    await test.step("a full reload resets to the default order (NEWFRONT-409)", async () => {
+      // The row acceptance claims reload survival, but the store is
+      // session-only: re-apply a sort, reload, and pin the reset.
+      await driver.settingsMembersSortOpen("Display name");
+      const items = await driver.settingsMembersSortItems();
+      const descending = items.find((t) => t.startsWith("Z")) ?? "";
+      expect(descending).not.toBe("");
+      await driver.settingsMembersSortPick(descending);
+      await expect.poll(() => driver.settingsMembersSortMarker("Display name"), { timeout: 15_000 }).toBe("descending");
+      await driver.reloadPage();
+      await expect.poll(() => driver.settingsMembersRows(), { timeout: 30_000 }).toHaveLength(3);
+      await expect
+        .poll(async () => (await driver.settingsMembersRows()).map((r) => r.displayName), { timeout: 15_000 })
+        .toEqual(defaultOrder);
+      expect(await driver.settingsMembersSortMarker("Display name")).toBe("none");
     });
   }
 );

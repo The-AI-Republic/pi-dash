@@ -7875,7 +7875,8 @@ export interface ParityDriver {
   settingsMembersGuestToggleDisabled(): Promise<boolean>;
   /** Shut the co-worker picker of invite row `index` without picking. */
   settingsMembersInviteCloseMemberPicker(index: number): Promise<void>;
-
+  /** Active sort marker on a member-table column header: ascending, descending, or none. */
+  settingsMembersSortMarker(column: string): Promise<"ascending" | "descending" | "none">;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */

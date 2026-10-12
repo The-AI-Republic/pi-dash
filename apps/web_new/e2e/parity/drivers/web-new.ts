@@ -12305,5 +12305,7 @@ export class WebNewDriver implements ParityDriver {
   async settingsMembersInviteCloseMemberPicker(_index: number): Promise<void> {
     return todo("settingsMembersInviteCloseMemberPicker");
   }
-
+  async settingsMembersSortMarker(_column: string): Promise<"ascending" | "descending" | "none"> {
+    return todo("settingsMembersSortMarker");
+  }
 }

@@ -39,8 +39,11 @@ active indicator while any filter applies.
 ## Sorting (PSET-021)
 
 Each column header menu offers ascending, descending and clear choices.
-The choice persists as a display filter and the header shows a direction
-indicator while its column drives the order.
+The choice persists per project as a display filter across tab visits
+within the session; a full reload resets the table to its default order
+(NEWFRONT-409). The active header shows a direction indicator (an up or
+down arrow beside the menu chevron) while its column drives the order;
+inactive headers show the chevron alone.
 
 ## Adding members (PSET-022)
 
