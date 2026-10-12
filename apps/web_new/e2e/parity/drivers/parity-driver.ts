@@ -7751,6 +7751,131 @@ export interface ParityDriver {
   projectGithubGuidanceVisible(): Promise<boolean>;
   /** Full visible text of the tab (for pinned non-behavior assertions). */
   projectGithubTabText(): Promise<string>;
+
+  // --- Project members tab (NEWFRONT-391, PSET-018–027). Observed on the
+  // --- running old app: the members settings page stacks a defaults
+  // --- section (lead, default assignee, guest access), a teamspace strip
+  // --- and the member list (search, role filters, admin add control,
+  // --- five-column table with per-column sort, hover remove/leave menu,
+  // --- invite dialog, remove/leave confirmations, skeleton and no-match
+  // --- states). Appended; existing methods above are untouched per the
+  // --- shared driver contract.
+  /** Open a project's settings Members page; settles on the list or the denial view. */
+  settingsMembersOpen(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Whether the not-authorized view shows instead of the member table. */
+  settingsMembersDenied(): Promise<boolean>;
+  /** Member rows in display order: names, email, role word, joining text, profile link. */
+  settingsMembersRows(): Promise<
+    {
+      fullName: string;
+      displayName: string;
+      email: string;
+      roleLabel: string;
+      joinedText: string;
+      profileHref: string | null;
+    }[]
+  >;
+  /** Fill the member search box (client-side filter, no requests). */
+  settingsMembersSearchFill(query: string): Promise<void>;
+  /** Whether the centered no-match notice currently shows. */
+  settingsMembersNoMatchVisible(): Promise<boolean>;
+  /** Open the role Filters dropdown. */
+  settingsMembersFiltersOpen(): Promise<void>;
+  /** Role checkbox labels offered in the open Filters dropdown. */
+  settingsMembersFilterOptions(): Promise<string[]>;
+  /** Whether the role checkbox `label` is currently checked. */
+  settingsMembersFilterChecked(label: string): Promise<boolean>;
+  /** Toggle the role checkbox `label` in the open Filters dropdown. */
+  settingsMembersFilterToggle(label: string): Promise<void>;
+  /** Close the Filters dropdown without losing the applied filters. */
+  settingsMembersFiltersClose(): Promise<void>;
+  /** Whether the Filters button shows its active-filters indicator. */
+  settingsMembersFilterActive(): Promise<boolean>;
+  /** Open the sort menu of the `column` header ("Full name", "Display name", "Email", "Account type", "Joining date"). */
+  settingsMembersSortOpen(column: string): Promise<void>;
+  /** Items offered in the open column sort menu. */
+  settingsMembersSortItems(): Promise<string[]>;
+  /** Pick the sort menu item `text`; resolves once the rows settle. */
+  settingsMembersSortPick(text: string): Promise<void>;
+  /** Move between settings tabs through the sidebar (in-app navigation). */
+  settingsMembersGotoTab(tab: string): Promise<void>;
+  /** Whether the admin-only add control renders. */
+  settingsMembersAddVisible(): Promise<boolean>;
+  /** Open the invite dialog via the add control. */
+  settingsMembersOpenInvite(): Promise<void>;
+  /** Whether the invite dialog is currently open. */
+  settingsMembersInviteOpen(): Promise<boolean>;
+  /** How many invite rows the open dialog holds. */
+  settingsMembersInviteRowCount(): Promise<number>;
+  /** Append another invite row ("Add more"). */
+  settingsMembersInviteAddRow(): Promise<void>;
+  /** Remove the invite row at `index` (0-based). */
+  settingsMembersInviteRemoveRow(index: number): Promise<void>;
+  /** Open the co-worker picker of invite row `index`. */
+  settingsMembersInviteOpenMemberPicker(index: number): Promise<void>;
+  /** Co-worker option texts in the open picker, in display order. */
+  settingsMembersInviteMemberOptions(): Promise<string[]>;
+  /** Pick the co-worker whose option contains `text` in the open picker. */
+  settingsMembersInvitePickMember(index: number, text: string): Promise<void>;
+  /** Role option labels offered for invite row `index`. */
+  settingsMembersInviteRoleOptions(index: number): Promise<string[]>;
+  /** Pick role `label` for invite row `index`. */
+  settingsMembersInvitePickRole(index: number, label: string): Promise<void>;
+  /** Inline error under invite row `index`, or "" when the row shows none. */
+  settingsMembersInviteRowError(index: number): Promise<string>;
+  /** Submit the invite dialog; resolves once it closes. */
+  settingsMembersInviteSubmit(): Promise<void>;
+  /** Click submit without waiting for close (validation-failure path). */
+  settingsMembersInviteAttemptSubmit(): Promise<void>;
+  /** Dismiss the invite dialog without adding ("Cancel"). */
+  settingsMembersInviteCancel(): Promise<void>;
+  /** Whether the account-type cell of `displayName` offers the inline role editor. */
+  settingsMembersRoleEditable(displayName: string): Promise<boolean>;
+  /** Role word currently shown in the account-type cell of `displayName`. */
+  settingsMembersRoleText(displayName: string): Promise<string>;
+  /** Open the inline role editor of `displayName`. */
+  settingsMembersRoleEditorOpen(displayName: string): Promise<void>;
+  /** Role option labels in the open inline editor. */
+  settingsMembersRoleEditorOptions(): Promise<string[]>;
+  /** Pick role `label` in the open inline editor; resolves once rows settle. */
+  settingsMembersRoleEditorPick(label: string): Promise<void>;
+  /** Hover the row of `displayName` and open its contextual menu. */
+  settingsMembersOpenRowMenu(displayName: string): Promise<void>;
+  /** Item texts in the open row menu. */
+  settingsMembersRowMenuItems(): Promise<string[]>;
+  /** Pick the row-menu item `text`; resolves once the menu closes. */
+  settingsMembersRowMenuPick(text: string): Promise<void>;
+  /** Body text of the open remove/leave confirmation, or "" when shut. */
+  settingsMembersConfirmText(): Promise<string>;
+  /** Confirm the remove/leave dialog; resolves once it closes. */
+  settingsMembersConfirmSubmit(): Promise<void>;
+  /** Dismiss the remove/leave dialog without acting. */
+  settingsMembersConfirmCancel(): Promise<void>;
+  /** Whether the members loading skeleton currently shows. */
+  settingsMembersSkeletonVisible(): Promise<boolean>;
+  /** Delay members-list API answers by `ms` so the skeleton is observable. */
+  settingsMembersDelayLoad(ms: number): Promise<void>;
+  /** Whether the project-defaults section renders. */
+  settingsMembersDefaultsVisible(): Promise<boolean>;
+  /** Current lead picker text ("None" when cleared). */
+  settingsMembersLeadText(): Promise<string>;
+  /** Pick `displayName` (or "None") as project lead; resolves once it saves. */
+  settingsMembersLeadPick(displayName: string): Promise<void>;
+  /** Current default-assignee picker text ("None" when cleared). */
+  settingsMembersAssigneeText(): Promise<string>;
+  /** Pick `displayName` (or "None") as default assignee; resolves once it saves. */
+  settingsMembersAssigneePick(displayName: string): Promise<void>;
+  /** Whether the lead picker is currently disabled (non-admin view). */
+  settingsMembersLeadDisabled(): Promise<boolean>;
+  /** Guest-access toggle state as rendered. */
+  settingsMembersGuestToggleState(): Promise<boolean>;
+  /** Flip the guest-access toggle; resolves once it saves. */
+  settingsMembersGuestToggle(): Promise<void>;
+  /** Whether the guest-access toggle is currently disabled (non-admin view). */
+  settingsMembersGuestToggleDisabled(): Promise<boolean>;
+  /** Shut the co-worker picker of invite row `index` without picking. */
+  settingsMembersInviteCloseMemberPicker(index: number): Promise<void>;
+
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
