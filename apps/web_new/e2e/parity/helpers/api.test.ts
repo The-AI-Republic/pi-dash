@@ -28,8 +28,15 @@ import {
   profileActivityExportCsv,
   serverApiTokens,
   serverCreateApiToken,
+  serverBindRepositoryRaw,
+  serverDeleteProjectRaw,
+  serverIdentifierTaken,
   serverPageRecord,
+  serverProjectFetchStatus,
+  serverProjectRecord,
   serverPublishBoardFacts,
+  serverRepositoryStatus,
+  serverSearchIssueNames,
   type AuthedSession,
 } from "./api";
 
@@ -864,5 +871,140 @@ describe("serverCreateApiToken", () => {
     stubStatus = 500;
     stubRaw = "boom";
     await expect(serverCreateApiToken("session=x", { label: "x" }, apiBase)).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+// Project settings General tab readers (NEWFRONT-389, PSET-005–012): the
+// same stub-server shape as the board-facts tests above.
+describe("serverProjectRecord", () => {
+  it("returns the raw project record on OK", async () => {
+    payload = { id: "project-1", name: "Atlas", identifier: "ATL" };
+    const record = await serverProjectRecord("ws", "project-1", "session=x", apiBase);
+    expect(record).toEqual({ id: "project-1", name: "Atlas", identifier: "ATL" });
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/ws/projects/project-1/");
+  });
+
+  it("throws on a non-OK project read", async () => {
+    stubStatus = 404;
+    await expect(serverProjectRecord("ws", "project-1", "session=x", apiBase)).rejects.toThrow(
+      "[parity] project read failed with HTTP 404."
+    );
+  });
+});
+
+describe("serverProjectFetchStatus", () => {
+  it("returns the status with a null record on a refusal", async () => {
+    stubStatus = 403;
+    await expect(serverProjectFetchStatus("ws", "project-1", "session=x", apiBase)).resolves.toEqual({
+      status: 403,
+      record: null,
+    });
+  });
+
+  it("returns the status with the record on OK", async () => {
+    payload = { id: "project-1", name: "Atlas" };
+    const fetched = await serverProjectFetchStatus("ws", "project-1", "session=x", apiBase);
+    expect(fetched.status).toBe(200);
+    expect(fetched.record).toEqual({ id: "project-1", name: "Atlas" });
+  });
+});
+
+describe("serverDeleteProjectRaw", () => {
+  it("resolves with the status and body on success", async () => {
+    stubRaw = "";
+    const outcome = await serverDeleteProjectRaw("ws", "project-1", "session=x", apiBase);
+    expect(outcome.status).toBe(200);
+    expect(stubSeen[0]?.method).toBe("DELETE");
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/ws/projects/project-1/");
+  });
+
+  it("resolves with the refusal body instead of throwing", async () => {
+    stubStatus = 403;
+    stubRaw = JSON.stringify({ error: "default project" });
+    const outcome = await serverDeleteProjectRaw("ws", "project-1", "session=x", apiBase);
+    expect(outcome.status).toBe(403);
+    expect(outcome.body).toContain("default project");
+  });
+});
+
+describe("serverIdentifierTaken", () => {
+  it("returns true when the reservation count is positive", async () => {
+    payload = { exists: 2 };
+    await expect(serverIdentifierTaken("ws", "ATL", "session=x", apiBase)).resolves.toBe(true);
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/ws/project-identifiers?name=ATL");
+  });
+
+  it("returns false on a zero count or a missing key", async () => {
+    payload = { exists: 0 };
+    await expect(serverIdentifierTaken("ws", "NEW", "session=x", apiBase)).resolves.toBe(false);
+    payload = {};
+    await expect(serverIdentifierTaken("ws", "NEW", "session=x", apiBase)).resolves.toBe(false);
+  });
+
+  it("throws on a non-OK identifier lookup", async () => {
+    stubStatus = 500;
+    await expect(serverIdentifierTaken("ws", "ATL", "session=x", apiBase)).rejects.toThrow(
+      "[parity] identifier lookup failed with HTTP 500."
+    );
+  });
+});
+
+describe("serverRepositoryStatus", () => {
+  it("returns the raw repository record on OK", async () => {
+    payload = { repo_url: "https://github.com/acme/atlas", synced: true };
+    const record = await serverRepositoryStatus("ws", "project-1", "session=x", apiBase);
+    expect(record).toEqual({ repo_url: "https://github.com/acme/atlas", synced: true });
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/ws/projects/project-1/repository/");
+  });
+
+  it("throws on a non-OK repository read", async () => {
+    stubStatus = 404;
+    await expect(serverRepositoryStatus("ws", "project-1", "session=x", apiBase)).rejects.toThrow(
+      "[parity] repository read failed with HTTP 404."
+    );
+  });
+});
+
+describe("serverBindRepositoryRaw", () => {
+  it("posts the repo URL and resolves with the raw outcome", async () => {
+    stubStatus = 401;
+    stubRaw = JSON.stringify({ error: "GitHub token is missing" });
+    const outcome = await serverBindRepositoryRaw(
+      "ws",
+      "project-1",
+      "https://github.com/acme/atlas",
+      "session=x",
+      apiBase
+    );
+    expect(outcome.status).toBe(401);
+    expect(outcome.body).toContain("GitHub token is missing");
+    expect(stubSeen[0]?.method).toBe("POST");
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/ws/projects/project-1/repository/bind/");
+    expect(JSON.parse(stubSeen[0]?.body ?? "{}")).toEqual({ repo_url: "https://github.com/acme/atlas" });
+  });
+});
+
+describe("serverSearchIssueNames", () => {
+  it("returns the issue names for an array payload", async () => {
+    stubRaw = JSON.stringify([{ name: "Alpha" }, { name: "Beta" }]);
+    const names = await serverSearchIssueNames("ws", "project-1", "alp", "session=x", apiBase);
+    expect(names).toEqual(["Alpha", "Beta"]);
+    expect(stubSeen[0]?.url).toBe(
+      "/api/workspaces/ws/projects/project-1/search-issues/?search=alp&workspace_search=false"
+    );
+  });
+
+  it("returns an empty list for a non-array payload and drops non-string names", async () => {
+    stubRaw = JSON.stringify({ results: [] });
+    await expect(serverSearchIssueNames("ws", "project-1", "alp", "session=x", apiBase)).resolves.toEqual([]);
+    stubRaw = JSON.stringify([{ name: "Alpha" }, { name: 7 }, {}]);
+    await expect(serverSearchIssueNames("ws", "project-1", "alp", "session=x", apiBase)).resolves.toEqual(["Alpha"]);
+  });
+
+  it("throws on a non-OK issue search", async () => {
+    stubStatus = 500;
+    await expect(serverSearchIssueNames("ws", "project-1", "alp", "session=x", apiBase)).rejects.toThrow(
+      "[parity] issue search failed with HTTP 500."
+    );
   });
 });
