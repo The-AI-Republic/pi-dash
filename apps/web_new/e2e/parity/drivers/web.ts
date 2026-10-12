@@ -42004,4 +42004,674 @@ export class WebDriver implements ParityDriver {
       .replace(/\s+/g, " ")
       .trim();
   }
+
+
+  // --- Project members tab (NEWFRONT-391, PSET-018–027). Appended; existing
+  // --- methods above are untouched per the shared driver contract.
+  async settingsMembersOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/members`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on either the list heading (member or better) or the denial
+    // view (guests and outsiders); callers assert which one they got.
+    const settled = await Promise.race([
+      this.page
+        .getByRole("heading", { name: "Members", exact: true })
+        .first()
+        .waitFor({ timeout: 60_000 })
+        .then(
+          () => true,
+          () => false
+        ),
+      this.page
+        .getByRole("heading", { name: /not authorized/i })
+        .first()
+        .waitFor({ timeout: 60_000 })
+        .then(
+          () => true,
+          () => false
+        ),
+    ]);
+    if (!settled) throw new Error("[parity] members settings settled on neither the list nor the denial view.");
+  }
+
+  async settingsMembersDenied(): Promise<boolean> {
+    return this.page
+      .getByRole("heading", { name: /not authorized/i })
+      .first()
+      .isVisible();
+  }
+
+  private membersTable() {
+    return this.page.locator("table").first();
+  }
+
+  private memberRow(displayName: string) {
+    return this.membersTable().locator("tbody tr", { hasText: displayName }).first();
+  }
+
+  async settingsMembersRows(): Promise<
+    {
+      fullName: string;
+      displayName: string;
+      email: string;
+      roleLabel: string;
+      joinedText: string;
+      profileHref: string | null;
+    }[]
+  > {
+    const rows = this.membersTable().locator("tbody tr");
+    const total = await rows.count();
+    const out: {
+      fullName: string;
+      displayName: string;
+      email: string;
+      roleLabel: string;
+      joinedText: string;
+      profileHref: string | null;
+    }[] = [];
+    for (let i = 0; i < total; i++) {
+      const cells = rows.nth(i).locator("td");
+      if ((await cells.count()) < 5) continue;
+      const nameCell = cells.nth(0);
+      const link = nameCell.locator("a[href*='/profile/']").first();
+      const profileHref = await link.getAttribute("href").catch(() => null);
+      const cellText = ((await nameCell.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+      const avatarText = ((await link.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+      const fullName =
+        avatarText !== "" && cellText.startsWith(avatarText) ? cellText.slice(avatarText.length).trim() : cellText;
+      out.push({
+        fullName,
+        displayName: (
+          (await cells
+            .nth(1)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim(),
+        email: (
+          (await cells
+            .nth(2)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim(),
+        roleLabel: (
+          (await cells
+            .nth(3)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim(),
+        joinedText: (
+          (await cells
+            .nth(4)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim(),
+        profileHref,
+      });
+    }
+    return out;
+  }
+
+  async settingsMembersSearchFill(query: string): Promise<void> {
+    await this.page.locator("input[placeholder='Search']").first().fill(query);
+  }
+
+  async settingsMembersNoMatchVisible(): Promise<boolean> {
+    return this.page.getByText("No matching members", { exact: true }).isVisible();
+  }
+
+  /** The open Filters popper (role checkboxes), or null when shut. */
+  private membersFilterMenu() {
+    return this.page.locator("div[data-popper-placement]").first();
+  }
+
+  async settingsMembersFiltersOpen(): Promise<void> {
+    const buttons = this.page.getByRole("button", { name: "Filters" });
+    const total = await buttons.count();
+    for (let i = 0; i < total; i++) {
+      await buttons.nth(i).click();
+      const menu = this.membersFilterMenu();
+      try {
+        await menu.getByRole("button", { name: "Admin", exact: true }).waitFor({ timeout: 5_000 });
+        return;
+      } catch {
+        await this.page.keyboard.press("Escape");
+      }
+    }
+    throw new Error("[parity] members Filters menu never offered the role checkboxes.");
+  }
+
+  async settingsMembersFilterOptions(): Promise<string[]> {
+    const buttons = this.membersFilterMenu().getByRole("button");
+    const total = await buttons.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await buttons
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
+  async settingsMembersFilterChecked(label: string): Promise<boolean> {
+    const button = this.membersFilterMenu().getByRole("button", { name: label, exact: true });
+    const box = button.locator("div").first();
+    const html = await box.innerHTML().catch(() => "");
+    return html.includes("<svg");
+  }
+
+  async settingsMembersFilterToggle(label: string): Promise<void> {
+    await this.membersFilterMenu().getByRole("button", { name: label, exact: true }).click();
+  }
+
+  async settingsMembersFiltersClose(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.membersFilterMenu()
+      .waitFor({ state: "detached", timeout: 10_000 })
+      .catch(() => {});
+  }
+
+  async settingsMembersFilterActive(): Promise<boolean> {
+    const buttons = this.page.getByRole("button", { name: "Filters" });
+    const total = await buttons.count();
+    for (let i = 0; i < total; i++) {
+      const dot = await buttons
+        .nth(i)
+        .locator("..")
+        .locator("div.absolute")
+        .count()
+        .catch(() => 0);
+      if (dot > 0) return true;
+    }
+    return false;
+  }
+
+  async settingsMembersSortOpen(column: string): Promise<void> {
+    await this.page.locator("th", { hasText: column }).getByRole("button").first().click({ timeout: 30_000 });
+  }
+
+  async settingsMembersSortItems(): Promise<string[]> {
+    const menu = this.page.locator("div[data-popper-placement], div[data-headlessui-state='open']").last();
+    const items = menu.locator("div[role='menuitem'], [role='menu'] [tabindex], li");
+    const total = await items.count();
+    const texts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await items
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") texts.push(text);
+    }
+    // Fallback: the CustomMenu renders plain clickable rows without roles.
+    if (texts.length === 0) {
+      const fallback = menu.locator("div.cursor-pointer, div[class*='cursor-pointer']");
+      const fallbackTotal = await fallback.count();
+      for (let i = 0; i < fallbackTotal; i++) {
+        const text = (
+          (await fallback
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim();
+        if (text !== "") texts.push(text);
+      }
+    }
+    return texts;
+  }
+
+  async settingsMembersSortPick(text: string): Promise<void> {
+    // Match on whitespace-normalized text: menu items render icon-adjacent
+    // line breaks ("A\nZ"), so the raw text never contains the "A Z" shape
+    // the scenarios pass back from settingsMembersSortItems.
+    const menu = this.page.locator("div[data-popper-placement], div[data-headlessui-state='open']").last();
+    const items = menu.locator(
+      "div[role='menuitem'], [role='menu'] [tabindex], li, div.cursor-pointer, div[class*='cursor-pointer'], button"
+    );
+    const total = await items.count();
+    for (let i = 0; i < total; i++) {
+      const raw = (
+        (await items
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (raw === text || (text !== "" && raw.includes(text))) {
+        await items.nth(i).click({ timeout: 30_000 });
+        await menu.waitFor({ state: "detached", timeout: 15_000 }).catch(() => {});
+        return;
+      }
+    }
+    throw new Error(`[parity] members sort menu offered no item matching "${text}".`);
+  }
+
+  /** Move between settings tabs through the sidebar (in-app navigation). */
+  async settingsMembersGotoTab(tab: string): Promise<void> {
+    await this.page.getByRole("link", { name: tab, exact: true }).first().click({ timeout: 30_000 });
+    if (tab === "Members") {
+      await this.page.getByRole("heading", { name: "Members", exact: true }).first().waitFor({ timeout: 60_000 });
+    } else {
+      await this.page.waitForURL(new RegExp(`/settings/projects/[^/]+/?$`), { timeout: 60_000 }).catch(() => {});
+      await this.page.waitForLoadState("domcontentloaded");
+    }
+  }
+
+  async settingsMembersAddVisible(): Promise<boolean> {
+    return this.page.getByRole("button", { name: "Add member", exact: true }).isVisible();
+  }
+
+  private membersInviteDialog() {
+    return this.page.locator("[role='dialog']").first();
+  }
+
+  /** Combobox buttons in the invite dialog, in DOM order: member, role, member, role, … */
+  private membersInvitePickers() {
+    return this.membersInviteDialog().locator("button[aria-haspopup='listbox']");
+  }
+
+  async settingsMembersOpenInvite(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add member", exact: true }).click({ timeout: 30_000 });
+    await this.membersInviteDialog()
+      .getByRole("button", { name: "Select co-worker" })
+      .first()
+      .waitFor({ timeout: 30_000 });
+  }
+
+  async settingsMembersInviteOpen(): Promise<boolean> {
+    // Read the heading, not the dialog wrapper: the wrapper renders with
+    // zero height (Playwright reports it hidden) while its content shows.
+    return this.membersInviteDialog()
+      .getByRole("heading", { name: "Invite members" })
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async settingsMembersInviteRowCount(): Promise<number> {
+    const total = await this.membersInvitePickers().count();
+    return Math.floor(total / 2);
+  }
+
+  async settingsMembersInviteAddRow(): Promise<void> {
+    const before = await this.settingsMembersInviteRowCount();
+    await this.membersInviteDialog().getByRole("button", { name: "Add more" }).click({ timeout: 30_000 });
+    await this.page
+      .waitForFunction(
+        (expected) => {
+          const dialog = document.querySelector("[role='dialog']");
+          if (!dialog) return false;
+          return dialog.querySelectorAll("button[aria-haspopup='listbox']").length >= expected * 2;
+        },
+        before + 1,
+        { timeout: 15_000 }
+      )
+      .catch(() => {});
+  }
+
+  async settingsMembersInviteRemoveRow(index: number): Promise<void> {
+    // The row's remove control is the text-less icon button inside the row
+    // group; picker buttons always carry text.
+    const group = this.membersInviteDialog().locator("div.group").nth(index);
+    const candidates = group.locator("button");
+    const total = await candidates.count();
+    for (let i = total - 1; i >= 0; i--) {
+      const text = (
+        (await candidates
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text === "") {
+        await candidates.nth(i).click({ timeout: 30_000 });
+        return;
+      }
+    }
+    throw new Error(`[parity] invite row ${index} offered no remove control.`);
+  }
+
+  async settingsMembersInviteOpenMemberPicker(index: number): Promise<void> {
+    // Idempotent: the picker button toggles, so a click while open would
+    // shut it (Escape is a no-op on this popup).
+    if ((await this.membersOpenListbox().count()) > 0) return;
+    await this.membersInvitePickers()
+      .nth(index * 2)
+      .click({ timeout: 30_000 });
+    // The popup wrapper reports zero size (see membersOpenListbox): wait
+    // for attachment and offered options, never for visibility.
+    await this.membersOpenListbox().waitFor({ state: "attached", timeout: 15_000 });
+  }
+
+  async settingsMembersInviteCloseMemberPicker(index: number): Promise<void> {
+    // Toggle shut through the button: Escape leaves this popup open.
+    if ((await this.membersOpenListbox().count()) === 0) return;
+    await this.membersInvitePickers()
+      .nth(index * 2)
+      .click({ timeout: 30_000 });
+    await this.membersOpenListbox()
+      .waitFor({ state: "detached", timeout: 15_000 })
+      .catch(() => {});
+  }
+
+  async settingsMembersSortMarker(column: string): Promise<"ascending" | "descending" | "none"> {
+    // The active header carries a directional arrow beside the (always
+    // present) chevron: ArrowDownWideNarrow for ascending, ArrowUpNarrowWide
+    // for descending. Inactive headers show the chevron alone.
+    const header = this.page.locator("th", { hasText: column }).getByRole("button").first();
+    if ((await header.locator("svg.lucide-arrow-down-wide-narrow").count()) > 0) return "ascending";
+    if ((await header.locator("svg.lucide-arrow-up-narrow-wide").count()) > 0) return "descending";
+    return "none";
+  }
+
+  /**
+   * The open listbox popup (member, role and defaults pickers share it).
+   * Headless UI renders the popup wrapper with zero size, so callers wait
+   * on attached state and click the (sized) options, never on visibility.
+   */
+  private membersOpenListbox() {
+    return this.page.locator("div[role='listbox'], ul[role='listbox']").first();
+  }
+
+  private async membersListboxOptionTexts(): Promise<string[]> {
+    const box = this.membersOpenListbox();
+    const options = box.locator("[role='option'], li");
+    const total = await options.count();
+    const texts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await options
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") texts.push(text);
+    }
+    return texts;
+  }
+
+  async settingsMembersInviteMemberOptions(): Promise<string[]> {
+    return this.membersListboxOptionTexts();
+  }
+
+  async settingsMembersInvitePickMember(index: number, text: string): Promise<void> {
+    await this.settingsMembersInviteOpenMemberPicker(index);
+    await this.membersOpenListbox().getByText(text, { exact: false }).first().click({ timeout: 30_000 });
+    await this.membersOpenListbox()
+      .waitFor({ state: "detached", timeout: 15_000 })
+      .catch(() => {});
+  }
+
+  async settingsMembersInviteRoleOptions(index: number): Promise<string[]> {
+    const picker = this.membersInvitePickers().nth(index * 2 + 1);
+    if ((await this.membersOpenListbox().count()) === 0) {
+      await picker.click({ timeout: 30_000 });
+      await this.membersOpenListbox().waitFor({ state: "attached", timeout: 15_000 });
+    }
+    const texts = await this.membersListboxOptionTexts();
+    // Toggle shut through the button: Escape is unreliable on this popup.
+    await picker.click({ timeout: 30_000 });
+    await this.membersOpenListbox()
+      .waitFor({ state: "detached", timeout: 15_000 })
+      .catch(() => {});
+    return texts;
+  }
+
+  async settingsMembersInvitePickRole(index: number, label: string): Promise<void> {
+    if ((await this.membersOpenListbox().count()) === 0) {
+      await this.membersInvitePickers()
+        .nth(index * 2 + 1)
+        .click({ timeout: 30_000 });
+      await this.membersOpenListbox().waitFor({ state: "attached", timeout: 15_000 });
+    }
+    await this.membersOpenListbox().getByRole("option", { name: label, exact: true }).click({ timeout: 30_000 });
+    await this.membersOpenListbox()
+      .waitFor({ state: "detached", timeout: 15_000 })
+      .catch(() => {});
+  }
+
+  async settingsMembersInviteRowError(index: number): Promise<string> {
+    const group = this.membersInviteDialog().locator("div.group").nth(index);
+    const errors = group.locator("span.text-danger-primary, span[class*='text-danger']");
+    const total = await errors.count();
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await errors
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") return text;
+    }
+    return "";
+  }
+
+  async settingsMembersInviteSubmit(): Promise<void> {
+    await this.membersInviteDialog()
+      .getByRole("button", { name: /Add members?/ })
+      .first()
+      .click({ timeout: 30_000 });
+    await this.membersInviteDialog().waitFor({ state: "detached", timeout: 30_000 });
+  }
+
+  async settingsMembersInviteAttemptSubmit(): Promise<void> {
+    await this.membersInviteDialog()
+      .getByRole("button", { name: /Add members?/ })
+      .first()
+      .click({ timeout: 30_000 });
+  }
+
+  async settingsMembersInviteCancel(): Promise<void> {
+    await this.membersInviteDialog().getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 30_000 });
+    await this.membersInviteDialog()
+      .waitFor({ state: "detached", timeout: 15_000 })
+      .catch(() => {});
+  }
+
+  private memberRoleCell(displayName: string) {
+    return this.memberRow(displayName).locator("td").nth(3);
+  }
+
+  async settingsMembersRoleEditable(displayName: string): Promise<boolean> {
+    return (await this.memberRoleCell(displayName).locator("button[aria-haspopup='listbox']").count()) > 0;
+  }
+
+  async settingsMembersRoleText(displayName: string): Promise<string> {
+    return (
+      (await this.memberRoleCell(displayName)
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async settingsMembersRoleEditorOpen(displayName: string): Promise<void> {
+    // Idempotent: the editor button toggles, so a click while open would
+    // shut it instead.
+    if ((await this.membersOpenListbox().count()) > 0) return;
+    await this.memberRoleCell(displayName).locator("button[aria-haspopup='listbox']").click({ timeout: 30_000 });
+    await this.membersOpenListbox().waitFor({ state: "attached", timeout: 15_000 });
+  }
+
+  async settingsMembersRoleEditorOptions(): Promise<string[]> {
+    return this.membersListboxOptionTexts();
+  }
+
+  async settingsMembersRoleEditorPick(label: string): Promise<void> {
+    await this.membersOpenListbox().getByRole("option", { name: label, exact: true }).click({ timeout: 30_000 });
+    await this.membersOpenListbox()
+      .waitFor({ state: "detached", timeout: 15_000 })
+      .catch(() => {});
+  }
+
+  async settingsMembersOpenRowMenu(displayName: string): Promise<void> {
+    const row = this.memberRow(displayName);
+    await row.hover();
+    await row.locator("button[aria-haspopup='menu']").click({ timeout: 30_000 });
+  }
+
+  async settingsMembersRowMenuItems(): Promise<string[]> {
+    const menu = this.page.locator("div[data-popper-placement], div[data-headlessui-state='open']").last();
+    const text = ((await menu.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    // Single-item menu ("Remove X" / "Leave"): return it whole.
+    return text === "" ? [] : [text];
+  }
+
+  async settingsMembersRowMenuPick(text: string): Promise<void> {
+    const menu = this.page.locator("div[data-popper-placement], div[data-headlessui-state='open']").last();
+    await menu.getByText(text, { exact: false }).first().click({ timeout: 30_000 });
+    await menu.waitFor({ state: "detached", timeout: 15_000 }).catch(() => {});
+  }
+
+  async settingsMembersConfirmText(): Promise<string> {
+    // The dialog wrapper reports zero height (see settingsMembersInviteOpen),
+    // so recognize the confirmation by its question copy: the invite dialog
+    // asks nothing, while both confirmations do ("Leave project?"/"Remove…?").
+    const dialog = this.membersInviteDialog();
+    const text = ((await dialog.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return text.includes("?") ? text : "";
+  }
+
+  async settingsMembersConfirmSubmit(): Promise<void> {
+    const dialog = this.membersInviteDialog();
+    await dialog.getByRole("button", { name: /^(Remove|Leave)$/ }).click({ timeout: 30_000 });
+    await dialog.waitFor({ state: "detached", timeout: 30_000 }).catch(() => {});
+  }
+
+  async settingsMembersConfirmCancel(): Promise<void> {
+    const dialog = this.membersInviteDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 30_000 });
+    await dialog.waitFor({ state: "detached", timeout: 15_000 }).catch(() => {});
+  }
+
+  async settingsMembersSkeletonVisible(): Promise<boolean> {
+    // The members loader renders pulsing placeholder blocks before the ids
+    // land; the table renders once they do.
+    const skeletons = this.page.locator("div.animate-pulse, span.animate-pulse, div[class*='animate-pulse']");
+    if ((await skeletons.count()) > 0) return true;
+    return (await this.membersTable().count()) === 0 && !(await this.settingsMembersNoMatchVisible());
+  }
+
+  async settingsMembersDelayLoad(ms: number): Promise<void> {
+    // Hold the member-list answers so the skeleton stays up long enough to
+    // observe; writes pass through untouched.
+    const hold = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue();
+    };
+    await this.page.route("**/api/workspaces/*/projects/*/members", hold);
+    await this.page.route("**/api/workspaces/*/projects/*/members/", hold);
+  }
+
+  /** Defaults picker button in the `title` setting row (lead / assignee). */
+  private membersDefaultsPicker(title: string) {
+    // The row holds the heading plus the picker button: the heading's
+    // grandparent is the row root (the parent holds the heading alone).
+    const row = this.page.getByRole("heading", { name: title, exact: true }).locator("xpath=../..");
+    return row.getByRole("button").first();
+  }
+
+  async settingsMembersDefaultsVisible(): Promise<boolean> {
+    return this.page.getByRole("heading", { name: "Project Lead" }).isVisible();
+  }
+
+  async settingsMembersLeadText(): Promise<string> {
+    return (
+      (await this.membersDefaultsPicker("Project Lead")
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async settingsMembersLeadPick(displayName: string): Promise<void> {
+    await this.membersDefaultsPicker("Project Lead").click({ timeout: 30_000 });
+    await this.membersOpenListbox().waitFor({ state: "attached", timeout: 15_000 });
+    await this.membersOpenListbox().getByText(displayName, { exact: false }).first().click({ timeout: 30_000 });
+    // The button prefixes the picked name with the avatar initial, so match
+    // on containment ("None" still matches exactly when cleared).
+    await expect
+      .poll(async () => (await this.settingsMembersLeadText()).includes(displayName), { timeout: 30_000 })
+      .toBe(true);
+  }
+
+  async settingsMembersAssigneeText(): Promise<string> {
+    return (
+      (await this.membersDefaultsPicker("Default Assignee")
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async settingsMembersAssigneePick(displayName: string): Promise<void> {
+    await this.membersDefaultsPicker("Default Assignee").click({ timeout: 30_000 });
+    await this.membersOpenListbox().waitFor({ state: "attached", timeout: 15_000 });
+    await this.membersOpenListbox().getByText(displayName, { exact: false }).first().click({ timeout: 30_000 });
+    await expect
+      .poll(async () => (await this.settingsMembersAssigneeText()).includes(displayName), { timeout: 30_000 })
+      .toBe(true);
+  }
+
+  async settingsMembersLeadDisabled(): Promise<boolean> {
+    return this.membersDefaultsPicker("Project Lead").isDisabled();
+  }
+
+  private membersGuestToggle() {
+    // Same row shape as the defaults pickers: the heading's grandparent is
+    // the row root holding the switch.
+    const row = this.page.getByRole("heading", { name: "Guest access", exact: true }).locator("xpath=../..");
+    return row.getByRole("switch").first();
+  }
+
+  async settingsMembersGuestToggleState(): Promise<boolean> {
+    const toggle = this.membersGuestToggle();
+    const checked = await toggle.getAttribute("aria-checked").catch(() => null);
+    if (checked !== null) return checked === "true";
+    const pressed = await toggle.getAttribute("aria-pressed").catch(() => null);
+    if (pressed !== null) return pressed === "true";
+    const html = await toggle.innerHTML().catch(() => "");
+    return html.includes("checked") || (await toggle.getAttribute("data-state").catch(() => "")) === "checked";
+  }
+
+  async settingsMembersGuestToggle(): Promise<void> {
+    const before = await this.settingsMembersGuestToggleState();
+    await this.membersGuestToggle().click({ timeout: 30_000 });
+    await expect.poll(async () => this.settingsMembersGuestToggleState(), { timeout: 30_000 }).toBe(!before);
+  }
+
+  async settingsMembersGuestToggleDisabled(): Promise<boolean> {
+    return this.membersGuestToggle().isDisabled();
+  }
+
 }

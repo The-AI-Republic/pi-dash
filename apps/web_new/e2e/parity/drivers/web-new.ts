@@ -12133,4 +12133,179 @@ export class WebNewDriver implements ParityDriver {
   async projectGithubTabText(): Promise<string> {
     return todo("projectGithubTabText");
   }
+
+
+  // --- Project members tab (NEWFRONT-391, PSET-018–027). Throwing stubs per
+  // --- the shared driver contract; the new app implements them later.
+  async settingsMembersOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("settingsMembersOpen");
+  }
+  async settingsMembersDenied(): Promise<boolean> {
+    return todo("settingsMembersDenied");
+  }
+  async settingsMembersRows(): Promise<
+    {
+      fullName: string;
+      displayName: string;
+      email: string;
+      roleLabel: string;
+      joinedText: string;
+      profileHref: string | null;
+    }[]
+  > {
+    return todo("settingsMembersRows");
+  }
+  async settingsMembersSearchFill(_query: string): Promise<void> {
+    return todo("settingsMembersSearchFill");
+  }
+  async settingsMembersNoMatchVisible(): Promise<boolean> {
+    return todo("settingsMembersNoMatchVisible");
+  }
+  async settingsMembersFiltersOpen(): Promise<void> {
+    return todo("settingsMembersFiltersOpen");
+  }
+  async settingsMembersFilterOptions(): Promise<string[]> {
+    return todo("settingsMembersFilterOptions");
+  }
+  async settingsMembersFilterChecked(_label: string): Promise<boolean> {
+    return todo("settingsMembersFilterChecked");
+  }
+  async settingsMembersFilterToggle(_label: string): Promise<void> {
+    return todo("settingsMembersFilterToggle");
+  }
+  async settingsMembersFiltersClose(): Promise<void> {
+    return todo("settingsMembersFiltersClose");
+  }
+  async settingsMembersFilterActive(): Promise<boolean> {
+    return todo("settingsMembersFilterActive");
+  }
+  async settingsMembersSortOpen(_column: string): Promise<void> {
+    return todo("settingsMembersSortOpen");
+  }
+  async settingsMembersSortItems(): Promise<string[]> {
+    return todo("settingsMembersSortItems");
+  }
+  async settingsMembersSortPick(_text: string): Promise<void> {
+    return todo("settingsMembersSortPick");
+  }
+  async settingsMembersGotoTab(_tab: string): Promise<void> {
+    return todo("settingsMembersGotoTab");
+  }
+  async settingsMembersAddVisible(): Promise<boolean> {
+    return todo("settingsMembersAddVisible");
+  }
+  async settingsMembersOpenInvite(): Promise<void> {
+    return todo("settingsMembersOpenInvite");
+  }
+  async settingsMembersInviteOpen(): Promise<boolean> {
+    return todo("settingsMembersInviteOpen");
+  }
+  async settingsMembersInviteRowCount(): Promise<number> {
+    return todo("settingsMembersInviteRowCount");
+  }
+  async settingsMembersInviteAddRow(): Promise<void> {
+    return todo("settingsMembersInviteAddRow");
+  }
+  async settingsMembersInviteRemoveRow(_index: number): Promise<void> {
+    return todo("settingsMembersInviteRemoveRow");
+  }
+  async settingsMembersInviteOpenMemberPicker(_index: number): Promise<void> {
+    return todo("settingsMembersInviteOpenMemberPicker");
+  }
+  async settingsMembersInviteMemberOptions(): Promise<string[]> {
+    return todo("settingsMembersInviteMemberOptions");
+  }
+  async settingsMembersInvitePickMember(_index: number, _text: string): Promise<void> {
+    return todo("settingsMembersInvitePickMember");
+  }
+  async settingsMembersInviteRoleOptions(_index: number): Promise<string[]> {
+    return todo("settingsMembersInviteRoleOptions");
+  }
+  async settingsMembersInvitePickRole(_index: number, _label: string): Promise<void> {
+    return todo("settingsMembersInvitePickRole");
+  }
+  async settingsMembersInviteRowError(_index: number): Promise<string> {
+    return todo("settingsMembersInviteRowError");
+  }
+  async settingsMembersInviteSubmit(): Promise<void> {
+    return todo("settingsMembersInviteSubmit");
+  }
+  async settingsMembersInviteAttemptSubmit(): Promise<void> {
+    return todo("settingsMembersInviteAttemptSubmit");
+  }
+  async settingsMembersInviteCancel(): Promise<void> {
+    return todo("settingsMembersInviteCancel");
+  }
+  async settingsMembersRoleEditable(_displayName: string): Promise<boolean> {
+    return todo("settingsMembersRoleEditable");
+  }
+  async settingsMembersRoleText(_displayName: string): Promise<string> {
+    return todo("settingsMembersRoleText");
+  }
+  async settingsMembersRoleEditorOpen(_displayName: string): Promise<void> {
+    return todo("settingsMembersRoleEditorOpen");
+  }
+  async settingsMembersRoleEditorOptions(): Promise<string[]> {
+    return todo("settingsMembersRoleEditorOptions");
+  }
+  async settingsMembersRoleEditorPick(_label: string): Promise<void> {
+    return todo("settingsMembersRoleEditorPick");
+  }
+  async settingsMembersOpenRowMenu(_displayName: string): Promise<void> {
+    return todo("settingsMembersOpenRowMenu");
+  }
+  async settingsMembersRowMenuItems(): Promise<string[]> {
+    return todo("settingsMembersRowMenuItems");
+  }
+  async settingsMembersRowMenuPick(_text: string): Promise<void> {
+    return todo("settingsMembersRowMenuPick");
+  }
+  async settingsMembersConfirmText(): Promise<string> {
+    return todo("settingsMembersConfirmText");
+  }
+  async settingsMembersConfirmSubmit(): Promise<void> {
+    return todo("settingsMembersConfirmSubmit");
+  }
+  async settingsMembersConfirmCancel(): Promise<void> {
+    return todo("settingsMembersConfirmCancel");
+  }
+  async settingsMembersSkeletonVisible(): Promise<boolean> {
+    return todo("settingsMembersSkeletonVisible");
+  }
+  async settingsMembersDelayLoad(_ms: number): Promise<void> {
+    return todo("settingsMembersDelayLoad");
+  }
+  async settingsMembersDefaultsVisible(): Promise<boolean> {
+    return todo("settingsMembersDefaultsVisible");
+  }
+  async settingsMembersLeadText(): Promise<string> {
+    return todo("settingsMembersLeadText");
+  }
+  async settingsMembersLeadPick(_displayName: string): Promise<void> {
+    return todo("settingsMembersLeadPick");
+  }
+  async settingsMembersAssigneeText(): Promise<string> {
+    return todo("settingsMembersAssigneeText");
+  }
+  async settingsMembersAssigneePick(_displayName: string): Promise<void> {
+    return todo("settingsMembersAssigneePick");
+  }
+  async settingsMembersLeadDisabled(): Promise<boolean> {
+    return todo("settingsMembersLeadDisabled");
+  }
+  async settingsMembersGuestToggleState(): Promise<boolean> {
+    return todo("settingsMembersGuestToggleState");
+  }
+  async settingsMembersGuestToggle(): Promise<void> {
+    return todo("settingsMembersGuestToggle");
+  }
+  async settingsMembersGuestToggleDisabled(): Promise<boolean> {
+    return todo("settingsMembersGuestToggleDisabled");
+  }
+  async settingsMembersInviteCloseMemberPicker(_index: number): Promise<void> {
+    return todo("settingsMembersInviteCloseMemberPicker");
+  }
+  async settingsMembersSortMarker(_column: string): Promise<"ascending" | "descending" | "none"> {
+    return todo("settingsMembersSortMarker");
+  }
 }

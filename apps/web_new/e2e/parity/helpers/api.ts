@@ -17121,3 +17121,221 @@ export async function serverPlantRepositoryBinding(
   if (id === "") throw new Error("[parity] binding plant produced no id.");
   return id;
 }
+
+
+// --- Project members tab (NEWFRONT-391, PSET-018–027). Appended; existing
+// --- helpers above are untouched per the shared harness contract.
+
+/** Project admin role id (siblings PROJECT_ROLE_GUEST/MEMBER live above). */
+export const PROJECT_ROLE_ADMIN = 20;
+
+/** One project membership as the members endpoint reports it. */
+export interface ParityProjectMember {
+  /** Membership row id (addresses the PATCH/DELETE detail endpoints). */
+  membershipId: string;
+  /** User id of the member. */
+  memberId: string;
+  displayName: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  /** Project role number (20 admin, 15 member, 5 guest). */
+  role: number;
+  /** Joining timestamp as the server sent it (may be ""). */
+  joinedAt: string;
+}
+
+/**
+ * One membership's detail as the member endpoint reports it: the list rows
+ * carry only UUID references, so details are read per membership id and
+ * joined with the list row's project role.
+ */
+async function fetchProjectMemberIdentity(
+  workspaceSlug: string,
+  projectId: string,
+  membershipId: string,
+  sessionCookie: string,
+  apiBase: string
+): Promise<{ memberId: string; displayName: string; firstName: string; lastName: string; email: string }> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/members/${membershipId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project member read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as { member?: unknown };
+  const member =
+    record.member !== undefined && typeof record.member === "object" && record.member !== null
+      ? (record.member as Record<string, unknown>)
+      : null;
+  if (
+    member === null ||
+    typeof member["id"] !== "string" ||
+    typeof member["display_name"] !== "string" ||
+    typeof member["email"] !== "string"
+  ) {
+    throw new Error("[parity] project member detail carried no usable member object.");
+  }
+  return {
+    memberId: member["id"] as string,
+    displayName: member["display_name"] as string,
+    firstName: typeof member["first_name"] === "string" ? member["first_name"] : "",
+    lastName: typeof member["last_name"] === "string" ? member["last_name"] : "",
+    email: member["email"] as string,
+  };
+}
+
+/**
+ * Project memberships with user identity in API order; throws unless the
+ * server answers 2xx. (Sibling serverProjectMembers carries only user ids
+ * and roles; this variant joins the per-membership detail for names and
+ * emails, which the members-table scenarios assert.)
+ */
+export async function serverProjectMemberProfiles(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityProjectMember[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/members/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project members read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  const members: ParityProjectMember[] = [];
+  for (const row of rows) {
+    const record = row as { id?: unknown; role?: unknown; original_role?: unknown; created_at?: unknown };
+    if (typeof record.id !== "string") throw new Error("[parity] project member row carried no string id.");
+    const role = record.original_role ?? record.role;
+    if (typeof role !== "number") throw new Error("[parity] project member row carried no numeric role.");
+    const detail = await fetchProjectMemberIdentity(workspaceSlug, projectId, record.id, sessionCookie, apiBase);
+    members.push({
+      membershipId: record.id,
+      ...detail,
+      role,
+      joinedAt: typeof record.created_at === "string" ? record.created_at : "",
+    });
+  }
+  return members;
+}
+
+/** One membership by member email, or null when not on the project. */
+export async function serverProjectMemberByEmail(
+  workspaceSlug: string,
+  projectId: string,
+  email: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityProjectMember | null> {
+  const members = await serverProjectMemberProfiles(workspaceSlug, projectId, sessionCookie, apiBase);
+  return members.find((m) => m.email.toLowerCase() === email.toLowerCase()) ?? null;
+}
+
+/** Change one member's project role by membership id; throws unless the server accepts. */
+export async function serverPatchProjectMember(
+  workspaceSlug: string,
+  projectId: string,
+  memberId: string,
+  sessionCookie: string,
+  role: number,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/members/${memberId}/`, {
+    method: "PATCH",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  if (!res.ok) throw new Error(`[parity] project member patch failed with HTTP ${res.status}.`);
+}
+
+/** Remove one member from a project by membership id; throws unless the server accepts. */
+export async function serverRemoveProjectMember(
+  workspaceSlug: string,
+  projectId: string,
+  memberId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/members/${memberId}/`, {
+    method: "DELETE",
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status !== 200 && res.status !== 204)
+    throw new Error(`[parity] project member remove failed with HTTP ${res.status}.`);
+}
+
+/** Leave a project as the session user; throws unless the server accepts. */
+export async function serverLeaveProject(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/members/leave/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status !== 200 && res.status !== 204)
+    throw new Error(`[parity] project leave failed with HTTP ${res.status}.`);
+}
+
+/** Lead / default-assignee / guest-visibility fields of one project. */
+export interface ParityProjectSettings {
+  projectLeadId: string | null;
+  defaultAssigneeId: string | null;
+  guestViewAll: boolean;
+}
+
+/** Read one project's lead, default assignee and guest-visibility flag. */
+export async function serverProjectSettings(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityProjectSettings> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] project settings read failed with HTTP ${res.status}.`);
+  const record = (await res.json()) as {
+    project_lead?: unknown;
+    default_assignee?: unknown;
+    guest_view_all_features?: unknown;
+  };
+  const idOrNull = (value: unknown): string | null => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "string") return value === "" ? null : value;
+    if (typeof value === "object") {
+      const id = (value as { id?: unknown }).id;
+      return typeof id === "string" ? id : null;
+    }
+    return null;
+  };
+  return {
+    projectLeadId: idOrNull(record.project_lead),
+    defaultAssigneeId: idOrNull(record.default_assignee),
+    guestViewAll: record.guest_view_all_features === true,
+  };
+}
+
+/**
+ * Change one workspace member's role by workspace-membership id; throws
+ * unless the server accepts. Member<->admin moves leave project roles
+ * untouched (only a move to guest cascades), so promotion/restore pairs
+ * are stack-safe for staging a workspace-admin viewer.
+ */
+export async function serverPatchWorkspaceMember(
+  workspaceSlug: string,
+  membershipId: string,
+  sessionCookie: string,
+  role: number,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/members/${membershipId}/`, {
+    method: "PATCH",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  if (!res.ok) throw new Error(`[parity] workspace member patch failed with HTTP ${res.status}.`);
+}
+
+/** End of the NEWFRONT-391 project-members-tab block. */
