@@ -147,6 +147,7 @@ import type {
   LocalFileDownload,
   SettingsProfileGeneralField,
   SettingsProfileSecurityField,
+  WsSettingsMemberRowFacts,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -12134,6 +12135,172 @@ export class WebNewDriver implements ParityDriver {
   }
   async projectGithubTabText(): Promise<string> {
     return todo("projectGithubTabText");
+  }
+
+  // --- Workspace-settings members + invitations oracle (NEWFRONT-411,
+  // --- WSET-008..015). Throwing stubs per the shared driver contract; the
+  // --- new app implements them later.
+  async wsSettingsMembersOpen(_workspaceSlug: string): Promise<void> {
+    return todo("wsSettingsMembersOpen");
+  }
+  async wsSettingsMembersCountChip(): Promise<number | null> {
+    return todo("wsSettingsMembersCountChip");
+  }
+  async wsSettingsMembersSearch(_query: string): Promise<void> {
+    return todo("wsSettingsMembersSearch");
+  }
+  async wsSettingsMembersSearchValue(): Promise<string> {
+    return todo("wsSettingsMembersSearchValue");
+  }
+  async wsSettingsMembersVisibleEmails(): Promise<string[]> {
+    return todo("wsSettingsMembersVisibleEmails");
+  }
+  async wsSettingsMembersVisibleRoles(): Promise<{ email: string; role: string }[]> {
+    return todo("wsSettingsMembersVisibleRoles");
+  }
+  async wsSettingsMembersSuspendedEmails(): Promise<string[]> {
+    return todo("wsSettingsMembersSuspendedEmails");
+  }
+  async wsSettingsMembersOpenFilters(): Promise<void> {
+    return todo("wsSettingsMembersOpenFilters");
+  }
+  async wsSettingsMembersFilterOptions(): Promise<string[]> {
+    return todo("wsSettingsMembersFilterOptions");
+  }
+  async wsSettingsMembersToggleFilter(_label: string): Promise<void> {
+    return todo("wsSettingsMembersToggleFilter");
+  }
+  async wsSettingsMembersCloseFilters(): Promise<void> {
+    return todo("wsSettingsMembersCloseFilters");
+  }
+  async wsSettingsMembersFilterBadge(): Promise<boolean> {
+    return todo("wsSettingsMembersFilterBadge");
+  }
+  async wsSettingsMembersNoMatchVisible(): Promise<boolean> {
+    return todo("wsSettingsMembersNoMatchVisible");
+  }
+  async wsSettingsMembersNoMatchText(): Promise<string | null> {
+    return todo("wsSettingsMembersNoMatchText");
+  }
+  async wsSettingsMembersLoaderVisible(): Promise<boolean> {
+    return todo("wsSettingsMembersLoaderVisible");
+  }
+  async wsSettingsMembersDelayNextList(_ms: number): Promise<void> {
+    return todo("wsSettingsMembersDelayNextList");
+  }
+  async wsSettingsMembersAddVisible(): Promise<boolean> {
+    return todo("wsSettingsMembersAddVisible");
+  }
+  async wsSettingsInviteOpen(): Promise<void> {
+    return todo("wsSettingsInviteOpen");
+  }
+  async wsSettingsInviteClose(): Promise<void> {
+    return todo("wsSettingsInviteClose");
+  }
+  async wsSettingsInviteVisible(): Promise<boolean> {
+    return todo("wsSettingsInviteVisible");
+  }
+  async wsSettingsInviteRowCount(): Promise<number> {
+    return todo("wsSettingsInviteRowCount");
+  }
+  async wsSettingsInviteFillRow(_index: number, _email: string): Promise<void> {
+    return todo("wsSettingsInviteFillRow");
+  }
+  async wsSettingsInviteRowValue(_index: number): Promise<string> {
+    return todo("wsSettingsInviteRowValue");
+  }
+  async wsSettingsInviteRowRole(_index: number): Promise<string> {
+    return todo("wsSettingsInviteRowRole");
+  }
+  async wsSettingsInviteSetRowRole(_index: number, _roleLabel: string): Promise<void> {
+    return todo("wsSettingsInviteSetRowRole");
+  }
+  async wsSettingsInviteRowRoles(_index: number): Promise<string[]> {
+    return todo("wsSettingsInviteRowRoles");
+  }
+  async wsSettingsInviteAddRow(): Promise<void> {
+    return todo("wsSettingsInviteAddRow");
+  }
+  async wsSettingsInviteRemoveRow(_index: number): Promise<void> {
+    return todo("wsSettingsInviteRemoveRow");
+  }
+  async wsSettingsInviteRowError(_index: number): Promise<string | null> {
+    return todo("wsSettingsInviteRowError");
+  }
+  async wsSettingsInviteSubmit(): Promise<void> {
+    return todo("wsSettingsInviteSubmit");
+  }
+  async wsSettingsInvitesGroupVisible(): Promise<boolean> {
+    return todo("wsSettingsInvitesGroupVisible");
+  }
+  async wsSettingsInvitesCount(): Promise<number | null> {
+    return todo("wsSettingsInvitesCount");
+  }
+  async wsSettingsInvitesVisibleEmails(): Promise<string[]> {
+    return todo("wsSettingsInvitesVisibleEmails");
+  }
+  async wsSettingsInvitesToggleGroup(): Promise<void> {
+    return todo("wsSettingsInvitesToggleGroup");
+  }
+  async wsSettingsInvitesExpanded(): Promise<boolean> {
+    return todo("wsSettingsInvitesExpanded");
+  }
+  async wsSettingsInviteRole(_email: string): Promise<string> {
+    return todo("wsSettingsInviteRole");
+  }
+  async wsSettingsInviteRoleOptions(_email: string): Promise<string[]> {
+    return todo("wsSettingsInviteRoleOptions");
+  }
+  async wsSettingsInviteSetRole(_email: string, _roleLabel: string): Promise<void> {
+    return todo("wsSettingsInviteSetRole");
+  }
+  async wsSettingsInviteMenuEntries(_email: string): Promise<string[]> {
+    return todo("wsSettingsInviteMenuEntries");
+  }
+  async wsSettingsInviteCopyLink(_email: string): Promise<string> {
+    return todo("wsSettingsInviteCopyLink");
+  }
+  async wsSettingsInviteOpenRemove(_email: string): Promise<void> {
+    return todo("wsSettingsInviteOpenRemove");
+  }
+  async wsSettingsRemoveDialogVisible(): Promise<boolean> {
+    return todo("wsSettingsRemoveDialogVisible");
+  }
+  async wsSettingsRemoveDialogTitle(): Promise<string | null> {
+    return todo("wsSettingsRemoveDialogTitle");
+  }
+  async wsSettingsRemoveDialogText(): Promise<string | null> {
+    return todo("wsSettingsRemoveDialogText");
+  }
+  async wsSettingsRemoveDialogConfirm(): Promise<void> {
+    return todo("wsSettingsRemoveDialogConfirm");
+  }
+  async wsSettingsRemoveDialogCancel(): Promise<void> {
+    return todo("wsSettingsRemoveDialogCancel");
+  }
+  async wsSettingsMemberRowFacts(_email: string): Promise<WsSettingsMemberRowFacts> {
+    return todo("wsSettingsMemberRowFacts");
+  }
+  async wsSettingsMemberRoleEditable(_email: string): Promise<boolean> {
+    return todo("wsSettingsMemberRoleEditable");
+  }
+  async wsSettingsMemberRoleOptions(_email: string): Promise<string[]> {
+    return todo("wsSettingsMemberRoleOptions");
+  }
+  async wsSettingsMemberSetRole(_email: string, _roleLabel: string): Promise<void> {
+    return todo("wsSettingsMemberSetRole");
+  }
+  async wsSettingsMemberMenuEntry(_email: string): Promise<string | null> {
+    return todo("wsSettingsMemberMenuEntry");
+  }
+  async wsSettingsMemberOpenRemove(_email: string): Promise<void> {
+    return todo("wsSettingsMemberOpenRemove");
+  }
+  async wsSettingsMembersActivityVisible(): Promise<boolean> {
+    return todo("wsSettingsMembersActivityVisible");
+  }
+  async wsSettingsMembersBillingVisible(): Promise<boolean> {
+    return todo("wsSettingsMembersBillingVisible");
   }
 
   // --- Project members tab (NEWFRONT-391, PSET-018–027). Throwing stubs per

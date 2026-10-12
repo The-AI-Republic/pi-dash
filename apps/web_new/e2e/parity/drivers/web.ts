@@ -155,6 +155,7 @@ import type {
   LocalFileDownload,
   SettingsProfileGeneralField,
   SettingsProfileSecurityField,
+  WsSettingsMemberRowFacts,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -42005,6 +42006,868 @@ export class WebDriver implements ParityDriver {
     )
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  // --- Workspace-settings members + invitations oracle (NEWFRONT-411,
+  // --- WSET-008..015). Every selector below was observed on the running
+  // --- old app. Appended; existing methods above are untouched per the
+  // --- shared driver contract.
+
+  /** The members settings content section (the heading plus roster, never sidebar chrome). */
+  private wsSettingsMembersSection(): Locator {
+    return this.page.locator("section", { has: this.page.locator("h4", { hasText: /^Members/ }) }).first();
+  }
+
+  /** One member table row by member email. */
+  private wsSettingsMemberRow(email: string): Locator {
+    return this.page.locator("tr", { hasText: email }).first();
+  }
+
+  /** One pending-invitation row by invitee email (a div.group, never a table row). */
+  private wsSettingsInviteRow(email: string): Locator {
+    return this.page.locator("div.group", { hasText: email }).first();
+  }
+
+  /** First email address inside a text blob, or null. */
+  private wsSettingsEmailOf(text: string): string | null {
+    return /[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}/.exec(text)?.[0] ?? null;
+  }
+
+  /**
+   * Wait until the roster settles: member rows, the no-match message, or
+   * a visible pending group (a search can match invitations alone, which
+   * shows neither rows nor no-match).
+   */
+  private async wsSettingsAwaitRosterSettled(): Promise<void> {
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      const rows = await this.page.locator("tr").count();
+      let withEmail = 0;
+      for (let i = 0; i < rows; i++) {
+        const text = (
+          (await this.page
+            .locator("tr")
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+        if (this.wsSettingsEmailOf(text) !== null) withEmail++;
+      }
+      if (withEmail > 0) return;
+      if (await this.wsSettingsMembersNoMatchVisible()) return;
+      if (await this.wsSettingsInvitesGroupVisible()) return;
+      if (Date.now() > deadline) throw new Error("[parity] members roster never settled.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async wsSettingsMembersOpen(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/members`, { waitUntil: "domcontentloaded" });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page
+      .locator("h4", { hasText: /^Members/ })
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsAwaitRosterSettled();
+  }
+
+  async wsSettingsMembersCountChip(): Promise<number | null> {
+    // The chip renders only with a non-empty roster; the heading reads
+    // "Members" plus the count on its own line.
+    const heading = this.page.locator("h4", { hasText: /^Members/ }).first();
+    if (!(await this.isShown(heading))) return null;
+    const text = ((await heading.innerText().catch(() => "")) ?? "").trim();
+    const count = /(\d+)\s*$/.exec(text)?.[1];
+    return count === undefined ? null : Number(count);
+  }
+
+  async wsSettingsMembersSearch(query: string): Promise<void> {
+    // Exact placeholder: the command palette carries its own longer one.
+    await this.page.getByPlaceholder("Search...", { exact: true }).fill(query);
+    await this.wsSettingsAwaitRosterSettled();
+  }
+
+  async wsSettingsMembersSearchValue(): Promise<string> {
+    return this.page.getByPlaceholder("Search...", { exact: true }).inputValue();
+  }
+
+  async wsSettingsMembersVisibleEmails(): Promise<string[]> {
+    const rows = await this.page.locator("tr").count();
+    const emails: string[] = [];
+    for (let i = 0; i < rows; i++) {
+      const text = (
+        (await this.page
+          .locator("tr")
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const email = this.wsSettingsEmailOf(text);
+      if (email !== null) emails.push(email);
+    }
+    return emails;
+  }
+
+  async wsSettingsMembersVisibleRoles(): Promise<{ email: string; role: string }[]> {
+    // Fixed column order in this checkout: full name, display name, email,
+    // account type (the role label or "Suspended"), auth, joining date.
+    const rows = await this.page.locator("tr").count();
+    const out: { email: string; role: string }[] = [];
+    for (let i = 0; i < rows; i++) {
+      const row = this.page.locator("tr").nth(i);
+      const text = ((await row.innerText().catch(() => "")) ?? "").trim();
+      const email = this.wsSettingsEmailOf(text);
+      if (email === null) continue;
+      const role = (
+        (await row
+          .locator("td")
+          .nth(3)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      out.push({ email, role });
+    }
+    return out;
+  }
+
+  async wsSettingsMembersSuspendedEmails(): Promise<string[]> {
+    const rows = await this.wsSettingsMembersVisibleRoles();
+    return rows.filter((row) => row.role === "Suspended").map((row) => row.email);
+  }
+
+  /**
+   * The currently open headlessui menu. Only open menus mount (closed
+   * ones unmount), but the menu root itself is zero-height, so waits use
+   * attached state while the option buttons inside carry real boxes.
+   */
+  private wsSettingsOpenMenu(): Locator {
+    return this.page.getByRole("menu").first();
+  }
+
+  async wsSettingsMembersOpenFilters(): Promise<void> {
+    await this.page.getByRole("button", { name: "Filters" }).first().click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsOpenMenu().waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsMembersFilterOptions(): Promise<string[]> {
+    // FilterOption rows carry no menuitem role, so read the open menu's
+    // text lines and keep the four known labels in display order.
+    const menu = this.wsSettingsOpenMenu();
+    await menu.waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    const text = ((await menu.innerText().catch(() => "")) ?? "").trim();
+    const known = ["Admin", "Member", "Guest", "Suspended"];
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => known.includes(line));
+  }
+
+  async wsSettingsMembersToggleFilter(label: string): Promise<void> {
+    const menu = this.wsSettingsOpenMenu();
+    await menu.waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    await menu.getByText(label, { exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsAwaitRosterSettled();
+  }
+
+  async wsSettingsMembersCloseFilters(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+  }
+
+  async wsSettingsMembersFilterBadge(): Promise<boolean> {
+    // An applied filter paints a marker dot inside the Filters menu
+    // wrapper next to the control; no dot renders without a filter.
+    const wrap = this.page
+      .locator('div[data-main-menu="true"]', { has: this.page.getByRole("button", { name: "Filters" }) })
+      .first();
+    if ((await wrap.count()) === 0) return false;
+    const dot = wrap.locator("div.rounded-full.bg-accent-primary");
+    return (
+      (await dot.count()) > 0 &&
+      (await dot
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
+  }
+
+  async wsSettingsMembersNoMatchVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByText("No matching members", { exact: true }));
+  }
+
+  async wsSettingsMembersNoMatchText(): Promise<string | null> {
+    const note = this.page.getByText("No matching members", { exact: true });
+    if (!(await this.isShown(note))) return null;
+    return ((
+      (await note
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim() || null) as string | null;
+  }
+
+  async wsSettingsMembersLoaderVisible(): Promise<boolean> {
+    // The skeleton paints placeholder blocks inside the members section
+    // while no member row renders yet; scoped so sidebar chrome never
+    // leaks in. Immediate read, no waiting: loader specs poll for it.
+    const section = this.wsSettingsMembersSection();
+    if ((await section.count()) === 0) return false;
+    const skeletons = await section.locator("span.bg-layer-1").count();
+    if (skeletons === 0) return false;
+    return (await this.wsSettingsMembersVisibleEmails()).length === 0;
+  }
+
+  async wsSettingsMembersDelayNextList(ms: number): Promise<void> {
+    // The roster resolves two reads (members, then invitations); hold each
+    // one's first GET once so the skeleton stays up long enough to observe.
+    let heldMembers = false;
+    let heldInvitations = false;
+    await this.page.route("**/api/workspaces/*/members/", async (route) => {
+      if (!heldMembers && route.request().method() === "GET") {
+        heldMembers = true;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      await route.continue();
+    });
+    await this.page.route("**/api/workspaces/*/invitations/", async (route) => {
+      if (!heldInvitations && route.request().method() === "GET") {
+        heldInvitations = true;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      await route.continue();
+    });
+  }
+
+  async wsSettingsMembersAddVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Add member", exact: true }));
+  }
+
+  async wsSettingsInviteOpen(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add member", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await this.page.locator('input[name="emails.0.email"]').waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsInviteClose(): Promise<void> {
+    const dialog = this.page.locator("form", { has: this.page.locator('input[name^="emails."]') }).first();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await this.page.locator('input[name="emails.0.email"]').waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsInviteVisible(): Promise<boolean> {
+    return this.isShown(this.page.locator('input[name="emails.0.email"]'));
+  }
+
+  async wsSettingsInviteRowCount(): Promise<number> {
+    return this.page.locator('input[name^="emails."][name$=".email"]').count();
+  }
+
+  async wsSettingsInviteFillRow(index: number, email: string): Promise<void> {
+    await this.page.locator(`input[name="emails.${index}.email"]`).fill(email);
+  }
+
+  async wsSettingsInviteRowValue(index: number): Promise<string> {
+    return this.page.locator(`input[name="emails.${index}.email"]`).inputValue();
+  }
+
+  /** One dialog row's container (the email input's field row inside the dialog form). */
+  private wsSettingsInviteFieldRow(index: number): Locator {
+    return this.page
+      .locator("form", { has: this.page.locator('input[name^="emails."]') })
+      .first()
+      .locator("div.group", { has: this.page.locator(`input[name="emails.${index}.email"]`) })
+      .first();
+  }
+
+  async wsSettingsInviteRowRole(index: number): Promise<string> {
+    const row = this.wsSettingsInviteFieldRow(index);
+    return (
+      (await row
+        .getByText(/^(Guest|Member|Admin)$/)
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async wsSettingsInviteSetRowRole(index: number, roleLabel: string): Promise<void> {
+    const row = this.wsSettingsInviteFieldRow(index);
+    await row
+      .getByText(/^(Guest|Member|Admin)$/)
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions()
+      .filter({ hasText: new RegExp(`^${roleLabel}$`) })
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsInviteRowRoles(index: number): Promise<string[]> {
+    // Close by toggling: an Escape close desyncs the select (a later
+    // reopen renders no options), while toggle-close reopens cleanly.
+    const row = this.wsSettingsInviteFieldRow(index);
+    const trigger = row.getByText(/^(Guest|Member|Admin)$/).first();
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions().first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const options = await this.wsSettingsVisibleOptions().allInnerTexts();
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions().first().waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+    return options.map((option) => option.trim()).filter((option) => option.length > 0);
+  }
+
+  async wsSettingsInviteAddRow(): Promise<void> {
+    const before = await this.wsSettingsInviteRowCount();
+    const dialog = this.page.locator("form", { has: this.page.locator('input[name^="emails."]') }).first();
+    await dialog.getByRole("button", { name: "Add more", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.wsSettingsInviteRowCount()) === before + 1) return;
+      if (Date.now() > deadline) throw new Error("[parity] invite dialog never appended a row.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async wsSettingsInviteRemoveRow(index: number): Promise<void> {
+    // The per-row remove control is the row's icon-only button; the role
+    // select trigger next to it always carries the role label text.
+    const row = this.wsSettingsInviteFieldRow(index);
+    const before = await this.wsSettingsInviteRowCount();
+    await row.getByRole("button").filter({ hasText: /^\s*$/ }).first().click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.wsSettingsInviteRowCount()) === before - 1) return;
+      if (Date.now() > deadline) throw new Error("[parity] invite dialog never dropped the row.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async wsSettingsInviteRowError(index: number): Promise<string | null> {
+    const row = this.wsSettingsInviteFieldRow(index);
+    const error = row.locator("span.text-danger-primary");
+    if ((await error.count()) === 0) return null;
+    if (
+      !(await error
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return null;
+    const text = ((
+      (await error
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim() || null) as string | null;
+    return text;
+  }
+
+  async wsSettingsInviteSubmit(): Promise<void> {
+    const dialog = this.page.locator("form", { has: this.page.locator('input[name^="emails."]') }).first();
+    const toastKey = (toast: { title: string; message: string } | null): string =>
+      toast === null ? "" : `${toast.title}\n${toast.message}`;
+    // Success closes the dialog; a server failure keeps it open and
+    // toasts; invalid rows block inline with no toast at all. Outcomes
+    // are read as CHANGES from the pre-submit state, since a stale toast
+    // or inline error from an earlier submit can still be showing.
+    const toastBefore = toastKey(await this.rulesLastToast());
+    const errorsBefore = await this.wsSettingsInviteErrorCount(dialog);
+    await dialog.getByRole("button", { name: "Send invitations", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if (!(await this.wsSettingsInviteVisible())) return;
+      const toast = await this.rulesLastToast();
+      if (toastKey(toast) !== toastBefore) {
+        // The success toast can land just before the close animation
+        // finishes; wait a real close out so callers asserting it shut
+        // never race the toast. Failure toasts keep the dialog open.
+        if (toast !== null && /invitations sent/i.test(`${toast.title}\n${toast.message}`)) {
+          const closed = await this.page
+            .locator('input[name="emails.0.email"]')
+            .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS })
+            .then(
+              () => true,
+              () => false
+            );
+          if (!closed) throw new Error("[parity] invite dialog stayed open after its success toast.");
+        }
+        return;
+      }
+      if ((await this.wsSettingsInviteErrorCount(dialog)) !== errorsBefore) return;
+      if (Date.now() > deadline) throw new Error("[parity] invite submit never closed, toasted, nor flagged a row.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  /** Visible inline row errors in the open invite dialog. */
+  private async wsSettingsInviteErrorCount(dialog: Locator): Promise<number> {
+    const errors = dialog.locator("span.text-danger-primary");
+    const total = await errors.count();
+    let visible = 0;
+    for (let i = 0; i < total; i++) {
+      if (
+        await errors
+          .nth(i)
+          .isVisible()
+          .catch(() => false)
+      )
+        visible++;
+    }
+    return visible;
+  }
+
+  async wsSettingsInvitesGroupVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByText("Pending invites", { exact: true }));
+  }
+
+  async wsSettingsInvitesCount(): Promise<number | null> {
+    const toggle = this.page.getByRole("button", { name: /Pending invites/ }).first();
+    if (!(await this.isShown(toggle))) return null;
+    const text = ((await toggle.innerText().catch(() => "")) ?? "").trim();
+    const count = /(\d+)\s*$/.exec(text)?.[1];
+    return count === undefined ? null : Number(count);
+  }
+
+  async wsSettingsInvitesVisibleEmails(): Promise<string[]> {
+    // Invitation rows are div.group blocks carrying the invitee email;
+    // member name cells share the group class but never an email address.
+    const groups = await this.page.locator("div.group").count();
+    const emails: string[] = [];
+    for (let i = 0; i < groups; i++) {
+      const node = this.page.locator("div.group").nth(i);
+      if (!(await node.isVisible().catch(() => false))) continue;
+      const text = ((await node.innerText().catch(() => "")) ?? "").trim();
+      const email = this.wsSettingsEmailOf(text);
+      // The collapsible body wraps every invitation row, so nested group
+      // ancestors repeat the same address; keep each address once.
+      if (email !== null && !emails.includes(email)) emails.push(email);
+    }
+    return emails;
+  }
+
+  async wsSettingsInvitesToggleGroup(): Promise<void> {
+    const before = await this.wsSettingsInvitesExpanded();
+    await this.page
+      .getByRole("button", { name: /Pending invites/ })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+    // The collapsible animates; resolve once the rows finish hiding/showing.
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.wsSettingsInvitesExpanded()) !== before) return;
+      if (Date.now() > deadline) throw new Error("[parity] pending group never finished toggling.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async wsSettingsInvitesExpanded(): Promise<boolean> {
+    if (!(await this.wsSettingsInvitesGroupVisible())) return false;
+    return (await this.wsSettingsInvitesVisibleEmails()).length > 0;
+  }
+
+  async wsSettingsInviteRole(email: string): Promise<string> {
+    const row = this.wsSettingsInviteRow(email);
+    return (
+      (await row
+        .getByText(/^(Guest|Member|Admin)$/)
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async wsSettingsInviteRoleOptions(email: string): Promise<string[]> {
+    // Close by toggling: an Escape close desyncs the select (a later
+    // reopen renders no options), while toggle-close reopens cleanly.
+    const row = this.wsSettingsInviteRow(email);
+    const trigger = row.getByText(/^(Guest|Member|Admin)$/).first();
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions().first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const options = await this.wsSettingsVisibleOptions().allInnerTexts();
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions().first().waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+    return options.map((option) => option.trim()).filter((option) => option.length > 0);
+  }
+
+  async wsSettingsInviteSetRole(email: string, roleLabel: string): Promise<void> {
+    const row = this.wsSettingsInviteRow(email);
+    await row
+      .getByText(/^(Guest|Member|Admin)$/)
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+    // The label updates optimistically, so settling on it alone would
+    // return before a failure reverts it: wait out the PATCH round-trip
+    // first (a no-op pick fires no request and falls straight through).
+    const patched = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "PATCH" &&
+          /\/api\/workspaces\/[^/]+\/invitations\/[^/]+\/$/.test(response.url()),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.wsSettingsVisibleOptions()
+      .filter({ hasText: new RegExp(`^${roleLabel}$`) })
+      .click({ timeout: WebDriver.WAIT_MS });
+    await patched;
+    // Writes carry no success toast: the row's own label settling is the
+    // success signal, while a failure surfaces as an error toast with the
+    // label reverted. Either outcome settles the write.
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.wsSettingsInviteRole(email)) === roleLabel) return;
+      const toast = await this.rulesLastToast();
+      if (toast !== null && /error/i.test(toast.title)) return;
+      if (Date.now() > deadline) throw new Error(`[parity] invitation role never settled on ${roleLabel}.`);
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  /** Items of the currently open menu (only the open menu's items mount). */
+  private wsSettingsOpenMenuItems(): Locator {
+    return this.page.getByRole("menuitem");
+  }
+
+  /** Visible options of the currently open role select. */
+  private wsSettingsVisibleOptions(): Locator {
+    return this.page.locator('[role="option"]:visible');
+  }
+
+  /** Open one invitation's ellipsis menu; resolves once its items render. */
+  private async wsSettingsInviteOpenMenu(email: string): Promise<void> {
+    const row = this.wsSettingsInviteRow(email);
+    await row.getByRole("button").filter({ hasText: /^\s*$/ }).first().click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsOpenMenuItems().first().waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsInviteMenuEntries(email: string): Promise<string[]> {
+    await this.wsSettingsInviteOpenMenu(email);
+    const entries = await this.wsSettingsOpenMenuItems().allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    return entries.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  }
+
+  async wsSettingsInviteCopyLink(email: string): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.wsSettingsInviteOpenMenu(email);
+    // The item nests its clickable button (same shape as the comment
+    // overflow menu), so click the inner button, not the item wrapper.
+    const item = this.wsSettingsOpenMenuItems().filter({ hasText: "Copy link" });
+    const inner = item.locator("button");
+    if ((await inner.count()) > 0) await inner.first().click({ timeout: WebDriver.WAIT_MS });
+    else await item.first().click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      const text = await this.page.evaluate(() => navigator.clipboard.readText()).catch(() => "");
+      if (text !== "") return text;
+      if (Date.now() > deadline) throw new Error("[parity] invitation copy-link never wrote the clipboard.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async wsSettingsInviteOpenRemove(email: string): Promise<void> {
+    await this.wsSettingsInviteOpenMenu(email);
+    const item = this.wsSettingsOpenMenuItems().filter({ hasText: "Remove" });
+    const inner = item.locator("button");
+    if ((await inner.count()) > 0) await inner.first().click({ timeout: WebDriver.WAIT_MS });
+    else await item.first().click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsWaitDialogOpen();
+  }
+
+  /**
+   * The currently open remove dialog. Dismissed dialogs unmount, but the
+   * dialog root itself is zero-height, so waits use attached state while
+   * the heading and buttons inside carry real boxes. Scoped by the h3
+   * heading because toasts also carry the dialog role.
+   */
+  private wsSettingsOpenDialog(): Locator {
+    return this.page.locator('div[role="dialog"]:has(h3)').first();
+  }
+
+  /** Resolve once a remove dialog mounts. */
+  private async wsSettingsWaitDialogOpen(): Promise<void> {
+    await this.wsSettingsOpenDialog().waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsRemoveDialogVisible(): Promise<boolean> {
+    return (await this.wsSettingsOpenDialog().count()) > 0;
+  }
+
+  async wsSettingsRemoveDialogTitle(): Promise<string | null> {
+    const dialog = this.wsSettingsOpenDialog();
+    if ((await dialog.count()) === 0) return null;
+    const heading = dialog.getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    return (((await heading.innerText().catch(() => "")) ?? "").trim() || null) as string | null;
+  }
+
+  async wsSettingsRemoveDialogText(): Promise<string | null> {
+    const dialog = this.wsSettingsOpenDialog();
+    if ((await dialog.count()) === 0) return null;
+    const text = ((await dialog.innerText().catch(() => "")) ?? "").trim();
+    return (text || null) as string | null;
+  }
+
+  async wsSettingsRemoveDialogConfirm(): Promise<void> {
+    const dialog = this.wsSettingsOpenDialog();
+    // The confirm control reads Remove or Leave (Removing/Leaving while it
+    // writes); click whichever the dialog offers, then settle the write
+    // round-trip (DELETE for removals, the leave POST for self-removal).
+    // Both outcomes close the dialog; the close wait stays best-effort
+    // and specs assert the outcome.
+    const confirm = dialog.getByRole("button", { name: /^(Remove|Leave|Removing|Leaving)$/ }).first();
+    const deleted = this.page
+      .waitForResponse(
+        (response) =>
+          (response.request().method() === "DELETE" &&
+            /\/api\/workspaces\/[^/]+\/(members|invitations)\/[^/]+\/$/.test(response.url())) ||
+          (response.request().method() === "POST" &&
+            /\/api\/workspaces\/[^/]+\/members\/leave\/$/.test(response.url())),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await confirm.click({ timeout: WebDriver.WAIT_MS });
+    await deleted;
+    // Dismissed dialogs unmount after a short leave transition; the
+    // zero-height root makes hidden-state meaningless, so wait detached.
+    await this.wsSettingsOpenDialog()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .then(
+        () => undefined,
+        () => undefined
+      );
+  }
+
+  async wsSettingsRemoveDialogCancel(): Promise<void> {
+    const dialog = this.wsSettingsOpenDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsOpenDialog().waitFor({ state: "detached", timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsMemberRowFacts(email: string): Promise<WsSettingsMemberRowFacts> {
+    const row = this.wsSettingsMemberRow(email);
+    await row.waitFor({ timeout: WebDriver.WAIT_MS });
+    const cells = row.locator("td");
+    const nameCell = cells.nth(0);
+    // The name cell also carries the avatar (initial text or image) plus
+    // the hover trigger; the full name is always the last span.
+    const nameSpans = nameCell.locator("span");
+    const fullName =
+      (await nameSpans.count()) > 0
+        ? (
+            (await nameSpans
+              .last()
+              .innerText()
+              .catch(() => "")) ?? ""
+          ).trim()
+        : "";
+    const displayName = (
+      (await cells
+        .nth(1)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const shownEmail = (
+      (await cells
+        .nth(2)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const role = (
+      (await cells
+        .nth(3)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const authRaw = (
+      (await cells
+        .nth(4)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const joiningRaw = (
+      (await cells
+        .nth(5)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const suspended = role === "Suspended";
+    const hasImage = (await nameCell.locator("img").count()) > 0;
+    const link = nameCell.locator("a").first();
+    const profileHref = (await link.count()) > 0 ? await link.getAttribute("href").catch(() => null) : null;
+    return {
+      fullName,
+      displayName,
+      email: shownEmail,
+      role,
+      auth: authRaw === "" ? null : authRaw,
+      joiningDate: joiningRaw === "" ? null : joiningRaw,
+      avatarKind: suspended ? "suspended" : hasImage ? "image" : "initial",
+      profileHref,
+    };
+  }
+
+  async wsSettingsMemberRoleEditable(email: string): Promise<boolean> {
+    // Editable rows render the role select trigger inside the account-type
+    // cell; self and non-admin views render the role as plain text.
+    const row = this.wsSettingsMemberRow(email);
+    if ((await row.count()) === 0) return false;
+    return (await row.locator("td").nth(3).getByRole("button").count()) > 0;
+  }
+
+  async wsSettingsMemberRoleOptions(email: string): Promise<string[]> {
+    // Close by toggling: an Escape close desyncs the select (a later
+    // reopen renders no options), while toggle-close reopens cleanly.
+    const row = this.wsSettingsMemberRow(email);
+    const trigger = row.locator("td").nth(3).getByRole("button").first();
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions().first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const options = await this.wsSettingsVisibleOptions().allInnerTexts();
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions().first().waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+    return options.map((option) => option.trim()).filter((option) => option.length > 0);
+  }
+
+  async wsSettingsMemberSetRole(email: string, roleLabel: string): Promise<void> {
+    const row = this.wsSettingsMemberRow(email);
+    // A pick that registers no write and no failure (no PATCH, no toast,
+    // label untouched) hit a stale menu instance mid-transition; retry it
+    // once before calling it a real failure.
+    for (let attempt = 0; ; attempt++) {
+      await row.locator("td").nth(3).getByRole("button").first().click({ timeout: WebDriver.WAIT_MS });
+      // The label updates optimistically, so settling on it alone would
+      // return before a failure reverts it: wait out the PATCH round-trip
+      // first (a no-op pick fires no request and falls straight through).
+      const patched = this.page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "PATCH" &&
+            /\/api\/workspaces\/[^/]+\/members\/[^/]+\/$/.test(response.url()),
+          { timeout: WebDriver.WAIT_MS }
+        )
+        .then(
+          () => true,
+          () => false
+        );
+      await this.wsSettingsVisibleOptions()
+        .filter({ hasText: new RegExp(`^${roleLabel}$`) })
+        .click({ timeout: WebDriver.WAIT_MS });
+      const didPatch = await patched;
+      // Role writes carry no success toast: the row's own label settling is
+      // the success signal, while a failure surfaces as an error toast with
+      // the label reverted. Either outcome settles the write.
+      const deadline = Date.now() + WebDriver.WAIT_MS;
+      for (;;) {
+        const current = (
+          (await row
+            .locator("td")
+            .nth(3)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+        if (current === roleLabel) return;
+        const toast = await this.rulesLastToast();
+        if (toast !== null && /error/i.test(toast.title)) return;
+        if (Date.now() > deadline) break;
+        await this.page.waitForTimeout(250);
+      }
+      if (didPatch || attempt >= 1) throw new Error(`[parity] member role never settled on ${roleLabel}.`);
+    }
+  }
+
+  /** One member row's hover-menu trigger (the empty-text control in the name cell), if any. */
+  private wsSettingsMemberMenuTrigger(email: string): Locator {
+    return this.wsSettingsMemberRow(email).locator("td").first().getByRole("button");
+  }
+
+  async wsSettingsMemberMenuEntry(email: string): Promise<string | null> {
+    // Suspended rows offer no hover menu at all.
+    const trigger = this.wsSettingsMemberMenuTrigger(email);
+    if ((await trigger.count()) === 0) return null;
+    await this.wsSettingsMemberRow(email).hover();
+    await trigger.first().click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.page.getByText("Remove", { exact: true }).count()) > 0) {
+        await this.page.keyboard.press("Escape");
+        return "Remove";
+      }
+      if ((await this.page.getByText("Leave", { exact: true }).count()) > 0) {
+        await this.page.keyboard.press("Escape");
+        return "Leave";
+      }
+      if (Date.now() > deadline) {
+        await this.page.keyboard.press("Escape");
+        return null;
+      }
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async wsSettingsMemberOpenRemove(email: string): Promise<void> {
+    const trigger = this.wsSettingsMemberMenuTrigger(email);
+    await this.wsSettingsMemberRow(email).hover();
+    await trigger.first().click({ timeout: WebDriver.WAIT_MS });
+    const remove = this.page.getByText("Remove", { exact: true });
+    const leave = this.page.getByText("Leave", { exact: true });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await remove.count()) > 0) {
+        await remove.first().click({ timeout: WebDriver.WAIT_MS });
+        break;
+      }
+      if ((await leave.count()) > 0) {
+        await leave.first().click({ timeout: WebDriver.WAIT_MS });
+        break;
+      }
+      if (Date.now() > deadline) throw new Error("[parity] member hover menu never offered Remove or Leave.");
+      await this.page.waitForTimeout(250);
+    }
+    await this.wsSettingsWaitDialogOpen();
+  }
+
+  async wsSettingsMembersActivityVisible(): Promise<boolean> {
+    // The activity entry would render inside the members content section;
+    // any visible Activity control there counts. Immediate read.
+    const section = this.wsSettingsMembersSection();
+    if ((await section.count()) === 0) return false;
+    if ((await section.getByRole("button", { name: /Activity/ }).count()) > 0) return true;
+    if ((await section.getByRole("link", { name: /Activity/ }).count()) > 0) return true;
+    return (await section.getByText(/Activity/).count()) > 0;
+  }
+
+  async wsSettingsMembersBillingVisible(): Promise<boolean> {
+    // The upsell entry would render among the members header actions
+    // (beside search, filters and Add); scoped to the section so the
+    // sidebar's Billing & Plans entry never leaks in. Immediate read.
+    const section = this.wsSettingsMembersSection();
+    if ((await section.count()) === 0) return false;
+    const billing = /upgrad|bill|pricing|trial|seats?\b/i;
+    const buttons = section.getByRole("button");
+    const totalButtons = await buttons.count();
+    for (let i = 0; i < totalButtons; i++) {
+      const text = (
+        (await buttons
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "" && billing.test(text)) return true;
+    }
+    const links = section.getByRole("link");
+    const totalLinks = await links.count();
+    for (let i = 0; i < totalLinks; i++) {
+      const text = (
+        (await links
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "" && billing.test(text)) return true;
+    }
+    return false;
   }
 
   // --- Project members tab (NEWFRONT-391, PSET-018–027). Appended; existing
