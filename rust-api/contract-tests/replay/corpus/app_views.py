@@ -212,34 +212,11 @@ SESSIONS = (
                 "DELETE", _G + "/{member_global}/",
                 route="/api/workspaces/{slug}/views/{pk}/",
                 auth="member", expect_status=204,
-                # Known divergence (PIDASHCONV-925): Django's soft
-                # delete stamps updated_by like the model save;
-                # Rust's workspace_destroy only stamps deleted_at.
-                known_cell_diffs=[
-                    ("issue_views", "PIDASHCONV-925",
-                     {"name": "Member global"}, "updated_by_id",
-                     "{member}", None),
-                ],
-                # Known divergence (PIDASHCONV-924): Rust's
-                # workspace_destroy soft-deletes with no enqueue;
-                # Django's model delete() enqueues
-                # soft_delete_related_objects.
-                known_absent_jobs={
-                    "pi_dash.bgtasks.deletion_task.soft_delete_related_objects": "PIDASHCONV-924",
-                },
             ),
             Request(
                 "DELETE", _G + "/{gv}/",
                 route="/api/workspaces/{slug}/views/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-924): same missing
-                # soft_delete enqueue through workspace_destroy
-                # (the gv row was PUT-updated, so the 925 stamping
-                # gap is invisible here — updated_by is already
-                # the deleter on both sides).
-                known_absent_jobs={
-                    "pi_dash.bgtasks.deletion_task.soft_delete_related_objects": "PIDASHCONV-924",
-                },
             ),
             Request(
                 "GET", _G + "/",
@@ -258,14 +235,6 @@ SESSIONS = (
                 known_absent_jobs={
                     "pi_dash.bgtasks.deletion_task.soft_delete_related_objects": "PIDASHCONV-923",
                 },
-                # Known divergence (PIDASHCONV-925): Django's soft
-                # delete stamps updated_by like the model save;
-                # Rust's project_destroy only stamps deleted_at.
-                known_cell_diffs=[
-                    ("issue_views", "PIDASHCONV-925",
-                     {"name": "Locked"}, "updated_by_id",
-                     "{admin}", None),
-                ],
             ),
             Request(
                 "GET", _P + "/",

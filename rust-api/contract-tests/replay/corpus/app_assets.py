@@ -353,15 +353,6 @@ SESSIONS = (
                 route="/api/assets/v2/workspaces/{slug}/projects/{project_id}/{entity_id}/bulk/",
                 json={"asset_ids": ["{bc}"]},
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-929): Django's
-                # save_project_cover stamps updated_by via
-                # project.save(); Rust's SAVE_PROJECT_COVER_SQL is a
-                # bare cover_image_asset_id update.
-                known_cell_diffs=[
-                    ("projects", "PIDASHCONV-929",
-                     {"identifier": "RPJ"}, "updated_by_id",
-                     "{admin}", None),
-                ],
             ),
             Request(
                 "POST", _P + "/" + MISSING_ID + "/bulk/",
@@ -424,11 +415,10 @@ SESSIONS = (
                 "GET", "/api/workspaces/file-assets/{ws_id}/{wsleaf}/",
                 route="/api/workspaces/file-assets/{workspace_id}/{key}/",
                 auth="admin", expect_status=200,
-                # Known divergence (PIDASHCONV-930): Django renders
-                # the DRF absolute asset URL (request host — a
-                # topology port, uncomparable exactly); Rust renders
-                # the bare key. The leaf blanks; the fix is proven
-                # by shape, not by this pin (see the issue).
+                # PIDASHCONV-930 landed (Rust renders the DRF
+                # absolute asset URL like Django); the host is a
+                # topology port, uncomparable exactly, so the leaf
+                # still blanks.
                 body_blank_paths=["data/0/asset"],
             ),
             Request(
@@ -466,11 +456,10 @@ SESSIONS = (
                 "GET", "/api/workspaces/file-assets/{ws_id}/{wsleaf}/",
                 route="/api/workspaces/file-assets/{workspace_id}/{key}/",
                 auth="admin", expect_status=200,
-                # Known divergence (PIDASHCONV-930): Django renders
-                # the DRF absolute asset URL (request host — a
-                # topology port, uncomparable exactly); Rust renders
-                # the bare key. The leaf blanks; the fix is proven
-                # by shape, not by this pin (see the issue).
+                # PIDASHCONV-930 landed (Rust renders the DRF
+                # absolute asset URL like Django); the host is a
+                # topology port, uncomparable exactly, so the leaf
+                # still blanks.
                 body_blank_paths=["data/0/asset"],
             ),
             Request(
@@ -487,11 +476,10 @@ SESSIONS = (
                 "GET", "/api/workspaces/file-assets/{ws_id}/{wsleaf}/",
                 route="/api/workspaces/file-assets/{workspace_id}/{key}/",
                 auth="admin", expect_status=200,
-                # Known divergence (PIDASHCONV-930): Django renders
-                # the DRF absolute asset URL (request host — a
-                # topology port, uncomparable exactly); Rust renders
-                # the bare key. The leaf blanks; the fix is proven
-                # by shape, not by this pin (see the issue).
+                # PIDASHCONV-930 landed (Rust renders the DRF
+                # absolute asset URL like Django); the host is a
+                # topology port, uncomparable exactly, so the leaf
+                # still blanks.
                 body_blank_paths=["data/0/asset"],
             ),
             Request(

@@ -166,7 +166,7 @@ def template_context(world: dict) -> dict:
         "outsider": str(users["outsider"]["id"]),
         # The seeded X-Api-Key token (admin-owned): identical both
         # sides within a run, minted fresh per seed — pins name it
-        # instead of the literal (PIDASHCONV-920 header pins).
+        # instead of the literal.
         "api_token": world["api_token"],
     }
 

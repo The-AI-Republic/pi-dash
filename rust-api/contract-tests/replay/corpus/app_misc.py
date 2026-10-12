@@ -418,13 +418,6 @@ SESSIONS = (
                 "DELETE", _AV + "/{avid}/",
                 route="/api/workspaces/{slug}/analytic-view/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-934): Rust's
-                # view_destroy soft-deletes with no enqueue;
-                # Django's model delete() enqueues
-                # soft_delete_related_objects.
-                known_absent_jobs={
-                    "pi_dash.bgtasks.deletion_task.soft_delete_related_objects": "PIDASHCONV-934",
-                },
             ),
             Request(
                 "GET", _AV + "/{avid}/",

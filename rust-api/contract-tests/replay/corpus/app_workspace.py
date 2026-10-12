@@ -467,24 +467,11 @@ SESSIONS = (
                 route="/api/workspaces/{slug}/invitations/{pk}/",
                 json={"role": 5},
                 auth="admin", expect_status=404,
-                # Known divergence (PIDASHCONV-901): same 404 text,
-                # different key case (Django lowercase, Rust
-                # capital). Bytes verified, not eyeballed.
-                known_body_aliases=[
-                    ("detail", "Detail", "PIDASHCONV-901",
-                     "No WorkspaceMemberInvite matches the given query."),
-                ],
             ),
             Request(
                 "DELETE", _WS + "/invitations/{inv_del}/",
                 route="/api/workspaces/{slug}/invitations/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-902): Rust skips
-                # the mixin soft_delete_related_objects enqueue.
-                known_absent_jobs={
-                    "pi_dash.bgtasks.deletion_task."
-                    "soft_delete_related_objects": "PIDASHCONV-902",
-                },
             ),
             # Joins. Replay-ws (seeded outsider invite): wrong-token
             # 403 -> reject 200 -> double-respond 400. The accept leg
@@ -561,13 +548,6 @@ SESSIONS = (
                 route="/api/workspaces/{slug}/invitations/{pk}/join/",
                 json={"token": "{otok}", "accepted": True},
                 auth="outsider", expect_status=200,
-                # Known divergence (PIDASHCONV-903): Rust skips
-                # the mixin soft_delete_related_objects enqueue
-                # for the consumed invite.
-                known_absent_jobs={
-                    "pi_dash.bgtasks.deletion_task."
-                    "soft_delete_related_objects": "PIDASHCONV-903",
-                },
             ),
             # Join-request review (newcomer requesters, admin-called):
             # approve -> approve-twice 400 -> deny -> deny-non-admin

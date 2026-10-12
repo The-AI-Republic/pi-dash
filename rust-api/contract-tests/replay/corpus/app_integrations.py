@@ -635,14 +635,6 @@ SESSIONS = (
                     r"installations/new\?state=[A-Za-z0-9_-]+",
                 ],
                 expect_status=201,
-                # Known divergence (PIDASHCONV-932): Django's create
-                # stamps created_by with the actor; Rust's
-                # install_start INSERT omits it.
-                known_cell_diffs=[
-                    ("github_app_install_sessions", "PIDASHCONV-932",
-                     {"workspace_id": "{ws_id}"}, "created_by_id",
-                     "{admin}", None),
-                ],
             ),
             # App refresh: missing slug 400 -> unknown ws 404 ->
             # member 403 -> not-installed 404. (The live-check 502's

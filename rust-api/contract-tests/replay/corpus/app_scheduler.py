@@ -288,13 +288,6 @@ SESSIONS = (
                 "DELETE", _B + "/{bind}/",
                 route="/api/workspaces/{slug}/projects/{project_id}/scheduler-bindings/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-921): Rust's
-                # binding_uninstall soft-deletes inline with no
-                # enqueue; Django's model delete() enqueues
-                # soft_delete_related_objects.
-                known_absent_jobs={
-                    "pi_dash.bgtasks.deletion_task.soft_delete_related_objects": "PIDASHCONV-921",
-                },
             ),
             Request(
                 "GET", _B + "/{bind}/",
@@ -305,13 +298,6 @@ SESSIONS = (
                 "DELETE", _S + "/{sched3}/",
                 route="/api/workspaces/{slug}/schedulers/{pk}/",
                 auth="admin", expect_status=204,
-                # Known divergence (PIDASHCONV-922): Rust's
-                # scheduler_delete stamps deleted_at inline with
-                # no enqueue; Django's model delete() enqueues
-                # soft_delete_related_objects.
-                known_absent_jobs={
-                    "pi_dash.bgtasks.deletion_task.soft_delete_related_objects": "PIDASHCONV-922",
-                },
             ),
             Request(
                 "GET", _B + "/",
