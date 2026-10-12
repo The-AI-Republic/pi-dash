@@ -8012,8 +8012,8 @@ export interface ParityDriver {
   wsSettingsOutletText(): Promise<string>;
   /** Current pathname (deep links must not redirect). */
   wsSettingsCurrentPath(): Promise<string>;
-  /** Open one webhook's detail page; settles on form, denial, or loading. */
-  wsSettingsOpenWebhookDetail(workspaceSlug: string, webhookId: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Open one webhook's detail page (shared by NEWFRONT-415 and NEWFRONT-412). With cookies, navigates authenticated and settles on form, denial, or loading; without, uses the ambient session and requires the form or a denial view. */
+  wsSettingsOpenWebhookDetail(workspaceSlug: string, webhookId: string, cookies?: ParityBrowserCookie[]): Promise<void>;
   /** Webhook detail state: edit form, inline denial, or still loading. */
   wsSettingsWebhookDetailState(): Promise<"form" | "denied" | "loading">;
   /** Desktop-only hooks rendered inside settings (expected: none). */
@@ -8273,6 +8273,179 @@ export interface ParityDriver {
   wsSettingsConfirmDelete(): Promise<void>;
   /** Dismiss the delete dialog via its Cancel control. */
   wsSettingsCancelDelete(): Promise<void>;
+
+  // --- Workspace-settings developer oracle (NEWFRONT-412, WSET-016..024,
+  // --- WSET-041). Observed on the running old app: an admin-only
+  // --- integrations page (banner heading plus one card per git provider,
+  // --- each with a token form that verifies against the live provider and
+  // --- a disconnect action from the connected state) and an admin-only
+  // --- webhooks area (list with loader and empty state, create dialog with
+  // --- URL plus all-or-individual event selection, one-time masked secret
+  // --- reveal with copy and an auto-downloaded CSV backup, detail page with
+  // --- edit form plus secret block and danger-zone delete). Non-admins get
+  // --- the shared not-authorized view on every page (the layout intercepts
+  // --- members before the detail page's own paragraph can render).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+  /** Open the integrations page; settles on the cards or the denial view. */
+  wsSettingsOpenIntegrations(workspaceSlug: string): Promise<void>;
+  /** Whether the integrations page shows the not-authorized view. */
+  wsSettingsIntegrationsNotAuthorized(): Promise<boolean>;
+  /** Whether the integrations banner heading is visible. */
+  wsSettingsIntegrationsHeadingVisible(): Promise<boolean>;
+  /** Provider card titles in render order (GitHub, GitLab). */
+  wsSettingsIntegrationsProviderTitles(): Promise<string[]>;
+  /** Current document title. */
+  wsSettingsPageTitle(): Promise<string>;
+  /** The GitHub card status line, or null when the card is missing. */
+  wsSettingsGithubStatusText(): Promise<string | null>;
+  /** Fill the GitHub token field. */
+  wsSettingsGithubTokenFill(token: string): Promise<void>;
+  /** Current GitHub token field value; empty when the field is missing. */
+  wsSettingsGithubTokenValue(): Promise<string>;
+  /** Whether the GitHub Connect control is currently enabled. */
+  wsSettingsGithubConnectEnabled(): Promise<boolean>;
+  /** Click GitHub Connect; resolves once the connect call settles. */
+  wsSettingsGithubConnect(): Promise<void>;
+  /** Whether the GitHub card shows the connected state. */
+  wsSettingsGithubConnected(): Promise<boolean>;
+  /** Whether the GitHub Disconnect control is currently visible. */
+  wsSettingsGithubDisconnectVisible(): Promise<boolean>;
+  /** Click GitHub Disconnect; resolves once the disconnect call settles. */
+  wsSettingsGithubDisconnect(): Promise<void>;
+  /** The GitLab card status line, or null when the card is missing. */
+  wsSettingsGitlabStatusText(): Promise<string | null>;
+  /** Fill the GitLab host field. */
+  wsSettingsGitlabHostFill(host: string): Promise<void>;
+  /** Fill the GitLab token field. */
+  wsSettingsGitlabTokenFill(token: string): Promise<void>;
+  /** Current GitLab token field value; empty when the field is missing. */
+  wsSettingsGitlabTokenValue(): Promise<string>;
+  /** Whether the GitLab Connect control is currently enabled. */
+  wsSettingsGitlabConnectEnabled(): Promise<boolean>;
+  /** Click GitLab Connect; resolves once the connect call settles. */
+  wsSettingsGitlabConnect(): Promise<void>;
+  /** Whether the GitLab card shows the connected state. */
+  wsSettingsGitlabConnected(): Promise<boolean>;
+  /** Whether the GitLab Disconnect control is currently visible. */
+  wsSettingsGitlabDisconnectVisible(): Promise<boolean>;
+  /** Click GitLab Disconnect; resolves once the disconnect call settles. */
+  wsSettingsGitlabDisconnect(): Promise<void>;
+  /** Open the webhooks list; settles on the list or the denial view. */
+  wsSettingsOpenWebhooks(workspaceSlug: string): Promise<void>;
+  /** Whether the webhooks list shows the not-authorized view. */
+  wsSettingsWebhooksNotAuthorized(): Promise<boolean>;
+  /** Whether the webhooks heading is visible. */
+  wsSettingsWebhooksHeadingVisible(): Promise<boolean>;
+  /** Whether the list-level Add webhook control is visible. */
+  wsSettingsWebhooksAddVisible(): Promise<boolean>;
+  /** Whether the no-webhooks empty state is visible. */
+  wsSettingsWebhooksEmptyVisible(): Promise<boolean>;
+  /** Whether the list skeleton is currently showing. */
+  wsSettingsWebhooksLoaderVisible(): Promise<boolean>;
+  /** Hold list GETs so the skeleton stays up long enough to observe. */
+  wsSettingsWebhooksDelayListFetch(ms: number): Promise<void>;
+  /** Row target URLs in render order. */
+  wsSettingsWebhooksRowUrls(): Promise<string[]>;
+  /** Open the row for a target URL; settles on the detail form. */
+  wsSettingsWebhooksOpenRow(url: string): Promise<void>;
+  /** Whether the row switch for a target URL is currently on. */
+  wsSettingsWebhooksRowActiveOn(url: string): Promise<boolean>;
+  /** Flip the row switch for a target URL; resolves once the write settles. */
+  wsSettingsWebhooksRowToggleActive(url: string): Promise<void>;
+  /** Click the list-level Add webhook control. */
+  wsSettingsWebhooksAddClick(): Promise<void>;
+  /** Click the empty-state creation action. */
+  wsSettingsWebhooksEmptyAddClick(): Promise<void>;
+  /** Whether the webhook dialog (form or reveal step) is open. */
+  wsSettingsWebhookDialogOpen(): Promise<boolean>;
+  /** The dialog form title (Create webhook), or null when not on the form step. */
+  wsSettingsWebhookDialogTitle(): Promise<string | null>;
+  /** Fill the dialog/detail target URL field. */
+  wsSettingsWebhookUrlFill(url: string): Promise<void>;
+  /** Current target URL field value. */
+  wsSettingsWebhookUrlValue(): Promise<string>;
+  /** The inline URL error, or null when none shows. */
+  wsSettingsWebhookUrlError(): Promise<string | null>;
+  /** Which event mode radio is checked, or null when the form is missing. */
+  wsSettingsWebhookEventMode(): Promise<"all" | "individual" | null>;
+  /** Pick an event mode radio. */
+  wsSettingsWebhookPickEventMode(mode: "all" | "individual"): Promise<void>;
+  /** Individual event options with their checked state (empty when hidden). */
+  wsSettingsWebhookIndividualOptions(): Promise<{ label: string; checked: boolean }[]>;
+  /** Toggle one individual event option by label. */
+  wsSettingsWebhookToggleIndividual(label: string): Promise<void>;
+  /** Click Create; resolves once the create call settles. */
+  wsSettingsWebhookSubmit(): Promise<void>;
+  /** Click Create; resolves with the auto-downloaded backup file. */
+  wsSettingsWebhookSubmitAndCaptureDownload(): Promise<LocalFileDownload>;
+  /** Click Cancel in the dialog. */
+  wsSettingsWebhookCancel(): Promise<void>;
+  /** Press Escape with the dialog open. */
+  wsSettingsWebhookPressEscape(): Promise<void>;
+  /** Whether the secret reveal step (Key created) is visible. */
+  wsSettingsWebhookRevealVisible(): Promise<boolean>;
+  /** The reveal explainer paragraph, or null when the step is missing. */
+  wsSettingsWebhookRevealText(): Promise<string | null>;
+  /** Whether the secret currently renders in the clear (vs masked dots). */
+  wsSettingsWebhookSecretShown(): Promise<boolean>;
+  /** The in-clear secret, or null when masked or absent. */
+  wsSettingsWebhookSecretValue(): Promise<string | null>;
+  /** Whether the view/copy secret actions are present. */
+  wsSettingsWebhookSecretActionsVisible(): Promise<boolean>;
+  /** Click the view-secret action. */
+  wsSettingsWebhookSecretToggleView(): Promise<void>;
+  /** Click the copy-secret action. */
+  wsSettingsWebhookSecretCopy(): Promise<void>;
+  /** Click Close on the reveal step. */
+  wsSettingsWebhookRevealClose(): Promise<void>;
+  /** Whether the detail page shows a not-authorized state (view or paragraph). */
+  wsSettingsWebhookDetailNotAuthorized(): Promise<boolean>;
+  /** Which denial the detail page shows: the shared view, the page paragraph, or none. */
+  wsSettingsWebhookDetailDenialKind(): Promise<"view" | "paragraph" | null>;
+  /** Whether the detail spinner is currently showing. */
+  wsSettingsWebhookDetailLoaderVisible(): Promise<boolean>;
+  /** Hold detail GETs so the spinner stays up long enough to observe. */
+  wsSettingsWebhookDetailDelayFetch(ms: number): Promise<void>;
+  /** Whether the detail active switch is currently on. */
+  wsSettingsWebhookDetailActiveOn(): Promise<boolean>;
+  /** Flip the detail active switch. */
+  wsSettingsWebhookDetailToggleActive(): Promise<void>;
+  /** Click Update; resolves once the update call settles. */
+  wsSettingsWebhookDetailUpdate(): Promise<void>;
+  /** Current Update button label, or null when the button is missing. */
+  wsSettingsWebhookDetailUpdateLabel(): Promise<string | null>;
+  /** Hold update PATCHes so the updating state stays up long enough to observe. */
+  wsSettingsWebhookDetailDelayUpdate(ms: number): Promise<void>;
+  /** Whether the detail secret-key block is visible. */
+  wsSettingsWebhookSecretBlockVisible(): Promise<boolean>;
+  /** Click Re-generate key; resolves once the regenerate call settles. */
+  wsSettingsWebhookRegenerate(): Promise<void>;
+  /** Current Re-generate button label, or null when the button is missing. */
+  wsSettingsWebhookRegenerateLabel(): Promise<string | null>;
+  /** Hold regenerate POSTs so the re-generating state stays up to observe. */
+  wsSettingsWebhookDelayRegenerate(ms: number): Promise<void>;
+  /**
+   * Click Re-generate key and capture the backup file download; null when
+   * no download fires.
+   */
+  wsSettingsWebhookRegenerateAndCaptureDownload(): Promise<LocalFileDownload | null>;
+  /** Whether the Danger zone disclosure is visible. */
+  wsSettingsWebhookDeleteSectionVisible(): Promise<boolean>;
+  /** Expand the Danger zone disclosure. */
+  wsSettingsWebhookDeleteSectionExpand(): Promise<void>;
+  /** Whether the delete panel (with its Delete webhook button) is showing. */
+  wsSettingsWebhookDeletePanelVisible(): Promise<boolean>;
+  /** Click the Delete webhook button. */
+  wsSettingsWebhookDeleteOpen(): Promise<void>;
+  /** Whether the delete confirmation dialog is open. */
+  wsSettingsWebhookDeleteDialogOpen(): Promise<boolean>;
+  /** The delete confirmation body text, or null when the dialog is missing. */
+  wsSettingsWebhookDeleteDialogText(): Promise<string | null>;
+  /** Confirm deletion; resolves once the delete settles on the list. */
+  wsSettingsWebhookDeleteConfirm(): Promise<void>;
+  /** Dismiss the delete confirmation dialog. */
+  wsSettingsWebhookDeleteCancel(): Promise<void>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */

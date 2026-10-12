@@ -43266,21 +43266,54 @@ export class WebDriver implements ParityDriver {
   async wsSettingsOpenWebhookDetail(
     workspaceSlug: string,
     webhookId: string,
-    cookies: ParityBrowserCookie[]
+    cookies?: ParityBrowserCookie[]
   ): Promise<void> {
-    await this.openAuthenticated(`/${workspaceSlug}/settings/webhooks/${webhookId}`, cookies);
-    // Unknown ids never resolve (NEWFRONT-417): the spinner persists, so
-    // once the authorized shell has rendered for a while with neither
-    // form nor denial, settle as "still loading" instead of waiting out
-    // the whole budget.
-    const start = Date.now();
-    for (;;) {
-      const state = await this.wsSettingsWebhookDetailState();
-      if (state !== "loading") return;
-      if (Date.now() - start > 10_000 && (await this.wsSettingsSidebarVisible())) return;
-      if (Date.now() - start > WebDriver.WAIT_MS) return;
-      await this.page.waitForTimeout(500);
+    if (cookies !== undefined) {
+      // NEWFRONT-415 path: cookie-authenticated navigation that tolerates
+      // forever-loading unknown ids (NEWFRONT-417).
+      await this.openAuthenticated(`/${workspaceSlug}/settings/webhooks/${webhookId}`, cookies);
+      const start = Date.now();
+      for (;;) {
+        const state = await this.wsSettingsWebhookDetailState();
+        if (state !== "loading") return;
+        if (Date.now() - start > 10_000 && (await this.wsSettingsSidebarVisible())) return;
+        if (Date.now() - start > WebDriver.WAIT_MS) return;
+        await this.page.waitForTimeout(500);
+      }
     }
+    // NEWFRONT-412 path: ambient session; requires the form or a denial view.
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/webhooks/${webhookId}`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.page
+          .getByText("Webhook details", { exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByText("You are not authorized to access this page.", { exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByRole("heading", { name: /not authorized/i })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] webhook detail settled on neither the form nor a denial view.");
   }
 
   async wsSettingsWebhookDetailState(): Promise<"form" | "denied" | "loading"> {
@@ -44450,6 +44483,859 @@ export class WebDriver implements ParityDriver {
       .locator("#workspaceName")
       .first()
       .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+
+  // --- Workspace-settings developer oracle (NEWFRONT-412, WSET-016..024,
+  // --- WSET-041). Appended; existing methods above are untouched per the
+  // --- shared driver contract.
+
+  /** Card root for a provider: the bordered block around its heading. */
+  private wsSettingsProviderCard(name: "GitHub" | "GitLab"): Locator {
+    return this.page.locator("div.border-b", { has: this.page.getByRole("heading", { name, exact: true }) }).last();
+  }
+
+  async wsSettingsOpenIntegrations(workspaceSlug: string): Promise<void> {
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/integrations`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.page
+          .getByRole("heading", { name: "GitHub", exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByRole("heading", { name: /not authorized/i })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] integrations page settled on neither cards nor the denial view.");
+  }
+
+  async wsSettingsIntegrationsNotAuthorized(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
+  }
+
+  async wsSettingsIntegrationsHeadingVisible(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: "Integrations", exact: true }).count()) > 0;
+  }
+
+  async wsSettingsIntegrationsProviderTitles(): Promise<string[]> {
+    const titles: string[] = [];
+    for (const name of ["GitHub", "GitLab"] as const) {
+      const head = this.page.getByRole("heading", { name, exact: true });
+      if ((await head.count()) > 0) titles.push(name);
+    }
+    return titles;
+  }
+
+  async wsSettingsPageTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  private wsSettingsCardStatus(name: "GitHub" | "GitLab"): Locator {
+    // The status line is the paragraph beside the card heading.
+    return this.wsSettingsProviderCard(name).locator("p").first();
+  }
+
+  private async wsSettingsCardStatusText(name: "GitHub" | "GitLab"): Promise<string | null> {
+    const line = this.wsSettingsCardStatus(name);
+    if ((await line.count()) === 0) return null;
+    const text = (
+      (await line
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text === "" ? null : text;
+  }
+
+  async wsSettingsGithubStatusText(): Promise<string | null> {
+    return this.wsSettingsCardStatusText("GitHub");
+  }
+
+  async wsSettingsGithubTokenFill(token: string): Promise<void> {
+    await this.page.getByPlaceholder("github_pat_...").fill(token, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsGithubTokenValue(): Promise<string> {
+    // Empty when the field is missing (mid-reload): the connect-failure
+    // settle polls this without throwing.
+    const field = this.page.getByPlaceholder("github_pat_...");
+    if ((await field.count()) === 0) return "";
+    return field.first().inputValue({ timeout: WebDriver.WAIT_MS });
+  }
+
+  private wsSettingsGithubConnectButton(): Locator {
+    return this.wsSettingsProviderCard("GitHub").getByRole("button", { name: "Connect", exact: true });
+  }
+
+  async wsSettingsGithubConnectEnabled(): Promise<boolean> {
+    const control = this.wsSettingsGithubConnectButton();
+    if ((await control.count()) === 0) return false;
+    return control.first().isEnabled();
+  }
+
+  async wsSettingsGithubConnect(): Promise<void> {
+    const settled = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("/integrations/github/connect/") && response.request().method() === "POST",
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.wsSettingsGithubConnectButton().first().click({ timeout: WebDriver.WAIT_MS });
+    await settled;
+    // The 401 path trips the global session interceptor, which reloads
+    // through /?next_path=... and bounces back; settle there when it
+    // happens so later reads see post-reload state.
+    await this.page.waitForURL((url) => url.searchParams.has("next_path"), { timeout: 10_000 }).catch(() => undefined);
+    await this.page.waitForURL("**/settings/integrations", { timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async wsSettingsGithubConnected(): Promise<boolean> {
+    return (await this.wsSettingsProviderCard("GitHub").getByText("Connected as", { exact: false }).count()) > 0;
+  }
+
+  private wsSettingsGithubDisconnectButton(): Locator {
+    return this.wsSettingsProviderCard("GitHub").getByRole("button", { name: "Disconnect", exact: true });
+  }
+
+  async wsSettingsGithubDisconnectVisible(): Promise<boolean> {
+    return (await this.wsSettingsGithubDisconnectButton().count()) > 0;
+  }
+
+  async wsSettingsGithubDisconnect(): Promise<void> {
+    const settled = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("/integrations/github/disconnect/") && response.request().method() === "POST",
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.wsSettingsGithubDisconnectButton().first().click({ timeout: WebDriver.WAIT_MS });
+    await settled;
+  }
+
+  async wsSettingsGitlabStatusText(): Promise<string | null> {
+    return this.wsSettingsCardStatusText("GitLab");
+  }
+
+  async wsSettingsGitlabHostFill(host: string): Promise<void> {
+    await this.page.getByPlaceholder("https://gitlab.com").fill(host, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsGitlabTokenFill(token: string): Promise<void> {
+    await this.page.getByPlaceholder("glpat-...").fill(token, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsGitlabTokenValue(): Promise<string> {
+    // Empty when the field is missing (mid-reload): the connect-failure
+    // settle polls this without throwing.
+    const field = this.page.getByPlaceholder("glpat-...");
+    if ((await field.count()) === 0) return "";
+    return field.first().inputValue({ timeout: WebDriver.WAIT_MS });
+  }
+
+  private wsSettingsGitlabConnectButton(): Locator {
+    return this.wsSettingsProviderCard("GitLab").getByRole("button", { name: "Connect", exact: true });
+  }
+
+  async wsSettingsGitlabConnectEnabled(): Promise<boolean> {
+    const control = this.wsSettingsGitlabConnectButton();
+    if ((await control.count()) === 0) return false;
+    return control.first().isEnabled();
+  }
+
+  async wsSettingsGitlabConnect(): Promise<void> {
+    const settled = this.page
+      .waitForResponse(
+        (response) => response.url().includes("/integrations/git/accounts/") && response.request().method() === "POST",
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.wsSettingsGitlabConnectButton().first().click({ timeout: WebDriver.WAIT_MS });
+    await settled;
+    // Same 401-interceptor reload as the GitHub card; settle on the
+    // bounce-back when it happens (see wsSettingsGithubConnect).
+    await this.page.waitForURL((url) => url.searchParams.has("next_path"), { timeout: 10_000 }).catch(() => undefined);
+    await this.page.waitForURL("**/settings/integrations", { timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async wsSettingsGitlabConnected(): Promise<boolean> {
+    return (await this.wsSettingsProviderCard("GitLab").getByText("Connected as", { exact: false }).count()) > 0;
+  }
+
+  private wsSettingsGitlabDisconnectButton(): Locator {
+    return this.wsSettingsProviderCard("GitLab").getByRole("button", { name: "Disconnect", exact: true });
+  }
+
+  async wsSettingsGitlabDisconnectVisible(): Promise<boolean> {
+    return (await this.wsSettingsGitlabDisconnectButton().count()) > 0;
+  }
+
+  async wsSettingsGitlabDisconnect(): Promise<void> {
+    const settled = this.page
+      .waitForResponse(
+        (response) =>
+          /\/integrations\/git\/accounts\/[^/]+\/$/.test(response.url()) && response.request().method() === "DELETE",
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.wsSettingsGitlabDisconnectButton().first().click({ timeout: WebDriver.WAIT_MS });
+    await settled;
+  }
+
+  async wsSettingsOpenWebhooks(workspaceSlug: string): Promise<void> {
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/webhooks`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.page
+          .getByRole("button", { name: "Add webhook", exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByRole("heading", { name: /not authorized/i })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] webhooks list settled on neither content nor the denial view.");
+  }
+
+  async wsSettingsWebhooksNotAuthorized(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
+  }
+
+  async wsSettingsWebhooksHeadingVisible(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: "Webhooks", exact: true }).count()) > 0;
+  }
+
+  private wsSettingsWebhooksAddButton(): Locator {
+    // The list-level control lives in the settings heading; the empty
+    // state carries its own same-named action further down.
+    return this.page.getByRole("button", { name: "Add webhook", exact: true }).first();
+  }
+
+  async wsSettingsWebhooksAddVisible(): Promise<boolean> {
+    return (await this.wsSettingsWebhooksAddButton().count()) > 0;
+  }
+
+  async wsSettingsWebhooksEmptyVisible(): Promise<boolean> {
+    return (await this.page.getByText("No Webhook added yet", { exact: true }).count()) > 0;
+  }
+
+  async wsSettingsWebhooksLoaderVisible(): Promise<boolean> {
+    // The skeleton carries no live-region role: it renders the section
+    // name as plain text with a button placeholder where Add renders, so
+    // "name without the control" is the loader signal.
+    const name = (await this.page.getByText("Webhooks", { exact: true }).count()) > 0;
+    if (!name) return false;
+    if (await this.wsSettingsWebhooksNotAuthorized()) return false;
+    return (await this.page.getByRole("button", { name: "Add webhook", exact: true }).count()) === 0;
+  }
+
+  async wsSettingsWebhooksDelayListFetch(ms: number): Promise<void> {
+    const hold = async (route: Route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    await this.page.route("**/api/workspaces/*/webhooks/", hold);
+  }
+
+  async wsSettingsWebhooksRowUrls(): Promise<string[]> {
+    // Row links point at their detail pages; the surrounding layout links
+    // never carry a webhook id.
+    const links = this.page.locator('a[href*="/settings/webhooks/"]');
+    const count = await links.count();
+    const urls: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const text = (
+        (await links
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") urls.push(text);
+    }
+    return urls;
+  }
+
+  private wsSettingsWebhooksRowLink(url: string): Locator {
+    return this.page.getByRole("link", { name: url });
+  }
+
+  async wsSettingsWebhooksOpenRow(url: string): Promise<void> {
+    await this.wsSettingsWebhooksRowLink(url).first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByText("Webhook details", { exact: true }).first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  private wsSettingsWebhooksRowSwitch(url: string): Locator {
+    // The row switch renders inside the row link.
+    return this.wsSettingsWebhooksRowLink(url).first().getByRole("switch");
+  }
+
+  async wsSettingsWebhooksRowActiveOn(url: string): Promise<boolean> {
+    const control = this.wsSettingsWebhooksRowSwitch(url);
+    if ((await control.count()) === 0) return false;
+    return control.first().isChecked();
+  }
+
+  async wsSettingsWebhooksRowToggleActive(url: string): Promise<void> {
+    const wrote = this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/webhooks\/[^/]+\/$/.test(response.url()) &&
+          response.request().method() === "PATCH",
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.wsSettingsWebhooksRowSwitch(url).first().click({ timeout: WebDriver.WAIT_MS });
+    await wrote;
+  }
+
+  async wsSettingsWebhooksAddClick(): Promise<void> {
+    await this.wsSettingsWebhooksAddButton().click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByText("Create webhook", { exact: true }).first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsWebhooksEmptyAddClick(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: "Add webhook", exact: true })
+      .last()
+      .click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByText("Create webhook", { exact: true }).first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  /** The webhook dialog (create form or reveal step), when open. */
+  private wsSettingsDialog(): Locator {
+    // Toasts are role=dialog too: stay outside the Notifications region.
+    return this.page.locator('xpath=//*[@role="dialog" and not(ancestor::*[@aria-label="Notifications"])]').last();
+  }
+
+  /** The webhook dialog currently showing the given step. */
+  private wsSettingsDialogOn(step: "Create webhook" | "Key created" | "Delete webhook"): Locator {
+    // Scoped to the step marker so a transient second dialog (tooltip,
+    // transition remnant) can never steal the scope.
+    return this.page
+      .locator('xpath=//*[@role="dialog" and not(ancestor::*[@aria-label="Notifications"])]', {
+        has: this.page.getByText(step, { exact: true }),
+      })
+      .last();
+  }
+
+  async wsSettingsWebhookDialogOpen(): Promise<boolean> {
+    return (await this.wsSettingsDialog().count()) > 0;
+  }
+
+  async wsSettingsWebhookDialogTitle(): Promise<string | null> {
+    // The form title is a plain div, not a heading role.
+    if ((await this.wsSettingsDialogOn("Create webhook").count()) === 0) return null;
+    return "Create webhook";
+  }
+
+  /** The webhook form: the dialog form when a dialog is open, else the page form. */
+  private wsSettingsForm(): Locator {
+    return this.page.locator("form").first();
+  }
+
+  async wsSettingsWebhookUrlFill(url: string): Promise<void> {
+    await this.wsSettingsForm().getByPlaceholder("https://example.com/post").fill(url, {
+      timeout: WebDriver.WAIT_MS,
+    });
+  }
+
+  async wsSettingsWebhookUrlValue(): Promise<string> {
+    return this.wsSettingsForm()
+      .getByPlaceholder("https://example.com/post")
+      .inputValue({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsWebhookUrlError(): Promise<string | null> {
+    const error = this.wsSettingsForm().getByText("URL is required", { exact: true });
+    if ((await error.count()) === 0) return null;
+    return "URL is required";
+  }
+
+  async wsSettingsWebhookEventMode(): Promise<"all" | "individual" | null> {
+    const form = this.wsSettingsForm();
+    if ((await form.count()) === 0) return null;
+    // The radios carry no accessible names; the ids are the stable hooks.
+    const all = form.locator("input#all");
+    const individual = form.locator("input#individual");
+    if ((await all.count()) === 0 || (await individual.count()) === 0) return null;
+    if (await individual.first().isChecked()) return "individual";
+    if (await all.first().isChecked()) return "all";
+    return null;
+  }
+
+  async wsSettingsWebhookPickEventMode(mode: "all" | "individual"): Promise<void> {
+    const label = mode === "all" ? "Send me everything" : "Select individual events";
+    await this.wsSettingsForm().getByText(label, { exact: true }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsWebhookIndividualOptions(): Promise<{ label: string; checked: boolean }[]> {
+    const form = this.wsSettingsForm();
+    const options: { label: string; checked: boolean }[] = [];
+    for (const key of ["project", "cycle", "issue", "module", "issue_comment"]) {
+      const box = form.locator(`input#${key}`);
+      if ((await box.count()) === 0) continue;
+      const label = form.locator(`label[for="${key}"]`);
+      const text =
+        (await label.count()) === 0
+          ? key
+          : (
+              (await label
+                .first()
+                .innerText()
+                .catch(() => "")) ?? ""
+            )
+              .replace(/\s+/g, " ")
+              .trim() || key;
+      options.push({ label: text, checked: await box.first().isChecked() });
+    }
+    return options;
+  }
+
+  async wsSettingsWebhookToggleIndividual(label: string): Promise<void> {
+    await this.wsSettingsForm().getByText(label, { exact: true }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  private wsSettingsCreateButton(): Locator {
+    return this.wsSettingsDialogOn("Create webhook").getByRole("button", { name: "Create", exact: true });
+  }
+
+  async wsSettingsWebhookSubmit(): Promise<void> {
+    await this.wsSettingsCreateButton().click({ timeout: WebDriver.WAIT_MS });
+    // Settles on whichever lands first: the create response, the inline
+    // URL error (client validation fires no request), or the reveal step.
+    await Promise.race([
+      this.page
+        .waitForResponse(
+          (response) =>
+            /\/api\/workspaces\/[^/]+\/webhooks\/$/.test(response.url()) && response.request().method() === "POST",
+          { timeout: WebDriver.WAIT_MS }
+        )
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+      this.wsSettingsForm()
+        .getByText("URL is required", { exact: true })
+        .waitFor({ timeout: WebDriver.WAIT_MS })
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+      this.page
+        .getByText("Key created", { exact: true })
+        .first()
+        .waitFor({ timeout: WebDriver.WAIT_MS })
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+    ]);
+  }
+
+  async wsSettingsWebhookSubmitAndCaptureDownload(): Promise<LocalFileDownload> {
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: WebDriver.WAIT_MS }),
+      this.wsSettingsCreateButton().click({ timeout: WebDriver.WAIT_MS }),
+    ]);
+    await this.page.getByText("Key created", { exact: true }).first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const path = await download.path();
+    if (!path) throw new Error("[parity] webhook backup download landed without a path.");
+    return { fileName: download.suggestedFilename(), content: readFileSync(path, "utf8") };
+  }
+
+  async wsSettingsWebhookCancel(): Promise<void> {
+    await this.wsSettingsDialogOn("Create webhook")
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsWebhookPressEscape(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+  }
+
+  async wsSettingsWebhookRevealVisible(): Promise<boolean> {
+    return (await this.page.getByText("Key created", { exact: true }).count()) > 0;
+  }
+
+  async wsSettingsWebhookRevealText(): Promise<string | null> {
+    const dialog = this.wsSettingsDialogOn("Key created");
+    if ((await dialog.count()) === 0) return null;
+    const paragraph = dialog.locator("p").first();
+    if ((await paragraph.count()) === 0) return null;
+    const text = (
+      (await paragraph
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text === "" ? null : text;
+  }
+
+  /** The revealed key paragraph: masked renders dot divs in its place. */
+  private wsSettingsSecretKeyText(): Locator {
+    // The key paragraph is the direct child of the secret box's
+    // non-selectable container; scoping there keeps the event-option
+    // descriptions (same text size, different container) out.
+    return this.page.locator("div.select-none > p").first();
+  }
+
+  async wsSettingsWebhookSecretShown(): Promise<boolean> {
+    return (await this.wsSettingsSecretKeyText().count()) > 0;
+  }
+
+  async wsSettingsWebhookSecretValue(): Promise<string | null> {
+    const key = this.wsSettingsSecretKeyText();
+    if ((await key.count()) === 0) return null;
+    const text = ((await key.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? null : text;
+  }
+
+  // The view/copy secret buttons are icon-only with no accessible
+  // names: the view button carries an eye svg, the copy button a custom
+  // non-lucide svg. Scoped to the reveal dialog on that step, else to the
+  // detail form.
+  private async wsSettingsSecretScope(): Promise<Locator> {
+    const reveal = this.wsSettingsDialogOn("Key created");
+    if ((await reveal.count()) > 0) return reveal;
+    return this.wsSettingsForm();
+  }
+
+  async wsSettingsWebhookSecretActionsVisible(): Promise<boolean> {
+    const scope = await this.wsSettingsSecretScope();
+    const view = scope.locator("button:has(svg[class*='lucide-eye'])");
+    const copy = scope.locator("button:has(svg:not([class*='lucide']))");
+    return (await view.count()) > 0 && (await copy.count()) > 0;
+  }
+
+  async wsSettingsWebhookSecretToggleView(): Promise<void> {
+    const scope = await this.wsSettingsSecretScope();
+    await scope.locator("button:has(svg[class*='lucide-eye'])").first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsWebhookSecretCopy(): Promise<void> {
+    // The app writes through the async clipboard API, which headless
+    // Chromium denies without an explicit grant.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const scope = await this.wsSettingsSecretScope();
+    await scope.locator("button:has(svg:not([class*='lucide']))").first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsWebhookRevealClose(): Promise<void> {
+    await this.wsSettingsDialogOn("Key created")
+      .getByRole("button", { name: "Close", exact: true })
+      .click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .getByText("Key created", { exact: true })
+      .waitFor({ state: "detached", timeout: WebDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async wsSettingsWebhookDetailNotAuthorized(): Promise<boolean> {
+    if ((await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0) return true;
+    return (await this.page.getByText("You are not authorized to access this page.", { exact: true }).count()) > 0;
+  }
+
+  async wsSettingsWebhookDetailDenialKind(): Promise<"view" | "paragraph" | null> {
+    // The layout intercepts non-admins with the shared denial view before
+    // the page's own paragraph can render.
+    if ((await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0) return "view";
+    if ((await this.page.getByText("You are not authorized to access this page.", { exact: true }).count()) > 0)
+      return "paragraph";
+    return null;
+  }
+
+  async wsSettingsWebhookDetailLoaderVisible(): Promise<boolean> {
+    // The spinner carries no live-region role: while it shows, the
+    // pulsing mark renders with neither the form nor the denial text.
+    if ((await this.page.getByText("Webhook details", { exact: true }).count()) > 0) return false;
+    if (await this.wsSettingsWebhookDetailNotAuthorized()) return false;
+    return (await this.page.locator(".animate-pulse").count()) > 0;
+  }
+
+  async wsSettingsWebhookDetailDelayFetch(ms: number): Promise<void> {
+    const hold = async (route: Route) => {
+      const url = route.request().url();
+      if (route.request().method() !== "GET" || !/\/webhooks\/[^/]+\/$/.test(url)) {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    // The glob keeps the trailing slash: `*` never spans `/`, so a
+    // slash-less tail would miss `/webhooks/<id>/`.
+    await this.page.route("**/webhooks/*/", hold);
+  }
+
+  private wsSettingsDetailSwitch(): Locator {
+    return this.wsSettingsForm().getByRole("switch").first();
+  }
+
+  async wsSettingsWebhookDetailActiveOn(): Promise<boolean> {
+    const control = this.wsSettingsDetailSwitch();
+    if ((await control.count()) === 0) return false;
+    return control.first().isChecked();
+  }
+
+  async wsSettingsWebhookDetailToggleActive(): Promise<void> {
+    await this.wsSettingsDetailSwitch().first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  private wsSettingsUpdateButton(): Locator {
+    return this.wsSettingsForm()
+      .getByRole("button", { name: /^(Update|Updating)$/ })
+      .first();
+  }
+
+  async wsSettingsWebhookDetailUpdate(): Promise<void> {
+    await this.wsSettingsUpdateButton().click({ timeout: WebDriver.WAIT_MS });
+    // Settles on the update response or the inline URL error (client
+    // validation fires no request), whichever lands first.
+    await Promise.race([
+      this.page
+        .waitForResponse(
+          (response) =>
+            /\/api\/workspaces\/[^/]+\/webhooks\/[^/]+\/$/.test(response.url()) &&
+            response.request().method() === "PATCH",
+          { timeout: WebDriver.WAIT_MS }
+        )
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+      this.wsSettingsForm()
+        .getByText("URL is required", { exact: true })
+        .waitFor({ timeout: WebDriver.WAIT_MS })
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+    ]);
+  }
+
+  async wsSettingsWebhookDetailUpdateLabel(): Promise<string | null> {
+    const control = this.wsSettingsUpdateButton();
+    if ((await control.count()) === 0) return null;
+    const text = (
+      (await control
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text === "" ? null : text;
+  }
+
+  async wsSettingsWebhookDetailDelayUpdate(ms: number): Promise<void> {
+    const hold = async (route: Route) => {
+      const url = route.request().url();
+      if (route.request().method() !== "PATCH" || !/\/webhooks\/[^/]+\/$/.test(url)) {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    // Trailing slash kept for the same reason as the detail-fetch hold.
+    await this.page.route("**/webhooks/*/", hold);
+  }
+
+  async wsSettingsWebhookSecretBlockVisible(): Promise<boolean> {
+    return (await this.wsSettingsForm().getByText("Secret key", { exact: true }).count()) > 0;
+  }
+
+  private wsSettingsRegenerateButton(): Locator {
+    // Common prefix: idle renders "Re-generate key", loading renders
+    // "Re-generating..." (neither contains the other).
+    return this.page.getByRole("button", { name: /Re-generat/ }).first();
+  }
+
+  async wsSettingsWebhookRegenerate(): Promise<void> {
+    const settled = this.page
+      .waitForResponse(
+        (response) => response.url().includes("/regenerate/") && response.request().method() === "POST",
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.wsSettingsRegenerateButton().click({ timeout: WebDriver.WAIT_MS });
+    await settled;
+  }
+
+  async wsSettingsWebhookRegenerateLabel(): Promise<string | null> {
+    const control = this.wsSettingsRegenerateButton();
+    if ((await control.count()) === 0) return null;
+    const text = (
+      (await control
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text === "" ? null : text;
+  }
+
+  async wsSettingsWebhookDelayRegenerate(ms: number): Promise<void> {
+    const hold = async (route: Route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    await this.page.route("**/regenerate/", hold);
+  }
+
+  async wsSettingsWebhookRegenerateAndCaptureDownload(): Promise<LocalFileDownload | null> {
+    let download: import("@playwright/test").Download | null = null;
+    const waiter = this.page.waitForEvent("download", { timeout: 10_000 }).then(
+      (caught) => {
+        download = caught;
+      },
+      () => undefined
+    );
+    await this.wsSettingsWebhookRegenerate();
+    await waiter;
+    if (download === null) return null;
+    const path = await (download as import("@playwright/test").Download).path();
+    if (!path) throw new Error("[parity] regenerate backup download landed without a path.");
+    return {
+      fileName: (download as import("@playwright/test").Download).suggestedFilename(),
+      content: readFileSync(path, "utf8"),
+    };
+  }
+
+  async wsSettingsWebhookDeleteSectionVisible(): Promise<boolean> {
+    return (await this.page.getByText("Danger zone", { exact: true }).count()) > 0;
+  }
+
+  async wsSettingsWebhookDeleteSectionExpand(): Promise<void> {
+    await this.page.getByText("Danger zone", { exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .getByRole("button", { name: "Delete webhook", exact: true })
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsWebhookDeletePanelVisible(): Promise<boolean> {
+    return (
+      (await this.page.getByRole("button", { name: "Delete webhook", exact: true }).count()) > 0 &&
+      (await this.page.getByText("Once a webhook is deleted", { exact: false }).count()) > 0
+    );
+  }
+
+  async wsSettingsWebhookDeleteOpen(): Promise<void> {
+    await this.page.getByRole("button", { name: "Delete webhook", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .getByRole("heading", { name: "Delete webhook", exact: true })
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsWebhookDeleteDialogOpen(): Promise<boolean> {
+    return (await this.page.getByRole("heading", { name: "Delete webhook", exact: true }).count()) > 0;
+  }
+
+  async wsSettingsWebhookDeleteDialogText(): Promise<string | null> {
+    const dialog = this.wsSettingsDialogOn("Delete webhook");
+    if ((await dialog.count()) === 0) return null;
+    const body = dialog.locator("div.text-13").first();
+    if ((await body.count()) === 0) return null;
+    const text = ((await body.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? null : text;
+  }
+
+  async wsSettingsWebhookDeleteConfirm(): Promise<void> {
+    const gone = this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/webhooks\/[^/]+\/$/.test(response.url()) &&
+          response.request().method() === "DELETE",
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.wsSettingsDialogOn("Delete webhook")
+      .getByRole("button", { name: "Delete", exact: true })
+      .click({ timeout: WebDriver.WAIT_MS });
+    await gone;
+    // Settle on whichever outcome lands first: success navigates back to
+    // the list, failure stays put with a toast. (Waiting out the list
+    // unconditionally would outlive the failure toast.)
+    const add = this.page.getByRole("button", { name: "Add webhook", exact: true }).first();
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    while (Date.now() < deadline) {
+      if ((await add.count()) > 0) break;
+      if ((await this.lastToast()) !== null) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  async wsSettingsWebhookDeleteCancel(): Promise<void> {
+    await this.wsSettingsDialogOn("Delete webhook")
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .getByRole("heading", { name: "Delete webhook", exact: true })
+      .waitFor({ state: "detached", timeout: WebDriver.WAIT_MS })
       .catch(() => undefined);
   }
 }

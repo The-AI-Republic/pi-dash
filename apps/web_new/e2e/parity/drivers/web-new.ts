@@ -12487,7 +12487,7 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsOpenWebhookDetail(
     _workspaceSlug: string,
     _webhookId: string,
-    _cookies: ParityBrowserCookie[]
+    _cookies?: ParityBrowserCookie[]
   ): Promise<void> {
     return todo("wsSettingsOpenWebhookDetail");
   }
@@ -12866,5 +12866,243 @@ export class WebNewDriver implements ParityDriver {
   }
   async wsSettingsCancelDelete(): Promise<void> {
     return todo("wsSettingsCancelDelete");
+  }
+
+  // --- Workspace-settings developer oracle (NEWFRONT-412, WSET-016..024,
+  // --- WSET-041). Throwing stubs per the shared driver contract; the new
+  // --- app implements them later.
+  async wsSettingsOpenIntegrations(_workspaceSlug: string): Promise<void> {
+    return todo("wsSettingsOpenIntegrations");
+  }
+  async wsSettingsIntegrationsNotAuthorized(): Promise<boolean> {
+    return todo("wsSettingsIntegrationsNotAuthorized");
+  }
+  async wsSettingsIntegrationsHeadingVisible(): Promise<boolean> {
+    return todo("wsSettingsIntegrationsHeadingVisible");
+  }
+  async wsSettingsIntegrationsProviderTitles(): Promise<string[]> {
+    return todo("wsSettingsIntegrationsProviderTitles");
+  }
+  async wsSettingsPageTitle(): Promise<string> {
+    return todo("wsSettingsPageTitle");
+  }
+  async wsSettingsGithubStatusText(): Promise<string | null> {
+    return todo("wsSettingsGithubStatusText");
+  }
+  async wsSettingsGithubTokenFill(_token: string): Promise<void> {
+    return todo("wsSettingsGithubTokenFill");
+  }
+  async wsSettingsGithubTokenValue(): Promise<string> {
+    return todo("wsSettingsGithubTokenValue");
+  }
+  async wsSettingsGithubConnectEnabled(): Promise<boolean> {
+    return todo("wsSettingsGithubConnectEnabled");
+  }
+  async wsSettingsGithubConnect(): Promise<void> {
+    return todo("wsSettingsGithubConnect");
+  }
+  async wsSettingsGithubConnected(): Promise<boolean> {
+    return todo("wsSettingsGithubConnected");
+  }
+  async wsSettingsGithubDisconnectVisible(): Promise<boolean> {
+    return todo("wsSettingsGithubDisconnectVisible");
+  }
+  async wsSettingsGithubDisconnect(): Promise<void> {
+    return todo("wsSettingsGithubDisconnect");
+  }
+  async wsSettingsGitlabStatusText(): Promise<string | null> {
+    return todo("wsSettingsGitlabStatusText");
+  }
+  async wsSettingsGitlabHostFill(_host: string): Promise<void> {
+    return todo("wsSettingsGitlabHostFill");
+  }
+  async wsSettingsGitlabTokenFill(_token: string): Promise<void> {
+    return todo("wsSettingsGitlabTokenFill");
+  }
+  async wsSettingsGitlabTokenValue(): Promise<string> {
+    return todo("wsSettingsGitlabTokenValue");
+  }
+  async wsSettingsGitlabConnectEnabled(): Promise<boolean> {
+    return todo("wsSettingsGitlabConnectEnabled");
+  }
+  async wsSettingsGitlabConnect(): Promise<void> {
+    return todo("wsSettingsGitlabConnect");
+  }
+  async wsSettingsGitlabConnected(): Promise<boolean> {
+    return todo("wsSettingsGitlabConnected");
+  }
+  async wsSettingsGitlabDisconnectVisible(): Promise<boolean> {
+    return todo("wsSettingsGitlabDisconnectVisible");
+  }
+  async wsSettingsGitlabDisconnect(): Promise<void> {
+    return todo("wsSettingsGitlabDisconnect");
+  }
+  async wsSettingsOpenWebhooks(_workspaceSlug: string): Promise<void> {
+    return todo("wsSettingsOpenWebhooks");
+  }
+  async wsSettingsWebhooksNotAuthorized(): Promise<boolean> {
+    return todo("wsSettingsWebhooksNotAuthorized");
+  }
+  async wsSettingsWebhooksHeadingVisible(): Promise<boolean> {
+    return todo("wsSettingsWebhooksHeadingVisible");
+  }
+  async wsSettingsWebhooksAddVisible(): Promise<boolean> {
+    return todo("wsSettingsWebhooksAddVisible");
+  }
+  async wsSettingsWebhooksEmptyVisible(): Promise<boolean> {
+    return todo("wsSettingsWebhooksEmptyVisible");
+  }
+  async wsSettingsWebhooksLoaderVisible(): Promise<boolean> {
+    return todo("wsSettingsWebhooksLoaderVisible");
+  }
+  async wsSettingsWebhooksDelayListFetch(_ms: number): Promise<void> {
+    return todo("wsSettingsWebhooksDelayListFetch");
+  }
+  async wsSettingsWebhooksRowUrls(): Promise<string[]> {
+    return todo("wsSettingsWebhooksRowUrls");
+  }
+  async wsSettingsWebhooksOpenRow(_url: string): Promise<void> {
+    return todo("wsSettingsWebhooksOpenRow");
+  }
+  async wsSettingsWebhooksRowActiveOn(_url: string): Promise<boolean> {
+    return todo("wsSettingsWebhooksRowActiveOn");
+  }
+  async wsSettingsWebhooksRowToggleActive(_url: string): Promise<void> {
+    return todo("wsSettingsWebhooksRowToggleActive");
+  }
+  async wsSettingsWebhooksAddClick(): Promise<void> {
+    return todo("wsSettingsWebhooksAddClick");
+  }
+  async wsSettingsWebhooksEmptyAddClick(): Promise<void> {
+    return todo("wsSettingsWebhooksEmptyAddClick");
+  }
+  async wsSettingsWebhookDialogOpen(): Promise<boolean> {
+    return todo("wsSettingsWebhookDialogOpen");
+  }
+  async wsSettingsWebhookDialogTitle(): Promise<string | null> {
+    return todo("wsSettingsWebhookDialogTitle");
+  }
+  async wsSettingsWebhookUrlFill(_url: string): Promise<void> {
+    return todo("wsSettingsWebhookUrlFill");
+  }
+  async wsSettingsWebhookUrlValue(): Promise<string> {
+    return todo("wsSettingsWebhookUrlValue");
+  }
+  async wsSettingsWebhookUrlError(): Promise<string | null> {
+    return todo("wsSettingsWebhookUrlError");
+  }
+  async wsSettingsWebhookEventMode(): Promise<"all" | "individual" | null> {
+    return todo("wsSettingsWebhookEventMode");
+  }
+  async wsSettingsWebhookPickEventMode(_mode: "all" | "individual"): Promise<void> {
+    return todo("wsSettingsWebhookPickEventMode");
+  }
+  async wsSettingsWebhookIndividualOptions(): Promise<{ label: string; checked: boolean }[]> {
+    return todo("wsSettingsWebhookIndividualOptions");
+  }
+  async wsSettingsWebhookToggleIndividual(_label: string): Promise<void> {
+    return todo("wsSettingsWebhookToggleIndividual");
+  }
+  async wsSettingsWebhookSubmit(): Promise<void> {
+    return todo("wsSettingsWebhookSubmit");
+  }
+  async wsSettingsWebhookSubmitAndCaptureDownload(): Promise<LocalFileDownload> {
+    return todo("wsSettingsWebhookSubmitAndCaptureDownload");
+  }
+  async wsSettingsWebhookCancel(): Promise<void> {
+    return todo("wsSettingsWebhookCancel");
+  }
+  async wsSettingsWebhookPressEscape(): Promise<void> {
+    return todo("wsSettingsWebhookPressEscape");
+  }
+  async wsSettingsWebhookRevealVisible(): Promise<boolean> {
+    return todo("wsSettingsWebhookRevealVisible");
+  }
+  async wsSettingsWebhookRevealText(): Promise<string | null> {
+    return todo("wsSettingsWebhookRevealText");
+  }
+  async wsSettingsWebhookSecretShown(): Promise<boolean> {
+    return todo("wsSettingsWebhookSecretShown");
+  }
+  async wsSettingsWebhookSecretValue(): Promise<string | null> {
+    return todo("wsSettingsWebhookSecretValue");
+  }
+  async wsSettingsWebhookSecretActionsVisible(): Promise<boolean> {
+    return todo("wsSettingsWebhookSecretActionsVisible");
+  }
+  async wsSettingsWebhookSecretToggleView(): Promise<void> {
+    return todo("wsSettingsWebhookSecretToggleView");
+  }
+  async wsSettingsWebhookSecretCopy(): Promise<void> {
+    return todo("wsSettingsWebhookSecretCopy");
+  }
+  async wsSettingsWebhookRevealClose(): Promise<void> {
+    return todo("wsSettingsWebhookRevealClose");
+  }
+  async wsSettingsWebhookDetailNotAuthorized(): Promise<boolean> {
+    return todo("wsSettingsWebhookDetailNotAuthorized");
+  }
+  async wsSettingsWebhookDetailDenialKind(): Promise<"view" | "paragraph" | null> {
+    return todo("wsSettingsWebhookDetailDenialKind");
+  }
+  async wsSettingsWebhookDetailLoaderVisible(): Promise<boolean> {
+    return todo("wsSettingsWebhookDetailLoaderVisible");
+  }
+  async wsSettingsWebhookDetailDelayFetch(_ms: number): Promise<void> {
+    return todo("wsSettingsWebhookDetailDelayFetch");
+  }
+  async wsSettingsWebhookDetailActiveOn(): Promise<boolean> {
+    return todo("wsSettingsWebhookDetailActiveOn");
+  }
+  async wsSettingsWebhookDetailToggleActive(): Promise<void> {
+    return todo("wsSettingsWebhookDetailToggleActive");
+  }
+  async wsSettingsWebhookDetailUpdate(): Promise<void> {
+    return todo("wsSettingsWebhookDetailUpdate");
+  }
+  async wsSettingsWebhookDetailUpdateLabel(): Promise<string | null> {
+    return todo("wsSettingsWebhookDetailUpdateLabel");
+  }
+  async wsSettingsWebhookDetailDelayUpdate(_ms: number): Promise<void> {
+    return todo("wsSettingsWebhookDetailDelayUpdate");
+  }
+  async wsSettingsWebhookSecretBlockVisible(): Promise<boolean> {
+    return todo("wsSettingsWebhookSecretBlockVisible");
+  }
+  async wsSettingsWebhookRegenerate(): Promise<void> {
+    return todo("wsSettingsWebhookRegenerate");
+  }
+  async wsSettingsWebhookRegenerateLabel(): Promise<string | null> {
+    return todo("wsSettingsWebhookRegenerateLabel");
+  }
+  async wsSettingsWebhookDelayRegenerate(_ms: number): Promise<void> {
+    return todo("wsSettingsWebhookDelayRegenerate");
+  }
+  async wsSettingsWebhookRegenerateAndCaptureDownload(): Promise<LocalFileDownload | null> {
+    return todo("wsSettingsWebhookRegenerateAndCaptureDownload");
+  }
+  async wsSettingsWebhookDeleteSectionVisible(): Promise<boolean> {
+    return todo("wsSettingsWebhookDeleteSectionVisible");
+  }
+  async wsSettingsWebhookDeleteSectionExpand(): Promise<void> {
+    return todo("wsSettingsWebhookDeleteSectionExpand");
+  }
+  async wsSettingsWebhookDeletePanelVisible(): Promise<boolean> {
+    return todo("wsSettingsWebhookDeletePanelVisible");
+  }
+  async wsSettingsWebhookDeleteOpen(): Promise<void> {
+    return todo("wsSettingsWebhookDeleteOpen");
+  }
+  async wsSettingsWebhookDeleteDialogOpen(): Promise<boolean> {
+    return todo("wsSettingsWebhookDeleteDialogOpen");
+  }
+  async wsSettingsWebhookDeleteDialogText(): Promise<string | null> {
+    return todo("wsSettingsWebhookDeleteDialogText");
+  }
+  async wsSettingsWebhookDeleteConfirm(): Promise<void> {
+    return todo("wsSettingsWebhookDeleteConfirm");
+  }
+  async wsSettingsWebhookDeleteCancel(): Promise<void> {
+    return todo("wsSettingsWebhookDeleteCancel");
   }
 }
