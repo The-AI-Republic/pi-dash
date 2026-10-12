@@ -26,6 +26,7 @@ export const getProjectFormValues = (): Partial<IProject> => ({
   cover_image_url: getRandomCoverImage(),
   timezone: getBrowserTimezone(),
   description: "",
+  context: "",
   logo_props: {
     in_use: "emoji",
     emoji: {

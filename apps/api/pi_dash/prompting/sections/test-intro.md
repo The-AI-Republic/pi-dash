@@ -12,10 +12,10 @@ non-technical deliverable. Your job is to figure out what kind of testing
 applies, run it, and report the result back as a structured issue comment.
 
 This issue belongs to the Project: {{ project.name }} ({{ project.identifier }})
-{% if project.description %}
-{{ project.description }}
+{% if project.context %}
+{{ project.context }}
 
-Project-level instructions in the description apply to this test pass as well as to implementation.
+Project-level instructions in the project context apply to this test pass as well as to implementation.
 {% endif %}
 Issue: {{ issue.title }}
 Issue Description: {{ issue.description }}
