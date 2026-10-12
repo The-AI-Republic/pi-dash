@@ -2290,9 +2290,12 @@ async fn workspace_destroy(
     permissions::workspace_view_destroy_recheck(&member, owned_by == user_id)
         .map_err(gate_denial)?;
     let now = chrono::Utc::now();
-    sqlx::query(r#"UPDATE issue_views SET deleted_at = $2 WHERE id = $1"#)
+    // `view.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
+    // `save()` (`updated_at`, CRUM `updated_by`).
+    sqlx::query(r#"UPDATE issue_views SET deleted_at = $2, updated_at = $2, updated_by_id = $3 WHERE id = $1"#)
         .bind(pk)
         .bind(now)
+        .bind(user_id)
         .execute(&pool)
         .await
         .map_err(|_| Denial::ServerError)?;
@@ -2688,9 +2691,12 @@ async fn project_destroy(
     let (_, owned_by, _) = lock_project_view(&pool, &slug, &project_id, &pk).await?;
     permissions::project_view_destroy_recheck(&member, owned_by == user_id).map_err(gate_denial)?;
     let now = chrono::Utc::now();
-    sqlx::query(r#"UPDATE issue_views SET deleted_at = $2 WHERE id = $1"#)
+    // `view.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
+    // `save()` (`updated_at`, CRUM `updated_by`).
+    sqlx::query(r#"UPDATE issue_views SET deleted_at = $2, updated_at = $2, updated_by_id = $3 WHERE id = $1"#)
         .bind(pk)
         .bind(now)
+        .bind(user_id)
         .execute(&pool)
         .await
         .map_err(|_| Denial::ServerError)?;
