@@ -1862,6 +1862,7 @@ mod tests {
                 dispatch_settings.cloud_agent.clone(),
                 dispatch_settings.managed_runner.clone(),
                 std::collections::HashMap::new(),
+                std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
             )),
         );
         pidash_jobs::tasks_ticker::fire_binding::register_fire_binding(
@@ -1871,6 +1872,7 @@ mod tests {
                 pool.clone(),
                 dispatch_settings.cloud_agent,
                 dispatch_settings.managed_runner,
+                std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
             ),
         );
         pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pool.clone());
@@ -1882,6 +1884,7 @@ mod tests {
             pool.clone(),
             None,
             &runner_settings,
+            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
         ));
         pidash_jobs::runner_runs::register_runner_runs_tasks(
             &mut registry,
@@ -1901,6 +1904,7 @@ mod tests {
             pidash_db::config::Settings::from_env().expect("settings parse in test env");
         let invoke = crate::model_runtime::invoke::InvokeCtx {
             tools: crate::model_runtime::tools_exec::ToolCtx {
+                toolsets: std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
                 pool: pool.clone(),
                 cloud: execute_settings.cloud_agent.clone(),
                 managed: execute_settings.managed_runner.clone(),
@@ -1926,6 +1930,7 @@ mod tests {
                 execute_settings.cloud_agent.block_private_urls,
                 invoke,
             )),
+            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
         );
         // The same call `worker()` makes (PIDASHCONV-865): every seam
         // constructor is lazy (no I/O), so the mirror builds them over

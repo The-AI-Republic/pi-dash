@@ -49,6 +49,9 @@ use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
 use pidash_services::dispatch::{AdmissionCache, LlmProfile};
+use pidash_services::extensions::CloudAgentToolsetsSeam;
+#[cfg(test)]
+use pidash_services::extensions::NoExtraToolsets;
 use pidash_services::orchestration::clock::{self as clock, ClockIssue, ClockWrite, RunEndedRef};
 use pidash_types::orchestration::{StateRef, TickerEventKind};
 
@@ -199,6 +202,7 @@ pub async fn complete_project_move_handoff_live(
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
     run_id: Uuid,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
 ) -> Result<Option<Uuid>, CreationJobsError> {
     let actor = run_creator(pool, run_id).await?;
     let universe = actor.into_iter().collect::<Vec<_>>();
@@ -208,7 +212,7 @@ pub async fn complete_project_move_handoff_live(
         managed: managed.clone(),
         cache: RunnerSeamCache::default(),
         has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
-        extra_toolsets_enabled: |_: Uuid| false,
+        toolsets,
         llm_profile: profile_fn(presence),
         now_unix_secs: Utc::now().timestamp(),
     };
@@ -227,6 +231,7 @@ pub async fn maybe_apply_deferred_pause_live(
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
     run_id: Uuid,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
 ) -> Result<bool, DispatchJobsError> {
     let presence: Arc<HashMap<Uuid, bool>> = Arc::new(HashMap::new());
     let deps = StoreDeps {
@@ -234,7 +239,7 @@ pub async fn maybe_apply_deferred_pause_live(
         managed: managed.clone(),
         cache: RunnerSeamCache::default(),
         has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
-        extra_toolsets_enabled: |_: Uuid| false,
+        toolsets,
         llm_profile: profile_fn(presence),
         now_unix_secs: Utc::now().timestamp(),
     };
@@ -533,10 +538,15 @@ mod tests {
     async fn live_handoff_unknown_run_is_none() {
         let pool = pool().await;
         let (cloud, managed) = settings();
-        let replacement =
-            complete_project_move_handoff_live(&pool, &cloud, &managed, Uuid::new_v4())
-                .await
-                .expect("unknown run is Ok");
+        let replacement = complete_project_move_handoff_live(
+            &pool,
+            &cloud,
+            &managed,
+            Uuid::new_v4(),
+            Arc::new(NoExtraToolsets),
+        )
+        .await
+        .expect("unknown run is Ok");
         assert!(replacement.is_none());
     }
 
@@ -546,9 +556,15 @@ mod tests {
     async fn live_pause_unknown_run_is_false() {
         let pool = pool().await;
         let (cloud, managed) = settings();
-        let applied = maybe_apply_deferred_pause_live(&pool, &cloud, &managed, Uuid::new_v4())
-            .await
-            .expect("unknown run is Ok");
+        let applied = maybe_apply_deferred_pause_live(
+            &pool,
+            &cloud,
+            &managed,
+            Uuid::new_v4(),
+            Arc::new(NoExtraToolsets),
+        )
+        .await
+        .expect("unknown run is Ok");
         assert!(!applied);
     }
 

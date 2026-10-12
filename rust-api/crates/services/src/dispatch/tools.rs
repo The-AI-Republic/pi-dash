@@ -47,9 +47,9 @@
 //!   [`resolve_model_for_creator`], delegating to the assistant seam.
 //! * `resolve_model_for_run` (`model_provider.py:6-7`) →
 //!   [`resolve_model_for_run`] (CE passthrough).
-//! * CE `extra_toolsets_*` (`toolsets.py:23-50`) →
-//!   [`extra_toolsets_enabled_for`] / [`resolve_extra_toolsets_for_run`] /
-//!   [`extra_toolsets_schema_tool`].
+//! * CE `extra_toolsets_*` (`toolsets.py:23-50`) → the injectable
+//!   [`crate::extensions::CloudAgentToolsetsSeam`] (CE:
+//!   [`crate::extensions::NoExtraToolsets`]).
 //!
 //! Translation notes:
 //!
@@ -89,8 +89,8 @@
 //!   `resolve_current_tool_names` emit catalog names only), so [`build_tools`]
 //!   grants the 15 catalog tools and the closed catalog is not widened.
 //! * The tool-plan snapshot discipline (`toolsets.py:23-31`) is honoured:
-//!   [`extra_toolsets_enabled_for`] is read at creation (L3 takes it as a
-//!   seam verdict) and never consulted here at execution time.
+//!   the seam's enabled check is read at creation (L3 takes it as a
+//!   verdict) and never consulted here at execution time.
 //!
 //! Fixture: `rust-api/fixtures/dispatch/fx-disp-05-tools.golden.json`
 //! (FX-DISP-05).
@@ -1951,34 +1951,6 @@ pub fn resolve_model_for_run(
     )
 }
 
-// ---------------------------------------------------------------------------
-// CE extra-toolsets seam (`ee/cloud_agent/toolsets.py:23-50`)
-// ---------------------------------------------------------------------------
-
-/// Whether the user opted in to the extra toolsets
-/// (`toolsets.py:23-31`). CE: nobody has. Read once at creation and
-/// snapshotted onto the plan (L3 takes it as a seam verdict), never
-/// consulted at execution time.
-pub fn extra_toolsets_enabled_for() -> bool {
-    false
-}
-
-/// Additional toolsets for the run (`toolsets.py:34-36`). CE: none —
-/// generic over the toolset representation so any consumer binds an
-/// empty vec. A build overlaying this owns the three documented
-/// obligations: admit only what the plan allows (the seam must not
-/// widen the closed catalog), degrade-never-fail, report dropped
-/// capability on the run's event stream.
-pub fn resolve_extra_toolsets_for_run<T>() -> Vec<T> {
-    Vec::new()
-}
-
-/// Name of the deferred-schema-fetch tool (`toolsets.py:39-50`). CE:
-/// none (the prompt section renders only when a name exists).
-pub fn extra_toolsets_schema_tool() -> &'static str {
-    ""
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3020,8 +2992,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ce_seam_defaults() {
+    #[tokio::test]
+    async fn ce_seam_defaults() {
+        use crate::extensions::{
+            CloudAgentToolsetsSeam, NoExtraToolsets, ToolsetsResolution, ToolsetsRun,
+        };
+
         let fx = fixture();
         assert!(!fx["ce_seam_defaults"]["extra_toolsets_enabled_for"]
             .as_bool()
@@ -3031,10 +3007,15 @@ mod tests {
             json!([])
         );
         assert_eq!(fx["ce_seam_defaults"]["extra_toolsets_schema_tool"], "");
-        assert!(!extra_toolsets_enabled_for());
-        let none: Vec<()> = resolve_extra_toolsets_for_run();
-        assert!(none.is_empty());
-        assert_eq!(extra_toolsets_schema_tool(), "");
+        let seam = NoExtraToolsets;
+        assert!(!seam.extra_toolsets_enabled(Uuid::nil()).await);
+        let run = ToolsetsRun {
+            run_id: Uuid::nil(),
+            creator_id: Uuid::nil(),
+            extra_toolsets: true,
+        };
+        assert_eq!(seam.extra_toolsets(&run).await, ToolsetsResolution::empty());
+        assert_eq!(seam.schema_tool_name(), "");
     }
 
     #[test]

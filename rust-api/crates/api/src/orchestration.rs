@@ -31,6 +31,7 @@
 //! `issue_move.py:353-372`).
 
 use std::future::Future;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -40,6 +41,7 @@ use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
 use pidash_db::tx::Transaction as DbTransaction;
 use pidash_jobs::dispatch::{dispatch_agent_run, DispatchDecision};
 use pidash_services::dispatch::{consume_admission_token, DeferredConsume};
+use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::runner_runs::finalization as finalize_kernel;
 
 use crate::project_move_handoff::{drain_publish_effects, HandoffStore, RedisAdmissionCache};
@@ -55,6 +57,7 @@ pub(crate) struct SpanCreationDeps {
     pub(crate) managed: ManagedRunnerSettings,
     pub(crate) cache: RedisAdmissionCache,
     pub(crate) now_unix_secs: i64,
+    pub(crate) toolsets: Arc<dyn CloudAgentToolsetsSeam>,
 }
 
 impl SpanCreationDeps {
@@ -69,6 +72,7 @@ impl SpanCreationDeps {
                 client: redis_client(state),
             },
             now_unix_secs: unix_now_secs(),
+            toolsets: state.toolsets().clone(),
         }
     }
 }
@@ -102,6 +106,7 @@ pub(crate) fn handoff_store<'t, 'p>(
         deps.managed.clone(),
         deps.cache.clone(),
         deps.now_unix_secs,
+        deps.toolsets.clone(),
     )
 }
 

@@ -36,6 +36,7 @@
 //! replayed by the live suite below.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -49,7 +50,9 @@ use pidash_db::tx::Transaction;
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile, UserFlags,
 };
-use pidash_services::extensions::{CloudAgentToolsetsSeam, NoExtraToolsets};
+use pidash_services::extensions::CloudAgentToolsetsSeam;
+#[cfg(test)]
+use pidash_services::extensions::NoExtraToolsets;
 use pidash_services::orchestration::creation::{
     active_run_sql, latest_prior_run_sql, run_insert_returning_sql, run_lock_sql, run_select_sql,
     user_id_for_run, ASSIGNED_POD_SELECT_SQL, BUNDLE_ANCESTOR_HOP_SQL, BUNDLE_ASSIGNEES_SQL,
@@ -84,14 +87,15 @@ use crate::dispatch::{execution_fields as resolve_execution_fields, DeferredAdmi
 // ---------------------------------------------------------------------------
 
 /// The jobs-owned inputs behind a [`LiveCreationStore`].
-pub struct StoreDeps<C, H, E, P> {
+pub struct StoreDeps<C, H, P> {
     pub cloud: CloudAgentSettings,
     pub managed: ManagedRunnerSettings,
     pub cache: C,
     /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`).
     pub has_usable_llm_config: H,
-    /// `extra_toolsets_enabled_for(creator)` (`toolsets.py:23-32`).
-    pub extra_toolsets_enabled: E,
+    /// `extra_toolsets_enabled_for(creator)` (`toolsets.py:23-32`): the
+    /// injected toolsets seam (also answers the schema-tool name).
+    pub toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     /// `managed_llm_profile(user)` (`managed_runner/policy.py:27-36`).
     pub llm_profile: P,
     /// `int(time.time())` for the admission buckets.
@@ -101,16 +105,16 @@ pub struct StoreDeps<C, H, E, P> {
 /// The live creation store: the services seam traits over one
 /// insertion transaction plus the D-11 delegation inputs.
 ///
-/// `H`/`E`/`P` are `Clone` so each `execution_fields` call can wrap a
+/// `H`/`P` are `Clone` so each `execution_fields` call can wrap a
 /// lazy `FnOnce` over the call's actor without borrowing the store.
-pub struct LiveCreationStore<'c, C, H, E, P> {
+pub struct LiveCreationStore<'c, C, H, P> {
     tx: Transaction<'c>,
     pool: &'c PgPool,
     cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
     cache: C,
     has_usable_llm_config: H,
-    extra_toolsets_enabled: E,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     llm_profile: P,
     now_unix_secs: i64,
     dispatches: Vec<Uuid>,
@@ -119,8 +123,8 @@ pub struct LiveCreationStore<'c, C, H, E, P> {
     rollback: bool,
 }
 
-impl<'c, C, H, E, P> LiveCreationStore<'c, C, H, E, P> {
-    pub fn new(tx: Transaction<'c>, pool: &'c PgPool, deps: StoreDeps<C, H, E, P>) -> Self {
+impl<'c, C, H, P> LiveCreationStore<'c, C, H, P> {
+    pub fn new(tx: Transaction<'c>, pool: &'c PgPool, deps: StoreDeps<C, H, P>) -> Self {
         Self {
             tx,
             pool,
@@ -128,7 +132,7 @@ impl<'c, C, H, E, P> LiveCreationStore<'c, C, H, E, P> {
             managed: deps.managed,
             cache: deps.cache,
             has_usable_llm_config: deps.has_usable_llm_config,
-            extra_toolsets_enabled: deps.extra_toolsets_enabled,
+            toolsets: deps.toolsets,
             llm_profile: deps.llm_profile,
             now_unix_secs: deps.now_unix_secs,
             dispatches: Vec::new(),
@@ -325,11 +329,10 @@ fn map_project(row: &PgRow) -> Result<ProjectView, sqlx::Error> {
 // Seam implementation
 // ---------------------------------------------------------------------------
 
-impl<C, H, E, P> CreationSeam for LiveCreationStore<'_, C, H, E, P>
+impl<C, H, P> CreationSeam for LiveCreationStore<'_, C, H, P>
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     async fn issue(&mut self, issue_id: Uuid) -> Result<IssueView, CreationError> {
@@ -570,7 +573,7 @@ where
             cloud,
             managed,
             has_usable_llm_config,
-            extra_toolsets_enabled,
+            toolsets,
             llm_profile,
             now_unix_secs,
             deferred,
@@ -590,7 +593,7 @@ where
             now_unix_secs: *now_unix_secs,
         };
         let has_llm = has_usable_llm_config.clone();
-        let extra = extra_toolsets_enabled.clone();
+        let toolsets = toolsets.clone();
         let profile = llm_profile.clone();
         let mut collect = |consume: DeferredConsume| deferred.push(consume);
         let fields = resolve_execution_fields(
@@ -602,7 +605,7 @@ where
             &mut collect,
             ExecutionSeams {
                 has_usable_llm_config: move || actor_id.is_some_and(&has_llm),
-                extra_toolsets_enabled: move || actor_id.is_some_and(&extra),
+                toolsets,
                 llm_profile: move || profile(actor_id),
             },
         )
@@ -666,7 +669,7 @@ where
     }
 
     fn extra_toolsets_schema_tool(&self) -> String {
-        NoExtraToolsets.schema_tool_name().to_owned()
+        self.toolsets.schema_tool_name().to_owned()
     }
 }
 
@@ -1279,11 +1282,10 @@ async fn load_render_bundle(
 // Finalize seam implementation (row effects only — D-15 owns the pipeline)
 // ---------------------------------------------------------------------------
 
-impl<C, H, E, P> FinalizeAgentRunSeam for LiveCreationStore<'_, C, H, E, P>
+impl<C, H, P> FinalizeAgentRunSeam for LiveCreationStore<'_, C, H, P>
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     async fn finalize_failed_run(
@@ -1397,15 +1399,14 @@ async fn drain<C: AdmissionCache>(
 /// Open the insertion transaction, run
 /// [`create_and_dispatch_run`][pidash_services::orchestration::creation::create_and_dispatch_run],
 /// commit, then drain post-commit dispatch.
-pub async fn create_and_dispatch_run<C, H, E, P>(
+pub async fn create_and_dispatch_run<C, H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, E, P>,
+    deps: StoreDeps<C, H, P>,
     req: &pidash_services::orchestration::creation::CreateDispatchRequest,
 ) -> Result<CreationOutcome<pidash_types::orchestration::TransitionOutcome>, CreationJobsError>
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     let cloud = deps.cloud.clone();
@@ -1427,15 +1428,14 @@ where
 /// Open the insertion transaction, run
 /// [`create_continuation_run`][pidash_services::orchestration::creation::create_continuation_run],
 /// commit, then drain post-commit dispatch.
-pub async fn create_continuation_run<C, H, E, P>(
+pub async fn create_continuation_run<C, H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, E, P>,
+    deps: StoreDeps<C, H, P>,
     req: &pidash_services::orchestration::creation::ContinuationRequest,
 ) -> Result<CreationOutcome<pidash_types::orchestration::ContinuationOutcome>, CreationJobsError>
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     let cloud = deps.cloud.clone();
@@ -1457,15 +1457,14 @@ where
 /// Open the insertion transaction, run
 /// [`create_project_move_handoff_run`][pidash_services::orchestration::creation::create_project_move_handoff_run],
 /// commit, then drain post-commit dispatch.
-pub async fn create_project_move_handoff_run<C, H, E, P>(
+pub async fn create_project_move_handoff_run<C, H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, E, P>,
+    deps: StoreDeps<C, H, P>,
     req: &pidash_services::orchestration::creation::HandoffCreateRequest,
 ) -> Result<CreationOutcome<RunView>, CreationJobsError>
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     let cloud = deps.cloud.clone();
@@ -1488,16 +1487,15 @@ where
 /// Open the transaction, run
 /// [`complete_project_move_handoff`][pidash_services::orchestration::creation::complete_project_move_handoff],
 /// commit, then drain post-commit dispatch.
-pub async fn complete_project_move_handoff<C, H, E, P>(
+pub async fn complete_project_move_handoff<C, H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, E, P>,
+    deps: StoreDeps<C, H, P>,
     run_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<CreationOutcome<Option<RunView>>, CreationJobsError>
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     let cloud = deps.cloud.clone();
@@ -1736,10 +1734,6 @@ mod tests {
         true
     }
 
-    fn no_toolsets(_user: Uuid) -> bool {
-        false
-    }
-
     fn unavailable_profile(_user: Option<Uuid>) -> LlmProfile {
         LlmProfile {
             available: false,
@@ -1747,8 +1741,7 @@ mod tests {
         }
     }
 
-    type TestDeps =
-        StoreDeps<FakeCache, fn(Uuid) -> bool, fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile>;
+    type TestDeps = StoreDeps<FakeCache, fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile>;
 
     fn deps() -> TestDeps {
         StoreDeps {
@@ -1756,10 +1749,37 @@ mod tests {
             managed: django_managed_settings(),
             cache: FakeCache::default(),
             has_usable_llm_config: no_llm,
-            extra_toolsets_enabled: no_toolsets,
+            toolsets: Arc::new(NoExtraToolsets),
             llm_profile: unavailable_profile,
             now_unix_secs: now().timestamp(),
         }
+    }
+
+    /// A replacement seam naming its schema tool: the store answers the
+    /// injected name, not the CE default.
+    #[derive(Debug)]
+    struct AcmeToolsets;
+
+    impl CloudAgentToolsetsSeam for AcmeToolsets {
+        fn schema_tool_name(&self) -> &'static str {
+            "acme_get_tool_schema"
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    async fn live_store_schema_tool_name_flows_from_injected_seam() {
+        let pool = pool().await;
+        let tx = Transaction::begin(&pool).await.expect("begin");
+        let mut store_deps = deps();
+        store_deps.toolsets = Arc::new(AcmeToolsets);
+        let store = LiveCreationStore::new(tx, &pool, store_deps);
+        assert_eq!(
+            store.extra_toolsets_schema_tool(),
+            "acme_get_tool_schema".to_owned()
+        );
+        let (tx, _, _, _, _, _) = store.into_parts();
+        tx.rollback().await.expect("rollback");
     }
 
     struct Graph {

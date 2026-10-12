@@ -216,11 +216,10 @@ fn db(error: sqlx::Error) -> DispatchError {
     DispatchError::Db(error.to_string())
 }
 
-impl<C, H, E, P> DispatchSeam for LiveCreationStore<'_, C, H, E, P>
+impl<C, H, P> DispatchSeam for LiveCreationStore<'_, C, H, P>
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     async fn lock_issue_for_retick(
@@ -728,9 +727,9 @@ macro_rules! dispatch_driver {
     ($name:ident, $svc:path, $out:ty, $rollback:expr $(, $arg:ident : $typ:ty)* $(,)?) => {
         #[doc = concat!("Open the insertion transaction, run [`", stringify!($svc), "`], commit (or roll back when the outcome says so), then drain post-commit dispatch. The caller emits the outcome's collected log lines via `tracing` (see [`emit_logs`]).")]
         #[allow(clippy::too_many_arguments)]
-        pub async fn $name<C, H, E, P>(
+        pub async fn $name<C, H, P>(
             pool: &PgPool,
-            deps: StoreDeps<C, H, E, P>,
+            deps: StoreDeps<C, H, P>,
             matcher: &dyn PodRunnerMatcher,
             now: DateTime<Utc>,
             jitter_secs: f64,
@@ -739,7 +738,6 @@ macro_rules! dispatch_driver {
         where
             C: AdmissionCache,
             H: Fn(Uuid) -> bool + Clone + Send + Sync,
-            E: Fn(Uuid) -> bool + Clone + Send + Sync,
             P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
         {
             let cloud = deps.cloud.clone();
@@ -803,9 +801,9 @@ dispatch_driver!(
 /// [`bounce_issue_no_eligible_runner`][pidash_services::orchestration::dispatch::bounce_issue_no_eligible_runner],
 /// commit. (Explicit rather than macro-generated: the bounce takes no
 /// matcher.)
-pub async fn bounce_issue_no_eligible_runner<C, H, E, P>(
+pub async fn bounce_issue_no_eligible_runner<C, H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, E, P>,
+    deps: StoreDeps<C, H, P>,
     now: DateTime<Utc>,
     jitter_secs: f64,
     issue_id: Uuid,
@@ -815,7 +813,6 @@ pub async fn bounce_issue_no_eligible_runner<C, H, E, P>(
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     let cloud = deps.cloud.clone();
@@ -869,9 +866,9 @@ dispatch_driver!(
 /// drain post-commit dispatch. `created_by` is the crum user for the
 /// ticker INSERT (the human caller).
 #[allow(clippy::too_many_arguments)]
-pub async fn run_ai_for_human<C, H, E, P>(
+pub async fn run_ai_for_human<C, H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, E, P>,
+    deps: StoreDeps<C, H, P>,
     matcher: &dyn PodRunnerMatcher,
     now: DateTime<Utc>,
     jitter_secs: f64,
@@ -882,7 +879,6 @@ pub async fn run_ai_for_human<C, H, E, P>(
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     let cloud = deps.cloud.clone();
@@ -925,9 +921,9 @@ where
 /// commit, then emit the agent-wait line. `epoch_secs` is `time.time()`
 /// for the activity row.
 #[allow(clippy::too_many_arguments)]
-pub async fn wait_ticker<C, H, E, P>(
+pub async fn wait_ticker<C, H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, E, P>,
+    deps: StoreDeps<C, H, P>,
     now: DateTime<Utc>,
     jitter_secs: f64,
     epoch_secs: f64,
@@ -938,7 +934,6 @@ pub async fn wait_ticker<C, H, E, P>(
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     let cloud = deps.cloud.clone();
@@ -972,9 +967,9 @@ where
 /// Open the insertion transaction, run
 /// [`maybe_apply_deferred_pause`][pidash_services::orchestration::dispatch::maybe_apply_deferred_pause],
 /// commit.
-pub async fn maybe_apply_deferred_pause<C, H, E, P>(
+pub async fn maybe_apply_deferred_pause<C, H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, E, P>,
+    deps: StoreDeps<C, H, P>,
     now: DateTime<Utc>,
     jitter_secs: f64,
     run_id: Uuid,
@@ -982,7 +977,6 @@ pub async fn maybe_apply_deferred_pause<C, H, E, P>(
 where
     C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     let cloud = deps.cloud.clone();
@@ -1019,9 +1013,9 @@ where
 /// read live SQL. `new_deps` builds a fresh [`StoreDeps`] per dispatch
 /// (caches are call-scoped, like the L6 drivers); `matcher` is the D-14
 /// seam (scripted in tests, implemented by D-14 later).
-pub struct FireTickShim<C, H, E, P> {
+pub struct FireTickShim<C, H, P> {
     pool: PgPool,
-    new_deps: Arc<dyn Fn() -> StoreDeps<C, H, E, P> + Send + Sync>,
+    new_deps: Arc<dyn Fn() -> StoreDeps<C, H, P> + Send + Sync>,
     matcher: Arc<dyn PodRunnerMatcher>,
     states: Arc<dyn Fn(Option<Uuid>) -> Option<StateView> + Send + Sync>,
 }
@@ -1034,10 +1028,10 @@ pub struct StateView {
     pub group: String,
 }
 
-impl<C, H, E, P> FireTickShim<C, H, E, P> {
+impl<C, H, P> FireTickShim<C, H, P> {
     pub fn new(
         pool: PgPool,
-        new_deps: Arc<dyn Fn() -> StoreDeps<C, H, E, P> + Send + Sync>,
+        new_deps: Arc<dyn Fn() -> StoreDeps<C, H, P> + Send + Sync>,
         matcher: Arc<dyn PodRunnerMatcher>,
         states: Arc<dyn Fn(Option<Uuid>) -> Option<StateView> + Send + Sync>,
     ) -> Self {
@@ -1077,11 +1071,10 @@ pub fn shim_is_ticking_state(state: Option<&StateView>) -> bool {
     is_ticking_state(state_ref.as_ref())
 }
 
-impl<C, H, E, P> FireTickSeam for FireTickShim<C, H, E, P>
+impl<C, H, P> FireTickSeam for FireTickShim<C, H, P>
 where
     C: AdmissionCache + Send + Sync + 'static,
     H: Fn(Uuid) -> bool + Clone + Send + Sync + 'static,
-    E: Fn(Uuid) -> bool + Clone + Send + Sync + 'static,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync + 'static,
 {
     fn is_ticking_state(&self, state_id: Option<Uuid>) -> bool {
@@ -1161,6 +1154,7 @@ where
 mod tests {
     use super::*;
     use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+    use pidash_services::extensions::NoExtraToolsets;
     use pidash_services::orchestration::dispatch::BOUNCE_BODY_DEFAULT;
     use serde_json::{json, Value};
     use sqlx::postgres::PgPoolOptions;
@@ -1411,10 +1405,6 @@ mod tests {
         true
     }
 
-    fn no_toolsets(_user: Uuid) -> bool {
-        false
-    }
-
     fn unavailable_profile(_user: Option<Uuid>) -> LlmProfile {
         LlmProfile {
             available: false,
@@ -1422,8 +1412,7 @@ mod tests {
         }
     }
 
-    type TestDeps =
-        StoreDeps<FakeCache, fn(Uuid) -> bool, fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile>;
+    type TestDeps = StoreDeps<FakeCache, fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile>;
 
     fn deps() -> TestDeps {
         StoreDeps {
@@ -1431,7 +1420,7 @@ mod tests {
             managed: django_managed_settings(),
             cache: FakeCache::default(),
             has_usable_llm_config: no_llm,
-            extra_toolsets_enabled: no_toolsets,
+            toolsets: Arc::new(NoExtraToolsets),
             llm_profile: unavailable_profile,
             now_unix_secs: now().timestamp(),
         }

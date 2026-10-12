@@ -1083,8 +1083,8 @@ pub fn profile_fn(
 }
 
 /// Live [`StoreDeps`](pidash_jobs::orchestration::StoreDeps): settings from
-/// the app state, LLM presence for the creator universe, the CE
-/// `extra_toolsets_enabled = false`, and the request admission cache.
+/// the app state, LLM presence for the creator universe, the installed
+/// toolsets seam, and the request admission cache.
 /// Returns the opaque struct so each driver call site keeps its concrete
 /// closure types.
 #[allow(clippy::too_many_arguments)]
@@ -1100,7 +1100,6 @@ pub async fn dispatch_deps(
         pidash_jobs::orchestration::StoreDeps<
             RequestCache,
             impl Fn(Uuid) -> bool + Clone + Send + Sync,
-            impl Fn(Uuid) -> bool + Clone + Send + Sync,
             impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
         >,
         LiveMatcher,
@@ -1114,7 +1113,7 @@ pub async fn dispatch_deps(
             managed: state.settings().managed_runner.clone(),
             cache: RequestCache::default(),
             has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
-            extra_toolsets_enabled: |_: Uuid| false,
+            toolsets: state.toolsets().clone(),
             llm_profile: profile_fn(presence),
             now_unix_secs,
         },

@@ -49,6 +49,8 @@
 //! * `created_at` renders `datetime.isoformat()` (micros iff nonzero),
 //!   the `render_isoformat` precedent.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
@@ -67,6 +69,7 @@ use pidash_services::assistant::seams::agent_model_profile_for_user;
 use pidash_services::assistant::tools_issues::{escape_icontains, PROJECT_WRITE_GATE_SQL};
 use pidash_services::dispatch::tools as plan;
 use pidash_services::dispatch::{consume_admission_token, LlmProfile};
+use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::orchestration::creation::STATE_SELECT_SQL;
 use pidash_services::orchestration::entries::{
     handle_issue_state_transition, PreflightSeam, TransitionRequest,
@@ -264,6 +267,8 @@ pub struct ToolCtx {
     pub http: reqwest::Client,
     /// Pool + cache + secret + API base for app auth.
     pub github: GithubAppContext,
+    /// Injected cloud-agent toolsets seam (transition store inputs).
+    pub toolsets: Arc<dyn CloudAgentToolsetsSeam>,
 }
 
 /// The `_scope` outcome (`tools.py:46-73`): the run's tenant position
@@ -1451,7 +1456,7 @@ async fn drive_transition<'a>(
         managed: ctx.managed.clone(),
         cache: RunnerSeamCache::default(),
         has_usable_llm_config: move |user: Uuid| user == creator && has_key,
-        extra_toolsets_enabled: move |_: Uuid| plan::extra_toolsets_enabled_for(),
+        toolsets: ctx.toolsets.clone(),
         llm_profile: move |user: Option<Uuid>| {
             let key = user == Some(creator) && has_key;
             let profile = agent_model_profile_for_user(key);

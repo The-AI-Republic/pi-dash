@@ -52,6 +52,7 @@ use uuid::Uuid;
 use pidash_db::config::Settings;
 use pidash_db::tasks_cleanup::cleanup_queries::MongoSink;
 use pidash_db::Pools;
+use pidash_services::extensions::NoExtraToolsets;
 
 use crate::orchestration::StateView;
 use crate::worker::Registry;
@@ -210,6 +211,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.settings.cloud_agent.clone(),
             ctx.settings.managed_runner.clone(),
             ctx.fire_tick_states.clone(),
+            std::sync::Arc::new(NoExtraToolsets),
         )),
     );
     crate::tasks_ticker::fire_binding::register_fire_binding(
@@ -219,6 +221,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.pools.primary().clone(),
             ctx.settings.cloud_agent.clone(),
             ctx.settings.managed_runner.clone(),
+            std::sync::Arc::new(NoExtraToolsets),
         ),
     );
     // D-07 send/stack (PIDASHCONV-865; kept in sync with
@@ -283,6 +286,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         redis,
         &ctx.settings,
+        std::sync::Arc::new(NoExtraToolsets),
     ));
     crate::runner_runs::register_runner_runs_tasks(
         registry,
@@ -313,6 +317,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
                 pidash_db::redis::RedisHandle::from_settings(&ctx.settings),
                 ctx.settings.secret_key.clone(),
             ),
+            toolsets: std::sync::Arc::new(NoExtraToolsets),
         },
         keys: model_runtime::keys::KeyResolver::from_env(
             ctx.settings.assistant.key_cache_ttl_secs,
@@ -329,6 +334,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.settings.cloud_agent.block_private_urls,
             invoke,
         )),
+        std::sync::Arc::new(NoExtraToolsets),
     );
     // D-08 issue_activity (PIDASHCONV-836; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`, where the
