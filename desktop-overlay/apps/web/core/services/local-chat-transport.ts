@@ -237,6 +237,8 @@ interface ActiveTurn {
   content: string;
   /** Set once the turn has been resubmitted with a new model credential. */
   authRetried: boolean;
+  /** Set when the user stopped the turn; it is not submitted again. */
+  stopped?: boolean;
 }
 
 interface FrameSubscriber {
@@ -450,7 +452,7 @@ export class LocalChatTransport implements ChatTransport {
     const refusal = frame.result === "chat_failed" ? frame.data : null;
     if (refusal?.code === MODEL_AUTH_FAILED) {
       const turn = this.activeTurns.get(sessionId);
-      if (turn && !turn.authRetried) {
+      if (turn && !turn.authRetried && !turn.stopped) {
         // Still the same turn as far as the page is concerned: it stays busy
         // and hears nothing unless the second attempt fails too.
         turn.authRetried = true;
@@ -489,14 +491,23 @@ export class LocalChatTransport implements ChatTransport {
   /**
    * The gateway refused the engine's credential: mint a new one and submit the
    * turn again, once. The user's message is already in history. If no new
-   * credential can be had, the turn ends with the reason — a request to sign
+   * credential can be had, the turn ends with the reason and a request to sign
    * in — in the transcript.
    */
   private async retryWithNewCredential(sessionId: string, turn: ActiveTurn, refused: ChatFrame): Promise<void> {
+    let minted = false;
     try {
       await this.bridge.refreshModelCredential();
+      minted = true;
       // Closed, or failed over the transport, while the credential was minted.
       if (this.activeTurns.get(sessionId) !== turn) return;
+      if (turn.stopped) {
+        // Stopped while the credential was minted: the daemon had no turn to
+        // cancel, so end it here instead of starting it over.
+        this.activeTurns.delete(sessionId);
+        this.deliver(refused);
+        return;
+      }
       const session = await this.bridge.invoke<StoredSession | null>("chat_get_session", {
         account: this.bridge.getAccount(),
         sessionId,
@@ -506,7 +517,11 @@ export class LocalChatTransport implements ChatTransport {
     } catch (error) {
       if (this.activeTurns.get(sessionId) !== turn) return;
       this.activeTurns.delete(sessionId);
-      await this.failWithNote(refused, error instanceof Error && error.message ? error.message : SIGN_IN_AGAIN);
+      const reason = error instanceof Error ? error.message : "";
+      // Without a new credential the refused one is all there is, so the way
+      // out is to sign in, whatever kept the new one from being minted.
+      const note = minted ? reason || SIGN_IN_AGAIN : [reason, SIGN_IN_AGAIN].filter(Boolean).join("\n");
+      await this.failWithNote(refused, note);
     }
   }
 
@@ -650,6 +665,8 @@ export class LocalChatTransport implements ChatTransport {
   async cancelChat(sessionId: string, reason?: string): Promise<{ ok: boolean }> {
     // No session lookup: cancel carries only the session id now that the
     // runner selector is gone, and the daemon resolves its own runner.
+    const turn = this.activeTurns.get(sessionId);
+    if (turn) turn.stopped = true;
     await this.bridge.invoke<void>("chat_cancel", {
       workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,

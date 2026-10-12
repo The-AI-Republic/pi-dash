@@ -681,11 +681,14 @@ describe("LocalChatTransport gateway refusals (PDASHOSS01-288)", () => {
 
   it("asks the user to sign in without resubmitting when no new credential can be had", async () => {
     const { ctx, transport, events, calls, notes } = setup();
-    ctx.refreshModelCredential.mockRejectedValueOnce(new Error("Sign in again to reconnect Pi Dash Agent."));
+    // What the runtime reports when Pi Dash itself answers 401 with no reason.
+    ctx.refreshModelCredential.mockRejectedValueOnce(new Error("Could not connect Pi Dash Agent."));
     await transport.sendChatMessage(SESSION, "hello");
     emit(ctx.listeners, "chat://frame", refused("model_auth_failed", "Invalid JWT"));
     await vi.waitFor(() => expect(events.map((e) => e.kind)).toContain("chat_failed"));
-    expect(notes()).toEqual(["Sign in again to reconnect Pi Dash Agent."]);
+    expect(notes()).toHaveLength(1);
+    expect(notes()[0]).toMatch(/^Could not connect Pi Dash Agent\.\n/);
+    expect(notes()[0]).toMatch(/sign in again/i);
     expect(calls("chat_send")).toHaveLength(1);
     await transport.sendChatMessage(SESSION, "hello");
   });
@@ -708,6 +711,21 @@ describe("LocalChatTransport gateway refusals (PDASHOSS01-288)", () => {
     minted();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(calls("chat_send")).toHaveLength(1);
+  });
+
+  it("does not resubmit a turn the user stopped while the credential was minted", async () => {
+    const { ctx, transport, events, calls, notes } = setup();
+    let minted!: () => void;
+    ctx.refreshModelCredential.mockImplementationOnce(() => new Promise<void>((resolve) => (minted = resolve)));
+    await transport.sendChatMessage(SESSION, "hello");
+    emit(ctx.listeners, "chat://frame", refused("model_auth_failed"));
+    await transport.cancelChat(SESSION);
+    minted();
+    await vi.waitFor(() => expect(events.map((e) => e.kind)).toContain("chat_failed"));
+    expect(calls("chat_send")).toHaveLength(1);
+    expect(notes()).toEqual([]);
+    // Released, and the next turn gets its own refresh.
+    await transport.sendChatMessage(SESSION, "hello");
   });
 });
 
