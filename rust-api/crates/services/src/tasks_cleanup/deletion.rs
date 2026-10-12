@@ -47,9 +47,10 @@
 use std::collections::HashSet;
 
 use pidash_db::tasks_cleanup::{
-    entry_table_for, fetch_live_to_many, fetch_one_to_one, fetch_row, load_schema_info, now_stamp,
-    null_bulk, null_one_to_one, parse_pk, reverse_relations, run_named_hard_deletes,
-    run_sweep_hard_deletes, stamp_row, sweep_tables, LookupError, RowState,
+    classify_delete_edges, entry_table_for, fetch_live_to_many, fetch_one_to_one, fetch_row,
+    load_fk_details, load_schema_info, now_stamp, null_bulk, null_one_to_one, parse_pk,
+    reverse_relations, run_model_hard_delete, stamp_row, sweep_tables_in_django_order, LookupError,
+    ModelDeleteError, RowState, HARD_DELETE_NAMED_TABLES,
 };
 use pidash_db::{Pools, RequestContext};
 use serde_json::Value;
@@ -350,30 +351,86 @@ pub struct HardDeleteOutcome {
 }
 
 /// `hard_delete()` (`deletion_task.py:114-193`): the 18 named models in
-/// source order, then every `deleted_at` base table. `cutoff` is the
-/// preformatted `now - HARD_DELETE_AFTER_DAYS` literal.
+/// source order, then every `deleted_at` model in `apps.get_models()`
+/// order (re-inclusive of the named ones). `cutoff` is the preformatted
+/// `now - HARD_DELETE_AFTER_DAYS` literal.
+///
+/// Collector emulation (PIDASHCONV-928): each per-model `.delete()` runs
+/// the ORM Collector — `CASCADE` closure collected unscoped (live,
+/// tombstoned, triage, and future-dated rows alike), `SET_NULL` targets
+/// nulled unscoped, a remaining `PROTECT` reference aborting before any
+/// write — with the writes landing in ONE transaction whose deferred FK
+/// checks enforce `DO_NOTHING` at commit. [`run_model_hard_delete`]
+/// emulates one model; this driver only fixes the model order and
+/// attributes row counts. An aborting model leaves earlier models'
+/// commits in place, exactly like the sequential Python `.delete()`
+/// calls.
+///
+/// Ported bugs (BUG-DEL-3): the Collector's per-model atomicity fails the
+/// whole task on remnants no table order could avoid — a due issue with
+/// ANY `issue_activities` (the `DO_NOTHING` edges are never collected, and
+/// `issues` precedes `issue_activities` in both phases, so nothing from
+/// `issues` onward is ever deleted while one exists), and a due parent
+/// with a due `PROTECT` child processed later (the check ignores the
+/// delete set). Pinned on both sides by the `*_protect_*` /
+/// `*_do_nothing_*` contract tests against the Django baseline.
 pub async fn hard_delete(
     pools: &Pools,
     ctx: &RequestContext,
     cutoff: &str,
 ) -> Result<HardDeleteOutcome, DeletionError> {
     let writes = pools.primary();
-    let named_deleted = run_named_hard_deletes(writes, cutoff)
+    let reads = read_pool!(pools, ctx);
+    let schema = load_schema_info(reads).await.map_err(db_error)?;
+    let edges = load_fk_details(reads).await.map_err(db_error)?;
+    let (cascade, set_null, protect) = classify_delete_edges(&edges, &schema);
+    let mut named_deleted = 0;
+    let mut sweep_deleted = 0;
+    for table in HARD_DELETE_NAMED_TABLES {
+        let outcome = run_model_hard_delete(
+            writes, &schema, &cascade, &set_null, &protect, table, cutoff,
+        )
         .await
-        .map_err(db_error)?;
-    let schema = load_schema_info(read_pool!(pools, ctx))
-        .await
-        .map_err(db_error)?;
-    let tables = sweep_tables(&schema);
+        .map_err(map_model_error)?;
+        for (deleted_table, affected) in outcome.deleted {
+            if HARD_DELETE_NAMED_TABLES.contains(&deleted_table.as_str()) {
+                named_deleted += affected;
+            } else {
+                sweep_deleted += affected;
+            }
+        }
+    }
+    let tables = sweep_tables_in_django_order(&schema);
     let sweep_tables_count = tables.len();
-    let sweep_deleted = run_sweep_hard_deletes(writes, &schema, cutoff)
+    for table in &tables {
+        let outcome = run_model_hard_delete(
+            writes, &schema, &cascade, &set_null, &protect, table, cutoff,
+        )
         .await
-        .map_err(db_error)?;
+        .map_err(map_model_error)?;
+        for (deleted_table, affected) in outcome.deleted {
+            if HARD_DELETE_NAMED_TABLES.contains(&deleted_table.as_str()) {
+                named_deleted += affected;
+            } else {
+                sweep_deleted += affected;
+            }
+        }
+    }
     Ok(HardDeleteOutcome {
         named_deleted,
         sweep_deleted,
         sweep_tables: sweep_tables_count,
     })
+}
+
+/// A [`ModelDeleteError`] fails the task exactly like the Python
+/// exception would: `ProtectedError` and the deferred `IntegrityError`
+/// both propagate out of `hard_delete()` and park the queue row.
+fn map_model_error(error: ModelDeleteError) -> DeletionError {
+    match error {
+        ModelDeleteError::Protected { .. } => DeletionError::Db(error.to_string()),
+        ModelDeleteError::Db(error) => db_error(error),
+    }
 }
 
 /// `restore_related_objects` (`deletion_task.py:108-110`), ported as-is:
