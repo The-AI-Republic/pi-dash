@@ -53,3 +53,29 @@ export function selectWorkspace(workspaces: WorkspaceList | undefined, slugOrId:
 export function selectWorkspaceRole(workspaces: WorkspaceList | undefined, slugOrId: string): number | null {
   return selectWorkspace(workspaces, slugOrId)?.role ?? null;
 }
+
+export type WorkspaceGateDecision = "ok" | "sign-in" | "not-found";
+
+/**
+ * The `/$ws` route gate (SHELL-001, SHELL-108). Signed-out visitors pass
+ * through: known pages bounce them to sign-in from the gated layout, while
+ * the workspace catch-all renders the illustrated not-found page without a
+ * session. Signed-in visitors who belong nowhere on this slug see the
+ * workspace access notice. Pure, so routes and tests share it.
+ */
+export function decideWorkspaceRouteGate(args: {
+  signedIn: boolean;
+  workspaces: WorkspaceList | undefined;
+  slugOrId: string;
+}): WorkspaceGateDecision {
+  if (!args.signedIn) return "ok";
+  return selectWorkspace(args.workspaces, args.slugOrId) === undefined ? "not-found" : "ok";
+}
+
+/**
+ * The gated-layout gate (SHELL-001): every known workspace page renders
+ * behind sign-in. Pure, so routes and tests share it.
+ */
+export function decideGatedWorkspaceGate(signedIn: boolean): WorkspaceGateDecision {
+  return signedIn ? "ok" : "sign-in";
+}

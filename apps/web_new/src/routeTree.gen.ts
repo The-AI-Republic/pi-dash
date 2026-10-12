@@ -12,8 +12,11 @@ import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
 import { Route as WsRouteRouteImport } from "./routes/$ws/route";
 import { Route as SignInRouteImport } from "./routes/sign-in";
-import { Route as WsIndexRouteImport } from "./routes/$ws/index";
-import { Route as WsProjectsProjectIdIssuesIndexRouteImport } from "./routes/$ws/projects/$projectId/issues/index";
+import { Route as WsSplatRouteImport } from "./routes/$ws/$";
+import { Route as WsGatedRouteRouteImport } from "./routes/$ws/_gated/route";
+import { Route as WsGatedIndexRouteImport } from "./routes/$ws/_gated/index";
+import { Route as WsGatedBrowseIssueKeyRouteImport } from "./routes/$ws/_gated/browse/$issueKey";
+import { Route as WsGatedProjectsProjectIdIssuesIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/issues/index";
 
 const IndexRoute = IndexRouteImport.update({
   id: "/",
@@ -30,44 +33,81 @@ const SignInRoute = SignInRouteImport.update({
   path: "/sign-in",
   getParentRoute: () => rootRouteImport,
 } as any);
-const WsIndexRoute = WsIndexRouteImport.update({
-  id: "/",
-  path: "/",
+const WsSplatRoute = WsSplatRouteImport.update({
+  id: "/$",
+  path: "/$",
   getParentRoute: () => WsRouteRoute,
 } as any);
-const WsProjectsProjectIdIssuesIndexRoute = WsProjectsProjectIdIssuesIndexRouteImport.update({
+const WsGatedRouteRoute = WsGatedRouteRouteImport.update({
+  id: "/_gated",
+  getParentRoute: () => WsRouteRoute,
+} as any);
+const WsGatedIndexRoute = WsGatedIndexRouteImport.update({
+  id: "/",
+  path: "/",
+  getParentRoute: () => WsGatedRouteRoute,
+} as any);
+const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
+  id: "/browse/$issueKey",
+  path: "/browse/$issueKey",
+  getParentRoute: () => WsGatedRouteRoute,
+} as any);
+const WsGatedProjectsProjectIdIssuesIndexRoute = WsGatedProjectsProjectIdIssuesIndexRouteImport.update({
   id: "/projects/$projectId/issues/",
   path: "/projects/$projectId/issues/",
-  getParentRoute: () => WsRouteRoute,
+  getParentRoute: () => WsGatedRouteRoute,
 } as any);
 
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
   "/$ws": typeof WsRouteRouteWithChildren;
   "/sign-in": typeof SignInRoute;
-  "/$ws/": typeof WsIndexRoute;
-  "/$ws/projects/$projectId/issues/": typeof WsProjectsProjectIdIssuesIndexRoute;
+  "/$ws/$": typeof WsSplatRoute;
+  "/$ws/": typeof WsGatedIndexRoute;
+  "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
+  "/$ws/projects/$projectId/issues/": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
+  "/$ws": typeof WsGatedIndexRoute;
   "/sign-in": typeof SignInRoute;
-  "/$ws": typeof WsIndexRoute;
-  "/$ws/projects/$projectId/issues": typeof WsProjectsProjectIdIssuesIndexRoute;
+  "/$ws/$": typeof WsSplatRoute;
+  "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
+  "/$ws/projects/$projectId/issues": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
   "/$ws": typeof WsRouteRouteWithChildren;
   "/sign-in": typeof SignInRoute;
-  "/$ws/": typeof WsIndexRoute;
-  "/$ws/projects/$projectId/issues/": typeof WsProjectsProjectIdIssuesIndexRoute;
+  "/$ws/_gated": typeof WsGatedRouteRouteWithChildren;
+  "/$ws/$": typeof WsSplatRoute;
+  "/$ws/_gated/": typeof WsGatedIndexRoute;
+  "/$ws/_gated/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
+  "/$ws/_gated/projects/$projectId/issues/": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
-  fullPaths: "/" | "/$ws" | "/sign-in" | "/$ws/" | "/$ws/projects/$projectId/issues/";
+  fullPaths:
+    | "/"
+    | "/$ws"
+    | "/sign-in"
+    | "/$ws/$"
+    | "/$ws/"
+    | "/$ws/browse/$issueKey"
+    | "/$ws/projects/$projectId/issues/";
   fileRoutesByTo: FileRoutesByTo;
-  to: "/" | "/sign-in" | "/$ws" | "/$ws/projects/$projectId/issues";
-  id: "__root__" | "/" | "/$ws" | "/sign-in" | "/$ws/" | "/$ws/projects/$projectId/issues/";
+  to: "/" | "/$ws" | "/sign-in" | "/$ws/$" | "/$ws/browse/$issueKey" | "/$ws/projects/$projectId/issues";
+  id:
+    | "__root__"
+    | "/"
+    | "/$ws"
+    | "/sign-in"
+    | "/$ws/_gated"
+    | "/$ws/$"
+    | "/$ws/_gated/"
+    | "/$ws/_gated/browse/$issueKey"
+    | "/$ws/_gated/projects/$projectId/issues/";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
@@ -99,31 +139,66 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof SignInRouteImport;
       parentRoute: typeof rootRouteImport;
     };
-    "/$ws/": {
-      id: "/$ws/";
-      path: "/";
-      fullPath: "/$ws/";
-      preLoaderRoute: typeof WsIndexRouteImport;
+    "/$ws/$": {
+      id: "/$ws/$";
+      path: "/$";
+      fullPath: "/$ws/$";
+      preLoaderRoute: typeof WsSplatRouteImport;
       parentRoute: typeof WsRouteRoute;
     };
-    "/$ws/projects/$projectId/issues/": {
-      id: "/$ws/projects/$projectId/issues/";
+    "/$ws/_gated": {
+      id: "/$ws/_gated";
+      path: "";
+      fullPath: "/$ws";
+      preLoaderRoute: typeof WsGatedRouteRouteImport;
+      parentRoute: typeof WsRouteRoute;
+    };
+    "/$ws/_gated/": {
+      id: "/$ws/_gated/";
+      path: "/";
+      fullPath: "/$ws/";
+      preLoaderRoute: typeof WsGatedIndexRouteImport;
+      parentRoute: typeof WsGatedRouteRoute;
+    };
+    "/$ws/_gated/browse/$issueKey": {
+      id: "/$ws/_gated/browse/$issueKey";
+      path: "/browse/$issueKey";
+      fullPath: "/$ws/browse/$issueKey";
+      preLoaderRoute: typeof WsGatedBrowseIssueKeyRouteImport;
+      parentRoute: typeof WsGatedRouteRoute;
+    };
+    "/$ws/_gated/projects/$projectId/issues/": {
+      id: "/$ws/_gated/projects/$projectId/issues/";
       path: "/projects/$projectId/issues";
       fullPath: "/$ws/projects/$projectId/issues/";
-      preLoaderRoute: typeof WsProjectsProjectIdIssuesIndexRouteImport;
-      parentRoute: typeof WsRouteRoute;
+      preLoaderRoute: typeof WsGatedProjectsProjectIdIssuesIndexRouteImport;
+      parentRoute: typeof WsGatedRouteRoute;
     };
   }
 }
 
+interface WsGatedRouteRouteChildren {
+  WsGatedIndexRoute: typeof WsGatedIndexRoute;
+  WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute;
+  WsGatedProjectsProjectIdIssuesIndexRoute: typeof WsGatedProjectsProjectIdIssuesIndexRoute;
+}
+
+const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
+  WsGatedIndexRoute: WsGatedIndexRoute,
+  WsGatedBrowseIssueKeyRoute: WsGatedBrowseIssueKeyRoute,
+  WsGatedProjectsProjectIdIssuesIndexRoute: WsGatedProjectsProjectIdIssuesIndexRoute,
+};
+
+const WsGatedRouteRouteWithChildren = WsGatedRouteRoute._addFileChildren(WsGatedRouteRouteChildren);
+
 interface WsRouteRouteChildren {
-  WsIndexRoute: typeof WsIndexRoute;
-  WsProjectsProjectIdIssuesIndexRoute: typeof WsProjectsProjectIdIssuesIndexRoute;
+  WsGatedRouteRoute: typeof WsGatedRouteRouteWithChildren;
+  WsSplatRoute: typeof WsSplatRoute;
 }
 
 const WsRouteRouteChildren: WsRouteRouteChildren = {
-  WsIndexRoute: WsIndexRoute,
-  WsProjectsProjectIdIssuesIndexRoute: WsProjectsProjectIdIssuesIndexRoute,
+  WsGatedRouteRoute: WsGatedRouteRouteWithChildren,
+  WsSplatRoute: WsSplatRoute,
 };
 
 const WsRouteRouteWithChildren = WsRouteRoute._addFileChildren(WsRouteRouteChildren);

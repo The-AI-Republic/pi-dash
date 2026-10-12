@@ -8,6 +8,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createSessionMiddleware, sessionExpiredMiddleware } from "./middleware.js";
 import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, selectPermissions } from "./permissions.js";
 import {
+  decideGatedWorkspaceGate,
+  decideWorkspaceRouteGate,
   getSessionClient,
   meQueryOptions,
   selectWorkspace,
@@ -124,6 +126,24 @@ describe("session queries", () => {
     expect(selectWorkspace(workspaces, "missing")).toBeUndefined();
     expect(selectWorkspaceRole(workspaces, "acme")).toBe(15);
     expect(selectWorkspaceRole(workspaces, "missing")).toBeNull();
+  });
+
+  it("lets signed-out visitors through the workspace route so the catch-all can render 404", () => {
+    expect(decideWorkspaceRouteGate({ signedIn: false, workspaces, slugOrId: "acme" })).toBe("ok");
+    expect(decideWorkspaceRouteGate({ signedIn: false, workspaces: [], slugOrId: "missing" })).toBe("ok");
+  });
+
+  it("keeps signed-in non-members out of the workspace route", () => {
+    expect(decideWorkspaceRouteGate({ signedIn: true, workspaces, slugOrId: "acme" })).toBe("ok");
+    expect(decideWorkspaceRouteGate({ signedIn: true, workspaces, slugOrId: "w2" })).toBe("ok");
+    expect(decideWorkspaceRouteGate({ signedIn: true, workspaces, slugOrId: "missing" })).toBe("not-found");
+    expect(decideWorkspaceRouteGate({ signedIn: true, workspaces: [], slugOrId: "acme" })).toBe("not-found");
+    expect(decideWorkspaceRouteGate({ signedIn: true, workspaces: undefined, slugOrId: "acme" })).toBe("not-found");
+  });
+
+  it("bounces signed-out visitors out of the gated layout", () => {
+    expect(decideGatedWorkspaceGate(true)).toBe("ok");
+    expect(decideGatedWorkspaceGate(false)).toBe("sign-in");
   });
 
   it("requires the bootstrap client before building options", () => {

@@ -1,0 +1,14 @@
+{
+  "name": "Pi Dash Desktop",
+  "short_name": "Pi Dash",
+  "description": "Projects, issues and agents in one place.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#0b0b0d",
+  "background_color": "#0b0b0d",
+  "icons": [
+    { "src": "/icon-contrast.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/apple-touch-icon.svg", "sizes": "180x180", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

@@ -11,13 +11,13 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Button } from "@pidash/kit";
 import * as React from "react";
 
-import { invalidateWorkspace } from "../../../../../core/query/optimistic.js";
-import { IssueList, issuesQueryOptions, parseIssueSearch } from "../../../../../features/issues/index.js";
-import { projectsQueryOptions } from "../../../../../features/projects/index.js";
-import { registerCommands } from "../../../../../shared/commands/index.js";
-import { notifyError } from "../../../../../shared/shell/index.js";
+import { invalidateWorkspace } from "../../../../../../core/query/optimistic.js";
+import { IssueList, issuesQueryOptions, parseIssueSearch } from "../../../../../../features/issues/index.js";
+import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
+import { registerCommands } from "../../../../../../shared/commands/index.js";
+import { notifyError } from "../../../../../../shared/shell/index.js";
 
-export const Route = createFileRoute("/$ws/projects/$projectId/issues/")({
+export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")({
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
   beforeLoad: async ({ context, params, search }) => {
     await context.queryClient.ensureQueryData(

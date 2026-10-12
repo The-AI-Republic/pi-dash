@@ -5,7 +5,7 @@
 // the oracle driver so scenarios compile against either target, but every
 // action throws until the matching area lands in apps/web_new. Area issues
 // fill these in method by method; the oracle driver stays untouched.
-import type { Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import type {
   ApprovalCard,
   ArchivesArchiveDialog,
@@ -575,29 +575,54 @@ export class WebNewDriver implements ParityDriver {
     return todo("rulesIntakeTriageVisible");
   }
 
-  // Shell chrome (NEWFRONT-126): skeleton throws until the shell area lands.
-  async openWorkspaceHome(): Promise<void> {
-    return todo("openWorkspaceHome");
+  // Shell chrome (NEWFRONT-126, rows SHELL-001/002; NEWFRONT-288): the
+  // route shell mounts the sidebar and the overlay portal on every
+  // workspace page. Later chrome slices extend the probes they own
+  // (rail, tabs, toggle, personalization) without touching these.
+  private async gotoShell(url: string): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await this.page.goto(url);
+      await this.page.waitForLoadState("domcontentloaded");
+      try {
+        // Attached, not visible: a collapsed sidebar is in the DOM at zero
+        // width, and navigation must still count it as mounted.
+        await this.page.locator("#main-sidebar").waitFor({ state: "attached", timeout: 45_000 });
+        return;
+      } catch {
+        if (attempt === 2) throw new Error(`[parity] sidebar never mounted at ${url}.`);
+      }
+    }
   }
 
-  async openProjectsList(): Promise<void> {
-    return todo("openProjectsList");
+  async openWorkspaceHome(workspaceSlug: string): Promise<void> {
+    await this.gotoShell(`/${workspaceSlug}/`);
   }
 
-  async openProjectTab(): Promise<void> {
-    return todo("openProjectTab");
+  async openProjectsList(workspaceSlug: string): Promise<void> {
+    await this.gotoShell(`/${workspaceSlug}/projects`);
+  }
+
+  async openProjectTab(workspaceSlug: string, projectId: string, tab: string): Promise<void> {
+    await this.gotoShell(`/${workspaceSlug}/projects/${projectId}/${tab}`);
   }
 
   async sidebarPresent(): Promise<boolean> {
-    return todo("sidebarPresent");
+    return (await this.page.locator("#main-sidebar").count()) > 0;
   }
 
   async sidebarWidth(): Promise<number | null> {
-    return todo("sidebarWidth");
+    const sidebar = this.page.locator("#main-sidebar");
+    if ((await sidebar.count()) === 0) return null;
+    const box = await sidebar.boundingBox();
+    if (box === null) return null;
+    // A collapsed sidebar keeps a one-pixel border in its box; report that
+    // as closed so callers read a clean open/closed signal.
+    const width = Math.round(box.width);
+    return width <= 1 ? 0 : width;
   }
 
   async portalPresent(): Promise<boolean> {
-    return todo("portalPresent");
+    return (await this.page.locator("#full-screen-portal").count()) > 0;
   }
 
   async railPresent(): Promise<boolean> {
@@ -637,7 +662,19 @@ export class WebNewDriver implements ParityDriver {
     starLink: boolean;
     accountFallback: boolean;
   }> {
-    return todo("topBarControls");
+    // Route shells (NEWFRONT-288): read what the chrome actually mounts.
+    // The switcher, toggle, search, inbox, help, star and account controls
+    // arrive with the top-bar slices, which extend these reads in place.
+    const page = this.page;
+    return {
+      workspaceMenu: (await page.getByRole("button", { name: "Open workspace switcher" }).count()) > 0,
+      sidebarToggle: (await page.locator('[data-testid="sidebar-toggle"]').count()) > 0,
+      search: (await page.locator('input[placeholder*="Search" i], input[type="search"]').count()) > 0,
+      inbox: (await page.locator('a[href*="/notifications"]').count()) > 0,
+      help: (await page.locator("button:has(svg.lucide-circle-help)").count()) > 0,
+      starLink: (await page.getByRole("link", { name: "Star us on GitHub" }).count()) > 0,
+      accountFallback: false,
+    };
   }
 
   async toggleSidebar(): Promise<void> {
@@ -2788,11 +2825,13 @@ export class WebNewDriver implements ParityDriver {
   // Skeleton stubs: throw until the apps/web_new palette area lands.
 
   async currentUrlPath(): Promise<string> {
-    return todo("currentUrlPath");
+    return new URL(this.page.url()).pathname;
   }
 
-  async goToPath(_path: string): Promise<void> {
-    return todo("goToPath");
+  async goToPath(path: string): Promise<void> {
+    // Settle on parsed DOM, not full load: late sub-resources can stall
+    // the load event while the app itself is already interactive.
+    await this.page.goto(path, { waitUntil: "domcontentloaded", timeout: 120_000 });
   }
 
   async pressPaletteOpenChord(): Promise<void> {
@@ -2911,16 +2950,35 @@ export class WebNewDriver implements ParityDriver {
     return todo("paletteHasText");
   }
 
-  async openBrowseWorkItem(_workspaceSlug: string, _identifier: string): Promise<void> {
-    return todo("openBrowseWorkItem");
+  // Browse route (NEWFRONT-288, row SHELL-106): the key address renders
+  // the project-scoped detail, never a workspace-wide browser.
+  async openBrowseWorkItem(workspaceSlug: string, identifier: string): Promise<void> {
+    await this.goToPath(`/${workspaceSlug}/browse/${identifier}`);
   }
 
   async browseShowsWorkItemDetail(): Promise<boolean> {
-    return todo("browseShowsWorkItemDetail");
+    // The unknown-key branch renders an explicit empty state; its
+    // absence (paired with the caller's route-URL and title assertions)
+    // proves the project-scoped detail rendered instead.
+    const missing = this.page.getByText("No work item matches this address");
+    if ((await missing.count()) === 0) return true;
+    return !(await missing
+      .first()
+      .isVisible()
+      .catch(() => false));
   }
 
   async browseShowsWorkspaceWideList(): Promise<boolean> {
-    return todo("browseShowsWorkspaceWideList");
+    // A cross-project browser would render many project/work-item cards
+    // or a list grid; the negative row asserts none exists.
+    const grid = this.page.locator('[class*="grid-cols-"]').filter({
+      has: this.page.locator('a[href*="/projects/"]'),
+    });
+    if ((await grid.count()) === 0) return false;
+    return await grid
+      .first()
+      .isVisible()
+      .catch(() => false);
   }
 
   // Top-bar search box (NEWFRONT-127, SHELL-081). Throwing stubs per the
@@ -4209,29 +4267,172 @@ export class WebNewDriver implements ParityDriver {
     return todo("ganttLoadMoreObservedOnScroll");
   }
 
-  // --- Root document shell + not-found (NEWFRONT-173). Throwing stubs
-  // --- per the shared driver contract; the document area fills these in.
+  // --- Root document shell + not-found (NEWFRONT-173, rows SHELL-107/108;
+  // --- implemented by NEWFRONT-288). Reads mirror the shared scenario
+  // --- contract: served markers from raw markup, hydrated facts from the
+  // --- live document, the illustrated surface by its semantic content.
 
   async documentShellFacts(): Promise<DocumentShellFacts> {
-    return todo("documentShellFacts");
+    return await this.page.evaluate(() => {
+      const meta = (key: string): string | null => {
+        const byName = document.querySelector<HTMLMetaElement>(`meta[name="${key}"]`);
+        if (byName !== null) return byName.content || null;
+        return document.querySelector<HTMLMetaElement>(`meta[property="${key}"]`)?.content ?? null;
+      };
+      const links = (rel: string): string[] =>
+        [...document.querySelectorAll<HTMLLinkElement>(`link[rel="${rel}"]`)]
+          .map((link) => link.getAttribute("href") ?? "")
+          .filter((href) => href.length > 0);
+      const sizeOf = (key: "og:image:width" | "og:image:height"): number | null => {
+        const raw = meta(key);
+        if (raw === null) return null;
+        const parsed = Number.parseInt(raw, 10);
+        return Number.isNaN(parsed) ? null : parsed;
+      };
+      const width = sizeOf("og:image:width");
+      const height = sizeOf("og:image:height");
+      return {
+        lang: document.documentElement.getAttribute("lang"),
+        title: document.title,
+        description: meta("description"),
+        keywordsPresent: document.querySelector('meta[name="keywords"]') !== null,
+        viewport: meta("viewport"),
+        themeColor: meta("theme-color"),
+        robots: meta("robots"),
+        ogTitle: meta("og:title"),
+        ogDescription: meta("og:description"),
+        ogUrl: meta("og:url"),
+        ogImage: meta("og:image"),
+        ogImageSize: width === null || height === null ? null : { width, height },
+        ogImageAlt: meta("og:image:alt"),
+        twitterSite: meta("twitter:site"),
+        twitterCard: meta("twitter:card"),
+        installability: {
+          applicationName: meta("application-name"),
+          appleMobileCapable: meta("apple-mobile-web-app-capable"),
+          mobileWebCapable: meta("mobile-web-app-capable"),
+        },
+        iconHrefs: [...links("icon"), ...links("shortcut icon")],
+        appleTouchIconHrefs: links("apple-touch-icon"),
+        manifestHrefs: links("manifest"),
+        rootColorScheme: document.documentElement.style.getPropertyValue("color-scheme").trim() || null,
+        mainMounted: document.querySelector("main") !== null,
+      };
+    });
   }
+
   async overlayPortalsPresent(): Promise<{ contextMenu: boolean; editor: boolean }> {
-    return todo("overlayPortalsPresent");
+    return await this.page.evaluate(() => ({
+      contextMenu: document.getElementById("context-menu-portal") !== null,
+      editor: document.getElementById("editor-portal") !== null,
+    }));
   }
+
   async sessionRecorderPresent(): Promise<boolean> {
-    return todo("sessionRecorderPresent");
+    // Absence marker: a tagged loader script plus any script fetched from
+    // the recorder host. Verified absent on the oracle.
+    return await this.page.evaluate(() => {
+      if (document.getElementById("clarity-tracking") !== null) return true;
+      return [...document.scripts].some((script) => script.src.includes("clarity.ms"));
+    });
   }
+
   async installAssetStatuses(): Promise<{ href: string; status: number }[]> {
-    return todo("installAssetStatuses");
+    const facts = await this.documentShellFacts();
+    const hrefs = [...new Set([...facts.manifestHrefs, ...facts.iconHrefs, ...facts.appleTouchIconHrefs])];
+    const out: { href: string; status: number }[] = [];
+    for (const href of hrefs) {
+      const url = new URL(href, this.page.url()).toString();
+      try {
+        out.push({ href, status: (await this.page.request.get(url)).status() });
+      } catch {
+        out.push({ href, status: 0 });
+      }
+    }
+    return out;
   }
+
   async notFoundFacts(): Promise<NotFoundFacts | null> {
-    return todo("notFoundFacts");
+    const title = await this.page.title();
+    if (!title.includes("404")) return null;
+    const surface = await this.page.evaluate(() => {
+      const scope = document.querySelector("main") ?? document.body;
+      const heading =
+        scope.querySelector("h1, h2, h3")?.textContent?.trim() ||
+        document.querySelector("h1, h2, h3")?.textContent?.trim() ||
+        null;
+      const body =
+        [...scope.querySelectorAll("p")]
+          .map((node) => node.textContent?.trim() ?? "")
+          .filter((text) => text.length > 0)
+          .sort((a, b) => b.length - a.length)[0] ?? null;
+      const home = scope.querySelector<HTMLAnchorElement>('a[href="/"]');
+      const img = scope.querySelector("img");
+      return {
+        heading,
+        body,
+        homeHref: home?.getAttribute("href") ?? null,
+        homeLabel: home?.textContent?.trim() || null,
+        illustrationSrc: img?.getAttribute("src") ?? null,
+        illustrationAlt: img?.getAttribute("alt") ?? null,
+        robots: document.querySelector<HTMLMetaElement>('meta[name="robots"]')?.content ?? null,
+      };
+    });
+    let illustration: NotFoundFacts["illustration"] = null;
+    if (surface.illustrationSrc !== null) {
+      const url = new URL(surface.illustrationSrc, this.page.url()).toString();
+      let status = 0;
+      try {
+        status = (await this.page.request.get(url)).status();
+      } catch {
+        status = 0;
+      }
+      illustration = { src: surface.illustrationSrc, alt: surface.illustrationAlt ?? "", status };
+    }
+    return {
+      title,
+      heading: surface.heading,
+      body: surface.body,
+      homeHref: surface.homeHref,
+      homeLabel: surface.homeLabel,
+      illustration,
+      robots: surface.robots,
+    };
   }
+
   async notFoundGoHome(): Promise<void> {
-    return todo("notFoundGoHome");
+    const before = this.page.url();
+    const home = this.page.locator("main").locator('a[href="/"]').first();
+    await home.click({ timeout: 30_000 });
+    await expect.poll(() => this.page.url(), { timeout: 30_000 }).not.toBe(before);
   }
-  async servedShellMarkers(_path: string): Promise<ServedShellMarkers> {
-    return todo("servedShellMarkers");
+
+  async servedShellMarkers(path: string): Promise<ServedShellMarkers> {
+    // Marker presence only: the served document is the crawler-facing
+    // layer, so the scenario pins which markers it carries without
+    // repeating its copy.
+    const url = new URL(path, this.page.url()).toString();
+    const response = await this.page.request.get(url, { timeout: 30_000 });
+    const markup = await response.text();
+    const nonEmpty = (pattern: RegExp): boolean => {
+      const match = pattern.exec(markup);
+      return match !== null && (match[1] ?? "").trim().length > 0;
+    };
+    const present = (needle: string): boolean => markup.includes(needle);
+    return {
+      status: response.status(),
+      hasTitle: nonEmpty(/<title>([^<]*)<\/title>/),
+      hasDescription: nonEmpty(/<meta[^>]*name="description"[^>]*content="([^"]*)"/),
+      hasSocial:
+        present('property="og:title"') &&
+        present('property="og:description"') &&
+        present('property="og:image"') &&
+        present('name="twitter:card"'),
+      hasIcons: present('rel="icon"'),
+      hasManifests: present('rel="manifest"'),
+      hasPortals: present('id="context-menu-portal"') && present('id="editor-portal"'),
+      hasRecorder: present("clarity-tracking") || present("clarity.ms"),
+    };
   }
   // --- NEWFRONT-178 (runners overview + pods). Throwing stubs per the
   // --- shared driver contract; the runners area fills these in when it

@@ -1,39 +1,27 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Workspace layout. Thin: session and membership gates, prefetch, shell
-// composition. Signed-out visitors bounce to sign-in with a return path;
-// unknown workspaces render the access notice below.
+// Workspace route. Thin: membership gate only, then the outlet. Known
+// workspace pages additionally pass the sign-in gate in the `_gated`
+// layout; the workspace catch-all (`/$ws/$`) is not a child of that
+// layout, so unknown addresses render the illustrated not-found page with
+// or without a session. Signed-in visitors on an unknown slug see the
+// workspace access notice below.
 
-import { useSuspenseQuery } from "@tanstack/react-query";
-import { createFileRoute, notFound, Outlet, redirect, useRouterState } from "@tanstack/react-router";
-import type * as React from "react";
+import { createFileRoute, notFound, Outlet } from "@tanstack/react-router";
 
-import { meQueryOptions, selectWorkspace, workspacesQueryOptions } from "../../core/session/queries.js";
-import { useSignOut } from "../../features/auth/index.js";
-import { projectsQueryOptions } from "../../features/projects/index.js";
-import { useCommandPalette } from "../../shared/commands/index.js";
-import { AppShell, Sidebar, TitleBar } from "../../shared/shell/index.js";
+import { decideWorkspaceRouteGate, meQueryOptions, workspacesQueryOptions } from "../../core/session/queries.js";
 
 export const Route = createFileRoute("/$ws")({
-  beforeLoad: async ({ context, params, location }) => {
+  beforeLoad: async ({ context, params }) => {
     const me = await context.queryClient.ensureQueryData(meQueryOptions(context.apiClient)).catch(() => null);
-    if (!me) {
-      throw redirect({ to: "/sign-in", search: { next: location.href } });
-    }
-    const workspaces = await context.queryClient
-      .ensureQueryData(workspacesQueryOptions(context.apiClient))
-      .catch(() => []);
-    if (!selectWorkspace(workspaces, params.ws)) {
+    const workspaces = me
+      ? await context.queryClient.ensureQueryData(workspacesQueryOptions(context.apiClient)).catch(() => undefined)
+      : undefined;
+    if (decideWorkspaceRouteGate({ signedIn: me !== null, workspaces, slugOrId: params.ws }) === "not-found") {
       throw notFound();
     }
     return {};
-  },
-  loader: async ({ context, params }) => {
-    await Promise.all([
-      context.queryClient.ensureQueryData(workspacesQueryOptions(context.apiClient)),
-      context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws)),
-    ]);
   },
   notFoundComponent: function WorkspaceAccessNotice() {
     return (
@@ -45,102 +33,7 @@ export const Route = createFileRoute("/$ws")({
       </main>
     );
   },
-  component: function WorkspaceLayoutComponent() {
-    const params = Route.useParams();
-    const navigate = Route.useNavigate();
-    const matches = useRouterState({ select: (state) => state.matches });
-    const openPalette = useCommandPalette((state) => state.openPalette);
-    const signOut = useSignOut();
-
-    return (
-      <WorkspaceShell
-        workspaceSlug={params.ws}
-        childProjectId={lastParam(matches, "projectId")}
-        onSelectWorkspace={(slug) => navigate({ to: "/$ws", params: { ws: slug } })}
-        onSelectProject={(projectId) =>
-          navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: params.ws, projectId }, search: {} })
-        }
-        onOpenPalette={openPalette}
-        onSignOut={() => {
-          void signOut.mutateAsync().then(() => navigate({ to: "/sign-in" }));
-        }}
-      />
-    );
+  component: function WorkspaceRouteComponent() {
+    return <Outlet />;
   },
 });
-
-function lastParam(matches: Array<{ params: Record<string, unknown> }>, name: string): string | null {
-  for (let index = matches.length - 1; index >= 0; index--) {
-    const value = matches[index]?.params[name];
-    if (typeof value === "string") return value;
-  }
-  return null;
-}
-
-function WorkspaceShell({
-  workspaceSlug,
-  childProjectId,
-  onSelectWorkspace,
-  onSelectProject,
-  onOpenPalette,
-  onSignOut,
-}: {
-  workspaceSlug: string;
-  childProjectId: string | null;
-  onSelectWorkspace: (slug: string) => void;
-  onSelectProject: (projectId: string) => void;
-  onOpenPalette: () => void;
-  onSignOut: () => void;
-}): React.ReactElement {
-  const context = Route.useRouteContext();
-  const { data: me } = useSuspenseQuery(meQueryOptions(context.apiClient));
-  const { data: workspaces } = useSuspenseQuery(workspacesQueryOptions(context.apiClient));
-  const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, workspaceSlug));
-
-  const workspace = selectWorkspace(workspaces, workspaceSlug);
-  const activeProject = projects.find((project) => project.id === childProjectId) ?? null;
-  const userLabel = me.display_name || me.email;
-
-  return (
-    <AppShell
-      commands={[
-        {
-          id: "shell.sign-out",
-          title: "Sign out",
-          hint: userLabel,
-          section: "Account",
-          run: onSignOut,
-        },
-        {
-          id: "shell.go-home",
-          title: "Go to workspace home",
-          hint: workspace?.name ?? workspaceSlug,
-          section: "Navigate",
-          run: () => onSelectWorkspace(workspaceSlug),
-        },
-      ]}
-      topBar={
-        <TitleBar
-          workspaceName={workspace?.name ?? workspaceSlug}
-          section={activeProject?.name ?? ""}
-          userLabel={userLabel}
-          onOpenPalette={onOpenPalette}
-        />
-      }
-      sidebar={
-        <Sidebar
-          workspaces={workspaces.map((entry) => ({ id: entry.id, slug: entry.slug, name: entry.name }))}
-          activeSlug={workspaceSlug}
-          onSelectWorkspace={onSelectWorkspace}
-          projects={projects.map((project) => ({ id: project.id, name: project.name, identifier: project.identifier }))}
-          activeProjectId={activeProject?.id ?? null}
-          onSelectProject={onSelectProject}
-          userLabel={userLabel}
-          onSignOut={onSignOut}
-        />
-      }
-    >
-      <Outlet />
-    </AppShell>
-  );
-}

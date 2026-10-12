@@ -3,23 +3,27 @@
 // See the LICENSE file for details.
 // Self-test for the initial-JS chain resolver (run: pnpm --filter web_new
 // test:size-initial). The fixture mirrors the real web manifest shape: an
-// entry, two first-route splits sharing chunks, and lazy splits that must
+// entry, three first-route splits sharing chunks, and lazy splits that must
 // stay excluded.
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import { ENTRY_KEY, FIRST_ROUTE_KEYS, WEB_OUT_DIR, initialChainFiles } from "./size-initial.mjs";
 
-const [LAYOUT_KEY, LEAF_KEY] = FIRST_ROUTE_KEYS;
+const [PARENT_KEY, GATED_KEY, LEAF_KEY] = FIRST_ROUTE_KEYS;
 
 function fixture() {
   return {
     [ENTRY_KEY]: {
       file: "assets/index-ENTRY.js",
-      dynamicImports: [LAYOUT_KEY, LEAF_KEY, "src/routes/sign-in.tsx?tsr-split=component"],
+      dynamicImports: [PARENT_KEY, GATED_KEY, LEAF_KEY, "src/routes/sign-in.tsx?tsr-split=component"],
     },
-    [LAYOUT_KEY]: {
-      file: "assets/route-LAYOUT.js",
+    [PARENT_KEY]: {
+      file: "assets/route-PARENT.js",
+      imports: [ENTRY_KEY],
+    },
+    [GATED_KEY]: {
+      file: "assets/route-GATED.js",
       imports: [ENTRY_KEY, "_toaster-HASH.js", "_api-HASH.js"],
     },
     [LEAF_KEY]: {
@@ -43,7 +47,8 @@ const CHAIN = [
   "dist/web/assets/api-HASH.js",
   "dist/web/assets/index-ENTRY.js",
   "dist/web/assets/index-LEAF.js",
-  "dist/web/assets/route-LAYOUT.js",
+  "dist/web/assets/route-GATED.js",
+  "dist/web/assets/route-PARENT.js",
   "dist/web/assets/toaster-HASH.js",
 ];
 

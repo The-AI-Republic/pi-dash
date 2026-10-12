@@ -6,9 +6,9 @@
 
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { projectsQueryOptions } from "../../features/projects/index.js";
+import { projectsQueryOptions } from "../../../features/projects/index.js";
 
-export const Route = createFileRoute("/$ws/")({
+export const Route = createFileRoute("/$ws/_gated/")({
   loader: async ({ context, params }) => {
     const projects = await context.queryClient
       .ensureQueryData(projectsQueryOptions(context.apiClient, params.ws))

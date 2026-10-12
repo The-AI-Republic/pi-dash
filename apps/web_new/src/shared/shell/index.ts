@@ -5,6 +5,16 @@
 export { AppShell } from "./AppShell.js";
 export type { AppShellProps } from "./AppShell.js";
 export { CommandPalette } from "./CommandPalette.js";
+export {
+  EDITOR_PORTAL_ID,
+  FULL_SCREEN_PORTAL_ID,
+  MENU_PORTAL_ID,
+  OverlayPortal,
+  markInitialColorScheme,
+  useDocumentHead,
+} from "./document.js";
+export type { DocumentHead, OverlayPortalProps, OverlayRootId } from "./document.js";
+export { NOT_FOUND_ART, NOT_FOUND_ROBOTS, NOT_FOUND_TITLE, NotFoundPage } from "./NotFoundPage.js";
 export { Sidebar } from "./Sidebar.js";
 export type { SidebarProject, SidebarProps, SidebarWorkspace } from "./Sidebar.js";
 export { TitleBar } from "./TitleBar.js";

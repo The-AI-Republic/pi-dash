@@ -7,6 +7,8 @@ export { createSessionMiddleware, sessionExpiredMiddleware } from "./middleware.
 export { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, selectPermissions } from "./permissions.js";
 export type { Permissions } from "./permissions.js";
 export {
+  decideGatedWorkspaceGate,
+  decideWorkspaceRouteGate,
   getSessionClient,
   meQueryOptions,
   selectWorkspace,
@@ -15,5 +17,6 @@ export {
   setSessionClient,
   workspacesQueryOptions,
 } from "./queries.js";
+export type { WorkspaceGateDecision } from "./queries.js";
 export { registerStoreReset, resetRegisteredStores, signOut, useSessionStore } from "./store.js";
 export type { SessionStatus, StoreReset } from "./store.js";
