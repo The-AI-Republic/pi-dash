@@ -6,6 +6,7 @@
 // every suite skips so CI stays green.
 import { ApiClient, createClient } from "../client.js";
 import type { Transport } from "../client.js";
+import { signIn } from "../contracts/auth.js";
 
 export const CONTRACT_BASE_URL = process.env["PIDASH_CONTRACT_BASE_URL"] ?? "";
 export const CONTRACT_EMAIL = process.env["PIDASH_CONTRACT_EMAIL"] ?? "contract.tester@example.com";
@@ -71,4 +72,23 @@ export function contractTransport(jar = new Map<string, string>()): Transport {
 export function contractClient(): ApiClient {
   if (!contractEnabled) throw new Error("PIDASH_CONTRACT_BASE_URL is not set");
   return createClient({ baseUrl: CONTRACT_BASE_URL, transport: contractTransport(), validate: true });
+}
+
+let sharedClient: ApiClient | null = null;
+
+/**
+ * One signed-in session per test file. Anonymous auth endpoints (CSRF
+ * token, email check, code generation) share the product's 30/minute
+ * throttle, so every suite signing in per test trips 429s once the package
+ * grows past a handful of files. Authenticated traffic is not throttled,
+ * so suites share a session and prove their contracts against it.
+ */
+export async function sharedSignedIn(): Promise<ApiClient> {
+  if (!sharedClient) {
+    const client = contractClient();
+    const result = await signIn(client, { email: CONTRACT_EMAIL, password: CONTRACT_PASSWORD });
+    if (!result.ok) throw new Error(`contract sign-in failed: ${result.code} ${result.message}`);
+    sharedClient = client;
+  }
+  return sharedClient;
 }

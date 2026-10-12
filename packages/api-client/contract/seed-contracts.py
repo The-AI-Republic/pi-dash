@@ -218,6 +218,37 @@ def seed():
         )
         note("issue-label", f"{first_issue.name}/{label.name}", link_created)
 
+    from pi_dash.db.models import Cycle, Module, Page, ProjectPage  # noqa: E402
+
+    cycle, cycle_created = Cycle.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract cycle",
+        defaults={"owned_by": user},
+    )
+    note("cycle", cycle.name, cycle_created)
+
+    module, module_created = Module.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract module",
+        defaults={"lead": user},
+    )
+    note("module", module.name, module_created)
+
+    page, page_created = Page.objects.get_or_create(
+        workspace=workspace,
+        owned_by=user,
+        name="Contract page",
+    )
+    note("page", page.name, page_created)
+    _, project_page_created = ProjectPage.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        page=page,
+    )
+    note("project-page", f"{project.identifier}/{page.name}", project_page_created)
+
     return {
         "email": user.email,
         "workspace_slug": workspace.slug,

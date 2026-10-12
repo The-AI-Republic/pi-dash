@@ -5,15 +5,11 @@
 import { describe, expect, it } from "vitest";
 import { getMe, getMeSettings } from "../contracts/users.js";
 import { listWorkspaces } from "../contracts/workspaces.js";
-import { signIn } from "../contracts/auth.js";
-import { CONTRACT_EMAIL, CONTRACT_PASSWORD, CONTRACT_WORKSPACE, contractClient, contractEnabled } from "./setup.js";
+import { CONTRACT_EMAIL, CONTRACT_WORKSPACE, contractEnabled, sharedSignedIn } from "./setup.js";
 import type { ApiClient } from "../client.js";
 
 async function signedIn(): Promise<ApiClient> {
-  const client = contractClient();
-  const result = await signIn(client, { email: CONTRACT_EMAIL, password: CONTRACT_PASSWORD });
-  expect(result.ok).toBe(true);
-  return client;
+  return sharedSignedIn();
 }
 
 describe.skipIf(!contractEnabled)("users contract", () => {
