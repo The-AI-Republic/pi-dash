@@ -7575,6 +7575,64 @@ export interface ParityDriver {
   delayNextPublishRead(ms: number): Promise<void>;
   /** Delay the next publish write (POST/PATCH/DELETE) by ms. */
   delayNextPublishWrite(ms: number): Promise<void>;
+
+  // --- Project-settings shell oracle (NEWFRONT-388, PSET-001/002/003/004/062/063).
+  // --- Observed on the running old app: the settings shell renders a grouped
+  // --- sidebar filtered by project role with the current tab highlighted and a
+  // --- drawer trigger on narrow screens; the bare projects path forwards to the
+  // --- first joined project or shows a no-projects guidance view; unknown or
+  // --- forbidden ids render a restriction screen with a join action; tab pages
+  // --- gate unauthorized roles behind a denial view; the server refuses
+  // --- out-of-role writes. Appended; existing methods above are untouched per
+  // --- the shared driver contract.
+  /** Open a settings tab by href suffix ("" is general, "/" its slash form); resolves once the shell settles. */
+  settingsShellOpen(workspaceSlug: string, projectId: string, tabHref: string): Promise<void>;
+  /** Visible desktop-sidebar group headings, in display order. */
+  settingsShellGroups(): Promise<string[]>;
+  /** Visible desktop-sidebar item labels, in display order. */
+  settingsShellItems(): Promise<string[]>;
+  /** Label of the highlighted sidebar item, or null. */
+  settingsShellActiveItem(): Promise<string | null>;
+  /** Current page URL path, without a trailing slash (the slash is incidental; both forms serve). */
+  settingsShellPath(): Promise<string>;
+  /** Whether the narrow-screen drawer trigger is showing. */
+  settingsShellDrawerTriggerVisible(): Promise<boolean>;
+  /** Open the narrow-screen drawer; resolves once its items render. */
+  settingsShellOpenDrawer(): Promise<void>;
+  /** Item labels inside the open drawer. */
+  settingsShellDrawerItems(): Promise<string[]>;
+  /** Restore a wide viewport after narrow-screen reads. */
+  settingsShellWideViewport(): Promise<void>;
+  /** Whether the not-authorized denial view is showing. */
+  settingsShellDeniedVisible(): Promise<boolean>;
+  /** Whether the project restriction (join) screen is showing. */
+  settingsShellRestrictionVisible(): Promise<boolean>;
+  /** Visible text of the restriction screen, or null. */
+  settingsShellRestrictionText(): Promise<string | null>;
+  /** Whether the restriction screen offers a join action. */
+  settingsShellJoinVisible(): Promise<boolean>;
+  /** Confirm the join action; resolves once the shell settles authorized. */
+  settingsShellJoin(): Promise<void>;
+  /** Whether the bare-path no-projects guidance view is showing. */
+  settingsShellNoProjectsVisible(): Promise<boolean>;
+  /** Whether the general-tab form is showing. */
+  settingsShellGeneralFormVisible(): Promise<boolean>;
+  /** Fill the general-tab name field without saving. */
+  settingsShellFillGeneralName(name: string): Promise<void>;
+  /** Follow a sidebar item by label; resolves once navigation settles. */
+  settingsShellFollowItem(label: string): Promise<void>;
+  /** Press keys on the open settings tab; reports dialog sightings plus the resulting path. */
+  settingsShellPressKeys(keys: string[]): Promise<{ dialogSeen: boolean; path: string }>;
+  /** Whether any bulk/export/import control shows in the settings content. */
+  settingsShellBulkExportImportVisible(): Promise<boolean>;
+  /** Whether any edition-gated (upgrade/cloud-only) UI shows on settings screens. */
+  settingsShellEditionGateVisible(): Promise<boolean>;
+  /** Count websocket connections opened while visiting each tab href. */
+  settingsShellCountSockets(tabHrefs: string[], workspaceSlug: string, projectId: string): Promise<number>;
+  /** Open the bare settings projects path; resolves once it settles. */
+  settingsProjectsOpen(workspaceSlug: string): Promise<void>;
+  /** Open project creation from the bare-path guidance view; resolves once the create form shows. */
+  settingsShellOpenGuidanceCreate(): Promise<void>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
