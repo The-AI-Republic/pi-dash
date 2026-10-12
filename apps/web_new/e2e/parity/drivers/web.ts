@@ -3023,16 +3023,50 @@ export class WebDriver implements ParityDriver {
 
   async homeLastToast(): Promise<{ title: string; message: string } | null> {
     // Toasts stack bottom-right and dismiss after a few seconds, so
-    // callers poll this right after the triggering action.
-    const candidates = this.page.locator('[class*="right-3"][class*="bottom-3"], [role="status"], [role="alert"]');
-    const count = await candidates.count();
-    if (count === 0) return null;
-    const text = ((await candidates.last().innerText()).trim() || "")
+    // callers poll this right after the triggering action. The stack
+    // prepends newest first (NEWFRONT-404/407), so the first toast root
+    // is the newest toast. Live-region nodes sort before the portaled
+    // roots in DOM order, so they are only a fallback when no toast
+    // root shows — a plain .first() over the union would return
+    // in-flow status/alert nodes instead of the toast.
+    const roots = this.page.locator('[class*="right-3"][class*="bottom-3"]');
+    let text = "";
+    if ((await roots.count()) > 0) {
+      text = (
+        (await roots
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+    }
+    if (text === "") {
+      const status = this.page.getByRole("status");
+      if ((await status.count()) > 0) {
+        text = (
+          (await status
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+      }
+    }
+    if (text === "") {
+      const alert = this.page.getByRole("alert");
+      if ((await alert.count()) > 0) {
+        text = (
+          (await alert
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+      }
+    }
+    const lines = text
       .split("\n")
       .map((t) => t.trim())
       .filter(Boolean);
-    if (text.length === 0) return null;
-    return { title: text[0] ?? "", message: text.slice(1).join(" ") };
+    if (lines.length === 0) return null;
+    return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
   }
 
   async homeReload(): Promise<void> {
@@ -13071,12 +13105,15 @@ export class WebDriver implements ParityDriver {
   }
 
   async boardLastToast(): Promise<{ title: string; message: string } | null> {
+    // Newest first: the Notifications stack prepends (NEWFRONT-407), so
+    // .first() is the newest toast and .last() would be the stale one
+    // when two overlap.
     const toasts = this.page.locator('[aria-label="Notifications"] [role="dialog"]');
     const count = await toasts.count();
     if (count === 0) return null;
     const text = (
       (await toasts
-        .nth(count - 1)
+        .first()
         .innerText()
         .catch(() => null)) ?? ""
     ).trim();
@@ -14717,10 +14754,11 @@ export class WebDriver implements ParityDriver {
   }
 
   async schedulerVisibleToasts(): Promise<{ title: string; message: string }[]> {
-    // Same toast roots as rulesLastToast, but every visible one oldest
-    // first so partitioned outcomes (one success plus one failure) assert
-    // together. Immediate read: toasts auto-dismiss, so callers read
-    // right after the submit that raised them.
+    // Same toast roots as rulesLastToast, but every visible one, newest
+    // first (the stack prepends, NEWFRONT-404/407), so partitioned
+    // outcomes (one success plus one failure) assert together.
+    // Immediate read: toasts auto-dismiss, so callers read right after
+    // the submit that raised them.
     const roots = this.page.locator("div.absolute.right-3.bottom-3");
     const total = await roots.count();
     const out: { title: string; message: string }[] = [];
@@ -25500,9 +25538,11 @@ export class WebDriver implements ParityDriver {
   async runnersLastToast(): Promise<string | null> {
     const titles = this.page.getByText("Error!", { exact: true });
     if ((await titles.count()) === 0) return null;
-    // Climb from the title to the toast root: the first ancestor whose
-    // text also carries the message.
-    const text = await titles.last().evaluate((element) => {
+    // Titles render newest first (the stack prepends, NEWFRONT-407), so
+    // the first match is the newest Error toast. Climb from the title
+    // to the toast root: the first ancestor whose text also carries the
+    // message.
+    const text = await titles.first().evaluate((element) => {
       let node: HTMLElement | null = element instanceof HTMLElement ? element : element.parentElement;
       while (node !== null && node !== document.body) {
         const text = (node.innerText ?? "").trim();
@@ -27268,12 +27308,15 @@ export class WebDriver implements ParityDriver {
   }
 
   async modulesLastToast(): Promise<ModulesToast | null> {
+    // Newest first: the Notifications stack prepends (NEWFRONT-407), so
+    // .first() is the newest toast and .last() would be the stale one
+    // when two overlap.
     const toasts = this.page.locator('[aria-label="Notifications"] [role="dialog"]');
     const count = await toasts.count();
     if (count === 0) return null;
     const text = (
       (await toasts
-        .nth(count - 1)
+        .first()
         .innerText()
         .catch(() => null)) ?? ""
     ).trim();

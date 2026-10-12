@@ -724,7 +724,7 @@ export interface ParityDriver {
   }>;
   /** Images rendered in the body of the card showing the given text. */
   composerCommentImageCount(text: string): Promise<number>;
-  /** Notices currently visible, oldest first, with their success/error kind. */
+  /** Notices currently visible, newest first, with their success/error kind. */
   composerVisibleNotices(): Promise<{ message: string; kind: "success" | "error" | "unknown" }[]>;
   // ---- Issue detail (NEWFRONT-121). ----
   /** Open the full-page detail of `IDENT-seq` (e.g. `PAR-1`); ends hydrated. */
@@ -2750,7 +2750,7 @@ export interface ParityDriver {
   schedulerInstallOpen(): Promise<boolean>;
   /** Close the bulk-install dialog via its cancel control. */
   schedulerCloseInstall(): Promise<void>;
-  /** Every toast currently visible, oldest first (for partitioned outcomes). */
+  /** Every toast currently visible, newest first (for partitioned outcomes). */
   schedulerVisibleToasts(): Promise<{ title: string; message: string }[]>;
   /** Open the workspace prompts route; settles on the page, the gate panel, or the workspace not-found surface. */
   schedulerOpenPrompts(workspaceSlug: string): Promise<void>;
