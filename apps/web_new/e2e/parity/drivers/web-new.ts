@@ -11611,4 +11611,22 @@ export class WebNewDriver implements ParityDriver {
   async profileActivityDownload(): Promise<{ file: LocalFileDownload; requestBody: { date: string } }> {
     return todo("profileActivityDownload");
   }
+
+  // --- Reactions oracle (NEWFRONT-116, CMT-022/023/024). Throwing stubs per
+  // --- the shared driver contract; the new app implements them later.
+  async reactionsIssueChipTooltipText(_emoji: string, _expectedName: string): Promise<string> {
+    return todo("reactionsIssueChipTooltipText");
+  }
+  async reactionsIssueAddEmoji(_emoji: string): Promise<void> {
+    return todo("reactionsIssueAddEmoji");
+  }
+  async reactionsIssuePickerReady(): Promise<boolean> {
+    return todo("reactionsIssuePickerReady");
+  }
+  async reactionsCommentAddEmoji(_cardText: string, _emoji: string): Promise<void> {
+    return todo("reactionsCommentAddEmoji");
+  }
+  async reactionsArchivedCommentClusterVisible(_cardText: string): Promise<boolean> {
+    return todo("reactionsArchivedCommentClusterVisible");
+  }
 }

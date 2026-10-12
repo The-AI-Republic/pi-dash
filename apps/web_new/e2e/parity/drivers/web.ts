@@ -40819,4 +40819,68 @@ export class WebDriver implements ParityDriver {
       requestBody: { date: body.date },
     };
   }
+
+  // --- Reactions oracle (NEWFRONT-116, CMT-022/023/024). Appended; existing
+  // --- methods above are untouched per the shared driver contract.
+
+  private async pickSpecificEmoji(trigger: Locator, emoji: string): Promise<void> {
+    await this.dismissOverlays();
+    await trigger.click({ force: true, timeout: 15_000 });
+    const entry = this.page.locator('button[data-slot="emoji-picker-list-emoji"]:visible', { hasText: emoji }).first();
+    await entry.waitFor({ timeout: 10_000 });
+    await entry.click({ force: true, timeout: 15_000 });
+  }
+
+  async reactionsIssueChipTooltipText(emoji: string, expectedName: string): Promise<string> {
+    const trigger = await this.issueReactionTrigger();
+    await trigger.locator("button:not([aria-haspopup])", { hasText: emoji }).first().hover({ timeout: 15_000 });
+    await this.page.waitForFunction((name) => document.body.innerText.includes(name), expectedName, {
+      timeout: 10_000,
+    });
+    return this.page.evaluate((name) => {
+      const candidates = Array.from(document.querySelectorAll("body *")).filter((el) =>
+        (el as HTMLElement).innerText?.includes(name)
+      );
+      candidates.sort((a, b) => a.innerHTML.length - b.innerHTML.length);
+      return ((candidates[0] as HTMLElement | undefined)?.innerText ?? "").slice(0, 200);
+    }, expectedName);
+  }
+
+  async reactionsIssueAddEmoji(emoji: string): Promise<void> {
+    await this.pickSpecificEmoji(await this.issueReactionTrigger(), emoji);
+  }
+
+  async reactionsIssuePickerReady(): Promise<boolean> {
+    const trigger = await this.issueReactionTrigger();
+    return trigger.evaluate((el) => {
+      const button = el as HTMLButtonElement;
+      return !button.disabled && el.getAttribute("aria-disabled") !== "true";
+    });
+  }
+
+  async reactionsCommentAddEmoji(cardText: string, emoji: string): Promise<void> {
+    await this.pickSpecificEmoji(
+      this.commentCard(cardText).first().locator('button[aria-haspopup="dialog"]').first(),
+      emoji
+    );
+  }
+
+  async reactionsArchivedCommentClusterVisible(cardText: string): Promise<boolean> {
+    const card = this.commentCard(cardText).first();
+    try {
+      await card.waitFor({ timeout: 15_000 });
+    } catch {
+      return false;
+    }
+    return card.evaluate((root) => {
+      const buttons = Array.from(root.querySelectorAll("button"));
+      // Picker triggers open a dialog; chips are plain buttons carrying the
+      // emoji plus count. Either one means reaction UI is showing.
+      return buttons.some((b) => {
+        if ((b as HTMLElement).getAttribute("aria-haspopup") === "dialog") return true;
+        const text = ((b as HTMLElement).innerText ?? "").replace(/\s+/g, "");
+        return text !== "" && /(\d+)$/.test(text);
+      });
+    });
+  }
 }

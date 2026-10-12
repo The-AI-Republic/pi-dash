@@ -7479,6 +7479,23 @@ export interface ParityDriver {
   modulesDragTimelineRowToSelf(name: string): Promise<void>;
   /** Whether the manual-sort warning toast shows. */
   modulesManualSortWarningVisible(): Promise<boolean>;
+
+  // --- Reactions oracle (NEWFRONT-116, CMT-022/023/024). Observed on the
+  // --- running old app: the issue cluster and each comment card carry a
+  // --- picker trigger plus chip buttons (emoji, count, viewer highlight);
+  // --- hovering a chip names who reacted; archived detail disables the
+  // --- issue control and hides comment clusters entirely. Appended; existing
+  // --- methods above are untouched per the shared driver contract.
+  /** Hover an issue-level reaction chip; resolves with the reactor tooltip text. */
+  reactionsIssueChipTooltipText(emoji: string, expectedName: string): Promise<string>;
+  /** Add a specific emoji to the issue through the picker (re-adds allowed). */
+  reactionsIssueAddEmoji(emoji: string): Promise<void>;
+  /** Whether the issue-level reaction picker trigger is currently enabled. */
+  reactionsIssuePickerReady(): Promise<boolean>;
+  /** Add a specific emoji to a comment card through its picker (re-adds allowed). */
+  reactionsCommentAddEmoji(cardText: string, emoji: string): Promise<void>;
+  /** Whether a comment card on the archived detail shows any reaction UI. */
+  reactionsArchivedCommentClusterVisible(cardText: string): Promise<boolean>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
