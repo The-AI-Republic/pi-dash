@@ -10167,6 +10167,85 @@ export interface WsSettingsMemberRowFacts {
   pageExportFocusedFacts(): Promise<PageExportFocusFacts | null>;
   /** Whether edition/desktop gate markers render on the current export surface. */
   pageExportGateMarkersPresent(): Promise<boolean>;
+
+  // --- Personal access tokens oracle (NEWFRONT-413, WSET-025..028).
+  // --- Observed on the running old app: the token page lives under
+  // --- profile settings (/settings/profile/api-tokens, Developer group);
+  // --- it lists the signed-in user's tokens with an Add control, a
+  // --- loader branch, and an illustrated empty state with its own
+  // --- creation action. The create dialog validates the title inline,
+  // --- offers expiry presets plus a custom date floored at tomorrow and
+  // --- a never-expires toggle with a live preview, then reveals the raw
+  // --- token once with copy support while a CSV backup downloads. Rows
+  // --- carry an active/expired marker, an expiry line, and a hover-only
+  // --- delete behind a confirmation dialog. Appended; existing methods
+  // --- above are untouched per the shared driver contract.
+  /** Open the token page as the cookie owner; settles on the page heading. */
+  wsSettingsApiTokenOpenTokens(cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Open the general tab, then reach the token page via its sidebar entry. */
+  wsSettingsApiTokenOpenViaSidebar(cookies: ParityBrowserCookie[]): Promise<void>;
+  /** The token page heading, or null when the page never settled. */
+  wsSettingsApiTokenHeading(): Promise<string | null>;
+  /** Whether the header Add control is currently visible. */
+  wsSettingsApiTokenAddVisible(): Promise<boolean>;
+  /** Hold the token list GET so the loader stays up long enough to observe. */
+  wsSettingsApiTokenLoaderSeen(): Promise<boolean>;
+  /** Whether the illustrated empty state with its creation action shows. */
+  wsSettingsApiTokenEmptyVisible(): Promise<boolean>;
+  /** Click the empty state's creation action; resolves on the open dialog. */
+  wsSettingsApiTokenEmptyCreate(): Promise<void>;
+  /** Click the header Add control; resolves on the open dialog. */
+  wsSettingsApiTokenOpenCreate(): Promise<void>;
+  /** Token rows in render order. */
+  wsSettingsApiTokenRows(): Promise<WsSettingsApiTokenRow[]>;
+  /** Full visible text of the token page content (for absence assertions). */
+  wsSettingsApiTokenPageText(): Promise<string>;
+  /** Whether the create dialog is currently open. */
+  wsSettingsApiTokenDialogOpen(): Promise<boolean>;
+  /** Fill the create dialog's title field. */
+  wsSettingsApiTokenFillTitle(title: string): Promise<void>;
+  /** Fill the create dialog's description field. */
+  wsSettingsApiTokenFillDescription(text: string): Promise<void>;
+  /** The inline title error, or null when none shows. */
+  wsSettingsApiTokenTitleError(): Promise<string | null>;
+  /** Expiry preset option labels in render order (closes the menu after). */
+  wsSettingsApiTokenPresetOptions(): Promise<string[]>;
+  /** Pick an expiry preset (or Custom) from the dialog's expiry menu. */
+  wsSettingsApiTokenPickPreset(label: string): Promise<void>;
+  /** Current text of the dialog's expiry trigger. */
+  wsSettingsApiTokenExpiryTriggerText(): Promise<string>;
+  /** Whether the dialog's expiry trigger is currently disabled. */
+  wsSettingsApiTokenExpiryTriggerDisabled(): Promise<boolean>;
+  /** The dialog's live expiry preview, or null when none shows. */
+  wsSettingsApiTokenExpiryPreview(): Promise<string | null>;
+  /** Flip the dialog's never-expires toggle. */
+  wsSettingsApiTokenToggleNeverExpires(): Promise<void>;
+  /** Pick Custom, move one month forward, and pick that month's given day. */
+  wsSettingsApiTokenPickCustomDayNextMonth(day: string): Promise<void>;
+  /** Whether today reads disabled and tomorrow enabled in the custom picker. */
+  wsSettingsApiTokenCustomFloor(): Promise<{ todayDisabled: boolean; tomorrowEnabled: boolean }>;
+  /** Submit the create dialog; resolves once the click settles. */
+  wsSettingsApiTokenSubmit(): Promise<void>;
+  /** Submit and capture the auto-downloaded backup file. */
+  wsSettingsApiTokenSubmitAndCaptureBackup(): Promise<WsSettingsApiTokenBackup>;
+  /** Cancel the create dialog; resolves once it closes. */
+  wsSettingsApiTokenCancelCreate(): Promise<void>;
+  /** The reveal step's heading, or null when the reveal is not showing. */
+  wsSettingsApiTokenRevealHeading(): Promise<string | null>;
+  /** The raw token the reveal step shows once, or null when absent. */
+  wsSettingsApiTokenRevealValue(): Promise<string | null>;
+  /** The reveal step's expiry line, or null when absent. */
+  wsSettingsApiTokenRevealExpiryLine(): Promise<string | null>;
+  /** Click the reveal copy control; resolves with the clipboard text. */
+  wsSettingsApiTokenRevealCopy(): Promise<string>;
+  /** Close the reveal step; resolves once the dialog closes. */
+  wsSettingsApiTokenRevealClose(): Promise<void>;
+  /** Open the delete confirmation for a row; resolves with the dialog text. */
+  wsSettingsApiTokenDeleteDialogText(label: string): Promise<string>;
+  /** Cancel the open delete confirmation. */
+  wsSettingsApiTokenDeleteCancel(): Promise<void>;
+  /** Delete a row through its confirmation; resolves once the row is gone. */
+  wsSettingsApiTokenDeleteConfirm(label: string): Promise<void>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
@@ -12879,4 +12958,24 @@ export interface AdminCloudGateFetchCounts {
   adminCheck: number;
   /** Auth-probe reads since the spy started. */
   probe: number;
+}
+
+/** One personal-access-token row as the token page renders it (NEWFRONT-413, WSET-028). */
+export interface WsSettingsApiTokenRow {
+  /** Token label. */
+  label: string;
+  /** True for the active marker, false for the expired marker. */
+  active: boolean;
+  /** Human expiry line as rendered (future date, never-expires, or expired-ago). */
+  expiryLine: string;
+  /** Description as rendered, or null when the row shows none. */
+  description: string | null;
+}
+
+/** The auto-downloaded token backup captured at creation (NEWFRONT-413, WSET-027). */
+export interface WsSettingsApiTokenBackup {
+  /** File name the app suggested for the save. */
+  fileName: string;
+  /** File bytes decoded as UTF-8 text. */
+  content: string;
 }

@@ -266,6 +266,8 @@ import type {
   CloudAssistantAddFill,
   CloudAssistantAddFormFacts,
   CloudAssistantConnectionFacts,
+  WsSettingsApiTokenBackup,
+  WsSettingsApiTokenRow,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -57079,5 +57081,387 @@ export class WebDriver implements ParityDriver {
     if ((await alert.count()) === 0) return null;
     const text = (await alert.first().innerText()).trim();
     return text === "" ? null : text;
+  }
+
+  // --- Personal access tokens oracle (NEWFRONT-413, WSET-025..028).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+  private wsSettingsApiTokenDialog(): Locator {
+    // The headless dialog wrapper reports hidden even while open, so
+    // callers wait on content (buttons, fields) rather than the wrapper.
+    return this.page.getByRole("dialog").first();
+  }
+
+  private async wsSettingsApiTokenWaitForCreateForm(): Promise<void> {
+    // The title field, not the dialog shell: after a reveal close the
+    // modal keeps the old reveal for ~350ms before resetting to the
+    // form, so only the field proves the form is back.
+    await this.page.getByPlaceholder("Title", { exact: true }).waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  private wsSettingsApiTokenExpiryTrigger(): Locator {
+    // The expiry select renders first among the dialog buttons in every
+    // form state (before the custom-date button when one shows).
+    return this.wsSettingsApiTokenDialog().getByRole("button").first();
+  }
+
+  private wsSettingsApiTokenRowScope(label: string): Locator {
+    // Token labels render as level-5 headings, unique to token rows on
+    // this page; the heading's grandparent is the row container.
+    return this.page.getByRole("heading", { level: 5, name: label, exact: true }).locator("xpath=../..");
+  }
+
+  private static wsSettingsApiTokenDayLabel(date: Date): string {
+    // Day-picker day buttons carry full-date accessible names ("Tuesday,
+    // October 20th, 2026"; today gains a "Today, " prefix the substring
+    // match below does not need).
+    const weekday = date.toLocaleString("en-US", { weekday: "long" });
+    const month = date.toLocaleString("en-US", { month: "long" });
+    const day = date.getDate();
+    const ordinal =
+      day % 10 === 1 && day !== 11
+        ? "st"
+        : day % 10 === 2 && day !== 12
+          ? "nd"
+          : day % 10 === 3 && day !== 13
+            ? "rd"
+            : "th";
+    return `${weekday}, ${month} ${day}${ordinal}, ${date.getFullYear()}`;
+  }
+
+  async wsSettingsApiTokenOpenTokens(cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated("/settings/profile/api-tokens", cookies);
+    await this.page
+      .getByRole("button", { name: "Add personal access token", exact: true })
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsApiTokenOpenViaSidebar(cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated("/settings/profile/general", cookies);
+    const entry = this.page.getByRole("button", { name: "Personal Access Tokens", exact: true });
+    await entry.waitFor({ timeout: WebDriver.WAIT_MS });
+    await entry.click({ timeout: WebDriver.OPEN_MS });
+    // Poll, not waitForURL: the tab switch is a same-document push that
+    // usually lands before a navigation wait attaches (and it carries a
+    // trailing slash the direct load does not).
+    await expect
+      .poll(() => this.page.url(), { timeout: WebDriver.WAIT_MS })
+      .toMatch(/\/settings\/profile\/api-tokens\/?$/);
+    await this.page
+      .getByRole("button", { name: "Add personal access token", exact: true })
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsApiTokenHeading(): Promise<string | null> {
+    const heading = this.page.getByRole("heading", { name: "Personal Access Tokens", exact: true }).first();
+    if ((await heading.count()) === 0) return null;
+    const text = (((await heading.textContent().catch(() => null)) ?? "").trim() || null) as string | null;
+    return text;
+  }
+
+  async wsSettingsApiTokenAddVisible(): Promise<boolean> {
+    const add = this.page.getByRole("button", { name: "Add personal access token", exact: true }).first();
+    return (await add.count()) > 0 && (await add.isVisible().catch(() => false));
+  }
+
+  async wsSettingsApiTokenLoaderSeen(): Promise<boolean> {
+    // Call after OpenTokens: the session cookies the earlier navigation
+    // planted carry this reload, and the route hold keeps the loader up
+    // long enough to observe.
+    const pattern = "**/api/users/api-tokens/";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "GET") {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      await route.continue();
+    });
+    try {
+      await this.page.goto("/settings/profile/api-tokens", { timeout: 60_000 });
+      const seen = await this.page
+        .getByTestId("api-tokens-loader")
+        .first()
+        .waitFor({ timeout: 10_000 })
+        .then(
+          () => true,
+          () => false
+        );
+      await this.page
+        .getByRole("button", { name: "Add personal access token", exact: true })
+        .waitFor({ timeout: WebDriver.WAIT_MS });
+      return seen;
+    } finally {
+      await this.page.unroute(pattern);
+    }
+  }
+
+  async wsSettingsApiTokenEmptyVisible(): Promise<boolean> {
+    const title = this.page.getByText("No Personal token yet", { exact: true }).first();
+    const action = this.page.getByRole("button", { name: "Add API token", exact: true }).first();
+    return (
+      (await title.count()) > 0 &&
+      (await action.count()) > 0 &&
+      (await title.isVisible().catch(() => false)) &&
+      (await action.isVisible().catch(() => false))
+    );
+  }
+
+  async wsSettingsApiTokenEmptyCreate(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add API token", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await this.wsSettingsApiTokenWaitForCreateForm();
+  }
+
+  async wsSettingsApiTokenOpenCreate(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: "Add personal access token", exact: true })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await this.wsSettingsApiTokenWaitForCreateForm();
+  }
+
+  async wsSettingsApiTokenRows(): Promise<WsSettingsApiTokenRow[]> {
+    const heads = this.page.getByRole("heading", { level: 5 });
+    const count = await heads.count();
+    const rows: WsSettingsApiTokenRow[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const head = heads.nth(index);
+      const label = ((await head.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
+      const scope = head.locator("xpath=../..");
+      const spans = (await scope.locator("span").allTextContents()).map((t) => t.trim());
+      const active = spans.includes("Active");
+      const paras = (await scope.locator("p").allTextContents()).map((t) => t.trim().replace(/\s+/g, " "));
+      const expiryLine = paras.find((t) => /^(Expires |Never expires|Expired )/.test(t)) ?? "";
+      const description = paras.find((t) => t !== "" && t !== expiryLine) ?? null;
+      rows.push({ label, active, expiryLine, description });
+    }
+    return rows;
+  }
+
+  async wsSettingsApiTokenPageText(): Promise<string> {
+    return (
+      (await this.page
+        .locator("main")
+        .last()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async wsSettingsApiTokenDialogOpen(): Promise<boolean> {
+    const title = this.page.getByPlaceholder("Title", { exact: true }).first();
+    return (await title.count()) > 0 && (await title.isVisible().catch(() => false));
+  }
+
+  async wsSettingsApiTokenFillTitle(title: string): Promise<void> {
+    await this.page.getByPlaceholder("Title", { exact: true }).fill(title);
+  }
+
+  async wsSettingsApiTokenFillDescription(text: string): Promise<void> {
+    await this.page.getByPlaceholder("Description", { exact: true }).fill(text);
+  }
+
+  async wsSettingsApiTokenTitleError(): Promise<string | null> {
+    const error = this.wsSettingsApiTokenDialog()
+      .getByText(/Title (is required|should be less than 255 characters)/)
+      .first();
+    if ((await error.count()) === 0) return null;
+    const text = ((await error.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
+    return text === "" ? null : text;
+  }
+
+  async wsSettingsApiTokenPresetOptions(): Promise<string[]> {
+    await this.wsSettingsApiTokenExpiryTrigger().click({ timeout: WebDriver.OPEN_MS });
+    const options = this.page.getByRole("option");
+    await options.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const labels = (await options.allTextContents()).map((t) => t.trim().replace(/\s+/g, " "));
+    await this.page.keyboard.press("Escape");
+    await expect.poll(() => this.page.getByRole("option").count(), { timeout: WebDriver.WAIT_MS }).toBe(0);
+    return labels;
+  }
+
+  async wsSettingsApiTokenPickPreset(label: string): Promise<void> {
+    await this.wsSettingsApiTokenExpiryTrigger().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("option", { name: label, exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.page.getByRole("option").count(), { timeout: WebDriver.WAIT_MS }).toBe(0);
+  }
+
+  async wsSettingsApiTokenExpiryTriggerText(): Promise<string> {
+    return (
+      (await this.wsSettingsApiTokenExpiryTrigger()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
+  }
+
+  async wsSettingsApiTokenExpiryTriggerDisabled(): Promise<boolean> {
+    return this.wsSettingsApiTokenExpiryTrigger().isDisabled();
+  }
+
+  async wsSettingsApiTokenExpiryPreview(): Promise<string | null> {
+    const preview = this.wsSettingsApiTokenDialog()
+      .getByText(/^Expires /)
+      .first();
+    if ((await preview.count()) === 0) return null;
+    const text = ((await preview.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
+    return text === "" ? null : text;
+  }
+
+  async wsSettingsApiTokenToggleNeverExpires(): Promise<void> {
+    await this.wsSettingsApiTokenDialog()
+      .getByText("Never expires", { exact: true })
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async wsSettingsApiTokenPickCustomDayNextMonth(day: string): Promise<void> {
+    await this.wsSettingsApiTokenPickPreset("Custom");
+    // Text, not role: the picker trigger nests buttons (outer combo plus
+    // an inner ghost button), which role-plus-name matching misses.
+    await this.wsSettingsApiTokenDialog().getByText("Set date", { exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    const cells = this.page.locator('[role="gridcell"]');
+    await cells.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("button", { name: "Go to the Next Month" }).click({ timeout: WebDriver.OPEN_MS });
+    const now = new Date();
+    const target = new Date(now.getFullYear(), now.getMonth() + 1, Number(day));
+    await this.page
+      .getByRole("button", { name: WebDriver.wsSettingsApiTokenDayLabel(target) })
+      .click({ timeout: WebDriver.OPEN_MS });
+    await expect.poll(() => this.page.locator('[role="gridcell"]').count(), { timeout: WebDriver.WAIT_MS }).toBe(0);
+    await this.wsSettingsApiTokenDialog()
+      .getByText(/^Expires /)
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsApiTokenCustomFloor(): Promise<{ todayDisabled: boolean; tomorrowEnabled: boolean }> {
+    await this.wsSettingsApiTokenPickPreset("Custom");
+    // Text, not role: the picker trigger nests buttons (outer combo plus
+    // an inner ghost button), which role-plus-name matching misses.
+    await this.wsSettingsApiTokenDialog().getByText("Set date", { exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    const cells = this.page.locator('[role="gridcell"]');
+    await cells.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const today = new Date();
+    const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+    const todayDisabled = await this.page
+      .getByRole("button", { name: WebDriver.wsSettingsApiTokenDayLabel(today) })
+      .isDisabled();
+    const tomorrowEnabled = !(await this.page
+      .getByRole("button", { name: WebDriver.wsSettingsApiTokenDayLabel(tomorrow) })
+      .isDisabled());
+    await this.page.keyboard.press("Escape");
+    await expect.poll(() => this.page.locator('[role="gridcell"]').count(), { timeout: WebDriver.WAIT_MS }).toBe(0);
+    return { todayDisabled, tomorrowEnabled };
+  }
+
+  async wsSettingsApiTokenSubmit(): Promise<void> {
+    await this.page.getByRole("button", { name: "Generate token", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async wsSettingsApiTokenSubmitAndCaptureBackup(): Promise<WsSettingsApiTokenBackup> {
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: 60_000 }),
+      this.page.getByRole("button", { name: "Generate token", exact: true }).click({ timeout: WebDriver.OPEN_MS }),
+    ]);
+    const stream = await download.createReadStream();
+    if (!stream) throw new Error("[parity] token backup download produced no bytes.");
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    return { fileName: download.suggestedFilename(), content: Buffer.concat(chunks).toString("utf8") };
+  }
+
+  async wsSettingsApiTokenCancelCreate(): Promise<void> {
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await expect
+      .poll(() => this.page.getByRole("button", { name: "Generate token", exact: true }).count(), {
+        timeout: WebDriver.WAIT_MS,
+      })
+      .toBe(0);
+  }
+
+  async wsSettingsApiTokenRevealHeading(): Promise<string | null> {
+    const heading = this.page.getByRole("heading", { name: "Key created", exact: true }).first();
+    if ((await heading.count()) === 0) return null;
+    const text = ((await heading.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
+    return text === "" ? null : text;
+  }
+
+  async wsSettingsApiTokenRevealValue(): Promise<string | null> {
+    const text =
+      (await this.wsSettingsApiTokenDialog()
+        .innerText()
+        .catch(() => "")) ?? "";
+    return /pi_dash_api_[0-9a-f]+/.exec(text)?.[0] ?? null;
+  }
+
+  async wsSettingsApiTokenRevealExpiryLine(): Promise<string | null> {
+    const text =
+      (await this.wsSettingsApiTokenDialog()
+        .innerText()
+        .catch(() => "")) ?? "";
+    const line = text
+      .split("\n")
+      .map((part) => part.trim().replace(/\s+/g, " "))
+      .find((part) => /^(Expires |Never expires$)/.test(part));
+    return line ?? null;
+  }
+
+  async wsSettingsApiTokenRevealCopy(): Promise<string> {
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the click. The copy
+    // control is the reveal's first button (the raw value row).
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.wsSettingsApiTokenDialog().getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await expect
+      .poll(() => this.page.evaluate(() => navigator.clipboard.readText()), { timeout: WebDriver.WAIT_MS })
+      .not.toBe("");
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async wsSettingsApiTokenRevealClose(): Promise<void> {
+    await this.page.getByRole("button", { name: "Close", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await expect
+      .poll(() => this.page.getByRole("heading", { name: "Key created", exact: true }).count(), {
+        timeout: WebDriver.WAIT_MS,
+      })
+      .toBe(0);
+  }
+
+  private async wsSettingsApiTokenOpenDeleteDialog(label: string): Promise<void> {
+    // The delete control renders only while its row is hovered.
+    const scope = this.wsSettingsApiTokenRowScope(label);
+    await scope.hover({ timeout: WebDriver.OPEN_MS });
+    await scope.getByRole("button").first().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.getByRole("button", { name: "Delete", exact: true }).waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async wsSettingsApiTokenDeleteDialogText(label: string): Promise<string> {
+    await this.wsSettingsApiTokenOpenDeleteDialog(label);
+    return (
+      (await this.wsSettingsApiTokenDialog()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
+  }
+
+  async wsSettingsApiTokenDeleteCancel(): Promise<void> {
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await expect
+      .poll(() => this.page.getByRole("button", { name: "Delete", exact: true }).count(), {
+        timeout: WebDriver.WAIT_MS,
+      })
+      .toBe(0);
+  }
+
+  async wsSettingsApiTokenDeleteConfirm(label: string): Promise<void> {
+    await this.wsSettingsApiTokenOpenDeleteDialog(label);
+    await this.page.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebDriver.OPEN_MS });
+    await expect
+      .poll(() => this.page.getByRole("heading", { level: 5, name: label, exact: true }).count(), {
+        timeout: WebDriver.WAIT_MS,
+      })
+      .toBe(0);
   }
 }

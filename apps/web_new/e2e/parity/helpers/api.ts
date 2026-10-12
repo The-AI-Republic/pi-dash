@@ -21679,3 +21679,70 @@ export async function serverCloudAdminPasswordShadowed(
   const signUp = await post("/api/instances/admins/sign-up/");
   return { signIn: signIn.status, signUp: signUp.status };
 }
+
+// --- Personal access tokens list + full-field create (NEWFRONT-413,
+// --- WSET-025/026/027/028). Appended; existing helpers above are untouched
+// --- per the shared harness contract. serverMintApiToken and
+// --- serverDeleteApiToken stay as-is; the list read and the expiring
+// --- create are new. Tokens are per-user, so every helper takes the token
+// --- owner's session.
+
+/** One personal-access-token row as the user token endpoints serialize it. */
+export interface ParityUserApiToken {
+  id: string;
+  label: string;
+  description: string;
+  expiredAt: string | null;
+  active: boolean;
+  /** Whether the payload carried the raw secret (only create responses do). */
+  hasToken: boolean;
+}
+
+function userApiTokenOf(row: Record<string, unknown>): ParityUserApiToken {
+  if (typeof row["id"] !== "string" || typeof row["label"] !== "string") {
+    throw new Error("[parity] api-token row carried no string id/label.");
+  }
+  const expired = row["expired_at"];
+  return {
+    id: row["id"],
+    label: row["label"],
+    description: typeof row["description"] === "string" ? row["description"] : "",
+    expiredAt: typeof expired === "string" ? expired : null,
+    active: row["is_active"] === true,
+    hasToken: typeof row["token"] === "string",
+  };
+}
+
+/** Tokens the session owner owns, in server order. */
+export async function serverApiTokens(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityUserApiToken[]> {
+  const res = await authedApi(`/users/api-tokens/`, sessionCookie, undefined, apiBase);
+  requireOk(res, "api-token list");
+  const rows = (await res.json()) as Array<Record<string, unknown>>;
+  return rows.map(userApiTokenOf);
+}
+
+/** Create with full fields; resolves with the id plus the raw one-time secret. */
+export async function serverCreateApiToken(
+  sessionCookie: string,
+  input: { label: string; description?: string; expiredAt?: string | null },
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; token: string }> {
+  const body: Record<string, unknown> = { label: input.label };
+  if (input.description !== undefined) body["description"] = input.description;
+  if (input.expiredAt !== undefined) body["expired_at"] = input.expiredAt;
+  const res = await authedApi(
+    `/users/api-tokens/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    apiBase
+  );
+  requireOk(res, "api-token create");
+  const rec = (await res.json()) as Record<string, unknown>;
+  if (typeof rec["id"] !== "string" || typeof rec["token"] !== "string") {
+    throw new Error("[parity] api-token create response carried no id/token.");
+  }
+  return { id: rec["id"], token: rec["token"] };
+}
