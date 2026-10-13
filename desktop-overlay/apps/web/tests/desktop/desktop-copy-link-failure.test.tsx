@@ -55,6 +55,8 @@ vi.mock("@/hooks/store/use-issue-detail", () => ({
 vi.mock("@/hooks/store/use-issues", () => ({ useIssues: () => ({ issues: { removeIssue: vi.fn() } }) }));
 vi.mock("@/hooks/store/use-project", () => ({ useProject: () => ({ getProjectIdentifierById: () => "DESK" }) }));
 vi.mock("@/hooks/use-platform-os", () => ({ usePlatformOS: () => ({ isMobile: false }) }));
+// The header navigates through the app router; these tests render it without one.
+vi.mock("@/hooks/use-app-router", () => ({ useAppRouter: () => ({ push: vi.fn() }) }));
 vi.mock("@/pi-dash-web/components/issues/issue-layouts/quick-action-dropdowns", () => ({
   createCopyMenuWithDuplication: vi.fn(),
 }));
