@@ -8,12 +8,18 @@
 import { expect, type Page } from "@playwright/test";
 import type {
   AdminAccountMenuFacts,
+  AdminEmailFacts,
+  AdminEmailFields,
+  AdminEmailFormFacts,
+  AdminEmailSecurity,
   AdminFailureFacts,
+  AdminGeneralFacts,
   AdminNotFoundFacts,
   AdminRootBranch,
   AdminSetupFacts,
   AdminSetupFields,
   AdminSignInFacts,
+  AdminTestEmailFacts,
   ApprovalCard,
   ArchivesArchiveDialog,
   ModulesDeleteDialog,
@@ -14247,6 +14253,121 @@ export class WebNewDriver implements ParityDriver {
   }
   async adminStubNoWorkspaces(): Promise<void> {
     return todo("adminStubNoWorkspaces");
+  }
+  // --- Instance-admin general/email oracle (NEWFRONT-442, ADM-013..022). ---
+  async adminGeneralFacts(): Promise<AdminGeneralFacts> {
+    return todo("adminGeneralFacts");
+  }
+  async adminGeneralFillName(_name: string): Promise<void> {
+    return todo("adminGeneralFillName");
+  }
+  async adminGeneralSetTelemetry(_on: boolean): Promise<void> {
+    return todo("adminGeneralSetTelemetry");
+  }
+  async adminGeneralSave(): Promise<void> {
+    return todo("adminGeneralSave");
+  }
+  async adminStartInstancePatchSpy(): Promise<void> {
+    return todo("adminStartInstancePatchSpy");
+  }
+  async adminInstancePatchBodies(): Promise<unknown[]> {
+    return todo("adminInstancePatchBodies");
+  }
+  async adminFailInstancePatch(): Promise<void> {
+    return todo("adminFailInstancePatch");
+  }
+  async adminDelayInstancePatch(_ms: number): Promise<void> {
+    return todo("adminDelayInstancePatch");
+  }
+  async adminClearInstancePatchFault(): Promise<void> {
+    return todo("adminClearInstancePatchFault");
+  }
+  async adminLastToast(): Promise<{ title: string; message: string } | null> {
+    return todo("adminLastToast");
+  }
+  async adminStartConsoleSpy(): Promise<void> {
+    return todo("adminStartConsoleSpy");
+  }
+  async adminConsoleErrors(): Promise<string[]> {
+    return todo("adminConsoleErrors");
+  }
+  async adminEmailFacts(): Promise<AdminEmailFacts> {
+    return todo("adminEmailFacts");
+  }
+  async adminEmailSetEnabled(_on: boolean): Promise<void> {
+    return todo("adminEmailSetEnabled");
+  }
+  async adminEmailFormFacts(): Promise<AdminEmailFormFacts> {
+    return todo("adminEmailFormFacts");
+  }
+  async adminEmailFill(_fields: AdminEmailFields): Promise<void> {
+    return todo("adminEmailFill");
+  }
+  async adminEmailTogglePassword(): Promise<void> {
+    return todo("adminEmailTogglePassword");
+  }
+  async adminEmailSetSecurity(_which: AdminEmailSecurity): Promise<void> {
+    return todo("adminEmailSetSecurity");
+  }
+  async adminEmailSave(): Promise<void> {
+    return todo("adminEmailSave");
+  }
+  async adminStartConfigPatchSpy(): Promise<void> {
+    return todo("adminStartConfigPatchSpy");
+  }
+  async adminConfigPatchBodies(): Promise<unknown[]> {
+    return todo("adminConfigPatchBodies");
+  }
+  async adminFailConfigPatch(): Promise<void> {
+    return todo("adminFailConfigPatch");
+  }
+  async adminDelayConfigPatch(_ms: number): Promise<void> {
+    return todo("adminDelayConfigPatch");
+  }
+  async adminClearConfigPatchFault(): Promise<void> {
+    return todo("adminClearConfigPatchFault");
+  }
+  async adminDelayConfigFetch(_ms: number): Promise<void> {
+    return todo("adminDelayConfigFetch");
+  }
+  async adminFailConfigFetch(): Promise<void> {
+    return todo("adminFailConfigFetch");
+  }
+  async adminClearConfigFetchFault(): Promise<void> {
+    return todo("adminClearConfigFetchFault");
+  }
+  async adminStartEmailDisableSpy(): Promise<void> {
+    return todo("adminStartEmailDisableSpy");
+  }
+  async adminEmailDisableCount(): Promise<number> {
+    return todo("adminEmailDisableCount");
+  }
+  async adminFailEmailDisable(): Promise<void> {
+    return todo("adminFailEmailDisable");
+  }
+  async adminClearEmailDisableFault(): Promise<void> {
+    return todo("adminClearEmailDisableFault");
+  }
+  async adminTestEmailOpen(): Promise<void> {
+    return todo("adminTestEmailOpen");
+  }
+  async adminTestEmailFacts(): Promise<AdminTestEmailFacts> {
+    return todo("adminTestEmailFacts");
+  }
+  async adminTestEmailFillReceiver(_email: string): Promise<void> {
+    return todo("adminTestEmailFillReceiver");
+  }
+  async adminTestEmailSend(): Promise<void> {
+    return todo("adminTestEmailSend");
+  }
+  async adminTestEmailClose(): Promise<void> {
+    return todo("adminTestEmailClose");
+  }
+  async adminStartEmailCheckSpy(): Promise<void> {
+    return todo("adminStartEmailCheckSpy");
+  }
+  async adminEmailCheckBodies(): Promise<unknown[]> {
+    return todo("adminEmailCheckBodies");
   }
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
   async spaceChromeNavbarIdentity(): Promise<SpaceChromeNavbarIdentity> {

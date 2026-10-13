@@ -28,12 +28,18 @@ import {
 import { parityOracleAdminUrl } from "../helpers/parity-env";
 import type {
   AdminAccountMenuFacts,
+  AdminEmailFacts,
+  AdminEmailFields,
+  AdminEmailFormFacts,
+  AdminEmailSecurity,
   AdminFailureFacts,
+  AdminGeneralFacts,
   AdminNotFoundFacts,
   AdminRootBranch,
   AdminSetupFacts,
   AdminSetupFields,
   AdminSignInFacts,
+  AdminTestEmailFacts,
   ApprovalCard,
   ArchivesFilterExpression,
   ArchivesListQuery,
@@ -50439,6 +50445,30 @@ export class WebDriver implements ParityDriver {
         return true;
       },
       async (route) => {
+        if (route.request().method() === "PATCH") {
+          // General/email oracle (NEWFRONT-442): count the write and
+          // optionally delay or fail it. Entry-session specs never
+          // PATCH, so their flows and counts are untouched by this branch.
+          // The body lands after the round-trip so body polls imply the
+          // server already committed (specs read server state next).
+          const fault = this.adminInstancePatchFault;
+          if (fault.mode === "fail") {
+            this.adminInstancePatchBodiesSeen.push(this.adminPostDataJson(route));
+            await route.fulfill({
+              status: 500,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "parity-probe-failure" }),
+            });
+            return;
+          }
+          if (fault.mode === "delay") {
+            await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+          }
+          const instancePatchResponse = await route.fetch();
+          this.adminInstancePatchBodiesSeen.push(this.adminPostDataJson(route));
+          await route.fulfill({ response: instancePatchResponse });
+          return;
+        }
         if (route.request().method() !== "GET") {
           await route.continue();
           return;
@@ -50859,6 +50889,510 @@ export class WebDriver implements ParityDriver {
 
   async adminStubNoWorkspaces(): Promise<void> {
     this.adminInstanceFetchFault = { mode: "stub-empty", delayMs: 0 };
+  }
+
+  // --- Instance-admin general/email oracle (NEWFRONT-442, ADM-013..022).
+  // --- Every selector below was observed on the running old admin
+  // --- console. Settings fields carry stable ids; the toggles expose
+  // --- role=switch; the transport-security picker is a combobox whose
+  // --- portal options carry role=option; toasts share the bottom-right
+  // --- host the main app uses; skeletons are status nodes told apart
+  // --- by child count (one pill in the header, five rows for the form).
+
+  private adminInstancePatchBodiesSeen: unknown[] = [];
+  private adminInstancePatchFault: { mode: "none" | "fail" | "delay"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminConsoleErrorsSeen: string[] = [];
+  private adminConsoleListenerInstalled = false;
+  private adminConfigPatchBodiesSeen: unknown[] = [];
+  private adminConfigPatchFault: { mode: "none" | "fail" | "delay"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminConfigFetchFault: { mode: "none" | "delay" | "fail"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminConfigRouteInstalled = false;
+  private adminEmailDisableSeen = 0;
+  private adminEmailDisableFault: "none" | "fail" = "none";
+  private adminEmailDisableRouteInstalled = false;
+  private adminEmailCheckBodiesSeen: unknown[] = [];
+  private adminEmailCheckRouteInstalled = false;
+
+  /** Request body as parsed JSON, or the raw payload when it is not JSON. */
+  private adminPostDataJson(route: Route): unknown {
+    try {
+      return route.request().postDataJSON();
+    } catch {
+      return route.request().postData();
+    }
+  }
+
+  private adminGeneralSaveButton(): Locator {
+    return this.page.locator("main").getByRole("button", { name: /Save changes|Saving/ });
+  }
+
+  async adminGeneralFacts(): Promise<AdminGeneralFacts> {
+    const main = this.page.locator("main");
+    const name = main.locator("#instance_name");
+    if ((await name.count()) === 0) {
+      throw new Error("[parity] general form is gone.");
+    }
+    const email = main.locator("#email");
+    const instanceId = main.locator("#instance_id");
+    const toggle = main.getByRole("switch");
+    if ((await toggle.count()) === 0) {
+      throw new Error("[parity] general telemetry switch is gone.");
+    }
+    const policy = main.getByRole("link", { name: /Telemetry Policy/ });
+    const save = this.adminGeneralSaveButton();
+    return {
+      name: await name.inputValue(),
+      nameDisabled: await name.isDisabled(),
+      email: await email.inputValue(),
+      emailDisabled: await email.isDisabled(),
+      instanceId: await instanceId.inputValue(),
+      instanceIdDisabled: await instanceId.isDisabled(),
+      telemetryOn: (await toggle.first().getAttribute("aria-checked")) === "true",
+      telemetryDisabled: await toggle.first().isDisabled(),
+      telemetryPolicyHref: (await policy.count()) === 0 ? null : await policy.first().getAttribute("href"),
+      telemetryPolicyTarget: (await policy.count()) === 0 ? null : await policy.first().getAttribute("target"),
+      saveLabel: (await save.first().innerText()).trim(),
+      saveDisabled: await save.first().isDisabled(),
+    };
+  }
+
+  async adminGeneralFillName(name: string): Promise<void> {
+    await this.page.locator("main").locator("#instance_name").fill(name);
+  }
+
+  async adminGeneralSetTelemetry(on: boolean): Promise<void> {
+    const toggle = this.page.locator("main").getByRole("switch");
+    await toggle.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const isOn = (await toggle.first().getAttribute("aria-checked")) === "true";
+    if (isOn !== on) {
+      await toggle.first().click({ timeout: WebDriver.WAIT_MS });
+    }
+  }
+
+  async adminGeneralSave(): Promise<void> {
+    const save = this.adminGeneralSaveButton();
+    await save.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await save.first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminStartInstancePatchSpy(): Promise<void> {
+    this.adminInstancePatchBodiesSeen = [];
+    this.adminInstancePatchFault = { mode: "none", delayMs: 0 };
+    // The shared instance route carries the PATCH branch; installing it
+    // for the first time also arms the fetch counter, which this spec
+    // never reads.
+    if (!this.adminInstanceFetchRouteInstalled) {
+      await this.adminStartInstanceFetchSpy();
+    }
+  }
+
+  async adminInstancePatchBodies(): Promise<unknown[]> {
+    return [...this.adminInstancePatchBodiesSeen];
+  }
+
+  async adminFailInstancePatch(): Promise<void> {
+    this.adminInstancePatchFault = { mode: "fail", delayMs: 0 };
+  }
+
+  async adminDelayInstancePatch(ms: number): Promise<void> {
+    this.adminInstancePatchFault = { mode: "delay", delayMs: ms };
+  }
+
+  async adminClearInstancePatchFault(): Promise<void> {
+    this.adminInstancePatchFault = { mode: "none", delayMs: 0 };
+  }
+
+  async adminLastToast(): Promise<{ title: string; message: string } | null> {
+    // The admin console toasts through the same bottom-right host as the
+    // main app, so the established reader applies unchanged.
+    return this.rulesLastToast();
+  }
+
+  async adminStartConsoleSpy(): Promise<void> {
+    this.adminConsoleErrorsSeen = [];
+    if (this.adminConsoleListenerInstalled) return;
+    this.adminConsoleListenerInstalled = true;
+    this.page.on("console", (message) => {
+      if (message.type() === "error") {
+        this.adminConsoleErrorsSeen.push(message.text());
+      }
+    });
+  }
+
+  async adminConsoleErrors(): Promise<string[]> {
+    return [...this.adminConsoleErrorsSeen];
+  }
+
+  async adminEmailFacts(): Promise<AdminEmailFacts> {
+    const main = this.page.locator("main");
+    const toggle = main.getByRole("switch");
+    const toggleVisible = (await toggle.count()) > 0 && (await toggle.first().isVisible());
+    const statuses = main.locator('[role="status"]');
+    let headerSkeletonVisible = false;
+    let formSkeletonVisible = false;
+    let formSkeletonRows = 0;
+    const total = await statuses.count();
+    for (let i = 0; i < total; i++) {
+      if (!(await statuses.nth(i).isVisible())) continue;
+      const kids = await statuses.nth(i).locator(":scope > *").count();
+      if (kids <= 1) {
+        headerSkeletonVisible = true;
+      } else {
+        formSkeletonVisible = true;
+        formSkeletonRows = kids;
+      }
+    }
+    const host = main.locator("#EMAIL_HOST");
+    const formVisible = (await host.count()) > 0 && (await host.first().isVisible());
+    return {
+      toggleVisible,
+      toggleOn: toggleVisible ? (await toggle.first().getAttribute("aria-checked")) === "true" : false,
+      toggleDisabled: toggleVisible ? await toggle.first().isDisabled() : false,
+      formVisible,
+      headerSkeletonVisible,
+      formSkeletonVisible,
+      formSkeletonRows,
+    };
+  }
+
+  async adminEmailSetEnabled(on: boolean): Promise<void> {
+    const toggle = this.page.locator("main").getByRole("switch");
+    await toggle.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const isOn = (await toggle.first().getAttribute("aria-checked")) === "true";
+    if (isOn !== on) {
+      await toggle.first().click({ timeout: WebDriver.WAIT_MS });
+    }
+  }
+
+  private adminEmailSecurityButton(): Locator {
+    return this.page.locator("main").getByRole("button", { name: /^(TLS|SSL|No email security)$/ });
+  }
+
+  async adminEmailFormFacts(): Promise<AdminEmailFormFacts> {
+    const main = this.page.locator("main");
+    const host = main.locator("#EMAIL_HOST");
+    if ((await host.count()) === 0) {
+      throw new Error("[parity] email form is gone.");
+    }
+    const password = main.locator("#EMAIL_HOST_PASSWORD");
+    const securityLabel = (await this.adminEmailSecurityButton().first().innerText()).trim();
+    let security: AdminEmailSecurity;
+    if (securityLabel === "TLS") security = "TLS";
+    else if (securityLabel === "SSL") security = "SSL";
+    else if (securityLabel === "No email security") security = "none";
+    else throw new Error(`[parity] unknown email security choice ${JSON.stringify(securityLabel)}.`);
+    const save = main.getByRole("button", { name: /Save changes|Saving/ });
+    const testEmail = main.getByRole("button", { name: "Send test email" });
+    return {
+      values: {
+        host: await host.inputValue(),
+        port: await main.locator("#EMAIL_PORT").inputValue(),
+        from: await main.locator("#EMAIL_FROM").inputValue(),
+        user: await main.locator("#EMAIL_HOST_USER").inputValue(),
+        passwordFilled: (await password.inputValue()) !== "",
+      },
+      passwordShown: (await password.getAttribute("type")) === "text",
+      security,
+      saveDisabled: await save.first().isDisabled(),
+      saveLabel: (await save.first().innerText()).trim(),
+      testEmailDisabled: await testEmail.first().isDisabled(),
+    };
+  }
+
+  async adminEmailFill(fields: AdminEmailFields): Promise<void> {
+    const main = this.page.locator("main");
+    if (fields.host !== undefined) await main.locator("#EMAIL_HOST").fill(fields.host);
+    if (fields.port !== undefined) await main.locator("#EMAIL_PORT").fill(fields.port);
+    if (fields.from !== undefined) await main.locator("#EMAIL_FROM").fill(fields.from);
+    if (fields.user !== undefined) await main.locator("#EMAIL_HOST_USER").fill(fields.user);
+    if (fields.password !== undefined) await main.locator("#EMAIL_HOST_PASSWORD").fill(fields.password);
+  }
+
+  /** Config password show/hide toggle: the nameless button beside the field. */
+  private adminEmailPasswordToggle(): Locator {
+    // The toggle carries no accessible name (icon only), so it is read
+    // structurally as the button sharing the field's container. Proven
+    // element-identical on the oracle.
+    return this.page.locator("main").locator("#EMAIL_HOST_PASSWORD").locator("xpath=..").getByRole("button");
+  }
+
+  async adminEmailTogglePassword(): Promise<void> {
+    await this.adminEmailPasswordToggle().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminEmailSetSecurity(which: AdminEmailSecurity): Promise<void> {
+    if ((await this.adminEmailFormFacts()).security === which) return;
+    await this.adminEmailSecurityButton().first().click({ timeout: WebDriver.WAIT_MS });
+    const label = which === "none" ? "No email security" : which;
+    const option = this.page.getByRole("option", { name: label });
+    await option.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await option.click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminEmailSave(): Promise<void> {
+    const save = this.page.locator("main").getByRole("button", { name: /Save changes|Saving/ });
+    await save.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await save.first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  /** Install the configurations route (GET faults plus the PATCH spy) once per page. */
+  private async adminEnsureConfigRoute(): Promise<void> {
+    if (this.adminConfigRouteInstalled) return;
+    this.adminConfigRouteInstalled = true;
+    await this.page.route(
+      (url) => url.pathname.replace(/\/+$/, "") === "/api/instances/configurations",
+      async (route) => {
+        const method = route.request().method();
+        if (method === "PATCH") {
+          // The body lands after the round-trip so body polls imply the
+          // server already committed (specs read server state next).
+          const patchFault = this.adminConfigPatchFault;
+          if (patchFault.mode === "fail") {
+            this.adminConfigPatchBodiesSeen.push(this.adminPostDataJson(route));
+            await route.fulfill({
+              status: 500,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "parity-probe-failure" }),
+            });
+            return;
+          }
+          if (patchFault.mode === "delay") {
+            await new Promise((resolve) => setTimeout(resolve, patchFault.delayMs));
+          }
+          const configPatchResponse = await route.fetch();
+          this.adminConfigPatchBodiesSeen.push(this.adminPostDataJson(route));
+          await route.fulfill({ response: configPatchResponse });
+          return;
+        }
+        if (method === "GET") {
+          const fault = this.adminConfigFetchFault;
+          if (fault.mode === "fail") {
+            await route.abort("failed");
+            return;
+          }
+          if (fault.mode === "delay") {
+            await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+          }
+          await route.continue();
+          return;
+        }
+        await route.continue();
+      }
+    );
+  }
+
+  async adminStartConfigPatchSpy(): Promise<void> {
+    this.adminConfigPatchBodiesSeen = [];
+    this.adminConfigPatchFault = { mode: "none", delayMs: 0 };
+    await this.adminEnsureConfigRoute();
+  }
+
+  async adminConfigPatchBodies(): Promise<unknown[]> {
+    return [...this.adminConfigPatchBodiesSeen];
+  }
+
+  async adminFailConfigPatch(): Promise<void> {
+    this.adminConfigPatchFault = { mode: "fail", delayMs: 0 };
+  }
+
+  async adminDelayConfigPatch(ms: number): Promise<void> {
+    this.adminConfigPatchFault = { mode: "delay", delayMs: ms };
+  }
+
+  async adminClearConfigPatchFault(): Promise<void> {
+    this.adminConfigPatchFault = { mode: "none", delayMs: 0 };
+  }
+
+  async adminDelayConfigFetch(ms: number): Promise<void> {
+    this.adminConfigFetchFault = { mode: "delay", delayMs: ms };
+    await this.adminEnsureConfigRoute();
+  }
+
+  async adminFailConfigFetch(): Promise<void> {
+    this.adminConfigFetchFault = { mode: "fail", delayMs: 0 };
+    await this.adminEnsureConfigRoute();
+  }
+
+  async adminClearConfigFetchFault(): Promise<void> {
+    this.adminConfigFetchFault = { mode: "none", delayMs: 0 };
+  }
+
+  /** Install the email-disable route (counter plus failure) once per page. */
+  private async adminEnsureEmailDisableRoute(): Promise<void> {
+    if (this.adminEmailDisableRouteInstalled) return;
+    this.adminEmailDisableRouteInstalled = true;
+    await this.page.route(
+      (url) => url.pathname.replace(/\/+$/, "") === "/api/instances/configurations/disable-email-feature",
+      async (route) => {
+        // The count lands after the round-trip so count polls imply the
+        // server already committed (specs read server state next).
+        if (this.adminEmailDisableFault === "fail") {
+          this.adminEmailDisableSeen += 1;
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "parity-probe-failure" }),
+          });
+          return;
+        }
+        const disableResponse = await route.fetch();
+        this.adminEmailDisableSeen += 1;
+        await route.fulfill({ response: disableResponse });
+      }
+    );
+  }
+
+  async adminStartEmailDisableSpy(): Promise<void> {
+    this.adminEmailDisableSeen = 0;
+    this.adminEmailDisableFault = "none";
+    await this.adminEnsureEmailDisableRoute();
+  }
+
+  async adminEmailDisableCount(): Promise<number> {
+    return this.adminEmailDisableSeen;
+  }
+
+  async adminFailEmailDisable(): Promise<void> {
+    this.adminEmailDisableFault = "fail";
+    await this.adminEnsureEmailDisableRoute();
+  }
+
+  async adminClearEmailDisableFault(): Promise<void> {
+    this.adminEmailDisableFault = "none";
+  }
+
+  private adminTestEmailDialog(): Locator {
+    return this.page.getByRole("dialog");
+  }
+
+  /**
+   * Modal heading: the visibility witness. The dialog wrapper itself
+   * carries no box (its panel is fixed-positioned), so open/shut reads
+   * go through the heading, which every step renders.
+   */
+  private adminTestEmailHeading(): Locator {
+    return this.adminTestEmailDialog().locator("h3");
+  }
+
+  async adminTestEmailOpen(): Promise<void> {
+    await this.page
+      .locator("main")
+      .getByRole("button", { name: "Send test email" })
+      .click({ timeout: WebDriver.WAIT_MS });
+    await this.adminTestEmailHeading().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminTestEmailFacts(): Promise<AdminTestEmailFacts> {
+    // One atomic in-page snapshot: the send transition unmounts the
+    // receiver field and the send control mid-read, and a serial
+    // locator read that lands on the unmount waits out its timeout for
+    // nodes that never come back, starving the spec's polls.
+    const snap = await this.page.evaluate(() => {
+      const shown = (el: Element | null): boolean => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && getComputedStyle(el).visibility !== "hidden";
+      };
+      const shut = {
+        open: false,
+        step: "compose",
+        receiver: "",
+        heading: "",
+        bodyText: "",
+        sendLabel: null as string | null,
+        dismissLabel: "",
+      };
+      const dialog = document.querySelector('[role="dialog"]');
+      const headingEl = dialog?.querySelector("h3") ?? null;
+      if (dialog === null || headingEl === null || !shown(headingEl)) return shut;
+      const heading = (headingEl.innerText ?? "").trim();
+      const receiverEl = dialog.querySelector("#receiver_email");
+      const buttons = [...dialog.querySelectorAll("button")].map((item) => (item.innerText ?? "").trim());
+      const sendLabel = buttons.find((text) => text === "Send email" || text === "Sending email") ?? null;
+      const dismissLabel = buttons.find((text) => text === "Cancel" || text === "Close") ?? "";
+      const hasReceiver = receiverEl !== null;
+      const hasSend = sendLabel !== null;
+      let step: string;
+      if (hasReceiver && hasSend) step = "compose";
+      else if (heading === "Failed") step = "failed";
+      else if (heading === "Email send") step = "success";
+      else return { ...shut, open: true, heading, unknown: true as const };
+      // The step body is whatever the dialog shows besides its heading
+      // and its controls, so success copy and server errors read alike.
+      let bodyText = ((dialog as HTMLElement).innerText ?? "").replace(heading, "").trim();
+      for (const label of buttons) {
+        bodyText = bodyText.replace(label, "").trim();
+      }
+      bodyText = bodyText
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .join("\n");
+      return {
+        open: true,
+        step,
+        receiver: receiverEl instanceof HTMLInputElement ? receiverEl.value : "",
+        heading,
+        bodyText,
+        sendLabel,
+        dismissLabel,
+      };
+    });
+    if ("unknown" in snap) {
+      throw new Error(`[parity] unknown test-email step ${JSON.stringify(snap.heading)}.`);
+    }
+    return snap as AdminTestEmailFacts;
+  }
+
+  async adminTestEmailFillReceiver(email: string): Promise<void> {
+    await this.adminTestEmailDialog().locator("#receiver_email").fill(email);
+  }
+
+  async adminTestEmailSend(): Promise<void> {
+    const dialog = this.adminTestEmailDialog();
+    await dialog.getByRole("button", { name: /Send email|Sending email/ }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminTestEmailClose(): Promise<void> {
+    const dialog = this.adminTestEmailDialog();
+    await dialog
+      .first()
+      .getByRole("button", { name: /Cancel|Close/ })
+      .click({ timeout: WebDriver.WAIT_MS });
+    await this.adminTestEmailHeading().first().waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+  }
+
+  /** Install the test-email route (body recorder, always passing through) once per page. */
+  private async adminEnsureEmailCheckRoute(): Promise<void> {
+    if (this.adminEmailCheckRouteInstalled) return;
+    this.adminEmailCheckRouteInstalled = true;
+    await this.page.route(
+      (url) => url.pathname.replace(/\/+$/, "") === "/api/instances/email-credentials-check",
+      async (route) => {
+        // The body lands after the round-trip, like the write spies.
+        const checkResponse = await route.fetch();
+        this.adminEmailCheckBodiesSeen.push(this.adminPostDataJson(route));
+        await route.fulfill({ response: checkResponse });
+      }
+    );
+  }
+
+  async adminStartEmailCheckSpy(): Promise<void> {
+    this.adminEmailCheckBodiesSeen = [];
+    await this.adminEnsureEmailCheckRoute();
+  }
+
+  async adminEmailCheckBodies(): Promise<unknown[]> {
+    return [...this.adminEmailCheckBodiesSeen];
   }
 
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
