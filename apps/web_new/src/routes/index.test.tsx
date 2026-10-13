@@ -2,39 +2,35 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { QueryClient } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
-import { createClient } from "@pidash/api-client";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Stand-in for the auth card: its internals belong to the auth area.
-// What this suite owns is the search schema, the entry branch decision,
-// plus prop passing. The real search primitives stay intact.
-vi.mock("../features/auth/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../features/auth/index.js")>();
-  return {
-    ...actual,
-    SignInCard: (props: {
-      next?: string;
-      initialEmail?: string;
-      initialErrorCode?: string | null;
-      invitationId?: string;
-      invitationSlug?: string;
-    }) => (
-      <div
-        data-testid="sign-in-card"
-        data-next={props.next ?? ""}
-        data-email={props.initialEmail ?? ""}
-        data-error={props.initialErrorCode ?? ""}
-        data-invitation={props.invitationId ?? ""}
-        data-slug={props.invitationSlug ?? ""}
-      />
-    ),
-  };
-});
+// What this suite owns is the search schema plus prop passing.
+vi.mock("../features/auth/index.js", () => ({
+  SignInCard: (props: {
+    next?: string;
+    unsafeNext?: string;
+    initialEmail?: string;
+    initialErrorCode?: string | null;
+    invitationId?: string;
+    invitationSlug?: string;
+  }) => (
+    <div
+      data-testid="sign-in-card"
+      data-next={props.next ?? ""}
+      data-unsafe-next={props.unsafeNext ?? ""}
+      data-email={props.initialEmail ?? ""}
+      data-error={props.initialErrorCode ?? ""}
+      data-invitation={props.invitationId ?? ""}
+      data-slug={props.invitationSlug ?? ""}
+    />
+  ),
+}));
 
-import { meQueryOptions } from "../core/session/queries.js";
+import { isRedirect } from "@tanstack/react-router";
+
 import { EntryScreen, parseEntrySearch, returnPath, Route } from "./index.js";
 
 describe("parseEntrySearch", () => {
@@ -58,18 +54,24 @@ describe("parseEntrySearch", () => {
 
   it("drops invalid params instead of throwing", () => {
     expect(parseEntrySearch({})).toEqual({});
-    expect(
-      parseEntrySearch({ next: "https://evil.test/", email: "", error_code: 42, invitation_id: "", slug: null })
-    ).toEqual({});
+    expect(parseEntrySearch({ next: "", email: "", error_code: 42, invitation_id: "", slug: null })).toEqual({});
+  });
+
+  it("forwards an unsafe return path for the server to sanitize (AUTH-016)", () => {
+    expect(parseEntrySearch({ next: "https://evil.test/phish" })).toEqual({
+      unsafeNext: "https://evil.test/phish",
+    });
+  });
+
+  it("reads the guard-bounce spelling of the return path", () => {
+    expect(parseEntrySearch({ next_path: "/acme" })).toEqual({ next: "/acme" });
+    expect(parseEntrySearch({ next_path: "https://evil.test/phish" })).toEqual({
+      unsafeNext: "https://evil.test/phish",
+    });
   });
 
   it("keeps a partial search", () => {
     expect(parseEntrySearch({ next: "/acme", error_code: "5900" })).toEqual({ next: "/acme", error_code: "5900" });
-  });
-
-  it("keeps the canonical return param and drops unsafe values", () => {
-    expect(parseEntrySearch({ next_path: "/acme/issues" })).toEqual({ next_path: "/acme/issues" });
-    expect(parseEntrySearch({ next_path: "https://evil.test/" })).toEqual({});
   });
 });
 
@@ -81,17 +83,83 @@ describe("returnPath", () => {
   });
 });
 
+describe("entry guard", () => {
+  const me = { is_password_autoset: false };
+
+  function stubContext(values: Record<string, unknown>, search: Record<string, unknown> = {}) {
+    return {
+      context: {
+        apiClient: {},
+        queryClient: {
+          ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
+            const value = values[options.queryKey[1] as string];
+            if (value instanceof Error) throw value;
+            if (value === undefined) throw new Error("no fixture");
+            return value;
+          },
+        },
+      },
+      search,
+      location: { href: "/" },
+      params: {},
+    } as never;
+  }
+
+  async function landingOf(args: never): Promise<string> {
+    try {
+      await Route.options.beforeLoad?.(args);
+    } catch (error) {
+      expect(isRedirect(error)).toBe(true);
+      return (error as unknown as { options: { href: string } }).options.href;
+    }
+    expect.unreachable("expected a redirect");
+  }
+
+  it("renders the card for signed-out visitors", async () => {
+    const failed = new Error("signed out");
+    await expect(Route.options.beforeLoad?.(stubContext({ me: failed }))).resolves.toEqual({});
+  });
+
+  it("honors the return path for signed-in members", async () => {
+    const settings = { workspace: { last_workspace_slug: "acme", fallback_workspace_slug: null } };
+    await expect(
+      landingOf(
+        stubContext(
+          { me, profile: { is_onboarded: true }, settings, workspaces: [{ slug: "acme" }] },
+          { next: "/acme/issues" }
+        )
+      )
+    ).resolves.toBe("/acme/issues");
+  });
+
+  it("lands signed-in members on their last workspace", async () => {
+    const settings = { workspace: { last_workspace_slug: "acme", fallback_workspace_slug: null } };
+    await expect(
+      landingOf(stubContext({ me, profile: { is_onboarded: true }, settings, workspaces: [{ slug: "acme" }] }))
+    ).resolves.toBe("/acme");
+  });
+
+  it("offers workspace creation to members with nowhere to go", async () => {
+    const settings = { workspace: { last_workspace_slug: null, fallback_workspace_slug: null } };
+    await expect(
+      landingOf(stubContext({ me, profile: { is_onboarded: true }, settings, workspaces: [] }))
+    ).resolves.toBe("/create-workspace");
+  });
+
+  it("funnels unfinished members to onboarding", async () => {
+    await expect(landingOf(stubContext({ me, profile: { is_onboarded: false } }))).resolves.toBe("/onboarding");
+  });
+});
+
 describe("EntryScreen", () => {
   it("renders the sign-in card with the return path for signed-out visitors", () => {
-    render(<EntryScreen signedIn={false} next="/acme/" />);
+    render(<EntryScreen next="/acme/" />);
     expect(screen.getByTestId("sign-in-card")).toHaveAttribute("data-next", "/acme/");
-    expect(screen.queryByRole("heading", { name: "Welcome to Pi Dash" })).toBeNull();
   });
 
   it("passes the card params through to the sign-in card", () => {
     render(
       <EntryScreen
-        signedIn={false}
         next="/acme"
         email="ada@example.com"
         errorCode="5065"
@@ -101,59 +169,42 @@ describe("EntryScreen", () => {
     );
     const card = screen.getByTestId("sign-in-card");
     expect(card).toHaveAttribute("data-next", "/acme");
+    expect(card).toHaveAttribute("data-unsafe-next", "");
     expect(card).toHaveAttribute("data-email", "ada@example.com");
     expect(card).toHaveAttribute("data-error", "5065");
     expect(card).toHaveAttribute("data-invitation", "invite-1");
     expect(card).toHaveAttribute("data-slug", "acme");
   });
 
-  it("renders the workspace-less notice for signed-in visitors", () => {
-    render(<EntryScreen signedIn={true} />);
-    expect(screen.getByRole("heading", { name: "Welcome to Pi Dash" })).not.toBeNull();
-    expect(screen.queryByTestId("sign-in-card")).toBeNull();
-  });
-
-  it("hands the canonical return param to the card", () => {
-    render(<EntryScreen signedIn={false} next="/alias" nextPath="/canonical" />);
-    expect(screen.getByTestId("sign-in-card")).toHaveAttribute("data-next", "/canonical");
+  it("passes an unsafe return path through to the sign-in card", () => {
+    render(<EntryScreen unsafeNext="https://evil.test/phish" />);
+    const card = screen.getByTestId("sign-in-card");
+    expect(card).toHaveAttribute("data-next", "");
+    expect(card).toHaveAttribute("data-unsafe-next", "https://evil.test/phish");
   });
 });
 
-describe("HomeComponent", () => {
-  function renderRoute(queryClient: QueryClient, search: { next?: string; next_path?: string }) {
-    const component = Route.options.component;
-    if (!component) throw new Error("missing component");
-    const apiClient = createClient({
-      baseUrl: "https://api.test",
-      transport: (url) => {
-        throw new Error(`unexpected fetch ${url}`);
-      },
-    });
-    const useSearch = vi.spyOn(Route, "useSearch").mockReturnValue(search);
-    const useRouteContext = vi.spyOn(Route, "useRouteContext").mockReturnValue({ queryClient, apiClient });
-    try {
-      render(React.createElement(component as () => React.ReactElement));
-    } finally {
-      useSearch.mockRestore();
-      useRouteContext.mockRestore();
-    }
-  }
-
-  it("shows the card with the canonical return path when signed out", () => {
-    renderRoute(new QueryClient(), { next: "/alias", next_path: "/canonical" });
-    expect(screen.getByTestId("sign-in-card")).toHaveAttribute("data-next", "/canonical");
+describe("entry route component", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
-  it("shows the notice when the session cache holds a user", () => {
-    const queryClient = new QueryClient();
-    const apiClient = createClient({
-      baseUrl: "https://api.test",
-      transport: (url) => {
-        throw new Error(`unexpected fetch ${url}`);
-      },
-    });
-    queryClient.setQueryData(meQueryOptions(apiClient).queryKey, { id: "u1" } as never);
-    renderRoute(queryClient, {});
-    expect(screen.getByRole("heading", { name: "Welcome to Pi Dash" })).not.toBeNull();
+  function renderEntry(search: { next?: string; unsafeNext?: string }): void {
+    vi.spyOn(Route, "useSearch").mockReturnValue(search);
+    const Component = Route.options.component;
+    if (!Component) throw new Error("entry route has no component");
+    render(<Component />);
+  }
+
+  it("passes a safe return path through to the sign-in card", () => {
+    renderEntry({ next: "/acme" });
+    expect(screen.getByTestId("sign-in-card")).toHaveAttribute("data-next", "/acme");
+  });
+
+  it("passes an unsafe return path through to the sign-in card", () => {
+    renderEntry({ unsafeNext: "https://evil.test/phish" });
+    const card = screen.getByTestId("sign-in-card");
+    expect(card).toHaveAttribute("data-next", "");
+    expect(card).toHaveAttribute("data-unsafe-next", "https://evil.test/phish");
   });
 });

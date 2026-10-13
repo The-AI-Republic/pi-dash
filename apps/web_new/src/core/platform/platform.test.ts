@@ -28,6 +28,11 @@ describe("platform selection", () => {
     expect(webPlatform.deepLinks).toBeUndefined();
     expect(webPlatform.agentRuntime).toBeUndefined();
     expect(webPlatform.updates).toBeUndefined();
+    expect(webPlatform.sessionTeardown).toBeUndefined();
+  });
+
+  it("leaves the session-teardown seam unimplemented until the desktop epic lands it", () => {
+    expect(desktopPlatform.sessionTeardown).toBeUndefined();
   });
 
   it("exposes the title-bar capability on the desktop platform", () => {

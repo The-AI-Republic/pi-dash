@@ -42,6 +42,12 @@ import { PasswordStrengthHint } from "./PasswordStrengthHint.js";
 export interface SignInCardProps {
   /** Where the server sends the user after sign-in (as next_path). */
   next?: string | undefined;
+  /**
+   * Raw return path from the URL (AUTH-016 absolute leg). Forwarded to the
+   * auth POSTs for the server to sanitize; never navigated to client-side.
+   * Present only when no safe `next` resolved.
+   */
+  unsafeNext?: string | undefined;
   initialEmail?: string | undefined;
   /** A server error_code carried in the URL after a native-form failure. */
   initialErrorCode?: string | null | undefined;
@@ -111,6 +117,7 @@ function LockedEmail({ email, onClear }: { email: string; onClear: () => void })
 
 export function SignInCard({
   next,
+  unsafeNext,
   initialEmail = "",
   initialErrorCode,
   invitationId,
@@ -186,7 +193,8 @@ export function SignInCard({
 
   const smtpConfigured = loadedConfig.is_smtp_configured;
   const emailMethods = loadedConfig.is_email_password_enabled || loadedConfig.is_magic_login_enabled;
-  const nextPathInput = next === undefined ? {} : { nextPath: next };
+  const postNext = unsafeNext ?? next;
+  const nextPathInput = postNext === undefined ? {} : { nextPath: postNext };
   const providers = resolveSignInProviders(edition.auth, loadedConfig, {
     mode,
     apiOrigin: getAppClient().baseUrl,

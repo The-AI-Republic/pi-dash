@@ -14,6 +14,7 @@ export type {
   MenuApi,
   MenuCommand,
   Platform,
+  SessionTeardownApi,
   StreamInit,
   StreamMessage,
   TitleBarApi,

@@ -11,13 +11,13 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   checkEmail,
+  deactivateAccount,
   generateMagicCode,
   requestPasswordReset,
   resetPassword,
   setPassword,
   signIn,
   signInWithMagicCode,
-  signOut as postSignOut,
   signUp,
   signUpWithMagicCode,
   type ResetPasswordInput,
@@ -26,7 +26,10 @@ import {
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../core/api/client.js";
-import { signOut as clearSession, useSessionStore } from "../../core/session/store.js";
+import { platform } from "../../core/platform/index.js";
+import { useSessionStore } from "../../core/session/store.js";
+import { markInitialColorScheme, notifyError, notifySuccess } from "../../shared/shell/index.js";
+import { performSignOut } from "./signOut.js";
 
 export function useEmailCheck() {
   return useMutation({
@@ -108,20 +111,63 @@ export function useSetPassword() {
 }
 
 /**
- * Sign out everywhere: end the server session (best effort — a dead
- * session is already gone), then clear every client store and the query
- * cache. The caller navigates to sign-in afterwards.
+ * Sign out everywhere (AUTH-017): end the server session, then clear every
+ * client store and the query cache, then the desktop local teardown.
+ * Resolves to the signed-out landing target; a failed POST toasts and
+ * rejects instead, so the caller leaves the user where they are.
  */
 export function useSignOut() {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationFn: () => performSignOut({ client: getAppClient(), queryClient, teardown: platform.sessionTeardown }),
+  });
+}
+
+/**
+ * Switch accounts (AUTH-018): sign out per AUTH-017, reset the theme to
+ * the system default, and land on the signed-out entry for a fresh login.
+ * A failed sign-out toasts and rejects; the dialog stays open.
+ */
+export function useSwitchAccount() {
+  const queryClient = useQueryClient();
+  return useMutation({
     mutationFn: async () => {
+      const landing = await performSignOut({
+        client: getAppClient(),
+        queryClient,
+        teardown: platform.sessionTeardown,
+      });
+      markInitialColorScheme();
+      return landing;
+    },
+  });
+}
+
+export const DEACTIVATE_SUCCESS_TITLE = "Account deactivated";
+export const DEACTIVATE_SUCCESS_MESSAGE = "You have been signed out.";
+export const DEACTIVATE_FAILED_TITLE = "Could not deactivate your account";
+
+/**
+ * Deactivate the account (AUTH-019): disable it, toast the outcome, then
+ * sign out per AUTH-017 and return to the signed-out entry. A failed
+ * deactivation toasts the server detail and rejects, leaving the account
+ * signed in.
+ */
+export function useDeactivateAccount() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const client = getAppClient();
       try {
-        await postSignOut(getAppClient());
-      } catch {
-        // The server session is already unusable; local state still clears.
+        await deactivateAccount(client);
+      } catch (error) {
+        // The client throws ApiError for every failure, so the message is
+        // always the server detail.
+        notifyError(DEACTIVATE_FAILED_TITLE, (error as Error).message);
+        throw error;
       }
-      clearSession(queryClient);
+      notifySuccess(DEACTIVATE_SUCCESS_TITLE, DEACTIVATE_SUCCESS_MESSAGE);
+      return performSignOut({ client, queryClient, teardown: platform.sessionTeardown });
     },
   });
 }

@@ -1,35 +1,48 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Gated workspace layout (pathless). Thin: sign-in gate, prefetch, shell
-// composition. Signed-out visitors bounce to sign-in with a return path.
-// The workspace catch-all (`/$ws/$`) is not a child of this layout, so
-// unknown addresses render the illustrated not-found page with or without
-// a session.
+// Gated workspace layout (pathless). Thin: auth gate, prefetch, shell
+// composition. Signed-out visitors bounce to the entry route with a
+// return path, unfinished members funnel to onboarding, and only onboarded
+// members render. The workspace catch-all (`/$ws/$`) is not a child of
+// this layout, so unknown addresses render the illustrated not-found page
+// with or without a session.
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Outlet, redirect, useRouterState } from "@tanstack/react-router";
 import type * as React from "react";
 
 import {
-  decideGatedWorkspaceGate,
+  decidePageGate,
+  loadGateInputs,
   meQueryOptions,
+  ONBOARDING_PATH,
   selectWorkspace,
   workspacesQueryOptions,
-} from "../../../core/session/queries.js";
-import { useSignOut } from "../../../features/auth/index.js";
+} from "../../../core/session/index.js";
+import { runSignOutAction, signOutCommand, useSignOut } from "../../../features/auth/index.js";
 import { projectsQueryOptions } from "../../../features/projects/index.js";
 import { useCommandPalette } from "../../../shared/commands/index.js";
 import { AppShell, Sidebar, TitleBar } from "../../../shared/shell/index.js";
 
 export const Route = createFileRoute("/$ws/_gated")({
   beforeLoad: async ({ context, location }) => {
-    const me = await context.queryClient.ensureQueryData(meQueryOptions(context.apiClient)).catch(() => null);
-    if (decideGatedWorkspaceGate(me !== null) === "sign-in") {
+    const { me, profile } = await loadGateInputs(context.queryClient, context.apiClient);
+    const decision = decidePageGate({
+      page: "signed-in-only",
+      signedIn: me !== null,
+      onboarded: profile?.is_onboarded ?? false,
+      hasPassword: me?.is_password_autoset === false,
+      currentPath: location.href,
+    });
+    if (decision.action === "sign-in") {
       // Land on the entry route, which renders the sign-in card in place
       // (SHELL-001): unknown visitors never reach workspace content, and
       // the return path survives so sign-in continues where they started.
-      throw redirect({ to: "/", search: { next: location.href } });
+      throw redirect({ to: "/", search: { next_path: decision.nextPath } });
+    }
+    if (decision.action === "onboarding") {
+      throw redirect({ href: ONBOARDING_PATH });
     }
     return {};
   },
@@ -56,7 +69,12 @@ export const Route = createFileRoute("/$ws/_gated")({
         }
         onOpenPalette={openPalette}
         onSignOut={() => {
-          void signOut.mutateAsync().then(() => navigate({ to: "/sign-in" }));
+          void runSignOutAction(
+            () => signOut.mutateAsync(),
+            (landing) => {
+              void navigate({ href: landing });
+            }
+          );
         }}
       />
     );
@@ -98,13 +116,7 @@ function WorkspaceShell({
   return (
     <AppShell
       commands={[
-        {
-          id: "shell.sign-out",
-          title: "Sign out",
-          hint: userLabel,
-          section: "Account",
-          run: onSignOut,
-        },
+        signOutCommand({ userLabel, onSignOut }),
         {
           id: "shell.go-home",
           title: "Go to workspace home",

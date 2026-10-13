@@ -8,7 +8,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createSessionMiddleware, sessionExpiredMiddleware } from "./middleware.js";
 import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, selectPermissions } from "./permissions.js";
 import {
-  decideGatedWorkspaceGate,
   decideWorkspaceRouteGate,
   getSessionClient,
   meQueryOptions,
@@ -140,11 +139,6 @@ describe("session queries", () => {
     expect(decideWorkspaceRouteGate({ signedIn: true, workspaces, slugOrId: "missing" })).toBe("not-found");
     expect(decideWorkspaceRouteGate({ signedIn: true, workspaces: [], slugOrId: "acme" })).toBe("not-found");
     expect(decideWorkspaceRouteGate({ signedIn: true, workspaces: undefined, slugOrId: "acme" })).toBe("not-found");
-  });
-
-  it("bounces signed-out visitors out of the gated layout", () => {
-    expect(decideGatedWorkspaceGate(true)).toBe("ok");
-    expect(decideGatedWorkspaceGate(false)).toBe("sign-in");
   });
 
   it("requires the bootstrap client before building options", () => {

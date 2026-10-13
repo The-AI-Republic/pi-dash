@@ -484,6 +484,33 @@ describe("SignInCard", () => {
     expect(posts[0]).toContain("next_path=%2Facme");
   });
 
+  it("forwards an unsafe return path raw so the server sanitizes it", async () => {
+    const user = userEvent.setup();
+    const posts: string[] = [];
+    await renderReadyCard(
+      stubTransport((url, init) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { body: CSRF, url };
+        if (url.endsWith("/api/instances/")) return { body: CONFIG, url };
+        if (url.endsWith("/auth/email-check/")) {
+          return { body: JSON.stringify({ existing: true, status: "CREDENTIAL" }), url };
+        }
+        if (url.endsWith("/auth/sign-in/")) {
+          posts.push(init.body ?? "");
+          return { body: "<html>", url: "https://app.test/phish" };
+        }
+        throw new Error(`unexpected ${url}`);
+      }),
+      { unsafeNext: "https://evil.test/phish" }
+    );
+    await user.type(screen.getByLabelText("Work email"), "ada@example.com");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.type(await screen.findByLabelText("Password"), "secret");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("https://app.test/phish"));
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toContain("next_path=https%3A%2F%2Fevil.test%2Fphish");
+  });
+
   it("keeps the password step with a banner when sign-in is unreachable", async () => {
     const user = userEvent.setup();
     await renderReadyCard(

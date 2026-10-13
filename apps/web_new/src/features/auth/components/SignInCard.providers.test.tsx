@@ -106,6 +106,20 @@ describe("SignInCard providers", () => {
     expect(assign).toHaveBeenCalledWith("https://api.test/auth/google/?next_path=%2Facme");
   });
 
+  it("carries an unsafe return path on provider starts for the server to sanitize", async () => {
+    const user = userEvent.setup();
+    await renderReadyCard(
+      stubTransport((url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { body: CSRF, url };
+        if (url.endsWith("/api/instances/")) return { body: configBody(), url };
+        throw new Error(`unexpected ${url}`);
+      }),
+      { unsafeNext: "https://evil.test/phish" }
+    );
+    await user.click(screen.getByRole("button", { name: "Sign in with Google" }));
+    expect(assign).toHaveBeenCalledWith("https://api.test/auth/google/?next_path=https%3A%2F%2Fevil.test%2Fphish");
+  });
+
   it("reads compact on the password step", async () => {
     const user = userEvent.setup();
     await renderReadyCard(
