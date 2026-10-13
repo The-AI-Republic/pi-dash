@@ -82,7 +82,9 @@ export const ActivityProfileSettings = observer(function ActivityProfileSettings
         title={t("Activity")}
         description={t("Track your recent actions and changes across all projects and work items.")}
       />
-      <div className="mt-7 w-full">{activityPages}</div>
+      <div className="mt-7 w-full" data-testid="settings-activity-list">
+        {activityPages}
+      </div>
       {isLoadMoreVisible && (
         <div className="mt-4 flex w-full items-center justify-center">
           <Button variant="ghost" onClick={handleLoadMore} appendIcon={<ChevronDown />}>
