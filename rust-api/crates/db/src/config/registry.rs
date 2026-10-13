@@ -277,6 +277,7 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("ASSISTANT_TURN_HARD_LIMIT", V::from(330)),
         ("ASSISTANT_HISTORY_MAX_TURNS", V::from(40)),
         ("ASSISTANT_LOOP_HISTORY_MAX_TURNS", V::from(5)),
+        ("ASSISTANT_TURN_QUEUE", V::Null),
         // Self-managed GitLab hosts allowed for outbound calls.
         ("GITLAB_ALLOWED_HOSTS", V::from("")),
         // Loop (auto project management).
