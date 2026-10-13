@@ -18767,6 +18767,8 @@ export interface ServerAdminInstanceInfo {
   workspacesExist: boolean;
   instanceName: string;
   telemetryEnabled: boolean;
+  /** Stable instance identifier (general-settings read-only field). */
+  instanceId: string;
 }
 
 /** The stack's api container: explicit override, else derived from PARITY_NS. */
@@ -18800,6 +18802,7 @@ export async function serverAdminInstanceInfo(apiBase: string = apiBaseFromEnv()
     workspacesExist: row["workspaces_exist"],
     instanceName: typeof row["instance_name"] === "string" ? row["instance_name"] : "",
     telemetryEnabled: row["is_telemetry_enabled"] === true,
+    instanceId: typeof row["instance_id"] === "string" ? row["instance_id"] : "",
   };
 }
 
@@ -20997,4 +21000,138 @@ export async function cloudStampConnectionVerified(connectionId: string): Promis
       `UserLLMConnection.objects.filter(pk=${JSON.stringify(connectionId)}).update(last_verified_at=timezone.now())\n` +
       `print("PARITY_VERIFIED:stamped")\n`
   );
+}
+
+// --- Instance-admin general/email oracle (NEWFRONT-442, ADM-013..022).
+// --- Server reads/writes for the general + email settings specs. Appended;
+// --- existing helpers above are untouched per the shared harness contract.
+
+/** Instance name plus telemetry flag as the read endpoints report them. */
+export interface ServerAdminGeneralSettings {
+  instanceName: string;
+  telemetryEnabled: boolean;
+}
+
+/** Raw instance PATCH round-trip: HTTP status plus the decoded JSON body. */
+export interface ServerAdminInstancePatchResult {
+  status: number;
+  body: unknown;
+}
+
+/**
+ * CSRF header pair for session-authenticated admin writes. The joined
+ * session string can carry the csrftoken twice (the sign-in response
+ * rotates the token the pre-login fetch set), so the cookie is rebuilt
+ * last-wins per key — exactly what a browser would send — and the
+ * header carries the surviving token.
+ */
+function serverAdminCsrfHeaders(sessionCookie: string): Record<string, string> {
+  const pairs = new Map<string, string>();
+  for (const part of sessionCookie.split(";")) {
+    const trimmed = part.trim();
+    if (trimmed === "") continue;
+    const cut = trimmed.indexOf("=");
+    if (cut <= 0) continue;
+    pairs.set(trimmed.slice(0, cut), trimmed);
+  }
+  const csrf = pairs.get("csrftoken")?.slice("csrftoken=".length) ?? "";
+  if (csrf === "") throw new Error("[parity] admin session carries no CSRF token.");
+  return { cookie: [...pairs.values()].join("; "), "X-CSRFToken": csrf };
+}
+
+/** Raw PATCH /api/instances/ round-trip; never throws on error statuses. */
+export async function serverAdminUpdateInstanceRaw(
+  sessionCookie: string,
+  data: { instance_name?: string; is_telemetry_enabled?: boolean },
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAdminInstancePatchResult> {
+  const res = await fetch(`${apiBase}/api/instances/`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", ...serverAdminCsrfHeaders(sessionCookie) },
+    body: JSON.stringify(data),
+  });
+  return { status: res.status, body: (await res.json().catch(() => null)) as unknown };
+}
+
+/** PATCH the instance name and/or telemetry flag; throws unless the write lands. */
+export async function serverAdminUpdateInstance(
+  sessionCookie: string,
+  data: { instanceName?: string; telemetryEnabled?: boolean },
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAdminGeneralSettings> {
+  const out = await serverAdminUpdateInstanceRaw(
+    sessionCookie,
+    {
+      ...(data.instanceName === undefined ? {} : { instance_name: data.instanceName }),
+      ...(data.telemetryEnabled === undefined ? {} : { is_telemetry_enabled: data.telemetryEnabled }),
+    },
+    apiBase
+  );
+  if (out.status < 200 || out.status >= 300) throw new Error(`[parity] instance PATCH failed with HTTP ${out.status}.`);
+  const row = (out.body ?? {}) as { instance_name?: unknown; is_telemetry_enabled?: unknown };
+  return {
+    instanceName: typeof row.instance_name === "string" ? row.instance_name : "",
+    telemetryEnabled: row.is_telemetry_enabled === true,
+  };
+}
+
+/** Instance configurations as GET reports them (secrets arrive decrypted). */
+export async function serverAdminGetConfigurations(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, string>> {
+  const res = await fetch(`${apiBase}/api/instances/configurations/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] configurations read failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Array<{ key?: unknown; value?: unknown }>;
+  const map: Record<string, string> = {};
+  for (const row of rows) {
+    if (typeof row.key === "string") map[row.key] = typeof row.value === "string" ? row.value : "";
+  }
+  return map;
+}
+
+/**
+ * PATCH instance configurations; resolves with the rows the server
+ * reports updated. Only keys with an existing row are written (the
+ * endpoint skips the rest), and values arrive stripped server-side.
+ */
+export async function serverAdminUpdateConfigurations(
+  sessionCookie: string,
+  data: Record<string, string>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Record<string, string>> {
+  const res = await fetch(`${apiBase}/api/instances/configurations/`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", ...serverAdminCsrfHeaders(sessionCookie) },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`[parity] configurations PATCH failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Array<{ key?: unknown; value?: unknown }>;
+  const map: Record<string, string> = {};
+  for (const row of rows) {
+    if (typeof row.key === "string") map[row.key] = typeof row.value === "string" ? row.value : "";
+  }
+  return map;
+}
+
+/** Raw test-email round-trip: HTTP status plus the decoded JSON body (or null). */
+export interface ServerAdminEmailCheckResult {
+  status: number;
+  body: unknown;
+}
+
+/** POST the test-email check; never throws on error statuses. */
+export async function serverAdminEmailCheck(
+  sessionCookie: string,
+  receiverEmail: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAdminEmailCheckResult> {
+  const res = await fetch(`${apiBase}/api/instances/email-credentials-check/`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...serverAdminCsrfHeaders(sessionCookie) },
+    body: JSON.stringify({ receiver_email: receiverEmail }),
+  });
+  return { status: res.status, body: (await res.json().catch(() => null)) as unknown };
 }

@@ -8167,6 +8167,84 @@ export interface ParityDriver {
   /** Answer info reads with no workspaces (drives the first-workspace popup branch). */
   adminStubNoWorkspaces(): Promise<void>;
 
+  // --- Instance-admin general/email oracle (NEWFRONT-442, ADM-013..022). ---
+  /** General-settings facts: name/email/id fields, telemetry, save control. */
+  adminGeneralFacts(): Promise<AdminGeneralFacts>;
+  /** Fill the instance-name field (empty string clears it). */
+  adminGeneralFillName(name: string): Promise<void>;
+  /** Flip the telemetry switch to `on`. */
+  adminGeneralSetTelemetry(on: boolean): Promise<void>;
+  /** Click the general-settings save control (no settle wait; the spec polls). */
+  adminGeneralSave(): Promise<void>;
+  /** Start recording instance PATCH writes (resets the bodies log). */
+  adminStartInstancePatchSpy(): Promise<void>;
+  /** Instance PATCH request bodies seen since the spy started. */
+  adminInstancePatchBodies(): Promise<unknown[]>;
+  /** Fail subsequent instance PATCH writes with a server error. */
+  adminFailInstancePatch(): Promise<void>;
+  /** Delay subsequent instance PATCH writes by ms. */
+  adminDelayInstancePatch(ms: number): Promise<void>;
+  /** Lift the instance-PATCH fault. */
+  adminClearInstancePatchFault(): Promise<void>;
+  /** Newest visible admin toast, or null when none shows. */
+  adminLastToast(): Promise<{ title: string; message: string } | null>;
+  /** Start capturing the page's console errors (resets the log). */
+  adminStartConsoleSpy(): Promise<void>;
+  /** Console error texts captured since the spy started. */
+  adminConsoleErrors(): Promise<string[]>;
+  /** Email-page facts: master toggle, form/skeleton visibility. */
+  adminEmailFacts(): Promise<AdminEmailFacts>;
+  /** Flip the master email toggle to `on` (no settle wait; the spec polls). */
+  adminEmailSetEnabled(on: boolean): Promise<void>;
+  /** Email config-form facts (fails fast while the form is hidden). */
+  adminEmailFormFacts(): Promise<AdminEmailFormFacts>;
+  /** Fill email config fields (partial; empty string clears). */
+  adminEmailFill(fields: AdminEmailFields): Promise<void>;
+  /** Toggle the config password field between hidden and shown. */
+  adminEmailTogglePassword(): Promise<void>;
+  /** Pick the transport-security choice. */
+  adminEmailSetSecurity(which: AdminEmailSecurity): Promise<void>;
+  /** Click the config-form save control (no settle wait; the spec polls). */
+  adminEmailSave(): Promise<void>;
+  /** Start recording configuration PATCH writes (resets the bodies log). */
+  adminStartConfigPatchSpy(): Promise<void>;
+  /** Configuration PATCH request bodies seen since the spy started. */
+  adminConfigPatchBodies(): Promise<unknown[]>;
+  /** Fail subsequent configuration PATCH writes with a server error. */
+  adminFailConfigPatch(): Promise<void>;
+  /** Delay subsequent configuration PATCH writes by ms. */
+  adminDelayConfigPatch(ms: number): Promise<void>;
+  /** Lift the configuration-PATCH fault. */
+  adminClearConfigPatchFault(): Promise<void>;
+  /** Delay configuration GET reads by ms. */
+  adminDelayConfigFetch(ms: number): Promise<void>;
+  /** Fail configuration GET reads (network error). */
+  adminFailConfigFetch(): Promise<void>;
+  /** Lift the configuration-GET fault. */
+  adminClearConfigFetchFault(): Promise<void>;
+  /** Start counting email-disable DELETE calls (resets the count). */
+  adminStartEmailDisableSpy(): Promise<void>;
+  /** Email-disable DELETE calls seen since the spy started. */
+  adminEmailDisableCount(): Promise<number>;
+  /** Fail subsequent email-disable DELETE calls with a server error. */
+  adminFailEmailDisable(): Promise<void>;
+  /** Lift the email-disable failure. */
+  adminClearEmailDisableFault(): Promise<void>;
+  /** Open the send-test-email modal (waits for it to show). */
+  adminTestEmailOpen(): Promise<void>;
+  /** Send-test-email modal facts (resolves open:false while the modal is shut). */
+  adminTestEmailFacts(): Promise<AdminTestEmailFacts>;
+  /** Fill the modal's receiver field. */
+  adminTestEmailFillReceiver(email: string): Promise<void>;
+  /** Click the modal's send control (no settle wait; the spec polls). */
+  adminTestEmailSend(): Promise<void>;
+  /** Click the modal's dismiss control and wait for it to shut. */
+  adminTestEmailClose(): Promise<void>;
+  /** Start recording test-email POST bodies (resets the log). */
+  adminStartEmailCheckSpy(): Promise<void>;
+  /** Test-email POST request bodies seen since the spy started. */
+  adminEmailCheckBodies(): Promise<unknown[]>;
+
   // --- Space board access & routing (NEWFRONT-447, SPC-001..009). ---
   /** Open an arbitrary in-app path (unknown-path routing, SPC-009). */
   spaceAccessOpenPath(path: string): Promise<void>;
@@ -11618,6 +11696,103 @@ export interface AdminNotFoundFacts {
   messageVisible: boolean;
   /** Back-action label, or null when absent. */
   actionLabel: string | null;
+}
+
+// --- Instance-admin general/email oracle types (NEWFRONT-442, ADM-013..022).
+
+/** General-settings facts (NEWFRONT-442, ADM-013..017). */
+export interface AdminGeneralFacts {
+  /** Current instance-name field value. */
+  name: string;
+  /** Whether the name field is disabled. */
+  nameDisabled: boolean;
+  /** Admin-email field value (first admin's address). */
+  email: string;
+  /** Whether the email field is disabled. */
+  emailDisabled: boolean;
+  /** Instance-ID field value. */
+  instanceId: string;
+  /** Whether the instance-ID field is disabled. */
+  instanceIdDisabled: boolean;
+  /** Whether the telemetry switch is on. */
+  telemetryOn: boolean;
+  /** Whether the telemetry switch is disabled. */
+  telemetryDisabled: boolean;
+  /** Telemetry policy link target, or null when absent. */
+  telemetryPolicyHref: string | null;
+  /** Telemetry policy link target attribute, or null when absent. */
+  telemetryPolicyTarget: string | null;
+  /** Save control label (busy state swaps it). */
+  saveLabel: string;
+  /** Whether the save control is disabled. */
+  saveDisabled: boolean;
+}
+
+/** Email-page shell facts (NEWFRONT-442, ADM-018/022). */
+export interface AdminEmailFacts {
+  /** Whether the master toggle is showing. */
+  toggleVisible: boolean;
+  /** Whether the master toggle is on. */
+  toggleOn: boolean;
+  /** Whether the master toggle is disabled. */
+  toggleDisabled: boolean;
+  /** Whether the config form is showing. */
+  formVisible: boolean;
+  /** Whether the header pill skeleton is showing. */
+  headerSkeletonVisible: boolean;
+  /** Whether the multi-row form skeleton is showing. */
+  formSkeletonVisible: boolean;
+  /** Form skeleton row count (zero when the skeleton hides). */
+  formSkeletonRows: number;
+}
+
+/** Transport-security choice as rendered (NEWFRONT-442, ADM-020). */
+export type AdminEmailSecurity = "TLS" | "SSL" | "none";
+
+/** Email config-form field values for filling (NEWFRONT-442, ADM-019). */
+export interface AdminEmailFields {
+  host?: string;
+  port?: string;
+  from?: string;
+  user?: string;
+  password?: string;
+}
+
+/** Email config-form facts (NEWFRONT-442, ADM-019/020/021). */
+export interface AdminEmailFormFacts {
+  /** Current field values. */
+  values: { host: string; port: string; from: string; user: string; passwordFilled: boolean };
+  /** Whether the password field is currently shown as text. */
+  passwordShown: boolean;
+  /** Rendered transport-security choice. */
+  security: AdminEmailSecurity;
+  /** Whether the save control is disabled. */
+  saveDisabled: boolean;
+  /** Save control label (busy state swaps it). */
+  saveLabel: string;
+  /** Whether the send-test-email control is disabled. */
+  testEmailDisabled: boolean;
+}
+
+/** Send-test-email modal step (NEWFRONT-442, ADM-021). */
+export type AdminTestEmailStep = "compose" | "success" | "failed";
+
+/** Send-test-email modal facts (NEWFRONT-442, ADM-021). */
+export interface AdminTestEmailFacts {
+  /** Whether the modal is open. */
+  open: boolean;
+  /** Which step is showing. */
+  step: AdminTestEmailStep;
+  /** Current receiver field value. */
+  receiver: string;
+  /** Modal heading text. */
+  heading: string;
+  /** Step body text (success copy or the server error). */
+  bodyText: string;
+  /** Send control label (busy state swaps it). */
+  sendLabel: string | null;
+  /** Dismiss control label. */
+  dismissLabel: string;
 }
 
 /** Navbar project identity as rendered (NEWFRONT-448, SPC-010). */
