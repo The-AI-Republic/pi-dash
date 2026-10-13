@@ -48821,8 +48821,11 @@ export class WebDriver implements ParityDriver {
   }
 
   async spaceBoardEmptyVisible(): Promise<boolean> {
+    // The settle already waits for rows or the notice; whichever rendered
+    // decides it — the notice and the rows come from the same fetch, so a
+    // rendered board never flips between them afterwards.
+    await this.spaceBoardWaitForLayout();
     const notice = this.page.getByText("No work items found", { exact: true });
-    await notice.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS }).catch(() => {});
     return notice.isVisible().catch(() => false);
   }
 

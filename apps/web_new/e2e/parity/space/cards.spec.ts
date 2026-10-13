@@ -236,7 +236,10 @@ test(
         });
       }
     } finally {
-      await convergeSeededBoard(seed, cookie, facts.id, anchor);
+      // Best-effort: a failing restore must not mask the scenario's own
+      // failure. The next flip scenario converges (asserted) at its start,
+      // so a broken restore still surfaces loudly.
+      await convergeSeededBoard(seed, cookie, facts.id, anchor).catch(() => {});
     }
   }
 );

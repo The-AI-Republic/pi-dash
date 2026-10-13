@@ -110,7 +110,10 @@ test(
         expect(await driver.spaceBoardLayoutOptions()).toEqual(["kanban"]);
       });
     } finally {
-      await convergeSeededBoard(seed, cookie, facts.id, anchor);
+      // Best-effort: a failing restore must not mask the scenario's own
+      // failure. The next flip scenario converges (asserted) at its start,
+      // so a broken restore still surfaces loudly.
+      await convergeSeededBoard(seed, cookie, facts.id, anchor).catch(() => {});
     }
   }
 );
@@ -153,7 +156,10 @@ test(
         expect(await driver.spaceBoardSwitchLayoutRefetches("list")).toBe(0);
       });
     } finally {
-      await convergeSeededBoard(seed, cookie, facts.id, anchor);
+      // Best-effort: a failing restore must not mask the scenario's own
+      // failure. The next flip scenario converges (asserted) at its start,
+      // so a broken restore still surfaces loudly.
+      await convergeSeededBoard(seed, cookie, facts.id, anchor).catch(() => {});
     }
   }
 );
@@ -194,7 +200,10 @@ test(
         expect(driver.page.url()).toContain("board=kanban");
       });
     } finally {
-      await convergeSeededBoard(seed, cookie, facts.id, anchor);
+      // Best-effort: a failing restore must not mask the scenario's own
+      // failure. The next flip scenario converges (asserted) at its start,
+      // so a broken restore still surfaces loudly.
+      await convergeSeededBoard(seed, cookie, facts.id, anchor).catch(() => {});
     }
   }
 );
@@ -216,7 +225,7 @@ test(
       });
       await test.step("populated groups render their rows and empty states render bare headers", async () => {
         const server = await serverPublicIssues(anchor, {}, cookie);
-        const populated = groups.find((g) => g.name !== emptyName);
+        const populated = groups.find((g) => g.rows > 0);
         if (populated === undefined) throw new Error("[parity] list shows no populated group.");
         expect(populated.rows).toBe(Math.min(50, server.totalCount));
         expect(populated.rows).toBeGreaterThan(0);
@@ -272,7 +281,7 @@ test(
       });
       await test.step("populated columns render their cards and empty states render bare columns", async () => {
         const server = await serverPublicIssues(anchor, {}, cookie);
-        const populated = columns.find((c) => c.name !== emptyName);
+        const populated = columns.find((c) => c.rows > 0);
         if (populated === undefined) throw new Error("[parity] board shows no populated column.");
         expect(populated.rows).toBe(Math.min(50, server.totalCount));
         expect(populated.rows).toBeGreaterThan(0);
@@ -335,16 +344,23 @@ async function setupEmptyPublishedProject(
   return { projectId, boardId: board.boardId, anchor: published.anchor, owned: board.owned };
 }
 
-/** Tear down a project created by setupEmptyPublishedProject. */
+/** Tear down a project created by setupEmptyPublishedProject. Warns instead of
+ * throwing so teardown never masks the scenario's own failure. */
 async function teardownPublishedProject(
   seed: ParitySeedFacts,
   cookie: string,
   world: { projectId: string; boardId: string; owned: boolean }
 ): Promise<void> {
   if (world.owned) {
-    await serverUnpublishBoard(seed.workspaceSlug, world.projectId, world.boardId, cookie);
+    await serverUnpublishBoard(seed.workspaceSlug, world.projectId, world.boardId, cookie).catch((error: unknown) => {
+      // eslint-disable-next-line no-console -- teardown noise stays in the log.
+      console.warn(`[parity] board unpublish for ${world.projectId} failed: ${String(error).slice(0, 160)}`);
+    });
   }
-  await serverDeleteProject(seed.workspaceSlug, world.projectId, cookie);
+  await serverDeleteProject(seed.workspaceSlug, world.projectId, cookie).catch((error: unknown) => {
+    // eslint-disable-next-line no-console -- teardown noise stays in the log.
+    console.warn(`[parity] project delete for ${world.projectId} failed: ${String(error).slice(0, 160)}`);
+  });
 }
 
 test(
@@ -364,6 +380,10 @@ test(
       await test.step("board layout shows the same empty notice", async () => {
         await driver.spaceOpenBoard(world.anchor, "?board=kanban");
         expect(await driver.spaceBoardEmptyVisible()).toBe(true);
+      });
+      await test.step("boards with issues render no empty notice", async () => {
+        await driver.spaceOpenBoard(requireAnchor(seed), "?board=list");
+        expect(await driver.spaceBoardEmptyVisible()).toBe(false);
       });
     } finally {
       await teardownPublishedProject(seed, cookie, world);
