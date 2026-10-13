@@ -14,7 +14,17 @@ pub async fn run(_args: Args, paths: &Paths) -> Result<()> {
         crate::service::reload::restart_and_verify_with_progress(paths, |msg| eprintln!("{msg}"))
             .await;
     if outcome.ok {
-        println!("daemon restarted ({}).", outcome.summary);
+        match &outcome.warnings {
+            // Degraded success: the daemon restarted and reached the cloud,
+            // but some runners didn't open their session in time. Exit 0 —
+            // non-zero is reserved for genuine daemon failures so scripts
+            // that only care about the daemon keep working (PDASHOSS01-222).
+            Some(warnings) => {
+                println!("{}:", outcome.summary);
+                println!("{warnings}");
+            }
+            None => println!("daemon restarted ({}).", outcome.summary),
+        }
         return Ok(());
     }
     anyhow::bail!(
