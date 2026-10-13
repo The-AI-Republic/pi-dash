@@ -216,8 +216,10 @@ import type {
   CloudDocsFacts,
   CloudDownloadCardFacts,
   CloudHomeSectionFacts,
+  CloudLoginCardFacts,
   CloudNavLinkFacts,
   CloudPricingTierFacts,
+  CloudProviderButtonFacts,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -53516,6 +53518,173 @@ export class WebDriver implements ParityDriver {
     const url = popup.url();
     await popup.close();
     return url;
+  }
+
+  // --- Cloud login, SSO + session (NEWFRONT-438, CLOUD-011..020).
+  // --- Observed on the running cloud oracle: the login card carries one
+  // --- continue action into the provider handoff; silent resume, the
+  // --- explicit-logout marker, refresh/replay, and sign-out behave per the
+  // --- inventory; the real provider is unreachable so handoffs are captured
+  // --- at the sign-in request boundary and answered with a stub page.
+
+  private cloudSignInSeen: string[] = [];
+  private cloudRefreshSeen = 0;
+  private cloudConsoleErrorsSeen: string[] = [];
+
+  private cloudRefreshHandler = (request: import("@playwright/test").Request): void => {
+    if (request.url().includes("/api/auth/refresh/")) this.cloudRefreshSeen += 1;
+  };
+
+  private cloudConsoleHandler = (message: import("@playwright/test").ConsoleMessage): void => {
+    if (message.type() === "error") this.cloudConsoleErrorsSeen.push(message.text());
+  };
+
+  private cloudLoginCard(): Locator {
+    return this.page.getByRole("heading", { name: "Sign in to Pi Dash" }).locator("xpath=ancestor::section[1]");
+  }
+
+  async cloudLoginCardFacts(): Promise<CloudLoginCardFacts> {
+    const card = this.cloudLoginCard();
+    await card.waitFor({ timeout: 60_000 });
+    const alert = card.getByRole("alert");
+    const terms = card.getByRole("link", { name: "Terms" });
+    const privacy = card.getByRole("link", { name: "Privacy Policy" });
+    const home = this.page.locator('a[href="/home"]').first();
+    const norm = (value: string | null): string => (value ?? "").replace(/\s+/g, " ").trim();
+    return {
+      heading: norm(await card.getByRole("heading").first().innerText()),
+      accountLine: norm(await card.locator("p").first().innerText()),
+      continueActions: await card.getByRole("button").count(),
+      continueHref: (await card.getByRole("link", { name: /continue with/i }).getAttribute("href")) ?? "",
+      termsHref: ((await terms.count()) > 0 ? await terms.first().getAttribute("href") : null) ?? null,
+      privacyHref: ((await privacy.count()) > 0 ? await privacy.first().getAttribute("href") : null) ?? null,
+      homeHref: ((await home.count()) > 0 ? await home.getAttribute("href") : null) ?? null,
+      alertText: ((await alert.count()) > 0 ? norm(await alert.first().innerText()) : "") || null,
+    };
+  }
+
+  async cloudArmSignInCapture(): Promise<void> {
+    this.cloudSignInSeen = [];
+    await this.page.unroute("**/api/auth/sign-in/**");
+    await this.page.route("**/api/auth/sign-in/**", async (route) => {
+      this.cloudSignInSeen.push(route.request().url());
+      await route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<!doctype html><title>sign-in stub</title>",
+      });
+    });
+  }
+
+  async cloudSignInRequests(): Promise<string[]> {
+    return [...this.cloudSignInSeen];
+  }
+
+  async cloudAwaitSignInRequest(previousCount: number): Promise<string> {
+    // Poll the capture log rather than waiting on the next request: the
+    // handoff may already have left (silent resume fires on load).
+    const started = Date.now();
+    while (Date.now() - started < 60_000) {
+      const next = this.cloudSignInSeen[previousCount];
+      if (next !== undefined) return next;
+      await this.page.waitForTimeout(250);
+    }
+    throw new Error("[parity] no sign-in handoff left the app.");
+  }
+
+  async cloudClickLoginContinue(): Promise<void> {
+    const card = this.cloudLoginCard();
+    await card.waitFor({ timeout: 60_000 });
+    await card.getByRole("button", { name: /continue with/i }).click();
+  }
+
+  async cloudExplicitLogoutMarker(): Promise<boolean> {
+    return this.page.evaluate(() => window.sessionStorage.getItem("pidash:explicitly-logged-out") === "1");
+  }
+
+  async cloudSuppressSilentSso(): Promise<void> {
+    await this.page.addInitScript(() => {
+      window.sessionStorage.setItem("pidash:explicitly-logged-out", "1");
+    });
+  }
+
+  async cloudArmRefreshCounter(): Promise<void> {
+    this.cloudRefreshSeen = 0;
+    this.page.off("request", this.cloudRefreshHandler);
+    this.page.on("request", this.cloudRefreshHandler);
+  }
+
+  async cloudRefreshHits(): Promise<number> {
+    return this.cloudRefreshSeen;
+  }
+
+  async cloudSignOutViaAccountMenu(): Promise<void> {
+    await this.openAccountMenu();
+    await this.clickAccountMenuItem("Sign out");
+    await this.page.getByRole("heading", { name: "Sign in to Pi Dash" }).waitFor({ timeout: 60_000 });
+  }
+
+  async cloudFailRefresh(): Promise<void> {
+    await this.page.unroute("**/api/auth/refresh/");
+    await this.page.route("**/api/auth/refresh/", async (route) => route.abort("failed"));
+  }
+
+  async cloudArmConsoleErrors(): Promise<void> {
+    this.cloudConsoleErrorsSeen = [];
+    this.page.off("console", this.cloudConsoleHandler);
+    this.page.on("console", this.cloudConsoleHandler);
+  }
+
+  async cloudConsoleErrors(): Promise<string[]> {
+    return [...this.cloudConsoleErrorsSeen];
+  }
+
+  async cloudStubTauri(): Promise<void> {
+    await this.page.addInitScript(() => {
+      (window as unknown as Record<string, unknown>).__TAURI__ = {
+        core: {
+          invoke: async () => {
+            throw new Error("[parity] system browser open is blocked in the oracle.");
+          },
+        },
+      };
+    });
+  }
+
+  async cloudProfilePasswordFieldCount(): Promise<number> {
+    return this.page.locator('input[type="password"]').count();
+  }
+
+  async cloudExpireAccessCookie(): Promise<void> {
+    await this.page.context().clearCookies({ name: "pidash_access" });
+  }
+
+  async cloudCookieNames(): Promise<string[]> {
+    const names = (await this.page.context().cookies()).map((cookie) => cookie.name);
+    return [...new Set(names)].sort();
+  }
+
+  async cloudProviderButtonFacts(): Promise<CloudProviderButtonFacts> {
+    const provider = this.page.getByRole("button", { name: /ai republic/i });
+    const standard = this.page.getByRole("button", { name: "Continue", exact: true });
+    // The auth form hydrates its OAuth options asynchronously; wait for
+    // the form's own action first, then give the provider option a beat so
+    // a cold load cannot misread absence.
+    await standard.first().waitFor({ timeout: 60_000 });
+    const started = Date.now();
+    while ((await provider.count()) === 0 && Date.now() - started < 10_000) {
+      await this.page.waitForTimeout(250);
+    }
+    const visible = (await provider.count()) > 0;
+    return {
+      visible,
+      label: visible ? ((await provider.first().innerText()) ?? "").replace(/\s+/g, " ").trim() : "",
+      standardContinueVisible: (await standard.count()) > 0,
+    };
+  }
+
+  async cloudClickProviderButton(): Promise<void> {
+    await this.page.getByRole("button", { name: /ai republic/i }).click();
   }
 
   // --- Page-export dialog oracle reads (NEWFRONT-383, EXP-016..021 + 023/024).
