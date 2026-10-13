@@ -10,7 +10,13 @@ import { ToastHost } from "@pidash/kit";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import * as React from "react";
 
-import { decidePageGate, loadGateInputs, loadLandingTarget, workspacesQueryOptions } from "../core/session/index.js";
+import {
+  decidePageGate,
+  isOnboardedProfile,
+  loadGateInputs,
+  loadLandingTarget,
+  workspacesQueryOptions,
+} from "../core/session/index.js";
 import { myInvitationsQueryOptions, OnboardingFlow } from "../features/auth/index.js";
 import { getToastManager, useSessionExpiredRedirect } from "../shared/shell/index.js";
 
@@ -20,7 +26,7 @@ export const Route = createFileRoute("/onboarding")({
     const decision = decidePageGate({
       page: "onboarding-funnel",
       signedIn: me !== null,
-      onboarded: profile?.is_onboarded ?? false,
+      onboarded: isOnboardedProfile(profile),
       hasPassword: me?.is_password_autoset === false,
       currentPath: location.href,
     });

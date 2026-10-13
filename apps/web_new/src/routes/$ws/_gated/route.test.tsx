@@ -126,6 +126,19 @@ describe("gated layout guard", () => {
   it("renders for onboarded members", async () => {
     await expect(Route.options.beforeLoad?.(stubContext({ me, profile: { is_onboarded: true } }))).resolves.toEqual({});
   });
+
+  it("renders for members whose flags are all set even without the marker", async () => {
+    const profile = {
+      is_onboarded: false,
+      onboarding_step: {
+        profile_complete: true,
+        workspace_create: true,
+        workspace_invite: true,
+        workspace_join: true,
+      },
+    };
+    await expect(Route.options.beforeLoad?.(stubContext({ me, profile }))).resolves.toEqual({});
+  });
 });
 
 describe("gated layout shell wiring", () => {

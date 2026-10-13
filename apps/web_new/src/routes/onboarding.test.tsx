@@ -68,8 +68,19 @@ function seedMe(client: QueryClient, apiClient: ApiClient, isPasswordAutoset: bo
   } as never);
 }
 
-function seedProfile(client: QueryClient, apiClient: ApiClient, isOnboarded: boolean) {
-  client.setQueryData(profileQueryOptions(apiClient).queryKey, { is_onboarded: isOnboarded } as never);
+const ALL_STEP_FLAGS = {
+  profile_complete: true,
+  workspace_create: true,
+  workspace_invite: true,
+  workspace_join: true,
+};
+
+function seedProfile(
+  client: QueryClient,
+  apiClient: ApiClient,
+  profile: { is_onboarded: boolean; onboarding_step?: Record<string, unknown> }
+) {
+  client.setQueryData(profileQueryOptions(apiClient).queryKey, profile as never);
 }
 
 function seedFlowReads(client: QueryClient, apiClient: ApiClient) {
@@ -101,7 +112,7 @@ describe("onboarding funnel guard", () => {
     const client = queryClient();
     const apiClient = throwingClient();
     seedMe(client, apiClient, false);
-    seedProfile(client, apiClient, false);
+    seedProfile(client, apiClient, { is_onboarded: false });
     seedFlowReads(client, apiClient);
     await expect(load(client, apiClient)).resolves.toEqual({ ok: {} });
   });
@@ -110,7 +121,21 @@ describe("onboarding funnel guard", () => {
     const client = queryClient();
     const apiClient = throwingClient();
     seedMe(client, apiClient, false);
-    seedProfile(client, apiClient, true);
+    seedProfile(client, apiClient, { is_onboarded: true });
+    client.setQueryData(settingsQueryOptions(apiClient).queryKey, {
+      workspace: { last_workspace_slug: "acme", fallback_workspace_slug: null },
+    } as never);
+    client.setQueryData(workspacesQueryOptions(apiClient).queryKey, [{ id: "w1", slug: "acme" }] as never);
+    const outcome = await load(client, apiClient);
+    expect("thrown" in outcome && isRedirect(outcome.thrown)).toBe(true);
+    expect((outcome as { thrown: { options: unknown } }).thrown.options).toMatchObject({ href: "/acme" });
+  });
+
+  it("sends all-flags profiles without the marker to the landing route", async () => {
+    const client = queryClient();
+    const apiClient = throwingClient();
+    seedMe(client, apiClient, false);
+    seedProfile(client, apiClient, { is_onboarded: false, onboarding_step: { ...ALL_STEP_FLAGS } });
     client.setQueryData(settingsQueryOptions(apiClient).queryKey, {
       workspace: { last_workspace_slug: "acme", fallback_workspace_slug: null },
     } as never);
@@ -124,7 +149,7 @@ describe("onboarding funnel guard", () => {
     const client = queryClient();
     const apiClient = unauthorizedClient();
     seedMe(client, apiClient, false);
-    seedProfile(client, apiClient, false);
+    seedProfile(client, apiClient, { is_onboarded: false });
     await expect(load(client, apiClient)).resolves.toEqual({ ok: {} });
   });
 

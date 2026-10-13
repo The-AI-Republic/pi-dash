@@ -149,6 +149,22 @@ describe("entry guard", () => {
   it("funnels unfinished members to onboarding", async () => {
     await expect(landingOf(stubContext({ me, profile: { is_onboarded: false } }))).resolves.toBe("/onboarding");
   });
+
+  it("lands members whose flags are all set even without the marker", async () => {
+    const settings = { workspace: { last_workspace_slug: "acme", fallback_workspace_slug: null } };
+    const profile = {
+      is_onboarded: false,
+      onboarding_step: {
+        profile_complete: true,
+        workspace_create: true,
+        workspace_invite: true,
+        workspace_join: true,
+      },
+    };
+    await expect(landingOf(stubContext({ me, profile, settings, workspaces: [{ slug: "acme" }] }))).resolves.toBe(
+      "/acme"
+    );
+  });
 });
 
 describe("EntryScreen", () => {
