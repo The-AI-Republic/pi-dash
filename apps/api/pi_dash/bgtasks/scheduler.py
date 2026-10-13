@@ -36,7 +36,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from pi_dash.bgtasks._rrule import next_fire_from_rrule
+from pi_dash.bgtasks._rrule import next_fire_with_error
 from pi_dash.db.models.scheduler import (
     LAST_ERROR_MAX_LEN,
     SchedulerBinding,
@@ -71,9 +71,19 @@ def _next_fire_for_binding(binding: SchedulerBinding, *, now: Optional[datetime]
     """Resolve the next firing for ``binding``.
 
     Forwards to :func:`pi_dash.bgtasks._rrule.next_fire_from_rrule` with the
-    binding's stored RRULE bundle. Returns ``None`` on parse error.
+    binding's stored RRULE bundle. Returns ``None`` on parse error *and* on
+    an exhausted series; use :func:`_next_fire_for_binding_checked` where the
+    two cases must be told apart.
     """
-    return next_fire_from_rrule(
+    nxt, _err = _next_fire_for_binding_checked(binding, now=now)
+    return nxt
+
+
+def _next_fire_for_binding_checked(
+    binding: SchedulerBinding, *, now: Optional[datetime] = None
+) -> tuple[Optional[datetime], Optional[str]]:
+    """``(next_fire, parse_error)`` for ``binding`` — see ``next_fire_with_error``."""
+    return next_fire_with_error(
         dtstart=binding.dtstart,
         rrule_str=binding.rrule or "",
         tzid=binding.tzid or "UTC",
@@ -179,8 +189,8 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
             )
             return False
 
-        nxt = _next_fire_for_binding(binding, now=now)
-        if nxt is None:
+        nxt, parse_error = _next_fire_for_binding_checked(binding, now=now)
+        if parse_error is not None:
             # Bad RRULE bundle — record the error and disable the binding
             # so we don't re-attempt every minute. Same recovery path as
             # the legacy bad-cron handler: re-enable via the API edit
@@ -194,6 +204,27 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
                 update_fields=["last_error", "enabled", "next_run_at", "updated_at"]
             )
             return False
+
+        # ``nxt is None`` with a clean parse means the series has no
+        # occurrence after now — it finished, which is NOT an error.
+        series_completed = nxt is None
+        if series_completed and binding.next_run_at is None:
+            # Exhausted with no concrete occurrence claimed either (e.g. a
+            # bundle created entirely in the past). Complete quietly: disable
+            # without an error so the UI can badge "Completed" rather than
+            # implying a misconfiguration.
+            binding.last_error = ""
+            binding.enabled = False
+            binding.save(update_fields=["last_error", "enabled", "updated_at"])
+            logger.info(
+                "scheduler.fire: series completed binding=%s (nothing due); disabled quietly",
+                binding.pk,
+            )
+            return False
+        # When ``series_completed`` and next_run_at <= now, that claimed
+        # occurrence is the FINAL one of a finite series (or a single-shot's
+        # dtstart) — fall through and dispatch it; Phase 3a completes the
+        # binding after a successful dispatch.
 
         prev_next_run_at = binding.next_run_at
         binding_pk = binding.pk
@@ -246,14 +277,22 @@ def fire_scheduler_binding(self, binding_id: str) -> bool:
                     if run_failed
                     else ""
                 )
+                update_fields = ["last_run", "last_error", "updated_at"]
+                if series_completed:
+                    # That dispatch was the series' final occurrence —
+                    # disable quietly so the scanner stops considering the
+                    # binding without flagging it as broken.
+                    success.enabled = False
+                    update_fields.append("enabled")
                 # Use save() so auto_now on updated_at fires; queryset
                 # .update() bypasses it (`auto_now` is set in pre_save).
-                success.save(update_fields=["last_run", "last_error", "updated_at"])
+                success.save(update_fields=update_fields)
         logger.info(
-            "scheduler.fire: dispatched run=%s binding=%s failed=%s",
+            "scheduler.fire: dispatched run=%s binding=%s failed=%s completed=%s",
             run.pk,
             binding_pk,
             run_failed,
+            series_completed,
         )
         # A run was produced and next_run_at stays advanced (no rollback),
         # so this is a dispatch, not a skip — return True regardless of the

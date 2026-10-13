@@ -19,6 +19,7 @@ from pi_dash.bgtasks._rrule import (
     RRuleValidationError,
     cron_to_rrule,
     next_fire_from_rrule,
+    next_fire_with_error,
     occurrences_between,
     validate_rrule_string,
 )
@@ -235,6 +236,72 @@ def test_next_fire_returns_none_on_bad_rrule():
         now=datetime(2026, 1, 1, 0, 0, tzinfo=dt_timezone.utc),
     )
     assert nxt is None
+
+
+# ---------------------------------------------------------------------------
+# next_fire_with_error — parse error vs exhausted series
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_next_fire_with_error_reports_parse_error():
+    dtstart = datetime(2026, 1, 1, 9, 0, tzinfo=dt_timezone.utc)
+    nxt, err = next_fire_with_error(
+        dtstart=dtstart,
+        rrule_str="garbage",
+        now=datetime(2026, 1, 1, 0, 0, tzinfo=dt_timezone.utc),
+    )
+    assert nxt is None
+    assert err is not None
+
+
+@pytest.mark.unit
+def test_next_fire_with_error_exhausted_count_is_not_an_error():
+    # COUNT=3 daily from Jan 1: occurrences Jan 1/2/3. Now = Jan 10 → exhausted.
+    dtstart = datetime(2026, 1, 1, 9, 0, tzinfo=dt_timezone.utc)
+    nxt, err = next_fire_with_error(
+        dtstart=dtstart,
+        rrule_str="FREQ=DAILY;COUNT=3",
+        now=datetime(2026, 1, 10, 0, 0, tzinfo=dt_timezone.utc),
+    )
+    assert nxt is None
+    assert err is None
+
+
+@pytest.mark.unit
+def test_next_fire_with_error_exhausted_until_is_not_an_error():
+    dtstart = datetime(2026, 1, 1, 9, 0, tzinfo=dt_timezone.utc)
+    nxt, err = next_fire_with_error(
+        dtstart=dtstart,
+        rrule_str="FREQ=DAILY;UNTIL=20260105T000000Z",
+        now=datetime(2026, 2, 1, 0, 0, tzinfo=dt_timezone.utc),
+    )
+    assert nxt is None
+    assert err is None
+
+
+@pytest.mark.unit
+def test_next_fire_with_error_single_shot_past_is_not_an_error():
+    dtstart = datetime(2026, 1, 1, 9, 0, tzinfo=dt_timezone.utc)
+    nxt, err = next_fire_with_error(
+        dtstart=dtstart,
+        rrule_str="",
+        now=datetime(2026, 6, 1, 0, 0, tzinfo=dt_timezone.utc),
+    )
+    assert nxt is None
+    assert err is None
+
+
+@pytest.mark.unit
+def test_next_fire_with_error_active_series():
+    dtstart = datetime(2026, 1, 1, 9, 0, tzinfo=dt_timezone.utc)
+    nxt, err = next_fire_with_error(
+        dtstart=dtstart,
+        rrule_str="FREQ=DAILY;COUNT=3",
+        now=datetime(2026, 1, 1, 12, 0, tzinfo=dt_timezone.utc),
+    )
+    assert nxt == datetime(2026, 1, 2, 9, 0, tzinfo=dt_timezone.utc)
+    assert err is None
 
 
 # ---------------------------------------------------------------------------

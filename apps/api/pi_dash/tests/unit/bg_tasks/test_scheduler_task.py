@@ -350,6 +350,93 @@ def test_fire_disables_binding_with_bad_rrule_and_clears_next_run_at(binding):
     assert "invalid rrule" in binding.last_error
 
 
+# ---------------------------------------------------------------------------
+# fire_scheduler_binding — finite series completion (exhausted ≠ invalid)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_fire_dispatches_final_occurrence_and_completes_quietly(binding):
+    """The last due occurrence of a COUNT series must still dispatch, and the
+    binding must then complete quietly (disabled, NO last_error) instead of
+    being flagged as a bad rrule."""
+    dtstart = timezone.now() - timedelta(minutes=5)
+    binding.dtstart = dtstart
+    binding.rrule = "FREQ=DAILY;COUNT=1"  # sole occurrence = dtstart
+    binding.next_run_at = dtstart  # claimed by an earlier tick, due now
+    binding.save(update_fields=["dtstart", "rrule", "next_run_at"])
+
+    fired = fire_scheduler_binding(str(binding.pk))
+    assert fired is True
+    binding.refresh_from_db()
+    assert binding.last_run_id is not None
+    assert binding.enabled is False
+    assert binding.last_error == ""
+    assert binding.next_run_at is None
+
+
+@pytest.mark.unit
+def test_fire_single_shot_fires_once_and_completes(binding):
+    """Empty rrule = single-shot at dtstart: it must fire exactly once, then
+    complete quietly."""
+    dtstart = timezone.now() - timedelta(minutes=5)
+    binding.dtstart = dtstart
+    binding.rrule = ""
+    binding.next_run_at = dtstart
+    binding.save(update_fields=["dtstart", "rrule", "next_run_at"])
+
+    fired = fire_scheduler_binding(str(binding.pk))
+    assert fired is True
+    binding.refresh_from_db()
+    assert binding.last_run_id is not None
+    assert binding.enabled is False
+    assert binding.last_error == ""
+    assert binding.next_run_at is None
+
+    # Re-firing a completed binding does nothing (it's disabled).
+    assert fire_scheduler_binding(str(binding.pk)) is False
+
+
+@pytest.mark.unit
+def test_fire_exhausted_with_nothing_due_completes_without_dispatch(binding):
+    """A series that is entirely in the past with no claimed occurrence
+    (next_run_at NULL) completes quietly without dispatching a run."""
+    binding.dtstart = timezone.now() - timedelta(days=30)
+    binding.rrule = "FREQ=DAILY;COUNT=3"
+    binding.next_run_at = None
+    binding.save(update_fields=["dtstart", "rrule", "next_run_at"])
+
+    fired = fire_scheduler_binding(str(binding.pk))
+    assert fired is False
+    binding.refresh_from_db()
+    assert binding.last_run_id is None
+    assert binding.enabled is False
+    assert binding.last_error == ""
+    assert binding.next_run_at is None
+
+
+@pytest.mark.unit
+def test_fire_final_occurrence_rolls_back_without_completing(monkeypatch, binding):
+    """Dispatch failure on the final occurrence must roll back next_run_at and
+    keep the binding enabled so the next tick retries it."""
+    dtstart = timezone.now() - timedelta(minutes=5)
+    binding.dtstart = dtstart
+    binding.rrule = "FREQ=DAILY;COUNT=1"
+    binding.next_run_at = dtstart
+    binding.save(update_fields=["dtstart", "rrule", "next_run_at"])
+
+    monkeypatch.setattr(
+        "pi_dash.orchestration.service.dispatch_scheduler_run",
+        lambda b: (None, "no default pod for workspace test"),
+    )
+    fired = fire_scheduler_binding(str(binding.pk))
+    assert fired is False
+    binding.refresh_from_db()
+    assert binding.enabled is True
+    assert binding.next_run_at == dtstart
+    assert "dispatch failed" in binding.last_error
+
+
 @pytest.mark.unit
 def test_fire_rolls_back_next_run_at_on_dispatch_failure(monkeypatch, binding):
     """Phase 3b: when dispatch returns None, restore prior next_run_at

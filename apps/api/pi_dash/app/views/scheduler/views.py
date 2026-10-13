@@ -272,10 +272,15 @@ class ProjectSchedulerBindingDetailEndpoint(BaseAPIView):
         if any(
             k in request.data for k in ("dtstart", "rrule", "rdates", "exdates", "tzid")
         ):
-            from pi_dash.bgtasks.scheduler import _next_fire_for_binding
+            from pi_dash.bgtasks.scheduler import _next_fire_for_binding_checked
             binding.refresh_from_db()
-            nxt = _next_fire_for_binding(binding, now=timezone.now())
-            if nxt is not None:
+            nxt, parse_error = _next_fire_for_binding_checked(binding, now=timezone.now())
+            # A clean parse with no future occurrence must CLEAR next_run_at
+            # (the edit made the series finite and already over) — keeping the
+            # stale time would fire a rule past its end. The serializer has
+            # already validated the bundle, so parse errors shouldn't happen;
+            # leave next_run_at untouched if one does.
+            if parse_error is None and binding.next_run_at != nxt:
                 binding.next_run_at = nxt
                 binding.save(update_fields=["next_run_at", "updated_at"])
         # Detail shape, not the list shape: the detail page PATCHes (enabled
