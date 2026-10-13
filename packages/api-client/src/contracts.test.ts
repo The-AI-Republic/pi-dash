@@ -23,13 +23,28 @@ import {
   signUp,
   signUpWithMagicCode,
 } from "./contracts/auth.js";
-import { getMe, getMeSettings } from "./contracts/users.js";
-import { listWorkspaces } from "./contracts/workspaces.js";
+import { getMe, getMeSettings, markOnboarded, updateMe } from "./contracts/users.js";
+import {
+  checkWorkspaceSlug,
+  createWorkspace,
+  getMyWorkspaceMembership,
+  listWorkspaces,
+} from "./contracts/workspaces.js";
+import {
+  acceptWorkspaceInvitations,
+  answerWorkspaceInvitation,
+  createWorkspaceJoinRequest,
+  getWorkspaceInvitation,
+  listWorkspaceInvitations,
+  listWorkspaceJoinRequests,
+  sendWorkspaceInvitations,
+} from "./contracts/invitations.js";
 import {
   addFavoriteProject,
   archiveProject,
   createProject,
   deleteProject,
+  getMyProjectRoles,
   getProjectUserProperties,
   getWorkspaceUserProperties,
   joinProjects,
@@ -534,6 +549,45 @@ describe("users contracts", () => {
     const parsed = await getMeSettings(client);
     expect(parsed.workspace.invites).toBe(0);
   });
+
+  it("patches the name and avatar and parses the update echo", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({
+            body: JSON.stringify({
+              id: UUID,
+              email: "ada@example.com",
+              username: "ada",
+              first_name: "Ada",
+              last_name: "Byron",
+              display_name: "Ada Byron",
+              avatar: "https://cdn.test/ada.png",
+              user_timezone: "UTC",
+            }),
+          })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateMe(client, { last_name: "Byron", avatar: "https://cdn.test/ada.png" });
+    expect(updated.display_name).toBe("Ada Byron");
+    const patchCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patchCall?.url).toBe("https://api.test/api/users/me/");
+    expect(patchCall?.init.body).toBe(JSON.stringify({ last_name: "Byron", avatar: "https://cdn.test/ada.png" }));
+  });
+
+  it("stamps the onboard marker", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ body: JSON.stringify({ message: "Updated successfully" }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await markOnboarded(client, { is_onboarded: true });
+    expect(result).toEqual({ message: "Updated successfully" });
+    const patchCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patchCall?.url).toBe("https://api.test/api/users/me/onboard/");
+    expect(patchCall?.init.body).toBe(JSON.stringify({ is_onboarded: true }));
+  });
 });
 
 describe("workspace contracts", () => {
@@ -545,6 +599,100 @@ describe("workspace contracts", () => {
     const parsed = await listWorkspaces(client);
     expect(parsed).toHaveLength(1);
     expect(parsed[0]?.role).toBe(20);
+  });
+
+  it("checks slug availability through the query param", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify({ status: true }) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await checkWorkspaceSlug(client, "fresh-slug");
+    expect(parsed).toEqual({ status: true });
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/workspace-slug-check/?slug=fresh-slug");
+  });
+
+  it("creates a workspace and parses the created row", async () => {
+    const row = {
+      id: UUID,
+      name: "Acme",
+      slug: "acme",
+      logo: null,
+      logo_asset: null,
+      logo_url: null,
+      owner: UUID2,
+      organization_size: "2-10",
+      timezone: "UTC",
+      background_color: "#fff",
+      total_members: 1,
+      role: 20,
+      created_by: UUID2,
+      updated_by: null,
+      created_at: "2024-01-02T03:04:05Z",
+      updated_at: "2024-01-02T03:04:05Z",
+    };
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 201, body: JSON.stringify(row) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const created = await createWorkspace(client, { name: "Acme", slug: "acme", organization_size: "2-10" });
+    expect(created.slug).toBe("acme");
+    expect(created.role).toBe(20);
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe("https://api.test/api/workspaces/");
+    expect(postCall?.init.body).toBe(JSON.stringify({ name: "Acme", slug: "acme", organization_size: "2-10" }));
+  });
+
+  it("parses my workspace membership", async () => {
+    const member = {
+      id: UUID,
+      workspace: UUID2,
+      member: UUID,
+      role: 20,
+      company_role: null,
+      view_props: {},
+      default_props: {},
+      issue_props: {},
+      is_active: true,
+      getting_started_checklist: {},
+      tips: {},
+      explored_features: {},
+      draft_issue_count: 2,
+      created_by: null,
+      updated_by: null,
+      created_at: "2024-01-02T03:04:05Z",
+      updated_at: "2024-02-03T04:05:06Z",
+    };
+    const client = createClient({ baseUrl: "https://api.test", transport: json(member) });
+    const parsed = await getMyWorkspaceMembership(client, "acme");
+    expect(parsed?.role).toBe(20);
+    expect(parsed?.draft_issue_count).toBe(2);
+  });
+
+  it("reports the null-pattern membership row as no membership", async () => {
+    const empty = {
+      role: null,
+      company_role: "",
+      view_props: null,
+      default_props: null,
+      issue_props: null,
+      is_active: false,
+      getting_started_checklist: null,
+      tips: null,
+      explored_features: null,
+      created_by: null,
+      updated_by: null,
+      workspace: null,
+      member: null,
+    };
+    const client = createClient({ baseUrl: "https://api.test", transport: json(empty) });
+    await expect(getMyWorkspaceMembership(client, "nope")).resolves.toBeNull();
+  });
+
+  it("reports null and primitive membership bodies as no membership", async () => {
+    const nullish = createClient({ baseUrl: "https://api.test", transport: json(null) });
+    await expect(getMyWorkspaceMembership(nullish, "acme")).resolves.toBeNull();
+    const primitive = createClient({ baseUrl: "https://api.test", transport: json("oops") });
+    await expect(getMyWorkspaceMembership(primitive, "acme")).resolves.toBeNull();
   });
 });
 
@@ -586,6 +734,14 @@ describe("project contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport });
     await listProjects(client, "acme");
     expect(transport.calls[0]?.url).toBe("https://api.test/api/workspaces/acme/projects/");
+  });
+
+  it("parses my project roles keyed by project id", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify({ [UUID2]: 20 }) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await getMyProjectRoles(client, "acme");
+    expect(parsed).toEqual({ [UUID2]: 20 });
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/users/me/workspaces/acme/project-roles/");
   });
 });
 
@@ -933,6 +1089,45 @@ describe("profile contracts", () => {
     expect(patched.language).toBe("fr");
     const patchCall = transport.calls.find((call) => call.init.method === "PATCH");
     expect(patchCall?.url).toBe("https://api.test/api/users/me/profile/");
+  });
+
+  it("patches the onboarding fields and the last-workspace stamp", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({
+            body: JSON.stringify({
+              ...profile,
+              role: "designer",
+              use_case: "planning",
+              has_marketing_email_consent: true,
+              onboarding_step: { profile_complete: true },
+              last_workspace_id: UUID2,
+            }),
+          })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const patched = await updateProfile(client, {
+      role: "designer",
+      use_case: "planning",
+      has_marketing_email_consent: true,
+      onboarding_step: { profile_complete: true },
+      last_workspace_id: UUID2,
+    });
+    expect(patched.role).toBe("designer");
+    expect(patched.use_case).toBe("planning");
+    expect(patched.has_marketing_email_consent).toBe(true);
+    expect(patched.last_workspace_id).toBe(UUID2);
+    const patchCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patchCall?.init.body).toBe(
+      JSON.stringify({
+        role: "designer",
+        use_case: "planning",
+        has_marketing_email_consent: true,
+        onboarding_step: { profile_complete: true },
+        last_workspace_id: UUID2,
+      })
+    );
   });
 
   it("parses the timezone patch and the zone list", async () => {
@@ -1411,5 +1606,128 @@ describe("project lifecycle contracts", () => {
     expect(read.sort_order).toBe(65535);
     const updated = await updateProjectUserProperties(client, "acme", UUID2, { sort_order: 1 });
     expect(updated.sort_order).toBe(1);
+  });
+});
+
+describe("invitation contracts", () => {
+  const invitation = {
+    id: UUID,
+    workspace: { id: UUID2, name: "Acme", slug: "acme", logo_url: null },
+    email: "ada@example.com",
+    accepted: false,
+    token: "tok",
+    message: null,
+    responded_at: null,
+    role: 15,
+    invite_link: "/workspace-invitations/?invitation_id=1&slug=acme&token=tok",
+    created_by: UUID2,
+    updated_by: null,
+    created_at: "2024-01-02T03:04:05Z",
+    updated_at: "2024-01-02T03:04:05Z",
+  };
+
+  it("lists my workspace invitations", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify([invitation]) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listWorkspaceInvitations(client);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.workspace.slug).toBe("acme");
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/users/me/workspaces/invitations/");
+  });
+
+  it("batch-accepts invitations and answers nothing (204)", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 204, body: "" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(acceptWorkspaceInvitations(client, [UUID])).resolves.toBeUndefined();
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe("https://api.test/api/users/me/workspaces/invitations/");
+    expect(postCall?.init.body).toBe(JSON.stringify({ invitations: [UUID] }));
+  });
+
+  it("fetches one invitation and answers it", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "POST") {
+        return fakeResponse({ body: JSON.stringify({ message: "Workspace Invitation Accepted" }) });
+      }
+      return fakeResponse({ body: JSON.stringify(invitation) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const fetched = await getWorkspaceInvitation(client, "acme", UUID);
+    expect(fetched.email).toBe("ada@example.com");
+    const answered = await answerWorkspaceInvitation(client, "acme", UUID, { accepted: true, token: "tok" });
+    expect(answered).toEqual({ message: "Workspace Invitation Accepted" });
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe(`https://api.test/api/workspaces/acme/invitations/${UUID}/join/`);
+    expect(postCall?.init.body).toBe(JSON.stringify({ accepted: true, token: "tok" }));
+  });
+
+  it("sends bulk workspace invitations", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ body: JSON.stringify({ message: "Emails sent successfully" }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await sendWorkspaceInvitations(client, "acme", {
+      emails: [{ email: "ada@example.com", role: 15 }],
+    });
+    expect(result).toEqual({ message: "Emails sent successfully" });
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe("https://api.test/api/workspaces/acme/invitations/");
+    expect(postCall?.init.body).toBe(JSON.stringify({ emails: [{ email: "ada@example.com", role: 15 }] }));
+  });
+
+  it("lists my workspace join requests", async () => {
+    const request = {
+      id: UUID,
+      requester: {
+        id: UUID2,
+        first_name: "Ada",
+        last_name: "Lovelace",
+        avatar: "",
+        avatar_url: null,
+        display_name: "ada",
+        is_bot: false,
+      },
+      admin_email: "root@example.com",
+      message: null,
+      status: "PENDING",
+      responded_at: null,
+      created_at: "2024-01-02T03:04:05Z",
+      updated_at: "2024-01-02T03:04:05Z",
+    };
+    const client = createClient({ baseUrl: "https://api.test", transport: json([request]) });
+    const parsed = await listWorkspaceJoinRequests(client);
+    expect(parsed[0]?.status).toBe("PENDING");
+    expect(parsed[0]?.requester.avatar_url).toBeNull();
+  });
+
+  it("creates a join request and parses both outcomes", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      const body = JSON.parse(call.init.body as string) as { admin_email: string };
+      return body.admin_email === "member@example.com"
+        ? fakeResponse({
+            body: JSON.stringify({ message: "You are already a member of this workspace", workspace_slug: "acme" }),
+          })
+        : fakeResponse({ status: 201, body: JSON.stringify({ message: "Request sent" }) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const sent = await createWorkspaceJoinRequest(client, { admin_email: "root@example.com" });
+    expect(sent).toEqual({ message: "Request sent" });
+    const shortcut = await createWorkspaceJoinRequest(client, { admin_email: "member@example.com" });
+    expect(shortcut).toEqual({ message: "You are already a member of this workspace", workspace_slug: "acme" });
+    const postCalls = transport.calls.filter((call) => call.init.method === "POST");
+    expect(postCalls).toHaveLength(2);
+    expect(postCalls[0]?.url).toBe("https://api.test/api/users/me/workspaces/join-requests/");
   });
 });

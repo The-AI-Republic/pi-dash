@@ -60,6 +60,11 @@ export interface ProfilePatch {
   start_of_the_week?: number;
   notification_view_mode?: string;
   is_smooth_cursor_enabled?: boolean;
+  role?: string | null;
+  use_case?: string | null;
+  has_marketing_email_consent?: boolean;
+  onboarding_step?: Record<string, unknown>;
+  last_workspace_id?: string | null;
 }
 
 export async function updateProfile(client: ApiClient, input: ProfilePatch): Promise<Profile> {
