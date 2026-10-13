@@ -8494,6 +8494,134 @@ export interface SpaceBoardStability {
   spaceCommentEmbedMenuVisible(index: number): Promise<boolean>;
   /** Comment reaction groups plus the add control inside the embedded frame. */
   spaceCommentEmbedReactions(index: number): Promise<{ groups: SpaceReactionGroup[]; addVisible: boolean }>;
+
+  // --- Cloud marketing + public surface (NEWFRONT-437, CLOUD-003/004/006–010).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract. Reads are structural (counts, link targets, metadata) so
+  // --- scenarios prove the surface without quoting its marketing copy.
+
+  /** Hero entry-link destinations on the marketing home, in display order. */
+  cloudHomeHeroActionHrefs(): Promise<string[]>;
+  /** Follow the hero entry link pointing at `href`; resolves once the landing renders. */
+  cloudHomeClickHeroAction(href: string): Promise<void>;
+  /** Structural facts of the marketing home below the hero. */
+  cloudHomeSections(): Promise<CloudHomeSectionFacts>;
+  /** Marketing header links: label, destination, external marker, current visibility. */
+  cloudHeaderLinks(): Promise<CloudNavLinkFacts[]>;
+  /** Marketing footer links: label, destination, external marker, current visibility. */
+  cloudFooterLinks(): Promise<CloudNavLinkFacts[]>;
+  /** Focus each header link in turn; false when any shows no focus ring. */
+  cloudHeaderLinksFocusVisible(): Promise<boolean>;
+  /** Focus each footer link in turn; false when any shows no focus ring. */
+  cloudFooterLinksFocusVisible(): Promise<boolean>;
+  /** Structural facts of the docs page (concepts, quick-start steps, code blocks, out-links). */
+  cloudDocsFacts(): Promise<CloudDocsFacts>;
+  /** Desktop installer cards: OS, architecture note, primary + secondary download targets. */
+  cloudDownloadCards(): Promise<CloudDownloadCardFacts[]>;
+  /** Whether the unsigned-installer notice renders on the downloads page. */
+  cloudDownloadsSigningNoticeVisible(): Promise<boolean>;
+  /** CLI card facts: installer target, docs link, web fallback link, sign-in hint. */
+  cloudCliCardFacts(): Promise<CloudCliCardFacts>;
+  /** Pricing tiers: name, price, call-to-action target, feature count. */
+  cloudPricingTiers(): Promise<CloudPricingTierFacts[]>;
+  /** Enterprise contact link target, or null when absent. */
+  cloudPricingEnterpriseHref(): Promise<string | null>;
+  /** FAQ entries on the pricing page (question/answer articles). */
+  cloudPricingFaqCount(): Promise<number>;
+  /** Whether the free tier names its creation cap numerically. */
+  cloudPricingFreeCapMentioned(): Promise<boolean>;
+  /** Arm a one-shot handler for the next quota confirm dialog (records its message). */
+  cloudArmConfirm(action: "accept" | "dismiss"): Promise<void>;
+  /** Confirm dialog messages seen since the arm, in arrival order. */
+  cloudConfirmMessages(): Promise<string[]>;
+  /** Wait for the upgrade popup the last accept opened; resolves with its URL and closes it. */
+  cloudUpgradePopupUrl(): Promise<string>;
+}
+
+/** One marketing header/footer link (NEWFRONT-437, CLOUD-004). */
+export interface CloudNavLinkFacts {
+  /** Accessible label as rendered. */
+  label: string;
+  /** Link destination (path or absolute URL). */
+  href: string;
+  /** Whether the link opens a new tab. */
+  external: boolean;
+  /** Whether the link is currently visible (responsive hiding). */
+  visible: boolean;
+}
+
+/** Marketing home structure below the hero (NEWFRONT-437, CLOUD-003). */
+export interface CloudHomeSectionFacts {
+  /** Four-item value strip entries. */
+  stripItems: number;
+  /** Numbered workflow steps. */
+  workflowSteps: number;
+  /** Capability articles. */
+  capabilityCards: number;
+  /** Open-source panel repository link target, or null when absent. */
+  repoHref: string | null;
+  /** Whether the repository link opens a new tab. */
+  repoExternal: boolean;
+  /** Closing call-to-action destination, or null when absent. */
+  closingCtaHref: string | null;
+}
+
+/** Docs page structure (NEWFRONT-437, CLOUD-006). */
+export interface CloudDocsFacts {
+  /** Three-part model concept cards. */
+  concepts: number;
+  /** Numbered quick-start steps. */
+  steps: number;
+  /** Command blocks across the page. */
+  codeBlocks: number;
+  /** Whether the install blocks reference the stable release-download URL. */
+  installRefsReleaseDownload: boolean;
+  /** Windows MSI installer link target, or null when absent. */
+  msiHref: string | null;
+  /** Sign-in entry link target, or null when absent. */
+  signInHref: string | null;
+  /** Public repository link target, or null when absent. */
+  repoHref: string | null;
+  /** Trust-note items in the closing band. */
+  footerItems: number;
+}
+
+/** One desktop installer card (NEWFRONT-437, CLOUD-007). */
+export interface CloudDownloadCardFacts {
+  /** Operating system the card targets. */
+  os: string;
+  /** Architecture/format note as rendered. */
+  arch: string;
+  /** Primary download target. */
+  primaryHref: string;
+  /** Secondary format target, or null when the card offers one format. */
+  secondaryHref: string | null;
+}
+
+/** Standalone CLI card facts (NEWFRONT-437, CLOUD-008). */
+export interface CloudCliCardFacts {
+  /** CLI installer download target. */
+  installerHref: string;
+  /** Setup-guide docs link target, or null when absent. */
+  docsHref: string | null;
+  /** Web fallback sign-in link target, or null when absent. */
+  webHref: string | null;
+  /** Whether the post-install sign-in hint renders. */
+  signinHintVisible: boolean;
+}
+
+/** One pricing tier (NEWFRONT-437, CLOUD-009). */
+export interface CloudPricingTierFacts {
+  /** Tier name as rendered. */
+  name: string;
+  /** Price line as rendered. */
+  price: string;
+  /** Call-to-action destination. */
+  ctaHref: string;
+  /** Whether the call-to-action leaves the app. */
+  ctaExternal: boolean;
+  /** Feature bullets. */
+  features: number;
 }
 
 /** Identity facts of one workspace-member roster row (NEWFRONT-411, WSET-011). */

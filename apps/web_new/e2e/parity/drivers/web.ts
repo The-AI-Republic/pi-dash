@@ -206,6 +206,12 @@ import type {
   SpacePickedEmoji,
   SpaceReactionGroup,
   SpaceVoteState,
+  CloudCliCardFacts,
+  CloudDocsFacts,
+  CloudDownloadCardFacts,
+  CloudHomeSectionFacts,
+  CloudNavLinkFacts,
+  CloudPricingTierFacts,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -52796,5 +52802,268 @@ export class WebDriver implements ParityDriver {
       )
     );
     return { groups, addVisible };
+  }
+
+  // --- Cloud marketing + public surface (NEWFRONT-437, CLOUD-003/004/006–010).
+  // --- Observed on the running cloud oracle: the marketing pages share one
+  // --- header/footer frame; the hero offers entry links; docs/downloads/
+  // --- pricing are static sections of cards, steps, and out-links; quota
+  // --- refusals surface as a native confirm opening the upgrade target.
+
+  private cloudConfirmAction: "accept" | "dismiss" | null = null;
+  private cloudConfirmSeen: string[] = [];
+  private cloudPopupWait: Promise<import("@playwright/test").Page | null> | null = null;
+
+  private cloudMain(): Locator {
+    return this.page.locator("main").first();
+  }
+
+  private async cloudLinkFacts(scope: Locator): Promise<CloudNavLinkFacts[]> {
+    // CSS anchors, not the link role: responsively hidden links leave the
+    // accessibility tree, and their hidden state is exactly what CLOUD-004
+    // asserts.
+    const links = scope.locator("a");
+    const count = await links.count();
+    const out: CloudNavLinkFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const link = links.nth(index);
+      const facts = await link.evaluate((root) => ({
+        // textContent, not innerText: responsively hidden links have no
+        // rendered text, but their label still identifies them.
+        label: (root.getAttribute("aria-label") ?? root.textContent ?? "").replace(/\s+/g, " ").trim(),
+        href: root.getAttribute("href") ?? "",
+        external: root.getAttribute("target") === "_blank",
+      }));
+      out.push({ ...facts, visible: await link.isVisible() });
+    }
+    return out;
+  }
+
+  async cloudHomeHeroActionHrefs(): Promise<string[]> {
+    const hero = this.cloudMain().locator("section").first();
+    await hero.waitFor({ timeout: 60_000 });
+    const links = hero.getByRole("link");
+    const count = await links.count();
+    const hrefs: string[] = [];
+    for (let index = 0; index < count; index++) {
+      hrefs.push((await links.nth(index).getAttribute("href")) ?? "");
+    }
+    return hrefs;
+  }
+
+  async cloudHomeClickHeroAction(href: string): Promise<void> {
+    const hero = this.cloudMain().locator("section").first();
+    const target = hero.locator(`a[href="${href}"]`).first();
+    await target.waitFor({ timeout: 60_000 });
+    await target.click();
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.cloudMain().waitFor({ timeout: 60_000 });
+  }
+
+  async cloudHomeSections(): Promise<CloudHomeSectionFacts> {
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const sections = main.locator("section");
+    const strip = sections.nth(1);
+    const stripItems = await strip.locator(":scope > div > div").count();
+    const workflowSteps = await main.locator("ol > li").count();
+    const capabilityCards = await main.locator("article").count();
+    const repo = main.locator('a[href*="github.com/The-AI-Republic/pi-dash"]').first();
+    const repoHref = (await repo.count()) > 0 ? ((await repo.getAttribute("href")) ?? null) : null;
+    const repoExternal = (await repo.count()) > 0 && (await repo.getAttribute("target")) === "_blank";
+    const sectionCount = await sections.count();
+    const closing = sections.nth(sectionCount - 1);
+    const closingCta = closing.getByRole("link").first();
+    const closingCtaHref = (await closingCta.count()) > 0 ? ((await closingCta.getAttribute("href")) ?? null) : null;
+    return { stripItems, workflowSteps, capabilityCards, repoHref, repoExternal, closingCtaHref };
+  }
+
+  async cloudHeaderLinks(): Promise<CloudNavLinkFacts[]> {
+    const header = this.page.locator("header").first();
+    await header.waitFor({ timeout: 60_000 });
+    return this.cloudLinkFacts(header);
+  }
+
+  async cloudFooterLinks(): Promise<CloudNavLinkFacts[]> {
+    const footer = this.page.locator("footer").first();
+    await footer.waitFor({ timeout: 60_000 });
+    return this.cloudLinkFacts(footer);
+  }
+
+  private async cloudScopeLinksFocusVisible(scope: Locator): Promise<boolean> {
+    const links = scope.locator("a");
+    const count = await links.count();
+    for (let index = 0; index < count; index++) {
+      const link = links.nth(index);
+      if (!(await link.isVisible())) continue;
+      await link.focus();
+      const ringed = await link.evaluate((root) => {
+        const style = getComputedStyle(root);
+        return style.boxShadow !== "none" || (style.outlineStyle !== "none" && style.outlineWidth !== "0px");
+      });
+      if (!ringed) return false;
+    }
+    return true;
+  }
+
+  async cloudHeaderLinksFocusVisible(): Promise<boolean> {
+    const header = this.page.locator("header").first();
+    await header.waitFor({ timeout: 60_000 });
+    return this.cloudScopeLinksFocusVisible(header);
+  }
+
+  async cloudFooterLinksFocusVisible(): Promise<boolean> {
+    const footer = this.page.locator("footer").first();
+    await footer.waitFor({ timeout: 60_000 });
+    return this.cloudScopeLinksFocusVisible(footer);
+  }
+
+  async cloudDocsFacts(): Promise<CloudDocsFacts> {
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const concepts = await main.locator("article").count();
+    const steps = await main.locator("ol > li").count();
+    const blocks = main.locator("pre");
+    const codeBlocks = await blocks.count();
+    let installRefsReleaseDownload = false;
+    for (let index = 0; index < codeBlocks; index++) {
+      const text = (await blocks.nth(index).innerText()) ?? "";
+      if (text.includes("releases/latest/download")) installRefsReleaseDownload = true;
+    }
+    const msi = main.locator('a[href$=".msi"]').first();
+    const msiHref = (await msi.count()) > 0 ? ((await msi.getAttribute("href")) ?? null) : null;
+    const signIn = main.locator('a[href="/login"]').first();
+    const signInHref = (await signIn.count()) > 0 ? ((await signIn.getAttribute("href")) ?? null) : null;
+    const repo = main.locator('a[href*="github.com/The-AI-Republic/pi-dash"]').first();
+    const repoHref = (await repo.count()) > 0 ? ((await repo.getAttribute("href")) ?? null) : null;
+    const sections = main.locator("section");
+    const footerItems = await sections.last().locator(":scope > div > div").count();
+    return {
+      concepts,
+      steps,
+      codeBlocks,
+      installRefsReleaseDownload,
+      msiHref,
+      signInHref,
+      repoHref,
+      footerItems,
+    };
+  }
+
+  async cloudDownloadCards(): Promise<CloudDownloadCardFacts[]> {
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const cards = main.locator("article");
+    const count = await cards.count();
+    const out: CloudDownloadCardFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const card = cards.nth(index);
+      const os = ((await card.locator("h3").first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+      const arch = ((await card.locator("p").first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+      const links = card.getByRole("link");
+      const linkCount = await links.count();
+      const primaryHref = linkCount > 0 ? ((await links.first().getAttribute("href")) ?? "") : "";
+      const secondaryHref = linkCount > 1 ? ((await links.nth(1).getAttribute("href")) ?? null) : null;
+      out.push({ os, arch, primaryHref, secondaryHref });
+    }
+    return out;
+  }
+
+  async cloudDownloadsSigningNoticeVisible(): Promise<boolean> {
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    return (await main.getByText(/not yet code-signed/).count()) > 0;
+  }
+
+  async cloudCliCardFacts(): Promise<CloudCliCardFacts> {
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const cli = main.locator("#cli-heading").locator("xpath=ancestor::section[1]").first();
+    const installer = cli.locator('a[href$=".msi"]').first();
+    const installerHref = (await installer.count()) > 0 ? ((await installer.getAttribute("href")) ?? "") : "";
+    const docs = cli.locator('a[href="/docs"]').first();
+    const docsHref = (await docs.count()) > 0 ? ((await docs.getAttribute("href")) ?? null) : null;
+    const sections = main.locator("section");
+    const closing = sections.last();
+    const web = closing.locator('a[href="/login"]').first();
+    const webHref = (await web.count()) > 0 ? ((await web.getAttribute("href")) ?? null) : null;
+    const signinHintVisible = (await cli.getByText(/pidash auth login/).count()) > 0;
+    return { installerHref, docsHref, webHref, signinHintVisible };
+  }
+
+  async cloudPricingTiers(): Promise<CloudPricingTierFacts[]> {
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const tiers = main.locator("section").nth(1).locator("article");
+    const count = await tiers.count();
+    const out: CloudPricingTierFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const tier = tiers.nth(index);
+      const name = ((await tier.locator("p").first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+      const price = await tier.evaluate((root) => {
+        const amount = root.querySelector("span.text-5xl");
+        return ((amount as HTMLElement | null)?.innerText ?? "").replace(/\s+/g, " ").trim();
+      });
+      const cta = tier.locator("a").last();
+      const ctaHref = (await cta.count()) > 0 ? ((await cta.getAttribute("href")) ?? "") : "";
+      // Off-app destination (the membership checkout navigates in place).
+      const ctaExternal = /^https?:\/\//.test(ctaHref);
+      const features = await tier.locator("ul > li").count();
+      out.push({ name, price, ctaHref, ctaExternal, features });
+    }
+    return out;
+  }
+
+  async cloudPricingEnterpriseHref(): Promise<string | null> {
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const contact = main.locator('a[href*="airepublic.com/contact"]').first();
+    if ((await contact.count()) === 0) return null;
+    return (await contact.getAttribute("href")) ?? null;
+  }
+
+  async cloudPricingFaqCount(): Promise<number> {
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    return main.locator("section").last().locator("article").count();
+  }
+
+  async cloudPricingFreeCapMentioned(): Promise<boolean> {
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const free = main.locator("section").nth(1).locator("article").first();
+    if ((await free.count()) === 0) return false;
+    return /500/.test((await free.innerText()) ?? "");
+  }
+
+  async cloudArmConfirm(action: "accept" | "dismiss"): Promise<void> {
+    this.cloudConfirmAction = action;
+    this.cloudConfirmSeen = [];
+    // The upgrade tab opens synchronously inside the accept; capture from
+    // arm time so a later read cannot miss an already-opened popup.
+    this.cloudPopupWait = this.page.waitForEvent("popup", { timeout: 60_000 }).catch(() => null);
+    // Re-arming must not stack handlers: a second registration would race
+    // the first on the same dialog ("already handled").
+    this.page.off("dialog", this.cloudConfirmHandler);
+    this.page.on("dialog", this.cloudConfirmHandler);
+  }
+
+  private cloudConfirmHandler = async (dialog: import("@playwright/test").Dialog): Promise<void> => {
+    this.cloudConfirmSeen.push(dialog.message());
+    if (this.cloudConfirmAction === "dismiss") await dialog.dismiss();
+    else await dialog.accept();
+  };
+
+  async cloudConfirmMessages(): Promise<string[]> {
+    return [...this.cloudConfirmSeen];
+  }
+
+  async cloudUpgradePopupUrl(): Promise<string> {
+    if (this.cloudPopupWait === null) throw new Error("[parity] cloudArmConfirm must run before reading the popup.");
+    const popup = await this.cloudPopupWait;
+    if (popup === null) throw new Error("[parity] no upgrade popup opened after the quota accept.");
+    const url = popup.url();
+    await popup.close();
+    return url;
   }
 }
