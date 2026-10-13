@@ -29,7 +29,8 @@
 // derive from the origin plus the provider path, and the Gitea help link
 // follows the typed host as of the last form render (a cleared host
 // reads stale until the next render, then falls back to the default
-// host). An unfinished required field blocks the submit silently.
+// host; bug: NEWFRONT-492). An unfinished required field blocks the
+// submit silently.
 // Loading shows five-bar skeletons on both the landing and the provider
 // body.
 import { test, expect } from "../fixtures";
@@ -727,7 +728,7 @@ test(
 );
 
 test(
-  specTitle(["ADM-030"], "Gitea credentials persist and the help link follows the typed host"),
+  specTitle(["ADM-030"], "bug: NEWFRONT-492 Gitea credentials persist; the help link lags the typed host"),
   { tag: specTags(["ADM-030"]) },
   async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
     const session = await serverAdminSession(seed.email, seed.password);

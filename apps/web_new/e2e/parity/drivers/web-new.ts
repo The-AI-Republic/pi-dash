@@ -14384,9 +14384,6 @@ export class WebNewDriver implements ParityDriver {
   async adminAuthSetMethodEnabled(_name: string, _on: boolean): Promise<void> {
     return todo("adminAuthSetMethodEnabled");
   }
-  async adminAuthOpenMethod(_name: string): Promise<void> {
-    return todo("adminAuthOpenMethod");
-  }
   async adminAuthMethodIconSrc(_name: string): Promise<string | null> {
     return todo("adminAuthMethodIconSrc");
   }

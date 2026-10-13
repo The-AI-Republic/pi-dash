@@ -8252,8 +8252,6 @@ export interface ParityDriver {
   adminAuthSetSignup(on: boolean): Promise<void>;
   /** Set the named method card's enable toggle to `on`, clicking only on mismatch. */
   adminAuthSetMethodEnabled(name: string, on: boolean): Promise<void>;
-  /** Follow the named method card's Configure/Edit link. */
-  adminAuthOpenMethod(name: string): Promise<void>;
   /** Method card logo image source, or null when the card shows no image. */
   adminAuthMethodIconSrc(name: string): Promise<string | null>;
   /** Provider sub-page shell snapshot: header card, master toggle, body state, tab title. */
