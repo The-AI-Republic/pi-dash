@@ -10,8 +10,10 @@ import { createServer, type Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   NETWORK,
+  analyticsAdvanceChartsRaw,
   analyticsAdvanceTotalsRaw,
   analyticsProjectCreateStatus,
+  analyticsProjectStatsRaw,
   analyticsWorkspaceName,
   exportsFindRecord,
   exportsListHistory,
@@ -240,6 +242,61 @@ describe("analyticsProjectCreateStatus", () => {
       identifier: "GT0101",
     });
     expect(status).toBe(403);
+  });
+});
+
+// Analytics overview/work-items chart reads (NEWFRONT-376): request shaping
+// and response mapping against the stub, so the live specs only prove server
+// behavior.
+describe("analyticsAdvanceChartsRaw", () => {
+  it("sends type without project_ids for the full workspace", async () => {
+    stubRaw = JSON.stringify([{ key: "work_items", name: "Work Items", count: 2 }]);
+    const read = await analyticsAdvanceChartsRaw(analyticsSession(), "anl-ws", "projects");
+    expect(read.status).toBe(200);
+    expect(read.payload).toEqual([{ key: "work_items", name: "Work Items", count: 2 }]);
+    expect(stubSeen).toHaveLength(1);
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.pathname).toBe("/api/workspaces/anl-ws/advance-analytics-charts");
+    expect(url.searchParams.get("type")).toBe("projects");
+    expect(url.searchParams.has("project_ids")).toBe(false);
+  });
+
+  it("comma-joins the picked projects into project_ids", async () => {
+    payload = { data: [], schema: {} };
+    const read = await analyticsAdvanceChartsRaw(analyticsSession(), "anl-ws", "work-items", ["a", "b"]);
+    expect(read.status).toBe(200);
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.searchParams.get("type")).toBe("work-items");
+    expect(url.searchParams.get("project_ids")).toBe("a,b");
+  });
+
+  it("carries the status with a null payload when the body is unparsable", async () => {
+    stubStatus = 403;
+    stubRaw = "forbidden";
+    const read = await analyticsAdvanceChartsRaw(analyticsSession(), "anl-ws", "projects");
+    expect(read.status).toBe(403);
+    expect(read.payload).toBeNull();
+  });
+});
+
+describe("analyticsProjectStatsRaw", () => {
+  it("sends the list's fields query to the project-stats read", async () => {
+    stubRaw = JSON.stringify([{ id: "p1", total_issues: 2, completed_issues: 1 }]);
+    const read = await analyticsProjectStatsRaw(analyticsSession(), "anl-ws");
+    expect(read.status).toBe(200);
+    expect(read.payload).toEqual([{ id: "p1", total_issues: 2, completed_issues: 1 }]);
+    expect(stubSeen).toHaveLength(1);
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.pathname).toBe("/api/workspaces/anl-ws/project-stats/");
+    expect(url.searchParams.get("fields")).toBe("total_work_items,total_completed_work_items");
+  });
+
+  it("carries the status with a null payload when the body is unparsable", async () => {
+    stubStatus = 500;
+    stubRaw = "boom";
+    const read = await analyticsProjectStatsRaw(analyticsSession(), "anl-ws");
+    expect(read.status).toBe(500);
+    expect(read.payload).toBeNull();
   });
 });
 

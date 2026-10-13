@@ -9548,6 +9548,51 @@ export interface DeskSigninUpdateLink {
   /** Analytics API reads captured since the spy started. */
   analyticsSpyRequests(): Promise<AnalyticsApiRequest[]>;
   // ---------------------------------------------------------------------------
+  // Analytics overview and work-items headline charts (NEWFRONT-376, ANL-005..009).
+  // Headline total cards, the per-project radar chart plus its written
+  // summary, the active-projects list, and the created-vs-resolved chart.
+  // Appended; existing entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Overview-tab headline cards in display order, settled (placeholders gone). */
+  analyticsOverviewCards(): Promise<AnalyticsHeadlineCard[]>;
+  /** Work-items-tab headline cards in display order, settled (placeholders gone). */
+  analyticsWorkItemsCards(): Promise<AnalyticsHeadlineCard[]>;
+  /** Placeholder blocks currently in the visible tab's headline grid (stall probes read this). */
+  analyticsHeadlinePlaceholders(): Promise<number>;
+  /** Stall one tab's headline-totals read so placeholders stay up (test hook). */
+  analyticsTotalsStall(tab: "overview" | "work-items"): Promise<void>;
+  /** Release a stalled headline-totals read (test hook). */
+  analyticsTotalsRelease(): Promise<void>;
+  /** Stall one charts read so the skeleton/loader stays up (test hook). */
+  analyticsChartsStall(chart: "projects" | "work-items"): Promise<void>;
+  /** Release a stalled charts read (test hook). */
+  analyticsChartsRelease(): Promise<void>;
+  /** Stall the project-stats read so list placeholders stay up (test hook). */
+  analyticsProjectStatsStall(): Promise<void>;
+  /** Release a stalled project-stats read (test hook). */
+  analyticsProjectStatsRelease(): Promise<void>;
+  /** Written per-dimension summary rows beside the radar chart, settled. */
+  analyticsRadarSummary(): Promise<AnalyticsRadarRow[]>;
+  /** Radar chart facts: angle-axis dimension labels plus whether the graphic renders. */
+  analyticsRadarFacts(): Promise<AnalyticsRadarFacts>;
+  /** Whether the radar section currently shows its loading skeleton. */
+  analyticsRadarLoading(): Promise<boolean>;
+  /** Active-projects rows in display order, settled (placeholders gone). */
+  analyticsActiveProjects(): Promise<AnalyticsActiveProject[]>;
+  /** Whether the active-projects list currently shows placeholder rows. */
+  analyticsActiveProjectsLoading(): Promise<boolean>;
+  /** Hover one active-project row; resolves with the tooltip text, or null when none appears. */
+  analyticsActiveProjectTooltip(name: string): Promise<string | null>;
+  /** Created-vs-resolved facts: legend, x-axis labels, series count, or the guidance text. */
+  analyticsCreatedResolvedFacts(): Promise<AnalyticsCreatedResolvedFacts>;
+  /** Whether the created-vs-resolved section currently shows its loader. */
+  analyticsCreatedResolvedLoading(): Promise<boolean>;
+  /** Guidance empty-panel text within a named analytics section, or null when it shows data. */
+  analyticsSectionGuidance(title: string): Promise<string | null>;
+  /** Scoped-dialog headline cards in display order, settled (placeholders gone). */
+  analyticsDialogHeadlineCards(): Promise<AnalyticsHeadlineCard[]>;
+  // ---------------------------------------------------------------------------
   // Profile-settings shell, general/account tabs and security tab
   // (NEWFRONT-426, rows PROF-009..015, PROF-026). The standalone settings
   // page at /settings/profile/<tab>: grouped sidebar navigation, the general
@@ -10772,6 +10817,54 @@ export interface AnalyticsApiRequest {
   path: string;
   /** Raw query string without the leading `?`. */
   query: string;
+}
+
+/** One headline total card (NEWFRONT-376, ANL-005/008). */
+export interface AnalyticsHeadlineCard {
+  /** Card label as rendered. */
+  label: string;
+  /** Card count as rendered. */
+  value: string;
+}
+
+/** One written radar-summary row (NEWFRONT-376, ANL-006). */
+export interface AnalyticsRadarRow {
+  /** Dimension name as rendered. */
+  dimension: string;
+  /** Dimension count as rendered. */
+  count: string;
+}
+
+/** Radar graphic facts (NEWFRONT-376, ANL-006). */
+export interface AnalyticsRadarFacts {
+  /** Angle-axis dimension labels in chart order. */
+  dimensions: string[];
+  /** Whether the radar graphic (svg) renders. */
+  plotted: boolean;
+}
+
+/** One active-projects row (NEWFRONT-376, ANL-007). */
+export interface AnalyticsActiveProject {
+  /** Project name as rendered (shortened when long). */
+  name: string;
+  /** Completion badge text as rendered (e.g. `75%`). */
+  badge: string;
+  /** Badge tone: success above halfway, danger at or below, unknown when unreadable. */
+  tone: "success" | "danger" | "unknown";
+  /** Whether the rendered name is visually shortened. */
+  truncated: boolean;
+}
+
+/** Created-vs-resolved chart facts (NEWFRONT-376, ANL-009). */
+export interface AnalyticsCreatedResolvedFacts {
+  /** Legend entries in display order. */
+  legend: string[];
+  /** X-axis tick labels in display order. */
+  xLabels: string[];
+  /** Rendered area series count. */
+  series: number;
+  /** Guidance empty-panel text, or null when the chart renders. */
+  guidance: string | null;
 }
 
 /** One workspace-exports history row (NEWFRONT-381, EXP-007/008/011/012). */

@@ -19656,3 +19656,55 @@ export async function serverDeskShellDeviceTokenError(
   const payload = (await res.json()) as { error?: unknown };
   return { status: res.status, error: typeof payload.error === "string" ? payload.error : "" };
 }
+
+// --- Analytics overview/work-items chart reads (NEWFRONT-376, ANL-005..009). ---
+// Appended; existing helpers above are untouched per the shared contract.
+
+/**
+ * Raw charts read for one analytics graph, optionally narrowed to a project
+ * subset (ANL-006 radar, ANL-009 created-vs-resolved). Mirrors the query the
+ * chart sections send: `type` always, `project_ids` only when the picker
+ * holds a non-empty selection.
+ */
+export async function analyticsAdvanceChartsRaw(
+  session: AuthedSession,
+  slug: string,
+  type: "projects" | "work-items",
+  projectIds: string[] = []
+): Promise<AnalyticsRawRead> {
+  const params = new URLSearchParams({ type });
+  if (projectIds.length > 0) params.set("project_ids", projectIds.join(","));
+  const res = await sessionFetch(
+    session,
+    "GET",
+    `/api/workspaces/${slug}/advance-analytics-charts?${params.toString()}`
+  );
+  let payload: unknown = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}
+
+/**
+ * Raw project-stats read backing the active-projects list (ANL-007). Mirrors
+ * the list's query, including the `fields` names it asks for (the server
+ * answers unknown names with its default full field set).
+ */
+export async function analyticsProjectStatsRaw(
+  session: AuthedSession,
+  slug: string,
+  fields: string[] = ["total_work_items", "total_completed_work_items"]
+): Promise<AnalyticsRawRead> {
+  const params = new URLSearchParams({ fields: fields.join(",") });
+  const res = await sessionFetch(session, "GET", `/api/workspaces/${slug}/project-stats/?${params.toString()}`);
+  let payload: unknown = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}

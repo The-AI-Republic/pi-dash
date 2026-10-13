@@ -162,6 +162,11 @@ import type {
   PagesToolbarTooltip,
   AnalyticsApiRequest,
   AnalyticsEmptyFacts,
+  AnalyticsHeadlineCard,
+  AnalyticsRadarRow,
+  AnalyticsRadarFacts,
+  AnalyticsActiveProject,
+  AnalyticsCreatedResolvedFacts,
   PagesBlocksAssetRow,
   PagesBlocksInfoStats,
   PagesBlocksInlineImage,
@@ -39716,6 +39721,501 @@ export class WebDriver implements ParityDriver {
 
   async analyticsSpyRequests(): Promise<AnalyticsApiRequest[]> {
     return [...this.analyticsSpySeen];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Analytics overview and work-items headline charts (NEWFRONT-376, ANL-005..009).
+  // Headline cards settle over the totals read (a plain placeholder block per
+  // card while loading, zero when a metric is missing); the radar section
+  // pairs its graphic with a written per-dimension ledger; the active-projects
+  // list pairs truncated names (full name on hover) with a completion badge;
+  // created-vs-resolved pairs two area series with calendar axis labels and a
+  // legend. Selectors below were observed on the running old app. Stall hooks
+  // hold one read family behind a gate so loading states stay observable.
+  // ---------------------------------------------------------------------------
+
+  /** Single route hook serving the totals/charts/project-stats stall gates. */
+  private analyticsReadHookInstalled = false;
+  private analyticsTotalsStalled = new Set<string>();
+  private analyticsTotalsGates: Array<() => void> = [];
+  private analyticsChartsStalled = new Set<string>();
+  private analyticsChartsGates: Array<() => void> = [];
+  private analyticsStatsStalled = false;
+  private analyticsStatsGates: Array<() => void> = [];
+
+  private async analyticsReadHook(): Promise<void> {
+    if (this.analyticsReadHookInstalled) return;
+    this.analyticsReadHookInstalled = true;
+    await this.page.route("**/api/workspaces/**", async (route) => {
+      const request = route.request();
+      if (request.method() === "GET") {
+        try {
+          const url = new URL(request.url());
+          if (
+            url.pathname.endsWith("/advance-analytics") &&
+            this.analyticsTotalsStalled.has(url.searchParams.get("tab") ?? "")
+          ) {
+            await new Promise<void>((resolve) => {
+              this.analyticsTotalsGates.push(resolve);
+            });
+          } else if (
+            url.pathname.endsWith("/advance-analytics-charts") &&
+            this.analyticsChartsStalled.has(url.searchParams.get("type") ?? "")
+          ) {
+            await new Promise<void>((resolve) => {
+              this.analyticsChartsGates.push(resolve);
+            });
+          } else if (url.pathname.endsWith("/project-stats/") && this.analyticsStatsStalled) {
+            await new Promise<void>((resolve) => {
+              this.analyticsStatsGates.push(resolve);
+            });
+          }
+        } catch {
+          // Unparseable URLs fall through untouched.
+        }
+      }
+      await route.fallback();
+    });
+  }
+
+  async analyticsTotalsStall(tab: "overview" | "work-items"): Promise<void> {
+    this.analyticsTotalsStalled.add(tab);
+    await this.analyticsReadHook();
+  }
+
+  async analyticsTotalsRelease(): Promise<void> {
+    this.analyticsTotalsStalled.clear();
+    const gates = this.analyticsTotalsGates;
+    this.analyticsTotalsGates = [];
+    gates.forEach((release) => release());
+  }
+
+  async analyticsChartsStall(chart: "projects" | "work-items"): Promise<void> {
+    this.analyticsChartsStalled.add(chart);
+    await this.analyticsReadHook();
+  }
+
+  async analyticsChartsRelease(): Promise<void> {
+    this.analyticsChartsStalled.clear();
+    const gates = this.analyticsChartsGates;
+    this.analyticsChartsGates = [];
+    gates.forEach((release) => release());
+  }
+
+  async analyticsProjectStatsStall(): Promise<void> {
+    this.analyticsStatsStalled = true;
+    await this.analyticsReadHook();
+  }
+
+  async analyticsProjectStatsRelease(): Promise<void> {
+    this.analyticsStatsStalled = false;
+    const gates = this.analyticsStatsGates;
+    this.analyticsStatsGates = [];
+    gates.forEach((release) => release());
+  }
+
+  /**
+   * Panel of the selected analytics tab. The headline grid is the panel's
+   * first grid container; each card pairs a label line with either a value
+   * block or a fixed-height placeholder block while the totals read flies.
+   */
+  private async analyticsHeadlineGrid(): Promise<{ labels: string[]; values: Array<string | null> }> {
+    return this.page.evaluate(() => {
+      const trigger = [...document.querySelectorAll("[role='tab']")].find(
+        (t) => t.getAttribute("aria-selected") === "true"
+      );
+      const controls = trigger?.getAttribute("aria-controls");
+      const panel = controls ? document.getElementById(controls) : null;
+      if (!panel) throw new Error("[parity] no selected analytics tab panel.");
+      const grid = panel.querySelector("div.grid");
+      if (!grid) throw new Error("[parity] selected analytics tab has no headline grid.");
+      const labels: string[] = [];
+      const values: Array<string | null> = [];
+      for (const card of [...grid.children]) {
+        const label = ((card.children[0]?.textContent ?? "") as string).trim();
+        const body = card.children[1] as HTMLElement | undefined;
+        labels.push(label);
+        if (!body) {
+          values.push(null);
+        } else if (body.style.height === "50px") {
+          values.push(null);
+        } else {
+          values.push((body.innerText as string).trim());
+        }
+      }
+      return { labels, values };
+    });
+  }
+
+  private async analyticsAwaitHeadlines(): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () => {
+          const trigger = [...document.querySelectorAll("[role='tab']")].find(
+            (t) => t.getAttribute("aria-selected") === "true"
+          );
+          const controls = trigger?.getAttribute("aria-controls");
+          const panel = controls ? document.getElementById(controls) : null;
+          const grid = panel?.querySelector("div.grid") ?? null;
+          if (!grid || grid.children.length === 0) return false;
+          return ![...grid.children].some(
+            (card) => (card.children[1] as HTMLElement | undefined)?.style.height === "50px"
+          );
+        },
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics headline cards never settled.");
+      });
+  }
+
+  async analyticsOverviewCards(): Promise<AnalyticsHeadlineCard[]> {
+    await this.analyticsAwaitHeadlines();
+    const grid = await this.analyticsHeadlineGrid();
+    return grid.labels.map((label, index) => ({ label, value: grid.values[index] ?? "" }));
+  }
+
+  async analyticsWorkItemsCards(): Promise<AnalyticsHeadlineCard[]> {
+    await this.analyticsAwaitHeadlines();
+    const grid = await this.analyticsHeadlineGrid();
+    return grid.labels.map((label, index) => ({ label, value: grid.values[index] ?? "" }));
+  }
+
+  async analyticsHeadlinePlaceholders(): Promise<number> {
+    return this.page.evaluate(() => {
+      const trigger = [...document.querySelectorAll("[role='tab']")].find(
+        (t) => t.getAttribute("aria-selected") === "true"
+      );
+      const controls = trigger?.getAttribute("aria-controls");
+      const panel = controls ? document.getElementById(controls) : null;
+      const grid = panel?.querySelector("div.grid") ?? null;
+      if (!grid) return 0;
+      return [...grid.children].filter((card) => (card.children[1] as HTMLElement | undefined)?.style.height === "50px")
+        .length;
+    });
+  }
+
+  /** Read the radar ledger rows (dimension plus count) from the live section. */
+  async analyticsRadarSummary(): Promise<AnalyticsRadarRow[]> {
+    await this.page
+      .waitForFunction(
+        (wanted) => {
+          const trigger = [...document.querySelectorAll("[role='tab']")].find(
+            (t) => t.getAttribute("aria-selected") === "true"
+          );
+          const controls = trigger?.getAttribute("aria-controls");
+          const panel = controls ? document.getElementById(controls) : null;
+          if (!panel) return false;
+          const heading = [...panel.querySelectorAll("h1")].find(
+            (h) => ((h.textContent ?? "") as string).trim() === wanted
+          );
+          const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+          if (!section) return false;
+          return section.querySelector("[role='status']") === null;
+        },
+        "Project Insights",
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics radar section never settled.");
+      });
+    return this.page.evaluate(() => {
+      const trigger = [...document.querySelectorAll("[role='tab']")].find(
+        (t) => t.getAttribute("aria-selected") === "true"
+      );
+      const controls = trigger?.getAttribute("aria-controls");
+      const panel = controls ? document.getElementById(controls) : null;
+      const heading = [...(panel?.querySelectorAll("h1") ?? [])].find(
+        (h) => ((h.textContent ?? "") as string).trim() === "Project Insights"
+      );
+      const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+      if (!section) return [];
+      return [...section.querySelectorAll("div")]
+        .filter((el) => {
+          const classes = typeof el.className === "string" ? el.className : "";
+          return classes.includes("justify-between") && classes.includes("text-primary");
+        })
+        .map((row) => ({
+          dimension: ((row.children[0]?.textContent ?? "") as string).trim(),
+          count: ((row.lastElementChild?.textContent ?? "") as string).trim(),
+        }))
+        .filter((row) => row.dimension !== "");
+    });
+  }
+
+  async analyticsRadarFacts(): Promise<AnalyticsRadarFacts> {
+    return this.page.evaluate(() => {
+      const trigger = [...document.querySelectorAll("[role='tab']")].find(
+        (t) => t.getAttribute("aria-selected") === "true"
+      );
+      const controls = trigger?.getAttribute("aria-controls");
+      const panel = controls ? document.getElementById(controls) : null;
+      const heading = [...(panel?.querySelectorAll("h1") ?? [])].find(
+        (h) => ((h.textContent ?? "") as string).trim() === "Project Insights"
+      );
+      const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+      if (!section) return { dimensions: [], plotted: false };
+      const svg = section.querySelector("svg.recharts-surface");
+      if (!svg) return { dimensions: [], plotted: false };
+      const dimensions = [...svg.querySelectorAll("text")]
+        .map((t) => ((t.textContent ?? "") as string).trim())
+        .filter((t) => t !== "");
+      return { dimensions, plotted: true };
+    });
+  }
+
+  async analyticsRadarLoading(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const trigger = [...document.querySelectorAll("[role='tab']")].find(
+        (t) => t.getAttribute("aria-selected") === "true"
+      );
+      const controls = trigger?.getAttribute("aria-controls");
+      const panel = controls ? document.getElementById(controls) : null;
+      if (!panel) return false;
+      const heading = [...panel.querySelectorAll("h1")].find(
+        (h) => ((h.textContent ?? "") as string).trim() === "Project Insights"
+      );
+      const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+      if (!section) return false;
+      return section.querySelector("[role='status']") !== null;
+    });
+  }
+
+  async analyticsActiveProjects(): Promise<AnalyticsActiveProject[]> {
+    await this.page
+      .waitForFunction(
+        () => {
+          const trigger = [...document.querySelectorAll("[role='tab']")].find(
+            (t) => t.getAttribute("aria-selected") === "true"
+          );
+          const controls = trigger?.getAttribute("aria-controls");
+          const panel = controls ? document.getElementById(controls) : null;
+          if (!panel) return false;
+          const heading = [...panel.querySelectorAll("h1")].find(
+            (h) => ((h.textContent ?? "") as string).trim() === "Active Projects"
+          );
+          const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+          if (!section) return false;
+          return ![...section.querySelectorAll("div")].some((el) => (el as HTMLElement).style.height === "40px");
+        },
+        undefined,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics active-projects list never settled.");
+      });
+    return this.page.evaluate(() => {
+      const trigger = [...document.querySelectorAll("[role='tab']")].find(
+        (t) => t.getAttribute("aria-selected") === "true"
+      );
+      const controls = trigger?.getAttribute("aria-controls");
+      const panel = controls ? document.getElementById(controls) : null;
+      const heading = [...(panel?.querySelectorAll("h1") ?? [])].find(
+        (h) => ((h.textContent ?? "") as string).trim() === "Active Projects"
+      );
+      const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+      if (!section) return [];
+      const rows: AnalyticsActiveProject[] = [];
+      for (const el of [...section.querySelectorAll("div")]) {
+        const badge = ((el.textContent ?? "") as string).trim();
+        if (!/^\d+%$/.test(badge)) continue;
+        const row = el.parentElement;
+        const nameEl = row?.querySelector("p") as HTMLElement | null;
+        if (!nameEl) continue;
+        const classes = typeof el.className === "string" ? el.className : "";
+        rows.push({
+          name: ((nameEl.textContent ?? "") as string).trim(),
+          badge,
+          tone: classes.includes("bg-success-subtle")
+            ? "success"
+            : classes.includes("bg-danger-subtle")
+              ? "danger"
+              : "unknown",
+          truncated: nameEl.scrollWidth > nameEl.clientWidth + 1,
+        });
+      }
+      return rows;
+    });
+  }
+
+  async analyticsActiveProjectsLoading(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const trigger = [...document.querySelectorAll("[role='tab']")].find(
+        (t) => t.getAttribute("aria-selected") === "true"
+      );
+      const controls = trigger?.getAttribute("aria-controls");
+      const panel = controls ? document.getElementById(controls) : null;
+      if (!panel) return false;
+      const heading = [...panel.querySelectorAll("h1")].find(
+        (h) => ((h.textContent ?? "") as string).trim() === "Active Projects"
+      );
+      const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+      if (!section) return false;
+      return [...section.querySelectorAll("div")].some((el) => (el as HTMLElement).style.height === "40px");
+    });
+  }
+
+  async analyticsActiveProjectTooltip(name: string): Promise<string | null> {
+    // The tooltip renders through a portal at the document root (outside the
+    // tab panel), so the hovered row's own label and the tooltip copy are told
+    // apart by ancestry: only the tooltip copy sits outside every panel.
+    const handle = await this.page.evaluateHandle((target) => {
+      const trigger = [...document.querySelectorAll("[role='tab']")].find(
+        (t) => t.getAttribute("aria-selected") === "true"
+      );
+      const controls = trigger?.getAttribute("aria-controls");
+      const panel = controls ? document.getElementById(controls) : null;
+      const heading = [...(panel?.querySelectorAll("h1") ?? [])].find(
+        (h) => ((h.textContent ?? "") as string).trim() === "Active Projects"
+      );
+      const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+      return (
+        [...(section?.querySelectorAll("p") ?? [])].find((p) => ((p.textContent ?? "") as string).trim() === target) ??
+        null
+      );
+    }, name);
+    const element = handle.asElement();
+    if (!element) return null;
+    await element.scrollIntoViewIfNeeded().catch(() => undefined);
+    await element.hover({ timeout: WebDriver.WAIT_MS }).catch(() => undefined);
+    return this.page
+      .waitForFunction(
+        (target) => {
+          const copy = [...document.querySelectorAll("p")].find(
+            (p) =>
+              ((p.textContent ?? "") as string).trim() === target &&
+              p.closest("[role='tabpanel'], [role='dialog']") === null
+          );
+          return copy ? ((copy.textContent ?? "") as string).trim() : null;
+        },
+        name,
+        { timeout: 10_000 }
+      )
+      .then((result) => result.jsonValue() as Promise<string | null>)
+      .catch(() => null);
+  }
+
+  async analyticsCreatedResolvedFacts(): Promise<AnalyticsCreatedResolvedFacts> {
+    await this.page
+      .waitForFunction(
+        () => {
+          const trigger = [...document.querySelectorAll("[role='tab']")].find(
+            (t) => t.getAttribute("aria-selected") === "true"
+          );
+          const controls = trigger?.getAttribute("aria-controls");
+          const panel = controls ? document.getElementById(controls) : null;
+          if (!panel) return false;
+          const heading = [...panel.querySelectorAll("h1")].find(
+            (h) => ((h.textContent ?? "") as string).trim() === "Created vs Resolved"
+          );
+          const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+          if (!section) return false;
+          if (section.querySelector("[role='status']") !== null) return false;
+          if (section.querySelector("svg.recharts-surface") !== null) return true;
+          return [...section.querySelectorAll("p")].some((p) => ((p.textContent ?? "") as string).trim().length > 20);
+        },
+        undefined,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics created-vs-resolved section never settled.");
+      });
+    return this.page.evaluate(() => {
+      const trigger = [...document.querySelectorAll("[role='tab']")].find(
+        (t) => t.getAttribute("aria-selected") === "true"
+      );
+      const controls = trigger?.getAttribute("aria-controls");
+      const panel = controls ? document.getElementById(controls) : null;
+      const heading = [...(panel?.querySelectorAll("h1") ?? [])].find(
+        (h) => ((h.textContent ?? "") as string).trim() === "Created vs Resolved"
+      );
+      const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+      if (!section) return { legend: [], xLabels: [], series: 0, guidance: null };
+      const guidance =
+        [...section.querySelectorAll("p")]
+          .map((p) => ((p.textContent ?? "") as string).trim())
+          .find((t) => t.length > 20) ?? null;
+      if (section.querySelector("svg.recharts-surface") === null)
+        return { legend: [], xLabels: [], series: 0, guidance };
+      // The legend is custom markup (not recharts' default classes): the
+      // wrapper's container holds one item per series, swatch plus label.
+      const legendWrap = section.querySelector(".recharts-legend-wrapper");
+      const legendItems = [...(legendWrap?.firstElementChild?.children ?? [])];
+      const legend = legendItems.map((el) => ((el.textContent ?? "") as string).trim()).filter((t) => t !== "");
+      // Ticks carry their own wrappers; the axis caption sits beside them.
+      const xLabels = [...section.querySelectorAll(".recharts-xAxis .recharts-cartesian-axis-tick text")]
+        .map((el) => ((el.textContent ?? "") as string).trim())
+        .filter((t) => t !== "");
+      // One area group per series; single-point series render dots only.
+      const series = section.querySelectorAll(".recharts-area").length;
+      return { legend, xLabels, series, guidance: null };
+    });
+  }
+
+  async analyticsCreatedResolvedLoading(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const trigger = [...document.querySelectorAll("[role='tab']")].find(
+        (t) => t.getAttribute("aria-selected") === "true"
+      );
+      const controls = trigger?.getAttribute("aria-controls");
+      const panel = controls ? document.getElementById(controls) : null;
+      if (!panel) return false;
+      const heading = [...panel.querySelectorAll("h1")].find(
+        (h) => ((h.textContent ?? "") as string).trim() === "Created vs Resolved"
+      );
+      const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+      if (!section) return false;
+      return section.querySelector("[role='status']") !== null;
+    });
+  }
+
+  async analyticsSectionGuidance(title: string): Promise<string | null> {
+    return this.page.evaluate((wanted) => {
+      const trigger = [...document.querySelectorAll("[role='tab']")].find(
+        (t) => t.getAttribute("aria-selected") === "true"
+      );
+      const controls = trigger?.getAttribute("aria-controls");
+      const panel = controls ? document.getElementById(controls) : null;
+      if (!panel) return null;
+      const heading = [...panel.querySelectorAll("h1")].find(
+        (h) => ((h.textContent ?? "") as string).trim() === wanted
+      );
+      const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+      if (!section || section.querySelector("svg.recharts-surface") !== null) return null;
+      return (
+        [...section.querySelectorAll("p")]
+          .map((p) => ((p.textContent ?? "") as string).trim())
+          .find((t) => t.length > 20) ?? null
+      );
+    }, title);
+  }
+
+  async analyticsDialogHeadlineCards(): Promise<AnalyticsHeadlineCard[]> {
+    await this.page
+      .waitForFunction(
+        () => {
+          const dialog = document.querySelector("[role='dialog']");
+          const grid = dialog?.querySelector("div.grid") ?? null;
+          if (!grid || grid.children.length === 0) return false;
+          return ![...grid.children].some(
+            (card) => (card.children[1] as HTMLElement | undefined)?.style.height === "50px"
+          );
+        },
+        undefined,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics dialog headline cards never settled.");
+      });
+    return this.page.evaluate(() => {
+      const dialog = document.querySelector("[role='dialog']");
+      const grid = dialog?.querySelector("div.grid") ?? null;
+      if (!grid) throw new Error("[parity] analytics dialog has no headline grid.");
+      return [...grid.children].map((card) => ({
+        label: ((card.children[0]?.textContent ?? "") as string).trim(),
+        value: ((card.children[1] as HTMLElement | undefined)?.innerText as string | undefined)?.trim() ?? "",
+      }));
+    });
   }
 
   // --- Pages blocks/embeds/mentions/links (NEWFRONT-316, PAGE-037-044).
