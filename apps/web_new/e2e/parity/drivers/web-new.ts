@@ -15526,4 +15526,22 @@ export class WebNewDriver implements ParityDriver {
   async cloudFocusedControl(): Promise<{ role: string; label: string } | null> {
     return todo("cloudFocusedControl");
   }
+
+  // --- Desktop sign-in halves (NEWFRONT-486, AUTH-022/AUTH-023). Stubs:
+  // --- the area gate implements them against apps/web_new.
+  async authDesktopUnavailableCardVisible(): Promise<boolean> {
+    return todo("authDesktopUnavailableCardVisible");
+  }
+
+  async authDesktopBrowserActionLabel(): Promise<string | null> {
+    return todo("authDesktopBrowserActionLabel");
+  }
+
+  async authDesktopClickBrowserAction(): Promise<void> {
+    return todo("authDesktopClickBrowserAction");
+  }
+
+  async authDesktopFailureAlertText(): Promise<string | null> {
+    return todo("authDesktopFailureAlertText");
+  }
 }

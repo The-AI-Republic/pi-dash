@@ -2,7 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { describe, expect, it, vi } from "vitest";
-import { authKeys, invitationQueryOptions, myInvitationsQueryOptions, myJoinRequestsQueryOptions } from "./queries.js";
+import {
+  authKeys,
+  invitationQueryOptions,
+  membershipQueryOptions,
+  myInvitationsQueryOptions,
+  myJoinRequestsQueryOptions,
+  projectQueryOptions,
+  projectRolesQueryOptions,
+} from "./queries.js";
 
 describe("invitation query", () => {
   it("keys one invitation by slug and id", () => {
@@ -50,5 +58,49 @@ describe("own invitations and join requests", () => {
     expect(options.queryKey).toEqual(authKeys.myJoinRequests);
     await expect(options.queryFn?.({} as never)).resolves.toEqual(requests);
     expect(getJson).toHaveBeenCalledWith("/api/users/me/workspaces/join-requests/");
+  });
+});
+
+describe("denial feed queries", () => {
+  function fakeClient(body: unknown) {
+    const getJson = vi.fn(async () => body);
+    const client = {
+      getJson,
+      parse: (_schema: unknown, data: unknown) => data,
+    } as never;
+    return { client, getJson };
+  }
+
+  it("keys the feeds under the workspace scope", () => {
+    expect(authKeys.membership("acme")).toEqual(["ws", "acme", "auth", "membership"]);
+    expect(authKeys.projectRoles("acme")).toEqual(["ws", "acme", "auth", "project-roles"]);
+    expect(authKeys.project("acme", "project-1")).toEqual(["ws", "acme", "auth", "project", "project-1"]);
+  });
+
+  it("reads the caller's own membership", async () => {
+    const row = { member: "user-1", role: 20 };
+    const { client, getJson } = fakeClient(row);
+    const options = membershipQueryOptions(client, "acme");
+    expect(options.queryKey).toEqual(authKeys.membership("acme"));
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(row);
+    expect(getJson).toHaveBeenCalledWith("/api/workspaces/acme/workspace-members/me/");
+  });
+
+  it("reads the caller's per-project roles", async () => {
+    const roles = { "project-1": 20 };
+    const { client, getJson } = fakeClient(roles);
+    const options = projectRolesQueryOptions(client, "acme");
+    expect(options.queryKey).toEqual(authKeys.projectRoles("acme"));
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(roles);
+    expect(getJson).toHaveBeenCalledWith("/api/users/me/workspaces/acme/project-roles/");
+  });
+
+  it("reads one project row for its fetch status", async () => {
+    const row = { id: "project-1", name: "Web" };
+    const { client, getJson } = fakeClient(row);
+    const options = projectQueryOptions(client, "acme", "project-1");
+    expect(options.queryKey).toEqual(authKeys.project("acme", "project-1"));
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(row);
+    expect(getJson).toHaveBeenCalledWith("/api/workspaces/acme/projects/project-1/");
   });
 });

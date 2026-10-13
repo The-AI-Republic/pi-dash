@@ -13,6 +13,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 // Local Django for `pnpm dev`. Overridden per shell with e.g.
 // `export PIDASH_API_ORIGIN="http://127.0.0.1:8123"` on its own line.
 const apiOrigin = process.env.PIDASH_API_ORIGIN ?? "http://localhost:8000";
+// Hosted web app origin for the desktop unavailable-sign-in card
+// (AUTH-023). The desktop pipeline bakes PIDASH_WEB_BASE_URL; builds
+// without it fall back to the API origin at runtime.
+const webBaseUrl = process.env.PIDASH_WEB_BASE_URL ?? null;
 
 // Static SPA only (D9). One bundle per target; the desktop bundle is loaded
 // by the Tauri shell. No file swapping: platform differences live behind
@@ -22,6 +26,7 @@ export default defineConfig(({ mode }) => {
   return {
     define: {
       __PIDASH_TARGET__: JSON.stringify(buildTarget),
+      __PIDASH_WEB_BASE_URL__: JSON.stringify(webBaseUrl),
     },
     outDir: `dist/${buildTarget}`,
     resolve: {

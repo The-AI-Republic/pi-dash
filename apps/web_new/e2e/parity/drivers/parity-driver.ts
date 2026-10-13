@@ -8521,6 +8521,20 @@ export interface ParityDriver {
   spaceAuthHeader(): Promise<{ heading: string | null; subline: string | null }>;
   /** Consent line text plus terms/privacy link targets (nulls when absent). */
   spaceAuthConsent(): Promise<{ text: string | null; termsHref: string | null; privacyHref: string | null }>;
+
+  // --- Desktop sign-in halves (NEWFRONT-486, AUTH-022/AUTH-023).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract. These run against the desktop builds only: the community
+  // --- desktop entry renders the unavailable card, and the failure landing
+  // --- echoes provider errors above the card.
+  /** True when the desktop unavailable-sign-in card shows. */
+  authDesktopUnavailableCardVisible(): Promise<boolean>;
+  /** Accessible label of the unavailable card's open-in-browser action, or null when absent. */
+  authDesktopBrowserActionLabel(): Promise<string | null>;
+  /** Click the unavailable card's open-in-browser action. */
+  authDesktopClickBrowserAction(): Promise<void>;
+  /** Alert text above the desktop card for a failure landing, or null when no alert shows. */
+  authDesktopFailureAlertText(): Promise<string | null>;
 }
 
 /** One list group / board column as rendered (NEWFRONT-449, SPC-023/024/026). */

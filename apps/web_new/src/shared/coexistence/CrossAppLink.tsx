@@ -19,6 +19,8 @@ export interface CrossAppLinkProps extends Omit<React.AnchorHTMLAttributes<HTMLA
   /** Prefix override for tests and previews; defaults to the bundled list. */
   prefixes?: readonly string[] | undefined;
   children: React.ReactNode;
+  /** React 19 ref-as-prop: forwarded to the anchor (or the router link). */
+  ref?: React.Ref<HTMLAnchorElement> | undefined;
 }
 
 // The installed router's prop types are anchored on its own copies of the

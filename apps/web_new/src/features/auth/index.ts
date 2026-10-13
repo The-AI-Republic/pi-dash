@@ -8,7 +8,9 @@ export {
   DEACTIVATE_SUCCESS_MESSAGE,
   DEACTIVATE_SUCCESS_TITLE,
   FINISH_FAILURE_TITLE,
+  JOIN_PROJECT_FAILED_TITLE,
   useAcceptWorkspaceInvitations,
+  useApproveDeviceCode,
   useCheckWorkspaceSlug,
   useCreateJoinRequest,
   useCreateWorkspace,
@@ -16,6 +18,7 @@ export {
   useEmailCheck,
   useFinishOnboarding,
   useForgotPassword,
+  useJoinProject,
   useMagicGenerate,
   useMagicSignIn,
   useMagicSignUp,
@@ -103,6 +106,35 @@ export {
 } from "./workspace.js";
 export type { WorkspaceStepView } from "./workspace.js";
 export { performSignOut, SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE, signOutLandingTarget } from "./signOut.js";
+export {
+  describeDeviceApprovalFailure,
+  DEVICE_APPROVE_FAILED_MESSAGE,
+  DEVICE_CODE_FIELD_LENGTH,
+  DEVICE_CODE_LENGTH,
+  formatDeviceCode,
+  isCompleteDeviceCode,
+  normalizeDeviceCode,
+} from "./device.js";
+export { decideProjectDenial, decideWorkspaceDenial, isProjectGateError } from "./denials.js";
+export type { ProjectDenial, WorkspaceDenial } from "./denials.js";
+export {
+  bakedWebBaseUrl,
+  describeDesktopSignInFailure,
+  fallbackToPlainNavigation,
+  parseBakedWebBaseUrl,
+  parseDesktopEntrySearch,
+  resolveBrowserAppUrl,
+} from "./desktop.js";
+export type { DesktopEntrySearch, DesktopSignInFailure } from "./desktop.js";
+export { authStepInputProps, pointerOnlyControlProps, swallowEnterInTextField, useFocusOnMount } from "./focus.js";
+export {
+  membershipQueryOptions,
+  projectQueryOptions,
+  projectRolesQueryOptions,
+  useProjectRoles,
+  useProjectRow,
+  useWorkspaceMembership,
+} from "./queries.js";
 export { DeactivateAccountDialog } from "./components/DeactivateAccountDialog.js";
 export type { DeactivateAccountDialogProps } from "./components/DeactivateAccountDialog.js";
 export { AuthBanner, isValidEmail, SignInCard } from "./components/SignInCard.js";
@@ -118,6 +150,16 @@ export type { ResetPasswordCardProps } from "./components/ResetPasswordCard.js";
 export { SetPasswordCard } from "./components/SetPasswordCard.js";
 export { SwitchAccountDialog } from "./components/SwitchAccountDialog.js";
 export type { SwitchAccountDialogProps } from "./components/SwitchAccountDialog.js";
+export { DeviceApprovalCard } from "./components/DeviceApprovalCard.js";
+export type { DeviceApprovalCardProps } from "./components/DeviceApprovalCard.js";
+export { DesktopSignInScreen } from "./components/DesktopSignInScreen.js";
+export type { DesktopSignInScreenProps } from "./components/DesktopSignInScreen.js";
+export { DesktopUnavailableCard } from "./components/DesktopUnavailableCard.js";
+export { ProjectAccessGate } from "./components/ProjectAccessGate.js";
+export type { ProjectAccessGateProps } from "./components/ProjectAccessGate.js";
+export { WorkspaceNotFoundScreen } from "./components/WorkspaceNotFoundScreen.js";
+export type { WorkspaceNotFoundScreenProps } from "./components/WorkspaceNotFoundScreen.js";
+export { WorkspaceNotMemberScreen } from "./components/WorkspaceNotMemberScreen.js";
 export { CLI_COPY_FAILED_TITLE, CliInstallStep } from "./components/CliInstallStep.js";
 export type { CliInstallStepProps } from "./components/CliInstallStep.js";
 export { OnboardingFlow, ONBOARDING_STAMP_FAILED_TITLE } from "./components/OnboardingFlow.js";

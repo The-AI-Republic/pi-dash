@@ -27,6 +27,21 @@ vi.mock("../features/auth/index.js", () => ({
       data-slug={props.invitationSlug ?? ""}
     />
   ),
+  DesktopSignInScreen: (props: { error?: string; errorDescription?: string }) => (
+    <div
+      data-testid="desktop-sign-in"
+      data-error={props.error ?? ""}
+      data-error-description={props.errorDescription ?? ""}
+    />
+  ),
+}));
+
+const platformHarness = vi.hoisted(() => ({ kind: "web" }));
+
+vi.mock("../core/platform/index.js", () => ({
+  get platform() {
+    return platformHarness;
+  },
 }));
 
 import { isRedirect } from "@tanstack/react-router";
@@ -72,6 +87,14 @@ describe("parseEntrySearch", () => {
 
   it("keeps a partial search", () => {
     expect(parseEntrySearch({ next: "/acme", error_code: "5900" })).toEqual({ next: "/acme", error_code: "5900" });
+  });
+
+  it("keeps the desktop failure landing for the desktop entry to read", () => {
+    expect(parseEntrySearch({ error: "access_denied", error_description: "The provider refused." })).toEqual({
+      error: "access_denied",
+      error_description: "The provider refused.",
+    });
+    expect(parseEntrySearch({ error: "", error_description: 7 })).toEqual({});
   });
 });
 
@@ -203,9 +226,15 @@ describe("EntryScreen", () => {
 describe("entry route component", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    platformHarness.kind = "web";
   });
 
-  function renderEntry(search: { next?: string; unsafeNext?: string }): void {
+  function renderEntry(search: {
+    next?: string;
+    unsafeNext?: string;
+    error?: string;
+    error_description?: string;
+  }): void {
     vi.spyOn(Route, "useSearch").mockReturnValue(search);
     const Component = Route.options.component;
     if (!Component) throw new Error("entry route has no component");
@@ -222,5 +251,14 @@ describe("entry route component", () => {
     const card = screen.getByTestId("sign-in-card");
     expect(card).toHaveAttribute("data-next", "");
     expect(card).toHaveAttribute("data-unsafe-next", "https://evil.test/phish");
+  });
+
+  it("renders the desktop sign-in screen on desktop builds", () => {
+    platformHarness.kind = "desktop";
+    renderEntry({ error: "access_denied", error_description: "The provider refused." });
+    const screen_ = screen.getByTestId("desktop-sign-in");
+    expect(screen_).toHaveAttribute("data-error", "access_denied");
+    expect(screen_).toHaveAttribute("data-error-description", "The provider refused.");
+    expect(screen.queryByTestId("sign-in-card")).not.toBeInTheDocument();
   });
 });

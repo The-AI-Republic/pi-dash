@@ -12,6 +12,7 @@ import { Button } from "@pidash/kit";
 import * as React from "react";
 
 import { invalidateWorkspace } from "../../../../../../core/query/optimistic.js";
+import { isProjectGateError } from "../../../../../../features/auth/index.js";
 import { IssueList, issuesQueryOptions, parseIssueSearch } from "../../../../../../features/issues/index.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
@@ -20,9 +21,16 @@ import { notifyError } from "../../../../../../shared/shell/index.js";
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")({
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
   beforeLoad: async ({ context, params, search }) => {
-    await context.queryClient.ensureQueryData(
-      issuesQueryOptions(context.apiClient, params.ws, params.projectId, search)
-    );
+    try {
+      await context.queryClient.ensureQueryData(
+        issuesQueryOptions(context.apiClient, params.ws, params.projectId, search)
+      );
+    } catch (error) {
+      // Denial statuses belong to the project gate (AUTH-024): let them
+      // through so the gate renders the denial screen instead of the load
+      // error.
+      if (!isProjectGateError(error)) throw error;
+    }
   },
   loader: async ({ context, params }) => {
     await context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws));

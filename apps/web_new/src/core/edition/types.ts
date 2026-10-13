@@ -6,6 +6,7 @@
 // programs against this interface.
 
 import type { Middleware } from "@pidash/api-client";
+import type { ComponentType } from "react";
 
 /** Extra route subtree contributed by an edition. */
 export interface RouteExtension {
@@ -36,6 +37,16 @@ export interface AuthProviderExtension {
  * design decision recorded in the PR and on the Decisions page. */
 export interface SlotComponents {
   issueDetailSidebarAfter?: () => null;
+  /**
+   * Desktop sign-in card (AUTH-022/AUTH-023, NEWFRONT-486). Editions whose
+   * server implements the desktop hand-off fill this with their
+   * browser-opening card; the OSS edition leaves it absent and the desktop
+   * entry renders the unavailable card instead. The edition card is
+   * recognized by the "Sign in to Pi Dash" heading; the community card
+   * deliberately avoids that wording so a misbuilt bundle fails its build
+   * check instead of passing silently.
+   */
+  desktopSignInCard?: ComponentType;
 }
 
 export interface Edition {

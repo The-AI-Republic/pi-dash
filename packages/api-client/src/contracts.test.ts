@@ -45,6 +45,7 @@ import {
   createProject,
   deleteProject,
   getMyProjectRoles,
+  getProject,
   getProjectUserProperties,
   getWorkspaceUserProperties,
   joinProjects,
@@ -743,6 +744,30 @@ describe("project contracts", () => {
     const parsed = await getMyProjectRoles(client, "acme");
     expect(parsed).toEqual({ [UUID2]: 20 });
     expect(transport.calls[0]?.url).toBe("https://api.test/api/users/me/workspaces/acme/project-roles/");
+  });
+
+  it("parses one project row without the list-only intake count", async () => {
+    const { intake_count: _listOnly, ...detail } = project;
+    const client = createClient({ baseUrl: "https://api.test", transport: json(detail) });
+    const parsed = await getProject(client, "acme", UUID);
+    expect(parsed.identifier).toBe("WEB");
+    expect(parsed.member_role).toBe(20);
+    expect("intake_count" in parsed).toBe(false);
+  });
+
+  it("hits the project detail URL", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: "{}" }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(getProject(client, "acme", UUID)).rejects.toThrow();
+    expect(transport.calls[0]?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID}/`);
+  });
+
+  it("surfaces denial statuses with the server detail", async () => {
+    const transport = recordingTransport(() => fakeResponse({ status: 404, body: '{"error":"nope"}' }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const failure = await getProject(client, "acme", UUID).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(404);
   });
 });
 

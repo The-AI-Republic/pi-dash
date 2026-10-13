@@ -11,6 +11,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   acceptWorkspaceInvitations,
+  approveDeviceCode,
   checkEmail,
   checkWorkspaceSlug,
   createWorkspace,
@@ -19,6 +20,7 @@ import {
   generateMagicCode,
   getMeSettings,
   getProfile,
+  joinProjects,
   listWorkspaces,
   markOnboarded,
   requestPasswordReset,
@@ -48,6 +50,7 @@ import {
 
 import { getAppClient } from "../../core/api/client.js";
 import { platform } from "../../core/platform/index.js";
+import { invalidateWorkspace } from "../../core/query/optimistic.js";
 import { resolveLanding } from "../../core/session/guards.js";
 import { sessionKeys } from "../../core/session/queries.js";
 import { useSessionStore } from "../../core/session/store.js";
@@ -279,6 +282,40 @@ export function useFinishOnboarding() {
         });
       } catch (error) {
         notifyError(FINISH_FAILURE_TITLE, (error as Error).message);
+        throw error;
+      }
+    },
+  });
+}
+
+/**
+ * CLI device approval (AUTH-021). Posts the typed code with a fresh
+ * forgery token; resolves with the stamped account and workspace.
+ */
+export function useApproveDeviceCode() {
+  return useMutation({
+    mutationFn: (userCode: string) => approveDeviceCode(freshClient(), userCode),
+  });
+}
+
+export const JOIN_PROJECT_FAILED_TITLE = "Could not join the project";
+
+/**
+ * Join a project from the denial screen (AUTH-024): post the join with a
+ * fresh forgery token, then refresh the workspace subtree (the permission
+ * feeds plus the project's entities) so the gate renders the project. A
+ * failed join toasts the server detail and rejects, keeping the screen.
+ */
+export function useJoinProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { slug: string; projectId: string }) => {
+      try {
+        const result = await joinProjects(freshClient(), input.slug, [input.projectId]);
+        await invalidateWorkspace(queryClient, input.slug);
+        return result;
+      } catch (error) {
+        notifyError(JOIN_PROJECT_FAILED_TITLE, (error as Error).message);
         throw error;
       }
     },

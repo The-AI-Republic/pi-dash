@@ -57,4 +57,21 @@ describe("CrossAppLink", () => {
     );
     expect(screen.getByRole("link", { name: "Sign in" })).toHaveAttribute("data-router-link");
   });
+
+  it("forwards a ref to the anchor", () => {
+    const seen: Array<HTMLAnchorElement | null> = [];
+    render(
+      <CrossAppLink
+        to="/invitations"
+        ref={(element) => {
+          seen.push(element);
+        }}
+      >
+        Invitations
+      </CrossAppLink>
+    );
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.tagName).toBe("A");
+    expect(seen[0]).toHaveAttribute("href", "/invitations");
+  });
 });
