@@ -116,7 +116,8 @@ suite alike. Bring the stack up, export the block `parity-up.sh` prints
 at the end, run the specs; `parity-reset.sh` and `parity-down.sh` target
 the same namespace. Anything set explicitly (`PARITY_PROJECT`,
 `PARITY_CONTAINER_PREFIX`, any `PARITY_*_PORT`, `PARITY_SEED_FILE`,
-`PARITY_API_URL`, `PARITY_ORACLE_URL`) wins over the derivation.
+`PARITY_API_URL`, `PARITY_ORACLE_URL`, `PARITY_API_CONTAINER`,
+`PARITY_REDIS_CONTAINER`) wins over the derivation.
 
 Locally-built image tags are namespaced the same way (NEWFRONT-435):
 `api`, `worker`, `oracle`, `oracle-prod`, `live`, `api-cloud` and
