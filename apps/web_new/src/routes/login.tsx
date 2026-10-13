@@ -43,9 +43,11 @@ export const Route = createFileRoute("/login")({
 
 /**
  * Desktop sign-in screen. The web build never renders this: its
- * beforeLoad already redirected to the entry.
+ * beforeLoad already redirected to the entry. Module-local (not
+ * exported): only this form lets the router split the route component
+ * out of the entry.
  */
-export function DesktopLoginScreen(): React.ReactElement | null {
+function DesktopLoginScreen(): React.ReactElement | null {
   const search = Route.useSearch();
   if (platform.kind !== "desktop") return null;
   return <DesktopSignInScreen error={search.error} errorDescription={search.errorDescription} />;

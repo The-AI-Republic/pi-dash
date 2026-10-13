@@ -38,7 +38,11 @@ export const Route = createFileRoute("/auth/device")({
     }
     return {};
   },
-  component: DeviceScreen,
+  // Inline wrapper (not a reference to the exported screen): only this
+  // form lets the router split the route component out of the entry.
+  component: function DeviceComponent() {
+    return <DeviceScreen />;
+  },
 });
 
 export function DeviceScreen(): React.ReactElement {
