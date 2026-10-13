@@ -19,12 +19,9 @@ whatever toolsets did build. Callers surface the skipped servers to the user
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from django.conf import settings
-
-from pydantic_ai import exceptions as pydantic_ai_exceptions
-from pydantic_ai.toolsets import WrapperToolset
 
 from pi_dash.assistant import crypto, ssrf
 from pi_dash.assistant.errors import AssistantError
@@ -48,128 +45,12 @@ DEFAULT_READ_TIMEOUT_S = 300.0
 DEFAULT_MAX_SERVERS = 10
 
 
-#: pydantic-ai exceptions that mean "handle this", not "the server broke".
-#: Mirrors what ``pydantic_ai.tool_manager`` re-raises rather than converting,
-#: and is resolved by name so a version that renames or drops one degrades to
-#: treating it as a server failure instead of failing at import.
-_CONTROL_FLOW_EXCEPTIONS: tuple[type[BaseException], ...] = tuple(
-    t
-    for t in (
-        getattr(pydantic_ai_exceptions, name, None)
-        for name in ("ModelRetry", "ToolRetryError", "SkipToolExecution", "CallDeferred", "ApprovalRequired")
-    )
-    if isinstance(t, type) and issubclass(t, BaseException)
-)
-
-
 @dataclass(frozen=True)
 class SkippedServer:
     """A server that could not be turned into a toolset, and why."""
 
     name: str
     reason: str
-
-
-@dataclass
-class ResilientToolset(WrapperToolset):
-    """Wraps a toolset so a failing server degrades instead of failing the turn.
-
-    Building an MCP toolset performs no I/O — the connection is opened when the
-    agent *enters* it, at the start of the run. Without this wrapper a server
-    that is down raises out of ``Agent.run`` and takes the whole turn with it,
-    so one broken tool server would cost the user their assistant entirely.
-
-    All three points where a server can reach out are covered: connecting,
-    listing tools, and *calling* one. The last matters most in practice — a
-    server that connects fine at turn start can still time out or drop mid-run,
-    and pydantic-ai's tool manager only converts ``ModelRetry``/``ToolError``,
-    so anything else propagates out of ``Agent.run``.
-
-    ``failure`` records what happened so the caller can tell the user which
-    server was dropped rather than leaving them to wonder why a capability
-    silently vanished.
-    """
-
-    #: Every field carries a default on purpose. pydantic-ai rebuilds wrappers
-    #: with ``dataclasses.replace(self, wrapped=...)`` in ``for_run``,
-    #: ``for_run_step`` and ``visit_and_replace``, which reconstructs through
-    #: ``__init__`` passing only the dataclass fields. A required argument here
-    #: — or a hand-written ``__init__`` that adds one — turns every such rebuild
-    #: into a TypeError, and it would fire exactly where this wrapper exists to
-    #: prevent a hard failure. Dormant today because ``MCPToolset.for_run``
-    #: returns ``self``; a pydantic-ai upgrade is all it takes to wake it.
-    server_name: str = ""
-    #: The tool prefix assigned to this server for the run. Carried on the
-    #: outermost wrapper because that is the object callers hold — the
-    #: prefixing wrapper underneath doesn't surface it.
-    prefix: str = ""
-    #: Run state, not configuration: a rebuilt wrapper starts clean rather than
-    #: inheriting a failure recorded against a connection it no longer holds.
-    failure: str | None = field(default=None, init=False, compare=False)
-    _entered: bool = field(default=False, init=False, compare=False, repr=False)
-
-    def _record(self, exc: Exception, what: str) -> None:
-        self.failure = type(exc).__name__
-        logger.warning(
-            "mcp server %s, continuing without it: %s (%s)",
-            what,
-            self.server_name,
-            exc,
-        )
-
-    async def __aenter__(self):
-        try:
-            await super().__aenter__()
-            self._entered = True
-        except Exception as exc:  # noqa: BLE001 — a dead server is not a turn failure
-            self._record(exc, "unreachable")
-        return self
-
-    async def __aexit__(self, *args) -> bool | None:
-        if not self._entered:
-            # Never entered, so there is nothing to unwind — and calling the
-            # wrapped __aexit__ would raise on a half-built connection.
-            return None
-        try:
-            return await super().__aexit__(*args)
-        except Exception as exc:  # noqa: BLE001 — teardown is still server I/O
-            # A transport can disappear after the final tool call but before
-            # the session's close handshake completes. That is the same
-            # additive-server outage as a connect/list/call failure: record it
-            # for the user, but do not replace the assistant turn's outcome
-            # with an MCP cleanup exception.
-            self._record(exc, "failed to close")
-            return None
-
-    async def get_tools(self, ctx):
-        if self.failure is not None:
-            return {}
-        try:
-            return await super().get_tools(ctx)
-        except Exception as exc:  # noqa: BLE001 — same rule as connect
-            self._record(exc, "failed to list tools")
-            return {}
-
-    async def call_tool(self, name, tool_args, ctx, tool):
-        """Absorb a mid-run tool failure into the tool's own result.
-
-        The server was reachable when the run started or this tool would not be
-        on offer, so a failure here is the server dying, timing out, or erroring
-        mid-turn. Returning the failure as the tool's result keeps the turn
-        alive and lets the model react to it; raising would end the turn, and
-        ``ModelRetry`` would burn the run's retries on a server that is not
-        coming back.
-
-        pydantic-ai's own control-flow exceptions pass through untouched: they
-        are decisions, not outages, and the tool manager is what acts on them.
-        """
-        try:
-            return await super().call_tool(name, tool_args, ctx, tool)
-        except _CONTROL_FLOW_EXCEPTIONS:
-            raise
-        except Exception as exc:  # noqa: BLE001 — a dying server is not a turn failure
-            self._record(exc, f"failed calling {name}")
-            return f"Tool server {self.server_name!r} was unavailable for this call ({type(exc).__name__})."
 
 
 def build_toolset(
@@ -193,6 +74,8 @@ def build_toolset(
     (removed in pydantic-ai v2); streamable HTTP is its default for http URLs.
     """
     from pydantic_ai.mcp import MCPToolset
+
+    from pi_dash.assistant.runtime.resilient_toolset import ResilientToolset
 
     headers = {"Authorization": auth_header} if auth_header else None
     toolset = MCPToolset(
@@ -307,3 +190,16 @@ def _read_timeout_setting() -> float:
 def max_servers() -> int:
     """Ceiling on enabled servers per user, enforced on create and at build."""
     return int(getattr(settings, "ASSISTANT_MCP_MAX_SERVERS", DEFAULT_MAX_SERVERS))
+
+
+def __getattr__(name: str):
+    # ``ResilientToolset`` now lives in a sibling module so that importing this
+    # one — which happens at Django URLconf load time, in every process — does
+    # not drag pydantic-ai into startup. Re-export it lazily so callers and
+    # tests that reach for ``mcp.ResilientToolset`` by name keep working, while
+    # the import cost is still deferred until something actually touches it.
+    if name == "ResilientToolset":
+        from pi_dash.assistant.runtime.resilient_toolset import ResilientToolset
+
+        return ResilientToolset
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
