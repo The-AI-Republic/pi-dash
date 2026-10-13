@@ -180,6 +180,14 @@ import type {
   SpaceLocaleBoardFacts,
   SpaceLocaleLandingFacts,
   SpaceAccessHeadFacts,
+  SpaceAuthLanding,
+  SpaceCommentNotice,
+  SpaceCommentRow,
+  SpaceCommentSection,
+  SpaceMentionResult,
+  SpacePickedEmoji,
+  SpaceReactionGroup,
+  SpaceVoteState,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -14552,5 +14560,171 @@ export class WebNewDriver implements ParityDriver {
   }
   async deskShellCloseReopenPath(): Promise<string> {
     return todo("deskShellCloseReopenPath");
+  }
+
+  // --- Space engagement: votes, reactions, comments (NEWFRONT-451, SPC-047–057).
+  // --- Throwing stubs per the shared driver contract.
+  async spaceCommentOpenIssue(_anchor: string, _issueName: string, _view?: string): Promise<void> {
+    return todo("spaceCommentOpenIssue");
+  }
+
+  async spaceCommentAuthLanding(): Promise<SpaceAuthLanding> {
+    return todo("spaceCommentAuthLanding");
+  }
+
+  async spaceVoteOverlayVisible(): Promise<boolean> {
+    return todo("spaceVoteOverlayVisible");
+  }
+
+  async spaceVoteOverlay(): Promise<SpaceVoteState> {
+    return todo("spaceVoteOverlay");
+  }
+
+  async spaceVoteClick(_direction: "up" | "down"): Promise<void> {
+    return todo("spaceVoteClick");
+  }
+
+  async spaceVoteCardVisible(_anchor: string, _issueName: string): Promise<boolean> {
+    return todo("spaceVoteCardVisible");
+  }
+
+  async spaceVoteCard(_anchor: string, _issueName: string): Promise<SpaceVoteState> {
+    return todo("spaceVoteCard");
+  }
+
+  async spaceVoteCardClick(_anchor: string, _issueName: string, _direction: "up" | "down"): Promise<void> {
+    return todo("spaceVoteCardClick");
+  }
+
+  async spaceReactOverlayVisible(): Promise<boolean> {
+    return todo("spaceReactOverlayVisible");
+  }
+
+  async spaceReactGroups(): Promise<SpaceReactionGroup[]> {
+    return todo("spaceReactGroups");
+  }
+
+  async spaceReactPick(): Promise<SpacePickedEmoji> {
+    return todo("spaceReactPick");
+  }
+
+  async spaceReactClickGroup(_emoji: string): Promise<void> {
+    return todo("spaceReactClickGroup");
+  }
+
+  async spaceReactAddVisible(): Promise<boolean> {
+    return todo("spaceReactAddVisible");
+  }
+
+  async spaceCommentSection(): Promise<SpaceCommentSection> {
+    return todo("spaceCommentSection");
+  }
+
+  async spaceCommentRows(): Promise<SpaceCommentRow[]> {
+    return todo("spaceCommentRows");
+  }
+
+  async spaceCommentToggleFold(_index: number): Promise<void> {
+    return todo("spaceCommentToggleFold");
+  }
+
+  async spaceCommentType(_text: string): Promise<void> {
+    return todo("spaceCommentType");
+  }
+
+  async spaceCommentPasteHtml(_html: string): Promise<void> {
+    return todo("spaceCommentPasteHtml");
+  }
+
+  async spaceCommentDraftText(): Promise<string> {
+    return todo("spaceCommentDraftText");
+  }
+
+  async spaceCommentSubmit(): Promise<void> {
+    return todo("spaceCommentSubmit");
+  }
+
+  async spaceCommentAttachImage(_filePath: string): Promise<void> {
+    return todo("spaceCommentAttachImage");
+  }
+
+  async spaceCommentMention(_memberQuery: string, _memberDisplayName: string): Promise<SpaceMentionResult> {
+    return todo("spaceCommentMention");
+  }
+
+  async spaceCommentMentionOpen(): Promise<boolean> {
+    return todo("spaceCommentMentionOpen");
+  }
+
+  async spaceCommentMenuVisible(_index: number): Promise<boolean> {
+    return todo("spaceCommentMenuVisible");
+  }
+
+  async spaceCommentMenuOpen(_index: number): Promise<void> {
+    return todo("spaceCommentMenuOpen");
+  }
+
+  async spaceCommentMenuItems(_index: number): Promise<string[]> {
+    return todo("spaceCommentMenuItems");
+  }
+
+  async spaceCommentInviteReturn(): Promise<{
+    anchor: string | null;
+    view: string | null;
+    issueId: string | null;
+  } | null> {
+    return todo("spaceCommentInviteReturn");
+  }
+
+  async spaceCommentEdit(_index: number, _newText: string): Promise<void> {
+    return todo("spaceCommentEdit");
+  }
+
+  async spaceCommentDelete(_index: number): Promise<void> {
+    return todo("spaceCommentDelete");
+  }
+
+  async spaceCommentNotices(): Promise<SpaceCommentNotice[]> {
+    return todo("spaceCommentNotices");
+  }
+
+  async spaceCommentReactions(_index: number): Promise<SpaceReactionGroup[]> {
+    return todo("spaceCommentReactions");
+  }
+
+  async spaceCommentReactPick(_index: number): Promise<SpacePickedEmoji> {
+    return todo("spaceCommentReactPick");
+  }
+
+  async spaceCommentReactClick(_index: number, _emoji: string): Promise<void> {
+    return todo("spaceCommentReactClick");
+  }
+
+  async spaceCommentReactAddVisible(_index: number): Promise<boolean> {
+    return todo("spaceCommentReactAddVisible");
+  }
+
+  async spaceCommentPeekMode(_mode: "side" | "modal" | "full"): Promise<void> {
+    return todo("spaceCommentPeekMode");
+  }
+
+  async spaceCommentOpenEmbed(_anchor: string, _issueName: string): Promise<void> {
+    return todo("spaceCommentOpenEmbed");
+  }
+
+  async spaceCommentEmbedSection(): Promise<SpaceCommentSection> {
+    return todo("spaceCommentEmbedSection");
+  }
+
+  async spaceReactEmbedAddVisible(): Promise<boolean> {
+    return todo("spaceReactEmbedAddVisible");
+  }
+
+  async spaceCommentEmbedMenuVisible(_index: number): Promise<boolean> {
+    return todo("spaceCommentEmbedMenuVisible");
+  }
+
+  async spaceCommentEmbedReactions(_index: number): Promise<{ groups: SpaceReactionGroup[]; addVisible: boolean }> {
+    return todo("spaceCommentEmbedReactions");
   }
 }

@@ -8409,6 +8409,91 @@ export interface SpaceBoardStability {
   after: string[];
   /** Public-issues fetches observed during the cycle. */
   refetches: number;
+
+  // --- Space engagement: votes, reactions, comments (NEWFRONT-451, SPC-047–057).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract. Reads target the peek overlay the card click opens; specs
+  // --- flip the board engagement flags through the publish API per test.
+  /** Open an issue's peek overlay through its board card; waits for the overlay. */
+  spaceCommentOpenIssue(anchor: string, issueName: string, view?: string): Promise<void>;
+  /** Where an anonymous action landed: the auth gate plus the preserved return address. */
+  spaceCommentAuthLanding(): Promise<SpaceAuthLanding>;
+  /** Whether the overlay renders vote controls (publisher flag on). */
+  spaceVoteOverlayVisible(): Promise<boolean>;
+  /** Overlay vote controls: counts, voter names, and the visitor's own votes. */
+  spaceVoteOverlay(): Promise<SpaceVoteState>;
+  /** Click the overlay up/down vote control. */
+  spaceVoteClick(direction: "up" | "down"): Promise<void>;
+  /** Whether a kanban card renders a vote footer. */
+  spaceVoteCardVisible(anchor: string, issueName: string): Promise<boolean>;
+  /** Kanban card vote footer: counts and the visitor's own votes. */
+  spaceVoteCard(anchor: string, issueName: string): Promise<SpaceVoteState>;
+  /** Click a kanban card's up/down vote control. */
+  spaceVoteCardClick(anchor: string, issueName: string, direction: "up" | "down"): Promise<void>;
+  /** Whether the overlay renders the emoji reaction control (flag on, not embedded). */
+  spaceReactOverlayVisible(): Promise<boolean>;
+  /** Overlay emoji reaction groups: emoji, counts, own state, reactors. */
+  spaceReactGroups(): Promise<SpaceReactionGroup[]>;
+  /** Add an emoji reaction through the overlay picker; resolves with the picked emoji. */
+  spaceReactPick(): Promise<SpacePickedEmoji>;
+  /** Click an overlay reaction pill (toggles the visitor's own reaction). */
+  spaceReactClickGroup(emoji: string): Promise<void>;
+  /** Whether the overlay reaction add control is present. */
+  spaceReactAddVisible(): Promise<boolean>;
+  /** Comments section state: visibility, thread, composer, sign-in invitation. */
+  spaceCommentSection(): Promise<SpaceCommentSection>;
+  /** Comment rows in display order. */
+  spaceCommentRows(): Promise<SpaceCommentRow[]>;
+  /** Toggle a folded comment's expanded state by row index. */
+  spaceCommentToggleFold(index: number): Promise<void>;
+  /** Type into the comment composer. */
+  spaceCommentType(text: string): Promise<void>;
+  /** Paste a formatted HTML fragment into the comment composer. */
+  spaceCommentPasteHtml(html: string): Promise<void>;
+  /** Current composer draft text. */
+  spaceCommentDraftText(): Promise<string>;
+  /** Submit the composer through the Enter key. */
+  spaceCommentSubmit(): Promise<void>;
+  /** Attach an image through the composer toolbar; resolves when the upload settles. */
+  spaceCommentAttachImage(filePath: string): Promise<void>;
+  /** Type a mention trigger and pick a member suggestion. */
+  spaceCommentMention(memberQuery: string, memberDisplayName: string): Promise<SpaceMentionResult>;
+  /** Whether the mention suggestion dropdown is currently open. */
+  spaceCommentMentionOpen(): Promise<boolean>;
+  /** Whether a comment row's owner menu is present (row index). */
+  spaceCommentMenuVisible(index: number): Promise<boolean>;
+  /** Open a comment row's owner menu (row index). */
+  spaceCommentMenuOpen(index: number): Promise<void>;
+  /** Names of the open owner menu's entries, in order. */
+  spaceCommentMenuItems(index: number): Promise<string[]>;
+  /** Return address the anonymous sign-in invitation preserves, when one renders. */
+  spaceCommentInviteReturn(): Promise<{ anchor: string | null; view: string | null; issueId: string | null } | null>;
+  /** Edit a comment through its owner menu: opens edit mode, replaces content, saves. */
+  spaceCommentEdit(index: number, newText: string): Promise<void>;
+  /** Delete a comment through its owner menu. */
+  spaceCommentDelete(index: number): Promise<void>;
+  /** Visible toast notices (for the failure paths). */
+  spaceCommentNotices(): Promise<SpaceCommentNotice[]>;
+  /** Reaction groups on one comment row. */
+  spaceCommentReactions(index: number): Promise<SpaceReactionGroup[]>;
+  /** Add an emoji reaction to one comment row; resolves with the picked emoji. */
+  spaceCommentReactPick(index: number): Promise<SpacePickedEmoji>;
+  /** Click a comment reaction pill (toggles the visitor's own reaction). */
+  spaceCommentReactClick(index: number, emoji: string): Promise<void>;
+  /** Whether a comment row's reaction add control is present. */
+  spaceCommentReactAddVisible(index: number): Promise<boolean>;
+  /** Switch the peek overlay presentation; resolves when the new view renders. */
+  spaceCommentPeekMode(mode: "side" | "modal" | "full"): Promise<void>;
+  /** Embed the board in a same-origin frame and open an issue inside it. */
+  spaceCommentOpenEmbed(anchor: string, issueName: string): Promise<void>;
+  /** Comments section state inside the embedded frame. */
+  spaceCommentEmbedSection(): Promise<SpaceCommentSection>;
+  /** Whether the embedded overlay renders the issue emoji add control. */
+  spaceReactEmbedAddVisible(): Promise<boolean>;
+  /** Whether a comment row's owner menu is present inside the embedded frame. */
+  spaceCommentEmbedMenuVisible(index: number): Promise<boolean>;
+  /** Comment reaction groups plus the add control inside the embedded frame. */
+  spaceCommentEmbedReactions(index: number): Promise<{ groups: SpaceReactionGroup[]; addVisible: boolean }>;
 }
 
 /** Identity facts of one workspace-member roster row (NEWFRONT-411, WSET-011). */
@@ -11157,4 +11242,100 @@ export interface SpaceAccessHeadFacts {
   twitterDescription: string | null;
   /** Content of meta[name="twitter:image"], or null when absent. */
   twitterImage: string | null;
+}
+
+// --- Space engagement facts (NEWFRONT-451, SPC-047–057). ---
+
+/** Where an anonymous engagement action landed (NEWFRONT-451). */
+export interface SpaceAuthLanding {
+  /** True when the current page is the auth gate (landing). */
+  onAuthGate: boolean;
+  /** Board anchor the return address preserves, when one is preserved. */
+  returnAnchor: string | null;
+  /** Board view the return address preserves, when one is preserved. */
+  returnView: string | null;
+  /** Open issue the return address preserves, when one is preserved. */
+  returnIssueId: string | null;
+}
+
+/** One side of the up/down vote control (NEWFRONT-451). */
+export interface SpaceVoteSide {
+  /** Vote count as rendered. */
+  count: number;
+  /** Voter display names from the hover card, in render order. */
+  voters: string[];
+  /** True when the control shows the visitor's own vote. */
+  mine: boolean;
+}
+
+/** Overlay or card vote state (NEWFRONT-451). */
+export interface SpaceVoteState {
+  up: SpaceVoteSide;
+  down: SpaceVoteSide;
+}
+
+/** One grouped emoji reaction row (NEWFRONT-451). */
+export interface SpaceReactionGroup {
+  /** Emoji character as rendered. */
+  emoji: string;
+  /** Reaction count as rendered. */
+  count: number;
+  /** True when the pill shows the visitor's own reaction. */
+  mine: boolean;
+  /** Reactor display names from the hover card, in render order. */
+  users: string[];
+}
+
+/** An emoji chosen through a reaction picker (NEWFRONT-451). */
+export interface SpacePickedEmoji {
+  /** Emoji character as rendered. */
+  emoji: string;
+  /** Decimal code-point form the API stores ("128077" for 👍). */
+  code: string;
+}
+
+/** Comments section visibility facts (NEWFRONT-451). */
+export interface SpaceCommentSection {
+  /** True when the section shell renders at all. */
+  sectionVisible: boolean;
+  /** Thread rows rendered. */
+  threadCount: number;
+  /** True when the composer renders. */
+  composerVisible: boolean;
+  /** True when the anonymous sign-in invitation renders. */
+  signInInviteVisible: boolean;
+}
+
+/** One rendered comment row (NEWFRONT-451). */
+export interface SpaceCommentRow {
+  /** Author line as rendered (bots carry their suffix). */
+  author: string;
+  /** True when the row carries the bot marking. */
+  botMark: boolean;
+  /** Age line as rendered ("commented …"). */
+  ageText: string;
+  /** Rendered body text (empty while folded and unexpanded). */
+  contentText: string;
+  /** True when the row is folded (moderated). */
+  folded: boolean;
+  /** Machine-authored speaker label, when the row carries one. */
+  speakerLabel: string | null;
+  /** Whether the avatar renders an image or an initial fallback. */
+  avatarKind: "image" | "initial";
+  /** True when the rendered body embeds an image node. */
+  hasImage: boolean;
+}
+
+/** Outcome of a mention attempt in the composer (NEWFRONT-451). */
+export interface SpaceMentionResult {
+  /** True when the dropdown offered the member. */
+  offered: boolean;
+  /** True when a mention chip landed in the draft. */
+  inserted: boolean;
+}
+
+/** One visible toast notice (NEWFRONT-451). */
+export interface SpaceCommentNotice {
+  message: string;
+  kind: "success" | "error" | "unknown";
 }
