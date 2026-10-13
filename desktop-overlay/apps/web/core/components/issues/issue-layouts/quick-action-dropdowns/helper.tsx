@@ -98,14 +98,24 @@ export const useIssueActionHandlers = (props: MenuItemFactoryProps) => {
     [workspaceSlug, projectIdentifier, issue]
   );
 
-  const handleCopyIssueLink = () =>
-    copyTextToClipboard(desktopWebUrl(workItemLink)).then(() =>
+  // desktopWebUrl throws when the bundle has no public web origin, so it has to
+  // run inside the try: resolved outside, the failure never reaches a toast.
+  const handleCopyIssueLink = async () => {
+    try {
+      await copyTextToClipboard(desktopWebUrl(workItemLink));
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: "Link copied",
         message: "Work item link copied to clipboard",
-      })
-    );
+      });
+    } catch {
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: "Error!",
+        message: "Work item link could not be copied.",
+      });
+    }
+  };
 
   const handleOpenInNewTab = () => window.open(workItemLink, "_blank");
 

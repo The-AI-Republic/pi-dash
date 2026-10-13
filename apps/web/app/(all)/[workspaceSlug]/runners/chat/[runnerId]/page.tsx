@@ -48,6 +48,16 @@ function approvalModeStorageKey(runnerId: string | undefined): string {
   return `pidash:chat-approval-mode:${runnerId ?? "unknown"}`;
 }
 
+function readStoredApprovalMode(runnerId: string | undefined): TApprovalMode {
+  let stored: string | null = null;
+  try {
+    stored = window.localStorage.getItem(approvalModeStorageKey(runnerId));
+  } catch {
+    stored = null;
+  }
+  return stored === "ask" || stored === "workspace" || stored === "full_access" ? stored : DEFAULT_APPROVAL_MODE;
+}
+
 /** Project a `chat_approval_request` event onto the prompt's shape. */
 function pendingApprovalFromEvent(event: IAgentChatEvent): PendingChatApproval | null {
   const payload = event.payload as Record<string, unknown>;
@@ -236,11 +246,18 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     () => typeof (transport as ApprovalCapableTransport).decideChatApproval === "function",
     [transport]
   );
-  const [approvalMode, setApprovalModeState] = useState<TApprovalMode>(DEFAULT_APPROVAL_MODE);
+  const [approvalMode, setApprovalModeState] = useState<TApprovalMode>(() =>
+    approvalsSupported ? readStoredApprovalMode(runnerId) : DEFAULT_APPROVAL_MODE
+  );
+  // Mirrors the state for `applyApprovalMode`, and is written in the same
+  // place the state is set rather than in a follow-up effect: the warm effect
+  // can run in the very commit that loads the saved mode (a remount on a warm
+  // SWR cache), and must not read the mode that commit just superseded.
   const approvalModeRef = useRef(approvalMode);
-  useEffect(() => {
-    approvalModeRef.current = approvalMode;
-  }, [approvalMode]);
+  const setApprovalMode = useCallback((mode: TApprovalMode) => {
+    approvalModeRef.current = mode;
+    setApprovalModeState(mode);
+  }, []);
   // Push the currently-selected mode into the transport's slot for a session
   // right before it is warmed or sent to, so the runner captures it when it
   // spawns the thread. A no-op on the cloud transport.
@@ -335,20 +352,12 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   // supports approvals; the cloud transport ignores the mode entirely.
   useEffect(() => {
     if (!approvalsSupported) return;
-    let stored: string | null = null;
-    try {
-      stored = window.localStorage.getItem(approvalModeStorageKey(runnerId));
-    } catch {
-      stored = null;
-    }
-    setApprovalModeState(
-      stored === "ask" || stored === "workspace" || stored === "full_access" ? stored : DEFAULT_APPROVAL_MODE
-    );
-  }, [runnerId, approvalsSupported]);
+    setApprovalMode(readStoredApprovalMode(runnerId));
+  }, [runnerId, approvalsSupported, setApprovalMode]);
 
   const changeApprovalMode = useCallback(
     (mode: TApprovalMode) => {
-      setApprovalModeState(mode);
+      setApprovalMode(mode);
       try {
         window.localStorage.setItem(approvalModeStorageKey(runnerId), mode);
       } catch {
@@ -358,7 +367,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       // the next thread, so a turn already running keeps the mode it started.
       if (session?.id) (transport as ApprovalCapableTransport).setApprovalMode?.(session.id, mode);
     },
-    [runnerId, session?.id, transport]
+    [runnerId, session?.id, setApprovalMode, transport]
   );
 
   const decideApproval = useCallback(

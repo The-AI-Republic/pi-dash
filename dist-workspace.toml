@@ -35,7 +35,12 @@ targets = [
     "x86_64-unknown-linux-musl",
 ]
 pr-run-mode = "plan"
-install-path = "$HOME/.local/bin"
+# "~/" (cargo-dist's HomeSubdir), not "$HOME/" (EnvSubdir): the PowerShell
+# installer renders EnvSubdir as `$env:HOME`, which Windows does not set, so
+# the installer aborted with "could not find a valid path to install to".
+# HomeSubdir renders as PowerShell's built-in `$HOME` (the user profile) and
+# as `$HOME` in the shell installer, so macOS/Linux install paths are unchanged.
+install-path = "~/.local/bin"
 
 # Build deps for the musl targets. Harmless on the gnu runners.
 #
