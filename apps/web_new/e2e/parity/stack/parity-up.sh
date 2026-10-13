@@ -268,6 +268,15 @@ for route in $WARM_ROUTES; do
 done
 echo "[parity] oracle is warm"
 
+# The older docker-exec helpers (apiShell, desktopRuntimeShell, redis)
+# default to the parity19-* container names with no namespace
+# derivation, so the suite-env block must carry the resolved names
+# (NEWFRONT-472). Explicit settings still win.
+export PARITY_API_CONTAINER
+PARITY_API_CONTAINER="${PARITY_API_CONTAINER:-${PARITY_CONTAINER_PREFIX:-parity19}-api}"
+export PARITY_REDIS_CONTAINER
+PARITY_REDIS_CONTAINER="${PARITY_REDIS_CONTAINER:-${PARITY_CONTAINER_PREFIX:-parity19}-redis}"
+
 echo "[parity] suite env for this stack (export before running specs):"
 if [ -n "${PARITY_NS:-}" ]; then
   echo "export PARITY_NS='$PARITY_NS'"
@@ -278,4 +287,6 @@ fi
 echo "export PARITY_SEED_FILE='$PARITY_SEED_FILE'"
 echo "export PARITY_API_URL='$PARITY_API_URL'"
 echo "export PARITY_ORACLE_URL='$PARITY_ORACLE_URL'"
+echo "export PARITY_API_CONTAINER='$PARITY_API_CONTAINER'"
+echo "export PARITY_REDIS_CONTAINER='$PARITY_REDIS_CONTAINER'"
 echo "export PARITY_ORACLE_ADMIN_URL='$PARITY_ORACLE_ADMIN_URL'"
