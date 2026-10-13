@@ -8812,7 +8812,137 @@ export interface DeskSigninUpdateLink {
   analyticsStopRequestSpy(): Promise<void>;
   /** Analytics API reads captured since the spy started. */
   analyticsSpyRequests(): Promise<AnalyticsApiRequest[]>;
+  // ---------------------------------------------------------------------------
+  // Profile-settings shell, general/account tabs and security tab
+  // (NEWFRONT-426, rows PROF-009..015, PROF-026). The standalone settings
+  // page at /settings/profile/<tab>: grouped sidebar navigation, the general
+  // tab (names, locked email, avatar dialog, email-change flow, deactivation
+  // danger zone) and the security tab (password change with strength,
+  // confirmation and reveal controls). Appended; existing entries above are
+  // untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Open one profile-settings tab authenticated; settles on the shell or the loader-only view. */
+  settingsProfileOpen(tabId: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Whether the settings shell (sidebar with the settings title) rendered. */
+  settingsProfileShellVisible(): Promise<boolean>;
+  /** Whether the page shows only the loading indicator with no settings content. */
+  settingsProfileLoaderOnly(): Promise<boolean>;
+  /** Sidebar group headings in display order (personal, developer, workspace shortcuts). */
+  settingsProfileGroupLabels(): Promise<string[]>;
+  /** Tab labels inside one sidebar group, in display order. */
+  settingsProfileGroupTabs(group: string): Promise<string[]>;
+  /** Label of the currently active sidebar tab, or null when none reads active. */
+  settingsProfileActiveTab(): Promise<string | null>;
+  /** Accessible name of the sidebar back control, or null when it renders none. */
+  settingsProfileBackLabel(): Promise<string | null>;
+  /** Sidebar title text ("Profile settings"), or null when the shell is absent. */
+  settingsProfileSidebarTitle(): Promise<string | null>;
+  /** Workspace shortcut entries (workspaces plus create/invites actions) in display order. */
+  settingsProfileWorkspaceShortcuts(): Promise<string[]>;
+  /** Activate one sidebar tab; resolves once the tab address lands. */
+  settingsProfileSelectTab(label: string): Promise<void>;
+  /** Open an arbitrary path authenticated; resolves with the final path-plus-query after redirects. */
+  settingsProfileOpenPath(path: string, cookies: ParityBrowserCookie[]): Promise<string>;
+  /** Current value of one general-tab field. */
+  settingsProfileGeneralFieldValue(field: SettingsProfileGeneralField): Promise<string>;
+  /** Fill one general-tab field without submitting. */
+  settingsProfileGeneralFillField(field: SettingsProfileGeneralField, value: string): Promise<void>;
+  /** Inline error under one general-tab field, or null when the field shows none. */
+  settingsProfileGeneralFieldError(field: SettingsProfileGeneralField): Promise<string | null>;
+  /** Whether the general-tab email input is disabled. */
+  settingsProfileGeneralEmailDisabled(): Promise<boolean>;
+  /** Submit the general form; resolves once feedback (toast or inline) settles. */
+  settingsProfileGeneralSave(): Promise<void>;
+  /** General save button label ("Save changes" idle, "Saving" while working). */
+  settingsProfileGeneralSaveLabel(): Promise<string>;
+  /** General-tab header identity line (displayed name plus email). */
+  settingsProfileGeneralIdentity(): Promise<{ name: string; email: string }>;
+  /** Open the avatar upload dialog from the general tab. */
+  settingsProfileAvatarDialogOpen(): Promise<void>;
+  /** Whether the avatar upload dialog is currently visible. */
+  settingsProfileAvatarDialogVisible(): Promise<boolean>;
+  /** Pick one file in the avatar dialog without submitting (rejection probes). */
+  settingsProfileAvatarPick(filePath: string): Promise<void>;
+  /** Upload one image file through the avatar dialog and save; resolves once feedback settles. */
+  settingsProfileAvatarUpload(filePath: string): Promise<void>;
+  /** Remove the current avatar through the dialog; resolves once feedback settles. */
+  settingsProfileAvatarRemove(): Promise<void>;
+  /** Whether the dialog's remove action renders disabled. */
+  settingsProfileAvatarRemoveDisabled(): Promise<boolean>;
+  /** Whether the general tab shows an avatar photo (as opposed to the placeholder). */
+  settingsProfileAvatarPhotoVisible(): Promise<boolean>;
+  /** Dismiss the avatar dialog without saving. */
+  settingsProfileAvatarCancel(): Promise<void>;
+  /** Invalid-file rejection text in the avatar dialog, or null when none shows. */
+  settingsProfileAvatarRejection(): Promise<string | null>;
+  /** Whether the general tab shows a cover-image control (main#523/#574 remove it; still present). */
+  settingsProfileCoverControlVisible(): Promise<boolean>;
+  /** Whether the change-email entry renders below the locked email field. */
+  settingsProfileChangeEmailVisible(): Promise<boolean>;
+  /** Open the change-email dialog. */
+  settingsProfileChangeEmailOpen(): Promise<void>;
+  /** Which change-email step shows: address entry, code verification, or no dialog. */
+  settingsProfileEmailModalStep(): Promise<"email" | "code" | "closed">;
+  /** Fill the new-address field of the change-email dialog. */
+  settingsProfileEmailModalFillEmail(email: string): Promise<void>;
+  /** Submit the visible change-email step; resolves once the dialog settles. */
+  settingsProfileEmailModalSubmit(): Promise<void>;
+  /** Fill the verification-code field of the change-email dialog. */
+  settingsProfileEmailModalFillCode(code: string): Promise<void>;
+  /** Inline error on one change-email field, or null when it shows none. */
+  settingsProfileEmailModalError(field: "email" | "code"): Promise<string | null>;
+  /** Helper line under the code field, or null when none shows. */
+  settingsProfileEmailModalHelper(): Promise<string | null>;
+  /** Whether the address field is locked while the code step shows. */
+  settingsProfileEmailModalEmailDisabled(): Promise<boolean>;
+  /** Dismiss the change-email dialog. */
+  settingsProfileEmailModalClose(): Promise<void>;
+  /** Whether the deactivation danger zone renders on the general tab. */
+  settingsProfileDeactivateVisible(): Promise<boolean>;
+  /** Danger-zone explanatory text, or null when the zone is absent. */
+  settingsProfileDeactivateDescription(): Promise<string | null>;
+  /** Open the deactivation confirmation dialog. */
+  settingsProfileDeactivateOpen(): Promise<void>;
+  /** Deactivation dialog title, or null when no dialog shows. */
+  settingsProfileDeactivateTitle(): Promise<string | null>;
+  /** Confirm deactivation; resolves once the app settles after the write. */
+  settingsProfileDeactivateConfirm(): Promise<void>;
+  /** Dismiss the deactivation dialog without confirming. */
+  settingsProfileDeactivateCancel(): Promise<void>;
+  /** Whether the confirm action currently reads as working ("Deactivating"). */
+  settingsProfileDeactivateWorking(): Promise<boolean>;
+  /** Whether one security-tab password field renders (current is gated by account origin). */
+  settingsProfileSecurityFieldVisible(field: SettingsProfileSecurityField): Promise<boolean>;
+  /** Fill one security-tab password field. */
+  settingsProfileSecurityFill(field: SettingsProfileSecurityField, value: string): Promise<void>;
+  /** Input type of one password field ("password" masked, "text" revealed). */
+  settingsProfileSecurityFieldType(field: SettingsProfileSecurityField): Promise<string>;
+  /** Toggle the reveal control of one password field. */
+  settingsProfileSecurityToggleReveal(field: SettingsProfileSecurityField): Promise<void>;
+  /** Inline error on one password field, or null when it shows none. */
+  settingsProfileSecurityFieldError(field: SettingsProfileSecurityField): Promise<string | null>;
+  /** Whether the confirmation-mismatch note currently shows. */
+  settingsProfileSecurityMismatchVisible(): Promise<boolean>;
+  /** Whether the new-same-as-old note currently shows. */
+  settingsProfileSecuritySameAsOldVisible(): Promise<boolean>;
+  /** Whether the strength indicator currently shows under the new-password field. */
+  settingsProfileSecurityStrengthVisible(): Promise<boolean>;
+  /** Whether the change-password submit currently renders disabled. */
+  settingsProfileSecuritySubmitDisabled(): Promise<boolean>;
+  /** Submit the password form; resolves once feedback settles. */
+  settingsProfileSecuritySubmit(): Promise<void>;
+  /** Current value of one password field (proves the post-success reset). */
+  settingsProfileSecurityFieldValue(field: SettingsProfileSecurityField): Promise<string>;
+  /** Move focus away from one password field (proves focus-aware note timing). */
+  settingsProfileSecurityBlur(field: SettingsProfileSecurityField): Promise<void>;
 }
+
+/** General-tab field keys for the NEWFRONT-426 settingsProfile readers. */
+export type SettingsProfileGeneralField = "first_name" | "last_name" | "display_name" | "email";
+
+/** Security-tab field keys for the NEWFRONT-426 settingsProfile readers. */
+export type SettingsProfileSecurityField = "current" | "new" | "confirm";
 
 /** Canonical filter-section keys for the intake list panel. */
 export type IntakeListFilterKey =

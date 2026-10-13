@@ -18014,3 +18014,128 @@ export async function serverUnseedGithubAppInstallation(workspaceSlug: string): 
     console.log(`[parity] github-app unseed failed (${String(error)}); leaving it for reseed.`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Profile-settings account assertions (NEWFRONT-426, rows PROF-011..015). The
+// signed-in user's record (names, email, avatar, password mode), the instance
+// gates behind the email-change and deactivation controls, and minted email-
+// update codes standing in for the mailed code. Appended; existing entries
+// above are untouched per the shared contract.
+// ---------------------------------------------------------------------------
+
+/** The signed-in user's record as the settings tabs read and write it. */
+export interface ServerSettingsUserRecord {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  displayName: string;
+  avatarUrl: string;
+  passwordAutoset: boolean;
+}
+
+/** Read the caller's user record (names, email, avatar, password mode). */
+export async function serverSettingsUserRecord(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerSettingsUserRecord> {
+  const res = await fetchTolerant(`${apiBase}/api/users/me/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) throw new Error(`[parity] users/me read failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as Record<string, unknown>;
+  if (typeof row["id"] !== "string") throw new Error("[parity] users/me row carried no id.");
+  const text = (key: string): string => (typeof row[key] === "string" ? (row[key] as string) : "");
+  return {
+    id: row["id"],
+    email: text("email"),
+    firstName: text("first_name"),
+    lastName: text("last_name"),
+    displayName: text("display_name"),
+    avatarUrl: text("avatar_url"),
+    passwordAutoset: row["is_password_autoset"] === true,
+  };
+}
+
+/** Instance gates behind the settings account controls (mail, self-managed). */
+export async function serverInstanceFlags(
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ smtpConfigured: boolean; selfManaged: boolean }> {
+  const res = await fetchTolerant(`${apiBase}/api/instances/`);
+  if (!res.ok) throw new Error(`[parity] instance config read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { config?: Record<string, unknown> };
+  const config = payload.config ?? {};
+  return {
+    smtpConfigured: config["is_smtp_configured"] === true,
+    selfManaged: config["is_self_managed"] === true,
+  };
+}
+
+/**
+ * Plant an email-update verification code in the server cache for a user,
+ * standing in for the mailed code (the backend binds it to user plus new
+ * address for ten minutes). Mirrors mintMagicCode's slot-aware redis path by
+ * going through the Django cache API instead, so key formatting always
+ * matches the update_email read.
+ */
+export async function serverMintEmailUpdateCode(userId: string, email: string, code?: string): Promise<string> {
+  const value = code ?? String(Math.floor(100000 + Math.random() * 900000));
+  const key = `magic_email_update_${userId}_${email}`;
+  const out = await apiShell(
+    `import json\n` +
+      `from django.core.cache import cache\n` +
+      `cache.set(${JSON.stringify(key)}, json.dumps({"token": ${JSON.stringify(value)}}), timeout=600)\n` +
+      `print("PARITY_EMAIL_CODE_OK")\n`
+  );
+  if (!out.includes("PARITY_EMAIL_CODE_OK")) {
+    throw new Error(`[parity] email-update code mint produced no ack for ${email}.`);
+  }
+  return value;
+}
+
+/** Whether the account with this address is still active (deactivation flips it off). */
+export async function serverUserActive(email: string): Promise<boolean> {
+  const out = await apiShell(
+    `from pi_dash.db.models import User\n` +
+      `user = User.objects.filter(email=${JSON.stringify(email)}).first()\n` +
+      `print("PARITY_ACTIVE:" + str(bool(user and user.is_active)))\n`
+  );
+  const line = /^PARITY_ACTIVE:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (line === "") throw new Error(`[parity] user active read produced no row for ${email}.`);
+  return line === "True";
+}
+
+/**
+ * Create an account with a one-time magic code the way the code form does,
+ * resolving with a full authenticated session (the sign-in endpoint only
+ * serves existing users). The caller plants the code first with
+ * mintMagicCode; the sign-up endpoint still requires the instance mail
+ * switch, so flip it on for the call and restore it after.
+ */
+export async function serverMagicSignUp(
+  email: string,
+  code: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<AuthedSession> {
+  const tokenRes = await fetchTolerant(`${apiBase}/auth/get-csrf-token/`);
+  if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
+  const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
+  const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
+  const preCookies = cookieHeader(setCookieHeaders(tokenRes));
+  const body = new URLSearchParams({ email, code, csrfmiddlewaretoken: token });
+  const res = await fetchTolerant(`${apiBase}/auth/magic-sign-up/`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie: preCookies },
+    body,
+    redirect: "manual",
+  });
+  if (res.status !== 200 && res.status !== 302) {
+    throw new Error(`[parity] magic sign-up failed with HTTP ${res.status} for ${email}.`);
+  }
+  const cookie = cookieHeader([...setCookieHeaders(tokenRes), ...setCookieHeaders(res)]);
+  if (!cookie.includes("session-id=")) throw new Error("[parity] magic sign-up carried no session cookie.");
+  const meRes = await fetchTolerant(`${apiBase}/api/users/me/`, { headers: { cookie } });
+  if (!meRes.ok) throw new Error(`[parity] users/me read failed with HTTP ${meRes.status} after magic sign-up.`);
+  const me = (await meRes.json()) as { id?: unknown };
+  const userId = typeof me.id === "string" ? me.id : "";
+  const csrfToken = /(?:^|;\s*)csrftoken=([^;]*)/.exec(cookie)?.[1] ?? "";
+  return { email, password: "", userId, cookie, csrfToken, apiBase };
+}
