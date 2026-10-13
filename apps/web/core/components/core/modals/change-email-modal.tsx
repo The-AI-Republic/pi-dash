@@ -80,7 +80,7 @@ export const ChangeEmailModal = observer(function ChangeEmailModal(props: Props)
   };
 
   const handleSignOut = async () => {
-    await signOut().catch(() =>
+    await signOut({ skipConfirmation: true }).catch(() =>
       setToast({
         type: TOAST_TYPE.ERROR,
         title: t("Error!"),
