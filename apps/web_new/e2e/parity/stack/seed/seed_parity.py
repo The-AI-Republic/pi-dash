@@ -507,6 +507,11 @@ def build() -> dict:
     }
     if inbox_issue_id is not None:
         facts["inboxIssueId"] = inbox_issue_id
+    space_anchor = DeployBoard.objects.filter(
+        entity_name="project", entity_identifier=project.id
+    ).values_list("anchor", flat=True).first()
+    if space_anchor is not None:
+        facts["spaceAnchor"] = space_anchor
     return facts
 
 
@@ -546,11 +551,27 @@ def seed_rules_fixtures(project, workspace, state, user) -> None:
     # Externally shared project (CMT-006): a published project board gives
     # the project a public anchor, which is what renders the visibility
     # toggle, badge and overflow switch.
-    DeployBoard.objects.get_or_create(
+    board, _ = DeployBoard.objects.get_or_create(
         entity_name="project",
         entity_identifier=project.id,
         defaults={"workspace_id": workspace.id, "created_by_id": user.id},
     )
+    # NEWFRONT-97 (space oracle): the public space endpoints resolve the
+    # board by project_id and read view_props for the layout switcher, so
+    # converge the seeded row to a really-published shape on every reseed
+    # (a NULL project 404s every space URL; empty views hide the switcher).
+    # Flags stay as seeded — specs flip them per test through the publish
+    # upsert and restore after. Every space-oracle child carries this hunk
+    # verbatim; the first merge wins and the rest auto-merge.
+    board.project_id = project.id
+    board.view_props = {
+        "list": True,
+        "kanban": True,
+        "calendar": True,
+        "gantt": True,
+        "spreadsheet": True,
+    }
+    board.save(update_fields=["project_id", "view_props"])
     # Intake triage needs the intake view switched on (CMT-018).
     if not project.intake_view:
         project.intake_view = True

@@ -148,6 +148,12 @@ import type {
   SettingsProfileGeneralField,
   SettingsProfileSecurityField,
   WsSettingsMemberRowFacts,
+  SpaceBoardGroupFacts,
+  SpaceBoardCardFacts,
+  SpaceBoardCardMarkers,
+  SpaceBoardCardFooter,
+  SpaceBoardDragFacts,
+  SpaceBoardStability,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -13800,5 +13806,99 @@ export class WebNewDriver implements ParityDriver {
   }
   async deskUpdateSidebarButtonVisible(): Promise<boolean> {
     return todo("deskUpdateSidebarButtonVisible");
+  }
+  // === NEWFRONT-97 space navigation (shared; keep earliest-merged on dup). ===
+  async spaceOpenBoard(_anchor: string, _query?: string): Promise<void> {
+    return todo("spaceOpenBoard");
+  }
+
+  async spaceOpenLanding(): Promise<void> {
+    return todo("spaceOpenLanding");
+  }
+
+  async spaceOpenLegacyLink(_workspaceSlug: string, _projectId: string): Promise<void> {
+    return todo("spaceOpenLegacyLink");
+  }
+  // --- Space layouts & cards oracle (NEWFRONT-449, SPC-020..033). ---
+  async spaceBoardLayoutOptions(): Promise<string[]> {
+    return todo("spaceBoardLayoutOptions");
+  }
+  async spaceBoardActiveLayout(): Promise<string> {
+    return todo("spaceBoardActiveLayout");
+  }
+  async spaceBoardSwitchLayout(_layout: string): Promise<void> {
+    return todo("spaceBoardSwitchLayout");
+  }
+  async spaceBoardSwitchLayoutRefetches(_layout: string): Promise<number> {
+    return todo("spaceBoardSwitchLayoutRefetches");
+  }
+  async spaceBoardListGroups(): Promise<SpaceBoardGroupFacts[]> {
+    return todo("spaceBoardListGroups");
+  }
+  async spaceBoardKanbanColumns(): Promise<SpaceBoardGroupFacts[]> {
+    return todo("spaceBoardKanbanColumns");
+  }
+  async spaceBoardKanbanColumnsFlow(): Promise<"row" | "column" | "single"> {
+    return todo("spaceBoardKanbanColumnsFlow");
+  }
+  async spaceBoardEmptyVisible(): Promise<boolean> {
+    return todo("spaceBoardEmptyVisible");
+  }
+  async spaceBoardListGroupLoadMoreVisible(_groupName: string): Promise<boolean> {
+    return todo("spaceBoardListGroupLoadMoreVisible");
+  }
+  async spaceBoardListGroupLoadMore(_groupName: string): Promise<void> {
+    return todo("spaceBoardListGroupLoadMore");
+  }
+  async spaceBoardListGroupShowsLoader(_groupName: string): Promise<boolean> {
+    return todo("spaceBoardListGroupShowsLoader");
+  }
+  async spaceBoardKanbanColumnScrollLoad(_columnName: string): Promise<void> {
+    return todo("spaceBoardKanbanColumnScrollLoad");
+  }
+  async spaceBoardKanbanColumnShowsLoader(_columnName: string): Promise<boolean> {
+    return todo("spaceBoardKanbanColumnShowsLoader");
+  }
+  async spaceBoardKanbanScrollBurstFetches(_columnName: string, _scrolls: number): Promise<number> {
+    return todo("spaceBoardKanbanScrollBurstFetches");
+  }
+  async spaceBoardCardFacts(_issueName: string): Promise<SpaceBoardCardFacts> {
+    return todo("spaceBoardCardFacts");
+  }
+  async spaceBoardCardMarkers(_issueName: string): Promise<SpaceBoardCardMarkers> {
+    return todo("spaceBoardCardMarkers");
+  }
+  async spaceBoardKanbanCardFooter(_issueName: string): Promise<SpaceBoardCardFooter> {
+    return todo("spaceBoardKanbanCardFooter");
+  }
+  async spaceBoardListCardFooterVisible(_issueName: string): Promise<boolean> {
+    return todo("spaceBoardListCardFooterVisible");
+  }
+  async spaceBoardOpenCard(_issueName: string): Promise<void> {
+    return todo("spaceBoardOpenCard");
+  }
+  async spaceBoardPeekVisible(): Promise<boolean> {
+    return todo("spaceBoardPeekVisible");
+  }
+  async spaceBoardClosePeek(): Promise<void> {
+    return todo("spaceBoardClosePeek");
+  }
+  async spaceBoardHighlightedRow(): Promise<string | null> {
+    return todo("spaceBoardHighlightedRow");
+  }
+  async spaceBoardCardDragFacts(): Promise<SpaceBoardDragFacts> {
+    return todo("spaceBoardCardDragFacts");
+  }
+  async spaceBoardDragCardOrder(_issueName: string): Promise<{ before: string[]; after: string[] }> {
+    return todo("spaceBoardDragCardOrder");
+  }
+  async spaceBoardVisibleOrder(): Promise<string[]> {
+    return todo("spaceBoardVisibleOrder");
+  }
+  async spaceBoardRefocusStability(): Promise<SpaceBoardStability> {
+    return todo("spaceBoardRefocusStability");
+  }
+  async spaceBoardReconnectStability(): Promise<{ before: string[]; after: string[] }> {
+    return todo("spaceBoardReconnectStability");
   }
 }
