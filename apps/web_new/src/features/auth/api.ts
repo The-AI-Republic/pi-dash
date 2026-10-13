@@ -13,6 +13,8 @@ import {
   signIn,
   signInWithMagicCode,
   signOut as postSignOut,
+  signUp,
+  signUpWithMagicCode,
   type SignInResult,
 } from "@pidash/api-client";
 
@@ -49,6 +51,20 @@ export function useMagicSignIn() {
   return useMutation({
     mutationFn: (input: { email: string; code: string; nextPath?: string }) =>
       signInWithMagicCode(getAppClient(), input).then(markSignedIn),
+  });
+}
+
+export function usePasswordSignUp() {
+  return useMutation({
+    mutationFn: (input: { email: string; password: string; confirmPassword: string; nextPath?: string }) =>
+      signUp(getAppClient(), input).then(markSignedIn),
+  });
+}
+
+export function useMagicSignUp() {
+  return useMutation({
+    mutationFn: (input: { email: string; code: string; nextPath?: string }) =>
+      signUpWithMagicCode(getAppClient(), input).then(markSignedIn),
   });
 }
 

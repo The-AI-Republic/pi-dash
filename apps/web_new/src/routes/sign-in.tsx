@@ -6,17 +6,20 @@
 // everyone else gets the card with the server error (if any) preloaded.
 
 import { createFileRoute, redirect } from "@tanstack/react-router";
+import * as React from "react";
 
 import { meQueryOptions, workspacesQueryOptions } from "../core/session/queries.js";
 import { SignInCard } from "../features/auth/index.js";
 
-interface SignInSearch {
+export interface SignInSearch {
   next?: string | undefined;
   email?: string | undefined;
   error_code?: string | undefined;
+  invitation_id?: string | undefined;
+  slug?: string | undefined;
 }
 
-function asString(value: unknown): string | undefined {
+export function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
@@ -27,12 +30,24 @@ export function safeNextPath(value: unknown): string | undefined {
   return path;
 }
 
+/** Search schema: invalid params fall back to absent instead of throwing. */
+export function parseSignInSearch(search: Record<string, unknown>): SignInSearch {
+  const next = safeNextPath(search["next"]);
+  const email = asString(search["email"]);
+  const errorCode = asString(search["error_code"]);
+  const invitationId = asString(search["invitation_id"]);
+  const slug = asString(search["slug"]);
+  return {
+    ...(next === undefined ? {} : { next }),
+    ...(email === undefined ? {} : { email }),
+    ...(errorCode === undefined ? {} : { error_code: errorCode }),
+    ...(invitationId === undefined ? {} : { invitation_id: invitationId }),
+    ...(slug === undefined ? {} : { slug }),
+  };
+}
+
 export const Route = createFileRoute("/sign-in")({
-  validateSearch: (search: Record<string, unknown>): SignInSearch => ({
-    ...(safeNextPath(search["next"]) === undefined ? {} : { next: safeNextPath(search["next"]) }),
-    ...(asString(search["email"]) === undefined ? {} : { email: asString(search["email"]) }),
-    ...(asString(search["error_code"]) === undefined ? {} : { error_code: asString(search["error_code"]) }),
-  }),
+  validateSearch: parseSignInSearch,
   beforeLoad: async ({ context, search }) => {
     const me = await context.queryClient.ensureQueryData(meQueryOptions(context.apiClient)).catch(() => null);
     if (!me) return {};
@@ -50,10 +65,20 @@ export const Route = createFileRoute("/sign-in")({
   },
   component: function SignInComponent() {
     const search = Route.useSearch();
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-(--bg) p-(--space-8)">
-        <SignInCard next={search.next} initialEmail={search.email ?? ""} initialErrorCode={search.error_code ?? null} />
-      </main>
-    );
+    return <SignInScreen search={search} />;
   },
 });
+
+export function SignInScreen({ search }: { search: SignInSearch }): React.ReactElement {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-(--bg) p-(--space-8)">
+      <SignInCard
+        next={search.next}
+        initialEmail={search.email ?? ""}
+        initialErrorCode={search.error_code ?? null}
+        invitationId={search.invitation_id}
+        invitationSlug={search.slug}
+      />
+    </main>
+  );
+}

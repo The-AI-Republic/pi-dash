@@ -10,21 +10,36 @@ export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> 
   label: string;
   hint?: string;
   error?: string;
+  /** Control pinned to the input's right edge, e.g. a clear or show/hide button. */
+  trailing?: React.ReactNode;
 }
 
-export function Input({ label, hint, error, id, className, ...rest }: InputProps): React.ReactElement {
+export function Input({ label, hint, error, id, className, trailing, ...rest }: InputProps): React.ReactElement {
   const generatedId = React.useId();
   const fieldId = id ?? generatedId;
   return (
     <FieldScaffold label={label} hint={hint} error={error} fieldId={fieldId}>
       {(describedBy) => (
-        <input
-          id={fieldId}
-          aria-invalid={error ? true : undefined}
-          aria-describedby={describedBy}
-          className={cn(fieldInputClasses, fieldInputErrorClasses(Boolean(error)), FOCUS_RING, className)}
-          {...rest}
-        />
+        // The wrapper stays mounted with or without a trailing control so
+        // the field never remounts (and loses focus) when one appears.
+        <div className="relative">
+          <input
+            id={fieldId}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={describedBy}
+            className={cn(
+              fieldInputClasses,
+              fieldInputErrorClasses(Boolean(error)),
+              FOCUS_RING,
+              trailing === undefined ? null : "pr-(--space-12)",
+              className
+            )}
+            {...rest}
+          />
+          {trailing === undefined ? null : (
+            <div className="absolute top-1/2 right-(--space-2) -translate-y-1/2">{trailing}</div>
+          )}
+        </div>
       )}
     </FieldScaffold>
   );

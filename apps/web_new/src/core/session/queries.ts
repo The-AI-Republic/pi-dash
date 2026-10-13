@@ -1,11 +1,19 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Session queries: the current user and the workspaces they belong to.
-// Route loaders prefetch these; components read them through the hooks.
+// Session queries: the current user, the workspaces they belong to, and
+// the instance config the signed-out cards read. Route loaders prefetch
+// these; components read them through the hooks.
 
 import { queryOptions } from "@tanstack/react-query";
-import { getMe, listWorkspaces, type ApiClient, type Workspace, type WorkspaceList } from "@pidash/api-client";
+import {
+  getInstanceConfig,
+  getMe,
+  listWorkspaces,
+  type ApiClient,
+  type Workspace,
+  type WorkspaceList,
+} from "@pidash/api-client";
 
 import { REFERENCE_STALE_TIME_MS } from "../query/client.js";
 
@@ -26,6 +34,19 @@ export function workspacesQueryOptions(client: ApiClient) {
   return queryOptions({
     queryKey: sessionKeys.workspaces,
     queryFn: () => listWorkspaces(client),
+    staleTime: REFERENCE_STALE_TIME_MS,
+  });
+}
+
+export const instanceKeys = {
+  config: ["instance", "config"],
+} as const;
+
+/** Instance flags the auth cards and workspace surfaces read (AUTH-003/007/008/041). */
+export function instanceConfigQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: instanceKeys.config,
+    queryFn: () => getInstanceConfig(client),
     staleTime: REFERENCE_STALE_TIME_MS,
   });
 }

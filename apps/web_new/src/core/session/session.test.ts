@@ -157,4 +157,17 @@ describe("session queries", () => {
     expect(meQueryOptions(getSessionClient()).queryKey).toEqual(sessionKeys.me);
     expect(workspacesQueryOptions(getSessionClient()).queryKey).toEqual(sessionKeys.workspaces);
   });
+
+  it("reads the instance config through its own key", async () => {
+    const { instanceConfigQueryOptions, instanceKeys } = await import("./index.js");
+    const flags = { is_smtp_configured: true };
+    const fakeClient = {
+      getJson: () => Promise.resolve({ config: flags }),
+      parse: (_schema: unknown, data: unknown) => data,
+    };
+    const options = instanceConfigQueryOptions(fakeClient as never);
+    expect(instanceKeys.config).toEqual(["instance", "config"]);
+    expect(options.queryKey).toEqual(instanceKeys.config);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(flags);
+  });
 });

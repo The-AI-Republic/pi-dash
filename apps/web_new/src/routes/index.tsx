@@ -11,17 +11,34 @@ import * as React from "react";
 
 import { meQueryOptions, workspacesQueryOptions } from "../core/session/queries.js";
 import { SignInCard } from "../features/auth/index.js";
-import { safeNextPath } from "./sign-in.js";
+import { asString, safeNextPath } from "./sign-in.js";
 
-interface EntrySearch {
+export interface EntrySearch {
   next?: string | undefined;
+  email?: string | undefined;
+  error_code?: string | undefined;
+  invitation_id?: string | undefined;
+  slug?: string | undefined;
+}
+
+/** Search schema: invalid params fall back to absent instead of throwing. */
+export function parseEntrySearch(search: Record<string, unknown>): EntrySearch {
+  const next = safeNextPath(search["next"]);
+  const email = asString(search["email"]);
+  const errorCode = asString(search["error_code"]);
+  const invitationId = asString(search["invitation_id"]);
+  const slug = asString(search["slug"]);
+  return {
+    ...(next === undefined ? {} : { next }),
+    ...(email === undefined ? {} : { email }),
+    ...(errorCode === undefined ? {} : { error_code: errorCode }),
+    ...(invitationId === undefined ? {} : { invitation_id: invitationId }),
+    ...(slug === undefined ? {} : { slug }),
+  };
 }
 
 export const Route = createFileRoute("/")({
-  validateSearch: (search: Record<string, unknown>): EntrySearch => {
-    const next = safeNextPath(search["next"]);
-    return next === undefined ? {} : { next };
-  },
+  validateSearch: parseEntrySearch,
   beforeLoad: async ({ context }) => {
     const me = await context.queryClient.ensureQueryData(meQueryOptions(context.apiClient)).catch(() => null);
     if (!me) return {};
@@ -41,16 +58,40 @@ export const Route = createFileRoute("/")({
       <EntryScreen
         signedIn={context.queryClient.getQueryData(meQueryOptions(context.apiClient).queryKey) != null}
         next={search.next}
+        email={search.email}
+        errorCode={search.error_code}
+        invitationId={search.invitation_id}
+        invitationSlug={search.slug}
       />
     );
   },
 });
 
-export function EntryScreen({ signedIn, next }: { signedIn: boolean; next?: string | undefined }): React.ReactElement {
+export function EntryScreen({
+  signedIn,
+  next,
+  email,
+  errorCode,
+  invitationId,
+  invitationSlug,
+}: {
+  signedIn: boolean;
+  next?: string | undefined;
+  email?: string | undefined;
+  errorCode?: string | undefined;
+  invitationId?: string | undefined;
+  invitationSlug?: string | undefined;
+}): React.ReactElement {
   if (!signedIn) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-(--bg) p-(--space-8)">
-        <SignInCard next={next} initialEmail="" initialErrorCode={null} />
+        <SignInCard
+          next={next}
+          initialEmail={email ?? ""}
+          initialErrorCode={errorCode ?? null}
+          invitationId={invitationId}
+          invitationSlug={invitationSlug}
+        />
       </main>
     );
   }
