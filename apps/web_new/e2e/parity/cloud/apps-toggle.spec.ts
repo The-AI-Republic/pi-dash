@@ -50,13 +50,15 @@ test(
 
       await driver.cloudAppsToggle();
       await expect.poll(() => driver.cloudAppsToggleState(), { timeout: 60_000 }).toBe(true);
-      expect(await agentToolsFlag(session.cookie)).toBe(true);
+      // The switch is optimistic: the UI flips before the profile PATCH
+      // lands, so the server read gets a deadline instead of asserting once.
+      await expect.poll(() => agentToolsFlag(session.cookie), { timeout: 60_000 }).toBe(true);
       await driver.page.reload({ waitUntil: "domcontentloaded" });
       await expect.poll(() => driver.cloudAppsToggleState(), { timeout: 60_000 }).toBe(true);
 
       await driver.cloudAppsToggle();
       await expect.poll(() => driver.cloudAppsToggleState(), { timeout: 60_000 }).toBe(false);
-      expect(await agentToolsFlag(session.cookie)).toBe(false);
+      await expect.poll(() => agentToolsFlag(session.cookie), { timeout: 60_000 }).toBe(false);
     } finally {
       await stub.uninstall();
     }
