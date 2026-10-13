@@ -35,14 +35,14 @@ export function ForgotPasswordCard({ initialEmail = "" }: ForgotPasswordCardProp
   const [now, setNow] = React.useState(() => Date.now());
   const forgot = useForgotPassword();
 
-  React.useEffect(() => {
-    if (lastSentAt === null) return;
-    const timer = globalThis.setInterval(() => setNow(Date.now()), 1000);
-    return () => globalThis.clearInterval(timer);
-  }, [lastSentAt]);
-
   const resendIn = resendCountdown(lastSentAt, now, FORGOT_RESEND_COOLDOWN_S);
   const coolingDown = resendIn > 0;
+
+  React.useEffect(() => {
+    if (!coolingDown) return;
+    const timer = globalThis.setInterval(() => setNow(Date.now()), 1000);
+    return () => globalThis.clearInterval(timer);
+  }, [coolingDown]);
   const sent = lastSentAt !== null;
   const showInvalid = emailTouched && email.length > 0 && !isValidEmail(email);
   const submitDisabled = !isValidEmail(email) || forgot.isPending || coolingDown;

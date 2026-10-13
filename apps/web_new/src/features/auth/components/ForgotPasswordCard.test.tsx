@@ -156,6 +156,8 @@ describe("ForgotPasswordCard", () => {
       });
       expect(screen.getByRole("button", { name: "Resend link" })).toBeEnabled();
       expect(field).toBeEnabled();
+      // The ticker stops once the countdown elapses instead of re-rendering forever.
+      expect(vi.getTimerCount()).toBe(0);
 
       submitForm(container);
       await act(async () => {});
