@@ -7,7 +7,13 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { selectPermissions, type Permissions } from "./permissions.js";
-import { getSessionClient, meQueryOptions, selectWorkspace, workspacesQueryOptions } from "./queries.js";
+import {
+  getSessionClient,
+  instanceConfigQueryOptions,
+  meQueryOptions,
+  selectWorkspace,
+  workspacesQueryOptions,
+} from "./queries.js";
 import { useSessionStore, type SessionStatus } from "./store.js";
 
 /** The signed-in user. Suspends while loading when used with Suspense. */
@@ -40,4 +46,9 @@ export function usePermissions(slugOrId: string): Permissions & { isLoading: boo
 /** The sign-in lifecycle state for redirects and the session-expired UI. */
 export function useSessionStatus(): SessionStatus {
   return useSessionStore((state) => state.status);
+}
+
+/** Instance flags the auth cards and workspace surfaces read. */
+export function useInstanceConfig() {
+  return useQuery(instanceConfigQueryOptions(getSessionClient()));
 }

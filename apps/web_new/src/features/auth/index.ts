@@ -3,8 +3,19 @@
 // See the LICENSE file for details.
 // Public API of the auth feature. Other features import only from here.
 
-export { useEmailCheck, useMagicGenerate, useMagicSignIn, usePasswordSignIn, useSignOut } from "./api.js";
-export { describeSignInError } from "./authErrors.js";
-export type { SignInError, SignInStep } from "./authErrors.js";
-export { SignInCard } from "./components/SignInCard.js";
+export {
+  useEmailCheck,
+  useMagicGenerate,
+  useMagicSignIn,
+  useMagicSignUp,
+  usePasswordSignIn,
+  usePasswordSignUp,
+  useSignOut,
+} from "./api.js";
+export { describeAuthError, describeSubmitFailure } from "./authErrors.js";
+export type { AuthError, AuthErrorAction, AuthMode, SignInStep, SubmitFailure } from "./authErrors.js";
+export { resolveSignInProviders } from "./providers.js";
+export type { ResolveProvidersOptions, SignInProvider } from "./providers.js";
+export { authKeys, invitationQueryOptions, useWorkspaceInvitation } from "./queries.js";
+export { isValidEmail, SignInCard } from "./components/SignInCard.js";
 export type { SignInCardProps } from "./components/SignInCard.js";

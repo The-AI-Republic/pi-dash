@@ -39,6 +39,30 @@ describe("Input", () => {
     render(<Input label="Title" />);
     expect(screen.getByLabelText("Title").className).toContain("focus-visible:outline-2");
   });
+
+  it("pins a trailing control inside the field", async () => {
+    const user = userEvent.setup();
+    let cleared = 0;
+    render(
+      <Input
+        label="Title"
+        trailing={
+          <button type="button" aria-label="Clear" onClick={() => (cleared += 1)}>
+            Clear
+          </button>
+        }
+      />
+    );
+    const field = screen.getByLabelText("Title");
+    expect(field.className).toContain("pr-(--space-12)");
+    await user.click(screen.getByRole("button", { name: "Clear" }));
+    expect(cleared).toBe(1);
+  });
+
+  it("adds no trailing padding without a trailing control", () => {
+    render(<Input label="Title" />);
+    expect(screen.getByLabelText("Title").className).not.toContain("pr-(--space-12)");
+  });
 });
 
 describe("Textarea", () => {

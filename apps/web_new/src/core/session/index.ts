@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 
-export { useMe, usePermissions, useSessionStatus, useWorkspace, useWorkspaces } from "./hooks.js";
+export { useInstanceConfig, useMe, usePermissions, useSessionStatus, useWorkspace, useWorkspaces } from "./hooks.js";
 export { createSessionMiddleware, sessionExpiredMiddleware } from "./middleware.js";
 export { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, selectPermissions } from "./permissions.js";
 export type { Permissions } from "./permissions.js";
@@ -10,6 +10,8 @@ export {
   decideGatedWorkspaceGate,
   decideWorkspaceRouteGate,
   getSessionClient,
+  instanceConfigQueryOptions,
+  instanceKeys,
   meQueryOptions,
   selectWorkspace,
   selectWorkspaceRole,
