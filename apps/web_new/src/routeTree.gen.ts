@@ -11,9 +11,14 @@
 import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
 import { Route as WsRouteRouteImport } from "./routes/$ws/route";
+import { Route as LoginRouteImport } from "./routes/login";
+import { Route as RegisterRouteImport } from "./routes/register";
 import { Route as SignInRouteImport } from "./routes/sign-in";
+import { Route as SignUpRouteImport } from "./routes/sign-up";
+import { Route as SigninRouteImport } from "./routes/signin";
 import { Route as WsSplatRouteImport } from "./routes/$ws/$";
 import { Route as WsGatedRouteRouteImport } from "./routes/$ws/_gated/route";
+import { Route as AccountsSignUpRouteImport } from "./routes/accounts/sign-up";
 import { Route as WsGatedIndexRouteImport } from "./routes/$ws/_gated/index";
 import { Route as WsGatedBrowseIssueKeyRouteImport } from "./routes/$ws/_gated/browse/$issueKey";
 import { Route as WsGatedProjectsProjectIdIssuesIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/issues/index";
@@ -28,9 +33,29 @@ const WsRouteRoute = WsRouteRouteImport.update({
   path: "/$ws",
   getParentRoute: () => rootRouteImport,
 } as any);
+const LoginRoute = LoginRouteImport.update({
+  id: "/login",
+  path: "/login",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const RegisterRoute = RegisterRouteImport.update({
+  id: "/register",
+  path: "/register",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const SignInRoute = SignInRouteImport.update({
   id: "/sign-in",
   path: "/sign-in",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const SignUpRoute = SignUpRouteImport.update({
+  id: "/sign-up",
+  path: "/sign-up",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const SigninRoute = SigninRouteImport.update({
+  id: "/signin",
+  path: "/signin",
   getParentRoute: () => rootRouteImport,
 } as any);
 const WsSplatRoute = WsSplatRouteImport.update({
@@ -41,6 +66,11 @@ const WsSplatRoute = WsSplatRouteImport.update({
 const WsGatedRouteRoute = WsGatedRouteRouteImport.update({
   id: "/_gated",
   getParentRoute: () => WsRouteRoute,
+} as any);
+const AccountsSignUpRoute = AccountsSignUpRouteImport.update({
+  id: "/accounts/sign-up",
+  path: "/accounts/sign-up",
+  getParentRoute: () => rootRouteImport,
 } as any);
 const WsGatedIndexRoute = WsGatedIndexRouteImport.update({
   id: "/",
@@ -61,8 +91,13 @@ const WsGatedProjectsProjectIdIssuesIndexRoute = WsGatedProjectsProjectIdIssuesI
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
   "/$ws": typeof WsRouteRouteWithChildren;
+  "/login": typeof LoginRoute;
+  "/register": typeof RegisterRoute;
   "/sign-in": typeof SignInRoute;
+  "/sign-up": typeof SignUpRoute;
+  "/signin": typeof SigninRoute;
   "/$ws/$": typeof WsSplatRoute;
+  "/accounts/sign-up": typeof AccountsSignUpRoute;
   "/$ws/": typeof WsGatedIndexRoute;
   "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
   "/$ws/projects/$projectId/issues/": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
@@ -70,8 +105,13 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
   "/$ws": typeof WsGatedIndexRoute;
+  "/login": typeof LoginRoute;
+  "/register": typeof RegisterRoute;
   "/sign-in": typeof SignInRoute;
+  "/sign-up": typeof SignUpRoute;
+  "/signin": typeof SigninRoute;
   "/$ws/$": typeof WsSplatRoute;
+  "/accounts/sign-up": typeof AccountsSignUpRoute;
   "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
   "/$ws/projects/$projectId/issues": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
 }
@@ -79,9 +119,14 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
   "/$ws": typeof WsRouteRouteWithChildren;
+  "/login": typeof LoginRoute;
+  "/register": typeof RegisterRoute;
   "/sign-in": typeof SignInRoute;
+  "/sign-up": typeof SignUpRoute;
+  "/signin": typeof SigninRoute;
   "/$ws/_gated": typeof WsGatedRouteRouteWithChildren;
   "/$ws/$": typeof WsSplatRoute;
+  "/accounts/sign-up": typeof AccountsSignUpRoute;
   "/$ws/_gated/": typeof WsGatedIndexRoute;
   "/$ws/_gated/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
   "/$ws/_gated/projects/$projectId/issues/": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
@@ -91,20 +136,41 @@ export interface FileRouteTypes {
   fullPaths:
     | "/"
     | "/$ws"
+    | "/login"
+    | "/register"
     | "/sign-in"
+    | "/sign-up"
+    | "/signin"
     | "/$ws/$"
+    | "/accounts/sign-up"
     | "/$ws/"
     | "/$ws/browse/$issueKey"
     | "/$ws/projects/$projectId/issues/";
   fileRoutesByTo: FileRoutesByTo;
-  to: "/" | "/$ws" | "/sign-in" | "/$ws/$" | "/$ws/browse/$issueKey" | "/$ws/projects/$projectId/issues";
+  to:
+    | "/"
+    | "/$ws"
+    | "/login"
+    | "/register"
+    | "/sign-in"
+    | "/sign-up"
+    | "/signin"
+    | "/$ws/$"
+    | "/accounts/sign-up"
+    | "/$ws/browse/$issueKey"
+    | "/$ws/projects/$projectId/issues";
   id:
     | "__root__"
     | "/"
     | "/$ws"
+    | "/login"
+    | "/register"
     | "/sign-in"
+    | "/sign-up"
+    | "/signin"
     | "/$ws/_gated"
     | "/$ws/$"
+    | "/accounts/sign-up"
     | "/$ws/_gated/"
     | "/$ws/_gated/browse/$issueKey"
     | "/$ws/_gated/projects/$projectId/issues/";
@@ -113,7 +179,12 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
   WsRouteRoute: typeof WsRouteRouteWithChildren;
+  LoginRoute: typeof LoginRoute;
+  RegisterRoute: typeof RegisterRoute;
   SignInRoute: typeof SignInRoute;
+  SignUpRoute: typeof SignUpRoute;
+  SigninRoute: typeof SigninRoute;
+  AccountsSignUpRoute: typeof AccountsSignUpRoute;
 }
 
 declare module "@tanstack/react-router" {
@@ -132,11 +203,39 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof WsRouteRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/login": {
+      id: "/login";
+      path: "/login";
+      fullPath: "/login";
+      preLoaderRoute: typeof LoginRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/register": {
+      id: "/register";
+      path: "/register";
+      fullPath: "/register";
+      preLoaderRoute: typeof RegisterRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/sign-in": {
       id: "/sign-in";
       path: "/sign-in";
       fullPath: "/sign-in";
       preLoaderRoute: typeof SignInRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/sign-up": {
+      id: "/sign-up";
+      path: "/sign-up";
+      fullPath: "/sign-up";
+      preLoaderRoute: typeof SignUpRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/signin": {
+      id: "/signin";
+      path: "/signin";
+      fullPath: "/signin";
+      preLoaderRoute: typeof SigninRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/$ws/$": {
@@ -152,6 +251,13 @@ declare module "@tanstack/react-router" {
       fullPath: "/$ws";
       preLoaderRoute: typeof WsGatedRouteRouteImport;
       parentRoute: typeof WsRouteRoute;
+    };
+    "/accounts/sign-up": {
+      id: "/accounts/sign-up";
+      path: "/accounts/sign-up";
+      fullPath: "/accounts/sign-up";
+      preLoaderRoute: typeof AccountsSignUpRouteImport;
+      parentRoute: typeof rootRouteImport;
     };
     "/$ws/_gated/": {
       id: "/$ws/_gated/";
@@ -206,6 +312,11 @@ const WsRouteRouteWithChildren = WsRouteRoute._addFileChildren(WsRouteRouteChild
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   WsRouteRoute: WsRouteRouteWithChildren,
+  LoginRoute: LoginRoute,
+  RegisterRoute: RegisterRoute,
   SignInRoute: SignInRoute,
+  SignUpRoute: SignUpRoute,
+  SigninRoute: SigninRoute,
+  AccountsSignUpRoute: AccountsSignUpRoute,
 };
 export const routeTree = rootRouteImport._addFileChildren(rootRouteChildren)._addFileTypes<FileRouteTypes>();

@@ -8,25 +8,29 @@ import { describe, expect, it, vi } from "vitest";
 
 // Stand-in for the auth card: its internals belong to the auth area.
 // What this suite owns is the search schema, the entry branch decision,
-// plus prop passing.
-vi.mock("../features/auth/index.js", () => ({
-  SignInCard: (props: {
-    next?: string;
-    initialEmail?: string;
-    initialErrorCode?: string | null;
-    invitationId?: string;
-    invitationSlug?: string;
-  }) => (
-    <div
-      data-testid="sign-in-card"
-      data-next={props.next ?? ""}
-      data-email={props.initialEmail ?? ""}
-      data-error={props.initialErrorCode ?? ""}
-      data-invitation={props.invitationId ?? ""}
-      data-slug={props.invitationSlug ?? ""}
-    />
-  ),
-}));
+// plus prop passing. The real search primitives stay intact.
+vi.mock("../features/auth/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../features/auth/index.js")>();
+  return {
+    ...actual,
+    SignInCard: (props: {
+      next?: string;
+      initialEmail?: string;
+      initialErrorCode?: string | null;
+      invitationId?: string;
+      invitationSlug?: string;
+    }) => (
+      <div
+        data-testid="sign-in-card"
+        data-next={props.next ?? ""}
+        data-email={props.initialEmail ?? ""}
+        data-error={props.initialErrorCode ?? ""}
+        data-invitation={props.invitationId ?? ""}
+        data-slug={props.invitationSlug ?? ""}
+      />
+    ),
+  };
+});
 
 import { EntryScreen, parseEntrySearch } from "./index.js";
 

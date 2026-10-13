@@ -1,14 +1,15 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Sign-in card. Email first: the server decides whether the address signs
+// Auth card. Email first: the server decides whether the address signs
 // in with a password or an emailed code, and whether the card stays in
-// sign-in mode or flips into sign-up mode. Provider buttons resolve
+// its home mode or flips into the other one. Provider buttons resolve
 // through the edition intersected with the instance flags; failures
 // render the server code as a banner and land on the step that can fix
-// them. Written from parity/specs/auth.md AUTH-001-008; later slices
-// mount the sign-up card, recovery pages, and guards on this card's
-// step, error, and return-path conventions.
+// them. Written from parity/specs/auth.md AUTH-001-011; the sign-up card
+// is this same machine with the sign-up home (see SignUpCard), and later
+// slices mount recovery pages and guards on its step, error, and
+// return-path conventions.
 
 import { Button, IconButton, Input, Popover, Spinner } from "@pidash/kit";
 import type { SignInResult } from "@pidash/api-client";
@@ -33,8 +34,10 @@ import {
   type AuthMode,
   type SignInStep,
 } from "../authErrors.js";
+import { isStrongSecret } from "../passwordStrength.js";
 import { resolveSignInProviders } from "../providers.js";
 import { useWorkspaceInvitation } from "../queries.js";
+import { PasswordStrengthHint } from "./PasswordStrengthHint.js";
 
 export interface SignInCardProps {
   /** Where the server sends the user after sign-in (as next_path). */
@@ -45,6 +48,8 @@ export interface SignInCardProps {
   /** Invitation link params for the invitation-aware header. */
   invitationId?: string | undefined;
   invitationSlug?: string | undefined;
+  /** The card's home mode and URL; clearing the email resets to it. */
+  homeMode?: AuthMode | undefined;
 }
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -56,8 +61,11 @@ export function isValidEmail(value: string): boolean {
 
 const RESEND_COOLDOWN_S = 5;
 const SIGN_IN_HOME = "/";
+const SIGN_UP_HOME = "/sign-up";
 const NETWORK_MESSAGE = "Could not reach the server. Check your connection and try again.";
 const CODE_SEND_MESSAGE = "Could not send a code. Try again in a moment.";
+const WEAK_SECRET_MESSAGE = "Choose a strong password to create your account.";
+const MISMATCH_MESSAGE = "The two passwords don't match.";
 
 function Banner({
   message,
@@ -105,21 +113,23 @@ export function SignInCard({
   initialErrorCode,
   invitationId,
   invitationSlug,
+  homeMode = "sign-in",
 }: SignInCardProps): React.ReactElement {
   const trimmedInitialEmail = initialEmail.trim();
   const initialError = React.useMemo(
-    () => describeAuthError(initialErrorCode, "sign-in", trimmedInitialEmail),
-    [initialErrorCode, trimmedInitialEmail]
+    () => describeAuthError(initialErrorCode, homeMode, trimmedInitialEmail),
+    [initialErrorCode, homeMode, trimmedInitialEmail]
   );
   const [email, setEmail] = React.useState(trimmedInitialEmail);
   const [emailTouched, setEmailTouched] = React.useState(false);
   const [step, setStep] = React.useState<SignInStep>(initialError?.step ?? "email");
-  const [mode, setMode] = React.useState<AuthMode>(initialError?.mode ?? "sign-in");
+  const [mode, setMode] = React.useState<AuthMode>(initialError?.mode ?? homeMode);
   const [banner, setBanner] = React.useState<{ message: string; action: AuthErrorAction | null } | null>(
     initialError ? { message: initialError.message, action: initialError.action ?? null } : null
   );
   const [password, setPassword] = React.useState("");
   const [confirm, setConfirm] = React.useState("");
+  const [confirmFocused, setConfirmFocused] = React.useState(false);
   const [showPassword, setShowPassword] = React.useState(false);
   const [code, setCode] = React.useState("");
   const [lastSentAt, setLastSentAt] = React.useState<number | null>(null);
@@ -140,15 +150,18 @@ export function SignInCard({
     return () => globalThis.clearInterval(timer);
   }, [lastSentAt]);
 
+  const signingUpHome = homeMode === "sign-up";
+  const cardLabel = signingUpHome ? "Sign up" : "Sign in";
   const loadedConfig = instanceConfig.data;
   if (loadedConfig === undefined) {
     if (instanceConfig.isError) {
       return (
-        <section aria-label="Sign in" className="flex w-full max-w-90 flex-col gap-(--space-6)">
+        <section aria-label={cardLabel} className="flex w-full max-w-90 flex-col gap-(--space-6)">
           <div className="flex flex-col gap-(--space-1)">
-            <h1 className="text-h2 text-(--text)">Sign in to Pi Dash</h1>
+            <h1 className="text-h2 text-(--text)">{signingUpHome ? "Create your account" : "Sign in to Pi Dash"}</h1>
             <p className="text-body text-(--text-muted)">
-              Could not load sign-in. Check your connection and try again.
+              {signingUpHome ? "Could not load sign-up." : "Could not load sign-in."} Check your connection and try
+              again.
             </p>
           </div>
           <Button
@@ -163,8 +176,8 @@ export function SignInCard({
       );
     }
     return (
-      <section aria-label="Sign in" className="flex w-full max-w-90 flex-col items-center gap-(--space-6)">
-        <Spinner label="Loading sign-in options" />
+      <section aria-label={cardLabel} className="flex w-full max-w-90 flex-col items-center gap-(--space-6)">
+        <Spinner label={signingUpHome ? "Loading sign-up options" : "Loading sign-in options"} />
       </section>
     );
   }
@@ -188,6 +201,11 @@ export function SignInCard({
 
   const resendIn = lastSentAt === null ? 0 : Math.max(0, RESEND_COOLDOWN_S - Math.floor((now - lastSentAt) / 1000));
   const showInvalid = emailTouched && email.length > 0 && !isValidEmail(email);
+  const signingUp = mode === "sign-up";
+  const secretMismatch = confirm.length > 0 && confirm !== password;
+  const showMismatch = signingUp && secretMismatch && (!confirmFocused || confirm.length >= password.length);
+  const showStrengthHint = signingUp && password.length > 0 && !isStrongSecret(password);
+  const signUpSubmitDisabled = signingUp && (password.length === 0 || password !== confirm);
   const continueDisabled = email.trim().length === 0 || !isValidEmail(email) || emailCheck.isPending;
   const codeSubmitPending = mode === "sign-up" ? magicSignUp.isPending : magicSignIn.isPending;
   const codeSubmitDisabled = code.trim().length === 0 || magicGenerate.isPending || codeSubmitPending;
@@ -214,20 +232,24 @@ export function SignInCard({
               setMode(nextMode);
               setStep("code");
             },
-            onError: () => fail(CODE_SEND_MESSAGE, "email", "sign-in"),
+            onError: () => fail(CODE_SEND_MESSAGE, "email", homeMode),
           });
         } else {
           setMode(nextMode);
           setStep("password");
         }
       },
-      onError: () => fail(NETWORK_MESSAGE, "email", "sign-in"),
+      onError: () => fail(NETWORK_MESSAGE, "email", homeMode),
     });
   };
 
   const submitPassword = (event: React.FormEvent) => {
     event.preventDefault();
     setBanner(null);
+    if (mode === "sign-up" && !isStrongSecret(password)) {
+      setBanner({ message: WEAK_SECRET_MESSAGE, action: null });
+      return;
+    }
     const address = email.trim();
     const onSuccess = (result: SignInResult) => {
       if (result.ok) {
@@ -291,19 +313,20 @@ export function SignInCard({
   const restart = () => {
     setEmail("");
     setEmailTouched(false);
-    setMode("sign-in");
+    setMode(homeMode);
     setStep("email");
     setBanner(null);
     setPassword("");
     setConfirm("");
+    setConfirmFocused(false);
     setCode("");
-    globalThis.window.location.assign(SIGN_IN_HOME);
+    globalThis.window.location.assign(signingUpHome ? SIGN_UP_HOME : SIGN_IN_HOME);
   };
 
-  const passwordPrimaryLabel = smtpConfigured ? (mode === "sign-up" ? "Create account" : "Sign in") : "Go to workspace";
+  const passwordPrimaryLabel = mode === "sign-up" ? "Create account" : smtpConfigured ? "Sign in" : "Go to workspace";
 
   return (
-    <section aria-label="Sign in" className="flex w-full max-w-90 flex-col gap-(--space-6)">
+    <section aria-label={cardLabel} className="flex w-full max-w-90 flex-col gap-(--space-6)">
       {banner ? <Banner message={banner.message} action={banner.action} onDismiss={() => setBanner(null)} /> : null}
       {invitation.isFetching ? (
         <div className="flex flex-col items-center gap-(--space-1)">
@@ -392,6 +415,7 @@ export function SignInCard({
               {step === "password" ? (
                 <form onSubmit={submitPassword} className="flex flex-col gap-(--space-4)">
                   <LockedEmail email={email} onClear={restart} />
+                  {next === undefined ? null : <input type="hidden" name="next_path" value={next} readOnly />}
                   <Input
                     label="Password"
                     type={showPassword ? "text" : "password"}
@@ -411,6 +435,7 @@ export function SignInCard({
                       </Button>
                     }
                   />
+                  {showStrengthHint ? <PasswordStrengthHint secret={password} /> : null}
                   {mode === "sign-up" ? (
                     <Input
                       label="Confirm password"
@@ -419,6 +444,9 @@ export function SignInCard({
                       required
                       value={confirm}
                       onChange={(event) => setConfirm(event.target.value)}
+                      onFocus={() => setConfirmFocused(true)}
+                      onBlur={() => setConfirmFocused(false)}
+                      {...(showMismatch ? { error: MISMATCH_MESSAGE } : {})}
                     />
                   ) : null}
                   {mode === "sign-in" ? (
@@ -444,7 +472,12 @@ export function SignInCard({
                       </Popover>
                     )
                   ) : null}
-                  <Button type="submit" variant="primary" loading={busy}>
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    loading={busy}
+                    {...(signingUp ? { disabled: signUpSubmitDisabled } : {})}
+                  >
                     {passwordPrimaryLabel}
                   </Button>
                   {mode === "sign-in" && smtpConfigured ? (
@@ -457,6 +490,7 @@ export function SignInCard({
               {step === "code" ? (
                 <form onSubmit={submitCode} className="flex flex-col gap-(--space-4)">
                   <LockedEmail email={email} onClear={restart} />
+                  {next === undefined ? null : <input type="hidden" name="next_path" value={next} readOnly />}
                   <Input
                     label="One-time code"
                     inputMode="numeric"

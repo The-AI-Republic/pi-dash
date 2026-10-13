@@ -10,8 +10,7 @@ import { createFileRoute, redirect } from "@tanstack/react-router";
 import * as React from "react";
 
 import { meQueryOptions, workspacesQueryOptions } from "../core/session/queries.js";
-import { SignInCard } from "../features/auth/index.js";
-import { asString, safeNextPath } from "./sign-in.js";
+import { asString, safeNextPath, SignInCard } from "../features/auth/index.js";
 
 export interface EntrySearch {
   next?: string | undefined;
