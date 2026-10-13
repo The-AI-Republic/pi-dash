@@ -21135,3 +21135,134 @@ export async function serverAdminEmailCheck(
   });
   return { status: res.status, body: (await res.json().catch(() => null)) as unknown };
 }
+
+// --- Instance-admin workspaces oracle helpers (NEWFRONT-444, ADM-037..045). ---
+
+/** One workspace row as GET /api/instances/workspaces/ reports it. */
+export interface ServerAdminWorkspace {
+  id: string;
+  name: string;
+  slug: string;
+  ownerEmail: string | null;
+  totalProjects: number | null;
+  totalMembers: number | null;
+  logoUrl: string | null;
+}
+
+/** Paginated workspace list as the server reports it. */
+export interface ServerAdminWorkspaceList {
+  results: ServerAdminWorkspace[];
+  nextPageResults: boolean;
+  nextCursor: string | null;
+  totalCount: number | null;
+}
+
+function toServerAdminWorkspace(row: Record<string, unknown>): ServerAdminWorkspace {
+  const owner = row["owner"] as { email?: unknown } | null | undefined;
+  return {
+    id: typeof row["id"] === "string" ? row["id"] : "",
+    name: typeof row["name"] === "string" ? row["name"] : "",
+    slug: typeof row["slug"] === "string" ? row["slug"] : "",
+    ownerEmail: typeof owner?.email === "string" ? owner.email : null,
+    totalProjects: typeof row["total_projects"] === "number" ? row["total_projects"] : null,
+    totalMembers: typeof row["total_members"] === "number" ? row["total_members"] : null,
+    logoUrl: typeof row["logo_url"] === "string" && row["logo_url"] !== "" ? (row["logo_url"] as string) : null,
+  };
+}
+
+/**
+ * List instance workspaces as GET /api/instances/workspaces/ reports them
+ * (cursor-paginated, ten per page). Throws unless the read lands.
+ */
+export async function serverAdminListWorkspaces(
+  sessionCookie: string,
+  cursor?: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAdminWorkspaceList> {
+  const url =
+    cursor === undefined || cursor === ""
+      ? `${apiBase}/api/instances/workspaces/`
+      : `${apiBase}/api/instances/workspaces/?cursor=${encodeURIComponent(cursor)}`;
+  const res = await fetch(url, { headers: { cookie: sessionCookie } });
+  if (!res.ok) throw new Error(`[parity] instance workspaces read failed with HTTP ${res.status}.`);
+  const body = (await res.json()) as {
+    results?: unknown[];
+    next_page_results?: unknown;
+    next_cursor?: unknown;
+    total_count?: unknown;
+  };
+  const rows = Array.isArray(body.results) ? body.results : [];
+  return {
+    results: rows.map((row) => toServerAdminWorkspace((row ?? {}) as Record<string, unknown>)),
+    nextPageResults: body.next_page_results === true,
+    nextCursor: typeof body.next_cursor === "string" ? body.next_cursor : null,
+    totalCount: typeof body.total_count === "number" ? body.total_count : null,
+  };
+}
+
+/** Payload for creating an instance workspace (owner is server-assigned). */
+export interface ServerAdminCreateWorkspaceInput {
+  name: string;
+  slug: string;
+  organizationSize: string;
+}
+
+/**
+ * Create an instance workspace via POST /api/instances/workspaces/.
+ * Throws unless the server reports the created row.
+ */
+export async function serverAdminCreateWorkspace(
+  sessionCookie: string,
+  input: ServerAdminCreateWorkspaceInput,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAdminWorkspace> {
+  const res = await fetch(`${apiBase}/api/instances/workspaces/`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...serverAdminCsrfHeaders(sessionCookie) },
+    body: JSON.stringify({
+      name: input.name,
+      slug: input.slug,
+      organization_size: input.organizationSize,
+    }),
+  });
+  if (res.status !== 201) throw new Error(`[parity] instance workspace create failed with HTTP ${res.status}.`);
+  return toServerAdminWorkspace((await res.json()) as Record<string, unknown>);
+}
+
+/**
+ * Check slug availability via GET /api/instances/workspace-slug-check/.
+ * Resolves true when the slug is free (and not restricted). Throws unless
+ * the read lands.
+ */
+export async function serverAdminSlugCheck(
+  sessionCookie: string,
+  slug: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await fetch(`${apiBase}/api/instances/workspace-slug-check/?slug=${encodeURIComponent(slug)}`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] workspace slug check failed with HTTP ${res.status}.`);
+  const body = (await res.json()) as { status?: unknown };
+  return body.status === true;
+}
+
+/**
+ * Delete every workspace whose slug starts with the given prefix (test
+ * cleanup; the console surfaces no delete). Resolves with the deleted
+ * count. Refuses an empty prefix so the seed workspace is never at risk.
+ */
+export async function serverAdminDeleteWorkspacesBySlugPrefix(prefix: string): Promise<number> {
+  if (prefix === "") throw new Error("[parity] workspace cleanup prefix must not be empty.");
+  const out = await serverAdminShell(
+    `from pi_dash.db.models import Workspace\n` +
+      `rows = Workspace.objects.filter(slug__startswith=${JSON.stringify(prefix)})\n` +
+      `count = rows.count()\n` +
+      `rows.delete()\n` +
+      `print("PARITY_DELETED:" + str(count))\n` +
+      `print("PARITY_DELETE_OK")\n`
+  );
+  if (!out.includes("PARITY_DELETE_OK")) throw new Error("[parity] workspace cleanup produced no receipt.");
+  const match = /PARITY_DELETED:(\d+)/.exec(out);
+  return match === null ? 0 : Number.parseInt(match[1] ?? "0", 10);
+}

@@ -8,6 +8,7 @@
 import { expect, type Page } from "@playwright/test";
 import type {
   AdminAccountMenuFacts,
+  AdminAiFacts,
   AdminAuthCopyFact,
   AdminAuthDiscardFacts,
   AdminAuthFormFacts,
@@ -19,12 +20,16 @@ import type {
   AdminEmailSecurity,
   AdminFailureFacts,
   AdminGeneralFacts,
+  AdminImageFacts,
   AdminNotFoundFacts,
   AdminRootBranch,
   AdminSetupFacts,
   AdminSetupFields,
   AdminSignInFacts,
   AdminTestEmailFacts,
+  AdminWorkspaceCreateFacts,
+  AdminWorkspaceListFacts,
+  AdminWorkspaceRow,
   ApprovalCard,
   ArchivesArchiveDialog,
   ModulesDeleteDialog,
@@ -14428,6 +14433,94 @@ export class WebNewDriver implements ParityDriver {
   }
   async adminAuthReadClipboard(): Promise<string> {
     return todo("adminAuthReadClipboard");
+  }
+  // --- Admin workspaces + AI + image oracle (NEWFRONT-444, ADM-037..050). ---
+  async adminWorkspaceListFacts(): Promise<AdminWorkspaceListFacts> {
+    return todo("adminWorkspaceListFacts");
+  }
+  async adminWorkspaceRows(): Promise<AdminWorkspaceRow[]> {
+    return todo("adminWorkspaceRows");
+  }
+  async adminWorkspaceSetCreationRestricted(_on: boolean): Promise<void> {
+    return todo("adminWorkspaceSetCreationRestricted");
+  }
+  async adminWorkspaceLoadMore(): Promise<void> {
+    return todo("adminWorkspaceLoadMore");
+  }
+  async adminStartWorkspacesFetchSpy(): Promise<void> {
+    return todo("adminStartWorkspacesFetchSpy");
+  }
+  async adminWorkspacesFetchUrls(): Promise<string[]> {
+    return todo("adminWorkspacesFetchUrls");
+  }
+  async adminDelayWorkspacesFetch(_ms: number): Promise<void> {
+    return todo("adminDelayWorkspacesFetch");
+  }
+  async adminFailWorkspacesFetch(): Promise<void> {
+    return todo("adminFailWorkspacesFetch");
+  }
+  async adminStubEmptyWorkspaces(): Promise<void> {
+    return todo("adminStubEmptyWorkspaces");
+  }
+  async adminClearWorkspacesFetchFault(): Promise<void> {
+    return todo("adminClearWorkspacesFetchFault");
+  }
+  async adminWorkspaceCreateFacts(): Promise<AdminWorkspaceCreateFacts> {
+    return todo("adminWorkspaceCreateFacts");
+  }
+  async adminWorkspaceCreateFillName(_name: string): Promise<void> {
+    return todo("adminWorkspaceCreateFillName");
+  }
+  async adminWorkspaceCreateFillSlug(_slug: string): Promise<void> {
+    return todo("adminWorkspaceCreateFillSlug");
+  }
+  async adminWorkspaceCreateSelectOrgSize(_size: string): Promise<void> {
+    return todo("adminWorkspaceCreateSelectOrgSize");
+  }
+  async adminWorkspaceCreateSubmit(): Promise<void> {
+    return todo("adminWorkspaceCreateSubmit");
+  }
+  async adminStartSlugCheckSpy(): Promise<void> {
+    return todo("adminStartSlugCheckSpy");
+  }
+  async adminSlugCheckSlugs(): Promise<string[]> {
+    return todo("adminSlugCheckSlugs");
+  }
+  async adminFailSlugCheck(): Promise<void> {
+    return todo("adminFailSlugCheck");
+  }
+  async adminClearSlugCheckFault(): Promise<void> {
+    return todo("adminClearSlugCheckFault");
+  }
+  async adminStartWorkspaceCreateSpy(): Promise<void> {
+    return todo("adminStartWorkspaceCreateSpy");
+  }
+  async adminWorkspaceCreateBodies(): Promise<unknown[]> {
+    return todo("adminWorkspaceCreateBodies");
+  }
+  async adminFailWorkspaceCreate(): Promise<void> {
+    return todo("adminFailWorkspaceCreate");
+  }
+  async adminDelayWorkspaceCreate(_ms: number): Promise<void> {
+    return todo("adminDelayWorkspaceCreate");
+  }
+  async adminClearWorkspaceCreateFault(): Promise<void> {
+    return todo("adminClearWorkspaceCreateFault");
+  }
+  async adminAiFacts(): Promise<AdminAiFacts> {
+    return todo("adminAiFacts");
+  }
+  async adminAiFill(_model: string, _key: string): Promise<void> {
+    return todo("adminAiFill");
+  }
+  async adminAiToggleKeyVisibility(): Promise<void> {
+    return todo("adminAiToggleKeyVisibility");
+  }
+  async adminAiSave(): Promise<void> {
+    return todo("adminAiSave");
+  }
+  async adminImageFacts(): Promise<AdminImageFacts> {
+    return todo("adminImageFacts");
   }
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
   async spaceChromeNavbarIdentity(): Promise<SpaceChromeNavbarIdentity> {
