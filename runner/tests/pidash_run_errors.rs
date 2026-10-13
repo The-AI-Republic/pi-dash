@@ -14,6 +14,7 @@ fn empty_paths(root: &std::path::Path) -> Paths {
         config_dir: root.join("config"),
         data_dir: root.join("data"),
         runtime_dir: root.join("runtime"),
+        ipc_socket: None,
     }
 }
 

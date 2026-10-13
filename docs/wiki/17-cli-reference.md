@@ -583,6 +583,7 @@ Other commands return `0` on success and surface anyhow errors on failure (non-z
 | ------------------------- | -------------- | ---------------------------------------- |
 | `PIDASH_CONFIG_DIR`       | All            | Override config dir                      |
 | `PIDASH_DATA_DIR`         | All            | Override data dir                        |
+| `PIDASH_IPC_SOCKET`       | All            | Daemon control socket (desktop-assigned) |
 | `PIDASH_LOG`              | All            | Log level                                |
 | `PIDASH_PROJECT_ID`       | `issue create` | Default project when `--project` omitted |
 | `PIDASH_ISSUE_IDENTIFIER` | `state list`   | Default issue context                    |

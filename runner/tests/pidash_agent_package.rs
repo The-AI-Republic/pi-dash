@@ -27,6 +27,7 @@ fn setup(root: &Path) -> Paths {
         config_dir: root.join("config"),
         data_dir: root.join("data"),
         runtime_dir: root.join("runtime"),
+        ipc_socket: None,
     };
     paths.ensure().unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({
