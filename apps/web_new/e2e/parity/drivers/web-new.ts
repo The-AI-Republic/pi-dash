@@ -8,6 +8,11 @@
 import { expect, type Page } from "@playwright/test";
 import type {
   AdminAccountMenuFacts,
+  AdminAuthCopyFact,
+  AdminAuthDiscardFacts,
+  AdminAuthFormFacts,
+  AdminAuthLandingFacts,
+  AdminAuthProviderFacts,
   AdminEmailFacts,
   AdminEmailFields,
   AdminEmailFormFacts,
@@ -14368,6 +14373,61 @@ export class WebNewDriver implements ParityDriver {
   }
   async adminEmailCheckBodies(): Promise<unknown[]> {
     return todo("adminEmailCheckBodies");
+  }
+  // --- Admin authentication landing + provider sub-pages (NEWFRONT-443, ADM-023..036). ---
+  async adminAuthLandingFacts(): Promise<AdminAuthLandingFacts> {
+    return todo("adminAuthLandingFacts");
+  }
+  async adminAuthSetSignup(_on: boolean): Promise<void> {
+    return todo("adminAuthSetSignup");
+  }
+  async adminAuthSetMethodEnabled(_name: string, _on: boolean): Promise<void> {
+    return todo("adminAuthSetMethodEnabled");
+  }
+  async adminAuthMethodIconSrc(_name: string): Promise<string | null> {
+    return todo("adminAuthMethodIconSrc");
+  }
+  async adminAuthProviderFacts(): Promise<AdminAuthProviderFacts> {
+    return todo("adminAuthProviderFacts");
+  }
+  async adminAuthProviderSetEnabled(_on: boolean): Promise<void> {
+    return todo("adminAuthProviderSetEnabled");
+  }
+  async adminAuthFormFacts(): Promise<AdminAuthFormFacts> {
+    return todo("adminAuthFormFacts");
+  }
+  async adminAuthFormFill(_values: Record<string, string>): Promise<void> {
+    return todo("adminAuthFormFill");
+  }
+  async adminAuthFormSetSync(_on: boolean): Promise<void> {
+    return todo("adminAuthFormSetSync");
+  }
+  async adminAuthFormSave(): Promise<void> {
+    return todo("adminAuthFormSave");
+  }
+  async adminAuthFormBack(): Promise<void> {
+    return todo("adminAuthFormBack");
+  }
+  async adminAuthDiscardFacts(): Promise<AdminAuthDiscardFacts> {
+    return todo("adminAuthDiscardFacts");
+  }
+  async adminAuthDiscardKeep(): Promise<void> {
+    return todo("adminAuthDiscardKeep");
+  }
+  async adminAuthDiscardLeave(): Promise<void> {
+    return todo("adminAuthDiscardLeave");
+  }
+  async adminAuthCopyFacts(): Promise<AdminAuthCopyFact[]> {
+    return todo("adminAuthCopyFacts");
+  }
+  async adminAuthCopyField(_label: string): Promise<void> {
+    return todo("adminAuthCopyField");
+  }
+  async adminAuthCopyHelpHref(_label: string): Promise<string | null> {
+    return todo("adminAuthCopyHelpHref");
+  }
+  async adminAuthReadClipboard(): Promise<string> {
+    return todo("adminAuthReadClipboard");
   }
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
   async spaceChromeNavbarIdentity(): Promise<SpaceChromeNavbarIdentity> {
