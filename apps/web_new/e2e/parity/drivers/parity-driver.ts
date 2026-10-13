@@ -8740,6 +8740,112 @@ export interface WsSettingsMemberRowFacts {
   settingsProfileImportExportMentions(): Promise<string[]>;
   /** Member/user-picker controls inside the settings content (expected: none). */
   settingsProfileMemberControlCount(): Promise<number>;
+  // ---------------------------------------------------------------------------
+  // Member profile pages (NEWFRONT-425, PROF-001..008).
+  // The profile overview (breadcrumb, tab strip, count cards, workload and
+  // distribution charts, recent activity), the assigned/created/subscribed
+  // issue tabs, the activity tab, and the identity sidebar. Guests see the
+  // summary tab only and meet an inline denial on the issue-tab addresses
+  // (the activity address renders its feed view without a denial); the
+  // sidebar still carries cover art and the edit pencil still opens the
+  // settings dialog in this checkout (removal/navigation are main#523,
+  // main#574 and main#573 targets pinned as Gaps in the rows). Issue-tab
+  // layout/display/peek behavior reuses the shared layouts, display and
+  // peek methods; only the two-layout switcher contract is profile-side.
+  // Appended; existing entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Open one member's profile overview; settles on the breadcrumb plus the overview. */
+  profileOpen(workspaceSlug: string, userId: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Breadcrumb label ("Your work" on your own profile, "<name> Work" on another's). */
+  profileBreadcrumbLabel(): Promise<string>;
+  /** Desktop tab strip labels in display order. */
+  profileVisibleTabs(): Promise<string[]>;
+  /** Href of one desktop tab, or null when the tab is absent. */
+  profileTabHref(tab: string): Promise<string | null>;
+  /** Open one profile tab directly; settles on tab content or the inline denial. */
+  profileOpenTab(workspaceSlug: string, userId: string, tab: string, cookies: ParityBrowserCookie[]): Promise<void>;
+  /** True while the inline no-permission notice renders instead of tab content. */
+  profileAccessDenied(): Promise<boolean>;
+  /** Mobile tab picker label (empty on the summary tab), or null when the picker is absent. */
+  profileMobileTabPickerLabel(): Promise<string | null>;
+  /** Mobile tab picker option labels, opening and closing the picker. */
+  profileMobileTabPickerOptions(): Promise<string[]>;
+  /** Overview count cards: title, rendered value, and tab href, in display order. */
+  profileOverviewCards(): Promise<Array<{ title: string; value: string; href: string | null }>>;
+  /** Open one overview count card's tab; resolves once the tab settles. */
+  profileOverviewOpenCard(route: string): Promise<void>;
+  /** True while the overview shows stats placeholder blocks instead of cards. */
+  profileOverviewStatsLoading(): Promise<boolean>;
+  /** Stall the user-stats read so placeholders stay up (test hook). */
+  profileOverviewStallStats(): Promise<void>;
+  /** Release a stalled user-stats read (test hook). */
+  profileOverviewReleaseStats(): Promise<void>;
+  /** Workload group cards: label plus rendered count, in display order. */
+  profileWorkloadGroups(): Promise<Array<{ label: string; count: string }>>;
+  /** Priority chart category labels in display order. */
+  profilePriorityChartCategories(): Promise<string[]>;
+  /** State chart legend rows: label plus rendered count, in display order. */
+  profileStateChartLegend(): Promise<Array<{ label: string; count: string }>>;
+  /** Number of "no work item assigned yet" chart empty states on the overview. */
+  profileChartsEmptyCount(): Promise<number>;
+  /** Recent-activity entry texts on the overview, in display order. */
+  profileOverviewActivityEntries(): Promise<string[]>;
+  /** Work-item hrefs behind the overview recent-activity entries, in display order. */
+  profileOverviewActivityEntryHrefs(): Promise<string[]>;
+  /** True while the overview recent-activity section shows its empty state. */
+  profileOverviewActivityEmpty(): Promise<boolean>;
+  /** Layout keys the profile issue-tab switcher offers, in display order. */
+  profileIssuesOfferedLayouts(): Promise<Array<"list" | "kanban">>;
+  /** Layout keys the mobile Layout menu offers, in display order. */
+  profileMobileOfferedLayouts(): Promise<Array<"list" | "kanban">>;
+  /** Switch layouts through the mobile Layout menu; resolves once the layout renders. */
+  profileMobileSwitchTo(layout: "list" | "kanban"): Promise<void>;
+  /** True while the mobile kanban board renders (drop-target marker). */
+  profileMobileKanbanVisible(): Promise<boolean>;
+  /** Active profile layout on mobile, derived from the rendered container. */
+  profileMobileActiveLayout(): Promise<"list" | "kanban">;
+  /** Reload the current profile tab on mobile; resolves once a layout container renders. */
+  profileMobileReloadIssues(): Promise<void>;
+  /** True while a profile tab renders neither content nor denial (unknown tab id). */
+  profileTabRendersNothing(): Promise<boolean>;
+  /** Activity-tab entry texts in display order. */
+  profileActivityEntries(): Promise<string[]>;
+  /** Work-item hrefs behind the activity-tab entries, in display order. */
+  profileActivityEntryHrefs(): Promise<string[]>;
+  /** True while the activity tab shows its load-more control. */
+  profileActivityLoadMoreVisible(): Promise<boolean>;
+  /** Click load-more; resolves once further entries render. */
+  profileActivityLoadMore(): Promise<void>;
+  /** True while the identity sidebar panel is on-screen (expanded). */
+  profileSidebarVisible(): Promise<boolean>;
+  /** True while the sidebar shows cover art (current behavior; removal is the main#523/#574 target). */
+  profileSidebarCoverVisible(): Promise<boolean>;
+  /** Sidebar avatar: photo URL or initial fallback. */
+  profileSidebarAvatar(): Promise<{ kind: "image"; src: string } | { kind: "initial"; initial: string }>;
+  /** Sidebar full name plus parenthesized display name. */
+  profileSidebarName(): Promise<{ full: string; display: string }>;
+  /** Sidebar "Joined on" value. */
+  profileSidebarJoinDate(): Promise<string>;
+  /** Sidebar live-clock text. */
+  profileSidebarClock(): Promise<string>;
+  /** Sidebar per-project rows: name plus completion tint, in display order. */
+  profileSidebarProjectRows(): Promise<Array<{ name: string; completion: string | null }>>;
+  /** Expand one sidebar project row; resolves once its counts render. */
+  profileSidebarExpandProject(name: string): Promise<void>;
+  /** One expanded sidebar project row's created/assigned/due/completed counts. */
+  profileSidebarProjectCounts(name: string): Promise<{
+    created: string;
+    assigned: string;
+    due: string;
+    completed: string;
+  }>;
+  /** True while the own-profile edit pencil renders in the sidebar. */
+  profileSidebarEditPencilVisible(): Promise<boolean>;
+  /** Click the own-profile edit pencil; resolves once the settings dialog opens. */
+  profileSidebarClickEditPencil(): Promise<void>;
+  /** Toggle the identity sidebar through the header control (mobile); resolves once it settles. */
+  profileSidebarToggle(): Promise<void>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */

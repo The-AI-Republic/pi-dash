@@ -18322,3 +18322,300 @@ export async function serverMagicSignUp(
   const csrfToken = /(?:^|;\s*)csrftoken=([^;]*)/.exec(cookie)?.[1] ?? "";
   return { email, password: "", userId, cookie, csrfToken, apiBase };
 }
+
+// ---------------------------------------------------------------------------
+// Member profile reads (NEWFRONT-425, PROF-001..008).
+// Server-state twins of what the profile overview, issue tabs, activity tab
+// and identity sidebar render: the user-stats, user-profile, user-activity
+// and user-issues reads plus an issue-subscribe fixture helper. Appended;
+// existing helpers above are untouched per the shared contract.
+// ---------------------------------------------------------------------------
+
+/** One user's workspace stats: counts plus priority/state distributions. */
+export interface ServerUserStats {
+  assigned_issues: number;
+  created_issues: number;
+  subscribed_issues: number;
+  completed_issues: number;
+  pending_issues: number;
+  priority_distribution: Array<{ priority: string; priority_count: number }>;
+  state_distribution: Array<{ state_group: string; state_count: number }>;
+}
+
+function serverProfileCount(payload: Record<string, unknown>, field: string): number {
+  const value = payload[field];
+  if (typeof value !== "number") throw new Error(`[parity] user-stats row carried no numeric ${field}.`);
+  return value;
+}
+
+/** The user-stats read behind the overview cards and charts. */
+export async function serverUserStats(
+  session: AuthedSession,
+  workspaceSlug: string,
+  userId: string
+): Promise<ServerUserStats> {
+  const res = await sessionFetch(session, "GET", `/api/workspaces/${workspaceSlug}/user-stats/${userId}/`);
+  if (!res.ok) throw new Error(`[parity] user-stats read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as Record<string, unknown>;
+  const priorities = payload["priority_distribution"];
+  const states = payload["state_distribution"];
+  if (!Array.isArray(priorities)) throw new Error("[parity] user-stats row carried no priority distribution.");
+  if (!Array.isArray(states)) throw new Error("[parity] user-stats row carried no state distribution.");
+  return {
+    assigned_issues: serverProfileCount(payload, "assigned_issues"),
+    created_issues: serverProfileCount(payload, "created_issues"),
+    subscribed_issues: serverProfileCount(payload, "subscribed_issues"),
+    completed_issues: serverProfileCount(payload, "completed_issues"),
+    pending_issues: serverProfileCount(payload, "pending_issues"),
+    priority_distribution: (priorities as Array<Record<string, unknown>>).map((row) => {
+      if (typeof row["priority"] !== "string" || typeof row["priority_count"] !== "number") {
+        throw new Error("[parity] priority distribution row carried no priority/count.");
+      }
+      return { priority: row["priority"], priority_count: row["priority_count"] };
+    }),
+    state_distribution: (states as Array<Record<string, unknown>>).map((row) => {
+      if (typeof row["state_group"] !== "string" || typeof row["state_count"] !== "number") {
+        throw new Error("[parity] state distribution row carried no group/count.");
+      }
+      return { state_group: row["state_group"], state_count: row["state_count"] };
+    }),
+  };
+}
+
+/** One user's identity plus per-project breakdown behind the sidebar. */
+export interface ServerProfileSegregation {
+  project_data: Array<{
+    id: string;
+    assigned_issues: number;
+    completed_issues: number;
+    created_issues: number;
+    pending_issues: number;
+  }>;
+  user_data: {
+    avatar_url: string | null;
+    display_name: string;
+    first_name: string;
+    last_name: string;
+    date_joined: string;
+    user_timezone: string;
+  };
+}
+
+/** The user-profile (segregation) read behind the sidebar and breadcrumb. */
+export async function serverProfileSegregation(
+  session: AuthedSession,
+  workspaceSlug: string,
+  userId: string
+): Promise<ServerProfileSegregation> {
+  const res = await sessionFetch(session, "GET", `/api/workspaces/${workspaceSlug}/user-profile/${userId}/`);
+  if (!res.ok) throw new Error(`[parity] user-profile read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as Record<string, unknown>;
+  const projects = payload["project_data"];
+  const user = payload["user_data"];
+  if (!Array.isArray(projects)) throw new Error("[parity] user-profile row carried no project data.");
+  if (typeof user !== "object" || user === null) throw new Error("[parity] user-profile row carried no user data.");
+  const userRow = user as Record<string, unknown>;
+  for (const field of ["display_name", "first_name", "last_name", "date_joined", "user_timezone"]) {
+    if (typeof userRow[field] !== "string") throw new Error(`[parity] user-profile user row carried no ${field}.`);
+  }
+  return {
+    project_data: (projects as Array<Record<string, unknown>>).map((row) => {
+      if (typeof row["id"] !== "string") throw new Error("[parity] segregation project row carried no id.");
+      for (const field of ["assigned_issues", "completed_issues", "created_issues", "pending_issues"]) {
+        if (typeof row[field] !== "number") throw new Error(`[parity] segregation project row carried no ${field}.`);
+      }
+      return {
+        id: row["id"] as string,
+        assigned_issues: row["assigned_issues"] as number,
+        completed_issues: row["completed_issues"] as number,
+        created_issues: row["created_issues"] as number,
+        pending_issues: row["pending_issues"] as number,
+      };
+    }),
+    user_data: {
+      avatar_url: typeof userRow["avatar_url"] === "string" ? (userRow["avatar_url"] as string) : null,
+      display_name: userRow["display_name"] as string,
+      first_name: userRow["first_name"] as string,
+      last_name: userRow["last_name"] as string,
+      date_joined: userRow["date_joined"] as string,
+      user_timezone: userRow["user_timezone"] as string,
+    },
+  };
+}
+
+/** One user-activity feed entry (id plus actor display name). */
+export interface ServerUserActivityEntry {
+  id: string;
+  actor: string | null;
+}
+
+/** A user-activity feed page: entries plus paging totals. */
+export interface ServerUserActivity {
+  results: ServerUserActivityEntry[];
+  total_pages: number;
+  total_results: number;
+}
+
+/** The user-activity read behind the overview section and the activity tab. */
+export async function serverUserActivity(
+  session: AuthedSession,
+  workspaceSlug: string,
+  userId: string,
+  query: { per_page: number; cursor?: string }
+): Promise<ServerUserActivity> {
+  const params = new URLSearchParams({ per_page: String(query.per_page) });
+  if (query.cursor !== undefined) params.set("cursor", query.cursor);
+  const res = await sessionFetch(
+    session,
+    "GET",
+    `/api/workspaces/${workspaceSlug}/user-activity/${userId}/?${params.toString()}`
+  );
+  if (!res.ok) throw new Error(`[parity] user-activity read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as Record<string, unknown>;
+  if (!Array.isArray(payload["results"])) throw new Error("[parity] user-activity row carried no results.");
+  if (typeof payload["total_pages"] !== "number" || typeof payload["total_results"] !== "number") {
+    throw new Error("[parity] user-activity row carried no paging totals.");
+  }
+  return {
+    results: (payload["results"] as Array<Record<string, unknown>>).map((row) => {
+      if (typeof row["id"] !== "string") throw new Error("[parity] user-activity entry carried no id.");
+      const actor = row["actor_detail"] as Record<string, unknown> | undefined;
+      return {
+        id: row["id"],
+        actor: typeof actor?.["display_name"] === "string" ? (actor["display_name"] as string) : null,
+      };
+    }),
+    total_pages: payload["total_pages"] as number,
+    total_results: payload["total_results"] as number,
+  };
+}
+
+/** One user-issues row (id plus name). */
+export interface ServerUserIssue {
+  id: string;
+  name: string;
+}
+
+function serverUserIssueOf(row: Record<string, unknown>): ServerUserIssue {
+  if (typeof row["id"] !== "string" || typeof row["name"] !== "string") {
+    throw new Error("[parity] user-issues row carried no id/name.");
+  }
+  return { id: row["id"], name: row["name"] };
+}
+
+/**
+ * The user-issues read behind one issue tab. Pass the tab's own filter
+ * (`assignees`, `created_by` or `subscriber` set to the viewed user); the
+ * payload flattens grouped and flat shapes alike.
+ */
+export async function serverUserIssues(
+  session: AuthedSession,
+  workspaceSlug: string,
+  userId: string,
+  params: Record<string, string>
+): Promise<ServerUserIssue[]> {
+  const query = new URLSearchParams(params).toString();
+  const res = await sessionFetch(session, "GET", `/api/workspaces/${workspaceSlug}/user-issues/${userId}/?${query}`);
+  if (!res.ok) throw new Error(`[parity] user-issues read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as Record<string, unknown>;
+  const results = payload["results"];
+  if (Array.isArray(results)) {
+    return (results as Array<Record<string, unknown>>).map(serverUserIssueOf);
+  }
+  if (typeof results === "object" && results !== null) {
+    const out: ServerUserIssue[] = [];
+    for (const group of Object.values(results as Record<string, unknown>)) {
+      const rows = (group as Record<string, unknown>)["results"];
+      if (Array.isArray(rows)) {
+        for (const row of rows as Array<Record<string, unknown>>) out.push(serverUserIssueOf(row));
+      }
+    }
+    return out;
+  }
+  throw new Error("[parity] user-issues row carried no results.");
+}
+
+/** Subscribe the session owner to an issue (fixture setup for the subscribed tab). */
+export async function serverSubscribeIssue(
+  session: AuthedSession,
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string
+): Promise<void> {
+  const res = await sessionFetch(
+    session,
+    "POST",
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/subscribe/`
+  );
+  if (!res.ok) throw new Error(`[parity] issue subscribe failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Set the session owner's avatar through the same signed-URL flow the
+ * profile form uses; the status flip links the asset to the user, which
+ * is what the sidebar avatar URL derives from. Resolves with the asset
+ * id plus its served URL.
+ */
+export async function serverUploadUserAvatar(
+  session: AuthedSession,
+  file: { name: string; mime: string; bytes: Uint8Array }
+): Promise<{ assetId: string; assetUrl: string }> {
+  const created = await sessionFetch(session, "POST", `/api/assets/v2/user-assets/`, {
+    name: file.name,
+    type: file.mime,
+    size: file.bytes.length,
+    entity_type: "USER_AVATAR",
+    entity_identifier: "",
+  });
+  if (!created.ok) throw new Error(`[parity] avatar asset row create failed with HTTP ${created.status}.`);
+  const signed = (await created.json()) as {
+    asset_id: string;
+    asset_url: string;
+    upload_data: { url: string; fields: Record<string, string> };
+  };
+  if (typeof signed.asset_id !== "string" || typeof signed.upload_data?.url !== "string") {
+    throw new Error("[parity] avatar asset row create returned no signed URL.");
+  }
+  const form = new FormData();
+  for (const [key, value] of Object.entries(signed.upload_data.fields ?? {})) form.append(key, value);
+  form.append("file", new Blob([file.bytes], { type: file.mime }), file.name);
+  // The server signs the upload against the request host, so a direct API
+  // call yields an API-origin URL that Django cannot serve (404); only the
+  // parity proxy routes the bucket path to minio. Re-host the signed URL
+  // there — the signature covers the fields, not the host.
+  const uploadUrl = (() => {
+    try {
+      const proxy = new URL(parityOracleUrl(process.env));
+      const target = new URL(signed.upload_data.url);
+      target.protocol = proxy.protocol;
+      target.host = proxy.host;
+      return target.toString();
+    } catch {
+      return signed.upload_data.url;
+    }
+  })();
+  // Object storage is stubbed on the shared runners (the minio image
+  // resolves to `sleep infinity`, so the proxy answers 502); the asset
+  // record and the avatar link the scenario asserts are pure database
+  // rows and verify identically without bytes. Upload bytes when the
+  // store answers, but only a dead store falls back to record-only.
+  let stored: Response | null = null;
+  try {
+    stored = await fetch(uploadUrl, { method: "POST", body: form });
+  } catch {
+    stored = null;
+  }
+  if (stored === null || stored.status === 502 || stored.status === 503 || stored.status === 504) {
+    console.warn(
+      `[parity] object store unreachable (status ${stored === null ? "refused" : stored.status}); continuing record-only.`
+    );
+  } else if (!stored.ok) {
+    throw new Error(`[parity] avatar byte upload failed with HTTP ${stored.status}.`);
+  }
+  const flipped = await sessionFetch(session, "PATCH", `/api/assets/v2/user-assets/${signed.asset_id}/`, {});
+  if (!flipped.ok) throw new Error(`[parity] avatar asset status flip failed with HTTP ${flipped.status}.`);
+  return {
+    assetId: signed.asset_id,
+    assetUrl: typeof signed.asset_url === "string" ? signed.asset_url : "",
+  };
+}
