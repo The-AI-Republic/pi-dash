@@ -145,6 +145,11 @@ import type {
   PagesToolbarTooltip,
   AnalyticsApiRequest,
   AnalyticsEmptyFacts,
+  AnalyticsHeadlineCard,
+  AnalyticsRadarRow,
+  AnalyticsRadarFacts,
+  AnalyticsActiveProject,
+  AnalyticsCreatedResolvedFacts,
   PagesBlocksAssetRow,
   PagesBlocksInfoStats,
   PagesBlocksInlineImage,
@@ -11459,6 +11464,65 @@ export class WebNewDriver implements ParityDriver {
 
   async analyticsSpyRequests(): Promise<AnalyticsApiRequest[]> {
     return todo("analyticsSpyRequests");
+  }
+
+  // --- Analytics overview and work-items headline charts (NEWFRONT-376, ANL-005..009). Appended stubs.
+  async analyticsOverviewCards(): Promise<AnalyticsHeadlineCard[]> {
+    return todo("analyticsOverviewCards");
+  }
+  async analyticsWorkItemsCards(): Promise<AnalyticsHeadlineCard[]> {
+    return todo("analyticsWorkItemsCards");
+  }
+  async analyticsHeadlinePlaceholders(): Promise<number> {
+    return todo("analyticsHeadlinePlaceholders");
+  }
+  async analyticsTotalsStall(_tab: "overview" | "work-items"): Promise<void> {
+    return todo("analyticsTotalsStall");
+  }
+  async analyticsTotalsRelease(): Promise<void> {
+    return todo("analyticsTotalsRelease");
+  }
+  async analyticsChartsStall(_chart: "projects" | "work-items"): Promise<void> {
+    return todo("analyticsChartsStall");
+  }
+  async analyticsChartsRelease(): Promise<void> {
+    return todo("analyticsChartsRelease");
+  }
+  async analyticsProjectStatsStall(): Promise<void> {
+    return todo("analyticsProjectStatsStall");
+  }
+  async analyticsProjectStatsRelease(): Promise<void> {
+    return todo("analyticsProjectStatsRelease");
+  }
+  async analyticsRadarSummary(): Promise<AnalyticsRadarRow[]> {
+    return todo("analyticsRadarSummary");
+  }
+  async analyticsRadarFacts(): Promise<AnalyticsRadarFacts> {
+    return todo("analyticsRadarFacts");
+  }
+  async analyticsRadarLoading(): Promise<boolean> {
+    return todo("analyticsRadarLoading");
+  }
+  async analyticsActiveProjects(): Promise<AnalyticsActiveProject[]> {
+    return todo("analyticsActiveProjects");
+  }
+  async analyticsActiveProjectsLoading(): Promise<boolean> {
+    return todo("analyticsActiveProjectsLoading");
+  }
+  async analyticsActiveProjectTooltip(_name: string): Promise<string | null> {
+    return todo("analyticsActiveProjectTooltip");
+  }
+  async analyticsCreatedResolvedFacts(): Promise<AnalyticsCreatedResolvedFacts> {
+    return todo("analyticsCreatedResolvedFacts");
+  }
+  async analyticsCreatedResolvedLoading(): Promise<boolean> {
+    return todo("analyticsCreatedResolvedLoading");
+  }
+  async analyticsSectionGuidance(_title: string): Promise<string | null> {
+    return todo("analyticsSectionGuidance");
+  }
+  async analyticsDialogHeadlineCards(): Promise<AnalyticsHeadlineCard[]> {
+    return todo("analyticsDialogHeadlineCards");
   }
 
   // --- Pages blocks/embeds/mentions/links (NEWFRONT-316, PAGE-037-044).
