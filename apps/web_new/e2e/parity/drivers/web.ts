@@ -175,6 +175,9 @@ import type {
   ExportsSettingsHistoryRow,
   AnalyticsExportTable,
   LocalFileDownload,
+  PageExportFile,
+  PageExportFocusFacts,
+  PageExportRow,
   SettingsProfileGeneralField,
   SettingsProfileSecurityField,
   WsSettingsMemberRowFacts,
@@ -53065,5 +53068,136 @@ export class WebDriver implements ParityDriver {
     const url = popup.url();
     await popup.close();
     return url;
+  }
+
+  // --- Page-export dialog oracle reads (NEWFRONT-383, EXP-016..021 + 023/024).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract.
+  private pageExportModal(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Export page" }).last();
+  }
+
+  private pageExportRowLabel(row: PageExportRow): string {
+    if (row === "format") return "Export format";
+    if (row === "scope") return "Include content";
+    return "Page format";
+  }
+
+  async pageExportHeading(): Promise<string | null> {
+    const modal = this.pageExportModal();
+    if ((await modal.count()) === 0) return null;
+    const heading = modal.getByRole("heading", { name: "Export page" }).first();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ") || null;
+  }
+
+  async pageExportOfferedOptions(row: PageExportRow): Promise<string[]> {
+    const modal = this.pageExportModal();
+    await modal.waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    const button = modal
+      .getByText(this.pageExportRowLabel(row), { exact: true })
+      .locator("xpath=..")
+      .locator("button")
+      .first();
+    if ((await button.count()) === 0) return [];
+    await button.click({ timeout: WebDriver.OPEN_MS });
+    const options = this.page.getByRole("option");
+    await options.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const labels = await options.evaluateAll((nodes) => {
+      const seen = new Set<string>();
+      const out: string[] = [];
+      for (const node of nodes) {
+        const label = (node.textContent ?? "").trim().replace(/\s+/g, " ") || "";
+        if (label !== "" && !seen.has(label)) {
+          seen.add(label);
+          out.push(label);
+        }
+      }
+      return out;
+    });
+    // Dismiss verified, never with Escape: an Escape-dismissed menu
+    // closes visually but leaves the select's toggle state desynced, so
+    // the next same-button click is swallowed instead of reopening
+    // (observed live; part of bug NEWFRONT-471). Toggle-click and
+    // outside-click both dismiss cleanly.
+    const heading = modal.getByRole("heading", { name: "Export page" }).first();
+    for (let attempt = 0; attempt < 4 && (await options.count()) > 0; attempt += 1) {
+      if (attempt % 2 === 0) await button.click({ timeout: WebDriver.OPEN_MS }).catch(() => undefined);
+      else await heading.click({ timeout: WebDriver.OPEN_MS }).catch(() => undefined);
+      await this.page.waitForTimeout(300);
+    }
+    if ((await options.count()) > 0) throw new Error("[parity] page export menu stayed open after dismiss attempts.");
+    return labels;
+  }
+
+  async pageExportConfirmFull(): Promise<PageExportFile> {
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: WebDriver.OPEN_MS }),
+      this.pageExportModal().getByRole("button", { name: "Export", exact: true }).click({ timeout: WebDriver.OPEN_MS }),
+    ]);
+    const fileName = download.suggestedFilename();
+    const localPath = await download.path();
+    if (localPath === null) throw new Error("[parity] export download produced no local file.");
+    const bytes = readFileSync(localPath);
+    return { fileName, byteLength: bytes.length, content: bytes.toString("latin1") };
+  }
+
+  async pageExportFailSave(): Promise<void> {
+    // The dialog funnels every format through the blob-URL save primitive;
+    // replacing it with a thrower deterministically drives the failure
+    // branch (error notice, dialog stays open). A reload clears it.
+    await this.page.evaluate(() => {
+      (URL as unknown as { createObjectURL: unknown }).createObjectURL = () => {
+        throw new Error("[parity] pageExportFailSave sabotage");
+      };
+    });
+  }
+
+  async pageExportFocusedFacts(): Promise<PageExportFocusFacts | null> {
+    return this.page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el || el === document.body) return null;
+      const role = el.getAttribute("role") ?? el.tagName.toLowerCase();
+      const name = ((el.getAttribute("aria-label") ?? el.textContent ?? "").trim().replace(/\s+/g, " ") || "").slice(
+        0,
+        60
+      );
+      const style = getComputedStyle(el);
+      const outlineDrawn = style.outlineStyle !== "none" && style.outlineStyle !== "hidden";
+      const shadow = style.boxShadow;
+      const shadowDrawn =
+        shadow !== "none" &&
+        shadow !== "" &&
+        !/^rgba?\(0,\s*0,\s*0,\s*0\)(\s+0(px)?){3,4}(,\s*rgba?\(0,\s*0,\s*0,\s*0\)(\s+0(px)?){3,4})*$/.test(shadow);
+      return {
+        label: `${role} :: ${name}`,
+        indicator: outlineDrawn ? "outline" : shadowDrawn ? "shadow" : "none",
+        focusVisible: el.matches(":focus-visible"),
+      };
+    });
+  }
+
+  async pageExportGateMarkersPresent(): Promise<boolean> {
+    // Upgrade/paywall/desktop-shell markers on the current surface: tight
+    // patterns only (modulesXEditionGateMarkersPresent precedent) — the
+    // scenario fails on any hit, so generic words stay out.
+    const root = this.page.locator("main");
+    for (const role of ["button", "link", "menuitem"] as const) {
+      const found = root.getByRole(role, { name: /upgrade|premium|enterprise|contact sales|go to cloud/i });
+      const count = await found.count();
+      for (let i = 0; i < count; i++) {
+        if (
+          await found
+            .nth(i)
+            .isVisible()
+            .catch(() => false)
+        )
+          return true;
+      }
+    }
+    for (const heading of ["Available on", "Not available in your plan", "Desktop app", "Offline mode"]) {
+      if (await this.isShown(root.getByRole("heading", { name: heading }).first())) return true;
+    }
+    return false;
   }
 }

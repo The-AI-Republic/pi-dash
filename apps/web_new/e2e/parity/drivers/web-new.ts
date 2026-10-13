@@ -157,6 +157,9 @@ import type {
   ExportsSettingsHistoryRow,
   AnalyticsExportTable,
   LocalFileDownload,
+  PageExportFile,
+  PageExportFocusFacts,
+  PageExportRow,
   SettingsProfileGeneralField,
   SettingsProfileSecurityField,
   WsSettingsMemberRowFacts,
@@ -14807,5 +14810,32 @@ export class WebNewDriver implements ParityDriver {
 
   async cloudUpgradePopupUrl(): Promise<string> {
     return todo("cloudUpgradePopupUrl");
+  }
+
+  // --- Page-export dialog oracle reads (NEWFRONT-383, EXP-016..021 + 023/024).
+  // --- Appended; existing stubs above are untouched per the shared driver
+  // --- contract.
+  async pageExportHeading(): Promise<string | null> {
+    return todo("pageExportHeading");
+  }
+
+  async pageExportOfferedOptions(_row: PageExportRow): Promise<string[]> {
+    return todo("pageExportOfferedOptions");
+  }
+
+  async pageExportConfirmFull(): Promise<PageExportFile> {
+    return todo("pageExportConfirmFull");
+  }
+
+  async pageExportFailSave(): Promise<void> {
+    return todo("pageExportFailSave");
+  }
+
+  async pageExportFocusedFacts(): Promise<PageExportFocusFacts | null> {
+    return todo("pageExportFocusedFacts");
+  }
+
+  async pageExportGateMarkersPresent(): Promise<boolean> {
+    return todo("pageExportGateMarkersPresent");
   }
 }
