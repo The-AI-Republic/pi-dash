@@ -47806,4 +47806,731 @@ export class WebDriver implements ParityDriver {
     // The tab heading sits outside the form; activating it drops field focus.
     await this.page.getByText("Change password", { exact: true }).first().click();
   }
+
+  // -------------------------------------------------------------------------
+  // Member profile pages (NEWFRONT-425, PROF-001..008).
+  // Appended; existing methods above are untouched per the shared driver
+  // contract. Selectors were observed on the running old app (oracle-prod):
+  // the breadcrumb owns the page's only truncated label slot; tab links
+  // carry exact tab labels (actor and card links never match); the sidebar
+  // panel is the fixed slot carrying the Joined-on row; the mobile picker
+  // and sidebar toggle share one mobile-only header container. Guests see
+  // the summary tab only and meet the inline denial on the issue-tab
+  // addresses, while the activity address renders its feed view without a
+  // denial; an unknown tab id renders no outlet content at all.
+  // -------------------------------------------------------------------------
+
+  private profileStatsHookInstalled = false;
+  private profileStatsMode: "pass" | "stall" = "pass";
+  private profileStatsGates: Array<() => void> = [];
+
+  /** Breadcrumb label slot of the profile header (unique truncated label). */
+  private profileBreadcrumb(): Locator {
+    return this.page.locator("div.line-clamp-1").filter({ hasText: /[Ww]ork$/ });
+  }
+
+  /** Settle on the loaded profile frame: resolved breadcrumb plus tab strip. */
+  private async profileWaitForFrame(): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () => {
+          const crumbs = [...document.querySelectorAll("div.line-clamp-1")];
+          const loaded = crumbs.some(
+            (el) => /[Ww]ork$/.test((el.textContent ?? "").trim()) && !/undefined/.test(el.textContent ?? "")
+          );
+          const tabs = [...document.querySelectorAll('a[href*="/profile/"]')].some(
+            (el) => (el.textContent ?? "").trim() === "Summary"
+          );
+          return loaded && tabs;
+        },
+        null,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] profile page never settled on the breadcrumb plus tab strip.");
+      });
+  }
+
+  async profileOpen(workspaceSlug: string, userId: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/profile/${userId}`, cookies);
+    await this.profileWaitForFrame();
+    await this.page
+      .getByRole("heading", { name: "Overview", exact: true })
+      .first()
+      .waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async profileBreadcrumbLabel(): Promise<string> {
+    const crumb = this.profileBreadcrumb();
+    await crumb.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    return (((await crumb.first().innerText()) ?? "") as string).trim();
+  }
+
+  /** Tab strip links (exact tab labels only; actor and card links never match). */
+  private profileTabLinks(): Locator {
+    return this.page
+      .locator('a[href*="/profile/"]')
+      .filter({ hasText: /^(Summary|Assigned|Created|Subscribed|Activity)$/ });
+  }
+
+  async profileVisibleTabs(): Promise<string[]> {
+    const links = this.profileTabLinks();
+    await links.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const count = await links.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      out.push((((await links.nth(i).innerText()) ?? "") as string).trim());
+    }
+    return out;
+  }
+
+  async profileTabHref(tab: string): Promise<string | null> {
+    const links = this.profileTabLinks();
+    await links.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const count = await links.count();
+    for (let i = 0; i < count; i++) {
+      if ((((await links.nth(i).innerText()) ?? "") as string).trim() === tab) {
+        return links.nth(i).getAttribute("href");
+      }
+    }
+    return null;
+  }
+
+  async profileOpenTab(
+    workspaceSlug: string,
+    userId: string,
+    tab: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/profile/${userId}/${tab}`, cookies);
+    await this.profileWaitForFrame();
+    // Unknown tab ids render no outlet content; the loaded frame is settled.
+    if (tab !== "assigned" && tab !== "created" && tab !== "subscribed" && tab !== "activity") return;
+    await this.page
+      .waitForFunction(
+        () => {
+          const body = document.body.textContent ?? "";
+          return (
+            body.includes("You do not have the permission to access this page.") ||
+            body.includes("All work items") ||
+            body.includes("No work items") ||
+            body.includes("Recent activity")
+          );
+        },
+        null,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error(`[parity] profile tab ${tab} settled on neither content nor denial.`);
+      });
+  }
+
+  async profileAccessDenied(): Promise<boolean> {
+    return (
+      (await this.page.getByText("You do not have the permission to access this page.", { exact: true }).count()) > 0
+    );
+  }
+
+  /** Mobile header container holding the tab picker plus the sidebar toggle. */
+  private profileMobileHeader(): Locator {
+    return this.page.locator("div.flex.gap-4.md\\:hidden");
+  }
+
+  /** Mobile tab picker trigger (bordered slot; its label stays empty, bug NEWFRONT-433). */
+  private profileMobilePicker(): Locator {
+    return this.profileMobileHeader().locator("div.rounded-md.border").first();
+  }
+
+  async profileMobileTabPickerLabel(): Promise<string | null> {
+    const picker = this.profileMobilePicker();
+    if ((await picker.count()) === 0) return null;
+    if (!(await picker.isVisible().catch(() => false))) return null;
+    return (((await picker.innerText()) ?? "") as string).trim();
+  }
+
+  async profileMobileTabPickerOptions(): Promise<string[]> {
+    const picker = this.profileMobilePicker();
+    await picker.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await picker.click({ timeout: WebDriver.WAIT_MS });
+    const items = this.page.getByRole("menuitem");
+    await items.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const count = await items.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      out.push((((await items.nth(i).innerText()) ?? "") as string).trim().replace(/\s+/g, " "));
+    }
+    await this.page.keyboard.press("Escape");
+    return out;
+  }
+
+  /** Overview section (count cards) below its heading. */
+  private profileOverviewSection(): Locator {
+    return this.page.getByRole("heading", { name: "Overview", exact: true }).locator("xpath=..");
+  }
+
+  /** Last line of a card's text is its value; the rest is its title. */
+  private static profileCardTitleValue(text: string): { title: string; value: string } {
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+    if (lines.length === 0) return { title: "", value: "" };
+    return { title: lines.slice(0, -1).join(" "), value: lines[lines.length - 1] as string };
+  }
+
+  async profileOverviewCards(): Promise<Array<{ title: string; value: string; href: string | null }>> {
+    const links = this.profileOverviewSection().locator("a");
+    await links.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const count = await links.count();
+    const out: Array<{ title: string; value: string; href: string | null }> = [];
+    for (let i = 0; i < count; i++) {
+      const { title, value } = WebDriver.profileCardTitleValue(
+        (((await links.nth(i).innerText()) ?? "") as string).trim()
+      );
+      out.push({ title, value, href: await links.nth(i).getAttribute("href") });
+    }
+    return out;
+  }
+
+  async profileOverviewOpenCard(route: string): Promise<void> {
+    const link = this.profileOverviewSection().locator(`a[href$="/${route}/"]`);
+    await link.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await link.first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .waitForFunction(
+        () => {
+          const body = document.body.textContent ?? "";
+          return (
+            body.includes("You do not have the permission to access this page.") ||
+            body.includes("All work items") ||
+            body.includes("No work items")
+          );
+        },
+        null,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error(`[parity] overview card ${route} never landed on its tab.`);
+      });
+  }
+
+  async profileOverviewStatsLoading(): Promise<boolean> {
+    const heading = this.page.getByRole("heading", { name: "Overview", exact: true });
+    if ((await heading.count()) === 0) return false;
+    return (await this.profileOverviewSection().locator("a").count()) === 0;
+  }
+
+  /** Single route hook stalling the user-stats read (placeholder proof). */
+  private async profileStatsHook(): Promise<void> {
+    if (this.profileStatsHookInstalled) return;
+    this.profileStatsHookInstalled = true;
+    // The trailing double-star crosses the user id plus its trailing slash.
+    await this.page.route("**/api/workspaces/*/user-stats/**", async (route) => {
+      if (route.request().method() === "GET" && this.profileStatsMode === "stall") {
+        await new Promise<void>((resolve) => {
+          this.profileStatsGates.push(resolve);
+        });
+      }
+      await route.fallback();
+    });
+  }
+
+  async profileOverviewStallStats(): Promise<void> {
+    this.profileStatsMode = "stall";
+    await this.profileStatsHook();
+  }
+
+  async profileOverviewReleaseStats(): Promise<void> {
+    const gates = this.profileStatsGates;
+    this.profileStatsGates = [];
+    this.profileStatsMode = "pass";
+    gates.forEach((release) => release());
+  }
+
+  /** Workload section (group cards) below its heading. */
+  private profileWorkloadSection(): Locator {
+    return this.page.getByRole("heading", { name: "Workload", exact: true }).locator("xpath=..");
+  }
+
+  async profileWorkloadGroups(): Promise<Array<{ label: string; count: string }>> {
+    const cards = this.profileWorkloadSection().locator("a");
+    await cards.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const count = await cards.count();
+    const out: Array<{ label: string; count: string }> = [];
+    for (let i = 0; i < count; i++) {
+      const { title, value } = WebDriver.profileCardTitleValue(
+        (((await cards.nth(i).innerText()) ?? "") as string).trim()
+      );
+      out.push({ label: title, count: value });
+    }
+    return out;
+  }
+
+  /** Chart section below one of the "Work items by ..." headings. */
+  private profileChartSection(heading: string): Locator {
+    return this.page.getByRole("heading", { name: heading, exact: true }).locator("xpath=..");
+  }
+
+  async profilePriorityChartCategories(): Promise<string[]> {
+    const section = this.profileChartSection("Work items by Priority");
+    await section.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const known = new Set(["Urgent", "High", "Medium", "Low", "None"]);
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      const texts = section.locator("svg text");
+      const count = await texts.count();
+      const out: string[] = [];
+      for (let i = 0; i < count; i++) {
+        // SVG text nodes are not HTML elements, so textContent (not innerText).
+        const label = (((await texts.nth(i).textContent()) ?? "") as string).trim();
+        if (known.has(label) && !out.includes(label)) out.push(label);
+      }
+      if (out.length > 0) return out;
+      if ((await section.getByText("No work item assigned yet", { exact: true }).count()) > 0) {
+        return [];
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("[parity] priority chart settled on neither bars nor its empty state.");
+      }
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async profileStateChartLegend(): Promise<Array<{ label: string; count: string }>> {
+    const section = this.profileChartSection("Work items by state");
+    await section.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const labels = ["Backlog", "Unstarted", "Started", "Review", "Test", "Completed", "Canceled"];
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await section.getByText("Canceled", { exact: true }).count()) > 0) break;
+      if ((await section.getByText("No work item assigned yet", { exact: true }).count()) > 0) {
+        return [];
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("[parity] state chart settled on neither legend nor its empty state.");
+      }
+      await this.page.waitForTimeout(500);
+    }
+    const out: Array<{ label: string; count: string }> = [];
+    for (const label of labels) {
+      const cell = section.getByText(label, { exact: true });
+      if ((await cell.count()) === 0) {
+        throw new Error(`[parity] state legend is missing its ${label} row.`);
+      }
+      const row = (((await cell.locator("xpath=../..").innerText()) ?? "") as string).trim().replace(/\s+/g, " ");
+      const count = row.split(" ").pop() ?? "";
+      out.push({ label, count });
+    }
+    return out;
+  }
+
+  async profileChartsEmptyCount(): Promise<number> {
+    return this.page.getByText("No work item assigned yet", { exact: true }).count();
+  }
+
+  /** First "Recent activity" section (the overview page carries exactly one). */
+  private profileOverviewActivitySection(): Locator {
+    return this.page.getByRole("heading", { name: "Recent activity", exact: true }).first().locator("xpath=..");
+  }
+
+  async profileOverviewActivityEntries(): Promise<string[]> {
+    const section = this.profileOverviewActivitySection();
+    await section.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const rows = section.locator("div.space-y-5 > div");
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      const count = await rows.count();
+      const out: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const text = (((await rows.nth(i).innerText()) ?? "") as string).trim().replace(/\s+/g, " ");
+        if (text !== "") out.push(text);
+      }
+      if (out.length > 0) return out;
+      if ((await section.getByText("No Data yet", { exact: true }).count()) > 0) return [];
+      if (Date.now() >= deadline) {
+        throw new Error("[parity] overview activity settled on neither entries nor its empty state.");
+      }
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async profileOverviewActivityEntryHrefs(): Promise<string[]> {
+    const links = this.profileOverviewActivitySection().locator('a[href*="/browse/"]');
+    const count = await links.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const href = await links.nth(i).getAttribute("href");
+      if (href) out.push(href);
+    }
+    return out;
+  }
+
+  async profileOverviewActivityEmpty(): Promise<boolean> {
+    return (await this.profileOverviewActivitySection().getByText("No Data yet", { exact: true }).count()) > 0;
+  }
+
+  /** Profile issue-tab layout switcher (the shared two-layout selection). */
+  private profileIssuesSwitcherButtons(): Locator {
+    return this.page.locator("div.flex.items-center.gap-1.rounded-md.bg-layer-3.p-1 > button");
+  }
+
+  async profileIssuesOfferedLayouts(): Promise<Array<"list" | "kanban">> {
+    const buttons = this.profileIssuesSwitcherButtons();
+    await buttons.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    const count = await buttons.count();
+    if (count !== 2) {
+      throw new Error(`[parity] profile switcher offers ${count} layouts, expected 2.`);
+    }
+    return ["list", "kanban"];
+  }
+
+  /** Mobile Layout/Display menu row below the tab picker. */
+  private profileMobileMenuRow(): Locator {
+    return this.page.locator("div.flex.justify-evenly");
+  }
+
+  async profileMobileOfferedLayouts(): Promise<Array<"list" | "kanban">> {
+    const trigger = this.profileMobileMenuRow().getByText("Layout", { exact: true });
+    await trigger.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    const items = this.page.getByRole("menuitem");
+    await items.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const count = await items.count();
+    const labels: string[] = [];
+    for (let i = 0; i < count; i++) {
+      labels.push((((await items.nth(i).innerText()) ?? "") as string).trim().replace(/\s+/g, " "));
+    }
+    await this.page.keyboard.press("Escape");
+    return labels.map((label) => {
+      // Menu items suffix the layout name ("List Layout", "Board Layout").
+      if (label === "List Layout") return "list" as const;
+      if (label === "Board Layout") return "kanban" as const;
+      throw new Error(`[parity] unknown mobile profile layout label "${label}".`);
+    });
+  }
+
+  async profileMobileSwitchTo(layout: "list" | "kanban"): Promise<void> {
+    const trigger = this.profileMobileMenuRow().getByText("Layout", { exact: true });
+    await trigger.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    const label = layout === "list" ? "List Layout" : "Board Layout";
+    await this.page.getByRole("menuitem", { name: label, exact: true }).first().click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      const visible = layout === "list" ? await this.layoutsListVisible() : await this.profileMobileKanbanVisible();
+      if (visible) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] ${layout} layout never rendered after switching.`);
+      }
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async profileMobileKanbanVisible(): Promise<boolean> {
+    // Mobile kanban cards render as plain links (no card ids), so the
+    // board's drag-delete drop target is the exclusive marker.
+    return (await this.page.getByText("Drop here to delete the work item.", { exact: true }).count()) > 0;
+  }
+
+  async profileMobileActiveLayout(): Promise<"list" | "kanban"> {
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if (await this.layoutsListVisible()) return "list";
+      if (await this.profileMobileKanbanVisible()) return "kanban";
+      if (Date.now() >= deadline) {
+        throw new Error("[parity] no profile layout container became visible.");
+      }
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async profileMobileReloadIssues(): Promise<void> {
+    // The shared mobile reload gates on the desktop kanban card ids,
+    // which mobile profile cards never carry; gate on the profile's own
+    // containers instead.
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    await this.profileMobileActiveLayout();
+  }
+
+  async profileTabRendersNothing(): Promise<boolean> {
+    if (await this.profileAccessDenied()) return false;
+    const body = ((await this.page.locator("body").innerText()) ?? "") as string;
+    for (const marker of ["All work items", "Recent activity", "Overview", "Workload"]) {
+      if (body.includes(marker)) return false;
+    }
+    return true;
+  }
+
+  /** Activity-tab feed lists (one per loaded page). */
+  private profileActivityLists(): Locator {
+    return this.page.locator('ul[role="list"]');
+  }
+
+  async profileActivityEntries(): Promise<string[]> {
+    const lists = this.profileActivityLists();
+    // An empty feed renders an empty (hidden) list; attachment marks the
+    // settled fetch either way.
+    await lists.first().waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    const listsCount = await lists.count();
+    const out: string[] = [];
+    for (let report = 0; report < listsCount; report++) {
+      const kids = lists.nth(report).locator(":scope > *");
+      const count = await kids.count();
+      for (let i = 0; i < count; i++) {
+        const text = (((await kids.nth(i).innerText()) ?? "") as string).trim().replace(/\s+/g, " ");
+        if (text !== "") out.push(text);
+      }
+    }
+    return out;
+  }
+
+  async profileActivityEntryHrefs(): Promise<string[]> {
+    const links = this.profileActivityLists().locator('a[href*="/browse/"]');
+    const count = await links.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const href = await links.nth(i).getAttribute("href");
+      if (href) out.push(href);
+    }
+    return out;
+  }
+
+  async profileActivityLoadMoreVisible(): Promise<boolean> {
+    const button = this.page.getByRole("button", { name: "Load more", exact: true });
+    if ((await button.count()) === 0) return false;
+    return button
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async profileActivityLoadMore(): Promise<void> {
+    const before = (await this.profileActivityEntries()).length;
+    await this.page
+      .getByRole("button", { name: "Load more", exact: true })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.profileActivityEntries()).length > before) return;
+      if (Date.now() >= deadline) throw new Error("[parity] activity load-more added no entries.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  /** Identity sidebar panel (the fixed slot carrying the Joined-on row). */
+  private profileSidebarPanel(): Locator {
+    return this.page.locator("div.fixed").filter({ hasText: "Joined on" });
+  }
+
+  async profileSidebarVisible(): Promise<boolean> {
+    // A collapsed panel stays in the DOM (pushed off-screen), so the
+    // panel's arrival marks the loaded sidebar in every state.
+    await this.profileSidebarPanel().first().waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    const box = await this.page
+      .getByText("Joined on", { exact: true })
+      .first()
+      .boundingBox()
+      .catch(() => null);
+    if (!box) return false;
+    const width = this.page.viewportSize()?.width ?? 1280;
+    return box.x < width && box.x + box.width > 0;
+  }
+
+  async profileSidebarCoverVisible(): Promise<boolean> {
+    const panel = this.profileSidebarPanel();
+    await panel.first().waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    const imgs = panel.first().locator("img");
+    const count = await imgs.count();
+    for (let i = 0; i < count; i++) {
+      const box = await imgs
+        .nth(i)
+        .boundingBox()
+        .catch(() => null);
+      if (box && box.height > 80 && box.width > 80) return true;
+    }
+    return false;
+  }
+
+  async profileSidebarAvatar(): Promise<{ kind: "image"; src: string } | { kind: "initial"; initial: string }> {
+    const panel = this.profileSidebarPanel().first();
+    await panel.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const imgs = panel.locator("img");
+    const count = await imgs.count();
+    for (let i = 0; i < count; i++) {
+      const box = await imgs
+        .nth(i)
+        .boundingBox()
+        .catch(() => null);
+      if (box && box.height <= 80) {
+        return { kind: "image", src: (await imgs.nth(i).getAttribute("src")) ?? "" };
+      }
+    }
+    // Initial fallback: the small single-letter block (the cover slot also
+    // carries the letter through its nested avatar, so size disambiguates).
+    const divs = panel.locator("div");
+    const divCount = await divs.count();
+    for (let i = 0; i < divCount; i++) {
+      const text = (((await divs.nth(i).textContent()) ?? "") as string).trim();
+      if (!/^[A-Za-z]$/.test(text)) continue;
+      const box = await divs
+        .nth(i)
+        .boundingBox()
+        .catch(() => null);
+      if (box && box.width <= 60 && box.height <= 60) return { kind: "initial", initial: text };
+    }
+    throw new Error("[parity] sidebar shows neither an avatar photo nor an initial.");
+  }
+
+  async profileSidebarName(): Promise<{ full: string; display: string }> {
+    const panel = this.profileSidebarPanel().first();
+    const full = (((await panel.locator("h4").first().innerText()) ?? "") as string).trim().replace(/\s+/g, " ");
+    const display = (((await panel.locator("h6").first().innerText()) ?? "") as string).trim();
+    return { full, display };
+  }
+
+  /** Value cell of one sidebar detail row ("Joined on", "Timezone"). */
+  private async profileSidebarDetail(label: string): Promise<string> {
+    const panel = this.profileSidebarPanel().first();
+    const cell = panel.getByText(label, { exact: true });
+    await cell.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const row = (((await cell.locator("xpath=..").innerText()) ?? "") as string).trim().replace(/\s+/g, " ");
+    return row.startsWith(label) ? row.slice(label.length).trim() : row;
+  }
+
+  async profileSidebarJoinDate(): Promise<string> {
+    return this.profileSidebarDetail("Joined on");
+  }
+
+  async profileSidebarClock(): Promise<string> {
+    return this.profileSidebarDetail("Timezone");
+  }
+
+  async profileSidebarProjectRows(): Promise<Array<{ name: string; completion: string | null }>> {
+    const panel = this.profileSidebarPanel().first();
+    await panel.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const buttons = panel.locator("button");
+    const count = await buttons.count();
+    const out: Array<{ name: string; completion: string | null }> = [];
+    for (let i = 0; i < count; i++) {
+      const text = (((await buttons.nth(i).textContent()) ?? "") as string).trim().replace(/\s+/g, " ");
+      if (text === "") continue;
+      // The tint abuts the name without whitespace in textContent.
+      const match = /^(.*?)(\d+%)$/.exec(text);
+      if (match) {
+        out.push({ name: (match[1] ?? "").trim(), completion: match[2] ?? null });
+      } else {
+        out.push({ name: text, completion: null });
+      }
+    }
+    return out;
+  }
+
+  /** Project name behind one sidebar row button's text (tint stripped). */
+  private static profileSidebarRowName(text: string): string {
+    return text.replace(/\d+%$/, "").trim();
+  }
+
+  /** Disclosure root of one sidebar project row, found by its button's name. */
+  private async profileSidebarProjectRoot(name: string): Promise<Locator> {
+    const panel = this.profileSidebarPanel().first();
+    const buttons = panel.locator("button");
+    const count = await buttons.count();
+    for (let i = 0; i < count; i++) {
+      const text = (((await buttons.nth(i).textContent()) ?? "") as string).trim().replace(/\s+/g, " ");
+      if (text !== "" && WebDriver.profileSidebarRowName(text) === name) {
+        return buttons.nth(i).locator("xpath=../..");
+      }
+    }
+    throw new Error(`[parity] sidebar has no project row named ${name}.`);
+  }
+
+  async profileSidebarExpandProject(name: string): Promise<void> {
+    const root = await this.profileSidebarProjectRoot(name);
+    if ((await root.getByText("Created", { exact: true }).count()) > 0) return;
+    const panel = this.profileSidebarPanel().first();
+    const buttons = panel.locator("button");
+    const count = await buttons.count();
+    for (let i = 0; i < count; i++) {
+      const text = (((await buttons.nth(i).textContent()) ?? "") as string).trim().replace(/\s+/g, " ");
+      if (text !== "" && WebDriver.profileSidebarRowName(text) === name) {
+        await buttons.nth(i).click({ timeout: WebDriver.WAIT_MS });
+        await root.getByText("Created", { exact: true }).waitFor({ timeout: WebDriver.WAIT_MS });
+        return;
+      }
+    }
+  }
+
+  async profileSidebarProjectCounts(name: string): Promise<{
+    created: string;
+    assigned: string;
+    due: string;
+    completed: string;
+  }> {
+    const root = await this.profileSidebarProjectRoot(name);
+    const read = async (label: string): Promise<string> => {
+      const cell = root.getByText(label, { exact: true });
+      await cell.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+      // The count cell directly follows the label cell; read it (and only it).
+      const countCell = cell.locator("xpath=following-sibling::div[1]");
+      const text = (((await countCell.innerText()) ?? "") as string).trim().replace(/\s+/g, " ");
+      return (/^(\d+)\s+Work items?/.exec(text)?.[1] ?? "").trim();
+    };
+    return {
+      created: await read("Created"),
+      assigned: await read("Assigned"),
+      due: await read("Due"),
+      completed: await read("Completed"),
+    };
+  }
+
+  /** Icon-only buttons of the sidebar panel (the edit pencil when present). */
+  private async profileSidebarIconButtons(): Promise<Locator[]> {
+    const panel = this.profileSidebarPanel();
+    await panel.first().waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    const buttons = panel.first().locator("button");
+    const count = await buttons.count();
+    const out: Locator[] = [];
+    for (let i = 0; i < count; i++) {
+      const text = (((await buttons.nth(i).textContent()) ?? "") as string).trim();
+      if (text !== "") continue;
+      if (
+        await buttons
+          .nth(i)
+          .isVisible()
+          .catch(() => false)
+      )
+        out.push(buttons.nth(i));
+    }
+    return out;
+  }
+
+  async profileSidebarEditPencilVisible(): Promise<boolean> {
+    return (await this.profileSidebarIconButtons()).length > 0;
+  }
+
+  async profileSidebarClickEditPencil(): Promise<void> {
+    const pencils = await this.profileSidebarIconButtons();
+    if (pencils.length === 0) throw new Error("[parity] sidebar shows no edit pencil to click.");
+    await (pencils[0] as Locator).click({ timeout: WebDriver.WAIT_MS });
+    // The dialog root itself carries an empty box; its header text marks
+    // the opened dialog instead.
+    await this.page
+      .getByText("Your profile", { exact: true })
+      .first()
+      .waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async profileSidebarToggle(): Promise<void> {
+    const toggle = this.profileMobileHeader().locator("div.shrink-0 button").first();
+    await toggle.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const before = await this.profileSidebarVisible();
+    await toggle.click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.profileSidebarVisible()) !== before) return;
+      if (Date.now() >= deadline) throw new Error("[parity] sidebar toggle never flipped the panel.");
+      await this.page.waitForTimeout(300);
+    }
+  }
 }

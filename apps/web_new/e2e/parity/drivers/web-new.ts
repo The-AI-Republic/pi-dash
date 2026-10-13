@@ -13637,4 +13637,150 @@ export class WebNewDriver implements ParityDriver {
   async settingsProfileSecurityBlur(_field: SettingsProfileSecurityField): Promise<void> {
     return todo("settingsProfileSecurityBlur");
   }
+
+  // ---------------------------------------------------------------------------
+  // Member profile pages (NEWFRONT-425, PROF-001..008). Stubs; the area has
+  // not landed in apps/web_new yet. Appended; existing stubs above are
+  // untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  async profileOpen(_workspaceSlug: string, _userId: string, _cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("profileOpen");
+  }
+  async profileBreadcrumbLabel(): Promise<string> {
+    return todo("profileBreadcrumbLabel");
+  }
+  async profileVisibleTabs(): Promise<string[]> {
+    return todo("profileVisibleTabs");
+  }
+  async profileTabHref(_tab: string): Promise<string | null> {
+    return todo("profileTabHref");
+  }
+  async profileOpenTab(
+    _workspaceSlug: string,
+    _userId: string,
+    _tab: string,
+    _cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    return todo("profileOpenTab");
+  }
+  async profileAccessDenied(): Promise<boolean> {
+    return todo("profileAccessDenied");
+  }
+  async profileMobileTabPickerLabel(): Promise<string | null> {
+    return todo("profileMobileTabPickerLabel");
+  }
+  async profileMobileTabPickerOptions(): Promise<string[]> {
+    return todo("profileMobileTabPickerOptions");
+  }
+  async profileOverviewCards(): Promise<Array<{ title: string; value: string; href: string | null }>> {
+    return todo("profileOverviewCards");
+  }
+  async profileOverviewOpenCard(_route: string): Promise<void> {
+    return todo("profileOverviewOpenCard");
+  }
+  async profileOverviewStatsLoading(): Promise<boolean> {
+    return todo("profileOverviewStatsLoading");
+  }
+  async profileOverviewStallStats(): Promise<void> {
+    return todo("profileOverviewStallStats");
+  }
+  async profileOverviewReleaseStats(): Promise<void> {
+    return todo("profileOverviewReleaseStats");
+  }
+  async profileWorkloadGroups(): Promise<Array<{ label: string; count: string }>> {
+    return todo("profileWorkloadGroups");
+  }
+  async profilePriorityChartCategories(): Promise<string[]> {
+    return todo("profilePriorityChartCategories");
+  }
+  async profileStateChartLegend(): Promise<Array<{ label: string; count: string }>> {
+    return todo("profileStateChartLegend");
+  }
+  async profileChartsEmptyCount(): Promise<number> {
+    return todo("profileChartsEmptyCount");
+  }
+  async profileOverviewActivityEntries(): Promise<string[]> {
+    return todo("profileOverviewActivityEntries");
+  }
+  async profileOverviewActivityEntryHrefs(): Promise<string[]> {
+    return todo("profileOverviewActivityEntryHrefs");
+  }
+  async profileOverviewActivityEmpty(): Promise<boolean> {
+    return todo("profileOverviewActivityEmpty");
+  }
+  async profileIssuesOfferedLayouts(): Promise<Array<"list" | "kanban">> {
+    return todo("profileIssuesOfferedLayouts");
+  }
+  async profileMobileOfferedLayouts(): Promise<Array<"list" | "kanban">> {
+    return todo("profileMobileOfferedLayouts");
+  }
+  async profileMobileSwitchTo(_layout: "list" | "kanban"): Promise<void> {
+    return todo("profileMobileSwitchTo");
+  }
+  async profileMobileKanbanVisible(): Promise<boolean> {
+    return todo("profileMobileKanbanVisible");
+  }
+  async profileMobileActiveLayout(): Promise<"list" | "kanban"> {
+    return todo("profileMobileActiveLayout");
+  }
+  async profileMobileReloadIssues(): Promise<void> {
+    return todo("profileMobileReloadIssues");
+  }
+  async profileTabRendersNothing(): Promise<boolean> {
+    return todo("profileTabRendersNothing");
+  }
+  async profileActivityEntries(): Promise<string[]> {
+    return todo("profileActivityEntries");
+  }
+  async profileActivityEntryHrefs(): Promise<string[]> {
+    return todo("profileActivityEntryHrefs");
+  }
+  async profileActivityLoadMoreVisible(): Promise<boolean> {
+    return todo("profileActivityLoadMoreVisible");
+  }
+  async profileActivityLoadMore(): Promise<void> {
+    return todo("profileActivityLoadMore");
+  }
+  async profileSidebarVisible(): Promise<boolean> {
+    return todo("profileSidebarVisible");
+  }
+  async profileSidebarCoverVisible(): Promise<boolean> {
+    return todo("profileSidebarCoverVisible");
+  }
+  async profileSidebarAvatar(): Promise<{ kind: "image"; src: string } | { kind: "initial"; initial: string }> {
+    return todo("profileSidebarAvatar");
+  }
+  async profileSidebarName(): Promise<{ full: string; display: string }> {
+    return todo("profileSidebarName");
+  }
+  async profileSidebarJoinDate(): Promise<string> {
+    return todo("profileSidebarJoinDate");
+  }
+  async profileSidebarClock(): Promise<string> {
+    return todo("profileSidebarClock");
+  }
+  async profileSidebarProjectRows(): Promise<Array<{ name: string; completion: string | null }>> {
+    return todo("profileSidebarProjectRows");
+  }
+  async profileSidebarExpandProject(_name: string): Promise<void> {
+    return todo("profileSidebarExpandProject");
+  }
+  async profileSidebarProjectCounts(_name: string): Promise<{
+    created: string;
+    assigned: string;
+    due: string;
+    completed: string;
+  }> {
+    return todo("profileSidebarProjectCounts");
+  }
+  async profileSidebarEditPencilVisible(): Promise<boolean> {
+    return todo("profileSidebarEditPencilVisible");
+  }
+  async profileSidebarClickEditPencil(): Promise<void> {
+    return todo("profileSidebarClickEditPencil");
+  }
+  async profileSidebarToggle(): Promise<void> {
+    return todo("profileSidebarToggle");
+  }
 }
