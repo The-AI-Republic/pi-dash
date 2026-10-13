@@ -18107,7 +18107,8 @@ export async function serverUserActive(email: string): Promise<boolean> {
  * Create an account with a one-time magic code the way the code form does,
  * resolving with a full authenticated session (the sign-in endpoint only
  * serves existing users). The caller plants the code first with
- * mintMagicCode; no mail round-trip is involved, so no SMTP flip is needed.
+ * mintMagicCode; the sign-up endpoint still requires the instance mail
+ * switch, so flip it on for the call and restore it after.
  */
 export async function serverMagicSignUp(
   email: string,
