@@ -44,6 +44,7 @@ Current seams:
 | ------------------------------------------------------------------------------- | -------------------------------- | --------------------------------------------------------------------------------------- |
 | `sign-in-card.tsx` — `DesktopSignInCard`                                        | `app/(home)/page.tsx`            | Explains that desktop sign-in isn't available for this server yet and opens the web app |
 | `agent-runtime-edition.ts` — `AGENT_RUNTIME_REASON_MESSAGES`, `CSRF_TOKEN_PATH` | `core/services/agent-runtime.ts` | Generic messages for managed-runner reason codes; `/auth/get-csrf-token/`               |
+| `onboarding-edition.ts` — `SHOW_CLI_INSTALL_STEP`                               | onboarding flow                  | `true` for web; desktop overrides it because the CLI is bundled                         |
 
 ## Path convention
 
@@ -78,6 +79,8 @@ desktop/src-tauri/dist/
 - `apps/web/core/components/desktop-update-button.tsx` — the corner button
   beside the sidebar's user menu while an app update is waiting (found by
   the daily check, or deferred at launch); clicking it installs and restarts.
+- `apps/web/ce/components/desktop/onboarding-edition.ts` — omits the CLI
+  installation page from desktop onboarding because the app bundles the CLI.
 - `apps/web/core/utils/desktop-web-url.ts` — resolves an in-app path against
   `VITE_WEB_BASE_URL` (baked by `dev-prep.sh`, defaulting to `PI_DASH_URL`).
   Bundled pages run on a Tauri-owned origin, so anything that builds a

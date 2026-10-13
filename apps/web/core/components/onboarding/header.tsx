@@ -15,6 +15,7 @@ import { cn } from "@pi-dash/utils";
 import { useInstance } from "@/hooks/store/use-instance";
 import { useUser } from "@/hooks/store/user";
 // local imports
+import { getOnboardingStepOrder, getPreviousOnboardingStep } from "./flow";
 import { SwitchAccountDropdown } from "./switch-account-dropdown";
 
 type OnboardingHeaderProps = {
@@ -30,36 +31,17 @@ export const OnboardingHeader = observer(function OnboardingHeader(props: Onboar
   const { config: instanceConfig } = useInstance();
   const isSelfManaged = instanceConfig?.is_self_managed;
 
-  // handle step back
+  const previousStep = getPreviousOnboardingStep(currentStep, isSelfManaged);
   const handleStepBack = () => {
-    switch (currentStep) {
-      case EOnboardingSteps.PROFILE_SETUP:
-        updateCurrentStep(EOnboardingSteps.CLI_INSTALL);
-        break;
-      case EOnboardingSteps.ROLE_SETUP:
-        updateCurrentStep(EOnboardingSteps.PROFILE_SETUP);
-        break;
-      case EOnboardingSteps.USE_CASE_SETUP:
-        updateCurrentStep(EOnboardingSteps.ROLE_SETUP);
-        break;
-      case EOnboardingSteps.WORKSPACE_CREATE_OR_JOIN:
-        updateCurrentStep(isSelfManaged ? EOnboardingSteps.PROFILE_SETUP : EOnboardingSteps.USE_CASE_SETUP);
-        break;
-    }
+    if (previousStep) updateCurrentStep(previousStep);
   };
 
   // can go back
-  const canGoBack = ![EOnboardingSteps.CLI_INSTALL, EOnboardingSteps.INVITE_MEMBERS].includes(currentStep);
+  const canGoBack = previousStep !== null;
 
   // step order for progress tracking — include INVITE_MEMBERS if user is currently on it
   const showInviteStep = !hasInvitations || currentStep === EOnboardingSteps.INVITE_MEMBERS;
-  const stepOrder: TOnboardingStep[] = [
-    EOnboardingSteps.CLI_INSTALL,
-    EOnboardingSteps.PROFILE_SETUP,
-    ...(isSelfManaged ? [] : [EOnboardingSteps.ROLE_SETUP, EOnboardingSteps.USE_CASE_SETUP]),
-    EOnboardingSteps.WORKSPACE_CREATE_OR_JOIN,
-    ...(showInviteStep ? [EOnboardingSteps.INVITE_MEMBERS] : []),
-  ];
+  const stepOrder: TOnboardingStep[] = getOnboardingStepOrder(isSelfManaged, showInviteStep);
 
   // derived values
   const currentStepNumber = stepOrder.indexOf(currentStep) + 1;
