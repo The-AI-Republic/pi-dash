@@ -298,10 +298,11 @@ export class ApiClient {
     }
     if (body !== null && typeof body === "object") {
       const record = body as Record<string, unknown>;
-      if (typeof record["error_code"] === "string") {
+      const errorCode = record["error_code"];
+      if (typeof errorCode === "string" || typeof errorCode === "number") {
         return new ApiError({
           status: response.status,
-          code: record["error_code"],
+          code: String(errorCode),
           message: typeof record["error_message"] === "string" ? record["error_message"] : "Request failed",
         });
       }
@@ -321,6 +322,13 @@ export class ApiClient {
           status: response.status,
           code: (record as { code: string }).code,
           message: (record as { message: string }).message,
+        });
+      }
+      if (typeof record["error"] === "string" && record["error"].length > 0) {
+        return new ApiError({
+          status: response.status,
+          code: "http",
+          message: record["error"],
         });
       }
       const fields: Record<string, string[]> = {};

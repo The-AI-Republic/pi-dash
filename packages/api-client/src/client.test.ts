@@ -120,6 +120,57 @@ describe("ApiClient", () => {
     expect((error as ApiError).message).toContain("name");
   });
 
+  it("passes numeric auth error codes through in decimal", async () => {
+    const transport = recordingTransport(() =>
+      jsonResponse({ error_code: 5900, error_message: "RATE_LIMIT_EXCEEDED" }, 429)
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await client.getJson("/auth/magic-generate/").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(429);
+    expect((error as ApiError).code).toBe("5900");
+    expect((error as ApiError).message).toBe("RATE_LIMIT_EXCEEDED");
+    expect(isRetryable(error)).toBe(true);
+  });
+
+  it("prefers the numeric code over a payload error string", async () => {
+    const transport = recordingTransport(() =>
+      jsonResponse(
+        { error_code: 5145, error_message: "PASSWORD_ALREADY_SET", error: "Your password is already set" },
+        400
+      )
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await client.getJson("/auth/set-password/").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("5145");
+    expect((error as ApiError).message).toBe("PASSWORD_ALREADY_SET");
+  });
+
+  it("falls back when the numeric code has no message", async () => {
+    const transport = recordingTransport(() => jsonResponse({ error_code: 5900 }, 429));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await client.getJson("/auth/magic-generate/").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("5900");
+    expect((error as ApiError).message).toBe("Request failed");
+  });
+
+  it("reads single-error bodies into the message", async () => {
+    const transport = recordingTransport(() => jsonResponse({ error: "Code not recognized." }, 404));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await client.getJson("/api/v1/auth/device/approve/").catch((e: unknown) => e);
+    expect((error as ApiError).status).toBe(404);
+    expect((error as ApiError).code).toBe("http");
+    expect((error as ApiError).message).toBe("Code not recognized.");
+  });
+
+  it("ignores an empty error string", async () => {
+    const transport = recordingTransport(() => jsonResponse({ error: "" }, 500));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await client.getJson("/x/").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("http");
+    expect((error as ApiError).message).toBe('{"error":""}');
+  });
+
   it("maps network failures, timeouts and aborts", async () => {
     const network: Transport = async () => {
       throw new TypeError("fetch failed");

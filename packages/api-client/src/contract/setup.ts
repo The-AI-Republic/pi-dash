@@ -14,6 +14,7 @@ export const CONTRACT_PASSWORD = process.env["PIDASH_CONTRACT_PASSWORD"] ?? "Con
 export const CONTRACT_WORKSPACE = process.env["PIDASH_CONTRACT_WORKSPACE"] ?? "contract-acme";
 export const CONTRACT_PROJECT_IDENTIFIER = "CT";
 export const CONTRACT_SECONDARY_EMAIL = process.env["PIDASH_CONTRACT_SECONDARY_EMAIL"] ?? "contract.probe@example.com";
+export const CONTRACT_AUTOSET_EMAIL = process.env["PIDASH_CONTRACT_AUTOSET_EMAIL"] ?? "contract.autoset@example.com";
 
 export const contractEnabled = CONTRACT_BASE_URL.length > 0;
 
