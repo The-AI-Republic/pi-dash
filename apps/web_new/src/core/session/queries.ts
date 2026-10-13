@@ -9,6 +9,7 @@ import { queryOptions } from "@tanstack/react-query";
 import {
   getInstanceConfig,
   getMe,
+  getProfile,
   listWorkspaces,
   type ApiClient,
   type Workspace,
@@ -20,6 +21,7 @@ import { REFERENCE_STALE_TIME_MS } from "../query/client.js";
 export const sessionKeys = {
   me: ["session", "me"],
   workspaces: ["session", "workspaces"],
+  profile: ["session", "profile"],
 } as const;
 
 export function meQueryOptions(client: ApiClient) {
@@ -34,6 +36,15 @@ export function workspacesQueryOptions(client: ApiClient) {
   return queryOptions({
     queryKey: sessionKeys.workspaces,
     queryFn: () => listWorkspaces(client),
+    staleTime: REFERENCE_STALE_TIME_MS,
+  });
+}
+
+/** The user's profile (onboarding flags, preferences). Guards read the onboarded marker. */
+export function profileQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: sessionKeys.profile,
+    queryFn: () => getProfile(client),
     staleTime: REFERENCE_STALE_TIME_MS,
   });
 }

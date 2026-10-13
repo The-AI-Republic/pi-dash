@@ -5,16 +5,23 @@
 // drives the steps, these hooks only talk to the server and keep the
 // session store in sync. Sign-in completion navigates through the server
 // landing URL (see SignInCard), so success needs no cache work here.
+// Every credential submission drops the cached forgery token first so the
+// POST carries a freshly fetched one (AUTH-020).
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   checkEmail,
   generateMagicCode,
+  requestPasswordReset,
+  resetPassword,
+  setPassword,
   signIn,
   signInWithMagicCode,
   signOut as postSignOut,
   signUp,
   signUpWithMagicCode,
+  type ResetPasswordInput,
+  type SetPasswordResult,
   type SignInResult,
 } from "@pidash/api-client";
 
@@ -40,31 +47,63 @@ function markSignedIn(result: SignInResult): SignInResult {
   return result;
 }
 
+/**
+ * The app client with a dropped forgery-token cache: the next unsafe
+ * request fetches a fresh token, so every credential submission carries
+ * one issued for this submit (AUTH-020).
+ */
+function freshClient() {
+  const client = getAppClient();
+  client.clearCsrfCache();
+  return client;
+}
+
 export function usePasswordSignIn() {
   return useMutation({
     mutationFn: (input: { email: string; password: string; nextPath?: string }) =>
-      signIn(getAppClient(), input).then(markSignedIn),
+      signIn(freshClient(), input).then(markSignedIn),
   });
 }
 
 export function useMagicSignIn() {
   return useMutation({
     mutationFn: (input: { email: string; code: string; nextPath?: string }) =>
-      signInWithMagicCode(getAppClient(), input).then(markSignedIn),
+      signInWithMagicCode(freshClient(), input).then(markSignedIn),
   });
 }
 
 export function usePasswordSignUp() {
   return useMutation({
     mutationFn: (input: { email: string; password: string; confirmPassword: string; nextPath?: string }) =>
-      signUp(getAppClient(), input).then(markSignedIn),
+      signUp(freshClient(), input).then(markSignedIn),
   });
 }
 
 export function useMagicSignUp() {
   return useMutation({
     mutationFn: (input: { email: string; code: string; nextPath?: string }) =>
-      signUpWithMagicCode(getAppClient(), input).then(markSignedIn),
+      signUpWithMagicCode(freshClient(), input).then(markSignedIn),
+  });
+}
+
+/** Forgot-password request (AUTH-012). Success mails the reset link. */
+export function useForgotPassword() {
+  return useMutation({
+    mutationFn: (email: string) => requestPasswordReset(freshClient(), email),
+  });
+}
+
+/** Password reset from the emailed uid/token link (AUTH-013). */
+export function usePasswordReset() {
+  return useMutation({
+    mutationFn: (input: ResetPasswordInput) => resetPassword(freshClient(), input),
+  });
+}
+
+/** First password for passwordless accounts (AUTH-014). */
+export function useSetPassword() {
+  return useMutation({
+    mutationFn: (password: string): Promise<SetPasswordResult> => setPassword(freshClient(), password),
   });
 }
 

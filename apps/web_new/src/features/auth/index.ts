@@ -5,11 +5,14 @@
 
 export {
   useEmailCheck,
+  useForgotPassword,
   useMagicGenerate,
   useMagicSignIn,
   useMagicSignUp,
+  usePasswordReset,
   usePasswordSignIn,
   usePasswordSignUp,
+  useSetPassword,
   useSignOut,
 } from "./api.js";
 export { describeAuthError, describeSubmitFailure } from "./authErrors.js";
@@ -20,7 +23,14 @@ export type { SecretCriterion } from "./passwordStrength.js";
 export { resolveSignInProviders } from "./providers.js";
 export type { ResolveProvidersOptions, SignInProvider } from "./providers.js";
 export { authKeys, invitationQueryOptions, useWorkspaceInvitation } from "./queries.js";
-export { isValidEmail, SignInCard } from "./components/SignInCard.js";
-export type { SignInCardProps } from "./components/SignInCard.js";
+export { AuthBanner, isValidEmail, SignInCard } from "./components/SignInCard.js";
+export type { AuthBannerProps, SignInCardProps } from "./components/SignInCard.js";
 export { SignUpCard } from "./components/SignUpCard.js";
 export type { SignUpCardProps } from "./components/SignUpCard.js";
+export { ForgotPasswordCard } from "./components/ForgotPasswordCard.js";
+export type { ForgotPasswordCardProps } from "./components/ForgotPasswordCard.js";
+export { NewPasswordForm } from "./components/NewPasswordForm.js";
+export type { NewPasswordFormProps } from "./components/NewPasswordForm.js";
+export { ResetPasswordCard } from "./components/ResetPasswordCard.js";
+export type { ResetPasswordCardProps } from "./components/ResetPasswordCard.js";
+export { SetPasswordCard } from "./components/SetPasswordCard.js";

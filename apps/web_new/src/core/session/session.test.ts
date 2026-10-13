@@ -12,6 +12,7 @@ import {
   decideWorkspaceRouteGate,
   getSessionClient,
   meQueryOptions,
+  profileQueryOptions,
   selectWorkspace,
   selectWorkspaceRole,
   sessionKeys,
@@ -156,6 +157,18 @@ describe("session queries", () => {
     expect(getSessionClient()).toBe(fakeClient);
     expect(meQueryOptions(getSessionClient()).queryKey).toEqual(sessionKeys.me);
     expect(workspacesQueryOptions(getSessionClient()).queryKey).toEqual(sessionKeys.workspaces);
+    expect(profileQueryOptions(getSessionClient()).queryKey).toEqual(sessionKeys.profile);
+  });
+
+  it("reads the profile through its own key", async () => {
+    const fakeClient = {
+      getJson: () => Promise.resolve({ is_onboarded: true }),
+      parse: (_schema: unknown, data: unknown) => data,
+    };
+    const options = profileQueryOptions(fakeClient as never);
+    expect(sessionKeys.profile).toEqual(["session", "profile"]);
+    expect(options.queryKey).toEqual(sessionKeys.profile);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual({ is_onboarded: true });
   });
 
   it("reads the instance config through its own key", async () => {

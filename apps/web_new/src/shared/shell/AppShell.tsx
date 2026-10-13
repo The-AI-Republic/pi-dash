@@ -9,13 +9,12 @@
 // fill them without reworking this composition.
 
 import { ToastHost } from "@pidash/kit";
-import { useRouter } from "@tanstack/react-router";
 import * as React from "react";
 
 import { matchesShortcut, registerCommands, useCommandPalette, type PidashCommand } from "../commands/index.js";
-import { useSessionStore } from "../../core/session/store.js";
 import { CommandPalette } from "./CommandPalette.js";
-import { getToastManager, notifyError } from "./toaster.js";
+import { useSessionExpiredRedirect } from "./expiredRedirect.js";
+import { getToastManager } from "./toaster.js";
 
 export interface AppShellProps {
   topBar: React.ReactNode;
@@ -42,10 +41,8 @@ export function AppShell({
   dialogs,
   children,
 }: AppShellProps): React.ReactElement {
-  const router = useRouter();
-  const status = useSessionStore((state) => state.status);
-  const returnUrl = useSessionStore((state) => state.returnUrl);
   const togglePalette = useCommandPalette((state) => state.togglePalette);
+  useSessionExpiredRedirect();
 
   React.useEffect(() => registerCommands(commands), [commands]);
 
@@ -61,15 +58,6 @@ export function AppShell({
       globalThis.window.removeEventListener("keydown", onKeyDown);
     };
   }, [togglePalette]);
-
-  const expiredNoticed = React.useRef(false);
-  React.useEffect(() => {
-    if (status !== "expired" || expiredNoticed.current) return;
-    expiredNoticed.current = true;
-    notifyError("Session expired", "Sign in again to continue.");
-    const current = router.state.location.href;
-    void router.navigate({ to: "/sign-in", search: { next: returnUrl ?? current } });
-  }, [status, returnUrl, router]);
 
   return (
     <div className="flex h-screen flex-col bg-(--bg) text-(--text)">
