@@ -13,6 +13,9 @@ on:
       - "reopened"
     paths:
       - "desktop/**"
+      # Path dependency of desktop/src-tauri (the daemon wire protocol);
+      # editing it changes no lockfile under desktop/.
+      - "pidash-ipc/**"
       - ".github/workflows/pull-request-test-desktop.yml"
   # Post-merge validation, same reasoning as the runner workflow: PR checks
   # don't re-run when the base moves.
@@ -24,6 +27,7 @@ on:
       - "main-test"
     paths:
       - "desktop/**"
+      - "pidash-ipc/**"
       - ".github/workflows/pull-request-test-desktop.yml"
 
 concurrency:
