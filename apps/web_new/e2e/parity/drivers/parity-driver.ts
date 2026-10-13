@@ -8279,6 +8279,72 @@ export interface ParityDriver {
   spacePeekLastNotice(): Promise<{ title: string; message: string } | null>;
   /** True while the open overlay shows skeleton placeholders instead of content. */
   spacePeekSkeletonsVisible(): Promise<boolean>;
+
+  // --- Spaces auth (NEWFRONT-452, SPC-058..064). ---
+  /** Open the landing auth card with query params (email, error_code, next_path). */
+  spaceAuthOpenLanding(params?: { email?: string; errorCode?: string; nextPath?: string }): Promise<void>;
+  /** Which auth step is currently visible (signed-in = the logged-in guidance view). */
+  spaceAuthStep(): Promise<"email" | "password" | "code" | "signed-in" | "unknown">;
+  /** Sign-in vs sign-up mode from the header, or null when the header is absent. */
+  spaceAuthMode(): Promise<"sign-in" | "sign-up" | null>;
+  /** Fill the email field without submitting (negative validation tests). */
+  spaceAuthFillEmail(email: string): Promise<void>;
+  /** Submit the email step; resolves once the email-check round-trip answers. */
+  spaceAuthSubmitEmail(email: string): Promise<void>;
+  /** Blur the email field (inline validation shows only when unfocused). */
+  spaceAuthBlurEmail(): Promise<void>;
+  /** Inline email validation error text, or null when none shows. */
+  spaceAuthEmailError(): Promise<string | null>;
+  /** Whether the email-step Continue submit is enabled. */
+  spaceAuthEmailSubmitEnabled(): Promise<boolean>;
+  /** Dismissible auth banner text, or null when no banner shows. */
+  spaceAuthBanner(): Promise<string | null>;
+  /** Dismiss the auth banner. */
+  spaceAuthDismissBanner(): Promise<void>;
+  /** Clear the locked email on the password/code step, resetting the card. */
+  spaceAuthClearEmail(): Promise<void>;
+  /** Fill the password fields without submitting (strength/meter tests). */
+  spaceAuthFillPassword(password: string, confirmPassword?: string): Promise<void>;
+  /** Submit the password step; ends in a full page load (success or error redirect). */
+  spaceAuthSubmitPassword(password: string, confirmPassword?: string): Promise<void>;
+  /** Whether the password-step submit is currently enabled. */
+  spaceAuthPasswordSubmitEnabled(): Promise<boolean>;
+  /** Toggle password visibility for one field. */
+  spaceAuthTogglePasswordVisibility(field: "password" | "confirm"): Promise<void>;
+  /** Input types of the password fields (null when the field is absent). */
+  spaceAuthPasswordFieldTypes(): Promise<{ password: string | null; confirm: string | null }>;
+  /** True when the sign-up strength meter shows. */
+  spaceAuthStrengthMeterVisible(): Promise<boolean>;
+  /** Strength meter message text, or null when the meter is absent. */
+  spaceAuthStrengthMessage(): Promise<string | null>;
+  /** Inline password-confirmation error text, or null when none shows. */
+  spaceAuthPasswordMismatchError(): Promise<string | null>;
+  /** Label of the primary button on the password step, or null when absent. */
+  spaceAuthPasswordPrimaryLabel(): Promise<string | null>;
+  /** True when the "sign in with unique code" switch shows (sign-in + SMTP). */
+  spaceAuthSeesSwitchToCode(): Promise<boolean>;
+  /** Click the switch-to-code control; resolves once the code step renders. */
+  spaceAuthSwitchToCode(): Promise<void>;
+  /** True when the password step shows the confirm-password field (sign-up mode). */
+  spaceAuthSeesConfirmPassword(): Promise<boolean>;
+  /** Submit the code step; ends in a full page load (success or error redirect). */
+  spaceAuthSubmitCode(code: string): Promise<void>;
+  /** Resend control on the code step: enabled state plus label. */
+  spaceAuthCodeResendState(): Promise<{ disabled: boolean; label: string | null }>;
+  /** Click the resend control on the code step. */
+  spaceAuthClickResendCode(): Promise<void>;
+  /** Names of the visible third-party provider buttons (empty when none). */
+  spaceAuthProviderButtons(): Promise<string[]>;
+  /** True when the provider buttons render compact (icon-only, password step). */
+  spaceAuthProvidersCompact(): Promise<boolean>;
+  /** True when the provider divider ("or") shows. */
+  spaceAuthProvidersDividerVisible(): Promise<boolean>;
+  /** Click a third-party provider button (starts a full-page provider flow). */
+  spaceAuthClickProvider(name: string): Promise<void>;
+  /** Auth header heading + subline (nulls when the header is absent). */
+  spaceAuthHeader(): Promise<{ heading: string | null; subline: string | null }>;
+  /** Consent line text plus terms/privacy link targets (nulls when absent). */
+  spaceAuthConsent(): Promise<{ text: string | null; termsHref: string | null; privacyHref: string | null }>;
 }
 
 /** One list group / board column as rendered (NEWFRONT-449, SPC-023/024/026). */
@@ -8342,8 +8408,7 @@ export interface SpaceBoardStability {
   /** List order after the cycle. */
   after: string[];
   /** Public-issues fetches observed during the cycle. */
-  refetches: number;
-}
+  refetches: number;}
 
 /** Identity facts of one workspace-member roster row (NEWFRONT-411, WSET-011). */
 export interface WsSettingsMemberRowFacts {

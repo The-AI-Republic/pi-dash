@@ -14207,6 +14207,135 @@ export class WebNewDriver implements ParityDriver {
 
   async spaceAccessHeadFacts(): Promise<SpaceAccessHeadFacts> {
     return todo("spaceAccessHeadFacts");
+
+
+  // --- Spaces auth (NEWFRONT-452, SPC-058..064). ---
+  async spaceAuthOpenLanding(_params?: { email?: string; errorCode?: string; nextPath?: string }): Promise<void> {
+    return todo("spaceAuthOpenLanding");
+  }
+
+  async spaceAuthStep(): Promise<"email" | "password" | "code" | "signed-in" | "unknown"> {
+    return todo("spaceAuthStep");
+  }
+
+  async spaceAuthMode(): Promise<"sign-in" | "sign-up" | null> {
+    return todo("spaceAuthMode");
+  }
+
+  async spaceAuthFillEmail(_email: string): Promise<void> {
+    return todo("spaceAuthFillEmail");
+  }
+
+  async spaceAuthSubmitEmail(_email: string): Promise<void> {
+    return todo("spaceAuthSubmitEmail");
+  }
+
+  async spaceAuthBlurEmail(): Promise<void> {
+    return todo("spaceAuthBlurEmail");
+  }
+
+  async spaceAuthEmailError(): Promise<string | null> {
+    return todo("spaceAuthEmailError");
+  }
+
+  async spaceAuthEmailSubmitEnabled(): Promise<boolean> {
+    return todo("spaceAuthEmailSubmitEnabled");
+  }
+
+  async spaceAuthBanner(): Promise<string | null> {
+    return todo("spaceAuthBanner");
+  }
+
+  async spaceAuthDismissBanner(): Promise<void> {
+    return todo("spaceAuthDismissBanner");
+  }
+
+  async spaceAuthClearEmail(): Promise<void> {
+    return todo("spaceAuthClearEmail");
+  }
+
+  async spaceAuthFillPassword(_password: string, _confirmPassword?: string): Promise<void> {
+    return todo("spaceAuthFillPassword");
+  }
+
+  async spaceAuthSubmitPassword(_password: string, _confirmPassword?: string): Promise<void> {
+    return todo("spaceAuthSubmitPassword");
+  }
+
+  async spaceAuthPasswordSubmitEnabled(): Promise<boolean> {
+    return todo("spaceAuthPasswordSubmitEnabled");
+  }
+
+  async spaceAuthTogglePasswordVisibility(_field: "password" | "confirm"): Promise<void> {
+    return todo("spaceAuthTogglePasswordVisibility");
+  }
+
+  async spaceAuthPasswordFieldTypes(): Promise<{ password: string | null; confirm: string | null }> {
+    return todo("spaceAuthPasswordFieldTypes");
+  }
+
+  async spaceAuthStrengthMeterVisible(): Promise<boolean> {
+    return todo("spaceAuthStrengthMeterVisible");
+  }
+
+  async spaceAuthStrengthMessage(): Promise<string | null> {
+    return todo("spaceAuthStrengthMessage");
+  }
+
+  async spaceAuthPasswordMismatchError(): Promise<string | null> {
+    return todo("spaceAuthPasswordMismatchError");
+  }
+
+  async spaceAuthPasswordPrimaryLabel(): Promise<string | null> {
+    return todo("spaceAuthPasswordPrimaryLabel");
+  }
+
+  async spaceAuthSeesSwitchToCode(): Promise<boolean> {
+    return todo("spaceAuthSeesSwitchToCode");
+  }
+
+  async spaceAuthSwitchToCode(): Promise<void> {
+    return todo("spaceAuthSwitchToCode");
+  }
+
+  async spaceAuthSeesConfirmPassword(): Promise<boolean> {
+    return todo("spaceAuthSeesConfirmPassword");
+  }
+
+  async spaceAuthSubmitCode(_code: string): Promise<void> {
+    return todo("spaceAuthSubmitCode");
+  }
+
+  async spaceAuthCodeResendState(): Promise<{ disabled: boolean; label: string | null }> {
+    return todo("spaceAuthCodeResendState");
+  }
+
+  async spaceAuthClickResendCode(): Promise<void> {
+    return todo("spaceAuthClickResendCode");
+  }
+
+  async spaceAuthProviderButtons(): Promise<string[]> {
+    return todo("spaceAuthProviderButtons");
+  }
+
+  async spaceAuthProvidersCompact(): Promise<boolean> {
+    return todo("spaceAuthProvidersCompact");
+  }
+
+  async spaceAuthProvidersDividerVisible(): Promise<boolean> {
+    return todo("spaceAuthProvidersDividerVisible");
+  }
+
+  async spaceAuthClickProvider(_name: string): Promise<void> {
+    return todo("spaceAuthClickProvider");
+  }
+
+  async spaceAuthHeader(): Promise<{ heading: string | null; subline: string | null }> {
+    return todo("spaceAuthHeader");
+  }
+
+  async spaceAuthConsent(): Promise<{ text: string | null; termsHref: string | null; privacyHref: string | null }> {
+    return todo("spaceAuthConsent");
   }
 
   // --- Space filters + peek shell (NEWFRONT-450, SPC-034–046).
