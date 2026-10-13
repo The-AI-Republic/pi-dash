@@ -82,6 +82,7 @@ export default {
   "Active Projects": "Active Projects",
   Activity: "Activity",
   Add: "Add",
+  "Add AI Worker": "Add AI Worker",
   "Add API token": "Add API token",
   "Add assignees": "Add assignees",
   "Add assignees to work items to see a breakdown of work by assignees.":

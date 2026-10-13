@@ -154,7 +154,7 @@ const RunnersListPage = observer(function RunnersListPage() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-1.5">
-              <div className="text-13 font-medium text-primary">{t("Add runner")}</div>
+              <div className="text-13 font-medium text-primary">{t("Add AI Worker")}</div>
               <Tooltip
                 position="bottom"
                 tooltipContent={
@@ -184,7 +184,7 @@ const RunnersListPage = observer(function RunnersListPage() {
             </div>
           </div>
           <Button onClick={() => setAddOpen(true)} disabled={!workspaceId}>
-            {t("Add runner")}
+            {t("Add AI Worker")}
           </Button>
         </div>
       </section>
