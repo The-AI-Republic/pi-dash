@@ -409,6 +409,21 @@ describe("ProfileSetupStep", () => {
     expect(screen.getByText("Choose an image under 5 MB.")).toBeInTheDocument();
   });
 
+  it("clears the chosen file when the picker reports no files", async () => {
+    const user = userEvent.setup();
+    renderStep();
+
+    await screen.findByLabelText("Your name");
+    await user.click(screen.getByRole("button", { name: "Add a photo" }));
+    await user.upload(screen.getByLabelText("Choose an image"), new File(["bytes"], "ada.png", { type: "image/png" }));
+    expect(screen.getByText("ada.png (5 bytes)")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Upload" })).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText("Choose an image"), { target: { files: null } });
+    expect(screen.queryByText("ada.png (5 bytes)")).toBeNull();
+    expect(screen.getByRole("button", { name: "Upload" })).toBeDisabled();
+  });
+
   it("disables upload with no file chosen", () => {
     renderStep();
     fireEvent.click(screen.getByRole("button", { name: "Add a photo" }));
