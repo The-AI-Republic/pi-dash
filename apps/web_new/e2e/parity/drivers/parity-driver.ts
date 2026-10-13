@@ -8580,6 +8580,101 @@ export interface SpaceBoardStability {
   cloudProviderButtonFacts(): Promise<CloudProviderButtonFacts>;
   /** Activate the generic card's provider button. */
   cloudClickProviderButton(): Promise<void>;
+
+  // --- Cloud Apps catalog (NEWFRONT-439, CLOUD-021–031). Appended;
+  // --- existing methods above are untouched per the shared driver
+  // --- contract. Reads are structural (entries, cards, badges, dialog
+  // --- fields, toggle state) so scenarios prove the catalog without
+  // --- quoting its copy; server payloads stay in the specs' stubs.
+
+  /** Sidebar Apps entry destination, or null when the entry is absent. */
+  cloudAppsSidebarHref(): Promise<string | null>;
+  /** Whether the sidebar Apps entry carries its own icon node. */
+  cloudAppsSidebarIconPresent(): Promise<boolean>;
+  /** Follow the sidebar Apps entry; resolves once the Apps page renders. */
+  cloudAppsOpenFromSidebar(): Promise<void>;
+  /** Intro paragraph under the Apps heading (ownership statement). */
+  cloudAppsIntroText(): Promise<string>;
+  /** Replace the catalog search box contents. */
+  cloudAppsSearchFill(value: string): Promise<void>;
+  /** Type into the catalog search box with realistic keystroke pacing. */
+  cloudAppsSearchTypeText(text: string): Promise<void>;
+  /** Current catalog search box contents. */
+  cloudAppsSearchValue(): Promise<string>;
+  /** Whether the catalog search box renders. */
+  cloudAppsSearchVisible(): Promise<boolean>;
+  /** Card titles in display order. */
+  cloudAppsCardNames(): Promise<string[]>;
+  /** Per-card facts: badge, actions, icon source, letter tile. */
+  cloudAppsCards(): Promise<CloudAppsCardFacts[]>;
+  /** Click a card action (Install, Connect, Uninstall) by card name. */
+  cloudAppsClickCardAction(name: string, action: "Install" | "Connect" | "Uninstall"): Promise<void>;
+  /** Whether a card action is currently disabled (busy guard). */
+  cloudAppsCardActionDisabled(name: string, action: "Install" | "Connect" | "Uninstall"): Promise<boolean>;
+  /** Step the catalog pager forward; resolves once the window renders. */
+  cloudAppsNextPage(): Promise<void>;
+  /** Step the catalog pager back; resolves once the window renders. */
+  cloudAppsPrevPage(): Promise<void>;
+  /** Pager indicator text (page number), or null when the pager is absent. */
+  cloudAppsPageIndicator(): Promise<string | null>;
+  /** Whether the catalog pager renders. */
+  cloudAppsPagerVisible(): Promise<boolean>;
+  /** Whether the credential dialog is open. */
+  cloudAppsDialogVisible(): Promise<boolean>;
+  /** Credential dialog title, or null when closed. */
+  cloudAppsDialogTitle(): Promise<string | null>;
+  /** Credential dialog fields: label, input type, placeholder. */
+  cloudAppsDialogFields(): Promise<CloudAppsDialogFieldFacts[]>;
+  /** Credential dialog publisher instructions as rendered plain text, or null when absent. */
+  cloudAppsDialogInstructions(): Promise<string | null>;
+  /** Credential dialog issuance-link target, or null when no link renders. */
+  cloudAppsDialogSetupHref(): Promise<string | null>;
+  /** Fill a credential dialog field by its label. */
+  cloudAppsDialogFill(label: string, value: string): Promise<void>;
+  /** Submit the credential dialog. */
+  cloudAppsDialogSubmit(): Promise<void>;
+  /** Cancel the credential dialog. */
+  cloudAppsDialogCancel(): Promise<void>;
+  /** Inline credential dialog errors currently shown. */
+  cloudAppsDialogErrors(): Promise<string[]>;
+  /** Agent-tools toggle state, or null when the toggle is absent. */
+  cloudAppsToggleState(): Promise<boolean | null>;
+  /** Agent-tools toggle label plus description text. */
+  cloudAppsToggleText(): Promise<string>;
+  /** Flip the agent-tools toggle. */
+  cloudAppsToggle(): Promise<void>;
+  /** Inner text of the Apps content area (panels, empty states, catalog). */
+  cloudAppsBodyText(): Promise<string>;
+  /** Whether the catalog card grid renders (vs a panel or empty state). */
+  cloudAppsCatalogVisible(): Promise<boolean>;
+  /** Click the visible Retry button in the Apps content area. */
+  cloudAppsClickRetry(): Promise<void>;
+  /** Click the sidebar create control on the Apps page; true when the create dialog opens. */
+  cloudAppsSidebarCreateOpensDialog(): Promise<boolean>;
+}
+
+/** One Apps catalog card (NEWFRONT-439, CLOUD-028). */
+export interface CloudAppsCardFacts {
+  /** Card title as rendered. */
+  name: string;
+  /** State marker: installed, unfinished (needs connection), or none. */
+  badge: "installed" | "needs-connection" | null;
+  /** Action buttons on the card, in display order. */
+  actions: string[];
+  /** Icon source: self-hosted graphic, proxied URL, or letter tile only. */
+  icon: "inline" | "proxied" | "letter";
+  /** Letter-tile character rendered under the icon. */
+  letter: string;
+}
+
+/** One credential-dialog field (NEWFRONT-439, CLOUD-027). */
+export interface CloudAppsDialogFieldFacts {
+  /** Field label as rendered. */
+  label: string;
+  /** Input type (secret fields mask). */
+  inputType: string;
+  /** Placeholder hint, or empty when none. */
+  placeholder: string;
 }
 
 /** One marketing header/footer link (NEWFRONT-437, CLOUD-004). */

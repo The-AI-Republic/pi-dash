@@ -194,6 +194,8 @@ import type {
   SpacePickedEmoji,
   SpaceReactionGroup,
   SpaceVoteState,
+  CloudAppsCardFacts,
+  CloudAppsDialogFieldFacts,
   CloudCliCardFacts,
   CloudDocsFacts,
   CloudDownloadCardFacts,
@@ -15021,5 +15023,135 @@ export class WebNewDriver implements ParityDriver {
 
   async pageExportGateMarkersPresent(): Promise<boolean> {
     return todo("pageExportGateMarkersPresent");
+  }
+
+  // --- Cloud Apps catalog (NEWFRONT-439, CLOUD-021–031). Appended;
+  // --- existing stubs above are untouched per the shared driver contract.
+  async cloudAppsSidebarHref(): Promise<string | null> {
+    return todo("cloudAppsSidebarHref");
+  }
+
+  async cloudAppsSidebarIconPresent(): Promise<boolean> {
+    return todo("cloudAppsSidebarIconPresent");
+  }
+
+  async cloudAppsOpenFromSidebar(): Promise<void> {
+    return todo("cloudAppsOpenFromSidebar");
+  }
+
+  async cloudAppsIntroText(): Promise<string> {
+    return todo("cloudAppsIntroText");
+  }
+
+  async cloudAppsSearchFill(_value: string): Promise<void> {
+    return todo("cloudAppsSearchFill");
+  }
+
+  async cloudAppsSearchTypeText(_text: string): Promise<void> {
+    return todo("cloudAppsSearchTypeText");
+  }
+
+  async cloudAppsSearchValue(): Promise<string> {
+    return todo("cloudAppsSearchValue");
+  }
+
+  async cloudAppsSearchVisible(): Promise<boolean> {
+    return todo("cloudAppsSearchVisible");
+  }
+
+  async cloudAppsCardNames(): Promise<string[]> {
+    return todo("cloudAppsCardNames");
+  }
+
+  async cloudAppsCards(): Promise<CloudAppsCardFacts[]> {
+    return todo("cloudAppsCards");
+  }
+
+  async cloudAppsClickCardAction(_name: string, _action: "Install" | "Connect" | "Uninstall"): Promise<void> {
+    return todo("cloudAppsClickCardAction");
+  }
+
+  async cloudAppsCardActionDisabled(_name: string, _action: "Install" | "Connect" | "Uninstall"): Promise<boolean> {
+    return todo("cloudAppsCardActionDisabled");
+  }
+
+  async cloudAppsNextPage(): Promise<void> {
+    return todo("cloudAppsNextPage");
+  }
+
+  async cloudAppsPrevPage(): Promise<void> {
+    return todo("cloudAppsPrevPage");
+  }
+
+  async cloudAppsPageIndicator(): Promise<string | null> {
+    return todo("cloudAppsPageIndicator");
+  }
+
+  async cloudAppsPagerVisible(): Promise<boolean> {
+    return todo("cloudAppsPagerVisible");
+  }
+
+  async cloudAppsDialogVisible(): Promise<boolean> {
+    return todo("cloudAppsDialogVisible");
+  }
+
+  async cloudAppsDialogTitle(): Promise<string | null> {
+    return todo("cloudAppsDialogTitle");
+  }
+
+  async cloudAppsDialogFields(): Promise<CloudAppsDialogFieldFacts[]> {
+    return todo("cloudAppsDialogFields");
+  }
+
+  async cloudAppsDialogInstructions(): Promise<string | null> {
+    return todo("cloudAppsDialogInstructions");
+  }
+
+  async cloudAppsDialogSetupHref(): Promise<string | null> {
+    return todo("cloudAppsDialogSetupHref");
+  }
+
+  async cloudAppsDialogFill(_label: string, _value: string): Promise<void> {
+    return todo("cloudAppsDialogFill");
+  }
+
+  async cloudAppsDialogSubmit(): Promise<void> {
+    return todo("cloudAppsDialogSubmit");
+  }
+
+  async cloudAppsDialogCancel(): Promise<void> {
+    return todo("cloudAppsDialogCancel");
+  }
+
+  async cloudAppsDialogErrors(): Promise<string[]> {
+    return todo("cloudAppsDialogErrors");
+  }
+
+  async cloudAppsToggleState(): Promise<boolean | null> {
+    return todo("cloudAppsToggleState");
+  }
+
+  async cloudAppsToggleText(): Promise<string> {
+    return todo("cloudAppsToggleText");
+  }
+
+  async cloudAppsToggle(): Promise<void> {
+    return todo("cloudAppsToggle");
+  }
+
+  async cloudAppsBodyText(): Promise<string> {
+    return todo("cloudAppsBodyText");
+  }
+
+  async cloudAppsCatalogVisible(): Promise<boolean> {
+    return todo("cloudAppsCatalogVisible");
+  }
+
+  async cloudAppsClickRetry(): Promise<void> {
+    return todo("cloudAppsClickRetry");
+  }
+
+  async cloudAppsSidebarCreateOpensDialog(): Promise<boolean> {
+    return todo("cloudAppsSidebarCreateOpensDialog");
   }
 }
