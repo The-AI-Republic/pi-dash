@@ -17122,6 +17122,189 @@ export async function serverPlantRepositoryBinding(
   return id;
 }
 
+// --- Workspace-settings members + invitations helpers (NEWFRONT-411,
+// --- WSET-008..015). Observed on the running old app: the members list
+// --- carries the membership id, nested user record, numeric role
+// --- (20/15/5) and the active flag; invitations carry id, email and
+// --- numeric role; member role PATCH refuses self changes (400); the
+// --- member DELETE endpoint only deactivates (the row persists as
+// --- Suspended, and later writes to it 404) while self-removal goes
+// --- through the leave endpoint; invitation PATCH/DELETE address the
+// --- invitation id. Appended; existing helpers above are untouched per
+// --- the shared harness contract.
+
+/** One workspace membership as the server reports it (full identity row). */
+export interface ParityWorkspaceMemberFull {
+  membershipId: string;
+  userId: string;
+  displayName: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  role: number;
+  isActive: boolean;
+  avatarUrl: string | null;
+  isBot: boolean;
+}
+
+/** Workspace members with roles and activity flags, in API order. */
+export async function serverWorkspaceMembersFull(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityWorkspaceMemberFull[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/members/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] workspace members read failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Record<string, unknown>[];
+  return rows.map((row) => {
+    const member = row["member"] as Record<string, unknown>;
+    if (
+      typeof row["id"] !== "string" ||
+      typeof member?.["id"] !== "string" ||
+      typeof member?.["display_name"] !== "string" ||
+      typeof member?.["email"] !== "string" ||
+      typeof row["role"] !== "number" ||
+      typeof row["is_active"] !== "boolean"
+    )
+      throw new Error("[parity] workspace member carried no id/user/role/is_active.");
+    return {
+      membershipId: row["id"] as string,
+      userId: member["id"] as string,
+      displayName: member["display_name"] as string,
+      firstName: typeof member["first_name"] === "string" ? (member["first_name"] as string) : "",
+      lastName: typeof member["last_name"] === "string" ? (member["last_name"] as string) : "",
+      email: member["email"] as string,
+      role: row["role"] as number,
+      isActive: row["is_active"] as boolean,
+      avatarUrl: typeof member["avatar_url"] === "string" ? (member["avatar_url"] as string) : null,
+      isBot: member["is_bot"] === true,
+    };
+  });
+}
+
+/** One pending workspace invitation as the server reports it. */
+export interface ParityWorkspaceInvitation {
+  id: string;
+  email: string;
+  role: number;
+}
+
+/** Pending workspace invitations, in API order. */
+export async function serverWorkspaceInvitations(
+  workspaceSlug: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityWorkspaceInvitation[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/invitations/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] workspace invitations read failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Record<string, unknown>[];
+  return rows.map((row) => {
+    if (typeof row["id"] !== "string" || typeof row["email"] !== "string" || typeof row["role"] !== "number")
+      throw new Error("[parity] invitation row carried no id/email/role.");
+    return { id: row["id"] as string, email: row["email"] as string, role: row["role"] as number };
+  });
+}
+
+/**
+ * Invite email-plus-role rows in one bulk call (the dialog's own shape),
+ * then resolve the created invitation rows. The create response carries
+ * only a message, so the rows come from a follow-up list read.
+ */
+export async function serverCreateWorkspaceInvitations(
+  workspaceSlug: string,
+  invites: { email: string; role: number }[],
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityWorkspaceInvitation[]> {
+  const res = await mutateJSON("POST", `${apiBase}/api/workspaces/${workspaceSlug}/invitations/`, sessionCookie, {
+    emails: invites.map((invite) => ({ email: invite.email, role: invite.role })),
+  });
+  if (!res.ok) throw new Error(`[parity] invitation bulk create failed with HTTP ${res.status}.`);
+  const rows = await serverWorkspaceInvitations(workspaceSlug, sessionCookie, apiBase);
+  const wanted = new Set(invites.map((invite) => invite.email.toLowerCase()));
+  const created = rows.filter((row) => wanted.has(row.email.toLowerCase()));
+  if (created.length !== invites.length)
+    throw new Error("[parity] invitation bulk create left some invitees unlisted.");
+  return created;
+}
+
+/** Strict invitation role PATCH (setup and state assertions; throws on failure). */
+export async function serverPatchWorkspaceInvitation(
+  workspaceSlug: string,
+  invitationId: string,
+  data: { role: number },
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityWorkspaceInvitation> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/invitations/${invitationId}/`,
+    sessionCookie,
+    data
+  );
+  if (!res.ok) throw new Error(`[parity] invitation patch failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as Record<string, unknown>;
+  if (typeof row["id"] !== "string" || typeof row["email"] !== "string" || typeof row["role"] !== "number")
+    throw new Error("[parity] invitation patch response carried no id/email/role.");
+  return { id: row["id"] as string, email: row["email"] as string, role: row["role"] as number };
+}
+
+/** Lenient invitation removal for finally-blocks. */
+export async function serverCleanupWorkspaceInvitation(
+  workspaceSlug: string,
+  invitationId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "DELETE",
+    `${apiBase}/api/workspaces/${workspaceSlug}/invitations/${invitationId}/`,
+    sessionCookie
+  );
+  if (!res.ok) console.log(`[parity] invitation cleanup DELETE returned HTTP ${res.status}; leaving it for reseed.`);
+}
+
+/** Strict member role PATCH (setup; throws on failure). */
+export async function serverPatchWorkspaceMemberRole(
+  workspaceSlug: string,
+  membershipId: string,
+  role: number,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/members/${membershipId}/`,
+    sessionCookie,
+    { role }
+  );
+  if (!res.ok) throw new Error(`[parity] workspace member patch failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Hard-delete a workspace membership row through the Django shell. The
+ * member DELETE endpoint only deactivates (the row persists as
+ * Suspended), so specs that need the row gone — teardown, or a
+ * failure setup whose UI write must 404 — delete here instead.
+ * Idempotent: deleting a missing row is a no-op. Needs
+ * PARITY_API_CONTAINER on namespaced stacks (NEWFRONT-42).
+ */
+export async function serverHardDeleteWorkspaceMember(membershipId: string): Promise<void> {
+  // SoftDeleteModel overrides delete(): plain .delete() only stamps
+  // deleted_at and returns an int; soft=False performs the real delete
+  // and returns the usual (count, labels) tuple.
+  const out = await apiShell(
+    `from pi_dash.db.models.workspace import WorkspaceMember\n` +
+      `deleted, _ = WorkspaceMember.objects.filter(id=${JSON.stringify(membershipId)}).delete(soft=False)\n` +
+      `print("PARITY_DELETED:" + str(deleted))\n`
+  );
+  if (!/^PARITY_DELETED:\d+$/m.test(out)) throw new Error("[parity] membership hard delete produced no count.");
+}
+
 // --- Project members tab (NEWFRONT-391, PSET-018–027). Appended; existing
 // --- helpers above are untouched per the shared harness contract.
 

@@ -7864,6 +7864,152 @@ export interface ParityDriver {
   /** Full visible text of the tab (for pinned non-behavior assertions). */
   projectGithubTabText(): Promise<string>;
 
+  // --- Workspace-settings members + invitations oracle (NEWFRONT-411,
+  // --- WSET-008..015). Observed on the running old app: the members page
+  // --- shows a roster with a count chip, a name search box, a role filter
+  // --- (Admin/Member/Guest/Suspended) combining with the search, and an
+  // --- active-first row order; admins invite through a bulk email-plus-role
+  // --- dialog; pending invitations render in an admin-only collapsible
+  // --- group with role editing and a copy-link/remove menu; member rows
+  // --- carry identity columns plus a profile link, an admin-only role
+  // --- control (never offered on self; the server refuses self role
+  // --- changes) and a hover remove/leave action behind a confirmation
+  // --- dialog (self-removal leaves the workspace and lands on a
+  // --- not-authorized gate for it); no skeleton renders while the roster loads
+  // --- (bug NEWFRONT-422) but an inline no-match message shows when
+  // --- filters exclude everyone; the activity and billing entries beside
+  // --- the Add control render nothing in this OSS checkout. Appended;
+  // --- existing methods above are untouched per the shared driver
+  // --- contract.
+  /** Open the workspace members settings page; resolves once the roster settles. */
+  wsSettingsMembersOpen(workspaceSlug: string): Promise<void>;
+  /** Roster-size count chip next to the Members heading, or null when absent. */
+  wsSettingsMembersCountChip(): Promise<number | null>;
+  /** Fill the roster search box. */
+  wsSettingsMembersSearch(query: string): Promise<void>;
+  /** Current value of the roster search box. */
+  wsSettingsMembersSearchValue(): Promise<string>;
+  /** Member emails in row order (stable identity for order assertions). */
+  wsSettingsMembersVisibleEmails(): Promise<string[]>;
+  /** Role label per member row, in row order. */
+  wsSettingsMembersVisibleRoles(): Promise<{ email: string; role: string }[]>;
+  /** Emails whose rows currently show the Suspended marker. */
+  wsSettingsMembersSuspendedEmails(): Promise<string[]>;
+  /** Open the role-filters dropdown. */
+  wsSettingsMembersOpenFilters(): Promise<void>;
+  /** Role-filter option labels in display order. */
+  wsSettingsMembersFilterOptions(): Promise<string[]>;
+  /** Toggle one role filter by label; resolves once the roster settles. */
+  wsSettingsMembersToggleFilter(label: string): Promise<void>;
+  /** Close the role-filters dropdown. */
+  wsSettingsMembersCloseFilters(): Promise<void>;
+  /** Whether the filters control shows its applied-filters marker. */
+  wsSettingsMembersFilterBadge(): Promise<boolean>;
+  /** Whether the inline no-match message is showing. */
+  wsSettingsMembersNoMatchVisible(): Promise<boolean>;
+  /** The inline no-match message text, or null when absent. */
+  wsSettingsMembersNoMatchText(): Promise<string | null>;
+  /** Whether the roster skeleton loader is currently visible. */
+  wsSettingsMembersLoaderVisible(): Promise<boolean>;
+  /** Delay the next roster reads (members + invitations GETs) by ms. */
+  wsSettingsMembersDelayNextList(ms: number): Promise<void>;
+  /** Whether the Add-member control is showing (admin-only). */
+  wsSettingsMembersAddVisible(): Promise<boolean>;
+  /** Open the bulk-invite dialog; resolves once its first row renders. */
+  wsSettingsInviteOpen(): Promise<void>;
+  /** Close the bulk-invite dialog via Cancel. */
+  wsSettingsInviteClose(): Promise<void>;
+  /** Whether the bulk-invite dialog is currently open. */
+  wsSettingsInviteVisible(): Promise<boolean>;
+  /** Number of email-plus-role rows in the open dialog. */
+  wsSettingsInviteRowCount(): Promise<number>;
+  /** Fill one dialog row's email field. */
+  wsSettingsInviteFillRow(index: number, email: string): Promise<void>;
+  /** Current value of one dialog row's email field. */
+  wsSettingsInviteRowValue(index: number): Promise<string>;
+  /** Current role label of one dialog row. */
+  wsSettingsInviteRowRole(index: number): Promise<string>;
+  /** Set one dialog row's role by label. */
+  wsSettingsInviteSetRowRole(index: number, roleLabel: string): Promise<void>;
+  /** Role options one dialog row offers, in display order. */
+  wsSettingsInviteRowRoles(index: number): Promise<string[]>;
+  /** Append a row via the dialog's Add-more control. */
+  wsSettingsInviteAddRow(): Promise<void>;
+  /** Remove one dialog row by index. */
+  wsSettingsInviteRemoveRow(index: number): Promise<void>;
+  /** Inline validation error under one dialog row's email, or null. */
+  wsSettingsInviteRowError(index: number): Promise<string | null>;
+  /** Submit the dialog; resolves once it closes, toasts, or flags a row inline. */
+  wsSettingsInviteSubmit(): Promise<void>;
+  /** Whether the pending-invitations group is showing (admin-only). */
+  wsSettingsInvitesGroupVisible(): Promise<boolean>;
+  /** Pending-invitations count chip, or null when the group is hidden. */
+  wsSettingsInvitesCount(): Promise<number | null>;
+  /** Pending-invitation emails in display order. */
+  wsSettingsInvitesVisibleEmails(): Promise<string[]>;
+  /** Toggle the pending-invitations collapsible group; resolves once the rows finish hiding/showing. */
+  wsSettingsInvitesToggleGroup(): Promise<void>;
+  /** Whether the pending group currently shows its invitation rows. */
+  wsSettingsInvitesExpanded(): Promise<boolean>;
+  /** Current role label of one pending invitation. */
+  wsSettingsInviteRole(email: string): Promise<string>;
+  /** Role options one pending invitation offers, in display order. */
+  wsSettingsInviteRoleOptions(email: string): Promise<string[]>;
+  /** Set one pending invitation's role by label. */
+  wsSettingsInviteSetRole(email: string, roleLabel: string): Promise<void>;
+  /** Ellipsis-menu entries of one pending invitation, in display order. */
+  wsSettingsInviteMenuEntries(email: string): Promise<string[]>;
+  /** Copy one pending invitation's link; resolves with the clipboard text. */
+  wsSettingsInviteCopyLink(email: string): Promise<string>;
+  /** Open the remove confirmation for one pending invitation. */
+  wsSettingsInviteOpenRemove(email: string): Promise<void>;
+  /** Whether the member/invitation remove dialog is showing. */
+  wsSettingsRemoveDialogVisible(): Promise<boolean>;
+  /** Remove-dialog heading text, or null when absent. */
+  wsSettingsRemoveDialogTitle(): Promise<string | null>;
+  /** Remove-dialog body text, or null when absent. */
+  wsSettingsRemoveDialogText(): Promise<string | null>;
+  /** Confirm the open remove dialog; resolves once the write settles (success closes it; specs assert the outcome). */
+  wsSettingsRemoveDialogConfirm(): Promise<void>;
+  /** Cancel the open remove dialog; resolves once it closes. */
+  wsSettingsRemoveDialogCancel(): Promise<void>;
+  /** Identity facts of one member row: names, role, auth medium, joining date, avatar shape, profile link. */
+  wsSettingsMemberRowFacts(email: string): Promise<WsSettingsMemberRowFacts>;
+  /** Whether one member row offers an editable role control (never on self). */
+  wsSettingsMemberRoleEditable(email: string): Promise<boolean>;
+  /** Role options one member row offers, in display order. */
+  wsSettingsMemberRoleOptions(email: string): Promise<string[]>;
+  /** Set one member's role by label; resolves once the row settles. */
+  wsSettingsMemberSetRole(email: string, roleLabel: string): Promise<void>;
+  /** Hover-menu entry of one member row ("Remove" or "Leave"), or null when none. */
+  wsSettingsMemberMenuEntry(email: string): Promise<string | null>;
+  /** Open the remove/leave confirmation for one member row. */
+  wsSettingsMemberOpenRemove(email: string): Promise<void>;
+  /** Whether any member-activity entry shows on the members page. */
+  wsSettingsMembersActivityVisible(): Promise<boolean>;
+  /** Whether any billing/upsell entry shows in the members header actions. */
+  wsSettingsMembersBillingVisible(): Promise<boolean>;
+}
+
+/** Identity facts of one workspace-member roster row (NEWFRONT-411, WSET-011). */
+export interface WsSettingsMemberRowFacts {
+  /** Full name as rendered (first plus last). */
+  fullName: string;
+  /** Display name as rendered. */
+  displayName: string;
+  /** Member email as rendered. */
+  email: string;
+  /** Role label as rendered (Admin/Member/Guest), or "Suspended". */
+  role: string;
+  /** Authentication-medium label, or null when the row shows none. */
+  auth: string | null;
+  /** Joining-date text as rendered, or null when the row shows none. */
+  joiningDate: string | null;
+  /** Avatar shape: photo, initial letter, or the suspended marker. */
+  avatarKind: "image" | "initial" | "suspended";
+  /** Profile-link target of the avatar, or null when it links nowhere. */
+  profileHref: string | null;
+
   // --- Project members tab (NEWFRONT-391, PSET-018–027). Observed on the
   // --- running old app: the members settings page stacks a defaults
   // --- section (lead, default assignee, guest access), a teamspace strip
