@@ -7,7 +7,9 @@ Run from apps/api with the project's virtualenv::
 The script prints its database target first and refuses names that look
 shared (production, staging, ...). Without --apply it only prints what it
 would create. Re-running is safe: every row is created with get_or_create
-under a ``contract-`` prefix.
+under a ``contract-`` prefix, except the ``EMAIL_HOST`` instance flag the
+backend reads by exact key. Consumable fixtures (the probe memberships, the
+autoset user) are repaired on re-seed, not just created.
 
 Required environment (same as a local runserver)::
 
@@ -22,6 +24,7 @@ REFUSALS = ("prod", "production", "staging", "main", "shared")
 
 SEED_EMAIL = "contract.tester@example.com"
 SEED_SECONDARY_EMAIL = "contract.probe@example.com"
+SEED_AUTOSET_EMAIL = "contract.autoset@example.com"
 SEED_PASSWORD = os.environ.get("PIDASH_CONTRACT_PASSWORD", "Contract123!")
 SEED_WORKSPACE_SLUG = "contract-acme"
 SEED_PROJECT_IDENTIFIER = "CT"
@@ -57,7 +60,7 @@ def seed():
         WorkspaceMember,
     )
     from pi_dash.db.models.state import DEFAULT_STATES  # noqa: E402
-    from pi_dash.license.models.instance import Instance  # noqa: E402
+    from pi_dash.license.models.instance import Instance, InstanceConfiguration  # noqa: E402
 
     created = []
 
@@ -165,9 +168,42 @@ def seed():
     )
     note("project-member", f"{project.identifier}/{probe.email}", probe_project_created)
 
+    # Passwordless-style user: the set-password contract test signs in as
+    # this user with the known seed password, then sets a fresh one — which
+    # flips is_password_autoset off. The fixture is repaired (not just
+    # created) so re-seeding restores it after a test run consumes it.
+    autoset, autoset_created = User.objects.get_or_create(
+        email=SEED_AUTOSET_EMAIL,
+        defaults={
+            "username": "contract.autoset",
+            "first_name": "Contract",
+            "last_name": "Autoset",
+            "is_active": True,
+            "is_password_autoset": True,
+        },
+    )
+    if autoset_created or not autoset.check_password(SEED_PASSWORD) or not autoset.is_password_autoset:
+        autoset.password = make_password(SEED_PASSWORD)
+        autoset.is_active = True
+        autoset.is_password_autoset = True
+        autoset.save()
+    note("user", autoset.email, autoset_created)
+
+    # Outgoing-mail switch: the forgot-password contract proves the live
+    # success path, which needs EMAIL_HOST set. The value is a dummy host —
+    # sends only enqueue celery tasks (no worker runs in contract tests),
+    # and no suite depends on mail being unconfigured.
+    _, email_host_created = InstanceConfiguration.objects.get_or_create(
+        key="EMAIL_HOST",
+        defaults={"value": "contract-smtp.invalid", "category": "SMTP", "is_encrypted": False},
+    )
+    note("instance-config", "EMAIL_HOST", email_host_created)
+
     states = []
     for index, spec in enumerate(DEFAULT_STATES):
-        state, state_created = State.objects.get_or_create(
+        # all_state_objects: the default manager hides triage-group rows,
+        # so a plain get_or_create would duplicate Triage on re-seed.
+        state, state_created = State.all_state_objects.get_or_create(
             workspace=workspace,
             project=project,
             name=spec["name"],

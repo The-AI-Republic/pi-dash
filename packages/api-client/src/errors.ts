@@ -21,7 +21,7 @@ export interface ApiErrorInit {
  * Single error type for transport failures, HTTP error statuses, unreadable
  * bodies and contract violations. `code` carries a machine-readable reason:
  * one of the client codes above, or the server's own code (`error_code`,
- * DRF `code`) passed through untouched.
+ * DRF `code`) passed through untouched, in decimal for numeric codes.
  */
 export class ApiError extends Error {
   readonly status: number;

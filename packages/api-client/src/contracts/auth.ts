@@ -7,6 +7,7 @@
 // error_code / error_message query params is a failed sign-in.
 import * as z from "zod/mini";
 import { ApiClient, CSRF_ENDPOINT } from "../client.js";
+import { uuid } from "./fields.js";
 
 export const CsrfTokenResponse = z.object({
   csrf_token: z.string(),
@@ -38,9 +39,10 @@ function firstQueryParam(url: string, name: string): string | null {
 /**
  * The native auth views answer form POSTs with a redirect: success lands
  * on the app (or next_path), failure lands back carrying error_code and
- * error_message query params. Every form flow below reads that convention.
+ * error_message query params. Every form flow below reads that convention,
+ * and cards use this to read link-carried codes off their own URL.
  */
-function readRedirectResult(location: string): SignInResult {
+export function parseAuthRedirectResult(location: string): SignInResult {
   const code = location ? firstQueryParam(location, "error_code") : null;
   if (code) {
     return {
@@ -66,7 +68,7 @@ export async function signIn(client: ApiClient, input: SignInInput): Promise<Sig
   // answers a bespoke 200 failure page, not a 403, so nothing downstream
   // can detect it — the refresh must happen here.
   client.clearCsrfCache();
-  return readRedirectResult(response.url);
+  return parseAuthRedirectResult(response.url);
 }
 
 /**
@@ -112,7 +114,7 @@ export async function signInWithMagicCode(client: ApiClient, input: MagicSignInI
   });
   // Same rotation as password sign-in (see signIn).
   client.clearCsrfCache();
-  return readRedirectResult(response.url);
+  return parseAuthRedirectResult(response.url);
 }
 
 export interface SignOutResult {
@@ -124,4 +126,142 @@ export async function signOut(client: ApiClient): Promise<SignOutResult> {
   // The session is gone; its CSRF token goes with it.
   client.clearCsrfCache();
   return { location: response.url };
+}
+
+export interface SignUpInput {
+  email: string;
+  password: string;
+  confirmPassword?: string;
+  nextPath?: string;
+}
+
+export async function signUp(client: ApiClient, input: SignUpInput): Promise<SignInResult> {
+  const response = await client.post("/auth/sign-up/", {
+    form: {
+      email: input.email,
+      password: input.password,
+      confirm_password: input.confirmPassword ?? undefined,
+      next_path: input.nextPath ?? undefined,
+    },
+  });
+  // Account creation logs the session in, rotating CSRF like signIn.
+  client.clearCsrfCache();
+  return parseAuthRedirectResult(response.url);
+}
+
+export interface MagicSignUpInput {
+  email: string;
+  code: string;
+  nextPath?: string;
+}
+
+export async function signUpWithMagicCode(client: ApiClient, input: MagicSignUpInput): Promise<SignInResult> {
+  const response = await client.post("/auth/magic-sign-up/", {
+    form: {
+      email: input.email,
+      code: input.code,
+      next_path: input.nextPath ?? undefined,
+    },
+  });
+  // Same rotation as password sign-up (see signUp).
+  client.clearCsrfCache();
+  return parseAuthRedirectResult(response.url);
+}
+
+/** Response of POST /auth/forgot-password/: the mailed-link confirmation. */
+export const ForgotPasswordResponse = z.object({
+  message: z.string(),
+});
+export type ForgotPasswordResponse = z.infer<typeof ForgotPasswordResponse>;
+
+export async function requestPasswordReset(client: ApiClient, email: string): Promise<ForgotPasswordResponse> {
+  const envelope = await client.sendJson<unknown>("POST", "/auth/forgot-password/", { json: { email } });
+  return client.parse(ForgotPasswordResponse, envelope.data, "POST /auth/forgot-password/");
+}
+
+export interface ResetPasswordInput {
+  uid: string;
+  token: string;
+  password: string;
+  confirmPassword?: string;
+}
+
+export async function resetPassword(client: ApiClient, input: ResetPasswordInput): Promise<SignInResult> {
+  const response = await client.post(
+    `/auth/reset-password/${encodeURIComponent(input.uid)}/${encodeURIComponent(input.token)}/`,
+    {
+      form: {
+        password: input.password,
+        confirm_password: input.confirmPassword ?? undefined,
+      },
+    }
+  );
+  // The reset signs no session in, so the CSRF cache survives.
+  return parseAuthRedirectResult(response.url);
+}
+
+/** Thin projection of the user row after the first password is set. */
+export const SetPasswordResult = z.object({
+  id: uuid(),
+  email: z.email(),
+  is_password_autoset: z.boolean(),
+});
+export type SetPasswordResult = z.infer<typeof SetPasswordResult>;
+
+export async function setPassword(client: ApiClient, password: string): Promise<SetPasswordResult> {
+  const envelope = await client.sendJson<unknown>("POST", "/auth/set-password/", { json: { password } });
+  // Setting the first password re-logs the session in, rotating CSRF.
+  client.clearCsrfCache();
+  return client.parse(SetPasswordResult, envelope.data, "POST /auth/set-password/");
+}
+
+/** Response of POST /api/v1/auth/device/approve/: the stamped grant. */
+export const DeviceApproveResponse = z.object({
+  ok: z.literal(true),
+  user_email: z.email(),
+  workspace_slug: z.nullable(z.string()),
+});
+export type DeviceApproveResponse = z.infer<typeof DeviceApproveResponse>;
+
+export async function approveDeviceCode(client: ApiClient, userCode: string): Promise<DeviceApproveResponse> {
+  const envelope = await client.sendJson<unknown>("POST", "/api/v1/auth/device/approve/", {
+    json: { user_code: userCode },
+  });
+  return client.parse(DeviceApproveResponse, envelope.data, "POST /api/v1/auth/device/approve/");
+}
+
+export async function deactivateAccount(client: ApiClient): Promise<number> {
+  const response = await client.delete("/api/users/me/");
+  // Deactivation wipes every session server-side; the CSRF token goes with them.
+  client.clearCsrfCache();
+  return response.status;
+}
+
+/**
+ * Instance flags the auth cards read: sign-up and workspace-creation
+ * gates, enabled providers, the email login methods, the mail posture,
+ * and the self-managed marker. The payload carries more; the area reads
+ * these.
+ */
+export const InstanceConfig = z.object({
+  enable_signup: z.boolean(),
+  is_workspace_creation_disabled: z.boolean(),
+  is_google_enabled: z.boolean(),
+  is_github_enabled: z.boolean(),
+  is_gitlab_enabled: z.boolean(),
+  is_gitea_enabled: z.boolean(),
+  is_magic_login_enabled: z.boolean(),
+  is_email_password_enabled: z.boolean(),
+  is_smtp_configured: z.boolean(),
+  is_self_managed: z.boolean(),
+});
+export type InstanceConfig = z.infer<typeof InstanceConfig>;
+
+const InstanceResponse = z.object({
+  config: InstanceConfig,
+});
+
+export async function getInstanceConfig(client: ApiClient): Promise<InstanceConfig> {
+  const body = await client.getJson<unknown>("/api/instances/");
+  return client.parse(InstanceResponse, body, "GET /api/instances/").config;
 }

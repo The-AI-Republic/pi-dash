@@ -18,16 +18,37 @@ export type {
 } from "./client.js";
 export {
   CsrfTokenResponse,
+  DeviceApproveResponse,
   EmailCheckResponse,
+  ForgotPasswordResponse,
+  InstanceConfig,
   MagicGenerateResponse,
+  SetPasswordResult,
+  approveDeviceCode,
   checkEmail,
+  deactivateAccount,
   generateMagicCode,
   getCsrfToken,
+  getInstanceConfig,
+  parseAuthRedirectResult,
+  requestPasswordReset,
+  resetPassword,
+  setPassword,
   signIn,
   signInWithMagicCode,
   signOut,
+  signUp,
+  signUpWithMagicCode,
 } from "./contracts/auth.js";
-export type { MagicSignInInput, SignInInput, SignInResult, SignOutResult } from "./contracts/auth.js";
+export type {
+  MagicSignInInput,
+  MagicSignUpInput,
+  ResetPasswordInput,
+  SignInInput,
+  SignInResult,
+  SignOutResult,
+  SignUpInput,
+} from "./contracts/auth.js";
 export { Me, MeSettings, MeSettingsWorkspace, UserLite, getMe, getMeSettings } from "./contracts/users.js";
 export { Workspace, WorkspaceList, WorkspaceLite, listWorkspaces } from "./contracts/workspaces.js";
 export { Project, ProjectList, ProjectLite, listProjects } from "./contracts/projects.js";

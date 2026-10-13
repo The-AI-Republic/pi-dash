@@ -6,7 +6,23 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./errors.js";
 import { createClient } from "./client.js";
-import { checkEmail, generateMagicCode, getCsrfToken, signIn, signInWithMagicCode, signOut } from "./contracts/auth.js";
+import {
+  approveDeviceCode,
+  checkEmail,
+  deactivateAccount,
+  generateMagicCode,
+  getCsrfToken,
+  getInstanceConfig,
+  parseAuthRedirectResult,
+  requestPasswordReset,
+  resetPassword,
+  setPassword,
+  signIn,
+  signInWithMagicCode,
+  signOut,
+  signUp,
+  signUpWithMagicCode,
+} from "./contracts/auth.js";
 import { getMe, getMeSettings } from "./contracts/users.js";
 import { listWorkspaces } from "./contracts/workspaces.js";
 import {
@@ -210,6 +226,255 @@ describe("auth contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport });
     await signIn(client, { email: "a@b.c", password: "secret" });
     await signOut(client);
+    const csrfCalls = transport.calls.filter((call) => call.url.endsWith("/auth/get-csrf-token/"));
+    expect(csrfCalls).toHaveLength(2);
+  });
+
+  it("posts native sign-up and reads the landing URL", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 200, body: "<html>", url: "https://app.test/onboarding" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await signUp(client, {
+      email: "new@example.com",
+      password: "secret",
+      confirmPassword: "secret",
+      nextPath: "/invites",
+    });
+    expect(result).toEqual({ ok: true, location: "https://app.test/onboarding" });
+    const signUpCall = transport.calls.find((call) => call.url.endsWith("/auth/sign-up/"));
+    expect(signUpCall?.init.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    expect(signUpCall?.init.body).toContain("confirm_password=secret");
+    expect(signUpCall?.init.body).toContain(`next_path=${encodeURIComponent("/invites")}`);
+  });
+
+  it("reads sign-up failure from numeric error query params", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({
+            status: 200,
+            body: "<html>",
+            url: "https://app.test/?error_code=5030&error_message=USER_ALREADY_EXIST",
+          })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await signUp(client, { email: "ada@example.com", password: "secret" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("5030");
+      expect(result.message).toBe("USER_ALREADY_EXIST");
+    }
+  });
+
+  it("posts code sign-up through the same redirect convention", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 200, body: "<html>", url: "https://app.test/onboarding" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await signUpWithMagicCode(client, { email: "new@example.com", code: "123456" });
+    expect(result).toEqual({ ok: true, location: "https://app.test/onboarding" });
+    const codeCall = transport.calls.find((call) => call.url.endsWith("/auth/magic-sign-up/"));
+    expect(codeCall?.init.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    expect(codeCall?.init.body).toContain("code=123456");
+  });
+
+  it("requests a password reset and parses the confirmation", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ body: JSON.stringify({ message: "Check your email to reset your password" }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await requestPasswordReset(client, "ada@example.com");
+    expect(parsed).toEqual({ message: "Check your email to reset your password" });
+    const resetCall = transport.calls.find((call) => call.url.endsWith("/auth/forgot-password/"));
+    expect(resetCall?.init.method).toBe("POST");
+    expect(resetCall?.init.body).toBe(JSON.stringify({ email: "ada@example.com" }));
+  });
+
+  it("rejects a reset request without a confirmation message", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json({}) });
+    const error = await requestPasswordReset(client, "ada@example.com").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("posts the reset to the uid/token URL", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({
+            status: 200,
+            body: "<html>",
+            url: "https://app.test/accounts/reset-password?error_code=5125&error_message=INVALID_PASSWORD_TOKEN",
+          })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await resetPassword(client, {
+      uid: "dWlk",
+      token: "tok-en_1",
+      password: "secret",
+      confirmPassword: "secret",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("5125");
+    const resetCall = transport.calls.find((call) => call.url.includes("/auth/reset-password/"));
+    expect(resetCall?.url).toBe("https://api.test/auth/reset-password/dWlk/tok-en_1/");
+    expect(resetCall?.init.body).toContain("password=secret");
+    expect(resetCall?.init.body).toContain("confirm_password=secret");
+  });
+
+  it("passes optional fields through the code and reset paths", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 200, body: "<html>", url: "https://app.test/acme" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await signUpWithMagicCode(client, { email: "new@example.com", code: "123456", nextPath: "/invites" });
+    const codeCall = transport.calls.find((call) => call.url.endsWith("/auth/magic-sign-up/"));
+    expect(codeCall?.init.body).toContain(`next_path=${encodeURIComponent("/invites")}`);
+    const result = await resetPassword(client, { uid: "dWlk", token: "tok-en_1", password: "secret" });
+    expect(result).toEqual({ ok: true, location: "https://app.test/acme" });
+    const resetCall = transport.calls.find((call) => call.url.includes("/auth/reset-password/"));
+    const resetBody = resetCall?.init.body;
+    expect(typeof resetBody).toBe("string");
+    expect(resetBody ?? "").not.toContain("confirm_password");
+  });
+
+  it("sets the first password and reads the user projection", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({
+            body: JSON.stringify({
+              id: UUID,
+              email: "ada@example.com",
+              is_password_autoset: false,
+              first_name: "Ada",
+            }),
+          })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await setPassword(client, "fresh-secret");
+    expect(parsed).toEqual({ id: UUID, email: "ada@example.com", is_password_autoset: false });
+    const setCall = transport.calls.find((call) => call.url.endsWith("/auth/set-password/"));
+    expect(setCall?.init.body).toBe(JSON.stringify({ password: "fresh-secret" }));
+  });
+
+  it("approves a device code and parses the grant", async () => {
+    const grant = { ok: true, user_email: "ada@example.com", workspace_slug: "acme" };
+    const client = createClient({ baseUrl: "https://api.test", transport: json(grant) });
+    const parsed = await approveDeviceCode(client, "ABCD-1234");
+    expect(parsed).toEqual(grant);
+  });
+
+  it("parses a device grant without a workspace", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ ok: true, user_email: "ada@example.com", workspace_slug: null }),
+    });
+    const parsed = await approveDeviceCode(client, "ABCD-1234");
+    expect(parsed.workspace_slug).toBeNull();
+  });
+
+  it("rejects a device grant that is not ok", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ ok: false, user_email: "ada@example.com", workspace_slug: null }),
+    });
+    const error = await approveDeviceCode(client, "ABCD-1234").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("deactivates the account and reports the status", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 204, body: "" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const status = await deactivateAccount(client);
+    expect(status).toBe(204);
+    const deleteCall = transport.calls.find((call) => call.url.endsWith("/api/users/me/"));
+    expect(deleteCall?.init.method).toBe("DELETE");
+  });
+
+  it("reads the instance config and strips the rest", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        config: {
+          enable_signup: false,
+          is_workspace_creation_disabled: false,
+          is_google_enabled: false,
+          is_github_enabled: false,
+          is_gitlab_enabled: false,
+          is_gitea_enabled: false,
+          is_magic_login_enabled: true,
+          is_email_password_enabled: true,
+          is_smtp_configured: true,
+          is_self_managed: true,
+          github_app_name: "",
+          file_size_limit: 5242880,
+        },
+        instance: { id: UUID, workspaces_exist: true },
+      }),
+    });
+    const parsed = await getInstanceConfig(client);
+    expect(parsed).toEqual({
+      enable_signup: false,
+      is_workspace_creation_disabled: false,
+      is_google_enabled: false,
+      is_github_enabled: false,
+      is_gitlab_enabled: false,
+      is_gitea_enabled: false,
+      is_magic_login_enabled: true,
+      is_email_password_enabled: true,
+      is_smtp_configured: true,
+      is_self_managed: true,
+    });
+  });
+
+  it("rejects an instance answer without the config flags", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ config: { enable_signup: true } }),
+    });
+    const error = await getInstanceConfig(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("parses link-carried auth errors off a URL", () => {
+    expect(parseAuthRedirectResult("https://app.test/acme")).toEqual({
+      ok: true,
+      location: "https://app.test/acme",
+    });
+    expect(parseAuthRedirectResult("")).toEqual({ ok: true, location: "" });
+    expect(parseAuthRedirectResult("https://app.test/?error_code=5900&error_message=RATE_LIMIT_EXCEEDED")).toEqual({
+      ok: false,
+      location: "https://app.test/?error_code=5900&error_message=RATE_LIMIT_EXCEEDED",
+      code: "5900",
+      message: "RATE_LIMIT_EXCEEDED",
+    });
+    const bare = parseAuthRedirectResult("https://app.test/?error_code=5060");
+    expect(bare.ok).toBe(false);
+    if (!bare.ok) expect(bare.message).toBe("5060");
+  });
+
+  it("refetches the CSRF token after the new session-changing writes", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 200, body: "<html>", url: "https://app.test/acme" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await signUp(client, { email: "new@example.com", password: "secret" });
+    await signUpWithMagicCode(client, { email: "new@example.com", code: "123456" });
     const csrfCalls = transport.calls.filter((call) => call.url.endsWith("/auth/get-csrf-token/"));
     expect(csrfCalls).toHaveLength(2);
   });
