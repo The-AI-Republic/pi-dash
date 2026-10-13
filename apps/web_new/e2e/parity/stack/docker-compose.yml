@@ -203,6 +203,101 @@ services:
     mem_limit: 256m
     profiles: ["oracle-prod"]
 
+  # Cloud-edition API (NEWFRONT-436). The OSS api image with the private
+  # overlay layered on (Dockerfile.api-cloud), running under the cloud
+  # scratch settings (the cloud settings plus the 600/minute anon
+  # widening, mirroring `api`'s parity_scratch_settings.py). Same ports,
+  # volumes shape and healthcheck as `api`: one stack serves one
+  # edition, and parity-up.sh starts exactly one of them. The `api`
+  # network alias keeps the proxy, the Caddyfile and the live service
+  # untouched — `api:8000` resolves to whichever api runs. Behind the
+  # `cloud` profile so a bare `docker compose up` stays OSS exactly.
+  api-cloud:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.api-cloud
+      args:
+        BASE_API_IMAGE: ${PARITY_CONTAINER_PREFIX:-parity19}-api:local
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-api-cloud:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-api-cloud
+    mem_limit: 1g
+    command:
+      [
+        "bash",
+        "-c",
+        "python manage.py migrate --no-input && exec uvicorn pi_dash.asgi:application --host 0.0.0.0 --port 8000",
+      ]
+    depends_on:
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    networks:
+      default:
+        aliases:
+          - api
+    volumes:
+      - ./parity_cloud_scratch_settings.py:/code/parity_cloud_scratch_settings.py:ro
+    environment:
+      DJANGO_SETTINGS_MODULE: parity_cloud_scratch_settings
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: parity19minio
+      AWS_SECRET_ACCESS_KEY: parity19minio-scratch-secret
+      AWS_S3_BUCKET_NAME: parity19-assets
+      AWS_REGION: us-east-1
+      AWS_S3_ENDPOINT_URL: http://minio:9000
+      MINIO_ENDPOINT_URL: http://minio:9000
+      SECRET_KEY: parity19-fixed-local-secret-not-used-outside-scratch
+      ALLOWED_HOSTS: "*"
+      DATABASE_URL: postgresql://parity19:parity19@pg:5432/pidash
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_HOST: mq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: parity19
+      RABBITMQ_PASSWORD: parity19
+      RABBITMQ_VHOST: pidash
+      API_KEY_RATE_LIMIT: 100000/minute
+      ENABLE_MAGIC_LINK_LOGIN: "1"
+      EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
+      WEB_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      APP_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      SPACE_BASE_URL: http://localhost:${PARITY_ORACLE_PORT:-13000}
+      ASSISTANT_CRYPTO_BACKEND: fernet
+      ASSISTANT_ENCRYPTION_KEY: aBpRyG1sxQfr1J0PQpxBXUgw79E4lXDzKu_bA1ZTmGM=
+      # OpenHub app lane, server side. The catalog endpoints (and only they)
+      # register when this is on; its browser-side twin bakes into the
+      # cloud oracle image, and the two flip together.
+      OPENHUB_APPS_ENABLED: "1"
+      # Fixed scratch-only session secret, like SECRET_KEY above. The cloud
+      # settings default mints a random one per process, which would
+      # invalidate every session on each api restart.
+      AIREPUBLIC_SESSION_JWT_SECRET: parity19-fixed-cloud-jwt-secret-not-used-outside-scratch
+    ports:
+      - "${PARITY_API_PORT:-18019}:8000"
+    healthcheck:
+      test:
+        ["CMD-SHELL", 'python -c "import socket; socket.create_connection((''localhost'', 8000), timeout=5).close()"']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    profiles: ["cloud"]
+
+  # Cloud-edition oracle (NEWFRONT-436). The old app as a production build
+  # with the private overlay copied on top (Dockerfile.oracle-cloud-prod),
+  # served as static files by nginx on :3000 like `oracle-prod`. Selected
+  # with PARITY_ORACLE_EDITION=cloud; parity-up.sh points ORACLE_UPSTREAM
+  # here. Behind the `cloud` profile like `api-cloud`.
+  oracle-cloud-prod:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-cloud-prod
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-cloud-prod:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-cloud-prod
+    mem_limit: 256m
+    profiles: ["cloud"]
+
   # Background task worker (NEWFRONT-115). The API queues mention
   # extraction, mention links and notifications as celery tasks; without a
   # consumer those rows never materialize, so mention/notification oracle

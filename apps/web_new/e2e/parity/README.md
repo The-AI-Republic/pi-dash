@@ -57,6 +57,10 @@ Always narrow while you iterate; the full oracle suite is several hundred
 scenarios on one worker. A `--` before the arguments is accepted and
 ignored.
 
+Cloud-edition rows (CLOUD-\*) run against the cloud oracle instead of the
+OSS one: bring the stack up with `PARITY_ORACLE_EDITION=cloud` (runbook
+in `stack/README.md` "Cloud oracle"), then run the specs the same way.
+
 ## Writing a scenario
 
 1. Find the inventory rows it proves; every scenario names at least one.

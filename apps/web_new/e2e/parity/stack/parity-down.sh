@@ -44,3 +44,11 @@ echo "[parity] teardown target: compose project $PARITY_PROJECT (scratch only)"
 parity_assert_project "$PARITY_PROJECT"
 # By project name, not by file: works even after the checkout is gone.
 docker compose -p "$PARITY_PROJECT" down -v --remove-orphans
+# Drop the cloud overlay staging (NEWFRONT-436): proprietary files must not
+# linger in the tree past the stack that used them. Best-effort — plain OSS
+# stacks never create it, and teardown must succeed either way.
+if [ -f "$STACK_DIR/lib/parity-cloud.sh" ]; then
+  # shellcheck source=lib/parity-cloud.sh
+  . "$STACK_DIR/lib/parity-cloud.sh"
+  parity_cloud_clean_staging || true
+fi

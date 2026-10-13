@@ -117,9 +117,9 @@ the same namespace. Anything set explicitly (`PARITY_PROJECT`,
 `PARITY_API_URL`, `PARITY_ORACLE_URL`) wins over the derivation.
 
 Locally-built image tags are namespaced the same way (NEWFRONT-435):
-`api`, `worker`, `oracle`, `oracle-prod` and `live` build as
-`<prefix>-<service>:local` (`worker` reuses the `api` image), where the
-prefix is the resolved
+`api`, `worker`, `oracle`, `oracle-prod`, `live`, `api-cloud` and
+`oracle-cloud-prod` build as `<prefix>-<service>:local` (`worker` reuses
+the `api` image), where the prefix is the resolved
 `PARITY_CONTAINER_PREFIX` (default `parity19`), so a build in one
 namespace never retags the image a sibling namespace runs. The first
 bring-up in a fresh namespace builds its own set of images; after that
@@ -297,9 +297,111 @@ pnpm --filter web_new dev   # :3010, the Playwright `new` base URL
 ## Editions
 
 This checkout runs the OSS backend. Where the cloud overlay exists, the
-same scripts serve it: check out the edition tree and rerun `parity-up.sh`
-(the image build picks up the overlay). Desktop rows run against the
-desktop build of web_new with the same seeded stack.
+same scripts serve the cloud edition (NEWFRONT-436); desktop rows run
+against the desktop build of web_new with the same seeded stack.
+
+## Cloud oracle
+
+The cloud edition of the old app — the OSS API plus the private overlay,
+behind the overlaid production frontend — as a selectable oracle for the
+CLOUD-\* rows. The default stays OSS: nothing below changes unless
+`PARITY_ORACLE_EDITION=cloud` is exported.
+
+Prerequisite: a runner-local checkout of the private overlay repo,
+OUTSIDE the pi-dash tree (read-only input; never commit it into pi-dash,
+never import it from web_new code):
+
+```sh
+git clone --depth 1 git@github.com:The-AI-Republic/private-pi-dash.git ~/private-pi-dash
+```
+
+Bring-up resolves it from `CLOUD_OVERLAY_DIR`, else from the
+`<repo-root>/../private-pi-dash` sibling. A missing or incomplete
+checkout fails before any Docker call, with these instructions.
+
+Bring up (one stack serves one edition; use a second `PARITY_NS`
+namespace to run OSS and cloud side by side — ports, volumes, seed file
+and suite URLs all derive from the namespace exactly like the OSS
+stack):
+
+```sh
+export PARITY_NS=436   # or your slot; omit for the default stack
+export PARITY_ORACLE_EDITION=cloud
+apps/web_new/e2e/parity/stack/parity-up.sh
+```
+
+That stages the overlay inputs into the gitignored
+`stack/.cloud-staging/` directory (refreshed every bring-up, so overlay
+edits apply on the next run), builds `api-cloud` (the OSS api image plus
+one overlay layer) and `oracle-cloud-prod` (the production oracle plus
+one overlay layer), and starts `pg redis mq minio api-cloud
+oracle-cloud-prod proxy`. `api-cloud` runs on
+`parity_cloud_scratch_settings.py` (mounted read-only), which layers the
+same 600/minute anonymous widening onto the cloud settings — the cloud
+settings inherit the 30/minute production budget, which would otherwise
+saturate minutes into an oracle run. There is no cloud worker (nothing
+in the cloud area needs background fan-out) and no dev-mode cloud oracle
+(`PARITY_ORACLE_MODE=dev` with the cloud edition refuses; unset it).
+Teardown is the existing path — `parity-down.sh`, `parity-reset.sh` and
+the run-end reaper all work unchanged — plus removal of the staging
+directory, so no overlay file lingers in the tree past its stack:
+
+```sh
+export PARITY_NS=436
+export PARITY_ORACLE_EDITION=cloud
+apps/web_new/e2e/parity/stack/parity-down.sh   # containers, volumes, staging; images stay
+```
+
+Seed contents (`seed/seed_cloud.py`, same `PARITY_SEED_JSON:` line and
+key names as the OSS seed, so shared helpers keep working):
+
+- user `cloud-oracle@example.com` (dev-login subject `parity|cloud-seed`,
+  display name `Cloud Oracle`), verified and onboarded, no password —
+  cloud identities come from the provider;
+- workspace `Cloud Workspace` (`cloud-ws`), owned by that user;
+- project `Cloud Project` (`CLD`), flat list layout preference;
+- one `Todo` state plus three issues: `Cloud first/second/third issue`.
+
+Scenarios sign this user in through the dev-login endpoint, which bypasses
+real airepublic SSO (no `AIREPUBLIC_*` secrets needed for the core
+flows). Seeded values are overridable through `PARITY_CLOUD_SEED_EMAIL`,
+`PARITY_CLOUD_SEED_SUB` and `PARITY_CLOUD_SEED_DISPLAY_NAME`.
+
+Smoke verification (from the bring-up shell, with the printed suite env
+exported; `PARITY_API_URL` is the api port, `PARITY_ORACLE_URL` the
+proxy):
+
+```sh
+# 1. The overlay pages render through the proxy.
+curl -s -o /dev/null -w 'home:%{http_code}\n' "$PARITY_ORACLE_URL/home"
+curl -s -o /dev/null -w 'login:%{http_code}\n' "$PARITY_ORACLE_URL/login"
+# 2. The seeded identity signs in (dev-login bypasses real SSO). Carry the
+# session cookies like the browser does: the session-backed views below
+# read those, not the Bearer token.
+SEED="$(cat "$PARITY_SEED_FILE")"
+EMAIL="$(echo "$SEED" | python3 -c 'import json,sys; print(json.load(sys.stdin)["email"])')"
+JAR="$(mktemp)"
+curl -s -c "$JAR" -o /dev/null -w 'devlogin:%{http_code}\n' -X POST "$PARITY_API_URL/api/auth/dev-login/" \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"display_name\":\"smoke\"}"
+curl -s -b "$JAR" -o /dev/null -w 'me:%{http_code}\n' "$PARITY_API_URL/api/auth/me/"
+# 3. The cloud APIs respond.
+curl -s -b "$JAR" -o /dev/null -w 'openhub:%{http_code}\n' "$PARITY_API_URL/api/openhub/status/"
+curl -s -b "$JAR" -o /dev/null -w 'billing:%{http_code}\n' "$PARITY_API_URL/api/billing/me/plan/"
+curl -s -b "$JAR" -o /dev/null -w 'connections:%{http_code}\n' "$PARITY_API_URL/api/users/me/ai-assistant/connections/"
+```
+
+All seven answer 200. The openhub status may report `connected: false`
+(no gateway behind a scratch stack) — the smoke proves the endpoint
+responds, not that a gateway answers.
+
+Notes for scenario authors: the OpenHub app lane is on in both halves
+(`OPENHUB_APPS_ENABLED=1` on the API, `VITE_OPENHUB_APPS_ENABLED=1`
+baked into the oracle); the flag-off shape is a documented follow-up
+(see `parity/cloud-oracle.md`). The `helpers/stack.ts` instance control
+targets the `api` service — extend it if a cloud scenario needs it.
+The overlay's pinned OSS SHA and its skew against this branch are
+reconciled in `parity/cloud-oracle.md`.
 
 ## Seed contents
 
