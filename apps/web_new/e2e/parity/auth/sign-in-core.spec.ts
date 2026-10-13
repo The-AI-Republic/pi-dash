@@ -3,7 +3,9 @@
 // See the LICENSE file for details.
 // Oracle scenarios for the sign-in core (NEWFRONT-107): one per row
 // AUTH-001 through AUTH-008, green on apps/web first. The same file must go
-// green on apps/web_new once the auth area lands there.
+// green on apps/web_new once the auth area lands there. AUTH-044 (retired
+// sign-in addresses, added by NEWFRONT-483) runs old-first in the area
+// gate like the rest.
 // Behavior notes (learned from the old app, reference only):
 // - The card is email-first: an email check decides the next step, and an
 //   unknown address flips the card into sign-up mode.
@@ -389,6 +391,27 @@ test(
       expect(explanation).toMatch(/smtp/i);
       expect(await driver.seesUniqueCodeButton()).toBe(false);
       expect(await driver.passwordPrimaryButtonLabel()).toBe("Go to workspace");
+    });
+  }
+);
+
+test(
+  specTitle(["AUTH-044"], "retired sign-in addresses land bare on the home route"),
+  { tag: specTags(["AUTH-044"]) },
+  async ({ driver }) => {
+    for (const retired of ["/sign-in", "/signin", "/login"]) {
+      await test.step(`${retired} forwards to /`, async () => {
+        // The forward runs client-side after hydration, which is slow when
+        // the dev server compiles under suite load.
+        await driver.openPath(retired);
+        await expect.poll(() => driver.currentPath(), { timeout: 60_000 }).toBe("/");
+      });
+    }
+
+    await test.step("no prefill or return path survives the forward", async () => {
+      await driver.openPath("/sign-in?email=prefill%40example.com&next_path=%2Facme");
+      await expect.poll(() => driver.currentPath(), { timeout: 60_000 }).toBe("/");
+      expect(await driver.authEmailValue()).toBe("");
     });
   }
 );

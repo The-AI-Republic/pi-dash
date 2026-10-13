@@ -968,8 +968,10 @@ describe("SignInCard", () => {
     );
     await user.type(screen.getByLabelText("Work email"), "ada@example.com");
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    await user.type(await screen.findByLabelText("Password"), "secret");
-    await user.type(screen.getByLabelText("Confirm password"), "secret");
+    // Strong secrets: AUTH-010 refuses weak ones before anything posts, so
+    // the server-side 5030 recovery below needs a postable secret.
+    await user.type(await screen.findByLabelText("Password"), "Tq7!mZ2@kP9#xR");
+    await user.type(screen.getByLabelText("Confirm password"), "Tq7!mZ2@kP9#xR");
     await user.click(screen.getByRole("button", { name: "Create account" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/already exists/i);
     expect(screen.getByLabelText("Work email")).toBeInTheDocument();
@@ -1087,5 +1089,54 @@ describe("SignInCard", () => {
     );
     expect(await screen.findByLabelText("Work email")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Sign-in is unavailable" })).toBeNull();
+  });
+
+  it("gates weak secrets in flipped sign-up mode without posting", async () => {
+    const user = userEvent.setup();
+    let posts = 0;
+    await renderReadyCard(
+      stubTransport((url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { body: CSRF, url };
+        if (url.endsWith("/api/instances/")) return { body: CONFIG, url };
+        if (url.endsWith("/auth/email-check/")) {
+          return { body: JSON.stringify({ existing: false, status: "CREDENTIAL" }), url };
+        }
+        if (url.endsWith("/auth/sign-up/")) {
+          posts += 1;
+          return { body: "<html>", url: "https://app.test/onboarding" };
+        }
+        throw new Error(`unexpected ${url}`);
+      })
+    );
+    await user.type(screen.getByLabelText("Work email"), "new@example.com");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByLabelText("Password");
+    await user.type(screen.getByLabelText("Password"), "weakpass1");
+    await user.type(screen.getByLabelText("Confirm password"), "weakpass1");
+    await user.click(screen.getByRole("button", { name: "Create account" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/strong password/i);
+    expect(posts).toBe(0);
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("disables submit on a mismatched confirmation in flipped sign-up mode", async () => {
+    const user = userEvent.setup();
+    await renderReadyCard(
+      stubTransport((url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { body: CSRF, url };
+        if (url.endsWith("/api/instances/")) return { body: CONFIG, url };
+        if (url.endsWith("/auth/email-check/")) {
+          return { body: JSON.stringify({ existing: false, status: "CREDENTIAL" }), url };
+        }
+        throw new Error(`unexpected ${url}`);
+      })
+    );
+    await user.type(screen.getByLabelText("Work email"), "new@example.com");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByLabelText("Password");
+    await user.type(screen.getByLabelText("Password"), "Tq7!mZ2@kP9#xR");
+    await user.type(screen.getByLabelText("Confirm password"), "Tq7!mZ2@kP9#xR-other");
+    expect(await screen.findByText(/don't match/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create account" })).toBeDisabled();
   });
 });
