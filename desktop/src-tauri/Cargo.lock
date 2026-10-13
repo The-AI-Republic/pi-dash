@@ -2702,7 +2702,9 @@ dependencies = [
 name = "pi-dash-desktop"
 version = "0.3.3"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
+ "getrandom 0.3.4",
  "libc",
  "pidash-ipc",
  "reqwest",
@@ -2710,6 +2712,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-deep-link",

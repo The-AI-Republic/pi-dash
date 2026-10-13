@@ -170,11 +170,12 @@ fn validate_desktop_login_handoff(dist: &std::path::Path) {
 
     let has_browser_handoff = home_signin_chunks
         .iter()
-        .any(|contents| contents.contains("open_in_browser") && contents.contains("desktop"));
+        .any(|contents| contents.contains("desktop_begin_sign_in"));
     if !has_browser_handoff {
         panic!(
-            "Release build but the desktop home sign-in route does not invoke open_in_browser. \
-            The sign-in would run inside the Tauri webview instead of the system browser."
+            "Release build but the desktop home sign-in route does not invoke \
+            desktop_begin_sign_in. The sign-in would run inside the Tauri webview instead of \
+            the system browser, or the app would ignore its callback."
         );
     }
 }
