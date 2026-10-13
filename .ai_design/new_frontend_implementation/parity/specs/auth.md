@@ -630,6 +630,16 @@ fraction (current step over visible total, with the invite step counted
 only while the user has no invitations or is already on it) and the
 account menu; step content scrolls to top on every step change.
 
+Forward transitions stamp progress as they go: leaving the CLI step
+stores nothing, and leaving role setup stores nothing beyond the role
+value. Leaving use-case setup — or leaving profile setup on self-managed
+instances — stamps `profile_complete` and then either finishes
+immediately when the user already belongs to a workspace or moves to the
+workspace step. Advancing from workspace creation to the invite step
+stamps `workspace_create`. Completing the invite step stamps
+`workspace_invite` as part of finishing (subsumed by the finish
+routine's all-flags stamp in AUTH-039).
+
 The old tree also holds older full-page onboarding variants beside the
 steps flow (previously, invited users finished right after profile
 setup). They are unmounted dead code encoding the same capabilities, so
@@ -780,8 +790,9 @@ never submits the form. Sending drops empty rows and posts
 `POST /api/workspaces/{slug}/invitations/` with
 `{emails: [{email, role}]}` against the first workspace (roles: 20 admin,
 15 member, 5 guest), toasts success, and finishes onboarding; a failed
-send toasts the server detail and stays. Deferring ("do it later" gist)
-finishes onboarding without sending anything.
+send toasts the server detail and stays. Deferring through the
+finish-without-inviting action completes onboarding without sending
+anything.
 
 ### AUTH-038 — solo-workspace shortcut
 
