@@ -13,6 +13,11 @@
 # resolver (parity-env.sh, same algorithm as helpers/parity-env.ts) owns
 # the mapping; explicit PARITY_* settings always win, and with no
 # namespace set every value is exactly the legacy default.
+#
+# Editions (NEWFRONT-436): PARITY_ORACLE_EDITION=cloud serves the
+# cloud-edition oracle (overlaid API plus overlaid production oracle)
+# instead of the OSS one; unset means OSS, exactly as before. One stack
+# serves one edition — run a second namespace for the other.
 set -euo pipefail
 
 export STACK_DIR
@@ -53,8 +58,44 @@ elif [ -n "${1:-}" ]; then
   exit 2
 fi
 
+# Which edition of the old app serves as the oracle (NEWFRONT-436). oss
+# (default): the open-source app and API, exactly as before. cloud: the
+# cloud edition — the OSS API plus the private overlay (api-cloud) behind
+# the overlaid production oracle (oracle-cloud-prod). Anything else fails
+# fast here, before any Docker call, so a typo never boots half a stack.
+export PARITY_ORACLE_EDITION
+PARITY_ORACLE_EDITION="${PARITY_ORACLE_EDITION:-oss}"
+export API_SERVICE
+API_SERVICE="api"
+export SEED_SCRIPT
+SEED_SCRIPT="$STACK_DIR/seed/seed_parity.py"
+export SEED_LABEL
+SEED_LABEL="parity"
+case "$PARITY_ORACLE_EDITION" in
+  oss) ;;
+  cloud)
+    if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then
+      echo "[parity] refusing: PARITY_ORACLE_MODE=dev has no cloud oracle yet; unset it for the cloud production oracle" >&2
+      exit 2
+    fi
+    # shellcheck source=lib/parity-cloud.sh
+    . "$STACK_DIR/lib/parity-cloud.sh"
+    export CLOUD_OVERLAY_DIR
+    CLOUD_OVERLAY_DIR="$(parity_cloud_resolve_overlay)" || exit 1
+    parity_cloud_stage_overlay "$CLOUD_OVERLAY_DIR" || exit 1
+    API_SERVICE="api-cloud"
+    SEED_SCRIPT="$STACK_DIR/seed/seed_cloud.py"
+    SEED_LABEL="cloud"
+    ;;
+  *)
+    echo "[parity] refusing: PARITY_ORACLE_EDITION must be 'oss' or 'cloud', got '$PARITY_ORACLE_EDITION'" >&2
+    exit 2
+    ;;
+esac
+
 echo "[parity] repo root: $REPO_ROOT"
 echo "[parity] stack project: $PARITY_PROJECT (namespace '${PARITY_NS:-<none>}')"
+echo "[parity] oracle edition: $PARITY_ORACLE_EDITION"
 # Which build of the old app serves as the oracle. prod (default): the
 # production build behind nginx, far lighter on CPU and memory (see
 # oracle-prod in docker-compose.yml). dev: the dev server, as before.
@@ -65,6 +106,12 @@ ORACLE_UPSTREAM="oracle-prod:3000"
 if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then
   ORACLE_SERVICE="oracle"
   ORACLE_UPSTREAM="oracle:3000"
+fi
+# The cloud edition serves its own oracle build; the mode knob above is
+# OSS-only (a cloud+dev combination already refused further up).
+if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
+  ORACLE_SERVICE="oracle-cloud-prod"
+  ORACLE_UPSTREAM="oracle-cloud-prod:3000"
 fi
 
 # Preflight: this project must not already belong to another checkout,
@@ -79,16 +126,35 @@ echo "[parity] preflight: checking ownership and published ports for project $PA
 echo "[parity] checking host disk before the build"
 "$STACK_DIR/parity-disk-check.sh"
 
+# api-cloud layers on the OSS api image, so the cloud path builds the base
+# first; one build call would not order them. (No flag array: empty-array
+# expansion trips `set -u` on the bash 3.2 macOS still ships.)
 if [ "$PARITY_REBUILD" = "1" ]; then
-  echo "[parity] rebuilding scratch images from zero (${PARITY_CONTAINER_PREFIX:-parity19}-api, $ORACLE_SERVICE)"
-  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build --no-cache api "$ORACLE_SERVICE"
+  echo "[parity] rebuilding scratch images from zero (${PARITY_CONTAINER_PREFIX:-parity19}-$API_SERVICE, $ORACLE_SERVICE)"
+  if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
+    docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build --no-cache api
+  fi
+  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build --no-cache "$API_SERVICE" "$ORACLE_SERVICE"
 else
-  echo "[parity] building scratch images (${PARITY_CONTAINER_PREFIX:-parity19}-api, $ORACLE_SERVICE; cached unless inputs changed)"
-  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build api "$ORACLE_SERVICE"
+  echo "[parity] building scratch images (${PARITY_CONTAINER_PREFIX:-parity19}-$API_SERVICE, $ORACLE_SERVICE; cached unless inputs changed)"
+  if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
+    docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build api
+  fi
+  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build "$API_SERVICE" "$ORACLE_SERVICE"
 fi
 
-echo "[parity] starting pg, redis, mq, api, worker, $ORACLE_SERVICE, proxy"
-docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" up -d pg redis mq api worker "$ORACLE_SERVICE" proxy
+if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
+  # --no-deps: the proxy's static depends_on names the OSS `api`, which
+  # must not boot in a cloud stack (it would collide on the API port), so
+  # every service here is explicit — minio included, since it otherwise
+  # rides along only via that depends_on. No worker: nothing in the cloud
+  # area needs background fan-out.
+  echo "[parity] starting pg, redis, mq, minio, api-cloud, $ORACLE_SERVICE, proxy"
+  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" up -d --no-deps pg redis mq minio api-cloud "$ORACLE_SERVICE" proxy
+else
+  echo "[parity] starting pg, redis, mq, api, worker, $ORACLE_SERVICE, proxy"
+  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" up -d pg redis mq api worker "$ORACLE_SERVICE" proxy
+fi
 
 # Inside a Pi Dash agent run the stack is torn down when the run ends (no-op
 # for a person's shell or CI; PARITY_KEEP_STACK=1 opts out).
@@ -107,23 +173,23 @@ echo "[parity] API is reachable"
 echo "[parity] waiting for migrations to finish"
 for _ in $(seq 1 120); do
   export PENDING
-  PENDING="$(docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" exec -T api python manage.py showmigrations 2>/dev/null | grep -c '\[ \]' || true)"
+  PENDING="$(docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" exec -T "$API_SERVICE" python manage.py showmigrations 2>/dev/null | grep -c '\[ \]' || true)"
   if [ "$PENDING" = "0" ]; then
     break
   fi
   sleep 10
 done
-docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" exec -T api python manage.py migrate --check
+docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" exec -T "$API_SERVICE" python manage.py migrate --check
 echo "[parity] schema is current"
 
 echo "[parity] bootstrapping the instance (idempotent)"
-docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" exec -T api python manage.py register_instance parity19-scratch > /dev/null
-docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" exec -T api python manage.py configure_instance > /dev/null
-docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" exec -T api python manage.py shell -c "from pi_dash.license.models import Instance; Instance.objects.filter(is_setup_done=False).update(is_setup_done=True)"
+docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" exec -T "$API_SERVICE" python manage.py register_instance parity19-scratch > /dev/null
+docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" exec -T "$API_SERVICE" python manage.py configure_instance > /dev/null
+docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" exec -T "$API_SERVICE" python manage.py shell -c "from pi_dash.license.models import Instance; Instance.objects.filter(is_setup_done=False).update(is_setup_done=True)"
 
-echo "[parity] seeding the parity workspace"
+echo "[parity] seeding the $SEED_LABEL workspace"
 export SEED_OUT
-SEED_OUT="$(docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" exec -T api python manage.py shell < "$STACK_DIR/seed/seed_parity.py")"
+SEED_OUT="$(docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" exec -T "$API_SERVICE" python manage.py shell < "$SEED_SCRIPT")"
 echo "$SEED_OUT" | grep -E "^(PARITY_SEED_JSON:|Traceback|.*Error)" || true
 export SEED_JSON
 SEED_JSON="$(echo "$SEED_OUT" | grep '^PARITY_SEED_JSON:' | sed 's/^PARITY_SEED_JSON://' | tail -n 1)"
@@ -141,14 +207,23 @@ echo "$SEED_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print('
 # flake. Entry plus one seeded project route, through the proxy — the same
 # two loads the manual workaround used. A 3xx counts as served (deep routes
 # redirect anonymous visitors to sign-in). On the production oracle this
-# passes instantly and doubles as a smoke test.
-echo "[parity] warming the oracle (entry + project routes)"
+# passes instantly and doubles as a smoke test. The cloud oracle warms its
+# marketing surface instead: the root redirect plus the two overlay pages
+# the smoke steps prove (NEWFRONT-436).
+if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
+  echo "[parity] warming the oracle (entry + marketing routes)"
+else
+  echo "[parity] warming the oracle (entry + project routes)"
+fi
 export WARM_BASE
 WARM_BASE="http://localhost:$PARITY_ORACLE_PORT"
 export WARM_DEEP
 WARM_DEEP="$(echo "$SEED_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print('/%s/projects/%s/issues' % (d['workspaceSlug'], d['projectId']))" || echo "/")"
 export WARM_ROUTES
 WARM_ROUTES="/ $WARM_DEEP"
+if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
+  WARM_ROUTES="/ /home /login"
+fi
 for route in $WARM_ROUTES; do
   warmed=0
   for _ in $(seq 1 120); do
@@ -169,6 +244,9 @@ echo "[parity] oracle is warm"
 echo "[parity] suite env for this stack (export before running specs):"
 if [ -n "${PARITY_NS:-}" ]; then
   echo "export PARITY_NS='$PARITY_NS'"
+fi
+if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
+  echo "export PARITY_ORACLE_EDITION='cloud'"
 fi
 echo "export PARITY_SEED_FILE='$PARITY_SEED_FILE'"
 echo "export PARITY_API_URL='$PARITY_API_URL'"

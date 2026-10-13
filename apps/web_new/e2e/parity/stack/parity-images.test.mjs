@@ -32,6 +32,10 @@ const EXPECTED_BUILT = new Map([
   ["oracle-prod", "oracle-prod"],
   ["worker", "api"],
   ["live", "live"],
+  // Cloud edition (NEWFRONT-436): same rule — the overlay images are
+  // namespaced like every other locally-built tag.
+  ["api-cloud", "api-cloud"],
+  ["oracle-cloud-prod", "oracle-cloud-prod"],
 ]);
 
 // Minimal indentation parse: service headers sit at 2 spaces, their keys
@@ -84,7 +88,20 @@ function renderedLocalImages(prefix) {
   }
   const out = execFileSync(
     "docker",
-    ["compose", "-p", "parityimagestest", "-f", composeFile, "--profile", "oracle-prod", "--profile", "full", "config"],
+    [
+      "compose",
+      "-p",
+      "parityimagestest",
+      "-f",
+      composeFile,
+      "--profile",
+      "oracle-prod",
+      "--profile",
+      "full",
+      "--profile",
+      "cloud",
+      "config",
+    ],
     { env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
   );
   const images = new Set();
@@ -123,7 +140,9 @@ describe("parity stack image tags (NEWFRONT-435)", () => {
   it("names the resolved tag (not a fixed one) in parity-up.sh logs", () => {
     const text = readFileSync(upScript, "utf8");
     assert.ok(!text.includes("parity19-api"), "parity-up.sh must not name a fixed image tag");
-    assert.ok(text.includes(`${PREFIX_EXPR}-api`), "parity-up.sh logs must interpolate the resolved api tag");
+    // The edition-aware log line interpolates the prefix and the selected
+    // api service (NEWFRONT-436); OSS still renders exactly the old tag.
+    assert.ok(text.includes(`${PREFIX_EXPR}-$API_SERVICE`), "parity-up.sh logs must interpolate the resolved api tag");
   });
 
   it(
