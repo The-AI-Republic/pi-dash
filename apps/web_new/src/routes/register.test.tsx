@@ -28,9 +28,9 @@ describe("LegacySignUpRedirect", () => {
   });
 
   it("keeps the trailing slash on the landing load", async () => {
-    // Guards the full-document navigation above: if the router ever
-    // normalized the landing load, the AUTH-011 legacy assertions (which
-    // pin /sign-up/ with the slash) would fail at the area gate.
+    // Guards the full-document navigation above: the old app redirects
+    // legacy sign-up addresses to /sign-up/ with the slash, so the
+    // landing load must preserve it.
     const rootRoute = createRootRoute();
     const targetRoute = createRoute({
       getParentRoute: () => rootRoute,

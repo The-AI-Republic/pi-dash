@@ -23,6 +23,25 @@ describe("isStrongSecret", () => {
     expect(isStrongSecret("NoDigits!!")).toBe(false);
     expect(isStrongSecret("NoPunct12")).toBe(false);
   });
+
+  it("refuses marks outside the fixed punctuation set", () => {
+    expect(isStrongSecret("Abcdef12 ")).toBe(false);
+    expect(isStrongSecret("Abcdef1~")).toBe(false);
+    expect(isStrongSecret("Abcdef1`")).toBe(false);
+    expect(isStrongSecret("Abcdef1\\")).toBe(false);
+    expect(isStrongSecret("Abcdef1é")).toBe(false);
+  });
+
+  it("accepts each bracket mark of the fixed set", () => {
+    for (const mark of ["[", "]", "^", "_", "{", "|", "}"]) {
+      expect(isStrongSecret(`Abcdef1${mark}`)).toBe(true);
+    }
+  });
+
+  it("counts ASCII letters only for the case classes", () => {
+    expect(isStrongSecret("abcdef1!É")).toBe(false);
+    expect(isStrongSecret("ABCDEF1!ß")).toBe(false);
+  });
 });
 
 describe("secretCriteria", () => {

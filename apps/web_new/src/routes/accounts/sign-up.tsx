@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 // Legacy sign-up address (AUTH-011). /accounts/sign-up forwards to the
 // canonical card at /sign-up/ after hydration. A full-document navigation
-// keeps the trailing slash the parity suite pins; a router redirect would
+// keeps the trailing slash the old app serves; a router redirect would
 // strip it.
 
 import { createFileRoute } from "@tanstack/react-router";

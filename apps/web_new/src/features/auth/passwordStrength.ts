@@ -3,33 +3,62 @@
 // See the LICENSE file for details.
 // New-password strength gate (AUTH-010). The sign-up card refuses weak
 // secrets before anything is posted; the same rule drives the strength
-// hint beside the secret field. Written from parity/specs/auth.md
-// AUTH-010: a strong secret is at least eight characters long and mixes
-// upper-case, lower-case, digits, and punctuation.
+// hint beside the secret field. The gates (banner, mismatch block, hint)
+// come from parity/specs/auth.md AUTH-010; the acceptance set below
+// mirrors the old app's observed rule — eight characters plus one of
+// each class, ASCII letters only, and a fixed punctuation set — so edge
+// secrets classify the same here.
 
 const MIN_SECRET_LENGTH = 8;
 
-/** Non-alphanumeric characters count as the required punctuation. */
-function hasPunctuation(value: string): boolean {
+const ASCII_UPPER_FIRST = 65;
+const ASCII_UPPER_LAST = 90;
+const ASCII_LOWER_FIRST = 97;
+const ASCII_LOWER_LAST = 122;
+const ASCII_DIGIT_FIRST = 48;
+const ASCII_DIGIT_LAST = 57;
+
+/**
+ * Whether a code unit belongs to the fixed punctuation set: the `!`
+ * through `/` and `:` through `@` runs, the four bracket marks
+ * `[ ] ^ _`, and the `{ | }` run. Anything else — spaces, backslashes,
+ * backticks, tildes, non-ASCII — does not satisfy the rule.
+ */
+function isAcceptedMark(code: number): boolean {
+  if (code >= 33 && code <= 47) return true;
+  if (code >= 58 && code <= 64) return true;
+  if (code === 91 || code === 93 || code === 94 || code === 95) return true;
+  return code >= 123 && code <= 125;
+}
+
+function hasUpperCase(value: string): boolean {
   for (const char of value) {
     const code = char.charCodeAt(0);
-    const alphanumeric = (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
-    if (!alphanumeric) return true;
+    if (code >= ASCII_UPPER_FIRST && code <= ASCII_UPPER_LAST) return true;
   }
   return false;
 }
 
-function hasUpperCase(value: string): boolean {
-  return value !== value.toLowerCase();
-}
-
 function hasLowerCase(value: string): boolean {
-  return value !== value.toUpperCase();
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    if (code >= ASCII_LOWER_FIRST && code <= ASCII_LOWER_LAST) return true;
+  }
+  return false;
 }
 
 function hasDigit(value: string): boolean {
   for (const char of value) {
-    if (char >= "0" && char <= "9") return true;
+    const code = char.charCodeAt(0);
+    if (code >= ASCII_DIGIT_FIRST && code <= ASCII_DIGIT_LAST) return true;
+  }
+  return false;
+}
+
+/** True once any character belongs to the fixed punctuation set. */
+function hasPunctuation(value: string): boolean {
+  for (const char of value) {
+    if (isAcceptedMark(char.charCodeAt(0))) return true;
   }
   return false;
 }
