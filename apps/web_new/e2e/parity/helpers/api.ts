@@ -19004,3 +19004,123 @@ export async function serverAdminSignOut(sessionCookie: string, apiBase: string 
   });
   if (res.status !== 302) throw new Error(`[parity] admin sign-out answered HTTP ${res.status}, not a redirect.`);
 }
+
+// --- Space board access & routing server reads (NEWFRONT-447, SPC-001..009).
+// --- Public space endpoints need no session; the publish upsert/delete
+// --- helpers below run as the seed admin and restore after.
+
+/** Raw public-endpoint read: HTTP status plus the decoded JSON body (or null). */
+export interface ServerSpacePublicRead {
+  status: number;
+  payload: unknown;
+}
+
+async function serverSpacePublicGet(path: string, apiBase: string): Promise<ServerSpacePublicRead> {
+  const res = await fetchTolerant(`${apiBase}${path}`);
+  const text = await res.text();
+  let payload: unknown = null;
+  try {
+    payload = text === "" ? null : (JSON.parse(text) as unknown);
+  } catch {
+    payload = text;
+  }
+  return { status: res.status, payload };
+}
+
+/** Public board settings for an anchor (anonymous; 404 when unpublished). */
+export async function serverSpaceBoardSettings(
+  anchor: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerSpacePublicRead> {
+  return serverSpacePublicGet(`/api/public/anchor/${anchor}/settings/`, apiBase);
+}
+
+/** Public board metadata for an anchor (anonymous; 404 when unpublished). */
+export async function serverSpaceBoardMeta(
+  anchor: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerSpacePublicRead> {
+  return serverSpacePublicGet(`/api/public/anchor/${anchor}/meta/`, apiBase);
+}
+
+/** Published anchor for a workspace project (anonymous; 404 when unpublished). */
+export async function serverSpaceAnchorForProject(
+  workspaceSlug: string,
+  projectId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerSpacePublicRead> {
+  return serverSpacePublicGet(`/api/public/workspaces/${workspaceSlug}/projects/${projectId}/anchor/`, apiBase);
+}
+
+/** Names of the issues the public board endpoint serves for an anchor. */
+export async function serverSpaceBoardIssueNames(
+  anchor: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; names: string[]; ids: string[]; totalCount: number }> {
+  const read = await serverSpacePublicGet(`/api/public/anchor/${anchor}/issues/`, apiBase);
+  const payload = (read.payload ?? {}) as { results?: unknown; total_count?: unknown };
+  const rows = Array.isArray(payload.results) ? payload.results : [];
+  const names = rows
+    .map((row) => (row as { name?: unknown }).name)
+    .filter((name): name is string => typeof name === "string");
+  const ids = rows.map((row) => (row as { id?: unknown }).id).filter((id): id is string => typeof id === "string");
+  return {
+    status: read.status,
+    names,
+    ids,
+    totalCount: typeof payload.total_count === "number" ? payload.total_count : names.length,
+  };
+}
+
+/** Publish (upsert) a project's board; resolves with the board row id and anchor. */
+export async function serverSpacePublishBoard(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ id: string; anchor: string }> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/project-deploy-boards/`,
+    {
+      method: "POST",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify({}),
+    }
+  );
+  const body = (await res.text().then(
+    (text) => (text === "" ? null : (JSON.parse(text) as unknown)),
+    () => null
+  )) as { id?: unknown; anchor?: unknown } | null;
+  if (!res.ok || !body || typeof body.id !== "string" || typeof body.anchor !== "string") {
+    throw new Error(`[parity] board publish failed with HTTP ${res.status}.`);
+  }
+  return { id: body.id, anchor: body.anchor };
+}
+
+/** Withdraw a published board; throws unless the server accepts. */
+export async function serverSpaceDeleteBoard(
+  workspaceSlug: string,
+  projectId: string,
+  boardId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/project-deploy-boards/${boardId}/`,
+    { method: "DELETE", headers: { cookie: sessionCookie } }
+  );
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`[parity] board delete failed with HTTP ${res.status}.`);
+  }
+}
+
+/** HTTP status of the current-user fetch with (or without) a session cookie. */
+export async function serverSpaceMeStatus(
+  sessionCookie: string | null,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetchTolerant(`${apiBase}/api/users/me/`, {
+    headers: sessionCookie === null ? {} : { cookie: sessionCookie },
+  });
+  return res.status;
+}
