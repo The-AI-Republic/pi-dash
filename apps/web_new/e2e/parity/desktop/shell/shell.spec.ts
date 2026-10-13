@@ -41,6 +41,7 @@ import {
   createIssue,
   deleteIssue,
   issueAttachments,
+  serverDeskShellDeviceApprove,
   serverDeskShellDeviceApproveStatus,
   serverDeskShellDeviceStart,
   serverDeskShellDeviceToken,
@@ -285,6 +286,22 @@ test(
       expect(token.accessToken.length).toBeGreaterThan(0);
       expect(token.userEmail).toBe(seed.email);
       expect(token.workspaceSlug).toBe(seed.workspaceSlug);
+    });
+
+    await test.step("a second grant approves through the API alone", async () => {
+      // The desktop flow's exact path: start the grant, approve it with
+      // the session over the API (no web page involved), then exchange.
+      // The fresh grant has never been polled, so its first token call
+      // is accepted without honoring the poll gap.
+      const second = await serverDeskShellDeviceStart();
+      const session = await signInSession(seed.email, seed.password);
+      const approval = await serverDeskShellDeviceApprove(second.userCode, session);
+      expect(approval.ok).toBe(true);
+      expect(approval.userEmail).toBe(seed.email);
+      expect(approval.workspaceSlug).toBe(seed.workspaceSlug);
+      const token = await serverDeskShellDeviceToken(second.deviceCode);
+      expect(token.accessToken.length).toBeGreaterThan(0);
+      expect(token.userEmail).toBe(seed.email);
     });
 
     await test.step("approval stays gated on a session and a real code", async () => {
