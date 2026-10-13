@@ -153,6 +153,8 @@ import type {
   ExportsSettingsHistoryRow,
   AnalyticsExportTable,
   LocalFileDownload,
+  SettingsProfileGeneralField,
+  SettingsProfileSecurityField,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -46278,5 +46280,667 @@ export class WebDriver implements ParityDriver {
       return nodes.filter((el) => visible(el) && /\b(member|user|assignee|reviewer|owner)\b/i.test(labelled(el)))
         .length;
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Profile-settings shell, general/account tabs and security tab
+  // (NEWFRONT-426, rows PROF-009..015, PROF-026). Selectors were observed on
+  // the running old app: the standalone page renders its sidebar title plus
+  // grouped tab buttons, the general form carries stable input ids, and the
+  // dialogs are Headless-UI surfaces (role="dialog"). Appended; existing
+  // entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Known sidebar tab labels keyed by tab address segment. */
+  private static readonly settingsProfileTabLabels: Record<string, string> = {
+    general: "Profile",
+    preferences: "Preferences",
+    "ai-assistant": "AI Assistant",
+    "auto-project-management": "Auto Project Management",
+    notifications: "Notifications",
+    security: "Security",
+    activity: "Activity",
+    integrations: "Integrations",
+    "api-tokens": "Personal Access Tokens",
+  };
+
+  /** Sidebar group headings in display order. */
+  private static readonly settingsProfileGroups = ["Your Profile", "Developer", "Workspace"];
+
+  /** Navigate to a settings address with cookies; the loader-only view is a valid settle (no text). */
+  private async settingsProfileGoto(path: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    // Not openAuthenticated: its boot check requires rendered text, which
+    // the loader-only view legitimately never produces.
+    await this.page.context().addCookies(cookies);
+    await this.page.goto(path, { waitUntil: "domcontentloaded" });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.settingsProfileSettle();
+  }
+
+  /** Settle the settings page: the shell title renders, or the loader-only view does. */
+  private async settingsProfileSettle(): Promise<void> {
+    // Valid tabs flash the loader while the user loads, so the loader only
+    // counts after the shell window passes; the unknown-tab loader, which
+    // never resolves, is still accepted well inside the budget.
+    await this.page
+      .waitForFunction(
+        (start) => {
+          const body = document.body.textContent ?? "";
+          if (body.includes("Profile settings")) return true;
+          return document.querySelector(".animate-pulse") !== null && Date.now() - start > 10_000;
+        },
+        Date.now(),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] settings page settled on neither the shell nor the loader.");
+      });
+  }
+
+  /** A toast carrying user-visible text is currently on screen. */
+  private async settingsProfileToastVisible(): Promise<boolean> {
+    return this.page
+      .waitForFunction(
+        () =>
+          [...document.querySelectorAll("div.absolute.right-3.bottom-3")].some(
+            (el) => (el as HTMLElement).innerText.trim() !== ""
+          ),
+        { timeout: 5_000 }
+      )
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  /** Vertical center of one exact-text element, or null when it renders none. */
+  private async settingsProfileTextY(text: string): Promise<number | null> {
+    // Case-insensitive: group headings source lowercase words ("Your
+    // profile") under a capitalize style, so exact-case never resolves.
+    const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const els = this.page.getByText(new RegExp(`^${escaped}$`, "i"));
+    if ((await els.count()) === 0) return null;
+    const box = await els.first().boundingBox();
+    if (!box) return null;
+    return box.y + box.height / 2;
+  }
+
+  async settingsProfileOpen(tabId: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.settingsProfileGoto(`/settings/profile/${tabId}`, cookies);
+  }
+
+  async settingsProfileShellVisible(): Promise<boolean> {
+    return (await this.page.getByText("Profile settings", { exact: true }).count()) > 0;
+  }
+
+  async settingsProfileLoaderOnly(): Promise<boolean> {
+    if (await this.settingsProfileShellVisible()) return false;
+    return (await this.page.locator(".animate-pulse").count()) > 0;
+  }
+
+  async settingsProfileGroupLabels(): Promise<string[]> {
+    const placed: Array<{ label: string; y: number }> = [];
+    for (const label of WebDriver.settingsProfileGroups) {
+      const y = await this.settingsProfileTextY(label);
+      if (y !== null) placed.push({ label, y });
+    }
+    placed.sort((a, b) => a.y - b.y);
+    return placed.map((entry) => entry.label);
+  }
+
+  async settingsProfileGroupTabs(group: string): Promise<string[]> {
+    const groupY = await this.settingsProfileTextY(group);
+    if (groupY === null) return [];
+    const labels = Object.values(WebDriver.settingsProfileTabLabels);
+    const placed: Array<{ label: string; y: number }> = [];
+    for (const label of labels) {
+      const btn = this.page.getByRole("button", { name: label, exact: true });
+      if ((await btn.count()) === 0) continue;
+      const box = await btn.first().boundingBox();
+      if (box) placed.push({ label, y: box.y + box.height / 2 });
+    }
+    // The owning group is the nearest heading above the tab button.
+    const headings: Array<{ label: string; y: number }> = [];
+    for (const heading of WebDriver.settingsProfileGroups) {
+      const y = await this.settingsProfileTextY(heading);
+      if (y !== null) headings.push({ label: heading, y });
+    }
+    return placed
+      .filter((tab) => {
+        let owner: string | null = null;
+        for (const heading of headings) {
+          if (heading.y < tab.y && (owner === null || heading.y > (headings.find((h) => h.label === owner)?.y ?? -1))) {
+            owner = heading.label;
+          }
+        }
+        return owner === group;
+      })
+      .sort((a, b) => a.y - b.y)
+      .map((entry) => entry.label);
+  }
+
+  async settingsProfileActiveTab(): Promise<string | null> {
+    // The active sidebar entry carries the selected tint; content buttons
+    // never do, so the tint plus a known tab label identifies it.
+    const labels = Object.values(WebDriver.settingsProfileTabLabels);
+    const tinted = this.page.locator("button.bg-layer-transparent-selected");
+    const total = await tinted.count();
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await tinted
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (labels.includes(text)) return text;
+    }
+    return null;
+  }
+
+  async settingsProfileBackLabel(): Promise<string | null> {
+    const back = this.page.getByRole("button", { name: "Back to home" });
+    if ((await back.count()) === 0) return null;
+    return (await back.first().getAttribute("aria-label")) ?? "Back to home";
+  }
+
+  async settingsProfileSidebarTitle(): Promise<string | null> {
+    const title = this.page.getByText("Profile settings", { exact: true });
+    if ((await title.count()) === 0) return null;
+    return (
+      (
+        (await title
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim() || null
+    );
+  }
+
+  async settingsProfileWorkspaceShortcuts(): Promise<string[]> {
+    const headingY = await this.settingsProfileTextY("Workspace");
+    if (headingY === null) return [];
+    const links = this.page.getByRole("link");
+    const total = await links.count();
+    const placed: Array<{ label: string; y: number }> = [];
+    for (let i = 0; i < total; i++) {
+      const box = await links
+        .nth(i)
+        .boundingBox()
+        .catch(() => null);
+      if (!box || box.y < headingY) continue;
+      const text = (
+        (await links
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") placed.push({ label: text, y: box.y });
+    }
+    placed.sort((a, b) => a.y - b.y);
+    return placed.map((entry) => entry.label);
+  }
+
+  async settingsProfileSelectTab(label: string): Promise<void> {
+    const before = this.page.url();
+    await this.page.getByRole("button", { name: label, exact: true }).first().click();
+    await this.page
+      .waitForFunction((prior) => window.location.href !== prior, before, { timeout: WebDriver.WAIT_MS })
+      .catch(() => {
+        throw new Error(`[parity] settings tab switch to ${label} never navigated.`);
+      });
+    await this.settingsProfileSettle();
+  }
+
+  async settingsProfileOpenPath(path: string, cookies: ParityBrowserCookie[]): Promise<string> {
+    await this.settingsProfileGoto(path, cookies);
+    const url = new URL(this.page.url());
+    return `${url.pathname}${url.search}`;
+  }
+
+  /** The general tab's form, scoping its inputs away from dialog duplicates. */
+  private settingsProfileGeneralForm(): Locator {
+    return this.page.locator("form");
+  }
+
+  private settingsProfileGeneralInput(field: SettingsProfileGeneralField): Locator {
+    return this.settingsProfileGeneralForm().locator(`#${field}`);
+  }
+
+  private static readonly settingsProfileGeneralHeadings: Record<SettingsProfileGeneralField, string> = {
+    first_name: "First name",
+    last_name: "Last name",
+    display_name: "Display name",
+    email: "Email",
+  };
+
+  async settingsProfileGeneralFieldValue(field: SettingsProfileGeneralField): Promise<string> {
+    return this.settingsProfileGeneralInput(field).inputValue();
+  }
+
+  async settingsProfileGeneralFillField(field: SettingsProfileGeneralField, value: string): Promise<void> {
+    await this.settingsProfileGeneralInput(field).fill(value);
+  }
+
+  async settingsProfileGeneralFieldError(field: SettingsProfileGeneralField): Promise<string | null> {
+    const container = this.settingsProfileGeneralForm()
+      .locator("h4", { hasText: WebDriver.settingsProfileGeneralHeadings[field] })
+      .locator("..");
+    const error = container.locator(":scope > span.text-11.text-danger-primary");
+    if ((await error.count()) === 0) return null;
+    return (
+      (
+        (await error
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim() || null
+    );
+  }
+
+  async settingsProfileGeneralEmailDisabled(): Promise<boolean> {
+    return this.settingsProfileGeneralInput("email").isDisabled();
+  }
+
+  async settingsProfileGeneralSave(): Promise<void> {
+    await this.settingsProfileGeneralForm()
+      .getByRole("button", { name: /Save changes|Saving/ })
+      .click();
+    // Success toasts; failed validation reports inline without submitting.
+    await this.page
+      .waitForFunction(
+        () =>
+          [...document.querySelectorAll("div.absolute.right-3.bottom-3")].some(
+            (el) => (el as HTMLElement).innerText.trim() !== ""
+          ) || document.querySelector("form span.text-11.text-danger-primary") !== null,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => undefined);
+  }
+
+  async settingsProfileGeneralSaveLabel(): Promise<string> {
+    return (
+      (await this.settingsProfileGeneralForm()
+        .getByRole("button", { name: /Save changes|Saving/ })
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async settingsProfileGeneralIdentity(): Promise<{ name: string; email: string }> {
+    const emailEl = this.page.locator("span.text-13.tracking-tight");
+    const email = ((await emailEl.innerText().catch(() => "")) ?? "").trim();
+    const header = emailEl.locator("xpath=..");
+    const name = (
+      (await header
+        .locator("span")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return { name, email };
+  }
+
+  /** The avatar control block (cover area), holding the dialog trigger. */
+  private settingsProfileAvatarBlock(): Locator {
+    return this.page.locator("div.relative.h-44");
+  }
+
+  /** The currently open dialog, if any (avatar, email and deactivation share ModalCore). */
+  private settingsProfileDialog(): Locator {
+    return this.page.getByRole("dialog");
+  }
+
+  async settingsProfileAvatarDialogOpen(): Promise<void> {
+    await this.settingsProfileAvatarBlock().getByRole("button").first().click();
+    await this.page.getByText("Upload Image", { exact: true }).waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async settingsProfileAvatarDialogVisible(): Promise<boolean> {
+    return this.page
+      .getByText("Upload Image", { exact: true })
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async settingsProfileAvatarPick(filePath: string): Promise<void> {
+    await this.settingsProfileDialog().locator('input[type="file"]').setInputFiles(filePath);
+  }
+
+  async settingsProfileAvatarUpload(filePath: string): Promise<void> {
+    await this.settingsProfileAvatarPick(filePath);
+    await this.settingsProfileDialog().getByRole("button", { name: "Upload & Save", exact: true }).click();
+    // A successful upload closes the dialog and the auto-submit toasts.
+    await this.page
+      .waitForFunction(() => !(document.body.textContent ?? "").includes("Upload Image"), {
+        timeout: WebDriver.WAIT_MS,
+      })
+      .catch(() => {
+        throw new Error("[parity] avatar upload never closed the dialog.");
+      });
+    await this.settingsProfileToastVisible();
+  }
+
+  async settingsProfileAvatarRemove(): Promise<void> {
+    await this.settingsProfileDialog().getByRole("button", { name: "Remove", exact: true }).click();
+    await this.page
+      .waitForFunction(() => !(document.body.textContent ?? "").includes("Upload Image"), {
+        timeout: WebDriver.WAIT_MS,
+      })
+      .catch(() => {
+        throw new Error("[parity] avatar removal never closed the dialog.");
+      });
+    await this.settingsProfileToastVisible();
+  }
+
+  async settingsProfileAvatarRemoveDisabled(): Promise<boolean> {
+    return this.settingsProfileDialog().getByRole("button", { name: "Remove", exact: true }).isDisabled();
+  }
+
+  async settingsProfileAvatarPhotoVisible(): Promise<boolean> {
+    return (await this.settingsProfileAvatarBlock().getByRole("button").first().locator("img").count()) > 0;
+  }
+
+  async settingsProfileAvatarCancel(): Promise<void> {
+    await this.settingsProfileDialog().getByRole("button", { name: "Cancel", exact: true }).click();
+    await this.page
+      .waitForFunction(() => !(document.body.textContent ?? "").includes("Upload Image"), {
+        timeout: WebDriver.WAIT_MS,
+      })
+      .catch(() => undefined);
+  }
+
+  async settingsProfileAvatarRejection(): Promise<string | null> {
+    const note = this.settingsProfileDialog().locator("p.text-danger-primary");
+    if ((await note.count()) === 0) return null;
+    return (
+      (
+        (await note
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim() || null
+    );
+  }
+
+  async settingsProfileCoverControlVisible(): Promise<boolean> {
+    return (await this.page.getByText("Change cover", { exact: true }).count()) > 0;
+  }
+
+  async settingsProfileChangeEmailVisible(): Promise<boolean> {
+    const entry = this.settingsProfileGeneralForm().getByRole("button", { name: "Change email", exact: true });
+    if ((await entry.count()) === 0) return false;
+    return entry
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async settingsProfileChangeEmailOpen(): Promise<void> {
+    await this.settingsProfileGeneralForm().getByRole("button", { name: "Change email", exact: true }).click();
+    await this.page.locator("h3", { hasText: "Change email" }).waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async settingsProfileEmailModalStep(): Promise<"email" | "code" | "closed"> {
+    if ((await this.page.locator("h3", { hasText: "Change email" }).count()) === 0) return "closed";
+    const code = this.settingsProfileDialog().getByPlaceholder("123456");
+    if (
+      (await code.count()) > 0 &&
+      (await code
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return "code";
+    return "email";
+  }
+
+  async settingsProfileEmailModalFillEmail(email: string): Promise<void> {
+    await this.settingsProfileDialog().getByPlaceholder("Enter your email").fill(email);
+  }
+
+  async settingsProfileEmailModalSubmit(): Promise<void> {
+    // Settle per submitted step: the address step moves to the code field,
+    // the code step closes the dialog on success; either can report inline.
+    const onCodeStep = await this.settingsProfileDialog()
+      .getByPlaceholder("123456")
+      .isVisible()
+      .catch(() => false);
+    await this.settingsProfileDialog().locator('button[type="submit"]').click();
+    await this.page
+      .waitForFunction(
+        (fromCode) => {
+          const dialog = document.querySelector('[role="dialog"]');
+          if (dialog === null) return true;
+          if (dialog.querySelector("span.text-danger-primary") !== null) return true;
+          if (!fromCode && dialog.querySelector('input[placeholder="123456"]') !== null) return true;
+          return false;
+        },
+        onCodeStep,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => undefined);
+  }
+
+  async settingsProfileEmailModalFillCode(code: string): Promise<void> {
+    await this.settingsProfileDialog().getByPlaceholder("123456").fill(code);
+  }
+
+  async settingsProfileEmailModalError(field: "email" | "code"): Promise<string | null> {
+    // The dialog reports at most one inline error, always on its visible
+    // step's field: address errors never survive onto the code step.
+    const step = await this.settingsProfileEmailModalStep();
+    if ((field === "email") !== (step === "email")) return null;
+    const error = this.settingsProfileDialog().locator("span.text-11.text-danger-primary");
+    if ((await error.count()) === 0) return null;
+    return (
+      (
+        (await error
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim() || null
+    );
+  }
+
+  async settingsProfileEmailModalHelper(): Promise<string | null> {
+    const helper = this.settingsProfileDialog().locator("span.text-success-primary");
+    if ((await helper.count()) === 0) return null;
+    return (
+      (
+        (await helper
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim() || null
+    );
+  }
+
+  async settingsProfileEmailModalEmailDisabled(): Promise<boolean> {
+    return this.settingsProfileDialog().getByPlaceholder("Enter your email").isDisabled();
+  }
+
+  async settingsProfileEmailModalClose(): Promise<void> {
+    await this.settingsProfileDialog().getByRole("button", { name: "Cancel", exact: true }).click();
+    await this.page
+      .waitForFunction(
+        () => !(document.body.textContent ?? "").includes("Enter a new email address to receive a verification link."),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => undefined);
+  }
+
+  async settingsProfileDeactivateVisible(): Promise<boolean> {
+    return (await this.page.getByText("Deactivate account", { exact: true }).count()) > 0;
+  }
+
+  async settingsProfileDeactivateDescription(): Promise<string | null> {
+    const note = this.page.getByText(/When deactivating an account/);
+    if ((await note.count()) === 0) return null;
+    return (
+      (
+        (await note
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim() || null
+    );
+  }
+
+  async settingsProfileDeactivateOpen(): Promise<void> {
+    await this.page.getByRole("button", { name: "Deactivate account", exact: true }).click();
+    await this.page.locator("h3", { hasText: "Deactivate your account" }).waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async settingsProfileDeactivateTitle(): Promise<string | null> {
+    const title = this.page.locator("h3", { hasText: "Deactivate your account" });
+    if ((await title.count()) === 0) return null;
+    return (
+      (
+        (await title
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim() || null
+    );
+  }
+
+  async settingsProfileDeactivateConfirm(): Promise<void> {
+    await this.settingsProfileDialog()
+      .getByRole("button", { name: /Confirm|Deactivating/ })
+      .click();
+    // Success signs out and leaves the settings page; failure toasts inline.
+    await this.page
+      .waitForFunction(
+        () =>
+          !window.location.pathname.startsWith("/settings") ||
+          [...document.querySelectorAll("div.absolute.right-3.bottom-3")].some(
+            (el) => (el as HTMLElement).innerText.trim() !== ""
+          ),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => undefined);
+  }
+
+  async settingsProfileDeactivateCancel(): Promise<void> {
+    await this.settingsProfileDialog().getByRole("button", { name: "Cancel", exact: true }).click();
+    await this.page
+      .waitForFunction(() => !(document.body.textContent ?? "").includes("Deactivate your account"), {
+        timeout: WebDriver.WAIT_MS,
+      })
+      .catch(() => undefined);
+  }
+
+  async settingsProfileDeactivateWorking(): Promise<boolean> {
+    const action = this.settingsProfileDialog().getByRole("button", { name: /Confirm|Deactivating/ });
+    if ((await action.count()) === 0) return false;
+    return (
+      (
+        (await action
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim() as string
+    ).includes("Deactivating");
+  }
+
+  /** The security tab's form, holding the three password fields. */
+  private settingsProfileSecurityForm(): Locator {
+    return this.page.locator("form");
+  }
+
+  private static readonly settingsProfileSecurityIds: Record<SettingsProfileSecurityField, string> = {
+    current: "old_password",
+    new: "new_password",
+    confirm: "confirm_password",
+  };
+
+  private static readonly settingsProfileSecurityHeadings: Record<SettingsProfileSecurityField, string> = {
+    current: "Current password",
+    new: "New password",
+    confirm: "Confirm password",
+  };
+
+  private settingsProfileSecurityInput(field: SettingsProfileSecurityField): Locator {
+    return this.settingsProfileSecurityForm().locator(`#${WebDriver.settingsProfileSecurityIds[field]}`);
+  }
+
+  /** One password field's container (heading, input row, indicator, notes). */
+  private settingsProfileSecurityContainer(field: SettingsProfileSecurityField): Locator {
+    return this.settingsProfileSecurityForm()
+      .locator("h4", { hasText: WebDriver.settingsProfileSecurityHeadings[field] })
+      .locator("..");
+  }
+
+  async settingsProfileSecurityFieldVisible(field: SettingsProfileSecurityField): Promise<boolean> {
+    const input = this.settingsProfileSecurityInput(field);
+    if ((await input.count()) === 0) return false;
+    return input
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async settingsProfileSecurityFill(field: SettingsProfileSecurityField, value: string): Promise<void> {
+    await this.settingsProfileSecurityInput(field).fill(value);
+  }
+
+  async settingsProfileSecurityFieldType(field: SettingsProfileSecurityField): Promise<string> {
+    return (await this.settingsProfileSecurityInput(field).getAttribute("type")) ?? "";
+  }
+
+  async settingsProfileSecurityToggleReveal(field: SettingsProfileSecurityField): Promise<void> {
+    // The eye glyph is the input row's direct svg child; the strength
+    // indicator lower in the container carries its own glyphs.
+    await this.settingsProfileSecurityContainer(field).locator(":scope > div.relative > svg").click();
+  }
+
+  async settingsProfileSecurityFieldError(field: SettingsProfileSecurityField): Promise<string | null> {
+    // Field errors render as small danger spans; the same-as-old note shares
+    // the style (matched by text) and the mismatch note renders larger.
+    const spans = this.settingsProfileSecurityContainer(field).locator(":scope > span.text-11.text-danger-primary");
+    const total = await spans.count();
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await spans
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text === "" || text === "New password must be different from old password") continue;
+      return text;
+    }
+    return null;
+  }
+
+  async settingsProfileSecurityMismatchVisible(): Promise<boolean> {
+    return (await this.settingsProfileSecurityForm().getByText("Passwords don't match").count()) > 0;
+  }
+
+  async settingsProfileSecuritySameAsOldVisible(): Promise<boolean> {
+    return (
+      (await this.settingsProfileSecurityForm().getByText("New password must be different from old password").count()) >
+      0
+    );
+  }
+
+  async settingsProfileSecurityStrengthVisible(): Promise<boolean> {
+    return (await this.settingsProfileSecurityForm().getByText("Min 8 characters", { exact: true }).count()) > 0;
+  }
+
+  async settingsProfileSecuritySubmitDisabled(): Promise<boolean> {
+    return this.settingsProfileSecurityForm().locator('button[type="submit"]').isDisabled();
+  }
+
+  async settingsProfileSecuritySubmit(): Promise<void> {
+    await this.settingsProfileSecurityForm().locator('button[type="submit"]').click();
+    await this.settingsProfileToastVisible();
+  }
+
+  async settingsProfileSecurityFieldValue(field: SettingsProfileSecurityField): Promise<string> {
+    return this.settingsProfileSecurityInput(field).inputValue();
+  }
+
+  async settingsProfileSecurityBlur(field: SettingsProfileSecurityField): Promise<void> {
+    void field;
+    // The tab heading sits outside the form; activating it drops field focus.
+    await this.page.getByText("Change password", { exact: true }).first().click();
   }
 }

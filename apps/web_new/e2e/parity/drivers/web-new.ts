@@ -145,6 +145,8 @@ import type {
   ExportsSettingsHistoryRow,
   AnalyticsExportTable,
   LocalFileDownload,
+  SettingsProfileGeneralField,
+  SettingsProfileSecurityField,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -13289,5 +13291,183 @@ export class WebNewDriver implements ParityDriver {
   }
   async settingsProfileMemberControlCount(): Promise<number> {
     return todo("settingsProfileMemberControlCount");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Profile-settings shell, general/account tabs and security tab
+  // (NEWFRONT-426, rows PROF-009..015, PROF-026). Stubs until the area lands
+  // in apps/web_new. Appended; existing entries above are untouched per the
+  // shared contract.
+  // ---------------------------------------------------------------------------
+  async settingsProfileOpen(_tabId: string, _cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("settingsProfileOpen");
+  }
+  async settingsProfileShellVisible(): Promise<boolean> {
+    return todo("settingsProfileShellVisible");
+  }
+  async settingsProfileLoaderOnly(): Promise<boolean> {
+    return todo("settingsProfileLoaderOnly");
+  }
+  async settingsProfileGroupLabels(): Promise<string[]> {
+    return todo("settingsProfileGroupLabels");
+  }
+  async settingsProfileGroupTabs(_group: string): Promise<string[]> {
+    return todo("settingsProfileGroupTabs");
+  }
+  async settingsProfileActiveTab(): Promise<string | null> {
+    return todo("settingsProfileActiveTab");
+  }
+  async settingsProfileBackLabel(): Promise<string | null> {
+    return todo("settingsProfileBackLabel");
+  }
+  async settingsProfileSidebarTitle(): Promise<string | null> {
+    return todo("settingsProfileSidebarTitle");
+  }
+  async settingsProfileWorkspaceShortcuts(): Promise<string[]> {
+    return todo("settingsProfileWorkspaceShortcuts");
+  }
+  async settingsProfileSelectTab(_label: string): Promise<void> {
+    return todo("settingsProfileSelectTab");
+  }
+  async settingsProfileOpenPath(_path: string, _cookies: ParityBrowserCookie[]): Promise<string> {
+    return todo("settingsProfileOpenPath");
+  }
+  async settingsProfileGeneralFieldValue(_field: SettingsProfileGeneralField): Promise<string> {
+    return todo("settingsProfileGeneralFieldValue");
+  }
+  async settingsProfileGeneralFillField(_field: SettingsProfileGeneralField, _value: string): Promise<void> {
+    return todo("settingsProfileGeneralFillField");
+  }
+  async settingsProfileGeneralFieldError(_field: SettingsProfileGeneralField): Promise<string | null> {
+    return todo("settingsProfileGeneralFieldError");
+  }
+  async settingsProfileGeneralEmailDisabled(): Promise<boolean> {
+    return todo("settingsProfileGeneralEmailDisabled");
+  }
+  async settingsProfileGeneralSave(): Promise<void> {
+    return todo("settingsProfileGeneralSave");
+  }
+  async settingsProfileGeneralSaveLabel(): Promise<string> {
+    return todo("settingsProfileGeneralSaveLabel");
+  }
+  async settingsProfileGeneralIdentity(): Promise<{ name: string; email: string }> {
+    return todo("settingsProfileGeneralIdentity");
+  }
+  async settingsProfileAvatarDialogOpen(): Promise<void> {
+    return todo("settingsProfileAvatarDialogOpen");
+  }
+  async settingsProfileAvatarDialogVisible(): Promise<boolean> {
+    return todo("settingsProfileAvatarDialogVisible");
+  }
+  async settingsProfileAvatarPick(_filePath: string): Promise<void> {
+    return todo("settingsProfileAvatarPick");
+  }
+  async settingsProfileAvatarUpload(_filePath: string): Promise<void> {
+    return todo("settingsProfileAvatarUpload");
+  }
+  async settingsProfileAvatarRemove(): Promise<void> {
+    return todo("settingsProfileAvatarRemove");
+  }
+  async settingsProfileAvatarRemoveDisabled(): Promise<boolean> {
+    return todo("settingsProfileAvatarRemoveDisabled");
+  }
+  async settingsProfileAvatarPhotoVisible(): Promise<boolean> {
+    return todo("settingsProfileAvatarPhotoVisible");
+  }
+  async settingsProfileAvatarCancel(): Promise<void> {
+    return todo("settingsProfileAvatarCancel");
+  }
+  async settingsProfileAvatarRejection(): Promise<string | null> {
+    return todo("settingsProfileAvatarRejection");
+  }
+  async settingsProfileCoverControlVisible(): Promise<boolean> {
+    return todo("settingsProfileCoverControlVisible");
+  }
+  async settingsProfileChangeEmailVisible(): Promise<boolean> {
+    return todo("settingsProfileChangeEmailVisible");
+  }
+  async settingsProfileChangeEmailOpen(): Promise<void> {
+    return todo("settingsProfileChangeEmailOpen");
+  }
+  async settingsProfileEmailModalStep(): Promise<"email" | "code" | "closed"> {
+    return todo("settingsProfileEmailModalStep");
+  }
+  async settingsProfileEmailModalFillEmail(_email: string): Promise<void> {
+    return todo("settingsProfileEmailModalFillEmail");
+  }
+  async settingsProfileEmailModalSubmit(): Promise<void> {
+    return todo("settingsProfileEmailModalSubmit");
+  }
+  async settingsProfileEmailModalFillCode(_code: string): Promise<void> {
+    return todo("settingsProfileEmailModalFillCode");
+  }
+  async settingsProfileEmailModalError(_field: "email" | "code"): Promise<string | null> {
+    return todo("settingsProfileEmailModalError");
+  }
+  async settingsProfileEmailModalHelper(): Promise<string | null> {
+    return todo("settingsProfileEmailModalHelper");
+  }
+  async settingsProfileEmailModalEmailDisabled(): Promise<boolean> {
+    return todo("settingsProfileEmailModalEmailDisabled");
+  }
+  async settingsProfileEmailModalClose(): Promise<void> {
+    return todo("settingsProfileEmailModalClose");
+  }
+  async settingsProfileDeactivateVisible(): Promise<boolean> {
+    return todo("settingsProfileDeactivateVisible");
+  }
+  async settingsProfileDeactivateDescription(): Promise<string | null> {
+    return todo("settingsProfileDeactivateDescription");
+  }
+  async settingsProfileDeactivateOpen(): Promise<void> {
+    return todo("settingsProfileDeactivateOpen");
+  }
+  async settingsProfileDeactivateTitle(): Promise<string | null> {
+    return todo("settingsProfileDeactivateTitle");
+  }
+  async settingsProfileDeactivateConfirm(): Promise<void> {
+    return todo("settingsProfileDeactivateConfirm");
+  }
+  async settingsProfileDeactivateCancel(): Promise<void> {
+    return todo("settingsProfileDeactivateCancel");
+  }
+  async settingsProfileDeactivateWorking(): Promise<boolean> {
+    return todo("settingsProfileDeactivateWorking");
+  }
+  async settingsProfileSecurityFieldVisible(_field: SettingsProfileSecurityField): Promise<boolean> {
+    return todo("settingsProfileSecurityFieldVisible");
+  }
+  async settingsProfileSecurityFill(_field: SettingsProfileSecurityField, _value: string): Promise<void> {
+    return todo("settingsProfileSecurityFill");
+  }
+  async settingsProfileSecurityFieldType(_field: SettingsProfileSecurityField): Promise<string> {
+    return todo("settingsProfileSecurityFieldType");
+  }
+  async settingsProfileSecurityToggleReveal(_field: SettingsProfileSecurityField): Promise<void> {
+    return todo("settingsProfileSecurityToggleReveal");
+  }
+  async settingsProfileSecurityFieldError(_field: SettingsProfileSecurityField): Promise<string | null> {
+    return todo("settingsProfileSecurityFieldError");
+  }
+  async settingsProfileSecurityMismatchVisible(): Promise<boolean> {
+    return todo("settingsProfileSecurityMismatchVisible");
+  }
+  async settingsProfileSecuritySameAsOldVisible(): Promise<boolean> {
+    return todo("settingsProfileSecuritySameAsOldVisible");
+  }
+  async settingsProfileSecurityStrengthVisible(): Promise<boolean> {
+    return todo("settingsProfileSecurityStrengthVisible");
+  }
+  async settingsProfileSecuritySubmitDisabled(): Promise<boolean> {
+    return todo("settingsProfileSecuritySubmitDisabled");
+  }
+  async settingsProfileSecuritySubmit(): Promise<void> {
+    return todo("settingsProfileSecuritySubmit");
+  }
+  async settingsProfileSecurityFieldValue(_field: SettingsProfileSecurityField): Promise<string> {
+    return todo("settingsProfileSecurityFieldValue");
+  }
+  async settingsProfileSecurityBlur(_field: SettingsProfileSecurityField): Promise<void> {
+    return todo("settingsProfileSecurityBlur");
   }
 }
