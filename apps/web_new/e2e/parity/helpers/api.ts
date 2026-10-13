@@ -20193,7 +20193,17 @@ export function cloudBrowserCookies(sessionCookie: string): BrowserCookie[] {
   ];
   const refresh = jar.get("pidash_refresh");
   if (refresh !== undefined) {
-    cookies.push({ name: "pidash_refresh", value: refresh, domain, path: "/", httpOnly: true, sameSite: "Lax" });
+    // The server scopes the refresh cookie to the refresh endpoint and
+    // expires that same path on sign-out; a path-/ twin would survive the
+    // sign-out and resurrect the session (NEWFRONT-438).
+    cookies.push({
+      name: "pidash_refresh",
+      value: refresh,
+      domain,
+      path: "/api/auth/refresh/",
+      httpOnly: true,
+      sameSite: "Lax",
+    });
   }
   return cookies;
 }
@@ -20396,4 +20406,109 @@ export async function analyticsProjectStateColors(
     }
     return { id: record.id, name: record.name, color: record.color };
   });
+}
+
+// --- Cloud login/SSO/session helpers (NEWFRONT-438, CLOUD-011..020).
+// --- Appended; existing helpers above are untouched per the shared harness
+// --- contract. Real airepublic SSO is unavailable on runners, so these prove
+// --- the handoff up to the provider boundary (redirect target + parameters)
+// --- and the session endpoints' own contracts.
+
+/** A redirect answer without following it: status plus the Location header. */
+export interface CloudRedirectAnswer {
+  status: number;
+  location: string;
+}
+
+/**
+ * Ask the cloud sign-in endpoint where it would send the browser, without
+ * following the redirect. `params` are the query pairs the app would send
+ * (return_to, return_origin, desktop).
+ */
+export async function cloudSignInRedirect(
+  params: Record<string, string>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudRedirectAnswer> {
+  const query = new URLSearchParams(params).toString();
+  const res = await fetchTolerant(`${apiBase}/api/auth/sign-in/?${query}`, { redirect: "manual" });
+  return { status: res.status, location: res.headers.get("location") ?? "" };
+}
+
+/**
+ * Ask the desktop exchange endpoint where it would send the webview,
+ * without following the redirect. Serves the negative shapes (missing or
+ * unknown code/state); the positive exchange needs the real provider.
+ */
+export async function cloudDesktopExchangeStatus(
+  params: Record<string, string>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudRedirectAnswer> {
+  const query = new URLSearchParams(params).toString();
+  const res = await fetchTolerant(`${apiBase}/api/auth/desktop-exchange/?${query}`, { redirect: "manual" });
+  return { status: res.status, location: res.headers.get("location") ?? "" };
+}
+
+/** A refresh answer: status plus the raw Set-Cookie lines. */
+export interface CloudRefreshAnswer {
+  status: number;
+  setCookies: string[];
+}
+
+/**
+ * Rotate a cloud session through the refresh endpoint with the given
+ * cookie header. A live refresh cookie answers 200 and re-sets the pair;
+ * anything else answers 401.
+ */
+export async function cloudRefreshStatus(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudRefreshAnswer> {
+  const res = await fetchTolerant(`${apiBase}/api/auth/refresh/`, {
+    method: "POST",
+    headers: { cookie: sessionCookie },
+  });
+  return { status: res.status, setCookies: setCookieHeaders(res) };
+}
+
+/** A sign-out answer: status plus the raw Set-Cookie lines and payload. */
+export interface CloudSignOutAnswer {
+  status: number;
+  setCookies: string[];
+  payload: Record<string, unknown>;
+}
+
+/**
+ * Sign a cloud session out the way the app does: fetch a CSRF token (which
+ * also sets the csrf cookie), then post with both cookie and header. The
+ * session cookies come back expired; the payload names the upstream
+ * provider logout URL the web app deliberately never visits.
+ */
+export async function cloudSignOutServer(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudSignOutAnswer> {
+  const csrfRes = await fetchTolerant(`${apiBase}/api/auth/get-csrf-token/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!csrfRes.ok) throw new Error(`[parity] cloud csrf read failed with HTTP ${csrfRes.status}.`);
+  const csrfPayload = (await csrfRes.json()) as { csrf_token?: unknown };
+  if (typeof csrfPayload.csrf_token !== "string" || csrfPayload.csrf_token === "") {
+    throw new Error("[parity] cloud csrf read carried no token.");
+  }
+  const jar = cookieJar(
+    sessionCookie.split(";").map((pair) => pair.trim()),
+    setCookieHeaders(csrfRes)
+  );
+  const merged = [...jar.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
+  const res = await fetchTolerant(`${apiBase}/api/auth/sign-out/`, {
+    method: "POST",
+    headers: {
+      cookie: merged,
+      "content-type": "application/json",
+      "X-CSRFTOKEN": csrfPayload.csrf_token,
+    },
+    body: "{}",
+  });
+  const payload = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  return { status: res.status, setCookies: setCookieHeaders(res), payload };
 }

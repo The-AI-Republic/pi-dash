@@ -198,8 +198,10 @@ import type {
   CloudDocsFacts,
   CloudDownloadCardFacts,
   CloudHomeSectionFacts,
+  CloudLoginCardFacts,
   CloudNavLinkFacts,
   CloudPricingTierFacts,
+  CloudProviderButtonFacts,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -14913,6 +14915,85 @@ export class WebNewDriver implements ParityDriver {
 
   async cloudUpgradePopupUrl(): Promise<string> {
     return todo("cloudUpgradePopupUrl");
+  }
+
+  // --- Cloud login, SSO + session (NEWFRONT-438, CLOUD-011..020).
+  // --- Stubs: the cloud login area has not landed in apps/web_new yet.
+
+  async cloudLoginCardFacts(): Promise<CloudLoginCardFacts> {
+    return todo("cloudLoginCardFacts");
+  }
+
+  async cloudArmSignInCapture(): Promise<void> {
+    return todo("cloudArmSignInCapture");
+  }
+
+  async cloudSignInRequests(): Promise<string[]> {
+    return todo("cloudSignInRequests");
+  }
+
+  async cloudAwaitSignInRequest(_previousCount: number): Promise<string> {
+    return todo("cloudAwaitSignInRequest");
+  }
+
+  async cloudClickLoginContinue(): Promise<void> {
+    return todo("cloudClickLoginContinue");
+  }
+
+  async cloudExplicitLogoutMarker(): Promise<boolean> {
+    return todo("cloudExplicitLogoutMarker");
+  }
+
+  async cloudSuppressSilentSso(): Promise<void> {
+    return todo("cloudSuppressSilentSso");
+  }
+
+  async cloudArmRefreshCounter(): Promise<void> {
+    return todo("cloudArmRefreshCounter");
+  }
+
+  async cloudRefreshHits(): Promise<number> {
+    return todo("cloudRefreshHits");
+  }
+
+  async cloudSignOutViaAccountMenu(): Promise<void> {
+    return todo("cloudSignOutViaAccountMenu");
+  }
+
+  async cloudFailRefresh(): Promise<void> {
+    return todo("cloudFailRefresh");
+  }
+
+  async cloudArmConsoleErrors(): Promise<void> {
+    return todo("cloudArmConsoleErrors");
+  }
+
+  async cloudConsoleErrors(): Promise<string[]> {
+    return todo("cloudConsoleErrors");
+  }
+
+  async cloudStubTauri(): Promise<void> {
+    return todo("cloudStubTauri");
+  }
+
+  async cloudProfilePasswordFieldCount(): Promise<number> {
+    return todo("cloudProfilePasswordFieldCount");
+  }
+
+  async cloudExpireAccessCookie(): Promise<void> {
+    return todo("cloudExpireAccessCookie");
+  }
+
+  async cloudCookieNames(): Promise<string[]> {
+    return todo("cloudCookieNames");
+  }
+
+  async cloudProviderButtonFacts(): Promise<CloudProviderButtonFacts> {
+    return todo("cloudProviderButtonFacts");
+  }
+
+  async cloudClickProviderButton(): Promise<void> {
+    return todo("cloudClickProviderButton");
   }
 
   // --- Page-export dialog oracle reads (NEWFRONT-383, EXP-016..021 + 023/024).

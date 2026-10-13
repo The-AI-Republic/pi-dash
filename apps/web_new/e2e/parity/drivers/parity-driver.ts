@@ -8536,6 +8536,50 @@ export interface SpaceBoardStability {
   cloudConfirmMessages(): Promise<string[]>;
   /** Wait for the upgrade popup the last accept opened; resolves with its URL and closes it. */
   cloudUpgradePopupUrl(): Promise<string>;
+
+  // --- Cloud login, SSO + session (NEWFRONT-438, CLOUD-011..020).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract. Reads are structural (targets, counts, markers) so the
+  // --- scenarios prove the handoff without quoting the card's copy.
+
+  /** Structural facts of the cloud sign-in card on the current page. */
+  cloudLoginCardFacts(): Promise<CloudLoginCardFacts>;
+  /** Intercept sign-in handoffs: record request URLs, answer a stub page. */
+  cloudArmSignInCapture(): Promise<void>;
+  /** Sign-in request URLs seen since the arm, in arrival order. */
+  cloudSignInRequests(): Promise<string[]>;
+  /** Wait for capture entry `previousCount + 1`; resolves with its URL. */
+  cloudAwaitSignInRequest(previousCount: number): Promise<string>;
+  /** Activate the login card's continue action. */
+  cloudClickLoginContinue(): Promise<void>;
+  /** Whether the explicit-logout marker is recorded for this tab. */
+  cloudExplicitLogoutMarker(): Promise<boolean>;
+  /** Record the explicit-logout marker before the next page load (fixture). */
+  cloudSuppressSilentSso(): Promise<void>;
+  /** Count refresh-endpoint posts from now on. */
+  cloudArmRefreshCounter(): Promise<void>;
+  /** Refresh-endpoint posts seen since the arm. */
+  cloudRefreshHits(): Promise<number>;
+  /** Sign out through the sidebar account menu; resolves on the sign-in card. */
+  cloudSignOutViaAccountMenu(): Promise<void>;
+  /** Fail the refresh endpoint at the network level from now on. */
+  cloudFailRefresh(): Promise<void>;
+  /** Record console errors from now on. */
+  cloudArmConsoleErrors(): Promise<void>;
+  /** Console error texts seen since the arm, in arrival order. */
+  cloudConsoleErrors(): Promise<string[]>;
+  /** Present a desktop shell global that rejects browser opens (fixture). */
+  cloudStubTauri(): Promise<void>;
+  /** Password inputs on the current page (onboarding profile step). */
+  cloudProfilePasswordFieldCount(): Promise<number>;
+  /** Drop the access cookie while keeping the refresh cookie (fixture). */
+  cloudExpireAccessCookie(): Promise<void>;
+  /** Cookie names the browser jar currently holds. */
+  cloudCookieNames(): Promise<string[]>;
+  /** Provider button facts on a generic auth card. */
+  cloudProviderButtonFacts(): Promise<CloudProviderButtonFacts>;
+  /** Activate the generic card's provider button. */
+  cloudClickProviderButton(): Promise<void>;
 }
 
 /** One marketing header/footer link (NEWFRONT-437, CLOUD-004). */
@@ -8622,6 +8666,36 @@ export interface CloudPricingTierFacts {
   ctaExternal: boolean;
   /** Feature bullets. */
   features: number;
+}
+
+/** Cloud sign-in card structure (NEWFRONT-438, CLOUD-011). */
+export interface CloudLoginCardFacts {
+  /** Card heading as rendered. */
+  heading: string;
+  /** Account-type line as rendered. */
+  accountLine: string;
+  /** Continue actions the card offers (exactly one on the oracle). */
+  continueActions: number;
+  /** Static destination of the continue action. */
+  continueHref: string;
+  /** Terms link target, or null when absent. */
+  termsHref: string | null;
+  /** Privacy link target, or null when absent. */
+  privacyHref: string | null;
+  /** Marketing-home link target, or null when absent. */
+  homeHref: string | null;
+  /** Resume-failure alert text, or null when no alert renders. */
+  alertText: string | null;
+}
+
+/** Provider button on a generic auth card (NEWFRONT-438, CLOUD-017). */
+export interface CloudProviderButtonFacts {
+  /** Whether the provider button renders. */
+  visible: boolean;
+  /** Provider button label as rendered. */
+  label: string;
+  /** Whether the standard continue action renders alongside it. */
+  standardContinueVisible: boolean;
 }
 
 /** Identity facts of one workspace-member roster row (NEWFRONT-411, WSET-011). */
