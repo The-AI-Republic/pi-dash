@@ -14459,4 +14459,34 @@ export class WebNewDriver implements ParityDriver {
   async spacePeekSkeletonsVisible(): Promise<boolean> {
     return todo("spacePeekSkeletonsVisible");
   }
+  async deskShellNativeHttpPresent(): Promise<boolean> {
+    return todo("deskShellNativeHttpPresent");
+  }
+  async deskShellBeginTrafficWatch(): Promise<void> {
+    return todo("deskShellBeginTrafficWatch");
+  }
+  async deskShellTrafficUrls(): Promise<string[]> {
+    return todo("deskShellTrafficUrls");
+  }
+  async deskShellEndTrafficWatch(): Promise<void> {
+    return todo("deskShellEndTrafficWatch");
+  }
+  async deskShellAbortSemantics(): Promise<{ aborted: string; timedOut: string; unroutable: string }> {
+    return todo("deskShellAbortSemantics");
+  }
+  async deskShellZoomMenuVisible(): Promise<boolean> {
+    return todo("deskShellZoomMenuVisible");
+  }
+  async deskShellDeviceAuthHeading(): Promise<string | null> {
+    return todo("deskShellDeviceAuthHeading");
+  }
+  async deskShellDeviceApproveEnabled(): Promise<boolean> {
+    return todo("deskShellDeviceApproveEnabled");
+  }
+  async deskShellDeviceSubmitCode(_code: string): Promise<void> {
+    return todo("deskShellDeviceSubmitCode");
+  }
+  async deskShellCloseReopenPath(): Promise<string> {
+    return todo("deskShellCloseReopenPath");
+  }
 }

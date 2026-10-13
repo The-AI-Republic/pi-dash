@@ -19517,3 +19517,142 @@ export async function spaceDropMagicCode(email: string): Promise<void> {
     timeout: 60_000,
   });
 }
+
+// --- Desktop CLI device-grant endpoints (NEWFRONT-210, DESK-021). Appended;
+// --- existing helpers above are untouched per the shared harness contract.
+// --- The desktop CLI setup automates both halves of the web /auth/device/
+// --- page (overlay pidash-cli.ts); the oracle drives the human-typed page
+// --- plus these endpoints directly.
+
+/** Device/user code pair plus the RFC 8628 polling facts. */
+export interface ServerDeskShellDeviceGrant {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  expiresIn: number;
+  interval: number;
+}
+
+/** Anonymous start of a device grant; resolves with the code pair. */
+export async function serverDeskShellDeviceStart(
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerDeskShellDeviceGrant> {
+  const res = await fetchTolerant(`${apiBase}/api/v1/auth/device/start/`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) throw new Error(`[parity] device start failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as {
+    device_code?: unknown;
+    user_code?: unknown;
+    verification_uri?: unknown;
+    expires_in?: unknown;
+    interval?: unknown;
+  };
+  if (
+    typeof payload.device_code !== "string" ||
+    typeof payload.user_code !== "string" ||
+    typeof payload.verification_uri !== "string" ||
+    typeof payload.expires_in !== "number" ||
+    typeof payload.interval !== "number"
+  ) {
+    throw new Error("[parity] device start response carried no code pair.");
+  }
+  return {
+    deviceCode: payload.device_code,
+    userCode: payload.user_code,
+    verificationUri: payload.verification_uri,
+    expiresIn: payload.expires_in,
+    interval: payload.interval,
+  };
+}
+
+/** Session-authenticated approval of a pending grant by its user code. */
+export async function serverDeskShellDeviceApprove(
+  userCode: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ ok: boolean; userEmail: string; workspaceSlug: string | null }> {
+  const res = await authedApi(
+    "/v1/auth/device/approve/",
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ user_code: userCode }),
+    },
+    apiBase
+  );
+  if (!res.ok) throw new Error(`[parity] device approve failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { ok?: unknown; user_email?: unknown; workspace_slug?: unknown };
+  if (payload.ok !== true || typeof payload.user_email !== "string") {
+    throw new Error("[parity] device approve response carried no approval.");
+  }
+  return {
+    ok: true,
+    userEmail: payload.user_email,
+    workspaceSlug: typeof payload.workspace_slug === "string" ? payload.workspace_slug : null,
+  };
+}
+
+/** Raw status of an approval attempt; null session sends no cookie. */
+export async function serverDeskShellDeviceApproveStatus(
+  userCode: string,
+  sessionCookie: string | null,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (sessionCookie !== null) headers["cookie"] = sessionCookie;
+  const res = await fetchTolerant(`${apiBase}/api/v1/auth/device/approve/`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ user_code: userCode }),
+  });
+  return res.status;
+}
+
+/** Anonymous exchange of an approved device code for a CLI token. */
+export async function serverDeskShellDeviceToken(
+  deviceCode: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ accessToken: string; tokenType: string; userEmail: string | null; workspaceSlug: string | null }> {
+  const res = await fetchTolerant(`${apiBase}/api/v1/auth/device/token/`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ device_code: deviceCode }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`[parity] device token failed with HTTP ${res.status}: ${detail.slice(0, 160)}.`);
+  }
+  const payload = (await res.json()) as {
+    access_token?: unknown;
+    token_type?: unknown;
+    user_email?: unknown;
+    workspace_slug?: unknown;
+  };
+  if (typeof payload.access_token !== "string" || payload.access_token === "") {
+    throw new Error("[parity] device token response carried no token.");
+  }
+  return {
+    accessToken: payload.access_token,
+    tokenType: typeof payload.token_type === "string" ? payload.token_type : "",
+    userEmail: typeof payload.user_email === "string" ? payload.user_email : null,
+    workspaceSlug: typeof payload.workspace_slug === "string" ? payload.workspace_slug : null,
+  };
+}
+
+/** Raw status plus error code of a token poll (pending grants answer 400). */
+export async function serverDeskShellDeviceTokenError(
+  deviceCode: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; error: string }> {
+  const res = await fetchTolerant(`${apiBase}/api/v1/auth/device/token/`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ device_code: deviceCode }),
+  });
+  const payload = (await res.json()) as { error?: unknown };
+  return { status: res.status, error: typeof payload.error === "string" ? payload.error : "" };
+}
