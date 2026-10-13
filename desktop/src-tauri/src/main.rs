@@ -4,6 +4,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
 mod account_settings;
 mod chat;
 mod chat_history;
@@ -486,6 +487,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             desktop_clear_web_data,
             updates::desktop_pending_update,
             updates::desktop_install_update,
+            about::desktop_about,
             managed_runner::managed_doctor,
             // Direct local chat history: stored on this machine only, per
             // account, never relayed to or stored by the Pi Dash server.
