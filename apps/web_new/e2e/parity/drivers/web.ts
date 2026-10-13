@@ -51143,4 +51143,299 @@ export class WebDriver implements ParityDriver {
   async spacePeekSkeletonsVisible(): Promise<boolean> {
     return this.isShown(this.spacePeekDialog().getByRole("status"));
   }
+
+  // --- Spaces auth (NEWFRONT-452, SPC-058..064). ---
+  // Selectors were read off the running old space app. The landing card
+  // stacks banner, header, provider options, one native form and the
+  // consent line inside a single column; the banner and the visibility
+  // toggles are unlabelled clickable nodes (no alert role, no button
+  // name), so they are located structurally from the card's form instead
+  // of by role. Steps are told apart by field placeholder, checking the
+  // password/code markers first: those steps keep a disabled email field
+  // with the same placeholder as the email step.
+
+  /** The auth card column: the direct parent of the card's single form. */
+  private spaceAuthCard(): Locator {
+    return this.page.locator("form").first().locator("xpath=..");
+  }
+
+  /** The dismissible banner: the card column's svg-bearing child div. */
+  private spaceAuthBannerNode(): Locator {
+    return this.spaceAuthCard().locator("xpath=./div[.//*[name()='svg']]");
+  }
+
+  /** The mode header: the card column's child div with direct span children. */
+  private spaceAuthHeaderNode(): Locator {
+    return this.spaceAuthCard().locator("xpath=./div[./span]");
+  }
+
+  async spaceAuthOpenLanding(params?: { email?: string; errorCode?: string; nextPath?: string }): Promise<void> {
+    const query = new URLSearchParams();
+    if (params?.email !== undefined) query.set("email", params.email);
+    if (params?.errorCode !== undefined) query.set("error_code", params.errorCode);
+    if (params?.nextPath !== undefined) query.set("next_path", params.nextPath);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    await this.page.goto(`/${suffix}`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+    await this.awaitAppBoot(`/${suffix}`);
+  }
+
+  async spaceAuthStep(): Promise<"email" | "password" | "code" | "signed-in" | "unknown"> {
+    const page = this.page;
+    if ((await page.getByPlaceholder("Enter password").count()) > 0) return "password";
+    if ((await page.getByPlaceholder("123456").count()) > 0) return "code";
+    if ((await page.getByPlaceholder("name@company.com").count()) > 0) return "email";
+    const guidance = page.getByRole("heading", { name: "Nice! Just one more step." }).first();
+    if (await guidance.isVisible().catch(() => false)) return "signed-in";
+    return "unknown";
+  }
+
+  async spaceAuthMode(): Promise<"sign-in" | "sign-up" | null> {
+    const { heading } = await this.spaceAuthHeader();
+    if (heading === "Sign in to upvote or comment") return "sign-in";
+    if (heading === "View, comment, and do more") return "sign-up";
+    return null;
+  }
+
+  async spaceAuthFillEmail(email: string): Promise<void> {
+    await this.page.getByPlaceholder("name@company.com").first().fill(email);
+  }
+
+  async spaceAuthSubmitEmail(email: string): Promise<void> {
+    const page = this.page;
+    const emailField = page.getByPlaceholder("name@company.com").first();
+    await emailField.fill(email);
+    const emailForm = page.locator("form", { has: emailField });
+    // The email check round-trips to the server, then the card shows the
+    // next step (or, with no method enabled, a banner or nothing at all),
+    // so the submit resolves on the answered check and the scenario polls
+    // for whichever end state it proves.
+    await Promise.all([
+      page.waitForResponse(/\/auth\/spaces\/email-check\//, { timeout: WebDriver.WAIT_MS }),
+      this.submitOf(emailForm).click(),
+    ]);
+  }
+
+  async spaceAuthBlurEmail(): Promise<void> {
+    // Tab moves focus off the autofocused field onto the submit, which is
+    // what reveals the inline validation message for a bad address.
+    await this.page.getByPlaceholder("name@company.com").first().press("Tab");
+  }
+
+  async spaceAuthEmailError(): Promise<string | null> {
+    const error = this.page.getByText("Email is invalid").first();
+    if ((await error.count()) === 0) return null;
+    if (!(await error.isVisible().catch(() => false))) return null;
+    return (await error.innerText()).trim();
+  }
+
+  async spaceAuthEmailSubmitEnabled(): Promise<boolean> {
+    const field = this.page.getByPlaceholder("name@company.com").first();
+    const form = this.page.locator("form", { has: field });
+    return this.submitOf(form).isEnabled();
+  }
+
+  async spaceAuthBanner(): Promise<string | null> {
+    const banner = this.spaceAuthBannerNode().first();
+    if ((await banner.count()) === 0) return null;
+    if (!(await banner.isVisible().catch(() => false))) return null;
+    const text = (await banner.innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async spaceAuthDismissBanner(): Promise<void> {
+    // The dismiss control is an unlabelled clickable node: the banner's
+    // last direct child div.
+    await this.spaceAuthBannerNode().first().locator("xpath=./div[last()]").click();
+  }
+
+  async spaceAuthClearEmail(): Promise<void> {
+    // The locked-email clear control is an unlabelled clickable icon next
+    // to the disabled email field on the password/code steps.
+    const field =
+      (await this.page.getByPlaceholder("Enter password").count()) > 0
+        ? this.page.getByPlaceholder("Enter password")
+        : this.page.getByPlaceholder("123456");
+    const form = this.page.locator("form", { has: field });
+    const lockedEmail = form.getByPlaceholder("name@company.com");
+    await lockedEmail.locator("xpath=following-sibling::*").first().click();
+    await this.page.getByPlaceholder("name@company.com").first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async spaceAuthFillPassword(password: string, confirmPassword?: string): Promise<void> {
+    const page = this.page;
+    await page.getByPlaceholder("Enter password").fill(password);
+    if (confirmPassword !== undefined) {
+      await page.getByPlaceholder("Confirm password").fill(confirmPassword);
+    }
+  }
+
+  async spaceAuthSubmitPassword(password: string, confirmPassword?: string): Promise<void> {
+    const page = this.page;
+    const passwordField = page.getByPlaceholder("Enter password");
+    await passwordField.fill(password);
+    if (confirmPassword !== undefined) {
+      await page.getByPlaceholder("Confirm password").fill(confirmPassword);
+    }
+    await this.nativeSubmit(page.locator("form", { has: passwordField }));
+  }
+
+  async spaceAuthPasswordSubmitEnabled(): Promise<boolean> {
+    const field = this.page.getByPlaceholder("Enter password");
+    const form = this.page.locator("form", { has: field });
+    return this.submitOf(form).first().isEnabled();
+  }
+
+  async spaceAuthTogglePasswordVisibility(field: "password" | "confirm"): Promise<void> {
+    // The eye toggle is an unlabelled clickable icon beside its field.
+    const input =
+      field === "password"
+        ? this.page.getByPlaceholder("Enter password")
+        : this.page.getByPlaceholder("Confirm password");
+    await input.locator("xpath=following-sibling::*").first().click();
+  }
+
+  async spaceAuthPasswordFieldTypes(): Promise<{ password: string | null; confirm: string | null }> {
+    const page = this.page;
+    const passwordInput = page.getByPlaceholder("Enter password");
+    const confirmInput = page.getByPlaceholder("Confirm password");
+    return {
+      password: (await passwordInput.count()) > 0 ? await passwordInput.getAttribute("type") : null,
+      confirm: (await confirmInput.count()) > 0 ? await confirmInput.getAttribute("type") : null,
+    };
+  }
+
+  async spaceAuthStrengthMeterVisible(): Promise<boolean> {
+    // The meter renders its criteria chips only while the sign-up
+    // password is non-empty and fails the strength rules.
+    const chips = this.page.getByText("Min 8 characters").first();
+    return chips.isVisible().catch(() => false);
+  }
+
+  async spaceAuthStrengthMessage(): Promise<string | null> {
+    const page = this.page;
+    for (const message of ["Password is too short", "Password is weak", "Password is strong"]) {
+      const node = page.getByText(message, { exact: true }).first();
+      if ((await node.count()) > 0 && (await node.isVisible().catch(() => false))) return message;
+    }
+    return null;
+  }
+
+  async spaceAuthPasswordMismatchError(): Promise<string | null> {
+    const error = this.page.getByText(/Passwords don.t match/).first();
+    if ((await error.count()) === 0) return null;
+    if (!(await error.isVisible().catch(() => false))) return null;
+    return (await error.innerText()).trim();
+  }
+
+  async spaceAuthPasswordPrimaryLabel(): Promise<string | null> {
+    const field = this.page.getByPlaceholder("Enter password");
+    if ((await field.count()) === 0) return null;
+    const form = this.page.locator("form", { has: field });
+    const label = (await this.submitOf(form).first().innerText()).trim();
+    return label === "" ? null : label;
+  }
+
+  async spaceAuthSeesSwitchToCode(): Promise<boolean> {
+    return (await this.page.getByRole("button", { name: "Sign in with unique code" }).count()) > 0;
+  }
+
+  async spaceAuthSwitchToCode(): Promise<void> {
+    await this.page.getByRole("button", { name: "Sign in with unique code" }).click();
+    await this.page.getByPlaceholder("123456").waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async spaceAuthSeesConfirmPassword(): Promise<boolean> {
+    return (await this.page.getByPlaceholder("Confirm password").count()) > 0;
+  }
+
+  async spaceAuthSubmitCode(code: string): Promise<void> {
+    const page = this.page;
+    const codeField = page.getByPlaceholder("123456");
+    await codeField.fill(code);
+    const form = page.locator("form", { has: codeField });
+    // The code form binds its CSRF token at render from a fetch racing
+    // the test: submitting before it resolves posts token-less and the
+    // server answers the verification-failed page instead of running the
+    // form. Wait for the token first (the password form awaits its own
+    // token on submit, so it needs no such wait).
+    const csrfField = form.locator('input[name="csrfmiddlewaretoken"]');
+    await expect.poll(() => csrfField.inputValue(), { timeout: WebDriver.WAIT_MS }).not.toBe("");
+    await this.nativeSubmit(form);
+  }
+
+  async spaceAuthCodeResendState(): Promise<{ disabled: boolean; label: string | null }> {
+    const resend = this.page.getByRole("button", { name: /resend|requesting new code/i }).first();
+    if ((await resend.count()) === 0) return { disabled: true, label: null };
+    const label = (await resend.innerText()).trim();
+    return { disabled: !(await resend.isEnabled()), label: label === "" ? null : label };
+  }
+
+  async spaceAuthClickResendCode(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: /resend|requesting new code/i })
+      .first()
+      .click();
+  }
+
+  private spaceAuthProviderButton(name: string): Locator {
+    // Full text off the password step ("Sign in/up with <name>"), icon
+    // only on it: match whichever shape renders.
+    const page = this.page;
+    const textMatch = page.getByRole("button", { name: new RegExp(`with ${name}`, "i") });
+    const iconMatch = page.locator("button", { has: page.locator(`img[alt="${name} Logo"]`) });
+    return textMatch.or(iconMatch);
+  }
+
+  async spaceAuthProviderButtons(): Promise<string[]> {
+    const names: string[] = [];
+    for (const provider of ["Google", "GitHub", "GitLab", "Gitea"]) {
+      if ((await this.spaceAuthProviderButton(provider).count()) > 0) names.push(provider);
+    }
+    return names;
+  }
+
+  async spaceAuthProvidersCompact(): Promise<boolean> {
+    for (const provider of ["Google", "GitHub", "GitLab", "Gitea"]) {
+      const button = this.spaceAuthProviderButton(provider).first();
+      if ((await button.count()) === 0) continue;
+      // Compact buttons carry the provider icon with no text at all.
+      return (await button.innerText()).trim() === "";
+    }
+    return false;
+  }
+
+  async spaceAuthProvidersDividerVisible(): Promise<boolean> {
+    const divider = this.page.getByText("or", { exact: true }).first();
+    return divider.isVisible().catch(() => false);
+  }
+
+  async spaceAuthClickProvider(name: string): Promise<void> {
+    await this.spaceAuthProviderButton(name).first().click();
+  }
+
+  async spaceAuthHeader(): Promise<{ heading: string | null; subline: string | null }> {
+    const header = this.spaceAuthHeaderNode().first();
+    if ((await header.count()) === 0) return { heading: null, subline: null };
+    const spans = header.locator(":scope > span");
+    if ((await spans.count()) < 2) return { heading: null, subline: null };
+    const heading = (await spans.nth(0).innerText()).trim();
+    const subline = (await spans.nth(1).innerText()).trim();
+    return { heading: heading === "" ? null : heading, subline: subline === "" ? null : subline };
+  }
+
+  async spaceAuthConsent(): Promise<{ text: string | null; termsHref: string | null; privacyHref: string | null }> {
+    const page = this.page;
+    const terms = page.getByRole("link", { name: "Terms of Service" }).first();
+    const privacy = page.getByRole("link", { name: "Privacy Policy" }).first();
+    if ((await terms.count()) === 0 || (await privacy.count()) === 0) {
+      return { text: null, termsHref: null, privacyHref: null };
+    }
+    const paragraph = terms.locator("xpath=ancestor::p").first();
+    const text = (await paragraph.innerText()).trim();
+    return {
+      text: text === "" ? null : text,
+      termsHref: await terms.getAttribute("href"),
+      privacyHref: await privacy.getAttribute("href"),
+    };
+  }
 }

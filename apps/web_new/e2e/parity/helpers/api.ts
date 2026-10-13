@@ -19395,3 +19395,125 @@ async function serverSpaceSettingsSeedRead(
     views,
   };
 }
+
+// --- Spaces auth helpers (NEWFRONT-452, SPC-058..064). Appended; existing
+// --- helpers above are untouched per the shared harness contract. The
+// --- spaces endpoints mirror the app auth endpoints with their own URL
+// --- prefix and redirect base, so these are small spaces-shaped variants
+// --- of emailCheck/magicGenerate/nativeMagicSignIn/signUpAccount.
+
+/**
+ * Raw spaces email-check call; throws carrying the server's error_code on
+ * failure. Always anonymous: this endpoint enforces CSRF for
+ * session-authenticated callers, so sending a session cookie would 403.
+ */
+export async function spaceEmailCheck(email: string, apiBase: string = apiBaseFromEnv()): Promise<EmailCheckResult> {
+  const res = await fetchTolerant(`${apiBase}/auth/spaces/email-check/`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const payload: unknown = await res.json();
+  if (!res.ok) {
+    const code = (payload as { error_code?: unknown }).error_code;
+    throw new Error(`[parity] spaces email-check failed with HTTP ${res.status} (error_code ${String(code)}).`);
+  }
+  return payload as EmailCheckResult;
+}
+
+/** Generate a spaces one-time code for an address; resolves with the key. */
+export async function spaceMagicGenerate(email: string, apiBase: string = apiBaseFromEnv()): Promise<string> {
+  const res = await fetchTolerant(`${apiBase}/auth/spaces/magic-generate/`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const payload: unknown = await res.json();
+  if (!res.ok) {
+    const code = (payload as { error_code?: unknown }).error_code;
+    throw new Error(`[parity] spaces magic-generate failed with HTTP ${res.status} (error_code ${String(code)}).`);
+  }
+  const key = (payload as { key?: unknown }).key;
+  if (typeof key !== "string") throw new Error("[parity] spaces magic-generate response carried no key.");
+  return key;
+}
+
+/** Outcome of posting a spaces native form straight at the server. */
+export interface NativeSpaceAuthResult {
+  status: number;
+  location: string;
+  sessionCookie: boolean;
+}
+
+/** Shared native-POST plumbing for the spaces auth forms (form outcomes never throw). */
+async function nativeSpacePost(
+  path: string,
+  fields: Record<string, string>,
+  apiBase: string
+): Promise<NativeSpaceAuthResult> {
+  const tokenRes = await fetchTolerant(`${apiBase}/auth/get-csrf-token/`);
+  if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
+  const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
+  const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
+  const preCookies = cookieHeader(setCookieHeaders(tokenRes));
+  const body = new URLSearchParams({ ...fields, csrfmiddlewaretoken: token });
+  const res = await fetchTolerant(`${apiBase}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie: preCookies },
+    body,
+    redirect: "manual",
+  });
+  const location = res.headers.get("location") ?? "";
+  const gotSessionCookie = cookieHeader([...setCookieHeaders(tokenRes), ...setCookieHeaders(res)]).includes(
+    "session-id="
+  );
+  return { status: res.status, location, sessionCookie: gotSessionCookie };
+}
+
+/** Submit a spaces one-time code the way the code form does; never throws. */
+export async function nativeSpaceMagicAuth(
+  email: string,
+  code: string,
+  mode: "sign-in" | "sign-up",
+  apiBase: string = apiBaseFromEnv()
+): Promise<NativeSpaceAuthResult> {
+  return nativeSpacePost(`/auth/spaces/magic-${mode}/`, { email, code }, apiBase);
+}
+
+/** Submit spaces credentials the way the password form does; never throws. */
+export async function nativeSpacePasswordAuth(
+  email: string,
+  password: string,
+  mode: "sign-in" | "sign-up",
+  apiBase: string = apiBaseFromEnv()
+): Promise<NativeSpaceAuthResult> {
+  return nativeSpacePost(`/auth/spaces/${mode}/`, { email, password }, apiBase);
+}
+
+/**
+ * Read the live one-time code for an address from the stack redis,
+ * standing in for the emailed code the console backend prints. Resolves
+ * null when no code is planted (never generated, consumed, or expired).
+ */
+export async function spaceMagicCode(email: string): Promise<string | null> {
+  const container = process.env["PARITY_REDIS_CONTAINER"] ?? "parity19-redis";
+  try {
+    const { stdout } = await execFileAsync("docker", ["exec", "-i", container, "redis-cli", "GET", `magic_${email}`], {
+      timeout: 60_000,
+    });
+    const raw = stdout.trim();
+    if (raw === "") return null;
+    const payload = JSON.parse(raw) as { token?: unknown };
+    return typeof payload.token === "string" ? payload.token : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Drop the live one-time code for an address (expiry stand-in). */
+export async function spaceDropMagicCode(email: string): Promise<void> {
+  const container = process.env["PARITY_REDIS_CONTAINER"] ?? "parity19-redis";
+  await execFileAsync("docker", ["exec", "-i", container, "redis-cli", "DEL", `magic_${email}`], {
+    timeout: 60_000,
+  });
+}
