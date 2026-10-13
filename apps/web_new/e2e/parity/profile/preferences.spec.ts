@@ -13,6 +13,9 @@
 // seeded stack stay green whatever earlier runs left behind.
 import { test, expect } from "../fixtures";
 import {
+  serverCreateCycle,
+  serverCycleDetail,
+  serverDeleteCycle,
   serverEmailPreferences,
   serverPatchProfile,
   serverProfileLocale,
@@ -283,6 +286,88 @@ test(
       await driver.settingsProfileSetTimezone(initialTz);
       expect((await serverProfileLocale(session)).user_timezone).toBe(initialTz);
     });
+  }
+);
+
+test(
+  specTitle(ROWS_017, "timezone shifts stored dates rendered in your timezone"),
+  { tag: specTags(ROWS_017) },
+  async ({ driver, seed }) => {
+    await test.step("sign in through the UI", async () => {
+      await driver.signInWithPassword(seed.email, seed.password);
+    });
+    const session = await signInSession(seed.email, seed.password);
+    const initialTz = (await serverProfileLocale(session)).user_timezone ?? "UTC";
+
+    // Cycle days a few weeks out, so the range always lands on real dates.
+    const toISODate = (plusDays: number): string => {
+      const at = new Date();
+      at.setUTCDate(at.getUTCDate() + plusDays);
+      return at.toISOString().slice(0, 10);
+    };
+    // The app renders "MMM dd, yyyy" in the member timezone; mirror that
+    // conversion from the stored ISO value for each expected reading.
+    const renderIn = (iso: string, timeZone: string): string =>
+      new Intl.DateTimeFormat("en-US", {
+        month: "short",
+        day: "2-digit",
+        year: "numeric",
+        timeZone,
+      }).format(new Date(iso));
+
+    const cycleId = await serverCreateCycle(
+      seed.workspaceSlug,
+      seed.projectId,
+      `prof017 tz dates ${Date.now().toString(36)}`,
+      toISODate(28),
+      toISODate(35),
+      session
+    );
+    try {
+      // The stored timestamps stay fixed while the picks change; every
+      // expected reading below derives from these two values.
+      const stored = await serverCycleDetail(seed.workspaceSlug, seed.projectId, cycleId, session);
+      expect(stored.startDate).not.toBeNull();
+      expect(stored.endDate).not.toBeNull();
+      const storedStart = stored.startDate!;
+      const storedEnd = stored.endDate!;
+
+      const readPair = async (timezone: string): Promise<{ start: string | null; end: string | null }> => {
+        await driver.settingsProfileOpenPreferences();
+        await driver.settingsProfileSetTimezone(timezone);
+        expect((await serverProfileLocale(session)).user_timezone).toBe(timezone);
+        await driver.openCyclePage(seed.workspaceSlug, seed.projectId, cycleId);
+        return driver.settingsProfileCycleUserTimezoneDates();
+      };
+
+      let kiritimati: { start: string | null; end: string | null } = { start: null, end: null };
+      await test.step("Kiritimati renders the stored dates Kiritimati-side", async () => {
+        kiritimati = await readPair("Pacific/Kiritimati");
+        expect(kiritimati).toEqual({
+          start: renderIn(storedStart, "Pacific/Kiritimati"),
+          end: renderIn(storedEnd, "Pacific/Kiritimati"),
+        });
+      });
+
+      await test.step("Midway shifts both rendered dates", async () => {
+        const midway = await readPair("Pacific/Midway");
+        expect(midway).toEqual({
+          start: renderIn(storedStart, "Pacific/Midway"),
+          end: renderIn(storedEnd, "Pacific/Midway"),
+        });
+        // Twenty-five hours apart, so the same stored pair always reads
+        // differently across the two picks.
+        expect(midway).not.toEqual(kiritimati);
+      });
+
+      await test.step("restore the initial timezone", async () => {
+        await driver.settingsProfileOpenPreferences();
+        await driver.settingsProfileSetTimezone(initialTz);
+        expect((await serverProfileLocale(session)).user_timezone).toBe(initialTz);
+      });
+    } finally {
+      await serverDeleteCycle(seed.workspaceSlug, seed.projectId, cycleId, session);
+    }
   }
 );
 

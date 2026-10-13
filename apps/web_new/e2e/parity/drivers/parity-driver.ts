@@ -10355,8 +10355,9 @@ export interface WsSettingsMemberRowFacts {
   // The preferences tab (theme switcher with custom-color designer, language /
   // timezone / week-start selectors), cross-screen reads proving those choices
   // reshape other screens (home greeting clock, profile sidebar clock, issue
-  // calendar day order), and the settings activity tab (paged own history with
-  // a themed empty state). The notifications tab needs no methods here: the
+  // calendar day order, cycle "in your timezone" dates), and the settings
+  // activity tab (paged own history with a themed empty state). The
+  // notifications tab needs no methods here: the
   // PROF-018 scenario reuses the notificationsEmail* methods (NEWFRONT-201).
   // Appended; existing entries above are untouched per the shared contract.
   // ---------------------------------------------------------------------------
@@ -10413,6 +10414,13 @@ export interface WsSettingsMemberRowFacts {
   settingsProfileOwnActivityLoadMore(): Promise<void>;
   /** Empty-state illustration src on the activity tab, or null when entries render. */
   settingsProfileOwnActivityEmptyIllustration(): Promise<string | null>;
+  /**
+   * Stored cycle dates as the "In your timezone" tooltip renders them.
+   * The current page must be a cycle detail page; hovers the analytics
+   * sidebar's date range and reads the tooltip (each date "MMM dd, yyyy",
+   * or null when the tooltip shows none).
+   */
+  settingsProfileCycleUserTimezoneDates(): Promise<{ start: string | null; end: string | null }>;
 }
 
 /** General-tab text field addressed by the settingsGeneral field methods (NEWFRONT-389). */

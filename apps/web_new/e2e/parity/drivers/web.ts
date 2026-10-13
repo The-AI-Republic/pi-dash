@@ -58259,4 +58259,20 @@ export class WebDriver implements ParityDriver {
     if ((await img.count()) === 0) return null;
     return img.getAttribute("src");
   }
+
+  async settingsProfileCycleUserTimezoneDates(): Promise<{ start: string | null; end: string | null }> {
+    // The analytics sidebar's date-range button shows the merged range
+    // ("Nov 10 - 17, 2026"); hovering it reveals the "In your timezone"
+    // tooltip with each stored date rendered in the member timezone.
+    const trigger = this.page
+      .locator("button")
+      .filter({ hasText: /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/ })
+      .first();
+    await trigger.hover({ timeout: WebDriver.WAIT_MS });
+    const heading = this.page.getByText("In your timezone", { exact: true }).first();
+    await heading.waitFor({ timeout: WebDriver.WAIT_MS });
+    const text = ((await heading.locator("xpath=..").textContent()) ?? "").replace(/\s+/g, " ");
+    const dates = text.match(/[A-Z][a-z]{2} \d{2}, \d{4}/g) ?? [];
+    return { start: dates[0] ?? null, end: dates[1] ?? null };
+  }
 }

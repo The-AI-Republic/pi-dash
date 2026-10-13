@@ -16785,4 +16785,7 @@ export class WebNewDriver implements ParityDriver {
   async settingsProfileOwnActivityEmptyIllustration(): Promise<string | null> {
     return todo("settingsProfileOwnActivityEmptyIllustration");
   }
+  async settingsProfileCycleUserTimezoneDates(): Promise<{ start: string | null; end: string | null }> {
+    return todo("settingsProfileCycleUserTimezoneDates");
+  }
 }
