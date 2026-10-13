@@ -51438,4 +51438,144 @@ export class WebDriver implements ParityDriver {
       privacyHref: await privacy.getAttribute("href"),
     };
   }
+
+  // --- Desktop share links, transport, CLI, native shell (NEWFRONT-210, DESK-019–025).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract.
+
+  async deskShellNativeHttpPresent(): Promise<boolean> {
+    // The desktop transport flag is defined by the shell's initialization
+    // script (main.rs); the web build never sets it, so its absence (with
+    // no __TAURI__ bridge) leaves the browser fetch adapter in charge.
+    return this.page.evaluate(() => "__PIDASH_NATIVE_HTTP__" in window);
+  }
+
+  private deskShellTraffic: string[] = [];
+  private deskShellTrafficListener: ((request: { url(): string }) => void) | null = null;
+
+  async deskShellBeginTrafficWatch(): Promise<void> {
+    if (this.deskShellTrafficListener !== null) {
+      this.page.off("request", this.deskShellTrafficListener);
+      this.deskShellTrafficListener = null;
+    }
+    this.deskShellTraffic = [];
+    const listener = (request: { url(): string }): void => {
+      this.deskShellTraffic.push(request.url());
+    };
+    this.deskShellTrafficListener = listener;
+    this.page.on("request", listener);
+  }
+
+  async deskShellTrafficUrls(): Promise<string[]> {
+    return [...this.deskShellTraffic];
+  }
+
+  async deskShellEndTrafficWatch(): Promise<void> {
+    if (this.deskShellTrafficListener !== null) {
+      this.page.off("request", this.deskShellTrafficListener);
+      this.deskShellTrafficListener = null;
+    }
+  }
+
+  async deskShellAbortSemantics(): Promise<{ aborted: string; timedOut: string; unroutable: string }> {
+    // Without the native transport there is no desktop_api_cancel command:
+    // cancellation, timeouts, and transport failures are plain browser
+    // fetch semantics. Probe all three against the live page origin.
+    return this.page.evaluate(async () => {
+      const nameOf = async (run: () => Promise<Response>): Promise<string> => {
+        try {
+          await run();
+          return "fulfilled";
+        } catch (error) {
+          // Abort and timeout rejections are DOMExceptions; network
+          // failures are plain TypeErrors — both carry their name.
+          return error instanceof Error ? error.name : `non-error:${typeof error}`;
+        }
+      };
+      const target = `${window.location.origin}/api/auth/get-csrf-token/`;
+      const aborted = await nameOf(() => {
+        const controller = new AbortController();
+        controller.abort();
+        return fetch(target, { signal: controller.signal });
+      });
+      const timedOut = await nameOf(() => fetch(target, { signal: AbortSignal.timeout(1) }));
+      const unroutable = await nameOf(() => fetch("https://parity-unroutable.invalid/api/"));
+      return { aborted, timedOut, unroutable };
+    });
+  }
+
+  async deskShellZoomMenuVisible(): Promise<boolean> {
+    // The desktop View menu carries Zoom In / Zoom Out / Actual Size
+    // (main.rs); the web app has no menu bar, so those entries must
+    // never appear under a menu role.
+    const entries = this.page.getByRole("menuitem", { name: /^(Zoom In|Zoom Out|Actual Size)$/ });
+    if ((await entries.count()) === 0) return false;
+    return entries
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async deskShellDeviceAuthHeading(): Promise<string | null> {
+    const heading = this.page.getByRole("heading", { name: "Authorize Pi Dash CLI" }).first();
+    if ((await heading.count()) === 0) return null;
+    const text = ((await heading.innerText().catch(() => null)) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  async deskShellDeviceApproveEnabled(): Promise<boolean> {
+    const submit = this.page.getByRole("button", { name: "Approve" }).first();
+    await submit.waitFor({ timeout: WebDriver.actionTimeout });
+    return submit.isEnabled().catch(() => false);
+  }
+
+  async deskShellDeviceSubmitCode(code: string): Promise<void> {
+    const input = this.page.getByPlaceholder("XXXX-YYYY").first();
+    await input.waitFor({ timeout: WebDriver.actionTimeout });
+    await input.fill(code);
+    const submit = this.page.getByRole("button", { name: "Approve" }).first();
+    await submit.click({ timeout: WebDriver.actionTimeout });
+    // Either the approval lands or the form reports the server's error;
+    // wait for one of the two so the scenario never reads a mid-flight
+    // form.
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      const text = await this.page
+        .locator("body")
+        .innerText()
+        .catch(() => "");
+      if (
+        /Approved\.|Could not approve|not recognized|already been used|has expired|has been denied|must be 8 characters/i.test(
+          text
+        )
+      )
+        return;
+      if (Date.now() >= deadline) throw new Error("[parity] device approval never settled.");
+      await this.page.waitForTimeout(300);
+    }
+  }
+
+  async deskShellCloseReopenPath(): Promise<string> {
+    // Closing the web app ends the page normally: nothing parks in a
+    // tray, so reopening is a fresh load carrying the same cookie
+    // session. The driver's page is closed by this call; only API
+    // checks may follow it in the scenario.
+    const context = this.page.context();
+    await this.page.close();
+    const fresh = await context.newPage();
+    await fresh.goto("/");
+    await fresh.waitForLoadState("domcontentloaded");
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      let path = "/";
+      try {
+        path = new URL(fresh.url()).pathname;
+      } catch {
+        path = "/";
+      }
+      if (path !== "/") return path;
+      if (Date.now() >= deadline) return path;
+      await fresh.waitForTimeout(500);
+    }
+  }
 }

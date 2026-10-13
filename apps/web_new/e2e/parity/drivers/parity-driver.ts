@@ -9671,6 +9671,34 @@ export interface DeskSigninUpdateLink {
   settingsProfileSecurityFieldValue(field: SettingsProfileSecurityField): Promise<string>;
   /** Move focus away from one password field (proves focus-aware note timing). */
   settingsProfileSecurityBlur(field: SettingsProfileSecurityField): Promise<void>;
+
+  // --- Desktop share links, transport, CLI, native shell (NEWFRONT-210, DESK-019–025).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract. The native halves live in the desktop shell (main.rs) and
+  // --- the desktop bundle; on web these rows assert the web-observable
+  // --- side: same-origin copied links, browser fetch transport, the
+  // --- human-typed device approval, normal close semantics, no zoom menu,
+  // --- normal server-host navigation, and rendered entry routes.
+  /** True when the desktop native-HTTP flag is defined on the window. */
+  deskShellNativeHttpPresent(): Promise<boolean>;
+  /** Start recording every request URL the page issues. */
+  deskShellBeginTrafficWatch(): Promise<void>;
+  /** Request URLs recorded since the traffic watch began, in order. */
+  deskShellTrafficUrls(): Promise<string[]>;
+  /** Stop the traffic watch and detach its listener. */
+  deskShellEndTrafficWatch(): Promise<void>;
+  /** Browser fetch failure names for aborted, timed-out, and unroutable requests. */
+  deskShellAbortSemantics(): Promise<{ aborted: string; timedOut: string; unroutable: string }>;
+  /** True when an app menu carries zoom in/out/reset entries. */
+  deskShellZoomMenuVisible(): Promise<boolean>;
+  /** Heading of the device-code approval page, or null when absent. */
+  deskShellDeviceAuthHeading(): Promise<string | null>;
+  /** Whether the device-code approval submit currently renders enabled. */
+  deskShellDeviceApproveEnabled(): Promise<boolean>;
+  /** Type the device code into the approval form and submit; resolves once the outcome settles. */
+  deskShellDeviceSubmitCode(code: string): Promise<void>;
+  /** Close the page, reopen the entry in a fresh page of the same context; resolves with the landed path. The driver's page stays closed, so only API checks may follow. */
+  deskShellCloseReopenPath(): Promise<string>;
 }
 
 /** General-tab field keys for the NEWFRONT-426 settingsProfile readers. */
