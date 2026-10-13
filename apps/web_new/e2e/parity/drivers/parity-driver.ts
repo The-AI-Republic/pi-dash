@@ -8245,6 +8245,46 @@ export interface ParityDriver {
   /** Test-email POST request bodies seen since the spy started. */
   adminEmailCheckBodies(): Promise<unknown[]>;
 
+  // --- Admin authentication landing + provider sub-pages (NEWFRONT-443, ADM-023..036). ---
+  /** Landing snapshot: sign-up toggle, skeleton, and method cards in DOM order. */
+  adminAuthLandingFacts(): Promise<AdminAuthLandingFacts>;
+  /** Set the open-sign-up toggle to `on`, clicking only on mismatch. */
+  adminAuthSetSignup(on: boolean): Promise<void>;
+  /** Set the named method card's enable toggle to `on`, clicking only on mismatch. */
+  adminAuthSetMethodEnabled(name: string, on: boolean): Promise<void>;
+  /** Follow the named method card's Configure/Edit link. */
+  adminAuthOpenMethod(name: string): Promise<void>;
+  /** Method card logo image source, or null when the card shows no image. */
+  adminAuthMethodIconSrc(name: string): Promise<string | null>;
+  /** Provider sub-page shell snapshot: header card, master toggle, body state, tab title. */
+  adminAuthProviderFacts(): Promise<AdminAuthProviderFacts>;
+  /** Set the provider sub-page master toggle to `on`, clicking only on mismatch. */
+  adminAuthProviderSetEnabled(on: boolean): Promise<void>;
+  /** Provider credential-form snapshot: values, placeholders, sync switch, save gating. */
+  adminAuthFormFacts(): Promise<AdminAuthFormFacts>;
+  /** Fill provider-form fields by input id. */
+  adminAuthFormFill(values: Record<string, string>): Promise<void>;
+  /** Set the provider-form sync switch to `on`, clicking only on mismatch. */
+  adminAuthFormSetSync(on: boolean): Promise<void>;
+  /** Press the provider-form save control. */
+  adminAuthFormSave(): Promise<void>;
+  /** Press the provider-form "Go back" link. */
+  adminAuthFormBack(): Promise<void>;
+  /** Unsaved-changes discard modal snapshot. */
+  adminAuthDiscardFacts(): Promise<AdminAuthDiscardFacts>;
+  /** Dismiss the discard modal via Keep editing. */
+  adminAuthDiscardKeep(): Promise<void>;
+  /** Confirm the discard modal via its Go back link. */
+  adminAuthDiscardLeave(): Promise<void>;
+  /** Copy-to-clipboard fields on the page in DOM order. */
+  adminAuthCopyFacts(): Promise<AdminAuthCopyFact[]>;
+  /** Press the copy field labeled `label`. */
+  adminAuthCopyField(label: string): Promise<void>;
+  /** Help-link target inside the copy field labeled `label`, or null when absent. */
+  adminAuthCopyHelpHref(label: string): Promise<string | null>;
+  /** Current clipboard text (grants clipboard permissions first). */
+  adminAuthReadClipboard(): Promise<string>;
+
   // --- Space board access & routing (NEWFRONT-447, SPC-001..009). ---
   /** Open an arbitrary in-app path (unknown-path routing, SPC-009). */
   spaceAccessOpenPath(path: string): Promise<void>;
@@ -11793,6 +11833,109 @@ export interface AdminTestEmailFacts {
   sendLabel: string | null;
   /** Dismiss control label. */
   dismissLabel: string;
+}
+
+/** Method-card control branch as rendered (NEWFRONT-443, ADM-026). */
+export type AdminAuthMethodControl = "toggle" | "configure" | "edit-toggle";
+
+/** One authentication-method card in DOM order (NEWFRONT-443, ADM-024/025/026). */
+export interface AdminAuthMethodCard {
+  /** Card name text. */
+  name: string;
+  /** Card description text. */
+  description: string;
+  /** Whether the card shows an icon slot. */
+  hasIcon: boolean;
+  /** Which control branch the card renders. */
+  control: AdminAuthMethodControl;
+  /** Toggle state; null on the configure branch (no toggle rendered). */
+  toggleOn: boolean | null;
+  /** Whether the toggle is disabled (false on the configure branch). */
+  toggleDisabled: boolean;
+  /** Configure/Edit link target; null on the toggle-only branch. */
+  linkHref: string | null;
+}
+
+/** Authentication landing-page snapshot (NEWFRONT-443, ADM-023/024/025/026/036). */
+export interface AdminAuthLandingFacts {
+  /** Whether the loaded page (sign-up row) is showing rather than the skeleton. */
+  loaded: boolean;
+  /** Whether the loading skeleton is showing. */
+  skeletonVisible: boolean;
+  /** Skeleton bar count (zero when the skeleton hides). */
+  skeletonBars: number;
+  /** Whether the open-sign-up switch is on. */
+  signupOn: boolean;
+  /** Whether the open-sign-up switch is disabled. */
+  signupDisabled: boolean;
+  /** Method cards in DOM order (empty while unloaded). */
+  cards: AdminAuthMethodCard[];
+}
+
+/** Provider sub-page shell snapshot (NEWFRONT-443, ADM-027). */
+export interface AdminAuthProviderFacts {
+  /** Header card provider name. */
+  name: string;
+  /** Header card provider description. */
+  description: string;
+  /** Whether the header logo image is showing. */
+  hasIcon: boolean;
+  /** Whether the master toggle is on. */
+  toggleOn: boolean;
+  /** Whether the master toggle is disabled. */
+  toggleDisabled: boolean;
+  /** Whether the credential form body is showing. */
+  formVisible: boolean;
+  /** Whether the body skeleton is showing. */
+  skeletonVisible: boolean;
+  /** Body skeleton bar count (zero when the skeleton hides). */
+  skeletonBars: number;
+  /** Document tab title. */
+  title: string;
+}
+
+/** Provider credential-form snapshot (NEWFRONT-443, ADM-028/029/030/031/032/035). */
+export interface AdminAuthFormFacts {
+  /** Field values keyed by input id. */
+  values: Record<string, string>;
+  /** Field placeholders keyed by input id. */
+  placeholders: Record<string, string>;
+  /** Field input types keyed by input id. */
+  types: Record<string, string>;
+  /** Sync-switch caption text. */
+  syncLabel: string;
+  /** Whether the sync switch is on. */
+  syncOn: boolean;
+  /** Whether the save control is disabled. */
+  saveDisabled: boolean;
+  /** Save control label (busy state swaps it). */
+  saveLabel: string;
+  /** Go-back link target, or null when absent. */
+  backHref: string | null;
+}
+
+/** Unsaved-changes discard modal snapshot (NEWFRONT-443, ADM-034). */
+export interface AdminAuthDiscardFacts {
+  /** Whether the modal is open. */
+  open: boolean;
+  /** Modal title text. */
+  title: string;
+  /** Modal body text. */
+  body: string;
+  /** Keep-editing control label. */
+  keepLabel: string;
+  /** Leave (go-back) control label. */
+  backLabel: string;
+  /** Leave control link target, or null when absent. */
+  backHref: string | null;
+}
+
+/** One copy-to-clipboard field in DOM order (NEWFRONT-443, ADM-033). */
+export interface AdminAuthCopyFact {
+  /** Field label text. */
+  label: string;
+  /** Shown URL text. */
+  url: string;
 }
 
 /** Navbar project identity as rendered (NEWFRONT-448, SPC-010). */

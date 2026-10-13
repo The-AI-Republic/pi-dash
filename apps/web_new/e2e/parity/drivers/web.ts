@@ -28,6 +28,12 @@ import {
 import { parityOracleAdminUrl } from "../helpers/parity-env";
 import type {
   AdminAccountMenuFacts,
+  AdminAuthCopyFact,
+  AdminAuthDiscardFacts,
+  AdminAuthFormFacts,
+  AdminAuthLandingFacts,
+  AdminAuthMethodCard,
+  AdminAuthProviderFacts,
   AdminEmailFacts,
   AdminEmailFields,
   AdminEmailFormFacts,
@@ -51393,6 +51399,363 @@ export class WebDriver implements ParityDriver {
 
   async adminEmailCheckBodies(): Promise<unknown[]> {
     return [...this.adminEmailCheckBodiesSeen];
+  }
+
+  // --- Admin authentication landing + provider sub-pages (NEWFRONT-443, ADM-023..036). ---
+  // Observed on the running old admin console. Method cards are the only
+  // bg-layer-2 blocks on these pages (the loader renders bg-layer-1 bars
+  // under role=status), so card roots read structurally; the sign-up row
+  // renders before the cards, so the first switch on the landing is its
+  // toggle. Facts read in one in-page snapshot so a config save landing
+  // mid-read cannot split the observation across renders.
+
+  /** One method card by visible name; throws unless exactly one matches. */
+  private async adminAuthCard(name: string): Promise<Locator> {
+    const card = this.page.locator("main").locator("div.bg-layer-2").filter({ hasText: name });
+    if ((await card.count()) !== 1) {
+      throw new Error(`[parity] expected one auth card for ${JSON.stringify(name)}.`);
+    }
+    return card.first();
+  }
+
+  async adminAuthLandingFacts(): Promise<AdminAuthLandingFacts> {
+    const snap = (await this.page.evaluate(() => {
+      const shut = {
+        loaded: false,
+        skeletonVisible: false,
+        skeletonBars: 0,
+        signupOn: false,
+        signupDisabled: false,
+        cards: [] as Array<{
+          name: string;
+          description: string;
+          hasIcon: boolean;
+          control: string;
+          toggleOn: boolean | null;
+          toggleDisabled: boolean;
+          linkHref: string | null;
+        }>,
+      };
+      const main = document.querySelector("main");
+      if (main === null) return shut;
+      const shown = (el: Element | null): boolean => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      for (const status of [...main.querySelectorAll('[role="status"]')]) {
+        if (!shown(status)) continue;
+        shut.skeletonVisible = true;
+        shut.skeletonBars = status.children.length;
+      }
+      const switches = [...main.querySelectorAll('[role="switch"]')];
+      const signup = switches[0] as HTMLElement | undefined;
+      const signupLabel = "Allow anyone to sign up even without an invite";
+      shut.loaded = (main.textContent ?? "").includes(signupLabel);
+      if (signup !== undefined && shut.loaded) {
+        shut.signupOn = signup.getAttribute("aria-checked") === "true";
+        shut.signupDisabled =
+          (signup as HTMLButtonElement).disabled === true || signup.getAttribute("aria-disabled") === "true";
+      }
+      const cards = [...main.querySelectorAll("div.bg-layer-2")];
+      for (const card of cards) {
+        const left = card.children[0] as HTMLElement | undefined;
+        const right = card.children[1] as HTMLElement | undefined;
+        if (left === undefined || right === undefined) continue;
+        const lines = ((left as HTMLElement).innerText ?? "")
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0);
+        const toggle = right.querySelector('[role="switch"]');
+        const link = right.querySelector("a");
+        let control = "configure";
+        if (toggle !== null && link !== null) control = "edit-toggle";
+        else if (toggle !== null) control = "toggle";
+        shut.cards.push({
+          name: lines[0] ?? "",
+          description: lines.slice(1).join(" "),
+          hasIcon: left.querySelector("img,svg") !== null,
+          control,
+          toggleOn: toggle === null ? null : toggle.getAttribute("aria-checked") === "true",
+          toggleDisabled:
+            toggle === null
+              ? false
+              : (toggle as HTMLButtonElement).disabled === true || toggle.getAttribute("aria-disabled") === "true",
+          linkHref: link?.getAttribute("href") ?? null,
+        });
+      }
+      return shut;
+    })) as Omit<AdminAuthLandingFacts, "cards"> & {
+      cards: Array<Omit<AdminAuthMethodCard, "control"> & { control: string }>;
+    };
+    for (const card of snap.cards) {
+      if (card.control !== "toggle" && card.control !== "configure" && card.control !== "edit-toggle") {
+        throw new Error(`[parity] unknown auth card control ${JSON.stringify(card.control)}.`);
+      }
+    }
+    return snap as AdminAuthLandingFacts;
+  }
+
+  async adminAuthSetSignup(on: boolean): Promise<void> {
+    const toggle = this.page.locator("main").getByRole("switch");
+    await toggle.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const isOn = (await toggle.first().getAttribute("aria-checked")) === "true";
+    if (isOn !== on) {
+      await toggle.first().click({ timeout: WebDriver.WAIT_MS });
+    }
+  }
+
+  async adminAuthSetMethodEnabled(name: string, on: boolean): Promise<void> {
+    const toggle = (await this.adminAuthCard(name)).getByRole("switch");
+    if ((await toggle.count()) === 0) {
+      throw new Error(`[parity] auth card ${JSON.stringify(name)} shows no toggle.`);
+    }
+    await toggle.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const isOn = (await toggle.first().getAttribute("aria-checked")) === "true";
+    if (isOn !== on) {
+      await toggle.first().click({ timeout: WebDriver.WAIT_MS });
+    }
+  }
+
+  async adminAuthOpenMethod(name: string): Promise<void> {
+    const link = (await this.adminAuthCard(name)).getByRole("link");
+    if ((await link.count()) === 0) {
+      throw new Error(`[parity] auth card ${JSON.stringify(name)} shows no link.`);
+    }
+    await link.first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminAuthMethodIconSrc(name: string): Promise<string | null> {
+    const image = (await this.adminAuthCard(name)).locator("img");
+    if ((await image.count()) === 0) return null;
+    return image.first().getAttribute("src");
+  }
+
+  async adminAuthProviderFacts(): Promise<AdminAuthProviderFacts> {
+    return this.page.evaluate(() => {
+      const shut = {
+        name: "",
+        description: "",
+        hasIcon: false,
+        toggleOn: false,
+        toggleDisabled: true,
+        formVisible: false,
+        skeletonVisible: false,
+        skeletonBars: 0,
+        title: document.title,
+      };
+      const main = document.querySelector("main");
+      if (main === null) return shut;
+      const shown = (el: Element | null): boolean => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const card = main.querySelector("div.bg-layer-2");
+      if (card !== null) {
+        const left = card.children[0] as HTMLElement | undefined;
+        const right = card.children[1] as HTMLElement | undefined;
+        if (left !== undefined && right !== undefined) {
+          const lines = ((left as HTMLElement).innerText ?? "")
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0);
+          shut.name = lines[0] ?? "";
+          shut.description = lines.slice(1).join(" ");
+          shut.hasIcon = left.querySelector("img,svg") !== null;
+          const toggle = right.querySelector('[role="switch"]');
+          if (toggle !== null) {
+            shut.toggleOn = toggle.getAttribute("aria-checked") === "true";
+            shut.toggleDisabled =
+              (toggle as HTMLButtonElement).disabled === true || toggle.getAttribute("aria-disabled") === "true";
+          }
+        }
+      }
+      shut.formVisible = [...main.querySelectorAll("input[id]")].some((input) => shown(input));
+      for (const status of [...main.querySelectorAll('[role="status"]')]) {
+        if (!shown(status)) continue;
+        shut.skeletonVisible = true;
+        shut.skeletonBars = status.children.length;
+      }
+      return shut;
+    });
+  }
+
+  async adminAuthProviderSetEnabled(on: boolean): Promise<void> {
+    const toggle = this.page.locator("main").locator("div.bg-layer-2").first().getByRole("switch");
+    await toggle.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const isOn = (await toggle.first().getAttribute("aria-checked")) === "true";
+    if (isOn !== on) {
+      await toggle.first().click({ timeout: WebDriver.WAIT_MS });
+    }
+  }
+
+  async adminAuthFormFacts(): Promise<AdminAuthFormFacts> {
+    return this.page.evaluate(() => {
+      const values: Record<string, string> = {};
+      const placeholders: Record<string, string> = {};
+      const types: Record<string, string> = {};
+      let syncLabel = "";
+      let syncOn = false;
+      let saveDisabled = true;
+      let saveLabel = "";
+      let backHref: string | null = null;
+      const main = document.querySelector("main");
+      if (main !== null) {
+        for (const input of [...main.querySelectorAll("input[id]")]) {
+          const id = input.getAttribute("id") ?? "";
+          if (id === "") continue;
+          values[id] = (input as HTMLInputElement).value ?? "";
+          placeholders[id] = input.getAttribute("placeholder") ?? "";
+          types[id] = input.getAttribute("type") ?? "";
+        }
+        const caption = [...main.querySelectorAll("h4")].find((node) =>
+          (node.textContent ?? "").includes("Refresh user attributes")
+        );
+        if (caption !== undefined) {
+          syncLabel = (caption.textContent ?? "").trim();
+          const sync = caption.parentElement?.querySelector('[role="switch"]') ?? null;
+          if (sync !== null) syncOn = sync.getAttribute("aria-checked") === "true";
+        }
+        const save =
+          [...main.querySelectorAll("button")].find((node) => {
+            const text = ((node as HTMLElement).innerText ?? "").trim();
+            return text === "Save changes" || text === "Saving";
+          }) ?? null;
+        if (save !== null) {
+          saveDisabled = (save as HTMLButtonElement).disabled === true;
+          saveLabel = ((save as HTMLElement).innerText ?? "").trim();
+        }
+        // The discard modal carries its own Go back link when open; the
+        // form link is the one outside the dialog.
+        const back =
+          [...main.querySelectorAll("a")].find(
+            (node) =>
+              ((node as HTMLElement).innerText ?? "").trim() === "Go back" && node.closest('[role="dialog"]') === null
+          ) ?? null;
+        backHref = back?.getAttribute("href") ?? null;
+      }
+      return { values, placeholders, types, syncLabel, syncOn, saveDisabled, saveLabel, backHref };
+    });
+  }
+
+  async adminAuthFormFill(values: Record<string, string>): Promise<void> {
+    const main = this.page.locator("main");
+    for (const [id, value] of Object.entries(values)) {
+      await main.locator(`#${id}`).fill(value);
+    }
+  }
+
+  async adminAuthFormSetSync(on: boolean): Promise<void> {
+    // The sync switch shares the caption's row; the header master toggle
+    // sits in the card above, so this never addresses the wrong switch.
+    const caption = this.page.locator("main").getByText(/Refresh user attributes from .* during sign in/);
+    await caption.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const sync = caption.locator("xpath=..").getByRole("switch");
+    await sync.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const isOn = (await sync.first().getAttribute("aria-checked")) === "true";
+    if (isOn !== on) {
+      await sync.first().click({ timeout: WebDriver.WAIT_MS });
+    }
+  }
+
+  async adminAuthFormSave(): Promise<void> {
+    const save = this.page.locator("main").getByRole("button", { name: /Save changes|Saving/ });
+    await save.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await save.first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminAuthFormBack(): Promise<void> {
+    // The discard modal renders before the form, so the form link is the
+    // last Go back on the page whether or not the modal is mounted.
+    const back = this.page.locator("main").getByRole("link", { name: "Go back" });
+    await back.last().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await back.last().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminAuthDiscardFacts(): Promise<AdminAuthDiscardFacts> {
+    return this.page.evaluate(() => {
+      const shut = { open: false, title: "", body: "", keepLabel: "", backLabel: "", backHref: null as string | null };
+      const dialog = document.querySelector('[role="dialog"]');
+      const heading = dialog?.querySelector("h3") ?? null;
+      if (!(heading instanceof HTMLElement)) return shut;
+      const rect = heading.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return shut;
+      const buttons = [...(dialog?.querySelectorAll("button") ?? [])].map((node) =>
+        (((node as HTMLElement).innerText ?? "") as string).trim()
+      );
+      const back = dialog?.querySelector("a") ?? null;
+      const body = dialog?.querySelector("p");
+      return {
+        open: true,
+        title: ((heading as HTMLElement).innerText ?? "").trim(),
+        body: ((body as HTMLElement | null)?.innerText ?? "").trim(),
+        keepLabel: buttons.find((text) => text === "Keep editing") ?? "",
+        backLabel: (((back as HTMLElement | null)?.innerText ?? "") as string).trim(),
+        backHref: back?.getAttribute("href") ?? null,
+      };
+    });
+  }
+
+  async adminAuthDiscardKeep(): Promise<void> {
+    await this.page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Keep editing" })
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminAuthDiscardLeave(): Promise<void> {
+    await this.page.getByRole("dialog").getByRole("link", { name: "Go back" }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminAuthCopyFacts(): Promise<AdminAuthCopyFact[]> {
+    return this.page.evaluate(() => {
+      const facts: Array<{ label: string; url: string }> = [];
+      const main = document.querySelector("main");
+      if (main === null) return facts;
+      for (const button of [...main.querySelectorAll("button")]) {
+        const text = (((button as HTMLElement).innerText ?? "") as string).trim();
+        // Save and the icon-only password toggles are not copy fields.
+        if (text === "" || text === "Save changes" || text === "Saving") continue;
+        const label = button.parentElement?.querySelector("h4");
+        if (label === null || label === undefined) continue;
+        const shown = button.querySelector("p");
+        facts.push({
+          label: ((label as HTMLElement).innerText ?? "").trim(),
+          url: (((shown as HTMLElement | null)?.innerText ?? text) as string).trim(),
+        });
+      }
+      return facts;
+    });
+  }
+
+  /** Copy-field container by its h4 label; throws unless exactly one matches. */
+  private async adminAuthCopyContainer(label: string): Promise<Locator> {
+    const heading = this.page.locator("main").locator("h4").filter({ hasText: label });
+    if ((await heading.count()) !== 1) {
+      throw new Error(`[parity] expected one copy field for ${JSON.stringify(label)}.`);
+    }
+    return heading.first().locator("xpath=..");
+  }
+
+  async adminAuthCopyField(label: string): Promise<void> {
+    // The clipboard write needs the permission before the click, not
+    // just before the read (home quick-link precedent).
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const button = (await this.adminAuthCopyContainer(label)).getByRole("button");
+    await button.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await button.first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminAuthCopyHelpHref(label: string): Promise<string | null> {
+    const link = (await this.adminAuthCopyContainer(label)).getByRole("link");
+    if ((await link.count()) === 0) return null;
+    return link.first().getAttribute("href");
+  }
+
+  async adminAuthReadClipboard(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
 
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
