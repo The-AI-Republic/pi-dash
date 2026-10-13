@@ -10,7 +10,7 @@
 // web_new test:parity-stack.)
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -78,12 +78,12 @@ function runBringUp(envExtra) {
 }
 
 describe("cloud oracle stack (NEWFRONT-436)", () => {
-  it("defines api-cloud as the overlaid API on the same ports and volumes", () => {
+  it("defines api-cloud as the overlaid API on the same ports, scratch settings and healthcheck", () => {
     const text = readFileSync(composeFile, "utf8");
     const api = serviceBlock(text, "api");
     const cloud = serviceBlock(text, "api-cloud");
     assert.ok(cloud.includes("dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.api-cloud"));
-    assert.ok(cloud.includes("DJANGO_SETTINGS_MODULE: pi_dash_cloud.settings.local"));
+    assert.ok(cloud.includes("DJANGO_SETTINGS_MODULE: parity_cloud_scratch_settings"));
     assert.ok(cloud.includes('OPENHUB_APPS_ENABLED: "1"'));
     assert.ok(
       cloud.includes("AIREPUBLIC_SESSION_JWT_SECRET: parity19-fixed-cloud-jwt-secret-not-used-outside-scratch")
@@ -101,6 +101,29 @@ describe("cloud oracle stack (NEWFRONT-436)", () => {
     // The `api` network alias keeps the proxy, the Caddyfile and the live
     // service untouched: api:8000 resolves to whichever api runs.
     assert.ok(cloud.includes("aliases:") && cloud.includes("- api"), "api-cloud must alias the api hostname");
+    // Same anon-throttle widening story as OSS (D2): the cloud
+    // settings inherit the 30/minute production budget, which
+    // saturates minutes into an oracle run, so api-cloud mounts its
+    // own scratch settings and runs under them.
+    assert.ok(
+      cloud.includes("- ./parity_cloud_scratch_settings.py:/code/parity_cloud_scratch_settings.py:ro"),
+      "api-cloud must mount the cloud scratch settings"
+    );
+    // Same liveness probe as OSS: the port binds only after migrate
+    // succeeds, so the socket check gates dependents on both editions.
+    assert.ok(
+      cloud.includes("socket.create_connection((''localhost'', 8000), timeout=5)"),
+      "api-cloud must keep the OSS healthcheck"
+    );
+  });
+
+  it("widens only the anonymous throttle in the cloud scratch settings", () => {
+    const text = readFileSync(join(here, "parity_cloud_scratch_settings.py"), "utf8");
+    assert.ok(
+      text.includes("from pi_dash_cloud.settings.local import *"),
+      "cloud scratch settings must layer on the cloud settings"
+    );
+    assert.ok(text.includes('"anon": "600/minute"'), "cloud scratch settings must widen anon to 600/minute");
   });
 
   it("defines oracle-cloud-prod as a static nginx oracle with no published ports", () => {
@@ -267,6 +290,55 @@ describe("cloud oracle stack (NEWFRONT-436)", () => {
     } finally {
       rmSync(overlay, { recursive: true, force: true });
       rmSync(join(here, ".cloud-staging"), { recursive: true, force: true });
+    }
+  });
+
+  it("resolves the default overlay sibling with CLOUD_OVERLAY_DIR unset", () => {
+    // The documented default is the <repo-root>/../private-pi-dash
+    // sibling. The stack dir sits 5 levels deep, so the resolver must
+    // climb five: a 4-up climb lands INSIDE the tree (D1). Fake a repo
+    // at the real depth so the default resolves without touching this
+    // checkout.
+    const root = mkdtempSync(join(tmpdir(), "parity-cloud-default-"));
+    try {
+      const fakeStack = join(root, "repo", "apps", "web_new", "e2e", "parity", "stack");
+      mkdirSync(fakeStack, { recursive: true });
+      const overlay = join(root, "private-pi-dash");
+      for (const sub of ["ee-overlay/apps/web", "ee-overlay/apps/api", "ee-overlay/packages", "pi_dash_cloud"]) {
+        mkdirSync(join(overlay, sub), { recursive: true });
+      }
+      writeFileSync(join(overlay, ".oss-pin"), "pinned-sha\n");
+      const script = [`. "${cloudLib}"`, "parity_cloud_resolve_overlay"].join("\n");
+      const env = { ...process.env, STACK_DIR: fakeStack };
+      delete env.CLOUD_OVERLAY_DIR;
+      const resolved = execFileSync("bash", ["-c", script], {
+        env,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+      assert.equal(resolved, realpathSync(overlay), "the default must be the outside-tree sibling");
+      // A missing sibling refuses with the OUTSIDE-tree path: the
+      // message must never steer proprietary code into the tree.
+      rmSync(overlay, { recursive: true, force: true });
+      let stderr = "";
+      try {
+        execFileSync("bash", ["-c", script], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        assert.fail("the resolver must refuse a missing default sibling");
+      } catch (error) {
+        stderr = String(error.stderr ?? "");
+      }
+      // Literal fragments (no path.join: it would normalize the ".."
+      // away). The shell always emits forward slashes.
+      assert.ok(
+        stderr.includes("repo/../private-pi-dash"),
+        `refusal must name the outside-tree sibling, got: ${stderr}`
+      );
+      assert.ok(
+        !stderr.includes("apps/../private-pi-dash"),
+        `refusal must not name an inside-tree path, got: ${stderr}`
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

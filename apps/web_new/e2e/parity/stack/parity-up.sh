@@ -23,7 +23,7 @@ set -euo pipefail
 export STACK_DIR
 STACK_DIR="$(cd "$(dirname "$0")" && pwd)"
 export REPO_ROOT
-REPO_ROOT="$(cd "$STACK_DIR/../../../.." && pwd)"
+REPO_ROOT="$(cd "$STACK_DIR/../../../../.." && pwd)"
 export PARITY_DIR
 PARITY_DIR="$(cd "$STACK_DIR/.." && pwd)"
 export COMPOSE_FILE

@@ -35,10 +35,11 @@ not the pin), and the branch-vs-branch comparison is what matters:
   shadows is byte-identical between the two branches, so the overlay
   applies to this branch exactly as it applies to `main`.
 
-Reproduce:
+Reproduce (known-skew check — the full 26-file comparison was run at
+reconcile time by diffing each replaced file between `origin/main` and
+`origin/web-new-dev`; only the file below differed):
 
 ```sh
-PIN=2b4633931b5c94f88b123c4ca1bcf96dda577414
 git diff --name-only origin/main origin/web-new-dev -- apps/web/core/services/auth-signout.ts
 ```
 
@@ -56,6 +57,12 @@ new OSS file), not in the parity stack.
 
 ## What the oracle bakes in
 
+- Anonymous throttle widened to 600/minute via
+  `stack/parity_cloud_scratch_settings.py` (mounted read-only into
+  `api-cloud`), mirroring the OSS stack's `parity_scratch_settings.py`.
+  The cloud settings inherit the 30/minute production `anon` budget
+  unchanged, which saturates minutes into an oracle run; the
+  authentication throttle is untouched, so AUTH-006 still trips it.
 - OpenHub app lane ON in both halves (`OPENHUB_APPS_ENABLED=1` on the
   API, `VITE_OPENHUB_APPS_ENABLED=1` in the oracle bundle). The flag-off
   shape (CLOUD-021's second half: sidebar byte-identical to OSS, route

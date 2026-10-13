@@ -36,7 +36,7 @@
 parity_cloud_resolve_overlay() {
   local dir="${CLOUD_OVERLAY_DIR:-}"
   if [ -z "$dir" ]; then
-    dir="$(cd "${STACK_DIR:?parity-cloud.sh needs STACK_DIR}/../../../.." && pwd)/../private-pi-dash"
+    dir="$(cd "${STACK_DIR:?parity-cloud.sh needs STACK_DIR}/../../../../.." && pwd)/../private-pi-dash"
   fi
   if [ ! -d "$dir" ]; then
     parity_cloud_missing "$dir"

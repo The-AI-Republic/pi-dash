@@ -335,8 +335,12 @@ That stages the overlay inputs into the gitignored
 edits apply on the next run), builds `api-cloud` (the OSS api image plus
 one overlay layer) and `oracle-cloud-prod` (the production oracle plus
 one overlay layer), and starts `pg redis mq minio api-cloud
-oracle-cloud-prod proxy`. There is no cloud worker (nothing in the cloud
-area needs background fan-out) and no dev-mode cloud oracle
+oracle-cloud-prod proxy`. `api-cloud` runs on
+`parity_cloud_scratch_settings.py` (mounted read-only), which layers the
+same 600/minute anonymous widening onto the cloud settings — the cloud
+settings inherit the 30/minute production budget, which would otherwise
+saturate minutes into an oracle run. There is no cloud worker (nothing
+in the cloud area needs background fan-out) and no dev-mode cloud oracle
 (`PARITY_ORACLE_MODE=dev` with the cloud edition refuses; unset it).
 Teardown is the existing path — `parity-down.sh`, `parity-reset.sh` and
 the run-end reaper all work unchanged — plus removal of the staging
@@ -377,7 +381,7 @@ curl -s -o /dev/null -w 'login:%{http_code}\n' "$PARITY_ORACLE_URL/login"
 SEED="$(cat "$PARITY_SEED_FILE")"
 EMAIL="$(echo "$SEED" | python3 -c 'import json,sys; print(json.load(sys.stdin)["email"])')"
 JAR="$(mktemp)"
-curl -s -c "$JAR" -X POST "$PARITY_API_URL/api/auth/dev-login/" \
+curl -s -c "$JAR" -o /dev/null -w 'devlogin:%{http_code}\n' -X POST "$PARITY_API_URL/api/auth/dev-login/" \
   -H 'Content-Type: application/json' \
   -d "{\"email\":\"$EMAIL\",\"display_name\":\"smoke\"}"
 curl -s -b "$JAR" -o /dev/null -w 'me:%{http_code}\n' "$PARITY_API_URL/api/auth/me/"

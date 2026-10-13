@@ -205,11 +205,13 @@ services:
 
   # Cloud-edition API (NEWFRONT-436). The OSS api image with the private
   # overlay layered on (Dockerfile.api-cloud), running under the cloud
-  # settings module. Same ports, volumes and healthcheck as `api`: one
-  # stack serves one edition, and parity-up.sh starts exactly one of them.
-  # The `api` network alias keeps the proxy, the Caddyfile and the live
-  # service untouched — `api:8000` resolves to whichever api runs. Behind
-  # the `cloud` profile so a bare `docker compose up` stays OSS exactly.
+  # scratch settings (the cloud settings plus the 600/minute anon
+  # widening, mirroring `api`'s parity_scratch_settings.py). Same ports,
+  # volumes shape and healthcheck as `api`: one stack serves one
+  # edition, and parity-up.sh starts exactly one of them. The `api`
+  # network alias keeps the proxy, the Caddyfile and the live service
+  # untouched — `api:8000` resolves to whichever api runs. Behind the
+  # `cloud` profile so a bare `docker compose up` stays OSS exactly.
   api-cloud:
     build:
       context: ../../../../..
@@ -236,8 +238,10 @@ services:
       default:
         aliases:
           - api
+    volumes:
+      - ./parity_cloud_scratch_settings.py:/code/parity_cloud_scratch_settings.py:ro
     environment:
-      DJANGO_SETTINGS_MODULE: pi_dash_cloud.settings.local
+      DJANGO_SETTINGS_MODULE: parity_cloud_scratch_settings
       USE_MINIO: "1"
       AWS_ACCESS_KEY_ID: parity19minio
       AWS_SECRET_ACCESS_KEY: parity19minio-scratch-secret
