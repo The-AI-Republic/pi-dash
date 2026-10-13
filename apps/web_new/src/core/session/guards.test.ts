@@ -9,6 +9,7 @@ import {
   asString,
   CREATE_WORKSPACE_PATH,
   decidePageGate,
+  isOnboardedProfile,
   loadGateInputs,
   loadLandingTarget,
   ONBOARDING_PATH,
@@ -69,6 +70,48 @@ describe("parseReturnPath", () => {
   it("stays absent without a return path", () => {
     expect(parseReturnPath({})).toEqual({});
     expect(parseReturnPath({ next: "", next_path: 42 })).toEqual({});
+  });
+});
+
+describe("isOnboardedProfile", () => {
+  const allFlags = {
+    profile_complete: true,
+    workspace_create: true,
+    workspace_invite: true,
+    workspace_join: true,
+  };
+
+  it("accepts the onboarded marker", () => {
+    expect(isOnboardedProfile({ is_onboarded: true })).toBe(true);
+    expect(isOnboardedProfile({ is_onboarded: true, onboarding_step: {} })).toBe(true);
+  });
+
+  it("accepts all four progress flags without the marker (finish crash window)", () => {
+    expect(isOnboardedProfile({ is_onboarded: false, onboarding_step: { ...allFlags } })).toBe(true);
+  });
+
+  it("rejects partial progress flags", () => {
+    const { workspace_join: _dropped, ...threeFlags } = allFlags;
+    expect(_dropped).toBe(true);
+    expect(isOnboardedProfile({ is_onboarded: false, onboarding_step: threeFlags })).toBe(false);
+    expect(
+      isOnboardedProfile({
+        is_onboarded: false,
+        onboarding_step: { ...allFlags, profile_complete: false },
+      })
+    ).toBe(false);
+    expect(isOnboardedProfile({ is_onboarded: false, onboarding_step: {} })).toBe(false);
+  });
+
+  it("rejects a missing progress bag", () => {
+    expect(isOnboardedProfile({ is_onboarded: false })).toBe(false);
+    expect(isOnboardedProfile({ is_onboarded: false, onboarding_step: null })).toBe(false);
+    expect(isOnboardedProfile({ is_onboarded: false, onboarding_step: undefined })).toBe(false);
+  });
+
+  it("fails closed when the profile cannot be read", () => {
+    expect(isOnboardedProfile(null)).toBe(false);
+    expect(isOnboardedProfile(undefined)).toBe(false);
   });
 });
 

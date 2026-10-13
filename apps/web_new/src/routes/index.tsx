@@ -13,6 +13,7 @@ import * as React from "react";
 import {
   asString,
   decidePageGate,
+  isOnboardedProfile,
   loadGateInputs,
   loadLandingTarget,
   ONBOARDING_PATH,
@@ -66,7 +67,7 @@ export const Route = createFileRoute("/")({
     const decision = decidePageGate({
       page: "signed-out-only",
       signedIn: me !== null,
-      onboarded: profile?.is_onboarded ?? false,
+      onboarded: isOnboardedProfile(profile),
       hasPassword: me?.is_password_autoset === false,
       currentPath: location.href,
     });

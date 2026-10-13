@@ -63,8 +63,19 @@ function seedMe(client: QueryClient, apiClient: ApiClient, isPasswordAutoset: bo
   } as never);
 }
 
-function seedProfile(client: QueryClient, apiClient: ApiClient, isOnboarded: boolean) {
-  client.setQueryData(profileQueryOptions(apiClient).queryKey, { is_onboarded: isOnboarded } as never);
+const ALL_STEP_FLAGS = {
+  profile_complete: true,
+  workspace_create: true,
+  workspace_invite: true,
+  workspace_join: true,
+};
+
+function seedProfile(
+  client: QueryClient,
+  apiClient: ApiClient,
+  profile: { is_onboarded: boolean; onboarding_step?: Record<string, unknown> }
+) {
+  client.setQueryData(profileQueryOptions(apiClient).queryKey, profile as never);
 }
 
 async function load(client: QueryClient, apiClient: ApiClient): Promise<{ ok: unknown } | { thrown: unknown }> {
@@ -101,7 +112,7 @@ describe("set-password guard", () => {
     const client = queryClient();
     const apiClient = throwingClient();
     seedMe(client, apiClient, true);
-    seedProfile(client, apiClient, false);
+    seedProfile(client, apiClient, { is_onboarded: false });
     await expect(load(client, apiClient)).resolves.toEqual({ ok: {} });
   });
 
@@ -109,7 +120,17 @@ describe("set-password guard", () => {
     const client = queryClient();
     const apiClient = throwingClient();
     seedMe(client, apiClient, false);
-    seedProfile(client, apiClient, true);
+    seedProfile(client, apiClient, { is_onboarded: true });
+    const outcome = await load(client, apiClient);
+    expect("thrown" in outcome && isRedirect(outcome.thrown)).toBe(true);
+    expect((outcome as { thrown: { options: unknown } }).thrown.options).toMatchObject({ to: "/" });
+  });
+
+  it("sends away set users whose flags are all set even without the marker", async () => {
+    const client = queryClient();
+    const apiClient = throwingClient();
+    seedMe(client, apiClient, false);
+    seedProfile(client, apiClient, { is_onboarded: false, onboarding_step: { ...ALL_STEP_FLAGS } });
     const outcome = await load(client, apiClient);
     expect("thrown" in outcome && isRedirect(outcome.thrown)).toBe(true);
     expect((outcome as { thrown: { options: unknown } }).thrown.options).toMatchObject({ to: "/" });
@@ -119,7 +140,7 @@ describe("set-password guard", () => {
     const client = queryClient();
     const apiClient = throwingClient();
     seedMe(client, apiClient, false);
-    seedProfile(client, apiClient, false);
+    seedProfile(client, apiClient, { is_onboarded: false });
     await expect(load(client, apiClient)).resolves.toEqual({ ok: {} });
   });
 

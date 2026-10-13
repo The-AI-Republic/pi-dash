@@ -67,10 +67,33 @@ export type PageGateDecision =
   | { action: "landing" };
 
 /**
- * Gate one page type (AUTH-015). `onboarded` reads profile.is_onboarded
- * and `hasPassword` reads me.is_password_autoset === false; callers pass
- * the values, this decides. A sign-in decision carries the return path the
- * bounce must preserve.
+ * The progress flags the finish stamp writes (AUTH-039). When every one
+ * is set, the profile counts as onboarded even when the onboarded marker
+ * itself never landed — the crash window between the two finish writes.
+ */
+const ONBOARDING_DONE_FLAGS = ["profile_complete", "workspace_create", "workspace_invite", "workspace_join"] as const;
+
+/**
+ * Whether a profile counts as onboarded (shared definition): the
+ * onboarded marker, or every progress flag set. An unreadable profile
+ * counts as unfinished — callers fail closed toward onboarding, never
+ * into the app. Every guard reads onboarded-ness through this helper.
+ */
+export function isOnboardedProfile(
+  profile: { is_onboarded: boolean; onboarding_step?: Record<string, unknown> | null | undefined } | null | undefined
+): boolean {
+  if (!profile) return false;
+  if (profile.is_onboarded) return true;
+  const steps = profile.onboarding_step ?? {};
+  return ONBOARDING_DONE_FLAGS.every((flag) => Boolean(steps[flag]));
+}
+
+/**
+ * Gate one page type (AUTH-015). `onboarded` reads
+ * isOnboardedProfile(profile) and `hasPassword` reads
+ * me.is_password_autoset === false; callers pass the values, this
+ * decides. A sign-in decision carries the return path the bounce must
+ * preserve.
  */
 export function decidePageGate(args: {
   page: AuthPageKind;

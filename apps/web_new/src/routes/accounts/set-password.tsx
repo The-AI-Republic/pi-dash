@@ -13,6 +13,7 @@ import { ToastHost } from "@pidash/kit";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import * as React from "react";
 
+import { isOnboardedProfile } from "../../core/session/guards.js";
 import { meQueryOptions, profileQueryOptions } from "../../core/session/queries.js";
 import { SetPasswordCard } from "../../features/auth/index.js";
 import { getToastManager, useSessionExpiredRedirect } from "../../shared/shell/index.js";
@@ -41,8 +42,10 @@ export const Route = createFileRoute("/accounts/set-password")({
     }
     const profile = await context.queryClient.ensureQueryData(profileQueryOptions(context.apiClient)).catch(() => null);
     if (
-      decideSetPasswordGate({ passwordAutoset: me.is_password_autoset, onboarded: profile?.is_onboarded ?? null }) ===
-      "away"
+      decideSetPasswordGate({
+        passwordAutoset: me.is_password_autoset,
+        onboarded: profile === null ? null : isOnboardedProfile(profile),
+      }) === "away"
     ) {
       throw redirect({ to: "/" });
     }

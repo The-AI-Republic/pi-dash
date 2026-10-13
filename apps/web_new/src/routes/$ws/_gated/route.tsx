@@ -14,6 +14,7 @@ import type * as React from "react";
 
 import {
   decidePageGate,
+  isOnboardedProfile,
   loadGateInputs,
   meQueryOptions,
   ONBOARDING_PATH,
@@ -31,7 +32,7 @@ export const Route = createFileRoute("/$ws/_gated")({
     const decision = decidePageGate({
       page: "signed-in-only",
       signedIn: me !== null,
-      onboarded: profile?.is_onboarded ?? false,
+      onboarded: isOnboardedProfile(profile),
       hasPassword: me?.is_password_autoset === false,
       currentPath: location.href,
     });

@@ -55,7 +55,7 @@ export function useInstanceConfig() {
   return useQuery(instanceConfigQueryOptions(getSessionClient()));
 }
 
-/** The signed-in user's profile. Guards read is_onboarded off it. */
+/** The signed-in user's profile. Guards read onboarded-ness off it via isOnboardedProfile. */
 export function useProfile() {
   return useQuery(profileQueryOptions(getSessionClient()));
 }

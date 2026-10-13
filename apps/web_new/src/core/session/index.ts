@@ -6,6 +6,7 @@ export {
   asString,
   CREATE_WORKSPACE_PATH,
   decidePageGate,
+  isOnboardedProfile,
   loadGateInputs,
   loadLandingTarget,
   ONBOARDING_PATH,
