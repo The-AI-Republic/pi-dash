@@ -116,6 +116,14 @@ the same namespace. Anything set explicitly (`PARITY_PROJECT`,
 `PARITY_CONTAINER_PREFIX`, any `PARITY_*_PORT`, `PARITY_SEED_FILE`,
 `PARITY_API_URL`, `PARITY_ORACLE_URL`) wins over the derivation.
 
+Locally-built image tags are namespaced the same way (NEWFRONT-435):
+`api`, `worker`, `oracle`, `oracle-prod` and `live` build as
+`<prefix>-<service>:local`, where the prefix is the resolved
+`PARITY_CONTAINER_PREFIX` (default `parity19`), so a build in one
+namespace never retags the image a sibling namespace runs. The first
+bring-up in a fresh namespace builds its own set of images; after that
+Docker reuses their layers exactly as before.
+
 Rules:
 
 - Numeric namespaces only for the one-setting flow. A non-numeric

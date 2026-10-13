@@ -80,10 +80,10 @@ echo "[parity] checking host disk before the build"
 "$STACK_DIR/parity-disk-check.sh"
 
 if [ "$PARITY_REBUILD" = "1" ]; then
-  echo "[parity] rebuilding scratch images from zero (parity19-api, $ORACLE_SERVICE)"
+  echo "[parity] rebuilding scratch images from zero (${PARITY_CONTAINER_PREFIX:-parity19}-api, $ORACLE_SERVICE)"
   docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build --no-cache api "$ORACLE_SERVICE"
 else
-  echo "[parity] building scratch images (parity19-api, $ORACLE_SERVICE; cached unless inputs changed)"
+  echo "[parity] building scratch images (${PARITY_CONTAINER_PREFIX:-parity19}-api, $ORACLE_SERVICE; cached unless inputs changed)"
   docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build api "$ORACLE_SERVICE"
 fi
 

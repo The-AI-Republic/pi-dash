@@ -15,7 +15,10 @@
 # PARITY_CONTAINER_PREFIX and PARITY_*_PORT settings always win over the
 # namespace derivation. The container prefix defaults to the resolved
 # project, so a namespace can never reuse another stack's container
-# names or mount its postgres datadir.
+# names or mount its postgres datadir. Locally-built image tags carry
+# the same prefix (NEWFRONT-435): without it concurrent namespaces
+# shared one tag and a build in one retagged the image another's next
+# recreate pulled, serving the wrong branch's bundle.
 # Every service carries a mem_limit: a stack that runs away is killed inside
 # its own containers instead of taking the runner host down with it.
 name: ${PARITY_PROJECT:-parity19}
@@ -103,7 +106,7 @@ services:
     build:
       context: ../../../../../apps/api
       dockerfile: Dockerfile.dev
-    image: parity19-api:local
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-api:local
     container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-api
     mem_limit: 1g
     # The stock dev entrypoint registers instances and buckets; parity runs
@@ -168,7 +171,7 @@ services:
     build:
       context: ../../../../..
       dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle
-    image: parity19-oracle:local
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle:local
     container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle
     mem_limit: 2g
     # Empty base keeps API calls same-origin; the proxy routes them to Django.
@@ -195,7 +198,7 @@ services:
     build:
       context: ../../../../..
       dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-prod
-    image: parity19-oracle-prod:local
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-prod:local
     container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-prod
     mem_limit: 256m
     profiles: ["oracle-prod"]
@@ -214,7 +217,7 @@ services:
     build:
       context: ../../../../../apps/api
       dockerfile: Dockerfile.dev
-    image: parity19-api:local
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-api:local
     # Slotted like every other service (NEWFRONT-187): the hardcoded name
     # collided across PARITY_PROJECT stacks, so only the first stack ever
     # got a worker and assistant turns in every other slot never ran.
@@ -298,7 +301,7 @@ services:
     build:
       context: ../../../../..
       dockerfile: apps/live/Dockerfile.live
-    image: parity19-live:local
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-live:local
     container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-live
     mem_limit: 512m
     depends_on:
