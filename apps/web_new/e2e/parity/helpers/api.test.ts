@@ -601,6 +601,18 @@ describe("analyticsAdvanceCustomChartsRaw", () => {
     expect(url.searchParams.get("project_ids")).toBe("a,b");
   });
 
+  it("omits an empty group_by like a missing split", async () => {
+    stubRaw = JSON.stringify({ data: [], schema: {} });
+    const read = await analyticsAdvanceCustomChartsRaw(analyticsSession(), "anl-ws", {
+      x_axis: "PRIORITY",
+      y_axis: "WORK_ITEM_COUNT",
+      group_by: "",
+    });
+    expect(read.status).toBe(200);
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.searchParams.has("group_by")).toBe(false);
+  });
+
   it("carries the status with a null payload when the body is unparsable", async () => {
     stubStatus = 403;
     stubRaw = "forbidden";
@@ -647,6 +659,14 @@ describe("analyticsScopedTotalsRaw", () => {
     expect(url.searchParams.get("project_ids")).toBe("p1");
     expect(url.searchParams.get("cycle_id")).toBe("c9");
   });
+
+  it("carries the status with a null payload when the body is unparsable", async () => {
+    stubStatus = 403;
+    stubRaw = "forbidden";
+    const read = await analyticsScopedTotalsRaw(analyticsSession(), "anl-ws", "p1");
+    expect(read.status).toBe(403);
+    expect(read.payload).toBeNull();
+  });
 });
 
 describe("analyticsScopedChartsRaw", () => {
@@ -662,6 +682,14 @@ describe("analyticsScopedChartsRaw", () => {
     expect(url.searchParams.get("type")).toBe("custom-work-items");
     expect(url.searchParams.get("x_axis")).toBe("PRIORITY");
   });
+
+  it("carries the status with a null payload when the body is unparsable", async () => {
+    stubStatus = 403;
+    stubRaw = "forbidden";
+    const read = await analyticsScopedChartsRaw(analyticsSession(), "anl-ws", "p1", "custom-work-items");
+    expect(read.status).toBe(403);
+    expect(read.payload).toBeNull();
+  });
 });
 
 describe("analyticsScopedStatsRaw", () => {
@@ -674,6 +702,14 @@ describe("analyticsScopedStatsRaw", () => {
     expect(url.pathname).toBe("/api/workspaces/anl-ws/projects/p1/advance-analytics-stats");
     expect(url.searchParams.get("type")).toBe("work-items");
     expect(url.searchParams.get("module_id")).toBe("m9");
+  });
+
+  it("carries the status with a null payload when the body is unparsable", async () => {
+    stubStatus = 403;
+    stubRaw = "forbidden";
+    const read = await analyticsScopedStatsRaw(analyticsSession(), "anl-ws", "p1");
+    expect(read.status).toBe(403);
+    expect(read.payload).toBeNull();
   });
 });
 
@@ -695,5 +731,17 @@ describe("analyticsProjectStateColors", () => {
   it("throws when a state row carries no color", async () => {
     stubRaw = JSON.stringify([{ id: "s1", name: "Backlog", group: "backlog" }]);
     await expect(analyticsProjectStateColors(analyticsSession(), "anl-ws", "p1")).rejects.toThrow(/no id\/name\/color/);
+  });
+
+  it("throws when the states read fails", async () => {
+    stubStatus = 500;
+    stubRaw = "boom";
+    await expect(analyticsProjectStateColors(analyticsSession(), "anl-ws", "p1")).rejects.toThrow(/HTTP 500/);
+  });
+
+  it("maps a non-list payload to an empty list", async () => {
+    stubRaw = JSON.stringify({ data: [] });
+    const rows = await analyticsProjectStateColors(analyticsSession(), "anl-ws", "p1");
+    expect(rows).toEqual([]);
   });
 });
