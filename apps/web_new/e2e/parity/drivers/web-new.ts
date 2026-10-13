@@ -150,6 +150,9 @@ import type {
   AnalyticsRadarFacts,
   AnalyticsActiveProject,
   AnalyticsCreatedResolvedFacts,
+  AnalyticsCustomChartFacts,
+  AnalyticsCustomTooltipRow,
+  AnalyticsDialogAssignee,
   PagesBlocksAssetRow,
   PagesBlocksInfoStats,
   PagesBlocksInlineImage,
@@ -11540,6 +11543,106 @@ export class WebNewDriver implements ParityDriver {
   }
   async analyticsDialogHeadlineCards(): Promise<AnalyticsHeadlineCard[]> {
     return todo("analyticsDialogHeadlineCards");
+  }
+
+  // --- Analytics custom insights, tables, dialog (NEWFRONT-377, ANL-010..017).
+  async analyticsCustomPickerLabels(): Promise<{ metric: string; xAxis: string; split: string }> {
+    return todo("analyticsCustomPickerLabels");
+  }
+  async analyticsCustomPickerOptions(_index: 0 | 1 | 2): Promise<string[]> {
+    return todo("analyticsCustomPickerOptions");
+  }
+  async analyticsCustomPickerSelect(_index: 0 | 1 | 2, _label: string): Promise<void> {
+    return todo("analyticsCustomPickerSelect");
+  }
+  async analyticsCustomChartFacts(): Promise<AnalyticsCustomChartFacts> {
+    return todo("analyticsCustomChartFacts");
+  }
+  async analyticsCustomTooltipSegments(_barIndex: number): Promise<AnalyticsCustomTooltipRow[]> {
+    return todo("analyticsCustomTooltipSegments");
+  }
+  async analyticsExportRowCount(_kind: AnalyticsExportTable): Promise<number> {
+    return todo("analyticsExportRowCount");
+  }
+  async analyticsExportHeaders(_kind: AnalyticsExportTable): Promise<string[]> {
+    return todo("analyticsExportHeaders");
+  }
+  async analyticsExportCountLabel(_kind: AnalyticsExportTable): Promise<string> {
+    return todo("analyticsExportCountLabel");
+  }
+  async analyticsExportSearchExpanded(_kind: AnalyticsExportTable): Promise<boolean> {
+    return todo("analyticsExportSearchExpanded");
+  }
+  async analyticsExportSearchClose(_kind: AnalyticsExportTable): Promise<void> {
+    return todo("analyticsExportSearchClose");
+  }
+  async analyticsExportEmptyText(_kind: AnalyticsExportTable): Promise<string | null> {
+    return todo("analyticsExportEmptyText");
+  }
+  async analyticsInsightTableStall(): Promise<void> {
+    return todo("analyticsInsightTableStall");
+  }
+  async analyticsInsightTableRelease(): Promise<void> {
+    return todo("analyticsInsightTableRelease");
+  }
+  async analyticsInsightSkeletonCells(): Promise<number> {
+    return todo("analyticsInsightSkeletonCells");
+  }
+  async analyticsDialogOpenFromIssues(
+    _workspaceSlug: string,
+    _projectId: string,
+    _cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    return todo("analyticsDialogOpenFromIssues");
+  }
+  async analyticsDialogOpenFromCycle(
+    _workspaceSlug: string,
+    _projectId: string,
+    _cycleId: string,
+    _cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    return todo("analyticsDialogOpenFromCycle");
+  }
+  async analyticsDialogOpenFromModule(
+    _workspaceSlug: string,
+    _projectId: string,
+    _moduleId: string,
+    _cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    return todo("analyticsDialogOpenFromModule");
+  }
+  async analyticsSurfaceTriggerCount(): Promise<number> {
+    return todo("analyticsSurfaceTriggerCount");
+  }
+  async analyticsDialogTitle(): Promise<string> {
+    return todo("analyticsDialogTitle");
+  }
+  async analyticsDialogSpinnerSeen(): Promise<boolean> {
+    return todo("analyticsDialogSpinnerSeen");
+  }
+  async analyticsDialogWideToggleVisible(): Promise<boolean> {
+    return todo("analyticsDialogWideToggleVisible");
+  }
+  async analyticsDialogToggleWide(): Promise<void> {
+    return todo("analyticsDialogToggleWide");
+  }
+  async analyticsDialogWidth(): Promise<number> {
+    return todo("analyticsDialogWidth");
+  }
+  async analyticsDialogRowCount(): Promise<number> {
+    return todo("analyticsDialogRowCount");
+  }
+  async analyticsDialogTableHeaders(): Promise<string[]> {
+    return todo("analyticsDialogTableHeaders");
+  }
+  async analyticsDialogTableCells(): Promise<string[][]> {
+    return todo("analyticsDialogTableCells");
+  }
+  async analyticsDialogAssigneeFacts(): Promise<AnalyticsDialogAssignee[]> {
+    return todo("analyticsDialogAssigneeFacts");
+  }
+  async analyticsDialogExportDownload(_tableIndex: 0 | 1): Promise<LocalFileDownload> {
+    return todo("analyticsDialogExportDownload");
   }
 
   // --- Pages blocks/embeds/mentions/links (NEWFRONT-316, PAGE-037-044).

@@ -20231,3 +20231,169 @@ export async function cloudCreateIssueRaw(
   }
   return { status: res.status, payload };
 }
+
+// --- Analytics custom insights / tables / scoped dialog reads (NEWFRONT-377, ANL-010..017). ---
+// Appended; existing helpers above are untouched per the shared contract.
+// Mirrors the queries the custom-insights chart, the state-breakdown table,
+// and the project-scoped dialog send: the custom graph carries its axis
+// params on the charts read, the breakdown reads the stats endpoint, and
+// the dialog reads the project-scoped advance-analytics variants.
+
+/**
+ * Raw custom-graph charts read (ANL-010..012). Mirrors the query the
+ * custom-insights section sends: `type=custom-work-items` always, the axis
+ * params always (group_by omitted when no second split is chosen), and
+ * `project_ids` only when the picker holds a non-empty selection.
+ */
+export async function analyticsAdvanceCustomChartsRaw(
+  session: AuthedSession,
+  slug: string,
+  params: { x_axis: string; y_axis: string; group_by?: string },
+  projectIds: string[] = []
+): Promise<AnalyticsRawRead> {
+  const query = new URLSearchParams({ type: "custom-work-items", x_axis: params.x_axis, y_axis: params.y_axis });
+  if (params.group_by !== undefined && params.group_by !== "") query.set("group_by", params.group_by);
+  if (projectIds.length > 0) query.set("project_ids", projectIds.join(","));
+  const res = await sessionFetch(
+    session,
+    "GET",
+    `/api/workspaces/${slug}/advance-analytics-charts?${query.toString()}`
+  );
+  let payload: unknown = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}
+
+/**
+ * Raw state-breakdown stats read (ANL-013). Mirrors the insight table's
+ * query: `type=work-items` always, `project_ids` only under a picker
+ * selection.
+ */
+export async function analyticsAdvanceStatsRaw(
+  session: AuthedSession,
+  slug: string,
+  projectIds: string[] = []
+): Promise<AnalyticsRawRead> {
+  const query = new URLSearchParams({ type: "work-items" });
+  if (projectIds.length > 0) query.set("project_ids", projectIds.join(","));
+  const res = await sessionFetch(session, "GET", `/api/workspaces/${slug}/advance-analytics-stats?${query.toString()}`);
+  let payload: unknown = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}
+
+/**
+ * Raw project-scoped headline-totals read (ANL-014 dialog). Mirrors the
+ * dialog's peek-view totals query: the project path plus `tab` and the
+ * scoping params (`project_ids` always, `cycle_id`/`module_id` when the
+ * dialog opened from those surfaces).
+ */
+export async function analyticsScopedTotalsRaw(
+  session: AuthedSession,
+  slug: string,
+  projectId: string,
+  extra: Record<string, string> = {}
+): Promise<AnalyticsRawRead> {
+  const query = new URLSearchParams({ tab: "work-items", project_ids: projectId, ...extra });
+  const res = await sessionFetch(
+    session,
+    "GET",
+    `/api/workspaces/${slug}/projects/${projectId}/advance-analytics?${query.toString()}`
+  );
+  let payload: unknown = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}
+
+/**
+ * Raw project-scoped charts read (ANL-014 dialog). Same scoping shape as
+ * the totals variant, with the graph `type` in place of `tab`; `extra`
+ * carries axis params for the custom graph or cycle/module scoping.
+ */
+export async function analyticsScopedChartsRaw(
+  session: AuthedSession,
+  slug: string,
+  projectId: string,
+  type: string,
+  extra: Record<string, string> = {}
+): Promise<AnalyticsRawRead> {
+  const query = new URLSearchParams({ type, project_ids: projectId, ...extra });
+  const res = await sessionFetch(
+    session,
+    "GET",
+    `/api/workspaces/${slug}/projects/${projectId}/advance-analytics-charts?${query.toString()}`
+  );
+  let payload: unknown = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}
+
+/**
+ * Raw project-scoped stats read (ANL-014/015 dialog table). Same scoping
+ * shape as the totals variant with the stats `type`.
+ */
+export async function analyticsScopedStatsRaw(
+  session: AuthedSession,
+  slug: string,
+  projectId: string,
+  extra: Record<string, string> = {}
+): Promise<AnalyticsRawRead> {
+  const query = new URLSearchParams({ type: "work-items", project_ids: projectId, ...extra });
+  const res = await sessionFetch(
+    session,
+    "GET",
+    `/api/workspaces/${slug}/projects/${projectId}/advance-analytics-stats?${query.toString()}`
+  );
+  let payload: unknown = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  return { status: res.status, payload };
+}
+
+/** One project state with the display color the state-axis bars reuse (ANL-011). */
+export interface AnalyticsStateColor {
+  id: string;
+  name: string;
+  color: string;
+}
+
+/**
+ * Project states with display colors (ANL-011 state-axis fills). The shared
+ * states helper drops the color field, so the oracle reads it directly.
+ */
+export async function analyticsProjectStateColors(
+  session: AuthedSession,
+  slug: string,
+  projectId: string
+): Promise<AnalyticsStateColor[]> {
+  const res = await sessionFetch(session, "GET", `/api/workspaces/${slug}/projects/${projectId}/states/`);
+  if (!res.ok) throw new Error(`[parity] state color read failed with HTTP ${res.status}.`);
+  const rows: unknown = await res.json();
+  const list: unknown[] = Array.isArray(rows) ? rows : [];
+  return list.map((row) => {
+    const record = row as { id?: unknown; name?: unknown; color?: unknown };
+    if (typeof record.id !== "string" || typeof record.name !== "string" || typeof record.color !== "string") {
+      throw new Error("[parity] state row carried no id/name/color.");
+    }
+    return { id: record.id, name: record.name, color: record.color };
+  });
+}

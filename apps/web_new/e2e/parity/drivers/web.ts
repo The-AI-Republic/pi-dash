@@ -168,6 +168,9 @@ import type {
   AnalyticsRadarFacts,
   AnalyticsActiveProject,
   AnalyticsCreatedResolvedFacts,
+  AnalyticsCustomChartFacts,
+  AnalyticsCustomTooltipRow,
+  AnalyticsDialogAssignee,
   PagesBlocksAssetRow,
   PagesBlocksInfoStats,
   PagesBlocksInlineImage,
@@ -39760,6 +39763,10 @@ export class WebDriver implements ParityDriver {
   private analyticsChartsGates: Array<() => void> = [];
   private analyticsStatsStalled = false;
   private analyticsStatsGates: Array<() => void> = [];
+  // Insight-table stats stall (NEWFRONT-377, ANL-013). Appended; the gates
+  // above are untouched.
+  private analyticsInsightStatsStalled = false;
+  private analyticsInsightStatsGates: Array<() => void> = [];
 
   private async analyticsReadHook(): Promise<void> {
     if (this.analyticsReadHookInstalled) return;
@@ -39786,6 +39793,10 @@ export class WebDriver implements ParityDriver {
           } else if (url.pathname.endsWith("/project-stats/") && this.analyticsStatsStalled) {
             await new Promise<void>((resolve) => {
               this.analyticsStatsGates.push(resolve);
+            });
+          } else if (url.pathname.endsWith("/advance-analytics-stats") && this.analyticsInsightStatsStalled) {
+            await new Promise<void>((resolve) => {
+              this.analyticsInsightStatsGates.push(resolve);
             });
           }
         } catch {
@@ -40234,6 +40245,443 @@ export class WebDriver implements ParityDriver {
         value: ((card.children[1] as HTMLElement | undefined)?.innerText as string | undefined)?.trim() ?? "",
       }));
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Analytics custom insights, data tables, and scoped dialog (NEWFRONT-377,
+  // ANL-010..017). The custom-insights section is scoped through its heading
+  // outside any dialog (the dialog carries its own copy when open); its
+  // three picker buttons open portaled listboxes, and its bar chart is a
+  // recharts SVG whose segment paths carry fill plus corner radii. Table
+  // helpers below extend the NEWFRONT-382 chart/insight table family.
+  // Appended; existing methods above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Custom-insights section on the tab (never the dialog's copy). */
+  private analyticsCustomSection(): Locator {
+    return this.page
+      .locator("xpath=//h1[contains(normalize-space(.), 'Customized Insights') and not(ancestor::*[@role='dialog'])]")
+      .first()
+      .locator("xpath=../../..");
+  }
+
+  async analyticsCustomPickerLabels(): Promise<{ metric: string; xAxis: string; split: string }> {
+    const buttons = this.analyticsCustomSection().getByRole("button");
+    const texts: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      texts.push((((await buttons.nth(index).textContent({ timeout: WebDriver.WAIT_MS })) ?? "") as string).trim());
+    }
+    return { metric: texts[0] ?? "", xAxis: texts[1] ?? "", split: texts[2] ?? "" };
+  }
+
+  private analyticsCustomListbox(): Locator {
+    return this.page.locator("[role='listbox']");
+  }
+
+  /**
+   * Open one custom-insights picker. Closing with Escape leaves the
+   * dropdown's toggle state diverged (the button keeps reading expanded
+   * with no panel), so opens and closes always go through the button and a
+   * missed open resets with Escape before one fresh retry.
+   */
+  private async analyticsCustomOpenPicker(index: 0 | 1 | 2): Promise<void> {
+    const button = this.analyticsCustomSection().getByRole("button").nth(index);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await button.click({ timeout: WebDriver.WAIT_MS });
+      const opened = await this.analyticsCustomListbox()
+        .waitFor({ state: "attached", timeout: 5_000 })
+        .then(
+          () => true,
+          () => false
+        );
+      if (opened) break;
+      await this.page.keyboard.press("Escape");
+      if (attempt === 1) throw new Error("[parity] custom picker never opened.");
+    }
+    // The listbox shell itself reports hidden (its size comes from the
+    // inner dropdown), so the open proof is a visible option, not the shell.
+    await this.analyticsCustomListbox()
+      .locator("[role='option']")
+      .first()
+      .waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  /** Close the open picker through its button (never Escape; see above). */
+  private async analyticsCustomClosePicker(index: 0 | 1 | 2): Promise<void> {
+    await this.analyticsCustomSection().getByRole("button").nth(index).click({ timeout: WebDriver.WAIT_MS });
+    await this.analyticsCustomListbox().waitFor({ state: "detached", timeout: WebDriver.WAIT_MS });
+  }
+
+  async analyticsCustomPickerOptions(index: 0 | 1 | 2): Promise<string[]> {
+    await this.analyticsCustomOpenPicker(index);
+    const options = this.analyticsCustomListbox().locator("[role='option']");
+    const count = await options.count();
+    const texts: string[] = [];
+    for (let option = 0; option < count; option += 1) {
+      texts.push((((await options.nth(option).textContent()) ?? "") as string).trim());
+    }
+    await this.analyticsCustomClosePicker(index);
+    return texts;
+  }
+
+  async analyticsCustomPickerSelect(index: 0 | 1 | 2, label: string): Promise<void> {
+    await this.analyticsCustomOpenPicker(index);
+    // The re-query races the click, so the wait arms first. Re-picking the
+    // current value (or clearing an empty split) fires nothing, which is a
+    // legitimate no-op rather than a failure.
+    const landed = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("advance-analytics-charts") && response.url().includes("custom-work-items"),
+        { timeout: 30_000 }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.analyticsCustomListbox()
+      .locator("[role='option']")
+      .filter({ hasText: new RegExp(`^${escapeRegExp(label)}$`) })
+      .click({ timeout: WebDriver.WAIT_MS });
+    await landed;
+    await this.analyticsCustomListbox()
+      .waitFor({ state: "detached", timeout: WebDriver.WAIT_MS })
+      .catch(() => {});
+  }
+
+  async analyticsCustomChartFacts(): Promise<AnalyticsCustomChartFacts> {
+    return this.page.evaluate(() => {
+      const heading = [...document.querySelectorAll("h1")].find(
+        (h) =>
+          ((h.textContent ?? "") as string).includes("Customized Insights") && h.closest("[role='dialog']") === null
+      );
+      const section = heading?.parentElement?.parentElement?.parentElement ?? null;
+      if (!section) throw new Error("[parity] custom-insights section not found.");
+      const legend = section.querySelector(".recharts-legend-wrapper, .recharts-default-legend") !== null;
+      const xLabels = [...section.querySelectorAll(".recharts-xAxis .recharts-cartesian-axis-tick")].map((tick) =>
+        ((tick.textContent ?? "") as string).trim()
+      );
+      // Each segment path draws M{x},{y+topR} ... L{x+w},{y+h-botR}
+      // Q{x+w},{y+h}: a rounded edge offsets the move/line point from its
+      // curve control, a sharp edge repeats the same coordinate.
+      const segments = [...section.querySelectorAll("g.recharts-bar path[fill]")].map((node) => {
+        const element = node as SVGPathElement;
+        const numbers = ((element.getAttribute("d") ?? "") as string).match(/-?\d+(?:\.\d+)?/g) ?? [];
+        if (numbers.length < 24) throw new Error("[parity] custom-chart segment path has an unknown shape.");
+        const values = numbers.map(Number);
+        return {
+          cx: ((values[0] ?? 0) + (values[8] ?? 0)) / 2,
+          cy: values[3] ?? 0,
+          fill: (element.getAttribute("fill") ?? "") as string,
+          topRounded: values[1] !== values[3],
+          bottomRounded: values[13] !== values[15],
+        };
+      });
+      return { segments, xLabels, legend };
+    });
+  }
+
+  async analyticsCustomTooltipSegments(barIndex: number): Promise<AnalyticsCustomTooltipRow[]> {
+    const facts = await this.analyticsCustomChartFacts();
+    // Group segment paths into bars by shared center-x (identical SVG
+    // coordinates per bar), then hover one path of the wanted bar.
+    const groups = new Map<number, number[]>();
+    facts.segments.forEach((segment, pathIndex) => {
+      const key = Math.round(segment.cx * 100);
+      const group = groups.get(key) ?? [];
+      group.push(pathIndex);
+      groups.set(key, group);
+    });
+    const ordered = [...groups.entries()].sort((a, b) => a[0] - b[0]).map(([, paths]) => paths);
+    const wanted = ordered[barIndex];
+    if (!wanted || wanted.length === 0) {
+      throw new Error(`[parity] custom chart has no bar at index ${barIndex}.`);
+    }
+    await this.analyticsCustomSection()
+      .locator("g.recharts-bar path[fill]")
+      .nth(wanted[0] ?? 0)
+      .hover({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .waitForFunction(
+        () =>
+          [...document.querySelectorAll(".recharts-tooltip-wrapper")].some(
+            (node) => (node as HTMLElement).offsetParent !== null
+          ),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] custom-chart tooltip never appeared.");
+      });
+    return this.page.evaluate(() => {
+      const visible = [...document.querySelectorAll(".recharts-tooltip-wrapper")].filter(
+        (node) => (node as HTMLElement).offsetParent !== null
+      );
+      const tip = visible[visible.length - 1];
+      if (!tip) return [];
+      // Each segment row pairs a truncating label container (dot plus
+      // "Label:") with a value span as the item's second child.
+      return [...tip.querySelectorAll("div.truncate")].map((node) => {
+        const item = node.parentElement;
+        const label = ((node.querySelector("span")?.textContent ?? "") as string).replace(/:\s*$/, "").trim();
+        const value = ((item?.children[1]?.textContent ?? "") as string).trim();
+        return { label, value };
+      });
+    });
+  }
+
+  /**
+   * Table index tolerating the chart table's absence. The chart section
+   * renders a guidance panel instead of a table when its graph read fails,
+   * leaving the insight table as the only table; the insight table itself
+   * always renders.
+   */
+  private async analyticsExportTableIndex(kind: AnalyticsExportTable): Promise<0 | 1> {
+    if (kind === "chart") return 0;
+    return (await this.page.locator("table").count()) > 1 ? 1 : 0;
+  }
+
+  /** Export-action index with the same absence tolerance as the tables. */
+  private async analyticsExportActionIndex(kind: AnalyticsExportTable): Promise<0 | 1> {
+    if (kind === "chart") return 0;
+    return (await this.page.getByRole("button", { name: "Export as csv" }).count()) > 1 ? 1 : 0;
+  }
+
+  /** One analytics table's toolbar by resolved export-action index. */
+  private analyticsExportToolbarAt(actionIndex: 0 | 1): Locator {
+    return this.page.getByRole("button", { name: "Export as csv" }).nth(actionIndex).locator("xpath=../..");
+  }
+
+  async analyticsExportRowCount(kind: AnalyticsExportTable): Promise<number> {
+    // Atomic by design: multi-call cell reads race row-count shrinkage
+    // (skeleton-to-data swaps, search narrowing) and hang when a resolved
+    // row unmounts mid-read, so settle polls count first and read once.
+    return this.page
+      .locator("table")
+      .nth(await this.analyticsExportTableIndex(kind))
+      .locator("tbody tr")
+      .count();
+  }
+
+  async analyticsExportHeaders(kind: AnalyticsExportTable): Promise<string[]> {
+    const table = this.page.locator("table").nth(await this.analyticsExportTableIndex(kind));
+    const heads = table.locator("thead th");
+    const count = await heads.count();
+    const texts: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      texts.push((((await heads.nth(index).textContent()) ?? "") as string).trim());
+    }
+    return texts;
+  }
+
+  async analyticsExportCountLabel(kind: AnalyticsExportTable): Promise<string> {
+    // The row-count line is the toolbar's only wrapping single-line label;
+    // the search box wrapper shares the placeholder tone but never wraps.
+    const toolbar = this.analyticsExportToolbarAt(await this.analyticsExportActionIndex(kind));
+    return (((await toolbar.locator("div.whitespace-nowrap").first().textContent()) ?? "") as string).trim();
+  }
+
+  async analyticsExportSearchExpanded(kind: AnalyticsExportTable): Promise<boolean> {
+    const toolbar = this.analyticsExportToolbarAt(await this.analyticsExportActionIndex(kind));
+    return toolbar.getByPlaceholder("Search").isVisible();
+  }
+
+  async analyticsExportSearchClose(kind: AnalyticsExportTable): Promise<void> {
+    const toolbar = this.analyticsExportToolbarAt(await this.analyticsExportActionIndex(kind));
+    if (!(await toolbar.getByPlaceholder("Search").isVisible())) {
+      throw new Error("[parity] analytics table search box is already closed.");
+    }
+    // Document order puts the clear-and-collapse control before the export
+    // action (the open box unmounted its opener, leaving X then Export).
+    await toolbar.getByRole("button").first().click({ timeout: WebDriver.WAIT_MS });
+    await toolbar.getByPlaceholder("Search").waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+  }
+
+  async analyticsExportEmptyText(kind: AnalyticsExportTable): Promise<string | null> {
+    // The guidance branch renders one body row with a single spanning cell
+    // carrying the empty-view title; data rows always span several cells.
+    const table = this.page.locator("table").nth(await this.analyticsExportTableIndex(kind));
+    if ((await table.locator("tbody tr").count()) !== 1) return null;
+    const cells = table.locator("tbody tr").first().locator("td");
+    if ((await cells.count()) !== 1) return null;
+    const text = (((await cells.first().textContent()) ?? "") as string).trim().replace(/\s+/g, " ");
+    return text.length > 20 ? text : null;
+  }
+
+  async analyticsInsightTableStall(): Promise<void> {
+    this.analyticsInsightStatsStalled = true;
+    await this.analyticsReadHook();
+  }
+
+  async analyticsInsightTableRelease(): Promise<void> {
+    this.analyticsInsightStatsStalled = false;
+    const gates = this.analyticsInsightStatsGates;
+    this.analyticsInsightStatsGates = [];
+    gates.forEach((release) => release());
+  }
+
+  async analyticsInsightSkeletonCells(): Promise<number> {
+    // The skeleton loader renders bare tables whose cells hold fixed-height
+    // placeholder blocks; settled tables never carry that inline height.
+    return this.page.locator("table").nth(1).locator("td > div[style*='height'][style*='20px']").count();
+  }
+
+  /** Watch for the dialog's pre-content spinner mounting (armed before open). */
+  private async analyticsDialogArmSpinner(): Promise<void> {
+    await this.page.evaluate(() => {
+      const scope = window as unknown as Record<string, unknown>;
+      scope["__paritySpinSeen"] = false;
+      const observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          for (const node of [...mutation.addedNodes]) {
+            if (
+              node instanceof HTMLElement &&
+              (node.getAttribute("role") === "status" || node.querySelector("[role='status']") !== null)
+            ) {
+              scope["__paritySpinSeen"] = true;
+            }
+          }
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      scope["__paritySpinObs"] = observer;
+    });
+  }
+
+  private async analyticsDialogOpenFromSurface(path: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(path, cookies);
+    await this.page
+      .getByRole("button", { name: "Analytics" })
+      .waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await this.analyticsDialogArmSpinner();
+    await this.page.getByRole("button", { name: "Analytics" }).click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("dialog").waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async analyticsDialogOpenFromIssues(
+    workspaceSlug: string,
+    projectId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.analyticsDialogOpenFromSurface(`/${workspaceSlug}/projects/${projectId}/issues`, cookies);
+  }
+
+  async analyticsDialogOpenFromCycle(
+    workspaceSlug: string,
+    projectId: string,
+    cycleId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.analyticsDialogOpenFromSurface(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`, cookies);
+  }
+
+  async analyticsDialogOpenFromModule(
+    workspaceSlug: string,
+    projectId: string,
+    moduleId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.analyticsDialogOpenFromSurface(`/${workspaceSlug}/projects/${projectId}/modules/${moduleId}`, cookies);
+  }
+
+  async analyticsSurfaceTriggerCount(): Promise<number> {
+    return this.page.getByRole("button", { name: "Analytics" }).count();
+  }
+
+  async analyticsDialogTitle(): Promise<string> {
+    const heading = this.page.getByRole("dialog").locator("h3");
+    await heading.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    return (((await heading.textContent()) ?? "") as string).trim();
+  }
+
+  async analyticsDialogSpinnerSeen(): Promise<boolean> {
+    return this.page.evaluate(() => (window as unknown as Record<string, unknown>)["__paritySpinSeen"] === true);
+  }
+
+  async analyticsDialogWideToggleVisible(): Promise<boolean> {
+    return this.page.getByRole("dialog").getByRole("button").first().isVisible();
+  }
+
+  async analyticsDialogToggleWide(): Promise<void> {
+    const before = await this.analyticsDialogWidth();
+    await this.page.getByRole("dialog").getByRole("button").first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .waitForFunction(
+        (previous) => {
+          const content = document.querySelector("[role='dialog'] [role='document']");
+          if (!content) return false;
+          return Math.abs(content.getBoundingClientRect().width - previous) > 1;
+        },
+        before,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics dialog width never settled after the toggle.");
+      });
+  }
+
+  async analyticsDialogWidth(): Promise<number> {
+    const box = await this.page.getByRole("dialog").locator("[role='document']").boundingBox();
+    if (!box) throw new Error("[parity] analytics dialog content has no box.");
+    return box.width;
+  }
+
+  async analyticsDialogRowCount(): Promise<number> {
+    // Atomic settle read (same shrinkage race as the tab tables).
+    return this.page.getByRole("dialog").locator("table").nth(1).locator("tbody tr").count();
+  }
+
+  async analyticsDialogTableHeaders(): Promise<string[]> {
+    const heads = this.page.getByRole("dialog").locator("table").nth(1).locator("thead th");
+    const count = await heads.count();
+    const texts: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      texts.push((((await heads.nth(index).textContent()) ?? "") as string).trim());
+    }
+    return texts;
+  }
+
+  async analyticsDialogTableCells(): Promise<string[][]> {
+    const rows = this.page.getByRole("dialog").locator("table").nth(1).locator("tbody tr");
+    const count = await rows.count();
+    const out: string[][] = [];
+    for (let index = 0; index < count; index += 1) {
+      const cells = rows.nth(index).locator("td");
+      const cellCount = await cells.count();
+      const texts: string[] = [];
+      for (let cell = 0; cell < cellCount; cell += 1) {
+        texts.push((((await cells.nth(cell).textContent()) ?? "") as string).trim());
+      }
+      out.push(texts);
+    }
+    return out;
+  }
+
+  async analyticsDialogAssigneeFacts(): Promise<AnalyticsDialogAssignee[]> {
+    const rows = this.page.getByRole("dialog").locator("table").nth(1).locator("tbody tr");
+    const count = await rows.count();
+    const out: AnalyticsDialogAssignee[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const cell = rows.nth(index).locator("td").first();
+      const avatar = (await cell.locator("img").count()) > 0;
+      const text = (((await cell.locator("span").last().textContent()) ?? "") as string).trim();
+      const unassigned = text === "Unassigned";
+      out.push({ text, avatar, initial: !avatar && !unassigned, unassigned });
+    }
+    return out;
+  }
+
+  async analyticsDialogExportDownload(tableIndex: 0 | 1): Promise<LocalFileDownload> {
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: WebDriver.WAIT_MS }),
+      this.page
+        .getByRole("dialog")
+        .getByRole("button", { name: "Export as csv" })
+        .nth(tableIndex)
+        .click({ timeout: WebDriver.WAIT_MS }),
+    ]);
+    const path = await download.path();
+    if (!path) throw new Error("[parity] dialog export download landed without a path.");
+    return { fileName: download.suggestedFilename(), content: readFileSync(path, "utf8") };
   }
 
   // --- Pages blocks/embeds/mentions/links (NEWFRONT-316, PAGE-037-044).

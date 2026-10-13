@@ -11,9 +11,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   NETWORK,
   analyticsAdvanceChartsRaw,
+  analyticsAdvanceCustomChartsRaw,
+  analyticsAdvanceStatsRaw,
   analyticsAdvanceTotalsRaw,
   analyticsProjectCreateStatus,
+  analyticsProjectStateColors,
   analyticsProjectStatsRaw,
+  analyticsScopedChartsRaw,
+  analyticsScopedStatsRaw,
+  analyticsScopedTotalsRaw,
   analyticsWorkspaceName,
   exportsFindRecord,
   exportsListHistory,
@@ -556,5 +562,138 @@ describe("profileActivityExportCsv", () => {
   it("throws on a non-OK export response", async () => {
     stubStatus = 400;
     await expect(profileActivityExportCsv(exportsSession(), "exp-ws", "user-7", "")).rejects.toThrow(/HTTP 400/);
+  });
+});
+
+// Analytics custom-insights / tables / scoped dialog reads (NEWFRONT-377):
+// request shaping and response mapping against the stub, so the live specs
+// only prove server behavior.
+describe("analyticsAdvanceCustomChartsRaw", () => {
+  it("sends the axis params without group_by for single-series", async () => {
+    stubRaw = JSON.stringify({ data: [], schema: {} });
+    const read = await analyticsAdvanceCustomChartsRaw(analyticsSession(), "anl-ws", {
+      x_axis: "PRIORITY",
+      y_axis: "WORK_ITEM_COUNT",
+    });
+    expect(read.status).toBe(200);
+    expect(read.payload).toEqual({ data: [], schema: {} });
+    expect(stubSeen).toHaveLength(1);
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.pathname).toBe("/api/workspaces/anl-ws/advance-analytics-charts");
+    expect(url.searchParams.get("type")).toBe("custom-work-items");
+    expect(url.searchParams.get("x_axis")).toBe("PRIORITY");
+    expect(url.searchParams.get("y_axis")).toBe("WORK_ITEM_COUNT");
+    expect(url.searchParams.has("group_by")).toBe(false);
+    expect(url.searchParams.has("project_ids")).toBe(false);
+  });
+
+  it("carries group_by plus the picked projects when split and scoped", async () => {
+    stubRaw = JSON.stringify({ data: [], schema: {} });
+    const read = await analyticsAdvanceCustomChartsRaw(
+      analyticsSession(),
+      "anl-ws",
+      { x_axis: "PRIORITY", y_axis: "WORK_ITEM_COUNT", group_by: "STATES" },
+      ["a", "b"]
+    );
+    expect(read.status).toBe(200);
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.searchParams.get("group_by")).toBe("STATES");
+    expect(url.searchParams.get("project_ids")).toBe("a,b");
+  });
+
+  it("carries the status with a null payload when the body is unparsable", async () => {
+    stubStatus = 403;
+    stubRaw = "forbidden";
+    const read = await analyticsAdvanceCustomChartsRaw(analyticsSession(), "anl-ws", {
+      x_axis: "PRIORITY",
+      y_axis: "WORK_ITEM_COUNT",
+    });
+    expect(read.status).toBe(403);
+    expect(read.payload).toBeNull();
+  });
+});
+
+describe("analyticsAdvanceStatsRaw", () => {
+  it("sends the work-items stats type with the picked projects", async () => {
+    stubRaw = JSON.stringify([{ project__name: "P" }]);
+    const read = await analyticsAdvanceStatsRaw(analyticsSession(), "anl-ws", ["a"]);
+    expect(read.status).toBe(200);
+    expect(read.payload).toEqual([{ project__name: "P" }]);
+    expect(stubSeen).toHaveLength(1);
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.pathname).toBe("/api/workspaces/anl-ws/advance-analytics-stats");
+    expect(url.searchParams.get("type")).toBe("work-items");
+    expect(url.searchParams.get("project_ids")).toBe("a");
+  });
+
+  it("carries the status with a null payload when the body is unparsable", async () => {
+    stubStatus = 403;
+    stubRaw = "forbidden";
+    const read = await analyticsAdvanceStatsRaw(analyticsSession(), "anl-ws");
+    expect(read.status).toBe(403);
+    expect(read.payload).toBeNull();
+  });
+});
+
+describe("analyticsScopedTotalsRaw", () => {
+  it("reads totals through the project path with the scope params", async () => {
+    stubRaw = JSON.stringify({ total_work_items: { count: 2 } });
+    const read = await analyticsScopedTotalsRaw(analyticsSession(), "anl-ws", "p1", { cycle_id: "c9" });
+    expect(read.status).toBe(200);
+    expect(stubSeen).toHaveLength(1);
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.pathname).toBe("/api/workspaces/anl-ws/projects/p1/advance-analytics");
+    expect(url.searchParams.get("tab")).toBe("work-items");
+    expect(url.searchParams.get("project_ids")).toBe("p1");
+    expect(url.searchParams.get("cycle_id")).toBe("c9");
+  });
+});
+
+describe("analyticsScopedChartsRaw", () => {
+  it("reads graphs through the project path with the graph type", async () => {
+    stubRaw = JSON.stringify({ data: [], schema: {} });
+    const read = await analyticsScopedChartsRaw(analyticsSession(), "anl-ws", "p1", "custom-work-items", {
+      x_axis: "PRIORITY",
+      y_axis: "WORK_ITEM_COUNT",
+    });
+    expect(read.status).toBe(200);
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.pathname).toBe("/api/workspaces/anl-ws/projects/p1/advance-analytics-charts");
+    expect(url.searchParams.get("type")).toBe("custom-work-items");
+    expect(url.searchParams.get("x_axis")).toBe("PRIORITY");
+  });
+});
+
+describe("analyticsScopedStatsRaw", () => {
+  it("reads stats through the project path with the stats type", async () => {
+    stubRaw = JSON.stringify([]);
+    const read = await analyticsScopedStatsRaw(analyticsSession(), "anl-ws", "p1", { module_id: "m9" });
+    expect(read.status).toBe(200);
+    expect(read.payload).toEqual([]);
+    const url = new URL(stubSeen[0]?.url ?? "", "http://stub");
+    expect(url.pathname).toBe("/api/workspaces/anl-ws/projects/p1/advance-analytics-stats");
+    expect(url.searchParams.get("type")).toBe("work-items");
+    expect(url.searchParams.get("module_id")).toBe("m9");
+  });
+});
+
+describe("analyticsProjectStateColors", () => {
+  it("maps state rows to id, name, and color", async () => {
+    stubRaw = JSON.stringify([
+      { id: "s1", name: "Backlog", group: "backlog", color: "#60646c" },
+      { id: "s2", name: "Done", group: "completed", color: "#22c55e" },
+    ]);
+    const rows = await analyticsProjectStateColors(analyticsSession(), "anl-ws", "p1");
+    expect(rows).toEqual([
+      { id: "s1", name: "Backlog", color: "#60646c" },
+      { id: "s2", name: "Done", color: "#22c55e" },
+    ]);
+    expect(stubSeen).toHaveLength(1);
+    expect(stubSeen[0]?.url).toBe("/api/workspaces/anl-ws/projects/p1/states/");
+  });
+
+  it("throws when a state row carries no color", async () => {
+    stubRaw = JSON.stringify([{ id: "s1", name: "Backlog", group: "backlog" }]);
+    await expect(analyticsProjectStateColors(analyticsSession(), "anl-ws", "p1")).rejects.toThrow(/no id\/name\/color/);
   });
 });
