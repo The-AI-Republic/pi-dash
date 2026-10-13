@@ -466,12 +466,16 @@ test(
 
     await test.step("the forward honors a pending destination", async () => {
       const user = await signUpFreshUser("parity-desk");
-      const slug = uniqueSlug("deskws");
-      const workspace = await createWorkspaceViaApi(user, { name: "Desktop", slug });
-      await setLastWorkspace(user, workspace.id);
+      const homeSlug = uniqueSlug("deskhome");
+      const awaySlug = uniqueSlug("deskaway");
+      const home = await createWorkspaceViaApi(user, { name: "Desktop home", slug: homeSlug });
+      await createWorkspaceViaApi(user, { name: "Desktop away", slug: awaySlug });
+      await setLastWorkspace(user, home.id);
       await markOnboarded(user);
-      await driver.openAuthenticated(`/?next_path=/${slug}`, browserCookies(user));
-      await expect.poll(() => driver.currentPath(), POLL_60).toContain(`/${slug}`);
+      // The pending destination differs from the last workspace on
+      // purpose: landing on the last workspace must fail this step.
+      await driver.openAuthenticated(`/?next_path=/${awaySlug}`, browserCookies(user));
+      await expect.poll(() => driver.currentPath(), POLL_60).toContain(`/${awaySlug}`);
     });
   }
 );

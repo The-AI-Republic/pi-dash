@@ -85,6 +85,14 @@ describe("desktop transport without the shell", () => {
   });
 });
 
+describe("desktop openExternal without the shell", () => {
+  it("rejects so the caller falls back to plain navigation", async () => {
+    await expect(desktopPlatform.openExternal("https://example.test/")).rejects.toThrow(
+      "openExternal needs the native bridge"
+    );
+  });
+});
+
 describe("native frame codec", () => {
   it("round-trips a head and body", () => {
     const head = { id: "1", url: "https://example.test/api/x/", method: "POST" };
