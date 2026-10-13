@@ -10,14 +10,20 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  acceptWorkspaceInvitations,
   checkEmail,
+  checkWorkspaceSlug,
+  createWorkspace,
+  createWorkspaceJoinRequest,
   deactivateAccount,
   generateMagicCode,
   getMeSettings,
   getProfile,
+  listWorkspaces,
   markOnboarded,
   requestPasswordReset,
   resetPassword,
+  sendWorkspaceInvitations,
   setPassword,
   signIn,
   signInWithMagicCode,
@@ -26,6 +32,8 @@ import {
   updateMe,
   updateProfile,
   uploadUserAvatar,
+  type CreatedWorkspace,
+  type JoinRequestResult,
   type MePatch,
   type MeSettings,
   type Profile,
@@ -33,6 +41,8 @@ import {
   type ResetPasswordInput,
   type SetPasswordResult,
   type SignInResult,
+  type WorkspaceCreateInput,
+  type WorkspaceInvitee,
   type WorkspaceList,
 } from "@pidash/api-client";
 
@@ -43,6 +53,7 @@ import { sessionKeys } from "../../core/session/queries.js";
 import { useSessionStore } from "../../core/session/store.js";
 import { markInitialColorScheme, notifyError, notifySuccess } from "../../shared/shell/index.js";
 import { finishProfileStamp } from "./onboarding.js";
+import { authKeys } from "./queries.js";
 import { performSignOut } from "./signOut.js";
 
 export function useEmailCheck() {
@@ -153,6 +164,89 @@ export function useUpdateProfile() {
 export function useUploadUserAvatar() {
   return useMutation({
     mutationFn: (file: File) => uploadUserAvatar(getAppClient(), file),
+  });
+}
+
+/** Slug availability read (AUTH-035). Resolves true when the slug is free. */
+export function useCheckWorkspaceSlug() {
+  return useMutation({
+    mutationFn: async (slug: string): Promise<boolean> => {
+      const answer = await checkWorkspaceSlug(getAppClient(), slug);
+      return answer.status;
+    },
+  });
+}
+
+/**
+ * Workspace creation (AUTH-034): post the workspace, stamp it as the last
+ * workspace, then refresh the cached workspace list and settings so the
+ * finish landing validates against them. Resolves to the created row.
+ */
+export function useCreateWorkspace() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: WorkspaceCreateInput): Promise<CreatedWorkspace> => {
+      const client = getAppClient();
+      const created = await createWorkspace(client, input);
+      await updateProfile(client, { last_workspace_id: created.id });
+      const [workspaces, settings] = await Promise.all([listWorkspaces(client), getMeSettings(client)]);
+      queryClient.setQueryData<WorkspaceList>(sessionKeys.workspaces, workspaces);
+      queryClient.setQueryData<MeSettings>(sessionKeys.settings, settings);
+      return created;
+    },
+  });
+}
+
+/**
+ * Batch-accept invitations (AUTH-034): join the selected workspaces and
+ * refresh the cached list and settings. The caller finishes onboarding.
+ */
+export function useAcceptWorkspaceInvitations() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (invitationIds: string[]): Promise<void> => {
+      const client = getAppClient();
+      await acceptWorkspaceInvitations(client, invitationIds);
+      const [workspaces, settings] = await Promise.all([listWorkspaces(client), getMeSettings(client)]);
+      queryClient.setQueryData<WorkspaceList>(sessionKeys.workspaces, workspaces);
+      queryClient.setQueryData<MeSettings>(sessionKeys.settings, settings);
+    },
+  });
+}
+
+/**
+ * Workspace access request (AUTH-036): post the admin address. When the
+ * answer names a workspace slug the caller already belongs there, so the
+ * hook refreshes the cached list and settings before the caller finishes.
+ * Always refreshes the caller's own join-request list.
+ */
+export function useCreateJoinRequest() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (adminEmail: string): Promise<JoinRequestResult> => {
+      const client = getAppClient();
+      const result = await createWorkspaceJoinRequest(client, { admin_email: adminEmail });
+      if (result.workspace_slug !== undefined) {
+        const [workspaces, settings] = await Promise.all([listWorkspaces(client), getMeSettings(client)]);
+        queryClient.setQueryData<WorkspaceList>(sessionKeys.workspaces, workspaces);
+        queryClient.setQueryData<MeSettings>(sessionKeys.settings, settings);
+      }
+      await queryClient.invalidateQueries({ queryKey: authKeys.myJoinRequests });
+      return result;
+    },
+  });
+}
+
+/**
+ * Bulk workspace invites (AUTH-037): post the filled rows against the
+ * given workspace slug. Resolves to the server message.
+ */
+export function useSendWorkspaceInvites() {
+  return useMutation({
+    mutationFn: async (input: { slug: string; emails: WorkspaceInvitee[] }): Promise<string> => {
+      const result = await sendWorkspaceInvitations(getAppClient(), input.slug, { emails: input.emails });
+      return result.message;
+    },
   });
 }
 

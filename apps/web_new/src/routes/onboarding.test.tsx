@@ -17,10 +17,19 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 // Stand-in for the flow: its internals belong to the auth area. What this
-// suite owns is the funnel guard plus the screen wiring.
+// suite owns is the funnel guard plus the screen wiring. The stand-in
+// records the props it receives so the suite can assert which steps the
+// screen mounts inside the flow.
+const seenFlowProps = vi.hoisted(() => ({ props: [] as unknown[] }));
 vi.mock("../features/auth/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../features/auth/index.js")>();
-  return { ...original, OnboardingFlow: () => <div data-testid="onboarding-flow" /> };
+  return {
+    ...original,
+    OnboardingFlow: (props: unknown) => {
+      seenFlowProps.props.push(props);
+      return <div data-testid="onboarding-flow" />;
+    },
+  };
 });
 
 import {
@@ -29,6 +38,7 @@ import {
   settingsQueryOptions,
   workspacesQueryOptions,
 } from "../core/session/queries.js";
+import { InviteMembersStep, WorkspaceStep } from "../features/auth/index.js";
 import { myInvitationsQueryOptions } from "../features/auth/queries.js";
 import { Route } from "./onboarding.js";
 
@@ -167,5 +177,16 @@ describe("OnboardingScreen", () => {
     if (!component) throw new Error("missing component");
     render(React.createElement(component as () => React.ReactElement));
     expect(screen.getByTestId("onboarding-flow")).toBeInTheDocument();
+  });
+
+  it("mounts the workspace and invite steps inside the flow", () => {
+    seenFlowProps.props.length = 0;
+    const component = Route.options.component;
+    if (!component) throw new Error("missing component");
+    render(React.createElement(component as () => React.ReactElement));
+    expect(seenFlowProps.props).toHaveLength(1);
+    const steps = (seenFlowProps.props[0] as { steps: Record<string, unknown> }).steps;
+    expect(steps["workspace"]).toBe(WorkspaceStep);
+    expect(steps["invite"]).toBe(InviteMembersStep);
   });
 });

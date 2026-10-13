@@ -8,6 +8,10 @@ export {
   DEACTIVATE_SUCCESS_MESSAGE,
   DEACTIVATE_SUCCESS_TITLE,
   FINISH_FAILURE_TITLE,
+  useAcceptWorkspaceInvitations,
+  useCheckWorkspaceSlug,
+  useCreateJoinRequest,
+  useCreateWorkspace,
   useDeactivateAccount,
   useEmailCheck,
   useFinishOnboarding,
@@ -18,6 +22,7 @@ export {
   usePasswordReset,
   usePasswordSignIn,
   usePasswordSignUp,
+  useSendWorkspaceInvites,
   useSetPassword,
   useSignOut,
   useSwitchAccount,
@@ -76,6 +81,27 @@ export type {
   OnboardingStamp,
   OnboardingStep,
 } from "./onboarding.js";
+export {
+  deriveWorkspaceSlug,
+  INVITE_INITIAL_ROW_COUNT,
+  isReservedWorkspaceSlug,
+  isSoloTeamSize,
+  RESERVED_WORKSPACE_SLUGS,
+  resolvePendingEmail,
+  resolveWorkspaceDefaultView,
+  selectPendingJoinRequest,
+  SLUG_FORMAT_MESSAGE,
+  SLUG_TAKEN_MESSAGE,
+  SOLO_TEAM_SIZE,
+  validateWorkspaceName,
+  validateWorkspaceSlug,
+  WORKSPACE_INVITE_ROLES,
+  WORKSPACE_NAME_MAX_LENGTH,
+  WORKSPACE_SLUG_MAX_LENGTH,
+  WORKSPACE_TEAM_SIZES,
+  workspaceRoleLabel,
+} from "./workspace.js";
+export type { WorkspaceStepView } from "./workspace.js";
 export { performSignOut, SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE, signOutLandingTarget } from "./signOut.js";
 export { DeactivateAccountDialog } from "./components/DeactivateAccountDialog.js";
 export type { DeactivateAccountDialogProps } from "./components/DeactivateAccountDialog.js";
@@ -119,3 +145,29 @@ export {
   UseCaseSetupStep,
 } from "./components/UseCaseSetupStep.js";
 export type { UseCaseSetupStepProps } from "./components/UseCaseSetupStep.js";
+export {
+  CREATE_FAILED_TITLE,
+  CREATE_SUCCESS_TITLE,
+  TEAM_SIZE_REQUIRED_MESSAGE,
+  WorkspaceCreateForm,
+} from "./components/WorkspaceCreateForm.js";
+export type { TeamSizeSelectorField, WorkspaceCreateFormProps } from "./components/WorkspaceCreateForm.js";
+export {
+  INVITE_FAILED_TITLE,
+  INVITE_ROW_ERROR_MESSAGE,
+  INVITE_SUCCESS_TITLE,
+  InviteMembersStep,
+} from "./components/InviteMembersStep.js";
+export type { InviteMembersStepProps } from "./components/InviteMembersStep.js";
+export {
+  INVITES_EMPTY_MESSAGE,
+  INVITES_FAILED_TITLE,
+  WorkspaceInvitesView,
+} from "./components/WorkspaceInvitesView.js";
+export type { WorkspaceInvitesViewProps } from "./components/WorkspaceInvitesView.js";
+export { JOIN_FAILED_TITLE, WorkspaceJoinByEmailView } from "./components/WorkspaceJoinByEmailView.js";
+export type { WorkspaceJoinByEmailViewProps } from "./components/WorkspaceJoinByEmailView.js";
+export { WorkspacePendingView } from "./components/WorkspacePendingView.js";
+export type { WorkspacePendingViewProps } from "./components/WorkspacePendingView.js";
+export { WorkspaceStep } from "./components/WorkspaceStep.js";
+export type { WorkspaceStepProps } from "./components/WorkspaceStep.js";
