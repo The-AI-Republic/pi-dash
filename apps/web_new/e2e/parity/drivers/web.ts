@@ -51517,14 +51517,6 @@ export class WebDriver implements ParityDriver {
     }
   }
 
-  async adminAuthOpenMethod(name: string): Promise<void> {
-    const link = (await this.adminAuthCard(name)).getByRole("link");
-    if ((await link.count()) === 0) {
-      throw new Error(`[parity] auth card ${JSON.stringify(name)} shows no link.`);
-    }
-    await link.first().click({ timeout: WebDriver.WAIT_MS });
-  }
-
   async adminAuthMethodIconSrc(name: string): Promise<string | null> {
     const image = (await this.adminAuthCard(name)).locator("img");
     if ((await image.count()) === 0) return null;
