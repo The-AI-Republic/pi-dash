@@ -161,6 +161,19 @@ import type {
   SpaceBoardCardFooter,
   SpaceBoardDragFacts,
   SpaceBoardStability,
+  SpaceChromeAccountIdentity,
+  SpaceChromeBadgeFacts,
+  SpaceChromeCrashFacts,
+  SpaceChromeFailureFacts,
+  SpaceChromeFramedFacts,
+  SpaceChromeNavbarIdentity,
+  SpaceChromeProgressProbe,
+  SpaceChromeSignOutForm,
+  SpaceChromeSignOutResult,
+  SpaceChromeSpinnerProbe,
+  SpaceChromeToastFacts,
+  SpaceLocaleBoardFacts,
+  SpaceLocaleLandingFacts,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -13814,6 +13827,7 @@ export class WebNewDriver implements ParityDriver {
   async deskUpdateSidebarButtonVisible(): Promise<boolean> {
     return todo("deskUpdateSidebarButtonVisible");
   }
+
   // === NEWFRONT-97 space navigation (shared; keep earliest-merged on dup). ===
   async spaceOpenBoard(_anchor: string, _query?: string): Promise<void> {
     return todo("spaceOpenBoard");
@@ -14041,5 +14055,103 @@ export class WebNewDriver implements ParityDriver {
   }
   async adminStubNoWorkspaces(): Promise<void> {
     return todo("adminStubNoWorkspaces");
+  }
+  // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
+  async spaceChromeNavbarIdentity(): Promise<SpaceChromeNavbarIdentity> {
+    return todo("spaceChromeNavbarIdentity");
+  }
+  async spaceChromeNavbarWithoutProjectDetails(_anchor: string): Promise<SpaceChromeNavbarIdentity> {
+    return todo("spaceChromeNavbarWithoutProjectDetails");
+  }
+  async spaceChromeNavbarWithLogo(_anchor: string, _kind: "icon" | "emoji"): Promise<SpaceChromeNavbarIdentity> {
+    return todo("spaceChromeNavbarWithLogo");
+  }
+  async spaceChromeTheme(): Promise<"light" | "dark"> {
+    return todo("spaceChromeTheme");
+  }
+  async spaceChromeToggleTheme(): Promise<void> {
+    return todo("spaceChromeToggleTheme");
+  }
+  async spaceChromeBodyBackground(): Promise<string> {
+    return todo("spaceChromeBodyBackground");
+  }
+  async spaceChromeClearStoredTheme(): Promise<void> {
+    return todo("spaceChromeClearStoredTheme");
+  }
+  async spaceChromeEmulateColorScheme(_scheme: "light" | "dark"): Promise<void> {
+    return todo("spaceChromeEmulateColorScheme");
+  }
+  async spaceChromeBadgeFacts(): Promise<SpaceChromeBadgeFacts | null> {
+    return todo("spaceChromeBadgeFacts");
+  }
+  async spaceChromeBadgeNewTabUrl(): Promise<string> {
+    return todo("spaceChromeBadgeNewTabUrl");
+  }
+  async spaceChromeAnonymousSignInHref(): Promise<string | null> {
+    return todo("spaceChromeAnonymousSignInHref");
+  }
+  async spaceChromeAccountMenuIdentity(): Promise<SpaceChromeAccountIdentity> {
+    return todo("spaceChromeAccountMenuIdentity");
+  }
+  async spaceChromeSignOutForm(): Promise<SpaceChromeSignOutForm> {
+    return todo("spaceChromeSignOutForm");
+  }
+  async spaceChromeSignOut(): Promise<SpaceChromeSignOutResult> {
+    return todo("spaceChromeSignOut");
+  }
+  async spaceChromeOpenBoardFramed(_anchor: string, _query?: string): Promise<void> {
+    return todo("spaceChromeOpenBoardFramed");
+  }
+  async spaceChromeFramedFacts(): Promise<SpaceChromeFramedFacts> {
+    return todo("spaceChromeFramedFacts");
+  }
+  async spaceChromeOpenIssuePeek(_anchor: string, _issueId: string, _query?: string): Promise<void> {
+    return todo("spaceChromeOpenIssuePeek");
+  }
+  async spaceChromeEmojiControlCount(): Promise<number> {
+    return todo("spaceChromeEmojiControlCount");
+  }
+  async spaceChromeSpinnerDuring(
+    _stage: "instance" | "settings" | "issues",
+    _anchor: string
+  ): Promise<SpaceChromeSpinnerProbe> {
+    return todo("spaceChromeSpinnerDuring");
+  }
+  async spaceChromeProgressDuringSlowTransition(
+    _workspaceSlug: string,
+    _projectId: string
+  ): Promise<SpaceChromeProgressProbe> {
+    return todo("spaceChromeProgressDuringSlowTransition");
+  }
+  async spaceChromeCopyIssueLinkToast(_anchor: string, _issueId: string): Promise<SpaceChromeToastFacts> {
+    return todo("spaceChromeCopyIssueLinkToast");
+  }
+  async spaceChromeCommentFailureToast(
+    _anchor: string,
+    _issueId: string,
+    _bodyText: string
+  ): Promise<SpaceChromeToastFacts> {
+    return todo("spaceChromeCommentFailureToast");
+  }
+  async spaceChromeInstanceFailureFacts(_anchor: string): Promise<SpaceChromeFailureFacts> {
+    return todo("spaceChromeInstanceFailureFacts");
+  }
+  async spaceChromeRetryInstanceLoad(): Promise<void> {
+    return todo("spaceChromeRetryInstanceLoad");
+  }
+  async spaceChromeCrashFacts(_anchor: string): Promise<SpaceChromeCrashFacts> {
+    return todo("spaceChromeCrashFacts");
+  }
+  async spaceChromeRefreshAfterCrash(): Promise<void> {
+    return todo("spaceChromeRefreshAfterCrash");
+  }
+  async spaceLocaleBoardFacts(_anchor: string, _issueId: string): Promise<SpaceLocaleBoardFacts> {
+    return todo("spaceLocaleBoardFacts");
+  }
+  async spaceLocaleLandingFacts(): Promise<SpaceLocaleLandingFacts> {
+    return todo("spaceLocaleLandingFacts");
+  }
+  async spaceLocaleSetStoredLocale(_locale: string | null): Promise<void> {
+    return todo("spaceLocaleSetStoredLocale");
   }
 }

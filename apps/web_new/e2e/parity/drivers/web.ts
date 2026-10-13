@@ -178,6 +178,19 @@ import type {
   SpaceBoardCardFooter,
   SpaceBoardDragFacts,
   SpaceBoardStability,
+  SpaceChromeAccountIdentity,
+  SpaceChromeBadgeFacts,
+  SpaceChromeCrashFacts,
+  SpaceChromeFailureFacts,
+  SpaceChromeFramedFacts,
+  SpaceChromeNavbarIdentity,
+  SpaceChromeProgressProbe,
+  SpaceChromeSignOutForm,
+  SpaceChromeSignOutResult,
+  SpaceChromeSpinnerProbe,
+  SpaceChromeToastFacts,
+  SpaceLocaleBoardFacts,
+  SpaceLocaleLandingFacts,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -48603,6 +48616,7 @@ export class WebDriver implements ParityDriver {
     // so that accessible name must never appear.
     return this.isShown(this.page.getByRole("button", { name: /^Update to Pi Dash / }));
   }
+
   // === NEWFRONT-97 space navigation (shared; keep earliest-merged on dup). ===
   async spaceOpenBoard(anchor: string, query = ""): Promise<void> {
     await this.page.goto(`/issues/${anchor}${query}`);
@@ -49866,5 +49880,699 @@ export class WebDriver implements ParityDriver {
 
   async adminStubNoWorkspaces(): Promise<void> {
     this.adminInstanceFetchFault = { mode: "stub-empty", delayMs: 0 };
+  }
+
+  // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
+  // Every selector below was observed on the running old space app. The
+  // navbar carries no landmarks, so the project name is read from its
+  // truncating slot (the only line-clamped node on the board) and the
+  // icon-only theme switch is the button right after the Filters control.
+
+  /** Project-name slot in the navbar (first line-clamped node on the board). */
+  private spaceNavbarName(): Locator {
+    return this.page.locator(".line-clamp-1").first();
+  }
+
+  /** Icon-only navbar theme switch, neighbor-anchored after Filters. */
+  private spaceThemeButton(): Locator {
+    return this.page.getByRole("button", { name: "Filters" }).locator("xpath=following::button[1]");
+  }
+
+  /** Public issue keys (project code plus sequence) in DOM order, deduped. */
+  private async spaceIssueKeys(): Promise<string[]> {
+    const nodes = this.page.getByText(/^[A-Z]{2,}-\d+$/);
+    const total = await nodes.count();
+    const keys: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        ((await nodes
+          .nth(i)
+          .textContent()
+          .catch(() => "")) ?? "") as string
+      ).trim();
+      if (/^[A-Z]{2,}-\d+$/.test(text) && !keys.includes(text)) keys.push(text);
+    }
+    return keys;
+  }
+
+  /** Resolve once issue keys render (board settled with content). */
+  private async spaceWaitForBoardContent(): Promise<void> {
+    await this.page
+      .getByText(/^[A-Z]{2,}-\d+$/)
+      .first()
+      .waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  /** Resolve once the peek overlay settles (property block rendered). */
+  private async spaceWaitForPeek(): Promise<void> {
+    await this.page.getByText("Due date", { exact: true }).first().waitFor({
+      state: "visible",
+      timeout: WebDriver.WAIT_MS,
+    });
+  }
+
+  async spaceChromeNavbarIdentity(): Promise<SpaceChromeNavbarIdentity> {
+    const nameEl = this.spaceNavbarName();
+    await nameEl.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    // The slot shows a placeholder until publish settings land; converge on
+    // the settled name (or on rendered board content, which proves the
+    // placeholder is final rather than still loading).
+    const keys = this.page.getByText(/^[A-Z]{2,}-\d+$/);
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const current = (((await nameEl.textContent().catch(() => "")) ?? "") as string).replace(/\s+/g, " ").trim();
+      if (current !== "" && current !== "...") break;
+      if ((await keys.count()) > 0) break;
+      if (Date.now() >= deadline) break;
+      await this.page.waitForTimeout(300);
+    }
+    const raw = ((await nameEl.textContent().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    const logoSlot = nameEl.locator("xpath=preceding-sibling::span[1]");
+    let logo: SpaceChromeNavbarIdentity["logo"] = "empty";
+    if ((await logoSlot.count()) > 0) {
+      const glyph = ((await logoSlot.textContent().catch(() => "")) ?? "").trim();
+      const svgs = await logoSlot.locator("svg").count();
+      if (svgs > 0 && glyph === "") logo = "fallback";
+      else if (/[^ -~]/.test(glyph)) logo = "emoji";
+      else if (glyph !== "") logo = "icon";
+    }
+    return { name: raw === "" ? null : raw, logo };
+  }
+
+  /**
+   * Fulfill the publish-settings fetch with a mutated payload (fetched live
+   * first, so only the named branch changes), open the board, and read the
+   * navbar. The route is always removed before returning.
+   */
+  private async spaceNavbarWithMutatedSettings(
+    anchor: string,
+    mutate: (payload: Record<string, unknown>) => void
+  ): Promise<SpaceChromeNavbarIdentity> {
+    const pattern = "**/api/public/anchor/*/settings/";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      const upstream = await route.fetch();
+      const payload = (await upstream.json()) as Record<string, unknown>;
+      mutate(payload);
+      await route.fulfill({ response: upstream, body: JSON.stringify(payload) });
+    });
+    try {
+      await this.spaceOpenBoard(anchor);
+      return await this.spaceChromeNavbarIdentity();
+    } finally {
+      await this.page.unroute(pattern);
+    }
+  }
+
+  async spaceChromeNavbarWithoutProjectDetails(anchor: string): Promise<SpaceChromeNavbarIdentity> {
+    return this.spaceNavbarWithMutatedSettings(anchor, (payload) => {
+      delete payload["project_details"];
+    });
+  }
+
+  async spaceChromeNavbarWithLogo(anchor: string, kind: "icon" | "emoji"): Promise<SpaceChromeNavbarIdentity> {
+    return this.spaceNavbarWithMutatedSettings(anchor, (payload) => {
+      const details = payload["project_details"] as Record<string, unknown>;
+      details["logo_props"] =
+        kind === "icon"
+          ? { in_use: "icon", icon: { name: "rocket", color: "#1075e1" } }
+          : { in_use: "emoji", emoji: { value: "128512" } };
+    });
+  }
+
+  async spaceChromeTheme(): Promise<"light" | "dark"> {
+    const theme = await this.page.evaluate(() => document.documentElement.getAttribute("data-theme"));
+    return theme === "dark" ? "dark" : "light";
+  }
+
+  async spaceChromeToggleTheme(): Promise<void> {
+    const before = await this.spaceChromeTheme();
+    await this.spaceThemeButton().click({ timeout: WebDriver.WAIT_MS });
+    // The switch applies on the next frame; poll briefly, then report
+    // whatever settled (the first click from the system default pins the
+    // explicit theme instead of flipping — SPC-011 pins that quirk).
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const now = await this.spaceChromeTheme();
+      if (now !== before) return;
+      if (Date.now() >= deadline) return;
+      await this.page.waitForTimeout(200);
+    }
+  }
+
+  async spaceChromeBodyBackground(): Promise<string> {
+    return this.page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  }
+
+  async spaceChromeClearStoredTheme(): Promise<void> {
+    await this.page.evaluate(() => localStorage.removeItem("theme"));
+  }
+
+  async spaceChromeEmulateColorScheme(scheme: "light" | "dark"): Promise<void> {
+    await this.page.emulateMedia({ colorScheme: scheme });
+  }
+
+  async spaceChromeBadgeFacts(): Promise<SpaceChromeBadgeFacts | null> {
+    const badge = this.page.locator('a[target="_blank"]:has-text("Powered by")').first();
+    await badge.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS }).catch(() => null);
+    if (!(await this.isShown(badge))) return null;
+    const box = await badge.boundingBox();
+    if (box === null) return null;
+    const viewport = this.page.viewportSize();
+    return {
+      href: (await badge.getAttribute("href")) ?? "",
+      target: await badge.getAttribute("target"),
+      rel: await badge.getAttribute("rel"),
+      text: (((await badge.innerText().catch(() => "")) ?? "") as string).replace(/\s+/g, " ").trim(),
+      box: { x: box.x, y: box.y, width: box.width, height: box.height },
+      viewport: { width: viewport?.width ?? 0, height: viewport?.height ?? 0 },
+    };
+  }
+
+  async spaceChromeBadgeNewTabUrl(): Promise<string> {
+    const badge = this.page.locator('a[target="_blank"]:has-text("Powered by")').first();
+    await badge.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: WebDriver.WAIT_MS }),
+      badge.click({ timeout: WebDriver.WAIT_MS }),
+    ]);
+    const url = popup.url();
+    await popup.close();
+    return url;
+  }
+
+  async spaceChromeAnonymousSignInHref(): Promise<string | null> {
+    const link = this.page.locator('a:has-text("Sign in")').first();
+    await link.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS }).catch(() => null);
+    if (!(await this.isShown(link))) return null;
+    return link.getAttribute("href", { timeout: 5_000 }).catch(() => null);
+  }
+
+  /** Open the avatar popover; resolves once the menu renders (already-open is a no-op). */
+  private async spaceOpenAccountMenu(): Promise<void> {
+    const signOut = this.page.getByRole("button", { name: "Sign out" }).first();
+    if (await this.isShown(signOut)) return;
+    await this.page.locator("button:has(h6)").first().click({ timeout: WebDriver.WAIT_MS });
+    await signOut.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async spaceChromeAccountMenuIdentity(): Promise<SpaceChromeAccountIdentity> {
+    const trigger = this.page.locator("button:has(h6)").first();
+    await trigger.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const displayName = (
+      ((await trigger
+        .locator("h6")
+        .first()
+        .textContent()
+        .catch(() => "")) ?? "") as string
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    await this.spaceOpenAccountMenu();
+    return { displayName: displayName === "" ? null : displayName, offersSignOut: true };
+  }
+
+  async spaceChromeSignOutForm(): Promise<SpaceChromeSignOutForm> {
+    await this.spaceOpenAccountMenu();
+    const form = this.page.locator('form[action*="sign-out"]').first();
+    await form.waitFor({ state: "attached", timeout: WebDriver.WAIT_MS });
+    return {
+      action: (await form.getAttribute("action")) ?? "",
+      nextPath: await form
+        .locator('input[name="next_path"]')
+        .inputValue()
+        .catch(() => null),
+    };
+  }
+
+  async spaceChromeSignOut(): Promise<SpaceChromeSignOutResult> {
+    await this.spaceOpenAccountMenu();
+    const submit = this.page.getByRole("button", { name: "Sign out" }).first();
+    const [response] = await Promise.all([
+      this.page.waitForResponse(
+        (res) => res.request().method() === "POST" && res.url().includes("/auth/spaces/sign-out/"),
+        { timeout: WebDriver.WAIT_MS }
+      ),
+      submit.click({ timeout: WebDriver.WAIT_MS }),
+    ]);
+    await this.page.waitForLoadState("domcontentloaded");
+    return {
+      locationHeader: response.headers()["location"] ?? null,
+      landedPath: await this.currentPath(),
+    };
+  }
+
+  async spaceChromeOpenBoardFramed(anchor: string, query = ""): Promise<void> {
+    // The harness page is served from the app origin (route-fulfilled), so
+    // the embedded board is same-site and keeps the context's session.
+    const pattern = "**/parity-frame-harness";
+    await this.page.route(pattern, async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: `<html><body style="margin:0"><iframe src="/issues/${anchor}${query}" width="1200" height="750" title="embedded board"></iframe></body></html>`,
+      });
+    });
+    try {
+      await this.page.goto("/parity-frame-harness");
+      await this.page.waitForLoadState("domcontentloaded");
+      await this.page
+        .frameLocator("iframe")
+        .getByText(/^[A-Z]{2,}-\d+$/)
+        .first()
+        .waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    } finally {
+      await this.page.unroute(pattern);
+    }
+  }
+
+  async spaceChromeFramedFacts(): Promise<SpaceChromeFramedFacts> {
+    const frame = this.page.frameLocator("iframe");
+    const keys = frame.getByText(/^[A-Z]{2,}-\d+$/);
+    const signIn = frame.locator('a:has-text("Sign in"), button:has-text("Sign in")');
+    const avatar = frame.locator("button:has(h6)");
+    let signInVisible = false;
+    for (let i = 0; i < (await signIn.count()); i++) {
+      if (
+        await signIn
+          .nth(i)
+          .isVisible()
+          .catch(() => false)
+      )
+        signInVisible = true;
+    }
+    const sessionActiveInFrame =
+      (await frame
+        .locator("body")
+        .evaluate(async () => {
+          try {
+            const res = await fetch("/api/users/me/");
+            return res.status === 200;
+          } catch {
+            return false;
+          }
+        })
+        .catch(() => false)) === true;
+    return {
+      sessionActiveInFrame,
+      boardReadable:
+        (await keys.count()) > 0 &&
+        (await keys
+          .first()
+          .isVisible()
+          .catch(() => false)),
+      signInVisible,
+      avatarVisible:
+        (await avatar.count()) > 0 &&
+        (await avatar
+          .first()
+          .isVisible()
+          .catch(() => false)),
+      emojiControls: await this.spaceEmojiControlCountIn(frame),
+    };
+  }
+
+  /**
+   * Emoji add controls reveal an "Add reaction" tooltip on hover; count the
+   * icon-only buttons that do. Scoped to a frame locator when given.
+   */
+  private async spaceEmojiControlCountIn(scope?: ReturnType<Page["frameLocator"]>): Promise<number> {
+    const root = scope ?? this.page;
+    const buttons = root.getByRole("button");
+    const total = await buttons.count();
+    let found = 0;
+    for (let i = 0; i < total; i++) {
+      const button = buttons.nth(i);
+      const text = (((await button.innerText().catch(() => "")) ?? "") as string).trim();
+      if (text !== "") continue;
+      await button.hover({ timeout: 5_000 }).catch(() => undefined);
+      const tip = root.getByText("Add reaction", { exact: true }).first();
+      await tip.waitFor({ state: "visible", timeout: 2_000 }).catch(() => null);
+      if (await tip.isVisible().catch(() => false)) found++;
+    }
+    return found;
+  }
+
+  async spaceChromeEmojiControlCount(): Promise<number> {
+    return this.spaceEmojiControlCountIn();
+  }
+
+  async spaceChromeOpenIssuePeek(anchor: string, issueId: string, query = ""): Promise<void> {
+    const base = query === "" ? "?board=list" : query;
+    const glue = base.includes("?") ? "&" : "?";
+    await this.spaceOpenBoard(anchor, `${base}${glue}peekId=${issueId}`);
+    await this.spaceWaitForPeek();
+  }
+
+  /**
+   * Boot-aware board load for hold-based probes: the dev oracle's modules
+   * can 504 under Caddy on noisy boxes, leaving the SSR spinner shell with
+   * zero fetches fired — which would fool a spinner observation. Reload
+   * until the held fetch provably fires (proving JS booted), then observe.
+   */
+  private async spaceBootWithHeldFetch(heldPath: string, anchor: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      // Arm the waiter before navigating: early loader fetches would
+      // otherwise fire before registration and be missed.
+      const firedPromise = this.page
+        .waitForRequest((req) => req.method() === "GET" && req.url().includes(heldPath), {
+          timeout: WebDriver.WAIT_MS,
+        })
+        .then(() => true)
+        .catch(() => false);
+      await this.spaceOpenBoard(anchor);
+      if (await firedPromise) return true;
+    }
+    return false;
+  }
+
+  async spaceChromeSpinnerDuring(
+    stage: "instance" | "settings" | "issues",
+    anchor: string
+  ): Promise<SpaceChromeSpinnerProbe> {
+    const pattern =
+      stage === "instance"
+        ? "**/api/instances/"
+        : stage === "settings"
+          ? "**/api/public/anchor/*/settings/"
+          : "**/api/public/anchor/*/issues*";
+    const heldPath = stage === "instance" ? "/api/instances/" : `/api/public/anchor/${anchor}/issues`;
+    const heldSettings = `/api/public/anchor/${anchor}/settings/`;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await this.page.route(pattern, async (route) => {
+      try {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
+        await gate;
+        await route.continue();
+      } catch {
+        // Stale held request from a boot-retry reload; the live load refires.
+      }
+    });
+    const spinner = this.page.locator("svg.animate-pulse");
+    const keys = this.page.getByText(/^[A-Z]{2,}-\d+$/);
+    const visibleKeys = async (): Promise<number> => {
+      let shown = 0;
+      for (let i = 0; i < (await keys.count()); i++) {
+        if (
+          await keys
+            .nth(i)
+            .isVisible()
+            .catch(() => false)
+        )
+          shown++;
+      }
+      return shown;
+    };
+    let sawSpinner = false;
+    let contentAbsentWhileSpinning = false;
+    let placeholderWhileHeld = false;
+    try {
+      const booted = await this.spaceBootWithHeldFetch(stage === "settings" ? heldSettings : heldPath, anchor);
+      if (booted) {
+        // Settle a beat so the held stage's loading state fully renders.
+        await this.page.waitForTimeout(1_000);
+        const spinning =
+          (await spinner.count()) > 0 &&
+          (await spinner
+            .first()
+            .isVisible()
+            .catch(() => false));
+        const shown = await visibleKeys();
+        const nameEl = this.spaceNavbarName();
+        const name =
+          (await nameEl.count()) > 0
+            ? (
+                ((await nameEl
+                  .first()
+                  .textContent()
+                  .catch(() => "")) ?? "") as string
+              )
+                .replace(/\s+/g, " ")
+                .trim()
+            : "";
+        sawSpinner = spinning;
+        contentAbsentWhileSpinning = shown === 0;
+        // Resolution holds the navbar on its placeholder with empty content.
+        placeholderWhileHeld = name === "..." && shown === 0;
+      }
+    } finally {
+      release();
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
+    let settledWithContent = false;
+    try {
+      // Settle gets a doubled budget: the released fetch lands behind the
+      // dev server's compile queue on noisy shared boxes.
+      await this.page
+        .getByText(/^[A-Z]{2,}-\d+$/)
+        .first()
+        .waitFor({ state: "visible", timeout: WebDriver.WAIT_MS * 2 });
+      settledWithContent = true;
+    } catch {
+      settledWithContent = false;
+    }
+    return { sawSpinner, placeholderWhileHeld, contentAbsentWhileSpinning, settledWithContent };
+  }
+
+  async spaceChromeProgressDuringSlowTransition(
+    workspaceSlug: string,
+    projectId: string
+  ): Promise<SpaceChromeProgressProbe> {
+    const pattern = "**/api/public/workspaces/*/projects/*/anchor/";
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await this.page.route(pattern, async (route) => {
+      try {
+        await gate;
+        await route.continue();
+      } catch {
+        // Stale held request from a boot-retry reload; the live load refires.
+      }
+    });
+    const bar = this.page.locator("div.bprogress");
+    let sawBar = false;
+    try {
+      // Boot-aware like the spinner probe: the client loader only runs once
+      // JS boots, so reload until its lookup provably fires. The waiter arms
+      // before navigating so the early loader fetch cannot slip past it.
+      let booted = false;
+      for (let attempt = 0; attempt < 3 && !booted; attempt++) {
+        const firedPromise = this.page
+          .waitForRequest((req) => req.method() === "GET" && req.url().includes("/anchor/"), {
+            timeout: WebDriver.WAIT_MS,
+          })
+          .then(() => true)
+          .catch(() => false);
+        await this.spaceOpenLegacyLink(workspaceSlug, projectId);
+        booted = await firedPromise;
+      }
+      if (booted) {
+        // Presence, not visibility: the bar node only exists while progress
+        // runs (rendered on start, removed on completion).
+        const deadline = Date.now() + 20_000;
+        for (;;) {
+          if ((await bar.count()) > 0) {
+            sawBar = true;
+            break;
+          }
+          if (Date.now() >= deadline) break;
+          await this.page.waitForTimeout(200);
+        }
+      }
+    } finally {
+      release();
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
+    let completed = false;
+    try {
+      await this.spaceWaitForBoardContent();
+      // The bar fades out over its animation window once idle; poll for removal.
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        if ((await bar.count()) === 0) {
+          completed = true;
+          break;
+        }
+        if (Date.now() >= deadline) break;
+        await this.page.waitForTimeout(300);
+      }
+    } catch {
+      completed = false;
+    }
+    return { sawBar, completed };
+  }
+
+  async spaceChromeCopyIssueLinkToast(anchor: string, issueId: string): Promise<SpaceChromeToastFacts> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.spaceChromeOpenIssuePeek(anchor, issueId);
+    const copy = this.page.locator("button:has(svg.-rotate-45)").first();
+    await copy.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await copy.click({ timeout: WebDriver.WAIT_MS });
+    const title = this.page.getByText("Link copied!", { exact: true }).first();
+    await title.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS }).catch(() => null);
+    const message = this.page.getByText("Work item link copied to clipboard.", { exact: true }).first();
+    const clipboard = await this.page.evaluate(() => navigator.clipboard.readText().catch(() => null));
+    return {
+      title: (await title.isVisible().catch(() => false)) ? "Link copied!" : null,
+      message: (await message.isVisible().catch(() => false)) ? "Work item link copied to clipboard." : null,
+      clipboard,
+    };
+  }
+
+  async spaceChromeCommentFailureToast(
+    anchor: string,
+    issueId: string,
+    bodyText: string
+  ): Promise<SpaceChromeToastFacts> {
+    const pattern = "**/api/public/anchor/*/issues/*/comments/*";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "POST") {
+        await route.abort("failed");
+        return;
+      }
+      await route.continue();
+    });
+    try {
+      await this.spaceChromeOpenIssuePeek(anchor, issueId);
+      const editor = this.page.locator("#peek-overview-add-comment").first();
+      await editor.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+      await editor.click({ timeout: WebDriver.WAIT_MS });
+      await this.page.keyboard.type(bodyText);
+      await this.page.keyboard.press("Enter");
+      const title = this.page.getByText("Error!", { exact: true }).first();
+      await title.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS }).catch(() => null);
+      const message = this.page.getByText("Comment could not be posted. Please try again.", { exact: true }).first();
+      return {
+        title: (await title.isVisible().catch(() => false)) ? "Error!" : null,
+        message: (await message.isVisible().catch(() => false))
+          ? "Comment could not be posted. Please try again."
+          : null,
+        clipboard: null,
+      };
+    } finally {
+      await this.page.unroute(pattern);
+    }
+  }
+
+  async spaceChromeInstanceFailureFacts(anchor: string): Promise<SpaceChromeFailureFacts> {
+    const pattern = "**/api/instances/";
+    await this.page.route(pattern, async (route) => route.abort("failed"));
+    try {
+      await this.spaceOpenBoard(anchor);
+      const heading = this.page.getByRole("heading", { name: /Unable to fetch instance details/ }).first();
+      await heading.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+      const retry = this.page.getByRole("button", { name: /Retry/ }).first();
+      const images = this.page.locator("img");
+      const total = await images.count();
+      let illustration = false;
+      for (let i = 0; i < total; i++) {
+        const src =
+          (await images
+            .nth(i)
+            .getAttribute("src")
+            .catch(() => "")) ?? "";
+        if (src.includes("failure")) illustration = true;
+      }
+      const home = this.page.locator('a[href="/"]').first();
+      return {
+        heading: (((await heading.textContent().catch(() => "")) ?? "") as string).replace(/\s+/g, " ").trim(),
+        retryVisible: await retry.isVisible().catch(() => false),
+        illustrationVisible: illustration,
+        logoBarVisible: await home.isVisible().catch(() => false),
+      };
+    } finally {
+      await this.page.unroute(pattern);
+    }
+  }
+
+  async spaceChromeRetryInstanceLoad(): Promise<void> {
+    await this.page.getByRole("button", { name: /Retry/ }).first().click({ timeout: WebDriver.WAIT_MS });
+    await this.spaceWaitForBoardContent();
+  }
+
+  async spaceChromeCrashFacts(anchor: string): Promise<SpaceChromeCrashFacts> {
+    const pattern = "**/api/public/anchor/*/settings/";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      const upstream = await route.fetch();
+      const payload = (await upstream.json()) as Record<string, unknown>;
+      const details = payload["project_details"] as Record<string, unknown>;
+      details["logo_props"] = { in_use: "emoji", emoji: { value: "not-a-code-point" } };
+      await route.fulfill({ response: upstream, body: JSON.stringify(payload) });
+    });
+    try {
+      await this.spaceOpenBoard(anchor);
+      const heading = this.page.getByRole("heading").first();
+      await heading.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+      const refresh = this.page.getByRole("button", { name: /Refresh/ }).first();
+      const support = this.page.locator('a[href^="mailto:"]').first();
+      const forum = this.page.locator('a[target="_blank"]').first();
+      return {
+        heading: (((await heading.textContent().catch(() => "")) ?? "") as string).replace(/\s+/g, " ").trim(),
+        refreshVisible: await refresh.isVisible().catch(() => false),
+        supportHref: await support.getAttribute("href").catch(() => null),
+        forumHref: await forum.getAttribute("href").catch(() => null),
+      };
+    } finally {
+      await this.page.unroute(pattern);
+    }
+  }
+
+  async spaceChromeRefreshAfterCrash(): Promise<void> {
+    await this.page
+      .getByRole("button", { name: /Refresh/ })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+    await this.spaceWaitForBoardContent();
+  }
+
+  async spaceLocaleBoardFacts(anchor: string, issueId: string): Promise<SpaceLocaleBoardFacts> {
+    await this.spaceChromeOpenIssuePeek(anchor, issueId);
+    const due = this.page.getByText("Due date", { exact: true }).first();
+    const section = due.locator("xpath=ancestor::div[contains(., 'State')][1]");
+    const peekProperties = (((await section.innerText().catch(() => "")) ?? "") as string).replace(/\s+/g, " ").trim();
+    const chrome = this.spaceNavbarName().locator("xpath=ancestor::div[2]");
+    const chromeText = (((await chrome.innerText().catch(() => "")) ?? "") as string).replace(/\s+/g, " ").trim();
+    return {
+      peekProperties,
+      issueKeys: await this.spaceIssueKeys(),
+      chromeText,
+      htmlLang: await this.page.evaluate(() => document.documentElement.getAttribute("lang")),
+      storedLocale: await this.page.evaluate(() => localStorage.getItem("userLanguage")),
+    };
+  }
+
+  async spaceLocaleLandingFacts(): Promise<SpaceLocaleLandingFacts> {
+    await this.spaceOpenLanding();
+    const title = this.page.getByText("View, comment, and do more", { exact: true }).first();
+    await title.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const subtitle = this.page
+      .getByText("Sign up or log in to work with Pi Dash work items and Pages.", { exact: true })
+      .first();
+    const consent = this.page.getByText(/Terms of Service/i).first();
+    const read = async (node: Locator): Promise<string> =>
+      (((await node.textContent().catch(() => "")) ?? "") as string).replace(/\s+/g, " ").trim();
+    return { title: await read(title), subtitle: await read(subtitle), consent: await read(consent) };
+  }
+
+  async spaceLocaleSetStoredLocale(locale: string | null): Promise<void> {
+    if (locale === null) {
+      await this.page.evaluate(() => localStorage.removeItem("userLanguage"));
+    } else {
+      await this.page.evaluate((value) => localStorage.setItem("userLanguage", value), locale);
+    }
   }
 }
