@@ -8007,6 +8007,7 @@ export interface ParityDriver {
   deskUpdateEndTrafficWatch(): Promise<void>;
   /** True when the desktop update-install button is present. */
   deskUpdateSidebarButtonVisible(): Promise<boolean>;
+
   // === NEWFRONT-97 space navigation (shared; every space-oracle child
   // carries this block verbatim — keep the earliest-merged copy on dup). ===
   /** Open a published board at its anchor address; query is old-app raw (e.g. "?board=kanban"). */
@@ -8165,6 +8166,34 @@ export interface ParityDriver {
   adminClearSessionFetchDelay(): Promise<void>;
   /** Answer info reads with no workspaces (drives the first-workspace popup branch). */
   adminStubNoWorkspaces(): Promise<void>;
+
+  // --- Space board access & routing (NEWFRONT-447, SPC-001..009). ---
+  /** Open an arbitrary in-app path (unknown-path routing, SPC-009). */
+  spaceAccessOpenPath(path: string): Promise<void>;
+  /** Open the landing page already signed in as the owner of `cookies`; `query` is old-app raw (e.g. "?next_path=/issues/x"). */
+  spaceAccessOpenLandingAuthed(cookies: ParityBrowserCookie[], query?: string): Promise<void>;
+  /** Whether the board navbar shows the project named `name`. */
+  spaceAccessBoardShowsProject(name: string): Promise<boolean>;
+  /** Whether the board shows an issue row titled `name`. */
+  spaceAccessBoardShowsIssue(name: string): Promise<boolean>;
+  /** Anonymous navbar sign-in link target, or null when no sign-in renders. */
+  spaceAccessSignInHref(): Promise<string | null>;
+  /** Whether the anchor-not-found illustration page is showing (SPC-003). */
+  spaceAccessAnchorNotFoundVisible(): Promise<boolean>;
+  /** Whether the generic board-error illustration is showing (SPC-004). */
+  spaceAccessBoardErrorVisible(): Promise<boolean>;
+  /** Whether the generic unmatched-path page is showing (SPC-009). */
+  spaceAccessGenericNotFoundVisible(): Promise<boolean>;
+  /** Fail upcoming board-settings fetches with `status` until cleared (SPC-004). */
+  spaceAccessFailBoardSettings(status?: number): Promise<void>;
+  /** Fail upcoming public-issues fetches with `status` until cleared (SPC-004). */
+  spaceAccessFailBoardIssues(status?: number): Promise<void>;
+  /** Remove the failure routes installed by the spaceAccessFail* helpers. */
+  spaceAccessClearFailures(): Promise<void>;
+  /** Which landing view is showing: the auth forms, the signed-in guidance, or neither. */
+  spaceAccessLandingView(): Promise<"auth" | "signed-in" | "other">;
+  /** Document head metadata facts for the current page (SPC-007, SPC-008). */
+  spaceAccessHeadFacts(): Promise<SpaceAccessHeadFacts>;
 }
 
 /** One list group / board column as rendered (NEWFRONT-449, SPC-023/024/026). */
@@ -10834,4 +10863,26 @@ export interface SpaceLocaleLandingFacts {
   subtitle: string;
   /** Consent/legal line text. */
   consent: string;
+}
+
+/** Document head metadata facts for a space page (NEWFRONT-447, SPC-007/008). */
+export interface SpaceAccessHeadFacts {
+  /** Rendered document title. */
+  title: string;
+  /** Content of meta[name="description"], or null when absent. */
+  description: string | null;
+  /** Content of meta[name="robots"], or null when absent. */
+  robots: string | null;
+  /** Content of meta[property="og:title"], or null when absent. */
+  ogTitle: string | null;
+  /** Content of meta[property="og:description"], or null when absent. */
+  ogDescription: string | null;
+  /** Content of meta[property="og:image"], or null when absent. */
+  ogImage: string | null;
+  /** Content of meta[name="twitter:title"], or null when absent. */
+  twitterTitle: string | null;
+  /** Content of meta[name="twitter:description"], or null when absent. */
+  twitterDescription: string | null;
+  /** Content of meta[name="twitter:image"], or null when absent. */
+  twitterImage: string | null;
 }

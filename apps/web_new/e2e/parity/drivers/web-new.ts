@@ -174,6 +174,7 @@ import type {
   SpaceChromeToastFacts,
   SpaceLocaleBoardFacts,
   SpaceLocaleLandingFacts,
+  SpaceAccessHeadFacts,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -14153,5 +14154,58 @@ export class WebNewDriver implements ParityDriver {
   }
   async spaceLocaleSetStoredLocale(_locale: string | null): Promise<void> {
     return todo("spaceLocaleSetStoredLocale");
+  }
+
+  // --- Space board access & routing (NEWFRONT-447, SPC-001..009). ---
+  async spaceAccessOpenPath(_path: string): Promise<void> {
+    return todo("spaceAccessOpenPath");
+  }
+
+  async spaceAccessOpenLandingAuthed(_cookies: ParityBrowserCookie[], _query?: string): Promise<void> {
+    return todo("spaceAccessOpenLandingAuthed");
+  }
+
+  async spaceAccessBoardShowsProject(_name: string): Promise<boolean> {
+    return todo("spaceAccessBoardShowsProject");
+  }
+
+  async spaceAccessBoardShowsIssue(_name: string): Promise<boolean> {
+    return todo("spaceAccessBoardShowsIssue");
+  }
+
+  async spaceAccessSignInHref(): Promise<string | null> {
+    return todo("spaceAccessSignInHref");
+  }
+
+  async spaceAccessAnchorNotFoundVisible(): Promise<boolean> {
+    return todo("spaceAccessAnchorNotFoundVisible");
+  }
+
+  async spaceAccessBoardErrorVisible(): Promise<boolean> {
+    return todo("spaceAccessBoardErrorVisible");
+  }
+
+  async spaceAccessGenericNotFoundVisible(): Promise<boolean> {
+    return todo("spaceAccessGenericNotFoundVisible");
+  }
+
+  async spaceAccessFailBoardSettings(_status?: number): Promise<void> {
+    return todo("spaceAccessFailBoardSettings");
+  }
+
+  async spaceAccessFailBoardIssues(_status?: number): Promise<void> {
+    return todo("spaceAccessFailBoardIssues");
+  }
+
+  async spaceAccessClearFailures(): Promise<void> {
+    return todo("spaceAccessClearFailures");
+  }
+
+  async spaceAccessLandingView(): Promise<"auth" | "signed-in" | "other"> {
+    return todo("spaceAccessLandingView");
+  }
+
+  async spaceAccessHeadFacts(): Promise<SpaceAccessHeadFacts> {
+    return todo("spaceAccessHeadFacts");
   }
 }

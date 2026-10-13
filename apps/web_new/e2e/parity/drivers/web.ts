@@ -191,6 +191,7 @@ import type {
   SpaceChromeToastFacts,
   SpaceLocaleBoardFacts,
   SpaceLocaleLandingFacts,
+  SpaceAccessHeadFacts,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -50574,5 +50575,115 @@ export class WebDriver implements ParityDriver {
     } else {
       await this.page.evaluate((value) => localStorage.setItem("userLanguage", value), locale);
     }
+  }
+
+  // --- Space board access & routing (NEWFRONT-447, SPC-001..009). ---
+  // Selectors below were read off the running old space app: the navbar
+  // carries the project name as plain text plus a "Sign in" link for
+  // anonymous visitors; the three not-found/error views are told apart by
+  // heading text and level; the landing gate shows either the email-first
+  // auth form or the signed-in guidance view.
+
+  async spaceAccessOpenPath(path: string): Promise<void> {
+    await this.page.goto(path, { waitUntil: "domcontentloaded", timeout: 120_000 });
+  }
+
+  async spaceAccessOpenLandingAuthed(cookies: ParityBrowserCookie[], query = ""): Promise<void> {
+    await this.page.context().addCookies(cookies);
+    await this.page.goto(`/${query}`, { waitUntil: "domcontentloaded" });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.awaitAppBoot("/");
+  }
+
+  async spaceAccessBoardShowsProject(name: string): Promise<boolean> {
+    return this.page
+      .getByText(name, { exact: true })
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async spaceAccessBoardShowsIssue(name: string): Promise<boolean> {
+    return this.page
+      .getByText(name, { exact: true })
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async spaceAccessSignInHref(): Promise<string | null> {
+    const link = this.page.getByRole("link", { name: "Sign in" }).first();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href");
+  }
+
+  async spaceAccessAnchorNotFoundVisible(): Promise<boolean> {
+    // Heading-leveled, not illustration-based: a failed image load would
+    // read invisible, while the not-found view heads at h3 and the
+    // board-error view at h1 despite sharing the heading text.
+    return this.page
+      .getByRole("heading", { level: 3, name: "Oops! Something went wrong." })
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async spaceAccessBoardErrorVisible(): Promise<boolean> {
+    return this.page
+      .getByRole("heading", { level: 1, name: "Oops! Something went wrong." })
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async spaceAccessGenericNotFoundVisible(): Promise<boolean> {
+    const heading = this.page.getByRole("heading", { name: "That didn't work" }).first();
+    return heading.isVisible().catch(() => false);
+  }
+
+  async spaceAccessFailBoardSettings(status = 500): Promise<void> {
+    await this.page.route("**/api/public/anchor/*/settings/", (route) =>
+      route.fulfill({ status, contentType: "application/json", body: "{}" })
+    );
+  }
+
+  async spaceAccessFailBoardIssues(status = 500): Promise<void> {
+    // "**", not "*": the list URL carries "/?cursor=..." after "issues",
+    // and a lone "*" never crosses a "/".
+    await this.page.route("**/api/public/anchor/*/issues/**", (route) =>
+      route.fulfill({ status, contentType: "application/json", body: "{}" })
+    );
+  }
+
+  async spaceAccessClearFailures(): Promise<void> {
+    await this.page.unrouteAll({ behavior: "wait" });
+  }
+
+  async spaceAccessLandingView(): Promise<"auth" | "signed-in" | "other"> {
+    const emailField = this.page.getByLabel("Email").first();
+    if (await emailField.isVisible().catch(() => false)) return "auth";
+    const guidance = this.page.getByRole("heading", { name: "Nice! Just one more step." }).first();
+    if (await guidance.isVisible().catch(() => false)) return "signed-in";
+    return "other";
+  }
+
+  private async spaceAccessMetaContent(selector: string): Promise<string | null> {
+    const node = this.page.locator(`head meta${selector}`).first();
+    if ((await node.count()) === 0) return null;
+    return node.getAttribute("content");
+  }
+
+  async spaceAccessHeadFacts(): Promise<SpaceAccessHeadFacts> {
+    return {
+      title: await this.page.title(),
+      description: await this.spaceAccessMetaContent('[name="description"]'),
+      robots: await this.spaceAccessMetaContent('[name="robots"]'),
+      ogTitle: await this.spaceAccessMetaContent('[property="og:title"]'),
+      ogDescription: await this.spaceAccessMetaContent('[property="og:description"]'),
+      ogImage: await this.spaceAccessMetaContent('[property="og:image"]'),
+      twitterTitle: await this.spaceAccessMetaContent('[name="twitter:title"]'),
+      twitterDescription: await this.spaceAccessMetaContent('[name="twitter:description"]'),
+      twitterImage: await this.spaceAccessMetaContent('[name="twitter:image"]'),
+    };
   }
 }
