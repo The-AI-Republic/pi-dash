@@ -4,12 +4,12 @@
 // Self-contained API mocks for the perf specs (NEWFRONT-21). The payloads
 // follow the @pidash/api-client contracts; the app parses every one with
 // zod at runtime, so a malformed mock fails the spec loudly instead of
-// silently rendering nothing. Anything outside the four endpoints the
+// silently rendering nothing. Anything outside the five endpoints the
 // issue-list slice calls is aborted, keeping the specs hermetic: a new
 // endpoint shows up as a failure that updates these mocks.
 import type { Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
-import type { IssueListItem, IssueListResponse, Me, Project, Workspace } from "@pidash/api-client";
+import type { IssueListItem, IssueListResponse, Me, Profile, Project, Workspace } from "@pidash/api-client";
 
 export const PERF_WORKSPACE_SLUG = "perf-ws";
 export const PERF_PROJECT_ID = "123e4567-e89b-42d3-a456-426614174001";
@@ -43,6 +43,41 @@ export function mockMe(): Me {
     is_password_autoset: false,
     last_login_medium: "password",
     last_login_time: NOW,
+  };
+}
+
+export function mockProfile(): Profile {
+  return {
+    id: USER_ID,
+    user: USER_ID,
+    theme: { mode: "dark" },
+    is_app_rail_docked: true,
+    is_tour_completed: false,
+    onboarding_step: {},
+    use_case: null,
+    role: null,
+    is_onboarded: true,
+    last_workspace_id: WORKSPACE_ID,
+    billing_address_country: "INDIA",
+    billing_address: null,
+    has_billing_address: false,
+    company_name: "",
+    notification_view_mode: "full",
+    is_smooth_cursor_enabled: false,
+    is_mobile_onboarded: false,
+    mobile_onboarding_step: {},
+    mobile_timezone_auto_set: false,
+    language: "en",
+    start_of_the_week: 0,
+    goals: {},
+    background_color: "#fff",
+    is_navigation_tour_completed: false,
+    has_marketing_email_consent: false,
+    is_subscribed_to_changelog: false,
+    product_tour: {},
+    settings: {},
+    created_at: NOW,
+    updated_at: NOW,
   };
 }
 
@@ -152,6 +187,10 @@ export async function installApiMocks(
     (route) => route.fulfill(jsonFulfill(mockMe()))
   );
   await page.route(
+    (url) => url.pathname === "/api/users/me/profile/",
+    (route) => route.fulfill(jsonFulfill(mockProfile()))
+  );
+  await page.route(
     (url) => url.pathname === "/api/users/me/workspaces/",
     (route) => route.fulfill(jsonFulfill(mockWorkspaces()))
   );
@@ -165,6 +204,7 @@ export async function installApiMocks(
   );
   const known = new Set([
     "/api/users/me/",
+    "/api/users/me/profile/",
     "/api/users/me/workspaces/",
     `/api/workspaces/${PERF_WORKSPACE_SLUG}/projects/`,
     issuesPath,
