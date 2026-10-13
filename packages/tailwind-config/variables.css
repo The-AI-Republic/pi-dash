@@ -250,6 +250,7 @@
     --bg-success-subtle-1: var(--green-200);
     --bg-warning-primary: var(--amber-600);
     --bg-warning-subtle: var(--amber-100);
+    --bg-warning-subtle-1: var(--amber-200);
     --bg-danger-primary: var(--red-700);
     --bg-danger-primary-hover: var(--red-800);
     --bg-danger-primary-active: var(--red-900);
@@ -500,6 +501,7 @@
       --bg-success-subtle-1: var(--green-100);
       --bg-warning-primary: var(--amber-600);
       --bg-warning-subtle: var(--amber-100);
+      --bg-warning-subtle-1: var(--amber-100);
       --bg-danger-primary: var(--red-300);
       --bg-danger-primary-hover: var(--red-400);
       --bg-danger-primary-active: var(--red-500);
@@ -774,6 +776,7 @@
   --background-color-success-subtle-1: var(--bg-success-subtle-1);
   --background-color-warning-primary: var(--bg-warning-primary);
   --background-color-warning-subtle: var(--bg-warning-subtle);
+  --background-color-warning-subtle-1: var(--bg-warning-subtle-1);
   --background-color-danger-primary: var(--bg-danger-primary);
   --background-color-danger-primary-hover: var(--bg-danger-primary-hover);
   --background-color-danger-primary-active: var(--bg-danger-primary-active);
