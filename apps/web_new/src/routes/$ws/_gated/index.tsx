@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Workspace home (first vertical slice). Forwards into the first project
-// until the dashboard lands with NEWFRONT-70.
+// until the dashboard lands with NEWFRONT-70. The product-tour seam
+// (AUTH-042, owned by the auth area) stays mounted here: later home UI
+// keeps it, passing the create-project dialog opener once it exists.
 
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
+import { WorkspaceHomeTour } from "../../../features/auth/index.js";
 import { projectsQueryOptions } from "../../../features/projects/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/")({
@@ -24,10 +27,13 @@ export const Route = createFileRoute("/$ws/_gated/")({
   },
   component: function WorkspaceHomeComponent() {
     return (
-      <section aria-label="Workspace home" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
-        <h2 className="text-h3 text-(--text)">No projects yet</h2>
-        <p className="text-body text-(--text-muted)">Projects in this workspace will appear in the sidebar.</p>
-      </section>
+      <>
+        <WorkspaceHomeTour />
+        <section aria-label="Workspace home" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
+          <h2 className="text-h3 text-(--text)">No projects yet</h2>
+          <p className="text-body text-(--text-muted)">Projects in this workspace will appear in the sidebar.</p>
+        </section>
+      </>
     );
   },
 });

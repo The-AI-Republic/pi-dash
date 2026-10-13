@@ -43,6 +43,11 @@ export interface OnboardingStepProps {
   onAdvance: (options?: { skipInvites?: boolean }) => void;
   invitations: WorkspaceInvitationList;
   joinRequests: WorkspaceJoinRequestList;
+  /**
+   * True when the instance config disables workspace creation (AUTH-041).
+   * Only the workspace step reads it; every step receives it.
+   */
+  creationDisabled?: boolean | undefined;
 }
 
 export type OnboardingStepComponent = React.ComponentType<OnboardingStepProps>;
@@ -156,6 +161,7 @@ export function OnboardingFlow({ steps: extensions = {} }: OnboardingFlowProps):
           onAdvance={(options) => advance(current, options)}
           invitations={invitationList}
           joinRequests={requestList}
+          creationDisabled={instanceConfig.data?.is_workspace_creation_disabled === true}
         />
       ) : null}
     </OnboardingShell>

@@ -5,6 +5,8 @@ import type { WorkspaceJoinRequestList } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import {
+  ADMIN_REQUEST_SUBJECT,
+  buildAdminRequestMailto,
   deriveWorkspaceSlug,
   INVITE_INITIAL_ROW_COUNT,
   isReservedWorkspaceSlug,
@@ -205,5 +207,30 @@ describe("invite roles", () => {
     expect(workspaceRoleLabel(15)).toBe("Member");
     expect(workspaceRoleLabel(5)).toBe("Guest");
     expect(workspaceRoleLabel(99)).toBe("Member");
+  });
+});
+
+describe("buildAdminRequestMailto", () => {
+  it("drafts an unaddressed request carrying the subject and template", () => {
+    const href = buildAdminRequestMailto({ firstName: "Ada", lastName: "Lovelace", email: "ada@example.com" });
+    expect(href.startsWith("mailto:?")).toBe(true);
+    const query = new URLSearchParams(href.slice("mailto:?".length));
+    expect(query.get("subject")).toBe(ADMIN_REQUEST_SUBJECT);
+    const body = query.get("body") ?? "";
+    expect(body).toContain("[/workspace-name]");
+    expect(body).toContain("ada@example.com");
+    expect(body).toContain("Ada Lovelace");
+  });
+
+  it("signs with the bare address when the name is blank", () => {
+    const href = buildAdminRequestMailto({ firstName: "", lastName: "  ", email: "ada@example.com" });
+    const body = new URLSearchParams(href.slice("mailto:?".length)).get("body") ?? "";
+    expect(body.endsWith("ada@example.com")).toBe(true);
+  });
+
+  it("encodes reserved characters in the draft", () => {
+    const href = buildAdminRequestMailto({ firstName: "Ada&Co", lastName: "", email: "ada+tour@example.com" });
+    expect(href).toContain(encodeURIComponent("Ada&Co"));
+    expect(href).toContain(encodeURIComponent("ada+tour@example.com"));
   });
 });

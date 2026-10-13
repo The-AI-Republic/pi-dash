@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
 import { Route as WsRouteRouteImport } from "./routes/$ws/route";
+import { Route as CreateWorkspaceRouteImport } from "./routes/create-workspace";
 import { Route as LoginRouteImport } from "./routes/login";
 import { Route as OnboardingRouteImport } from "./routes/onboarding";
 import { Route as RegisterRouteImport } from "./routes/register";
@@ -37,6 +38,11 @@ const IndexRoute = IndexRouteImport.update({
 const WsRouteRoute = WsRouteRouteImport.update({
   id: "/$ws",
   path: "/$ws",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const CreateWorkspaceRoute = CreateWorkspaceRouteImport.update({
+  id: "/create-workspace",
+  path: "/create-workspace",
   getParentRoute: () => rootRouteImport,
 } as any);
 const LoginRoute = LoginRouteImport.update({
@@ -127,6 +133,7 @@ const WsGatedProjectsProjectIdIssuesIndexRoute = WsGatedProjectsProjectIdIssuesI
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
   "/$ws": typeof WsRouteRouteWithChildren;
+  "/create-workspace": typeof CreateWorkspaceRoute;
   "/login": typeof LoginRoute;
   "/onboarding": typeof OnboardingRoute;
   "/register": typeof RegisterRoute;
@@ -147,6 +154,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
   "/$ws": typeof WsGatedIndexRoute;
+  "/create-workspace": typeof CreateWorkspaceRoute;
   "/login": typeof LoginRoute;
   "/onboarding": typeof OnboardingRoute;
   "/register": typeof RegisterRoute;
@@ -167,6 +175,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
   "/$ws": typeof WsRouteRouteWithChildren;
+  "/create-workspace": typeof CreateWorkspaceRoute;
   "/login": typeof LoginRoute;
   "/onboarding": typeof OnboardingRoute;
   "/register": typeof RegisterRoute;
@@ -190,6 +199,7 @@ export interface FileRouteTypes {
   fullPaths:
     | "/"
     | "/$ws"
+    | "/create-workspace"
     | "/login"
     | "/onboarding"
     | "/register"
@@ -210,6 +220,7 @@ export interface FileRouteTypes {
   to:
     | "/"
     | "/$ws"
+    | "/create-workspace"
     | "/login"
     | "/onboarding"
     | "/register"
@@ -229,6 +240,7 @@ export interface FileRouteTypes {
     | "__root__"
     | "/"
     | "/$ws"
+    | "/create-workspace"
     | "/login"
     | "/onboarding"
     | "/register"
@@ -251,6 +263,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
   WsRouteRoute: typeof WsRouteRouteWithChildren;
+  CreateWorkspaceRoute: typeof CreateWorkspaceRoute;
   LoginRoute: typeof LoginRoute;
   OnboardingRoute: typeof OnboardingRoute;
   RegisterRoute: typeof RegisterRoute;
@@ -278,6 +291,13 @@ declare module "@tanstack/react-router" {
       path: "/$ws";
       fullPath: "/$ws";
       preLoaderRoute: typeof WsRouteRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/create-workspace": {
+      id: "/create-workspace";
+      path: "/create-workspace";
+      fullPath: "/create-workspace";
+      preLoaderRoute: typeof CreateWorkspaceRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/login": {
@@ -443,6 +463,7 @@ const WsRouteRouteWithChildren = WsRouteRoute._addFileChildren(WsRouteRouteChild
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   WsRouteRoute: WsRouteRouteWithChildren,
+  CreateWorkspaceRoute: CreateWorkspaceRoute,
   LoginRoute: LoginRoute,
   OnboardingRoute: OnboardingRoute,
   RegisterRoute: RegisterRoute,

@@ -102,10 +102,10 @@ function profileFixture(flags: Record<string, boolean> = {}) {
   };
 }
 
-function configFixture(selfManaged: boolean) {
+function configFixture(selfManaged: boolean, creationDisabled = false) {
   return {
     enable_signup: true,
-    is_workspace_creation_disabled: false,
+    is_workspace_creation_disabled: creationDisabled,
     is_google_enabled: false,
     is_github_enabled: false,
     is_gitlab_enabled: false,
@@ -134,6 +134,7 @@ const SETTINGS = {
 interface FlowSetup {
   flags?: Record<string, boolean>;
   selfManaged?: boolean;
+  creationDisabled?: boolean;
   workspaces?: (typeof ACME)[];
   invitations?: Array<{ id: string }>;
   failProfilePatch?: boolean;
@@ -196,7 +197,10 @@ function renderFlow(setup: FlowSetup = {}): void {
   queryClient.setQueryData(["session", "me"], ME);
   queryClient.setQueryData(["session", "profile"], profileFixture(setup.flags ?? {}));
   queryClient.setQueryData(["session", "workspaces"], setup.workspaces ?? []);
-  queryClient.setQueryData(["instance", "config"], configFixture(setup.selfManaged ?? false));
+  queryClient.setQueryData(
+    ["instance", "config"],
+    configFixture(setup.selfManaged ?? false, setup.creationDisabled ?? false)
+  );
   queryClient.setQueryData(["auth", "my-invitations"], setup.invitations ?? []);
   queryClient.setQueryData(["auth", "my-join-requests"], []);
   render(
@@ -452,6 +456,22 @@ describe("OnboardingFlow", () => {
     expect(seen).toEqual([{ invitations: [], joinRequests: [] }]);
     await user.click(screen.getByRole("button", { name: "to-invite" }));
     await waitFor(() => expect(screen.getByText("6/6")).toBeInTheDocument());
+  });
+
+  it("passes the creation-disabled flag to mounted steps", async () => {
+    const seen: unknown[] = [];
+    renderFlow({
+      flags: { profile_complete: true },
+      creationDisabled: true,
+      steps: {
+        workspace: (props) => {
+          seen.push(props.creationDisabled);
+          return <div data-testid="workspace-step" />;
+        },
+      },
+    });
+    await screen.findByTestId("workspace-step");
+    expect(seen).toEqual([true]);
   });
 
   it("hides the invite step from the total while invitations exist", async () => {

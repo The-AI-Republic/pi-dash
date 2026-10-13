@@ -1,11 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Workspace onboarding logic (AUTH-034–039). Pure helpers for the
+// Workspace onboarding logic (AUTH-034–041). Pure helpers for the
 // create-or-join step and the invite-members step: the workspace
 // name/slug validators, slug derivation, the reserved-slug list, team
 // sizes, the default sub-view resolution, the pending-request lookup,
-// and the invite-role labels. Written from parity/specs/auth.md.
+// the invite-role labels, and the admin-request mail draft for the
+// creation-disabled screen. Written from parity/specs/auth.md.
 
 import type { WorkspaceJoinRequestList } from "@pidash/api-client";
 
@@ -212,4 +213,22 @@ export function workspaceRoleLabel(role: number): string {
     default:
       return "Member";
   }
+}
+
+// --- creation-disabled admin request (AUTH-041) ------------------------------
+
+/** Subject of the prefilled mail asking the instance admin for a workspace. */
+export const ADMIN_REQUEST_SUBJECT = "Requesting a new workspace";
+
+/**
+ * The ask-the-admin mail draft (AUTH-041): no recipient — the requester
+ * addresses it to whoever administers their instance — with a prefilled
+ * subject and a body template naming the workspace URL and purpose slots
+ * plus the requester's own name and address as the signature.
+ */
+export function buildAdminRequestMailto(requester: { firstName: string; lastName: string; email: string }): string {
+  const name = `${requester.firstName} ${requester.lastName}`.trim();
+  const signature = name === "" ? requester.email : `${name}\n${requester.email}`;
+  const body = `Hello,\n\nCould you set up a workspace for me? I would like the URL [/workspace-name] to use for [what the workspace is for].\n\nThank you,\n${signature}`;
+  return `mailto:?subject=${encodeURIComponent(ADMIN_REQUEST_SUBJECT)}&body=${encodeURIComponent(body)}`;
 }

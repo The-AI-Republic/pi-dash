@@ -9,9 +9,11 @@ export {
   DEACTIVATE_SUCCESS_TITLE,
   FINISH_FAILURE_TITLE,
   JOIN_PROJECT_FAILED_TITLE,
+  TOUR_COMPLETE_FAILED_TITLE,
   useAcceptWorkspaceInvitations,
   useApproveDeviceCode,
   useCheckWorkspaceSlug,
+  useCompleteTour,
   useCreateJoinRequest,
   useCreateWorkspace,
   useDeactivateAccount,
@@ -85,6 +87,8 @@ export type {
   OnboardingStep,
 } from "./onboarding.js";
 export {
+  ADMIN_REQUEST_SUBJECT,
+  buildAdminRequestMailto,
   deriveWorkspaceSlug,
   INVITE_INITIAL_ROW_COUNT,
   isReservedWorkspaceSlug,
@@ -135,6 +139,16 @@ export {
   useProjectRow,
   useWorkspaceMembership,
 } from "./queries.js";
+export {
+  nextTourStep,
+  previousTourStep,
+  shouldShowProductTour,
+  TOUR_CONTENT_STOPS,
+  TOUR_VIDEO_EMBED_URL,
+  tourContentStop,
+  tourWelcomeGreeting,
+} from "./tour.js";
+export type { TourContentStop, TourStepKey } from "./tour.js";
 export { DeactivateAccountDialog } from "./components/DeactivateAccountDialog.js";
 export type { DeactivateAccountDialogProps } from "./components/DeactivateAccountDialog.js";
 export { AuthBanner, isValidEmail, SignInCard } from "./components/SignInCard.js";
@@ -213,3 +227,23 @@ export { WorkspacePendingView } from "./components/WorkspacePendingView.js";
 export type { WorkspacePendingViewProps } from "./components/WorkspacePendingView.js";
 export { WorkspaceStep } from "./components/WorkspaceStep.js";
 export type { WorkspaceStepProps } from "./components/WorkspaceStep.js";
+export {
+  CREATION_DISABLED_ASK_LABEL,
+  CREATION_DISABLED_BACK_LABEL,
+  CREATION_DISABLED_HEADING,
+  CreationDisabledScreen,
+} from "./components/CreationDisabledScreen.js";
+export type { CreationDisabledScreenProps } from "./components/CreationDisabledScreen.js";
+export { CREATION_NOTICE_JOIN_LABEL, InOnboardingCreationNotice } from "./components/InOnboardingCreationNotice.js";
+export type { InOnboardingCreationNoticeProps } from "./components/InOnboardingCreationNotice.js";
+export {
+  ProductTour,
+  TOUR_CLOSE_LABEL,
+  TOUR_SKIP_LABEL,
+  TOUR_START_PROJECT_LABEL,
+  TOUR_TAKE_TOUR_LABEL,
+} from "./components/ProductTour.js";
+export type { ProductTourProps } from "./components/ProductTour.js";
+export { TeamSizeDropdown, TEAM_SIZE_DROPDOWN_PLACEHOLDER } from "./components/TeamSizeDropdown.js";
+export { WorkspaceHomeTour } from "./components/WorkspaceHomeTour.js";
+export type { WorkspaceHomeTourProps } from "./components/WorkspaceHomeTour.js";
