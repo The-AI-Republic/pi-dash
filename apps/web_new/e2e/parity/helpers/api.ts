@@ -20141,3 +20141,93 @@ export async function serverSpacePlantBot(
   if (id === "") throw new Error("[parity] bot plant produced no id.");
   return { email, password, id, displayName: "Zeddy Spacebotte", firstName: "Zed" };
 }
+
+// --- Cloud oracle session + quota helpers (NEWFRONT-437, CLOUD-010).
+// --- Appended; existing helpers above are untouched per the shared harness
+// --- contract. The cloud oracle has no password sign-in: scenarios enter
+// --- through the dev-login endpoint (which anchors on email, so the seed
+// --- address returns the seed user) and carry the JWT cookies it sets.
+
+/** Authenticated cloud caller: cookie header plus the user id it belongs to. */
+export interface CloudSession {
+  /** `Cookie:` header value for authenticated API calls as this user. */
+  cookie: string;
+  /** UUID string of the signed-in user. */
+  userId: string;
+}
+
+/**
+ * Sign in to the cloud oracle through the dev-login bypass (no provider
+ * round trip, no AIREPUBLIC_* secrets). Resolves with the session cookies
+ * as one header value plus the user id.
+ */
+export async function cloudDevLogin(
+  email: string,
+  displayName?: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudSession> {
+  const res = await fetchTolerant(`${apiBase}/api/auth/dev-login/`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(displayName === undefined ? { email } : { email, display_name: displayName }),
+  });
+  if (!res.ok) throw new Error(`[parity] cloud dev-login failed with HTTP ${res.status} for ${email}.`);
+  const header = cookieHeader(setCookieHeaders(res));
+  if (!header.includes("pidash_access="))
+    throw new Error("[parity] cloud dev-login response carried no session cookie.");
+  const payload = (await res.json()) as { user?: { id?: unknown } };
+  const userId = payload.user?.id;
+  if (typeof userId !== "string" || userId === "")
+    throw new Error("[parity] cloud dev-login response carried no user id.");
+  return { cookie: header, userId };
+}
+
+/** Browser cookies for a cloud session, shaped for `context.addCookies`. */
+export function cloudBrowserCookies(sessionCookie: string): BrowserCookie[] {
+  const jar = cookieJar(sessionCookie.split(";").map((pair) => pair.trim()));
+  const access = jar.get("pidash_access");
+  if (access === undefined) throw new Error("[parity] cloud session cookie carried no pidash_access.");
+  const domain = oracleHostFromEnv();
+  const cookies: BrowserCookie[] = [
+    { name: "pidash_access", value: access, domain, path: "/", httpOnly: true, sameSite: "Lax" },
+  ];
+  const refresh = jar.get("pidash_refresh");
+  if (refresh !== undefined) {
+    cookies.push({ name: "pidash_refresh", value: refresh, domain, path: "/", httpOnly: true, sameSite: "Lax" });
+  }
+  return cookies;
+}
+
+/** Raw issue-create answer: the HTTP status plus the decoded JSON payload. */
+export interface CloudCreateAnswer {
+  status: number;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * Create one issue without throwing: resolves with the status plus payload
+ * so quota scenarios can assert the 402 refusal shape itself. The REST
+ * APIs are CSRF-exempt, so the session cookie header is sufficient.
+ */
+export async function cloudCreateIssueRaw(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  name: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudCreateAnswer> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) },
+    apiBase
+  );
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = (await res.json()) as Record<string, unknown>;
+  } catch {
+    payload = {};
+  }
+  return { status: res.status, payload };
+}

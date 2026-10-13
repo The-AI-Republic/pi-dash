@@ -188,6 +188,12 @@ import type {
   SpacePickedEmoji,
   SpaceReactionGroup,
   SpaceVoteState,
+  CloudCliCardFacts,
+  CloudDocsFacts,
+  CloudDownloadCardFacts,
+  CloudHomeSectionFacts,
+  CloudNavLinkFacts,
+  CloudPricingTierFacts,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -14726,5 +14732,80 @@ export class WebNewDriver implements ParityDriver {
 
   async spaceCommentEmbedReactions(_index: number): Promise<{ groups: SpaceReactionGroup[]; addVisible: boolean }> {
     return todo("spaceCommentEmbedReactions");
+  }
+
+  // --- Cloud marketing + public surface (NEWFRONT-437, CLOUD-003/004/006–010).
+  // --- Stubs: the cloud marketing area has not landed in apps/web_new yet.
+
+  async cloudHomeHeroActionHrefs(): Promise<string[]> {
+    return todo("cloudHomeHeroActionHrefs");
+  }
+
+  async cloudHomeClickHeroAction(_href: string): Promise<void> {
+    return todo("cloudHomeClickHeroAction");
+  }
+
+  async cloudHomeSections(): Promise<CloudHomeSectionFacts> {
+    return todo("cloudHomeSections");
+  }
+
+  async cloudHeaderLinks(): Promise<CloudNavLinkFacts[]> {
+    return todo("cloudHeaderLinks");
+  }
+
+  async cloudFooterLinks(): Promise<CloudNavLinkFacts[]> {
+    return todo("cloudFooterLinks");
+  }
+
+  async cloudHeaderLinksFocusVisible(): Promise<boolean> {
+    return todo("cloudHeaderLinksFocusVisible");
+  }
+
+  async cloudFooterLinksFocusVisible(): Promise<boolean> {
+    return todo("cloudFooterLinksFocusVisible");
+  }
+
+  async cloudDocsFacts(): Promise<CloudDocsFacts> {
+    return todo("cloudDocsFacts");
+  }
+
+  async cloudDownloadCards(): Promise<CloudDownloadCardFacts[]> {
+    return todo("cloudDownloadCards");
+  }
+
+  async cloudDownloadsSigningNoticeVisible(): Promise<boolean> {
+    return todo("cloudDownloadsSigningNoticeVisible");
+  }
+
+  async cloudCliCardFacts(): Promise<CloudCliCardFacts> {
+    return todo("cloudCliCardFacts");
+  }
+
+  async cloudPricingTiers(): Promise<CloudPricingTierFacts[]> {
+    return todo("cloudPricingTiers");
+  }
+
+  async cloudPricingEnterpriseHref(): Promise<string | null> {
+    return todo("cloudPricingEnterpriseHref");
+  }
+
+  async cloudPricingFaqCount(): Promise<number> {
+    return todo("cloudPricingFaqCount");
+  }
+
+  async cloudPricingFreeCapMentioned(): Promise<boolean> {
+    return todo("cloudPricingFreeCapMentioned");
+  }
+
+  async cloudArmConfirm(_action: "accept" | "dismiss"): Promise<void> {
+    return todo("cloudArmConfirm");
+  }
+
+  async cloudConfirmMessages(): Promise<string[]> {
+    return todo("cloudConfirmMessages");
+  }
+
+  async cloudUpgradePopupUrl(): Promise<string> {
+    return todo("cloudUpgradePopupUrl");
   }
 }
