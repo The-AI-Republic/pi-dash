@@ -67,15 +67,15 @@ const CODE_SEND_MESSAGE = "Could not send a code. Try again in a moment.";
 const WEAK_SECRET_MESSAGE = "Choose a strong password to create your account.";
 const MISMATCH_MESSAGE = "The two passwords don't match.";
 
-function Banner({
-  message,
-  action,
-  onDismiss,
-}: {
+export interface AuthBannerProps {
   message: string;
-  action: AuthErrorAction | null;
-  onDismiss: () => void;
-}): React.ReactElement {
+  action?: AuthErrorAction | null | undefined;
+  /** Absent on banners that replace their form (nothing to dismiss back to). */
+  onDismiss?: (() => void) | undefined;
+}
+
+/** Shared auth failure banner. Recovery pages reuse it for their token banners (AUTH-013). */
+export function AuthBanner({ message, action = null, onDismiss }: AuthBannerProps): React.ReactElement {
   return (
     <div
       role="alert"
@@ -89,9 +89,11 @@ function Banner({
           </a>
         ) : null}
       </p>
-      <Button variant="ghost" size="small" onClick={onDismiss} aria-label="Dismiss error">
-        Dismiss
-      </Button>
+      {onDismiss ? (
+        <Button variant="ghost" size="small" onClick={onDismiss} aria-label="Dismiss error">
+          Dismiss
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -327,7 +329,7 @@ export function SignInCard({
 
   return (
     <section aria-label={cardLabel} className="flex w-full max-w-90 flex-col gap-(--space-6)">
-      {banner ? <Banner message={banner.message} action={banner.action} onDismiss={() => setBanner(null)} /> : null}
+      {banner ? <AuthBanner message={banner.message} action={banner.action} onDismiss={() => setBanner(null)} /> : null}
       {invitation.isFetching ? (
         <div className="flex flex-col items-center gap-(--space-1)">
           <Spinner label="Loading invitation" />

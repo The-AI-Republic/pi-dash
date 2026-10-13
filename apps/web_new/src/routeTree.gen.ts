@@ -8,306 +8,371 @@
 // You should NOT make any changes in this file as it will be overwritten.
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
-import { Route as rootRouteImport } from "./routes/__root";
-import { Route as IndexRouteImport } from "./routes/index";
-import { Route as WsRouteRouteImport } from "./routes/$ws/route";
-import { Route as LoginRouteImport } from "./routes/login";
-import { Route as RegisterRouteImport } from "./routes/register";
-import { Route as SignInRouteImport } from "./routes/sign-in";
-import { Route as SignUpRouteImport } from "./routes/sign-up";
-import { Route as SigninRouteImport } from "./routes/signin";
-import { Route as WsSplatRouteImport } from "./routes/$ws/$";
-import { Route as WsGatedRouteRouteImport } from "./routes/$ws/_gated/route";
-import { Route as AccountsSignUpRouteImport } from "./routes/accounts/sign-up";
-import { Route as WsGatedIndexRouteImport } from "./routes/$ws/_gated/index";
-import { Route as WsGatedBrowseIssueKeyRouteImport } from "./routes/$ws/_gated/browse/$issueKey";
-import { Route as WsGatedProjectsProjectIdIssuesIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/issues/index";
+import { Route as rootRouteImport } from './routes/__root'
+import { Route as IndexRouteImport } from './routes/index'
+import { Route as WsRouteRouteImport } from './routes/$ws/route'
+import { Route as LoginRouteImport } from './routes/login'
+import { Route as RegisterRouteImport } from './routes/register'
+import { Route as SignInRouteImport } from './routes/sign-in'
+import { Route as SignUpRouteImport } from './routes/sign-up'
+import { Route as SigninRouteImport } from './routes/signin'
+import { Route as WsSplatRouteImport } from './routes/$ws/$'
+import { Route as WsGatedRouteRouteImport } from './routes/$ws/_gated/route'
+import { Route as AccountsForgotPasswordRouteImport } from './routes/accounts/forgot-password'
+import { Route as AccountsResetPasswordRouteImport } from './routes/accounts/reset-password'
+import { Route as AccountsSetPasswordRouteImport } from './routes/accounts/set-password'
+import { Route as AccountsSignUpRouteImport } from './routes/accounts/sign-up'
+import { Route as WsGatedIndexRouteImport } from './routes/$ws/_gated/index'
+import { Route as WsGatedBrowseIssueKeyRouteImport } from './routes/$ws/_gated/browse/$issueKey'
+import { Route as WsGatedProjectsProjectIdIssuesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/issues/index'
 
 const IndexRoute = IndexRouteImport.update({
-  id: "/",
-  path: "/",
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const WsRouteRoute = WsRouteRouteImport.update({
-  id: "/$ws",
-  path: "/$ws",
+  id: '/$ws',
+  path: '/$ws',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const LoginRoute = LoginRouteImport.update({
-  id: "/login",
-  path: "/login",
+  id: '/login',
+  path: '/login',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const RegisterRoute = RegisterRouteImport.update({
-  id: "/register",
-  path: "/register",
+  id: '/register',
+  path: '/register',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const SignInRoute = SignInRouteImport.update({
-  id: "/sign-in",
-  path: "/sign-in",
+  id: '/sign-in',
+  path: '/sign-in',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const SignUpRoute = SignUpRouteImport.update({
-  id: "/sign-up",
-  path: "/sign-up",
+  id: '/sign-up',
+  path: '/sign-up',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const SigninRoute = SigninRouteImport.update({
-  id: "/signin",
-  path: "/signin",
+  id: '/signin',
+  path: '/signin',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const WsSplatRoute = WsSplatRouteImport.update({
-  id: "/$",
-  path: "/$",
+  id: '/$',
+  path: '/$',
   getParentRoute: () => WsRouteRoute,
-} as any);
+} as any)
 const WsGatedRouteRoute = WsGatedRouteRouteImport.update({
-  id: "/_gated",
+  id: '/_gated',
   getParentRoute: () => WsRouteRoute,
-} as any);
-const AccountsSignUpRoute = AccountsSignUpRouteImport.update({
-  id: "/accounts/sign-up",
-  path: "/accounts/sign-up",
+} as any)
+const AccountsForgotPasswordRoute = AccountsForgotPasswordRouteImport.update({
+  id: '/accounts/forgot-password',
+  path: '/accounts/forgot-password',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
+const AccountsResetPasswordRoute = AccountsResetPasswordRouteImport.update({
+  id: '/accounts/reset-password',
+  path: '/accounts/reset-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AccountsSetPasswordRoute = AccountsSetPasswordRouteImport.update({
+  id: '/accounts/set-password',
+  path: '/accounts/set-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AccountsSignUpRoute = AccountsSignUpRouteImport.update({
+  id: '/accounts/sign-up',
+  path: '/accounts/sign-up',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const WsGatedIndexRoute = WsGatedIndexRouteImport.update({
-  id: "/",
-  path: "/",
+  id: '/',
+  path: '/',
   getParentRoute: () => WsGatedRouteRoute,
-} as any);
+} as any)
 const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
-  id: "/browse/$issueKey",
-  path: "/browse/$issueKey",
+  id: '/browse/$issueKey',
+  path: '/browse/$issueKey',
   getParentRoute: () => WsGatedRouteRoute,
-} as any);
-const WsGatedProjectsProjectIdIssuesIndexRoute = WsGatedProjectsProjectIdIssuesIndexRouteImport.update({
-  id: "/projects/$projectId/issues/",
-  path: "/projects/$projectId/issues/",
-  getParentRoute: () => WsGatedRouteRoute,
-} as any);
+} as any)
+const WsGatedProjectsProjectIdIssuesIndexRoute =
+  WsGatedProjectsProjectIdIssuesIndexRouteImport.update({
+    id: '/projects/$projectId/issues/',
+    path: '/projects/$projectId/issues/',
+    getParentRoute: () => WsGatedRouteRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
-  "/": typeof IndexRoute;
-  "/$ws": typeof WsRouteRouteWithChildren;
-  "/login": typeof LoginRoute;
-  "/register": typeof RegisterRoute;
-  "/sign-in": typeof SignInRoute;
-  "/sign-up": typeof SignUpRoute;
-  "/signin": typeof SigninRoute;
-  "/$ws/$": typeof WsSplatRoute;
-  "/accounts/sign-up": typeof AccountsSignUpRoute;
-  "/$ws/": typeof WsGatedIndexRoute;
-  "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
-  "/$ws/projects/$projectId/issues/": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
+  '/': typeof IndexRoute
+  '/$ws': typeof WsRouteRouteWithChildren
+  '/login': typeof LoginRoute
+  '/register': typeof RegisterRoute
+  '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
+  '/signin': typeof SigninRoute
+  '/$ws/$': typeof WsSplatRoute
+  '/accounts/forgot-password': typeof AccountsForgotPasswordRoute
+  '/accounts/reset-password': typeof AccountsResetPasswordRoute
+  '/accounts/set-password': typeof AccountsSetPasswordRoute
+  '/accounts/sign-up': typeof AccountsSignUpRoute
+  '/$ws/': typeof WsGatedIndexRoute
+  '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
+  '/$ws/projects/$projectId/issues/': typeof WsGatedProjectsProjectIdIssuesIndexRoute
 }
 export interface FileRoutesByTo {
-  "/": typeof IndexRoute;
-  "/$ws": typeof WsGatedIndexRoute;
-  "/login": typeof LoginRoute;
-  "/register": typeof RegisterRoute;
-  "/sign-in": typeof SignInRoute;
-  "/sign-up": typeof SignUpRoute;
-  "/signin": typeof SigninRoute;
-  "/$ws/$": typeof WsSplatRoute;
-  "/accounts/sign-up": typeof AccountsSignUpRoute;
-  "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
-  "/$ws/projects/$projectId/issues": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
+  '/': typeof IndexRoute
+  '/$ws': typeof WsGatedIndexRoute
+  '/login': typeof LoginRoute
+  '/register': typeof RegisterRoute
+  '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
+  '/signin': typeof SigninRoute
+  '/$ws/$': typeof WsSplatRoute
+  '/accounts/forgot-password': typeof AccountsForgotPasswordRoute
+  '/accounts/reset-password': typeof AccountsResetPasswordRoute
+  '/accounts/set-password': typeof AccountsSetPasswordRoute
+  '/accounts/sign-up': typeof AccountsSignUpRoute
+  '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
+  '/$ws/projects/$projectId/issues': typeof WsGatedProjectsProjectIdIssuesIndexRoute
 }
 export interface FileRoutesById {
-  __root__: typeof rootRouteImport;
-  "/": typeof IndexRoute;
-  "/$ws": typeof WsRouteRouteWithChildren;
-  "/login": typeof LoginRoute;
-  "/register": typeof RegisterRoute;
-  "/sign-in": typeof SignInRoute;
-  "/sign-up": typeof SignUpRoute;
-  "/signin": typeof SigninRoute;
-  "/$ws/_gated": typeof WsGatedRouteRouteWithChildren;
-  "/$ws/$": typeof WsSplatRoute;
-  "/accounts/sign-up": typeof AccountsSignUpRoute;
-  "/$ws/_gated/": typeof WsGatedIndexRoute;
-  "/$ws/_gated/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
-  "/$ws/_gated/projects/$projectId/issues/": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
+  __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
+  '/$ws': typeof WsRouteRouteWithChildren
+  '/login': typeof LoginRoute
+  '/register': typeof RegisterRoute
+  '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
+  '/signin': typeof SigninRoute
+  '/$ws/_gated': typeof WsGatedRouteRouteWithChildren
+  '/$ws/$': typeof WsSplatRoute
+  '/accounts/forgot-password': typeof AccountsForgotPasswordRoute
+  '/accounts/reset-password': typeof AccountsResetPasswordRoute
+  '/accounts/set-password': typeof AccountsSetPasswordRoute
+  '/accounts/sign-up': typeof AccountsSignUpRoute
+  '/$ws/_gated/': typeof WsGatedIndexRoute
+  '/$ws/_gated/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
+  '/$ws/_gated/projects/$projectId/issues/': typeof WsGatedProjectsProjectIdIssuesIndexRoute
 }
 export interface FileRouteTypes {
-  fileRoutesByFullPath: FileRoutesByFullPath;
+  fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    | "/"
-    | "/$ws"
-    | "/login"
-    | "/register"
-    | "/sign-in"
-    | "/sign-up"
-    | "/signin"
-    | "/$ws/$"
-    | "/accounts/sign-up"
-    | "/$ws/"
-    | "/$ws/browse/$issueKey"
-    | "/$ws/projects/$projectId/issues/";
-  fileRoutesByTo: FileRoutesByTo;
+    | '/'
+    | '/$ws'
+    | '/login'
+    | '/register'
+    | '/sign-in'
+    | '/sign-up'
+    | '/signin'
+    | '/$ws/$'
+    | '/accounts/forgot-password'
+    | '/accounts/reset-password'
+    | '/accounts/set-password'
+    | '/accounts/sign-up'
+    | '/$ws/'
+    | '/$ws/browse/$issueKey'
+    | '/$ws/projects/$projectId/issues/'
+  fileRoutesByTo: FileRoutesByTo
   to:
-    | "/"
-    | "/$ws"
-    | "/login"
-    | "/register"
-    | "/sign-in"
-    | "/sign-up"
-    | "/signin"
-    | "/$ws/$"
-    | "/accounts/sign-up"
-    | "/$ws/browse/$issueKey"
-    | "/$ws/projects/$projectId/issues";
+    | '/'
+    | '/$ws'
+    | '/login'
+    | '/register'
+    | '/sign-in'
+    | '/sign-up'
+    | '/signin'
+    | '/$ws/$'
+    | '/accounts/forgot-password'
+    | '/accounts/reset-password'
+    | '/accounts/set-password'
+    | '/accounts/sign-up'
+    | '/$ws/browse/$issueKey'
+    | '/$ws/projects/$projectId/issues'
   id:
-    | "__root__"
-    | "/"
-    | "/$ws"
-    | "/login"
-    | "/register"
-    | "/sign-in"
-    | "/sign-up"
-    | "/signin"
-    | "/$ws/_gated"
-    | "/$ws/$"
-    | "/accounts/sign-up"
-    | "/$ws/_gated/"
-    | "/$ws/_gated/browse/$issueKey"
-    | "/$ws/_gated/projects/$projectId/issues/";
-  fileRoutesById: FileRoutesById;
+    | '__root__'
+    | '/'
+    | '/$ws'
+    | '/login'
+    | '/register'
+    | '/sign-in'
+    | '/sign-up'
+    | '/signin'
+    | '/$ws/_gated'
+    | '/$ws/$'
+    | '/accounts/forgot-password'
+    | '/accounts/reset-password'
+    | '/accounts/set-password'
+    | '/accounts/sign-up'
+    | '/$ws/_gated/'
+    | '/$ws/_gated/browse/$issueKey'
+    | '/$ws/_gated/projects/$projectId/issues/'
+  fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute;
-  WsRouteRoute: typeof WsRouteRouteWithChildren;
-  LoginRoute: typeof LoginRoute;
-  RegisterRoute: typeof RegisterRoute;
-  SignInRoute: typeof SignInRoute;
-  SignUpRoute: typeof SignUpRoute;
-  SigninRoute: typeof SigninRoute;
-  AccountsSignUpRoute: typeof AccountsSignUpRoute;
+  IndexRoute: typeof IndexRoute
+  WsRouteRoute: typeof WsRouteRouteWithChildren
+  LoginRoute: typeof LoginRoute
+  RegisterRoute: typeof RegisterRoute
+  SignInRoute: typeof SignInRoute
+  SignUpRoute: typeof SignUpRoute
+  SigninRoute: typeof SigninRoute
+  AccountsForgotPasswordRoute: typeof AccountsForgotPasswordRoute
+  AccountsResetPasswordRoute: typeof AccountsResetPasswordRoute
+  AccountsSetPasswordRoute: typeof AccountsSetPasswordRoute
+  AccountsSignUpRoute: typeof AccountsSignUpRoute
 }
 
-declare module "@tanstack/react-router" {
+declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    "/": {
-      id: "/";
-      path: "/";
-      fullPath: "/";
-      preLoaderRoute: typeof IndexRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/$ws": {
-      id: "/$ws";
-      path: "/$ws";
-      fullPath: "/$ws";
-      preLoaderRoute: typeof WsRouteRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/login": {
-      id: "/login";
-      path: "/login";
-      fullPath: "/login";
-      preLoaderRoute: typeof LoginRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/register": {
-      id: "/register";
-      path: "/register";
-      fullPath: "/register";
-      preLoaderRoute: typeof RegisterRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/sign-in": {
-      id: "/sign-in";
-      path: "/sign-in";
-      fullPath: "/sign-in";
-      preLoaderRoute: typeof SignInRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/sign-up": {
-      id: "/sign-up";
-      path: "/sign-up";
-      fullPath: "/sign-up";
-      preLoaderRoute: typeof SignUpRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/signin": {
-      id: "/signin";
-      path: "/signin";
-      fullPath: "/signin";
-      preLoaderRoute: typeof SigninRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/$ws/$": {
-      id: "/$ws/$";
-      path: "/$";
-      fullPath: "/$ws/$";
-      preLoaderRoute: typeof WsSplatRouteImport;
-      parentRoute: typeof WsRouteRoute;
-    };
-    "/$ws/_gated": {
-      id: "/$ws/_gated";
-      path: "";
-      fullPath: "/$ws";
-      preLoaderRoute: typeof WsGatedRouteRouteImport;
-      parentRoute: typeof WsRouteRoute;
-    };
-    "/accounts/sign-up": {
-      id: "/accounts/sign-up";
-      path: "/accounts/sign-up";
-      fullPath: "/accounts/sign-up";
-      preLoaderRoute: typeof AccountsSignUpRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/$ws/_gated/": {
-      id: "/$ws/_gated/";
-      path: "/";
-      fullPath: "/$ws/";
-      preLoaderRoute: typeof WsGatedIndexRouteImport;
-      parentRoute: typeof WsGatedRouteRoute;
-    };
-    "/$ws/_gated/browse/$issueKey": {
-      id: "/$ws/_gated/browse/$issueKey";
-      path: "/browse/$issueKey";
-      fullPath: "/$ws/browse/$issueKey";
-      preLoaderRoute: typeof WsGatedBrowseIssueKeyRouteImport;
-      parentRoute: typeof WsGatedRouteRoute;
-    };
-    "/$ws/_gated/projects/$projectId/issues/": {
-      id: "/$ws/_gated/projects/$projectId/issues/";
-      path: "/projects/$projectId/issues";
-      fullPath: "/$ws/projects/$projectId/issues/";
-      preLoaderRoute: typeof WsGatedProjectsProjectIdIssuesIndexRouteImport;
-      parentRoute: typeof WsGatedRouteRoute;
-    };
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$ws': {
+      id: '/$ws'
+      path: '/$ws'
+      fullPath: '/$ws'
+      preLoaderRoute: typeof WsRouteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/register': {
+      id: '/register'
+      path: '/register'
+      fullPath: '/register'
+      preLoaderRoute: typeof RegisterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-in': {
+      id: '/sign-in'
+      path: '/sign-in'
+      fullPath: '/sign-in'
+      preLoaderRoute: typeof SignInRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-up': {
+      id: '/sign-up'
+      path: '/sign-up'
+      fullPath: '/sign-up'
+      preLoaderRoute: typeof SignUpRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/signin': {
+      id: '/signin'
+      path: '/signin'
+      fullPath: '/signin'
+      preLoaderRoute: typeof SigninRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$ws/$': {
+      id: '/$ws/$'
+      path: '/$'
+      fullPath: '/$ws/$'
+      preLoaderRoute: typeof WsSplatRouteImport
+      parentRoute: typeof WsRouteRoute
+    }
+    '/$ws/_gated': {
+      id: '/$ws/_gated'
+      path: ''
+      fullPath: '/$ws'
+      preLoaderRoute: typeof WsGatedRouteRouteImport
+      parentRoute: typeof WsRouteRoute
+    }
+    '/accounts/forgot-password': {
+      id: '/accounts/forgot-password'
+      path: '/accounts/forgot-password'
+      fullPath: '/accounts/forgot-password'
+      preLoaderRoute: typeof AccountsForgotPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accounts/reset-password': {
+      id: '/accounts/reset-password'
+      path: '/accounts/reset-password'
+      fullPath: '/accounts/reset-password'
+      preLoaderRoute: typeof AccountsResetPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accounts/set-password': {
+      id: '/accounts/set-password'
+      path: '/accounts/set-password'
+      fullPath: '/accounts/set-password'
+      preLoaderRoute: typeof AccountsSetPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accounts/sign-up': {
+      id: '/accounts/sign-up'
+      path: '/accounts/sign-up'
+      fullPath: '/accounts/sign-up'
+      preLoaderRoute: typeof AccountsSignUpRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$ws/_gated/': {
+      id: '/$ws/_gated/'
+      path: '/'
+      fullPath: '/$ws/'
+      preLoaderRoute: typeof WsGatedIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/browse/$issueKey': {
+      id: '/$ws/_gated/browse/$issueKey'
+      path: '/browse/$issueKey'
+      fullPath: '/$ws/browse/$issueKey'
+      preLoaderRoute: typeof WsGatedBrowseIssueKeyRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/projects/$projectId/issues/': {
+      id: '/$ws/_gated/projects/$projectId/issues/'
+      path: '/projects/$projectId/issues'
+      fullPath: '/$ws/projects/$projectId/issues/'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdIssuesIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
   }
 }
 
 interface WsGatedRouteRouteChildren {
-  WsGatedIndexRoute: typeof WsGatedIndexRoute;
-  WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute;
-  WsGatedProjectsProjectIdIssuesIndexRoute: typeof WsGatedProjectsProjectIdIssuesIndexRoute;
+  WsGatedIndexRoute: typeof WsGatedIndexRoute
+  WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute
+  WsGatedProjectsProjectIdIssuesIndexRoute: typeof WsGatedProjectsProjectIdIssuesIndexRoute
 }
 
 const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedIndexRoute: WsGatedIndexRoute,
   WsGatedBrowseIssueKeyRoute: WsGatedBrowseIssueKeyRoute,
-  WsGatedProjectsProjectIdIssuesIndexRoute: WsGatedProjectsProjectIdIssuesIndexRoute,
-};
+  WsGatedProjectsProjectIdIssuesIndexRoute:
+    WsGatedProjectsProjectIdIssuesIndexRoute,
+}
 
-const WsGatedRouteRouteWithChildren = WsGatedRouteRoute._addFileChildren(WsGatedRouteRouteChildren);
+const WsGatedRouteRouteWithChildren = WsGatedRouteRoute._addFileChildren(
+  WsGatedRouteRouteChildren,
+)
 
 interface WsRouteRouteChildren {
-  WsGatedRouteRoute: typeof WsGatedRouteRouteWithChildren;
-  WsSplatRoute: typeof WsSplatRoute;
+  WsGatedRouteRoute: typeof WsGatedRouteRouteWithChildren
+  WsSplatRoute: typeof WsSplatRoute
 }
 
 const WsRouteRouteChildren: WsRouteRouteChildren = {
   WsGatedRouteRoute: WsGatedRouteRouteWithChildren,
   WsSplatRoute: WsSplatRoute,
-};
+}
 
-const WsRouteRouteWithChildren = WsRouteRoute._addFileChildren(WsRouteRouteChildren);
+const WsRouteRouteWithChildren =
+  WsRouteRoute._addFileChildren(WsRouteRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
@@ -317,6 +382,11 @@ const rootRouteChildren: RootRouteChildren = {
   SignInRoute: SignInRoute,
   SignUpRoute: SignUpRoute,
   SigninRoute: SigninRoute,
+  AccountsForgotPasswordRoute: AccountsForgotPasswordRoute,
+  AccountsResetPasswordRoute: AccountsResetPasswordRoute,
+  AccountsSetPasswordRoute: AccountsSetPasswordRoute,
   AccountsSignUpRoute: AccountsSignUpRoute,
-};
-export const routeTree = rootRouteImport._addFileChildren(rootRouteChildren)._addFileTypes<FileRouteTypes>();
+}
+export const routeTree = rootRouteImport
+  ._addFileChildren(rootRouteChildren)
+  ._addFileTypes<FileRouteTypes>()

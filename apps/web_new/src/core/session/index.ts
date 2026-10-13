@@ -13,6 +13,7 @@ export {
   instanceConfigQueryOptions,
   instanceKeys,
   meQueryOptions,
+  profileQueryOptions,
   selectWorkspace,
   selectWorkspaceRole,
   sessionKeys,

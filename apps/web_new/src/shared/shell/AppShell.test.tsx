@@ -84,6 +84,8 @@ describe("AppShell", () => {
     act(() => {
       useSessionStore.setState({ status: "expired", returnUrl: "/acme/" });
     });
-    expect(navigate).toHaveBeenCalledWith({ to: "/sign-in", search: { next: "/acme/" } });
+    // next_path, not next: the spec and the AUTH-020 oracle pin next_path
+    // in the expired-bounce URL (session-account.spec.ts).
+    expect(navigate).toHaveBeenCalledWith({ to: "/", search: { next_path: "/acme/" } });
   });
 });

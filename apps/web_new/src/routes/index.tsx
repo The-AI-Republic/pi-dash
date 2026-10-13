@@ -14,6 +14,8 @@ import { asString, safeNextPath, SignInCard } from "../features/auth/index.js";
 
 export interface EntrySearch {
   next?: string | undefined;
+  /** Canonical return-path param (spec AUTH-015/016); next stays as an alias. */
+  next_path?: string | undefined;
   email?: string | undefined;
   error_code?: string | undefined;
   invitation_id?: string | undefined;
@@ -23,17 +25,24 @@ export interface EntrySearch {
 /** Search schema: invalid params fall back to absent instead of throwing. */
 export function parseEntrySearch(search: Record<string, unknown>): EntrySearch {
   const next = safeNextPath(search["next"]);
+  const nextPath = safeNextPath(search["next_path"]);
   const email = asString(search["email"]);
   const errorCode = asString(search["error_code"]);
   const invitationId = asString(search["invitation_id"]);
   const slug = asString(search["slug"]);
   return {
     ...(next === undefined ? {} : { next }),
+    ...(nextPath === undefined ? {} : { next_path: nextPath }),
     ...(email === undefined ? {} : { email }),
     ...(errorCode === undefined ? {} : { error_code: errorCode }),
     ...(invitationId === undefined ? {} : { invitation_id: invitationId }),
     ...(slug === undefined ? {} : { slug }),
   };
+}
+
+/** Effective return path: the canonical param wins over the alias. */
+export function returnPath(search: { next?: string | undefined; next_path?: string | undefined }): string | undefined {
+  return search.next_path ?? search.next;
 }
 
 export const Route = createFileRoute("/")({
@@ -57,6 +66,7 @@ export const Route = createFileRoute("/")({
       <EntryScreen
         signedIn={context.queryClient.getQueryData(meQueryOptions(context.apiClient).queryKey) != null}
         next={search.next}
+        nextPath={search.next_path}
         email={search.email}
         errorCode={search.error_code}
         invitationId={search.invitation_id}
@@ -69,6 +79,7 @@ export const Route = createFileRoute("/")({
 export function EntryScreen({
   signedIn,
   next,
+  nextPath,
   email,
   errorCode,
   invitationId,
@@ -76,6 +87,7 @@ export function EntryScreen({
 }: {
   signedIn: boolean;
   next?: string | undefined;
+  nextPath?: string | undefined;
   email?: string | undefined;
   errorCode?: string | undefined;
   invitationId?: string | undefined;
@@ -85,7 +97,7 @@ export function EntryScreen({
     return (
       <main className="flex min-h-screen items-center justify-center bg-(--bg) p-(--space-8)">
         <SignInCard
-          next={next}
+          next={returnPath({ next, next_path: nextPath })}
           initialEmail={email ?? ""}
           initialErrorCode={errorCode ?? null}
           invitationId={invitationId}
