@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { describe, expect, it, vi } from "vitest";
-import { authKeys, invitationQueryOptions } from "./queries.js";
+import { authKeys, invitationQueryOptions, myInvitationsQueryOptions, myJoinRequestsQueryOptions } from "./queries.js";
 
 describe("invitation query", () => {
   it("keys one invitation by slug and id", () => {
@@ -28,5 +28,27 @@ describe("invitation query", () => {
     expect(invitationQueryOptions(fakeClient, "", "invite-1").enabled).toBe(false);
     expect(invitationQueryOptions(fakeClient, "acme", "").enabled).toBe(false);
     expect(invitationQueryOptions(fakeClient, "", "").enabled).toBe(false);
+  });
+});
+
+describe("own invitations and join requests", () => {
+  it("keys the caller's invitation list", async () => {
+    const invitations = [{ id: "invite-1" }];
+    const getJson = vi.fn(async () => invitations);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = myInvitationsQueryOptions(fakeClient);
+    expect(options.queryKey).toEqual(authKeys.myInvitations);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(invitations);
+    expect(getJson).toHaveBeenCalledWith("/api/users/me/workspaces/invitations/");
+  });
+
+  it("keys the caller's join-request list", async () => {
+    const requests = [{ id: "request-1" }];
+    const getJson = vi.fn(async () => requests);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = myJoinRequestsQueryOptions(fakeClient);
+    expect(options.queryKey).toEqual(authKeys.myJoinRequests);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(requests);
+    expect(getJson).toHaveBeenCalledWith("/api/users/me/workspaces/join-requests/");
   });
 });

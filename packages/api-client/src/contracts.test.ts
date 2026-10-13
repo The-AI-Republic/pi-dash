@@ -92,6 +92,7 @@ import { searchWorkspace } from "./contracts/search.js";
 import { getProfile, listTimezones, updateMyTimezone, updateProfile } from "./contracts/profile.js";
 import { createAssistantThread, getLlmConfig, listAssistantThreads } from "./contracts/assistant.js";
 import { getUnreadNotifications } from "./contracts/notifications.js";
+import { uploadUserAvatar } from "./contracts/assets.js";
 import { updateCycle } from "./contracts/cycles.js";
 import { updateModule } from "./contracts/modules.js";
 import { updatePage } from "./contracts/pages.js";
@@ -1729,5 +1730,90 @@ describe("invitation contracts", () => {
     const postCalls = transport.calls.filter((call) => call.init.method === "POST");
     expect(postCalls).toHaveLength(2);
     expect(postCalls[0]?.url).toBe("https://api.test/api/users/me/workspaces/join-requests/");
+  });
+});
+
+describe("assets contracts", () => {
+  const grant = {
+    asset_id: "asset-1",
+    asset_url: "https://cdn.test/avatars/asset-1.png",
+    upload_data: { url: "https://uploads.test/signed", fields: { key: "avatars/asset-1.png", policy: "p" } },
+  };
+
+  function grantTransport() {
+    return recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "POST") {
+        return fakeResponse({ status: 201, body: JSON.stringify(grant) });
+      }
+      return fakeResponse({ body: JSON.stringify({ ok: true }) });
+    });
+  }
+
+  it("uploads an avatar through grant, bytes, and confirm", async () => {
+    const transport = grantTransport();
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const file = new File(["bytes"], "ada.png", { type: "image/png" });
+    const uploads: Array<{ url: string; body: FormData }> = [];
+    const url = await uploadUserAvatar(client, file, async (target, body) => {
+      uploads.push({ url: target, body });
+      return { ok: true, status: 204 };
+    });
+    expect(url).toBe("https://cdn.test/avatars/asset-1.png");
+
+    const grantCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(grantCall?.url).toBe("https://api.test/api/assets/v2/user-assets/");
+    expect(grantCall?.init.body).toBe(
+      JSON.stringify({
+        entity_identifier: "",
+        entity_type: "USER_AVATAR",
+        name: "ada.png",
+        size: file.size,
+        type: "image/png",
+      })
+    );
+
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]?.url).toBe("https://uploads.test/signed");
+    const payload = uploads[0]?.body;
+    expect(payload?.get("key")).toBe("avatars/asset-1.png");
+    expect(payload?.get("policy")).toBe("p");
+    expect(payload?.get("file")).toBe(file);
+
+    const confirmCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(confirmCall?.url).toBe("https://api.test/api/assets/v2/user-assets/asset-1/");
+  });
+
+  it("rejects when the signed upload refuses the bytes", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: grantTransport() });
+    const file = new File(["bytes"], "ada.png", { type: "image/png" });
+    const failure = await uploadUserAvatar(client, file, async () => ({ ok: false, status: 403 })).then(
+      () => null,
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(403);
+  });
+
+  it("POSTs the bytes through the global fetch by default", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: grantTransport() });
+    const file = new File(["bytes"], "ada.png", { type: "image/png" });
+    const seen: Array<{ url: string; init: { method?: string; body?: unknown } }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init: { method?: string; body?: unknown }) => {
+      seen.push({ url, init });
+      return { ok: true, status: 204 };
+    }) as typeof fetch;
+    try {
+      await uploadUserAvatar(client, file);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.url).toBe("https://uploads.test/signed");
+    expect(seen[0]?.init.method).toBe("POST");
+    expect(seen[0]?.init.body).toBeInstanceOf(FormData);
   });
 });

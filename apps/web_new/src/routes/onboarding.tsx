@@ -1,0 +1,53 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Onboarding route (AUTH-029). Thin: the funnel guard plus the flow.
+// Signed-out visitors bounce to the entry with the return path, finished
+// users leave for the landing route, and unfinished signed-in users render
+// the single-URL flow. Written from parity/specs/auth.md.
+
+import { ToastHost } from "@pidash/kit";
+import { createFileRoute, redirect } from "@tanstack/react-router";
+import * as React from "react";
+
+import { decidePageGate, loadGateInputs, loadLandingTarget, workspacesQueryOptions } from "../core/session/index.js";
+import { myInvitationsQueryOptions, OnboardingFlow } from "../features/auth/index.js";
+import { getToastManager, useSessionExpiredRedirect } from "../shared/shell/index.js";
+
+export const Route = createFileRoute("/onboarding")({
+  beforeLoad: async ({ context, location }) => {
+    const { me, profile } = await loadGateInputs(context.queryClient, context.apiClient);
+    const decision = decidePageGate({
+      page: "onboarding-funnel",
+      signedIn: me !== null,
+      onboarded: profile?.is_onboarded ?? false,
+      hasPassword: me?.is_password_autoset === false,
+      currentPath: location.href,
+    });
+    if (decision.action === "sign-in") {
+      throw redirect({ to: "/", search: { next_path: decision.nextPath } });
+    }
+    if (decision.action === "landing") {
+      throw redirect({ href: await loadLandingTarget(context.queryClient, context.apiClient) });
+    }
+    // Prefetch the flow's reads; failures fall back to empty inside the flow.
+    await Promise.all([
+      context.queryClient.ensureQueryData(workspacesQueryOptions(context.apiClient)).catch(() => undefined),
+      context.queryClient.ensureQueryData(myInvitationsQueryOptions(context.apiClient)).catch(() => undefined),
+    ]);
+    return {};
+  },
+  component: function OnboardingComponent() {
+    return <OnboardingScreen />;
+  },
+});
+
+export function OnboardingScreen(): React.ReactElement {
+  useSessionExpiredRedirect();
+  return (
+    <main>
+      <OnboardingFlow />
+      <ToastHost manager={getToastManager()} />
+    </main>
+  );
+}

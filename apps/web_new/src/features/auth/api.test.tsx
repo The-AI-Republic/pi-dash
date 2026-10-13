@@ -12,6 +12,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
 import { useSessionStore } from "../../core/session/store.js";
 import {
+  FINISH_FAILURE_TITLE,
+  useFinishOnboarding,
   useForgotPassword,
   useMagicSignIn,
   useMagicSignUp,
@@ -20,6 +22,9 @@ import {
   usePasswordSignUp,
   useSetPassword,
   useSignOut,
+  useUpdateMe,
+  useUpdateProfile,
+  useUploadUserAvatar,
 } from "./api.js";
 
 vi.mock("../../shared/shell/index.js", async (importOriginal) => {
@@ -257,5 +262,214 @@ describe("useSignOut", () => {
     expect(notifyError).toHaveBeenCalledWith(SIGN_OUT_FAILED_TITLE, SIGN_OUT_FAILED_MESSAGE);
     expect(queryClient.getQueryData(["session", "me"])).toEqual({ id: "user-1" });
     expect(useSessionStore.getState().status).toBe("authenticated");
+  });
+});
+
+const PROFILE_FIXTURE = {
+  id: "123e4567-e89b-12d3-a456-426614174000",
+  user: "223e4567-e89b-12d3-a456-426614174001",
+  theme: {},
+  is_app_rail_docked: false,
+  is_tour_completed: false,
+  onboarding_step: {},
+  use_case: null,
+  role: null,
+  is_onboarded: false,
+  last_workspace_id: null,
+  billing_address_country: "",
+  billing_address: null,
+  has_billing_address: false,
+  company_name: "",
+  notification_view_mode: "full",
+  is_smooth_cursor_enabled: false,
+  is_mobile_onboarded: false,
+  mobile_onboarding_step: {},
+  mobile_timezone_auto_set: false,
+  language: "en",
+  start_of_the_week: 0,
+  goals: {},
+  background_color: "",
+  is_navigation_tour_completed: false,
+  has_marketing_email_consent: false,
+  is_subscribed_to_changelog: false,
+  product_tour: {},
+  settings: {},
+  created_at: "2024-01-02T03:04:05Z",
+  updated_at: "2024-02-03T04:05:06Z",
+};
+
+describe("useUpdateMe", () => {
+  it("patches the user row and refreshes the cached user", async () => {
+    const seen: string[] = [];
+    createAppClient(
+      "https://api.test",
+      stubTransport(async (url, init) => {
+        seen.push(`${init.method} ${url}`);
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        return {
+          status: 200,
+          body: JSON.stringify({
+            id: "123e4567-e89b-12d3-a456-426614174000",
+            email: "ada@example.com",
+            username: "ada",
+            first_name: "Ada",
+            last_name: "Byron",
+            display_name: "Ada Byron",
+            avatar: "",
+            user_timezone: "UTC",
+          }),
+          url,
+        };
+      })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["session", "me"], { id: "user-1" });
+    const { result } = renderHook(() => useUpdateMe(), { wrapper: wrapper(queryClient) });
+
+    let updated: unknown;
+    await act(async () => {
+      updated = await result.current.mutateAsync({ first_name: "Ada", last_name: "Byron" });
+    });
+    expect((updated as { display_name: string }).display_name).toBe("Ada Byron");
+    expect(seen).toContain("PATCH https://api.test/api/users/me/");
+    expect(queryClient.getQueryState(["session", "me"])?.isInvalidated).toBe(true);
+  });
+});
+
+describe("useUpdateProfile", () => {
+  it("patches the profile and refreshes the cached profile", async () => {
+    const seen: string[] = [];
+    createAppClient(
+      "https://api.test",
+      stubTransport(async (url, init) => {
+        seen.push(`${init.method} ${url}`);
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        return { status: 200, body: JSON.stringify({ ...PROFILE_FIXTURE, role: "developer" }), url };
+      })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["session", "profile"], { ...PROFILE_FIXTURE });
+    const { result } = renderHook(() => useUpdateProfile(), { wrapper: wrapper(queryClient) });
+
+    let updated: unknown;
+    await act(async () => {
+      updated = await result.current.mutateAsync({ role: "developer" });
+    });
+    expect((updated as { role: string }).role).toBe("developer");
+    expect(seen).toContain("PATCH https://api.test/api/users/me/profile/");
+    expect(queryClient.getQueryState(["session", "profile"])?.isInvalidated).toBe(true);
+  });
+});
+
+describe("useUploadUserAvatar", () => {
+  it("uploads through the three legs and resolves the asset URL", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport(async (url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        if (url.endsWith("/api/assets/v2/user-assets/")) {
+          return {
+            status: 201,
+            body: JSON.stringify({
+              asset_id: "asset-1",
+              asset_url: "https://cdn.test/avatars/asset-1.png",
+              upload_data: { url: "https://uploads.test/signed", fields: { key: "k" } },
+            }),
+            url,
+          };
+        }
+        return { status: 200, body: "{}", url };
+      })
+    );
+    const realFetch = globalThis.fetch;
+    const puts: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      puts.push(url);
+      return { ok: true, status: 204 };
+    }) as unknown as typeof fetch;
+    try {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const { result } = renderHook(() => useUploadUserAvatar(), { wrapper: wrapper(queryClient) });
+      let url: unknown;
+      await act(async () => {
+        url = await result.current.mutateAsync(new File(["bytes"], "ada.png", { type: "image/png" }));
+      });
+      expect(url).toBe("https://cdn.test/avatars/asset-1.png");
+      expect(puts).toEqual(["https://uploads.test/signed"]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
+describe("useFinishOnboarding", () => {
+  const settings = {
+    id: "123e4567-e89b-12d3-a456-426614174000",
+    email: "ada@example.com",
+    workspace: {
+      last_workspace_id: "w1",
+      last_workspace_slug: "acme",
+      fallback_workspace_id: null,
+      fallback_workspace_slug: null,
+      invites: 0,
+    },
+  };
+
+  function finishTransport(seen: string[]) {
+    return stubTransport(async (url, init) => {
+      seen.push(`${init.method} ${url}`);
+      if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+      if (url.endsWith("/api/users/me/profile/") && init.method === "PATCH") {
+        return { status: 200, body: JSON.stringify(PROFILE_FIXTURE), url };
+      }
+      if (url.endsWith("/api/users/me/onboard/")) {
+        return { status: 200, body: JSON.stringify({ message: "Updated successfully" }), url };
+      }
+      if (url.endsWith("/api/users/me/settings/")) {
+        return { status: 200, body: JSON.stringify(settings), url };
+      }
+      if (url.endsWith("/api/users/me/profile/")) {
+        return { status: 200, body: JSON.stringify(PROFILE_FIXTURE), url };
+      }
+      return { status: 200, body: "{}", url };
+    });
+  }
+
+  it("stamps, marks, refreshes, and lands in the last workspace", async () => {
+    const seen: string[] = [];
+    createAppClient("https://api.test", finishTransport(seen));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(
+      ["session", "workspaces"],
+      [{ id: "w1", name: "Acme", slug: "acme", logo_url: "", total_members: 1, role: 20 }]
+    );
+    const { result } = renderHook(() => useFinishOnboarding(), { wrapper: wrapper(queryClient) });
+
+    let landing: unknown;
+    await act(async () => {
+      landing = await result.current.mutateAsync();
+    });
+    expect(landing).toBe("/acme");
+    expect(seen).toContain("PATCH https://api.test/api/users/me/profile/");
+    expect(seen).toContain("PATCH https://api.test/api/users/me/onboard/");
+    expect(queryClient.getQueryData(["session", "profile"])).toMatchObject({ is_onboarded: true });
+    expect(queryClient.getQueryData(["session", "settings"])).toEqual(settings);
+  });
+
+  it("toasts and rejects when a leg fails", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport(async (url) => {
+        if (url.endsWith("/api/users/me/profile/")) return { status: 500, body: "{}", url };
+        return { status: 200, body: CSRF, url };
+      })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const { result } = renderHook(() => useFinishOnboarding(), { wrapper: wrapper(queryClient) });
+
+    await act(async () => {
+      await expect(result.current.mutateAsync()).rejects.toThrow();
+    });
+    expect(notifyError).toHaveBeenCalledWith(FINISH_FAILURE_TITLE, expect.any(String));
   });
 });
