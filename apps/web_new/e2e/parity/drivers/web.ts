@@ -28,6 +28,7 @@ import {
 import { parityOracleAdminUrl } from "../helpers/parity-env";
 import type {
   AdminAccountMenuFacts,
+  AdminAiFacts,
   AdminAuthCopyFact,
   AdminAuthDiscardFacts,
   AdminAuthFormFacts,
@@ -40,12 +41,16 @@ import type {
   AdminEmailSecurity,
   AdminFailureFacts,
   AdminGeneralFacts,
+  AdminImageFacts,
   AdminNotFoundFacts,
   AdminRootBranch,
   AdminSetupFacts,
   AdminSetupFields,
   AdminSignInFacts,
   AdminTestEmailFacts,
+  AdminWorkspaceCreateFacts,
+  AdminWorkspaceListFacts,
+  AdminWorkspaceRow,
   ApprovalCard,
   ArchivesFilterExpression,
   ArchivesListQuery,
@@ -51748,6 +51753,471 @@ export class WebDriver implements ParityDriver {
   async adminAuthReadClipboard(): Promise<string> {
     await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  // --- Admin workspaces + AI + image oracle (NEWFRONT-444, ADM-037..050).
+  // --- Every selector below was observed on the running old admin
+  // --- console. The workspace toggle is the page's only switch; the
+  // --- count reads from the section heading's bullet span; rows are
+  // --- the main's external links; skeletons are status nodes told
+  // --- apart by child count (one pill for the toggle row, four rows
+  // --- for the list). The create form fields carry stable ids; the
+  // --- org-size picker is a button plus portal options; errors are
+  // --- read by their message text. AI fields carry stable ids; the
+  // --- callout is static text with a contact link.
+
+  private adminWorkspacesFetchUrlsSeen: string[] = [];
+  private adminWorkspacesFetchFault: { mode: "none" | "delay" | "fail" | "empty"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminWorkspaceCreateBodiesSeen: unknown[] = [];
+  private adminWorkspaceCreateFault: { mode: "none" | "fail" | "delay"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminWorkspacesRouteInstalled = false;
+  private adminSlugCheckSlugsSeen: string[] = [];
+  private adminSlugCheckFault: "none" | "fail" = "none";
+  private adminSlugCheckRouteInstalled = false;
+
+  /** Install the instance-workspaces route (list spy/faults plus create spy) once per page. */
+  private async adminEnsureWorkspacesRoute(): Promise<void> {
+    if (this.adminWorkspacesRouteInstalled) return;
+    this.adminWorkspacesRouteInstalled = true;
+    await this.page.route(
+      (url) => url.pathname.replace(/\/+$/, "") === "/api/instances/workspaces",
+      async (route) => {
+        const method = route.request().method();
+        if (method === "POST") {
+          const createFault = this.adminWorkspaceCreateFault;
+          if (createFault.mode === "fail") {
+            this.adminWorkspaceCreateBodiesSeen.push(this.adminPostDataJson(route));
+            await route.fulfill({
+              status: 500,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "parity-probe-failure" }),
+            });
+            return;
+          }
+          if (createFault.mode === "delay") {
+            await new Promise((resolve) => setTimeout(resolve, createFault.delayMs));
+          }
+          const createResponse = await route.fetch();
+          this.adminWorkspaceCreateBodiesSeen.push(this.adminPostDataJson(route));
+          await route.fulfill({ response: createResponse });
+          return;
+        }
+        if (method === "GET") {
+          const fault = this.adminWorkspacesFetchFault;
+          if (fault.mode === "fail") {
+            this.adminWorkspacesFetchUrlsSeen.push(route.request().url());
+            await route.fulfill({
+              status: 500,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "parity-probe-failure" }),
+            });
+            return;
+          }
+          if (fault.mode === "empty") {
+            this.adminWorkspacesFetchUrlsSeen.push(route.request().url());
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                results: [],
+                next_page_results: false,
+                next_cursor: null,
+                total_count: 0,
+              }),
+            });
+            return;
+          }
+          if (fault.mode === "delay") {
+            await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+          }
+          this.adminWorkspacesFetchUrlsSeen.push(route.request().url());
+          await route.continue();
+          return;
+        }
+        await route.continue();
+      }
+    );
+  }
+
+  /** Install the slug-check route (spy plus fail fault) once per page. */
+  private async adminEnsureSlugCheckRoute(): Promise<void> {
+    if (this.adminSlugCheckRouteInstalled) return;
+    this.adminSlugCheckRouteInstalled = true;
+    await this.page.route(
+      (url) => url.pathname.replace(/\/+$/, "") === "/api/instances/workspace-slug-check",
+      async (route) => {
+        const slug = route.request().url();
+        const match = /[?&]slug=([^&]*)/.exec(slug);
+        this.adminSlugCheckSlugsSeen.push(match === null ? "" : decodeURIComponent(match[1] ?? ""));
+        if (this.adminSlugCheckFault === "fail") {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "parity-probe-failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      }
+    );
+  }
+
+  async adminWorkspaceListFacts(): Promise<AdminWorkspaceListFacts> {
+    const main = this.page.locator("main");
+    const toggle = main.getByRole("switch");
+    const toggleVisible = (await toggle.count()) > 0 && (await toggle.first().isVisible());
+    const statuses = main.locator('[role="status"]');
+    let toggleSkeletonVisible = false;
+    let listSkeletonVisible = false;
+    let listSkeletonRows = 0;
+    const total = await statuses.count();
+    for (let i = 0; i < total; i++) {
+      if (!(await statuses.nth(i).isVisible())) continue;
+      const kids = await statuses.nth(i).locator(":scope > *").count();
+      if (kids <= 1) {
+        toggleSkeletonVisible = true;
+      } else {
+        listSkeletonVisible = true;
+        listSkeletonRows = kids;
+      }
+    }
+    const heading = main.getByText("All workspaces on this instance");
+    let count: number | null = null;
+    let countSpinnerVisible = false;
+    if ((await heading.count()) > 0 && (await heading.first().isVisible())) {
+      const text = await heading.first().innerText();
+      const match = /•\s*(\d+)/.exec(text);
+      count = match === null ? null : Number.parseInt(match[1] ?? "", 10);
+      const spinner = heading.first().locator("svg");
+      countSpinnerVisible = (await spinner.count()) > 0 && (await spinner.first().isVisible());
+    }
+    const helper = main.getByText(/can't yet delete workspaces/);
+    const helperVisible = (await helper.count()) > 0 && (await helper.first().isVisible());
+    const create = main.getByRole("link", { name: "Create workspace" });
+    const createHref = (await create.count()) === 0 ? null : await create.first().getAttribute("href");
+    const loadMore = main.getByRole("button", { name: /Load more/ });
+    const loadMoreVisible = (await loadMore.count()) > 0 && (await loadMore.first().isVisible());
+    return {
+      toggleVisible,
+      toggleOn: toggleVisible ? (await toggle.first().getAttribute("aria-checked")) === "true" : false,
+      toggleDisabled: toggleVisible ? await toggle.first().isDisabled() : false,
+      toggleSkeletonVisible,
+      count,
+      countSpinnerVisible,
+      listSkeletonVisible,
+      listSkeletonRows,
+      helperVisible,
+      createHref,
+      loadMoreVisible,
+      loadMoreDisabled: loadMoreVisible ? await loadMore.first().isDisabled() : false,
+      loadMoreLabel: loadMoreVisible ? (await loadMore.first().innerText()).trim() : null,
+    };
+  }
+
+  async adminWorkspaceRows(): Promise<AdminWorkspaceRow[]> {
+    const main = this.page.locator("main");
+    const links = main.locator('a[target="_blank"]');
+    const total = await links.count();
+    const rows: AdminWorkspaceRow[] = [];
+    for (let i = 0; i < total; i++) {
+      const row = links.nth(i);
+      if (!(await row.isVisible())) continue;
+      const nameNode = row.locator("h3").first();
+      const name = (await nameNode.count()) === 0 ? "" : (await nameNode.innerText()).trim();
+      const slugNode = row.locator("h4").first();
+      const slugRaw = (await slugNode.count()) === 0 ? "" : (await slugNode.innerText()).trim();
+      const slug = slugRaw.replace(/^\[/, "").replace(/\]$/, "");
+      const text = await row.innerText();
+      let ownerEmail: string | null = null;
+      if (/Owned by:/.test(text)) {
+        const emailNode = row.getByText(/@/);
+        ownerEmail = (await emailNode.count()) === 0 ? null : (await emailNode.first().innerText()).trim() || null;
+      }
+      const projectsMatch = /Total projects:\s*(\d+)/.exec(text);
+      const membersMatch = /Total members:\s*(\d+)/.exec(text);
+      const logo = row.getByRole("img", { name: "Workspace Logo" });
+      const logoImageVisible = (await logo.count()) > 0 && (await logo.first().isVisible());
+      let logoLetter: string | null = null;
+      if (!logoImageVisible) {
+        const letterSpan = row.locator("span").first();
+        logoLetter = (await letterSpan.count()) === 0 ? null : (await letterSpan.innerText()).trim() || null;
+      }
+      const buttons = row.getByRole("button");
+      rows.push({
+        name,
+        slug,
+        href: await row.getAttribute("href"),
+        target: await row.getAttribute("target"),
+        rel: await row.getAttribute("rel"),
+        ownerEmail,
+        totalProjects: projectsMatch === null ? null : Number.parseInt(projectsMatch[1] ?? "", 10),
+        totalMembers: membersMatch === null ? null : Number.parseInt(membersMatch[1] ?? "", 10),
+        logoImageVisible,
+        logoLetter,
+        exposesMutation: (await buttons.count()) > 0,
+      });
+    }
+    return rows;
+  }
+
+  async adminWorkspaceSetCreationRestricted(on: boolean): Promise<void> {
+    const toggle = this.page.locator("main").getByRole("switch");
+    await toggle.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const isOn = (await toggle.first().getAttribute("aria-checked")) === "true";
+    if (isOn !== on) {
+      await toggle.first().click({ timeout: WebDriver.WAIT_MS });
+    }
+  }
+
+  async adminWorkspaceLoadMore(): Promise<void> {
+    const loadMore = this.page.locator("main").getByRole("button", { name: /Load more/ });
+    await loadMore.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await loadMore.first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminStartWorkspacesFetchSpy(): Promise<void> {
+    this.adminWorkspacesFetchUrlsSeen = [];
+    this.adminWorkspacesFetchFault = { mode: "none", delayMs: 0 };
+    await this.adminEnsureWorkspacesRoute();
+  }
+
+  async adminWorkspacesFetchUrls(): Promise<string[]> {
+    return [...this.adminWorkspacesFetchUrlsSeen];
+  }
+
+  async adminDelayWorkspacesFetch(ms: number): Promise<void> {
+    await this.adminEnsureWorkspacesRoute();
+    this.adminWorkspacesFetchFault = { mode: "delay", delayMs: ms };
+  }
+
+  async adminFailWorkspacesFetch(): Promise<void> {
+    await this.adminEnsureWorkspacesRoute();
+    this.adminWorkspacesFetchFault = { mode: "fail", delayMs: 0 };
+  }
+
+  async adminStubEmptyWorkspaces(): Promise<void> {
+    await this.adminEnsureWorkspacesRoute();
+    this.adminWorkspacesFetchFault = { mode: "empty", delayMs: 0 };
+  }
+
+  async adminClearWorkspacesFetchFault(): Promise<void> {
+    this.adminWorkspacesFetchFault = { mode: "none", delayMs: 0 };
+  }
+
+  async adminWorkspaceCreateFacts(): Promise<AdminWorkspaceCreateFacts> {
+    const main = this.page.locator("main");
+    const nameInput = main.locator("#workspaceName");
+    const slugInput = main.locator("#workspaceUrl");
+    if ((await nameInput.count()) === 0 || (await slugInput.count()) === 0) {
+      throw new Error("[parity] workspace create form is gone.");
+    }
+    const prefixNode = main.locator("span", { hasText: /^https?:\/\// }).first();
+    const slugPrefix = (await prefixNode.count()) === 0 ? null : (await prefixNode.innerText()).trim() || null;
+    const orgButton = main.getByRole("button", {
+      name: /Select a range|Just myself|2-10|11-50|51-200|201-500|500\+/,
+    });
+    let orgSize: string | null = null;
+    if ((await orgButton.count()) > 0) {
+      const label = (await orgButton.first().innerText()).trim();
+      orgSize = label === "Select a range" ? null : label;
+    }
+    const submit = main.getByRole("button", { name: /Create workspace|Creating workspace/ });
+    const nameErrorNode = main.getByText(/Workspace name (is required|must be|can only|cannot contain)/);
+    const slugErrorNode = main.getByText(/Slug (is required|must be|can only|cannot contain)/);
+    const takenNode = main.getByText(/This URL is taken/);
+    const invalidNode = main.getByText(/URLs can contain only/);
+    const orgErrorNode = main.getByText("This is a required field.");
+    const back = main.getByRole("link", { name: "Go back" });
+    return {
+      name: await nameInput.inputValue(),
+      slug: await slugInput.inputValue(),
+      slugPrefix,
+      orgSize,
+      submitDisabled: await submit.first().isDisabled(),
+      submitLabel: (await submit.first().innerText()).trim(),
+      nameError:
+        (await nameErrorNode.count()) === 0 || !(await nameErrorNode.first().isVisible())
+          ? null
+          : (await nameErrorNode.first().innerText()).trim(),
+      slugError:
+        (await slugErrorNode.count()) === 0 || !(await slugErrorNode.first().isVisible())
+          ? null
+          : (await slugErrorNode.first().innerText()).trim(),
+      slugTakenVisible: (await takenNode.count()) > 0 && (await takenNode.first().isVisible()),
+      invalidSlugVisible: (await invalidNode.count()) > 0 && (await invalidNode.first().isVisible()),
+      orgSizeError:
+        (await orgErrorNode.count()) === 0 || !(await orgErrorNode.first().isVisible())
+          ? null
+          : (await orgErrorNode.first().innerText()).trim(),
+      backHref: (await back.count()) === 0 ? null : await back.first().getAttribute("href"),
+    };
+  }
+
+  async adminWorkspaceCreateFillName(name: string): Promise<void> {
+    await this.page.locator("main").locator("#workspaceName").fill(name);
+  }
+
+  async adminWorkspaceCreateFillSlug(slug: string): Promise<void> {
+    await this.page.locator("main").locator("#workspaceUrl").fill(slug);
+  }
+
+  async adminWorkspaceCreateSelectOrgSize(size: string): Promise<void> {
+    const main = this.page.locator("main");
+    const orgButton = main.getByRole("button", {
+      name: /Select a range|Just myself|2-10|11-50|51-200|201-500|500\+/,
+    });
+    await orgButton.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const current = (await orgButton.first().innerText()).trim();
+    if (current === size) return;
+    await orgButton.first().click({ timeout: WebDriver.WAIT_MS });
+    const option = this.page.getByRole("option", { name: size });
+    await option.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await option.click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminWorkspaceCreateSubmit(): Promise<void> {
+    const submit = this.page.locator("main").getByRole("button", { name: /Create workspace|Creating workspace/ });
+    await submit.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await submit.first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminStartSlugCheckSpy(): Promise<void> {
+    this.adminSlugCheckSlugsSeen = [];
+    this.adminSlugCheckFault = "none";
+    await this.adminEnsureSlugCheckRoute();
+  }
+
+  async adminSlugCheckSlugs(): Promise<string[]> {
+    return [...this.adminSlugCheckSlugsSeen];
+  }
+
+  async adminFailSlugCheck(): Promise<void> {
+    await this.adminEnsureSlugCheckRoute();
+    this.adminSlugCheckFault = "fail";
+  }
+
+  async adminClearSlugCheckFault(): Promise<void> {
+    this.adminSlugCheckFault = "none";
+  }
+
+  async adminStartWorkspaceCreateSpy(): Promise<void> {
+    this.adminWorkspaceCreateBodiesSeen = [];
+    this.adminWorkspaceCreateFault = { mode: "none", delayMs: 0 };
+    await this.adminEnsureWorkspacesRoute();
+  }
+
+  async adminWorkspaceCreateBodies(): Promise<unknown[]> {
+    return [...this.adminWorkspaceCreateBodiesSeen];
+  }
+
+  async adminFailWorkspaceCreate(): Promise<void> {
+    await this.adminEnsureWorkspacesRoute();
+    this.adminWorkspaceCreateFault = { mode: "fail", delayMs: 0 };
+  }
+
+  async adminDelayWorkspaceCreate(ms: number): Promise<void> {
+    await this.adminEnsureWorkspacesRoute();
+    this.adminWorkspaceCreateFault = { mode: "delay", delayMs: ms };
+  }
+
+  async adminClearWorkspaceCreateFault(): Promise<void> {
+    this.adminWorkspaceCreateFault = { mode: "none", delayMs: 0 };
+  }
+
+  async adminAiFacts(): Promise<AdminAiFacts> {
+    const main = this.page.locator("main");
+    const modelInput = main.locator("#LLM_MODEL");
+    const formVisible = (await modelInput.count()) > 0 && (await modelInput.first().isVisible());
+    const keyInput = main.locator("#LLM_API_KEY");
+    const save = main.getByRole("button", { name: /Save changes|Saving/ });
+    const modelHelp = main.getByRole("link", { name: "Learn more" });
+    const keyHelp = main.getByRole("link", { name: "here." });
+    const callout = main.getByText(/preferred AI models vendor/);
+    const calloutVisible = (await callout.count()) > 0 && (await callout.first().isVisible());
+    const calloutLink = main.getByRole("link", { name: /touch with us/ });
+    const statuses = main.locator('[role="status"]');
+    let skeletonVisible = false;
+    let skeletonBlocks = 0;
+    const total = await statuses.count();
+    for (let i = 0; i < total; i++) {
+      if (!(await statuses.nth(i).isVisible())) continue;
+      skeletonVisible = true;
+      skeletonBlocks = await statuses.nth(i).locator(":scope > *").count();
+      break;
+    }
+    return {
+      formVisible,
+      model: formVisible ? await modelInput.inputValue() : "",
+      keyFilled: formVisible ? (await keyInput.inputValue()) !== "" : false,
+      keyShown: formVisible ? (await keyInput.getAttribute("type")) === "text" : false,
+      saveLabel: (await save.count()) === 0 ? "" : (await save.first().innerText()).trim(),
+      saveDisabled: (await save.count()) === 0 ? false : await save.first().isDisabled(),
+      modelHelpHref: (await modelHelp.count()) === 0 ? null : await modelHelp.first().getAttribute("href"),
+      keyHelpHref: (await keyHelp.count()) === 0 ? null : await keyHelp.first().getAttribute("href"),
+      calloutVisible,
+      calloutHref: (await calloutLink.count()) === 0 ? null : await calloutLink.first().getAttribute("href"),
+      skeletonVisible,
+      skeletonBlocks,
+    };
+  }
+
+  async adminAiFill(model: string, key: string): Promise<void> {
+    const main = this.page.locator("main");
+    await main.locator("#LLM_MODEL").fill(model);
+    await main.locator("#LLM_API_KEY").fill(key);
+  }
+
+  /** AI key show/hide toggle: the nameless button beside the key field. */
+  private adminAiKeyToggle(): Locator {
+    return this.page.locator("main").locator("#LLM_API_KEY").locator("xpath=..").getByRole("button");
+  }
+
+  async adminAiToggleKeyVisibility(): Promise<void> {
+    await this.adminAiKeyToggle().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminAiSave(): Promise<void> {
+    const save = this.page.locator("main").getByRole("button", { name: /Save changes|Saving/ });
+    await save.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await save.first().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminImageFacts(): Promise<AdminImageFacts> {
+    const sidebarEntry = this.page.getByRole("link", { name: /Images in Pi Dash/ });
+    const sidebarEntryVisible = (await sidebarEntry.count()) > 0 && (await sidebarEntry.first().isVisible());
+    const main = this.page.locator("main");
+    const title = main.getByText("Third-party image libraries");
+    const pageTitle =
+      (await title.count()) === 0 || !(await title.first().isVisible())
+        ? null
+        : (await title.first().innerText()).trim();
+    const keyField = main.locator("#UNSPLASH_ACCESS_KEY");
+    const keyFieldVisible = (await keyField.count()) > 0 && (await keyField.first().isVisible());
+    const save = main.getByRole("button", { name: /Save changes|Saving/ });
+    const saveVisible = (await save.count()) > 0 && (await save.first().isVisible());
+    const statuses = main.locator('[role="status"]');
+    let skeletonVisible = false;
+    const total = await statuses.count();
+    for (let i = 0; i < total; i++) {
+      if (await statuses.nth(i).isVisible()) {
+        skeletonVisible = true;
+        break;
+      }
+    }
+    return {
+      sidebarEntryVisible,
+      sidebarHref: !sidebarEntryVisible ? null : await sidebarEntry.first().getAttribute("href"),
+      pageTitle,
+      keyFieldVisible,
+      saveVisible,
+      skeletonVisible,
+    };
   }
 
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---

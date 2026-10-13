@@ -8283,6 +8283,66 @@ export interface ParityDriver {
   /** Current clipboard text (grants clipboard permissions first). */
   adminAuthReadClipboard(): Promise<string>;
 
+  // --- Admin workspaces + AI + image oracle (NEWFRONT-444, ADM-037..050). ---
+  /** Workspace-list page snapshot: toggle, count, skeletons, load-more, helper. */
+  adminWorkspaceListFacts(): Promise<AdminWorkspaceListFacts>;
+  /** Workspace rows in DOM order (external links into the main web app). */
+  adminWorkspaceRows(): Promise<AdminWorkspaceRow[]>;
+  /** Set the restrict-workspace-creation toggle to `on`, clicking only on mismatch. */
+  adminWorkspaceSetCreationRestricted(on: boolean): Promise<void>;
+  /** Press the load-more control (no-op guard lives in the caller). */
+  adminWorkspaceLoadMore(): Promise<void>;
+  /** Start spying on instance-workspace list reads. */
+  adminStartWorkspacesFetchSpy(): Promise<void>;
+  /** Workspace-list request URLs seen since the spy started. */
+  adminWorkspacesFetchUrls(): Promise<string[]>;
+  /** Delay instance-workspace list reads by ms. */
+  adminDelayWorkspacesFetch(ms: number): Promise<void>;
+  /** Fail instance-workspace list reads (HTTP 500). */
+  adminFailWorkspacesFetch(): Promise<void>;
+  /** Answer instance-workspace list reads with an empty page. */
+  adminStubEmptyWorkspaces(): Promise<void>;
+  /** Clear the workspaces-list fetch fault. */
+  adminClearWorkspacesFetchFault(): Promise<void>;
+  /** Workspace-create form snapshot: values, prefix, org size, gating, errors. */
+  adminWorkspaceCreateFacts(): Promise<AdminWorkspaceCreateFacts>;
+  /** Type into the create-form name field (drives slug derivation). */
+  adminWorkspaceCreateFillName(name: string): Promise<void>;
+  /** Type into the create-form slug field (independent edit). */
+  adminWorkspaceCreateFillSlug(slug: string): Promise<void>;
+  /** Pick an org-size option in the create form. */
+  adminWorkspaceCreateSelectOrgSize(size: string): Promise<void>;
+  /** Press the create-form submit control. */
+  adminWorkspaceCreateSubmit(): Promise<void>;
+  /** Start spying on slug-check reads. */
+  adminStartSlugCheckSpy(): Promise<void>;
+  /** Slug-check request slugs seen since the spy started. */
+  adminSlugCheckSlugs(): Promise<string[]>;
+  /** Fail slug-check reads (HTTP 500). */
+  adminFailSlugCheck(): Promise<void>;
+  /** Clear the slug-check fault. */
+  adminClearSlugCheckFault(): Promise<void>;
+  /** Start spying on workspace-create POSTs. */
+  adminStartWorkspaceCreateSpy(): Promise<void>;
+  /** Workspace-create POST bodies seen since the spy started. */
+  adminWorkspaceCreateBodies(): Promise<unknown[]>;
+  /** Fail workspace-create POSTs (HTTP 500). */
+  adminFailWorkspaceCreate(): Promise<void>;
+  /** Delay workspace-create POSTs by ms. */
+  adminDelayWorkspaceCreate(ms: number): Promise<void>;
+  /** Clear the workspace-create fault. */
+  adminClearWorkspaceCreateFault(): Promise<void>;
+  /** AI settings page snapshot: model, key, save, callout, skeleton. */
+  adminAiFacts(): Promise<AdminAiFacts>;
+  /** Fill the AI form model and key fields. */
+  adminAiFill(model: string, key: string): Promise<void>;
+  /** Toggle the AI key visibility control. */
+  adminAiToggleKeyVisibility(): Promise<void>;
+  /** Press the AI save control. */
+  adminAiSave(): Promise<void>;
+  /** Image-page presence snapshot (bug-pinned until main#523 lands). */
+  adminImageFacts(): Promise<AdminImageFacts>;
+
   // --- Space board access & routing (NEWFRONT-447, SPC-001..009). ---
   /** Open an arbitrary in-app path (unknown-path routing, SPC-009). */
   spaceAccessOpenPath(path: string): Promise<void>;
@@ -12217,4 +12277,134 @@ export interface PageExportFocusFacts {
   indicator: "outline" | "shadow" | "none";
   /** Whether the control matches :focus-visible. */
   focusVisible: boolean;
+}
+
+// --- Admin workspaces + AI + image oracle types (NEWFRONT-444, ADM-037..050). ---
+
+/** Workspace-list page snapshot (NEWFRONT-444, ADM-037/038/040/041/042). */
+export interface AdminWorkspaceListFacts {
+  /** Whether the restrict-creation toggle is showing (config loaded). */
+  toggleVisible: boolean;
+  /** Whether the restrict-creation toggle is on. */
+  toggleOn: boolean;
+  /** Whether the restrict-creation toggle is disabled. */
+  toggleDisabled: boolean;
+  /** Whether the toggle-row skeleton is showing (config loading). */
+  toggleSkeletonVisible: boolean;
+  /** Rendered workspace count, or null when the section is not showing. */
+  count: number | null;
+  /** Whether the mutation/pagination spinner beside the count is showing. */
+  countSpinnerVisible: boolean;
+  /** Whether the list skeleton (first load) is showing. */
+  listSkeletonVisible: boolean;
+  /** List skeleton row count (zero when the skeleton hides). */
+  listSkeletonRows: number;
+  /** Whether the no-delete helper line is showing. */
+  helperVisible: boolean;
+  /** Create-workspace link target, or null when absent. */
+  createHref: string | null;
+  /** Whether the load-more control is showing. */
+  loadMoreVisible: boolean;
+  /** Whether the load-more control is disabled. */
+  loadMoreDisabled: boolean;
+  /** Load-more control label. */
+  loadMoreLabel: string | null;
+}
+
+/** One workspace row as rendered (NEWFRONT-444, ADM-038/039/042). */
+export interface AdminWorkspaceRow {
+  /** Workspace name as rendered. */
+  name: string;
+  /** Workspace slug as rendered (without brackets). */
+  slug: string;
+  /** Row link target (main web app path). */
+  href: string | null;
+  /** Row link target attribute. */
+  target: string | null;
+  /** Row link rel attribute. */
+  rel: string | null;
+  /** Owner email as rendered, or null when the row shows none. */
+  ownerEmail: string | null;
+  /** Project count as rendered, or null when the row shows none. */
+  totalProjects: number | null;
+  /** Member count as rendered, or null when the row shows none. */
+  totalMembers: number | null;
+  /** Whether the row shows a logo image (vs a letter fallback). */
+  logoImageVisible: boolean;
+  /** Letter fallback as rendered, or null when a logo image shows. */
+  logoLetter: string | null;
+  /** Whether the row exposes any delete or edit control. */
+  exposesMutation: boolean;
+}
+
+/** Workspace-create form snapshot (NEWFRONT-444, ADM-043/044). */
+export interface AdminWorkspaceCreateFacts {
+  /** Current name field value. */
+  name: string;
+  /** Current slug field value. */
+  slug: string;
+  /** Slug-prefix (web base URL) as rendered, or null when absent. */
+  slugPrefix: string | null;
+  /** Selected org-size label, or null when none is picked. */
+  orgSize: string | null;
+  /** Whether the submit control is disabled. */
+  submitDisabled: boolean;
+  /** Submit control label (busy state swaps it). */
+  submitLabel: string;
+  /** Name validation message, or null when none shows. */
+  nameError: string | null;
+  /** Slug validation message, or null when none shows. */
+  slugError: string | null;
+  /** Whether the inline URL-taken error is showing. */
+  slugTakenVisible: boolean;
+  /** Whether the invalid-slug charset hint is showing. */
+  invalidSlugVisible: boolean;
+  /** Org-size validation message, or null when none shows. */
+  orgSizeError: string | null;
+  /** Go-back link target, or null when absent. */
+  backHref: string | null;
+}
+
+/** AI settings page snapshot (NEWFRONT-444, ADM-046/047/048). */
+export interface AdminAiFacts {
+  /** Whether the AI form is showing (config loaded). */
+  formVisible: boolean;
+  /** Current model field value. */
+  model: string;
+  /** Whether the key field holds any value. */
+  keyFilled: boolean;
+  /** Whether the key field is currently shown as text. */
+  keyShown: boolean;
+  /** Save control label (busy state swaps it). */
+  saveLabel: string;
+  /** Whether the save control is disabled. */
+  saveDisabled: boolean;
+  /** Model helper-link target, or null when absent. */
+  modelHelpHref: string | null;
+  /** Key helper-link target, or null when absent. */
+  keyHelpHref: string | null;
+  /** Whether the other-vendor callout is showing. */
+  calloutVisible: boolean;
+  /** Other-vendor callout contact-link target, or null when absent. */
+  calloutHref: string | null;
+  /** Whether the loading skeleton is showing. */
+  skeletonVisible: boolean;
+  /** Skeleton block count (zero when the skeleton hides). */
+  skeletonBlocks: number;
+}
+
+/** Image-page presence snapshot (NEWFRONT-444, ADM-049/050; bug: NEWFRONT-493). */
+export interface AdminImageFacts {
+  /** Whether the sidebar Images entry is showing. */
+  sidebarEntryVisible: boolean;
+  /** Sidebar Images entry target, or null when absent. */
+  sidebarHref: string | null;
+  /** Image page title as rendered, or null when the page is not showing. */
+  pageTitle: string | null;
+  /** Whether the Unsplash key field is showing. */
+  keyFieldVisible: boolean;
+  /** Whether the image save control is showing. */
+  saveVisible: boolean;
+  /** Whether the image loading skeleton is showing. */
+  skeletonVisible: boolean;
 }
