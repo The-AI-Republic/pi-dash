@@ -5,7 +5,8 @@
 import { describe, expect, it } from "vitest";
 import { getProfile, listTimezones, updateMyTimezone, updateProfile } from "../contracts/profile.js";
 import { getMe } from "../contracts/users.js";
-import { CONTRACT_EMAIL, contractEnabled, sharedSignedIn } from "./setup.js";
+import { listWorkspaces } from "../contracts/workspaces.js";
+import { CONTRACT_EMAIL, CONTRACT_WORKSPACE, contractEnabled, sharedSignedIn } from "./setup.js";
 import type { ApiClient } from "../client.js";
 
 async function signedIn(): Promise<ApiClient> {
@@ -30,6 +31,37 @@ describe.skipIf(!contractEnabled)("profile contract", () => {
     expect(patched.language).toBe("fr");
     const restored = await updateProfile(client, { language: before.language, theme: before.theme });
     expect(restored.language).toBe(before.language);
+  });
+
+  it("patches the onboarding fields and the last workspace, then restores them", async () => {
+    const client = await signedIn();
+    const before = await getProfile(client);
+    const workspaces = await listWorkspaces(client);
+    const seeded = workspaces.find((workspace) => workspace.slug === CONTRACT_WORKSPACE);
+    expect(seeded).toBeDefined();
+
+    const patched = await updateProfile(client, {
+      role: "designer",
+      use_case: "planning",
+      has_marketing_email_consent: !before.has_marketing_email_consent,
+      onboarding_step: { ...before.onboarding_step, profile_complete: true },
+      last_workspace_id: seeded?.id ?? null,
+    });
+    expect(patched.role).toBe("designer");
+    expect(patched.use_case).toBe("planning");
+    expect(patched.has_marketing_email_consent).toBe(!before.has_marketing_email_consent);
+    expect(patched.last_workspace_id).toBe(seeded?.id);
+
+    const restored = await updateProfile(client, {
+      role: before.role,
+      use_case: before.use_case,
+      has_marketing_email_consent: before.has_marketing_email_consent,
+      onboarding_step: before.onboarding_step,
+      last_workspace_id: before.last_workspace_id,
+    });
+    expect(restored.role).toBe(before.role);
+    expect(restored.use_case).toBe(before.use_case);
+    expect(restored.last_workspace_id).toBe(before.last_workspace_id);
   });
 
   it("patches the user timezone and restores it", async () => {

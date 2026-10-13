@@ -49,8 +49,54 @@ export type {
   SignOutResult,
   SignUpInput,
 } from "./contracts/auth.js";
-export { Me, MeSettings, MeSettingsWorkspace, UserLite, getMe, getMeSettings } from "./contracts/users.js";
-export { Workspace, WorkspaceList, WorkspaceLite, listWorkspaces } from "./contracts/workspaces.js";
+export {
+  Me,
+  MeSettings,
+  MeSettingsWorkspace,
+  MeUpdate,
+  UserLite,
+  getMe,
+  getMeSettings,
+  markOnboarded,
+  updateMe,
+} from "./contracts/users.js";
+export type { MePatch } from "./contracts/users.js";
+export {
+  CreatedWorkspace,
+  OwnWorkspaceMembership,
+  Workspace,
+  WorkspaceList,
+  WorkspaceLite,
+  WorkspaceSlugStatus,
+  checkWorkspaceSlug,
+  createWorkspace,
+  getMyWorkspaceMembership,
+  listWorkspaces,
+} from "./contracts/workspaces.js";
+export type { WorkspaceCreateInput } from "./contracts/workspaces.js";
+export {
+  BulkInviteResult,
+  InvitationAnswer,
+  JoinRequestRequester,
+  JoinRequestResult,
+  WorkspaceInvitation,
+  WorkspaceInvitationList,
+  WorkspaceJoinRequest,
+  WorkspaceJoinRequestList,
+  acceptWorkspaceInvitations,
+  answerWorkspaceInvitation,
+  createWorkspaceJoinRequest,
+  getWorkspaceInvitation,
+  listWorkspaceInvitations,
+  listWorkspaceJoinRequests,
+  sendWorkspaceInvitations,
+} from "./contracts/invitations.js";
+export type {
+  InvitationAnswerInput,
+  JoinRequestInput,
+  WorkspaceInviteInput,
+  WorkspaceInvitee,
+} from "./contracts/invitations.js";
 export { Project, ProjectList, ProjectLite, listProjects } from "./contracts/projects.js";
 export {
   FavoriteProject,
@@ -63,12 +109,14 @@ export {
   ProjectDetailsList,
   ProjectInvitation,
   ProjectInvitationList,
+  ProjectRoleMap,
   ProjectUserProperties,
   WorkspaceUserProperties,
   addFavoriteProject,
   archiveProject,
   createProject,
   deleteProject,
+  getMyProjectRoles,
   getProjectUserProperties,
   getWorkspaceUserProperties,
   joinProjects,

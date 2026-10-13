@@ -33,6 +33,51 @@ export async function getMe(client: ApiClient): Promise<Me> {
   return client.parse(Me, body, "GET /api/users/me/");
 }
 
+export interface MePatch {
+  first_name?: string;
+  last_name?: string;
+  avatar?: string;
+}
+
+/**
+ * The user row after an update. PATCH answers the full user serializer,
+ * which lacks the computed avatar/cover URLs the GET shape carries, so
+ * this is its own projection, not Me.
+ */
+export const MeUpdate = z.object({
+  id: uuid(),
+  email: z.email(),
+  username: z.string(),
+  first_name: z.string(),
+  last_name: z.string(),
+  display_name: z.string(),
+  avatar: z.string(),
+  user_timezone: z.string(),
+});
+export type MeUpdate = z.infer<typeof MeUpdate>;
+
+/**
+ * PATCH /api/users/me/ writes the display name and avatar. The avatar is
+ * the `avatar` text field (a URL sticks and reads back through
+ * `avatar_url`); an `avatar_url` key is silently ignored by the server.
+ */
+export async function updateMe(client: ApiClient, input: MePatch): Promise<MeUpdate> {
+  const envelope = await client.sendJson<unknown>("PATCH", "/api/users/me/", { json: input });
+  return client.parse(MeUpdate, envelope.data, "PATCH /api/users/me/");
+}
+
+export const OnboardResult = z.object({
+  message: z.string(),
+});
+export type OnboardResult = z.infer<typeof OnboardResult>;
+
+/** PATCH /api/users/me/onboard/ stamps the profile onboard marker. */
+export async function markOnboarded(client: ApiClient, input: { is_onboarded: boolean }): Promise<OnboardResult> {
+  const path = "/api/users/me/onboard/";
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: input });
+  return client.parse(OnboardResult, envelope.data, `PATCH ${path}`);
+}
+
 /** Small user projection embedded in members, issues and activity. */
 export const UserLite = z.object({
   id: uuid(),

@@ -373,3 +373,17 @@ export async function updateProjectUserProperties(
   const envelope = await client.sendJson<unknown>("PATCH", path, { json: patch });
   return client.parse(ProjectUserProperties, envelope.data, `PATCH ${path}`);
 }
+
+/**
+ * The caller's role in each project they belong to, keyed by project id.
+ * The denial screens read this to decide join versus no-access.
+ */
+export const ProjectRoleMap = z.record(z.string(), z.number());
+export type ProjectRoleMap = z.infer<typeof ProjectRoleMap>;
+
+/** GET /api/users/me/workspaces/<slug>/project-roles/ — my project roles. */
+export async function getMyProjectRoles(client: ApiClient, slug: string): Promise<ProjectRoleMap> {
+  const path = `/api/users/me/workspaces/${slug}/project-roles/`;
+  const body = await client.getJson<unknown>(path);
+  return client.parse(ProjectRoleMap, body, `GET ${path}`);
+}
