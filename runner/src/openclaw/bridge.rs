@@ -332,10 +332,10 @@ impl BridgeCursor {
                 match result.get("stopReason").and_then(|s| s.as_str()) {
                     Some(stop_reason) => {
                         self.terminal = true;
-                        if is_failure_stop_reason(stop_reason) {
+                        if let Some(reason) = failure_stop_reason(stop_reason) {
                             vec![BridgeEvent::Failed {
                                 run_id: self.run_id,
-                                reason: FailureReason::AgentCrash,
+                                reason,
                                 detail: Some(format!("openclaw stopReason: {stop_reason}")),
                             }]
                         } else {
@@ -379,12 +379,18 @@ impl BridgeCursor {
     }
 }
 
-/// ACP `stopReason` values that mean the turn did not complete its work:
-/// `cancelled` (interrupted) and `refusal` (the model declined). Everything
-/// else (`end_turn`, `max_tokens`, `max_turn_requests`) is a natural end and
-/// maps to `Completed` with the reason recorded as the conclusion.
-fn is_failure_stop_reason(stop_reason: &str) -> bool {
-    matches!(stop_reason, "cancelled" | "refusal")
+/// ACP `stopReason` values that mean the turn did not complete its work,
+/// mapped to the specific `FailureReason` instead of a blanket
+/// `AgentCrash` (PDASHOSS01-183): `cancelled` (interrupted) and `refusal`
+/// (the model declined — current clouds record it as REFUSED). Everything
+/// else (`end_turn`, `max_tokens`, `max_turn_requests`) is a natural end
+/// and maps to `Completed` with the reason recorded as the conclusion.
+fn failure_stop_reason(stop_reason: &str) -> Option<FailureReason> {
+    match stop_reason {
+        "cancelled" => Some(FailureReason::Cancelled),
+        "refusal" => Some(FailureReason::Refusal),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -475,10 +481,29 @@ mod tests {
     }
 
     #[test]
-    fn stop_reason_cancelled_fails() {
+    fn stop_reason_cancelled_fails_as_cancelled() {
         let mut c = cursor();
         let out = c.translate(msg(r#"{"id":3,"result":{"stopReason":"cancelled"}}"#));
-        assert!(matches!(out[0], BridgeEvent::Failed { .. }));
+        assert!(matches!(
+            out[0],
+            BridgeEvent::Failed {
+                reason: FailureReason::Cancelled,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn stop_reason_refusal_fails_as_refusal() {
+        let mut c = cursor();
+        let out = c.translate(msg(r#"{"id":3,"result":{"stopReason":"refusal"}}"#));
+        assert!(matches!(
+            out[0],
+            BridgeEvent::Failed {
+                reason: FailureReason::Refusal,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -486,6 +486,13 @@ pub enum FailureReason {
     /// the run to FAILED via a deliberate signal instead of inferring it
     /// from the heartbeat reaper after the next reconnect.
     DaemonRestart,
+    /// The model declined the task (e.g. an ACP `stopReason: "refusal"`).
+    /// The wire string `"refusal"` is a cross-language contract: current
+    /// clouds route it to a terminal REFUSED status with a queryable
+    /// `refusal_category` instead of a generic FAILED; older clouds fall
+    /// back to FAILED, which is the same place these landed before this
+    /// variant existed (as `AgentCrash`). See PDASHOSS01-183.
+    Refusal,
     /// The runner rejected an `Assign` because it already has a run in
     /// flight (or an active chat turn). The cloud considers a runner free
     /// the moment its previous run goes terminal in the database — which
@@ -512,6 +519,17 @@ mod tests {
         let back: FailureReason =
             serde_json::from_value(serde_json::json!("assign_rejected_busy")).unwrap();
         assert_eq!(back, FailureReason::AssignRejectedBusy);
+    }
+
+    /// The cloud's RunFailed endpoint branches on the literal string
+    /// `"refusal"` to record a REFUSED run instead of a FAILED one — the
+    /// wire name is a cross-language contract, not an implementation detail.
+    #[test]
+    fn refusal_wire_name_is_stable() {
+        let json = serde_json::to_value(FailureReason::Refusal).unwrap();
+        assert_eq!(json, serde_json::json!("refusal"));
+        let back: FailureReason = serde_json::from_value(serde_json::json!("refusal")).unwrap();
+        assert_eq!(back, FailureReason::Refusal);
     }
 
     #[test]

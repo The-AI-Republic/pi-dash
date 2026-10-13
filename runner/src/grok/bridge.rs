@@ -359,10 +359,10 @@ impl BridgeCursor {
                 match result.get("stopReason").and_then(|s| s.as_str()) {
                     Some(stop_reason) => {
                         self.terminal = true;
-                        if is_failure_stop_reason(stop_reason) {
+                        if let Some(reason) = failure_stop_reason(stop_reason) {
                             vec![BridgeEvent::Failed {
                                 run_id: self.run_id,
-                                reason: FailureReason::AgentCrash,
+                                reason,
                                 detail: Some(format!("grok stopReason: {stop_reason}")),
                             }]
                         } else {
@@ -406,12 +406,18 @@ impl BridgeCursor {
     }
 }
 
-/// ACP `stopReason` values meaning the turn did not complete its work:
-/// `cancelled` (interrupted) and `refusal` (the model declined). Everything
+/// ACP `stopReason` values meaning the turn did not complete its work,
+/// mapped to the specific `FailureReason` instead of a blanket
+/// `AgentCrash` (PDASHOSS01-183): `cancelled` (interrupted) and `refusal`
+/// (the model declined — current clouds record it as REFUSED). Everything
 /// else (`end_turn`, `max_tokens`, `max_turn_requests`) is a natural end.
 /// Mirrors the OpenClaw bridge.
-fn is_failure_stop_reason(stop_reason: &str) -> bool {
-    matches!(stop_reason, "cancelled" | "refusal")
+fn failure_stop_reason(stop_reason: &str) -> Option<FailureReason> {
+    match stop_reason {
+        "cancelled" => Some(FailureReason::Cancelled),
+        "refusal" => Some(FailureReason::Refusal),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -555,5 +561,19 @@ exec cat >/dev/null
         }
         assert!(saw_raw, "expected the streamed session/update as a Raw event");
         assert!(completed, "expected the stopReason to complete the turn");
+    }
+
+    #[test]
+    fn failure_stop_reasons_map_specifically() {
+        assert!(matches!(
+            failure_stop_reason("cancelled"),
+            Some(FailureReason::Cancelled)
+        ));
+        assert!(matches!(
+            failure_stop_reason("refusal"),
+            Some(FailureReason::Refusal)
+        ));
+        assert!(failure_stop_reason("end_turn").is_none());
+        assert!(failure_stop_reason("max_tokens").is_none());
     }
 }
