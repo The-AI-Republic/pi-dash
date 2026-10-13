@@ -198,6 +198,11 @@ import type {
 // its own); the open chord settles on it to ride out the 200ms close-reset.
 const PALETTE_ROOT_PLACEHOLDER = "Type a command or search";
 
+/** Escape a literal for embedding in a `new RegExp` (NEWFRONT-450 pill match). */
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export class WebDriver implements ParityDriver {
   readonly target: ParityTarget = "web";
   readonly page: Page;
@@ -50685,5 +50690,457 @@ export class WebDriver implements ParityDriver {
       twitterDescription: await this.spaceAccessMetaContent('[name="twitter:description"]'),
       twitterImage: await this.spaceAccessMetaContent('[name="twitter:image"]'),
     };
+  }
+
+  // --- Space filters + peek shell (NEWFRONT-450, SPC-034–046). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+  // --- Selectors were observed on the running old space app served per the
+  // --- NEWFRONT-97 recipe; no data-testid hooks were added to apps/space.
+  // --- Space filters (NEWFRONT-450, SPC-034–039). ---
+
+  /** The Filters popover panel, located by its generated panel id. */
+  private spaceFiltersPanelScope(): Locator {
+    return this.page.locator('div[id^="headlessui-popover-panel-"]');
+  }
+
+  private spaceFiltersSearchBox(): Locator {
+    return this.spaceFiltersPanelScope().getByPlaceholder("Search");
+  }
+
+  /** One facet section: the container holding that facet's header plus its option rows. */
+  private spaceFiltersFacetSection(facet: "Priority" | "State"): Locator {
+    const header = this.spaceFiltersPanelScope()
+      .getByText(new RegExp(`^${facet}( \\(\\d+\\))?$`))
+      .first();
+    return header.locator("xpath=../..");
+  }
+
+  /** The applied-filters list: parent of the clear-all control. */
+  private spaceFiltersAppliedList(): Locator {
+    return this.page.getByRole("button", { name: "Clear all" }).locator("xpath=..");
+  }
+
+  /** One facet shell on the applied strip, matched by its leading key label. */
+  private async spaceFiltersShellFor(facet: string): Promise<Locator> {
+    const shells = this.spaceFiltersAppliedList().locator(":scope > div");
+    const count = await shells.count();
+    for (let i = 0; i < count; i++) {
+      // Raw text: the shell capitalises its contents presentationally.
+      const label = ((await shells.nth(i).locator(":scope > span").first().textContent()) ?? "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+      if (label === facet.toLowerCase()) return shells.nth(i);
+    }
+    throw new Error(`[parity] applied strip has no ${facet} facet.`);
+  }
+
+  async spaceFiltersOpenPanel(): Promise<void> {
+    if (await this.spaceFiltersPanelOpen()) return;
+    await this.page.getByRole("button", { name: "Filters", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await this.spaceFiltersSearchBox().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async spaceFiltersPanelOpen(): Promise<boolean> {
+    return this.isShown(this.spaceFiltersSearchBox());
+  }
+
+  async spaceFiltersFacetNames(): Promise<string[]> {
+    const headers = this.spaceFiltersPanelScope().getByText(/^(Priority|State)( \(\d+\))?$/);
+    const count = await headers.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      names.push((await headers.nth(i).innerText()).trim().replace(/ \(\d+\)$/, ""));
+    }
+    return names;
+  }
+
+  async spaceFiltersSearchPanel(query: string): Promise<void> {
+    await this.spaceFiltersSearchBox().fill(query, { timeout: WebDriver.WAIT_MS });
+  }
+
+  private async spaceFiltersOptionRows(
+    facet: "Priority" | "State"
+  ): Promise<Array<{ name: string; checked: boolean }>> {
+    const section = this.spaceFiltersFacetSection(facet);
+    const buttons = section.getByRole("button");
+    const count = await buttons.count();
+    const rows: Array<{ name: string; checked: boolean }> = [];
+    for (let i = 0; i < count; i++) {
+      const text = (await buttons.nth(i).innerText()).trim();
+      // The section's collapse chevron is an icon-only button; skip it.
+      if (text === "") continue;
+      // The checkbox marker is the option's first box: it carries the
+      // accent fill only while the option is applied.
+      const markerClass =
+        (await buttons
+          .nth(i)
+          .locator("div")
+          .first()
+          .getAttribute("class")
+          .catch(() => null)) ?? "";
+      rows.push({ name: text, checked: markerClass.includes("bg-accent-primary") });
+    }
+    return rows;
+  }
+
+  async spaceFiltersPriorityOptions(): Promise<Array<{ name: string; checked: boolean }>> {
+    return this.spaceFiltersOptionRows("Priority");
+  }
+
+  async spaceFiltersStateOptions(): Promise<Array<{ name: string; checked: boolean }>> {
+    return this.spaceFiltersOptionRows("State");
+  }
+
+  /** Click a panel option, reopening the panel first and once more on a detach race. */
+  private async spaceFiltersClickOption(facet: "Priority" | "State", name: string): Promise<void> {
+    // Strip clicks dismiss the panel, and the strip-driven refetch can
+    // remount it again right after reopening, detaching the option
+    // mid-click; a user would simply reopen and click again.
+    await this.spaceFiltersOpenPanel();
+    const option = (): Locator => this.spaceFiltersFacetSection(facet).getByRole("button", { name });
+    try {
+      await option().click({ timeout: WebDriver.WAIT_MS });
+    } catch {
+      await this.spaceFiltersOpenPanel();
+      await option().click({ timeout: WebDriver.WAIT_MS });
+    }
+  }
+
+  async spaceFiltersPickPriority(name: string): Promise<void> {
+    await this.spaceFiltersClickOption("Priority", name);
+    await this.page.waitForURL((url) => url.searchParams.has("priority"), { timeout: WebDriver.WAIT_MS });
+  }
+
+  async spaceFiltersPickState(name: string): Promise<void> {
+    await this.spaceFiltersClickOption("State", name);
+    await this.page.waitForURL((url) => url.searchParams.has("state"), { timeout: WebDriver.WAIT_MS });
+  }
+
+  async spaceFiltersNoMatchesVisible(): Promise<boolean> {
+    return this.isShown(this.spaceFiltersPanelScope().getByText("No matches found"));
+  }
+
+  async spaceFiltersSearchBoxCount(): Promise<number> {
+    // Every search box on the board: the panel's option search plus any
+    // issue search the board might offer (the negative row pins: none).
+    const boxes = this.page.getByRole("textbox");
+    const count = await boxes.count();
+    let visible = 0;
+    for (let i = 0; i < count; i++) {
+      if (
+        await boxes
+          .nth(i)
+          .isVisible()
+          .catch(() => false)
+      )
+        visible++;
+    }
+    return visible;
+  }
+
+  async spaceFiltersSwitchLayout(layout: "list" | "kanban"): Promise<void> {
+    // The switcher offers its layouts as icon-only buttons in catalogue
+    // order (list, then board); resolve once the address carries the view.
+    const switcher = this.page.locator("div.flex.items-center.gap-1.rounded-sm.bg-layer-2.p-1");
+    await switcher
+      .getByRole("button")
+      .nth(layout === "list" ? 0 : 1)
+      .click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForURL((url) => url.searchParams.get("board") === layout, {
+      timeout: WebDriver.WAIT_MS,
+    });
+  }
+
+  async spaceFiltersAppliedFacets(): Promise<Array<{ facet: string; values: string[] }>> {
+    if (!(await this.spaceFiltersAppliedStripVisible())) return [];
+    const shells = this.spaceFiltersAppliedList().locator(":scope > div");
+    const count = await shells.count();
+    const facets: Array<{ facet: string; values: string[] }> = [];
+    for (let i = 0; i < count; i++) {
+      const shell = shells.nth(i);
+      const facet = ((await shell.locator(":scope > span").first().textContent()) ?? "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+      // Value pills are the inner container's direct div children; the
+      // facet-level remove is its direct button child. A facet with no
+      // pills renders as a bare shell (its label plus the remove). Reads
+      // are raw text: the shell capitalises its contents presentationally.
+      const pills = shell.locator(":scope > div").first().locator(":scope > div");
+      const pillCount = await pills.count();
+      const values: string[] = [];
+      for (let p = 0; p < pillCount; p++) {
+        const text = ((await pills.nth(p).textContent()) ?? "").replace(/\s+/g, " ").trim();
+        if (text !== "") values.push(text);
+      }
+      facets.push({ facet, values });
+    }
+    return facets;
+  }
+
+  async spaceFiltersAppliedStripVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Clear all" }));
+  }
+
+  async spaceFiltersRemoveValue(facet: string, value: string): Promise<void> {
+    const shell = await this.spaceFiltersShellFor(facet);
+    // Rendered pill text is capitalised presentationally; match the raw
+    // value case-insensitively.
+    const pill = shell
+      .locator(":scope > div")
+      .first()
+      .locator(":scope > div")
+      .filter({ hasText: new RegExp(escapeRegExp(value), "i") });
+    await pill.first().getByRole("button").click({ timeout: WebDriver.WAIT_MS });
+    await expect
+      .poll(
+        async () =>
+          (await this.spaceFiltersAppliedFacets()).find((entry) => entry.facet === facet.toLowerCase())?.values ?? [],
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .not.toContain(value);
+  }
+
+  async spaceFiltersClearFacet(facet: string): Promise<void> {
+    const shell = await this.spaceFiltersShellFor(facet);
+    await shell.locator(":scope > div").first().locator(":scope > button").click({ timeout: WebDriver.WAIT_MS });
+    await expect
+      .poll(async () => (await this.spaceFiltersAppliedFacets()).map((entry) => entry.facet), {
+        timeout: WebDriver.WAIT_MS,
+      })
+      .not.toContain(facet.toLowerCase());
+  }
+
+  async spaceFiltersClearAll(): Promise<void> {
+    await this.page.getByRole("button", { name: "Clear all" }).click({ timeout: WebDriver.WAIT_MS });
+    await expect.poll(() => this.spaceFiltersAppliedStripVisible(), { timeout: WebDriver.WAIT_MS }).toBe(false);
+  }
+
+  async spaceFiltersVisibleIssueNames(): Promise<string[]> {
+    // List-layout rows link by a dashed issue id; kanban rows use an
+    // underscored id, so this read stays in list layout by construction.
+    const rows = this.page.locator('a[id^="issue-"]');
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const text = (await rows.nth(i).innerText()).trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
+  }
+
+  private spaceFiltersFetchUrls: string[] = [];
+  private spaceFiltersFetchListener: ((request: { url(): string }) => void) | null = null;
+
+  async spaceFiltersBeginFetchWatch(): Promise<void> {
+    if (this.spaceFiltersFetchListener !== null) {
+      this.page.off("request", this.spaceFiltersFetchListener);
+      this.spaceFiltersFetchListener = null;
+    }
+    this.spaceFiltersFetchUrls = [];
+    const listener = (request: { url(): string }): void => {
+      const url = request.url();
+      // Public-issues list fetches only: the detail fetch shares the
+      // prefix with an issue id appended, and comments, reactions and
+      // votes hang below that.
+      if (/\/api\/public\/anchor\/[^/]+\/issues\/(\?|$)/.test(url)) this.spaceFiltersFetchUrls.push(url);
+    };
+    this.spaceFiltersFetchListener = listener;
+    this.page.on("request", listener);
+  }
+
+  async spaceFiltersFetchQueries(): Promise<string[]> {
+    return this.spaceFiltersFetchUrls.map((url) => url.split("?", 2)[1] ?? "");
+  }
+
+  async spaceFiltersEndFetchWatch(): Promise<void> {
+    if (this.spaceFiltersFetchListener !== null) {
+      this.page.off("request", this.spaceFiltersFetchListener);
+      this.spaceFiltersFetchListener = null;
+    }
+  }
+
+  // --- Space peek shell (NEWFRONT-450, SPC-040–046). ---
+
+  private spacePeekDialog(): Locator {
+    return this.page.getByRole("dialog");
+  }
+
+  /** The overlay's detail section: the key line's parent container. */
+  private spacePeekDetailsSection(): Locator {
+    return this.spacePeekDialog().locator("h6").first().locator("xpath=..");
+  }
+
+  private spacePeekHeaderCopyButton(): Locator {
+    // The header splits into a left control cluster and, while clipboard
+    // access is granted, a lone direct-child copy button on the right.
+    return this.spacePeekDialog().locator("div.w-full.p-5 > div.flex.items-center.justify-between > button");
+  }
+
+  async spacePeekOpen(): Promise<boolean> {
+    // Presence, not visibility: the dialog wrapper itself has no box (its
+    // panel is fixed-position), and the overlay mounts only while open.
+    return (await this.spacePeekDialog().count()) > 0;
+  }
+
+  async spacePeekMode(): Promise<"side" | "modal" | "full"> {
+    return this.page.evaluate((): "side" | "modal" | "full" => {
+      const dialog = document.querySelector('div[role="dialog"]');
+      const nodes: Element[] = dialog === null ? [] : [dialog, ...Array.from(dialog.querySelectorAll("*"))];
+      const has = (needle: string): boolean =>
+        nodes.some((node) => typeof node.className === "string" && node.className.includes(needle));
+      if (has("size-[95%]")) return "full";
+      if (has("w-3/5")) return "modal";
+      if (has("w-1/2")) return "side";
+      throw new Error("[parity] peek overlay open but presentation markers absent.");
+    });
+  }
+
+  async spacePeekSwitchMode(mode: "side" | "modal" | "full"): Promise<void> {
+    const label = mode === "side" ? "Side Peek" : mode === "modal" ? "Modal" : "Full Screen";
+    await this.spacePeekDialog().locator('button[aria-haspopup="listbox"]').click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: label }).click({ timeout: WebDriver.WAIT_MS });
+    // Mid-switch neither presentation's markers are mounted; ride that out.
+    await expect
+      .poll(
+        async () => {
+          try {
+            return await this.spacePeekMode();
+          } catch {
+            return null;
+          }
+        },
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .toBe(mode);
+  }
+
+  async spacePeekClose(via: "header" | "backdrop" | "escape" = "escape"): Promise<void> {
+    if (via === "header") {
+      // The side header's left cluster holds the dismiss control plus the
+      // presentation switcher; only the switcher declares a listbox.
+      const header = this.spacePeekDialog().locator("div.flex.items-center.justify-between").first();
+      await header
+        .locator(":scope > div")
+        .first()
+        .locator("button:not([aria-haspopup])")
+        .click({ timeout: WebDriver.WAIT_MS });
+    } else if (via === "backdrop") {
+      // The dim layer spans the viewport behind the centred panel; click
+      // near its corner, clear of even the near-full presentation.
+      const backdrop = this.spacePeekDialog().locator(":scope > div").first();
+      const marker = (await backdrop.getAttribute("class").catch(() => null)) ?? "";
+      if (!marker.includes("bg-backdrop")) throw new Error("[parity] peek overlay has no backdrop to click.");
+      await backdrop.click({ position: { x: 10, y: 10 }, timeout: WebDriver.WAIT_MS });
+    } else {
+      await this.page.keyboard.press("Escape");
+    }
+    await expect.poll(() => this.spacePeekOpen(), { timeout: WebDriver.WAIT_MS }).toBe(false);
+  }
+
+  async spacePeekKey(): Promise<string | null> {
+    return this.readText(this.spacePeekDialog().locator("h6").first());
+  }
+
+  async spacePeekTitle(): Promise<string | null> {
+    return this.readText(this.spacePeekDialog().locator("h6 + h4").first());
+  }
+
+  async spacePeekDescriptionVisible(): Promise<boolean> {
+    return this.isShown(this.spacePeekDetailsSection().locator(".ProseMirror"));
+  }
+
+  async spacePeekDescriptionText(): Promise<string | null> {
+    const editor = this.spacePeekDetailsSection().locator(".ProseMirror");
+    if (!(await this.isShown(editor))) return null;
+    const text = (await editor.first().innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async spacePeekDescriptionHtml(): Promise<string | null> {
+    const editor = this.spacePeekDetailsSection().locator(".ProseMirror");
+    if (!(await this.isShown(editor))) return null;
+    try {
+      const html = await editor.first().innerHTML({ timeout: 5_000 });
+      return html.trim() === "" ? null : html;
+    } catch {
+      return null;
+    }
+  }
+
+  async spacePeekDescriptionEditable(): Promise<boolean> {
+    const editor = this.spacePeekDetailsSection().locator(".ProseMirror");
+    return (await this.readAttr(editor, "contenteditable")) === "true";
+  }
+
+  private spacePeekPropertyRow(label: string): Locator {
+    // Each property row pairs a labelled quarter with a value cell; the
+    // label's row is two levels up.
+    return this.spacePeekDialog().getByText(label, { exact: true }).first().locator("xpath=../..");
+  }
+
+  async spacePeekProperties(): Promise<{
+    state: string;
+    priority: string;
+    dueDate: string | null;
+    dueDateEmphasised: boolean;
+  } | null> {
+    if (!(await this.spacePeekOpen())) return null;
+    const readCell = async (label: string): Promise<string> =>
+      (await this.spacePeekPropertyRow(label).locator(":scope > div:nth-child(2)").first().innerText()).trim();
+    const state = await readCell("State");
+    const priority = await readCell("Priority");
+    const dueText = await readCell("Due date");
+    if (dueText === "Empty") return { state, priority, dueDate: null, dueDateEmphasised: false };
+    const dueCell = this.spacePeekPropertyRow("Due date").locator(":scope > div:nth-child(2)").first();
+    const marker =
+      (await dueCell
+        .locator("div")
+        .first()
+        .getAttribute("class")
+        .catch(() => null)) ?? "";
+    return { state, priority, dueDate: dueText, dueDateEmphasised: marker.includes("text-danger-primary") };
+  }
+
+  async spacePeekActivityVisible(): Promise<boolean> {
+    return this.isShown(this.spacePeekDialog().getByRole("heading", { name: "Comments" }));
+  }
+
+  async spacePeekCopyLinkVisible(): Promise<boolean> {
+    return this.isShown(this.spacePeekHeaderCopyButton());
+  }
+
+  async spacePeekCopyLink(): Promise<void> {
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the click.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.spacePeekHeaderCopyButton().click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async spacePeekReadClipboard(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async spacePeekLastNotice(): Promise<{ title: string; message: string } | null> {
+    // Notices stack bottom-right and auto-dismiss; only a currently
+    // visible one with text is reported, newest first.
+    const roots = this.page.locator("div.absolute.right-3.bottom-3");
+    const total = await roots.count();
+    for (let i = 0; i < total; i++) {
+      const text = (await roots.nth(i).innerText()).trim();
+      if (text === "") continue;
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
+    }
+    return null;
+  }
+
+  async spacePeekSkeletonsVisible(): Promise<boolean> {
+    return this.isShown(this.spacePeekDialog().getByRole("status"));
   }
 }
