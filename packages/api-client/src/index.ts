@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // @pidash/api-client: fetch client, endpoint contracts, contract-test harness.
+export { SignedUserAsset, uploadUserAvatar } from "./contracts/assets.js";
+export type { ByteUpload, ByteUploadResponse } from "./contracts/assets.js";
 export { ApiError, isApiError, isRetryable } from "./errors.js";
 export type { ApiErrorCode, ApiErrorFields, ApiErrorInit } from "./errors.js";
 export { ApiClient, createClient, CSRF_ENDPOINT, CSRF_HEADER } from "./client.js";

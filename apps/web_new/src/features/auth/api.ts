@@ -13,6 +13,9 @@ import {
   checkEmail,
   deactivateAccount,
   generateMagicCode,
+  getMeSettings,
+  getProfile,
+  markOnboarded,
   requestPasswordReset,
   resetPassword,
   setPassword,
@@ -20,15 +23,26 @@ import {
   signInWithMagicCode,
   signUp,
   signUpWithMagicCode,
+  updateMe,
+  updateProfile,
+  uploadUserAvatar,
+  type MePatch,
+  type MeSettings,
+  type Profile,
+  type ProfilePatch,
   type ResetPasswordInput,
   type SetPasswordResult,
   type SignInResult,
+  type WorkspaceList,
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../core/api/client.js";
 import { platform } from "../../core/platform/index.js";
+import { resolveLanding } from "../../core/session/guards.js";
+import { sessionKeys } from "../../core/session/queries.js";
 import { useSessionStore } from "../../core/session/store.js";
 import { markInitialColorScheme, notifyError, notifySuccess } from "../../shared/shell/index.js";
+import { finishProfileStamp } from "./onboarding.js";
 import { performSignOut } from "./signOut.js";
 
 export function useEmailCheck() {
@@ -107,6 +121,73 @@ export function usePasswordReset() {
 export function useSetPassword() {
   return useMutation({
     mutationFn: (password: string): Promise<SetPasswordResult> => setPassword(freshClient(), password),
+  });
+}
+
+/** Display-name and avatar writes (AUTH-031). Refreshes the cached user row. */
+export function useUpdateMe() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: MePatch) => updateMe(getAppClient(), input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: sessionKeys.me });
+    },
+  });
+}
+
+/**
+ * Profile writes: role, use cases, marketing consent, progress flags
+ * (AUTH-031–033, AUTH-039). Refreshes the cached profile.
+ */
+export function useUpdateProfile() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: ProfilePatch) => updateProfile(getAppClient(), input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: sessionKeys.profile });
+    },
+  });
+}
+
+/** Avatar image upload (AUTH-031). Resolves to the public URL to store on the user row. */
+export function useUploadUserAvatar() {
+  return useMutation({
+    mutationFn: (file: File) => uploadUserAvatar(getAppClient(), file),
+  });
+}
+
+export const FINISH_FAILURE_TITLE = "Could not finish onboarding";
+
+/**
+ * Finish onboarding (AUTH-039, shared with S8): stamp every progress flag
+ * plus the last-workspace pointer, mark the profile onboarded, refresh the
+ * cached profile and settings, then mark the local profile onboarded.
+ * Resolves to the AUTH-016 landing target. Callers refresh the workspace
+ * list first (creation/join steps do), so landing validates against it. A
+ * failed finish toasts and rejects, leaving the user on the step.
+ */
+export function useFinishOnboarding() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (): Promise<string> => {
+      const client = getAppClient();
+      const workspaces = queryClient.getQueryData<WorkspaceList>(sessionKeys.workspaces);
+      try {
+        await updateProfile(client, finishProfileStamp(workspaces));
+        await markOnboarded(client, { is_onboarded: true });
+        const [profile, settings] = await Promise.all([getProfile(client), getMeSettings(client)]);
+        queryClient.setQueryData<Profile>(sessionKeys.profile, { ...profile, is_onboarded: true });
+        queryClient.setQueryData<MeSettings>(sessionKeys.settings, settings);
+        return resolveLanding({
+          lastSlug: settings.workspace.last_workspace_slug,
+          fallbackSlug: settings.workspace.fallback_workspace_slug,
+          workspaces,
+        });
+      } catch (error) {
+        notifyError(FINISH_FAILURE_TITLE, (error as Error).message);
+        throw error;
+      }
+    },
   });
 }
 
