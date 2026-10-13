@@ -51143,6 +51143,7 @@ export class WebDriver implements ParityDriver {
   async spacePeekSkeletonsVisible(): Promise<boolean> {
     return this.isShown(this.spacePeekDialog().getByRole("status"));
   }
+
   // --- Spaces auth (NEWFRONT-452, SPC-058..064). ---
   // Selectors were read off the running old space app. The landing card
   // stacks banner, header, provider options, one native form and the

@@ -8408,7 +8408,8 @@ export interface SpaceBoardStability {
   /** List order after the cycle. */
   after: string[];
   /** Public-issues fetches observed during the cycle. */
-  refetches: number;}
+  refetches: number;
+}
 
 /** Identity facts of one workspace-member roster row (NEWFRONT-411, WSET-011). */
 export interface WsSettingsMemberRowFacts {

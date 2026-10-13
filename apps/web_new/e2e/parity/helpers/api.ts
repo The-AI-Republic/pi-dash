@@ -19445,7 +19445,7 @@ export interface NativeSpaceAuthResult {
   sessionCookie: boolean;
 }
 
-/** Shared native-POST plumbing for the spaces auth forms (never throws). */
+/** Shared native-POST plumbing for the spaces auth forms (form outcomes never throw). */
 async function nativeSpacePost(
   path: string,
   fields: Record<string, string>,
@@ -19488,26 +19488,6 @@ export async function nativeSpacePasswordAuth(
   apiBase: string = apiBaseFromEnv()
 ): Promise<NativeSpaceAuthResult> {
   return nativeSpacePost(`/auth/spaces/${mode}/`, { email, password }, apiBase);
-}
-
-/**
- * Create an account through the spaces native sign-up POST without
- * touching the browser session. Auth scenarios need a signed-out visitor
- * on the landing card: creating through the UI would sign the context in
- * and swap the card for the logged-in guidance view.
- */
-export async function spaceSignUpAccount(
-  email: string,
-  password: string,
-  apiBase: string = apiBaseFromEnv()
-): Promise<void> {
-  const result = await nativeSpacePasswordAuth(email, password, "sign-up", apiBase);
-  if (result.status !== 200 && result.status !== 302) {
-    throw new Error(`[parity] spaces sign-up failed with HTTP ${result.status} for ${email}.`);
-  }
-  if (!result.sessionCookie) {
-    throw new Error(`[parity] spaces sign-up created no session for ${email} (${result.location}).`);
-  }
 }
 
 /**

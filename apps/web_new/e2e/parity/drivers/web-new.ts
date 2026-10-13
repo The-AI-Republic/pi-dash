@@ -14207,7 +14207,7 @@ export class WebNewDriver implements ParityDriver {
 
   async spaceAccessHeadFacts(): Promise<SpaceAccessHeadFacts> {
     return todo("spaceAccessHeadFacts");
-
+  }
 
   // --- Spaces auth (NEWFRONT-452, SPC-058..064). ---
   async spaceAuthOpenLanding(_params?: { email?: string; errorCode?: string; nextPath?: string }): Promise<void> {
