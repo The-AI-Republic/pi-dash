@@ -328,6 +328,24 @@ describe("auth contracts", () => {
     expect(resetCall?.init.body).toContain("confirm_password=secret");
   });
 
+  it("passes optional fields through the code and reset paths", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 200, body: "<html>", url: "https://app.test/acme" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await signUpWithMagicCode(client, { email: "new@example.com", code: "123456", nextPath: "/invites" });
+    const codeCall = transport.calls.find((call) => call.url.endsWith("/auth/magic-sign-up/"));
+    expect(codeCall?.init.body).toContain(`next_path=${encodeURIComponent("/invites")}`);
+    const result = await resetPassword(client, { uid: "dWlk", token: "tok-en_1", password: "secret" });
+    expect(result).toEqual({ ok: true, location: "https://app.test/acme" });
+    const resetCall = transport.calls.find((call) => call.url.includes("/auth/reset-password/"));
+    const resetBody = resetCall?.init.body;
+    expect(typeof resetBody).toBe("string");
+    expect(resetBody ?? "").not.toContain("confirm_password");
+  });
+
   it("sets the first password and reads the user projection", async () => {
     const transport = recordingTransport((call) =>
       call.url.endsWith("/auth/get-csrf-token/")
