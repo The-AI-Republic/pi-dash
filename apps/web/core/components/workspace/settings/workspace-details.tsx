@@ -15,7 +15,7 @@ import { EditIcon } from "@pi-dash/propel/icons";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { IWorkspace } from "@pi-dash/types";
 import { CustomSelect, Input } from "@pi-dash/ui";
-import { cn, copyUrlToClipboard, getFileURL, validateWorkspaceName } from "@pi-dash/utils";
+import { cn, getFileURL, validateWorkspaceName } from "@pi-dash/utils";
 // components
 import { WorkspaceImageUploadModal } from "@/components/core/modals/workspace-image-upload-modal";
 import { TimezoneSelect } from "@/components/global/timezone-select";
@@ -24,6 +24,7 @@ import { useWorkspace } from "@/hooks/store/use-workspace";
 import { useUserPermissions } from "@/hooks/store/user";
 // pi dash web components
 import { DeleteWorkspaceSection } from "@/pi-dash-web/components/workspace/delete-workspace-section";
+import { copyShareUrl } from "@/utils/share-url";
 
 const defaultValues: Partial<IWorkspace> = {
   name: "",
@@ -106,7 +107,7 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
   const handleCopyUrl = () => {
     if (!currentWorkspace) return;
 
-    void copyUrlToClipboard(`${currentWorkspace.slug}`)
+    void copyShareUrl(`${currentWorkspace.slug}`)
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,

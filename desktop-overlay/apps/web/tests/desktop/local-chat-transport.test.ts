@@ -17,8 +17,10 @@ const SESSION = "11111111-1111-1111-1111-111111111111";
 
 type Frame = Parameters<ChatFrameTranslator["translate"]>[0];
 
+type Listeners = Record<string, Set<(payload: unknown) => void>>;
+
 function makeBridge(overrides: Partial<Record<string, unknown>> = {}) {
-  const listeners: Record<string, (payload: unknown) => void> = {};
+  const listeners: Listeners = {};
   const invoke = vi.fn(async (command: string) => {
     if (command in overrides) return overrides[command];
     if (command === "chat_get_session")
@@ -36,8 +38,8 @@ function makeBridge(overrides: Partial<Record<string, unknown>> = {}) {
     return undefined;
   });
   const listen = vi.fn(async (event: string, handler: (payload: unknown) => void) => {
-    listeners[event] = handler;
-    return () => delete listeners[event];
+    (listeners[event] ??= new Set()).add(handler);
+    return () => void listeners[event]?.delete(handler);
   });
   const ensureRuntime = vi.fn(async () => {});
   const bridge: TauriBridge = {
@@ -50,8 +52,8 @@ function makeBridge(overrides: Partial<Record<string, unknown>> = {}) {
   return { bridge, invoke, listen, listeners, ensureRuntime };
 }
 
-function emit(listeners: Record<string, (payload: unknown) => void>, event: string, payload: unknown) {
-  listeners[event]?.(payload);
+function emit(listeners: Listeners, event: string, payload: unknown) {
+  for (const handler of listeners[event] ?? []) handler(payload);
 }
 
 describe("ChatFrameTranslator", () => {
@@ -451,6 +453,118 @@ describe("LocalChatTransport verbs", () => {
         "runner"
       );
     }
+  });
+});
+
+describe("LocalChatTransport in-flight turn (PIDESKAPP-32)", () => {
+  const storedSession = {
+    id: SESSION,
+    title: "",
+    workspace: "ws",
+    project: "pidash-builtin",
+    working_dir: "/w/1",
+    engine_version: "",
+    engine_thread_id: null,
+    created_at: 1,
+    updated_at: 5,
+  };
+  const storedUserEvent = {
+    id: "u1",
+    session_id: SESSION,
+    seq: 1,
+    role: "user",
+    content: "hello",
+    tool_calls: null,
+    approval_decision: null,
+    created_at: 20,
+  };
+  const completed = {
+    result: "chat_message_completed",
+    data: { chat_session_id: SESSION, message_id: "m1", status: "completed", completed_at: "2026-10-05T00:00:00Z" },
+  };
+  const failed = {
+    result: "chat_failed",
+    data: { chat_session_id: SESSION, code: "agent_failed", failed_at: "2026-10-05T00:00:00Z" },
+  };
+
+  function setup() {
+    const ctx = makeBridge({ chat_list_sessions: [storedSession], chat_append_event: storedUserEvent });
+    const transport = new LocalChatTransport(ctx.bridge);
+    const activeMessage = async () => (await transport.listChatSessions("ws"))[0].active_message_id;
+    return { ctx, transport, activeMessage };
+  }
+
+  it("reports the session as busy from send until the turn's completed frame", async () => {
+    const { ctx, transport, activeMessage } = setup();
+    expect(await activeMessage()).toBeNull();
+
+    await transport.sendChatMessage(SESSION, "hello");
+    // `chat_send` has resolved, but the turn is still streaming.
+    const sendArgs = ctx.invoke.mock.calls.find((c) => c[0] === "chat_send")![1] as Record<string, unknown>;
+    expect(await activeMessage()).toBe(sendArgs.messageId);
+
+    // A non-terminal frame, and a terminal frame of another session, keep it busy.
+    emit(ctx.listeners, "chat://frame", {
+      result: "chat_event",
+      data: { chat_session_id: SESSION, bridge_seq: 1, kind: "assistant_delta", payload: {} },
+    });
+    emit(ctx.listeners, "chat://frame", { ...completed, data: { ...completed.data, chat_session_id: "other" } });
+    expect(await activeMessage()).toBe(sendArgs.messageId);
+
+    // No `subscribeChatEvents` is active here: the turn still releases the
+    // session, as it must when the user has switched to another chat.
+    emit(ctx.listeners, "chat://frame", completed);
+    expect(await activeMessage()).toBeNull();
+  });
+
+  it("releases the session on a failed turn and on a transport error", async () => {
+    const { ctx, transport, activeMessage } = setup();
+    await transport.sendChatMessage(SESSION, "hello");
+    emit(ctx.listeners, "chat://frame", failed);
+    expect(await activeMessage()).toBeNull();
+
+    await transport.sendChatMessage(SESSION, "hello");
+    expect(await activeMessage()).not.toBeNull();
+    emit(ctx.listeners, "chat://error", { chat_session_id: SESSION, message: "daemon down" });
+    expect(await activeMessage()).toBeNull();
+  });
+
+  it("has already released the session when the page hears turn_completed", async () => {
+    const { ctx, transport, activeMessage } = setup();
+    let seen: Promise<string | null> | undefined;
+    transport.subscribeChatEvents(SESSION, 0, (event) => {
+      // What the page's session refetch reads when it reacts to the event.
+      if (event.kind === "turn_completed") seen = activeMessage();
+    });
+    await Promise.resolve();
+    await transport.sendChatMessage(SESSION, "hello");
+    emit(ctx.listeners, "chat://frame", completed);
+    await vi.waitFor(() => expect(seen).toBeDefined());
+    expect(await seen).toBeNull();
+  });
+
+  it("refuses a second send while a turn is in flight, without persisting or submitting it", async () => {
+    const { ctx, transport } = setup();
+    await transport.sendChatMessage(SESSION, "first");
+    await expect(transport.sendChatMessage(SESSION, "second")).rejects.toThrow(/still in progress/);
+    expect(ctx.invoke.mock.calls.filter((c) => c[0] === "chat_append_event")).toHaveLength(1);
+    expect(ctx.invoke.mock.calls.filter((c) => c[0] === "chat_send")).toHaveLength(1);
+
+    // Once the first turn ends the next send goes through.
+    emit(ctx.listeners, "chat://frame", completed);
+    await transport.sendChatMessage(SESSION, "second");
+    expect(ctx.invoke.mock.calls.filter((c) => c[0] === "chat_send")).toHaveLength(2);
+  });
+
+  it("releases the session when the send itself fails, so the user can retry", async () => {
+    const { ctx, transport, activeMessage } = setup();
+    ctx.invoke.mockImplementationOnce(async () => {
+      throw new Error("connecting to managed daemon");
+    });
+    await expect(transport.sendChatMessage(SESSION, "hello")).rejects.toThrow(/managed daemon/);
+    expect(await activeMessage()).toBeNull();
+    await transport.sendChatMessage(SESSION, "hello");
+    expect(await activeMessage()).not.toBeNull();
   });
 });
 
