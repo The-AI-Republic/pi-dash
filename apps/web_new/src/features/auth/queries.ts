@@ -17,6 +17,7 @@ import {
 
 import { getAppClient } from "../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../core/query/client.js";
+import { meQueryOptions } from "../../core/session/queries.js";
 
 export const authKeys = {
   invitation: (slug: string, invitationId: string) => ["auth", "invitation", slug, invitationId] as const,
@@ -114,4 +115,10 @@ export function useProjectRoles(slug: string) {
 /** One project row with its fetch status for the denial screens. */
 export function useProjectRow(slug: string, projectId: string) {
   return useQuery(projectQueryOptions(getAppClient(), slug, projectId));
+}
+
+/** The signed-in address, or undefined for visitors and failed reads. */
+export function useViewerEmail(): string | undefined {
+  const { data } = useQuery(meQueryOptions(getAppClient()));
+  return data?.email;
 }

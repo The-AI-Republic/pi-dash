@@ -12,12 +12,14 @@ import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
 import { Route as WsRouteRouteImport } from "./routes/$ws/route";
 import { Route as CreateWorkspaceRouteImport } from "./routes/create-workspace";
+import { Route as InvitationsRouteImport } from "./routes/invitations";
 import { Route as LoginRouteImport } from "./routes/login";
 import { Route as OnboardingRouteImport } from "./routes/onboarding";
 import { Route as RegisterRouteImport } from "./routes/register";
 import { Route as SignInRouteImport } from "./routes/sign-in";
 import { Route as SignUpRouteImport } from "./routes/sign-up";
 import { Route as SigninRouteImport } from "./routes/signin";
+import { Route as WorkspaceInvitationsRouteImport } from "./routes/workspace-invitations";
 import { Route as WsSplatRouteImport } from "./routes/$ws/$";
 import { Route as WsGatedRouteRouteImport } from "./routes/$ws/_gated/route";
 import { Route as AccountsForgotPasswordRouteImport } from "./routes/accounts/forgot-password";
@@ -43,6 +45,11 @@ const WsRouteRoute = WsRouteRouteImport.update({
 const CreateWorkspaceRoute = CreateWorkspaceRouteImport.update({
   id: "/create-workspace",
   path: "/create-workspace",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const InvitationsRoute = InvitationsRouteImport.update({
+  id: "/invitations",
+  path: "/invitations",
   getParentRoute: () => rootRouteImport,
 } as any);
 const LoginRoute = LoginRouteImport.update({
@@ -73,6 +80,11 @@ const SignUpRoute = SignUpRouteImport.update({
 const SigninRoute = SigninRouteImport.update({
   id: "/signin",
   path: "/signin",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const WorkspaceInvitationsRoute = WorkspaceInvitationsRouteImport.update({
+  id: "/workspace-invitations",
+  path: "/workspace-invitations",
   getParentRoute: () => rootRouteImport,
 } as any);
 const WsSplatRoute = WsSplatRouteImport.update({
@@ -134,12 +146,14 @@ export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
   "/$ws": typeof WsRouteRouteWithChildren;
   "/create-workspace": typeof CreateWorkspaceRoute;
+  "/invitations": typeof InvitationsRoute;
   "/login": typeof LoginRoute;
   "/onboarding": typeof OnboardingRoute;
   "/register": typeof RegisterRoute;
   "/sign-in": typeof SignInRoute;
   "/sign-up": typeof SignUpRoute;
   "/signin": typeof SigninRoute;
+  "/workspace-invitations": typeof WorkspaceInvitationsRoute;
   "/$ws/$": typeof WsSplatRoute;
   "/accounts/forgot-password": typeof AccountsForgotPasswordRoute;
   "/accounts/reset-password": typeof AccountsResetPasswordRoute;
@@ -155,12 +169,14 @@ export interface FileRoutesByTo {
   "/": typeof IndexRoute;
   "/$ws": typeof WsGatedIndexRoute;
   "/create-workspace": typeof CreateWorkspaceRoute;
+  "/invitations": typeof InvitationsRoute;
   "/login": typeof LoginRoute;
   "/onboarding": typeof OnboardingRoute;
   "/register": typeof RegisterRoute;
   "/sign-in": typeof SignInRoute;
   "/sign-up": typeof SignUpRoute;
   "/signin": typeof SigninRoute;
+  "/workspace-invitations": typeof WorkspaceInvitationsRoute;
   "/$ws/$": typeof WsSplatRoute;
   "/accounts/forgot-password": typeof AccountsForgotPasswordRoute;
   "/accounts/reset-password": typeof AccountsResetPasswordRoute;
@@ -176,12 +192,14 @@ export interface FileRoutesById {
   "/": typeof IndexRoute;
   "/$ws": typeof WsRouteRouteWithChildren;
   "/create-workspace": typeof CreateWorkspaceRoute;
+  "/invitations": typeof InvitationsRoute;
   "/login": typeof LoginRoute;
   "/onboarding": typeof OnboardingRoute;
   "/register": typeof RegisterRoute;
   "/sign-in": typeof SignInRoute;
   "/sign-up": typeof SignUpRoute;
   "/signin": typeof SigninRoute;
+  "/workspace-invitations": typeof WorkspaceInvitationsRoute;
   "/$ws/_gated": typeof WsGatedRouteRouteWithChildren;
   "/$ws/$": typeof WsSplatRoute;
   "/accounts/forgot-password": typeof AccountsForgotPasswordRoute;
@@ -200,12 +218,14 @@ export interface FileRouteTypes {
     | "/"
     | "/$ws"
     | "/create-workspace"
+    | "/invitations"
     | "/login"
     | "/onboarding"
     | "/register"
     | "/sign-in"
     | "/sign-up"
     | "/signin"
+    | "/workspace-invitations"
     | "/$ws/$"
     | "/accounts/forgot-password"
     | "/accounts/reset-password"
@@ -221,12 +241,14 @@ export interface FileRouteTypes {
     | "/"
     | "/$ws"
     | "/create-workspace"
+    | "/invitations"
     | "/login"
     | "/onboarding"
     | "/register"
     | "/sign-in"
     | "/sign-up"
     | "/signin"
+    | "/workspace-invitations"
     | "/$ws/$"
     | "/accounts/forgot-password"
     | "/accounts/reset-password"
@@ -241,12 +263,14 @@ export interface FileRouteTypes {
     | "/"
     | "/$ws"
     | "/create-workspace"
+    | "/invitations"
     | "/login"
     | "/onboarding"
     | "/register"
     | "/sign-in"
     | "/sign-up"
     | "/signin"
+    | "/workspace-invitations"
     | "/$ws/_gated"
     | "/$ws/$"
     | "/accounts/forgot-password"
@@ -264,12 +288,14 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
   WsRouteRoute: typeof WsRouteRouteWithChildren;
   CreateWorkspaceRoute: typeof CreateWorkspaceRoute;
+  InvitationsRoute: typeof InvitationsRoute;
   LoginRoute: typeof LoginRoute;
   OnboardingRoute: typeof OnboardingRoute;
   RegisterRoute: typeof RegisterRoute;
   SignInRoute: typeof SignInRoute;
   SignUpRoute: typeof SignUpRoute;
   SigninRoute: typeof SigninRoute;
+  WorkspaceInvitationsRoute: typeof WorkspaceInvitationsRoute;
   AccountsForgotPasswordRoute: typeof AccountsForgotPasswordRoute;
   AccountsResetPasswordRoute: typeof AccountsResetPasswordRoute;
   AccountsSetPasswordRoute: typeof AccountsSetPasswordRoute;
@@ -298,6 +324,13 @@ declare module "@tanstack/react-router" {
       path: "/create-workspace";
       fullPath: "/create-workspace";
       preLoaderRoute: typeof CreateWorkspaceRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/invitations": {
+      id: "/invitations";
+      path: "/invitations";
+      fullPath: "/invitations";
+      preLoaderRoute: typeof InvitationsRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/login": {
@@ -340,6 +373,13 @@ declare module "@tanstack/react-router" {
       path: "/signin";
       fullPath: "/signin";
       preLoaderRoute: typeof SigninRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/workspace-invitations": {
+      id: "/workspace-invitations";
+      path: "/workspace-invitations";
+      fullPath: "/workspace-invitations";
+      preLoaderRoute: typeof WorkspaceInvitationsRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/$ws/$": {
@@ -464,12 +504,14 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   WsRouteRoute: WsRouteRouteWithChildren,
   CreateWorkspaceRoute: CreateWorkspaceRoute,
+  InvitationsRoute: InvitationsRoute,
   LoginRoute: LoginRoute,
   OnboardingRoute: OnboardingRoute,
   RegisterRoute: RegisterRoute,
   SignInRoute: SignInRoute,
   SignUpRoute: SignUpRoute,
   SigninRoute: SigninRoute,
+  WorkspaceInvitationsRoute: WorkspaceInvitationsRoute,
   AccountsForgotPasswordRoute: AccountsForgotPasswordRoute,
   AccountsResetPasswordRoute: AccountsResetPasswordRoute,
   AccountsSetPasswordRoute: AccountsSetPasswordRoute,
