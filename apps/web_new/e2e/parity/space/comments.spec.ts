@@ -6,8 +6,9 @@
 // (SPC-052), posting with attachments (SPC-053), mentions (SPC-054),
 // owner menu (SPC-055), edits (SPC-056) and comment reactions (SPC-057).
 // Each scenario flips the board flags through the publish API and restores
-// them, so reruns on one seeded stack stay green. Five scenarios pin
-// current bugs (NEWFRONT-459/460/461/465); the rows record the intent.
+// them, so reruns on one seeded stack stay green. Seven scenarios pin
+// current bugs (NEWFRONT-459/460/461/465/466/467); the rows record the
+// intent.
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
 import {
