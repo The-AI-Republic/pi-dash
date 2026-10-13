@@ -74,6 +74,17 @@ export interface AgentRuntimeApi {
   isAvailable(): Promise<boolean>;
 }
 
+/**
+ * Local session teardown (desktop only). The auth area calls this around
+ * sign-out (AUTH-017); the desktop epic implements and proves it
+ * (DESK-010: daemon stop, credential destroy, enrollment removal, webview
+ * wipe). Callers swallow failures: landing on sign-in stays right.
+ */
+export interface SessionTeardownApi {
+  /** Wipe local session artifacts. Rejects when the wipe fails. */
+  clearLocalSession(): Promise<void>;
+}
+
 /** Desktop auto-updater (desktop only). */
 export interface UpdaterApi {
   checkNow(): Promise<boolean>;
@@ -96,4 +107,5 @@ export interface Platform {
   deepLinks?: DeepLinkApi;
   agentRuntime?: AgentRuntimeApi;
   updates?: UpdaterApi;
+  sessionTeardown?: SessionTeardownApi;
 }

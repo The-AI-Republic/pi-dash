@@ -11,7 +11,9 @@ import {
   getSessionClient,
   instanceConfigQueryOptions,
   meQueryOptions,
+  profileQueryOptions,
   selectWorkspace,
+  settingsQueryOptions,
   workspacesQueryOptions,
 } from "./queries.js";
 import { useSessionStore, type SessionStatus } from "./store.js";
@@ -51,4 +53,14 @@ export function useSessionStatus(): SessionStatus {
 /** Instance flags the auth cards and workspace surfaces read. */
 export function useInstanceConfig() {
   return useQuery(instanceConfigQueryOptions(getSessionClient()));
+}
+
+/** The signed-in user's profile. Guards read is_onboarded off it. */
+export function useProfile() {
+  return useQuery(profileQueryOptions(getSessionClient()));
+}
+
+/** The signed-in user's settings. Landing reads the workspace slugs off it. */
+export function useMeSettings() {
+  return useQuery(settingsQueryOptions(getSessionClient()));
 }

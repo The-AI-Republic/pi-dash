@@ -3,12 +3,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, renderHook } from "@testing-library/react";
-import type { Transport } from "@pidash/api-client";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { Transport, TransportInit } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
+import { useSessionStore } from "../../core/session/store.js";
 import {
   useForgotPassword,
   useMagicSignIn,
@@ -17,7 +19,16 @@ import {
   usePasswordSignIn,
   usePasswordSignUp,
   useSetPassword,
+  useSignOut,
 } from "./api.js";
+
+vi.mock("../../shared/shell/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../shared/shell/index.js")>();
+  return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
+});
+
+import { notifyError } from "../../shared/shell/index.js";
+import { SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE } from "./signOut.js";
 
 interface SeenRequest {
   url: string;
@@ -62,8 +73,64 @@ function wrapper(client: QueryClient): React.ComponentType<{ children?: unknown 
   };
 }
 
+interface StubRoute {
+  status: number;
+  body: string;
+  url: string;
+}
+
+function stubTransport(handler: (url: string, init: TransportInit) => StubRoute | Promise<StubRoute>): Transport {
+  return async (url, init) => {
+    const response = await handler(url, init);
+    return {
+      status: response.status,
+      url: response.url,
+      headers: { get: () => null },
+      text: async () => response.body,
+    };
+  };
+}
+
+const CSRF = JSON.stringify({ csrf_token: "csrf" });
+
+interface Settlement {
+  landing?: string | undefined;
+  error?: unknown;
+}
+
+function SignOutProbe({ onSettled }: { onSettled: (outcome: Settlement) => void }): React.ReactElement {
+  const signOut = useSignOut();
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        signOut.mutate(undefined, {
+          onSuccess: (landing) => onSettled({ landing }),
+          onError: (error) => onSettled({ error }),
+        });
+      }}
+    >
+      Sign out
+    </button>
+  );
+}
+
+function renderProbe(transport: Transport, onSettled: (outcome: Settlement) => void): QueryClient {
+  createAppClient("https://api.test", transport);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  queryClient.setQueryData(["session", "me"], { id: "user-1" });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <SignOutProbe onSettled={onSettled} />
+    </QueryClientProvider>
+  );
+  return queryClient;
+}
+
 afterEach(() => {
   resetAppClient();
+  vi.mocked(notifyError).mockClear();
+  useSessionStore.setState({ status: "authenticated", returnUrl: null });
 });
 
 /**
@@ -149,3 +216,46 @@ describe.each([
     });
   }
 );
+
+describe("useSignOut", () => {
+  it("signs out to the entry route", async () => {
+    const settled: Settlement[] = [];
+    const queryClient = renderProbe(
+      stubTransport(async (url) => ({
+        status: 200,
+        body: url.endsWith("/auth/get-csrf-token/") ? CSRF : "{}",
+        url,
+      })),
+      (outcome) => settled.push(outcome)
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+    await waitFor(() => expect(settled).toHaveLength(1));
+    expect(settled[0]).toEqual({ landing: "/" });
+    expect(queryClient.getQueryData(["session", "me"])).toBeUndefined();
+    expect(useSessionStore.getState().status).toBe("signed-out");
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("toasts and rejects a failed POST without clearing", async () => {
+    const settled: Settlement[] = [];
+    const queryClient = renderProbe(
+      stubTransport(async (url) => {
+        if (url.endsWith("/auth/sign-out/")) return { status: 500, body: "{}", url };
+        return { status: 200, body: CSRF, url };
+      }),
+      (outcome) => settled.push(outcome)
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+    await waitFor(() => expect(settled).toHaveLength(1));
+    expect(settled[0]?.error).toBeInstanceOf(Error);
+    expect(notifyError).toHaveBeenCalledWith(SIGN_OUT_FAILED_TITLE, SIGN_OUT_FAILED_MESSAGE);
+    expect(queryClient.getQueryData(["session", "me"])).toEqual({ id: "user-1" });
+    expect(useSessionStore.getState().status).toBe("authenticated");
+  });
+});

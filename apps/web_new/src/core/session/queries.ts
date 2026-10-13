@@ -9,6 +9,7 @@ import { queryOptions } from "@tanstack/react-query";
 import {
   getInstanceConfig,
   getMe,
+  getMeSettings,
   getProfile,
   listWorkspaces,
   type ApiClient,
@@ -22,6 +23,7 @@ export const sessionKeys = {
   me: ["session", "me"],
   workspaces: ["session", "workspaces"],
   profile: ["session", "profile"],
+  settings: ["session", "settings"],
 } as const;
 
 export function meQueryOptions(client: ApiClient) {
@@ -45,6 +47,15 @@ export function profileQueryOptions(client: ApiClient) {
   return queryOptions({
     queryKey: sessionKeys.profile,
     queryFn: () => getProfile(client),
+    staleTime: REFERENCE_STALE_TIME_MS,
+  });
+}
+
+/** The signed-in user's settings (last/fallback workspace slugs for AUTH-016 landing). */
+export function settingsQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: sessionKeys.settings,
+    queryFn: () => getMeSettings(client),
     staleTime: REFERENCE_STALE_TIME_MS,
   });
 }
@@ -102,12 +113,4 @@ export function decideWorkspaceRouteGate(args: {
 }): WorkspaceGateDecision {
   if (!args.signedIn) return "ok";
   return selectWorkspace(args.workspaces, args.slugOrId) === undefined ? "not-found" : "ok";
-}
-
-/**
- * The gated-layout gate (SHELL-001): every known workspace page renders
- * behind sign-in. Pure, so routes and tests share it.
- */
-export function decideGatedWorkspaceGate(signedIn: boolean): WorkspaceGateDecision {
-  return signedIn ? "ok" : "sign-in";
 }
