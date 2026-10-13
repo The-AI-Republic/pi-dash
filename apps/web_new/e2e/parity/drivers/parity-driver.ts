@@ -9830,6 +9830,85 @@ export interface DeskSigninUpdateLink {
   /** Scoped-dialog headline cards in display order, settled (placeholders gone). */
   analyticsDialogHeadlineCards(): Promise<AnalyticsHeadlineCard[]>;
   // ---------------------------------------------------------------------------
+  // Analytics custom insights, data tables, and scoped dialog (NEWFRONT-377,
+  // ANL-010..017). The custom-insights section pairs three picker buttons
+  // (metric, x property, optional second split) with a bar chart plus a data
+  // table; the insight table lists per-project stage counts; the scoped
+  // dialog retitles the area per surface. Appended; existing entries above
+  // are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Current labels of the three custom-insights picker buttons, in order. */
+  analyticsCustomPickerLabels(): Promise<{ metric: string; xAxis: string; split: string }>;
+  /** Option labels offered by one custom-insights picker (0 metric, 1 x, 2 split); opens and closes it. */
+  analyticsCustomPickerOptions(index: 0 | 1 | 2): Promise<string[]>;
+  /** Choose one option in a custom-insights picker; resolves once the re-query lands. */
+  analyticsCustomPickerSelect(index: 0 | 1 | 2, label: string): Promise<void>;
+  /** Custom bar chart facts: per-segment fills plus rounding, x labels, legend presence. */
+  analyticsCustomChartFacts(): Promise<AnalyticsCustomChartFacts>;
+  /** Tooltip segment rows after hovering one custom-chart bar (label plus value per segment). */
+  analyticsCustomTooltipSegments(barIndex: number): Promise<AnalyticsCustomTooltipRow[]>;
+  /** Body-row count of one analytics table (atomic; race-free settle polls). */
+  analyticsExportRowCount(kind: AnalyticsExportTable): Promise<number>;
+  /** Header cell texts of one analytics table in display order. */
+  analyticsExportHeaders(kind: AnalyticsExportTable): Promise<string[]>;
+  /** Row-count label beside one analytics table's search box ("N Projects"). */
+  analyticsExportCountLabel(kind: AnalyticsExportTable): Promise<string>;
+  /** Whether one analytics table's search box currently renders expanded. */
+  analyticsExportSearchExpanded(kind: AnalyticsExportTable): Promise<boolean>;
+  /** Close one analytics table's open search box through its clear control. */
+  analyticsExportSearchClose(kind: AnalyticsExportTable): Promise<void>;
+  /** Empty-view title when one analytics table shows its guidance branch, else null. */
+  analyticsExportEmptyText(kind: AnalyticsExportTable): Promise<string | null>;
+  /** Stall the insight-table stats read so its skeletons stay up (test hook). */
+  analyticsInsightTableStall(): Promise<void>;
+  /** Release a stalled insight-table stats read (test hook). */
+  analyticsInsightTableRelease(): Promise<void>;
+  /** Skeleton placeholder cells currently rendered in the insight-table area. */
+  analyticsInsightSkeletonCells(): Promise<number>;
+  /** Open the scoped dialog from a project's issues list, authenticated as the given session. */
+  analyticsDialogOpenFromIssues(
+    workspaceSlug: string,
+    projectId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void>;
+  /** Open the scoped dialog from a cycle detail page, authenticated as the given session. */
+  analyticsDialogOpenFromCycle(
+    workspaceSlug: string,
+    projectId: string,
+    cycleId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void>;
+  /** Open the scoped dialog from a module detail page, authenticated as the given session. */
+  analyticsDialogOpenFromModule(
+    workspaceSlug: string,
+    projectId: string,
+    moduleId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void>;
+  /** Analytics open-triggers on the current surface (guest-negative proof). */
+  analyticsSurfaceTriggerCount(): Promise<number>;
+  /** Scoped-dialog heading text naming the current scope. */
+  analyticsDialogTitle(): Promise<string>;
+  /** Whether the dialog's pre-content spinner mounted during the last dialog open. */
+  analyticsDialogSpinnerSeen(): Promise<boolean>;
+  /** Whether the dialog's wide-screen toggle renders visibly at this viewport. */
+  analyticsDialogWideToggleVisible(): Promise<boolean>;
+  /** Flip the dialog's wide-screen toggle; resolves once the width settles. */
+  analyticsDialogToggleWide(): Promise<void>;
+  /** Current dialog content width in CSS pixels. */
+  analyticsDialogWidth(): Promise<number>;
+  /** Body-row count of the dialog's breakdown table (atomic; race-free settle polls). */
+  analyticsDialogRowCount(): Promise<number>;
+  /** Header cell texts of the dialog's breakdown table in display order. */
+  analyticsDialogTableHeaders(): Promise<string[]>;
+  /** Body-row cell texts of the dialog's breakdown table in display order. */
+  analyticsDialogTableCells(): Promise<string[][]>;
+  /** First-column identity facts per dialog breakdown row (avatar, initial, or unassigned). */
+  analyticsDialogAssigneeFacts(): Promise<AnalyticsDialogAssignee[]>;
+  /** Click one dialog table's export action; resolves with the downloaded file. */
+  analyticsDialogExportDownload(tableIndex: 0 | 1): Promise<LocalFileDownload>;
+  // ---------------------------------------------------------------------------
   // Profile-settings shell, general/account tabs and security tab
   // (NEWFRONT-426, rows PROF-009..015, PROF-026). The standalone settings
   // page at /settings/profile/<tab>: grouped sidebar navigation, the general
@@ -11102,6 +11181,50 @@ export interface AnalyticsCreatedResolvedFacts {
   series: number;
   /** Guidance empty-panel text, or null when the chart renders. */
   guidance: string | null;
+}
+
+/** One custom-chart bar segment (NEWFRONT-377, ANL-011). */
+export interface AnalyticsCustomChartSegment {
+  /** Segment center x in SVG units (groups segments into bars). */
+  cx: number;
+  /** Segment top y in SVG units (orders segments within a bar). */
+  cy: number;
+  /** Segment fill color as rendered. */
+  fill: string;
+  /** Whether the segment's top edge rounds. */
+  topRounded: boolean;
+  /** Whether the segment's bottom edge rounds. */
+  bottomRounded: boolean;
+}
+
+/** Custom bar chart facts (NEWFRONT-377, ANL-011). */
+export interface AnalyticsCustomChartFacts {
+  /** Rendered bar segments in document order. */
+  segments: AnalyticsCustomChartSegment[];
+  /** X-axis tick labels in display order. */
+  xLabels: string[];
+  /** Whether a legend renders beside the chart. */
+  legend: boolean;
+}
+
+/** One custom-chart tooltip row (NEWFRONT-377, ANL-011). */
+export interface AnalyticsCustomTooltipRow {
+  /** Segment label as rendered. */
+  label: string;
+  /** Segment value as rendered. */
+  value: string;
+}
+
+/** One dialog breakdown first-column identity (NEWFRONT-377, ANL-015). */
+export interface AnalyticsDialogAssignee {
+  /** First-column text as rendered (name, initial carrier, or the unassigned marker). */
+  text: string;
+  /** Whether the cell shows an avatar image. */
+  avatar: boolean;
+  /** Whether the cell shows a name initial with no avatar. */
+  initial: boolean;
+  /** Whether the cell shows the unassigned marker. */
+  unassigned: boolean;
 }
 
 /** One workspace-exports history row (NEWFRONT-381, EXP-007/008/011/012). */
