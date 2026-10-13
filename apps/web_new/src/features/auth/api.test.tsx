@@ -13,6 +13,10 @@ import { createAppClient, resetAppClient } from "../../core/api/client.js";
 import { useSessionStore } from "../../core/session/store.js";
 import {
   FINISH_FAILURE_TITLE,
+  useAcceptWorkspaceInvitations,
+  useCheckWorkspaceSlug,
+  useCreateJoinRequest,
+  useCreateWorkspace,
   useFinishOnboarding,
   useForgotPassword,
   useMagicSignIn,
@@ -20,6 +24,7 @@ import {
   usePasswordReset,
   usePasswordSignIn,
   usePasswordSignUp,
+  useSendWorkspaceInvites,
   useSetPassword,
   useSignOut,
   useUpdateMe,
@@ -33,6 +38,7 @@ vi.mock("../../shared/shell/index.js", async (importOriginal) => {
 });
 
 import { notifyError } from "../../shared/shell/index.js";
+import { authKeys } from "./queries.js";
 import { SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE } from "./signOut.js";
 
 interface SeenRequest {
@@ -471,5 +477,235 @@ describe("useFinishOnboarding", () => {
       await expect(result.current.mutateAsync()).rejects.toThrow();
     });
     expect(notifyError).toHaveBeenCalledWith(FINISH_FAILURE_TITLE, expect.any(String));
+  });
+});
+
+const CREATED_WORKSPACE_FIXTURE = {
+  id: "333e4567-e89b-12d3-a456-426614174002",
+  name: "Acme",
+  slug: "acme",
+  logo: null,
+  logo_asset: null,
+  logo_url: null,
+  owner: "123e4567-e89b-12d3-a456-426614174000",
+  organization_size: "2-10",
+  timezone: "UTC",
+  background_color: "",
+  total_members: 1,
+  role: 20,
+  created_by: null,
+  updated_by: null,
+  created_at: "2024-01-02T03:04:05Z",
+  updated_at: "2024-01-02T03:04:05Z",
+};
+
+const WORKSPACE_LIST_FIXTURE = [
+  {
+    id: "333e4567-e89b-12d3-a456-426614174002",
+    name: "Acme",
+    slug: "acme",
+    logo_url: null,
+    total_members: 1,
+    role: 20,
+  },
+];
+
+const SETTINGS_FIXTURE = {
+  id: "123e4567-e89b-12d3-a456-426614174000",
+  email: "ada@example.com",
+  workspace: {
+    last_workspace_id: "333e4567-e89b-12d3-a456-426614174002",
+    last_workspace_slug: "acme",
+    fallback_workspace_id: null,
+    fallback_workspace_slug: null,
+    invites: 0,
+  },
+};
+
+describe("useCheckWorkspaceSlug", () => {
+  it.each([
+    { status: true, expected: true },
+    { status: false, expected: false },
+  ])("resolves $expected when the server reports status $status", async ({ status, expected }) => {
+    const seen: string[] = [];
+    createAppClient(
+      "https://api.test",
+      stubTransport(async (url, init) => {
+        seen.push(`${init.method} ${url}`);
+        return { status: 200, body: JSON.stringify({ status }), url };
+      })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useCheckWorkspaceSlug(), { wrapper: wrapper(queryClient) });
+
+    let free: unknown;
+    await act(async () => {
+      free = await result.current.mutateAsync("acme");
+    });
+    expect(free).toBe(expected);
+    expect(seen).toContain("GET https://api.test/api/workspace-slug-check/?slug=acme");
+  });
+});
+
+describe("useCreateWorkspace", () => {
+  it("creates, stamps the last workspace, and refreshes the list and settings", async () => {
+    const seen: string[] = [];
+    let profilePatch: unknown;
+    createAppClient(
+      "https://api.test",
+      stubTransport(async (url, init) => {
+        seen.push(`${init.method} ${url}`);
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        if (url.endsWith("/api/workspaces/") && init.method === "POST") {
+          return { status: 201, body: JSON.stringify(CREATED_WORKSPACE_FIXTURE), url };
+        }
+        if (url.endsWith("/api/users/me/profile/") && init.method === "PATCH") {
+          profilePatch = JSON.parse(init.body as string);
+          return { status: 200, body: JSON.stringify(PROFILE_FIXTURE), url };
+        }
+        if (url.endsWith("/api/users/me/workspaces/")) {
+          return { status: 200, body: JSON.stringify(WORKSPACE_LIST_FIXTURE), url };
+        }
+        if (url.endsWith("/api/users/me/settings/")) {
+          return { status: 200, body: JSON.stringify(SETTINGS_FIXTURE), url };
+        }
+        return { status: 200, body: "{}", url };
+      })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useCreateWorkspace(), { wrapper: wrapper(queryClient) });
+
+    let created: unknown;
+    await act(async () => {
+      created = await result.current.mutateAsync({ name: "Acme", slug: "acme", organization_size: "2-10" });
+    });
+    expect((created as { slug: string }).slug).toBe("acme");
+    expect(seen).toContain("POST https://api.test/api/workspaces/");
+    expect(profilePatch).toEqual({ last_workspace_id: "333e4567-e89b-12d3-a456-426614174002" });
+    expect(queryClient.getQueryData(["session", "workspaces"])).toEqual(WORKSPACE_LIST_FIXTURE);
+    expect(queryClient.getQueryData(["session", "settings"])).toEqual(SETTINGS_FIXTURE);
+  });
+});
+
+describe("useAcceptWorkspaceInvitations", () => {
+  it("batch-accepts and refreshes the list and settings", async () => {
+    const seen: string[] = [];
+    let accepted: unknown;
+    createAppClient(
+      "https://api.test",
+      stubTransport(async (url, init) => {
+        seen.push(`${init.method} ${url}`);
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        if (url.endsWith("/api/users/me/workspaces/invitations/") && init.method === "POST") {
+          accepted = JSON.parse(init.body as string);
+          return { status: 204, body: "", url };
+        }
+        if (url.endsWith("/api/users/me/workspaces/")) {
+          return { status: 200, body: JSON.stringify(WORKSPACE_LIST_FIXTURE), url };
+        }
+        if (url.endsWith("/api/users/me/settings/")) {
+          return { status: 200, body: JSON.stringify(SETTINGS_FIXTURE), url };
+        }
+        return { status: 200, body: "{}", url };
+      })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useAcceptWorkspaceInvitations(), { wrapper: wrapper(queryClient) });
+
+    await act(async () => {
+      await result.current.mutateAsync(["invite-1", "invite-2"]);
+    });
+    expect(accepted).toEqual({ invitations: ["invite-1", "invite-2"] });
+    expect(queryClient.getQueryData(["session", "workspaces"])).toEqual(WORKSPACE_LIST_FIXTURE);
+    expect(queryClient.getQueryData(["session", "settings"])).toEqual(SETTINGS_FIXTURE);
+  });
+});
+
+describe("useCreateJoinRequest", () => {
+  function joinRequestTransport(seen: string[], answer: unknown) {
+    return stubTransport(async (url, init) => {
+      seen.push(`${init.method} ${url}`);
+      if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+      if (url.endsWith("/api/users/me/workspaces/join-requests/") && init.method === "POST") {
+        return { status: 201, body: JSON.stringify(answer), url };
+      }
+      if (url.endsWith("/api/users/me/workspaces/")) {
+        return { status: 200, body: JSON.stringify(WORKSPACE_LIST_FIXTURE), url };
+      }
+      if (url.endsWith("/api/users/me/settings/")) {
+        return { status: 200, body: JSON.stringify(SETTINGS_FIXTURE), url };
+      }
+      return { status: 200, body: "{}", url };
+    });
+  }
+
+  it("refreshes the list and settings when the answer names a workspace slug", async () => {
+    const seen: string[] = [];
+    createAppClient(
+      "https://api.test",
+      joinRequestTransport(seen, { message: "Already a member", workspace_slug: "acme" })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(authKeys.myJoinRequests, []);
+    const { result } = renderHook(() => useCreateJoinRequest(), { wrapper: wrapper(queryClient) });
+
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await result.current.mutateAsync("admin@example.com");
+    });
+    expect(outcome).toEqual({ message: "Already a member", workspace_slug: "acme" });
+    expect(seen).toContain("GET https://api.test/api/users/me/workspaces/");
+    expect(seen).toContain("GET https://api.test/api/users/me/settings/");
+    expect(queryClient.getQueryData(["session", "workspaces"])).toEqual(WORKSPACE_LIST_FIXTURE);
+    expect(queryClient.getQueryState(authKeys.myJoinRequests)?.isInvalidated).toBe(true);
+  });
+
+  it("skips the refresh for a plain request and still refreshes the request list", async () => {
+    const seen: string[] = [];
+    createAppClient("https://api.test", joinRequestTransport(seen, { message: "Request sent" }));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(authKeys.myJoinRequests, []);
+    const { result } = renderHook(() => useCreateJoinRequest(), { wrapper: wrapper(queryClient) });
+
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await result.current.mutateAsync("admin@example.com");
+    });
+    expect(outcome).toEqual({ message: "Request sent" });
+    expect(seen).not.toContain("GET https://api.test/api/users/me/workspaces/");
+    expect(seen).not.toContain("GET https://api.test/api/users/me/settings/");
+    expect(queryClient.getQueryState(authKeys.myJoinRequests)?.isInvalidated).toBe(true);
+  });
+});
+
+describe("useSendWorkspaceInvites", () => {
+  it("posts the rows against the workspace and resolves the message", async () => {
+    const seen: string[] = [];
+    let posted: unknown;
+    createAppClient(
+      "https://api.test",
+      stubTransport(async (url, init) => {
+        seen.push(`${init.method} ${url}`);
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        if (url.endsWith("/api/workspaces/acme/invitations/")) {
+          posted = JSON.parse(init.body as string);
+          return { status: 200, body: JSON.stringify({ message: "Invitations sent" }), url };
+        }
+        return { status: 200, body: "{}", url };
+      })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useSendWorkspaceInvites(), { wrapper: wrapper(queryClient) });
+
+    let message: unknown;
+    await act(async () => {
+      message = await result.current.mutateAsync({
+        slug: "acme",
+        emails: [{ email: "sam@example.com", role: 15 }],
+      });
+    });
+    expect(message).toBe("Invitations sent");
+    expect(posted).toEqual({ emails: [{ email: "sam@example.com", role: 15 }] });
+    expect(seen).toContain("POST https://api.test/api/workspaces/acme/invitations/");
   });
 });

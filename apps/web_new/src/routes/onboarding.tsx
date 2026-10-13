@@ -17,7 +17,7 @@ import {
   loadLandingTarget,
   workspacesQueryOptions,
 } from "../core/session/index.js";
-import { myInvitationsQueryOptions, OnboardingFlow } from "../features/auth/index.js";
+import { InviteMembersStep, myInvitationsQueryOptions, OnboardingFlow, WorkspaceStep } from "../features/auth/index.js";
 import { getToastManager, useSessionExpiredRedirect } from "../shared/shell/index.js";
 
 export const Route = createFileRoute("/onboarding")({
@@ -52,7 +52,7 @@ export function OnboardingScreen(): React.ReactElement {
   useSessionExpiredRedirect();
   return (
     <main>
-      <OnboardingFlow />
+      <OnboardingFlow steps={{ workspace: WorkspaceStep, invite: InviteMembersStep }} />
       <ToastHost manager={getToastManager()} />
     </main>
   );
