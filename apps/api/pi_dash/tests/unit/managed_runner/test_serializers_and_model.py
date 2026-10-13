@@ -209,6 +209,115 @@ def test_engine_version_is_length_capped(bundled_runner):
     assert len(bundled_runner.dev_metadata["codex_version"]) <= 64
 
 
+def test_apply_hello_emits_engine_version_log_event(bundled_runner, caplog):
+    """Design §15.1: a ``managed_runner.engine_version`` structured event is
+    logged at session open so support can see which bundled build reported in."""
+    import logging
+
+    from pi_dash.runner.services.session_service import apply_hello
+
+    with caplog.at_level(logging.INFO, logger="pi_dash.managed_runner"):
+        apply_hello(bundled_runner, {"os": "linux", "engine_version": "codex 1.2.3"})
+
+    events = [r.getMessage() for r in caplog.records if "managed_runner.engine_version" in r.getMessage()]
+    assert len(events) == 1
+    assert f"runner={bundled_runner.id}" in events[0]
+    assert "version=codex 1.2.3" in events[0]
+
+
+def test_apply_hello_omits_engine_version_log_when_not_reported(bundled_runner, caplog):
+    """A daemon that never sends ``engine_version`` produces no log noise."""
+    import logging
+
+    from pi_dash.runner.services.session_service import apply_hello
+
+    with caplog.at_level(logging.INFO, logger="pi_dash.managed_runner"):
+        apply_hello(bundled_runner, {"os": "linux", "version": "0.1.21"})
+
+    assert not [r for r in caplog.records if "managed_runner.engine_version" in r.getMessage()]
+
+
+@pytest.mark.parametrize("settings_module", ["pi_dash.settings.local", "pi_dash.settings.production"])
+def test_managed_runner_event_logger_is_declared_in_settings(settings_module):
+    """Regression guard for the defect the first test pass found.
+
+    ``LOGGING`` sets ``disable_existing_loggers: True`` and declares no
+    ``root`` logger, so any logger name it does not list resolves to level
+    WARNING with zero handlers. A ``managed_runner.*`` event emitted on an
+    undeclared name is written nowhere — and a ``caplog``-based assertion
+    cannot see that, because ``caplog.at_level`` attaches its own handler and
+    forces the level. This test reads the real settings instead.
+    """
+    import importlib
+
+    loggers = importlib.import_module(settings_module).LOGGING["loggers"]
+    assert "pi_dash.managed_runner" in loggers, (
+        f"{settings_module} does not declare 'pi_dash.managed_runner'; "
+        "managed_runner.* events would be silently dropped"
+    )
+    config = loggers["pi_dash.managed_runner"]
+    assert config["handlers"], "declared with no handlers — events still go nowhere"
+    assert config["level"] in ("INFO", "DEBUG")
+
+
+def test_engine_version_event_reaches_a_handler_under_real_logging_config(bundled_runner):
+    """End-to-end proof that the event is observable: apply the project's own
+    ``LOGGING`` (handlers swapped for an in-memory one) and confirm the record
+    emitted by ``apply_hello`` actually arrives."""
+    import copy
+    import importlib
+    import logging
+    import logging.config
+
+    from pi_dash.runner.services.session_service import apply_hello
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    config = copy.deepcopy(importlib.import_module("pi_dash.settings.local").LOGGING)
+    # Leave every other logger in the process alone; this test is only about
+    # whether our event name resolves to a handler.
+    config["disable_existing_loggers"] = False
+    config["handlers"] = {"capture": {"()": _Capture, "level": "DEBUG"}}
+    for logger_config in config["loggers"].values():
+        logger_config["handlers"] = ["capture"]
+
+    # ``dictConfig`` rewires *every* logger the config declares, not just ours,
+    # and there is no "undo". Snapshot them all so the capture handler and the
+    # ``propagate=False`` it sets cannot leak into the rest of the pytest
+    # process — a later test using ``caplog`` on e.g. ``pi_dash.api`` would
+    # otherwise capture nothing, because caplog's handler lives on the root
+    # logger and ``propagate=False`` stops records from ever reaching it.
+    saved = {}
+    for name in config["loggers"]:
+        existing = logging.getLogger(name)
+        saved[name] = (
+            existing.level,
+            existing.handlers[:],
+            existing.propagate,
+            existing.disabled,
+        )
+
+    try:
+        logging.config.dictConfig(config)
+        apply_hello(bundled_runner, {"os": "linux", "engine_version": "codex 1.2.3"})
+    finally:
+        for name, (level, handlers, propagate, disabled) in saved.items():
+            restored = logging.getLogger(name)
+            restored.setLevel(level)
+            restored.handlers = handlers
+            restored.propagate = propagate
+            restored.disabled = disabled
+
+    messages = [r.getMessage() for r in records if "managed_runner.engine_version" in r.getMessage()]
+    assert len(messages) == 1, "the engine_version event never reached a handler"
+    assert f"runner={bundled_runner.id}" in messages[0]
+    assert "version=codex 1.2.3" in messages[0]
+
+
 def test_apply_hello_persists_agent_kind_capability(bundled_runner):
     """The daemon reports the ``AgentKind`` it drives; we persist it as an
     ``agent:<kind>`` capability so diagnostics can identify the agent exactly."""

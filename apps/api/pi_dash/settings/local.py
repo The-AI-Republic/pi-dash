@@ -65,6 +65,14 @@ LOGGING = {
             "propagate": False,
         },
         "pi_dash.api": {"level": "INFO", "handlers": ["console"], "propagate": False},
+        # Managed-runner product events (design §15.1). Declared explicitly
+        # because ``disable_existing_loggers`` is True and there is no
+        # ``root`` logger: an undeclared name gets no handlers at all.
+        "pi_dash.managed_runner": {
+            "level": "INFO",
+            "handlers": ["console"],
+            "propagate": False,
+        },
         "pi_dash.worker": {"level": "INFO", "handlers": ["console"], "propagate": False},
         "pi_dash.exception": {
             "level": "ERROR",
