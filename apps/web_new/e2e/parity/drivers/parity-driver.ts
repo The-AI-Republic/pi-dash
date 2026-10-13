@@ -8651,6 +8651,58 @@ export interface SpaceBoardStability {
   cloudAppsClickRetry(): Promise<void>;
   /** Click the sidebar create control on the Apps page; true when the create dialog opens. */
   cloudAppsSidebarCreateOpensDialog(): Promise<boolean>;
+
+  // --- Cloud profile tabs + misc (NEWFRONT-440, CLOUD-032..040).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract. Reads are structural (titles, markers, control kinds) so
+  // --- the scenarios prove the surface without quoting its copy.
+
+  /** Connection cards on the AI Assistant tab, in display order. */
+  cloudAssistantConnections(): Promise<CloudAssistantConnectionFacts[]>;
+  /** Whether the empty-list guidance panel shows, and its add action label. */
+  cloudAssistantEmptyState(): Promise<{ visible: boolean; addLabel: string | null }>;
+  /** Which assistant-tab view is showing: the list or the add form. */
+  cloudAssistantView(): Promise<"list" | "add">;
+  /** Open the add-connection view from the list header. */
+  cloudAssistantClickAdd(): Promise<void>;
+  /** Back to the connections list from the add view. */
+  cloudAssistantClickBackToList(): Promise<void>;
+  /** Select the connection titled `title` via its radio. */
+  cloudAssistantSelectConnection(title: string): Promise<void>;
+  /** Set the model of the connection titled `title` (picker or text commit). */
+  cloudAssistantSetModel(title: string, model: string): Promise<void>;
+  /** Activate a row action (Test, Remove, Disconnect) on the titled connection. */
+  cloudAssistantClickRowAction(title: string, action: "Test" | "Remove" | "Disconnect"): Promise<void>;
+  /** Add-form structure: provider options, base-field visibility, save state. */
+  cloudAssistantAddFormFacts(): Promise<CloudAssistantAddFormFacts>;
+  /** Fill the add form; resolves once the fields hold the values. */
+  cloudAssistantAddFill(fill: CloudAssistantAddFill): Promise<void>;
+  /** Submit the add form; resolves once the list view returns. */
+  cloudAssistantAddSave(): Promise<void>;
+  /** Activate the provider sign-in action on the titled account row. */
+  cloudAssistantClickProviderSignIn(title: string): Promise<void>;
+  /** Wait for the provider sign-in popup; resolves with its URL and closes it. */
+  cloudAssistantProviderPopupUrl(): Promise<string>;
+  /** Count provider-login status polls from now on. */
+  cloudAssistantArmStatusCounter(): Promise<void>;
+  /** Provider-login status polls seen since the arm. */
+  cloudAssistantStatusHits(): Promise<number>;
+  /** Make window.open return null from now on (blocked-popup fixture). */
+  cloudAssistantBlockPopups(): Promise<void>;
+  /** Stale-session notice on the titled managed row, or null when absent. */
+  cloudAssistantStaleNotice(title: string): Promise<string | null>;
+  /** Visible profile-sidebar tab labels, in display order. */
+  cloudProfileSidebarTabs(): Promise<string[]>;
+  /** Active profile tab key, or null when none marks active. */
+  cloudProfileActiveTab(): Promise<string | null>;
+  /** Whether the shared tool-server section renders inside the assistant tab. */
+  cloudAssistantMcpSectionVisible(): Promise<boolean>;
+  /** Whether the Apps pointer renders inside the assistant tab. */
+  cloudAssistantAppsPointerVisible(): Promise<boolean>;
+  /** Whether the workspace sidebar shows the plan badge (absent on the oracle: NEWFRONT-474). */
+  cloudPlanBadgeVisible(): Promise<boolean>;
+  /** Focused control role + label, or null when the body holds focus. */
+  cloudFocusedControl(): Promise<{ role: string; label: string } | null>;
 }
 
 /** One Apps catalog card (NEWFRONT-439, CLOUD-028). */
@@ -8791,6 +8843,48 @@ export interface CloudProviderButtonFacts {
   label: string;
   /** Whether the standard continue action renders alongside it. */
   standardContinueVisible: boolean;
+}
+
+/** One AI Assistant connection card (NEWFRONT-440, CLOUD-032). */
+export interface CloudAssistantConnectionFacts {
+  /** Card title as rendered (kind-appropriate: host-derived or product name). */
+  title: string;
+  /** Whether the card's select radio is checked. */
+  selected: boolean;
+  /** Whether the select radio is disabled. */
+  selectDisabled: boolean;
+  /** Status markers rendered on the card, as text. */
+  markers: string[];
+  /** Model control kind: fixed picker, free text, or hidden (disconnected). */
+  modelControl: "select" | "input" | "hidden";
+  /** Current model value. */
+  modelValue: string;
+  /** Picker options when the control is a select. */
+  modelOptions: string[];
+  /** Whether a last-verified timestamp renders. */
+  verifiedVisible: boolean;
+  /** Row action labels rendered (Test, Remove, Disconnect, provider sign-in). */
+  actions: string[];
+}
+
+/** AI Assistant add-form structure (NEWFRONT-440, CLOUD-033). */
+export interface CloudAssistantAddFormFacts {
+  /** Provider option values in display order. */
+  providers: string[];
+  /** Currently chosen provider value. */
+  provider: string;
+  /** Whether the base-URL field renders. */
+  baseVisible: boolean;
+  /** Whether the save action is enabled. */
+  saveEnabled: boolean;
+}
+
+/** Add-form fill (NEWFRONT-440, CLOUD-033); every field is optional. */
+export interface CloudAssistantAddFill {
+  provider?: string;
+  baseUrl?: string;
+  model?: string;
+  key?: string;
 }
 
 /** Identity facts of one workspace-member roster row (NEWFRONT-411, WSET-011). */

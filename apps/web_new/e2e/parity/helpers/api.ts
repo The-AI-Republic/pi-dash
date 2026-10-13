@@ -20695,3 +20695,306 @@ export async function cloudProvisionWorkspaceMember(
   await cloudCompleteOnboarding(session.cookie, apiBase);
   return session;
 }
+
+// --- Cloud profile tabs + misc (NEWFRONT-440, CLOUD-032..040). ---
+// Appended; existing helpers above are untouched per the shared harness
+// contract. Raw reads/writes against the cloud assistant, billing,
+// instance, and agent endpoints (the session cookie header is sufficient;
+// the REST APIs are CSRF-exempt), plus Django-shell fixtures for states
+// no API can plant: an account-connected credential (real OAuth is
+// unreachable from runners) and a desktop-session token (the scratch IdP
+// has no desktop client).
+
+/** Status plus decoded body for a cloud assistant/billing/agent call. */
+export interface CloudAssistantAnswer {
+  status: number;
+  payload: Record<string, unknown>;
+}
+
+async function cloudAssistantFetch(
+  path: string,
+  sessionCookie: string,
+  init?: RequestInit,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  const res = await fetchTolerant(`${apiBase}${path}`, {
+    ...init,
+    headers: { cookie: sessionCookie, ...(init?.headers ?? {}) },
+  });
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = (await res.json()) as Record<string, unknown>;
+  } catch {
+    payload = {};
+  }
+  return { status: res.status, payload };
+}
+
+/** Raw connections-list read (CLOUD-032/033/034). */
+export async function cloudAssistantConnectionsRaw(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch("/api/users/me/ai-assistant/connections/", sessionCookie, undefined, apiBase);
+}
+
+/** Raw self-supplied-key connection create (CLOUD-033). */
+export async function cloudAssistantCreateByokRaw(
+  sessionCookie: string,
+  body: { provider_kind: string; base_url?: string; model_name: string; api_key: string },
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch(
+    "/api/users/me/ai-assistant/connections/",
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    apiBase
+  );
+}
+
+/** Raw connection select (CLOUD-032). */
+export async function cloudAssistantSelectRaw(
+  sessionCookie: string,
+  connectionId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch(
+    `/api/users/me/ai-assistant/connections/${connectionId}/select/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+    apiBase
+  );
+}
+
+/** Raw connection model update (CLOUD-032). */
+export async function cloudAssistantPatchModelRaw(
+  sessionCookie: string,
+  connectionId: string,
+  modelName: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch(
+    `/api/users/me/ai-assistant/connections/${connectionId}/`,
+    sessionCookie,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model_name: modelName }),
+    },
+    apiBase
+  );
+}
+
+/** Raw connection delete (CLOUD-032). */
+export async function cloudAssistantDeleteRaw(
+  sessionCookie: string,
+  connectionId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch(
+    `/api/users/me/ai-assistant/connections/${connectionId}/`,
+    sessionCookie,
+    { method: "DELETE" },
+    apiBase
+  );
+}
+
+/** Raw account-connection disconnect (CLOUD-032). */
+export async function cloudAssistantDisconnectRaw(
+  sessionCookie: string,
+  connectionId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch(
+    `/api/users/me/ai-assistant/connections/${connectionId}/disconnect/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+    apiBase
+  );
+}
+
+/** Raw provider-config read (CLOUD-037). */
+export async function cloudAssistantConfigRaw(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch("/api/users/me/ai-assistant/config/", sessionCookie, undefined, apiBase);
+}
+
+/** Raw active-config test (CLOUD-032). */
+export async function cloudAssistantTestRaw(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch(
+    "/api/users/me/ai-assistant/config/test/",
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+    apiBase
+  );
+}
+
+/** Raw provider-login start (CLOUD-033). */
+export async function cloudOpenaiLoginStartRaw(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch(
+    "/api/users/me/ai-assistant/openai-login/",
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+    apiBase
+  );
+}
+
+/** Raw provider-login status poll (CLOUD-033). */
+export async function cloudOpenaiLoginStatusRaw(
+  sessionCookie: string,
+  state: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch(
+    `/api/users/me/ai-assistant/openai-login/status/?state=${encodeURIComponent(state)}`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+}
+
+/** Raw billing-plan read (CLOUD-038). */
+export async function cloudBillingPlanRaw(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch("/api/billing/me/plan/", sessionCookie, undefined, apiBase);
+}
+
+/** Raw instance read; the security-tab guard keys off config.is_self_managed (CLOUD-035). */
+export async function cloudInstanceRaw(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch("/api/instances/", sessionCookie, undefined, apiBase);
+}
+
+/** Raw project read for the agent-executor options (CLOUD-040). */
+export async function cloudProjectRaw(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch(
+    `/api/workspaces/${workspaceSlug}/projects/${projectId}/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+}
+
+/** Raw desktop-engine model profile read (CLOUD-040). */
+export async function cloudAgentProfileRaw(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch("/api/users/me/ai-assistant/agent-profile/", sessionCookie, undefined, apiBase);
+}
+
+/** Raw desktop-engine credential mint (CLOUD-040). */
+export async function cloudAgentTokenRaw(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch(
+    "/api/users/me/ai-assistant/agent-token/",
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+    apiBase
+  );
+}
+
+/** Raw cloud CSRF-token read (CLOUD-040). */
+export async function cloudCsrfRaw(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudAssistantAnswer> {
+  return cloudAssistantFetch("/api/auth/get-csrf-token/", sessionCookie, undefined, apiBase);
+}
+
+/**
+ * Run a Django shell snippet inside this run's cloud api container;
+ * resolves with stdout. The container is <project>-api-cloud — derived
+ * from the namespace, not from PARITY_API_CONTAINER, which names the OSS
+ * api service even on cloud stacks.
+ */
+export async function cloudShell(python: string): Promise<string> {
+  const project = resolveParityEnv(process.env).project;
+  const { stdout } = await execFileAsync(
+    "docker",
+    ["exec", "-i", `${project}-api-cloud`, "python", "manage.py", "shell", "-c", python],
+    {
+      timeout: 120_000,
+    }
+  );
+  return stdout;
+}
+
+/**
+ * Mint a desktop-session access token for an existing user (CLOUD-040).
+ * The scratch IdP has no desktop OIDC client, so the agent-profile
+ * classification is unreachable through any login flow; minting through
+ * the same token issuer the views verify keeps the fixture honest.
+ */
+export async function cloudDesktopAccessToken(email: string): Promise<string> {
+  const out = await cloudShell(
+    `from pi_dash.db.models import User\n` +
+      `from pi_dash_cloud.airepublic import tokens\n` +
+      `user = User.objects.get(email=${JSON.stringify(email)})\n` +
+      `pair = tokens.mint_pair(str(user.id), client="desktop")\n` +
+      `print("PARITY_DESKTOP:" + pair.access)\n`
+  );
+  const token = /^PARITY_DESKTOP:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (token === "") throw new Error(`[parity] desktop token mint produced no token for ${email}.`);
+  return token;
+}
+
+/**
+ * Plant an account-connected credential for an existing user (CLOUD-032).
+ * Real provider OAuth is unreachable from runners; the planted row carries
+ * a shaped-but-unusable token, which is enough for every connected-state
+ * assertion short of a live provider turn (the test endpoint reports the
+ * failure inline, which is itself asserted).
+ */
+export async function cloudPlantCodexCredential(
+  email: string,
+  opts: { planClientId?: string; modelName?: string } = {}
+): Promise<void> {
+  const clientId = opts.planClientId ?? "parity-fixture-client";
+  const modelName = opts.modelName ?? "gpt-5.6-sol";
+  await cloudShell(
+    `from pi_dash.db.models import User\n` +
+      `from pi_dash_cloud.assistant import services\n` +
+      `from pi_dash_cloud.assistant.models import UserCodexCredential\n` +
+      `user = User.objects.get(email=${JSON.stringify(email)})\n` +
+      `# A discovered catalog like a real connected account carries: without\n` +
+      `# it the picker falls back to display-only defaults the model-update\n` +
+      `# validation then refuses.\n` +
+      `catalog = services.codex_model_options(None)\n` +
+      `UserCodexCredential.objects.update_or_create(user=user, defaults={` +
+      `"access_token_encrypted": b"parity-fixture-token", ` +
+      `"oauth_client_id": ${JSON.stringify(clientId)}, ` +
+      `"model_name": ${JSON.stringify(modelName)}, "is_active": True, ` +
+      `"available_models": catalog})\n` +
+      `print("PARITY_CODEX:planted")\n`
+  );
+}
+
+/** Stamp a connection row verified so the list renders its timestamp (CLOUD-032). */
+export async function cloudStampConnectionVerified(connectionId: string): Promise<void> {
+  await cloudShell(
+    `from django.utils import timezone\n` +
+      `from pi_dash_cloud.assistant.models import UserLLMConnection\n` +
+      `UserLLMConnection.objects.filter(pk=${JSON.stringify(connectionId)}).update(last_verified_at=timezone.now())\n` +
+      `print("PARITY_VERIFIED:stamped")\n`
+  );
+}
