@@ -19,7 +19,16 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
     let exe = std::env::current_exe()?;
     let exe_str = super::validate_path_for_unit(&exe)?;
     let config_dir = super::validate_path_for_unit(&paths.config_dir)?;
-    let data_dir = super::validate_path_for_unit(&paths.data_dir)?;
+    // Only bake PIDASH_DATA_DIR into the unit for a genuine override.
+    // Exporting the *default* data dir made `Paths::resolve` inside the
+    // daemon treat the install as isolated and move the IPC socket under
+    // `<data_dir>/runtime/`, where no override-less CLI could find it
+    // (PDASHOSS01-230).
+    let data_dir = if paths.data_dir_is_default() {
+        None
+    } else {
+        Some(super::validate_path_for_unit(&paths.data_dir)?)
+    };
     // See `service::capture_install_time_path` for why we bake $PATH in.
     let path_env = super::capture_install_time_path();
     let body = render_unit(exe_str, config_dir, data_dir, path_env.as_deref());
@@ -42,9 +51,17 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
 fn render_unit(
     exe: &str,
     config_dir: &str,
-    data_dir: &str,
+    data_dir: Option<&str>,
     path_env: Option<&str>,
 ) -> String {
+    // `data_dir` is None for a default-location install: the daemon
+    // resolves the same directory on its own, and exporting it would
+    // flip `Paths::resolve` into isolated mode and move the IPC socket
+    // (PDASHOSS01-230).
+    let data_line = match data_dir {
+        Some(d) => format!("\nEnvironment=PIDASH_DATA_DIR={d}"),
+        None => String::new(),
+    };
     let path_line = match path_env {
         Some(p) => format!("\nEnvironment=\"PATH={}\"", systemd_double_quoted_escape(p)),
         None => String::new(),
@@ -58,8 +75,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart={exe} __run
-Environment=PIDASH_CONFIG_DIR={config_dir}
-Environment=PIDASH_DATA_DIR={data_dir}{path_line}
+Environment=PIDASH_CONFIG_DIR={config_dir}{data_line}{path_line}
 Restart=on-failure
 RestartSec=5
 
@@ -246,7 +262,7 @@ mod tests {
         let body = render_unit(
             "/home/user/.cargo/bin/pidash",
             "/home/user/.config/pidash",
-            "/home/user/.local/share/pidash",
+            Some("/home/user/.local/share/pidash"),
             None,
         );
         assert!(
@@ -257,15 +273,30 @@ mod tests {
 
     #[test]
     fn unit_body_includes_exec_start_and_dirs() {
-        let body = render_unit("/bin/pidash", "/etc/pidash", "/var/lib/pidash", None);
+        let body = render_unit("/bin/pidash", "/etc/pidash", Some("/var/lib/pidash"), None);
         assert!(body.contains("ExecStart=/bin/pidash __run"));
         assert!(body.contains("Environment=PIDASH_CONFIG_DIR=/etc/pidash"));
         assert!(body.contains("Environment=PIDASH_DATA_DIR=/var/lib/pidash"));
     }
 
     #[test]
+    fn unit_body_omits_data_dir_for_default_install() {
+        // Regression: exporting the *default* data dir flipped
+        // `Paths::resolve` in the daemon into isolated mode, moving the
+        // IPC socket to <data>/runtime/ where the override-less CLI
+        // never looks (PDASHOSS01-230).
+        let body = render_unit("/bin/pidash", "/etc/pidash", None, None);
+        assert!(
+            !body.contains("PIDASH_DATA_DIR"),
+            "unit body must not export PIDASH_DATA_DIR for a default-location install; got:\n{body}"
+        );
+        // The config line must survive the omission without a dangling blank line.
+        assert!(body.contains("Environment=PIDASH_CONFIG_DIR=/etc/pidash\nRestart=on-failure"));
+    }
+
+    #[test]
     fn unit_body_omits_path_when_not_captured() {
-        let body = render_unit("/bin/pidash", "/etc/pidash", "/var/lib/pidash", None);
+        let body = render_unit("/bin/pidash", "/etc/pidash", Some("/var/lib/pidash"), None);
         assert!(
             !body.contains("Environment=\"PATH=") && !body.contains("Environment=PATH="),
             "unit body must not declare PATH when path_env is None; got:\n{body}"
@@ -277,7 +308,7 @@ mod tests {
         let body = render_unit(
             "/bin/pidash",
             "/etc/pidash",
-            "/var/lib/pidash",
+            Some("/var/lib/pidash"),
             Some("/home/user/.local/bin:/usr/local/bin:/usr/bin"),
         );
         assert!(
