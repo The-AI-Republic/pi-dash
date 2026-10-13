@@ -16,6 +16,7 @@ export default {
     "{count, plural, one {# project failed} other {# projects failed}}",
   "{count, plural, one {# project selected} other {# projects selected}}":
     "{count, plural, one {# project selected} other {# projects selected}}",
+  "{count, plural, one {# section} other {# sections}}": "{count, plural, one {# section} other {# sections}}",
   "{count, plural, one {Cycle} other {Cycles}}": "{count, plural, one {Cycle} other {Cycles}}",
   "{count, plural, one {Epic} other {Epics}}": "{count, plural, one {Epic} other {Epics}}",
   "{count, plural, one {Installed on # project} other {Installed on # projects}}":

@@ -368,7 +368,7 @@ function ReceiptNavigation({ entries }: { entries: TReceiptEntry[] }) {
           >
             <span className="block truncate">{kindLabel(kind)}</span>
             <span className="block truncate text-10 text-placeholder">
-              {t("{{count}} sections", { count: sections.length })}
+              {t("{count, plural, one {# section} other {# sections}}", { count: sections.length })}
             </span>
           </a>
         ))}
@@ -733,7 +733,7 @@ function ReceiptCard({
         <span className="flex items-center gap-2">
           {kindLabel(kind)}
           <Badge variant="accent-neutral" size="sm">
-            {t("{{count}} sections", { count: sections.length })}
+            {t("{count, plural, one {# section} other {# sections}}", { count: sections.length })}
           </Badge>
         </span>
         <span className="text-11 text-secondary">{open ? t("Hide") : t("Show")}</span>
