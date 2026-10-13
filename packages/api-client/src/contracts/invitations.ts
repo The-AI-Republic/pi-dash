@@ -102,7 +102,7 @@ export type BulkInviteResult = z.infer<typeof BulkInviteResult>;
 
 /**
  * POST /api/workspaces/<slug>/invitations/ with `{ emails }` invites a
- * batch of addresses (200 + message). Unknown roles default to guest;
+ * batch of addresses (200 + message). An omitted role defaults to guest;
  * inviting an existing member answers 400 naming the members.
  */
 export async function sendWorkspaceInvitations(
