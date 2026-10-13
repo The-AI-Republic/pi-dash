@@ -222,6 +222,9 @@ import type {
   CloudNavLinkFacts,
   CloudPricingTierFacts,
   CloudProviderButtonFacts,
+  CloudAssistantAddFill,
+  CloudAssistantAddFormFacts,
+  CloudAssistantConnectionFacts,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -54153,5 +54156,366 @@ export class WebDriver implements ParityDriver {
     } catch {
       return false;
     }
+  }
+
+  // --- Cloud profile tabs + misc (NEWFRONT-440, CLOUD-032..040).
+  // --- Observed on the running cloud oracle: the assistant tab lists one
+  // --- card per saved connection (radio select, kind title, markers,
+  // --- model control, row actions) with an add view behind the header
+  // --- action; the profile sidebar omits the security entry and its URL
+  // --- forwards to the general tab; the plan badge does not render
+  // --- (NEWFRONT-474). Selectors are role- and label-based.
+
+  private cloudAssistantStatusSeen = 0;
+
+  private cloudAssistantStatusHandler = (request: import("@playwright/test").Request): void => {
+    if (request.url().includes("/api/users/me/ai-assistant/openai-login/status/")) this.cloudAssistantStatusSeen += 1;
+  };
+
+  private cloudAssistantRadios(): Locator {
+    return this.page.locator('input[name="assistant-active-connection"]');
+  }
+
+  private cloudAssistantCardLabel(radio: Locator): Locator {
+    return radio.locator("xpath=parent::label");
+  }
+
+  private cloudAssistantCardRoot(radio: Locator): Locator {
+    return radio.locator("xpath=ancestor::div[2]");
+  }
+
+  private async cloudAssistantCardByTitle(title: string): Promise<Locator> {
+    const radios = this.cloudAssistantRadios();
+    const count = await radios.count();
+    for (let i = 0; i < count; i++) {
+      const label = this.cloudAssistantCardLabel(radios.nth(i));
+      if (this.cloudNorm(await label.locator("span").first().innerText()) === title) {
+        return this.cloudAssistantCardRoot(radios.nth(i));
+      }
+    }
+    throw new Error(`[parity] no assistant connection card titled ${JSON.stringify(title)}.`);
+  }
+
+  private cloudNorm(value: string): string {
+    return value.replace(/\s+/g, " ").trim();
+  }
+
+  async cloudAssistantConnections(): Promise<CloudAssistantConnectionFacts[]> {
+    const radios = this.cloudAssistantRadios();
+    const count = await radios.count();
+    const cards: CloudAssistantConnectionFacts[] = [];
+    for (let i = 0; i < count; i++) {
+      const radio = radios.nth(i);
+      const label = this.cloudAssistantCardLabel(radio);
+      const card = this.cloudAssistantCardRoot(radio);
+      const spans = await label.locator("span").allInnerTexts();
+      const title = this.cloudNorm(spans[0] ?? "");
+      const markers = spans
+        .slice(1)
+        .map((text) => this.cloudNorm(text))
+        .filter((text) => text !== "");
+      const select = card.locator("select").first();
+      const input = card.locator('input[list="assistant-known-byok-models"]').first();
+      const selectVisible = (await select.count()) > 0 && (await select.isVisible().catch(() => false));
+      const inputVisible = (await input.count()) > 0 && (await input.isVisible().catch(() => false));
+      const modelControl = selectVisible ? "select" : inputVisible ? "input" : "hidden";
+      let modelValue = "";
+      let modelOptions: string[] = [];
+      if (modelControl === "select") {
+        modelValue = await select.inputValue();
+        const options = select.locator("option");
+        const optionCount = await options.count();
+        for (let j = 0; j < optionCount; j++) {
+          modelOptions.push((await options.nth(j).getAttribute("value")) ?? "");
+        }
+      } else if (modelControl === "input") {
+        modelValue = await input.inputValue();
+      }
+      const verified = card.getByText("Verified", { exact: false }).first();
+      const verifiedVisible = (await verified.count()) > 0 && (await verified.isVisible().catch(() => false));
+      const header = label.locator("xpath=parent::div");
+      const actions = (await header.getByRole("button").allInnerTexts())
+        .map((text) => this.cloudNorm(text))
+        .filter((text) => text !== "");
+      cards.push({
+        title,
+        selected: await radio.isChecked(),
+        selectDisabled: await radio.isDisabled(),
+        markers,
+        modelControl,
+        modelValue,
+        modelOptions,
+        verifiedVisible,
+        actions,
+      });
+    }
+    return cards;
+  }
+
+  async cloudAssistantEmptyState(): Promise<{ visible: boolean; addLabel: string | null }> {
+    const hint = this.page.getByText("No AI provider connected yet", { exact: false }).first();
+    if ((await hint.count()) === 0 || !(await hint.isVisible().catch(() => false))) {
+      return { visible: false, addLabel: null };
+    }
+    const panel = hint.locator("xpath=ancestor::div[1]");
+    const action = panel.getByRole("button").first();
+    const addLabel = (await action.count()) > 0 ? this.cloudNorm(await action.innerText()) : null;
+    return { visible: true, addLabel: addLabel === "" ? null : addLabel };
+  }
+
+  async cloudAssistantView(): Promise<"list" | "add"> {
+    const back = this.page.getByRole("button", { name: "Back to connections" });
+    if (
+      (await back.count()) > 0 &&
+      (await back
+        .first()
+        .isVisible()
+        .catch(() => false))
+    )
+      return "add";
+    return "list";
+  }
+
+  async cloudAssistantClickAdd(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add connection" }).first().click();
+  }
+
+  async cloudAssistantClickBackToList(): Promise<void> {
+    await this.page.getByRole("button", { name: "Back to connections" }).click();
+  }
+
+  async cloudAssistantSelectConnection(title: string): Promise<void> {
+    // Click plus poll: the radio is server-driven, so its checked state
+    // flips only after the select roundtrip plus refetch lands.
+    const card = await this.cloudAssistantCardByTitle(title);
+    const radio = card.locator('input[name="assistant-active-connection"]');
+    await radio.click();
+    const started = Date.now();
+    for (;;) {
+      if (await radio.isChecked().catch(() => false)) return;
+      if (Date.now() - started > 60_000) {
+        throw new Error(`[parity] selecting ${JSON.stringify(title)} never checked its radio.`);
+      }
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async cloudAssistantSetModel(title: string, model: string): Promise<void> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const select = card.locator("select").first();
+    if ((await select.count()) > 0 && (await select.isVisible().catch(() => false))) {
+      await select.selectOption(model);
+      return;
+    }
+    const input = card.locator('input[list="assistant-known-byok-models"]').first();
+    await input.fill(model);
+    await input.press("Enter");
+  }
+
+  async cloudAssistantClickRowAction(title: string, action: "Test" | "Remove" | "Disconnect"): Promise<void> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    await card.getByRole("button", { name: action, exact: true }).click();
+  }
+
+  private cloudAssistantProviderSelect(): Locator {
+    return this.page.getByLabel("Provider");
+  }
+
+  async cloudAssistantAddFormFacts(): Promise<CloudAssistantAddFormFacts> {
+    const provider = this.cloudAssistantProviderSelect();
+    const options = provider.locator("option");
+    const optionCount = await options.count();
+    const providers: string[] = [];
+    for (let i = 0; i < optionCount; i++) {
+      providers.push((await options.nth(i).getAttribute("value")) ?? "");
+    }
+    const base = this.page.getByLabel("Base URL");
+    const save = this.page.getByRole("button", { name: "Add connection" });
+    return {
+      providers,
+      provider: await provider.inputValue(),
+      baseVisible:
+        (await base.count()) > 0 &&
+        (await base
+          .first()
+          .isVisible()
+          .catch(() => false)),
+      saveEnabled: await save.first().isEnabled(),
+    };
+  }
+
+  async cloudAssistantAddFill(fill: CloudAssistantAddFill): Promise<void> {
+    if (fill.provider !== undefined) await this.cloudAssistantProviderSelect().selectOption(fill.provider);
+    if (fill.baseUrl !== undefined) await this.page.getByLabel("Base URL").fill(fill.baseUrl);
+    if (fill.model !== undefined) await this.page.getByLabel("Model").fill(fill.model);
+    if (fill.key !== undefined) await this.page.getByLabel("API key").fill(fill.key);
+  }
+
+  async cloudAssistantAddSave(): Promise<void> {
+    // The success toast fires before the list refetch lands, so a toast
+    // alone cannot settle the save: wait for the list view, and treat a
+    // toast as the answer only when the view still shows the form after
+    // it (the failure shape keeps the form up). The create POST is the
+    // first gate, so a click that never submits cannot hide behind the
+    // toast watch.
+    const posted = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("/api/users/me/ai-assistant/connections/") && response.request().method() === "POST",
+        { timeout: 60_000 }
+      )
+      .catch(() => null);
+    await this.page.getByRole("button", { name: "Add connection" }).click();
+    await posted;
+    const started = Date.now();
+    let toastFirstSeen = 0;
+    for (;;) {
+      if ((await this.cloudAssistantView()) === "list") return;
+      if ((await this.toastText()) !== null) {
+        if (toastFirstSeen === 0) toastFirstSeen = Date.now();
+        if (Date.now() - toastFirstSeen > 5_000) return;
+      }
+      if (Date.now() - started > 60_000)
+        throw new Error("[parity] add-connection save settled on neither list nor toast.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async cloudAssistantClickProviderSignIn(title: string): Promise<void> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    await card.getByRole("button", { name: "Continue with ChatGPT" }).click();
+  }
+
+  async cloudAssistantProviderPopupUrl(): Promise<string> {
+    const pages = this.page.context().pages();
+    let popup = pages.find((page) => page !== this.page) ?? null;
+    if (popup === null) popup = await this.page.waitForEvent("popup", { timeout: 60_000 });
+    await popup.waitForFunction(() => !["", "about:blank"].includes(window.location.href), null, {
+      timeout: 60_000,
+    });
+    const url = popup.url();
+    await popup.close();
+    return url;
+  }
+
+  async cloudAssistantArmStatusCounter(): Promise<void> {
+    this.cloudAssistantStatusSeen = 0;
+    this.page.off("request", this.cloudAssistantStatusHandler);
+    this.page.on("request", this.cloudAssistantStatusHandler);
+  }
+
+  async cloudAssistantStatusHits(): Promise<number> {
+    return this.cloudAssistantStatusSeen;
+  }
+
+  async cloudAssistantBlockPopups(): Promise<void> {
+    await this.page.addInitScript(() => {
+      window.open = () => null;
+    });
+  }
+
+  async cloudAssistantStaleNotice(title: string): Promise<string | null> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const notice = card.getByText("predates OpenHub access", { exact: false }).first();
+    if ((await notice.count()) === 0 || !(await notice.isVisible().catch(() => false))) return null;
+    const text = this.cloudNorm(await notice.locator("xpath=ancestor::div[1]").innerText());
+    return text === "" ? null : text;
+  }
+
+  private cloudProfileTabLabels(): string[] {
+    return [
+      "Profile",
+      "Security",
+      "Activity",
+      "Preferences",
+      "AI Assistant",
+      "Auto Project Management",
+      "Notifications",
+      "Integrations",
+      "Personal Access Tokens",
+    ];
+  }
+
+  async cloudProfileSidebarTabs(): Promise<string[]> {
+    const labels = this.cloudProfileTabLabels();
+    const texts = await this.page.getByRole("button").allInnerTexts();
+    return texts.map((text) => this.cloudNorm(text)).filter((text) => labels.includes(text));
+  }
+
+  async cloudProfileActiveTab(): Promise<string | null> {
+    const keys: Record<string, string> = {
+      Profile: "general",
+      Security: "security",
+      Activity: "activity",
+      Preferences: "preferences",
+      "AI Assistant": "ai-assistant",
+      "Auto Project Management": "auto-project-management",
+      Notifications: "notifications",
+      Integrations: "integrations",
+      "Personal Access Tokens": "api-tokens",
+    };
+    const active = this.page.locator("button.bg-layer-transparent-selected");
+    const count = await active.count();
+    for (let i = 0; i < count; i++) {
+      const label = this.cloudNorm(await active.nth(i).innerText());
+      if (keys[label] !== undefined) return keys[label] ?? null;
+    }
+    return null;
+  }
+
+  async cloudAssistantMcpSectionVisible(): Promise<boolean> {
+    const heading = this.page.getByRole("heading", { name: "Tool servers (MCP)" }).first();
+    return (await heading.count()) > 0 && (await heading.isVisible().catch(() => false));
+  }
+
+  async cloudAssistantAppsPointerVisible(): Promise<boolean> {
+    const pointer = this.page.getByText("Looking for apps?", { exact: false }).first();
+    return (await pointer.count()) > 0 && (await pointer.isVisible().catch(() => false));
+  }
+
+  async cloudPlanBadgeVisible(): Promise<boolean> {
+    // Oracle label set for the plan badge (free/legacy); paid names render
+    // the plan name. Absent on the oracle (NEWFRONT-474); web_new
+    // re-implements this against its own badge.
+    const texts = await this.page.locator("#main-sidebar button").allInnerTexts();
+    return texts.map((text) => this.cloudNorm(text)).some((text) => text === "Upgrade" || text === "Migrate plan");
+  }
+
+  async cloudFocusedControl(): Promise<{ role: string; label: string } | null> {
+    return this.page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      if (el === null || el === document.body) return null;
+      const tag = el.tagName.toLowerCase();
+      const implicit: Record<string, string> = {
+        button: "button",
+        select: "combobox",
+        textarea: "textbox",
+      };
+      let role = el.getAttribute("role") ?? implicit[tag] ?? tag;
+      if (tag === "input") {
+        role = (el as HTMLInputElement).type === "radio" ? "radio" : "textbox";
+      }
+      const labelledBy = el.getAttribute("aria-labelledby");
+      if (labelledBy !== null && labelledBy !== "") {
+        const parts = labelledBy
+          .split(" ")
+          .map((id) => document.getElementById(id)?.innerText ?? "")
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (parts !== "") return { role, label: parts };
+      }
+      const aria = el.getAttribute("aria-label");
+      if (aria !== null && aria.trim() !== "") return { role, label: aria.trim() };
+      const wrap = el.closest("label");
+      if (wrap !== null) {
+        const clone = wrap.cloneNode(true) as HTMLElement;
+        clone.querySelectorAll("input,select,textarea,button").forEach((node) => node.remove());
+        const text = (clone.textContent ?? "").replace(/\s+/g, " ").trim();
+        if (text !== "") return { role, label: text };
+      }
+      const text = (el.innerText ?? "").replace(/\s+/g, " ").trim();
+      return { role, label: text };
+    });
   }
 }

@@ -204,6 +204,9 @@ import type {
   CloudNavLinkFacts,
   CloudPricingTierFacts,
   CloudProviderButtonFacts,
+  CloudAssistantAddFill,
+  CloudAssistantAddFormFacts,
+  CloudAssistantConnectionFacts,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -15153,5 +15156,100 @@ export class WebNewDriver implements ParityDriver {
 
   async cloudAppsSidebarCreateOpensDialog(): Promise<boolean> {
     return todo("cloudAppsSidebarCreateOpensDialog");
+  }
+
+  // --- Cloud profile tabs + misc (NEWFRONT-440, CLOUD-032..040).
+  // --- Stubs: the cloud profile area has not landed in apps/web_new yet.
+
+  async cloudAssistantConnections(): Promise<CloudAssistantConnectionFacts[]> {
+    return todo("cloudAssistantConnections");
+  }
+
+  async cloudAssistantEmptyState(): Promise<{ visible: boolean; addLabel: string | null }> {
+    return todo("cloudAssistantEmptyState");
+  }
+
+  async cloudAssistantView(): Promise<"list" | "add"> {
+    return todo("cloudAssistantView");
+  }
+
+  async cloudAssistantClickAdd(): Promise<void> {
+    return todo("cloudAssistantClickAdd");
+  }
+
+  async cloudAssistantClickBackToList(): Promise<void> {
+    return todo("cloudAssistantClickBackToList");
+  }
+
+  async cloudAssistantSelectConnection(_title: string): Promise<void> {
+    return todo("cloudAssistantSelectConnection");
+  }
+
+  async cloudAssistantSetModel(_title: string, _model: string): Promise<void> {
+    return todo("cloudAssistantSetModel");
+  }
+
+  async cloudAssistantClickRowAction(_title: string, _action: "Test" | "Remove" | "Disconnect"): Promise<void> {
+    return todo("cloudAssistantClickRowAction");
+  }
+
+  async cloudAssistantAddFormFacts(): Promise<CloudAssistantAddFormFacts> {
+    return todo("cloudAssistantAddFormFacts");
+  }
+
+  async cloudAssistantAddFill(_fill: CloudAssistantAddFill): Promise<void> {
+    return todo("cloudAssistantAddFill");
+  }
+
+  async cloudAssistantAddSave(): Promise<void> {
+    return todo("cloudAssistantAddSave");
+  }
+
+  async cloudAssistantClickProviderSignIn(_title: string): Promise<void> {
+    return todo("cloudAssistantClickProviderSignIn");
+  }
+
+  async cloudAssistantProviderPopupUrl(): Promise<string> {
+    return todo("cloudAssistantProviderPopupUrl");
+  }
+
+  async cloudAssistantArmStatusCounter(): Promise<void> {
+    return todo("cloudAssistantArmStatusCounter");
+  }
+
+  async cloudAssistantStatusHits(): Promise<number> {
+    return todo("cloudAssistantStatusHits");
+  }
+
+  async cloudAssistantBlockPopups(): Promise<void> {
+    return todo("cloudAssistantBlockPopups");
+  }
+
+  async cloudAssistantStaleNotice(_title: string): Promise<string | null> {
+    return todo("cloudAssistantStaleNotice");
+  }
+
+  async cloudProfileSidebarTabs(): Promise<string[]> {
+    return todo("cloudProfileSidebarTabs");
+  }
+
+  async cloudProfileActiveTab(): Promise<string | null> {
+    return todo("cloudProfileActiveTab");
+  }
+
+  async cloudAssistantMcpSectionVisible(): Promise<boolean> {
+    return todo("cloudAssistantMcpSectionVisible");
+  }
+
+  async cloudAssistantAppsPointerVisible(): Promise<boolean> {
+    return todo("cloudAssistantAppsPointerVisible");
+  }
+
+  async cloudPlanBadgeVisible(): Promise<boolean> {
+    return todo("cloudPlanBadgeVisible");
+  }
+
+  async cloudFocusedControl(): Promise<{ role: string; label: string } | null> {
+    return todo("cloudFocusedControl");
   }
 }
