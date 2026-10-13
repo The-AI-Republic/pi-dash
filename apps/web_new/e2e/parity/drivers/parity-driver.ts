@@ -9542,6 +9542,30 @@ export interface WsSettingsMemberRowFacts {
   spaceLocaleLandingFacts(): Promise<SpaceLocaleLandingFacts>;
   /** Store a locale choice (or clear it); applies on the next load (SPC-065). */
   spaceLocaleSetStoredLocale(locale: string | null): Promise<void>;
+  // ---------------------------------------------------------------------------
+  // Page-export dialog oracle reads (NEWFRONT-383, EXP-016..021 + 023/024).
+  // The dialog offers a format row (document vs plain text), a scope row
+  // (full fidelity vs image-free), and a page-size row that renders only
+  // for the document format; confirming saves a locally rendered file
+  // through the browser download event. Existing pagesHeaderExport* methods
+  // (NEWFRONT-318) drive the dialog; these reads cover what they cannot:
+  // the offered options, the full download bytes, fault injection, focus
+  // facts, and edition-gate markers. Appended; existing entries above are
+  // untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Dialog heading text, or null when the page-export dialog is closed. */
+  pageExportHeading(): Promise<string | null>;
+  /** Offered option labels of one dialog row in display order ([] when the row renders no button). */
+  pageExportOfferedOptions(row: PageExportRow): Promise<string[]>;
+  /** Confirm the export; resolves with the downloaded file's full bytes as latin1 text. */
+  pageExportConfirmFull(): Promise<PageExportFile>;
+  /** Sabotage the in-page save primitive so the next confirm fails (test hook; reload to clear). */
+  pageExportFailSave(): Promise<void>;
+  /** Focused control facts (label plus visible-indicator state), or null when nothing focuses. */
+  pageExportFocusedFacts(): Promise<PageExportFocusFacts | null>;
+  /** Whether edition/desktop gate markers render on the current export surface. */
+  pageExportGateMarkersPresent(): Promise<boolean>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
@@ -11466,4 +11490,29 @@ export interface SpaceMentionResult {
 export interface SpaceCommentNotice {
   message: string;
   kind: "success" | "error" | "unknown";
+}
+
+// --- Page-export dialog oracle types (NEWFRONT-383, EXP-016..021 + 023/024). ---
+
+/** One choice row of the page-export dialog. */
+export type PageExportRow = "format" | "scope" | "pageFormat";
+
+/** A captured page-export download with its full bytes (NEWFRONT-383). */
+export interface PageExportFile {
+  /** Suggested file name the browser download carried. */
+  fileName: string;
+  /** Download byte length. */
+  byteLength: number;
+  /** Full download bytes as latin1 text (byte-faithful for binary introspection). */
+  content: string;
+}
+
+/** Focused-control facts for keyboard walkthroughs (NEWFRONT-383). */
+export interface PageExportFocusFacts {
+  /** Accessible label of the focused control (`role :: name`). */
+  label: string;
+  /** Visible focus indicator kind: a drawn outline, a drawn shadow, or none. */
+  indicator: "outline" | "shadow" | "none";
+  /** Whether the control matches :focus-visible. */
+  focusVisible: boolean;
 }
