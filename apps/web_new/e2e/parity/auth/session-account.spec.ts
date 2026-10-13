@@ -8,32 +8,39 @@
 //
 // Recorded exceptions (see the hand-off comment; the issue pre-authorizes
 // explicit exceptions for desktop-only steps that cannot run here):
-// AUTH-022 and AUTH-023 have no scenario in this file. Verified against the
-// old tree: the system-browser login plus pidash://auth/callback return
+// AUTH-022 and AUTH-023 have scenarios at the foot of this file
+// (NEWFRONT-486), but they run against the desktop builds only, in the
+// area gate: the system-browser login plus pidash://auth/callback return
 // needs the desktop build, which cannot run in this checkout; the server
 // has no desktop-exchange endpoint; and both the error landing
-// (?error=/?error_description= "Sign-in didn't complete" alert) and the
-// unavailable card (ce/components/desktop/sign-in-card.tsx) render only
-// inside the desktop build. The web-observable provider pieces (provider
-// buttons when the instance enables OAuth, error_code failure banners)
-// belong to AUTH-003/AUTH-006, owned by a sibling, and the seeded stack
-// configures no OAuth provider — so no seam for either row is testable
-// here, and the parent merge run must cover them against an
-// edition/desktop build instead.
+// (?error=/?error_description= alert above the card) and the unavailable
+// card render only inside the desktop build. The web-observable provider
+// pieces (provider buttons when the instance enables OAuth, error_code
+// failure banners) belong to AUTH-003/AUTH-006, owned by a sibling, and
+// the seeded stack configures no OAuth provider — so no seam for either
+// row is testable on apps/web, and the gate runs these two scenarios
+// old-first against the desktop build, then on apps/web_new.
 // AUTH-017's desktop clause (the local webview store is wiped on sign-out)
 // is likewise desktop-only and has no scenario here for the same reason.
 import { test, expect } from "../fixtures";
+import type { ParityDriver } from "../drivers/parity-driver";
 import {
   approveDeviceCode,
+  browserCookies,
   createAccountSession,
   createWorkspace,
+  createWorkspaceViaApi,
   inviteWorkspaceMember,
+  markOnboarded,
   serverIssueNames,
   sessionValid,
+  setLastWorkspace,
   setOnboarded,
   signInSession,
   signInIssuesSessionWithoutCsrf,
+  signUpFreshUser,
   startDeviceFlow,
+  uniqueSlug,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 
@@ -392,6 +399,83 @@ test(
       const session = await signInSession(seed.email, seed.password);
       const server = await serverIssueNames(seed.workspaceSlug, seed.projectId, session);
       expect(new Set(server)).toEqual(new Set(seed.issueNames));
+    });
+  }
+);
+
+/** Session cookie names a signed-out desktop visit must never plant. */
+async function desktopSessionCookieNames(driver: ParityDriver): Promise<string[]> {
+  const cookies = await driver.page.context().cookies();
+  return cookies.map((cookie) => cookie.name);
+}
+
+test(
+  specTitle(["AUTH-022"], "desktop sign-in never starts on its own and failures land back with an error"),
+  { tag: specTags(["AUTH-022"]) },
+  async ({ driver }) => {
+    await test.step("a plain visit plants no session and navigates nowhere", async () => {
+      await driver.visit("/");
+      expect(await driver.currentPath()).toBe("/");
+      expect(await driver.authDesktopUnavailableCardVisible()).toBe(true);
+      expect(await desktopSessionCookieNames(driver)).not.toContain("session-id");
+    });
+
+    await test.step("a provider failure lands back with its description", async () => {
+      await driver.visit("/sign-in?error=access_denied&error_description=The%20provider%20refused%20the%20flow.");
+      await expect
+        .poll(() => driver.authDesktopFailureAlertText(), POLL_60)
+        .toContain("The provider refused the flow.");
+    });
+
+    await test.step("an aborted flow without a description names the error", async () => {
+      await driver.visit("/login?error=access_denied");
+      await expect.poll(() => driver.authDesktopFailureAlertText(), POLL_60).toContain("access_denied");
+    });
+  }
+);
+
+test(
+  specTitle(["AUTH-023"], "the desktop entry explains the missing hand-off and offers the browser instead"),
+  { tag: specTags(["AUTH-023"]) },
+  async ({ driver }) => {
+    for (const entry of ["/", "/login", "/sign-in"]) {
+      await test.step(`a signed-out visit to ${entry} shows the unavailable card instead of a form`, async () => {
+        await driver.visit(entry);
+        expect(await driver.authDesktopUnavailableCardVisible()).toBe(true);
+        expect(await driver.authStep()).toBe("unknown");
+        expect(await driver.authDesktopBrowserActionLabel()).not.toBeNull();
+      });
+    }
+
+    await test.step("the browser action leaves the desktop entry", async () => {
+      await driver.visit("/");
+      const before = driver.page.url();
+      await driver.authDesktopClickBrowserAction();
+      await expect.poll(() => driver.page.url(), POLL_60).not.toBe(before);
+    });
+
+    await test.step("signed-in visitors are forwarded to their workspace", async () => {
+      const user = await signUpFreshUser("parity-desk");
+      const slug = uniqueSlug("deskws");
+      const workspace = await createWorkspaceViaApi(user, { name: "Desktop", slug });
+      await setLastWorkspace(user, workspace.id);
+      await markOnboarded(user);
+      await driver.openAuthenticated("/", browserCookies(user));
+      await expect.poll(() => driver.currentPath(), POLL_60).toContain(`/${slug}`);
+    });
+
+    await test.step("the forward honors a pending destination", async () => {
+      const user = await signUpFreshUser("parity-desk");
+      const homeSlug = uniqueSlug("deskhome");
+      const awaySlug = uniqueSlug("deskaway");
+      const home = await createWorkspaceViaApi(user, { name: "Desktop home", slug: homeSlug });
+      await createWorkspaceViaApi(user, { name: "Desktop away", slug: awaySlug });
+      await setLastWorkspace(user, home.id);
+      await markOnboarded(user);
+      // The pending destination differs from the last workspace on
+      // purpose: landing on the last workspace must fail this step.
+      await driver.openAuthenticated(`/?next_path=/${awaySlug}`, browserCookies(user));
+      await expect.poll(() => driver.currentPath(), POLL_60).toContain(`/${awaySlug}`);
     });
   }
 );

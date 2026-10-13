@@ -54,6 +54,26 @@ export async function listProjects(client: ApiClient, slug: string): Promise<Pro
   return client.parse(ProjectList, body, `GET /api/workspaces/${slug}/projects/`);
 }
 
+const { intake_count: _listOnly, ...projectDetailShape } = Project.shape;
+
+/**
+ * One project row answered by GET .../projects/<id>/ (the retrieve view
+ * serializes the project row, not the list `.values()` projection, so the
+ * list-only pending-intake count is absent). Extra serializer fields pass
+ * through untouched. The denial screens read this for their fetch status:
+ * unknown projects 404, private projects 403 for non-members, other
+ * non-member projects 409.
+ */
+export const ProjectDetail = z.object(projectDetailShape);
+export type ProjectDetail = z.infer<typeof ProjectDetail>;
+
+/** GET /api/workspaces/<slug>/projects/<projectId>/ — one project row. */
+export async function getProject(client: ApiClient, slug: string, projectId: string): Promise<ProjectDetail> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/`;
+  const body = await client.getJson<unknown>(path);
+  return client.parse(ProjectDetail, body, `GET ${path}`);
+}
+
 /**
  * Full project row answered by GET .../projects/details/ and by POST
  * .../projects/ on create: every Project model field plus the membership

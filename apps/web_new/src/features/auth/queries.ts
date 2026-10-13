@@ -6,6 +6,9 @@
 
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
+  getMyProjectRoles,
+  getMyWorkspaceMembership,
+  getProject,
   getWorkspaceInvitation,
   listWorkspaceInvitations,
   listWorkspaceJoinRequests,
@@ -13,11 +16,15 @@ import {
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../core/api/client.js";
+import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../core/query/client.js";
 
 export const authKeys = {
   invitation: (slug: string, invitationId: string) => ["auth", "invitation", slug, invitationId] as const,
+  membership: (slug: string) => [...workspaceScope(slug), "auth", "membership"] as const,
   myInvitations: ["auth", "my-invitations"] as const,
   myJoinRequests: ["auth", "my-join-requests"] as const,
+  project: (slug: string, projectId: string) => [...workspaceScope(slug), "auth", "project", projectId] as const,
+  projectRoles: (slug: string) => [...workspaceScope(slug), "auth", "project-roles"] as const,
 };
 
 /** One emailed invitation for the invitation-aware card header (AUTH-005). */
@@ -58,4 +65,53 @@ export function myJoinRequestsQueryOptions(client: ApiClient) {
 /** The caller's own workspace join requests. */
 export function useMyWorkspaceJoinRequests() {
   return useQuery(myJoinRequestsQueryOptions(getAppClient()));
+}
+
+/**
+ * The caller's own membership in one workspace (AUTH-024). Null-pattern
+ * reads report null, which splits Case A from Case B. Fetched only once
+ * the slug is known in the workspace list.
+ */
+export function membershipQueryOptions(client: ApiClient, slug: string) {
+  return queryOptions({
+    queryKey: authKeys.membership(slug),
+    queryFn: () => getMyWorkspaceMembership(client, slug),
+    staleTime: REFERENCE_STALE_TIME_MS,
+  });
+}
+
+/** The caller's per-project roles in one workspace (the permission-store feed). */
+export function projectRolesQueryOptions(client: ApiClient, slug: string) {
+  return queryOptions({
+    queryKey: authKeys.projectRoles(slug),
+    queryFn: () => getMyProjectRoles(client, slug),
+    staleTime: REFERENCE_STALE_TIME_MS,
+  });
+}
+
+/**
+ * One project row (AUTH-024). The project gate reads this for its fetch
+ * status (409/403/404) rather than for the row itself.
+ */
+export function projectQueryOptions(client: ApiClient, slug: string, projectId: string) {
+  return queryOptions({
+    queryKey: authKeys.project(slug, projectId),
+    queryFn: () => getProject(client, slug, projectId),
+    staleTime: REFERENCE_STALE_TIME_MS,
+  });
+}
+
+/** The caller's own membership in one workspace; null when they hold none. */
+export function useWorkspaceMembership(slug: string) {
+  return useQuery(membershipQueryOptions(getAppClient(), slug));
+}
+
+/** The caller's per-project roles in one workspace, keyed by project id. */
+export function useProjectRoles(slug: string) {
+  return useQuery(projectRolesQueryOptions(getAppClient(), slug));
+}
+
+/** One project row with its fetch status for the denial screens. */
+export function useProjectRow(slug: string, projectId: string) {
+  return useQuery(projectQueryOptions(getAppClient(), slug, projectId));
 }

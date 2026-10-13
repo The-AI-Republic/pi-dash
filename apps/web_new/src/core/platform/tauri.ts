@@ -287,9 +287,11 @@ export const platform: Platform = {
   stream: (url, init) => desktopStream(url, init),
   openExternal: (url) => {
     const core = nativeApiOrigin()?.core;
+    // No native bridge: reject so the caller falls back to plain
+    // navigation (AUTH-023) instead of a popup neither the shell nor
+    // the parity harness can observe.
     if (!core) {
-      globalThis.window.open(url, "_blank", "noopener");
-      return Promise.resolve();
+      return Promise.reject(new Error("openExternal needs the native bridge"));
     }
     return core.invoke("plugin:opener|open_url", { url }).then(
       () => undefined,

@@ -23,8 +23,10 @@ import { Route as AccountsForgotPasswordRouteImport } from "./routes/accounts/fo
 import { Route as AccountsResetPasswordRouteImport } from "./routes/accounts/reset-password";
 import { Route as AccountsSetPasswordRouteImport } from "./routes/accounts/set-password";
 import { Route as AccountsSignUpRouteImport } from "./routes/accounts/sign-up";
+import { Route as AuthDeviceRouteImport } from "./routes/auth/device";
 import { Route as WsGatedIndexRouteImport } from "./routes/$ws/_gated/index";
 import { Route as WsGatedBrowseIssueKeyRouteImport } from "./routes/$ws/_gated/browse/$issueKey";
+import { Route as WsGatedProjectsProjectIdRouteRouteImport } from "./routes/$ws/_gated/projects/$projectId/route";
 import { Route as WsGatedProjectsProjectIdIssuesIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/issues/index";
 
 const IndexRoute = IndexRouteImport.update({
@@ -96,6 +98,11 @@ const AccountsSignUpRoute = AccountsSignUpRouteImport.update({
   path: "/accounts/sign-up",
   getParentRoute: () => rootRouteImport,
 } as any);
+const AuthDeviceRoute = AuthDeviceRouteImport.update({
+  id: "/auth/device",
+  path: "/auth/device",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const WsGatedIndexRoute = WsGatedIndexRouteImport.update({
   id: "/",
   path: "/",
@@ -106,10 +113,15 @@ const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
   path: "/browse/$issueKey",
   getParentRoute: () => WsGatedRouteRoute,
 } as any);
-const WsGatedProjectsProjectIdIssuesIndexRoute = WsGatedProjectsProjectIdIssuesIndexRouteImport.update({
-  id: "/projects/$projectId/issues/",
-  path: "/projects/$projectId/issues/",
+const WsGatedProjectsProjectIdRouteRoute = WsGatedProjectsProjectIdRouteRouteImport.update({
+  id: "/projects/$projectId",
+  path: "/projects/$projectId",
   getParentRoute: () => WsGatedRouteRoute,
+} as any);
+const WsGatedProjectsProjectIdIssuesIndexRoute = WsGatedProjectsProjectIdIssuesIndexRouteImport.update({
+  id: "/issues/",
+  path: "/issues/",
+  getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
 } as any);
 
 export interface FileRoutesByFullPath {
@@ -126,7 +138,9 @@ export interface FileRoutesByFullPath {
   "/accounts/reset-password": typeof AccountsResetPasswordRoute;
   "/accounts/set-password": typeof AccountsSetPasswordRoute;
   "/accounts/sign-up": typeof AccountsSignUpRoute;
+  "/auth/device": typeof AuthDeviceRoute;
   "/$ws/": typeof WsGatedIndexRoute;
+  "/$ws/projects/$projectId": typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
   "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
   "/$ws/projects/$projectId/issues/": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
 }
@@ -144,6 +158,8 @@ export interface FileRoutesByTo {
   "/accounts/reset-password": typeof AccountsResetPasswordRoute;
   "/accounts/set-password": typeof AccountsSetPasswordRoute;
   "/accounts/sign-up": typeof AccountsSignUpRoute;
+  "/auth/device": typeof AuthDeviceRoute;
+  "/$ws/projects/$projectId": typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
   "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
   "/$ws/projects/$projectId/issues": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
 }
@@ -163,7 +179,9 @@ export interface FileRoutesById {
   "/accounts/reset-password": typeof AccountsResetPasswordRoute;
   "/accounts/set-password": typeof AccountsSetPasswordRoute;
   "/accounts/sign-up": typeof AccountsSignUpRoute;
+  "/auth/device": typeof AuthDeviceRoute;
   "/$ws/_gated/": typeof WsGatedIndexRoute;
+  "/$ws/_gated/projects/$projectId": typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
   "/$ws/_gated/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
   "/$ws/_gated/projects/$projectId/issues/": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
 }
@@ -183,7 +201,9 @@ export interface FileRouteTypes {
     | "/accounts/reset-password"
     | "/accounts/set-password"
     | "/accounts/sign-up"
+    | "/auth/device"
     | "/$ws/"
+    | "/$ws/projects/$projectId"
     | "/$ws/browse/$issueKey"
     | "/$ws/projects/$projectId/issues/";
   fileRoutesByTo: FileRoutesByTo;
@@ -201,6 +221,8 @@ export interface FileRouteTypes {
     | "/accounts/reset-password"
     | "/accounts/set-password"
     | "/accounts/sign-up"
+    | "/auth/device"
+    | "/$ws/projects/$projectId"
     | "/$ws/browse/$issueKey"
     | "/$ws/projects/$projectId/issues";
   id:
@@ -219,7 +241,9 @@ export interface FileRouteTypes {
     | "/accounts/reset-password"
     | "/accounts/set-password"
     | "/accounts/sign-up"
+    | "/auth/device"
     | "/$ws/_gated/"
+    | "/$ws/_gated/projects/$projectId"
     | "/$ws/_gated/browse/$issueKey"
     | "/$ws/_gated/projects/$projectId/issues/";
   fileRoutesById: FileRoutesById;
@@ -237,6 +261,7 @@ export interface RootRouteChildren {
   AccountsResetPasswordRoute: typeof AccountsResetPasswordRoute;
   AccountsSetPasswordRoute: typeof AccountsSetPasswordRoute;
   AccountsSignUpRoute: typeof AccountsSignUpRoute;
+  AuthDeviceRoute: typeof AuthDeviceRoute;
 }
 
 declare module "@tanstack/react-router" {
@@ -339,6 +364,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof AccountsSignUpRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/auth/device": {
+      id: "/auth/device";
+      path: "/auth/device";
+      fullPath: "/auth/device";
+      preLoaderRoute: typeof AuthDeviceRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/$ws/_gated/": {
       id: "/$ws/_gated/";
       path: "/";
@@ -353,26 +385,45 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof WsGatedBrowseIssueKeyRouteImport;
       parentRoute: typeof WsGatedRouteRoute;
     };
+    "/$ws/_gated/projects/$projectId": {
+      id: "/$ws/_gated/projects/$projectId";
+      path: "/projects/$projectId";
+      fullPath: "/$ws/projects/$projectId";
+      preLoaderRoute: typeof WsGatedProjectsProjectIdRouteRouteImport;
+      parentRoute: typeof WsGatedRouteRoute;
+    };
     "/$ws/_gated/projects/$projectId/issues/": {
       id: "/$ws/_gated/projects/$projectId/issues/";
-      path: "/projects/$projectId/issues";
+      path: "/issues";
       fullPath: "/$ws/projects/$projectId/issues/";
       preLoaderRoute: typeof WsGatedProjectsProjectIdIssuesIndexRouteImport;
-      parentRoute: typeof WsGatedRouteRoute;
+      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute;
     };
   }
 }
 
+interface WsGatedProjectsProjectIdRouteRouteChildren {
+  WsGatedProjectsProjectIdIssuesIndexRoute: typeof WsGatedProjectsProjectIdIssuesIndexRoute;
+}
+
+const WsGatedProjectsProjectIdRouteRouteChildren: WsGatedProjectsProjectIdRouteRouteChildren = {
+  WsGatedProjectsProjectIdIssuesIndexRoute: WsGatedProjectsProjectIdIssuesIndexRoute,
+};
+
+const WsGatedProjectsProjectIdRouteRouteWithChildren = WsGatedProjectsProjectIdRouteRoute._addFileChildren(
+  WsGatedProjectsProjectIdRouteRouteChildren
+);
+
 interface WsGatedRouteRouteChildren {
   WsGatedIndexRoute: typeof WsGatedIndexRoute;
+  WsGatedProjectsProjectIdRouteRoute: typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
   WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute;
-  WsGatedProjectsProjectIdIssuesIndexRoute: typeof WsGatedProjectsProjectIdIssuesIndexRoute;
 }
 
 const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedIndexRoute: WsGatedIndexRoute,
+  WsGatedProjectsProjectIdRouteRoute: WsGatedProjectsProjectIdRouteRouteWithChildren,
   WsGatedBrowseIssueKeyRoute: WsGatedBrowseIssueKeyRoute,
-  WsGatedProjectsProjectIdIssuesIndexRoute: WsGatedProjectsProjectIdIssuesIndexRoute,
 };
 
 const WsGatedRouteRouteWithChildren = WsGatedRouteRoute._addFileChildren(WsGatedRouteRouteChildren);
@@ -402,5 +453,6 @@ const rootRouteChildren: RootRouteChildren = {
   AccountsResetPasswordRoute: AccountsResetPasswordRoute,
   AccountsSetPasswordRoute: AccountsSetPasswordRoute,
   AccountsSignUpRoute: AccountsSignUpRoute,
+  AuthDeviceRoute: AuthDeviceRoute,
 };
 export const routeTree = rootRouteImport._addFileChildren(rootRouteChildren)._addFileTypes<FileRouteTypes>();

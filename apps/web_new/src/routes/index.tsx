@@ -19,7 +19,8 @@ import {
   ONBOARDING_PATH,
   parseReturnPath,
 } from "../core/session/index.js";
-import { SignInCard } from "../features/auth/index.js";
+import { platform } from "../core/platform/index.js";
+import { DesktopSignInScreen, SignInCard } from "../features/auth/index.js";
 
 export interface EntrySearch {
   next?: string | undefined;
@@ -36,6 +37,9 @@ export interface EntrySearch {
   error_code?: string | undefined;
   invitation_id?: string | undefined;
   slug?: string | undefined;
+  /** Desktop failure landing (AUTH-022): only the desktop entry reads these. */
+  error?: string | undefined;
+  error_description?: string | undefined;
 }
 
 /** Search schema: invalid params fall back to absent instead of throwing. */
@@ -45,6 +49,8 @@ export function parseEntrySearch(search: Record<string, unknown>): EntrySearch {
   const errorCode = asString(search["error_code"]);
   const invitationId = asString(search["invitation_id"]);
   const slug = asString(search["slug"]);
+  const error = asString(search["error"]);
+  const errorDescription = asString(search["error_description"]);
   return {
     ...(next === undefined ? {} : { next }),
     ...(unsafeNext === undefined ? {} : { unsafeNext }),
@@ -52,6 +58,8 @@ export function parseEntrySearch(search: Record<string, unknown>): EntrySearch {
     ...(errorCode === undefined ? {} : { error_code: errorCode }),
     ...(invitationId === undefined ? {} : { invitation_id: invitationId }),
     ...(slug === undefined ? {} : { slug }),
+    ...(error === undefined ? {} : { error }),
+    ...(errorDescription === undefined ? {} : { error_description: errorDescription }),
   };
 }
 
@@ -81,6 +89,9 @@ export const Route = createFileRoute("/")({
   },
   component: function HomeComponent() {
     const search = Route.useSearch();
+    if (platform.kind === "desktop") {
+      return <DesktopSignInScreen error={search.error} errorDescription={search.error_description} />;
+    }
     return (
       <EntryScreen
         next={search.next}

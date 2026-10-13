@@ -9,6 +9,7 @@ import {
   archiveProject,
   createProject,
   deleteProject,
+  getProject,
   getProjectUserProperties,
   getWorkspaceUserProperties,
   joinProjects,
@@ -101,6 +102,48 @@ async function cleanupLifecycleProject(client: ApiClient, identifier: string): P
   const leftover = details.find((project) => project.identifier === identifier);
   if (leftover) await deleteProject(client, CONTRACT_WORKSPACE, leftover.id).catch(() => 0);
 }
+
+describe.skipIf(!contractEnabled)("project detail contract", () => {
+  it("reads one project row", async () => {
+    const id = await seededProjectId(client);
+    const row = await getProject(client, CONTRACT_WORKSPACE, id);
+    expect(row.id).toBe(id);
+    expect(row.identifier).toBe(CONTRACT_PROJECT_IDENTIFIER);
+    expect(row.member_role).toBe(20);
+  });
+
+  it("reports unknown projects as not-found", async () => {
+    const failure = await getProject(client, CONTRACT_WORKSPACE, "00000000-0000-0000-0000-000000000000").catch(
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(404);
+    expect((failure as ApiError).message).toBe("Project does not exist");
+  });
+
+  it("reports non-member projects as conflict, secret ones as forbidden", async () => {
+    // The probe is a workspace member but joins no new project: a public
+    // project answers 409, a secret one 403. Fresh identifiers per run for
+    // the same soft-delete reason as the lifecycle suite.
+    const open = lifecycleProject();
+    const secret = lifecycleProject();
+    await cleanupLifecycleProject(client, open.identifier);
+    await cleanupLifecycleProject(client, secret.identifier);
+    try {
+      const created = await createProject(client, CONTRACT_WORKSPACE, open);
+      const hidden = await createProject(client, CONTRACT_WORKSPACE, { ...secret, network: 0 });
+      const denied = await getProject(probe, CONTRACT_WORKSPACE, created.id).catch((error: unknown) => error);
+      expect(denied).toBeInstanceOf(ApiError);
+      expect((denied as ApiError).status).toBe(409);
+      const forbidden = await getProject(probe, CONTRACT_WORKSPACE, hidden.id).catch((error: unknown) => error);
+      expect(forbidden).toBeInstanceOf(ApiError);
+      expect((forbidden as ApiError).status).toBe(403);
+    } finally {
+      await cleanupLifecycleProject(client, open.identifier);
+      await cleanupLifecycleProject(client, secret.identifier);
+    }
+  });
+});
 
 describe.skipIf(!contractEnabled)("project details contract", () => {
   it("lists rich project rows with membership annotations", async () => {

@@ -4,12 +4,22 @@
 // Self-contained API mocks for the perf specs (NEWFRONT-21). The payloads
 // follow the @pidash/api-client contracts; the app parses every one with
 // zod at runtime, so a malformed mock fails the spec loudly instead of
-// silently rendering nothing. Anything outside the five endpoints the
+// silently rendering nothing. Anything outside the eight endpoints the
 // issue-list slice calls is aborted, keeping the specs hermetic: a new
 // endpoint shows up as a failure that updates these mocks.
 import type { Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
-import type { IssueListItem, IssueListResponse, Me, Profile, Project, Workspace } from "@pidash/api-client";
+import type {
+  IssueListItem,
+  IssueListResponse,
+  Me,
+  OwnWorkspaceMembership,
+  Profile,
+  Project,
+  ProjectDetail,
+  ProjectRoleMap,
+  Workspace,
+} from "@pidash/api-client";
 
 export const PERF_WORKSPACE_SLUG = "perf-ws";
 export const PERF_PROJECT_ID = "123e4567-e89b-42d3-a456-426614174001";
@@ -123,6 +133,40 @@ export function mockProjects(): Project[] {
   ];
 }
 
+/** One project row without the list-only intake count (the retrieve view shape). */
+export function mockProjectDetail(): ProjectDetail {
+  const { intake_count: _listOnly, ...detail } = mockProjects()[0] ?? {};
+  return detail as ProjectDetail;
+}
+
+/** The perf user belongs to the perf workspace as a member. */
+export function mockMembership(): OwnWorkspaceMembership {
+  return {
+    id: "123e4567-e89b-42d3-a456-426614174004",
+    workspace: WORKSPACE_ID,
+    member: USER_ID,
+    role: 15,
+    company_role: null,
+    view_props: {},
+    default_props: {},
+    issue_props: {},
+    is_active: true,
+    getting_started_checklist: {},
+    tips: {},
+    explored_features: {},
+    draft_issue_count: 0,
+    created_by: null,
+    updated_by: null,
+    created_at: NOW,
+    updated_at: NOW,
+  };
+}
+
+/** The perf user's per-project roles: member of the perf project. */
+export function mockProjectRoles(): ProjectRoleMap {
+  return { [PERF_PROJECT_ID]: 15 };
+}
+
 const PRIORITIES: IssueListItem["priority"][] = ["urgent", "high", "medium", "low", "none"];
 
 export function mockIssue(index: number): IssueListItem {
@@ -202,12 +246,32 @@ export async function installApiMocks(
     (url) => url.pathname === issuesPath,
     (route) => (options.blockIssues ? route.abort("blockedbyclient") : route.fulfill(jsonFulfill(issuesPayload)))
   );
+  // The project access gate (AUTH-024) reads the project row plus the
+  // permission-store feeds before the list renders.
+  const projectDetailPath = `/api/workspaces/${PERF_WORKSPACE_SLUG}/projects/${PERF_PROJECT_ID}/`;
+  const membershipPath = `/api/workspaces/${PERF_WORKSPACE_SLUG}/workspace-members/me/`;
+  const rolesPath = `/api/users/me/workspaces/${PERF_WORKSPACE_SLUG}/project-roles/`;
+  await page.route(
+    (url) => url.pathname === projectDetailPath,
+    (route) => route.fulfill(jsonFulfill(mockProjectDetail()))
+  );
+  await page.route(
+    (url) => url.pathname === membershipPath,
+    (route) => route.fulfill(jsonFulfill(mockMembership()))
+  );
+  await page.route(
+    (url) => url.pathname === rolesPath,
+    (route) => route.fulfill(jsonFulfill(mockProjectRoles()))
+  );
   const known = new Set([
     "/api/users/me/",
     "/api/users/me/profile/",
     "/api/users/me/workspaces/",
     `/api/workspaces/${PERF_WORKSPACE_SLUG}/projects/`,
     issuesPath,
+    projectDetailPath,
+    membershipPath,
+    rolesPath,
   ]);
   await page.route(
     (url) =>

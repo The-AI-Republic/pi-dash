@@ -14,11 +14,13 @@ import { useSessionStore } from "../../core/session/store.js";
 import {
   FINISH_FAILURE_TITLE,
   useAcceptWorkspaceInvitations,
+  useApproveDeviceCode,
   useCheckWorkspaceSlug,
   useCreateJoinRequest,
   useCreateWorkspace,
   useFinishOnboarding,
   useForgotPassword,
+  useJoinProject,
   useMagicSignIn,
   useMagicSignUp,
   usePasswordReset,
@@ -38,6 +40,7 @@ vi.mock("../../shared/shell/index.js", async (importOriginal) => {
 });
 
 import { notifyError } from "../../shared/shell/index.js";
+import { JOIN_PROJECT_FAILED_TITLE } from "./api.js";
 import { authKeys } from "./queries.js";
 import { SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE } from "./signOut.js";
 
@@ -60,7 +63,11 @@ function recordingTransport(seen: SeenRequest[]): Transport {
       });
     }
     let body = "";
-    if (url.endsWith("/auth/forgot-password/")) {
+    if (url.endsWith("/api/v1/auth/device/approve/")) {
+      body = JSON.stringify({ ok: true, user_email: "ada@example.com", workspace_slug: "acme" });
+    } else if (url.endsWith("/projects/invitations/")) {
+      body = JSON.stringify({ message: "joined" });
+    } else if (url.endsWith("/auth/forgot-password/")) {
       body = JSON.stringify({ message: "Check your email to reset your password" });
     } else if (url.endsWith("/auth/set-password/")) {
       body = JSON.stringify({
@@ -193,6 +200,18 @@ describe.each([
     args: "Tq7!mZ2@kP9#xR",
     postPath: "/auth/set-password/",
   },
+  {
+    name: "useApproveDeviceCode",
+    useHook: useApproveDeviceCode,
+    args: "ABCD-1234",
+    postPath: "/api/v1/auth/device/approve/",
+  },
+  {
+    name: "useJoinProject",
+    useHook: useJoinProject,
+    args: { slug: "acme", projectId: "project-1" },
+    postPath: "/api/users/me/workspaces/acme/projects/invitations/",
+  },
 ])(
   "$name",
   ({
@@ -227,6 +246,46 @@ describe.each([
     });
   }
 );
+
+describe("useJoinProject", () => {
+  it("refreshes the workspace subtree after joining", async () => {
+    const seen: SeenRequest[] = [];
+    createAppClient("https://api.test", recordingTransport(seen));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["ws", "acme", "auth", "project-roles"], {});
+    const { result } = renderHook(() => useJoinProject(), { wrapper: wrapper(queryClient) });
+
+    let joined: unknown;
+    await act(async () => {
+      joined = await result.current.mutateAsync({ slug: "acme", projectId: "project-1" });
+    });
+
+    expect(joined).toEqual({ message: "joined" });
+    expect(queryClient.getQueryState(["ws", "acme", "auth", "project-roles"])?.isInvalidated).toBe(true);
+  });
+
+  it("toasts and rejects when the join fails", async () => {
+    const transport = stubTransport((url) => {
+      if (url === CSRF_URL) return { status: 200, url, body: CSRF };
+      return { status: 500, url, body: "{}" };
+    });
+    createAppClient("https://api.test", transport);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useJoinProject(), { wrapper: wrapper(queryClient) });
+
+    let rejected: unknown = null;
+    await act(async () => {
+      try {
+        await result.current.mutateAsync({ slug: "acme", projectId: "project-1" });
+      } catch (error) {
+        rejected = error;
+      }
+    });
+
+    expect(rejected).toBeInstanceOf(Error);
+    expect(notifyError).toHaveBeenCalledWith(JOIN_PROJECT_FAILED_TITLE, expect.any(String));
+  });
+});
 
 describe("useSignOut", () => {
   it("signs out to the entry route", async () => {

@@ -55877,4 +55877,29 @@ export class WebDriver implements ParityDriver {
       return { role, label: text };
     });
   }
+
+  // --- Desktop sign-in halves (NEWFRONT-486, AUTH-022/AUTH-023). The old
+  // --- desktop build: the home page renders the failure alert above the
+  // --- card, and the community card offers the browser hand-off.
+  async authDesktopUnavailableCardVisible(): Promise<boolean> {
+    return this.page.getByRole("heading", { name: "Desktop sign-in isn't available yet" }).isVisible();
+  }
+
+  async authDesktopBrowserActionLabel(): Promise<string | null> {
+    const action = this.page.getByRole("button", { name: "Open Pi Dash in your browser" });
+    if ((await action.count()) === 0) return null;
+    const text = ((await action.first().textContent()) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  async authDesktopClickBrowserAction(): Promise<void> {
+    await this.page.getByRole("button", { name: "Open Pi Dash in your browser" }).click();
+  }
+
+  async authDesktopFailureAlertText(): Promise<string | null> {
+    const alert = this.page.getByRole("alert");
+    if ((await alert.count()) === 0) return null;
+    const text = (await alert.first().innerText()).trim();
+    return text === "" ? null : text;
+  }
 }
