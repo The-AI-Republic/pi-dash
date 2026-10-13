@@ -15,7 +15,15 @@
 // element-identical on the oracle. Tab reads scope to the nested
 // workspace main so sidebar rows and issue rows never leak in.
 import { readFileSync, statSync } from "node:fs";
-import { expect, type CDPSession, type ElementHandle, type Locator, type Page, type Route } from "@playwright/test";
+import {
+  expect,
+  type CDPSession,
+  type ElementHandle,
+  type Locator,
+  type Page,
+  type Request,
+  type Route,
+} from "@playwright/test";
 import type {
   ApprovalCard,
   ArchivesFilterExpression,
@@ -156,6 +164,12 @@ import type {
   SettingsProfileGeneralField,
   SettingsProfileSecurityField,
   WsSettingsMemberRowFacts,
+  SpaceBoardGroupFacts,
+  SpaceBoardCardFacts,
+  SpaceBoardCardMarkers,
+  SpaceBoardCardFooter,
+  SpaceBoardDragFacts,
+  SpaceBoardStability,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -48580,5 +48594,744 @@ export class WebDriver implements ParityDriver {
     // (overlay button + its test suite); the web-build stub renders nothing,
     // so that accessible name must never appear.
     return this.isShown(this.page.getByRole("button", { name: /^Update to Pi Dash / }));
+  }
+  // === NEWFRONT-97 space navigation (shared; keep earliest-merged on dup). ===
+  async spaceOpenBoard(anchor: string, query = ""): Promise<void> {
+    await this.page.goto(`/issues/${anchor}${query}`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async spaceOpenLanding(): Promise<void> {
+    await this.page.goto("/");
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async spaceOpenLegacyLink(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/${projectId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  // --- Space layouts & cards oracle (NEWFRONT-449, SPC-020..033). ---
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+  /** Old-app switcher tooltip labels keyed by layout (oracle-side mapping). */
+  private static readonly SPACE_BOARD_LAYOUT_LABELS: Record<string, string> = {
+    list: "List",
+    kanban: "Board",
+  };
+
+  /** Layout-list fetch pattern (excludes per-issue detail reads). */
+  private static readonly SPACE_BOARD_ISSUES_PATTERN = /\/api\/public\/anchor\/[^/]+\/issues\/?(\?|$)/;
+
+  /** Switcher buttons in display order. */
+  private spaceBoardSwitcherButtons(): Locator {
+    return this.page.locator("div.flex.items-center.gap-1.rounded-sm.bg-layer-2.p-1 button");
+  }
+
+  /** Hover a target and read the tooltip portal text it reveals. */
+  private async spaceBoardHoverTooltipText(target: Locator): Promise<string> {
+    const tips = this.page.locator("div.z-50");
+    // Park the pointer away first so a stale portal from the previous hover
+    // unmounts and can never be mistaken for this target's tooltip.
+    await this.page.mouse.move(4, 30);
+    await this.page
+      .waitForFunction(() => document.querySelectorAll("div.z-50").length === 0, null, { timeout: 5000 })
+      .catch(() => {});
+    const before = await tips.count();
+    await target.hover({ timeout: WebDriver.WAIT_MS });
+    await this.page
+      .waitForFunction((prev: number) => document.querySelectorAll("div.z-50").length > prev, before, {
+        timeout: 5000,
+      })
+      .catch(() => {});
+    const total = await tips.count();
+    for (let i = total - 1; i >= 0; i--) {
+      const text = (
+        (await tips
+          .nth(i)
+          .textContent()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text.length > 0) {
+        await this.page.mouse.move(4, 30);
+        return text;
+      }
+    }
+    await this.page.mouse.move(4, 30);
+    throw new Error("[parity] hover revealed no tooltip text.");
+  }
+
+  /** Run work while counting public-issues list fetches. */
+  private async spaceBoardCountIssuesRequests(work: () => Promise<void>): Promise<number> {
+    let hits = 0;
+    const onRequest = (req: Request): void => {
+      if (WebDriver.SPACE_BOARD_ISSUES_PATTERN.test(req.url())) hits += 1;
+    };
+    this.page.on("request", onRequest);
+    try {
+      await work();
+    } finally {
+      this.page.off("request", onRequest);
+    }
+    return hits;
+  }
+
+  /** Resolve once either layout's content (or the empty notice) renders. */
+  private async spaceBoardWaitForLayout(): Promise<void> {
+    // Generous shell budget: under a loaded box the dev server can stall a
+    // route compile well past the default wait; one wedged request gets a
+    // reload before the wait fails, while genuine breakage still fails
+    // loudly below. The fast path is unaffected.
+    const shellRendered = (): boolean => {
+      if (document.querySelector("div[class*='group/list-header']") !== null) return true;
+      if (document.querySelector("div[class*='group/kanban-block']") !== null) return true;
+      return [...document.querySelectorAll("div")].some(
+        (el) => el.children.length === 0 && (el.textContent?.trim() ?? "") === "No work items found"
+      );
+    };
+    const settled = await this.page.waitForFunction(shellRendered, null, { timeout: 60_000 }).then(
+      () => true,
+      () => false
+    );
+    if (!settled) {
+      await this.page.reload({ timeout: WebDriver.WAIT_MS }).catch(() => {});
+      await this.page.waitForLoadState("domcontentloaded", { timeout: WebDriver.WAIT_MS }).catch(() => {});
+      await this.page.waitForFunction(shellRendered, null, { timeout: 60_000 });
+    }
+    // Column shells render from states before issue counts land; wait for
+    // the data itself so counts and rows are never read mid-flight.
+    await this.page
+      .waitForFunction(
+        (): boolean => {
+          if (document.querySelector("a[id^='issue-'], a[href*='peekId']") !== null) return true;
+          return [...document.querySelectorAll("div")].some(
+            (el) => el.children.length === 0 && (el.textContent?.trim() ?? "") === "No work items found"
+          );
+        },
+        null,
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] board content never rendered its rows.");
+      });
+  }
+
+  async spaceBoardLayoutOptions(): Promise<string[]> {
+    const buttons = this.spaceBoardSwitcherButtons();
+    await buttons.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const count = await buttons.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const text = await this.spaceBoardHoverTooltipText(buttons.nth(i));
+      const hit = Object.entries(WebDriver.SPACE_BOARD_LAYOUT_LABELS).find(([, label]) => label === text);
+      if (hit === undefined)
+        throw new Error(`[parity] switcher tooltip ${JSON.stringify(text)} names no known layout.`);
+      const key = hit[0];
+      if (key === undefined) throw new Error("[parity] switcher tooltip matched an empty layout key.");
+      out.push(key);
+    }
+    return out;
+  }
+
+  async spaceBoardActiveLayout(): Promise<string> {
+    // The validation effect rewrites the address before content renders, so
+    // read only once the layout settled — never the raw arrival param.
+    await this.spaceBoardWaitForLayout();
+    await this.page.waitForFunction(() => new URL(window.location.href).searchParams.get("board") !== null, null, {
+      timeout: WebDriver.WAIT_MS,
+    });
+    return new URL(this.page.url()).searchParams.get("board") ?? "";
+  }
+
+  async spaceBoardSwitchLayout(layout: string): Promise<void> {
+    const label = WebDriver.SPACE_BOARD_LAYOUT_LABELS[layout];
+    if (label === undefined) throw new Error(`[parity] unknown board layout ${JSON.stringify(layout)}.`);
+    const buttons = this.spaceBoardSwitcherButtons();
+    await buttons.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const count = await buttons.count();
+    let clicked = false;
+    for (let i = 0; i < count; i++) {
+      const text = await this.spaceBoardHoverTooltipText(buttons.nth(i));
+      if (text === label) {
+        await buttons.nth(i).click({ timeout: WebDriver.WAIT_MS });
+        clicked = true;
+        break;
+      }
+    }
+    if (!clicked) throw new Error(`[parity] switcher offers no ${JSON.stringify(layout)} layout.`);
+    await this.page.waitForFunction(
+      (want: string) => new URL(window.location.href).searchParams.get("board") === want,
+      layout,
+      { timeout: WebDriver.WAIT_MS }
+    );
+    await this.spaceBoardWaitForLayout();
+  }
+
+  async spaceBoardSwitchLayoutRefetches(layout: string): Promise<number> {
+    // Settle first: the arrival fetch must land before counting starts, or
+    // the flip gets blamed for the load's own request.
+    await this.spaceBoardWaitForLayout();
+    await this.page.waitForTimeout(1000);
+    return this.spaceBoardCountIssuesRequests(async () => {
+      await this.spaceBoardSwitchLayout(layout);
+      // Let any trailing refetch land after the flip settles.
+      await this.page.waitForTimeout(1500);
+    });
+  }
+
+  async spaceBoardListGroups(): Promise<SpaceBoardGroupFacts[]> {
+    await this.spaceBoardWaitForLayout();
+    return this.page.evaluate((): SpaceBoardGroupFacts[] => {
+      const headers = [...document.querySelectorAll("div[class*='group/list-header']")];
+      return headers.map((header) => {
+        const name = header.querySelector("div.truncate")?.textContent?.trim() ?? "";
+        const raw = Number(header.querySelector("div.pl-2")?.textContent?.trim() ?? "0");
+        const root = header.parentElement?.parentElement ?? null;
+        const rows = root === null ? 0 : root.querySelectorAll("a[id^='issue-']").length;
+        return { name, count: Number.isNaN(raw) ? 0 : raw, rows };
+      });
+    });
+  }
+
+  async spaceBoardKanbanColumns(): Promise<SpaceBoardGroupFacts[]> {
+    await this.spaceBoardWaitForLayout();
+    return this.page.evaluate((): SpaceBoardGroupFacts[] => {
+      const columns = [...document.querySelectorAll("[class*='w-[350px]']")];
+      return columns.map((column) => {
+        const name = column.querySelector("div.truncate")?.textContent?.trim() ?? "";
+        const raw = Number(column.querySelector("div.pl-2")?.textContent?.trim() ?? "0");
+        const cards = column.querySelectorAll("a[href*='peekId']").length;
+        return { name, count: Number.isNaN(raw) ? 0 : raw, rows: cards };
+      });
+    });
+  }
+
+  async spaceBoardKanbanColumnsFlow(): Promise<"row" | "column" | "single"> {
+    return this.page.evaluate((): "row" | "column" | "single" => {
+      const columns = [...document.querySelectorAll("[class*='w-[350px]']")];
+      const first = columns[0];
+      const second = columns[1];
+      if (first === undefined || second === undefined) return "single";
+      const a = first.getBoundingClientRect();
+      const b = second.getBoundingClientRect();
+      const overlapY = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+      if (b.left > a.left && overlapY > 0) return "row";
+      return "column";
+    });
+  }
+
+  async spaceBoardEmptyVisible(): Promise<boolean> {
+    const notice = this.page.getByText("No work items found", { exact: true });
+    await notice.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS }).catch(() => {});
+    return notice.isVisible().catch(() => false);
+  }
+
+  /** Index of one list group by its exact header name. */
+  private async spaceBoardListGroupIndex(groupName: string): Promise<number> {
+    const index = await this.page.evaluate((want: string): number => {
+      const headers = [...document.querySelectorAll("div[class*='group/list-header']")];
+      return headers.findIndex((h) => (h.querySelector("div.truncate")?.textContent?.trim() ?? "") === want);
+    }, groupName);
+    if (index < 0) throw new Error(`[parity] list shows no ${JSON.stringify(groupName)} group.`);
+    return index;
+  }
+
+  /** Rows rendered in one list group. */
+  private async spaceBoardListGroupRowCount(index: number): Promise<number> {
+    return this.page.evaluate((i: number): number => {
+      const headers = [...document.querySelectorAll("div[class*='group/list-header']")];
+      const root = headers[i]?.parentElement?.parentElement ?? null;
+      return root === null ? 0 : root.querySelectorAll("a[id^='issue-']").length;
+    }, index);
+  }
+
+  /** Root element of one list group, located through its header. */
+  private spaceBoardListGroupRoot(groupName: string): Locator {
+    const header = this.page.locator("div[class*='group/list-header']", { hasText: groupName });
+    return header.locator("xpath=../..");
+  }
+
+  async spaceBoardListGroupLoadMoreVisible(groupName: string): Promise<boolean> {
+    const control = this.spaceBoardListGroupRoot(groupName).locator("div[role='button']", {
+      hasText: "Load more",
+    });
+    return control.isVisible().catch(() => false);
+  }
+
+  async spaceBoardListGroupLoadMore(groupName: string): Promise<void> {
+    const index = await this.spaceBoardListGroupIndex(groupName);
+    const before = await this.spaceBoardListGroupRowCount(index);
+    const control = this.spaceBoardListGroupRoot(groupName).locator("div[role='button']", {
+      hasText: "Load more",
+    });
+    await control.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await control.click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      ([i, prev]: [number, number]): boolean => {
+        const headers = [...document.querySelectorAll("div[class*='group/list-header']")];
+        const root = headers[i]?.parentElement?.parentElement ?? null;
+        const now = root === null ? 0 : root.querySelectorAll("a[id^='issue-']").length;
+        return now > prev;
+      },
+      [index, before] as [number, number],
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async spaceBoardListGroupShowsLoader(groupName: string): Promise<boolean> {
+    const index = await this.spaceBoardListGroupIndex(groupName);
+    let seen = false;
+    await this.page.route(
+      WebDriver.SPACE_BOARD_ISSUES_PATTERN,
+      async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await route.continue();
+      },
+      { times: 1 }
+    );
+    try {
+      const before = await this.spaceBoardListGroupRowCount(index);
+      const control = this.spaceBoardListGroupRoot(groupName).locator("div[role='button']", {
+        hasText: "Load more",
+      });
+      await control.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+      await control.click({ timeout: WebDriver.WAIT_MS });
+      // Poll for the placeholder rows while the delayed fetch is in flight.
+      const deadline = Date.now() + 8000;
+      for (;;) {
+        const pulse = await this.page.evaluate((i: number): boolean => {
+          const headers = [...document.querySelectorAll("div[class*='group/list-header']")];
+          const root = headers[i]?.parentElement?.parentElement ?? null;
+          return root !== null && root.querySelector("span.animate-pulse, div.animate-pulse") !== null;
+        }, index);
+        if (pulse) {
+          seen = true;
+          break;
+        }
+        if (Date.now() >= deadline) break;
+        await this.page.waitForTimeout(150);
+      }
+      // Settle: the delayed page lands and rows grow.
+      await this.page
+        .waitForFunction(
+          ([i, prev]: [number, number]): boolean => {
+            const headers = [...document.querySelectorAll("div[class*='group/list-header']")];
+            const root = headers[i]?.parentElement?.parentElement ?? null;
+            const now = root === null ? 0 : root.querySelectorAll("a[id^='issue-']").length;
+            return now > prev;
+          },
+          [index, before] as [number, number],
+          { timeout: WebDriver.WAIT_MS }
+        )
+        .catch(() => {});
+    } finally {
+      await this.page.unroute(WebDriver.SPACE_BOARD_ISSUES_PATTERN).catch(() => {});
+    }
+    return seen;
+  }
+
+  /** Index of one board column by its exact header name. */
+  private async spaceBoardKanbanColumnIndex(columnName: string): Promise<number> {
+    const index = await this.page.evaluate((want: string): number => {
+      const columns = [...document.querySelectorAll("[class*='w-[350px]']")];
+      return columns.findIndex((c) => (c.querySelector("div.truncate")?.textContent?.trim() ?? "") === want);
+    }, columnName);
+    if (index < 0) throw new Error(`[parity] board shows no ${JSON.stringify(columnName)} column.`);
+    return index;
+  }
+
+  /** Cards rendered in one board column. */
+  private async spaceBoardKanbanColumnCardCount(index: number): Promise<number> {
+    return this.page.evaluate((i: number): number => {
+      const columns = [...document.querySelectorAll("[class*='w-[350px]']")];
+      const column = columns[i] ?? null;
+      return column === null ? 0 : column.querySelectorAll("a[href*='peekId']").length;
+    }, index);
+  }
+
+  /** Scroll one column's scrollable body to its end. */
+  private async spaceBoardKanbanColumnScrollToEnd(index: number): Promise<void> {
+    await this.page.evaluate((i: number): void => {
+      const columns = [...document.querySelectorAll("[class*='w-[350px]']")];
+      const column = columns[i] ?? null;
+      const body = column?.querySelector("div.vertical-scrollbar") ?? column;
+      body?.scrollTo({ top: body.scrollHeight });
+    }, index);
+  }
+
+  async spaceBoardKanbanColumnScrollLoad(columnName: string): Promise<void> {
+    const index = await this.spaceBoardKanbanColumnIndex(columnName);
+    const before = await this.spaceBoardKanbanColumnCardCount(index);
+    await this.spaceBoardKanbanColumnScrollToEnd(index);
+    await this.page.waitForFunction(
+      ([i, prev]: [number, number]): boolean => {
+        const columns = [...document.querySelectorAll("[class*='w-[350px]']")];
+        const column = columns[i] ?? null;
+        const now = column === null ? 0 : column.querySelectorAll("a[href*='peekId']").length;
+        return now > prev;
+      },
+      [index, before] as [number, number],
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async spaceBoardKanbanColumnShowsLoader(columnName: string): Promise<boolean> {
+    const index = await this.spaceBoardKanbanColumnIndex(columnName);
+    let seen = false;
+    await this.page.route(
+      WebDriver.SPACE_BOARD_ISSUES_PATTERN,
+      async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await route.continue();
+      },
+      { times: 1 }
+    );
+    try {
+      const before = await this.spaceBoardKanbanColumnCardCount(index);
+      await this.spaceBoardKanbanColumnScrollToEnd(index);
+      // Poll for the placeholder cards while the delayed fetch is in flight.
+      const deadline = Date.now() + 8000;
+      for (;;) {
+        const pulse = await this.page.evaluate((i: number): boolean => {
+          const columns = [...document.querySelectorAll("[class*='w-[350px]']")];
+          const column = columns[i] ?? null;
+          return column !== null && column.querySelector("span.animate-pulse") !== null;
+        }, index);
+        if (pulse) {
+          seen = true;
+          break;
+        }
+        if (Date.now() >= deadline) break;
+        await this.page.waitForTimeout(150);
+      }
+      // Settle: the delayed page lands and cards grow.
+      await this.page
+        .waitForFunction(
+          ([i, prev]: [number, number]): boolean => {
+            const columns = [...document.querySelectorAll("[class*='w-[350px]']")];
+            const column = columns[i] ?? null;
+            const now = column === null ? 0 : column.querySelectorAll("a[href*='peekId']").length;
+            return now > prev;
+          },
+          [index, before] as [number, number],
+          { timeout: WebDriver.WAIT_MS }
+        )
+        .catch(() => {});
+    } finally {
+      await this.page.unroute(WebDriver.SPACE_BOARD_ISSUES_PATTERN).catch(() => {});
+    }
+    return seen;
+  }
+
+  async spaceBoardKanbanScrollBurstFetches(columnName: string, scrolls: number): Promise<number> {
+    const index = await this.spaceBoardKanbanColumnIndex(columnName);
+    // Hold the first page in flight while the burst runs, so a later page
+    // can never land mid-burst and start a legitimate second fetch: the
+    // count pins the debounce alone.
+    await this.page.route(
+      WebDriver.SPACE_BOARD_ISSUES_PATTERN,
+      async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await route.continue();
+      },
+      { times: 1 }
+    );
+    try {
+      const fetches = await this.spaceBoardCountIssuesRequests(async () => {
+        for (let i = 0; i < scrolls; i++) {
+          await this.page.evaluate((idx: number): void => {
+            const columns = [...document.querySelectorAll("[class*='w-[350px]']")];
+            const column = columns[idx] ?? null;
+            const body = column?.querySelector("div.vertical-scrollbar") ?? column;
+            body?.scrollTo({ top: 0 });
+            body?.scrollTo({ top: body.scrollHeight });
+          }, index);
+          await this.page.waitForTimeout(60);
+        }
+        // Let the debounced column settle past its quiet window.
+        await this.page.waitForTimeout(1200);
+      });
+      // Settle: the delayed page lands.
+      await this.page.waitForTimeout(2500);
+      return fetches;
+    } finally {
+      await this.page.unroute(WebDriver.SPACE_BOARD_ISSUES_PATTERN).catch(() => {});
+    }
+  }
+
+  /** Card link with the exact rendered title in either layout. */
+  private async spaceBoardCardLink(issueName: string): Promise<Locator> {
+    await this.spaceBoardWaitForLayout();
+    const id = await this.page.evaluate((want: string): string | null => {
+      const listLinks = [...document.querySelectorAll("a[id^='issue-']")];
+      for (const a of listLinks) {
+        if ((a.textContent?.trim() ?? "") === want) return a.getAttribute("id");
+      }
+      const kanbanLinks = [...document.querySelectorAll("a[href*='peekId']")];
+      for (const a of kanbanLinks) {
+        const title = a.querySelector(":scope > div > div:nth-child(2)");
+        if ((title?.textContent?.trim() ?? "") === want) return a.getAttribute("id");
+      }
+      return null;
+    }, issueName);
+    if (id === null || id === "") throw new Error(`[parity] board shows no card titled ${JSON.stringify(issueName)}.`);
+    return this.page.locator(`a[id="${id}"]`);
+  }
+
+  async spaceBoardCardFacts(issueName: string): Promise<SpaceBoardCardFacts> {
+    const link = await this.spaceBoardCardLink(issueName);
+    await link.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const id = (await link.getAttribute("id")) ?? "";
+    if (id.startsWith("issue-")) {
+      const title = ((await link.textContent().catch(() => "")) ?? "").trim();
+      const key = await link.evaluate(
+        (el): string =>
+          el.closest("div[class*='group/list-block']")?.querySelector("div.shrink-0.px-4")?.textContent?.trim() ?? ""
+      );
+      const hoverTitle = await this.spaceBoardHoverTooltipText(link);
+      return { key, title, hoverTitle };
+    }
+    const title = await link.evaluate(
+      (el): string => el.querySelector(":scope > div > div:nth-child(2)")?.textContent?.trim() ?? ""
+    );
+    const key = await link.evaluate(
+      (el): string => el.querySelector(":scope > div > div:nth-child(1)")?.textContent?.trim() ?? ""
+    );
+    const hoverTitle = await this.spaceBoardHoverTooltipText(link.locator(":scope > div > div:nth-child(2)"));
+    return { key, title, hoverTitle };
+  }
+
+  async spaceBoardCardMarkers(issueName: string): Promise<SpaceBoardCardMarkers> {
+    const link = await this.spaceBoardCardLink(issueName);
+    await link.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const id = (await link.getAttribute("id")) ?? "";
+    if (id.startsWith("issue-")) {
+      return link.evaluate((el): SpaceBoardCardMarkers => {
+        const row = el.closest("div[class*='group/list-block']");
+        const kids = row === null ? [] : [...row.children];
+        const markersDiv = kids.length > 1 ? kids[1] : undefined;
+        const propsDiv = markersDiv?.firstElementChild ?? null;
+        const chips =
+          propsDiv === null
+            ? []
+            : [...propsDiv.children].filter((c) => c.tagName === "DIV" && c.classList.contains("h-5"));
+        const first = chips[0];
+        const rawState = first === undefined ? null : (first.textContent?.trim() ?? null);
+        const second = chips[1];
+        const priorityMatch = second === undefined ? null : /text-priority-([a-z]+)/.exec(second.innerHTML);
+        const labelBlock = chips[2];
+        let labels: string[] = [];
+        if (labelBlock !== undefined) {
+          const inner = [...labelBlock.querySelectorAll("div.h-5")]
+            .map((d) => d.textContent?.trim() ?? "")
+            .filter((t) => t.length > 0);
+          if (inner.length > 0) {
+            labels = [...new Set(inner)];
+          } else {
+            const flat = labelBlock.textContent?.trim() ?? "";
+            labels = flat === "" ? [] : [flat];
+          }
+        }
+        const dates = chips
+          .slice(3)
+          .map((c) => c.textContent?.trim() ?? "")
+          .filter((t) => t.length > 0);
+        return {
+          state: rawState === "" ? null : rawState,
+          priority: priorityMatch?.[1] ?? null,
+          labels,
+          dates,
+          text: (row?.textContent ?? "").replace(/\s+/g, " "),
+        };
+      });
+    }
+    return link.evaluate((el): SpaceBoardCardMarkers => {
+      const details = el.querySelector(":scope > div");
+      const blocks = details === null ? [] : [...details.children];
+      const propsDiv = blocks.length > 2 ? blocks[2] : undefined;
+      const chips =
+        propsDiv === undefined
+          ? []
+          : [...propsDiv.children].filter((c) => c.tagName === "DIV" && c.classList.contains("h-5"));
+      const first = chips[0];
+      const rawState = first === undefined ? null : (first.textContent?.trim() ?? null);
+      const second = chips[1];
+      const priorityMatch = second === undefined ? null : /text-priority-([a-z]+)/.exec(second.innerHTML);
+      const labelBlock = chips[2];
+      let labels: string[] = [];
+      if (labelBlock !== undefined) {
+        const inner = [...labelBlock.querySelectorAll("div.h-5")]
+          .map((d) => d.textContent?.trim() ?? "")
+          .filter((t) => t.length > 0);
+        if (inner.length > 0) {
+          labels = [...new Set(inner)];
+        } else {
+          const flat = labelBlock.textContent?.trim() ?? "";
+          labels = flat === "" ? [] : [flat];
+        }
+      }
+      const dates = chips
+        .slice(3)
+        .map((c) => c.textContent?.trim() ?? "")
+        .filter((t) => t.length > 0);
+      return {
+        state: rawState === "" ? null : rawState,
+        priority: priorityMatch?.[1] ?? null,
+        labels,
+        dates,
+        text: (el.textContent ?? "").replace(/\s+/g, " "),
+      };
+    });
+  }
+
+  async spaceBoardKanbanCardFooter(issueName: string): Promise<SpaceBoardCardFooter> {
+    const link = await this.spaceBoardCardLink(issueName);
+    await link.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    return link.evaluate((el): SpaceBoardCardFooter => {
+      const card = el.parentElement;
+      const footer = card?.querySelector(":scope > div.rounded-b-lg") ?? null;
+      if (footer === null) return { visible: false, votes: false, reactions: false };
+      const html = footer.innerHTML;
+      const votes = html.includes("lucide-arrow-up") || html.includes("lucide-arrow-down");
+      const reactions = footer.querySelector("[aria-haspopup='dialog']") !== null;
+      return { visible: true, votes, reactions };
+    });
+  }
+
+  async spaceBoardListCardFooterVisible(issueName: string): Promise<boolean> {
+    const link = await this.spaceBoardCardLink(issueName);
+    await link.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    return link.evaluate((el): boolean => {
+      const row = el.closest("div[class*='group/list-block']");
+      if (row === null) return false;
+      if (row.querySelector("div.rounded-b-lg") !== null) return true;
+      return row.querySelector("button") !== null;
+    });
+  }
+
+  async spaceBoardOpenCard(issueName: string): Promise<void> {
+    const link = await this.spaceBoardCardLink(issueName);
+    await link.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await link.click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForFunction(() => new URL(window.location.href).searchParams.get("peekId") !== null, null, {
+      timeout: WebDriver.WAIT_MS,
+    });
+    // The dialog root is a zero-size wrapper; the panel is the visible face.
+    await this.page
+      .locator("div[id^='headlessui-dialog-panel-']")
+      .first()
+      .waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+  }
+
+  async spaceBoardPeekVisible(): Promise<boolean> {
+    const panel = this.page.locator("div[id^='headlessui-dialog-panel-']").first();
+    await panel.waitFor({ state: "visible", timeout: 10_000 }).catch(() => {});
+    return panel.isVisible().catch(() => false);
+  }
+
+  async spaceBoardClosePeek(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForFunction(() => new URL(window.location.href).searchParams.get("peekId") === null, null, {
+      timeout: WebDriver.WAIT_MS,
+    });
+    await this.page
+      .locator("div[id^='headlessui-dialog-panel-']")
+      .first()
+      .waitFor({ state: "hidden", timeout: WebDriver.WAIT_MS });
+  }
+
+  async spaceBoardHighlightedRow(): Promise<string | null> {
+    await this.spaceBoardWaitForLayout();
+    return this.page.evaluate((): string | null => {
+      const rows = [...document.querySelectorAll("div[class*='group/list-block']")];
+      const lit = rows.filter((r) => r.className.includes("border-accent-strong"));
+      if (lit.length > 1) throw new Error("[parity] more than one list row is highlighted.");
+      const first = lit[0];
+      if (first === undefined) return null;
+      return first.querySelector("a[id^='issue-']")?.textContent?.trim() ?? null;
+    });
+  }
+
+  async spaceBoardCardDragFacts(): Promise<SpaceBoardDragFacts> {
+    await this.spaceBoardWaitForLayout();
+    return this.page.evaluate((): SpaceBoardDragFacts => {
+      const cards = [...document.querySelectorAll("div[class*='group/list-block'], div[class*='group/kanban-block']")];
+      let draggable = 0;
+      let handles = 0;
+      let editControls = 0;
+      for (const card of cards) {
+        if (card.getAttribute("draggable") === "true") draggable += 1;
+        draggable += card.querySelectorAll("[draggable='true']").length;
+        handles += card.querySelectorAll("[data-drag-handle], [class*='cursor-grab'], [class*='cursor-move']").length;
+        editControls += card.querySelectorAll("input, textarea, select, [contenteditable='true']").length;
+      }
+      return { draggable, handles, editControls };
+    });
+  }
+
+  async spaceBoardDragCardOrder(issueName: string): Promise<{ before: string[]; after: string[] }> {
+    const before = await this.spaceBoardVisibleOrder();
+    const link = await this.spaceBoardCardLink(issueName);
+    await link.scrollIntoViewIfNeeded({ timeout: WebDriver.WAIT_MS });
+    const box = await link.boundingBox();
+    if (box === null) throw new Error("[parity] card has no bounding box to drag.");
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await this.page.mouse.move(x, y);
+    await this.page.mouse.down();
+    for (let i = 1; i <= 10; i++) {
+      await this.page.mouse.move(x, y + i * 12, { steps: 2 });
+      await this.page.waitForTimeout(30);
+    }
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(500);
+    const after = await this.spaceBoardVisibleOrder();
+    return { before, after };
+  }
+
+  async spaceBoardVisibleOrder(): Promise<string[]> {
+    await this.spaceBoardWaitForLayout();
+    const links = this.page.locator("a[id^='issue-']");
+    const count = await links.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      out.push(
+        (
+          (await links
+            .nth(i)
+            .textContent()
+            .catch(() => "")) ?? ""
+        ).trim()
+      );
+    }
+    return out;
+  }
+
+  async spaceBoardRefocusStability(): Promise<SpaceBoardStability> {
+    const before = await this.spaceBoardVisibleOrder();
+    const refetches = await this.spaceBoardCountIssuesRequests(async () => {
+      await this.page.evaluate((): void => {
+        window.dispatchEvent(new Event("blur"));
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("focus"));
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await this.page.waitForTimeout(2500);
+    });
+    const after = await this.spaceBoardVisibleOrder();
+    return { before, after, refetches };
+  }
+
+  async spaceBoardReconnectStability(): Promise<{ before: string[]; after: string[] }> {
+    const before = await this.spaceBoardVisibleOrder();
+    // Outlast the data layer's reconnect throttle so the online edge always
+    // gets its revalidation verdict; then give the verdict time to land.
+    await this.page.waitForTimeout(6000);
+    await this.page.context().setOffline(true);
+    await this.page.waitForTimeout(1000);
+    await this.page.context().setOffline(false);
+    await this.page.waitForTimeout(4000);
+    const after = await this.spaceBoardVisibleOrder();
+    return { before, after };
   }
 }

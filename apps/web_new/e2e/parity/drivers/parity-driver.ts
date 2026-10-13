@@ -40,6 +40,8 @@ export interface ParitySeedFacts {
   /** Bot identity for the CMT-012 automated-author step (NEWFRONT-112). */
   botEmail?: string;
   botPassword?: string;
+  /** Public anchor of the seeded project's published board (NEWFRONT-97 space oracle). */
+  spaceAnchor?: string;
 }
 
 /** A cookie shaped for a browser context, used to enter the app pre-authenticated. */
@@ -8005,6 +8007,135 @@ export interface ParityDriver {
   deskUpdateEndTrafficWatch(): Promise<void>;
   /** True when the desktop update-install button is present. */
   deskUpdateSidebarButtonVisible(): Promise<boolean>;
+  // === NEWFRONT-97 space navigation (shared; every space-oracle child
+  // carries this block verbatim — keep the earliest-merged copy on dup). ===
+  /** Open a published board at its anchor address; query is old-app raw (e.g. "?board=kanban"). */
+  spaceOpenBoard(anchor: string, query?: string): Promise<void>;
+  /** Open the space landing page (the auth gate). */
+  spaceOpenLanding(): Promise<void>;
+  /** Open a legacy workspace/project link (resolves to the anchor board or not-found). */
+  spaceOpenLegacyLink(workspaceSlug: string, projectId: string): Promise<void>;
+  // --- Space layouts & cards oracle (NEWFRONT-449, SPC-020..033).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+  /** Layout keys the board switcher currently offers, in display order. */
+  spaceBoardLayoutOptions(): Promise<string[]>;
+  /** The rendered layout key, read from the board address. */
+  spaceBoardActiveLayout(): Promise<string>;
+  /** Switch to a layout via the switcher; resolves once the address carries it and the layout renders. */
+  spaceBoardSwitchLayout(layout: string): Promise<void>;
+  /** Switch layouts; resolves with the count of public-issues fetches observed during the flip. */
+  spaceBoardSwitchLayoutRefetches(layout: string): Promise<number>;
+  /** List-layout groups: state name, header count, rendered rows. */
+  spaceBoardListGroups(): Promise<SpaceBoardGroupFacts[]>;
+  /** Board-layout columns: state name, header count, rendered cards. */
+  spaceBoardKanbanColumns(): Promise<SpaceBoardGroupFacts[]>;
+  /** How board columns flow: side-by-side, stacked, or a lone column. */
+  spaceBoardKanbanColumnsFlow(): Promise<"row" | "column" | "single">;
+  /** Whether the zero-issues empty notice is showing. */
+  spaceBoardEmptyVisible(): Promise<boolean>;
+  /** Whether a list group currently shows its manual load-more control. */
+  spaceBoardListGroupLoadMoreVisible(groupName: string): Promise<boolean>;
+  /** Click a list group's manual load-more; resolves once its rows grow. */
+  spaceBoardListGroupLoadMore(groupName: string): Promise<void>;
+  /** Whether placeholder rows show while a list group pages (delays the next fetch to catch them). */
+  spaceBoardListGroupShowsLoader(groupName: string): Promise<boolean>;
+  /** Scroll a board column to its end; resolves once its cards grow past the first page. */
+  spaceBoardKanbanColumnScrollLoad(columnName: string): Promise<void>;
+  /** Whether placeholder cards show while a board column pages (delays the next fetch to catch them). */
+  spaceBoardKanbanColumnShowsLoader(columnName: string): Promise<boolean>;
+  /** Rapid scroll bursts on one column; resolves with the issues-fetch count observed (debounce). */
+  spaceBoardKanbanScrollBurstFetches(columnName: string, scrolls: number): Promise<number>;
+  /** List card facts for an issue: public key, title, and the full title hover reveals. */
+  spaceBoardCardFacts(issueName: string): Promise<SpaceBoardCardFacts>;
+  /** List card property markers for an issue: state, priority, labels, dates, plus raw card text. */
+  spaceBoardCardMarkers(issueName: string): Promise<SpaceBoardCardMarkers>;
+  /** Board card footer for an issue: presence plus vote/reaction halves. */
+  spaceBoardKanbanCardFooter(issueName: string): Promise<SpaceBoardCardFooter>;
+  /** Whether a list card carries any vote/reaction footer. */
+  spaceBoardListCardFooterVisible(issueName: string): Promise<boolean>;
+  /** Click a card; resolves once the issue is in the address and the overlay opens. */
+  spaceBoardOpenCard(issueName: string): Promise<void>;
+  /** Whether the issue overlay is currently open. */
+  spaceBoardPeekVisible(): Promise<boolean>;
+  /** Close the issue overlay; resolves once it shuts and the address drops the issue. */
+  spaceBoardClosePeek(): Promise<void>;
+  /** Name of the highlighted list row, or null when none is highlighted. */
+  spaceBoardHighlightedRow(): Promise<string | null>;
+  /** Read-only facts: draggable cards, drag handles, and inline edit controls on the board. */
+  spaceBoardCardDragFacts(): Promise<SpaceBoardDragFacts>;
+  /** Attempt to drag one card; resolves with the list order before and after. */
+  spaceBoardDragCardOrder(issueName: string): Promise<{ before: string[]; after: string[] }>;
+  /** Issue names in list-layout display order. */
+  spaceBoardVisibleOrder(): Promise<string[]>;
+  /** Blur/focus cycle; resolves with order before/after plus issues-fetch count. */
+  spaceBoardRefocusStability(): Promise<SpaceBoardStability>;
+  /** Offline/online cycle; resolves with the list order before and after. */
+  spaceBoardReconnectStability(): Promise<{ before: string[]; after: string[] }>;
+}
+
+/** One list group / board column as rendered (NEWFRONT-449, SPC-023/024/026). */
+export interface SpaceBoardGroupFacts {
+  /** State name the header shows. */
+  name: string;
+  /** Issue count the header shows. */
+  count: number;
+  /** Cards/rows actually rendered beneath the header. */
+  rows: number;
+}
+
+/** Public identity facts of one board card (NEWFRONT-449, SPC-027). */
+export interface SpaceBoardCardFacts {
+  /** Public key as rendered (project code plus sequence number). */
+  key: string;
+  /** Card title as rendered. */
+  title: string;
+  /** Full title the hover tooltip reveals. */
+  hoverTitle: string;
+}
+
+/** Property markers of one board card (NEWFRONT-449, SPC-028). */
+export interface SpaceBoardCardMarkers {
+  /** State name the card shows, or null when no state marker renders. */
+  state: string | null;
+  /** Priority level the card shows (icon level), or null when absent. */
+  priority: string | null;
+  /** Label names the card shows. */
+  labels: string[];
+  /** Date marker texts the card shows. */
+  dates: string[];
+  /** Raw card text (cycle/module absence checks read this). */
+  text: string;
+}
+
+/** Presence facts of one board card footer (NEWFRONT-449, SPC-029). */
+export interface SpaceBoardCardFooter {
+  /** Whether any footer region renders inside the card. */
+  visible: boolean;
+  /** Whether the vote half renders. */
+  votes: boolean;
+  /** Whether the reaction half renders. */
+  reactions: boolean;
+}
+
+/** Read-only facts of the board (NEWFRONT-449, SPC-032). */
+export interface SpaceBoardDragFacts {
+  /** Cards marked draggable. */
+  draggable: number;
+  /** Drag handles on cards. */
+  handles: number;
+  /** Inline edit controls (inputs, textareas, editable regions) on cards. */
+  editControls: number;
+}
+
+/** Order stability across a blur/focus cycle (NEWFRONT-449, SPC-033). */
+export interface SpaceBoardStability {
+  /** List order before the cycle. */
+  before: string[];
+  /** List order after the cycle. */
+  after: string[];
+  /** Public-issues fetches observed during the cycle. */
+  refetches: number;
 }
 
 /** Identity facts of one workspace-member roster row (NEWFRONT-411, WSET-011). */

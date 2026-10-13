@@ -18619,3 +18619,140 @@ export async function serverUploadUserAvatar(
     assetUrl: typeof signed.asset_url === "string" ? signed.asset_url : "",
   };
 }
+
+// --- Space layouts & cards oracle (NEWFRONT-449, SPC-020..033).
+// --- Appended; existing helpers above are untouched per the shared driver
+// --- contract.
+
+/** One public-issues group as the board fetch returns it. */
+export interface ServerPublicIssueGroup {
+  id: string;
+  total: number;
+  nextPageResults: boolean;
+  nextCursor: string;
+  issues: Array<{ id: string; name: string; sequenceId: number; stateId: string; priority: string }>;
+}
+
+/**
+ * Grouped public-issues read in the shape the board's first fetch uses
+ * (cursor/per_page/group_by). The session cookie is optional; specs pass
+ * the seed-owner session so reads ride the authed throttle bucket while
+ * the browser stays an anonymous visitor.
+ */
+export async function serverPublicIssues(
+  anchor: string,
+  params: Record<string, string> = {},
+  sessionCookie?: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ totalCount: number; groups: ServerPublicIssueGroup[] }> {
+  const query = new URLSearchParams({ cursor: "50:0:0", per_page: "50", group_by: "state_id", ...params });
+  const headers: Record<string, string> = {};
+  if (sessionCookie !== undefined) headers["cookie"] = sessionCookie;
+  const res = await fetch(`${apiBase}/api/public/anchor/${anchor}/issues/?${query}`, { headers });
+  if (!res.ok) throw new Error(`[parity] public issues read failed with HTTP ${res.status}.`);
+  const body = (await res.json()) as Record<string, unknown>;
+  const totalCount = body["total_count"];
+  if (typeof totalCount !== "number") throw new Error("[parity] public issues carried no numeric total_count.");
+  const results = body["results"];
+  if (typeof results !== "object" || results === null || Array.isArray(results))
+    throw new Error("[parity] public issues carried no grouped results.");
+  const groups: ServerPublicIssueGroup[] = [];
+  for (const [id, raw] of Object.entries(results as Record<string, unknown>)) {
+    const group = raw as Record<string, unknown>;
+    const total = group["total_results"];
+    const rows = group["results"];
+    if (typeof total !== "number" || !Array.isArray(rows))
+      throw new Error("[parity] public issue group carried no total/results.");
+    groups.push({
+      id,
+      total,
+      nextPageResults: group["next_page_results"] === true,
+      nextCursor: typeof group["next_cursor"] === "string" ? (group["next_cursor"] as string) : "",
+      issues: rows.map((row) => {
+        const issue = row as Record<string, unknown>;
+        const issueId = issue["id"];
+        const name = issue["name"];
+        const sequenceId = issue["sequence_id"];
+        const stateId = issue["state_id"];
+        const priority = issue["priority"];
+        if (
+          typeof issueId !== "string" ||
+          typeof name !== "string" ||
+          typeof sequenceId !== "number" ||
+          typeof stateId !== "string" ||
+          typeof priority !== "string"
+        )
+          throw new Error("[parity] public issue carried no id/name/sequence/state/priority.");
+        return { id: issueId, name, sequenceId, stateId, priority };
+      }),
+    });
+  }
+  return { totalCount, groups };
+}
+
+/** Public board settings the app reads for flags and views. */
+export interface ServerPublicBoardSettings {
+  viewProps: Record<string, unknown>;
+  isVotesEnabled: boolean;
+  isReactionsEnabled: boolean;
+  isCommentsEnabled: boolean;
+}
+
+/** Public settings read; verifies board flips landed server-side. */
+export async function serverPublicBoardSettings(
+  anchor: string,
+  sessionCookie?: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerPublicBoardSettings> {
+  const headers: Record<string, string> = {};
+  if (sessionCookie !== undefined) headers["cookie"] = sessionCookie;
+  const res = await fetch(`${apiBase}/api/public/anchor/${anchor}/settings/`, { headers });
+  if (!res.ok) throw new Error(`[parity] public settings read failed with HTTP ${res.status}.`);
+  const rec = (await res.json()) as Record<string, unknown>;
+  const viewProps = rec["view_props"];
+  if (typeof viewProps !== "object" || viewProps === null)
+    throw new Error("[parity] public settings carried no view_props.");
+  return {
+    viewProps: viewProps as Record<string, unknown>,
+    isVotesEnabled: rec["is_votes_enabled"] === true,
+    isReactionsEnabled: rec["is_reactions_enabled"] === true,
+    isCommentsEnabled: rec["is_comments_enabled"] === true,
+  };
+}
+
+/** Public states for group-name mapping. */
+export async function serverPublicStates(
+  anchor: string,
+  sessionCookie?: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Array<{ id: string; name: string; group: string }>> {
+  const headers: Record<string, string> = {};
+  if (sessionCookie !== undefined) headers["cookie"] = sessionCookie;
+  const res = await fetch(`${apiBase}/api/public/anchor/${anchor}/states/`, { headers });
+  if (!res.ok) throw new Error(`[parity] public states read failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Record<string, unknown>[];
+  return rows.map((row) => {
+    const { id, name, group } = row;
+    if (typeof id !== "string" || typeof name !== "string" || typeof group !== "string")
+      throw new Error("[parity] public state carried no string id/name/group.");
+    return { id, name, group };
+  });
+}
+
+/** Flip a published board's views/flags; specs restore the previous shape after. */
+export async function serverPatchBoard(
+  workspaceSlug: string,
+  projectId: string,
+  boardId: string,
+  patch: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/project-deploy-boards/${boardId}/`,
+    sessionCookie,
+    patch
+  );
+  if (!res.ok) throw new Error(`[parity] board patch failed with HTTP ${res.status}.`);
+}
