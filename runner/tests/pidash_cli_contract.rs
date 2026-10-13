@@ -935,6 +935,74 @@ async fn issue_list_unknown_state_400_maps_to_exit_invalid() {
     assert!(err.detail.unwrap_or_default().contains("Valid states"));
 }
 
+// ---------------------------------------------------------------------------
+// Truncation note (PDASHOSS01-216): the server's default page size equals its
+// maximum (1000), so a >1000-item project is silently truncated unless the
+// caller checks `next_page_results`. The CLI flags that case on stderr —
+// stdout must stay the bare envelope and the exit code must stay 0.
+// ---------------------------------------------------------------------------
+
+const TRUNCATED_LIST_ENVELOPE: &str = r#"{"grouped_by":null,"sub_grouped_by":null,"total_count":4200,"next_cursor":"1000:1:0","prev_cursor":"1000:-1:1","next_page_results":true,"prev_page_results":false,"count":1000,"total_pages":5,"total_results":4200,"extra_stats":null,"results":[]}"#;
+
+#[tokio::test]
+async fn issue_list_truncation_notes_on_stderr_with_clean_stdout() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(TRUNCATED_LIST_ENVELOPE))).await;
+
+    let out = run_pidash(&fake, &["issue", "list", "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(
+        out.stderr.trim(),
+        "note: 1000 of 4200 results; pass --cursor 1000:1:0 for more"
+    );
+    // stdout carries the envelope untouched — the note must not leak into it.
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(TRUNCATED_LIST_ENVELOPE).unwrap();
+    assert_eq!(printed, expected);
+}
+
+#[tokio::test]
+async fn issue_list_final_page_prints_nothing_on_stderr() {
+    let fake = start_fake(Box::new(|_req| {
+        CannedResponse::ok(
+            r#"{"total_count":3,"next_cursor":"1000:1:0","prev_cursor":"1000:-1:1","next_page_results":false,"count":3,"results":[]}"#,
+        )
+    }))
+    .await;
+
+    let out = run_pidash(&fake, &["issue", "list", "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stderr, "");
+}
+
+#[tokio::test]
+async fn issue_list_envelope_without_next_page_results_stays_silent() {
+    // A server old enough to omit the field looks like a complete list;
+    // the note must not fire on guesswork.
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+
+    let out = run_pidash(&fake, &["issue", "list", "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stderr, "");
+}
+
+#[tokio::test]
+async fn page_list_truncation_notes_on_stderr_too() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(TRUNCATED_LIST_ENVELOPE))).await;
+
+    let out = run_pidash(&fake, &["page", "list", "--project", "ENG"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(
+        out.stderr.trim(),
+        "note: 1000 of 4200 results; pass --cursor 1000:1:0 for more"
+    );
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(TRUNCATED_LIST_ENVELOPE).unwrap();
+    assert_eq!(printed, expected);
+}
 
 // ---------------------------------------------------------------------------
 // `pidash page …` — the read path into project pages (PDASHOSS01-185).

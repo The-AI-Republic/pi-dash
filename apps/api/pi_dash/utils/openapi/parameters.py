@@ -275,11 +275,11 @@ PER_PAGE_PARAMETER = OpenApiParameter(
     name="per_page",
     type=OpenApiTypes.INT,
     location=OpenApiParameter.QUERY,
-    description="Number of results per page (default: 20, max: 100)",
+    description="Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
     required=False,
     examples=[
-        OpenApiExample(name="Default", value=20),
-        OpenApiExample(name="Maximum", value=100),
+        OpenApiExample(name="Default (also the maximum)", value=1000),
+        OpenApiExample(name="Smaller page", value=100),
     ],
 )
 
