@@ -715,7 +715,7 @@ const RunnerChatPage = observer(function RunnerChatPage() {
                   {session?.cwd || runner?.pod_detail?.name || runner?.status || ""}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-2">
                 {approvalsSupported && (
                   <ChatApprovalModeSelect
                     value={turnMode ?? approvalMode}

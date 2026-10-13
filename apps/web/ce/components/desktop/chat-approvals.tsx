@@ -95,31 +95,35 @@ export function ChatApprovalModeSelect(props: {
   const { value, onChange, pending, disabled } = props;
   const queued = pending && pending !== value ? pending : null;
   return (
-    <div className="flex items-center gap-1" role="group" aria-label="Approval mode">
-      <span className="mr-1 text-11 text-tertiary">Approvals</span>
-      {APPROVAL_MODES.map((mode) => {
-        const copy = APPROVAL_MODE_COPY[mode];
-        const active = mode === value;
-        const isQueued = mode === queued;
-        let tone = "text-secondary hover:bg-surface-2";
-        if (active) tone = "bg-surface-3 font-medium text-primary";
-        else if (isQueued) tone = "text-primary outline outline-1 outline-subtle";
-        return (
-          <button
-            key={mode}
-            type="button"
-            disabled={disabled}
-            aria-pressed={active}
-            title={isQueued ? `${copy.help} ${APPROVAL_MODE_PENDING_NOTE}.` : copy.help}
-            onClick={() => onChange(mode)}
-            className={`rounded px-2 py-1 text-11 transition-colors disabled:opacity-50 ${tone}`}
-          >
-            {copy.label}
-          </button>
-        );
-      })}
+    <div className="flex shrink-0 flex-col items-end" role="group" aria-label="Approval mode">
+      <div className="flex items-center gap-1">
+        <span className="mr-1 text-11 text-tertiary">Approvals</span>
+        {APPROVAL_MODES.map((mode) => {
+          const copy = APPROVAL_MODE_COPY[mode];
+          const active = mode === value;
+          const isQueued = mode === queued;
+          let tone = "text-secondary hover:bg-surface-2";
+          if (active) tone = "bg-surface-3 font-medium text-primary";
+          else if (isQueued) tone = "text-primary outline outline-1 outline-subtle";
+          return (
+            <button
+              key={mode}
+              type="button"
+              disabled={disabled}
+              aria-pressed={active}
+              title={isQueued ? `${copy.help} ${APPROVAL_MODE_PENDING_NOTE}.` : copy.help}
+              onClick={() => onChange(mode)}
+              className={`rounded px-2 py-1 text-11 whitespace-nowrap transition-colors disabled:opacity-50 ${tone}`}
+            >
+              {copy.label}
+            </button>
+          );
+        })}
+      </div>
+      {/* On its own line: beside the buttons it has no room in the chat header
+          and wraps one word per line. */}
       {queued && (
-        <span className="ml-1 text-11 text-tertiary" role="status">
+        <span className="text-11 leading-4 whitespace-nowrap text-tertiary" role="status">
           {APPROVAL_MODE_PENDING_NOTE}
         </span>
       )}
