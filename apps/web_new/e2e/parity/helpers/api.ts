@@ -17750,3 +17750,267 @@ export async function serverUnseedGitAccount(accountId: string): Promise<void> {
     console.log(`[parity] gitlab unseed skipped: ${error instanceof Error ? error.message : error}`);
   }
 }
+
+// --- Profile-settings upkeep + GitHub App server reads (NEWFRONT-428,
+// --- PROF-024, PROF-025). Typed reads/writes for the auto-pm master and
+// --- per-job toggles and the personal GitHub App connection, plus
+// --- Django-shell fixtures for instance-level state the UI cannot create
+// --- (scheduled upkeep jobs, a connected installation). Assistant, STT,
+// --- and tool-server CRUD plus connection-test probes already live above
+// --- (serverAssistant*); this block adds nothing parallel. Appended;
+// --- existing helpers above are untouched per the shared driver contract.
+
+/** One scheduled upkeep job as the auto-pm endpoint returns it. */
+export interface ServerAutoPmJob {
+  slug: string;
+  name: string;
+  description: string;
+  intervalLabel: string;
+  enabled: boolean;
+}
+
+/** The caller's upkeep settings: master switch plus scheduled jobs. */
+export interface ServerAutoPmSettings {
+  enabled: boolean;
+  jobs: ServerAutoPmJob[];
+}
+
+function autoPmSettingsOf(payload: unknown): ServerAutoPmSettings {
+  const row = payload as Record<string, unknown>;
+  const jobs = row["jobs"];
+  if (!Array.isArray(jobs)) throw new Error("[parity] upkeep settings carried no jobs array.");
+  return {
+    enabled: row["enabled"] === true,
+    jobs: jobs.map((entry) => {
+      const job = entry as Record<string, unknown>;
+      if (typeof job["slug"] !== "string" || typeof job["name"] !== "string") {
+        throw new Error("[parity] upkeep job carried no string slug/name.");
+      }
+      return {
+        slug: job["slug"],
+        name: job["name"],
+        description: typeof job["description"] === "string" ? job["description"] : "",
+        intervalLabel: typeof job["interval_label"] === "string" ? job["interval_label"] : "",
+        enabled: job["enabled"] === true,
+      };
+    }),
+  };
+}
+
+/** Read the caller's upkeep settings (master switch + scheduled jobs). */
+export async function serverAutoPmGet(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAutoPmSettings> {
+  const res = await apiJson("GET", "/api/users/me/auto-pm/", sessionCookie, undefined, apiBase);
+  if (res.status !== 200) throw new Error(`[parity] upkeep read failed with HTTP ${res.status}.`);
+  return autoPmSettingsOf(res.payload);
+}
+
+/** Set the master pause switch (true resumes, false pauses everything). */
+export async function serverAutoPmSetMaster(
+  sessionCookie: string,
+  enabled: boolean,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAutoPmSettings> {
+  const res = await mutateJSON("PATCH", `${apiBase}/api/users/me/auto-pm/`, sessionCookie, { enabled });
+  if (res.status !== 200) throw new Error(`[parity] upkeep master write failed with HTTP ${res.status}.`);
+  return autoPmSettingsOf((await res.json()) as unknown);
+}
+
+/** Set one scheduled job's switch. */
+export async function serverAutoPmSetJob(
+  sessionCookie: string,
+  slug: string,
+  enabled: boolean,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAutoPmSettings> {
+  const res = await serverAutoPmSetJobRaw(sessionCookie, slug, enabled, apiBase);
+  if (res.status !== 200) throw new Error(`[parity] upkeep job write failed with HTTP ${res.status}.`);
+  return autoPmSettingsOf(res.payload);
+}
+
+/** Raw job write for the unknown-slug refusal half (404 not_found). */
+export async function serverAutoPmSetJobRaw(
+  sessionCookie: string,
+  slug: string,
+  enabled: boolean,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  return apiJson("PATCH", `/api/users/me/auto-pm/jobs/${slug}/`, sessionCookie, { enabled }, apiBase);
+}
+
+/**
+ * Flip a loop job's instance-level enabled flag through the Django shell.
+ * The seeded stack schedules nothing (the builtin seeds enabled=False for
+ * an operator smoke test), so toggle scenarios enable here and restore
+ * afterwards; reruns round-trip the same flag. Needs PARITY_API_CONTAINER
+ * on namespaced stacks.
+ */
+export async function serverLoopJobSetEnabled(slug: string, enabled: boolean): Promise<void> {
+  const python =
+    `from pi_dash.db.models import LoopJob\n` +
+    `n = LoopJob.objects.filter(slug=${JSON.stringify(slug)}).update(enabled=${enabled ? "True" : "False"})\n` +
+    `print(f"PARITY_LOOP_JOB:{n}")\n`;
+  const out = await apiShell(python);
+  if (!out.includes("PARITY_LOOP_JOB:1")) throw new Error("[parity] loop-job flag update touched no row.");
+}
+
+/** One workspace's GitHub App connection facts. */
+export interface ServerGithubAppInstallation {
+  connected: boolean;
+  installationId: number | null;
+  accountLogin: string;
+  accountType: string;
+  repositorySelection: string;
+  repositoryCount: number;
+  verifiedAt: string | null;
+  lastCheckedAt: string | null;
+  lastCheckError: string;
+  suspended: boolean;
+}
+
+/** One admin workspace's GitHub App status row. */
+export interface ServerGithubAppWorkspace {
+  id: string;
+  slug: string;
+  name: string;
+  githubApp: ServerGithubAppInstallation;
+}
+
+/** The caller's GitHub App status across admin workspaces. */
+export interface ServerGithubAppStatus {
+  configured: boolean;
+  appSlug: string;
+  workspaces: ServerGithubAppWorkspace[];
+}
+
+function githubAppInstallationOf(row: unknown): ServerGithubAppInstallation {
+  const record = row as Record<string, unknown>;
+  return {
+    connected: record["connected"] === true,
+    installationId: typeof record["installation_id"] === "number" ? record["installation_id"] : null,
+    accountLogin: typeof record["account_login"] === "string" ? record["account_login"] : "",
+    accountType: typeof record["account_type"] === "string" ? record["account_type"] : "",
+    repositorySelection: typeof record["repository_selection"] === "string" ? record["repository_selection"] : "",
+    repositoryCount: typeof record["repository_count"] === "number" ? record["repository_count"] : 0,
+    verifiedAt: typeof record["verified_at"] === "string" ? record["verified_at"] : null,
+    lastCheckedAt: typeof record["last_checked_at"] === "string" ? record["last_checked_at"] : null,
+    lastCheckError: typeof record["last_check_error"] === "string" ? record["last_check_error"] : "",
+    suspended: typeof record["suspended_at"] === "string" && record["suspended_at"] !== "",
+  };
+}
+
+/** Read the caller's GitHub App status across admin workspaces. */
+export async function serverGithubAppStatus(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerGithubAppStatus> {
+  const res = await apiJson("GET", "/api/users/me/integrations/github/app/", sessionCookie, undefined, apiBase);
+  if (res.status !== 200) throw new Error(`[parity] github-app status read failed with HTTP ${res.status}.`);
+  const payload = res.payload as Record<string, unknown>;
+  const workspaces = payload["workspaces"];
+  if (!Array.isArray(workspaces)) throw new Error("[parity] github-app status carried no workspaces array.");
+  return {
+    configured: payload["configured"] === true,
+    appSlug: typeof payload["app_slug"] === "string" ? payload["app_slug"] : "",
+    workspaces: workspaces.map((entry) => {
+      const row = entry as Record<string, unknown>;
+      if (typeof row["slug"] !== "string" || typeof row["name"] !== "string") {
+        throw new Error("[parity] github-app workspace carried no string slug/name.");
+      }
+      return {
+        id: typeof row["id"] === "string" ? row["id"] : "",
+        slug: row["slug"],
+        name: row["name"],
+        githubApp: githubAppInstallationOf(row["github_app"]),
+      };
+    }),
+  };
+}
+
+/** Raw install-start outcome (409 while the instance config is missing). */
+export async function serverGithubAppInstallStartRaw(
+  sessionCookie: string,
+  workspaceSlug: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  return apiJson(
+    "POST",
+    "/api/users/me/integrations/github/app/install/",
+    sessionCookie,
+    { workspace_slug: workspaceSlug },
+    apiBase
+  );
+}
+
+/** Raw refresh outcome (404 uninstalled, 502 when GitHub cannot be reached). */
+export async function serverGithubAppRefreshRaw(
+  sessionCookie: string,
+  workspaceSlug: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; payload: unknown }> {
+  return apiJson(
+    "POST",
+    "/api/users/me/integrations/github/app/refresh/",
+    sessionCookie,
+    { workspace_slug: workspaceSlug },
+    apiBase
+  );
+}
+
+/**
+ * Plant a connected GitHub App installation for a workspace through the
+ * Django shell, mirroring what the install callback stores (provider row,
+ * FK-shim token, workspace link, installation facts). The real install
+ * needs GitHub OAuth, unreachable from the seeded stack, so the
+ * connected-panel and manual-refresh coverage plants here instead of
+ * installing through the API. Needs PARITY_API_CONTAINER on namespaced
+ * stacks.
+ */
+export async function serverSeedGithubAppInstallation(workspaceSlug: string, login: string): Promise<void> {
+  const python =
+    `from django.utils import timezone\n` +
+    `from pi_dash.db.models import APIToken, GithubAppInstallation, Integration, Workspace, WorkspaceIntegration, WorkspaceMember\n` +
+    `ws = Workspace.objects.get(slug=${JSON.stringify(workspaceSlug)})\n` +
+    `actor = WorkspaceMember.objects.filter(workspace=ws, role=20).first().member\n` +
+    `integration, _ = Integration.objects.get_or_create(provider="github", defaults={"title": "GitHub", "verified": True, "description": {"summary": "Mirror GitHub issues into Pi Dash projects."}})\n` +
+    `for ghost in WorkspaceIntegration.all_objects.filter(workspace=ws, integration=integration, deleted_at__isnull=False):\n` +
+    `    ghost.delete(soft=False)\n` +
+    `wi = WorkspaceIntegration.objects.filter(workspace=ws, integration=integration).first()\n` +
+    `if wi is None:\n` +
+    `    shim = APIToken.objects.create(user=actor, workspace=ws, user_type=1, is_active=False, label="github-app-plant-" + str(ws.id), description="GitHub App plant FK shim — not for auth")\n` +
+    `    wi = WorkspaceIntegration.objects.create(workspace=ws, actor=actor, integration=integration, api_token=shim, config={})\n` +
+    `GithubAppInstallation.all_objects.filter(workspace_integration=wi).delete()\n` +
+    `now = timezone.now()\n` +
+    `GithubAppInstallation.objects.create(workspace_integration=wi, installation_id=42428001, account_login=${JSON.stringify(login)}, account_type="Organization", repository_selection="selected", repository_count=3, permissions={"issues": "write"}, events=["issues"], installed_at=now, verified_at=now, last_checked_at=now, last_check_error="")\n` +
+    `print("PARITY_GITHUB_APP_SEEDED")\n`;
+  const out = await apiShell(python);
+  if (!out.includes("PARITY_GITHUB_APP_SEEDED")) throw new Error("[parity] github-app plant produced no marker.");
+}
+
+/**
+ * Remove the planted GitHub App installation (plus its workspace link and
+ * FK-shim token) through the Django shell. Best-effort: logs instead of
+ * throwing so finally-blocks stay safe.
+ */
+export async function serverUnseedGithubAppInstallation(workspaceSlug: string): Promise<void> {
+  try {
+    const python =
+      `from pi_dash.db.models import APIToken, GithubAppInstallation, Integration, Workspace, WorkspaceIntegration\n` +
+      `ws = Workspace.objects.get(slug=${JSON.stringify(workspaceSlug)})\n` +
+      `integration = Integration.objects.filter(provider="github").first()\n` +
+      `for wi in WorkspaceIntegration.all_objects.filter(workspace=ws, integration=integration):\n` +
+      `    token_id = wi.api_token_id\n` +
+      `    GithubAppInstallation.all_objects.filter(workspace_integration_id=wi.id).delete()\n` +
+      `    wi.delete(soft=False)\n` +
+      `    APIToken.all_objects.filter(id=token_id).delete()\n` +
+      `print("PARITY_GITHUB_APP_UNSEEDED")\n`;
+    const out = await apiShell(python);
+    if (!out.includes("PARITY_GITHUB_APP_UNSEEDED")) {
+      console.log("[parity] github-app unseed produced no marker; leaving it for reseed.");
+    }
+  } catch (error) {
+    console.log(`[parity] github-app unseed failed (${String(error)}); leaving it for reseed.`);
+  }
+}

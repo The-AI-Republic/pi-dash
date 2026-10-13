@@ -8446,6 +8446,154 @@ export interface ParityDriver {
   wsSettingsWebhookDeleteConfirm(): Promise<void>;
   /** Dismiss the delete confirmation dialog. */
   wsSettingsWebhookDeleteCancel(): Promise<void>;
+  // --- Profile-settings assistant/upkeep/integrations oracle (NEWFRONT-428,
+  // --- PROF-021..025, PROF-027, PROF-028). Tab navigation plus reads and
+  // --- actions for the AI-assistant tab (BYO LLM provider, BYO STT
+  // --- dictation, MCP tool servers), the upkeep tab (master pause,
+  // --- per-job toggles, empty-scheduled explanation), and the integrations
+  // --- tab (per-workspace GitHub App panel, install-callback markers,
+  // --- manual refresh); key-press/shortcut-silence, read/socket watchers,
+  // --- and drag/import absence reads for the cross-cutting rows.
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+  /** Open a profile-settings tab; settles once its content renders. */
+  settingsProfileOpenTab(
+    tab: "ai-assistant" | "auto-project-management" | "integrations",
+    cookies: ParityBrowserCookie[]
+  ): Promise<void>;
+  /** Open a profile-settings tab with a raw query string (callback markers). */
+  settingsProfileOpenTabWithQuery(
+    tab: "ai-assistant" | "auto-project-management" | "integrations",
+    query: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void>;
+  /** Current pathname. */
+  settingsProfileCurrentPath(): Promise<string>;
+  /** Current query string without the leading `?`. */
+  settingsProfileCurrentQuery(): Promise<string>;
+  /** Newest settings toast (title + message), or null when none shows. */
+  settingsProfileLastToast(): Promise<{ title: string; message: string } | null>;
+  /** LLM provider form facts. */
+  settingsProfileAssistantFacts(): Promise<{
+    provider: string;
+    baseUrlVisible: boolean;
+    baseUrl: string;
+    model: string;
+    keyValue: string;
+    keyPlaceholder: string;
+    saveDisabled: boolean;
+    testDisabled: boolean;
+    removeVisible: boolean;
+    lastVerified: string | null;
+  }>;
+  /** Pick the LLM provider kind. */
+  settingsProfileAssistantSetProvider(provider: "openai_compatible" | "anthropic"): Promise<void>;
+  /** Fill one LLM form field. */
+  settingsProfileAssistantFill(field: "baseUrl" | "model" | "key", value: string): Promise<void>;
+  /** Click Save; resolves once the write settles. */
+  settingsProfileAssistantSave(): Promise<void>;
+  /** Click Test connection; resolves once the probe settles. */
+  settingsProfileAssistantTest(): Promise<void>;
+  /** Click Remove; resolves once the delete settles. */
+  settingsProfileAssistantRemove(): Promise<void>;
+  /** Fail LLM/STT config PUT writes with HTTP 500 until cleared (save-failure hook). */
+  settingsProfileAssistantFailWrites(): Promise<void>;
+  /** Remove the assistant interception installed above. */
+  settingsProfileAssistantClearRoutes(): Promise<void>;
+  /** Voice dictation section facts. */
+  settingsProfileDictationFacts(): Promise<{
+    sectionVisible: boolean;
+    baseUrl: string;
+    model: string;
+    keyValue: string;
+    keyPlaceholder: string;
+    saveDisabled: boolean;
+    testDisabled: boolean;
+    removeVisible: boolean;
+    lastVerified: string | null;
+  }>;
+  /** Fill one dictation form field. */
+  settingsProfileDictationFill(field: "baseUrl" | "model" | "key", value: string): Promise<void>;
+  /** Click Save; resolves once the write settles. */
+  settingsProfileDictationSave(): Promise<void>;
+  /** Click Test connection; resolves once the probe settles. */
+  settingsProfileDictationTest(): Promise<void>;
+  /** Click Remove; resolves once the delete settles. */
+  settingsProfileDictationRemove(): Promise<void>;
+  /** Tool-server rows in display order. */
+  settingsProfileToolServerRows(): Promise<
+    { name: string; url: string; disabled: boolean; locked: boolean; prefix: string | null }[]
+  >;
+  /** Whether the add-server control is currently disabled. */
+  settingsProfileToolServerAddDisabled(): Promise<boolean>;
+  /** Fill the add form and submit; resolves once the write settles. */
+  settingsProfileToolServerAdd(name: string, url: string, authHeader?: string): Promise<void>;
+  /** Flip one server's enabled switch; resolves once the write settles. */
+  settingsProfileToolServerToggle(name: string): Promise<void>;
+  /** Remove one server; resolves once the delete settles. */
+  settingsProfileToolServerRemove(name: string): Promise<void>;
+  /** Upkeep tab facts: empty explanation or master + job switches. */
+  settingsProfileUpkeepFacts(): Promise<{
+    emptyExplanation: string | null;
+    masterPaused: boolean | null;
+    jobs: { name: string; interval: string; description: string; enabled: boolean; toggleDisabled: boolean }[];
+  }>;
+  /** Set the master pause switch; resolves once the write settles. */
+  settingsProfileUpkeepToggleMaster(paused: boolean): Promise<void>;
+  /** Set one job's switch; resolves once the write settles. */
+  settingsProfileUpkeepToggleJob(name: string, enabled: boolean): Promise<void>;
+  /** Fail upkeep PATCH writes with HTTP 500 until cleared (rollback hook). */
+  settingsProfileUpkeepFailWrites(): Promise<void>;
+  /** Remove the upkeep interception installed above. */
+  settingsProfileUpkeepClearRoutes(): Promise<void>;
+  /** Hold upkeep PATCH writes `ms` before passing them through (optimistic hook). */
+  settingsProfileUpkeepDelayWrites(ms: number): Promise<void>;
+  /** Integrations tab facts: picker, panel, banners. */
+  settingsProfileIntegrationsFacts(): Promise<{
+    loading: boolean;
+    noAdmin: boolean;
+    configuredWarning: string | null;
+    workspaceOptions: { slug: string; name: string }[];
+    selectedSlug: string | null;
+    panelHeading: string | null;
+    panelLead: string | null;
+    connected: boolean | null;
+    installLabel: string | null;
+    installDisabled: boolean | null;
+    refreshVisible: boolean;
+    statusFields: { label: string; value: string }[];
+    unconnectedCopy: string | null;
+    suspendedBanner: string | null;
+    lastCheckError: string | null;
+  }>;
+  /** Pick a workspace in the integrations picker; resolves once the panel swaps. */
+  settingsProfileIntegrationsSelect(slug: string): Promise<void>;
+  /** Click the manual Refresh control; resolves once the check settles. */
+  settingsProfileIntegrationsRefresh(): Promise<void>;
+  /** Fail refresh POSTs with the observed 502 until cleared (check-failure hook). */
+  settingsProfileIntegrationsFailRefresh(): Promise<void>;
+  /** Remove the integrations interception installed above. */
+  settingsProfileIntegrationsClearRoutes(): Promise<void>;
+  /** Press keys with the page body focused (shortcut-silence check). */
+  settingsProfilePressKeys(keys: string[]): Promise<void>;
+  /** Whether any dialog is currently open. */
+  settingsProfileDialogOpen(): Promise<boolean>;
+  /** Start counting profile-settings API reads. */
+  settingsProfileWatchReads(): Promise<void>;
+  /** Reads observed since the watcher armed. */
+  settingsProfileReadCount(): Promise<number>;
+  /** Start counting websocket connections. */
+  settingsProfileWatchSockets(): Promise<void>;
+  /** Sockets observed since the watcher armed. */
+  settingsProfileSocketCount(): Promise<number>;
+  /** Draggable elements inside the settings content. */
+  settingsProfileDraggableCount(): Promise<number>;
+  /** File inputs inside the settings content. */
+  settingsProfileFileInputCount(): Promise<number>;
+  /** Visible import/export mentions inside the settings content. */
+  settingsProfileImportExportMentions(): Promise<string[]>;
+  /** Member/user-picker controls inside the settings content (expected: none). */
+  settingsProfileMemberControlCount(): Promise<number>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
