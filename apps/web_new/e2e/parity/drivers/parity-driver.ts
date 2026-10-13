@@ -9086,6 +9086,69 @@ export interface WsSettingsMemberRowFacts {
   profileSidebarClickEditPencil(): Promise<void>;
   /** Toggle the identity sidebar through the header control (mobile); resolves once it settles. */
   profileSidebarToggle(): Promise<void>;
+
+  // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
+  // Reads below were observed on the running old space app; icon-only
+  // controls are reached structurally (neighbor-anchored), never by hooks.
+
+  /** Navbar project identity as rendered: name text plus logo-mark kind (SPC-010). */
+  spaceChromeNavbarIdentity(): Promise<SpaceChromeNavbarIdentity>;
+  /** Navbar identity when the publish payload carries no project details (SPC-010 fallback). */
+  spaceChromeNavbarWithoutProjectDetails(anchor: string): Promise<SpaceChromeNavbarIdentity>;
+  /** Navbar identity with an injected icon/emoji logo mark (SPC-010 mark branches). */
+  spaceChromeNavbarWithLogo(anchor: string, kind: "icon" | "emoji"): Promise<SpaceChromeNavbarIdentity>;
+  /** Current board theme as the document declares it (SPC-011). */
+  spaceChromeTheme(): Promise<"light" | "dark">;
+  /** Click the navbar theme switch; resolves once the theme settles (SPC-011). */
+  spaceChromeToggleTheme(): Promise<void>;
+  /** Computed body background color, proving the whole board flipped (SPC-011). */
+  spaceChromeBodyBackground(): Promise<string>;
+  /** Forget the stored theme choice so the next load follows the OS again (SPC-011). */
+  spaceChromeClearStoredTheme(): Promise<void>;
+  /** Emulate an OS color scheme for the next load's default (SPC-011). */
+  spaceChromeEmulateColorScheme(scheme: "light" | "dark"): Promise<void>;
+  /** Fixed product badge facts, or null when no badge renders (SPC-012). */
+  spaceChromeBadgeFacts(): Promise<SpaceChromeBadgeFacts | null>;
+  /** Click the badge; resolves with the new tab's URL (SPC-012). */
+  spaceChromeBadgeNewTabUrl(): Promise<string>;
+  /** Anonymous sign-in link target carrying the board position (SPC-013). */
+  spaceChromeAnonymousSignInHref(): Promise<string | null>;
+  /** Signed-in account menu identity (opens the menu; SPC-014). */
+  spaceChromeAccountMenuIdentity(): Promise<SpaceChromeAccountIdentity>;
+  /** Sign-out form target: action plus preserved return address (SPC-014). */
+  spaceChromeSignOutForm(): Promise<SpaceChromeSignOutForm>;
+  /** Submit sign-out; resolves with the redirect target and landed path (SPC-014). */
+  spaceChromeSignOut(): Promise<SpaceChromeSignOutResult>;
+  /** Open a board inside an embedding frame harness (SPC-015). */
+  spaceChromeOpenBoardFramed(anchor: string, query?: string): Promise<void>;
+  /** Framed-board facts: readability plus hidden controls (SPC-015). */
+  spaceChromeFramedFacts(): Promise<SpaceChromeFramedFacts>;
+  /** Open a board with an issue peek overlay raised (SPC-015/017/065 vehicle). */
+  spaceChromeOpenIssuePeek(anchor: string, issueId: string, query?: string): Promise<void>;
+  /** Count of visible emoji-reaction add controls (SPC-015 surface). */
+  spaceChromeEmojiControlCount(): Promise<number>;
+  /** Loading-spinner probe for one boot stage (SPC-016). */
+  spaceChromeSpinnerDuring(stage: "instance" | "settings" | "issues", anchor: string): Promise<SpaceChromeSpinnerProbe>;
+  /** Navigation-progress probe across a slow legacy-link transition (SPC-017). */
+  spaceChromeProgressDuringSlowTransition(workspaceSlug: string, projectId: string): Promise<SpaceChromeProgressProbe>;
+  /** Copy the peek link; resolves with the notice plus clipboard text (SPC-017). */
+  spaceChromeCopyIssueLinkToast(anchor: string, issueId: string): Promise<SpaceChromeToastFacts>;
+  /** Attempt a comment post with the API blocked; resolves with the error notice (SPC-017). */
+  spaceChromeCommentFailureToast(anchor: string, issueId: string, bodyText: string): Promise<SpaceChromeToastFacts>;
+  /** Instance-failure screen facts with the backend unreachable (SPC-018). */
+  spaceChromeInstanceFailureFacts(anchor: string): Promise<SpaceChromeFailureFacts>;
+  /** Restore the backend and retry from the failure screen; resolves on the board (SPC-018). */
+  spaceChromeRetryInstanceLoad(): Promise<void>;
+  /** Crash-screen facts after a render fault (SPC-019). */
+  spaceChromeCrashFacts(anchor: string): Promise<SpaceChromeCrashFacts>;
+  /** Refresh from the crash screen; resolves once the board renders again (SPC-019). */
+  spaceChromeRefreshAfterCrash(): Promise<void>;
+  /** Locale-observable board facts: layered strings, keys, dates, html lang (SPC-065). */
+  spaceLocaleBoardFacts(anchor: string, issueId: string): Promise<SpaceLocaleBoardFacts>;
+  /** Landing-page chrome strings for locale comparison (SPC-065). */
+  spaceLocaleLandingFacts(): Promise<SpaceLocaleLandingFacts>;
+  /** Store a locale choice (or clear it); applies on the next load (SPC-065). */
+  spaceLocaleSetStoredLocale(locale: string | null): Promise<void>;
 }
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
@@ -10631,4 +10694,144 @@ export interface AdminNotFoundFacts {
   messageVisible: boolean;
   /** Back-action label, or null when absent. */
   actionLabel: string | null;
+}
+
+/** Navbar project identity as rendered (NEWFRONT-448, SPC-010). */
+export interface SpaceChromeNavbarIdentity {
+  /** Project name text, the placeholder, or null when the name renders nothing. */
+  name: string | null;
+  /** Logo-mark branch: configured icon/emoji, the generic fallback, or an empty slot. */
+  logo: "icon" | "emoji" | "fallback" | "empty";
+}
+
+/** Fixed product badge facts (NEWFRONT-448, SPC-012). */
+export interface SpaceChromeBadgeFacts {
+  /** Link target (the product site address). */
+  href: string;
+  /** Link target attribute (new-tab marker). */
+  target: string | null;
+  /** Rel attribute. */
+  rel: string | null;
+  /** Visible badge text. */
+  text: string;
+  /** Badge bounding box in CSS pixels. */
+  box: { x: number; y: number; width: number; height: number };
+  /** Viewport size the box is measured against. */
+  viewport: { width: number; height: number };
+}
+
+/** Signed-in account menu identity (NEWFRONT-448, SPC-014). */
+export interface SpaceChromeAccountIdentity {
+  /** Display name shown on the avatar button, or null when absent. */
+  displayName: string | null;
+  /** Whether the opened menu offers sign-out. */
+  offersSignOut: boolean;
+}
+
+/** Sign-out form target (NEWFRONT-448, SPC-014). */
+export interface SpaceChromeSignOutForm {
+  /** Form action URL. */
+  action: string;
+  /** Preserved return address, or null when the form carries none. */
+  nextPath: string | null;
+}
+
+/** Sign-out outcome (NEWFRONT-448, SPC-014). */
+export interface SpaceChromeSignOutResult {
+  /** Redirect target the sign-out POST answered with, or null when unobserved. */
+  locationHeader: string | null;
+  /** Path the browser landed on after sign-out. */
+  landedPath: string;
+}
+
+/** Framed-board facts (NEWFRONT-448, SPC-015). */
+export interface SpaceChromeFramedFacts {
+  /** Whether the frame carries an authenticated session (guard against vacuous hides). */
+  sessionActiveInFrame: boolean;
+  /** Whether issue rows render inside the frame. */
+  boardReadable: boolean;
+  /** Whether any sign-in affordance renders inside the frame. */
+  signInVisible: boolean;
+  /** Whether the account avatar renders inside the frame. */
+  avatarVisible: boolean;
+  /** Visible emoji-reaction add controls inside the frame. */
+  emojiControls: number;
+}
+
+/** Loading-spinner probe outcome (NEWFRONT-448, SPC-016). */
+export interface SpaceChromeSpinnerProbe {
+  /** Whether the spinner showed while its stage was held. */
+  sawSpinner: boolean;
+  /** Whether the navbar showed its placeholder with content absent while held. */
+  placeholderWhileHeld: boolean;
+  /** Whether board content stayed absent while the spinner showed. */
+  contentAbsentWhileSpinning: boolean;
+  /** Whether the board settled with content after the hold released. */
+  settledWithContent: boolean;
+}
+
+/** Navigation-progress probe outcome (NEWFRONT-448, SPC-017). */
+export interface SpaceChromeProgressProbe {
+  /** Whether the progress indicator showed during the slow transition. */
+  sawBar: boolean;
+  /** Whether the indicator completed once the transition settled. */
+  completed: boolean;
+}
+
+/** Toast notice facts (NEWFRONT-448, SPC-017). */
+export interface SpaceChromeToastFacts {
+  /** Notice heading, or null when no notice appeared. */
+  title: string | null;
+  /** Notice body, or null when no notice appeared. */
+  message: string | null;
+  /** Clipboard text after a copy action, or null when unreadable. */
+  clipboard: string | null;
+}
+
+/** Instance-failure screen facts (NEWFRONT-448, SPC-018). */
+export interface SpaceChromeFailureFacts {
+  /** Failure heading text, or null when absent. */
+  heading: string | null;
+  /** Whether the retry control renders. */
+  retryVisible: boolean;
+  /** Whether a themed illustration renders. */
+  illustrationVisible: boolean;
+  /** Whether the logo bar renders above the failure view. */
+  logoBarVisible: boolean;
+}
+
+/** Crash-screen facts (NEWFRONT-448, SPC-019). */
+export interface SpaceChromeCrashFacts {
+  /** Error heading text, or null when absent. */
+  heading: string | null;
+  /** Whether the refresh control renders. */
+  refreshVisible: boolean;
+  /** Support contact link target, or null when absent. */
+  supportHref: string | null;
+  /** Forum link target, or null when absent. */
+  forumHref: string | null;
+}
+
+/** Locale-observable board facts (NEWFRONT-448, SPC-065). */
+export interface SpaceLocaleBoardFacts {
+  /** Peek property rows (state/priority/due-date labels and values). */
+  peekProperties: string;
+  /** Public issue keys in display order. */
+  issueKeys: string[];
+  /** Board chrome text (navbar plus badge). */
+  chromeText: string;
+  /** Document language tag. */
+  htmlLang: string | null;
+  /** Stored locale choice, or null when none is stored. */
+  storedLocale: string | null;
+}
+
+/** Landing-page chrome strings for locale comparison (NEWFRONT-448, SPC-065). */
+export interface SpaceLocaleLandingFacts {
+  /** Auth gate welcome title line. */
+  title: string;
+  /** Auth gate subtitle line. */
+  subtitle: string;
+  /** Consent/legal line text. */
+  consent: string;
 }
