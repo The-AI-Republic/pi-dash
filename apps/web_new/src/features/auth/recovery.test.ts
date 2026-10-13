@@ -161,6 +161,7 @@ describe("secretStrength", () => {
 
   it("needs three of the four character classes", () => {
     expect(secretStrength("abcdefgh")).toBe("weak");
+    expect(secretStrength("ABCDEFG1")).toBe("weak");
     expect(secretStrength("Abcdefgh")).toBe("weak");
     expect(secretStrength("Abcdefg1")).toBe("strong");
     expect(secretStrength("Abcdefg!")).toBe("strong");

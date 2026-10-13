@@ -85,6 +85,17 @@ describe("ResetPasswordCard", () => {
     expect(screen.queryByLabelText("New password")).toBeNull();
   });
 
+  it("banners at once when the link is missing its token", () => {
+    renderCard(
+      csrfThen(() => {
+        throw new Error("must not post without a link");
+      }),
+      { uid: "uid", token: "", email: "ada@example.com" }
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(/invalid password token/i);
+    expect(screen.queryByLabelText("New password")).toBeNull();
+  });
+
   it("locks the address and returns to the entry on success", async () => {
     renderCard(
       csrfThen((url) => {
