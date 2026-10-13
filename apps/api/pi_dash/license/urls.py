@@ -74,4 +74,7 @@ urlpatterns = [
     # Loop (Auto Project Management) admin — see
     # .ai_design/loop_project_management/design.md §9.2.
     path("loop/", include("pi_dash.loop.admin_urls")),
+    # Runner admin (support view of provisioning / runner_version /
+    # codex_version) — see .ai_design/managed_runner/design.md §15.1.
+    path("runners/", include("pi_dash.runner.admin_urls")),
 ]
