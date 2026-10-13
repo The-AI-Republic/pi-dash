@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid as _uuid
 from typing import Any, Dict, List
@@ -49,6 +50,36 @@ _POLL_SLICE_MS = 1000
 
 class _SessionEvictedDuringPoll(Exception):
     pass
+
+
+# Same charset discipline as ``session_service._AGENT_KIND_RE``, plus ``-``:
+# the daemon advertises the kebab-case CLI spellings (``claude-code``).
+_SUPPORTED_AGENT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_SUPPORTED_AGENTS_MAX = 32
+
+
+def _sanitize_supported_agents(body: Any) -> List[str] | None:
+    """Validated ``supported_agents`` list from the session-open body.
+
+    Returns ``None`` when the daemon advertised nothing usable — an older
+    daemon omits the field entirely — so the caller leaves the persisted
+    value untouched instead of clobbering it (mirrors the Hello
+    ``agent_kind`` no-clobber in ``services.session_service``). Entries are
+    deduplicated, order-preserving, charset-checked so a malformed payload
+    can never inject arbitrary text, and capped in count.
+    """
+    raw = body.get("supported_agents") if isinstance(body, dict) else None
+    if not isinstance(raw, list):
+        return None
+    cleaned: List[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not _SUPPORTED_AGENT_RE.match(item):
+            continue
+        if item not in cleaned:
+            cleaned.append(item)
+        if len(cleaned) >= _SUPPORTED_AGENTS_MAX:
+            break
+    return cleaned or None
 
 
 def _auth_dev_machine(request, dev_machine_id) -> DevMachine | None:
@@ -103,9 +134,14 @@ class MachineSessionOpenEndpoint(APIView):
                 protocol_version=settings.RUNNER_PROTOCOL_VERSION,
                 last_seen_at=timezone.now(),
             )
-            DevMachine.objects.filter(pk=machine.id).update(
-                last_seen_at=timezone.now()
-            )
+            machine_updates: Dict[str, Any] = {"last_seen_at": timezone.now()}
+            supported_agents = _sanitize_supported_agents(request.data)
+            if (
+                supported_agents is not None
+                and supported_agents != machine.supported_agents
+            ):
+                machine_updates["supported_agents"] = supported_agents
+            DevMachine.objects.filter(pk=machine.id).update(**machine_updates)
 
         # Post-tx Redis side effects — the session row is committed and the
         # row lock released, so a slow Redis call can no longer wedge the DB.

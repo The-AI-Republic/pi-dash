@@ -358,6 +358,12 @@ class DevMachine(models.Model):
         default=RunnerProvisioning.MANUAL,
         db_index=True,
     )
+    # Kebab-case agent kinds the machine's daemon binary understands
+    # (e.g. ``["codex", "claude-code", …]``), advertised on machine-session
+    # open. Empty means "unknown" — an older daemon that advertises nothing
+    # — so consumers must treat it as "offer everything", never "offer
+    # nothing".
+    supported_agents = models.JSONField(default=list, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

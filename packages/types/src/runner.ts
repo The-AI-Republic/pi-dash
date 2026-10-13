@@ -75,6 +75,10 @@ export interface IDevMachine {
   /** True when the machine's control session polled recently, i.e. the
    * daemon can execute cloud-pushed commands (create runner) right now. */
   control_online: boolean;
+  /** Kebab-case agent kinds the machine's daemon binary understands,
+   * advertised on machine-session open. Empty = unknown (older daemon that
+   * advertises nothing) — treat as "every agent", never "none". */
+  supported_agents: string[];
   last_seen_at: string | null;
   last_heartbeat_at: string | null;
   revoked_at: string | null;

@@ -118,6 +118,58 @@ def test_open_creates_machine_session(db, api_client, dev_machine, machine_token
 
 
 @pytest.mark.unit
+def test_open_persists_advertised_supported_agents(db, api_client, dev_machine, machine_token):
+    """The daemon advertises the agent kinds its binary understands on open
+    (PDASHOSS01-142); the cloud persists them on the DevMachine."""
+    _bearer(api_client, machine_token)
+    url = reverse("runner:machine-session-open", kwargs={"dev_machine_id": dev_machine.id})
+    resp = api_client.post(
+        url, {"supported_agents": ["codex", "claude-code", "muse-code"]}, format="json"
+    )
+    assert resp.status_code == 201, resp.data
+    dev_machine.refresh_from_db()
+    assert dev_machine.supported_agents == ["codex", "claude-code", "muse-code"]
+
+
+@pytest.mark.unit
+def test_open_without_supported_agents_leaves_persisted_set_untouched(
+    db, api_client, dev_machine, machine_token
+):
+    """An older daemon omits the field entirely — no-clobber, mirroring the
+    Hello ``agent_kind`` handling."""
+    dev_machine.supported_agents = ["codex"]
+    dev_machine.save(update_fields=["supported_agents"])
+    _bearer(api_client, machine_token)
+    url = reverse("runner:machine-session-open", kwargs={"dev_machine_id": dev_machine.id})
+    resp = api_client.post(url, {}, format="json")
+    assert resp.status_code == 201, resp.data
+    dev_machine.refresh_from_db()
+    assert dev_machine.supported_agents == ["codex"]
+
+
+@pytest.mark.unit
+def test_open_filters_malformed_supported_agents(db, api_client, dev_machine, machine_token):
+    """Charset-checked and deduplicated; a payload with nothing valid left
+    is treated as absent rather than clobbering with an empty list."""
+    _bearer(api_client, machine_token)
+    url = reverse("runner:machine-session-open", kwargs={"dev_machine_id": dev_machine.id})
+    resp = api_client.post(
+        url,
+        {"supported_agents": ["codex", "Not Valid!", 7, "codex", "x" * 64, "claude-code"]},
+        format="json",
+    )
+    assert resp.status_code == 201, resp.data
+    dev_machine.refresh_from_db()
+    assert dev_machine.supported_agents == ["codex", "claude-code"]
+
+    # All-invalid payload: persisted value stays put.
+    resp = api_client.post(url, {"supported_agents": ["???"]}, format="json")
+    assert resp.status_code == 201, resp.data
+    dev_machine.refresh_from_db()
+    assert dev_machine.supported_agents == ["codex", "claude-code"]
+
+
+@pytest.mark.unit
 def test_second_open_evicts_prior_session(db, api_client, dev_machine, machine_token):
     _bearer(api_client, machine_token)
     url = reverse("runner:machine-session-open", kwargs={"dev_machine_id": dev_machine.id})
