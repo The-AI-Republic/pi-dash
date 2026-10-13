@@ -19708,3 +19708,436 @@ export async function analyticsProjectStatsRaw(
   }
   return { status: res.status, payload };
 }
+
+// --- Space engagement server reads (NEWFRONT-451, SPC-047–057). Appended;
+// --- existing helpers above are untouched per the shared harness contract.
+// --- Reads ride out throttle windows (fetchTolerant); mutations throw HTTP
+// --- statuses so withThrottleRetry waits out a saturated window instead of
+// --- failing the oracle. Votes and reactions assert against the embedded
+// --- detail items: the public votes/reactions list endpoints resolve the
+// --- board by the wrong key and always answer [], so they cannot prove
+// --- anything (observed live; noted in the area spec).
+
+/** API container for shell snippets; namespaced stacks derive from PARITY_NS. */
+function serverSpaceApiContainer(): string {
+  const override = process.env["PARITY_API_CONTAINER"];
+  if (override !== undefined && override.trim() !== "") return override.trim();
+  const ns = process.env["PARITY_NS"];
+  if (ns !== undefined && /^\d+$/.test(ns.trim())) return `parity${ns.trim()}-api`;
+  return "parity19-api";
+}
+
+/** Run a Django shell snippet inside this run's stack api container. */
+export async function serverSpaceShell(python: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "docker",
+    ["exec", "-i", serverSpaceApiContainer(), "python", "manage.py", "shell", "-c", python],
+    {
+      timeout: 120_000,
+    }
+  );
+  return stdout;
+}
+
+/** Board engagement flags plus the published views, as the publish read returns them. */
+export interface SpaceBoardFlags {
+  comments: boolean;
+  reactions: boolean;
+  votes: boolean;
+  views: Record<string, boolean>;
+}
+
+/** Read the seeded board's engagement flags through the publish endpoint. */
+export async function serverSpaceBoardFlags(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<SpaceBoardFlags> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/project-deploy-boards/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] deploy-board read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as {
+    is_comments_enabled?: unknown;
+    is_reactions_enabled?: unknown;
+    is_votes_enabled?: unknown;
+    view_props?: unknown;
+  };
+  return {
+    comments: payload.is_comments_enabled === true,
+    reactions: payload.is_reactions_enabled === true,
+    votes: payload.is_votes_enabled === true,
+    views: (payload.view_props ?? {}) as Record<string, boolean>,
+  };
+}
+
+/** Resolve a public issue id by its rendered name. */
+export async function serverSpaceIssueIdByName(
+  anchor: string,
+  issueName: string,
+  sessionCookie: string = "",
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const res = await fetchTolerant(`${apiBase}/api/public/anchor/${anchor}/issues/`, {
+    headers: sessionCookie === "" ? {} : { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] public issues read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as { results?: { id?: unknown; name?: unknown }[] };
+  const found = (payload.results ?? []).find((row) => row.name === issueName);
+  if (typeof found?.id !== "string" || found.id === "")
+    throw new Error(`[parity] no public issue named ${JSON.stringify(issueName)}.`);
+  return found.id;
+}
+
+/** One embedded vote with its voter, as the issue detail carries it. */
+export interface SpaceServerVote {
+  vote: number;
+  actorId: string;
+  displayName: string;
+}
+
+/** One embedded reaction with its reactor, as the issue detail carries it. */
+export interface SpaceServerReaction {
+  reaction: string;
+  actorId: string;
+  displayName: string;
+}
+
+/** Votes plus reactions embedded in the public issue detail (the lists lie; the detail does not). */
+export async function serverSpaceIssueEngagement(
+  anchor: string,
+  issueId: string,
+  sessionCookie: string = "",
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ votes: SpaceServerVote[]; reactions: SpaceServerReaction[] }> {
+  const res = await fetchTolerant(`${apiBase}/api/public/anchor/${anchor}/issues/${issueId}/`, {
+    headers: sessionCookie === "" ? {} : { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] public issue detail read failed with HTTP ${res.status}.`);
+  const payload = (await res.json()) as {
+    vote_items?: { vote?: unknown; actor_details?: { id?: unknown; display_name?: unknown } }[];
+    reaction_items?: { reaction?: unknown; actor_details?: { id?: unknown; display_name?: unknown } }[];
+  };
+  return {
+    votes: (payload.vote_items ?? []).map((row) => ({
+      vote: typeof row.vote === "number" ? row.vote : 0,
+      actorId: typeof row.actor_details?.id === "string" ? row.actor_details.id : "",
+      displayName: typeof row.actor_details?.display_name === "string" ? row.actor_details.display_name : "",
+    })),
+    reactions: (payload.reaction_items ?? []).map((row) => ({
+      reaction: typeof row.reaction === "string" ? row.reaction : "",
+      actorId: typeof row.actor_details?.id === "string" ? row.actor_details.id : "",
+      displayName: typeof row.actor_details?.display_name === "string" ? row.actor_details.display_name : "",
+    })),
+  };
+}
+
+/** Cast or replace the caller's vote through the public votes endpoint. */
+export async function serverSpaceVote(
+  anchor: string,
+  issueId: string,
+  vote: 1 | -1,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await withThrottleRetry("space vote", async () => {
+    const res = await mutateJSON(
+      "POST",
+      `${apiBase}/api/public/anchor/${anchor}/issues/${issueId}/votes/`,
+      sessionCookie,
+      { vote }
+    );
+    if (!res.ok) throw new Error(`[parity] public vote failed with HTTP ${res.status}.`);
+  });
+}
+
+/** Remove the caller's vote through the public votes endpoint. */
+export async function serverSpaceDeleteVote(
+  anchor: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await withThrottleRetry("space vote delete", async () => {
+    const res = await mutateJSON(
+      "DELETE",
+      `${apiBase}/api/public/anchor/${anchor}/issues/${issueId}/votes/`,
+      sessionCookie
+    );
+    if (!res.ok && res.status !== 404) throw new Error(`[parity] public vote delete failed with HTTP ${res.status}.`);
+  });
+}
+
+/** Add an issue emoji reaction through the public endpoint (reaction is decimal code points). */
+export async function serverSpaceReact(
+  anchor: string,
+  issueId: string,
+  reaction: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await withThrottleRetry("space react", async () => {
+    const res = await mutateJSON(
+      "POST",
+      `${apiBase}/api/public/anchor/${anchor}/issues/${issueId}/reactions/`,
+      sessionCookie,
+      { reaction }
+    );
+    if (!res.ok) throw new Error(`[parity] public react failed with HTTP ${res.status}.`);
+  });
+}
+
+/** Remove the caller's issue emoji reaction through the public endpoint. */
+export async function serverSpaceDeleteReaction(
+  anchor: string,
+  issueId: string,
+  reaction: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await withThrottleRetry("space react delete", async () => {
+    const res = await mutateJSON(
+      "DELETE",
+      `${apiBase}/api/public/anchor/${anchor}/issues/${issueId}/reactions/${reaction}/`,
+      sessionCookie
+    );
+    if (!res.ok && res.status !== 404) throw new Error(`[parity] public react delete failed with HTTP ${res.status}.`);
+  });
+}
+
+/** One public comment row with the fields the overlay renders. */
+export interface SpaceServerComment {
+  id: string;
+  html: string;
+  stripped: string;
+  labels: string[];
+  speakerType: string;
+  speakerLabel: string;
+  actorId: string;
+  displayName: string;
+  firstName: string;
+  isBot: boolean;
+  avatarUrl: string;
+  createdAt: string;
+  reactions: { reaction: string; actorId: string; displayName: string }[];
+}
+
+function spaceServerCommentOf(row: {
+  id?: unknown;
+  comment_html?: unknown;
+  comment_stripped?: unknown;
+  labels?: unknown;
+  speaker_type?: unknown;
+  speaker_label?: unknown;
+  actor_detail?: {
+    id?: unknown;
+    display_name?: unknown;
+    first_name?: unknown;
+    is_bot?: unknown;
+    avatar_url?: unknown;
+    avatar?: unknown;
+  };
+  created_at?: unknown;
+  comment_reactions?: {
+    reaction?: unknown;
+    actor?: unknown;
+    display_name?: unknown;
+    actor_detail?: { id?: unknown; display_name?: unknown };
+  }[];
+}): SpaceServerComment {
+  return {
+    id: typeof row.id === "string" ? row.id : "",
+    html: typeof row.comment_html === "string" ? row.comment_html : "",
+    stripped: typeof row.comment_stripped === "string" ? row.comment_stripped : "",
+    labels: Array.isArray(row.labels) ? row.labels.filter((label): label is string => typeof label === "string") : [],
+    speakerType: typeof row.speaker_type === "string" ? row.speaker_type : "",
+    speakerLabel: typeof row.speaker_label === "string" ? row.speaker_label : "",
+    actorId: typeof row.actor_detail?.id === "string" ? row.actor_detail.id : "",
+    displayName: typeof row.actor_detail?.display_name === "string" ? row.actor_detail.display_name : "",
+    firstName: typeof row.actor_detail?.first_name === "string" ? row.actor_detail.first_name : "",
+    isBot: row.actor_detail?.is_bot === true,
+    avatarUrl:
+      typeof row.actor_detail?.avatar_url === "string" && row.actor_detail.avatar_url !== ""
+        ? row.actor_detail.avatar_url
+        : typeof row.actor_detail?.avatar === "string"
+          ? row.actor_detail.avatar
+          : "",
+    createdAt: typeof row.created_at === "string" ? row.created_at : "",
+    // Comment reactions serialize their actor flat (actor/display_name),
+    // unlike the nested actor_detail on issue reactions (NEWFRONT-466).
+    reactions: (row.comment_reactions ?? []).map((reaction) => ({
+      reaction: typeof reaction.reaction === "string" ? reaction.reaction : "",
+      actorId:
+        typeof reaction.actor_detail?.id === "string"
+          ? reaction.actor_detail.id
+          : typeof reaction.actor === "string"
+            ? reaction.actor
+            : "",
+      displayName:
+        typeof reaction.actor_detail?.display_name === "string"
+          ? reaction.actor_detail.display_name
+          : typeof reaction.display_name === "string"
+            ? reaction.display_name
+            : "",
+    })),
+  };
+}
+
+/** List an issue's public comments (anonymous read; the thread is public). */
+export async function serverSpaceComments(
+  anchor: string,
+  issueId: string,
+  sessionCookie: string = "",
+  apiBase: string = apiBaseFromEnv()
+): Promise<SpaceServerComment[]> {
+  const res = await fetchTolerant(`${apiBase}/api/public/anchor/${anchor}/issues/${issueId}/comments/`, {
+    headers: sessionCookie === "" ? {} : { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] public comments read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows = (Array.isArray(payload) ? payload : []) as Parameters<typeof spaceServerCommentOf>[0][];
+  return rows.map(spaceServerCommentOf);
+}
+
+/** Post a public comment; extra carries fixture fields (labels, speaker_*). */
+export async function serverSpacePostComment(
+  anchor: string,
+  issueId: string,
+  html: string,
+  stripped: string,
+  sessionCookie: string,
+  extra: Record<string, unknown> = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<SpaceServerComment> {
+  return withThrottleRetry("space comment post", async () => {
+    const res = await mutateJSON(
+      "POST",
+      `${apiBase}/api/public/anchor/${anchor}/issues/${issueId}/comments/`,
+      sessionCookie,
+      { comment_html: html, comment_stripped: stripped, ...extra }
+    );
+    if (!res.ok) throw new Error(`[parity] public comment post failed with HTTP ${res.status}.`);
+    return spaceServerCommentOf((await res.json()) as Parameters<typeof spaceServerCommentOf>[0]);
+  });
+}
+
+/** Delete a public comment the session owns. */
+export async function serverSpaceDeleteComment(
+  anchor: string,
+  issueId: string,
+  commentId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await withThrottleRetry("space comment delete", async () => {
+    const res = await mutateJSON(
+      "DELETE",
+      `${apiBase}/api/public/anchor/${anchor}/issues/${issueId}/comments/${commentId}/`,
+      sessionCookie
+    );
+    if (!res.ok && res.status !== 404)
+      throw new Error(`[parity] public comment delete failed with HTTP ${res.status}.`);
+  });
+}
+
+/** Add a comment emoji reaction through the public endpoint. */
+export async function serverSpaceCommentReact(
+  anchor: string,
+  commentId: string,
+  reaction: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await withThrottleRetry("space comment react", async () => {
+    const res = await mutateJSON(
+      "POST",
+      `${apiBase}/api/public/anchor/${anchor}/comments/${commentId}/reactions/`,
+      sessionCookie,
+      { reaction }
+    );
+    if (!res.ok) throw new Error(`[parity] public comment react failed with HTTP ${res.status}.`);
+  });
+}
+
+/** Remove the caller's comment emoji reaction through the public endpoint. */
+export async function serverSpaceDeleteCommentReaction(
+  anchor: string,
+  commentId: string,
+  reaction: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await withThrottleRetry("space comment react delete", async () => {
+    const res = await mutateJSON(
+      "DELETE",
+      `${apiBase}/api/public/anchor/${anchor}/comments/${commentId}/reactions/${reaction}/`,
+      sessionCookie
+    );
+    if (!res.ok && res.status !== 404)
+      throw new Error(`[parity] public comment react delete failed with HTTP ${res.status}.`);
+  });
+}
+
+/** One public board member, as the mention source lists them. */
+export interface SpaceServerMember {
+  id: string;
+  displayName: string;
+}
+
+/** List the board's public members (the mention autocomplete source). */
+export async function serverSpaceMembers(
+  anchor: string,
+  sessionCookie: string = "",
+  apiBase: string = apiBaseFromEnv()
+): Promise<SpaceServerMember[]> {
+  const res = await fetchTolerant(`${apiBase}/api/public/anchor/${anchor}/members/`, {
+    headers: sessionCookie === "" ? {} : { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] public members read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows = (Array.isArray(payload) ? payload : []) as {
+    member__id?: unknown;
+    member__display_name?: unknown;
+    id?: unknown;
+    display_name?: unknown;
+  }[];
+  return rows.map((row) => ({
+    id: typeof row.member__id === "string" ? row.member__id : typeof row.id === "string" ? row.id : "",
+    displayName:
+      typeof row.member__display_name === "string"
+        ? row.member__display_name
+        : typeof row.display_name === "string"
+          ? row.display_name
+          : "",
+  }));
+}
+
+/**
+ * Converge a distinct-names bot identity for the bot-marking proof (the
+ * seeded bot renders identically down both branches, so it cannot prove
+ * the marking). Convergent across reseeds and reruns; no cleanup needed.
+ */
+export async function serverSpacePlantBot(
+  email: string = "parity-space-bot@example.com",
+  password: string = "Parity-Seed-2"
+): Promise<{ email: string; password: string; id: string; displayName: string; firstName: string }> {
+  const out = await serverSpaceShell(
+    `from django.contrib.auth.hashers import make_password\n` +
+      `from pi_dash.db.models import User\n` +
+      `user, _ = User.objects.get_or_create(email=${JSON.stringify(email)}, defaults={"username": "parity_space_bot"})\n` +
+      `user.password = make_password(${JSON.stringify(password)})\n` +
+      `user.display_name = "Zeddy Spacebotte"\n` +
+      `user.first_name = "Zed"\n` +
+      `user.last_name = "Spacebotte"\n` +
+      `user.is_active = True\n` +
+      `user.is_email_verified = True\n` +
+      `user.is_bot = True\n` +
+      `user.save()\n` +
+      `print("PARITY_SPACE_BOT:" + str(user.id))\n`
+  );
+  const id = /^PARITY_SPACE_BOT:(.+)$/m.exec(out)?.[1]?.trim() ?? "";
+  if (id === "") throw new Error("[parity] bot plant produced no id.");
+  return { email, password, id, displayName: "Zeddy Spacebotte", firstName: "Zed" };
+}

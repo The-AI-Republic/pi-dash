@@ -19,6 +19,7 @@ import {
   expect,
   type CDPSession,
   type ElementHandle,
+  type FrameLocator,
   type Locator,
   type Page,
   type Request,
@@ -197,6 +198,14 @@ import type {
   SpaceLocaleBoardFacts,
   SpaceLocaleLandingFacts,
   SpaceAccessHeadFacts,
+  SpaceAuthLanding,
+  SpaceCommentNotice,
+  SpaceCommentRow,
+  SpaceCommentSection,
+  SpaceMentionResult,
+  SpacePickedEmoji,
+  SpaceReactionGroup,
+  SpaceVoteState,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -52077,5 +52086,715 @@ export class WebDriver implements ParityDriver {
       if (Date.now() >= deadline) return path;
       await fresh.waitForTimeout(500);
     }
+  }
+
+  // ---- Space engagement: votes, reactions, comments (NEWFRONT-451, SPC-047–057). ----
+  // Selectors were observed on the running old space app behind the parity
+  // proxy, never copied from its sources. The peek overlay is the dialog
+  // holding the presentation switcher (a listbox button); toasts share the
+  // dialog role so the filter matters. Never press Escape here: the overlay
+  // dialog closes on it, unlike the workspace surfaces.
+
+  /** The open peek overlay: the dialog holding the presentation switcher. */
+  private spaceOverlay(): Locator {
+    return this.page.getByRole("dialog").filter({ has: this.page.locator('button[aria-haspopup="listbox"]') });
+  }
+
+  /** Comment rows inside the overlay, in display order. */
+  private spaceOverlayRows(): Locator {
+    return this.spaceOverlay().first().locator("div.relative.flex.items-start");
+  }
+
+  /** The comment composer: the last editable surface (rows carry hidden edit forms before it). */
+  private spaceComposer(): Locator {
+    return this.spaceOverlay().first().locator('[contenteditable="true"]').last();
+  }
+
+  /** Parse hover-card names out of tooltip text (empty cards read "No … yet"). */
+  private static spaceHoverNames(text: string): string[] {
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (lines.length === 0) return [];
+    if (/^No .* yet$/.test(lines[0] ?? "")) return [];
+    const namesPart =
+      lines.length > 1 && /^\p{Extended_Pictographic}/u.test(lines[0] ?? "")
+        ? lines.slice(1).join(" ")
+        : lines.join(" ");
+    return namesPart
+      .replace(/\s+and \d+ more$/, "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter((name) => name.length > 0);
+  }
+
+  /** Hover a control and read its hover-card names; empty when no card opens. */
+  private async spaceReadHoverNames(button: Locator): Promise<string[]> {
+    // Portal shells linger in the DOM with zero-height boxes, so visibility
+    // can neither clear nor find them: settle on the card text instead. The
+    // mouse park clears the previous card, and the single non-empty tooltip
+    // shell after the hover carries this one (tooltips open one at a time).
+    // Picker and toast shells share the portal marker, so both are
+    // excluded structurally: pill clicks bubble to the picker trigger, so
+    // the picker panel is routinely open right here.
+    const nonEmptyPortalText = (): Promise<string | null> =>
+      this.page
+        .evaluate(() => {
+          const shells = Array.from(document.querySelectorAll("div[data-base-ui-portal]")).filter(
+            (el) => el.querySelector('[data-slot="popover-positioner"], [aria-label="Notifications"]') === null
+          );
+          const opened = shells.find((el) => (el.textContent ?? "").trim() !== "");
+          return opened ? (opened.textContent ?? "").trim() : null;
+        })
+        .catch(() => null);
+    await this.page.mouse.move(5, 5);
+    await this.page
+      .waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("div[data-base-ui-portal]"))
+            .filter((el) => el.querySelector('[data-slot="popover-positioner"], [aria-label="Notifications"]') === null)
+            .every((el) => (el.textContent ?? "").trim() === ""),
+        null,
+        { timeout: 5_000 }
+      )
+      .catch(() => {});
+    await button.hover({ timeout: 15_000 });
+    try {
+      await this.page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("div[data-base-ui-portal]"))
+            .filter((el) => el.querySelector('[data-slot="popover-positioner"], [aria-label="Notifications"]') === null)
+            .some((el) => (el.textContent ?? "").trim() !== ""),
+        null,
+        { timeout: 10_000 }
+      );
+    } catch {
+      return [];
+    }
+    const text = (await nonEmptyPortalText()) ?? "";
+    await this.page.mouse.move(5, 5);
+    return WebDriver.spaceHoverNames(text);
+  }
+
+  /** The issue-level reaction trigger (row triggers live inside comment rows). */
+  private async spaceIssueReactionTrigger(): Promise<Locator> {
+    const overlay = this.spaceOverlay().first();
+    const index = await overlay.evaluate((root) => {
+      const triggers = Array.from(root.querySelectorAll('button[aria-haspopup="dialog"]'));
+      return triggers.findIndex((el) => el.closest("div.relative.flex.items-start") === null);
+    });
+    if (index < 0) throw new Error("[parity] no issue-level reaction trigger in the overlay.");
+    return overlay.locator('button[aria-haspopup="dialog"]').nth(index);
+  }
+
+  /** Reaction pills within a trigger subtree (the trigger itself is skipped). */
+  private static spaceParseChips(entries: { text: string; cls: string; popup: string | null }[]): {
+    emoji: string;
+    count: number;
+    mine: boolean;
+  }[] {
+    const chips: { emoji: string; count: number; mine: boolean }[] = [];
+    for (const entry of entries) {
+      if (entry.popup === "dialog") continue;
+      const text = entry.text.trim();
+      if (text === "") continue;
+      const match = /^(.*?)(\d+)$/.exec(text.replace(/\s+/g, ""));
+      if (match && (match[1] ?? "") !== "")
+        chips.push({
+          emoji: match[1] ?? "",
+          count: Number(match[2]),
+          mine: entry.cls.includes("border-accent-strong"),
+        });
+    }
+    return chips;
+  }
+
+  /** Pills with settled counts: the rolling counter shows both digits mid-transition. */
+  private async spaceStableChips(trigger: Locator): Promise<{ emoji: string; count: number; mine: boolean }[]> {
+    const read = async () =>
+      WebDriver.spaceParseChips(
+        await trigger.evaluate((root) =>
+          Array.from(root.querySelectorAll("button")).map((b) => ({
+            text: (b as HTMLElement).innerText,
+            cls: (b as HTMLElement).className,
+            popup: (b as HTMLElement).getAttribute("aria-haspopup"),
+          }))
+        )
+      );
+    let previous = JSON.stringify(await read());
+    const deadline = Date.now() + 6_000;
+    for (;;) {
+      await this.page.waitForTimeout(400);
+      const current = JSON.stringify(await read());
+      if (current === previous) return JSON.parse(current) as { emoji: string; count: number; mine: boolean }[];
+      if (Date.now() >= deadline) return JSON.parse(current) as { emoji: string; count: number; mine: boolean }[];
+      previous = current;
+    }
+  }
+
+  private static spaceEmojiCode(emoji: string): string {
+    return Array.from(emoji)
+      .map((char) => char.codePointAt(0))
+      .join("-");
+  }
+
+  /** The picker's add button within a trigger (the empty-text control). */
+  private async spacePickerAddButton(trigger: Locator): Promise<Locator> {
+    const index = await trigger.evaluate((root) => {
+      const buttons = Array.from(root.querySelectorAll("button:not([aria-haspopup])"));
+      return buttons.findIndex((b) => ((b as HTMLElement).innerText ?? "").trim() === "");
+    });
+    if (index < 0) throw new Error("[parity] no reaction add button in the trigger.");
+    return trigger.locator("button:not([aria-haspopup])").nth(index);
+  }
+
+  /** Click the first rendered picker grid entry (typing in search collapses the popover). */
+  private async spacePickFirstEmoji(trigger: Locator): Promise<SpacePickedEmoji> {
+    // Open through the add button, never the trigger center: the center
+    // lands on a pill and posts a phantom reaction. The add control
+    // toggles, and pill clicks bubble up and routinely leave the picker
+    // open, so settle the panel shell first (it renders instantly), then
+    // wait out the grid data, which fetches over the network and may lag.
+    const entry = this.page.locator('button[data-slot="emoji-picker-list-emoji"]:visible').first();
+    const panel = this.page.locator("div.w-80");
+    const open = async () => {
+      await (await this.spacePickerAddButton(trigger)).click({ timeout: 15_000 });
+      await panel.waitFor({ timeout: 10_000 });
+    };
+    try {
+      await open();
+    } catch {
+      await open();
+    }
+    await entry.waitFor({ timeout: 60_000 });
+    const emoji = ((await entry.textContent()) ?? "").trim();
+    if (emoji === "") throw new Error("[parity] first grid entry carried no character.");
+    await entry.click({ force: true, timeout: 15_000 });
+    return { emoji, code: WebDriver.spaceEmojiCode(emoji) };
+  }
+
+  /** A kanban card shell for one issue (the title link's parent). */
+  private spaceKanbanCard(issueName: string): Locator {
+    return this.page.locator("a", { hasText: issueName }).first().locator("xpath=..");
+  }
+
+  private async spaceReadVotePair(up: Locator, down: Locator): Promise<SpaceVoteState> {
+    const read = async (button: Locator, marker: string) => {
+      const count = Number.parseInt(((await button.innerText().catch(() => "")) ?? "").trim() || "0", 10);
+      const cls = (await button.getAttribute("class")) ?? "";
+      return { count, voters: await this.spaceReadHoverNames(button), mine: cls.includes(marker) };
+    };
+    return { up: await read(up, "border-accent-strong-200"), down: await read(down, "border-danger-strong") };
+  }
+
+  async spaceCommentOpenIssue(anchor: string, issueName: string, view = "list"): Promise<void> {
+    await this.page.goto(`/issues/${anchor}?board=${view}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    const card = this.page.getByText(issueName, { exact: true }).first();
+    await card.waitFor({ timeout: 120_000 });
+    // The thread fetch fires unconditionally on open, but the section
+    // shell renders before it lands and the display editors hydrate their
+    // text a beat after that: wait for the list response, then settle.
+    const listed = this.page
+      .waitForResponse((response) => response.url().includes("/comments") && response.request().method() === "GET", {
+        timeout: 60_000,
+      })
+      .catch(() => null);
+    await card.click({ timeout: 30_000 });
+    await this.page.waitForFunction(() => window.location.href.includes("peek"), null, { timeout: 60_000 });
+    // Gate on the switcher, not the dialog wrapper: the wrapper is a
+    // zero-size positioning parent that never counts as visible.
+    await this.spaceOverlay().first().locator('button[aria-haspopup="listbox"]').first().waitFor({ timeout: 60_000 });
+    await listed;
+    await this.spaceCommentRows();
+  }
+
+  async spaceCommentAuthLanding(): Promise<SpaceAuthLanding> {
+    const url = new URL(this.page.url());
+    const landing: SpaceAuthLanding = {
+      onAuthGate: url.pathname === "/",
+      returnAnchor: null,
+      returnView: null,
+      returnIssueId: null,
+    };
+    const nextPath = url.searchParams.get("next_path");
+    if (nextPath === null) return landing;
+    const target = new URL(nextPath, url.origin);
+    const anchor = /^\/issues\/([^/]+)\/?$/.exec(target.pathname)?.[1] ?? null;
+    if (anchor === null) return landing;
+    landing.returnAnchor = anchor;
+    landing.returnView = target.searchParams.get("board");
+    landing.returnIssueId = target.searchParams.get("peekId");
+    return landing;
+  }
+
+  async spaceVoteOverlayVisible(): Promise<boolean> {
+    return this.isShown(this.spaceOverlay().first().getByRole("button", { name: /^\d+$/ }));
+  }
+
+  async spaceVoteOverlay(): Promise<SpaceVoteState> {
+    const buttons = this.spaceOverlay().first().getByRole("button", { name: /^\d+$/ });
+    return this.spaceReadVotePair(buttons.nth(0), buttons.nth(1));
+  }
+
+  async spaceVoteClick(direction: "up" | "down"): Promise<void> {
+    const buttons = this.spaceOverlay().first().getByRole("button", { name: /^\d+$/ });
+    await (direction === "up" ? buttons.nth(0) : buttons.nth(1)).click({ timeout: 15_000 });
+  }
+
+  async spaceVoteCardVisible(anchor: string, issueName: string): Promise<boolean> {
+    await this.page.goto(`/issues/${anchor}?board=kanban`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByText(issueName, { exact: true }).first().waitFor({ timeout: 120_000 });
+    return this.isShown(this.spaceKanbanCard(issueName).getByRole("button", { name: /^\d+$/ }));
+  }
+
+  async spaceVoteCard(anchor: string, issueName: string): Promise<SpaceVoteState> {
+    await this.page.goto(`/issues/${anchor}?board=kanban`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByText(issueName, { exact: true }).first().waitFor({ timeout: 120_000 });
+    const buttons = this.spaceKanbanCard(issueName).getByRole("button", { name: /^\d+$/ });
+    return this.spaceReadVotePair(buttons.nth(0), buttons.nth(1));
+  }
+
+  async spaceVoteCardClick(anchor: string, issueName: string, direction: "up" | "down"): Promise<void> {
+    await this.page.goto(`/issues/${anchor}?board=kanban`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByText(issueName, { exact: true }).first().waitFor({ timeout: 120_000 });
+    const buttons = this.spaceKanbanCard(issueName).getByRole("button", { name: /^\d+$/ });
+    await (direction === "up" ? buttons.nth(0) : buttons.nth(1)).click({ timeout: 15_000 });
+  }
+
+  async spaceReactOverlayVisible(): Promise<boolean> {
+    const overlay = this.spaceOverlay().first();
+    const index = await overlay
+      .evaluate((root) => {
+        const triggers = Array.from(root.querySelectorAll('button[aria-haspopup="dialog"]'));
+        return triggers.findIndex((el) => el.closest("div.relative.flex.items-start") === null);
+      })
+      .catch(() => -1);
+    if (index < 0) return false;
+    return this.isShown(overlay.locator('button[aria-haspopup="dialog"]').nth(index));
+  }
+
+  async spaceReactGroups(): Promise<SpaceReactionGroup[]> {
+    const trigger = await this.spaceIssueReactionTrigger();
+    const groups: SpaceReactionGroup[] = [];
+    for (const chip of await this.spaceStableChips(trigger)) {
+      const pill = trigger.locator("button:not([aria-haspopup])", { hasText: chip.emoji }).first();
+      groups.push({ ...chip, users: await this.spaceReadHoverNames(pill) });
+    }
+    return groups;
+  }
+
+  async spaceReactPick(): Promise<SpacePickedEmoji> {
+    return this.spacePickFirstEmoji(await this.spaceIssueReactionTrigger());
+  }
+
+  async spaceReactClickGroup(emoji: string): Promise<void> {
+    const trigger = await this.spaceIssueReactionTrigger();
+    await trigger.locator("button:not([aria-haspopup])", { hasText: emoji }).first().click({ timeout: 15_000 });
+  }
+
+  async spaceReactAddVisible(): Promise<boolean> {
+    const trigger = await this.spaceIssueReactionTrigger().catch(() => null);
+    if (trigger === null) return false;
+    return trigger.evaluate((root) =>
+      Array.from(root.querySelectorAll("button:not([aria-haspopup])")).some(
+        (b) => ((b as HTMLElement).innerText ?? "").trim() === ""
+      )
+    );
+  }
+
+  async spaceCommentSection(): Promise<SpaceCommentSection> {
+    const overlay = this.spaceOverlay().first();
+    const sectionVisible = (await overlay.getByRole("heading", { name: "Comments", exact: true }).count()) > 0;
+    return {
+      sectionVisible,
+      threadCount: sectionVisible ? (await this.spaceCommentRows()).length : 0,
+      composerVisible: sectionVisible ? await this.isShown(this.spaceComposer()) : false,
+      signInInviteVisible: sectionVisible && (await overlay.getByText("Sign in to add your comment").count()) > 0,
+    };
+  }
+
+  async spaceCommentRows(): Promise<SpaceCommentRow[]> {
+    let rows = await this.spaceReadRows();
+    if (rows.length === 0) {
+      await this.page.waitForTimeout(1_000);
+      return this.spaceReadRows();
+    }
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if (rows.length === 0 || rows.every((row) => row.folded || row.contentText.length > 0)) return rows;
+      await this.page.waitForTimeout(400);
+      rows = await this.spaceReadRows();
+    }
+    return rows;
+  }
+
+  private async spaceReadRows(): Promise<SpaceCommentRow[]> {
+    return this.spaceOverlay()
+      .first()
+      .evaluate((root) => {
+        const rows = Array.from(root.querySelectorAll("div.relative.flex.items-start"));
+        return rows.map((row) => {
+          const header = row.querySelector(":scope div.min-w-0 > div");
+          const author = (header?.firstElementChild?.textContent ?? "").trim();
+          const ageNode = header?.querySelector("p");
+          const ageClone = ageNode?.cloneNode(true) as HTMLElement | undefined;
+          ageClone?.querySelector("button")?.remove();
+          const ageText = (ageClone?.innerText ?? "").trim();
+          // The row menu trigger also carries aria-expanded, so the fold
+          // toggle is identified by its accessible name, not the attribute.
+          const foldToggle = Array.from(row.querySelectorAll("button[aria-expanded]")).find((candidate) =>
+            /Folded comment/.test(((candidate as HTMLElement).innerText ?? "").trim())
+          );
+          const folded = foldToggle !== undefined;
+          const expanded = foldToggle?.getAttribute("aria-expanded") === "true";
+          const display = row.querySelector(":scope div.issue-comments-section div.tiptap");
+          const contentText = folded && !expanded ? "" : ((display as HTMLElement | null)?.innerText?.trim() ?? "");
+          const speakerRaw = row.querySelector("span.font-medium")?.textContent?.trim() ?? "";
+          const speakerLabel = speakerRaw.endsWith(":")
+            ? speakerRaw.slice(0, -1)
+            : speakerRaw === ""
+              ? null
+              : speakerRaw;
+          return {
+            author,
+            botMark: / Bot$/.test(author),
+            ageText,
+            contentText,
+            folded,
+            speakerLabel,
+            avatarKind: (row.querySelector(":scope div.relative.px-1 img") !== null ? "image" : "initial") as
+              | "image"
+              | "initial",
+            hasImage:
+              row.querySelector(
+                ":scope div.issue-comments-section img, :scope div.issue-comments-section image-component"
+              ) !== null,
+          };
+        });
+      });
+  }
+
+  async spaceCommentToggleFold(index: number): Promise<void> {
+    await this.spaceOverlayRows()
+      .nth(index)
+      .getByRole("button", { name: /Folded comment/ })
+      .click({ timeout: 15_000 });
+  }
+
+  async spaceCommentType(text: string): Promise<void> {
+    const composer = this.spaceComposer();
+    await composer.click({ timeout: 30_000 });
+    await composer.fill(text, { timeout: 30_000 });
+  }
+
+  async spaceCommentPasteHtml(html: string): Promise<void> {
+    const page = this.page;
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.evaluate(
+      ([fragment]: [string]) => {
+        const blobHtml = new Blob([fragment], { type: "text/html" });
+        const blobText = new Blob([fragment.replace(/<[^>]*>/g, "")], { type: "text/plain" });
+        return navigator.clipboard.write([new ClipboardItem({ "text/html": blobHtml, "text/plain": blobText })]);
+      },
+      [html]
+    );
+    const composer = this.spaceComposer();
+    await composer.click({ timeout: 30_000 });
+    await composer.press(`${process.platform === "darwin" ? "Meta" : "Control"}+v`, { timeout: 30_000 });
+  }
+
+  async spaceCommentDraftText(): Promise<string> {
+    return (
+      (await this.spaceComposer()
+        .innerText({ timeout: 30_000 })
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+
+  async spaceCommentSubmit(): Promise<void> {
+    const composer = this.spaceComposer();
+    await composer.click({ timeout: 30_000 });
+    await this.page.keyboard.press("Enter");
+  }
+
+  async spaceCommentAttachImage(filePath: string): Promise<void> {
+    // The toolbar buttons are icon-only with no accessible names; the image
+    // command is the one carrying the image glyph.
+    const section = this.spaceOverlay().first().locator("div.issue-comments-section").last();
+    const attachButton = section.locator('button:has(svg[class*="image"])');
+    if ((await attachButton.count()) === 0) throw new Error("[parity] no image toolbar button in the space composer.");
+    const [chooser] = await Promise.all([
+      this.page.waitForEvent("filechooser", { timeout: 30_000 }),
+      attachButton.first().click({ timeout: 30_000 }),
+    ]);
+    await chooser.setFiles(filePath, { timeout: 30_000 });
+    // The node view renders its uploader chrome (no img) until the file
+    // lands, then swaps to the block with the resolved asset src; a
+    // preview-phase img (blob/data URL) does not count as finished.
+    await this.page.waitForFunction(
+      () => {
+        const editors = document.querySelectorAll('[contenteditable="true"]');
+        const composer = editors[editors.length - 1];
+        if (!(composer instanceof HTMLElement)) return false;
+        return Array.from(composer.querySelectorAll("img")).some((img) => {
+          const src = img.getAttribute("src") ?? "";
+          return src.startsWith("/") || src.startsWith("http");
+        });
+      },
+      null,
+      { timeout: 120_000 }
+    );
+  }
+
+  async spaceCommentMention(memberQuery: string, memberDisplayName: string): Promise<SpaceMentionResult> {
+    const composer = this.spaceComposer();
+    await composer.click({ timeout: 30_000 });
+    await this.page.keyboard.type(`@${memberQuery}`, { delay: 60 });
+    await this.page.waitForTimeout(2_000);
+    const offered = await this.spaceCommentMentionOpen();
+    let inserted = false;
+    if (offered) {
+      const option = this.page.locator("div.fixed.z-\\[100\\]").getByText(memberDisplayName, { exact: true });
+      await option.click({ timeout: 15_000 });
+      inserted = (await this.spaceCommentDraftText()).includes(`@${memberDisplayName}`);
+    }
+    return { offered, inserted };
+  }
+
+  async spaceCommentMentionOpen(): Promise<boolean> {
+    return (await this.page.locator("div.fixed.z-\\[100\\]").count()) > 0;
+  }
+
+  async spaceCommentMenuVisible(index: number): Promise<boolean> {
+    return this.isShown(this.spaceOverlayRows().nth(index).locator('button[id^="headlessui-menu-button"]'));
+  }
+
+  async spaceCommentMenuOpen(index: number): Promise<void> {
+    if ((await this.page.getByRole("menuitem").count()) === 0) {
+      await this.spaceOverlayRows()
+        .nth(index)
+        .locator('button[id^="headlessui-menu-button"]')
+        .click({ timeout: 15_000 });
+    }
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
+  }
+
+  async spaceCommentMenuItems(index: number): Promise<string[]> {
+    await this.spaceCommentMenuOpen(index);
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    const names: string[] = [];
+    for (let at = 0; at < count; at += 1) names.push(((await items.nth(at).innerText()) ?? "").trim());
+    return names;
+  }
+
+  async spaceCommentInviteReturn(): Promise<{
+    anchor: string | null;
+    view: string | null;
+    issueId: string | null;
+  } | null> {
+    const invite = this.spaceOverlay().first().locator('a[href*="next_path"]').first();
+    if ((await invite.count()) === 0) return null;
+    const href = await invite.getAttribute("href");
+    if (href === null) return null;
+    const outer = new URL(href, this.page.url());
+    const nextPath = outer.searchParams.get("next_path");
+    if (nextPath === null) return { anchor: null, view: null, issueId: null };
+    const target = new URL(nextPath, outer.origin);
+    return {
+      anchor: /^\/issues\/([^/]+)\/?$/.exec(target.pathname)?.[1] ?? null,
+      view: target.searchParams.get("board"),
+      issueId: target.searchParams.get("peekId"),
+    };
+  }
+
+  async spaceCommentEdit(index: number, newText: string): Promise<void> {
+    const row = this.spaceOverlayRows().nth(index);
+    await this.spaceCommentMenuOpen(index);
+    await this.page.getByRole("menuitem", { name: "Edit" }).click({ timeout: 15_000 });
+    const editor = row.locator('[contenteditable="true"]');
+    await editor.waitFor({ timeout: 15_000 });
+    await editor.fill(newText, { timeout: 30_000 });
+    await row.locator('button[type="submit"]').click({ timeout: 15_000 });
+    await editor.waitFor({ state: "hidden", timeout: 30_000 });
+  }
+
+  async spaceCommentDelete(index: number): Promise<void> {
+    await this.spaceCommentMenuOpen(index);
+    await this.page.getByRole("menuitem", { name: "Delete" }).click({ timeout: 15_000 });
+    await this.page
+      .getByRole("menuitem")
+      .first()
+      .waitFor({ state: "detached", timeout: 15_000 })
+      .catch(() => {});
+  }
+
+  async spaceCommentNotices(): Promise<SpaceCommentNotice[]> {
+    const dialogs = this.page.locator('div[aria-label="Notifications"] div[role="dialog"]');
+    const count = await dialogs.count();
+    const notices: SpaceCommentNotice[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const dialog = dialogs.nth(index);
+      const message = ((await dialog.innerText({ timeout: 30_000 }).catch(() => "")) ?? "").trim();
+      if (message.length === 0) continue;
+      let kind: SpaceCommentNotice["kind"] = "unknown";
+      if ((await dialog.locator('[class*="bg-success"]').count()) > 0) kind = "success";
+      else if ((await dialog.locator('[class*="bg-danger"], [class*="bg-error"]').count()) > 0) kind = "error";
+      notices.push({ message, kind });
+    }
+    return notices;
+  }
+
+  async spaceCommentReactions(index: number): Promise<SpaceReactionGroup[]> {
+    const row = this.spaceOverlayRows().nth(index);
+    const trigger = row.locator('button[aria-haspopup="dialog"]').first();
+    const groups: SpaceReactionGroup[] = [];
+    for (const chip of await this.spaceStableChips(trigger)) {
+      const pill = trigger.locator("button:not([aria-haspopup])", { hasText: chip.emoji }).first();
+      groups.push({ ...chip, users: await this.spaceReadHoverNames(pill) });
+    }
+    return groups;
+  }
+
+  async spaceCommentReactPick(index: number): Promise<SpacePickedEmoji> {
+    const row = this.spaceOverlayRows().nth(index);
+    return this.spacePickFirstEmoji(row.locator('button[aria-haspopup="dialog"]').first());
+  }
+
+  async spaceCommentReactClick(index: number, emoji: string): Promise<void> {
+    const row = this.spaceOverlayRows().nth(index);
+    await row
+      .locator('button[aria-haspopup="dialog"]')
+      .first()
+      .locator("button:not([aria-haspopup])", { hasText: emoji })
+      .first()
+      .click({ timeout: 15_000 });
+  }
+
+  async spaceCommentReactAddVisible(index: number): Promise<boolean> {
+    const trigger = this.spaceOverlayRows().nth(index).locator('button[aria-haspopup="dialog"]').first();
+    if ((await trigger.count()) === 0) return false;
+    return trigger.evaluate((root) =>
+      Array.from(root.querySelectorAll("button:not([aria-haspopup])")).some(
+        (b) => ((b as HTMLElement).innerText ?? "").trim() === ""
+      )
+    );
+  }
+
+  async spaceCommentPeekMode(mode: "side" | "modal" | "full"): Promise<void> {
+    const label = mode === "side" ? "Side Peek" : mode === "modal" ? "Modal" : "Full Screen";
+    await this.spaceOverlay().first().locator('button[aria-haspopup="listbox"]').click({ timeout: 15_000 });
+    await this.page.getByRole("option", { name: label }).click({ timeout: 15_000 });
+    await this.page
+      .waitForFunction(() => document.querySelectorAll('[role="option"]').length === 0, null, { timeout: 15_000 })
+      .catch(() => {});
+  }
+
+  /** The embedded board frame. */
+  private spaceEmbedFrame(): FrameLocator {
+    return this.page.frameLocator("iframe");
+  }
+
+  async spaceCommentOpenEmbed(anchor: string, issueName: string): Promise<void> {
+    // Serve the host page from the same origin through a route stub (a
+    // document.write host gets wiped by the app's next render, which keeps
+    // its JS context alive). Same-origin framing keeps the session cookies
+    // flowing, so signed-in and anonymous embeds both work.
+    await this.page.route("**/__parity-host", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: `<html><body style="margin:0"><iframe src="/issues/${anchor}?board=list" style="width:100%;height:100vh;border:0"></iframe></body></html>`,
+      })
+    );
+    await this.page.goto("/__parity-host");
+    await this.page.waitForLoadState("domcontentloaded");
+    const frame = this.spaceEmbedFrame();
+    const card = frame.getByText(issueName, { exact: true }).first();
+    await card.waitFor({ timeout: 120_000 });
+    // Same unconditional thread fetch as the full page: wait for it so
+    // embed reads never race the rows.
+    const listed = this.page
+      .waitForResponse((response) => response.url().includes("/comments") && response.request().method() === "GET", {
+        timeout: 60_000,
+      })
+      .catch(() => null);
+    await card.click({ timeout: 30_000 });
+    await frame.locator('button[aria-haspopup="listbox"]').first().waitFor({ timeout: 60_000 });
+    await listed;
+    await this.page.waitForTimeout(1_000);
+  }
+
+  async spaceCommentEmbedSection(): Promise<SpaceCommentSection> {
+    const frame = this.spaceEmbedFrame();
+    const overlay = frame
+      .getByRole("dialog")
+      .filter({ has: frame.locator('button[aria-haspopup="listbox"]') })
+      .first();
+    const sectionVisible = (await overlay.getByRole("heading", { name: "Comments", exact: true }).count()) > 0;
+    const rows = overlay.locator("div.relative.flex.items-start");
+    const composer = overlay.locator('[contenteditable="true"]').last();
+    return {
+      sectionVisible,
+      threadCount: sectionVisible ? await rows.count() : 0,
+      composerVisible:
+        sectionVisible && (await composer.count()) > 0 && (await composer.isVisible().catch(() => false)),
+      signInInviteVisible: sectionVisible && (await overlay.getByText("Sign in to add your comment").count()) > 0,
+    };
+  }
+
+  async spaceReactEmbedAddVisible(): Promise<boolean> {
+    const frame = this.spaceEmbedFrame();
+    const overlay = frame
+      .getByRole("dialog")
+      .filter({ has: frame.locator('button[aria-haspopup="listbox"]') })
+      .first();
+    const index = await overlay
+      .evaluate((root) => {
+        const triggers = Array.from(root.querySelectorAll('button[aria-haspopup="dialog"]'));
+        return triggers.findIndex((el) => el.closest("div.relative.flex.items-start") === null);
+      })
+      .catch(() => -1);
+    return index >= 0;
+  }
+
+  async spaceCommentEmbedMenuVisible(index: number): Promise<boolean> {
+    const frame = this.spaceEmbedFrame();
+    const overlay = frame
+      .getByRole("dialog")
+      .filter({ has: frame.locator('button[aria-haspopup="listbox"]') })
+      .first();
+    const menu = overlay
+      .locator("div.relative.flex.items-start")
+      .nth(index)
+      .locator('button[id^="headlessui-menu-button"]');
+    if ((await menu.count()) === 0) return false;
+    return menu.first().isVisible();
+  }
+
+  async spaceCommentEmbedReactions(index: number): Promise<{ groups: SpaceReactionGroup[]; addVisible: boolean }> {
+    const frame = this.spaceEmbedFrame();
+    const overlay = frame
+      .getByRole("dialog")
+      .filter({ has: frame.locator('button[aria-haspopup="listbox"]') })
+      .first();
+    const trigger = overlay
+      .locator("div.relative.flex.items-start")
+      .nth(index)
+      .locator('button[aria-haspopup="dialog"]')
+      .first();
+    if ((await trigger.count()) === 0) return { groups: [], addVisible: false };
+    const groups = (await this.spaceStableChips(trigger)).map((chip) => ({ ...chip, users: [] as string[] }));
+    const addVisible = await trigger.evaluate((root) =>
+      Array.from(root.querySelectorAll("button:not([aria-haspopup])")).some(
+        (b) => ((b as HTMLElement).innerText ?? "").trim() === ""
+      )
+    );
+    return { groups, addVisible };
   }
 }
