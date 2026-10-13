@@ -76,6 +76,22 @@ pub struct CredentialUnavailable {
     pub message: String,
 }
 
+/// Desktop-credential failure: the two `AgentModelTokenEndpoint.post`
+/// error arms (`agent_profile.py:87-99`). `Unavailable` is the
+/// `ManagedRunnerUnavailable` arm (the client should have consulted the
+/// profile first); `Classified` is the `_classify_credential_error` arm —
+/// the cloud seam's pre-classified gateway outcome. CE only ever produces
+/// `Unavailable`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialError {
+    /// Profile-refused: renders `409 {error: reason, detail}`.
+    Unavailable(CredentialUnavailable),
+    /// Classified gateway failure: renders `{error: code}` with NO
+    /// `detail` key at `status` (401 `gateway_session_revoked` or 503
+    /// `gateway_unavailable`).
+    Classified { code: String, status: u16 },
+}
+
 /// BYOK title inputs for [`TitleRequest`]: the caller's read of the user's
 /// config row (`None` at the request level when there is no row). Data,
 /// not handles — the caller extracts these exactly like the presence bits
@@ -169,19 +185,21 @@ pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
 
     /// Hand out the desktop engine's model credential for one user. CE has
     /// no lane the desktop can use, so there is nothing to hand out —
-    /// always an error. The overlay mints the user's own short-lived
-    /// gateway credential here.
+    /// always [`CredentialError::Unavailable`]. The overlay mints the
+    /// user's own short-lived gateway credential here, answering
+    /// [`CredentialError::Classified`] (its `_classify_credential_error`
+    /// outcome) when the gateway fetch fails.
     fn agent_model_credential(
         &self,
         user_id: Uuid,
-    ) -> SeamFuture<'_, Result<(String, String), CredentialUnavailable>> {
+    ) -> SeamFuture<'_, Result<(String, String), CredentialError>> {
         let _ = user_id;
         Box::pin(async move {
             crate::assistant::seams::agent_model_credential_for_user().map_err(|unavailable| {
-                CredentialUnavailable {
+                CredentialError::Unavailable(CredentialUnavailable {
                     reason: unavailable.code,
                     message: unavailable.detail,
-                }
+                })
             })
         })
     }
@@ -456,9 +474,12 @@ mod tests {
             .agent_model_credential(user())
             .await
             .expect_err("CE has no desktop lane");
-        assert_eq!(error.reason, reason::BYOK_UNSUPPORTED);
+        let CredentialError::Unavailable(unavailable) = &error else {
+            panic!("CE refuses via the profile arm, got {error:?}");
+        };
+        assert_eq!(unavailable.reason, reason::BYOK_UNSUPPORTED);
         assert_eq!(
-            error.message,
+            unavailable.message,
             "This build has no model lane the desktop agent can use."
         );
     }
@@ -578,7 +599,7 @@ mod tests {
         fn agent_model_credential(
             &self,
             user_id: Uuid,
-        ) -> SeamFuture<'_, Result<(String, String), CredentialUnavailable>> {
+        ) -> SeamFuture<'_, Result<(String, String), CredentialError>> {
             let _ = user_id;
             Box::pin(async move {
                 Ok((

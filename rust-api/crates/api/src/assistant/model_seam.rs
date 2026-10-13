@@ -194,7 +194,7 @@ async fn run_title(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_services::extensions::ByokTitleInputs;
+    use pidash_services::extensions::{ByokTitleInputs, CredentialError};
 
     fn seam() -> CeAssistantSeam {
         CeAssistantSeam::new(Arc::new(Settings::test_defaults()))
@@ -248,9 +248,12 @@ mod tests {
             .agent_model_credential(user())
             .await
             .expect_err("CE has no desktop lane");
-        assert_eq!(err.reason, "byok_not_supported_on_desktop");
+        let CredentialError::Unavailable(unavailable) = &err else {
+            panic!("CE refuses via the profile arm, got {err:?}");
+        };
+        assert_eq!(unavailable.reason, "byok_not_supported_on_desktop");
         assert_eq!(
-            err.message,
+            unavailable.message,
             "This build has no model lane the desktop agent can use."
         );
     }
