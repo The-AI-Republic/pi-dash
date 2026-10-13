@@ -7,6 +7,13 @@
 // fill these in method by method; the oracle driver stays untouched.
 import { expect, type Page } from "@playwright/test";
 import type {
+  AdminAccountMenuFacts,
+  AdminFailureFacts,
+  AdminNotFoundFacts,
+  AdminRootBranch,
+  AdminSetupFacts,
+  AdminSetupFields,
+  AdminSignInFacts,
   ApprovalCard,
   ArchivesArchiveDialog,
   ModulesDeleteDialog,
@@ -13900,5 +13907,139 @@ export class WebNewDriver implements ParityDriver {
   }
   async spaceBoardReconnectStability(): Promise<{ before: string[]; after: string[] }> {
     return todo("spaceBoardReconnectStability");
+  }
+
+  // --- Instance-admin entry/session oracle (NEWFRONT-441, ADM-001..012).
+  async adminOpenRoot(): Promise<void> {
+    return todo("adminOpenRoot");
+  }
+  async adminOpenPath(_path: string): Promise<void> {
+    return todo("adminOpenPath");
+  }
+  async adminRootBranch(): Promise<AdminRootBranch> {
+    return todo("adminRootBranch");
+  }
+  async adminWaitForRootBranch(_branch: AdminRootBranch): Promise<void> {
+    return todo("adminWaitForRootBranch");
+  }
+  async adminCurrentPath(): Promise<string> {
+    return todo("adminCurrentPath");
+  }
+  async adminCurrentSearch(): Promise<string> {
+    return todo("adminCurrentSearch");
+  }
+  async adminHistoryLength(): Promise<number> {
+    return todo("adminHistoryLength");
+  }
+  async adminStartInstanceFetchSpy(): Promise<void> {
+    return todo("adminStartInstanceFetchSpy");
+  }
+  async adminInstanceFetchCount(): Promise<number> {
+    return todo("adminInstanceFetchCount");
+  }
+  async adminFailInstanceFetch(): Promise<void> {
+    return todo("adminFailInstanceFetch");
+  }
+  async adminDelayInstanceFetch(_ms: number): Promise<void> {
+    return todo("adminDelayInstanceFetch");
+  }
+  async adminClearInstanceFetchFault(): Promise<void> {
+    return todo("adminClearInstanceFetchFault");
+  }
+  async adminFailureFacts(): Promise<AdminFailureFacts> {
+    return todo("adminFailureFacts");
+  }
+  async adminFailureRetry(): Promise<void> {
+    return todo("adminFailureRetry");
+  }
+  async adminLoaderFacts(): Promise<{ visible: boolean; formVisible: boolean }> {
+    return todo("adminLoaderFacts");
+  }
+  async adminSetupFacts(): Promise<AdminSetupFacts> {
+    return todo("adminSetupFacts");
+  }
+  async adminSetupFill(_fields: AdminSetupFields): Promise<void> {
+    return todo("adminSetupFill");
+  }
+  async adminSetupSetTelemetry(_on: boolean): Promise<void> {
+    return todo("adminSetupSetTelemetry");
+  }
+  async adminSetupFocus(_field: "password" | "confirm"): Promise<void> {
+    return todo("adminSetupFocus");
+  }
+  async adminSetupBlur(): Promise<void> {
+    return todo("adminSetupBlur");
+  }
+  async adminSetupTogglePassword(_field: "password" | "confirm"): Promise<void> {
+    return todo("adminSetupTogglePassword");
+  }
+  async adminSetupSubmit(): Promise<void> {
+    return todo("adminSetupSubmit");
+  }
+  async adminSignInFacts(): Promise<AdminSignInFacts> {
+    return todo("adminSignInFacts");
+  }
+  async adminSignInFill(_email: string, _password: string): Promise<void> {
+    return todo("adminSignInFill");
+  }
+  async adminSignInTogglePassword(): Promise<void> {
+    return todo("adminSignInTogglePassword");
+  }
+  async adminSignInSubmit(): Promise<void> {
+    return todo("adminSignInSubmit");
+  }
+  async adminSignInDismissMappedBanner(): Promise<void> {
+    return todo("adminSignInDismissMappedBanner");
+  }
+  async adminEnsureSignedIn(_email: string, _password: string): Promise<void> {
+    return todo("adminEnsureSignedIn");
+  }
+  async adminDashboardVisible(): Promise<boolean> {
+    return todo("adminDashboardVisible");
+  }
+  async adminOpenAccountMenu(): Promise<void> {
+    return todo("adminOpenAccountMenu");
+  }
+  async adminAccountMenuFacts(): Promise<AdminAccountMenuFacts> {
+    return todo("adminAccountMenuFacts");
+  }
+  async adminSidebarSignOut(): Promise<void> {
+    return todo("adminSidebarSignOut");
+  }
+  async adminThemeFacts(): Promise<{ stored: string | null; resolved: "light" | "dark" }> {
+    return todo("adminThemeFacts");
+  }
+  async adminSetTheme(_mode: "light" | "dark"): Promise<void> {
+    return todo("adminSetTheme");
+  }
+  async adminNotFoundFacts(): Promise<AdminNotFoundFacts> {
+    return todo("adminNotFoundFacts");
+  }
+  async adminNotFoundFollowAction(): Promise<void> {
+    return todo("adminNotFoundFollowAction");
+  }
+  async adminFirstWorkspacePopupFacts(): Promise<{ visible: boolean; createHref: string | null }> {
+    return todo("adminFirstWorkspacePopupFacts");
+  }
+  async adminFirstWorkspacePopupDismiss(): Promise<void> {
+    return todo("adminFirstWorkspacePopupDismiss");
+  }
+  async adminFirstWorkspacePopupFollowCreate(): Promise<void> {
+    return todo("adminFirstWorkspacePopupFollowCreate");
+  }
+  async adminSetupToggleTabIndex(_field: "password" | "confirm"): Promise<string | null> {
+    return todo("adminSetupToggleTabIndex");
+  }
+  async adminSignInEmailFocused(): Promise<boolean> {
+    return todo("adminSignInEmailFocused");
+  }
+  async adminDelaySessionFetch(_ms: number): Promise<void> {
+    return todo("adminDelaySessionFetch");
+  }
+  async adminClearSessionFetchDelay(): Promise<void> {
+    return todo("adminClearSessionFetchDelay");
+  }
+  async adminStubNoWorkspaces(): Promise<void> {
+    return todo("adminStubNoWorkspaces");
   }
 }

@@ -7,17 +7,18 @@ on one host each take a namespace — see "Concurrent runs" below.
 
 ## Services
 
-| Service  | Image                                                                              | Port           | Notes                                                                                       |
-| -------- | ---------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
-| `pg`     | postgres:15.7-alpine                                                               | 15419          | Scratch database `pidash`, user `parity19`                                                  |
-| `redis`  | redis:7-alpine                                                                     | 16319          | Django cache backend                                                                        |
-| `mq`     | rabbitmq:3-management-alpine                                                       | none published | Broker for background tasks                                                                 |
-| `api`    | built from `apps/api` (`Dockerfile.dev`, lean migrate-plus-serve command)          | 18019          | Django + uvicorn, migrates on boot                                                          |
-| `worker` | same image as `api` (celery worker, default queue)                                 | none published | Consumes background tasks: mention links, notifications                                     |
-| `oracle` | built from the repo root (`stack/Dockerfile.oracle`, old-app inputs only)          | internal :3000 | Old app with same-origin API calls                                                          |
-| `proxy`  | caddy:2-alpine (`stack/Caddyfile`)                                                 | 13000          | One origin: frontend plus `/auth`, `/api`, `/static` to Django, `/parity19-assets` to minio |
-| `minio`  | bitnamilegacy/minio, pinned tag+digest (bucket `parity19-assets`, created at boot) | 19019          | Object storage backing presigned asset uploads                                              |
-| `live`   | built from `apps/live` (opt-in profile `full`)                                     | 13001          | Realtime server for realtime rows                                                           |
+| Service        | Image                                                                              | Port           | Notes                                                                                       |
+| -------------- | ---------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------- |
+| `pg`           | postgres:15.7-alpine                                                               | 15419          | Scratch database `pidash`, user `parity19`                                                  |
+| `redis`        | redis:7-alpine                                                                     | 16319          | Django cache backend                                                                        |
+| `mq`           | rabbitmq:3-management-alpine                                                       | none published | Broker for background tasks                                                                 |
+| `api`          | built from `apps/api` (`Dockerfile.dev`, lean migrate-plus-serve command)          | 18019          | Django + uvicorn, migrates on boot                                                          |
+| `worker`       | same image as `api` (celery worker, default queue)                                 | none published | Consumes background tasks: mention links, notifications                                     |
+| `oracle`       | built from the repo root (`stack/Dockerfile.oracle`, old-app inputs only)          | internal :3000 | Old app with same-origin API calls                                                          |
+| `oracle-admin` | built from the repo root (`stack/Dockerfile.oracle-admin`, admin inputs only)      | internal :3000 | Old admin console, served under `/god-mode` (prod variant `oracle-admin-prod`)              |
+| `proxy`        | caddy:2-alpine (`stack/Caddyfile`)                                                 | 13000          | One origin: frontend plus `/auth`, `/api`, `/static` to Django, `/parity19-assets` to minio |
+| `minio`        | bitnamilegacy/minio, pinned tag+digest (bucket `parity19-assets`, created at boot) | 19019          | Object storage backing presigned asset uploads                                              |
+| `live`         | built from `apps/live` (opt-in profile `full`)                                     | 13001          | Realtime server for realtime rows                                                           |
 
 All ports move through `PARITY_PG_PORT`, `PARITY_REDIS_PORT`,
 `PARITY_API_PORT`, `PARITY_ORACLE_PORT`, `PARITY_MINIO_PORT`, `PARITY_LIVE_PORT`. A namespace
@@ -74,8 +75,9 @@ rebuild of both images:
 apps/web_new/e2e/parity/stack/parity-up.sh --rebuild
 ```
 
-The warm-up step loads the entry route plus one seeded project route
-through the proxy and waits until both are served. The dev-server oracle
+The warm-up step loads the entry route, one seeded project route, and
+the admin console entry (`/god-mode/`) through the proxy and waits until
+all are served. The dev-server oracle
 pays its dependency-optimization spike on those first requests; warming
 here means the suite's first specs never meet a cold boot. If the oracle
 cannot serve within ten minutes the script fails with a pointer to its
@@ -167,6 +169,43 @@ several hundred MB of memory and most of the stack's CPU while a suite runs.
 Use it when triaging a failure that only reproduces there — the dev server
 runs React in StrictMode and without minification, and a few recorded
 old-app bugs exist only in that mode.
+
+One switch selects both frontends: the admin oracle (`oracle-admin-prod`
+by default, `oracle-admin` under `PARITY_ORACLE_MODE=dev`) always matches
+the web oracle's mode, so runs never mix a prod web oracle with a dev
+admin oracle (NEWFRONT-441).
+
+## Admin console oracle
+
+The old admin console (`apps/admin`) serves through the same proxy origin
+under `/god-mode`, mirroring the production topology
+(`apps/proxy/Caddyfile.ce`: bare `/god-mode` redirects to `/god-mode/`,
+and `/god-mode/*` proxies to the admin service with the full path, which
+the app's `/god-mode` basename routes on). Same-origin serving is what
+makes the native credential POST and the session cookie work for admin
+scenarios, exactly like the web oracle.
+
+- Suite address: `PARITY_ORACLE_ADMIN_URL` (printed by `parity-up.sh`,
+  derived as `<oracle>/god-mode`, overridable explicitly). The suite
+  helper `parityOracleAdminUrl` resolves the same value.
+- No new published ports: the admin mount rides the proxy, so the
+  namespace derivation, the guard, and the six-port contract are
+  unchanged.
+- Upstream selection: both admin oracles share the network alias
+  `oracle-admin-upstream`, which is what the proxy dials — so no
+  per-mode variable has to cross into compose (new variables do not
+  survive hosts where docker runs behind an env-scrubbing sudo shim).
+  `parity-up.sh` stops the non-selected admin oracle so the alias never
+  splits traffic after a mode switch.
+- Native override: point `ORACLE_ADMIN_UPSTREAM` at
+  `host.docker.internal:<port>` to serve a natively run admin frontend
+  through the proxy, mirroring `ORACLE_UPSTREAM` (needs a docker that
+  forwards the variable to compose).
+- Seed identity: the seed owner (`PARITY_SEED_JSON` email/password) is
+  also an instance admin (verified), so admin scenarios sign in with the
+  seed credentials — no separate admin identity is seeded. The instance
+  ships set-up (`is_setup_done=True`); setup-form scenarios flip it off
+  per-scenario through the API helpers and restore it after.
 
 ## Teardown
 
@@ -284,9 +323,11 @@ fixed, run live natively — build the workspace packages with
 
 The stack serves the oracle behind one origin (port 13000): an edge proxy
 mirrors the production topology, routing `/auth`, `/api` and `/static` to
-Django and everything else to the old app, so the native credential POST
-and the session cookie behave exactly like deployed. That address is the
-Playwright `oracle` base URL.
+Django, `/god-mode/*` to the old admin console, and everything else to the
+old app, so the native credential POST and the session cookie behave
+exactly like deployed. That address is the Playwright `oracle` base URL;
+the admin mount is the `PARITY_ORACLE_ADMIN_URL` suite address (see
+"Admin console oracle" above).
 
 The new app is not served by this stack; run its dev server yourself:
 

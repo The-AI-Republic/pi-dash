@@ -57,6 +57,22 @@
 	handle /collaboration* {
 		reverse_proxy {$LIVE_UPSTREAM:oracle:3000}
 	}
+	# Admin console (NEWFRONT-441): the old admin app serves under
+	# /god-mode, mirroring the production topology
+	# (apps/proxy/Caddyfile.ce). The upstream keeps the full path — the
+	# admin app's basename is /god-mode, so it routes on it. The bare
+	# path redirects to the slashed form, exactly like production. Must
+	# precede the frontend catch-all. The default upstream is the shared
+	# `oracle-admin-upstream` alias (see docker-compose.yml), answered
+	# by whichever admin oracle runs. Point ORACLE_ADMIN_UPSTREAM at
+	# `host.docker.internal:<port>` for a natively run admin frontend
+	# (needs a docker that forwards the variable to compose).
+	handle /god-mode {
+		redir * /god-mode/ 301
+	}
+	handle /god-mode/* {
+		reverse_proxy {$ORACLE_ADMIN_UPSTREAM:oracle-admin-upstream:3000}
+	}
 	# The oracle normally runs in Docker as `oracle:3000`. Point
 	# ORACLE_UPSTREAM at `host.docker.internal:<port>` to serve a natively
 	# run frontend through the same one-origin proxy instead; unset means
