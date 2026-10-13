@@ -48533,4 +48533,52 @@ export class WebDriver implements ParityDriver {
       await this.page.waitForTimeout(300);
     }
   }
+
+  // --- Desktop updater web-observable sides (NEWFRONT-209, DESK-016–018).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract. Markers come from the native shell (updates.rs dialog
+  // --- titles) and the desktop install button (its accessible name).
+
+  private deskUpdateTraffic: string[] = [];
+  private deskUpdateTrafficListener: ((request: { url(): string }) => void) | null = null;
+
+  async deskUpdateNativePromptVisible(): Promise<boolean> {
+    // The native launch prompt is a system dialog titled "Update available"
+    // (updates.rs); a web page can never show it, so any visible dialog
+    // carrying that title would be the web side leaking the prompt.
+    const dialog = this.page.getByRole("dialog").filter({ hasText: "Update available" }).first();
+    if ((await dialog.count()) === 0) return false;
+    return dialog.isVisible().catch(() => false);
+  }
+
+  async deskUpdateBeginTrafficWatch(): Promise<void> {
+    if (this.deskUpdateTrafficListener !== null) {
+      this.page.off("request", this.deskUpdateTrafficListener);
+      this.deskUpdateTrafficListener = null;
+    }
+    this.deskUpdateTraffic = [];
+    const listener = (request: { url(): string }): void => {
+      this.deskUpdateTraffic.push(request.url());
+    };
+    this.deskUpdateTrafficListener = listener;
+    this.page.on("request", listener);
+  }
+
+  async deskUpdateTrafficUrls(): Promise<string[]> {
+    return [...this.deskUpdateTraffic];
+  }
+
+  async deskUpdateEndTrafficWatch(): Promise<void> {
+    if (this.deskUpdateTrafficListener !== null) {
+      this.page.off("request", this.deskUpdateTrafficListener);
+      this.deskUpdateTrafficListener = null;
+    }
+  }
+
+  async deskUpdateSidebarButtonVisible(): Promise<boolean> {
+    // The desktop install button names itself "Update to Pi Dash <version>"
+    // (overlay button + its test suite); the web-build stub renders nothing,
+    // so that accessible name must never appear.
+    return this.isShown(this.page.getByRole("button", { name: /^Update to Pi Dash / }));
+  }
 }

@@ -13783,4 +13783,22 @@ export class WebNewDriver implements ParityDriver {
   async profileSidebarToggle(): Promise<void> {
     return todo("profileSidebarToggle");
   }
+
+  // --- Desktop updater web-observable sides (NEWFRONT-209, DESK-016–018).
+  // --- Throwing stubs per the shared driver contract.
+  async deskUpdateNativePromptVisible(): Promise<boolean> {
+    return todo("deskUpdateNativePromptVisible");
+  }
+  async deskUpdateBeginTrafficWatch(): Promise<void> {
+    return todo("deskUpdateBeginTrafficWatch");
+  }
+  async deskUpdateTrafficUrls(): Promise<string[]> {
+    return todo("deskUpdateTrafficUrls");
+  }
+  async deskUpdateEndTrafficWatch(): Promise<void> {
+    return todo("deskUpdateEndTrafficWatch");
+  }
+  async deskUpdateSidebarButtonVisible(): Promise<boolean> {
+    return todo("deskUpdateSidebarButtonVisible");
+  }
 }

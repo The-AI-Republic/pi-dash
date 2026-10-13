@@ -7989,6 +7989,22 @@ export interface ParityDriver {
   wsSettingsMembersActivityVisible(): Promise<boolean>;
   /** Whether any billing/upsell entry shows in the members header actions. */
   wsSettingsMembersBillingVisible(): Promise<boolean>;
+
+  // --- Desktop updater web-observable sides (NEWFRONT-209, DESK-016–018).
+  // --- Appended; existing methods above are untouched per the shared driver
+  // --- contract. The updater lives in the native shell (updates.rs) and the
+  // --- desktop bundle (the sidebar install button); on web all three rows
+  // --- assert absence: no launch prompt, no feed traffic, no sidebar button.
+  /** True when a dialog carrying the native launch-prompt markers is visible. */
+  deskUpdateNativePromptVisible(): Promise<boolean>;
+  /** Start recording every request URL the page issues. */
+  deskUpdateBeginTrafficWatch(): Promise<void>;
+  /** Request URLs recorded since the traffic watch began, in order. */
+  deskUpdateTrafficUrls(): Promise<string[]>;
+  /** Stop the traffic watch and detach its listener. */
+  deskUpdateEndTrafficWatch(): Promise<void>;
+  /** True when the desktop update-install button is present. */
+  deskUpdateSidebarButtonVisible(): Promise<boolean>;
 }
 
 /** Identity facts of one workspace-member roster row (NEWFRONT-411, WSET-011). */
