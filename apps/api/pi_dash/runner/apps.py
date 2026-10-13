@@ -17,3 +17,7 @@ class RunnerConfig(AppConfig):
         from pi_dash.runner import signals  # noqa: F401
         from pi_dash.cloud_agent import checks  # noqa: F401
         from pi_dash.managed_runner import checks as managed_checks  # noqa: F401
+
+        # Registers post_save(AgentRun) handler emitting managed_runner
+        # run_pinned / queued_waiting observability events (design §15.1).
+        from pi_dash.managed_runner import signals as managed_signals  # noqa: F401

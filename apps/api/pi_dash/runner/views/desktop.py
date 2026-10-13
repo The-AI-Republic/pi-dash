@@ -17,8 +17,6 @@ through the ordinary machine-token path.
 
 from __future__ import annotations
 
-import logging
-
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
@@ -26,12 +24,11 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from pi_dash.managed_runner.events import event_logger
 from pi_dash.managed_runner.permissions import IsDesktopSession
 from pi_dash.runner.models import DevMachine, MachineToken, Runner, RunnerProvisioning, RunnerStatus
 from pi_dash.runner.services import tokens
 from pi_dash.runner.services.permissions import is_workspace_member
-
-logger = logging.getLogger(__name__)
 
 
 def _version_is_allowed(reported: str) -> bool:
@@ -148,7 +145,7 @@ class DesktopEnrollEndpoint(APIView):
                 is_service=True,
             )
 
-        logger.info(
+        event_logger.info(
             "managed_runner.enrolled user=%s dev_machine=%s workspace=%s",
             request.user.id,
             dev_machine.id,
@@ -190,5 +187,5 @@ class DesktopEnrollEndpoint(APIView):
                 provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
             ).exclude(status=RunnerStatus.REVOKED).update(status=RunnerStatus.OFFLINE)
 
-        logger.info("managed_runner.removed user=%s machines=%s", request.user.id, len(machine_ids))
+        event_logger.info("managed_runner.removed user=%s machines=%s", request.user.id, len(machine_ids))
         return Response(status=status.HTTP_204_NO_CONTENT)
