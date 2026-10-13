@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Stand-in for the auth card: its internals belong to the auth area.
 // What this suite owns is the search schema plus prop passing.
@@ -178,6 +178,31 @@ describe("EntryScreen", () => {
 
   it("passes an unsafe return path through to the sign-in card", () => {
     render(<EntryScreen unsafeNext="https://evil.test/phish" />);
+    const card = screen.getByTestId("sign-in-card");
+    expect(card).toHaveAttribute("data-next", "");
+    expect(card).toHaveAttribute("data-unsafe-next", "https://evil.test/phish");
+  });
+});
+
+describe("entry route component", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function renderEntry(search: { next?: string; unsafeNext?: string }): void {
+    vi.spyOn(Route, "useSearch").mockReturnValue(search);
+    const Component = Route.options.component;
+    if (!Component) throw new Error("entry route has no component");
+    render(<Component />);
+  }
+
+  it("passes a safe return path through to the sign-in card", () => {
+    renderEntry({ next: "/acme" });
+    expect(screen.getByTestId("sign-in-card")).toHaveAttribute("data-next", "/acme");
+  });
+
+  it("passes an unsafe return path through to the sign-in card", () => {
+    renderEntry({ unsafeNext: "https://evil.test/phish" });
     const card = screen.getByTestId("sign-in-card");
     expect(card).toHaveAttribute("data-next", "");
     expect(card).toHaveAttribute("data-unsafe-next", "https://evil.test/phish");
