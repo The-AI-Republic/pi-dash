@@ -30,6 +30,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 
+use pidash_services::extensions::CredentialError;
+
 use crate::desktop_gate::header_value;
 use crate::desktop_gate::DesktopCredential;
 use crate::middleware::SessionHandle;
@@ -99,6 +101,9 @@ fn desktop_denied() -> Response {
 /// signing the user out on a bug. `name` is the Python exception class
 /// name; only the cloud overlay ever raises the session trio — CE only
 /// ever reaches the `ManagedRunnerUnavailable` branch in the handler.
+/// The cloud seam classifies with its own copy and returns the outcome
+/// through `CredentialError::Classified`; this port pins the shared
+/// mapping.
 pub fn classify_credential_error(name: &str) -> (&'static str, StatusCode) {
     match name {
         "OpenHubAuthError" | "SessionRevoked" | "NoAIRepublicSession" => {
@@ -216,7 +221,7 @@ async fn post_token(
                 &serde_json::json!({"token": token, "expires_at": expires_at}),
             )
         }
-        Err(unavailable) => {
+        Err(CredentialError::Unavailable(unavailable)) => {
             // The client should have consulted the profile first; answer
             // with the same reason code it would have seen there.
             // `str(exc)`: the detail, or the code when empty (the
@@ -234,6 +239,19 @@ async fn post_token(
                     "detail": detail,
                 }),
             )
+        }
+        Err(CredentialError::Classified { code, status }) => {
+            // The profile said available but the gateway fetch failed: the
+            // seam's pre-classified `_classify_credential_error` outcome
+            // (`agent_profile.py:96-99`) — 401 "sign in again", 503 "retry
+            // later" — rendered with NO `detail` key.
+            tracing::warn!(
+                user = %actor.id,
+                code = %code,
+                "managed_runner.token_refresh_failed"
+            );
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            error_response(status, &serde_json::json!({ "error": code }))
         }
     }
 }
@@ -445,7 +463,7 @@ mod live_tests {
 
     use super::*;
     use pidash_services::extensions::{
-        AgentModelProfile, AssistantModelSeam, CredentialUnavailable, SeamFuture, TitleError,
+        AgentModelProfile, AssistantModelSeam, CredentialError, SeamFuture, TitleError,
         TitleRequest,
     };
     use serde_json::Value;
@@ -475,13 +493,46 @@ mod live_tests {
         fn agent_model_credential(
             &self,
             user_id: uuid::Uuid,
-        ) -> SeamFuture<'_, Result<(String, String), CredentialUnavailable>> {
+        ) -> SeamFuture<'_, Result<(String, String), CredentialError>> {
             let _ = user_id;
             Box::pin(async move {
                 Ok((
                     "gateway-token".to_owned(),
                     "2030-01-01T00:00:00Z".to_owned(),
                 ))
+            })
+        }
+
+        fn generate_title(
+            &self,
+            request: TitleRequest,
+        ) -> SeamFuture<'_, Result<String, TitleError>> {
+            let _ = request;
+            Box::pin(async move { Ok("seam title".to_owned()) })
+        }
+    }
+
+    /// Overlay-shaped seam: the profile said available but the gateway
+    /// credential fetch failed — the seam returns its pre-classified
+    /// `_classify_credential_error` outcome.
+    #[derive(Debug)]
+    struct ClassifiedSeam {
+        code: &'static str,
+        status: u16,
+    }
+
+    impl AssistantModelSeam for ClassifiedSeam {
+        fn agent_model_credential(
+            &self,
+            user_id: uuid::Uuid,
+        ) -> SeamFuture<'_, Result<(String, String), CredentialError>> {
+            let (code, status) = (self.code, self.status);
+            let _ = user_id;
+            Box::pin(async move {
+                Err(CredentialError::Classified {
+                    code: code.to_owned(),
+                    status,
+                })
             })
         }
 
@@ -677,6 +728,56 @@ mod live_tests {
         assert_eq!(
             body["detail"],
             "This build has no model lane the desktop agent can use."
+        );
+    }
+
+    #[tokio::test]
+    async fn token_flows_a_revoked_session_as_401_without_detail() {
+        let seam = ClassifiedSeam {
+            code: "gateway_session_revoked",
+            status: 401,
+        };
+        let Some((state, secret)) = live_state(Some(Arc::new(seam))).await else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = state.pools().expect("pools").primary().clone();
+        let user_id = seed_user(&pool).await;
+        let extension = desktop_session(user_id, &secret);
+        let (status, body) = body_json(
+            post_token(State(state), Some(extension), axum::http::HeaderMap::new()).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "gateway_session_revoked");
+        assert!(
+            body.get("detail").is_none(),
+            "classified arm carries no detail key: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_flows_a_dead_idp_as_503_without_detail() {
+        let seam = ClassifiedSeam {
+            code: "gateway_unavailable",
+            status: 503,
+        };
+        let Some((state, secret)) = live_state(Some(Arc::new(seam))).await else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = state.pools().expect("pools").primary().clone();
+        let user_id = seed_user(&pool).await;
+        let extension = desktop_session(user_id, &secret);
+        let (status, body) = body_json(
+            post_token(State(state), Some(extension), axum::http::HeaderMap::new()).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "gateway_unavailable");
+        assert!(
+            body.get("detail").is_none(),
+            "classified arm carries no detail key: {body}"
         );
     }
 }
