@@ -7,15 +7,17 @@
 //! from the layer below ([`super::models`], PIDASHCONV-247); fixture id
 //! F-A6-06 (`rust-api/fixtures/assistant/queries.json`).
 //!
-//! Shape of the port: pure SQL builders plus the JSON wire shapes. The SQL
-//! strings interpolate the caller's id (Django compiler-form, exactly what
-//! the fixture records); production executors must bind parameters instead —
-//! the `*_sql` functions pin the statement shape, they are not the execution
-//! path. Row locking renders `FOR UPDATE SKIP LOCKED` where Python takes a
-//! `SELECT ... FOR UPDATE` row lock (`events.py:92-93,116`): under contention
-//! a concurrent writer skips the locked thread row instead of blocking, per
-//! the Postgres-queue convention of this backend. Executing these statements
-//! (sqlx transactions, post-commit publish, Redis PUBLISH) belongs to the
+//! Shape of the port: pure SQL builders plus the JSON wire shapes. Every
+//! `*_sql` function returns executable Postgres: caller-supplied values are
+//! `$N` binds (positional, in the order each function's docs name), never
+//! interpolated text, so the statements run as-is through sqlx with the
+//! documented binds. Fixed predicate constants (`HISTORY_STATUS`,
+//! `DELTA_KIND`) render as quoted literals. Row locking renders
+//! `FOR UPDATE SKIP LOCKED` where Python takes a `SELECT ... FOR UPDATE`
+//! row lock (`events.py:92-93,116`): under contention a concurrent writer
+//! skips the locked thread row instead of blocking, per the Postgres-queue
+//! convention of this backend. Executing these statements (sqlx
+//! transactions, post-commit publish, Redis PUBLISH) belongs to the
 //! tasks/handlers layers that own transactions; those layers also own the
 //! `orm_sql`/`updates` fixture entries from `tasks.py`/views, which are
 //! recorded for them and deliberately not built here.
@@ -151,22 +153,26 @@ pub fn truncate_kind(kind: &str) -> &str {
 }
 
 /// `MAX(seq)+1` over a thread's events, `0` when empty (`events.py:73-75`).
-/// Allocated under the thread row lock in [`lock_thread_sql`].
-pub fn next_event_seq_sql(thread_id: &str) -> String {
+/// Allocated under the thread row lock in [`lock_thread_sql`]. `$1` binds
+/// the thread id; an empty thread yields no rows, so the caller adds one to
+/// the max or `0` (`or 0`, `events.py:74`).
+pub fn next_event_seq_sql() -> String {
     let table = assistant_event::TABLE;
     format!(
         "SELECT \"{table}\".\"thread_id\", MAX(\"{table}\".\"seq\") AS \"m\" \
-         FROM \"{table}\" WHERE \"{table}\".\"thread_id\" = {thread_id} \
+         FROM \"{table}\" WHERE \"{table}\".\"thread_id\" = $1 \
          GROUP BY \"{table}\".\"thread_id\""
     )
 }
 
 /// `MAX(seq)+1` over a thread's messages, `0` when empty (`events.py:78-80`).
-pub fn next_message_seq_sql(thread_id: &str) -> String {
+/// `$1` binds the thread id; an empty thread yields no rows, so the caller
+/// adds one to the max or `0` (`or 0`, `events.py:79`).
+pub fn next_message_seq_sql() -> String {
     let table = assistant_message::TABLE;
     format!(
         "SELECT \"{table}\".\"thread_id\", MAX(\"{table}\".\"seq\") AS \"m\" \
-         FROM \"{table}\" WHERE \"{table}\".\"thread_id\" = {thread_id} \
+         FROM \"{table}\" WHERE \"{table}\".\"thread_id\" = $1 \
          GROUP BY \"{table}\".\"thread_id\""
     )
 }
@@ -182,11 +188,14 @@ fn quoted_columns(table: &str, columns: &[&str]) -> String {
 /// Thread row lock for `append_event`/`create_message`
 /// (`events.py:92-93,116`): full thread row, `FOR UPDATE SKIP LOCKED` where
 /// Python blocks on `SELECT ... FOR UPDATE`. A concurrent writer that finds
-/// the row locked skips it instead of queueing behind the holder.
-pub fn lock_thread_sql(thread_id: &str) -> String {
+/// the row locked skips it instead of queueing behind the holder. `$1`
+/// binds the thread id.
+pub fn lock_thread_sql() -> String {
     let table = assistant_thread::TABLE;
     let columns = quoted_columns(table, assistant_thread::COLUMNS);
-    format!("SELECT {columns} FROM \"{table}\" WHERE \"{table}\".\"id\" = {thread_id} FOR UPDATE SKIP LOCKED")
+    format!(
+        "SELECT {columns} FROM \"{table}\" WHERE \"{table}\".\"id\" = $1 FOR UPDATE SKIP LOCKED"
+    )
 }
 
 /// `append_event` insert shape (`events.py:94-101`): every concrete event
@@ -211,18 +220,18 @@ pub fn insert_event_sql() -> String {
     format!("INSERT INTO \"{table}\" (\"{columns}\") VALUES ({placeholders})")
 }
 
-/// `create_message` insert shape (`events.py:117-125`): same conventions as
-/// [`insert_event_sql`]; `status` defaults to `completed`
-/// (`MessageStatus.COMPLETED`, `events.py:113`).
+/// `create_message` insert shape (`events.py:117-125`): every concrete
+/// message column in model field order, values bound positionally in
+/// [`assistant_message::COLUMNS`] order. Unlike [`insert_event_sql`], the pk
+/// is included: `AssistantMessage.id` is a `UUIDField` whose `uuid4` default
+/// runs Python-side (`models.py:126`), so there is no database default and
+/// the caller generates the id (`Uuid::new_v4`, as Django's `objects.create`
+/// sends its client-generated UUID) and binds it as `$1`. `status` defaults
+/// to `completed` (`MessageStatus.COMPLETED`, `events.py:113`).
 pub fn insert_message_sql() -> String {
     let table = assistant_message::TABLE;
-    let columns = assistant_message::COLUMNS
-        .iter()
-        .filter(|column| **column != "id")
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\", \"");
-    let placeholders = (1..=assistant_message::COLUMNS.len() - 1)
+    let columns = assistant_message::COLUMNS.join("\", \"");
+    let placeholders = (1..=assistant_message::COLUMNS.len())
         .map(|index| format!("${index}"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -282,11 +291,11 @@ pub fn message_envelope_json(parts: &MessageParts<'_>) -> String {
 }
 
 /// Delete a finished turn's delta events (`events.py:143-145`); completed
-/// content lives in the message rows.
-pub fn prune_turn_deltas_sql(turn_id: &str) -> String {
+/// content lives in the message rows. `$1` binds the turn id.
+pub fn prune_turn_deltas_sql() -> String {
     let table = assistant_event::TABLE;
     format!(
-        "DELETE FROM \"{table}\" WHERE (\"{table}\".\"turn_id\" = {turn_id} \
+        "DELETE FROM \"{table}\" WHERE (\"{table}\".\"turn_id\" = $1 \
          AND \"{table}\".\"kind\" = '{DELTA_KIND}')"
     )
 }
@@ -311,16 +320,18 @@ pub fn history_limit(kind: ThreadKind, chat_max: i64, loop_max: i64) -> i64 {
 /// Prior-turn query (`history.py:39-43`): newest `limit` completed turns with
 /// non-null `model_messages`, ordered newest-first with the `-id` tie-break
 /// for same-microsecond turns. Callers take this window then reverse it to
-/// chronological (`blobs.reverse()`, `history.py:44`).
-pub fn load_history_sql(thread_id: &str, limit: i64) -> String {
+/// chronological (`blobs.reverse()`, `history.py:44`). `$1` binds the thread
+/// id, `$2` the window (`history_limit`, lower-bounded at 1); the completed
+/// status is the fixed [`HISTORY_STATUS`] literal.
+pub fn load_history_sql() -> String {
     let table = assistant_turn::TABLE;
     let status = HISTORY_STATUS.as_str();
     format!(
         "SELECT \"{table}\".\"model_messages\" FROM \"{table}\" \
-         WHERE (\"{table}\".\"thread_id\" = {thread_id} \
+         WHERE (\"{table}\".\"thread_id\" = $1 \
          AND \"{table}\".\"model_messages\" IS NOT NULL \
-         AND \"{table}\".\"status\" = {status}) \
-         ORDER BY \"{table}\".\"created_at\" DESC, \"{table}\".\"id\" DESC LIMIT {limit}"
+         AND \"{table}\".\"status\" = '{status}') \
+         ORDER BY \"{table}\".\"created_at\" DESC, \"{table}\".\"id\" DESC LIMIT $2"
     )
 }
 
@@ -521,10 +532,10 @@ mod tests {
 
     #[test]
     fn prune_and_publish_shapes() {
-        let delete = prune_turn_deltas_sql("turn-1");
+        let delete = prune_turn_deltas_sql();
         assert!(delete.starts_with("DELETE FROM \"assistant_event\""));
         assert!(delete.contains("\"kind\" = 'assistant_delta'"));
-        assert!(delete.contains("turn-1"));
+        assert!(delete.contains("\"turn_id\" = $1"), "{delete}");
         let (channel, payload) = publish_frame("tid-1", "{}");
         assert_eq!(channel, "assistant:thread:tid-1");
         assert_eq!(payload, "{}");
@@ -533,15 +544,14 @@ mod tests {
     #[test]
     fn max_seq_sql_matches_fixture() {
         // F-A6-06: both MAX+1 statements byte-match the fixture vectors
-        // (`events.py:73-80`).
+        // (`events.py:73-80`); the thread id binds as `$1`.
         let events = &fixture()["events"];
-        let thread = "33ade466-0600-43ed-b19a-9616ba72e19b";
         assert_eq!(
-            next_event_seq_sql(thread),
+            next_event_seq_sql(),
             events["next_event_seq"]["sql"].as_str().expect("sql")
         );
         assert_eq!(
-            next_message_seq_sql(thread),
+            next_message_seq_sql(),
             events["next_message_seq"]["sql"].as_str().expect("sql")
         );
     }
@@ -550,11 +560,12 @@ mod tests {
     fn lock_and_insert_shapes() {
         // `append_event`/`create_message` shapes (`events.py:92-101,116-125`):
         // full thread row locked under the seq allocation, every
-        // non-pk column bound positionally on insert.
-        let lock = lock_thread_sql("tid-1");
+        // insert column bound positionally.
+        let lock = lock_thread_sql();
         assert!(lock.starts_with("SELECT \"assistant_thread\"."));
-        assert!(lock.contains("WHERE \"assistant_thread\".\"id\" = tid-1"));
+        assert!(lock.contains("WHERE \"assistant_thread\".\"id\" = $1"));
         assert!(lock.ends_with("FOR UPDATE SKIP LOCKED"));
+        // Events omit the pk: `BigAutoField` takes `DEFAULT`.
         let insert = insert_event_sql();
         assert!(insert.starts_with("INSERT INTO \"assistant_event\" ("));
         assert!(!insert.contains("\"id\""));
@@ -562,12 +573,13 @@ mod tests {
             insert.matches('$').count(),
             assistant_event::COLUMNS.len() - 1
         );
+        // Messages bind the pk: no database default (`models.py:126`).
         let insert = insert_message_sql();
         assert!(insert.starts_with("INSERT INTO \"assistant_message\" ("));
-        assert!(!insert.contains("\"id\""));
+        assert!(insert.starts_with("INSERT INTO \"assistant_message\" (\"id\", "));
         assert_eq!(
             insert.matches('$').count(),
-            assistant_message::COLUMNS.len() - 1
+            assistant_message::COLUMNS.len()
         );
     }
 
@@ -581,7 +593,7 @@ mod tests {
         assert_eq!(history_limit(ThreadKind::Chat, 0, 0), 1);
         assert_eq!(history_limit(ThreadKind::Loop, 40, -3), 1);
         assert_eq!(
-            load_history_sql("33ade466-0600-43ed-b19a-9616ba72e19b", 40),
+            load_history_sql(),
             history["load_history"]["sql"].as_str().expect("sql")
         );
     }
@@ -603,5 +615,324 @@ mod tests {
         );
         let messages = vec![json!({"role": "user"})];
         assert_eq!(dump_new_messages_json(messages.clone()), messages);
+    }
+
+    // -- live scratch-DB tests (env-gated) -------------------------------
+
+    /// Scratch Postgres for the Done-when verification. Unset (plain
+    /// `cargo test`) skips these; CI sets no database either, so the suite
+    /// stays green offline. Run with e.g.
+    /// `export DATABASE_URL=postgresql://user@host/db` for the real check.
+    async fn scratch_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::PgPool::connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    const LIVE_DDL: &[&str] = &[
+        "CREATE TEMPORARY TABLE assistant_thread (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, user_id UUID NOT NULL, title VARCHAR(255) NOT NULL, kind VARCHAR(16) NOT NULL, is_archived BOOLEAN NOT NULL, active_turn_id UUID NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)",
+        "CREATE TEMPORARY TABLE assistant_turn (id UUID PRIMARY KEY, thread_id UUID NOT NULL, model_messages JSONB NULL, status VARCHAR(16) NOT NULL, created_at TIMESTAMPTZ NOT NULL)",
+        "CREATE TEMPORARY TABLE assistant_message (id UUID PRIMARY KEY, thread_id UUID NOT NULL, turn_id UUID NULL, seq BIGINT NOT NULL, kind VARCHAR(16) NOT NULL, display_content TEXT NOT NULL, payload JSONB NOT NULL, status VARCHAR(16) NOT NULL, created_at TIMESTAMPTZ NOT NULL, completed_at TIMESTAMPTZ NULL)",
+        "CREATE TEMPORARY TABLE assistant_event (id BIGSERIAL PRIMARY KEY, thread_id UUID NOT NULL, turn_id UUID NULL, seq BIGINT NOT NULL, kind VARCHAR(64) NOT NULL, message_id UUID NULL, payload JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL)",
+    ];
+
+    async fn live_tx(pool: &sqlx::PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        for ddl in LIVE_DDL {
+            sqlx::query(ddl)
+                .execute(&mut *tx)
+                .await
+                .expect("create temp table");
+        }
+        tx
+    }
+
+    fn live_uuid(suffix: u8) -> uuid::Uuid {
+        uuid::Uuid::parse_str(&format!("33333333-3333-3333-3333-3333333333{suffix:02}"))
+            .expect("fixed test uuid")
+    }
+
+    fn live_ts(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(secs, 0).expect("fixed test timestamp")
+    }
+
+    async fn live_max(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        sql: &str,
+        thread: uuid::Uuid,
+    ) -> Option<Option<i64>> {
+        let row = sqlx::query(sql)
+            .bind(thread)
+            .fetch_optional(&mut **tx)
+            .await
+            .expect("seq select runs");
+        row.map(|row| {
+            use sqlx::Row;
+            row.try_get::<Option<i64>, _>("m").expect("m decodes")
+        })
+    }
+
+    #[tokio::test]
+    async fn live_next_seq_allocators() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let thread = live_uuid(1);
+        let empty = live_uuid(2);
+        for seq in [1_i64, 2] {
+            sqlx::query(
+                "INSERT INTO assistant_message (id, thread_id, turn_id, seq, kind, display_content, payload, status, created_at, completed_at) \
+                 VALUES ($1, $2, NULL, $3, 'user', 'hi', '{}', 'completed', '2026-01-01T00:00:00Z', NULL)",
+            )
+            .bind(live_uuid(10 + seq as u8))
+            .bind(thread)
+            .bind(seq)
+            .execute(&mut *tx)
+            .await
+            .expect("seed message");
+        }
+        for seq in [1_i64, 2, 3] {
+            sqlx::query(
+                "INSERT INTO assistant_event (thread_id, turn_id, seq, kind, message_id, payload, created_at) \
+                 VALUES ($1, NULL, $2, 'turn_started', NULL, '{}', '2026-01-01T00:00:00Z')",
+            )
+            .bind(thread)
+            .bind(seq)
+            .execute(&mut *tx)
+            .await
+            .expect("seed event");
+        }
+        assert_eq!(
+            live_max(&mut tx, &next_message_seq_sql(), thread).await,
+            Some(Some(2)),
+            "message MAX(seq) over the thread"
+        );
+        assert_eq!(
+            live_max(&mut tx, &next_event_seq_sql(), thread).await,
+            Some(Some(3)),
+            "event MAX(seq) over the thread"
+        );
+        // Empty threads yield no rows: the caller adds one to the max or 0.
+        assert_eq!(
+            live_max(&mut tx, &next_message_seq_sql(), empty).await,
+            None,
+            "empty thread has no message group"
+        );
+        assert_eq!(
+            live_max(&mut tx, &next_event_seq_sql(), empty).await,
+            None,
+            "empty thread has no event group"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_lock_thread_returns_row() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let thread = live_uuid(1);
+        sqlx::query(
+            "INSERT INTO assistant_thread (id, workspace_id, user_id, title, kind, is_archived, active_turn_id, created_at, updated_at) \
+             VALUES ($1, $2, $3, 'T', 'chat', FALSE, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .bind(thread)
+        .bind(live_uuid(8))
+        .bind(live_uuid(9))
+        .execute(&mut *tx)
+        .await
+        .expect("seed thread");
+        let row = sqlx::query(&lock_thread_sql())
+            .bind(thread)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("lock select runs");
+        use sqlx::Row;
+        assert_eq!(row.try_get::<uuid::Uuid, _>("id").expect("id"), thread);
+        assert_eq!(
+            row.try_get::<String, _>("title").expect("title"),
+            "T".to_owned()
+        );
+    }
+
+    #[tokio::test]
+    async fn live_inserts_round_trip() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let thread = live_uuid(1);
+        let turn = live_uuid(2);
+        let stamp = live_ts(1_700_000_000);
+        sqlx::query(&insert_event_sql())
+            .bind(thread)
+            .bind(Some(turn))
+            .bind(1_i64)
+            .bind("turn_started")
+            .bind(None::<uuid::Uuid>)
+            .bind(sqlx::types::Json(json!({"t": 1})))
+            .bind(stamp)
+            .execute(&mut *tx)
+            .await
+            .expect("event insert runs");
+        let message = live_uuid(3);
+        sqlx::query(&insert_message_sql())
+            .bind(message)
+            .bind(thread)
+            .bind(Some(turn))
+            .bind(1_i64)
+            .bind("user")
+            .bind("hi")
+            .bind(sqlx::types::Json(json!({})))
+            .bind("completed")
+            .bind(stamp)
+            .bind(None::<chrono::DateTime<chrono::Utc>>)
+            .execute(&mut *tx)
+            .await
+            .expect("message insert runs with an explicit id");
+        use sqlx::Row;
+        let row = sqlx::query("SELECT * FROM assistant_message WHERE id = $1")
+            .bind(message)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("message row readable");
+        assert_eq!(row.try_get::<uuid::Uuid, _>("id").expect("id"), message);
+        assert_eq!(row.try_get::<i64, _>("seq").expect("seq"), 1);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assistant_event")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("event count runs");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn live_load_history_window() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let thread = live_uuid(1);
+        // (id suffix, blob, status, created_at): the NULL blob and the
+        // running turn never surface; the tied pair orders by id DESC.
+        for (suffix, blob, status, secs) in [
+            (
+                11_u8,
+                Some(json!([{"role": "old"}])),
+                "completed",
+                1_700_000_000,
+            ),
+            (12_u8, None, "completed", 1_700_000_100),
+            (
+                13_u8,
+                Some(json!([{"role": "run"}])),
+                "running",
+                1_700_000_200,
+            ),
+            (
+                14_u8,
+                Some(json!([{"role": "new"}])),
+                "completed",
+                1_700_000_300,
+            ),
+            (
+                15_u8,
+                Some(json!([{"role": "tie"}])),
+                "completed",
+                1_700_000_300,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO assistant_turn (id, thread_id, model_messages, status, created_at) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(live_uuid(suffix))
+            .bind(thread)
+            .bind(blob.map(sqlx::types::Json))
+            .bind(status)
+            .bind(live_ts(secs))
+            .execute(&mut *tx)
+            .await
+            .expect("seed turn");
+        }
+        use sqlx::Row;
+        let blobs: Vec<serde_json::Value> = sqlx::query(&load_history_sql())
+            .bind(thread)
+            .bind(40_i64)
+            .fetch_all(&mut *tx)
+            .await
+            .expect("history select runs")
+            .iter()
+            .map(|row| row.try_get("model_messages").expect("blob decodes"))
+            .collect();
+        assert_eq!(
+            blobs,
+            vec![
+                json!([{"role": "tie"}]),
+                json!([{"role": "new"}]),
+                json!([{"role": "old"}]),
+            ],
+            "newest-first with the -id tie-break, NULL blobs and other statuses excluded"
+        );
+        let one: Vec<serde_json::Value> = sqlx::query(&load_history_sql())
+            .bind(thread)
+            .bind(1_i64)
+            .fetch_all(&mut *tx)
+            .await
+            .expect("history select runs")
+            .iter()
+            .map(|row| row.try_get("model_messages").expect("blob decodes"))
+            .collect();
+        assert_eq!(one, vec![json!([{"role": "tie"}])], "limit binds");
+    }
+
+    #[tokio::test]
+    async fn live_prune_turn_deltas() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let thread = live_uuid(1);
+        let turn = live_uuid(2);
+        let other = live_uuid(3);
+        for (seq, owner, kind) in [
+            (1_i64, turn, "assistant_delta"),
+            (2_i64, turn, "assistant_delta"),
+            (3_i64, turn, "turn_started"),
+            (4_i64, other, "assistant_delta"),
+        ] {
+            sqlx::query(
+                "INSERT INTO assistant_event (thread_id, turn_id, seq, kind, message_id, payload, created_at) \
+                 VALUES ($1, $2, $3, $4, NULL, '{}', '2026-01-01T00:00:00Z')",
+            )
+            .bind(thread)
+            .bind(owner)
+            .bind(seq)
+            .bind(kind)
+            .execute(&mut *tx)
+            .await
+            .expect("seed event");
+        }
+        let deleted = sqlx::query(&prune_turn_deltas_sql())
+            .bind(turn)
+            .execute(&mut *tx)
+            .await
+            .expect("prune runs")
+            .rows_affected();
+        assert_eq!(deleted, 2, "only this turn's deltas go");
+        let kinds: Vec<String> =
+            sqlx::query_scalar("SELECT kind FROM assistant_event ORDER BY seq")
+                .fetch_all(&mut *tx)
+                .await
+                .expect("survivors readable");
+        assert_eq!(kinds, vec!["turn_started", "assistant_delta"]);
     }
 }

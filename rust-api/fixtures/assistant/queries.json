@@ -1,7 +1,7 @@
 {
   "trace": "apps/api/pi_dash/assistant/runtime/events.py:37-143; apps/api/pi_dash/assistant/runtime/history.py:27-60",
   "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
-  "capture_note": "compiler-form SQL rendered offline with the project venv (no DB connection); same compiler other domains pair with CaptureQueriesContext executed SQL. Row shapes follow serialize_event/message_envelope key sets.",
+  "capture_note": "events/history sql entries are the executable bound-form statements ($N binds; bind order in each builder's docs), byte-matched by the Rust unit tests and proven live by the env-gated tests. orm_sql keeps Django compiler-form records (rendered offline with the project venv, no DB connection) as reference only; the compiler form is not valid SQL (bare UUIDs/literals) and no Rust builder renders it. Row shapes follow serialize_event/message_envelope key sets.",
   "events": {
     "event_channel": {
       "source": "apps/api/pi_dash/assistant/runtime/events.py:37-38",
@@ -34,12 +34,12 @@
     "next_event_seq": {
       "source": "apps/api/pi_dash/assistant/runtime/events.py:73-75",
       "shape": "MAX(seq) over thread events + 1 (0 when empty)",
-      "sql": "SELECT \"assistant_event\".\"thread_id\", MAX(\"assistant_event\".\"seq\") AS \"m\" FROM \"assistant_event\" WHERE \"assistant_event\".\"thread_id\" = 33ade466-0600-43ed-b19a-9616ba72e19b GROUP BY \"assistant_event\".\"thread_id\""
+      "sql": "SELECT \"assistant_event\".\"thread_id\", MAX(\"assistant_event\".\"seq\") AS \"m\" FROM \"assistant_event\" WHERE \"assistant_event\".\"thread_id\" = $1 GROUP BY \"assistant_event\".\"thread_id\""
     },
     "next_message_seq": {
       "source": "apps/api/pi_dash/assistant/runtime/events.py:78-80",
       "shape": "MAX(seq) over thread messages + 1 (0 when empty)",
-      "sql": "SELECT \"assistant_message\".\"thread_id\", MAX(\"assistant_message\".\"seq\") AS \"m\" FROM \"assistant_message\" WHERE \"assistant_message\".\"thread_id\" = 33ade466-0600-43ed-b19a-9616ba72e19b GROUP BY \"assistant_message\".\"thread_id\""
+      "sql": "SELECT \"assistant_message\".\"thread_id\", MAX(\"assistant_message\".\"seq\") AS \"m\" FROM \"assistant_message\" WHERE \"assistant_message\".\"thread_id\" = $1 GROUP BY \"assistant_message\".\"thread_id\""
     },
     "append_event": {
       "source": "apps/api/pi_dash/assistant/runtime/events.py:83-103",
@@ -92,7 +92,7 @@
       "source": "apps/api/pi_dash/assistant/runtime/history.py:27-53",
       "shape": "newest N COMPLETED turns with non-null model_messages (order -created_at,-id, slice, reverse to chronological); per-blob ModelMessagesTypeAdapter.validate_python, skip-on-error",
       "caps": "chat ASSISTANT_HISTORY_MAX_TURNS=40; loop ASSISTANT_LOOP_HISTORY_MAX_TURNS=5 (history.py:34-37)",
-      "sql": "SELECT \"assistant_turn\".\"model_messages\" FROM \"assistant_turn\" WHERE (\"assistant_turn\".\"thread_id\" = 33ade466-0600-43ed-b19a-9616ba72e19b AND \"assistant_turn\".\"model_messages\" IS NOT NULL AND \"assistant_turn\".\"status\" = completed) ORDER BY \"assistant_turn\".\"created_at\" DESC, \"assistant_turn\".\"id\" DESC LIMIT 40"
+      "sql": "SELECT \"assistant_turn\".\"model_messages\" FROM \"assistant_turn\" WHERE (\"assistant_turn\".\"thread_id\" = $1 AND \"assistant_turn\".\"model_messages\" IS NOT NULL AND \"assistant_turn\".\"status\" = 'completed') ORDER BY \"assistant_turn\".\"created_at\" DESC, \"assistant_turn\".\"id\" DESC LIMIT $2"
     },
     "dump_new_messages": {
       "source": "apps/api/pi_dash/assistant/runtime/history.py:56-60",
