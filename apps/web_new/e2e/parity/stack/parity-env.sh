@@ -115,6 +115,14 @@ API_URL="$(trim "${PARITY_API_URL:-}")"
 [ -n "$API_URL" ] || API_URL="http://localhost:$API_PORT"
 ORACLE_URL="$(trim "${PARITY_ORACLE_URL:-}")"
 [ -n "$ORACLE_URL" ] || ORACLE_URL="http://localhost:$ORACLE_PORT"
+# Admin console base (NEWFRONT-441): the /god-mode mount on the same
+# proxy origin. Explicit PARITY_ORACLE_ADMIN_URL wins; otherwise the
+# oracle URL with trailing slashes stripped plus /god-mode, so an
+# explicit oracle URL with a trailing slash still derives cleanly.
+ORACLE_ADMIN_URL="$(trim "${PARITY_ORACLE_ADMIN_URL:-}")"
+if [ -z "$ORACLE_ADMIN_URL" ]; then
+  ORACLE_ADMIN_URL="$(printf '%s' "$ORACLE_URL" | sed 's:/*$::')/god-mode"
+fi
 
 if [ -n "$NS" ]; then
   echo "[parity-env] namespace '$NS' -> project $PROJECT (oracle :$ORACLE_PORT api :$API_PORT pg :$PG_PORT)" >&2
@@ -135,4 +143,5 @@ fi
   printf 'export PARITY_SEED_FILE=%s\n' "$(sq "$SEED_FILE")"
   printf 'export PARITY_API_URL=%s\n' "$(sq "$API_URL")"
   printf 'export PARITY_ORACLE_URL=%s\n' "$(sq "$ORACLE_URL")"
+  printf 'export PARITY_ORACLE_ADMIN_URL=%s\n' "$(sq "$ORACLE_ADMIN_URL")"
 }

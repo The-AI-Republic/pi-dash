@@ -18756,3 +18756,251 @@ export async function serverPatchBoard(
   );
   if (!res.ok) throw new Error(`[parity] board patch failed with HTTP ${res.status}.`);
 }
+
+// --- Instance-admin entry/session oracle (NEWFRONT-441, ADM-001..012).
+// --- Session/setup helpers for the admin console specs. Appended;
+// --- existing helpers above are untouched per the shared harness contract.
+
+/** Instance facts the admin bootstrap gate branches on. */
+export interface ServerAdminInstanceInfo {
+  isSetupDone: boolean;
+  workspacesExist: boolean;
+  instanceName: string;
+  telemetryEnabled: boolean;
+}
+
+/** The stack's api container: explicit override, else derived from PARITY_NS. */
+function adminApiContainer(): string {
+  const override = (process.env["PARITY_API_CONTAINER"] ?? "").trim();
+  if (override !== "") return override;
+  return `${resolveParityEnv(process.env).containerPrefix}-api`;
+}
+
+/** Run a Django shell snippet inside the stack's api container; resolves with stdout. */
+async function serverAdminShell(python: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "docker",
+    ["exec", "-i", adminApiContainer(), "python", "manage.py", "shell", "-c", python],
+    { timeout: 120_000 }
+  );
+  return stdout;
+}
+
+/** Instance info as GET /api/instances/ reports it (anonymous read, like the gate). */
+export async function serverAdminInstanceInfo(apiBase: string = apiBaseFromEnv()): Promise<ServerAdminInstanceInfo> {
+  const res = await fetchTolerant(`${apiBase}/api/instances/`);
+  if (!res.ok) throw new Error(`[parity] instance info read failed with HTTP ${res.status}.`);
+  const body = (await res.json()) as { instance?: Record<string, unknown> };
+  const row = body.instance ?? {};
+  if (typeof row["is_setup_done"] !== "boolean" || typeof row["workspaces_exist"] !== "boolean") {
+    throw new Error("[parity] instance info carried no setup flag and workspaces flag.");
+  }
+  return {
+    isSetupDone: row["is_setup_done"],
+    workspacesExist: row["workspaces_exist"],
+    instanceName: typeof row["instance_name"] === "string" ? row["instance_name"] : "",
+    telemetryEnabled: row["is_telemetry_enabled"] === true,
+  };
+}
+
+/**
+ * Flip the instance setup flag for one scenario; resolves with the
+ * previous value for restore. The scratch stack runs with DEBUG, so no
+ * server cache holds the old flag — the delete below is a belt for
+ * non-debug stacks, where GET /api/instances/ caches for two hours.
+ */
+export async function serverAdminSetSetupDone(done: boolean): Promise<boolean> {
+  const out = await serverAdminShell(
+    `from pi_dash.license.models import Instance\n` +
+      `from django.core.cache import cache\n` +
+      `instance = Instance.objects.first()\n` +
+      `print("PARITY_WAS:" + ("1" if instance.is_setup_done else "0"))\n` +
+      `instance.is_setup_done = ${done ? "True" : "False"}\n` +
+      `instance.save(update_fields=["is_setup_done"])\n` +
+      `cache.delete("/api/instances/")\n` +
+      `print("PARITY_SETUP_OK")\n`
+  );
+  if (!out.includes("PARITY_SETUP_OK")) throw new Error("[parity] setup-flag flip produced no receipt.");
+  return /^PARITY_WAS:1$/m.test(out);
+}
+
+/** Emails holding an instance-admin row, in server order. */
+export async function serverAdminListAdmins(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string[]> {
+  const res = await fetch(`${apiBase}/api/instances/admins/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) throw new Error(`[parity] instance-admin list failed with HTTP ${res.status}.`);
+  const rows = (await res.json()) as Array<{ user_detail?: { email?: unknown } }>;
+  return rows.map((row) => row.user_detail?.email).filter((email): email is string => typeof email === "string");
+}
+
+/** Admin sign-in through the native credential endpoint; resolves with a session cookie header. */
+export async function serverAdminSession(
+  email: string,
+  password: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  return withThrottleRetry(`admin sign-in ${email}`, async () => {
+    const tokenRes = await fetchTolerant(`${apiBase}/auth/get-csrf-token/`);
+    if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
+    const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
+    const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
+    if (token === "") throw new Error("[parity] CSRF token response carried no token.");
+    const preCookies = cookieHeader(setCookieHeaders(tokenRes));
+    const body = new URLSearchParams({ email, password, csrfmiddlewaretoken: token });
+    const res = await fetchTolerant(`${apiBase}/api/instances/admins/sign-in/`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", cookie: preCookies },
+      body,
+      redirect: "manual",
+    });
+    // Both outcomes redirect: success lands on general/, failures carry
+    // error_code params back at the entry — the Location tells them apart.
+    const location = res.headers.get("location") ?? "";
+    if (res.status !== 302 || !location.includes("general/")) {
+      throw new Error(`[parity] admin sign-in for ${email} landed on ${JSON.stringify(location)}.`);
+    }
+    const header = cookieHeader([...setCookieHeaders(tokenRes), ...setCookieHeaders(res)]);
+    if (header === "") throw new Error("[parity] admin sign-in response carried no session cookie.");
+    return header;
+  });
+}
+
+/** Admin identity check: status plus email when the session is an admin session. */
+export async function serverAdminMe(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; email: string | null }> {
+  const res = await fetch(`${apiBase}/api/instances/admins/me/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) return { status: res.status, email: null };
+  const row = (await res.json()) as { email?: unknown };
+  return { status: res.status, email: typeof row.email === "string" ? row.email : null };
+}
+
+/**
+ * Clear every instance-admin row and mark setup un-done, for the setup
+ * scenarios; resolves with the previous admin count and setup flag so
+ * the scenario restores both in teardown.
+ */
+export async function serverAdminClearForSetup(): Promise<{ adminCount: number; wasSetupDone: boolean }> {
+  const out = await serverAdminShell(
+    `from pi_dash.license.models import Instance, InstanceAdmin\n` +
+      `from django.core.cache import cache\n` +
+      `count = InstanceAdmin.objects.count()\n` +
+      `# Hard-delete through all_objects: the default manager soft-deletes,\n` +
+      `# and the unique (instance, user) row would block the re-grant.\n` +
+      `InstanceAdmin.all_objects.all().delete()\n` +
+      `instance = Instance.objects.first()\n` +
+      `print("PARITY_COUNT:" + str(count))\n` +
+      `print("PARITY_WAS:" + ("1" if instance.is_setup_done else "0"))\n` +
+      `instance.is_setup_done = False\n` +
+      `instance.save(update_fields=["is_setup_done"])\n` +
+      `cache.delete("/api/instances/")\n` +
+      `print("PARITY_CLEAR_OK")\n`
+  );
+  if (!out.includes("PARITY_CLEAR_OK")) throw new Error("[parity] setup clear produced no receipt.");
+  const count = Number.parseInt(/^PARITY_COUNT:(\d+)$/m.exec(out)?.[1] ?? "", 10);
+  if (!Number.isInteger(count)) throw new Error("[parity] setup clear reported no admin count.");
+  return { adminCount: count, wasSetupDone: /^PARITY_WAS:1$/m.test(out) };
+}
+
+/**
+ * Restore the seeded admin world after a setup scenario: drop the admin
+ * row and user the scenario created, re-grant the seed owner when the
+ * clear removed rows, and restore the setup flag plus the instance name
+ * and telemetry flag the setup POST overwrote. Best-effort per step so
+ * teardown never masks the scenario failure; logs instead of throwing.
+ */
+export async function serverAdminRestoreAfterSetup(
+  seedEmail: string,
+  createdEmail: string,
+  previous: { adminCount: number; wasSetupDone: boolean; instanceName: string; telemetryEnabled: boolean }
+): Promise<void> {
+  try {
+    const out = await serverAdminShell(
+      `from pi_dash.license.models import Instance, InstanceAdmin\n` +
+        `from pi_dash.db.models import User\n` +
+        `from django.core.cache import cache\n` +
+        `# Hard-delete through all_objects (soft-deleted rows keep the unique key).\n` +
+        `InstanceAdmin.all_objects.filter(user__email=${JSON.stringify(createdEmail)}).delete()\n` +
+        `User.objects.filter(email=${JSON.stringify(createdEmail)}).delete()\n` +
+        `instance = Instance.objects.first()\n` +
+        `owner = User.objects.filter(email=${JSON.stringify(seedEmail)}).first()\n` +
+        `if owner is not None and ${previous.adminCount > 0 ? "True" : "False"}:\n` +
+        `    row = InstanceAdmin.all_objects.filter(instance=instance, user=owner).first()\n` +
+        `    if row is None:\n` +
+        `        InstanceAdmin.objects.create(instance=instance, user=owner, role=20, is_verified=True)\n` +
+        `    else:\n` +
+        `        row.deleted_at = None\n` +
+        `        row.role = 20\n` +
+        `        row.is_verified = True\n` +
+        `        row.save(update_fields=["deleted_at", "role", "is_verified"])\n` +
+        `instance.is_setup_done = ${previous.wasSetupDone ? "True" : "False"}\n` +
+        `instance.instance_name = ${JSON.stringify(previous.instanceName)}\n` +
+        `instance.is_telemetry_enabled = ${previous.telemetryEnabled ? "True" : "False"}\n` +
+        `instance.save(update_fields=["is_setup_done", "instance_name", "is_telemetry_enabled"])\n` +
+        `cache.delete("/api/instances/")\n` +
+        `print("PARITY_RESTORE_OK")\n`
+    );
+    if (!out.includes("PARITY_RESTORE_OK"))
+      console.log("[parity] setup restore produced no receipt; leaving it for reseed.");
+  } catch (error) {
+    console.log(
+      `[parity] setup restore failed (${error instanceof Error ? error.message : String(error)}); leaving it for reseed.`
+    );
+  }
+}
+
+/**
+ * Grant or revoke one user's instance-admin row (verified, role 20 when
+ * granted). Revocation hard-deletes through all_objects so the unique
+ * (instance, user) key is freed; granting undeletes-or-creates so
+ * soft-deleted leftovers never block the re-grant.
+ */
+export async function serverAdminSetGrant(email: string, granted: boolean): Promise<void> {
+  const verb = granted ? "grant" : "revoke";
+  const out = await serverAdminShell(
+    `from pi_dash.license.models import Instance, InstanceAdmin\n` +
+      `from pi_dash.db.models import User\n` +
+      `instance = Instance.objects.first()\n` +
+      `owner = User.objects.filter(email=${JSON.stringify(email)}).first()\n` +
+      `if owner is None:\n` +
+      `    raise SystemExit("PARITY_NO_USER")\n` +
+      (granted
+        ? `row = InstanceAdmin.all_objects.filter(instance=instance, user=owner).first()\n` +
+          `if row is None:\n` +
+          `    InstanceAdmin.objects.create(instance=instance, user=owner, role=20, is_verified=True)\n` +
+          `else:\n` +
+          `    row.deleted_at = None\n` +
+          `    row.role = 20\n` +
+          `    row.is_verified = True\n` +
+          `    row.save(update_fields=["deleted_at", "role", "is_verified"])\n`
+        : `InstanceAdmin.all_objects.filter(instance=instance, user=owner).delete()\n`) +
+      `print("PARITY_GRANT_OK")\n`
+  );
+  if (!out.includes("PARITY_GRANT_OK")) throw new Error(`[parity] admin ${verb} for ${email} produced no receipt.`);
+}
+
+/** Admin sign-out through the native endpoint; the session reads as signed out after. */
+export async function serverAdminSignOut(sessionCookie: string, apiBase: string = apiBaseFromEnv()): Promise<void> {
+  const tokenRes = await fetchTolerant(`${apiBase}/auth/get-csrf-token/`, { headers: { cookie: sessionCookie } });
+  if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
+  const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
+  const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
+  if (token === "") throw new Error("[parity] CSRF token response carried no token.");
+  // The session header rides through verbatim (re-joining it would keep
+  // only its first pair and drop the admin session), with the fresh
+  // CSRF cookie last: duplicate cookie keys resolve to the last value,
+  // which must match the posted token.
+  const fresh = cookieHeader(setCookieHeaders(tokenRes));
+  const cookies = sessionCookie === "" ? fresh : `${sessionCookie}; ${fresh}`;
+  const body = new URLSearchParams({ csrfmiddlewaretoken: token });
+  const res = await fetchTolerant(`${apiBase}/api/instances/admins/sign-out/`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie: cookies },
+    body,
+    redirect: "manual",
+  });
+  if (res.status !== 302) throw new Error(`[parity] admin sign-out answered HTTP ${res.status}, not a redirect.`);
+}

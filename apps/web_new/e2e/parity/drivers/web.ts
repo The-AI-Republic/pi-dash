@@ -24,7 +24,15 @@ import {
   type Request,
   type Route,
 } from "@playwright/test";
+import { parityOracleAdminUrl } from "../helpers/parity-env";
 import type {
+  AdminAccountMenuFacts,
+  AdminFailureFacts,
+  AdminNotFoundFacts,
+  AdminRootBranch,
+  AdminSetupFacts,
+  AdminSetupFields,
+  AdminSignInFacts,
   ApprovalCard,
   ArchivesFilterExpression,
   ArchivesListQuery,
@@ -49336,5 +49344,527 @@ export class WebDriver implements ParityDriver {
     await this.page.waitForTimeout(4000);
     const after = await this.spaceBoardVisibleOrder();
     return { before, after };
+  }
+
+  // --- Instance-admin entry/session oracle (NEWFRONT-441, ADM-001..012).
+  // --- Every selector below was observed on the running old admin
+  // --- console, never copied from its sources. Stable landmarks come
+  // --- from labels, roles and accessible names; the few icon-only
+  // --- controls (password show/hide toggles, the mapped-banner dismiss,
+  // --- the account-menu trigger) use structural reads proven
+  // --- element-identical on the oracle.
+
+  private adminInstanceFetchSeen = 0;
+  private adminInstanceFetchFault: { mode: "none" | "fail" | "delay" | "stub-empty"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminInstanceFetchRouteInstalled = false;
+
+  /** Admin console base (the /god-mode mount), without a trailing slash. */
+  private adminBase(): string {
+    return parityOracleAdminUrl(process.env).replace(/\/+$/, "");
+  }
+
+  private adminSignInForm(): Locator {
+    return this.page.locator("form").first();
+  }
+
+  private adminSetupForm(): Locator {
+    return this.page.locator("form").first();
+  }
+
+  /** Password show/hide toggle inside a form: the icon-only button beside the field. */
+  private adminPasswordToggle(form: Locator, index: number): Locator {
+    // The toggles carry no accessible name (icon only), so they are read
+    // structurally: every button in these forms except the submit is a
+    // toggle, in field order. Proven element-identical on the oracle.
+    return form.locator("button").nth(index);
+  }
+
+  private async adminPollBranch(branch: AdminRootBranch): Promise<void> {
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.adminRootBranch()) === branch) return;
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `[parity] admin gate never settled on ${JSON.stringify(branch)} (still ${JSON.stringify(await this.adminRootBranch())}).`
+        );
+      }
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async adminOpenRoot(): Promise<void> {
+    await this.page.goto(`${this.adminBase()}/`, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminOpenPath(path: string): Promise<void> {
+    const suffix = path.startsWith("/") ? path : `/${path}`;
+    await this.page.goto(`${this.adminBase()}${suffix}`, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminRootBranch(): Promise<AdminRootBranch> {
+    // Dashboard first: an authenticated admin never sees the gate.
+    if (await this.adminDashboardVisible()) return "dashboard";
+    if ((await this.page.getByLabel("First name").count()) > 0) return "setup";
+    const signIn = this.page.getByRole("button", { name: "Sign in" });
+    if ((await signIn.count()) > 0 && (await signIn.first().isVisible())) return "sign-in";
+    // The busy submit swaps its label for a spinner, so a submitting
+    // sign-in form reads back through its fields instead.
+    const email = this.page.locator("#email");
+    if ((await email.count()) > 0 && (await email.first().isVisible())) return "sign-in";
+    if ((await this.page.getByRole("button", { name: "Retry" }).count()) > 0) return "failure";
+    if ((await this.page.locator("svg.animate-pulse").count()) > 0) return "loader";
+    return "unknown";
+  }
+
+  async adminWaitForRootBranch(branch: AdminRootBranch): Promise<void> {
+    await this.adminPollBranch(branch);
+  }
+
+  async adminCurrentPath(): Promise<string> {
+    return new URL(this.page.url()).pathname;
+  }
+
+  async adminCurrentSearch(): Promise<string> {
+    return new URL(this.page.url()).search;
+  }
+
+  async adminHistoryLength(): Promise<number> {
+    return this.page.evaluate(() => window.history.length);
+  }
+
+  async adminStartInstanceFetchSpy(): Promise<void> {
+    this.adminInstanceFetchSeen = 0;
+    this.adminInstanceFetchFault = { mode: "none", delayMs: 0 };
+    if (this.adminInstanceFetchRouteInstalled) return;
+    this.adminInstanceFetchRouteInstalled = true;
+    await this.page.route(
+      (url) => {
+        if (url.pathname.replace(/\/+$/, "") !== "/api/instances") return false;
+        return true;
+      },
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
+        this.adminInstanceFetchSeen += 1;
+        const fault = this.adminInstanceFetchFault;
+        if (fault.mode === "fail") {
+          await route.abort("failed");
+          return;
+        }
+        if (fault.mode === "delay") {
+          await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+        }
+        if (fault.mode === "stub-empty") {
+          // Answer with the live payload patched to report no
+          // workspaces, so every other field stays truthful.
+          const live = await route.fetch();
+          const payload = (await live.json()) as { instance?: Record<string, unknown> };
+          await route.fulfill({
+            status: live.status(),
+            headers: live.headers(),
+            json: { ...payload, instance: { ...payload.instance, workspaces_exist: false } },
+          });
+          return;
+        }
+        await route.continue();
+      }
+    );
+  }
+
+  async adminInstanceFetchCount(): Promise<number> {
+    return this.adminInstanceFetchSeen;
+  }
+
+  async adminFailInstanceFetch(): Promise<void> {
+    this.adminInstanceFetchFault = { mode: "fail", delayMs: 0 };
+  }
+
+  async adminDelayInstanceFetch(ms: number): Promise<void> {
+    this.adminInstanceFetchFault = { mode: "delay", delayMs: ms };
+  }
+
+  async adminClearInstanceFetchFault(): Promise<void> {
+    this.adminInstanceFetchFault = { mode: "none", delayMs: 0 };
+  }
+
+  async adminFailureFacts(): Promise<AdminFailureFacts> {
+    const illustration = this.page.getByAltText("Instance failure illustration");
+    const retry = this.page.getByRole("button", { name: "Retry" });
+    const retryVisible = (await retry.count()) > 0 && (await retry.first().isVisible());
+    return {
+      illustrationVisible: (await illustration.count()) > 0 && (await illustration.first().isVisible()),
+      retryVisible,
+      retryLabel: retryVisible ? (await retry.first().innerText()).trim() || null : null,
+    };
+  }
+
+  async adminFailureRetry(): Promise<void> {
+    const retry = this.page.getByRole("button", { name: "Retry" });
+    await retry.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    await Promise.all([
+      this.page.waitForLoadState("load", { timeout: WebDriver.WAIT_MS }).catch(() => {}),
+      retry.first().click({ timeout: WebDriver.WAIT_MS }),
+    ]);
+    await this.page.waitForLoadState("domcontentloaded", { timeout: WebDriver.WAIT_MS }).catch(() => {});
+  }
+
+  async adminLoaderFacts(): Promise<{ visible: boolean; formVisible: boolean }> {
+    const loader = this.page.locator("svg.animate-pulse");
+    return {
+      visible: (await loader.count()) > 0 && (await loader.first().isVisible()),
+      formVisible: (await this.page.locator("form").count()) > 0,
+    };
+  }
+
+  async adminSetupFacts(): Promise<AdminSetupFacts> {
+    const form = this.adminSetupForm();
+    // Fail fast when the form is gone (mid-navigation polls must throw,
+    // not hang on a field that will never appear).
+    if ((await form.locator("#first_name").count()) === 0) {
+      throw new Error("[parity] setup form is gone.");
+    }
+    const valueOf = async (id: string): Promise<string> => form.locator(`#${id}`).inputValue();
+    const submit = form.locator('button[type="submit"]');
+    const typeOf = async (id: string): Promise<string | null> => form.locator(`#${id}`).getAttribute("type");
+    // Inline field errors carry a marker class the strength message
+    // lacks, so the two <p> elements in the password container stay
+    // distinguishable without reading their copy. The `has:` inner
+    // locator stays page-scoped: a form-scoped inner never matches.
+    const inlineIn = async (id: string): Promise<string | null> => {
+      const nodes = form.locator("div", { has: this.page.locator(`#${id}`) }).locator("p.px-1");
+      if ((await nodes.count()) === 0) return null;
+      const text = (await nodes.first().innerText()).trim();
+      return text === "" ? null : text;
+    };
+    const banner = await this.adminSetupBannerText(form);
+    const passwordScope = form.locator("div", { has: this.page.locator("#password") });
+    const fragments = passwordScope.locator("div.h-1");
+    const strengthMessageNodes = passwordScope.locator("p:not(.px-1)");
+    const mismatch = this.page.getByText("Passwords don't match", { exact: false });
+    return {
+      values: {
+        firstName: await valueOf("first_name"),
+        lastName: await valueOf("last_name"),
+        email: await valueOf("email"),
+        company: await valueOf("company_name"),
+      },
+      shown: {
+        password: (await typeOf("password")) === "text",
+        confirm: (await typeOf("confirm_password")) === "text",
+      },
+      submitDisabled: await submit.isDisabled(),
+      submitBusy: (await submit.locator("svg").count()) > 0,
+      telemetryChecked: await form.locator("#is_telemetry_enabled").isChecked(),
+      strengthVisible: (await fragments.count()) > 0,
+      strengthMessage:
+        (await strengthMessageNodes.count()) === 0
+          ? null
+          : (await strengthMessageNodes.first().innerText()).trim() || null,
+      mismatchVisible: (await mismatch.count()) > 0 && (await mismatch.first().isVisible()),
+      bannerText: banner,
+      inlineErrors: {
+        email: await inlineIn("email"),
+        password: await inlineIn("password"),
+      },
+    };
+  }
+
+  /** Setup top banner: the form's previous sibling when the page renders three blocks. */
+  private async adminSetupBannerText(form: Locator): Promise<string | null> {
+    const siblings = form.locator("xpath=..").locator(":scope > *");
+    if ((await siblings.count()) !== 3) return null;
+    const text = (await siblings.nth(1).innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async adminSetupFill(fields: AdminSetupFields): Promise<void> {
+    const form = this.adminSetupForm();
+    const entries: [keyof AdminSetupFields, string][] = [
+      ["firstName", "first_name"],
+      ["lastName", "last_name"],
+      ["email", "email"],
+      ["company", "company_name"],
+      ["password", "password"],
+      ["confirmPassword", "confirm_password"],
+    ];
+    for (const [key, id] of entries) {
+      const value = fields[key];
+      if (value === undefined) continue;
+      await form.locator(`#${id}`).fill(value, { timeout: WebDriver.WAIT_MS });
+    }
+  }
+
+  async adminSetupSetTelemetry(on: boolean): Promise<void> {
+    const form = this.adminSetupForm();
+    const box = form.locator("#is_telemetry_enabled");
+    if ((await box.isChecked()) !== on) {
+      await box.click({ timeout: WebDriver.WAIT_MS });
+    }
+  }
+
+  async adminSetupFocus(field: "password" | "confirm"): Promise<void> {
+    const form = this.adminSetupForm();
+    await form.locator(field === "password" ? "#password" : "#confirm_password").focus({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminSetupBlur(): Promise<void> {
+    // The form heading is outside every field container, so clicking it
+    // moves focus off the password fields without touching a control.
+    await this.page.getByText("Setup your Pi Dash Instance", { exact: true }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminSetupTogglePassword(field: "password" | "confirm"): Promise<void> {
+    const form = this.adminSetupForm();
+    await this.adminPasswordToggle(form, field === "password" ? 0 : 1).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminSetupSubmit(): Promise<void> {
+    const form = this.adminSetupForm();
+    const submit = form.locator('button[type="submit"]');
+    await submit.click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForLoadState("domcontentloaded", { timeout: WebDriver.WAIT_MS }).catch(() => {});
+  }
+
+  async adminSignInFacts(): Promise<AdminSignInFacts> {
+    const form = this.adminSignInForm();
+    // Fail fast when the form is gone (mid-navigation polls must throw,
+    // not hang on a field that will never appear). Both the field and
+    // the labeled submit are required: the dashboard settings form also
+    // carries an email field, so the field alone would misread it.
+    const submitProbe = form.getByRole("button", { name: "Sign in" });
+    if ((await form.locator("#email").count()) === 0 || (await submitProbe.count()) === 0) {
+      throw new Error("[parity] sign-in form is gone.");
+    }
+    const email = form.locator("#email");
+    const password = form.locator("#password");
+    const submit = form.locator('button[type="submit"]');
+    // The generic banner is the only <p> this form ever renders; the
+    // mapped banner carries the dismiss control instead.
+    const genericNodes = form.locator("p");
+    const dismissNodes = form.locator("div.cursor-pointer");
+    let mappedBanner: AdminSignInFacts["mappedBanner"] = null;
+    if ((await dismissNodes.count()) > 0) {
+      const root = form.locator("div", { has: this.page.locator("div.cursor-pointer") }).first();
+      const links = root.locator("a");
+      mappedBanner = {
+        text: (await root.innerText()).trim(),
+        linkHref: (await links.count()) === 0 ? null : await links.first().getAttribute("href"),
+      };
+    }
+    return {
+      email: await email.inputValue(),
+      passwordFilled: (await password.inputValue()).length > 0,
+      passwordShown: ((await password.getAttribute("type")) ?? "") === "text",
+      submitDisabled: await submit.isDisabled(),
+      submitBusy: (await submit.locator("svg").count()) > 0,
+      genericBanner:
+        (await genericNodes.count()) === 0 ? null : (await genericNodes.first().innerText()).trim() || null,
+      mappedBanner,
+    };
+  }
+
+  async adminSignInFill(email: string, password: string): Promise<void> {
+    const form = this.adminSignInForm();
+    await form.locator("#email").fill(email, { timeout: WebDriver.WAIT_MS });
+    await form.locator("#password").fill(password, { timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminSignInTogglePassword(): Promise<void> {
+    const form = this.adminSignInForm();
+    await this.adminPasswordToggle(form, 0).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminSignInSubmit(): Promise<void> {
+    const form = this.adminSignInForm();
+    await form.locator('button[type="submit"]').click({ timeout: WebDriver.WAIT_MS });
+    await this.page.waitForLoadState("domcontentloaded", { timeout: WebDriver.WAIT_MS }).catch(() => {});
+  }
+
+  async adminSignInDismissMappedBanner(): Promise<void> {
+    const form = this.adminSignInForm();
+    const dismiss = form.locator("div.cursor-pointer");
+    await dismiss.first().click({ timeout: WebDriver.WAIT_MS });
+    await expect(dismiss).toHaveCount(0, { timeout: WebDriver.OPEN_MS });
+  }
+
+  async adminEnsureSignedIn(email: string, password: string): Promise<void> {
+    await this.adminOpenRoot();
+    await this.adminPollBranch("sign-in");
+    await this.adminSignInFill(email, password);
+    await this.adminSignInSubmit();
+    await this.adminPollBranch("dashboard");
+  }
+
+  async adminDashboardVisible(): Promise<boolean> {
+    const heading = this.page.getByText("Instance admin", { exact: true });
+    return (await heading.count()) > 0 && (await heading.first().isVisible());
+  }
+
+  /** The sidebar account-menu trigger: the avatar button in the sidebar header. */
+  private adminAccountMenuTrigger(): Locator {
+    // Both sidebar header buttons are headless-ui menu buttons; only
+    // the avatar one carries text (the admin's initial), the icon one
+    // holds an svg alone. Proven element-identical on the oracle.
+    return this.page.locator('button[id^="headlessui-menu-button-"]').filter({ hasText: /\S/ }).first();
+  }
+
+  async adminOpenAccountMenu(): Promise<void> {
+    const menu = this.page.getByRole("menu");
+    if ((await menu.count()) > 0 && (await menu.first().isVisible())) return;
+    await this.adminAccountMenuTrigger().click({ timeout: WebDriver.WAIT_MS });
+    try {
+      await menu.waitFor({ state: "visible", timeout: 5_000 });
+    } catch {
+      // Toggle race: when the first click landed on an open menu it
+      // closed it instead, so a second click reopens it.
+      await this.adminAccountMenuTrigger().click({ timeout: WebDriver.WAIT_MS });
+      await menu.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    }
+  }
+
+  async adminAccountMenuFacts(): Promise<AdminAccountMenuFacts> {
+    const menu = this.page.getByRole("menu");
+    const emails = menu.locator("span");
+    const theme = menu.getByRole("menuitem", { name: /Switch to/ });
+    const signOut = menu.getByRole("menuitem", { name: "Sign out" });
+    return {
+      email: (await emails.count()) === 0 ? null : (await emails.first().innerText()).trim() || null,
+      themeLabel: (await theme.count()) === 0 ? null : (await theme.first().innerText()).trim() || null,
+      signOutVisible: (await signOut.count()) > 0 && (await signOut.first().isVisible()),
+    };
+  }
+
+  async adminSidebarSignOut(): Promise<void> {
+    await this.adminOpenAccountMenu();
+    const signOut = this.page.getByRole("menu").getByRole("menuitem", { name: "Sign out" });
+    // Dispatched, not clicked: the menu item unmounts mid-click as the
+    // native submit starts navigating, which a stability-waiting click
+    // reports as a timeout even though the sign-out landed.
+    await signOut.dispatchEvent("click", { timeout: WebDriver.WAIT_MS });
+    await this.page.waitForLoadState("domcontentloaded", { timeout: WebDriver.WAIT_MS }).catch(() => {});
+  }
+
+  async adminThemeFacts(): Promise<{ stored: string | null; resolved: "light" | "dark" }> {
+    return this.page.evaluate(() => {
+      const stored = window.localStorage.getItem("theme");
+      const resolved = window.document.documentElement.classList.contains("dark") ? "dark" : "light";
+      return { stored, resolved };
+    });
+  }
+
+  async adminSetTheme(mode: "light" | "dark"): Promise<void> {
+    await this.adminOpenAccountMenu();
+    const menu = this.page.getByRole("menu");
+    const label = (
+      (
+        await menu
+          .getByRole("menuitem", { name: /Switch to/ })
+          .first()
+          .innerText()
+      ).trim() ?? ""
+    ).toLowerCase();
+    const wanted = mode === "light" ? "switch to light mode" : "switch to dark mode";
+    if (label === wanted) {
+      await menu
+        .getByRole("menuitem", { name: /Switch to/ })
+        .first()
+        .click({ timeout: WebDriver.WAIT_MS });
+      await expect(menu).toBeHidden({ timeout: WebDriver.OPEN_MS });
+    } else {
+      await this.page.keyboard.press("Escape");
+      await expect(menu).toBeHidden({ timeout: WebDriver.OPEN_MS });
+    }
+  }
+
+  async adminNotFoundFacts(): Promise<AdminNotFoundFacts> {
+    const illustration = this.page.getByAltText("404 - Page not found");
+    const heading = this.page.getByText("Oops! Something went wrong.", { exact: true });
+    const action = this.page.getByRole("link", { name: "Go to general settings" });
+    // The catch-all chunk loads after the shell: settle on the action
+    // before reading, so facts never catch a half-rendered screen.
+    await action.first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const actionVisible = (await action.count()) > 0 && (await action.first().isVisible());
+    return {
+      illustrationVisible: (await illustration.count()) > 0 && (await illustration.first().isVisible()),
+      messageVisible: (await heading.count()) > 0 && (await heading.first().isVisible()),
+      actionLabel: actionVisible ? (await action.first().innerText()).trim() || null : null,
+    };
+  }
+
+  async adminNotFoundFollowAction(): Promise<void> {
+    await this.page.getByRole("link", { name: "Go to general settings" }).click({ timeout: WebDriver.WAIT_MS });
+    await this.adminPollBranch("dashboard");
+  }
+
+  /** First-workspace popup card: the row holding both the create link and dismiss. */
+  private adminFirstWorkspacePopupRow(): Locator {
+    const link = this.page.getByRole("link", { name: "Create workspace" });
+    return this.page.locator("div", { has: link }).last();
+  }
+
+  async adminFirstWorkspacePopupFacts(): Promise<{ visible: boolean; createHref: string | null }> {
+    const link = this.page.getByRole("link", { name: "Create workspace" });
+    const visible = (await link.count()) > 0 && (await link.first().isVisible());
+    return {
+      visible,
+      createHref: visible ? await link.first().getAttribute("href") : null,
+    };
+  }
+
+  async adminFirstWorkspacePopupDismiss(): Promise<void> {
+    const row = this.adminFirstWorkspacePopupRow();
+    await row.getByRole("button", { name: "Close" }).click({ timeout: WebDriver.WAIT_MS });
+    await expect(this.page.getByRole("link", { name: "Create workspace" })).toHaveCount(0, {
+      timeout: WebDriver.OPEN_MS,
+    });
+  }
+
+  async adminFirstWorkspacePopupFollowCreate(): Promise<void> {
+    await this.page.getByRole("link", { name: "Create workspace" }).first().click({ timeout: WebDriver.WAIT_MS });
+    // Client-side transition: no document load fires, so a load-state
+    // wait would resolve before the router commits. Wait on the URL.
+    await this.page.waitForURL((url) => url.pathname === "/god-mode/workspace/create/", {
+      timeout: WebDriver.WAIT_MS,
+    });
+  }
+
+  async adminSetupToggleTabIndex(field: "password" | "confirm"): Promise<string | null> {
+    const form = this.adminSetupForm();
+    return this.adminPasswordToggle(form, field === "password" ? 0 : 1).getAttribute("tabindex");
+  }
+
+  async adminSignInEmailFocused(): Promise<boolean> {
+    return this.page.evaluate(() => window.document.activeElement?.id === "email");
+  }
+
+  private adminSessionFetchDelayMs = 0;
+  private adminSessionFetchRouteInstalled = false;
+
+  async adminDelaySessionFetch(ms: number): Promise<void> {
+    this.adminSessionFetchDelayMs = ms;
+    if (this.adminSessionFetchRouteInstalled) return;
+    this.adminSessionFetchRouteInstalled = true;
+    await this.page.route(
+      (url) => url.pathname.replace(/\/+$/, "") === "/api/instances/admins/me",
+      async (route) => {
+        if (route.request().method() === "GET" && this.adminSessionFetchDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, this.adminSessionFetchDelayMs));
+        }
+        await route.continue();
+      }
+    );
+  }
+
+  async adminClearSessionFetchDelay(): Promise<void> {
+    this.adminSessionFetchDelayMs = 0;
+  }
+
+  async adminStubNoWorkspaces(): Promise<void> {
+    this.adminInstanceFetchFault = { mode: "stub-empty", delayMs: 0 };
   }
 }

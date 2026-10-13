@@ -8072,6 +8072,99 @@ export interface ParityDriver {
   spaceBoardRefocusStability(): Promise<SpaceBoardStability>;
   /** Offline/online cycle; resolves with the list order before and after. */
   spaceBoardReconnectStability(): Promise<{ before: string[]; after: string[] }>;
+
+  // --- Instance-admin entry/session oracle (NEWFRONT-441, ADM-001..012).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+
+  /** Open the admin console entry as a signed-out visitor. */
+  adminOpenRoot(): Promise<void>;
+  /** Open an admin console path under the /god-mode mount (leading slash, query allowed). */
+  adminOpenPath(path: string): Promise<void>;
+  /** Which branch of the admin bootstrap gate is currently showing. */
+  adminRootBranch(): Promise<AdminRootBranch>;
+  /** Poll until the bootstrap gate shows the expected branch (throws on timeout). */
+  adminWaitForRootBranch(branch: AdminRootBranch): Promise<void>;
+  /** Current admin pathname (the /god-mode mount included). */
+  adminCurrentPath(): Promise<string>;
+  /** Current admin query string, with the leading `?`, or empty. */
+  adminCurrentSearch(): Promise<string>;
+  /** Browser history length (proves replace-navigation adds no entry). */
+  adminHistoryLength(): Promise<number>;
+  /** Start counting GET /api/instances/ info reads (resets the count). */
+  adminStartInstanceFetchSpy(): Promise<void>;
+  /** Info reads observed since the spy started. */
+  adminInstanceFetchCount(): Promise<number>;
+  /** Fail subsequent info reads (stays armed until cleared). */
+  adminFailInstanceFetch(): Promise<void>;
+  /** Delay subsequent info reads by ms (stays armed until cleared). */
+  adminDelayInstanceFetch(ms: number): Promise<void>;
+  /** Lift any fail/delay fault; the spy keeps counting. */
+  adminClearInstanceFetchFault(): Promise<void>;
+  /** Failure-screen facts: illustration, retry control and its label. */
+  adminFailureFacts(): Promise<AdminFailureFacts>;
+  /** Click the failure-screen retry; resolves once the reload settles. */
+  adminFailureRetry(): Promise<void>;
+  /** Whether the brand loader is currently visible (and no form alongside it). */
+  adminLoaderFacts(): Promise<{ visible: boolean; formVisible: boolean }>;
+  /** Setup-form facts: values, gating, telemetry, meter, mismatch, errors. */
+  adminSetupFacts(): Promise<AdminSetupFacts>;
+  /** Fill setup-form fields (absent keys are left untouched). */
+  adminSetupFill(fields: AdminSetupFields): Promise<void>;
+  /** Set the telemetry opt-in to the wanted state. */
+  adminSetupSetTelemetry(on: boolean): Promise<void>;
+  /** Focus a setup password field (drives the meter/hint visibility). */
+  adminSetupFocus(field: "password" | "confirm"): Promise<void>;
+  /** Move focus off the password fields (onto the form heading). */
+  adminSetupBlur(): Promise<void>;
+  /** Toggle a setup password field between hidden and shown. */
+  adminSetupTogglePassword(field: "password" | "confirm"): Promise<void>;
+  /** Submit the setup form; resolves once the POST round-trip settles. */
+  adminSetupSubmit(): Promise<void>;
+  /** Sign-in-form facts: values, gating, busy state, banners. */
+  adminSignInFacts(): Promise<AdminSignInFacts>;
+  /** Fill the sign-in email and password fields. */
+  adminSignInFill(email: string, password: string): Promise<void>;
+  /** Toggle the sign-in password field between hidden and shown. */
+  adminSignInTogglePassword(): Promise<void>;
+  /** Submit the sign-in form; resolves once the POST round-trip settles. */
+  adminSignInSubmit(): Promise<void>;
+  /** Dismiss the mapped sign-in info banner; resolves once it closes. */
+  adminSignInDismissMappedBanner(): Promise<void>;
+  /** Complete the admin sign-in flow; ends on the dashboard. */
+  adminEnsureSignedIn(email: string, password: string): Promise<void>;
+  /** Whether the dashboard shell (sidebar plus header) is showing. */
+  adminDashboardVisible(): Promise<boolean>;
+  /** Open the sidebar account menu. */
+  adminOpenAccountMenu(): Promise<void>;
+  /** Account-menu facts: admin email, theme entry, sign-out entry. */
+  adminAccountMenuFacts(): Promise<AdminAccountMenuFacts>;
+  /** Sign out through the account menu; resolves once the round-trip settles. */
+  adminSidebarSignOut(): Promise<void>;
+  /** Theme persistence facts: stored choice plus the resolved mode. */
+  adminThemeFacts(): Promise<{ stored: string | null; resolved: "light" | "dark" }>;
+  /** Set the theme through the account menu (for the sign-out reset row). */
+  adminSetTheme(mode: "light" | "dark"): Promise<void>;
+  /** 404-screen facts: illustration, message, and the back action. */
+  adminNotFoundFacts(): Promise<AdminNotFoundFacts>;
+  /** Follow the 404 back action; resolves once navigation settles. */
+  adminNotFoundFollowAction(): Promise<void>;
+  /** First-workspace popup facts: visibility plus the create target. */
+  adminFirstWorkspacePopupFacts(): Promise<{ visible: boolean; createHref: string | null }>;
+  /** Dismiss the first-workspace popup; resolves once it closes. */
+  adminFirstWorkspacePopupDismiss(): Promise<void>;
+  /** Follow the popup's create action; resolves once navigation settles. */
+  adminFirstWorkspacePopupFollowCreate(): Promise<void>;
+  /** Tabindex of a setup password toggle (proves it stays out of tab order). */
+  adminSetupToggleTabIndex(field: "password" | "confirm"): Promise<string | null>;
+  /** Whether the sign-in email field holds focus (autofocus row). */
+  adminSignInEmailFocused(): Promise<boolean>;
+  /** Delay the admin session reads (admins/me) by ms. */
+  adminDelaySessionFetch(ms: number): Promise<void>;
+  /** Lift the session-read delay. */
+  adminClearSessionFetchDelay(): Promise<void>;
+  /** Answer info reads with no workspaces (drives the first-workspace popup branch). */
+  adminStubNoWorkspaces(): Promise<void>;
 }
 
 /** One list group / board column as rendered (NEWFRONT-449, SPC-023/024/026). */
@@ -10451,4 +10544,91 @@ export interface LocalFileDownload {
   fileName: string;
   /** File bytes decoded as UTF-8 text. */
   content: string;
+}
+
+// --- Instance-admin entry/session oracle types (NEWFRONT-441, ADM-001..012).
+
+/** Which branch of the admin bootstrap gate is showing. */
+export type AdminRootBranch = "loader" | "failure" | "setup" | "sign-in" | "dashboard" | "unknown";
+
+/** Failure-screen facts (NEWFRONT-441, ADM-003). */
+export interface AdminFailureFacts {
+  /** Whether the explanatory illustration is showing. */
+  illustrationVisible: boolean;
+  /** Whether the retry control is showing. */
+  retryVisible: boolean;
+  /** Retry control label, or null when absent. */
+  retryLabel: string | null;
+}
+
+/** Setup-form field values for filling (NEWFRONT-441, ADM-004/005). */
+export interface AdminSetupFields {
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  company?: string;
+  password?: string;
+  confirmPassword?: string;
+}
+
+/** Setup-form facts (NEWFRONT-441, ADM-004/005/006). */
+export interface AdminSetupFacts {
+  /** Current field values. */
+  values: { firstName: string; lastName: string; email: string; company: string };
+  /** Whether the password and confirm fields are currently shown as text. */
+  shown: { password: boolean; confirm: boolean };
+  /** Whether the submit control is disabled. */
+  submitDisabled: boolean;
+  /** Submit control label (busy state swaps it for a spinner). */
+  submitBusy: boolean;
+  /** Whether the telemetry opt-in is checked. */
+  telemetryChecked: boolean;
+  /** Whether the strength meter (fragments) is showing. */
+  strengthVisible: boolean;
+  /** Strength message text, or null when no message renders. */
+  strengthMessage: string | null;
+  /** Whether the confirm-mismatch hint is showing. */
+  mismatchVisible: boolean;
+  /** Top error banner text, or null when absent. */
+  bannerText: string | null;
+  /** Inline field error texts, or null when absent. */
+  inlineErrors: { email: string | null; password: string | null };
+}
+
+/** Sign-in-form facts (NEWFRONT-441, ADM-007/008). */
+export interface AdminSignInFacts {
+  /** Current email field value. */
+  email: string;
+  /** Whether the password field holds any value. */
+  passwordFilled: boolean;
+  /** Whether the password field is currently shown as text. */
+  passwordShown: boolean;
+  /** Whether the submit control is disabled. */
+  submitDisabled: boolean;
+  /** Whether the submit control shows its busy spinner. */
+  submitBusy: boolean;
+  /** Generic error banner text, or null when absent. */
+  genericBanner: string | null;
+  /** Mapped info banner facts, or null when absent. */
+  mappedBanner: { text: string; linkHref: string | null } | null;
+}
+
+/** Account-menu facts (NEWFRONT-441, ADM-010). */
+export interface AdminAccountMenuFacts {
+  /** Admin email as rendered, or null when absent. */
+  email: string | null;
+  /** Theme entry label, or null when absent. */
+  themeLabel: string | null;
+  /** Whether the sign-out entry is showing. */
+  signOutVisible: boolean;
+}
+
+/** 404-screen facts (NEWFRONT-441, ADM-011). */
+export interface AdminNotFoundFacts {
+  /** Whether the not-found illustration is showing. */
+  illustrationVisible: boolean;
+  /** Whether the explanatory message is showing. */
+  messageVisible: boolean;
+  /** Back-action label, or null when absent. */
+  actionLabel: string | null;
 }

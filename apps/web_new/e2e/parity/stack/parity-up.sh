@@ -44,6 +44,10 @@ export PARITY_ORACLE_PORT
 PARITY_ORACLE_PORT="${PARITY_ORACLE_PORT:-13000}"
 export PARITY_SEED_FILE
 PARITY_SEED_FILE="${PARITY_SEED_FILE:-$PARITY_DIR/.seed.json}"
+export PARITY_ORACLE_ADMIN_URL
+if [ -z "${PARITY_ORACLE_ADMIN_URL:-}" ]; then
+  PARITY_ORACLE_ADMIN_URL="$(printf '%s' "${PARITY_ORACLE_URL:-http://localhost:$PARITY_ORACLE_PORT}" | sed 's:/*$::')/god-mode"
+fi
 
 # Image builds are cache-aware (NEWFRONT-134): a rerun reuses every layer
 # unless the Dockerfile or its copied inputs changed, so the oracle
@@ -99,13 +103,22 @@ echo "[parity] oracle edition: $PARITY_ORACLE_EDITION"
 # Which build of the old app serves as the oracle. prod (default): the
 # production build behind nginx, far lighter on CPU and memory (see
 # oracle-prod in docker-compose.yml). dev: the dev server, as before.
+# The admin oracle follows the same switch (NEWFRONT-441), so one mode
+# selects both frontends and runs never mix a prod web oracle with a dev
+# admin oracle.
 export ORACLE_SERVICE
 ORACLE_SERVICE="oracle-prod"
 export ORACLE_UPSTREAM
 ORACLE_UPSTREAM="oracle-prod:3000"
+export ORACLE_ADMIN_SERVICE
+ORACLE_ADMIN_SERVICE="oracle-admin-prod"
+export ORACLE_ADMIN_UPSTREAM
+ORACLE_ADMIN_UPSTREAM="oracle-admin-prod:3000"
 if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then
   ORACLE_SERVICE="oracle"
   ORACLE_UPSTREAM="oracle:3000"
+  ORACLE_ADMIN_SERVICE="oracle-admin"
+  ORACLE_ADMIN_UPSTREAM="oracle-admin:3000"
 fi
 # The cloud edition serves its own oracle build; the mode knob above is
 # OSS-only (a cloud+dev combination already refused further up).
@@ -130,17 +143,17 @@ echo "[parity] checking host disk before the build"
 # first; one build call would not order them. (No flag array: empty-array
 # expansion trips `set -u` on the bash 3.2 macOS still ships.)
 if [ "$PARITY_REBUILD" = "1" ]; then
-  echo "[parity] rebuilding scratch images from zero (${PARITY_CONTAINER_PREFIX:-parity19}-$API_SERVICE, $ORACLE_SERVICE)"
+  echo "[parity] rebuilding scratch images from zero (${PARITY_CONTAINER_PREFIX:-parity19}-$API_SERVICE, $ORACLE_SERVICE, $ORACLE_ADMIN_SERVICE)"
   if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
     docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build --no-cache api
   fi
-  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build --no-cache "$API_SERVICE" "$ORACLE_SERVICE"
+  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build --no-cache "$API_SERVICE" "$ORACLE_SERVICE" "$ORACLE_ADMIN_SERVICE"
 else
-  echo "[parity] building scratch images (${PARITY_CONTAINER_PREFIX:-parity19}-$API_SERVICE, $ORACLE_SERVICE; cached unless inputs changed)"
+  echo "[parity] building scratch images (${PARITY_CONTAINER_PREFIX:-parity19}-$API_SERVICE, $ORACLE_SERVICE, $ORACLE_ADMIN_SERVICE; cached unless inputs changed)"
   if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
     docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build api
   fi
-  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build "$API_SERVICE" "$ORACLE_SERVICE"
+  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" build "$API_SERVICE" "$ORACLE_SERVICE" "$ORACLE_ADMIN_SERVICE"
 fi
 
 if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
@@ -149,12 +162,22 @@ if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
   # every service here is explicit — minio included, since it otherwise
   # rides along only via that depends_on. No worker: nothing in the cloud
   # area needs background fan-out.
-  echo "[parity] starting pg, redis, mq, minio, api-cloud, $ORACLE_SERVICE, proxy"
-  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" up -d --no-deps pg redis mq minio api-cloud "$ORACLE_SERVICE" proxy
+  echo "[parity] starting pg, redis, mq, minio, api-cloud, $ORACLE_SERVICE, $ORACLE_ADMIN_SERVICE, proxy"
+  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" up -d --no-deps pg redis mq minio api-cloud "$ORACLE_SERVICE" "$ORACLE_ADMIN_SERVICE" proxy
 else
-  echo "[parity] starting pg, redis, mq, api, worker, $ORACLE_SERVICE, proxy"
-  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" up -d pg redis mq api worker "$ORACLE_SERVICE" proxy
+  echo "[parity] starting pg, redis, mq, api, worker, $ORACLE_SERVICE, $ORACLE_ADMIN_SERVICE, proxy"
+  docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" up -d pg redis mq api worker "$ORACLE_SERVICE" "$ORACLE_ADMIN_SERVICE" proxy
 fi
+
+# Only one admin oracle may answer the shared `oracle-admin-upstream`
+# alias (see docker-compose.yml): stop the non-selected one, so a rerun
+# that switches PARITY_ORACLE_MODE never splits /god-mode traffic
+# between the dev server and the production build. Absent is fine.
+OTHER_ADMIN_SERVICE="oracle-admin"
+if [ "$ORACLE_ADMIN_SERVICE" = "oracle-admin" ]; then
+  OTHER_ADMIN_SERVICE="oracle-admin-prod"
+fi
+docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" --profile oracle-prod stop "$OTHER_ADMIN_SERVICE" > /dev/null 2>&1 || true
 
 # Inside a Pi Dash agent run the stack is torn down when the run ends (no-op
 # for a person's shell or CI; PARITY_KEEP_STACK=1 opts out).
@@ -220,7 +243,11 @@ WARM_BASE="http://localhost:$PARITY_ORACLE_PORT"
 export WARM_DEEP
 WARM_DEEP="$(echo "$SEED_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print('/%s/projects/%s/issues' % (d['workspaceSlug'], d['projectId']))" || echo "/")"
 export WARM_ROUTES
-WARM_ROUTES="/ $WARM_DEEP"
+# The admin console entry rides along (NEWFRONT-441): same proxy, the
+# /god-mode mount. The admin SPA answers its entry with the shell (a 2xx
+# carrying the loader, then setup or sign-in client-side), so a 2xx/3xx
+# here proves the whole mount — proxy route, upstream, basename — serves.
+WARM_ROUTES="/ $WARM_DEEP /god-mode/"
 if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
   WARM_ROUTES="/ /home /login"
 fi
@@ -251,3 +278,4 @@ fi
 echo "export PARITY_SEED_FILE='$PARITY_SEED_FILE'"
 echo "export PARITY_API_URL='$PARITY_API_URL'"
 echo "export PARITY_ORACLE_URL='$PARITY_ORACLE_URL'"
+echo "export PARITY_ORACLE_ADMIN_URL='$PARITY_ORACLE_ADMIN_URL'"

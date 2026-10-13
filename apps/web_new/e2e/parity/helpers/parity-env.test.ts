@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { seedFactsFromEnv } from "./api.js";
 import {
   parityApiUrl,
+  parityOracleAdminUrl,
   parityOracleUrl,
   PARITY_DEFAULT_PORTS,
   PARITY_DEFAULT_PROJECT,
@@ -145,6 +146,17 @@ describe("suite URL helpers", () => {
     expect(parityOracleUrl({ PARITY_NS: "257", PARITY_ORACLE_URL: "http://proxy:8080/" })).toBe("http://proxy:8080/");
     expect(parityApiUrl({ PARITY_API_URL: "http://api:9000" })).toBe("http://api:9000");
   });
+
+  it("mounts the admin oracle URL on the oracle origin under /god-mode (NEWFRONT-441)", () => {
+    expect(parityOracleAdminUrl({})).toBe("http://localhost:13000/god-mode");
+    expect(parityOracleAdminUrl({ PARITY_NS: "257" })).toBe("http://localhost:13057/god-mode");
+    // A trailing slash on the oracle URL still derives cleanly.
+    expect(parityOracleAdminUrl({ PARITY_ORACLE_URL: "http://proxy:8080//" })).toBe("http://proxy:8080/god-mode");
+    // An explicit admin URL wins over every derivation.
+    expect(parityOracleAdminUrl({ PARITY_NS: "257", PARITY_ORACLE_ADMIN_URL: "http://admin:3001/console/" })).toBe(
+      "http://admin:3001/console/"
+    );
+  });
 });
 
 describe("bash conformance (stack/parity-env.sh)", () => {
@@ -206,6 +218,10 @@ describe("bash conformance (stack/parity-env.sh)", () => {
     },
     // A quote in a free-form override exercises the bash single-quote escaper.
     { PARITY_PROJECT: "o'brien" },
+    // Admin mount (NEWFRONT-441): derivation, trailing-slash tolerance,
+    // and the explicit override.
+    { PARITY_NS: "257", PARITY_ORACLE_URL: "http://proxy:8080//" },
+    { PARITY_NS: "257", PARITY_ORACLE_ADMIN_URL: "http://admin:3001/console/" },
   ];
 
   for (const env of comparable) {
@@ -224,6 +240,7 @@ describe("bash conformance (stack/parity-env.sh)", () => {
       );
       expect(bash.values["PARITY_API_URL"]).toBe(parityApiUrl(env));
       expect(bash.values["PARITY_ORACLE_URL"]).toBe(parityOracleUrl(env));
+      expect(bash.values["PARITY_ORACLE_ADMIN_URL"]).toBe(parityOracleAdminUrl(env));
     });
   }
 

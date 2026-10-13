@@ -151,3 +151,14 @@ export function parityOracleUrl(env: Env): string {
 export function parityApiUrl(env: Env): string {
   return pick(env, "PARITY_API_URL") ?? `http://localhost:${resolveParityEnv(env).ports.api}`;
 }
+
+/**
+ * The admin-console oracle base URL (NEWFRONT-441): the /god-mode mount
+ * on the same proxy origin. Explicit PARITY_ORACLE_ADMIN_URL wins;
+ * otherwise the oracle URL with trailing slashes stripped plus
+ * /god-mode. Mirrors stack/parity-env.sh; parity-env.test.ts holds the
+ * two implementations to one behavior.
+ */
+export function parityOracleAdminUrl(env: Env): string {
+  return pick(env, "PARITY_ORACLE_ADMIN_URL") ?? `${parityOracleUrl(env).replace(/\/+$/, "")}/god-mode`;
+}

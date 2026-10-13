@@ -297,6 +297,60 @@ services:
     container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-cloud-prod
     mem_limit: 256m
     profiles: ["cloud"]
+  # The old admin console as an oracle (NEWFRONT-441). Same shape as
+  # `oracle`, but for apps/admin: the dev server, served through the
+  # proxy under /god-mode (see the Caddyfile), which mirrors the
+  # production topology (apps/proxy/Caddyfile.ce). The admin base path
+  # env bakes the same basename the app uses in production, so its
+  # router and asset URLs agree with the proxied path. Shares the
+  # PARITY_ORACLE_MODE switch with the web oracle (see parity-up.sh).
+  oracle-admin:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-admin
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-admin:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-admin
+    mem_limit: 2g
+    # Empty API base keeps API calls same-origin; the proxy routes them
+    # to Django. The admin base path must match the proxy's /god-mode
+    # mount, exactly like the production admin service.
+    environment:
+      VITE_API_BASE_URL: ""
+      VITE_ADMIN_BASE_PATH: "/god-mode"
+    # Listen on all interfaces so the proxy container can reach the
+    # server. Runs the router CLI directly instead of the app's dev
+    # script, whose baked-in port would otherwise collide with this one.
+    command: ["pnpm", "--filter=admin", "exec", "react-router", "dev", "--host", "0.0.0.0", "--port", "3000"]
+    depends_on:
+      - api
+    # Shared upstream name (see below): whichever admin oracle runs
+    # answers it, so the proxy needs no per-mode upstream variable —
+    # new variables do not cross hosts where docker runs behind an
+    # env-scrubbing sudo shim with a fixed allowlist, while the alias
+    # resolves on every host and in CI alike. parity-up.sh stops the
+    # non-selected admin oracle so the alias never splits traffic.
+    networks:
+      default:
+        aliases:
+          - oracle-admin-upstream
+
+  # The old admin console as a production build (the default admin
+  # oracle; select the dev server with PARITY_ORACLE_MODE=dev). Same
+  # code as `oracle-admin`, built by Dockerfile.oracle-admin-prod and
+  # served as static files by nginx on :3000. Behind a profile so a bare
+  # `docker compose up` never starts both admin oracles at once.
+  oracle-admin-prod:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-admin-prod
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-admin-prod:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-admin-prod
+    mem_limit: 512m
+    profiles: ["oracle-prod"]
+    networks:
+      default:
+        aliases:
+          - oracle-admin-upstream
 
   # Background task worker (NEWFRONT-115). The API queues mention
   # extraction, mention links and notifications as celery tasks; without a
@@ -382,8 +436,12 @@ services:
     # unset keeps the compose `live` service; a natively run live server
     # overrides with host.docker.internal:<port> (extra_hosts below resolves
     # it on Linux).
+    # ORACLE_ADMIN_UPSTREAM likewise for the /god-mode/* admin route
+    # (NEWFRONT-441): unset keeps the shared `oracle-admin-upstream`
+    # alias, which whichever admin oracle runs answers.
     environment:
       ORACLE_UPSTREAM: ${ORACLE_UPSTREAM:-oracle:3000}
+      ORACLE_ADMIN_UPSTREAM: ${ORACLE_ADMIN_UPSTREAM:-oracle-admin-upstream:3000}
       LIVE_UPSTREAM: ${LIVE_UPSTREAM:-live:3001}
     extra_hosts:
       - "host.docker.internal:host-gateway"

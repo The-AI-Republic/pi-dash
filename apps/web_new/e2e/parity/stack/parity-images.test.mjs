@@ -30,6 +30,8 @@ const EXPECTED_BUILT = new Map([
   ["api", "api"],
   ["oracle", "oracle"],
   ["oracle-prod", "oracle-prod"],
+  ["oracle-admin", "oracle-admin"],
+  ["oracle-admin-prod", "oracle-admin-prod"],
   ["worker", "api"],
   ["live", "live"],
   // Cloud edition (NEWFRONT-436): same rule — the overlay images are
