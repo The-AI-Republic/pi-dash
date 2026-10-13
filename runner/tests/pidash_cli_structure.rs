@@ -160,7 +160,7 @@ fn top_level_login_is_listed_in_help() {
 #[test]
 fn top_level_login_accepts_exactly_the_auth_login_flags() {
     // `pidash login` is an alias of `pidash auth login`; the two must share
-    // one arg struct so hidden flags (`--workspace`, `--device-code`) can't
+    // one arg struct so hidden flags (`--workspace`, `--device-code-stdin`) can't
     // drift apart.
     let cmd = Cli::command();
     let top = cmd.find_subcommand("login").expect("top-level login");
@@ -170,7 +170,7 @@ fn top_level_login_accepts_exactly_the_auth_login_flags() {
         .expect("`auth login` should still be registered");
     let ids = arg_ids(top);
     assert_eq!(ids, arg_ids(nested));
-    for id in ["url", "no_browser", "workspace", "device_code"] {
+    for id in ["url", "no_browser", "workspace", "device_code_stdin"] {
         assert!(ids.contains(&id.to_string()), "missing {id}: {ids:?}");
     }
 }
@@ -186,8 +186,7 @@ fn top_level_login_parses_every_flag() {
         "--no-browser",
         "--workspace",
         "acme",
-        "--device-code",
-        "DEV-123",
+        "--device-code-stdin",
     ])
     .expect("`pidash login` should accept every `auth login` flag");
     let Some(Command::Login(args)) = cli.command else {
@@ -196,21 +195,43 @@ fn top_level_login_parses_every_flag() {
     assert_eq!(args.url.as_deref(), Some("https://pidash.example.com"));
     assert!(args.no_browser);
     assert_eq!(args.workspace.as_deref(), Some("acme"));
-    assert_eq!(args.device_code.as_deref(), Some("DEV-123"));
+    assert!(args.device_code_stdin);
 }
 
 #[test]
 fn nested_auth_login_still_parses_desktop_invocation() {
-    // Mirrors desktop/src-tauri/src/pidash_cli.rs: `auth login --device-code`.
+    // Mirrors desktop/src-tauri/src/pidash_cli.rs (`login_invocation`).
     use pidash::cli::Command;
     use pidash::cli::auth::AuthCommand;
-    let cli = Cli::try_parse_from(["pidash", "auth", "login", "--device-code", "DEV-123"])
-        .expect("`pidash auth login --device-code` must keep parsing");
+    let cli = Cli::try_parse_from([
+        "pidash",
+        "auth",
+        "login",
+        "--no-browser",
+        "--url",
+        "https://pidash.example.com",
+        "--device-code-stdin",
+        "--workspace",
+        "acme",
+    ])
+    .expect("`pidash auth login --device-code-stdin` must keep parsing");
     let Some(Command::Auth(auth)) = cli.command else {
         panic!("expected Command::Auth, got {:?}", cli.command);
     };
     let AuthCommand::Login(args) = auth.command else {
         panic!("expected AuthCommand::Login");
     };
-    assert_eq!(args.device_code.as_deref(), Some("DEV-123"));
+    assert!(args.device_code_stdin);
+}
+
+#[test]
+fn device_code_is_never_accepted_on_argv() {
+    // An approved device code is a bearer credential and argv is visible in
+    // the process table, so there must be no flag that takes it as a value.
+    for flag in ["--device-code", "--device-code-stdin"] {
+        assert!(
+            Cli::try_parse_from(["pidash", "auth", "login", flag, "DEV-123"]).is_err(),
+            "`{flag} <CODE>` must not parse"
+        );
+    }
 }

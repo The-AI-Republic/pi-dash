@@ -10,9 +10,9 @@ import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { TIssueServiceType, TSubIssueOperations } from "@pi-dash/types";
 import { EIssueServiceType } from "@pi-dash/types";
-import { copyUrlToClipboard } from "@pi-dash/utils";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
+import { copyShareUrl } from "@/utils/share-url";
 
 export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSubIssueOperations => {
   // translation
@@ -30,7 +30,7 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
   const subIssueOperations: TSubIssueOperations = useMemo(
     () => ({
       copyLink: async (path) => {
-        await copyUrlToClipboard(path);
+        await copyShareUrl(path);
         setToast({
           type: TOAST_TYPE.SUCCESS,
           title: t("Link copied!"),

@@ -313,6 +313,14 @@ def claim_pending_for_new_session(
     claimed = 0
     while True:
         try:
+            # Deliberately NOT ``justid=True``: redis-py's JUSTID reply
+            # parser returns only the claimed-id list and drops the
+            # cursor, so ``result[0]`` would be the first claimed id
+            # rather than the next cursor. Feeding that back as
+            # ``start_id`` re-claims the same entry forever whenever the
+            # PEL is non-empty. Observed in prod 2026-10-04..06: ~180
+            # session-open threads spinning ~400 XAUTOCLAIM/s, pinning
+            # the API host at 100% CPU.
             result = client.xautoclaim(
                 name=sk,
                 groupname=gn,
@@ -320,22 +328,30 @@ def claim_pending_for_new_session(
                 min_idle_time=min_idle_ms,
                 start_id=cursor,
                 count=200,
-                justid=True,
             )
         except Exception:
             logger.exception("xautoclaim failed for runner %s", runner_id)
             return claimed
         if not result:
             return claimed
-        # xautoclaim returns (next_cursor, claimed_ids[, deleted_ids])
+        # xautoclaim returns (next_cursor, claimed_entries[, deleted_ids])
         next_cursor = result[0]
-        claimed_ids = result[1] if len(result) > 1 else []
+        claimed_entries = result[1] if len(result) > 1 else []
         if isinstance(next_cursor, bytes):
             next_cursor = next_cursor.decode()
-        claimed += len(claimed_ids)
+        claimed += len(claimed_entries)
         if next_cursor == "0-0":
             if old_consumer:
                 delete_consumer(runner_id, old_consumer, client=client)
+            return claimed
+        if next_cursor == cursor:
+            # A cursor that does not advance can never terminate the
+            # scan; bail rather than spin on Redis.
+            logger.error(
+                "xautoclaim cursor did not advance for runner %s cursor=%s",
+                runner_id,
+                cursor,
+            )
             return claimed
         cursor = next_cursor
 
