@@ -20,6 +20,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const composeFile = join(here, "docker-compose.yml");
 const caddyFile = join(here, "Caddyfile");
 const upScript = join(here, "parity-up.sh");
+const downScript = join(here, "parity-down.sh");
 const cloudLib = join(here, "lib", "parity-cloud.sh");
 const apiDockerfile = join(here, "Dockerfile.api-cloud");
 const oracleDockerfile = join(here, "Dockerfile.oracle-cloud-prod");
@@ -221,6 +222,28 @@ describe("cloud oracle stack (NEWFRONT-436)", () => {
       text.includes("up -d --no-deps pg redis mq minio api-cloud"),
       "cloud up names every service and skips OSS deps"
     );
+    assert.ok(text.includes("up -d pg redis mq api worker"), "the OSS up line keeps its exact service list");
+    // api-cloud layers on the OSS api image, so both build paths (cached
+    // and --rebuild) build the base api first; one call would not order
+    // them. The trailing newline keeps "build api" from matching the
+    // api-cloud service builds further down.
+    assert.ok(text.includes("build --no-cache api\n"), "the rebuild path builds the base api before the cloud images");
+    assert.ok(text.includes("build api\n"), "the cached path builds the base api before the cloud images");
+    // The stack dir sits 5 levels deep, so the repo root climbs five
+    // (same off-by-one family as D1).
+    assert.ok(
+      text.includes('REPO_ROOT="$(cd "$STACK_DIR/../../../../.."'),
+      "the repo root climbs five levels to the checkout root"
+    );
+    assert.ok(
+      text.includes('SEED_SCRIPT="$STACK_DIR/seed/seed_cloud.py"'),
+      "cloud bring-up seeds through the cloud seed script"
+    );
+    assert.ok(text.includes('SEED_LABEL="cloud"'), "cloud bring-up labels its seed output");
+    assert.ok(
+      text.includes("export PARITY_ORACLE_EDITION='cloud'"),
+      "the suite env re-exports the cloud edition for specs"
+    );
     // The oracle-build gate's anchors survive the edition work.
     assert.ok(text.includes("--rebuild"), "the no-cache escape hatch stays");
     assert.ok(text.includes("warming the oracle"), "the warm-up step stays");
@@ -240,6 +263,40 @@ describe("cloud oracle stack (NEWFRONT-436)", () => {
   it("ignores the overlay staging directory", () => {
     const text = readFileSync(webNewGitignore, "utf8");
     assert.ok(text.includes("e2e/parity/stack/.cloud-staging/"), "staged overlay files must never commit");
+  });
+
+  it("drops the overlay staging on teardown, tolerating its absence", () => {
+    const text = readFileSync(downScript, "utf8");
+    assert.ok(
+      text.includes('if [ -f "$STACK_DIR/lib/parity-cloud.sh" ]; then'),
+      "teardown guards on the cloud helper surviving"
+    );
+    assert.ok(
+      text.includes("parity_cloud_clean_staging || true"),
+      "teardown drops the staging best-effort (OSS stacks never create it)"
+    );
+    // The helper itself: removes a populated staging tree, and exits 0
+    // with nothing staged.
+    const stack = mkdtempSync(join(tmpdir(), "parity-cloud-clean-"));
+    try {
+      mkdirSync(join(stack, ".cloud-staging", "pi_dash_cloud"), { recursive: true });
+      writeFileSync(join(stack, ".cloud-staging", "pi_dash_cloud", "marker.py"), "# staged\n");
+      const env = { ...process.env, STACK_DIR: stack };
+      execFileSync("bash", ["-c", `. "${cloudLib}" && parity_cloud_clean_staging`], {
+        env,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      assert.ok(!existsSync(join(stack, ".cloud-staging")), "clean must remove a populated staging tree");
+      execFileSync("bash", ["-c", `. "${cloudLib}" && parity_cloud_clean_staging`], {
+        env,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      assert.ok(!existsSync(join(stack, ".cloud-staging")), "clean must tolerate an absent staging tree");
+    } finally {
+      rmSync(stack, { recursive: true, force: true });
+    }
   });
 
   it("refuses an unknown edition without touching docker", () => {
