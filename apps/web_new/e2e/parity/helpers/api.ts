@@ -20512,3 +20512,186 @@ export async function cloudSignOutServer(
   const payload = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   return { status: res.status, setCookies: setCookieHeaders(res), payload };
 }
+
+// --- Cloud Apps catalog server reads (NEWFRONT-439, CLOUD-021..031). ---
+// Appended; existing helpers above are untouched per the shared harness
+// contract. Raw (non-throwing) reads of the openhub proxy endpoints plus
+// cloud member provisioning, so Apps scenarios assert live server state
+// (what Django answers itself, with no gateway behind scratch) alongside
+// what the driver sees in the browser.
+
+/** Raw openhub answer: the HTTP status plus the decoded JSON payload. */
+export interface CloudOpenhubAnswer {
+  status: number;
+  payload: Record<string, unknown>;
+}
+
+async function cloudOpenhubRaw(
+  path: string,
+  sessionCookie: string,
+  init: RequestInit = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudOpenhubAnswer> {
+  const res = await fetchTolerant(`${apiBase}${path}`, {
+    ...init,
+    headers: { ...(init.headers ?? {}), cookie: sessionCookie },
+  });
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = (await res.json()) as Record<string, unknown>;
+  } catch {
+    payload = {};
+  }
+  return { status: res.status, payload };
+}
+
+/** Live openhub status probe (200 with connected:false behind scratch). */
+export async function cloudOpenhubStatusRaw(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudOpenhubAnswer> {
+  return cloudOpenhubRaw(`/api/openhub/status/`, sessionCookie, {}, apiBase);
+}
+
+/** Live marketplace read (taxonomy failure behind scratch, no gateway). */
+export async function cloudMarketplaceRaw(
+  sessionCookie: string,
+  query: string = "limit=24",
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudOpenhubAnswer> {
+  return cloudOpenhubRaw(`/api/openhub/apps/marketplace/?${query}`, sessionCookie, {}, apiBase);
+}
+
+/** Live install attempt (taxonomy failure behind scratch, no gateway). */
+export async function cloudInstallRaw(
+  sessionCookie: string,
+  appId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudOpenhubAnswer> {
+  return cloudOpenhubRaw(
+    `/api/openhub/apps/${encodeURIComponent(appId)}/install/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) },
+    apiBase
+  );
+}
+
+/** Live per-app auth-status read (taxonomy failure behind scratch). */
+export async function cloudAuthStatusRaw(
+  sessionCookie: string,
+  appId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudOpenhubAnswer> {
+  return cloudOpenhubRaw(`/api/openhub/apps/${encodeURIComponent(appId)}/auth/status/`, sessionCookie, {}, apiBase);
+}
+
+/** Live OAuth begin handoff without following the redirect. */
+export async function cloudOAuthBeginRaw(
+  sessionCookie: string,
+  appId: string,
+  returnPath: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; location: string }> {
+  const res = await fetchTolerant(
+    `${apiBase}/api/openhub/apps/${encodeURIComponent(appId)}/auth/oauth/begin/?return_path=${encodeURIComponent(returnPath)}`,
+    { headers: { cookie: sessionCookie }, redirect: "manual" }
+  );
+  return { status: res.status, location: res.headers.get("location") ?? "" };
+}
+
+/** Live credential submit (validates fields before any gateway call). */
+export async function cloudApiKeyRaw(
+  sessionCookie: string,
+  appId: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudOpenhubAnswer> {
+  return cloudOpenhubRaw(
+    `/api/openhub/apps/${encodeURIComponent(appId)}/auth/api-key/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    apiBase
+  );
+}
+
+/** Live icon-proxy read (validates shape before fetching). */
+export async function cloudIconRaw(
+  sessionCookie: string,
+  iconUrl: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; contentType: string }> {
+  const res = await fetchTolerant(`${apiBase}/api/openhub/apps/icon/?url=${encodeURIComponent(iconUrl)}`, {
+    headers: { cookie: sessionCookie },
+  });
+  return { status: res.status, contentType: res.headers.get("content-type") ?? "" };
+}
+
+/** Live profile-settings read (the agent-tools flag lives here). */
+export async function cloudProfileRaw(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudOpenhubAnswer> {
+  return cloudOpenhubRaw(`/api/users/me/profile/`, sessionCookie, {}, apiBase);
+}
+
+/** Live profile-settings write (namespaced merge, per-setting keys). */
+export async function cloudProfilePatchRaw(
+  sessionCookie: string,
+  body: Record<string, unknown>,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudOpenhubAnswer> {
+  return cloudOpenhubRaw(
+    `/api/users/me/profile/`,
+    sessionCookie,
+    { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    apiBase
+  );
+}
+
+/**
+ * Mark a cloud user onboarded through the app's own endpoint. The cloud
+ * REST APIs are CSRF-exempt and the call is idempotent, so provisioning
+ * converges by calling it unconditionally (no apiShell: stack helpers
+ * target the OSS api container, not api-cloud).
+ */
+export async function cloudCompleteOnboarding(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetchTolerant(`${apiBase}/api/users/me/onboard/`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", cookie: sessionCookie },
+    body: JSON.stringify({ is_onboarded: true }),
+  });
+  if (!res.ok) throw new Error(`[parity] cloud onboard PATCH failed with HTTP ${res.status}.`);
+}
+
+/**
+ * Provision a workspace member on the cloud oracle: dev-login anchors the
+ * user by email (idempotent), then invite + join unless already a member,
+ * then onboard. Convergent across retries: every step is a no-op when its
+ * outcome already holds. The caller keeps the user (user rows belong to
+ * the scratch stack and vanish with it).
+ */
+export async function cloudProvisionWorkspaceMember(
+  workspaceSlug: string,
+  email: string,
+  role: number,
+  ownerCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<CloudSession> {
+  const session = await cloudDevLogin(email, undefined, apiBase);
+  const members = await serverWorkspaceMembers(workspaceSlug, ownerCookie, apiBase);
+  if (!members.some((row) => row.userId === session.userId)) {
+    // A retry may find the invite already pending (join never ran): the
+    // re-invite then fails, which is fine — the pending row below is the
+    // convergence point, not the POST.
+    await inviteWorkspaceMember(workspaceSlug, ownerCookie, email, role, apiBase).catch(() => undefined);
+    const invites = await listWorkspaceInvites(workspaceSlug, ownerCookie, apiBase);
+    const invite = invites.find((row) => row.email === email);
+    if (invite === undefined) throw new Error(`[parity] cloud invite for ${email} left no pending row.`);
+    await joinWorkspace(workspaceSlug, invite.id, invite.token, session.cookie, apiBase);
+  }
+  await cloudCompleteOnboarding(session.cookie, apiBase);
+  return session;
+}

@@ -212,6 +212,8 @@ import type {
   SpacePickedEmoji,
   SpaceReactionGroup,
   SpaceVoteState,
+  CloudAppsCardFacts,
+  CloudAppsDialogFieldFacts,
   CloudCliCardFacts,
   CloudDocsFacts,
   CloudDownloadCardFacts,
@@ -53816,5 +53818,340 @@ export class WebDriver implements ParityDriver {
       if (await this.isShown(root.getByRole("heading", { name: heading }).first())) return true;
     }
     return false;
+  }
+
+  // --- Cloud Apps catalog (NEWFRONT-439, CLOUD-021–031). Appended;
+  // --- existing methods above are untouched per the shared driver
+  // --- contract. Observed on the running cloud oracle: the Apps page
+  // --- mounts the workspace shell with the catalog as its content; the
+  // --- shell nests mains and renders two asides, so reads scope to the
+  // --- innermost main and the on-canvas sidebar.
+
+  /** Innermost main: the Apps content (the shell nests mains two deep). */
+  private cloudAppsMain(): Locator {
+    return this.page.locator("main main").last();
+  }
+
+  /** Mounted workspace sidebar (the peek twin carries no id). */
+  private async cloudAppsAside(): Promise<Locator> {
+    const mounted = this.page.locator("#main-sidebar");
+    if ((await mounted.count()) > 0) return mounted;
+    const asides = this.page.locator("aside");
+    const count = await asides.count();
+    for (let index = 0; index < count; index++) {
+      const box = await asides
+        .nth(index)
+        .boundingBox()
+        .catch(() => null);
+      if (box !== null && box.x >= 0 && box.width > 0) return asides.nth(index);
+    }
+    return asides.first();
+  }
+
+  private async cloudAppsSidebarLink(): Promise<Locator> {
+    const aside = await this.cloudAppsAside();
+    return aside.locator('a:has-text("Apps")').first();
+  }
+
+  async cloudAppsSidebarHref(): Promise<string | null> {
+    const link = await this.cloudAppsSidebarLink();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href");
+  }
+
+  async cloudAppsSidebarIconPresent(): Promise<boolean> {
+    const link = await this.cloudAppsSidebarLink();
+    if ((await link.count()) === 0) return false;
+    return (await link.locator("svg").count()) > 0;
+  }
+
+  async cloudAppsOpenFromSidebar(): Promise<void> {
+    const link = await this.cloudAppsSidebarLink();
+    await link.click({ timeout: WebDriver.actionTimeout });
+    await this.cloudAppsMain().getByRole("heading", { name: "Apps" }).first().waitFor({
+      timeout: WebDriver.WAIT_MS,
+    });
+  }
+
+  async cloudAppsIntroText(): Promise<string> {
+    const main = this.cloudAppsMain();
+    const text = (
+      (await main
+        .locator("h1 + p")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return text.replace(/\s+/g, " ");
+  }
+
+  private cloudAppsSearchBox(): Locator {
+    return this.cloudAppsMain().locator('input[placeholder*="Search"]').first();
+  }
+
+  async cloudAppsSearchFill(value: string): Promise<void> {
+    await this.cloudAppsSearchBox().fill(value, { timeout: WebDriver.actionTimeout });
+  }
+
+  async cloudAppsSearchTypeText(text: string): Promise<void> {
+    const box = this.cloudAppsSearchBox();
+    await box.click({ timeout: WebDriver.actionTimeout });
+    await box.pressSequentially(text, { delay: 50, timeout: WebDriver.actionTimeout });
+  }
+
+  async cloudAppsSearchValue(): Promise<string> {
+    return this.cloudAppsSearchBox()
+      .inputValue()
+      .catch(() => "");
+  }
+
+  async cloudAppsSearchVisible(): Promise<boolean> {
+    return this.cloudAppsSearchBox()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  private cloudAppsGrid(): Locator {
+    return this.cloudAppsMain().locator("div.grid").first();
+  }
+
+  private async cloudAppsCard(name: string): Promise<Locator> {
+    return this.cloudAppsGrid().locator(":scope > div").filter({ hasText: name }).first();
+  }
+
+  async cloudAppsCardNames(): Promise<string[]> {
+    const cards = this.cloudAppsGrid().locator(":scope > div");
+    const count = await cards.count();
+    const out: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const title = cards.nth(index).locator("span.truncate").first();
+      if ((await title.count()) === 0) continue;
+      out.push(((await title.innerText().catch(() => "")) ?? "").trim());
+    }
+    return out;
+  }
+
+  async cloudAppsCards(): Promise<CloudAppsCardFacts[]> {
+    const cards = this.cloudAppsGrid().locator(":scope > div");
+    const count = await cards.count();
+    const out: CloudAppsCardFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const card = cards.nth(index);
+      const title = card.locator("span.truncate").first();
+      const name = ((await title.innerText().catch(() => "")) ?? "").trim();
+      if (name === "") continue;
+      let badge: CloudAppsCardFacts["badge"] = null;
+      if ((await card.getByText("Needs connection", { exact: true }).count()) > 0) badge = "needs-connection";
+      else if ((await card.getByText("Installed", { exact: true }).count()) > 0) badge = "installed";
+      const actions = (await card.getByRole("button").allInnerTexts()).map((label) => label.trim());
+      const img = card.locator("img").first();
+      let icon: CloudAppsCardFacts["icon"] = "letter";
+      if ((await img.count()) > 0) {
+        const src = (await img.getAttribute("src")) ?? "";
+        icon = src.startsWith("data:") ? "inline" : "proxied";
+      }
+      const tile = card.locator("div.relative").first();
+      const letter = ((await tile.innerText().catch(() => "")) ?? "").trim();
+      out.push({ name, badge, actions, icon, letter });
+    }
+    return out;
+  }
+
+  async cloudAppsClickCardAction(name: string, action: "Install" | "Connect" | "Uninstall"): Promise<void> {
+    const card = await this.cloudAppsCard(name);
+    await card.getByRole("button", { name: action, exact: true }).click({ timeout: WebDriver.actionTimeout });
+  }
+
+  async cloudAppsCardActionDisabled(name: string, action: "Install" | "Connect" | "Uninstall"): Promise<boolean> {
+    const card = await this.cloudAppsCard(name);
+    const button = card.getByRole("button", { name: action, exact: true });
+    if ((await button.count()) === 0) return false;
+    return button.isDisabled().catch(() => false);
+  }
+
+  async cloudAppsNextPage(): Promise<void> {
+    await this.cloudAppsMain()
+      .getByRole("button", { name: "Next", exact: true })
+      .click({ timeout: WebDriver.actionTimeout });
+  }
+
+  async cloudAppsPrevPage(): Promise<void> {
+    await this.cloudAppsMain()
+      .getByRole("button", { name: "Previous", exact: true })
+      .click({ timeout: WebDriver.actionTimeout });
+  }
+
+  async cloudAppsPageIndicator(): Promise<string | null> {
+    const main = this.cloudAppsMain();
+    const indicator = main.getByText(/^Page \d+$/).first();
+    if ((await indicator.count()) === 0) return null;
+    return ((await indicator.innerText().catch(() => "")) ?? "").trim() || null;
+  }
+
+  async cloudAppsPagerVisible(): Promise<boolean> {
+    const main = this.cloudAppsMain();
+    const next = main.getByRole("button", { name: "Next", exact: true });
+    if ((await next.count()) === 0) return false;
+    return next.isVisible().catch(() => false);
+  }
+
+  private cloudAppsDialog(): Locator {
+    return this.page.locator("div.fixed.inset-0").last();
+  }
+
+  async cloudAppsDialogVisible(): Promise<boolean> {
+    const dialog = this.cloudAppsDialog();
+    if ((await dialog.count()) === 0) return false;
+    return dialog.isVisible().catch(() => false);
+  }
+
+  async cloudAppsDialogTitle(): Promise<string | null> {
+    const dialog = this.cloudAppsDialog();
+    const heading = dialog.getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.innerText().catch(() => "")) ?? "").trim() || null;
+  }
+
+  async cloudAppsDialogFields(): Promise<CloudAppsDialogFieldFacts[]> {
+    const dialog = this.cloudAppsDialog();
+    const labels = dialog.locator("label");
+    const count = await labels.count();
+    const out: CloudAppsDialogFieldFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const label = labels.nth(index);
+      const text = (
+        (await label
+          .locator("span")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const input = label.locator("input").first();
+      const inputType = (await input.getAttribute("type").catch(() => null)) ?? "";
+      const placeholder = (await input.getAttribute("placeholder").catch(() => null)) ?? "";
+      out.push({ label: text, inputType, placeholder });
+    }
+    return out;
+  }
+
+  async cloudAppsDialogInstructions(): Promise<string | null> {
+    const dialog = this.cloudAppsDialog();
+    // Publisher instructions render as plain pre-wrapped text above the
+    // fields — never as markup, so innerText is the assertion surface.
+    const paragraphs = dialog.locator("p");
+    const count = await paragraphs.count();
+    for (let index = 0; index < count; index++) {
+      const text = (
+        (await paragraphs
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "" && !text.startsWith("Your credential")) return text;
+    }
+    return null;
+  }
+
+  async cloudAppsDialogSetupHref(): Promise<string | null> {
+    const dialog = this.cloudAppsDialog();
+    const link = dialog.locator("a").first();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href");
+  }
+
+  async cloudAppsDialogFill(label: string, value: string): Promise<void> {
+    const dialog = this.cloudAppsDialog();
+    const field = dialog.locator("label").filter({ hasText: label }).first().locator("input").first();
+    await field.fill(value, { timeout: WebDriver.actionTimeout });
+  }
+
+  async cloudAppsDialogSubmit(): Promise<void> {
+    const dialog = this.cloudAppsDialog();
+    await dialog.getByRole("button", { name: "Connect", exact: true }).click({
+      timeout: WebDriver.actionTimeout,
+    });
+  }
+
+  async cloudAppsDialogCancel(): Promise<void> {
+    const dialog = this.cloudAppsDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({
+      timeout: WebDriver.actionTimeout,
+    });
+  }
+
+  async cloudAppsDialogErrors(): Promise<string[]> {
+    const dialog = this.cloudAppsDialog();
+    const labels = dialog.locator("label");
+    const count = await labels.count();
+    const out: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const spans = labels.nth(index).locator("span");
+      const spanCount = await spans.count();
+      for (let inner = 1; inner < spanCount; inner++) {
+        const text = (
+          (await spans
+            .nth(inner)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+        if (text !== "") out.push(text);
+      }
+    }
+    return out;
+  }
+
+  private cloudAppsToggleSwitch(): Locator {
+    return this.cloudAppsMain().locator('[role="switch"]').first();
+  }
+
+  async cloudAppsToggleState(): Promise<boolean | null> {
+    const toggle = this.cloudAppsToggleSwitch();
+    if ((await toggle.count()) === 0) return null;
+    return (await toggle.getAttribute("aria-checked")) === "true";
+  }
+
+  async cloudAppsToggleText(): Promise<string> {
+    const toggle = this.cloudAppsToggleSwitch();
+    const panel = toggle.locator("xpath=ancestor::div[./div][1]/..").first();
+    if ((await panel.count()) === 0) return "";
+    return ((await panel.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  async cloudAppsToggle(): Promise<void> {
+    await this.cloudAppsToggleSwitch().click({ timeout: WebDriver.actionTimeout });
+  }
+
+  async cloudAppsBodyText(): Promise<string> {
+    const main = this.cloudAppsMain();
+    return ((await main.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  async cloudAppsCatalogVisible(): Promise<boolean> {
+    const grid = this.cloudAppsGrid();
+    if ((await grid.count()) === 0) return false;
+    return (await grid.locator(":scope > div").count()) > 0;
+  }
+
+  async cloudAppsClickRetry(): Promise<void> {
+    await this.cloudAppsMain()
+      .getByRole("button", { name: "Retry", exact: true })
+      .click({ timeout: WebDriver.actionTimeout });
+  }
+
+  async cloudAppsSidebarCreateOpensDialog(): Promise<boolean> {
+    // The command-palette provider proof: without it the sidebar create
+    // control is inert on this route (the layout mounts the provider for
+    // exactly this reason).
+    const aside = await this.cloudAppsAside();
+    const create = aside.getByRole("button", { name: "New work item", exact: true }).first();
+    if ((await create.count()) === 0) return false;
+    await create.click({ timeout: WebDriver.actionTimeout });
+    const title = this.page.getByPlaceholder("Title").first();
+    try {
+      await title.waitFor({ timeout: WebDriver.WAIT_MS });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
