@@ -8194,6 +8194,91 @@ export interface ParityDriver {
   spaceAccessLandingView(): Promise<"auth" | "signed-in" | "other">;
   /** Document head metadata facts for the current page (SPC-007, SPC-008). */
   spaceAccessHeadFacts(): Promise<SpaceAccessHeadFacts>;
+  // --- Space filters + peek shell (NEWFRONT-450, SPC-034–046). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+
+  // --- Space filters (NEWFRONT-450, SPC-034–039). ---
+  /** Open the board's Filters panel; resolves once the panel is visible. */
+  spaceFiltersOpenPanel(): Promise<void>;
+  /** True while the Filters panel is open. */
+  spaceFiltersPanelOpen(): Promise<boolean>;
+  /** Facet section titles the open panel offers, in display order. */
+  spaceFiltersFacetNames(): Promise<string[]>;
+  /** Type into the panel's option search box. */
+  spaceFiltersSearchPanel(query: string): Promise<void>;
+  /** Priority option rows the panel currently shows (after any search narrowing). */
+  spaceFiltersPriorityOptions(): Promise<Array<{ name: string; checked: boolean }>>;
+  /** State option rows the panel currently shows (after any search narrowing). */
+  spaceFiltersStateOptions(): Promise<Array<{ name: string; checked: boolean }>>;
+  /** Pick a priority option by its displayed name. */
+  spaceFiltersPickPriority(name: string): Promise<void>;
+  /** Pick a state option by its displayed name. */
+  spaceFiltersPickState(name: string): Promise<void>;
+  /** True when the panel shows its no-matches empty text. */
+  spaceFiltersNoMatchesVisible(): Promise<boolean>;
+  /** Search boxes currently visible on the board (panel search included). */
+  spaceFiltersSearchBoxCount(): Promise<number>;
+  /** Switch the board to another layout through the layout switcher. */
+  spaceFiltersSwitchLayout(layout: "list" | "kanban"): Promise<void>;
+  /** Facets on the applied strip: each facet key plus its pill values (empty when the facet renders a bare shell). */
+  spaceFiltersAppliedFacets(): Promise<Array<{ facet: string; values: string[] }>>;
+  /** True while the applied-filters strip renders above the board. */
+  spaceFiltersAppliedStripVisible(): Promise<boolean>;
+  /** Remove one applied value pill. */
+  spaceFiltersRemoveValue(facet: string, value: string): Promise<void>;
+  /** Clear one facet through its facet-level remove control. */
+  spaceFiltersClearFacet(facet: string): Promise<void>;
+  /** Clear every applied filter through the strip's clear-all control. */
+  spaceFiltersClearAll(): Promise<void>;
+  /** Issue titles currently rendered on the board, in display order. */
+  spaceFiltersVisibleIssueNames(): Promise<string[]>;
+  /** Start recording public-issues fetch URLs the page issues. */
+  spaceFiltersBeginFetchWatch(): Promise<void>;
+  /** Query strings of the recorded public-issues fetches, in order. */
+  spaceFiltersFetchQueries(): Promise<string[]>;
+  /** Stop the fetch watch and detach its listener. */
+  spaceFiltersEndFetchWatch(): Promise<void>;
+
+  // --- Space peek shell (NEWFRONT-450, SPC-040–046). ---
+  /** True while the issue overlay is open. */
+  spacePeekOpen(): Promise<boolean>;
+  /** Current overlay presentation; call only while the overlay is open. */
+  spacePeekMode(): Promise<"side" | "modal" | "full">;
+  /** Switch the open overlay to another presentation; resolves once it renders. */
+  spacePeekSwitchMode(mode: "side" | "modal" | "full"): Promise<void>;
+  /** Close the overlay; Escape works in every presentation, the header control only in side view, the backdrop only in modal/full. */
+  spacePeekClose(via?: "header" | "backdrop" | "escape"): Promise<void>;
+  /** Public key line the overlay shows (e.g. "PAR-12"), or null when closed. */
+  spacePeekKey(): Promise<string | null>;
+  /** Issue title the overlay shows, or null when closed. */
+  spacePeekTitle(): Promise<string | null>;
+  /** True when the overlay renders a description block. */
+  spacePeekDescriptionVisible(): Promise<boolean>;
+  /** Rendered description text, or null when no description block shows. */
+  spacePeekDescriptionText(): Promise<string | null>;
+  /** Raw markup of the rendered description block, or null when none shows. */
+  spacePeekDescriptionHtml(): Promise<string | null>;
+  /** True when the rendered description block is user-editable. */
+  spacePeekDescriptionEditable(): Promise<boolean>;
+  /** Property rows the overlay shows, or null when closed. */
+  spacePeekProperties(): Promise<{
+    state: string;
+    priority: string;
+    dueDate: string | null;
+    dueDateEmphasised: boolean;
+  } | null>;
+  /** True when the overlay mounts its activity (comments) section. */
+  spacePeekActivityVisible(): Promise<boolean>;
+  /** True when the overlay header offers a copy-link action. */
+  spacePeekCopyLinkVisible(): Promise<boolean>;
+  /** Click the header copy-link action (arranges clipboard permission first). */
+  spacePeekCopyLink(): Promise<void>;
+  /** Current clipboard text (arranges read permission first). */
+  spacePeekReadClipboard(): Promise<string>;
+  /** Most recently shown notice, if any is still visible. */
+  spacePeekLastNotice(): Promise<{ title: string; message: string } | null>;
+  /** True while the open overlay shows skeleton placeholders instead of content. */
+  spacePeekSkeletonsVisible(): Promise<boolean>;
 }
 
 /** One list group / board column as rendered (NEWFRONT-449, SPC-023/024/026). */

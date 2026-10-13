@@ -14208,4 +14208,126 @@ export class WebNewDriver implements ParityDriver {
   async spaceAccessHeadFacts(): Promise<SpaceAccessHeadFacts> {
     return todo("spaceAccessHeadFacts");
   }
+
+  // --- Space filters + peek shell (NEWFRONT-450, SPC-034–046).
+  // --- Throwing stubs per the shared driver contract.
+  // --- Space filters (NEWFRONT-450, SPC-034–039). ---
+  async spaceFiltersOpenPanel(): Promise<void> {
+    return todo("spaceFiltersOpenPanel");
+  }
+  async spaceFiltersPanelOpen(): Promise<boolean> {
+    return todo("spaceFiltersPanelOpen");
+  }
+  async spaceFiltersFacetNames(): Promise<string[]> {
+    return todo("spaceFiltersFacetNames");
+  }
+  async spaceFiltersSearchPanel(_query: string): Promise<void> {
+    return todo("spaceFiltersSearchPanel");
+  }
+  async spaceFiltersPriorityOptions(): Promise<Array<{ name: string; checked: boolean }>> {
+    return todo("spaceFiltersPriorityOptions");
+  }
+  async spaceFiltersStateOptions(): Promise<Array<{ name: string; checked: boolean }>> {
+    return todo("spaceFiltersStateOptions");
+  }
+  async spaceFiltersPickPriority(_name: string): Promise<void> {
+    return todo("spaceFiltersPickPriority");
+  }
+  async spaceFiltersPickState(_name: string): Promise<void> {
+    return todo("spaceFiltersPickState");
+  }
+  async spaceFiltersNoMatchesVisible(): Promise<boolean> {
+    return todo("spaceFiltersNoMatchesVisible");
+  }
+  async spaceFiltersSearchBoxCount(): Promise<number> {
+    return todo("spaceFiltersSearchBoxCount");
+  }
+  async spaceFiltersSwitchLayout(_layout: "list" | "kanban"): Promise<void> {
+    return todo("spaceFiltersSwitchLayout");
+  }
+  async spaceFiltersAppliedFacets(): Promise<Array<{ facet: string; values: string[] }>> {
+    return todo("spaceFiltersAppliedFacets");
+  }
+  async spaceFiltersAppliedStripVisible(): Promise<boolean> {
+    return todo("spaceFiltersAppliedStripVisible");
+  }
+  async spaceFiltersRemoveValue(_facet: string, _value: string): Promise<void> {
+    return todo("spaceFiltersRemoveValue");
+  }
+  async spaceFiltersClearFacet(_facet: string): Promise<void> {
+    return todo("spaceFiltersClearFacet");
+  }
+  async spaceFiltersClearAll(): Promise<void> {
+    return todo("spaceFiltersClearAll");
+  }
+  async spaceFiltersVisibleIssueNames(): Promise<string[]> {
+    return todo("spaceFiltersVisibleIssueNames");
+  }
+  async spaceFiltersBeginFetchWatch(): Promise<void> {
+    return todo("spaceFiltersBeginFetchWatch");
+  }
+  async spaceFiltersFetchQueries(): Promise<string[]> {
+    return todo("spaceFiltersFetchQueries");
+  }
+  async spaceFiltersEndFetchWatch(): Promise<void> {
+    return todo("spaceFiltersEndFetchWatch");
+  }
+
+  // --- Space peek shell (NEWFRONT-450, SPC-040–046). ---
+  async spacePeekOpen(): Promise<boolean> {
+    return todo("spacePeekOpen");
+  }
+  async spacePeekMode(): Promise<"side" | "modal" | "full"> {
+    return todo("spacePeekMode");
+  }
+  async spacePeekSwitchMode(_mode: "side" | "modal" | "full"): Promise<void> {
+    return todo("spacePeekSwitchMode");
+  }
+  async spacePeekClose(_via?: "header" | "backdrop" | "escape"): Promise<void> {
+    return todo("spacePeekClose");
+  }
+  async spacePeekKey(): Promise<string | null> {
+    return todo("spacePeekKey");
+  }
+  async spacePeekTitle(): Promise<string | null> {
+    return todo("spacePeekTitle");
+  }
+  async spacePeekDescriptionVisible(): Promise<boolean> {
+    return todo("spacePeekDescriptionVisible");
+  }
+  async spacePeekDescriptionText(): Promise<string | null> {
+    return todo("spacePeekDescriptionText");
+  }
+  async spacePeekDescriptionHtml(): Promise<string | null> {
+    return todo("spacePeekDescriptionHtml");
+  }
+  async spacePeekDescriptionEditable(): Promise<boolean> {
+    return todo("spacePeekDescriptionEditable");
+  }
+  async spacePeekProperties(): Promise<{
+    state: string;
+    priority: string;
+    dueDate: string | null;
+    dueDateEmphasised: boolean;
+  } | null> {
+    return todo("spacePeekProperties");
+  }
+  async spacePeekActivityVisible(): Promise<boolean> {
+    return todo("spacePeekActivityVisible");
+  }
+  async spacePeekCopyLinkVisible(): Promise<boolean> {
+    return todo("spacePeekCopyLinkVisible");
+  }
+  async spacePeekCopyLink(): Promise<void> {
+    return todo("spacePeekCopyLink");
+  }
+  async spacePeekReadClipboard(): Promise<string> {
+    return todo("spacePeekReadClipboard");
+  }
+  async spacePeekLastNotice(): Promise<{ title: string; message: string } | null> {
+    return todo("spacePeekLastNotice");
+  }
+  async spacePeekSkeletonsVisible(): Promise<boolean> {
+    return todo("spacePeekSkeletonsVisible");
+  }
 }

@@ -19124,3 +19124,274 @@ export async function serverSpaceMeStatus(
   });
   return res.status;
 }
+
+// --- Space filters + peek shell (NEWFRONT-450, SPC-034–046). Appended;
+// --- existing helpers above are untouched per the shared harness contract.
+// --- Public-anchor reads ride anonymous (AllowAny); provisioning and board
+// --- flips ride the seed owner's session.
+
+/** One public-issues row, as the scenarios assert on it. */
+export interface SpaceIssueFacts {
+  id: string;
+  name: string;
+  sequenceId: number;
+  priority: string;
+  stateId: string;
+  targetDate: string | null;
+  descriptionHtml: string | null;
+  labelIds: string[];
+}
+
+function spaceIssueFacts(row: unknown): SpaceIssueFacts {
+  const record = row as {
+    id?: unknown;
+    name?: unknown;
+    sequence_id?: unknown;
+    priority?: unknown;
+    state_id?: unknown;
+    target_date?: unknown;
+    description_html?: unknown;
+    label_ids?: unknown;
+  };
+  if (
+    typeof record.id !== "string" ||
+    typeof record.name !== "string" ||
+    typeof record.sequence_id !== "number" ||
+    typeof record.priority !== "string" ||
+    typeof record.state_id !== "string"
+  ) {
+    throw new Error("[parity] public issue row carried no id/name/sequence/priority/state.");
+  }
+  return {
+    id: record.id,
+    name: record.name,
+    sequenceId: record.sequence_id,
+    priority: record.priority,
+    stateId: record.state_id,
+    targetDate: typeof record.target_date === "string" ? record.target_date : null,
+    descriptionHtml: typeof record.description_html === "string" ? record.description_html : null,
+    labelIds: Array.isArray(record.label_ids)
+      ? record.label_ids.filter((id): id is string => typeof id === "string")
+      : [],
+  };
+}
+
+/** Anonymous GET against the public anchor tree; rides out throttle minutes. */
+async function spacePublicGet(anchor: string, path: string, apiBase: string = apiBaseFromEnv()): Promise<unknown> {
+  return withThrottleRetry(`space public ${path}`, async () => {
+    const res = await fetchTolerant(`${apiBase}/api/public/anchor/${anchor}${path}`);
+    if (!res.ok) throw new Error(`[parity] space public ${path} failed with HTTP ${res.status}.`);
+    return (await res.json()) as unknown;
+  });
+}
+
+/** Public-issues list rows for an anchor, optionally narrowed by query params. */
+export async function serverSpaceIssues(
+  anchor: string,
+  params: Record<string, string> = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<SpaceIssueFacts[]> {
+  const query = new URLSearchParams(params).toString();
+  const payload = await spacePublicGet(anchor, `/issues/${query === "" ? "" : `?${query}`}`, apiBase);
+  const results = (payload as { results?: unknown }).results;
+  if (!Array.isArray(results)) throw new Error("[parity] public issues response carried no results list.");
+  return results.map(spaceIssueFacts);
+}
+
+/** One public issue's detail row. */
+export async function serverSpaceIssueDetail(
+  anchor: string,
+  issueId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<SpaceIssueFacts> {
+  return spaceIssueFacts(await spacePublicGet(anchor, `/issues/${issueId}/`, apiBase));
+}
+
+/** Public workflow states backing the state facet. */
+export async function serverSpaceStates(
+  anchor: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Array<{ id: string; name: string; group: string }>> {
+  const rows: unknown = await spacePublicGet(anchor, "/states/", apiBase);
+  if (!Array.isArray(rows)) throw new Error("[parity] public states response was not a list.");
+  return rows.map((row) => {
+    const record = row as { id?: unknown; name?: unknown; group?: unknown };
+    if (typeof record.id !== "string" || typeof record.name !== "string" || typeof record.group !== "string") {
+      throw new Error("[parity] public state row carried no id/name/group.");
+    }
+    return { id: record.id, name: record.name, group: record.group };
+  });
+}
+
+/** Public project labels backing the address-only label filter. */
+export async function serverSpaceLabels(
+  anchor: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<Array<{ id: string; name: string }>> {
+  const rows: unknown = await spacePublicGet(anchor, "/labels/", apiBase);
+  if (!Array.isArray(rows)) throw new Error("[parity] public labels response was not a list.");
+  return rows.map((row) => {
+    const record = row as { id?: unknown; name?: unknown };
+    if (typeof record.id !== "string" || typeof record.name !== "string") {
+      throw new Error("[parity] public label row carried no id/name.");
+    }
+    return { id: record.id, name: record.name };
+  });
+}
+
+/** Published-board settings: engagement flags plus enabled views. */
+export async function serverSpaceSettings(
+  anchor: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{
+  comments: boolean;
+  reactions: boolean;
+  votes: boolean;
+  views: Record<string, boolean>;
+}> {
+  const record = (await spacePublicGet(anchor, "/settings/", apiBase)) as {
+    is_comments_enabled?: unknown;
+    is_reactions_enabled?: unknown;
+    is_votes_enabled?: unknown;
+    view_props?: unknown;
+  };
+  const views: Record<string, boolean> = {};
+  if (record.view_props !== null && typeof record.view_props === "object") {
+    for (const [key, value] of Object.entries(record.view_props as Record<string, unknown>)) {
+      views[key] = value === true;
+    }
+  }
+  return {
+    comments: record.is_comments_enabled === true,
+    reactions: record.is_reactions_enabled === true,
+    votes: record.is_votes_enabled === true,
+    views,
+  };
+}
+
+/** Fields the scenarios set when provisioning probe issues. */
+export interface SpaceProbeIssue {
+  name: string;
+  priority?: string;
+  targetDate?: string;
+  descriptionHtml?: string;
+  labelIds?: string[];
+}
+
+/** Provision a probe issue; resolves with its id (caller deletes it after). */
+export async function serverSpaceCreateIssue(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  probe: SpaceProbeIssue,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const body: Record<string, unknown> = { name: probe.name };
+  if (probe.priority !== undefined) body["priority"] = probe.priority;
+  if (probe.targetDate !== undefined) body["target_date"] = probe.targetDate;
+  if (probe.descriptionHtml !== undefined) body["description_html"] = probe.descriptionHtml;
+  if (probe.labelIds !== undefined) body["label_ids"] = probe.labelIds;
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/issues/`,
+    sessionCookie,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    apiBase
+  );
+  const payload = (await res.json().catch(() => null)) as { id?: unknown } | null;
+  if ((res.status !== 201 && res.status !== 200) || payload === null || typeof payload.id !== "string") {
+    throw new Error(`[parity] probe issue create failed with HTTP ${res.status}: ${JSON.stringify(payload)}`);
+  }
+  return payload.id;
+}
+
+/** Delete every project issue whose name starts with the probe prefix. */
+export async function serverSpaceCleanupProbes(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  prefix: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  for (const issue of await serverIssues(workspaceSlug, projectId, sessionCookie, apiBase)) {
+    if (issue.name.startsWith(prefix))
+      await serverDeleteIssue(workspaceSlug, projectId, issue.id, sessionCookie, apiBase);
+  }
+}
+
+/** Delete every project label whose name starts with the probe prefix. */
+export async function serverSpaceCleanupProbeLabels(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  prefix: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  for (const label of await projectLabels(workspaceSlug, projectId, sessionCookie, apiBase)) {
+    if (label.name.startsWith(prefix))
+      await deleteProjectLabel(workspaceSlug, projectId, label.id, sessionCookie, apiBase);
+  }
+}
+
+/** Flip the published board's engagement flags (read-modify-write: the upsert replaces every flag). */
+export async function serverSpaceSetBoardFlags(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  patch: { comments?: boolean; reactions?: boolean; votes?: boolean },
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const current = await serverSpaceSettingsSeedRead(workspaceSlug, projectId, sessionCookie, apiBase);
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/project-deploy-boards/`,
+    sessionCookie,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        is_comments_enabled: patch.comments ?? current.comments,
+        is_reactions_enabled: patch.reactions ?? current.reactions,
+        is_votes_enabled: patch.votes ?? current.votes,
+        views: current.views,
+      }),
+    },
+    apiBase
+  );
+  if (!res.ok) throw new Error(`[parity] deploy-board flag flip failed with HTTP ${res.status}.`);
+}
+
+/** Current board flags plus views through the workspace API (the flip's read half). */
+async function serverSpaceSettingsSeedRead(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string
+): Promise<{ comments: boolean; reactions: boolean; votes: boolean; views: Record<string, boolean> }> {
+  const res = await authed(
+    workspaceSlug,
+    `/projects/${projectId}/project-deploy-boards/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  requireOk(res, "deploy-board read");
+  const record = (await res.json()) as {
+    is_comments_enabled?: unknown;
+    is_reactions_enabled?: unknown;
+    is_votes_enabled?: unknown;
+    view_props?: unknown;
+  };
+  const views: Record<string, boolean> = {};
+  if (record.view_props !== null && typeof record.view_props === "object") {
+    for (const [key, value] of Object.entries(record.view_props as Record<string, unknown>)) {
+      views[key] = value === true;
+    }
+  }
+  return {
+    comments: record.is_comments_enabled === true,
+    reactions: record.is_reactions_enabled === true,
+    votes: record.is_votes_enabled === true,
+    views,
+  };
+}
