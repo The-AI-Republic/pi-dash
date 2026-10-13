@@ -32,6 +32,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use pidash_db::assistant::event_queries::{message_envelope_json, MessageParts};
+use pidash_db::config::AssistantSettings;
 use uuid::Uuid;
 
 use super::common::{
@@ -214,7 +215,7 @@ async fn post_message(
             MESSAGE_TOO_LONG_BODY.to_owned(),
         ));
     }
-    if !has_usable_llm_config(pool, &actor.id).await? {
+    if !llm_gate_allows(&state, pool, &actor.id).await? {
         return Err(json_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             LLM_CONFIG_MISSING_BODY.to_owned(),
@@ -334,7 +335,7 @@ async fn post_message(
     // (`messages.py:103`): enqueue `assistant.run_turn` with
     // `args=[str(turn_id)]` into `rust_job_queue` (the intake precedent;
     // the worker forwards the Python-owned name to the broker).
-    enqueue_run_turn(pool, &turn_id).await;
+    enqueue_run_turn(pool, &state.settings().assistant, &turn_id).await;
 
     let body = format!(
         "{{\"turn\":{{\"id\":{},\"status\":{}}},\"message\":{}}}",
@@ -345,12 +346,28 @@ async fn post_message(
     Ok(json_response(StatusCode::ACCEPTED, body))
 }
 
-/// `has_usable_llm_config` (`ee/assistant/model_provider.py:45-53`): the
-/// request-time gate must not build a model or decrypt anything — a
-/// `UserLLMConfig` row whose `api_key_encrypted` is set (`has_api_key`,
-/// `models.py:260-262`). The cloud overlay's platform credentials live
-/// behind the same gate in Django; the CE check is the row's stored key.
-async fn has_usable_llm_config(pool: &sqlx::PgPool, user_id: &Uuid) -> HandlerResult<bool> {
+/// The LLM-config gate (`messages.py:77`): the OSS key-bit read,
+/// resolved through the installed
+/// [`AssistantModelSeam`](pidash_services::extensions::AssistantModelSeam).
+/// CE answers the bit itself (the trait default delegates to the ported
+/// seam logic), so CE behavior is identical; the overlay additionally
+/// accepts its platform credentials. The gate must not build a model or
+/// decrypt anything.
+async fn llm_gate_allows(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    user_id: &Uuid,
+) -> HandlerResult<bool> {
+    let has_key = has_oss_api_key(pool, user_id).await?;
+    Ok(state
+        .assistant_seam()
+        .has_usable_llm_config(*user_id, has_key)
+        .await)
+}
+
+/// The OSS half of the gate: a `UserLLMConfig` row whose
+/// `api_key_encrypted` is set (`has_api_key`, `models.py:260-262`).
+async fn has_oss_api_key(pool: &sqlx::PgPool, user_id: &Uuid) -> HandlerResult<bool> {
     let row: Option<(Option<Vec<u8>>,)> = sqlx::query_as(
         "SELECT \"api_key_encrypted\" FROM \"assistant_user_llm_config\" WHERE \"user_id\" = $1",
     )
@@ -361,14 +378,28 @@ async fn has_usable_llm_config(pool: &sqlx::PgPool, user_id: &Uuid) -> HandlerRe
     Ok(matches!(row, Some((Some(key),)) if !key.is_empty()))
 }
 
+/// The queue `run_turn` jobs land on: `ASSISTANT_TURN_QUEUE` when the
+/// operator sets it to a non-empty name, else the default `celery` queue.
+/// The contract harness steers Django through celery `task_routes` from
+/// the same variable, so serve honors it here — the queue name is the
+/// only channel distinguishing TURN-oracle turns from APPSOFF-oracle
+/// turns.
+fn run_turn_queue(settings: &AssistantSettings) -> &str {
+    match settings.turn_queue.as_deref() {
+        Some(queue) if !queue.is_empty() => queue,
+        _ => pidash_jobs::queue::DEFAULT_QUEUE,
+    }
+}
+
 /// Best-effort post-commit enqueue (the intake `enqueue_message`
 /// precedent): without it the 202 response still stands.
-async fn enqueue_run_turn(pool: &sqlx::PgPool, turn_id: &Uuid) {
-    let job = pidash_jobs::queue::NewJob::new(
+async fn enqueue_run_turn(pool: &sqlx::PgPool, settings: &AssistantSettings, turn_id: &Uuid) {
+    let mut job = pidash_jobs::queue::NewJob::new(
         pidash_jobs::assistant::RUN_TURN_TASK,
         serde_json::json!([turn_id.to_string()]),
         serde_json::json!({}),
     );
+    job.queue = run_turn_queue(settings).to_owned();
     if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
         tracing::warn!(%error, turn = turn_id.to_string(), "assistant.messages: turn enqueue failed; response stands");
     }
@@ -412,6 +443,211 @@ async fn cancel_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use pidash_services::extensions::{AssistantModelSeam, SeamFuture, TitleError, TitleRequest};
+
+    /// Overlay-shaped seam: a keyless user still counts as configured.
+    #[derive(Debug)]
+    struct GatewaySeam;
+
+    impl AssistantModelSeam for GatewaySeam {
+        fn has_usable_llm_config(
+            &self,
+            user_id: uuid::Uuid,
+            has_api_key: bool,
+        ) -> SeamFuture<'_, bool> {
+            let _ = (user_id, has_api_key);
+            Box::pin(async move { true })
+        }
+
+        fn generate_title(
+            &self,
+            request: TitleRequest,
+        ) -> SeamFuture<'_, Result<String, TitleError>> {
+            let _ = request;
+            Box::pin(async move { Ok("seam title".to_owned()) })
+        }
+    }
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    fn live_state(seam: Option<Arc<dyn AssistantModelSeam>>) -> AppState {
+        let settings = pidash_db::config::Settings::test_defaults();
+        let mut state = AppState::with_settings("test", settings);
+        if let Some(seam) = seam {
+            state = state.with_assistant_seam(seam);
+        }
+        state
+    }
+
+    /// Seed one active user; returns its id. Column list mirrors the
+    /// contract harness `create_user` (the `handlers_members` precedent).
+    async fn seed_user(pool: &sqlx::PgPool) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        let email = format!("gate-{}@example.com", id.simple());
+        sqlx::query(
+            "INSERT INTO users (id, password, username, email, first_name, last_name,
+                avatar, date_joined, created_at, updated_at, last_location,
+                created_location, is_superuser, is_managed, is_password_expired,
+                is_active, is_staff, is_email_verified, is_password_autoset, token,
+                user_timezone, last_login_ip, last_logout_ip, last_login_medium,
+                last_login_uagent, is_bot, display_name, is_email_valid,
+                is_password_reset_required)
+             VALUES ($1, '!', $2, $2, 'Gate', 'User',
+                '', now(), now(), now(), '',
+                '', false, false, false,
+                true, false, true, false, '',
+                'UTC', '', '', '',
+                '', false, 'Gate User', true,
+                false)",
+        )
+        .bind(id)
+        .bind(&email)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        id
+    }
+
+    /// Seed a BYOK config row carrying a stored key for `user_id`.
+    /// Column list mirrors the save path (`llm_config.rs`).
+    async fn seed_llm_key(pool: &sqlx::PgPool, user_id: &uuid::Uuid) {
+        sqlx::query(
+            "INSERT INTO assistant_user_llm_config \
+             (user_id, provider_kind, base_url, model_name, api_key_encrypted, \
+             last_verified_at, created_at, updated_at) \
+             VALUES ($1, 'openai_compatible', 'https://api.example.com/v1', \
+             'byok-model', $2, NULL, now(), now())",
+        )
+        .bind(user_id)
+        .bind(b"stored-key-blob".to_vec())
+        .execute(pool)
+        .await
+        .expect("seed llm key");
+    }
+
+    #[tokio::test]
+    async fn gate_uses_the_installed_seam() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        // A keyless user (no config row at all): only the installed
+        // seam's verdict can open the gate.
+        let user_id = seed_user(&pool).await;
+        let state = live_state(Some(Arc::new(GatewaySeam)));
+        assert!(
+            llm_gate_allows(&state, &pool, &user_id)
+                .await
+                .expect("gate reads"),
+            "a seam that accepts the user must open the gate without an OSS key"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_keeps_the_ce_default() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        // No `with_assistant_seam`: the default CE seam answers the OSS
+        // bit exactly like the pre-seam check did.
+        let state = live_state(None);
+        let keyless = seed_user(&pool).await;
+        assert!(
+            !llm_gate_allows(&state, &pool, &keyless)
+                .await
+                .expect("gate reads"),
+            "CE still denies a keyless user (the 422 path)"
+        );
+        let keyed = seed_user(&pool).await;
+        seed_llm_key(&pool, &keyed).await;
+        assert!(
+            llm_gate_allows(&state, &pool, &keyed)
+                .await
+                .expect("gate reads"),
+            "CE still allows a user with a stored key"
+        );
+    }
+
+    #[test]
+    fn run_turn_queue_honors_the_setting() {
+        let mut settings = pidash_db::config::Settings::test_defaults().assistant;
+        assert_eq!(run_turn_queue(&settings), "celery");
+        settings.turn_queue = Some("turn972c02".to_owned());
+        assert_eq!(run_turn_queue(&settings), "turn972c02");
+    }
+
+    #[test]
+    fn run_turn_queue_treats_empty_as_unset() {
+        let mut settings = pidash_db::config::Settings::test_defaults().assistant;
+        settings.turn_queue = Some(String::new());
+        assert_eq!(run_turn_queue(&settings), "celery");
+    }
+
+    /// `ensure_schema`, tolerant of the parallel-test race: two tests
+    /// creating `rust_job_queue` at once collide on the catalog entry
+    /// (23505), so the loser retries into the winner's finished table.
+    async fn ensure_queue_schema(pool: &sqlx::PgPool) {
+        for _ in 0..5 {
+            match pidash_jobs::queue::ensure_schema(pool).await {
+                Ok(()) => return,
+                Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("23505") => continue,
+                Err(other) => panic!("queue schema: {other}"),
+            }
+        }
+        panic!("queue schema: still racing after retries");
+    }
+
+    #[tokio::test]
+    async fn enqueue_lands_on_the_steered_queue() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        ensure_queue_schema(&pool).await;
+        let mut settings = pidash_db::config::Settings::test_defaults().assistant;
+        settings.turn_queue = Some("turn1026probe".to_owned());
+        let turn_id = uuid::Uuid::new_v4();
+        enqueue_run_turn(&pool, &settings, &turn_id).await;
+        let (queue,): (String,) =
+            sqlx::query_as("SELECT queue FROM rust_job_queue WHERE args = $1")
+                .bind(serde_json::json!([turn_id.to_string()]))
+                .fetch_one(&pool)
+                .await
+                .expect("steered row lands");
+        assert_eq!(queue, "turn1026probe");
+    }
+
+    #[tokio::test]
+    async fn enqueue_keeps_the_default_queue() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        ensure_queue_schema(&pool).await;
+        let settings = pidash_db::config::Settings::test_defaults().assistant;
+        let turn_id = uuid::Uuid::new_v4();
+        enqueue_run_turn(&pool, &settings, &turn_id).await;
+        let (queue,): (String,) =
+            sqlx::query_as("SELECT queue FROM rust_job_queue WHERE args = $1")
+                .bind(serde_json::json!([turn_id.to_string()]))
+                .fetch_one(&pool)
+                .await
+                .expect("default row lands");
+        assert_eq!(queue, "celery");
+    }
 
     #[test]
     fn error_bodies_are_byte_identical() {

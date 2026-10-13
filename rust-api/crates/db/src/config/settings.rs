@@ -148,6 +148,12 @@ pub struct AssistantSettings {
     pub turn_hard_limit: i64,
     pub history_max_turns: i64,
     pub loop_history_max_turns: i64,
+    /// `ASSISTANT_TURN_QUEUE`: steer `assistant.run_turn` jobs onto this
+    /// PG queue instead of the default `celery` one. `None` keeps the
+    /// default; the contract harness splits TURN-oracle from
+    /// APPSOFF-oracle execution on the queue name, so serve honors the
+    /// same variable it steers Django with. Unset in production.
+    pub turn_queue: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1020,6 +1026,7 @@ impl Settings {
                     .req_int("ASSISTANT_HISTORY_MAX_TURNS", ConfigValue::from(40))?,
                 loop_history_max_turns: ctx
                     .req_int("ASSISTANT_LOOP_HISTORY_MAX_TURNS", ConfigValue::from(5))?,
+                turn_queue: ctx.opt_string("ASSISTANT_TURN_QUEUE")?,
             },
             loop_tuning: LoopSettings {
                 enabled: ctx.flag_tri("LOOP_ENABLED", "true")?,
@@ -1292,6 +1299,7 @@ impl Settings {
             "ASSISTANT_TURN_HARD_LIMIT",
             "ASSISTANT_HISTORY_MAX_TURNS",
             "ASSISTANT_LOOP_HISTORY_MAX_TURNS",
+            "ASSISTANT_TURN_QUEUE",
             "LOOP_ENABLED",
             "LOOP_STAGGER_WINDOW_MINUTES",
             "LOOP_MAX_DISPATCH_PER_TICK",
@@ -1593,6 +1601,18 @@ mod tests {
                 "{key} must be env-tier for boot"
             );
         }
+    }
+
+    #[test]
+    fn assistant_turn_queue_steering_defaults_to_none() {
+        assert_eq!(Settings::test_defaults().assistant.turn_queue, None);
+        let s = Settings::from_map_with(
+            &vars(&[("ASSISTANT_TURN_QUEUE", "turn972c02")]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert_eq!(s.assistant.turn_queue.as_deref(), Some("turn972c02"));
     }
 
     #[test]
