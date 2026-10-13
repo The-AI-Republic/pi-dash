@@ -118,7 +118,8 @@ the same namespace. Anything set explicitly (`PARITY_PROJECT`,
 
 Locally-built image tags are namespaced the same way (NEWFRONT-435):
 `api`, `worker`, `oracle`, `oracle-prod` and `live` build as
-`<prefix>-<service>:local`, where the prefix is the resolved
+`<prefix>-<service>:local` (`worker` reuses the `api` image), where the
+prefix is the resolved
 `PARITY_CONTAINER_PREFIX` (default `parity19`), so a build in one
 namespace never retags the image a sibling namespace runs. The first
 bring-up in a fresh namespace builds its own set of images; after that
