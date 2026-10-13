@@ -426,6 +426,77 @@ fn parse_claude_tool_results(message: &serde_json::Value) -> Vec<ExecCommandComp
         .collect()
 }
 
+/// Secret-like env names set inline on an observed agent command.
+///
+/// `PIDASHCONV-75` (tracked by PDASHOSS01-228): agent engines are known to
+/// silently drop inline `VAR=value cmd` prefix assignments for secret-looking
+/// names — the reporter's `DATABASE_URL=… manage.py migrate` fell back to the
+/// default `DATABASE_URL` and migrated the shared postgres database, with no
+/// signal anywhere that the value never reached the command. The runner is
+/// not in the execution path (it only observes the engine's event stream),
+/// so it cannot reject or fix the command — but it can remove the silence.
+///
+/// Returns the *names* (never the values) of leading `NAME=value` prefix
+/// assignments whose name looks secret-like, for every simple command in the
+/// pipeline/list: segments split on `&&`, `||`, `;`, `|` and newlines, then
+/// leading `[A-Za-z_][A-Za-z0-9_]*=` words scanned until the first
+/// non-assignment word (the program). `--flag=value` words never match (the
+/// name pattern excludes `-`), and `make VAR=1`-style trailing assignments
+/// are ignored — engines scrub the shell *prefix* form, so that is the form
+/// worth warning about. Deduplicated, order of first appearance.
+pub fn inline_secret_env_names(command: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for segment in command
+        .split(['\n', ';', '|'])
+        .flat_map(|s| s.split("&&"))
+    {
+        for word in segment.split_whitespace() {
+            // `(subshell` / `{ group` openers precede the simple command.
+            let word = word.trim_start_matches(['(', '{']);
+            if word.is_empty() {
+                continue;
+            }
+            let Some(name) = word.split_once('=').map(|(name, _)| name) else {
+                break; // first non-assignment word is the program
+            };
+            let valid = !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !valid {
+                break;
+            }
+            if is_secret_like_env_name(name) && !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// Whether an env-var name looks like it carries a credential or a
+/// credential-bearing connection string. Substrings cover the classic secret
+/// names (and match the default excludes agent engines are known to scrub);
+/// suffixes cover connection strings like `DATABASE_URL` / `REDIS_URL` —
+/// exactly the names the PIDASHCONV-75 incident saw dropped. An occasional
+/// false positive (`BASE_URL=… npm test`) costs one advisory line; a false
+/// negative costs a migrate against the wrong database.
+fn is_secret_like_env_name(name: &str) -> bool {
+    const SUBSTRINGS: &[&str] = &[
+        "KEY",
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "AUTH",
+    ];
+    const SUFFIXES: &[&str] = &["_URL", "_URI", "_DSN"];
+    let upper = name.to_ascii_uppercase();
+    SUBSTRINGS.iter().any(|s| upper.contains(s)) || SUFFIXES.iter().any(|s| upper.ends_with(s))
+}
+
 /// Maximum length for a forwarded agent narrative message. Bounds the
 /// mirrored payload so a single very long assistant turn can't balloon a
 /// `RunEvents` batch (the cloud additionally caps event payload bytes and
@@ -944,6 +1015,74 @@ mod tests {
         // implicit from the run's workspace_root.
         assert!(hint.cwd.is_none());
         assert_eq!(hint.tool_call_id.as_deref(), Some("tu_2"));
+    }
+
+    // ---- inline_secret_env_names tests -----------------------------------
+    //
+    // The incident shape (PIDASHCONV-75 / PDASHOSS01-228): an inline
+    // `DATABASE_URL=… manage.py migrate` whose assignment the engine
+    // scrubbed, silently migrating the shared postgres database. The
+    // detector's job is to make that inline form loud, and only that form —
+    // `export` on its own line and file-sourcing survive scrubbing and must
+    // stay silent.
+
+    #[test]
+    fn inline_secret_env_names_flags_the_incident_command() {
+        let names = inline_secret_env_names(
+            "DATABASE_URL=postgres://u:p@host/db REDIS_URL=redis://host:6379 \
+             python manage.py migrate",
+        );
+        assert_eq!(names, vec!["DATABASE_URL", "REDIS_URL"]);
+    }
+
+    #[test]
+    fn inline_secret_env_names_flags_classic_secret_names() {
+        for cmd in [
+            "API_KEY=abc ./deploy.sh",
+            "MY_SECRET=x AUTH_TOKEN=y run-thing",
+            "PGPASSWORD=hunter2 psql -h db",
+        ] {
+            assert!(!inline_secret_env_names(cmd).is_empty(), "missed: {cmd}");
+        }
+    }
+
+    #[test]
+    fn inline_secret_env_names_scans_every_pipeline_segment() {
+        let names = inline_secret_env_names(
+            "cd /app && DATABASE_URL=postgres://x alembic upgrade head; ls",
+        );
+        assert_eq!(names, vec!["DATABASE_URL"]);
+    }
+
+    #[test]
+    fn inline_secret_env_names_ignores_export_and_plain_commands() {
+        for cmd in [
+            // The forms that survive engine scrubbing must stay silent.
+            "export DATABASE_URL=postgres://u:p@host/db",
+            "source .env && python manage.py migrate",
+            // No env prefix at all.
+            "git fetch origin",
+            // `--flag=value` is not an assignment.
+            "pytest --junit-xml=out.xml",
+            // Trailing make-style variables are not the scrubbed shell form.
+            "make DATABASE_URL=postgres://x migrate",
+            // Non-secret inline names are legitimate and common.
+            "CI=1 NODE_ENV=test pnpm test",
+        ] {
+            assert!(
+                inline_secret_env_names(cmd).is_empty(),
+                "false positive on: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_secret_env_names_dedupes_and_never_returns_values() {
+        let names = inline_secret_env_names(
+            "DB_PASSWORD=s3cret cmd1 && DB_PASSWORD=s3cret cmd2",
+        );
+        assert_eq!(names, vec!["DB_PASSWORD"]);
+        assert!(names.iter().all(|n| !n.contains("s3cret")));
     }
 
     #[test]
