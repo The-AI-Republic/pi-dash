@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient } from "@tanstack/react-query";
+import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -36,6 +37,7 @@ vi.mock("../features/auth/index.js", async (importOriginal) => {
 
 import { createAppClient, resetAppClient } from "../core/api/client.js";
 import { parseSignUpSearch, redirectSignedInUser, SignUpScreen } from "./sign-up.js";
+import { routeTree } from "../routeTree.gen.js";
 
 interface StubRoute {
   body: string;
@@ -176,6 +178,14 @@ describe("redirectSignedInUser", () => {
     });
     await expect(redirectSignedInUser({ context, search: {} })).resolves.toEqual({});
   });
+
+  it("renders the card when the workspace list fails to load", async () => {
+    const context = guardContext((url) => {
+      if (url.endsWith("/api/users/me/")) return { body: ME, url };
+      throw new Error("workspaces unavailable");
+    });
+    await expect(redirectSignedInUser({ context, search: {} })).resolves.toEqual({});
+  });
 });
 
 describe("SignUpScreen", () => {
@@ -205,5 +215,29 @@ describe("SignUpScreen", () => {
     expect(card).toHaveAttribute("data-next", "");
     expect(card).toHaveAttribute("data-email", "");
     expect(card).toHaveAttribute("data-error", "");
+  });
+});
+
+describe("Route", () => {
+  afterEach(() => {
+    resetAppClient();
+  });
+
+  it("renders the card through the search schema", async () => {
+    const context = guardContext((url) => {
+      if (url.endsWith("/api/users/me/")) throw new Error("signed out");
+      throw new Error(`unexpected ${url}`);
+    });
+    const router = createRouter({
+      routeTree,
+      history: createMemoryHistory({
+        initialEntries: ["/sign-up?email=ada%40example.com&next_path=%2Facme"],
+      }),
+      context,
+    });
+    render(<RouterProvider router={router} />);
+    const card = await screen.findByTestId("sign-up-card");
+    expect(card).toHaveAttribute("data-email", "ada@example.com");
+    expect(card).toHaveAttribute("data-next", "/acme");
   });
 });
