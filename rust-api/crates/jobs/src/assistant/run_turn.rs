@@ -65,7 +65,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use sea_query::{Expr, Order, PostgresQueryBuilder, Query};
+use sea_query::{Expr, JoinType, Order, PostgresQueryBuilder, Query};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -552,8 +552,11 @@ pub const TABLE_EVENT: &str = "assistant_event";
 /// joins to thread and workspace, left join to the user message, `WHERE` on
 /// the turn id, `ORDER BY created_at`.
 pub fn load_context_sql() -> String {
+    // Aliases go through `from_as`/`join_as`: a `(table, alias)` tuple is a
+    // schema.table ref in sea-query, not an alias (it rendered
+    // `FROM "assistant_turn"."t"`, an invalid relation live).
     Query::select()
-        .from((TABLE_TURN, "t"))
+        .from_as(TABLE_TURN, "t")
         .columns([
             ("t", "id"),
             ("t", "thread_id"),
@@ -581,16 +584,22 @@ pub fn load_context_sql() -> String {
         ])
         .columns([("w", "id"), ("w", "slug"), ("w", "name")])
         .columns([("m", "id"), ("m", "display_content")])
-        .inner_join(
-            (TABLE_THREAD, "th"),
+        .join_as(
+            JoinType::InnerJoin,
+            TABLE_THREAD,
+            "th",
             Expr::col(("t", "thread_id")).equals(("th", "id")),
         )
-        .inner_join(
-            ("workspaces", "w"),
+        .join_as(
+            JoinType::InnerJoin,
+            "workspaces",
+            "w",
             Expr::col(("th", "workspace_id")).equals(("w", "id")),
         )
-        .left_join(
-            (TABLE_MESSAGE, "m"),
+        .join_as(
+            JoinType::LeftJoin,
+            TABLE_MESSAGE,
+            "m",
             Expr::col(("t", "user_message_id")).equals(("m", "id")),
         )
         .and_where(Expr::cust("t.\"id\" = $1"))
@@ -1315,6 +1324,24 @@ mod tests {
         ] {
             assert!(load.contains(table), "load selects {table}");
         }
+        // Aliased refs (`AS`), never schema.table misreads: `(table, alias)`
+        // tuples render `FROM "assistant_turn"."t"`, an invalid relation.
+        for aliased in [
+            "FROM \"assistant_turn\" AS \"t\"",
+            "INNER JOIN \"assistant_thread\" AS \"th\"",
+            "INNER JOIN \"workspaces\" AS \"w\"",
+            "LEFT JOIN \"assistant_message\" AS \"m\"",
+        ] {
+            assert!(load.contains(aliased), "load renders {aliased}: {load}");
+        }
+        for misread in [
+            "\"assistant_turn\".\"t\"",
+            "\"assistant_thread\".\"th\"",
+            "\"workspaces\".\"w\"",
+            "\"assistant_message\".\"m\"",
+        ] {
+            assert!(!load.contains(misread), "schema.table misread {misread}");
+        }
         assert!(
             load.contains("INNER JOIN"),
             "thread+workspace are inner joins"
@@ -1874,5 +1901,132 @@ mod tests {
         // End with nothing open: silent.
         assert!(sink.handle(&StreamItem::End, 200).is_empty());
         assert!(sink.fail_open(MSG_FAILED).is_none());
+    }
+
+    // -- live scratch-DB tests (env-gated) -------------------------------
+
+    /// Scratch Postgres for the Done-when verification. Unset (plain
+    /// `cargo test`) skips these; CI sets no database either, so the suite
+    /// stays green offline. Run with e.g.
+    /// `export DATABASE_URL=postgresql://user@host/db` for the real check.
+    async fn scratch_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::PgPool::connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    const LIVE_DDL: &[&str] = &[
+        "CREATE TEMPORARY TABLE assistant_turn (id UUID PRIMARY KEY, thread_id UUID NOT NULL, user_message_id UUID NULL, status VARCHAR(16) NOT NULL, model_messages JSONB NULL, usage JSONB NULL, model_used VARCHAR(255) NOT NULL, error_code VARCHAR(64) NOT NULL, error_detail TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, started_at TIMESTAMPTZ NULL, completed_at TIMESTAMPTZ NULL)",
+        "CREATE TEMPORARY TABLE assistant_thread (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, user_id UUID NOT NULL, title VARCHAR(255) NOT NULL, kind VARCHAR(16) NOT NULL, is_archived BOOLEAN NOT NULL, active_turn_id UUID NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)",
+        "CREATE TEMPORARY TABLE workspaces (id UUID PRIMARY KEY, slug VARCHAR(48) NOT NULL, name VARCHAR(80) NOT NULL)",
+        "CREATE TEMPORARY TABLE assistant_message (id UUID PRIMARY KEY, thread_id UUID NOT NULL, display_content TEXT NOT NULL)",
+    ];
+
+    async fn live_tx(pool: &sqlx::PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        for ddl in LIVE_DDL {
+            sqlx::query(ddl)
+                .execute(&mut *tx)
+                .await
+                .expect("create temp table");
+        }
+        tx
+    }
+
+    fn live_uuid(suffix: u8) -> Uuid {
+        Uuid::parse_str(&format!("44444444-4444-4444-4444-4444444444{suffix:02}"))
+            .expect("fixed test uuid")
+    }
+
+    #[tokio::test]
+    async fn live_load_context_select() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let workspace = live_uuid(1);
+        let user = live_uuid(2);
+        let thread = live_uuid(3);
+        let message = live_uuid(4);
+        let turn = live_uuid(5);
+        let orphan = live_uuid(6);
+        sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1, 'acme', 'Acme')")
+            .bind(workspace)
+            .execute(&mut *tx)
+            .await
+            .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO assistant_thread (id, workspace_id, user_id, title, kind, is_archived, active_turn_id, created_at, updated_at) \
+             VALUES ($1, $2, $3, 'T', 'chat', FALSE, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .bind(thread)
+        .bind(workspace)
+        .bind(user)
+        .execute(&mut *tx)
+        .await
+        .expect("seed thread");
+        sqlx::query(
+            "INSERT INTO assistant_message (id, thread_id, display_content) VALUES ($1, $2, 'hello')",
+        )
+        .bind(message)
+        .bind(thread)
+        .execute(&mut *tx)
+        .await
+        .expect("seed message");
+        for (id, user_message, status) in [
+            (turn, Some(message), TURN_QUEUED),
+            (orphan, None, TURN_RUNNING),
+        ] {
+            sqlx::query(
+                "INSERT INTO assistant_turn (id, thread_id, user_message_id, status, model_messages, usage, model_used, error_code, error_detail, created_at, started_at, completed_at) \
+                 VALUES ($1, $2, $3, $4, NULL, NULL, '', '', '', '2026-01-01T00:00:00Z', NULL, NULL)",
+            )
+            .bind(id)
+            .bind(thread)
+            .bind(user_message)
+            .bind(status)
+            .execute(&mut *tx)
+            .await
+            .expect("seed turn");
+        }
+        // Select order is 12 turn + 9 thread + 3 workspace + 2 message
+        // columns; several names repeat (`id`), so read by index.
+        use sqlx::Row;
+        let row = sqlx::query(&load_context_sql())
+            .bind(turn)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("context select runs");
+        assert_eq!(row.try_get::<Uuid, _>(0).expect("t.id"), turn);
+        assert_eq!(row.try_get::<Uuid, _>(1).expect("t.thread_id"), thread);
+        assert_eq!(
+            row.try_get::<String, _>(22).expect("w.slug"),
+            "acme".to_owned()
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>(25)
+                .expect("m.display_content"),
+            Some("hello".to_owned())
+        );
+        // The user-message join is a LEFT JOIN: turns without one load.
+        let row = sqlx::query(&load_context_sql())
+            .bind(orphan)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("context select runs without a user message");
+        assert_eq!(row.try_get::<Uuid, _>(0).expect("t.id"), orphan);
+        assert_eq!(
+            row.try_get::<Option<String>, _>(25)
+                .expect("m.display_content"),
+            None
+        );
     }
 }
