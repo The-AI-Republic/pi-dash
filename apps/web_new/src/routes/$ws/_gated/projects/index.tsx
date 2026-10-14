@@ -16,7 +16,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/")({
   component: ProjectsListRoute,
 });
 
-export function ProjectsListRoute(): React.ReactElement {
+function ProjectsListRoute(): React.ReactElement {
   const { ws } = Route.useParams();
   return <ProjectsListView workspaceSlug={ws} />;
 }

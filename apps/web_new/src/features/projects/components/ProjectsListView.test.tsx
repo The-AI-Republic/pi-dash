@@ -3,10 +3,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import type { ProjectDetails, Workspace } from "@pidash/api-client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Me, ProjectDetails, Workspace, WorkspaceMember } from "@pidash/api-client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Stand-in for the router Link: navigation is TanStack's own tested
 // behavior. What this suite owns is the view wiring.
@@ -19,6 +20,7 @@ vi.mock("@tanstack/react-router", () => ({
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { sessionKeys } from "../../../core/session/index.js";
 import { projectKeys } from "../api/keys.js";
+import { useListDisplayStore } from "../store/list-display.js";
 import { ProjectsListView } from "./ProjectsListView.js";
 
 const WS_ID = "123e4567-e89b-12d3-a456-426614174000";
@@ -82,17 +84,53 @@ function workspace(role: number): Workspace {
   return { id: WS_ID, name: "Acme", slug: "acme", logo_url: null, total_members: 2, role };
 }
 
-function renderView(args: { details?: ProjectDetails[]; role?: number; archived?: boolean }): void {
+const ME_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+function member(id: string, displayName: string): WorkspaceMember {
+  return {
+    id: `m-${id}`,
+    member: {
+      id,
+      first_name: displayName,
+      last_name: "",
+      avatar: "",
+      avatar_url: "",
+      display_name: displayName,
+      is_bot: false,
+    },
+    role: 10,
+  };
+}
+
+function renderView(args: {
+  details?: ProjectDetails[];
+  role?: number;
+  archived?: boolean;
+  members?: WorkspaceMember[];
+  me?: boolean;
+  slug?: string;
+}) {
   createAppClient("https://api.test", () => new Promise<never>(() => {}));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  if (args.details !== undefined) queryClient.setQueryData(projectKeys.details("acme"), args.details);
+  const slug = args.slug ?? "acme";
+  if (args.details !== undefined) queryClient.setQueryData(projectKeys.details(slug), args.details);
+  if (args.members !== undefined) queryClient.setQueryData(projectKeys.members(slug), args.members);
+  if (args.me === true) queryClient.setQueryData(sessionKeys.me, { id: ME_ID, display_name: "Ada Lovelace" } as Me);
   queryClient.setQueryData(sessionKeys.workspaces, [workspace(args.role ?? 20)]);
-  render(
+  return render(
     <QueryClientProvider client={queryClient}>
-      <ProjectsListView workspaceSlug="acme" {...(args.archived === undefined ? {} : { archived: args.archived })} />
+      <ProjectsListView workspaceSlug={slug} {...(args.archived === undefined ? {} : { archived: args.archived })} />
     </QueryClientProvider>
   );
 }
+
+function cardNames(): string[] {
+  return screen.getAllByRole("heading").map((heading) => heading.textContent ?? "");
+}
+
+beforeEach(() => {
+  useListDisplayStore.setState({ displays: {}, searchQuery: "", activeWorkspace: null });
+});
 
 afterEach(() => {
   resetAppClient();
@@ -129,5 +167,115 @@ describe("ProjectsListView", () => {
 
     expect(screen.getByLabelText("Archived projects")).not.toBeNull();
     expect(screen.getByRole("heading", { name: "Shelved" })).not.toBeNull();
+  });
+
+  it("reorders the rows through the sort menu", () => {
+    renderView({ details: [project("Zephyr"), project("Alpine")], role: 15 });
+
+    const desktop = screen.getByTestId("projects-desktop-filters");
+    fireEvent.click(within(desktop).getByTestId("projects-sort-trigger"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Name" }));
+
+    expect(cardNames()).toEqual(["Alpine", "Zephyr"]);
+    expect(useListDisplayStore.getState().displayFor("acme").sort).toEqual({
+      key: "name",
+      direction: "ascending",
+    });
+  });
+
+  it("filters through the panel and clears from the strip", async () => {
+    const user = userEvent.setup();
+    renderView({
+      details: [project("Strip Public", { network: 2 }), project("Strip Secret", { network: 0 })],
+      role: 15,
+    });
+
+    const desktop = screen.getByTestId("projects-desktop-filters");
+    await user.click(within(desktop).getByTestId("projects-filter-trigger"));
+    await user.click(screen.getByText("Private"));
+    expect(cardNames()).toEqual(["Strip Secret"]);
+    expect(screen.getByTestId("projects-filter-count")).toHaveTextContent("1/2");
+
+    await user.click(screen.getByRole("button", { name: "Remove Private" }));
+    expect(cardNames()).toEqual(["Strip Public", "Strip Secret"]);
+
+    await user.click(within(desktop).getByTestId("projects-filter-trigger"));
+    await user.click(screen.getByText("Private"));
+    await user.click(screen.getByRole("button", { name: "Clear all" }));
+    expect(cardNames()).toEqual(["Strip Public", "Strip Secret"]);
+    expect(screen.queryByTestId("projects-applied-filters")).toBeNull();
+  });
+
+  it("narrows to the caller's projects and leads", async () => {
+    const user = userEvent.setup();
+    renderView({
+      details: [
+        project("Mine", { member_role: 15, project_lead: ME_ID }),
+        project("Theirs", { member_role: null, project_lead: "bbbbbbbb-cccc-dddd-eeee-ffffffffffff" }),
+      ],
+      members: [member(ME_ID, "Ada Lovelace"), member("bbbbbbbb-cccc-dddd-eeee-ffffffffffff", "Grace Hopper")],
+      me: true,
+      role: 15,
+    });
+
+    const desktop = screen.getByTestId("projects-desktop-filters");
+    await user.click(within(desktop).getByTestId("projects-filter-trigger"));
+    await user.click(screen.getByText("My projects"));
+    expect(cardNames()).toEqual(["Mine"]);
+
+    await user.click(screen.getByRole("button", { name: "Remove My projects" }));
+    expect(cardNames()).toEqual(["Mine", "Theirs"]);
+
+    await user.click(within(desktop).getByTestId("projects-filter-trigger"));
+    const lead = screen.getByRole("region", { name: "Lead" });
+    await user.click(within(lead).getByText("You"));
+    expect(cardNames()).toEqual(["Mine"]);
+
+    await user.click(screen.getByRole("button", { name: "Clear Lead filters" }));
+    expect(cardNames()).toEqual(["Mine", "Theirs"]);
+  });
+
+  it("narrows by creation date", async () => {
+    const user = userEvent.setup();
+    renderView({
+      details: [
+        project("Fresh", { created_at: new Date().toISOString() }),
+        project("Stale", { created_at: "2020-01-01T00:00:00Z" }),
+      ],
+      role: 15,
+    });
+
+    const desktop = screen.getByTestId("projects-desktop-filters");
+    await user.click(within(desktop).getByTestId("projects-filter-trigger"));
+    await user.click(screen.getByText("Last 30 days"));
+    expect(cardNames()).toEqual(["Fresh"]);
+    expect(screen.getByTestId("projects-filter-count")).toHaveTextContent("1/2");
+  });
+
+  it("searches live and drops the text on workspace switches", async () => {
+    const user = userEvent.setup();
+    const first = renderView({
+      slug: "acme",
+      details: [project("Findable Apple"), project("Hidden Banana")],
+      role: 15,
+    });
+
+    await user.click(screen.getByRole("button", { name: "Search projects" }));
+    await user.type(screen.getByPlaceholderText("Search"), "apple");
+    expect(cardNames()).toEqual(["Findable Apple"]);
+    expect(useListDisplayStore.getState().searchQuery).toBe("apple");
+
+    first.unmount();
+    renderView({ slug: "globex", details: [project("Findable Apple"), project("Hidden Banana")], role: 15 });
+    expect(useListDisplayStore.getState().searchQuery).toBe("");
+    expect(cardNames()).toEqual(["Findable Apple", "Hidden Banana"]);
+  });
+
+  it("keeps one workspace's display apart from another", () => {
+    useListDisplayStore.getState().setSort("globex", { key: "name", direction: "descending" });
+    renderView({ slug: "acme", details: [project("Bravo"), project("Alpha")], role: 15 });
+
+    expect(cardNames()).toEqual(["Bravo", "Alpha"]);
+    expect(useListDisplayStore.getState().displayFor("globex").sort.key).toBe("name");
   });
 });

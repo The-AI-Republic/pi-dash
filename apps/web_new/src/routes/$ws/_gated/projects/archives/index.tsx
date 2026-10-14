@@ -15,7 +15,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/archives/")({
   component: ArchivedProjectsRoute,
 });
 
-export function ArchivedProjectsRoute(): React.ReactElement {
+function ArchivedProjectsRoute(): React.ReactElement {
   const { ws } = Route.useParams();
   return <ProjectsListView workspaceSlug={ws} archived={true} />;
 }
