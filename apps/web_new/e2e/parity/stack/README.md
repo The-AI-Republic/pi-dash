@@ -174,7 +174,9 @@ old-app bugs exist only in that mode.
 One switch selects both frontends: the admin oracle (`oracle-admin-prod`
 by default, `oracle-admin` under `PARITY_ORACLE_MODE=dev`) always matches
 the web oracle's mode, so runs never mix a prod web oracle with a dev
-admin oracle (NEWFRONT-441).
+admin oracle (NEWFRONT-441). The cloud edition selects its own admin
+oracle instead (`oracle-admin-cloud-prod` — see "Cloud oracle" below),
+so the admin entry gate always matches the edition.
 
 ## Admin console oracle
 
@@ -375,9 +377,14 @@ apps/web_new/e2e/parity/stack/parity-up.sh
 That stages the overlay inputs into the gitignored
 `stack/.cloud-staging/` directory (refreshed every bring-up, so overlay
 edits apply on the next run), builds `api-cloud` (the OSS api image plus
-one overlay layer) and `oracle-cloud-prod` (the production oracle plus
-one overlay layer), and starts `pg redis mq minio api-cloud
-oracle-cloud-prod proxy`. `api-cloud` runs on
+one overlay layer), `oracle-cloud-prod` (the production oracle plus one
+overlay layer) and `oracle-admin-cloud-prod` (the production admin
+oracle plus the overlay's single admin file — the cloud home-page
+override — swapped on top; NEWFRONT-446), and starts `pg redis mq
+minio api-cloud oracle-cloud-prod oracle-admin-cloud-prod proxy`. The
+cloud `/god-mode/` mount serves the overlaid admin entry gate (OIDC
+authorization resolver) instead of the OSS setup/sign-in gate; the
+dashboard pages past the gate are the same build with the same data. `api-cloud` runs on
 `parity_cloud_scratch_settings.py` (mounted read-only), which layers the
 same 600/minute anonymous widening onto the cloud settings — the cloud
 settings inherit the 30/minute production budget, which would otherwise
@@ -417,6 +424,10 @@ proxy):
 # 1. The overlay pages render through the proxy.
 curl -s -o /dev/null -w 'home:%{http_code}\n' "$PARITY_ORACLE_URL/home"
 curl -s -o /dev/null -w 'login:%{http_code}\n' "$PARITY_ORACLE_URL/login"
+# 1b. The cloud admin entry serves (the overlaid gate is
+# client-rendered, so a 200 shell proves the mount; the ADM-074..079
+# scenarios prove the gate branches).
+curl -s -o /dev/null -w 'godmode:%{http_code}\n' "$PARITY_ORACLE_URL/god-mode/"
 # 2. The seeded identity signs in (dev-login bypasses real SSO). Carry the
 # session cookies like the browser does: the session-backed views below
 # read those, not the Bearer token.
@@ -433,7 +444,7 @@ curl -s -b "$JAR" -o /dev/null -w 'billing:%{http_code}\n' "$PARITY_API_URL/api/
 curl -s -b "$JAR" -o /dev/null -w 'connections:%{http_code}\n' "$PARITY_API_URL/api/users/me/ai-assistant/connections/"
 ```
 
-All seven answer 200. The openhub status may report `connected: false`
+All eight answer 200. The openhub status may report `connected: false`
 (no gateway behind a scratch stack) — the smoke proves the endpoint
 responds, not that a gateway answers.
 

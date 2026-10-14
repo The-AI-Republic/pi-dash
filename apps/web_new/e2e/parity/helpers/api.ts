@@ -21599,3 +21599,83 @@ export async function serverAdminRunnersEndpointStatus(
   const res = await fetch(`${apiBase}/api/instances/runners/`, { headers: { cookie: sessionCookie } });
   return res.status;
 }
+
+// --- Instance-admin shell + cloud entry oracle (NEWFRONT-446, ADM-062..079).
+// --- Appended; existing helpers above are untouched per the shared harness contract.
+
+/** Running instance version as GET /api/instances/ reports it (help footer, ADM-067). */
+export async function serverAdminInstanceVersion(apiBase: string = apiBaseFromEnv()): Promise<string> {
+  const res = await fetchTolerant(`${apiBase}/api/instances/`);
+  if (!res.ok) throw new Error(`[parity] instance info read failed with HTTP ${res.status}.`);
+  const body = (await res.json()) as { instance?: Record<string, unknown> };
+  const version = body.instance?.["current_version"];
+  if (typeof version !== "string" || version === "") {
+    throw new Error("[parity] instance info carried no current_version.");
+  }
+  return version;
+}
+
+/**
+ * Grant instance-admin to a cloud user (ADM-075 fixture): the same
+ * get_or_create the cloud_grant_admin command runs, through the cloud
+ * api container. Fresh dev-login emails keep fixtures per-scenario, so
+ * no restore is needed. Resolves with whether the row was created.
+ */
+export async function serverAdminCloudGrantAdmin(email: string): Promise<boolean> {
+  const out = await cloudShell(
+    `from pi_dash.db.models import User\n` +
+      `from pi_dash.license.models import Instance, InstanceAdmin\n` +
+      `user = User.objects.get(email=${JSON.stringify(email)})\n` +
+      `instance = Instance.objects.first()\n` +
+      `_, created = InstanceAdmin.objects.get_or_create(user=user, instance=instance, defaults={"role": 20, "is_verified": True})\n` +
+      `print("PARITY_GRANTED:" + ("1" if created else "0"))\n` +
+      `print("PARITY_GRANT_OK")\n`
+  );
+  if (!out.includes("PARITY_GRANT_OK")) throw new Error(`[parity] cloud admin grant produced no receipt for ${email}.`);
+  return /^PARITY_GRANTED:1$/m.test(out);
+}
+
+/** Cloud auth-probe check: status plus user id when the cookie carries a session. */
+export async function serverCloudAuthMe(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; userId: string | null }> {
+  const res = await fetch(`${apiBase}/api/auth/me/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) return { status: res.status, userId: null };
+  const row = (await res.json()) as { id?: unknown; user?: { id?: unknown } };
+  const raw = typeof row.id === "string" ? row.id : typeof row.user?.id === "string" ? row.user.id : null;
+  return { status: res.status, userId: raw };
+}
+
+/**
+ * Cloud password-auth shadow check (ADM-074 server half): the OSS
+ * email/password admin endpoints answer 403 in the cloud edition (OIDC
+ * is the only way in). Resolves with both statuses.
+ */
+export async function serverCloudAdminPasswordShadowed(
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ signIn: number; signUp: number }> {
+  // A valid CSRF token carries the posts past the middleware so they
+  // reach the shadow view (without one, the CSRF failure page answers
+  // before any view runs).
+  const tokenRes = await fetchTolerant(`${apiBase}/auth/get-csrf-token/`);
+  if (!tokenRes.ok) throw new Error(`[parity] CSRF token fetch failed with HTTP ${tokenRes.status}.`);
+  const tokenPayload = (await tokenRes.json()) as { csrf_token?: unknown };
+  const token = typeof tokenPayload.csrf_token === "string" ? tokenPayload.csrf_token : "";
+  if (token === "") throw new Error("[parity] CSRF token response carried no token.");
+  const cookies = cookieHeader(setCookieHeaders(tokenRes));
+  const post = (path: string): Promise<Response> =>
+    fetch(`${apiBase}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", cookie: cookies },
+      body: new URLSearchParams({
+        email: "nobody@example.com",
+        password: "Parity-Nope-1!",
+        csrfmiddlewaretoken: token,
+      }),
+      redirect: "manual",
+    });
+  const signIn = await post("/api/instances/admins/sign-in/");
+  const signUp = await post("/api/instances/admins/sign-up/");
+  return { signIn: signIn.status, signUp: signUp.status };
+}

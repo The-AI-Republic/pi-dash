@@ -120,11 +120,16 @@ if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then
   ORACLE_ADMIN_SERVICE="oracle-admin"
   ORACLE_ADMIN_UPSTREAM="oracle-admin:3000"
 fi
-# The cloud edition serves its own oracle build; the mode knob above is
-# OSS-only (a cloud+dev combination already refused further up).
+# The cloud edition serves its own oracle builds; the mode knob above is
+# OSS-only (a cloud+dev combination already refused further up). The
+# admin oracle follows the edition too (NEWFRONT-446): the cloud admin
+# console swaps the overlay home page in, so the OSS admin build would
+# serve the wrong entry gate.
 if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
   ORACLE_SERVICE="oracle-cloud-prod"
   ORACLE_UPSTREAM="oracle-cloud-prod:3000"
+  ORACLE_ADMIN_SERVICE="oracle-admin-cloud-prod"
+  ORACLE_ADMIN_UPSTREAM="oracle-admin-cloud-prod:3000"
 fi
 
 # Preflight: this project must not already belong to another checkout,
@@ -170,14 +175,16 @@ else
 fi
 
 # Only one admin oracle may answer the shared `oracle-admin-upstream`
-# alias (see docker-compose.yml): stop the non-selected one, so a rerun
-# that switches PARITY_ORACLE_MODE never splits /god-mode traffic
-# between the dev server and the production build. Absent is fine.
-OTHER_ADMIN_SERVICE="oracle-admin"
-if [ "$ORACLE_ADMIN_SERVICE" = "oracle-admin" ]; then
-  OTHER_ADMIN_SERVICE="oracle-admin-prod"
-fi
-docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" --profile oracle-prod stop "$OTHER_ADMIN_SERVICE" > /dev/null 2>&1 || true
+# alias (see docker-compose.yml): stop every non-selected one, so a
+# rerun that switches PARITY_ORACLE_MODE or PARITY_ORACLE_EDITION never
+# splits /god-mode traffic between the admin builds. Absent is fine.
+# (No flag array: empty-array expansion trips `set -u` on the bash 3.2
+# macOS still ships.)
+for admin_service in oracle-admin oracle-admin-prod oracle-admin-cloud-prod; do
+  if [ "$admin_service" != "$ORACLE_ADMIN_SERVICE" ]; then
+    docker compose -p "$PARITY_PROJECT" -f "$COMPOSE_FILE" --profile oracle-prod --profile cloud stop "$admin_service" > /dev/null 2>&1 || true
+  fi
+done
 
 # Inside a Pi Dash agent run the stack is torn down when the run ends (no-op
 # for a person's shell or CI; PARITY_KEEP_STACK=1 opts out).
@@ -249,7 +256,10 @@ export WARM_ROUTES
 # here proves the whole mount — proxy route, upstream, basename — serves.
 WARM_ROUTES="/ $WARM_DEEP /god-mode/"
 if [ "$PARITY_ORACLE_EDITION" = "cloud" ]; then
-  WARM_ROUTES="/ /home /login"
+  # The cloud admin entry rides along too (NEWFRONT-446): the overlaid
+  # home page is client-rendered, so a 2xx/3xx on the mount proves the
+  # overlay-swapped admin build serves behind the proxy.
+  WARM_ROUTES="/ /home /login /god-mode/"
 fi
 for route in $WARM_ROUTES; do
   warmed=0

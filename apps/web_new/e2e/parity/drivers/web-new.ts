@@ -7,6 +7,8 @@
 // fill these in method by method; the oracle driver stays untouched.
 import { expect, type Page } from "@playwright/test";
 import type {
+  AdminAbsenceFacts,
+  AdminAccountFacts,
   AdminAccountMenuFacts,
   AdminAiFacts,
   AdminAuthCopyFact,
@@ -14,12 +16,20 @@ import type {
   AdminAuthFormFacts,
   AdminAuthLandingFacts,
   AdminAuthProviderFacts,
+  AdminBreadcrumbFacts,
+  AdminCloudGateFetchCounts,
+  AdminCloudHomeBranch,
+  AdminCloudHomeFacts,
+  AdminDeleteWatchFacts,
   AdminEmailFacts,
   AdminEmailFields,
   AdminEmailFormFacts,
   AdminEmailSecurity,
   AdminFailureFacts,
+  AdminFooterControl,
   AdminGeneralFacts,
+  AdminHamburgerFacts,
+  AdminHelpFacts,
   AdminImageFacts,
   AdminLoopDetailFacts,
   AdminLoopListFacts,
@@ -32,9 +42,13 @@ import type {
   AdminRunnersFacts,
   AdminSetupFacts,
   AdminSetupFields,
+  AdminShortcutProbeFacts,
+  AdminSidebarFacts,
   AdminSignInFacts,
   AdminTestEmailFacts,
+  AdminTransportFacts,
   AdminWorkspaceCreateFacts,
+  AdminWorkspaceDeleteFacts,
   AdminWorkspaceListFacts,
   AdminWorkspaceRow,
   ApprovalCard,
@@ -14650,6 +14664,101 @@ export class WebNewDriver implements ParityDriver {
   }
   async adminRunnersFacts(): Promise<AdminRunnersFacts> {
     return todo("adminRunnersFacts");
+  }
+  // --- Admin dashboard shell + negatives (NEWFRONT-446, ADM-062..073). ---
+  async adminSidebarFacts(): Promise<AdminSidebarFacts> {
+    return todo("adminSidebarFacts");
+  }
+  async adminSidebarFollowEntry(_name: string): Promise<void> {
+    return todo("adminSidebarFollowEntry");
+  }
+  async adminSidebarEntryTooltip(_href: string, _name: string): Promise<string | null> {
+    return todo("adminSidebarEntryTooltip");
+  }
+  async adminFooterTooltip(_control: AdminFooterControl, _label: string): Promise<string | null> {
+    return todo("adminFooterTooltip");
+  }
+  async adminSidebarToggleCollapse(): Promise<void> {
+    return todo("adminSidebarToggleCollapse");
+  }
+  async adminSidebarOutsideClick(): Promise<void> {
+    return todo("adminSidebarOutsideClick");
+  }
+  async adminAccountFacts(): Promise<AdminAccountFacts> {
+    return todo("adminAccountFacts");
+  }
+  async adminAccountOpen(): Promise<void> {
+    return todo("adminAccountOpen");
+  }
+  async adminBreadcrumbFacts(): Promise<AdminBreadcrumbFacts> {
+    return todo("adminBreadcrumbFacts");
+  }
+  async adminBreadcrumbTooltip(_label: string): Promise<string | null> {
+    return todo("adminBreadcrumbTooltip");
+  }
+  async adminHelpFacts(): Promise<AdminHelpFacts> {
+    return todo("adminHelpFacts");
+  }
+  async adminHelpOpen(): Promise<void> {
+    return todo("adminHelpOpen");
+  }
+  async adminHamburgerFacts(): Promise<AdminHamburgerFacts> {
+    return todo("adminHamburgerFacts");
+  }
+  async adminHamburgerToggle(): Promise<void> {
+    return todo("adminHamburgerToggle");
+  }
+  async adminStartConfigFetchSpy(): Promise<void> {
+    return todo("adminStartConfigFetchSpy");
+  }
+  async adminConfigFetchCount(): Promise<number> {
+    return todo("adminConfigFetchCount");
+  }
+  async adminStartTransportSpy(): Promise<void> {
+    return todo("adminStartTransportSpy");
+  }
+  async adminTransportFacts(): Promise<AdminTransportFacts> {
+    return todo("adminTransportFacts");
+  }
+  async adminAbsenceFacts(): Promise<AdminAbsenceFacts> {
+    return todo("adminAbsenceFacts");
+  }
+  async adminShortcutProbe(_keys: string[]): Promise<AdminShortcutProbeFacts> {
+    return todo("adminShortcutProbe");
+  }
+  async adminLoopDeleteWatchDialogs(): Promise<AdminDeleteWatchFacts> {
+    return todo("adminLoopDeleteWatchDialogs");
+  }
+  async adminWorkspaceDeleteFacts(): Promise<AdminWorkspaceDeleteFacts> {
+    return todo("adminWorkspaceDeleteFacts");
+  }
+  // --- Admin cloud entry gate (NEWFRONT-446, ADM-074..079). ---
+  async adminCloudHomeFacts(): Promise<AdminCloudHomeFacts> {
+    return todo("adminCloudHomeFacts");
+  }
+  async adminCloudWaitForHomeBranch(_branch: AdminCloudHomeBranch): Promise<void> {
+    return todo("adminCloudWaitForHomeBranch");
+  }
+  async adminCloudOpenRootWithCookies(_cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("adminCloudOpenRootWithCookies");
+  }
+  async adminCloudFailAdminCheck(_times: number, _status: number): Promise<void> {
+    return todo("adminCloudFailAdminCheck");
+  }
+  async adminCloudFailAuthProbe(_times: number, _status: number): Promise<void> {
+    return todo("adminCloudFailAuthProbe");
+  }
+  async adminCloudDelayAdminCheck(_ms: number): Promise<void> {
+    return todo("adminCloudDelayAdminCheck");
+  }
+  async adminCloudGateFetchCounts(): Promise<AdminCloudGateFetchCounts> {
+    return todo("adminCloudGateFetchCounts");
+  }
+  async adminCloudStartGateFetchSpy(): Promise<void> {
+    return todo("adminCloudStartGateFetchSpy");
+  }
+  async adminCloudRetry(): Promise<void> {
+    return todo("adminCloudRetry");
   }
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
   async spaceChromeNavbarIdentity(): Promise<SpaceChromeNavbarIdentity> {

@@ -38,6 +38,9 @@ const EXPECTED_BUILT = new Map([
   // namespaced like every other locally-built tag.
   ["api-cloud", "api-cloud"],
   ["oracle-cloud-prod", "oracle-cloud-prod"],
+  // Cloud admin oracle (NEWFRONT-446): same rule — the overlaid admin
+  // image is namespaced like every other locally-built tag.
+  ["oracle-admin-cloud-prod", "oracle-admin-cloud-prod"],
 ]);
 
 // Minimal indentation parse: service headers sit at 2 spaces, their keys
