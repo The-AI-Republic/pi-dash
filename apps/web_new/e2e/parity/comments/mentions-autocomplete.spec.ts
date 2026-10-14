@@ -22,7 +22,7 @@ test(
   async ({ driver, seed }) => {
     const member = requireMentionMember(seed);
 
-    await test.step("sign in through the UI", async () => {
+    await test.step("sign in", async () => {
       await driver.mentionsEnsureSignedIn(seed.email, seed.password);
     });
 

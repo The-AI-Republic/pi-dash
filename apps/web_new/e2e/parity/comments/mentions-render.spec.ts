@@ -23,7 +23,7 @@ test(
     const member = requireMentionMember(seed);
     const bodyText = `please review this cmt020-${Date.now().toString(36)}`;
 
-    await test.step("sign in through the UI", async () => {
+    await test.step("sign in", async () => {
       await driver.mentionsEnsureSignedIn(seed.email, seed.password);
     });
 
