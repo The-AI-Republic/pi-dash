@@ -37,6 +37,8 @@ import {
   projectFacts,
   createIssue,
   deleteIssue,
+  recentRuns,
+  runsDeleteRuns,
   serverDesktopRuntimeWorkspaceId,
   serverDesktopRuntimePlantRunner,
   serverDesktopRuntimeCleanupRunner,
@@ -187,11 +189,20 @@ test(
       await driver.desktopRuntimeStartRequestSpy();
       try {
         await test.step("the press dispatches through the cloud path with no local traffic", async () => {
-          await driver.clickWidgetAction("Manually Run AI");
-          // The seeded stack enrolls no runners, so dispatch reports its
-          // graceful failure (pinned by ISS-192); the gate half pinned here
-          // is that the press never touches the local-enrollment path.
-          await expect.poll(() => driver.lastToast(), { timeout: 60_000 }).toMatch(/failed to start agent run/i);
+          // The seed enrolls runners, so dispatch may start a run or fail
+          // gracefully depending on capacity — either way the gate half
+          // pinned here is that the press goes through the cloud path and
+          // never touches the local-enrollment path. The failure toast
+          // itself is pinned by ISS-192.
+          const dispatch = await driver.issueRunAiDispatch();
+          const attached = (await recentRuns(session)).filter((row) => row["work_item"] === issue.id);
+          if (dispatch.toast !== null && /agent run started/i.test(dispatch.toast)) {
+            expect(attached).toHaveLength(1);
+          } else {
+            expect(dispatch.toast).toMatch(/failed to start agent run/i);
+            expect(attached).toHaveLength(0);
+          }
+          expect(dispatch.requestUrls.some((url) => url.includes("/api/runners/runs/"))).toBe(true);
           expect(enrollmentTraffic(await driver.desktopRuntimeSpyUrls())).toEqual([]);
         });
       } finally {
@@ -206,6 +217,13 @@ test(
         expect(keys.session.filter((key) => key.startsWith("pidash-managed-workspaces:"))).toEqual([]);
       });
     } finally {
+      // deleteIssue nulls work_item instead of cascading, so an attached run
+      // from the success path is captured and deleted first — or each
+      // attempt leaks one queued run.
+      const leftovers = (await recentRuns(session))
+        .filter((row) => row["work_item"] === issue.id)
+        .map((row) => row["id"] as string);
+      await runsDeleteRuns(leftovers);
       await deleteIssue(seed.workspaceSlug, seed.projectId, issue.id, session).catch(() => undefined);
     }
   }
