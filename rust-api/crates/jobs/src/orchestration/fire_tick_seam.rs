@@ -426,11 +426,15 @@ where
         &mut self,
         project_id: Uuid,
     ) -> Result<Option<Uuid>, DispatchError> {
-        sqlx::query_scalar(PROJECT_DEFAULT_STATE_SQL)
+        // A missing row AND a NULL column both mean "no fallback"
+        // (`scheduling.py:1093-1096` reads `issue.project.default_state`,
+        // None-tolerant).
+        let row: Option<Option<Uuid>> = sqlx::query_scalar(PROJECT_DEFAULT_STATE_SQL)
             .bind(project_id)
             .fetch_optional(&mut **self.dispatch_tx().inner())
             .await
-            .map_err(db)
+            .map_err(db)?;
+        Ok(row.flatten())
     }
 
     async fn clock_policy_for_project(
@@ -2626,6 +2630,95 @@ mod tests {
         assert_eq!(desc.1, row.1);
         assert_eq!(desc.2, graph.ws);
         assert_eq!(desc.3, graph.project);
+    }
+
+    // -- live: null default fallback (PIDASHCONV-1044) ------------------------
+
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    #[tokio::test]
+    async fn live_default_state_id_null_set_missing() {
+        // `default_state_id` is nullable: a NULL column reads as "no
+        // fallback" (`Ok(None)`), like Django's
+        // `issue.project.default_state` (`scheduling.py:1093-1096`),
+        // instead of failing the scalar decode.
+        let _serial = LIVE_SERIAL.lock().await;
+        let pool = pool().await;
+        let graph = seed_graph(&pool, "defstate").await;
+        let tx = Transaction::begin(&pool).await.expect("begin");
+        let mut store = LiveCreationStore::new(tx, &pool, deps());
+        // `seed_graph` leaves `default_state_id` NULL: no fallback.
+        let none =
+            pidash_services::orchestration::dispatch::DispatchSeam::default_state_id_for_project(
+                &mut store,
+                graph.project,
+            )
+            .await
+            .expect("null default reads None");
+        assert_eq!(none, None);
+        // Missing project row: also no fallback.
+        let missing =
+            pidash_services::orchestration::dispatch::DispatchSeam::default_state_id_for_project(
+                &mut store,
+                Uuid::new_v4(),
+            )
+            .await
+            .expect("missing project reads None");
+        assert_eq!(missing, None);
+        // A set default round-trips.
+        sqlx::query("UPDATE projects SET default_state_id = $1 WHERE id = $2")
+            .bind(graph.states["Todo"])
+            .bind(graph.project)
+            .execute(&pool)
+            .await
+            .expect("set default");
+        let some =
+            pidash_services::orchestration::dispatch::DispatchSeam::default_state_id_for_project(
+                &mut store,
+                graph.project,
+            )
+            .await
+            .expect("set default reads Some");
+        assert_eq!(some, Some(graph.states["Todo"]));
+        let (tx, _, _, _, _, _) = store.into_parts();
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    #[tokio::test]
+    async fn live_bounce_no_backlog_null_default_stays() {
+        // The 1044 trigger: no Backlog state + NULL `default_state_id`
+        // — Django logs "no safe backlog target" and leaves the issue
+        // in place (`scheduling.py:1096-1107`); the bounce declines
+        // cleanly instead of 500ing on the fallback decode.
+        let _serial = LIVE_SERIAL.lock().await;
+        let pool = pool().await;
+        let graph = seed_graph(&pool, "bnull").await;
+        ensure_agent_user(&pool).await;
+        sqlx::query(
+            "UPDATE states SET \"group\" = 'unstarted' WHERE project_id = $1 AND \"group\" = 'backlog'",
+        )
+        .bind(graph.project)
+        .execute(&pool)
+        .await
+        .expect("drop backlog group");
+        let out = bounce_issue_no_eligible_runner(
+            &pool,
+            deps(),
+            now(),
+            JITTER,
+            graph.issue,
+            "tick",
+            "no-eligible-runner",
+        )
+        .await
+        .expect("bounce");
+        assert_eq!(out.outcome.moved_to, None);
+        let state: Uuid = sqlx::query_scalar("SELECT state_id FROM issues WHERE id = $1")
+            .bind(graph.issue)
+            .fetch_one(&pool)
+            .await
+            .expect("read issue state");
+        assert_eq!(state, graph.states["In Progress"]);
     }
 
     // -- live: wait activity (W1) + pause (U11) -------------------------------
