@@ -8,11 +8,10 @@
 //!   private-runner gate, workspace/project scopes, and the
 //!   `{results,count,total_count,total_pages,page,per_page}` envelope.
 //! * `AgentRunListEndpoint.post` (`:221-345`) → [`create_run`]:
-//!   `comment_and_run` / `run_ai` / direct branches. Only the validation
-//!   prefixes are owned (missing prompt / work_item 400s, issue + member
-//!   404s, all pinned by FX-RUN-08); every dispatch tail proxies to
-//!   Django (D-13 validation, D-12 scheduling, D-11 execution and D-04
-//!   compose the tails, and only D-04/D-11 have landed).
+//!   `comment_and_run` / `run_ai` / direct branches, all owned
+//!   (PIDASHCONV-1041 drives the dispatch tails through
+//!   [`super::dispatch`]); only the parser arms proxy (malformed JSON,
+//!   JSON non-objects).
 //! * `AgentReTickEndpoint.post` (`:482-523`) → [`retick`]: the missing /
 //!   malformed-UUID / not-found arms are owned; the `re_tick_ticker` tail
 //!   (D-12) proxies.
@@ -701,7 +700,7 @@ async fn request_actor(
 /// role row exists. (The `permissions::membership` kernel the L3 docs
 /// name is not on the auth module tree, so the one-predicate check
 /// lives here, like the scheduler-gate role comparisons.)
-fn is_workspace_member(role: Option<i32>) -> bool {
+pub(crate) fn is_workspace_member(role: Option<i32>) -> bool {
     role.is_some()
 }
 
@@ -713,7 +712,7 @@ fn is_workspace_admin(role: Option<i32>) -> bool {
 /// The caller's live active role in `workspace_id`
 /// (`workspace_role`, `core/permissions.py:37-46`).
 #[allow(clippy::result_large_err)]
-async fn workspace_role(
+pub(crate) async fn workspace_role(
     pool: &PgPool,
     workspace_id: Uuid,
     member_id: Uuid,
@@ -778,7 +777,7 @@ impl PodMiniStrings {
 /// Fetch the pod-mini columns for `pod_id` (hard-missing pod → 500,
 /// mirroring Django's `RelatedObjectDoesNotExist`).
 #[allow(clippy::result_large_err)]
-async fn pod_mini_for(pool: &PgPool, pod_id: Uuid) -> Result<PodMiniStrings, Response> {
+pub(crate) async fn pod_mini_for(pool: &PgPool, pod_id: Uuid) -> Result<PodMiniStrings, Response> {
     let row: Option<(Uuid, String, bool, Uuid, String)> = sqlx::query_as(&pod_mini_sql())
         .bind(pod_id)
         .fetch_optional(pool)
@@ -798,7 +797,10 @@ async fn pod_mini_for(pool: &PgPool, pod_id: Uuid) -> Result<PodMiniStrings, Res
 
 /// Fetch one run's tool calls (no ordering — the model has none).
 #[allow(clippy::result_large_err)]
-async fn tool_calls_for(pool: &PgPool, run_id: Uuid) -> Result<Vec<AgentRunToolCall>, Response> {
+pub(crate) async fn tool_calls_for(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<Vec<AgentRunToolCall>, Response> {
     tool_calls_for_many(pool, &[run_id])
         .await
         .map(|mut grouped| grouped.remove(&run_id).unwrap_or_default())
@@ -830,7 +832,11 @@ async fn tool_calls_for_many(
 
 /// Render one run through the detail shape (single-object serializer:
 /// `error_diagnostic` runs the classifier).
-fn render_detail(run: &AgentRun, pod: &PodMiniStrings, tool_calls: &[AgentRunToolCall]) -> Value {
+pub(crate) fn render_detail(
+    run: &AgentRun,
+    pod: &PodMiniStrings,
+    tool_calls: &[AgentRunToolCall],
+) -> Value {
     let pod_row = pod.as_row();
     let view = shape::run_detail_to_representation(run, &pod_row, tool_calls);
     serde_json::to_value(&view).expect("serializable run view")
@@ -1157,60 +1163,10 @@ fn not_found() -> Response {
 // `POST /api/runners/runs/` — create (`runs.py:221-466`)
 // ---------------------------------------------------------------------------
 
-/// Issue-bound create prefix (`_post_run_ai` / `_post_comment_and_run`
-/// through the membership check, `runs.py:359-369/431-442`): missing
-/// `work_item` 400, unknown issue 404, non-member 404 — then `Ok(None)`
-/// tells the caller to proxy the dispatch tail (D-12 scheduling).
-/// A truthy non-string `work_item` proxies too: `filter(pk=123)`
-/// raises Django's `ValidationError` (500), like the malformed create
-/// arm the contract pins. issue row comes from `all_objects` (no
-/// soft-delete scope). `Ok(())` tells the caller to proxy the tail.
-#[allow(clippy::result_large_err)]
-async fn issue_bound_prefix(
-    pool: &PgPool,
-    actor_id: Uuid,
-    body: &Value,
-    missing_body: &'static str,
-) -> Result<(), Response> {
-    let raw = body.get("work_item");
-    if !py_truthy_json(raw) {
-        return Err(json_response(
-            StatusCode::BAD_REQUEST,
-            missing_body.to_owned(),
-        ));
-    }
-    let Some(text) = raw.and_then(Value::as_str) else {
-        return Ok(());
-    };
-    let Ok(work_item_id) = text.parse::<Uuid>() else {
-        // `filter(pk="nope")` → `ValidationError` → Django 500.
-        return Ok(());
-    };
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(&issue_lookup_sql())
-        .bind(work_item_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
-    let Some((_, workspace_id)) = row else {
-        return Err(json_response(
-            StatusCode::NOT_FOUND,
-            ISSUE_NOT_FOUND_BODY.to_owned(),
-        ));
-    };
-    let role = workspace_role(pool, workspace_id, actor_id).await?;
-    if !is_workspace_member(role) {
-        return Err(json_response(
-            StatusCode::NOT_FOUND,
-            ISSUE_NOT_FOUND_BODY.to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-/// Create a run: the three `triggered_by` branches. Validation
-/// prefixes are owned; every dispatch tail proxies (providers: D-13
-/// validation for direct, D-12 scheduling for `run_ai` /
-/// `comment_and_run`).
+/// Create a run: the three `triggered_by` branches, all owned
+/// (PIDASHCONV-1041 drives them through [`super::dispatch`]). Only the
+/// parser arms proxy: malformed JSON (DRF's `ParseError` wording is
+/// CPython-`json` verbatim) and JSON non-objects (DRF parsers decide).
 pub async fn create_run(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
@@ -1242,30 +1198,21 @@ pub async fn create_run(
         return proxy_with_body(state, parts, bytes).await;
     }
     match classify_triggered_by(&parsed) {
-        TriggeredBy::ProxyInvalid => {
-            return proxy_with_body(state, parts, bytes).await;
-        }
+        // `(value or "").strip()` raises `AttributeError` on a truthy
+        // non-string — Django's 500 (probed, PIDASHCONV-1041).
+        TriggeredBy::ProxyInvalid => return server_error(),
         TriggeredBy::CommentAndRun => {
-            match issue_bound_prefix(pool, actor.id, &parsed, COMMENT_RUN_WORK_ITEM_REQUIRED_BODY)
-                .await
-            {
-                Ok(_) => return proxy_with_body(state, parts, bytes).await,
-                Err(response) => return response,
-            }
+            return super::dispatch::post_comment_and_run(&state, pool, actor.id, &parsed).await;
         }
         TriggeredBy::RunAi => {
-            match issue_bound_prefix(pool, actor.id, &parsed, RUN_AI_WORK_ITEM_REQUIRED_BODY).await
-            {
-                Ok(_) => return proxy_with_body(state, parts, bytes).await,
-                Err(response) => return response,
-            }
+            return super::dispatch::post_run_ai(&state, pool, actor.id, &parsed).await;
         }
         TriggeredBy::Direct => {}
     }
     if !py_truthy_json(parsed.get("prompt")) {
         return json_response(StatusCode::BAD_REQUEST, PROMPT_REQUIRED_BODY.to_owned());
     }
-    proxy_with_body(state, parts, bytes).await
+    super::dispatch::post_direct(&state, pool, actor.id, &parsed).await
 }
 
 // ---------------------------------------------------------------------------

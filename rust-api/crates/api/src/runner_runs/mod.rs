@@ -175,6 +175,7 @@
 
 pub mod approvals;
 pub mod chat;
+pub mod dispatch;
 pub mod metrics;
 pub mod run_endpoints;
 pub mod runs;

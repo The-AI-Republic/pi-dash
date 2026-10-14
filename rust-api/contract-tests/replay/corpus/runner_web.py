@@ -538,7 +538,9 @@ SESSIONS = (
                 json={"prompt": "hi", "workspace": "{ws_id}", "work_item": "nope"},
                 auth="admin", expect_status=500,
                 skip_body=True,
-                body_contains=[("<title>ValidationError", "<title>ValidationError")],
+                # PIDASHCONV-1041 owns the dispatch tail: Rust answers its
+                # generic JSON 500 instead of the proxied Django DEBUG page.
+                body_contains=[("<title>ValidationError", "Something went wrong")],
                 **_csrf("w0"),
             ),
             Request(
