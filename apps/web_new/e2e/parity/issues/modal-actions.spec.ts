@@ -26,6 +26,7 @@ import {
   signInSession,
   unarchiveServerIssue,
 } from "../helpers/api";
+import { pickFutureWeekdayISO, pickPastWeekdayISO } from "../helpers/calendar-dates";
 import { specTags, specTitle } from "../helpers/tags";
 
 /**
@@ -241,17 +242,19 @@ test(
     const RANGE = `NF120 preview range ${STAMP}`;
     const OVERDUE = `NF120 preview overdue ${STAMP}`;
     const NODATE = `NF120 preview nodate ${STAMP}`;
-    const dayOffset = (days: number): string => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+    const todayISO = new Date(STAMP).toISOString().slice(0, 10);
     // The card renders "MMM dd, yyyy" offset-free for date-only values.
     const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     const cardDate = (iso: string): string =>
       `${MONTHS[Number(iso.slice(5, 7)) - 1]} ${iso.slice(8, 10)}, ${iso.slice(0, 4)}`;
-    // Keep the plain range inside this month so it stays on the visible
-    // calendar grid whatever day the suite runs (falling back to tomorrow
-    // at month's end, when only grid spillover covers it).
-    const thisMonth = dayOffset(0).slice(0, 7);
-    const future = [7, 3, 1].map(dayOffset).find((iso) => iso.slice(0, 7) === thisMonth) ?? dayOffset(1);
-    const yesterday = dayOffset(-1);
+    // The calendar hides weekend columns unless the user enabled them, so
+    // both dated fixtures must be weekdays whatever day the suite runs (a
+    // weekend date renders no block at all). Keep the plain range inside
+    // this month so it stays on the visible grid (falling back to the
+    // nearest upcoming weekday at month's end, when only grid spillover
+    // covers it); the overdue day is the most recent weekday.
+    const future = pickFutureWeekdayISO(todayISO, [7, 3, 1], 1);
+    const overdueDay = pickPastWeekdayISO(todayISO, 1);
     await signInAndOpenIssues(driver, seed);
     const session = await signInSession(seed.email, seed.password);
 
@@ -270,82 +273,87 @@ test(
       throw last;
     };
 
-    await test.step("setup: dated issues with distinct priorities", async () => {
-      await createApiIssue(RANGE);
-      await createApiIssue(OVERDUE);
-      await createApiIssue(NODATE);
+    // Cleanup runs in a finally: a red run must still restore the list
+    // layout and remove the scenario's issues instead of leaking them.
+    try {
+      await test.step("setup: dated issues with distinct priorities", async () => {
+        await createApiIssue(RANGE);
+        await createApiIssue(OVERDUE);
+        await createApiIssue(NODATE);
+        const listed = await serverIssues(seed.workspaceSlug, seed.projectId, session);
+        const idOf = (name: string): string => listed.find((issue) => issue.name === name)!.id;
+        await patchServerIssue(seed.workspaceSlug, seed.projectId, idOf(RANGE), session, {
+          start_date: future,
+          target_date: future,
+          priority: "urgent",
+        });
+        await patchServerIssue(seed.workspaceSlug, seed.projectId, idOf(OVERDUE), session, {
+          target_date: overdueDay,
+        });
+        await driver.openProjectIssuesSettled(seed.workspaceSlug, seed.projectId);
+        await expect.poll(() => driver.countText(RANGE), { timeout: 120_000 }).toBeGreaterThan(0);
+      });
+
+      // Identifier, state and title the card must repeat, read back from the
+      // server so the assertions pin the link, not a hardcoded guess.
       const listed = await serverIssues(seed.workspaceSlug, seed.projectId, session);
-      const idOf = (name: string): string => listed.find((issue) => issue.name === name)!.id;
-      await patchServerIssue(seed.workspaceSlug, seed.projectId, idOf(RANGE), session, {
-        start_date: future,
-        target_date: future,
-        priority: "urgent",
+      const rangeId = listed.find((issue) => issue.name === RANGE)!.id;
+      const rangeDetail = await serverIssueRecord(seed.workspaceSlug, seed.projectId, rangeId, session);
+      const identifier = `${(await serverProject(seed.workspaceSlug, seed.projectId, session)).identifier}-${String(rangeDetail["sequence_id"])}`;
+      const states = await serverStates(seed.workspaceSlug, seed.projectId, session);
+      const stateName = states.find((state) => state.id === String(rangeDetail["state_id"]))!.name;
+
+      await test.step("an undated row shows a tooltip, not a preview card", async () => {
+        // Only calendar and gantt blocks carry the preview card, and neither
+        // renders an issue with no dates at all — so the neither-set branch
+        // has no hover surface. The list row hover pops a title tooltip
+        // instead; pin that, so the null case stays honestly uncovered
+        // rather than silently untested.
+        const before = await driver.countText(NODATE);
+        await driver.hoverIssueRow(NODATE);
+        await expect.poll(() => driver.countText(NODATE), { timeout: 30_000 }).toBeGreaterThan(before);
+        expect((await driver.hoverCardRead(NODATE)).text).toBe("");
       });
-      await patchServerIssue(seed.workspaceSlug, seed.projectId, idOf(OVERDUE), session, {
-        target_date: yesterday,
+
+      await test.step("the calendar renders the dated issues", async () => {
+        await driver.switchIssueLayout("Calendar Layout");
+        await expect.poll(() => driver.countText(RANGE), { timeout: 120_000 }).toBeGreaterThan(0);
       });
-      await driver.openProjectIssuesSettled(seed.workspaceSlug, seed.projectId);
-      await expect.poll(() => driver.countText(RANGE), { timeout: 120_000 }).toBeGreaterThan(0);
-    });
 
-    // Identifier, state and title the card must repeat, read back from the
-    // server so the assertions pin the link, not a hardcoded guess.
-    const listed = await serverIssues(seed.workspaceSlug, seed.projectId, session);
-    const rangeId = listed.find((issue) => issue.name === RANGE)!.id;
-    const rangeDetail = await serverIssueRecord(seed.workspaceSlug, seed.projectId, rangeId, session);
-    const identifier = `${(await serverProject(seed.workspaceSlug, seed.projectId, session)).identifier}-${String(rangeDetail["sequence_id"])}`;
-    const states = await serverStates(seed.workspaceSlug, seed.projectId, session);
-    const stateName = states.find((state) => state.id === String(rangeDetail["state_id"]))!.name;
+      let plainColor = "";
+      await test.step("the range card shows identifier, state, title, priority and dates", async () => {
+        const card = await driver.hoverCardRead(RANGE);
+        expect(card.text).toContain(identifier);
+        expect(card.text).toContain(stateName);
+        expect(card.text).toContain(RANGE);
+        expect(card.text).toContain(`${cardDate(future)} - ${cardDate(future)}`);
+        expect(card.priorityIcon).toContain("circle-alert");
+        plainColor = card.dateColor;
+        expect(plainColor).not.toBe("");
+      });
 
-    await test.step("an undated row shows a tooltip, not a preview card", async () => {
-      // Only calendar and gantt blocks carry the preview card, and neither
-      // renders an issue with no dates at all — so the neither-set branch
-      // has no hover surface. The list row hover pops a title tooltip
-      // instead; pin that, so the null case stays honestly uncovered
-      // rather than silently untested.
-      const before = await driver.countText(NODATE);
-      await driver.hoverIssueRow(NODATE);
-      await expect.poll(() => driver.countText(NODATE), { timeout: 30_000 }).toBeGreaterThan(before);
-      expect((await driver.hoverCardRead(NODATE)).text).toBe("");
-    });
-
-    await test.step("the calendar renders the dated issues", async () => {
-      await driver.switchIssueLayout("Calendar Layout");
-      await expect.poll(() => driver.countText(RANGE), { timeout: 120_000 }).toBeGreaterThan(0);
-    });
-
-    let plainColor = "";
-    await test.step("the range card shows identifier, state, title, priority and dates", async () => {
-      const card = await driver.hoverCardRead(RANGE);
-      expect(card.text).toContain(identifier);
-      expect(card.text).toContain(stateName);
-      expect(card.text).toContain(RANGE);
-      expect(card.text).toContain(`${cardDate(future)} - ${cardDate(future)}`);
-      expect(card.priorityIcon).toContain("circle-alert");
-      plainColor = card.dateColor;
-      expect(plainColor).not.toBe("");
-    });
-
-    await test.step("an overdue due date highlights", async () => {
-      const card = await driver.hoverCardRead(OVERDUE);
-      expect(card.text).toContain(OVERDUE);
-      expect(card.text).toContain(cardDate(yesterday));
-      expect(card.priorityIcon).toContain("ban");
-      expect(card.dateColor).not.toBe("");
-      expect(card.dateColor).not.toBe(plainColor);
-    });
-
-    await test.step("cleanup: restore the list layout and remove the issues", async () => {
-      // The layout persists server-side for every stack user, so never
-      // leave the calendar behind.
-      await driver.switchIssueLayout("List Layout");
-      const current = await serverIssues(seed.workspaceSlug, seed.projectId, session);
-      for (const title of [RANGE, OVERDUE, NODATE]) {
-        const mine = current.find((issue) => issue.name === title);
-        expect(mine).toBeDefined();
-        await deleteServerIssue(seed.workspaceSlug, seed.projectId, mine!.id, session);
-      }
-    });
+      await test.step("an overdue due date highlights", async () => {
+        const card = await driver.hoverCardRead(OVERDUE);
+        expect(card.text).toContain(OVERDUE);
+        expect(card.text).toContain(cardDate(overdueDay));
+        expect(card.priorityIcon).toContain("ban");
+        expect(card.dateColor).not.toBe("");
+        expect(card.dateColor).not.toBe(plainColor);
+      });
+    } finally {
+      await test.step("cleanup: restore the list layout and remove the issues", async () => {
+        // The layout persists server-side for every stack user, so never
+        // leave the calendar behind. Best-effort throughout: cleanup must
+        // not throw and mask the step that actually failed.
+        await driver.switchIssueLayout("List Layout").catch(() => undefined);
+        const current = await serverIssues(seed.workspaceSlug, seed.projectId, session).catch(() => []);
+        for (const title of [RANGE, OVERDUE, NODATE]) {
+          const mine = current.find((issue) => issue.name === title);
+          if (mine)
+            await deleteServerIssue(seed.workspaceSlug, seed.projectId, mine.id, session).catch(() => undefined);
+        }
+      });
+    }
   }
 );
 
