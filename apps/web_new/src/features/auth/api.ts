@@ -11,6 +11,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   acceptWorkspaceInvitations,
+  answerWorkspaceInvitation,
   approveDeviceCode,
   checkEmail,
   checkWorkspaceSlug,
@@ -406,6 +407,35 @@ export function useDeactivateAccount() {
       }
       notifySuccess(DEACTIVATE_SUCCESS_TITLE, DEACTIVATE_SUCCESS_MESSAGE);
       return performSignOut({ client, queryClient, teardown: platform.sessionTeardown });
+    },
+  });
+}
+
+export const SINGLE_ANSWER_FAILED_TITLE = "Could not answer the invitation";
+
+export interface AnswerInvitationInput {
+  slug: string;
+  invitationId: string;
+  accepted: boolean;
+  token: string;
+}
+
+/**
+ * Answer one emailed invitation (AUTH-027): accept or ignore it through
+ * the join URL. The caller lands per AUTH-028; a failed answer toasts the
+ * server detail and rejects, leaving the pending card on screen.
+ */
+export function useAnswerWorkspaceInvitation() {
+  return useMutation({
+    mutationFn: async ({ slug, invitationId, accepted, token }: AnswerInvitationInput) => {
+      try {
+        return await answerWorkspaceInvitation(getAppClient(), slug, invitationId, { accepted, token });
+      } catch (error) {
+        // The client throws ApiError for every failure, so the message is
+        // always the server detail.
+        notifyError(SINGLE_ANSWER_FAILED_TITLE, (error as Error).message);
+        throw error;
+      }
     },
   });
 }

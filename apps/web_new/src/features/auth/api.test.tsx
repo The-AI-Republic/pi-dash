@@ -13,8 +13,10 @@ import { createAppClient, resetAppClient } from "../../core/api/client.js";
 import { useSessionStore } from "../../core/session/store.js";
 import {
   FINISH_FAILURE_TITLE,
+  SINGLE_ANSWER_FAILED_TITLE,
   TOUR_COMPLETE_FAILED_TITLE,
   useAcceptWorkspaceInvitations,
+  useAnswerWorkspaceInvitation,
   useApproveDeviceCode,
   useCheckWorkspaceSlug,
   useCompleteTour,
@@ -837,5 +839,84 @@ describe("useCompleteTour", () => {
     expect((queryClient.getQueryData(["session", "profile"]) as { is_tour_completed: boolean }).is_tour_completed).toBe(
       false
     );
+  });
+});
+
+interface CapturedPost {
+  url: string;
+  method: string;
+  body: unknown;
+}
+
+describe("useAnswerWorkspaceInvitation", () => {
+  function setup(transport: Transport): QueryClient {
+    createAppClient("https://api.test", transport);
+    return new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  }
+
+  it("accepts through the join URL", async () => {
+    const posts: CapturedPost[] = [];
+    const queryClient = setup(
+      stubTransport(async (url, init) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        posts.push({ url, method: init.method, body: init.body === undefined ? null : JSON.parse(init.body) });
+        return { status: 200, body: JSON.stringify({ message: "joined" }), url };
+      })
+    );
+    const { result } = renderHook(() => useAnswerWorkspaceInvitation(), { wrapper: wrapper(queryClient) });
+
+    const answer = await result.current.mutateAsync({
+      slug: "acme",
+      invitationId: "invite-1",
+      accepted: true,
+      token: "token-1",
+    });
+
+    expect(answer).toEqual({ message: "joined" });
+    expect(posts).toEqual([
+      {
+        url: "https://api.test/api/workspaces/acme/invitations/invite-1/join/",
+        method: "POST",
+        body: { accepted: true, token: "token-1" },
+      },
+    ]);
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("ignores through the join URL", async () => {
+    const posts: CapturedPost[] = [];
+    const queryClient = setup(
+      stubTransport(async (url, init) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        posts.push({ url, method: init.method, body: init.body === undefined ? null : JSON.parse(init.body) });
+        return { status: 200, body: JSON.stringify({ message: "ignored" }), url };
+      })
+    );
+    const { result } = renderHook(() => useAnswerWorkspaceInvitation(), { wrapper: wrapper(queryClient) });
+
+    await result.current.mutateAsync({ slug: "acme", invitationId: "invite-1", accepted: false, token: "token-1" });
+
+    expect(posts).toEqual([
+      {
+        url: "https://api.test/api/workspaces/acme/invitations/invite-1/join/",
+        method: "POST",
+        body: { accepted: false, token: "token-1" },
+      },
+    ]);
+  });
+
+  it("toasts the server detail when the answer fails", async () => {
+    const queryClient = setup(
+      stubTransport(async (url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        return { status: 403, body: JSON.stringify({ error: "bad token" }), url };
+      })
+    );
+    const { result } = renderHook(() => useAnswerWorkspaceInvitation(), { wrapper: wrapper(queryClient) });
+
+    await expect(
+      result.current.mutateAsync({ slug: "acme", invitationId: "invite-1", accepted: true, token: "bogus" })
+    ).rejects.toThrow("bad token");
+    expect(notifyError).toHaveBeenCalledWith(SINGLE_ANSWER_FAILED_TITLE, "bad token");
   });
 });

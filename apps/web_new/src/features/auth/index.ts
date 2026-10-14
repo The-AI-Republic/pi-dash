@@ -9,8 +9,10 @@ export {
   DEACTIVATE_SUCCESS_TITLE,
   FINISH_FAILURE_TITLE,
   JOIN_PROJECT_FAILED_TITLE,
+  SINGLE_ANSWER_FAILED_TITLE,
   TOUR_COMPLETE_FAILED_TITLE,
   useAcceptWorkspaceInvitations,
+  useAnswerWorkspaceInvitation,
   useApproveDeviceCode,
   useCheckWorkspaceSlug,
   useCompleteTour,
@@ -35,9 +37,19 @@ export {
   useUpdateProfile,
   useUploadUserAvatar,
 } from "./api.js";
+export type { AnswerInvitationInput } from "./api.js";
 export { runSignOutAction, SIGN_OUT_COMMAND_ID, signOutCommand } from "./commands.js";
 export { describeAuthError, describeSubmitFailure } from "./authErrors.js";
 export type { AuthError, AuthErrorAction, AuthMode, SignInStep, SubmitFailure } from "./authErrors.js";
+export {
+  decideSingleInvitationView,
+  INVITATION_IGNORE_LANDING,
+  resolveSingleAcceptLanding,
+  selectBatchLandingTarget,
+  selectInvitationRoleLabel,
+  toggleInvitationSelection,
+} from "./invitations.js";
+export type { SingleInvitationView, SingleInvitationViewState } from "./invitations.js";
 export { asString, safeNextPath } from "./entrySearch.js";
 export { isStrongSecret, secretCriteria } from "./passwordStrength.js";
 export type { SecretCriterion } from "./passwordStrength.js";
@@ -50,6 +62,7 @@ export {
   myJoinRequestsQueryOptions,
   useMyWorkspaceInvitations,
   useMyWorkspaceJoinRequests,
+  useViewerEmail,
   useWorkspaceInvitation,
 } from "./queries.js";
 export {
@@ -109,6 +122,7 @@ export {
   workspaceRoleLabel,
 } from "./workspace.js";
 export type { WorkspaceStepView } from "./workspace.js";
+
 export { performSignOut, SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE, signOutLandingTarget } from "./signOut.js";
 export {
   describeDeviceApprovalFailure,
@@ -151,6 +165,20 @@ export {
 export type { TourContentStop, TourStepKey } from "./tour.js";
 export { DeactivateAccountDialog } from "./components/DeactivateAccountDialog.js";
 export type { DeactivateAccountDialogProps } from "./components/DeactivateAccountDialog.js";
+export {
+  BATCH_ACCEPT_FAILED_TITLE,
+  BATCH_ACCEPT_STALE_MESSAGE,
+  INVITATIONS_TITLE,
+  InvitationInbox,
+  NO_INVITES_ART,
+} from "./components/InvitationInbox.js";
+export {
+  COMMUNITY_URL,
+  GITHUB_STAR_URL,
+  SINGLE_INVITATION_TITLE,
+  SingleInvitation,
+} from "./components/SingleInvitation.js";
+export type { SingleInvitationProps } from "./components/SingleInvitation.js";
 export { AuthBanner, isValidEmail, SignInCard } from "./components/SignInCard.js";
 export type { AuthBannerProps, SignInCardProps } from "./components/SignInCard.js";
 export { SignUpCard } from "./components/SignUpCard.js";
