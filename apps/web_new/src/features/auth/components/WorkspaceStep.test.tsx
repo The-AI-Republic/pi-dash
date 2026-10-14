@@ -166,7 +166,7 @@ function renderStep(options: {
   invitations?: WorkspaceInvitationList;
   joinRequests?: WorkspaceJoinRequestList;
   joinAnswer?: unknown;
-  creationDisabled?: boolean;
+  creationDisabled?: boolean | "omit";
 }): StepHarness {
   const advances: ({ skipInvites?: boolean } | undefined)[] = [];
   const pushAdvance = (advanceOptions: { skipInvites?: boolean } | undefined): void => {
@@ -201,14 +201,15 @@ function renderStep(options: {
     })
   );
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  const creationDisabled = options.creationDisabled ?? false;
+  const creationDisabled = options.creationDisabled === "omit" ? undefined : (options.creationDisabled ?? false);
+  const disabledProp = creationDisabled === undefined ? {} : { creationDisabled };
   const view = render(
     <QueryClientProvider client={queryClient}>
       <WorkspaceStep
         onAdvance={pushAdvance}
         invitations={options.invitations ?? []}
         joinRequests={options.joinRequests ?? []}
-        creationDisabled={creationDisabled}
+        {...disabledProp}
       />
     </QueryClientProvider>
   );
@@ -221,7 +222,7 @@ function renderStep(options: {
             onAdvance={pushAdvance}
             invitations={invitations}
             joinRequests={joinRequests}
-            creationDisabled={creationDisabled}
+            {...disabledProp}
           />
         </QueryClientProvider>
       );
@@ -239,6 +240,12 @@ describe("WorkspaceStep", () => {
     expect(screen.getByRole("heading", { name: "Create your workspace" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Join by admin email" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Join with an invite" })).not.toBeInTheDocument();
+  });
+
+  it("treats an omitted creation flag as enabled", () => {
+    renderStep({ creationDisabled: "omit" });
+    expect(screen.getByRole("heading", { name: "Create your workspace" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Workspace creation is turned off" })).not.toBeInTheDocument();
   });
 
   it("replaces the create view with the restricted notice when creation is disabled", () => {
