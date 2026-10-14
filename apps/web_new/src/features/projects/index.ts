@@ -4,7 +4,14 @@
 // Public API of the projects feature. Other features import only from here.
 
 export { projectKeys } from "./api/keys.js";
-export { projectDetailsQueryOptions, projectsQueryOptions } from "./api/queries.js";
+export {
+  projectDetailsQueryOptions,
+  projectPropertiesQueryOptions,
+  projectsQueryOptions,
+  useProjectProperties,
+  useWorkspaceProperties,
+  workspacePropertiesQueryOptions,
+} from "./api/queries.js";
 export { ProjectCard } from "./components/ProjectCard.js";
 export type { ProjectCardProps } from "./components/ProjectCard.js";
 export { ProjectsEmptyState } from "./components/ProjectsEmptyState.js";
@@ -19,3 +26,49 @@ export type {
 } from "./components/ProjectsListScreen.js";
 export { ProjectsListView } from "./components/ProjectsListView.js";
 export type { ProjectsListViewProps } from "./components/ProjectsListView.js";
+export { applyNavigationPrefs, mergeNavigationPrefs, useTabPreferences } from "./api/tabPreferences.js";
+export type { TabPreferencesHandle } from "./api/tabPreferences.js";
+export {
+  countFittingTabs,
+  DEFAULT_TAB_KEY,
+  EPIC_TAB_KEY,
+  isProjectAdmin,
+  isProjectAuthorized,
+  isTabbedMode,
+  parseNavigationPrefs,
+  PROJECT_TAB_DEFS,
+  resolveActiveTabKey,
+  resolveOverflow,
+  selectCopyPath,
+  selectDefaultTarget,
+  selectProjectTabs,
+  selectQuickActions,
+  selectSwitcherTarget,
+  tabHref,
+} from "./tabs.js";
+export type {
+  ProjectTab,
+  ProjectTabDef,
+  ProjectTabFlags,
+  QuickActionEntry,
+  QuickActionId,
+  StripWorkItem,
+  TabPreferences,
+} from "./tabs.js";
+export { DefaultTabRedirect } from "./components/DefaultTabRedirect.js";
+export type { DefaultTabRedirectProps } from "./components/DefaultTabRedirect.js";
+export { LeaveProjectDialog, LEAVE_CONFIRM_PHRASE } from "./components/LeaveProjectDialog.js";
+export type { LeaveProjectDialogProps } from "./components/LeaveProjectDialog.js";
+export { ProjectQuickActions } from "./components/ProjectQuickActions.js";
+export type { ProjectQuickActionsProps } from "./components/ProjectQuickActions.js";
+export { ProjectSwitcher } from "./components/ProjectSwitcher.js";
+export type { ProjectSwitcherProps, SwitcherProject } from "./components/ProjectSwitcher.js";
+export { ProjectTabChrome } from "./components/ProjectTabChrome.js";
+export type { ProjectTabChromeProps } from "./components/ProjectTabChrome.js";
+export { ProjectTabStrip } from "./components/ProjectTabStrip.js";
+export type { ProjectTabStripProps } from "./components/ProjectTabStrip.js";
+export { PublishProjectDialog } from "./components/PublishProjectDialog.js";
+export type { PublishProjectDialogProps } from "./components/PublishProjectDialog.js";
+export { TabAreaMount } from "./components/TabAreaMount.js";
+export { TabBar } from "./components/TabBar.js";
+export type { TabBarProps } from "./components/TabBar.js";

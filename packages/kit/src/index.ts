@@ -11,6 +11,8 @@ export { Breadcrumbs, BREADCRUMB_LONG_LABEL_LENGTH } from "./components/Breadcru
 export type { BreadcrumbEntry, BreadcrumbsProps } from "./components/Breadcrumbs";
 export { Button } from "./components/Button";
 export type { ButtonProps, ButtonSize, ButtonVariant } from "./components/Button";
+export { ContextMenu } from "./components/ContextMenu";
+export type { ContextMenuProps } from "./components/ContextMenu";
 export { Dialog } from "./components/Dialog";
 export type { DialogProps } from "./components/Dialog";
 export { FieldScaffold } from "./components/FieldScaffold";

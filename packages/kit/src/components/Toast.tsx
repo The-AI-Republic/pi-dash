@@ -95,7 +95,10 @@ function ToastList({ manager }: { manager: ToastHostManager }): React.ReactEleme
 export function ToastHost({ manager }: { manager: ToastHostManager }): React.ReactElement {
   return (
     <BaseToast.Provider toastManager={manager}>
-      <BaseToast.Viewport className="pointer-events-none fixed right-(--space-8) bottom-(--space-8) z-50 flex w-80 flex-col gap-(--space-4)">
+      <BaseToast.Viewport
+        data-testid="toast-stack"
+        className="pointer-events-none fixed right-(--space-8) bottom-(--space-8) z-50 flex w-80 flex-col gap-(--space-4)"
+      >
         <ToastList manager={manager} />
       </BaseToast.Viewport>
     </BaseToast.Provider>

@@ -10,6 +10,10 @@ export interface MenuAction {
   label: string;
   onSelect: () => void;
   disabled?: boolean;
+  /** Leading mark (an avatar or glyph); hidden from assistive tech. */
+  icon?: React.ReactNode;
+  /** React key when sibling labels repeat (project names can collide). */
+  itemKey?: string;
 }
 
 export interface MenuSeparator {
@@ -56,11 +60,16 @@ export function Menu({ trigger, items, open, onOpenChange }: MenuProps): React.R
                 />
               ) : (
                 <BaseMenu.Item
-                  key={entry.label}
+                  key={entry.itemKey ?? entry.label}
                   disabled={entry.disabled ?? false}
                   onClick={entry.onSelect}
                   className={cn(itemClasses)}
                 >
+                  {entry.icon === undefined ? null : (
+                    <span aria-hidden="true" className="mr-(--space-2) inline-flex shrink-0 items-center">
+                      {entry.icon}
+                    </span>
+                  )}
                   {entry.label}
                 </BaseMenu.Item>
               )

@@ -74,6 +74,24 @@ function membershipRow(role: number) {
   };
 }
 
+function userPropertiesPayload(preference: string) {
+  return {
+    id: UUID,
+    workspace: UUID,
+    user: UUID,
+    filters: {},
+    display_filters: {},
+    display_properties: {},
+    rich_filters: {},
+    navigation_project_limit: 10,
+    navigation_control_preference: preference,
+    created_by: null,
+    updated_by: null,
+    created_at: "2024-01-02T03:04:05Z",
+    updated_at: "2024-02-03T04:05:06Z",
+  };
+}
+
 function renderLayout(detailStatus: number): void {
   const apiClient = createAppClient("https://api.test", async (url) => {
     let status = 404;
@@ -81,9 +99,26 @@ function renderLayout(detailStatus: number): void {
     if (url.endsWith("/auth/get-csrf-token/")) {
       status = 200;
       body = JSON.stringify({ csrf_token: "csrf" });
+    } else if (url.includes("/project-roles/")) {
+      status = 200;
+      body = JSON.stringify({ [PROJECT_ID]: 20 });
     } else if (url.endsWith(`/projects/${PROJECT_ID}/`)) {
       status = detailStatus;
       body = detailStatus === 200 ? JSON.stringify(projectRow()) : JSON.stringify({ error: "denied" });
+    } else if (url.includes(`/projects/${PROJECT_ID}/user-properties/`)) {
+      status = 200;
+      body = JSON.stringify({
+        ...userPropertiesPayload("TABBED"),
+        project: PROJECT_ID,
+        preferences: { navigation: { default_tab: "work_items", hide_in_more_menu: [] } },
+        sort_order: 1,
+      });
+    } else if (url.endsWith("/user-properties/")) {
+      status = 200;
+      body = JSON.stringify(userPropertiesPayload("TABBED"));
+    } else if (url.endsWith("/projects/")) {
+      status = 200;
+      body = JSON.stringify([{ ...projectRow(), intake_count: 0 }]);
     } else if (url.endsWith("/workspace-members/me/")) {
       status = 200;
       body = JSON.stringify(membershipRow(15));
@@ -138,10 +173,19 @@ describe("project layout", () => {
     await screen.findByText("Issues page");
   });
 
+  it("renders the tab strip above the page for members", async () => {
+    renderLayout(200);
+    await screen.findByTestId("project-tab-strip");
+    expect(screen.getByTestId("project-switcher-trigger")).toHaveTextContent("Web");
+    expect(screen.getByRole("link", { name: "Work Items" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByText("Issues page")).toBeInTheDocument();
+  });
+
   it("renders the denial screen for refused projects", async () => {
     renderLayout(409);
     await screen.findByRole("heading", { name: "You haven't joined this project yet" });
     expect(screen.queryByText("Issues page")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("project-tab-strip")).not.toBeInTheDocument();
   });
 
   it("renders not-found for unknown projects", async () => {

@@ -145,7 +145,10 @@ function checkFile(full) {
       const toParts = importerRel.split("/");
       const toFeature = toParts[1];
       const fromSelf = relative(appSrc, full).split(sep).join(posix.sep).split("/")[1];
-      if (toFeature !== fromSelf && !(toParts.length === 3 && toParts[2] === "index.ts") && toFeature !== undefined) {
+      // Sources address the index with the ESM `.js` specifier for the
+      // `.ts` file; both spellings name the same index module.
+      const throughIndex = toParts.length === 3 && (toParts[2] === "index.ts" || toParts[2] === "index.js");
+      if (toFeature !== fromSelf && !throughIndex && toFeature !== undefined) {
         void fromFeature;
         failures.push(`${rel}: cross-feature import must go through features/${toFeature}/index.ts ("${spec}")`);
       }
