@@ -11476,14 +11476,33 @@ export class WebDriver implements ParityDriver {
     const dialog = this.page.getByRole("dialog");
     const save = dialog.getByRole("button", { name: "Save", exact: true });
     const update = dialog.getByRole("button", { name: "Update", exact: true });
-    if ((await save.count()) > 0) await save.first().click();
-    else if ((await update.count()) > 0) await update.first().click();
-    else throw new Error("[parity] work-item modal has no Save/Update button.");
+    const isCreate = (await save.count()) > 0;
+    const primary = isCreate ? save : update;
+    if ((await primary.count()) === 0) throw new Error("[parity] work-item modal has no Save/Update button.");
+    await primary.first().click();
+    // Edits re-click on every poll round; creates click once. An edit
+    // submit that lands before the description editor finishes its
+    // async init is refused with "Editor is not ready to discard
+    // changes" (NEWFRONT-336: observed on the fast production oracle,
+    // where the heading renders and the first click lands while the
+    // editor instance is still undefined), leaving the modal open with
+    // no retry — so the loop re-submits until the modal closes, like
+    // the Escape-close loop above. A re-click only re-PATCHes
+    // identical field values, which is benign — but a create re-POST
+    // would duplicate the issue, so creates keep the single click and
+    // only wait. The re-click is short-fused and lenient: by the time
+    // it runs the modal may already be closing (healthy submits close
+    // within the first wait and never re-click).
     const deadline = Date.now() + WebDriver.LAYOUTS_BODY_WAIT_MS;
     for (;;) {
+      await this.page.waitForTimeout(500);
       if (!(await this.layoutsWorkItemModalVisible())) return;
       if (Date.now() >= deadline) throw new Error("[parity] work-item modal never closed after submit.");
-      await this.page.waitForTimeout(500);
+      if (!isCreate)
+        await primary
+          .first()
+          .click({ timeout: 5_000 })
+          .catch(() => {});
     }
   }
 

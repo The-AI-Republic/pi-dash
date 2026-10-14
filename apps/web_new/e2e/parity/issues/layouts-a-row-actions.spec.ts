@@ -404,6 +404,15 @@ test(
         })
         .toContain(id);
 
+      // Reload before the remove: the edit submit can land while the
+      // modal's own issue-details GETs are still in flight, and a late
+      // details response overwrites the shared issue map with the
+      // pre-rename name (NEWFRONT-336; the server state above is
+      // correct, but the row can stick on the old name). The reload
+      // refetches the list from the renamed server state — the same
+      // repair the ISS-064 test below applies to its cached rows.
+      await driver.layoutsReloadIssues();
+
       await driver.layoutsRowMenuChoose(renamed, "Remove from module");
       await expect
         .poll(async () => serverModuleIssueIds(seed.workspaceSlug, seed.projectId, moduleId, session), {
