@@ -2,71 +2,149 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
+// Workspace home wiring (NEWFRONT-278). The route keeps the tour seam
+// mounted, hands its path params plus the projects read to the dashboard,
+// and warms the assistant card reads in its loader; the dashboard's
+// sections belong to the home feature, so this suite only proves the
+// composition and the loader's cache writes.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
+import {
+  createMemoryHistory,
+  createRootRouteWithContext,
+  createRoute,
+  createRouter,
+  Outlet,
+  RouterProvider,
+} from "@tanstack/react-router";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { setSessionClient } from "../../../core/session/queries.js";
-import { Route } from "./index.js";
+import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import type { RouterContext } from "../../__root.js";
 
-// The real router except links: project rows render plain anchors.
-vi.mock("@tanstack/react-router", async (importOriginal) => {
-  const original = await importOriginal<typeof import("@tanstack/react-router")>();
+vi.mock("../../../features/auth/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../features/auth/index.js")>();
+  return { ...actual, WorkspaceHomeTour: () => <div data-testid="tour-seam" /> };
+});
+
+vi.mock("../../../features/home/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../features/home/index.js")>();
   return {
-    ...original,
-    Link: ({ children }: { children?: React.ReactNode }) => <a href="#">{children}</a>,
+    ...actual,
+    HomeDashboard: (props: { workspaceSlug: string; projects: unknown }) => (
+      <div
+        data-testid="home-dashboard"
+        data-slug={props.workspaceSlug}
+        data-projects={props.projects === undefined ? "loading" : "ready"}
+      />
+    ),
   };
 });
 
-function HomeComponent(): React.ReactElement {
-  const Component = Route.options.component as unknown as React.ComponentType;
-  return <Component />;
+import { homeKeys } from "../../../features/home/index.js";
+import { projectKeys } from "../../../features/projects/index.js";
+import { Route } from "./index.js";
+
+const THREAD = {
+  id: "11111111-1111-4111-8111-111111111111",
+  title: "Sprint summary",
+  is_archived: false,
+  has_active_turn: false,
+  created_at: "2026-10-01T00:00:00Z",
+  updated_at: "2026-10-02T00:00:00Z",
+};
+
+const CONFIG = {
+  provider_kind: "openai",
+  base_url: "https://api.test",
+  model_name: "pilot",
+  has_api_key: true,
+  last_verified_at: null,
+};
+
+function stubApiClient(body: (url: string) => unknown) {
+  return {
+    getJson: async (url: string) => body(url),
+    parse: (_schema: unknown, data: unknown) => data,
+  } as never;
 }
 
-function renderHome(
-  tourCompleted: boolean,
-  projects: ReadonlyArray<{ id: string; name: string }> = []
-): void {
-  setSessionClient({
-    getJson: () => new Promise<never>(() => {}),
-    parse: (_schema: unknown, data: unknown) => data,
-  } as never);
-  vi.spyOn(Route, "useLoaderData").mockReturnValue({ projects } as never);
-  vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme" } as never);
+function renderHome(): void {
+  const apiClient = createAppClient("https://api.test", (async (url: string) => ({
+    status: 500,
+    url,
+    headers: { get: () => null },
+    text: async () => "{}",
+  })) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  queryClient.setQueryData(["session", "profile"], { is_tour_completed: tourCompleted });
-  queryClient.setQueryData(["session", "me"], { first_name: "Ada" });
+  queryClient.setQueryData(projectKeys.list("acme"), []);
+  const component = Route.options.component;
+  if (!component) throw new Error("missing component");
+  const rootRoute = createRootRouteWithContext<RouterContext>()();
+  const wsRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/$ws",
+    component: () => <Outlet />,
+  });
+  const gatedRoute = createRoute({
+    getParentRoute: () => wsRoute,
+    id: "_gated",
+    component: () => <Outlet />,
+  });
+  const indexRoute = createRoute({
+    getParentRoute: () => gatedRoute,
+    path: "/",
+    component,
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([wsRoute.addChildren([gatedRoute.addChildren([indexRoute])])]),
+    context: { queryClient, apiClient },
+    history: createMemoryHistory({ initialEntries: ["/acme/"] }),
+  });
   render(
     <QueryClientProvider client={queryClient}>
-      <HomeComponent />
+      <RouterProvider router={router} />
     </QueryClientProvider>
   );
-  vi.restoreAllMocks();
 }
 
-describe("workspace home tour mount", () => {
-  it("shows the tour overlay over home while the flag is false", () => {
-    renderHome(false);
-    expect(screen.getByRole("heading", { name: "Welcome to Pi Dash, Ada" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "No projects yet" })).toBeInTheDocument();
-  });
-
-  it("shows home alone once the flag is set", () => {
-    renderHome(true);
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "No projects yet" })).toBeInTheDocument();
-  });
+afterEach(() => {
+  resetAppClient();
 });
 
-describe("workspace home interim project list", () => {
-  it("lists project links instead of forwarding while the dashboard is pending", () => {
-    renderHome(true, [
-      { id: "p1", name: "Alpha" },
-      { id: "p2", name: "Beta" },
-    ]);
-    expect(screen.getByRole("heading", { name: "Projects" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Alpha" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Beta" })).toBeInTheDocument();
+describe("workspace home route", () => {
+  it("mounts the tour seam and the dashboard with its params and projects", async () => {
+    renderHome();
+    expect(await screen.findByTestId("tour-seam")).toBeInTheDocument();
+    const dashboard = screen.getByTestId("home-dashboard");
+    expect(dashboard).toHaveAttribute("data-slug", "acme");
+    expect(dashboard).toHaveAttribute("data-projects", "ready");
+  });
+
+  it("warms the assistant card reads in its loader", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const apiClient = stubApiClient((url: string) => {
+      if (url.endsWith("/ai-assistant/threads/")) return [THREAD];
+      if (url.endsWith("/ai-assistant/config/")) return CONFIG;
+      throw new Error(`unexpected ${url}`);
+    });
+    const loader = Route.options.loader;
+    if (typeof loader !== "function") throw new Error("missing loader");
+    await loader({ context: { queryClient, apiClient }, params: { ws: "acme" } } as never);
+    expect(queryClient.getQueryData(homeKeys.threads("acme"))).toEqual([THREAD]);
+    expect(queryClient.getQueryData(homeKeys.assistantConfig("acme"))).toEqual(CONFIG);
+  });
+
+  it("tolerates failed assistant reads in its loader", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const apiClient = stubApiClient(() => {
+      throw new Error("denied");
+    });
+    const loader = Route.options.loader;
+    if (typeof loader !== "function") throw new Error("missing loader");
+    await expect(loader({ context: { queryClient, apiClient }, params: { ws: "acme" } } as never)).resolves.toEqual({});
+    expect(queryClient.getQueryData(homeKeys.threads("acme"))).toBeUndefined();
+    expect(queryClient.getQueryData(homeKeys.assistantConfig("acme"))).toBeUndefined();
   });
 });
