@@ -414,7 +414,21 @@ test(
         `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
         sessionBrowserCookies(guestSession)
       );
-      expect(await driver.layoutsRowState(first)).toEqual("Todo");
+      // Orientation without the chip: the guest row renders (name and
+      // identifier show) and links the issue, ...
+      expect(await driver.layoutsRowHref(first)).toContain("/browse/");
+      // ... and the server confirms that issue sits in Todo — the state
+      // the dev build renders as a disabled chip while the production
+      // build settles with no chip at all (NEWFRONT-339). Either settled
+      // shape reads as cannot-edit.
+      const rows = await serverIssues(seed.workspaceSlug, seed.projectId, ownerSession);
+      const firstId = rows.find((row) => row.name === first)?.id ?? "";
+      expect(firstId).not.toEqual("");
+      const states = await serverListStates(seed.workspaceSlug, seed.projectId, ownerSession);
+      const todoId = states.find((row) => row.name === "Todo")?.id;
+      expect(todoId).toBeDefined();
+      const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, firstId, ownerSession);
+      expect(details.stateId).toEqual(todoId);
       expect(await driver.layoutsRowCanEditState(first)).toEqual(false);
     } finally {
       await serverPatchProject(seed.workspaceSlug, seed.projectId, ownerSession, { guest_view_all_features: false });
