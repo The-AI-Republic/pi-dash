@@ -32,6 +32,9 @@ UPPER_WS = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
 def _assert_framework_404(response) -> None:
     assert response.status_code == 404, response.text
     assert "text/html" in response.headers.get("content-type", "")
+    # Framework 404s never pass a DRF view, so Django stamps no Allow;
+    # the Rust proxy fallthrough must not add one either (PIDASHCONV-1048).
+    assert "allow" not in response.headers
 
 
 @pytest.mark.parametrize("segment", ["not-a-uuid", "123", UPPER_WS])
@@ -87,3 +90,6 @@ def test_daemon_redeem_non_object_ticket_is_500(anon_client, blob):
     finally:
         rdb.delete(key)
     assert response.status_code == 500, response.text
+    # Raw-500 arms carry no Allow on either backend (Django's HTML error
+    # page has none; the Rust wrapper skips 500s).
+    assert "allow" not in response.headers

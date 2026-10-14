@@ -41,6 +41,7 @@ def test_web_approvals_list_shape(user_client, machine_client, daemon_run, seede
     approval_id = _seed_approval(machine_client, daemon_run, seeder)
     response = user_client.get(f"{WEB}/approvals/")
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     body = response.json()
     assert isinstance(body, list) and len(body) == 1
     approval = body[0]
@@ -53,6 +54,7 @@ def test_web_approvals_list_shape(user_client, machine_client, daemon_run, seede
 def test_web_approvals_list_denies_anonymous(anon_client):
     response = anon_client.get(f"{WEB}/approvals/")
     assert response.status_code == 401
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     assert response.json() == {"detail": "Authentication credentials were not provided."}
 
 
@@ -70,6 +72,7 @@ def test_web_approvals_list_isolates_creators(settings, user_client, machine_cli
             client, f"{WEB}/approvals/{approval_id}/decide/", {"decision": "accept"}
         )
         assert decided.status_code == 500
+        assert "allow" not in decided.headers
 
 
 def test_web_approval_decide_shape(user_client, machine_client, daemon_run, seeder):
@@ -84,6 +87,8 @@ def test_web_approval_decide_shape(user_client, machine_client, daemon_run, seed
         user_client, f"{WEB}/approvals/{approval_id}/decide/", {"decision": "accept"}
     )
     assert response.status_code == 500
+    # Django's own raw 500 (proxied): no Allow on either backend.
+    assert "allow" not in response.headers
 
 
 def test_web_approval_decide_rejects_bad_decision(user_client, machine_client, daemon_run, seeder):
@@ -92,6 +97,7 @@ def test_web_approval_decide_rejects_bad_decision(user_client, machine_client, d
         user_client, f"{WEB}/approvals/{approval_id}/decide/", {"decision": "maybe"}
     )
     assert response.status_code == 400
+    assert response.headers["allow"] == "POST, OPTIONS"
 
 
 def test_web_approval_decide_unknown_is_500(user_client):
@@ -102,6 +108,7 @@ def test_web_approval_decide_unknown_is_500(user_client):
         {"decision": "accept"},
     )
     assert response.status_code == 500
+    assert "allow" not in response.headers
 
 
 def test_web_approval_decide_denies_anonymous(anon_client, machine_client, daemon_run, seeder):
@@ -110,4 +117,5 @@ def test_web_approval_decide_denies_anonymous(anon_client, machine_client, daemo
         f"{WEB}/approvals/{approval_id}/decide/", json={"decision": "accept"}
     )
     assert response.status_code == 401
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"detail": "Authentication credentials were not provided."}

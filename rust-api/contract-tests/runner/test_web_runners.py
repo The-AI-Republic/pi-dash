@@ -151,6 +151,7 @@ def test_web_runner_revoke_shape(user_client, machine_flow, seeder):
 def test_web_runner_revive_is_deprecated_410(user_client, machine_flow):
     response = web_post(user_client, f"{WEB}/{machine_flow['runner_id']}/revive/", {})
     assert response.status_code == 410
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json()["error"] == "legacy_enrollment_disabled"
 
 
@@ -168,10 +169,12 @@ def test_web_runner_delete_shape(user_client, machine_flow, seeder):
 def test_web_runner_invites_deprecated_410(user_client):
     response = web_post(user_client, f"{WEB}/invites/", {})
     assert response.status_code == 410
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json()["error"] == "legacy_enrollment_disabled"
 
 
 def test_web_runner_invites_denies_anonymous(anon_client):
     response = anon_client.post(f"{WEB}/invites/", json={})
     assert response.status_code == 401
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"detail": "Authentication credentials were not provided."}

@@ -305,9 +305,19 @@ pub(crate) async fn serve_web_bytes(
     response
 }
 
+/// Marker: this response crossed the Django reverse proxy, so its
+/// headers are already Django's own bytes (a view's `Allow` where
+/// Django stamps one, none on framework pages such as the resolver
+/// 404). View wrappers that stamp DRF headers must pass marked
+/// responses through untouched to stay byte-identical.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProxiedUpstream;
+
 /// Fallback: reverse-proxy to Django.
 pub async fn proxy(State(state): State<AppState>, req: Request) -> Response {
-    proxy_request(&state, req).await
+    let mut response = proxy_request(&state, req).await;
+    response.extensions_mut().insert(ProxiedUpstream);
+    response
 }
 
 async fn proxy_request(state: &AppState, req: Request) -> Response {

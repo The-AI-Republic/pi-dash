@@ -212,6 +212,7 @@ def test_web_machine_token_ticket_shape(user_client, daemon_world):
         {"host_label": "ticket-host"},
     )
     assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "POST, OPTIONS"
     body = response.json()
     assert set(body) == {"ticket", "expires_in_secs"}
     assert body["ticket"] and body["expires_in_secs"] == 60
@@ -222,6 +223,7 @@ def test_web_machine_token_ticket_requires_host_label(user_client, daemon_world)
         user_client, f"{WEB}/machine-tokens/{daemon_world['workspace']['id']}/tickets/", {}
     )
     assert response.status_code == 400
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"error": "host_label is required"}
 
 
@@ -235,4 +237,5 @@ def test_web_machine_token_ticket_denies_foreign_workspace(user_client, seeder):
     )
     # Not a member: the workspace itself must not be confirmed.
     assert response.status_code == 404
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"error": "workspace not found"}

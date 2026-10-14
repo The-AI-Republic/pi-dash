@@ -3457,7 +3457,10 @@ pub async fn list_workspaces(
     let facts = allow_facts_for("", None, &[]);
     match apply_outcome(gates::decide_gate(gate_for_list(), &scope, &facts)) {
         Ok(()) => Err(Denial::ServerError),
-        Err(response) => Ok(response),
+        // Every gate denial is a view-rendered 4xx (DRF stamps `Allow`
+        // on all of them via `finalize_response`), including the
+        // missing-key 400.
+        Err(response) => Ok(with_allow(response, ALLOW_WORKSPACES)),
     }
 }
 

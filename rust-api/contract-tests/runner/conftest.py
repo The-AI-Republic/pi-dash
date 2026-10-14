@@ -108,6 +108,7 @@ def machine_flow(settings, seeder, daemon_world):
             },
         )
     assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "POST, OPTIONS"
     body = response.json()
     assert body["machine_token"].startswith("mt_")
     flow = {
@@ -176,6 +177,7 @@ def enrolled(settings, seeder, daemon_world):
             json={"enrollment_token": enrollment_raw, "host_label": host_label},
         )
     assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "POST, OPTIONS"
     body = response.json()
     flow = {
         "runner_id": body["runner_id"],

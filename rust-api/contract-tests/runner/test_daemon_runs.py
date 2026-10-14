@@ -26,6 +26,7 @@ def _idem() -> dict:
 def test_daemon_run_accept_shape(machine_client, daemon_run, seeder):
     response = machine_client.post(f"{DAEMON}/runs/{daemon_run['id']}/accept/", json={})
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"ok": True}
     assert (
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
@@ -39,15 +40,18 @@ def test_daemon_run_endpoints_dedupe(machine_client, daemon_run):
         f"{DAEMON}/runs/{daemon_run['id']}/accept/", json={}, headers=key
     )
     assert first.json() == {"ok": True}
+    assert first.headers["allow"] == "POST, OPTIONS"
     second = machine_client.post(
         f"{DAEMON}/runs/{daemon_run['id']}/accept/", json={}, headers=key
     )
     assert second.json() == {"ok": True, "duplicate": True}
+    assert second.headers["allow"] == "POST, OPTIONS"
 
 
 def test_daemon_run_queued_is_ack_only(machine_client, daemon_run, seeder):
     response = machine_client.post(f"{DAEMON}/runs/{daemon_run['id']}/queued/", json={})
     assert response.json() == {"ok": True, "ignored": True}
+    assert response.headers["allow"] == "POST, OPTIONS"
     # The retired worktree queue performs no transition: still assigned.
     assert (
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
@@ -62,6 +66,7 @@ def test_daemon_run_started_shape(machine_client, daemon_run, seeder):
         headers=_idem(),
     )
     assert response.json() == {"ok": True}
+    assert response.headers["allow"] == "POST, OPTIONS"
     row = seeder.db.fetchone(
         "SELECT status, thread_id, llm_model FROM agent_run WHERE id = %s", (daemon_run["id"],)
     )
@@ -77,6 +82,7 @@ def test_daemon_run_events_shape(machine_client, daemon_run, seeder):
         headers=_idem(),
     )
     assert response.json() == {"ok": True, "accepted": 1}
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert (
         seeder.db.fetchval(
             "SELECT COUNT(*) FROM agent_run_event WHERE agent_run_id = %s", (daemon_run["id"],)
@@ -93,6 +99,7 @@ def test_daemon_run_approvals_shape(machine_client, daemon_run, seeder):
         headers=_idem(),
     )
     assert response.json() == {"ok": True}
+    assert response.headers["allow"] == "POST, OPTIONS"
     row = seeder.db.fetchone(
         "SELECT status FROM agent_run_approval WHERE id = %s", (approval_id,)
     )
@@ -108,6 +115,7 @@ def test_daemon_run_awaiting_reauth_shape(machine_client, daemon_run, seeder):
         f"{DAEMON}/runs/{daemon_run['id']}/awaiting-reauth/", json={}, headers=_idem()
     )
     assert response.json() == {"ok": True}
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert (
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "awaiting_reauth"
@@ -122,6 +130,7 @@ def test_daemon_run_complete_shape(machine_client, daemon_run, seeder):
         headers=_idem(),
     )
     assert response.json() == {"ok": True}
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert (
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "completed"
@@ -136,6 +145,7 @@ def test_daemon_run_pause_shape(machine_client, daemon_run):
         headers=_idem(),
     )
     assert response.json() == {"ok": True}
+    assert response.headers["allow"] == "POST, OPTIONS"
 
 
 def test_daemon_run_fail_shape(machine_client, daemon_run, seeder):
@@ -146,6 +156,7 @@ def test_daemon_run_fail_shape(machine_client, daemon_run, seeder):
         headers=_idem(),
     )
     assert response.json() == {"ok": True}
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert (
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "failed"
@@ -159,6 +170,7 @@ def test_daemon_run_fail_refusal_shape(machine_client, daemon_run, seeder):
         headers=_idem(),
     )
     assert response.json() == {"ok": True, "refused": True}
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert (
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "refused"
@@ -170,6 +182,7 @@ def test_daemon_run_cancelled_shape(machine_client, daemon_run, seeder):
         f"{DAEMON}/runs/{daemon_run['id']}/cancelled/", json={}, headers=_idem()
     )
     assert response.json() == {"ok": True}
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert (
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "cancelled"
@@ -182,6 +195,7 @@ def test_daemon_run_resumed_shape(machine_client, daemon_run, seeder):
         f"{DAEMON}/runs/{daemon_run['id']}/resumed/", json={}, headers=_idem()
     )
     assert response.json() == {"ok": True}
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert (
         seeder.db.fetchval("SELECT status FROM agent_run WHERE id = %s", (daemon_run["id"],))
         == "running"
@@ -193,6 +207,7 @@ def test_daemon_run_stream_upgrade_shape(machine_client, daemon_run):
         f"{DAEMON}/runs/{daemon_run['id']}/stream/upgrade/", json={"stream": "events"}
     )
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "POST, OPTIONS"
     body = response.json()
     assert body["ticket"]
     assert body["expires_in_secs"] == 60
@@ -203,12 +218,14 @@ def test_daemon_run_stream_upgrade_rejects_stream(machine_client, daemon_run):
         f"{DAEMON}/runs/{daemon_run['id']}/stream/upgrade/", json={"stream": "video"}
     )
     assert response.status_code == 400
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"error": "invalid_stream"}
 
 
 def test_daemon_run_not_found(machine_client):
     response = machine_client.post(f"{DAEMON}/runs/{uuid.uuid4()}/accept/", json={})
     assert response.status_code == 404
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"error": "run_not_found"}
 
 
@@ -235,6 +252,7 @@ def test_daemon_run_rejects_foreign_runner(settings, seeder, daemon_world, daemo
     with bearer_client(settings.base_url, foreign_token) as foreign_client:
         response = foreign_client.post(f"{DAEMON}/runs/{daemon_run['id']}/accept/", json={})
     assert response.status_code == 403
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"error": "run_not_owned_by_runner"}
     # Teardown rows the foreign enroll minted.
     seeder.db.execute(
@@ -254,4 +272,5 @@ def test_daemon_run_requires_auth(anon_client, daemon_run):
     # No bearer token: auth returns None and the run resolves as not-owned.
     response = anon_client.post(f"{DAEMON}/runs/{daemon_run['id']}/accept/", json={})
     assert response.status_code == 403
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"error": "run_not_owned_by_runner"}

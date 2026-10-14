@@ -23,6 +23,7 @@ def test_daemon_projects_shape_via_api_key(settings, daemon_world):
     with api_key_client(settings.base_url, daemon_world["api_token"]["token"]) as client:
         response = client.get(f"{DAEMON}/projects/")
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     body = response.json()
     assert isinstance(body, list) and len(body) == 1
     project = body[0]
@@ -43,6 +44,7 @@ def test_daemon_projects_shape_via_api_key(settings, daemon_world):
 def test_daemon_projects_shape_via_runner_bearer(machine_client, daemon_world):
     response = machine_client.get(f"{DAEMON}/projects/")
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     body = response.json()
     assert [p["id"] for p in body] == [daemon_world["project"]["id"]]
 
@@ -61,12 +63,14 @@ def test_daemon_projects_shape_via_machine_token(settings, machine_flow, daemon_
     ) as client:
         response = client.get(f"{DAEMON}/projects/")
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     assert [p["id"] for p in response.json()] == [daemon_world["project"]["id"]]
 
 
 def test_daemon_projects_requires_auth(anon_client):
     response = anon_client.get(f"{DAEMON}/projects/")
     assert response.status_code == 401
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     assert response.json() == {"error": "authentication required"}
 
 
@@ -82,6 +86,7 @@ def test_daemon_projects_isolates_tenants(settings, seeder, daemon_world):
         assert other_project["id"] not in [p["id"] for p in body]
         forbidden = client.get(f"{DAEMON}/projects/", params={"workspace": other_ws["id"]})
         assert forbidden.status_code == 403
+        assert forbidden.headers["allow"] == "GET, HEAD, OPTIONS"
         assert forbidden.json() == {"error": "forbidden"}
 
 

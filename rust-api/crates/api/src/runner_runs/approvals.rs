@@ -29,7 +29,10 @@ use pidash_services::runner_runs::shape;
 use pidash_types::runner_runs::{ApprovalKind, ApprovalStatus};
 
 use super::runs::RowError;
-use super::{is_uuid_path_segment, json_response, pool_of, proxy_with_body, SERVER_ERROR_BODY};
+use super::{
+    is_uuid_path_segment, json_response, pool_of, proxy_with_body, view_response, ALLOW_APPROVALS,
+    ALLOW_APPROVAL_DECIDE, SERVER_ERROR_BODY,
+};
 use crate::license::{query_last, resolve_actor, QueryMap, UNAUTHENTICATED_BODY};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -125,6 +128,17 @@ pub async fn list_approvals(
     Query(query): Query<QueryMap>,
     extension: Option<Extension<SessionHandle>>,
 ) -> Response {
+    view_response(
+        list_approvals_inner(State(state), Query(query), extension).await,
+        ALLOW_APPROVALS,
+    )
+}
+
+async fn list_approvals_inner(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    extension: Option<Extension<SessionHandle>>,
+) -> Response {
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
         Err(response) => return response,
@@ -164,6 +178,18 @@ pub async fn list_approvals(
 /// `NotSupportedError` before the creator gate (the ported decide bug),
 /// so the 500 must be Django's own.
 pub async fn decide_approval(
+    State(state): State<AppState>,
+    Path(approval_raw): Path<String>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    view_response(
+        decide_approval_inner(State(state), Path(approval_raw), extension, req).await,
+        ALLOW_APPROVAL_DECIDE,
+    )
+}
+
+async fn decide_approval_inner(
     State(state): State<AppState>,
     Path(approval_raw): Path<String>,
     extension: Option<Extension<SessionHandle>>,

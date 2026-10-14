@@ -38,6 +38,7 @@ def test_daemon_enroll_shape(settings, seeder, daemon_world):
             json={"enrollment_token": raw, "host_label": host_label},
         )
     assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "POST, OPTIONS"
     body = response.json()
     assert body["runner_id"] == seeded["id"]
     assert body["runner_name"] == seeded["name"]
@@ -72,6 +73,7 @@ def test_daemon_enroll_rejects_unknown_token(anon_client):
         json={"enrollment_token": "apd_en_doesnotexist000000", "host_label": "h"},
     )
     assert response.status_code == 401
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"error": "invalid_or_expired_enrollment_token"}
 
 
@@ -85,6 +87,7 @@ def test_daemon_enroll_token_single_use(settings, seeder, daemon_world):
             f"{DAEMON}/runners/enroll/", json={"enrollment_token": raw, "host_label": "h1"}
         )
         assert first.status_code == 201
+        assert first.headers["allow"] == "POST, OPTIONS"
         second = client.post(
             f"{DAEMON}/runners/enroll/", json={"enrollment_token": raw, "host_label": "h2"}
         )
@@ -92,6 +95,7 @@ def test_daemon_enroll_token_single_use(settings, seeder, daemon_world):
     # unknown (401) rather than already-used (409 pins the revoked/enrolled
     # row states, which a hash lookup can no longer reach).
     assert second.status_code == 401
+    assert second.headers["allow"] == "POST, OPTIONS"
     assert second.json() == {"error": "invalid_or_expired_enrollment_token"}
     # Teardown rows the endpoint minted.
     seeder.db.execute(
@@ -111,6 +115,7 @@ def test_daemon_enroll_token_single_use(settings, seeder, daemon_world):
 def test_daemon_enroll_validates_body(anon_client):
     response = anon_client.post(f"{DAEMON}/runners/enroll/", json={})
     assert response.status_code == 400
+    assert response.headers["allow"] == "POST, OPTIONS"
 
 
 # -- runners/ (CLI create, X-Api-Key) -------------------------------------
@@ -128,6 +133,7 @@ def test_daemon_runner_create_shape(settings, daemon_world, seeder):
             },
         )
     assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "POST, OPTIONS"
     body = response.json()
     assert uuid.UUID(body["runner_id"])
     assert body["runner_name"] == f"cli-{seeder.tag}"
@@ -156,6 +162,7 @@ def test_daemon_runner_create_requires_auth(anon_client, daemon_world):
         f"{DAEMON}/runners/", json={"project": daemon_world["project"]["identifier"]}
     )
     assert response.status_code in (401, 403)
+    assert response.headers["allow"] == "POST, OPTIONS"
 
 
 def test_daemon_runner_create_validates_project(settings, daemon_world):
@@ -165,12 +172,14 @@ def test_daemon_runner_create_validates_project(settings, daemon_world):
             json={"workspace_slug": daemon_world["workspace"]["slug"]},
         )
         assert missing.status_code == 400
+        assert missing.headers["allow"] == "POST, OPTIONS"
         assert missing.json() == {"error": "project is required"}
         unknown = client.post(
             f"{DAEMON}/runners/",
             json={"project": "NOPE", "workspace_slug": daemon_world["workspace"]["slug"]},
         )
         assert unknown.status_code == 404
+        assert unknown.headers["allow"] == "POST, OPTIONS"
         assert unknown.json() == {"error": "project_not_found"}
 
 
@@ -185,6 +194,7 @@ def test_daemon_runner_create_rejects_invalid_name(settings, daemon_world):
             },
         )
     assert response.status_code == 400
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json()["error"] == "invalid_runner_name"
 
 
@@ -249,9 +259,11 @@ def test_daemon_self_revoke_rejects_cross_runner(settings, enrolled, seeder, dae
 def test_daemon_machine_token_redeem_validates_ticket(anon_client):
     missing = anon_client.post(f"{DAEMON}/machine-tokens/", json={})
     assert missing.status_code == 400
+    assert missing.headers["allow"] == "POST, OPTIONS"
     assert missing.json() == {"error": "ticket is required"}
     bogus = anon_client.post(f"{DAEMON}/machine-tokens/", json={"ticket": "nope"})
     assert bogus.status_code == 401
+    assert bogus.headers["allow"] == "POST, OPTIONS"
     assert bogus.json() == {"error": "invalid_or_expired_ticket"}
 
 
@@ -262,15 +274,18 @@ def test_daemon_machine_token_redeem_full_circle(settings, user_client, daemon_w
         json={"host_label": "redeem-circle"},
     )
     assert ticket_response.status_code == 201, ticket_response.text
+    assert ticket_response.headers["allow"] == "POST, OPTIONS"
     ticket = ticket_response.json()["ticket"]
     redeem = anon_client.post(f"{DAEMON}/machine-tokens/", json={"ticket": ticket})
     assert redeem.status_code == 201, redeem.text
+    assert redeem.headers["allow"] == "POST, OPTIONS"
     body = redeem.json()
     assert body["machine_token"].startswith("mt_")
     assert body["workspace_slug"] == daemon_world["workspace"]["slug"]
     # Single use: the ticket is consumed on read.
     again = anon_client.post(f"{DAEMON}/machine-tokens/", json={"ticket": ticket})
     assert again.status_code == 401
+    assert again.headers["allow"] == "POST, OPTIONS"
     # Teardown the redeemed token row.
     seeder.db.execute(
         "DELETE FROM machine_token WHERE user_id = %s AND host_label = 'redeem-circle'",

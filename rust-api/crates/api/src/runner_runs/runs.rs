@@ -69,7 +69,11 @@ use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, ToolCallStatus};
 use pidash_types::WorkspaceId;
 
-use super::{is_uuid_path_segment, json_response, pool_of, proxy_with_body, SERVER_ERROR_BODY};
+use super::{
+    is_uuid_path_segment, json_response, pool_of, proxy_with_body, view_response,
+    ALLOW_RELEASE_PIN, ALLOW_RETICK, ALLOW_RUNS, ALLOW_RUN_CANCEL, ALLOW_RUN_DETAIL,
+    SERVER_ERROR_BODY,
+};
 use crate::license::{query_last, resolve_actor, QueryMap, UNAUTHENTICATED_BODY};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -862,6 +866,17 @@ pub async fn list_runs(
     Query(query): Query<QueryMap>,
     extension: Option<Extension<SessionHandle>>,
 ) -> Response {
+    view_response(
+        list_runs_inner(State(state), Query(query), extension).await,
+        ALLOW_RUNS,
+    )
+}
+
+async fn list_runs_inner(
+    State(state): State<AppState>,
+    Query(query): Query<QueryMap>,
+    extension: Option<Extension<SessionHandle>>,
+) -> Response {
     let actor = match request_actor(&state, extension).await {
         Ok(Some(actor)) => actor,
         Ok(None) => return unauthorized(),
@@ -1100,6 +1115,19 @@ pub async fn run_detail(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
+    view_response(
+        run_detail_inner(State(state), Path(run_raw), Query(query), extension, req).await,
+        ALLOW_RUN_DETAIL,
+    )
+}
+
+async fn run_detail_inner(
+    State(state): State<AppState>,
+    Path(run_raw): Path<String>,
+    Query(query): Query<QueryMap>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
     if !is_uuid_path_segment(&run_raw) {
         return crate::edge::proxy(State(state), req).await;
     }
@@ -1190,6 +1218,20 @@ pub async fn create_run(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
+    // The dispatch tails (`dispatch::post_direct` / `post_run_ai` /
+    // `post_comment_and_run`) answer through this handler, so the one
+    // wrap covers every create arm.
+    view_response(
+        create_run_inner(State(state), extension, req).await,
+        ALLOW_RUNS,
+    )
+}
+
+async fn create_run_inner(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
     let actor = match request_actor(&state, extension).await {
         Ok(Some(actor)) => actor,
         Ok(None) => return unauthorized(),
@@ -1240,6 +1282,17 @@ pub async fn create_run(
 /// Re-tick: missing / malformed-UUID / not-found arms are owned; the
 /// `re_tick_ticker` tail (D-12) proxies.
 pub async fn retick(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    view_response(
+        retick_inner(State(state), extension, req).await,
+        ALLOW_RETICK,
+    )
+}
+
+async fn retick_inner(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     req: Request,
@@ -1308,6 +1361,18 @@ pub async fn retick(
 /// everything else — terminal 409, cloud-duplicate stamp, finalize —
 /// is owned.
 pub async fn cancel_run(
+    State(state): State<AppState>,
+    Path(run_raw): Path<String>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    view_response(
+        cancel_run_inner(State(state), Path(run_raw), extension, req).await,
+        ALLOW_RUN_CANCEL,
+    )
+}
+
+async fn cancel_run_inner(
     State(state): State<AppState>,
     Path(run_raw): Path<String>,
     extension: Option<Extension<SessionHandle>>,
@@ -1620,6 +1685,18 @@ async fn finalize_cancelled(
 /// are owned; the unpin itself proxies before any write (its
 /// `on_commit` drain is D-14 — Django re-decides under its own lock).
 pub async fn release_pin(
+    State(state): State<AppState>,
+    Path(run_raw): Path<String>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    view_response(
+        release_pin_inner(State(state), Path(run_raw), extension, req).await,
+        ALLOW_RELEASE_PIN,
+    )
+}
+
+async fn release_pin_inner(
     State(state): State<AppState>,
     Path(run_raw): Path<String>,
     extension: Option<Extension<SessionHandle>>,

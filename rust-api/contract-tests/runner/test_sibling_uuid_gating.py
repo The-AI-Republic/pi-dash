@@ -28,6 +28,9 @@ GOOD = "12345678-1234-abcd-ef01-234567890abc"
 def _assert_framework_404(response) -> None:
     assert response.status_code == 404, response.text
     assert "text/html" in response.headers.get("content-type", "")
+    # Framework 404s never pass a DRF view, so Django stamps no Allow;
+    # the Rust proxy fallthrough must not add one either (PIDASHCONV-1048).
+    assert "allow" not in response.headers
 
 
 # -- manage.rs: runner detail/patch + pod detail/patch/delete -----------------

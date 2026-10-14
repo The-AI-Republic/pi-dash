@@ -175,6 +175,7 @@ def test_web_projects_shape_via_session(user_client, daemon_world):
         f"{WEB}/projects/", params={"workspace": daemon_world["workspace"]["id"]}
     )
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     body = response.json()
     assert isinstance(body, list) and len(body) == 1
     project = body[0]
@@ -194,6 +195,7 @@ def test_web_projects_shape_via_api_key(settings, daemon_world):
             f"{WEB}/projects/", params={"workspace": daemon_world["workspace"]["id"]}
         )
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     assert [p["id"] for p in response.json()] == [daemon_world["project"]["id"]]
 
 
@@ -202,6 +204,7 @@ def test_web_projects_requires_auth(anon_client):
     # the view answers "authentication required" itself.
     response = anon_client.get(f"{WEB}/projects/")
     assert response.status_code == 401
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     assert response.json() == {"error": "authentication required"}
 
 
@@ -211,6 +214,7 @@ def test_web_projects_isolates_tenants(user_client, seeder, daemon_world):
     seeder.create_member(other_ws["id"], other_owner["id"])
     forbidden = user_client.get(f"{WEB}/projects/", params={"workspace": other_ws["id"]})
     assert forbidden.status_code == 403
+    assert forbidden.headers["allow"] == "GET, HEAD, OPTIONS"
     assert forbidden.json() == {"error": "forbidden"}
     own = user_client.get(
         f"{WEB}/projects/", params={"workspace": daemon_world["workspace"]["id"]}
