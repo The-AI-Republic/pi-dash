@@ -4,14 +4,20 @@
 // Sign-up route. Thin: search schema, session redirect, lazy card.
 // The canonical entry (/sign-up) prefills the card from the email param
 // and carries the return path through the steps as next_path (AUTH-011);
-// signed-in visitors continue to their return path or first workspace.
+// signed-in visitors continue to onboarding or their AUTH-016 landing.
 
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import type { QueryClient } from "@tanstack/react-query";
 import type { ApiClient } from "@pidash/api-client";
 import * as React from "react";
 
-import { meQueryOptions, workspacesQueryOptions } from "../core/session/queries.js";
+import {
+  decidePageGate,
+  isOnboardedProfile,
+  loadGateInputs,
+  loadLandingTarget,
+  ONBOARDING_PATH,
+} from "../core/session/index.js";
 import { asString, safeNextPath, SignUpCard } from "../features/auth/index.js";
 
 export interface SignUpSearch {
@@ -51,17 +57,22 @@ export async function redirectSignedInUser({
   context: SignUpGuardContext;
   search: SignUpSearch;
 }): Promise<Record<string, never>> {
-  const me = await context.queryClient.ensureQueryData(meQueryOptions(context.apiClient)).catch(() => null);
-  if (!me) return {};
-  if (search.next_path) {
-    throw redirect({ href: search.next_path });
+  const { me, profile } = await loadGateInputs(context.queryClient, context.apiClient);
+  const decision = decidePageGate({
+    page: "signed-out-only",
+    signedIn: me !== null,
+    onboarded: isOnboardedProfile(profile),
+    hasPassword: me?.is_password_autoset === false,
+    // A signed-out-only page never bounces to sign-in, so the return
+    // path that decision would carry is unreachable; the value only
+    // fills the decider's input.
+    currentPath: "/sign-up",
+  });
+  if (decision.action === "landing") {
+    throw redirect({ href: await loadLandingTarget(context.queryClient, context.apiClient, search.next_path) });
   }
-  const workspaces = await context.queryClient
-    .ensureQueryData(workspacesQueryOptions(context.apiClient))
-    .catch(() => []);
-  const first = workspaces[0];
-  if (first) {
-    throw redirect({ to: "/$ws", params: { ws: first.slug } });
+  if (decision.action === "onboarding") {
+    throw redirect({ href: ONBOARDING_PATH });
   }
   return {};
 }

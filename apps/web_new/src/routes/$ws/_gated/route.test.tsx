@@ -51,6 +51,17 @@ vi.mock("../../../features/auth/index.js", async (importOriginal) => {
   };
 });
 
+// The deactivation dialog the layout mounts imports its mutation straight
+// from the auth api module; stub it (the dialog's own suite owns its
+// behavior).
+vi.mock("../../../features/auth/api.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../features/auth/api.js")>();
+  return {
+    ...original,
+    useDeactivateAccount: () => ({ mutateAsync: async () => "/?deactivated=1", isPending: false }),
+  };
+});
+
 // Shell-chrome stand-ins: capture the registered commands and expose the
 // sidebar sign-out entry as a button; layout and palette stay untested here.
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {

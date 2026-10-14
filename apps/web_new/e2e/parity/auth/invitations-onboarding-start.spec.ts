@@ -171,17 +171,11 @@ test(
     await driver.declineSingleInvitation();
 
     await test.step("ignoring lands home", async () => {
-      await expect
-        .poll(
-          async () => {
-            const url = new URL(driver.page.url());
-            // Home is the bare origin (optional trailing slash); anything
-            // deeper means we landed somewhere else.
-            return url.pathname === "/" ? "home" : `elsewhere:${url.pathname}`;
-          },
-          { timeout: 60_000 }
-        )
-        .toBe("home");
+      // Home funnels through the signed-in guard (AUTH-015/016), so the
+      // workspace-less invitee settles on workspace creation; the bare
+      // origin is only transient on both apps. Assert the settled
+      // landing — anything inside a workspace means the wrong landing.
+      await expect.poll(() => driver.currentPath(), { timeout: 60_000 }).toMatch(/^\/create-workspace\/?$/);
     });
 
     await test.step("the server did not add a membership", async () => {
@@ -263,15 +257,13 @@ test(
 
     await driver.acceptSingleInvitation();
 
+    // Home funnels through the signed-in guard (AUTH-015/016), so the
+    // seed settles on their last workspace; the bare origin is only
+    // transient on both apps. The old app normalizes workspace landings
+    // with a trailing slash.
     await expect
-      .poll(
-        async () => {
-          const url = new URL(driver.page.url());
-          return url.pathname === "/" ? "home" : `elsewhere:${url.pathname}`;
-        },
-        { timeout: 60_000 }
-      )
-      .toBe("home");
+      .poll(() => driver.currentPath(), { timeout: 60_000 })
+      .toMatch(new RegExp(`^/${seed.workspaceSlug}/?$`));
   }
 );
 

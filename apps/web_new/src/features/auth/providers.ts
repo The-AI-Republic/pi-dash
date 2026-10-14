@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Third-party sign-in providers. The edition contributes the providers a
-// build knows (cloud only; the OSS edition contributes none) and the
-// instance config gates which of them are offered; only providers enabled
-// in both are shown. Each resolves to a full-page navigation at the
-// provider's native auth URL. Written from parity/specs/auth.md AUTH-003.
+// build knows (OSS lists the four native ones; cloud adds its extras) and
+// the instance config gates which of them are offered; only providers
+// enabled in both are shown. Each resolves to a full-page navigation at
+// the provider's native auth URL. Written from parity/specs/auth.md AUTH-003.
 
 import type { InstanceConfig } from "@pidash/api-client";
 

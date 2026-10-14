@@ -3,7 +3,11 @@
 // See the LICENSE file for details.
 // Issue view search (Data layer > Routing). The list route validates its
 // single search param against this schema; anything invalid falls back to
-// the defaults instead of throwing, so shared links never break.
+// absent instead of throwing, so shared links never break. The layout has
+// no schema default on purpose: TanStack writes validated defaults back to
+// the URL, and the param must stay out of links unless explicitly chosen
+// (AUTH-015/AUTH-016 landings pin clean issue URLs); rendering falls back
+// to the list layout where the param is read.
 
 import * as z from "zod/mini";
 
@@ -11,17 +15,15 @@ export const IssueLayout = z.enum(["list", "compact"]);
 export type IssueLayout = z.infer<typeof IssueLayout>;
 
 export const IssueSearch = z.object({
-  layout: z.optional(z._default(IssueLayout, "list")),
+  layout: z.optional(IssueLayout),
 });
 export type IssueSearch = z.infer<typeof IssueSearch>;
 
-export const DEFAULT_ISSUE_SEARCH: IssueSearch = { layout: "list" };
-
-/** Validate raw router search; invalid params fall back to defaults. */
+/** Validate raw router search; invalid params fall back to absent. */
 export function parseIssueSearch(raw: unknown): IssueSearch {
   try {
     return IssueSearch.parse(raw ?? {});
   } catch {
-    return { ...DEFAULT_ISSUE_SEARCH };
+    return {};
   }
 }

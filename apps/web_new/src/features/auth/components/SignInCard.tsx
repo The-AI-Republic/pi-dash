@@ -355,7 +355,8 @@ export function SignInCard({
       ) : mode === "sign-up" ? (
         <div className="flex flex-col gap-(--space-1)">
           <h1 className="text-h2 text-(--text)">Create your account</h1>
-          <p className="text-body text-(--text-muted)">Set a password to get started.</p>
+          {/* Parity pin (AUTH-004): the scenario reads "Create your Pi Dash account." */}
+          <p className="text-body text-(--text-muted)">Set a password to create your Pi Dash account.</p>
         </div>
       ) : (
         <div className="flex flex-col gap-(--space-1)">
@@ -398,6 +399,7 @@ export function SignInCard({
                     autoComplete="email"
                     required
                     autoFocus
+                    placeholder="name@company.com"
                     value={email}
                     onChange={(event) => setEmail(event.target.value)}
                     onBlur={() => setEmailTouched(true)}
@@ -432,6 +434,7 @@ export function SignInCard({
                     autoComplete="current-password"
                     required
                     autoFocus
+                    placeholder="Enter password"
                     value={password}
                     onChange={(event) => setPassword(event.target.value)}
                     trailing={
@@ -507,6 +510,7 @@ export function SignInCard({
                     autoComplete="one-time-code"
                     required
                     autoFocus
+                    placeholder="123456"
                     value={code}
                     onChange={(event) => setCode(event.target.value)}
                   />

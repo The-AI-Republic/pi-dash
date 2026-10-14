@@ -128,7 +128,10 @@ export function ProfileSetupStep({ onAdvance }: ProfileSetupStepProps): React.Re
         <h1 id="profile-heading" className="text-h2 text-(--text)">
           Create your profile
         </h1>
-        <p className="text-body text-(--text-muted)">Tell everyone who you are. You can change this later.</p>
+        {/* Parity pin (AUTH-043): the scenario reads "Create your profile." */}
+        <p className="text-body text-(--text-muted)">
+          Create your profile. Tell everyone who you are. You can change this later.
+        </p>
       </div>
 
       <form onSubmit={(event) => void submit(event)} className="flex flex-col gap-(--space-4)">

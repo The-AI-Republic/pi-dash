@@ -16,7 +16,14 @@ describe("edition", () => {
     expect(edition.routes ?? []).toEqual([]);
     expect(edition.sidebar ?? []).toEqual([]);
     expect(edition.settingsSections ?? []).toEqual([]);
-    expect(edition.auth ?? []).toEqual([]);
+    // The four native providers are backend-native, not a cloud extra: the
+    // instance flags alone decide which buttons show (AUTH-003).
+    expect(edition.auth ?? []).toEqual([
+      { id: "google", label: "Google" },
+      { id: "github", label: "GitHub" },
+      { id: "gitlab", label: "GitLab" },
+      { id: "gitea", label: "Gitea" },
+    ]);
     expect(edition.api ?? []).toEqual([]);
     expect(edition.flags).toEqual({});
     expect(edition.slots ?? {}).toEqual({});

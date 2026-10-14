@@ -75,6 +75,7 @@ export function ForgotPasswordCard({ initialEmail = "" }: ForgotPasswordCardProp
           autoComplete="email"
           required
           autoFocus
+          placeholder="name@company.com"
           value={email}
           disabled={coolingDown}
           onChange={(event) => setEmail(event.target.value)}

@@ -5,7 +5,7 @@
 // the oracle driver so scenarios compile against either target, but every
 // action throws until the matching area lands in apps/web_new. Area issues
 // fill these in method by method; the oracle driver stays untouched.
-import { expect, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 import type {
   AdminAbsenceFacts,
   AdminAccountFacts,
@@ -258,20 +258,168 @@ export class WebNewDriver implements ParityDriver {
     this.page = page;
   }
 
+  // --- Auth area (NEWFRONT-491 gate). The card is email-first with
+  // --- placeholder-pinned steps; submits are XHR plus a full navigation on
+  // --- success, an inline banner plus step recovery on failure.
+
+  /** Every wait below is explicitly bounded; a bare wait would hang to the test timeout. */
+  private static readonly WAIT_MS = 30_000;
+
+  private authEmailField() {
+    return this.page.getByPlaceholder("name@company.com").first();
+  }
+
+  private authPasswordField() {
+    return this.page.getByPlaceholder("Enter password").first();
+  }
+
+  private authCodeField() {
+    return this.page.getByPlaceholder("123456").first();
+  }
+
+  private cardSubmit(form: Locator) {
+    return form.locator('button[type="submit"]');
+  }
+
+  private cardSection() {
+    return this.page.locator('section[aria-label="Sign in"], section[aria-label="Sign up"]').first();
+  }
+
+  /** Settle on the card in any step (or the no-methods notice), reloading once on a blank paint. */
+  private async waitForCard(): Promise<void> {
+    const card = this.cardSection();
+    try {
+      await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      await this.page.reload();
+      await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    }
+  }
+
+  /** True once the password or code step shows (the email check round-tripped). */
+  private async nextAuthStepShown(timeoutMs: number): Promise<boolean> {
+    const password = this.authPasswordField()
+      .waitFor({ state: "visible", timeout: timeoutMs })
+      .then(
+        () => true,
+        () => false
+      );
+    const code = this.authCodeField()
+      .waitFor({ state: "visible", timeout: timeoutMs })
+      .then(
+        () => true,
+        () => false
+      );
+    const [passwordShown, codeShown] = await Promise.all([password, code]);
+    return passwordShown || codeShown;
+  }
+
   async openEntry(): Promise<void> {
-    return todo("openEntry");
+    await this.page.goto("/");
+    try {
+      await this.cardSection().waitFor({ timeout: 10_000 });
+      return;
+    } catch {
+      // A signed-in context bounces pre-paint (the old entry renders the
+      // card transiently instead, so same-context user switches submit
+      // through it). Clear the stale session and open the card for the
+      // next sign-in; a slow first paint just falls through to the retry.
+      if (new URL(this.page.url()).pathname !== "/") {
+        await this.dropSession();
+        await this.page.goto("/");
+      }
+      await this.waitForCard();
+    }
   }
 
-  async signInWithPassword(_email: string, _password: string): Promise<void> {
-    return todo("signInWithPassword");
+  async signInWithPassword(email: string, password: string): Promise<void> {
+    // Shared-stack flake cover: a swallowed submit or a throttled minute
+    // fails one pass, so the whole flow retries with quiet backoff.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await this.signInAttempt(email, password);
+        return;
+      } catch {
+        if (attempt === 2) break;
+        await this.page.waitForTimeout(25_000);
+      }
+    }
+    try {
+      await this.signInAttempt(email, password);
+    } catch {
+      throw new Error("[parity] sign-in never left the card.");
+    }
   }
 
-  async openProjectIssues(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("openProjectIssues");
+  private async signInAttempt(email: string, password: string): Promise<void> {
+    const page = this.page;
+    // Stay on the entry when already there: callers stage return paths and
+    // prefill in the entry query, and a fresh navigation would wipe them.
+    if (new URL(page.url()).pathname !== "/") await page.goto("/");
+    // Settle for either entry state: a retry after a partial pass lands
+    // already signed in (the session cookie survived), so the card never
+    // renders; signed-in visitors are redirected away from / by the guard.
+    const deadline = Date.now() + 60_000;
+    let settled: "signed-in" | "card" | null = null;
+    while (Date.now() < deadline) {
+      if (new URL(page.url()).pathname !== "/") {
+        settled = "signed-in";
+        break;
+      }
+      if ((await this.cardSection().count()) > 0) {
+        settled = "card";
+        break;
+      }
+      await page.waitForTimeout(1_000);
+    }
+    if (settled === "signed-in") return;
+    if (settled === null) throw new Error("[parity] sign-in card never rendered.");
+    await this.submitAuthEmail(email);
+    const passwordField = page.getByPlaceholder("Enter password");
+    await passwordField.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await passwordField.fill(password);
+    const passwordForm = page.locator("form", { has: passwordField });
+    // Success navigates away (location.assign to the landing); wait for
+    // the card to go rather than any URL, since landings differ per user.
+    await Promise.all([
+      this.cardSection().waitFor({ state: "detached", timeout: 90_000 }),
+      this.cardSubmit(passwordForm).click(),
+    ]);
+  }
+
+  async openProjectIssues(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues`);
+    // Settle on whatever the guard decides: the list in any settled state
+    // (rows, empty, error), the project-gate denial screen, or the
+    // signed-out entry after a bounce. Never throw on the bounce — callers
+    // assert it (sign-out kills the session).
+    const deadline = Date.now() + 60_000;
+    let reloaded = false;
+    for (;;) {
+      const list = this.page.locator('section[aria-label="Issue list"], section[aria-label="Issues"]');
+      if ((await list.count()) > 0 && (await list.first().isVisible())) return;
+      if ((await this.authEmailField().count()) > 0) return;
+      if ((await this.page.getByRole("heading", { name: "Workspace not found" }).count()) > 0) return;
+      if (Date.now() > deadline) return;
+      if (!reloaded && Date.now() > deadline - 30_000) {
+        reloaded = true;
+        await this.page.reload().catch(() => {});
+      } else {
+        await this.page.waitForTimeout(1_000);
+      }
+    }
   }
 
   async visibleIssueNames(): Promise<string[]> {
-    return todo("visibleIssueNames");
+    // Scaffold-tier selector: each row is an article whose second span
+    // carries the issue name (key first, priority badge last).
+    const rows = this.page.locator('section[aria-label="Issue list"] article');
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      names.push(((await rows.nth(i).locator("span").nth(1).innerText()) ?? "").trim());
+    }
+    return names;
   }
 
   // --- Mention flows (NEWFRONT-115). Throwing stubs per the shared driver
@@ -312,62 +460,96 @@ export class WebNewDriver implements ParityDriver {
   // Workspace onboarding + creation (NEWFRONT-111, AUTH-034..043). Throwing
   // stubs until the onboarding and workspace-creation areas land in
   // apps/web_new; the oracle driver already implements these.
-  async openAuthenticated(_path: string, _cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("openAuthenticated");
+  async openAuthenticated(path: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.page.context().addCookies(cookies);
+    await this.page.goto(path, { waitUntil: "domcontentloaded" });
+    await this.page.waitForLoadState("domcontentloaded");
   }
   async currentPath(): Promise<string> {
-    return todo("currentPath");
+    const url = new URL(this.page.url());
+    return `${url.pathname}${url.search}`;
   }
-  async hasVisibleText(_text: string): Promise<boolean> {
-    return todo("hasVisibleText");
+  async hasVisibleText(text: string): Promise<boolean> {
+    const match = this.page.getByText(text, { exact: false }).first();
+    if ((await match.count()) === 0) return false;
+    return match.isVisible();
   }
+  private async isShown(locator: Locator): Promise<boolean> {
+    if ((await locator.count()) === 0) return false;
+    return locator.first().isVisible();
+  }
+
   async awaitWorkspaceStep(): Promise<void> {
-    return todo("awaitWorkspaceStep");
+    // The workspace step arrives after the profile save round-trips; the
+    // spinner holds the route meanwhile. Bounded: 60 half-second polls.
+    for (let i = 0; i < 60; i++) {
+      if ((await this.visibleWorkspaceView()) !== "none") return;
+      await this.page.waitForTimeout(500);
+    }
+    throw new Error("[parity] workspace step never rendered.");
   }
   async visibleWorkspaceView(): Promise<WorkspaceOnboardingView> {
-    return todo("visibleWorkspaceView");
+    // Each view carries a distinct first-level heading; the creation-off
+    // notice intentionally reads as none (it replaces the create form).
+    const page = this.page;
+    if (await this.isShown(page.getByRole("heading", { name: "Your request is pending", exact: true })))
+      return "pending";
+    if (await this.isShown(page.getByRole("heading", { name: "Join a workspace", exact: true }))) return "invites";
+    if (await this.isShown(page.getByRole("heading", { name: "Request workspace access", exact: true })))
+      return "join_by_email";
+    if (await this.isShown(page.getByRole("heading", { name: "Create your workspace", exact: true }))) return "create";
+    return "none";
   }
-  async fillWorkspaceName(_name: string): Promise<void> {
-    return todo("fillWorkspaceName");
+  async fillWorkspaceName(name: string): Promise<void> {
+    await this.page.getByLabel("Workspace name").fill(name);
   }
-  async fillWorkspaceSlug(_slug: string): Promise<void> {
-    return todo("fillWorkspaceSlug");
+  async fillWorkspaceSlug(slug: string): Promise<void> {
+    await this.page.getByLabel("Workspace URL").fill(slug);
   }
   async workspaceSlugValue(): Promise<string> {
-    return todo("workspaceSlugValue");
+    return this.page.getByLabel("Workspace URL").inputValue();
   }
-  async selectTeamSizePill(_label: string): Promise<void> {
-    return todo("selectTeamSizePill");
+  async selectTeamSizePill(label: string): Promise<void> {
+    await this.page.getByRole("button", { name: label, exact: true }).click();
   }
-  async selectTeamSizeDropdown(_label: string): Promise<void> {
-    return todo("selectTeamSizeDropdown");
+  async selectTeamSizeDropdown(label: string): Promise<void> {
+    // The standalone form swaps the pills for a native select under the
+    // same "Team size" label.
+    await this.page.getByLabel("Team size").selectOption({ label });
   }
   async submitCreateWorkspace(): Promise<void> {
-    return todo("submitCreateWorkspace");
+    await this.page.getByRole("button", { name: "Create workspace", exact: true }).click();
   }
   async isCreateWorkspaceSubmitDisabled(): Promise<boolean> {
-    return todo("isCreateWorkspaceSubmitDisabled");
+    return this.page.getByRole("button", { name: "Create workspace", exact: true }).isDisabled();
   }
   async workspaceSlugErrorText(): Promise<string | null> {
-    return todo("workspaceSlugErrorText");
+    // The create form reports malformed, over-long, and taken slugs under
+    // the URL field; return whichever is showing.
+    for (const pin of ["URLs can contain only", "already taken", "within 48 characters"]) {
+      const note = this.page.getByText(pin, { exact: false });
+      if (await this.isShown(note)) return ((await note.first().textContent()) ?? pin).trim();
+    }
+    return null;
   }
   async gotoJoinByEmailFromCreate(): Promise<void> {
-    return todo("gotoJoinByEmailFromCreate");
+    await this.page.getByRole("button", { name: "Join by admin email", exact: true }).click();
   }
   async gotoInvitesFromCreate(): Promise<void> {
     return todo("gotoInvitesFromCreate");
   }
-  async fillWorkspaceAdminEmail(_email: string): Promise<void> {
-    return todo("fillWorkspaceAdminEmail");
+  async fillWorkspaceAdminEmail(email: string): Promise<void> {
+    await this.page.getByLabel("Admin email address").fill(email);
   }
   async submitJoinRequest(): Promise<void> {
-    return todo("submitJoinRequest");
+    await this.page.getByRole("button", { name: "Send join request", exact: true }).click();
   }
-  async pendingApprovalNamesEmail(_email: string): Promise<boolean> {
-    return todo("pendingApprovalNamesEmail");
+  async pendingApprovalNamesEmail(email: string): Promise<boolean> {
+    await this.page.getByText("Your request is pending", { exact: false }).first().waitFor();
+    return this.hasVisibleText(email);
   }
   async createInsteadFromPending(): Promise<void> {
-    return todo("createInsteadFromPending");
+    await this.page.getByRole("button", { name: "Create a workspace instead", exact: true }).click();
   }
   async selectInviteByWorkspace(_workspaceName: string): Promise<void> {
     return todo("selectInviteByWorkspace");
@@ -376,228 +558,407 @@ export class WebNewDriver implements ParityDriver {
     return todo("continueWithSelectedInvites");
   }
   async awaitInviteMembersStep(): Promise<void> {
-    return todo("awaitInviteMembersStep");
+    await this.page.getByRole("heading", { name: "Invite your team", exact: true }).waitFor({ timeout: 30_000 });
   }
   async isInviteMembersStepVisible(): Promise<boolean> {
-    return todo("isInviteMembersStepVisible");
+    return this.isShown(this.page.getByRole("heading", { name: "Invite your team", exact: true }));
   }
   async inviteRowCount(): Promise<number> {
-    return todo("inviteRowCount");
+    // One address input per row, labelled with its 1-based position.
+    return this.page.getByRole("textbox", { name: /email address \d+/i }).count();
   }
-  async fillInviteRow(_index: number, _email: string): Promise<void> {
-    return todo("fillInviteRow");
+  async fillInviteRow(index: number, email: string): Promise<void> {
+    await this.page.getByRole("textbox", { name: `Email address ${index + 1}`, exact: true }).fill(email);
   }
   async clickAddAnotherInvite(): Promise<void> {
-    return todo("clickAddAnotherInvite");
+    await this.page.getByRole("button", { name: "Add another", exact: true }).click();
   }
   async isSendInvitesDisabled(): Promise<boolean> {
-    return todo("isSendInvitesDisabled");
+    return this.page.getByRole("button", { name: "Continue", exact: true }).isDisabled();
   }
   async sendInvites(): Promise<void> {
-    return todo("sendInvites");
+    await this.page.getByRole("button", { name: "Continue", exact: true }).click();
   }
   async deferInvites(): Promise<void> {
-    return todo("deferInvites");
+    await this.page.getByRole("button", { name: "Invite later", exact: true }).click();
   }
   async isOnboardingBackVisible(): Promise<boolean> {
-    return todo("isOnboardingBackVisible");
+    return this.isShown(this.page.getByRole("button", { name: "Back", exact: true }));
   }
   async clickOnboardingBack(): Promise<void> {
-    return todo("clickOnboardingBack");
+    await this.page.getByRole("button", { name: "Back", exact: true }).click();
   }
   async isTourWelcomeVisible(): Promise<boolean> {
-    return todo("isTourWelcomeVisible");
+    // The welcome stop offers the tour; its take-the-tour button marks it.
+    return this.hasVisibleText("Take the tour");
   }
   async declineTour(): Promise<void> {
-    return todo("declineTour");
+    await this.page.getByRole("button", { name: "Explore on my own", exact: true }).click();
   }
   async isStandaloneCreationDisabledVisible(): Promise<boolean> {
-    return todo("isStandaloneCreationDisabledVisible");
+    return this.hasVisibleText("Only the instance admin can create workspaces");
   }
   async isRequestInstanceAdminLinkVisible(): Promise<boolean> {
-    return todo("isRequestInstanceAdminLinkVisible");
+    return this.isShown(this.page.getByRole("link", { name: "Ask the instance admin", exact: true }));
   }
   async isInOnboardingCreationDisabledNoticeVisible(): Promise<boolean> {
-    return todo("isInOnboardingCreationDisabledNoticeVisible");
+    return this.hasVisibleText("Workspace creation is turned off");
   }
 
   // --- Auth sign-in core (NEWFRONT-107). Throwing stubs per the shared
   // --- driver contract; the sign-in area fills these in when it lands.
 
-  async openSignInWithParams(_params: Record<string, string>): Promise<void> {
-    return todo("openSignInWithParams");
+  async openSignInWithParams(params: Record<string, string>): Promise<void> {
+    const query = new URLSearchParams(params);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    await this.page.goto(`/${suffix}`);
+    await this.waitForCard();
   }
 
-  async submitEmail(_email: string): Promise<void> {
-    return todo("submitEmail");
+  async submitEmail(email: string): Promise<void> {
+    const page = this.page;
+    const emailField = page.getByPlaceholder("name@company.com").first();
+    await emailField.fill(email);
+    const emailForm = page.locator("form", { has: emailField });
+    await this.cardSubmit(emailForm).click();
+    // The email check round-trips to the server, then the card shows the
+    // password or code step. Either placeholder marks the transition.
+    await page
+      .locator('input[placeholder="Enter password"], input[placeholder="123456"]')
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async submitPassword(_password: string): Promise<void> {
-    return todo("submitPassword");
+  async submitPassword(password: string): Promise<void> {
+    const page = this.page;
+    const passwordField = page.getByPlaceholder("Enter password");
+    await passwordField.fill(password);
+    // XHR submit: success navigates away, failure re-renders inline. The
+    // scenario polls the step and banner, so no navigation wait here.
+    await this.cardSubmit(page.locator("form", { has: passwordField })).click();
   }
 
   async authStep(): Promise<"email" | "password" | "code" | "unavailable" | "unknown"> {
-    return todo("authStep");
+    const page = this.page;
+    if ((await page.getByText("Sign-in is unavailable").count()) > 0) return "unavailable";
+    if ((await page.getByPlaceholder("Enter password").count()) > 0) return "password";
+    if ((await page.getByPlaceholder("123456").count()) > 0) return "code";
+    if ((await page.getByPlaceholder("name@company.com").count()) > 0) return "email";
+    return "unknown";
   }
 
   async bannerText(): Promise<string | null> {
-    return todo("bannerText");
+    const alert = this.page.getByRole("alert");
+    if ((await alert.count()) === 0) return null;
+    const text = (await alert.first().innerText()).trim();
+    return text === "" ? null : text;
   }
 
   async dismissBanner(): Promise<void> {
-    return todo("dismissBanner");
+    await this.page.getByRole("alert").getByRole("button").first().click();
   }
 
-  async seesWorkspaceInviteHeader(_workspaceName: string): Promise<boolean> {
-    return todo("seesWorkspaceInviteHeader");
+  async seesWorkspaceInviteHeader(workspaceName: string): Promise<boolean> {
+    // The invitation header reads as one line ("Join <workspace>"); any
+    // visible line pairing an invitation verb with the workspace name
+    // proves the match, without coupling to the header markup.
+    const candidates = this.page.getByText(/join/i);
+    const count = await candidates.count();
+    for (let i = 0; i < count; i++) {
+      if ((await candidates.nth(i).innerText()).trim().includes(workspaceName)) return true;
+    }
+    return false;
   }
 
   async seesGenericSignInHeader(): Promise<boolean> {
-    return todo("seesGenericSignInHeader");
+    return (await this.page.getByText("Welcome back to Pi Dash.").count()) > 0;
   }
 
   async seesGenericSignUpHeader(): Promise<boolean> {
-    return todo("seesGenericSignUpHeader");
+    return (await this.page.getByText("Create your Pi Dash account.").count()) > 0;
   }
 
   async seesConfirmPassword(): Promise<boolean> {
-    return todo("seesConfirmPassword");
+    return (await this.page.getByLabel("Confirm password").count()) > 0;
   }
 
   async passwordPrimaryButtonLabel(): Promise<string | null> {
-    return todo("passwordPrimaryButtonLabel");
+    const field = this.page.getByPlaceholder("Enter password");
+    if ((await field.count()) === 0) return null;
+    const form = this.page.locator("form", { has: field });
+    const label = await form.locator('button[type="submit"]').first().innerText();
+    return label.trim() === "" ? null : label.trim();
   }
 
   async forgotPasswordEntry(): Promise<"link" | "popover" | "absent"> {
-    return todo("forgotPasswordEntry");
+    const page = this.page;
+    const entry = page.getByText("Forgot your password?");
+    if ((await entry.count()) === 0) return "absent";
+    // The reset link navigates to the forgot-password page; the mail-less
+    // explanation is a popover toggle with no destination.
+    const asLink = entry.locator("xpath=ancestor-or-self::a");
+    if ((await asLink.count()) > 0) return "link";
+    return "popover";
   }
 
   async seesUniqueCodeButton(): Promise<boolean> {
-    return todo("seesUniqueCodeButton");
+    return (await this.page.getByRole("button", { name: "Sign in with unique code" }).count()) > 0;
   }
 
   async requestUniqueCode(): Promise<void> {
-    return todo("requestUniqueCode");
+    await this.page.getByRole("button", { name: "Sign in with unique code" }).click();
+    await this.page.getByPlaceholder("123456").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async resendCodeLabel(): Promise<string | null> {
-    return todo("resendCodeLabel");
+    const page = this.page;
+    const resend = page.getByRole("button", { name: /resend/i });
+    if ((await resend.count()) === 0) return null;
+    const label = (await resend.first().innerText()).trim();
+    return label === "" ? null : label;
   }
 
   async clickResendCode(): Promise<void> {
-    return todo("clickResendCode");
+    await this.page
+      .getByRole("button", { name: /resend/i })
+      .first()
+      .click();
   }
 
-  async submitCode(_code: string): Promise<void> {
-    return todo("submitCode");
+  async submitCode(code: string): Promise<void> {
+    const page = this.page;
+    const codeField = page.getByPlaceholder("123456");
+    await codeField.fill(code);
+    // XHR submit like the password step: the scenario polls the outcome.
+    await this.cardSubmit(page.locator("form", { has: codeField })).click();
   }
 
   async providerSignInButtons(): Promise<string[]> {
-    return todo("providerSignInButtons");
+    const names: string[] = [];
+    for (const provider of ["Google", "GitHub", "GitLab", "Gitea"]) {
+      const button = this.page.getByRole("button", { name: new RegExp(`Sign in with ${provider}`, "i") });
+      if ((await button.count()) > 0) names.push(provider);
+    }
+    return names;
   }
 
-  async clickProviderButton(_name: string): Promise<void> {
-    return todo("clickProviderButton");
+  async clickProviderButton(name: string): Promise<void> {
+    await this.page.getByRole("button", { name: new RegExp(`Sign in with ${name}`, "i") }).click();
   }
 
   async clearEmail(): Promise<void> {
-    return todo("clearEmail");
+    // Past the email step the locked address carries a step reset; on the
+    // email step the clear control only empties the field.
+    const reset = this.page.getByRole("button", { name: "Clear email" });
+    if ((await reset.count()) > 0) {
+      await reset.first().click();
+    } else {
+      await this.authEmailField().fill("");
+    }
+    await this.authEmailField().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async seesNoAuthMethods(): Promise<boolean> {
-    return todo("seesNoAuthMethods");
+    return (await this.page.getByText("Sign-in is unavailable").count()) > 0;
   }
 
   async forgotPasswordPopoverText(): Promise<string | null> {
-    return todo("forgotPasswordPopoverText");
+    // The mail-less explanation hides behind a popover toggle; open it,
+    // then read the revealed text.
+    await this.page.getByRole("button", { name: "Forgot your password?" }).click();
+    const explanation = this.page.getByText(/SMTP mail configured/i);
+    await explanation.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const text = ((await explanation.first().textContent()) ?? "").trim().replace(/\s+/g, " ");
+    return text === "" ? null : text;
   }
 
   // --- Auth sign-up, recovery, guards, landing (NEWFRONT-108, AUTH-009/016).
   // --- Throwing stubs per the shared driver contract; that area fills these
   // --- in when it lands. currentPath/authStep already stubbed above.
 
-  async openSignUp(_params?: { email?: string; nextPath?: string }): Promise<void> {
-    return todo("openSignUp");
+  async openSignUp(params?: { email?: string; nextPath?: string }): Promise<void> {
+    const query = new URLSearchParams();
+    if (params?.email !== undefined) query.set("email", params.email);
+    if (params?.nextPath !== undefined) query.set("next_path", params.nextPath);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    await this.page.goto(`/sign-up${suffix}`);
+    await this.waitForCard();
   }
 
-  async submitAuthEmail(_email: string): Promise<void> {
-    return todo("submitAuthEmail");
+  async submitAuthEmail(email: string): Promise<void> {
+    const field = this.authEmailField();
+    const form = this.page.locator("form", { has: field });
+    // A saturated throttle minute answers the check with a rate-limit
+    // banner instead of advancing; wait out the window and resubmit.
+    for (let attempt = 1; ; attempt += 1) {
+      await field.fill(email);
+      await this.cardSubmit(form).click();
+      if (await this.nextAuthStepShown(30_000)) return;
+      const banner = await this.authBanner();
+      if (banner !== null && /rate limit/i.test(banner) && attempt < 3) {
+        await this.page.waitForTimeout(65_000);
+        continue;
+      }
+      if (await this.nextAuthStepShown(60_000)) return;
+      throw new Error("[parity] email submit advanced to neither password nor code step.");
+    }
   }
 
   async authEmailValue(): Promise<string> {
-    return todo("authEmailValue");
+    return this.authEmailField().inputValue();
   }
 
   async authNextPathValue(): Promise<string | null> {
-    return todo("authNextPathValue");
+    const hidden = this.page.locator('input[type="hidden"][name="next_path"]');
+    if ((await hidden.count()) === 0) return null;
+    return hidden.first().getAttribute("value");
   }
 
-  async signUpWithPassword(_password: string, _confirmPassword: string): Promise<void> {
-    return todo("signUpWithPassword");
+  async signUpWithPassword(password: string, confirmPassword: string): Promise<void> {
+    await this.authPasswordField().fill(password);
+    await this.page.getByLabel("Confirm password").fill(confirmPassword);
+    // Success navigates to the post-sign-up path; wait for the URL to move.
+    const before = this.page.url();
+    const form = this.page.locator("form", { has: this.authPasswordField() });
+    await Promise.all([
+      this.page.waitForURL((url) => url.href !== before, { timeout: 60_000 }),
+      this.cardSubmit(form).click(),
+    ]);
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
-  async submitUniqueCode(_code: string): Promise<void> {
-    return todo("submitUniqueCode");
+  async submitUniqueCode(code: string): Promise<void> {
+    const field = this.authCodeField();
+    await field.fill(code);
+    const before = this.page.url();
+    await Promise.all([
+      this.page.waitForURL((url) => url.href !== before, { timeout: 60_000 }),
+      this.cardSubmit(this.page.locator("form", { has: field })).click(),
+    ]);
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
   async codeResendState(): Promise<{ disabled: boolean; label: string }> {
-    return todo("codeResendState");
+    const button = this.page.getByRole("button", { name: /resend|requesting/i });
+    await button.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const label = ((await button.first().textContent()) ?? "").trim().replace(/\s+/g, " ");
+    return { disabled: await button.first().isDisabled(), label };
   }
 
   async requestNewCode(): Promise<void> {
-    return todo("requestNewCode");
+    await this.page.getByRole("button", { name: /resend|requesting/i }).click();
   }
 
   async passwordSubmitEnabled(): Promise<boolean> {
-    return todo("passwordSubmitEnabled");
+    const form = this.page.locator("form", { has: this.authPasswordField() });
+    return this.cardSubmit(form).isEnabled();
   }
 
-  async fillPasswordFields(_password: string, _confirmPassword: string): Promise<void> {
-    return todo("fillPasswordFields");
+  async fillPasswordFields(password: string, confirmPassword: string): Promise<void> {
+    await this.authPasswordField().fill(password);
+    await this.page.getByLabel("Confirm password").fill(confirmPassword);
   }
 
   async clickPasswordSubmit(): Promise<void> {
-    return todo("clickPasswordSubmit");
+    const form = this.page.locator("form", { has: this.authPasswordField() });
+    await this.cardSubmit(form).click();
+    await this.page.waitForTimeout(2000);
   }
 
   async passwordMismatchError(): Promise<string | null> {
-    return todo("passwordMismatchError");
+    // The mismatch note renders off the confirm field's focus state, so it
+    // can lag the fill by a beat; wait briefly, then report absence.
+    const note = this.page.getByText("The two passwords don't match.");
+    try {
+      await note.first().waitFor({ timeout: 5_000 });
+    } catch {
+      return null;
+    }
+    return ((await note.first().textContent()) ?? "").trim();
   }
 
   async authBanner(): Promise<string | null> {
-    return todo("authBanner");
+    const banner = this.page.getByRole("alert");
+    if ((await banner.count()) === 0) return null;
+    return ((await banner.first().textContent()) ?? "").trim();
   }
 
   async waitForAuthBanner(): Promise<string> {
-    return todo("waitForAuthBanner");
+    // The banner renders after hydration plus the failure effect, so poll
+    // instead of reading once. Bounded: a missing banner is a real failure.
+    const banner = this.page.getByRole("alert");
+    await banner.first().waitFor({ timeout: 60_000 });
+    return ((await banner.first().textContent()) ?? "").trim();
   }
 
-  async openForgotPassword(_email?: string): Promise<void> {
-    return todo("openForgotPassword");
+  async openForgotPassword(email?: string): Promise<void> {
+    const suffix = email !== undefined ? `?email=${encodeURIComponent(email)}` : "";
+    await this.page.goto(`/accounts/forgot-password${suffix}`);
+    await this.page
+      .getByRole("button", { name: /send reset link|resend in/i })
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async submitForgotPassword(_email: string): Promise<string> {
-    return todo("submitForgotPassword");
+  async submitForgotPassword(email: string): Promise<string> {
+    const field = this.authEmailField();
+    await field.fill(email);
+    const form = this.page.locator("form", { has: field });
+    await this.cardSubmit(form).click();
+    // Either the inbox-check toast or the failure toast appears; the
+    // button label flips to the countdown on success.
+    const toast = this.page.getByText(/check your inbox|could not send a reset link/i).first();
+    await toast.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await toast.textContent()) ?? "").trim();
   }
 
   async forgotResendState(): Promise<{ disabled: boolean; label: string }> {
-    return todo("forgotResendState");
+    const button = this.page.getByRole("button", { name: /send reset link|resend in/i });
+    await button.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const label = ((await button.first().textContent()) ?? "").trim().replace(/\s+/g, " ");
+    return { disabled: await button.first().isDisabled(), label };
   }
 
-  async openResetPassword(_params: { uid: string; token: string; email: string }): Promise<void> {
-    return todo("openResetPassword");
+  async openResetPassword(params: { uid: string; token: string; email: string }): Promise<void> {
+    const query = new URLSearchParams({ uidb64: params.uid, token: params.token, email: params.email });
+    await this.page.goto(`/accounts/reset-password?${query.toString()}`);
+    // Exact: the show/hide toggle ("Show new password") would also match.
+    await this.page.getByLabel("New password", { exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async submitNewPassword(_password: string, _confirmPassword: string): Promise<void> {
-    return todo("submitNewPassword");
+  async submitNewPassword(password: string, confirmPassword: string): Promise<void> {
+    // The reset form's fields; the card's own confirm lives on another
+    // route, so the label reads stay unambiguous per page.
+    await this.page.getByLabel("New password", { exact: true }).fill(password);
+    await this.page.getByLabel("Confirm password", { exact: true }).fill(confirmPassword);
+    // Success navigates to the entry, failure renders an inline banner;
+    // wait for either so callers read a settled page.
+    const before = this.page.url();
+    const submit = this.page.locator("form").getByRole("button", { name: "Reset password" });
+    await submit.click();
+    await Promise.race([
+      this.page.waitForURL((url) => url.href !== before, { timeout: 60_000 }).then(
+        () => true,
+        () => false
+      ),
+      this.page
+        .getByRole("alert")
+        .first()
+        .waitFor({ timeout: 60_000 })
+        .then(
+          () => true,
+          () => false
+        ),
+    ]);
   }
 
   async openSetPassword(): Promise<void> {
-    return todo("openSetPassword");
+    await this.page.goto("/accounts/set-password");
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
-  async openPath(_path: string): Promise<void> {
-    return todo("openPath");
+  async openPath(path: string): Promise<void> {
+    await this.page.goto(path);
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
   // --- NEWFRONT-113 (rules) stubs: mirror of the oracle driver additions. ---
@@ -909,8 +1270,13 @@ export class WebNewDriver implements ParityDriver {
     return todo("bulkBarVisible");
   }
 
-  async pressKey(_key: string, _shift?: boolean): Promise<void> {
-    return todo("pressKey");
+  async pressKey(key: string, shift?: boolean): Promise<void> {
+    if (shift === true) await this.page.keyboard.down("Shift");
+    try {
+      await this.page.keyboard.press(key);
+    } finally {
+      if (shift === true) await this.page.keyboard.up("Shift");
+    }
   }
 
   async reloadSawDialog(): Promise<boolean> {
@@ -2463,68 +2829,168 @@ export class WebNewDriver implements ParityDriver {
     return todo("clearIssuePatchFailure");
   }
 
+  /** Wait for the signed-out entry card after a sign-out round-trip. */
+  private async waitForSignedOut(): Promise<void> {
+    await this.authEmailField().waitFor({ timeout: 60_000 });
+  }
+
+  /** Dismiss the first-run tour overlay when it covers the shell chrome. */
+  private async dismissTourIfShown(): Promise<void> {
+    if (!(await this.isTourWelcomeVisible())) return;
+    await this.declineTour();
+    // The seam flips the profile flag over the API; wait for the overlay
+    // to actually leave before touching shell chrome.
+    await this.page
+      .getByRole("dialog")
+      .waitFor({ state: "detached", timeout: 15_000 })
+      .catch(() => {});
+  }
+
+  /**
+   * Click through the account menu, surviving the tour overlay popping in
+   * mid-sequence: bounded attempts, Escape resets half-open menus, and the
+   * tour is dismissed ahead of every attempt.
+   */
+  private async clickAccountMenuItem(name: string): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.dismissTourIfShown();
+      try {
+        await this.page.getByRole("button", { name: "Account actions" }).click({ timeout: 15_000 });
+        await this.page.getByRole("menuitem", { name }).click({ timeout: 15_000 });
+        return;
+      } catch {
+        await this.page.keyboard.press("Escape").catch(() => {});
+      }
+    }
+    await this.dismissTourIfShown();
+    await this.page.getByRole("button", { name: "Account actions" }).click();
+    await this.page.getByRole("menuitem", { name }).click();
+  }
+
   async signOutViaAccountMenu(): Promise<void> {
-    return todo("signOutViaAccountMenu");
+    await this.clickAccountMenuItem("Sign out");
+    await this.waitForSignedOut();
   }
 
   async signOutViaCommandPalette(): Promise<void> {
-    return todo("signOutViaCommandPalette");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.dismissTourIfShown();
+      try {
+        await this.page.getByRole("button", { name: "Open command palette" }).click({ timeout: 15_000 });
+        const filter = this.page.getByPlaceholder("Type a command…");
+        await filter.fill("Sign out");
+        await this.page.getByRole("option", { name: "Sign out" }).first().click({ timeout: 15_000 });
+        await this.waitForSignedOut();
+        return;
+      } catch {
+        await this.page.keyboard.press("Escape").catch(() => {});
+      }
+    }
+    await this.dismissTourIfShown();
+    await this.page.getByRole("button", { name: "Open command palette" }).click();
+    const filter = this.page.getByPlaceholder("Type a command…");
+    await filter.fill("Sign out");
+    await this.page.getByRole("option", { name: "Sign out" }).first().click();
+    await this.waitForSignedOut();
   }
 
   async isSignedOut(): Promise<boolean> {
-    return todo("isSignedOut");
+    return this.authEmailField().isVisible();
   }
 
   async openSwitchAccount(): Promise<void> {
-    return todo("openSwitchAccount");
+    // The onboarding header names the signed-in account in its menu
+    // trigger; the menu carries the switch entry.
+    await this.page.getByRole("button", { name: /^Account: / }).click();
+    await this.page.getByRole("menuitem", { name: "Use a different email address" }).click();
+    await this.page.getByRole("dialog").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async switchAccountEmail(): Promise<string> {
-    return todo("switchAccountEmail");
+    // The dialog names the active account in its explanatory copy; the
+    // sentence period after the address is not part of it.
+    const dialog = this.page.getByRole("dialog");
+    const body = (await dialog.innerText()).trim();
+    const match = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/.exec(body);
+    if (!match) throw new Error("[parity] switch-account dialog names no email.");
+    return match[0];
   }
 
   async confirmSwitchAccount(): Promise<void> {
-    return todo("confirmSwitchAccount");
+    await this.page.getByRole("dialog").getByRole("button", { name: "Switch account" }).click();
+    await this.waitForSignedOut();
   }
 
   async openDeactivateAccount(): Promise<void> {
-    return todo("openDeactivateAccount");
+    await this.clickAccountMenuItem("Deactivate account");
+    await this.page.getByRole("dialog").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async confirmDeactivation(): Promise<void> {
-    return todo("confirmDeactivation");
+    await this.page.getByRole("dialog").getByRole("button", { name: "Deactivate account" }).click();
+    await this.waitForSignedOut();
   }
 
   async dropSession(): Promise<void> {
-    return todo("dropSession");
+    // Clear every cookie in the browser context: the next authenticated
+    // request behaves like an expired session.
+    await this.page.context().clearCookies();
   }
 
-  async visit(_path: string): Promise<void> {
-    return todo("visit");
+  async visit(path: string): Promise<void> {
+    await this.page.goto(path);
   }
 
-  async showsText(_text: string): Promise<boolean> {
-    return todo("showsText");
+  async showsText(text: string): Promise<boolean> {
+    const match = this.page.getByText(text, { exact: false }).first();
+    if ((await match.count()) === 0) return false;
+    return match.isVisible();
   }
 
-  async typeDeviceCode(_code: string): Promise<void> {
-    return todo("typeDeviceCode");
+  private deviceCodeField() {
+    // The approval form carries a single code input; it auto-formats XXXX-YYYY.
+    return this.page.getByLabel("Device code");
+  }
+
+  async typeDeviceCode(code: string): Promise<void> {
+    const field = this.deviceCodeField();
+    await field.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await field.fill("");
+    await field.pressSequentially(code, { delay: 20 });
   }
 
   async deviceCodeFieldValue(): Promise<string> {
-    return todo("deviceCodeFieldValue");
+    const field = this.deviceCodeField();
+    await field.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return field.inputValue();
   }
 
   async submitDeviceApproval(): Promise<void> {
-    return todo("submitDeviceApproval");
+    // The approval page carries a single submit button ("Approve",
+    // "Approving…" while the request is in flight). The exact-name match
+    // also waits out the in-flight state.
+    await this.page.getByRole("button", { name: /^approve$/i }).click();
   }
 
-  async typeText(_text: string): Promise<void> {
-    return todo("typeText");
+  async typeText(text: string): Promise<void> {
+    await this.page.keyboard.type(text);
   }
 
-  async focusedControlName(): Promise<null> {
-    return todo("focusedControlName");
+  async focusedControlName(): Promise<string | null> {
+    return this.page.evaluate(() => {
+      const active = document.activeElement as HTMLElement | null;
+      if (!active) return null;
+      const labelled = active.getAttribute("aria-label") ?? active.getAttribute("placeholder");
+      if (labelled && labelled.trim()) return labelled.trim();
+      const labelledBy = active.getAttribute("aria-labelledby");
+      if (labelledBy) {
+        const label = document.getElementById(labelledBy)?.textContent?.trim();
+        if (label) return label;
+      }
+      if (active.tagName === "BUTTON") return active.textContent?.trim() || "button";
+      if (active.tagName === "BODY") return null;
+      return active.tagName.toLowerCase();
+    });
   }
 
   // Sidebar + workspace navigation (NEWFRONT-125, SHELL-046..062).
@@ -3394,55 +3860,77 @@ export class WebNewDriver implements ParityDriver {
   // --- Throwing stubs per the shared driver contract; the invitations and
   // --- onboarding areas fill these in when they land.
   async openInvitations(): Promise<void> {
-    return todo("openInvitations");
+    await this.page.goto("/invitations");
+    // Any settled inbox state: the list header, the no-invites state, or
+    // the load-error state.
+    await this.page
+      .locator('h1, h2:has-text("No pending invites"), h2:has-text("Could not load invitations")')
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async invitationWorkspaceNames(): Promise<string[]> {
-    return todo("invitationWorkspaceNames");
+    // Each invite card is a toggle button whose medium-weight span carries
+    // the workspace name (role and member count ride alongside it).
+    const names = this.page.locator("main ul li button span.font-medium");
+    return (await names.allInnerTexts()).map((name) => name.trim());
   }
 
-  async toggleInvitation(_workspaceName: string): Promise<void> {
-    return todo("toggleInvitation");
+  async toggleInvitation(workspaceName: string): Promise<void> {
+    await this.page.locator("main ul li button", { hasText: workspaceName }).first().click();
   }
 
   async acceptSelectedInvitations(): Promise<void> {
-    return todo("acceptSelectedInvitations");
+    // The batch join round-trips, then lands on the joined workspace; the
+    // scenario polls the landing URL.
+    await this.page.getByRole("button", { name: "Accept selected", exact: true }).click();
   }
 
   async invitationsEmptyStateVisible(): Promise<boolean> {
     return todo("invitationsEmptyStateVisible");
   }
 
-  async openInvitationLink(_workspaceSlug: string, _invitationId: string, _token: string): Promise<void> {
-    return todo("openInvitationLink");
+  async openInvitationLink(workspaceSlug: string, invitationId: string, token: string): Promise<void> {
+    const query = new URLSearchParams({ invitation_id: invitationId, slug: workspaceSlug, token });
+    await this.page.goto(`/workspace-invitations?${query.toString()}`);
+    // Any settled link state: the invitation, a terminal notice, or the
+    // signed-out entry bounce.
+    await this.page.locator("h1").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pageText(): Promise<string> {
-    return todo("pageText");
+    await this.page.locator("body").waitFor();
+    return ((await this.page.locator("body").innerText()) ?? "").trim();
   }
 
   async acceptSingleInvitation(): Promise<void> {
-    return todo("acceptSingleInvitation");
+    await this.page.getByRole("button", { name: "Accept", exact: true }).click();
   }
 
   async declineSingleInvitation(): Promise<void> {
-    return todo("declineSingleInvitation");
+    await this.page.getByRole("button", { name: "Ignore", exact: true }).click();
   }
 
   async openOnboarding(): Promise<void> {
-    return todo("openOnboarding");
+    await this.page.goto("/onboarding");
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
   async advanceCliInstall(): Promise<void> {
-    return todo("advanceCliInstall");
+    // The step's primary action; the OS pills and copy control share the
+    // step but carry their own names.
+    await this.page.getByRole("button", { name: "Continue", exact: true }).click();
   }
 
   async skipCliInstall(): Promise<void> {
-    return todo("skipCliInstall");
+    await this.page.getByRole("button", { name: "Skip for now", exact: true }).click();
   }
 
-  async submitProfileStep(_displayName: string): Promise<void> {
-    return todo("submitProfileStep");
+  async submitProfileStep(displayName: string): Promise<void> {
+    await this.page.getByLabel("Your name").fill(displayName);
+    // The profile save round-trips, then the workspace step renders; the
+    // scenario polls for it.
+    await this.page.getByRole("button", { name: "Continue", exact: true }).click();
   }
 
   async submitRoleStep(_roleLabel: string): Promise<void> {
@@ -15768,18 +16256,40 @@ export class WebNewDriver implements ParityDriver {
   // --- Desktop sign-in halves (NEWFRONT-486, AUTH-022/AUTH-023). Stubs:
   // --- the area gate implements them against apps/web_new.
   async authDesktopUnavailableCardVisible(): Promise<boolean> {
-    return todo("authDesktopUnavailableCardVisible");
+    // Desktop-build only: the entry routes render the desktop screen
+    // instead of the email card. The client renders after boot, so settle
+    // briefly instead of reading the blank document.
+    const card = this.page.getByRole("heading", { name: "The desktop app can't sign you in yet" });
+    try {
+      await card.first().waitFor({ timeout: 10_000 });
+    } catch {
+      return false;
+    }
+    return card.first().isVisible();
   }
 
   async authDesktopBrowserActionLabel(): Promise<string | null> {
-    return todo("authDesktopBrowserActionLabel");
+    const action = this.page.getByRole("button", { name: "Continue in the browser" });
+    try {
+      await action.first().waitFor({ timeout: 10_000 });
+    } catch {
+      return null;
+    }
+    const label = ((await action.first().textContent()) ?? "").trim();
+    return label === "" ? null : label;
   }
 
   async authDesktopClickBrowserAction(): Promise<void> {
-    return todo("authDesktopClickBrowserAction");
+    await this.page.getByRole("button", { name: "Continue in the browser" }).click();
   }
 
   async authDesktopFailureAlertText(): Promise<string | null> {
-    return todo("authDesktopFailureAlertText");
+    const alert = this.page.getByRole("alert");
+    try {
+      await alert.first().waitFor({ timeout: 10_000 });
+    } catch {
+      return null;
+    }
+    return ((await alert.first().innerText()) ?? "").trim() || null;
   }
 }
