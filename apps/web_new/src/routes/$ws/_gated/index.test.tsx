@@ -2,13 +2,13 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Workspace home wiring (NEWFRONT-278, NEWFRONT-280). The route keeps the
-// tour seam mounted, hands its path params plus the projects read to the
-// dashboard with the widget stack in its `widgets` slot, and warms the
-// assistant card reads in its loader; the widget-map read stays off the
-// loader so first paint shows the dashboard skeleton. The dashboard's
-// sections belong to the home feature, so this suite only proves the
-// composition and the loader's cache writes.
+// Workspace home wiring (NEWFRONT-278, NEWFRONT-280, NEWFRONT-279). The
+// route keeps the tour seam mounted, hands its path params plus the
+// projects read to the dashboard with the widget stack in its `widgets`
+// slot, and warms the assistant card reads in its loader; the widget-map
+// read stays off the loader so first paint shows the dashboard skeleton.
+// The dashboard's sections belong to the home feature, so this suite only
+// proves the composition and the loader's cache writes.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import {
@@ -53,13 +53,33 @@ vi.mock("../../../features/home/index.js", async (importOriginal) => {
         )}
       </div>
     ),
-    HomeWidgetStack: (props: { workspaceSlug: string; projects: unknown }) => (
+    HomeWidgetStack: (props: {
+      workspaceSlug: string;
+      projects: unknown;
+      quicklinks?: React.ReactNode;
+      manageWidgets?: (controls: { open: boolean; onOpenChange: (open: boolean) => void }) => React.ReactNode;
+      emptyState?: React.ReactNode;
+    }) => (
       <div
         data-testid="widget-stack"
         data-slug={props.workspaceSlug}
         data-projects={props.projects === undefined ? "loading" : "ready"}
-      />
+      >
+        {props.quicklinks}
+        {props.manageWidgets?.({
+          open: false,
+          onOpenChange: () => {},
+        })}
+        {props.emptyState}
+      </div>
     ),
+    QuicklinksWidget: (props: { workspaceSlug: string }) => (
+      <div data-testid="quicklinks-slot" data-slug={props.workspaceSlug} />
+    ),
+    ManageWidgetsDialog: (props: { workspaceSlug: string; open: boolean }) => (
+      <div data-testid="manage-slot" data-slug={props.workspaceSlug} data-open={String(props.open)} />
+    ),
+    HomeAllOffState: () => <div data-testid="all-off-slot" />,
   };
 });
 
@@ -156,6 +176,15 @@ describe("workspace home route", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("heading", { name: "New project" })).toBeNull();
+  });
+
+  it("fills the stack's quicklinks, manage-widgets, and empty slots", async () => {
+    renderHome();
+    expect(await screen.findByTestId("widget-stack")).toBeInTheDocument();
+    expect(screen.getByTestId("quicklinks-slot")).toHaveAttribute("data-slug", "acme");
+    expect(screen.getByTestId("manage-slot")).toHaveAttribute("data-slug", "acme");
+    expect(screen.getByTestId("manage-slot")).toHaveAttribute("data-open", "false");
+    expect(screen.getByTestId("all-off-slot")).toBeInTheDocument();
   });
 
   it("warms the assistant card reads in its loader", async () => {

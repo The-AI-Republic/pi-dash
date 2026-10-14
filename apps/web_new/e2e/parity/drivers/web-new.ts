@@ -1769,10 +1769,9 @@ export class WebNewDriver implements ParityDriver {
 
   // Recents plus dashboard chrome (NEWFRONT-280, rows SHELL-014-017,
   // 021-023): widget, recents and chrome probes against the new dashboard
-  // DOM. Quicklink and all-off probes stay stubs for NEWFRONT-279, which
-  // extends this section without touching these. The manage-dialog probes
-  // assume 279's dialog contract: the widget name as exact text, a
-  // role="switch" toggle beside it, and a drag-handle button in its row.
+  // DOM. The manage-dialog probes assume NEWFRONT-279's dialog contract:
+  // the widget name as exact text, a role="switch" toggle beside it, and
+  // a drag-handle button in its row; 279's own probes follow below.
 
   private homeWidgetSectionTitles(): Locator {
     return this.page.locator("#home-widget-stack [data-widget-title]");
@@ -1850,56 +1849,150 @@ export class WebNewDriver implements ParityDriver {
     await this.page.mouse.up();
   }
 
+  // Quicklinks plus widget management (NEWFRONT-279, rows SHELL-011-013,
+  // 018-020): all-off and quicklink probes against the new dashboard DOM.
+  // Rows carry their title in a test id and open their address through a
+  // new-tab anchor; copy, edit and delete run through the row menu, and
+  // the link dialog reports validation through an alert.
+
   async homeAllOffVisible(): Promise<boolean> {
-    return todo("homeAllOffVisible");
+    const empty = this.page.getByTestId("home-all-off").first();
+    if ((await empty.count()) === 0) return false;
+    return empty.isVisible().catch(() => false);
+  }
+
+  private homeLinksSection(): Locator {
+    return this.page.locator("#home-quicklinks");
   }
 
   async homeQuickLinkNames(): Promise<string[]> {
-    return todo("homeQuickLinkNames");
+    if ((await this.homeLinksSection().count()) === 0) return [];
+    const titles = await this.homeLinksSection().getByTestId("quicklink-title").allTextContents();
+    return [...new Set(titles.map((title) => title.trim()).filter((title) => title.length > 0))];
   }
 
   async homeExpandQuickLinks(): Promise<void> {
-    return todo("homeExpandQuickLinks");
+    await this.homeLinksSection()
+      .getByRole("button", { name: /show all/i })
+      .first()
+      .click();
   }
 
   async homeQuickLinksCollapsed(): Promise<boolean> {
-    return todo("homeQuickLinksCollapsed");
+    if ((await this.homeLinksSection().count()) === 0) return false;
+    return (
+      (await this.homeLinksSection()
+        .getByRole("button", { name: /show all|show less/i })
+        .count()) > 0
+    );
   }
 
-  async homeAddQuickLink(_title: string, _url: string): Promise<void> {
-    return todo("homeAddQuickLink");
+  private homeLinkDialog(): Locator {
+    return this.page.getByRole("dialog", { name: /add link|edit link/i }).first();
   }
 
-  async homeEditQuickLink(_currentTitle: string, _nextTitle: string, _nextUrl: string): Promise<void> {
-    return todo("homeEditQuickLink");
+  private async homeLinkFormFill(title: string, url: string): Promise<void> {
+    const dialog = this.homeLinkDialog();
+    await dialog.getByLabel("Address").fill(url);
+    await dialog.getByLabel("Name").fill(title);
   }
 
-  async homeDeleteQuickLink(_title: string): Promise<void> {
-    return todo("homeDeleteQuickLink");
+  async homeAddQuickLink(title: string, url: string): Promise<void> {
+    await this.homeLinksSection()
+      .getByRole("button", { name: /add link/i })
+      .first()
+      .click();
+    await this.homeLinkDialog().waitFor({ state: "visible", timeout: 15_000 });
+    await this.homeLinkFormFill(title, url);
+    await this.homeLinkDialog()
+      .getByRole("button", { name: /save link/i })
+      .first()
+      .click();
+  }
+
+  private homeLinkRow(title: string): Locator {
+    const exact = title.replace(/"/g, "");
+    return this.homeLinksSection()
+      .locator(`xpath=.//li[.//*[@data-testid="quicklink-title" and normalize-space()="${exact}"]]`)
+      .first();
+  }
+
+  private async homeLinkRowMenu(title: string): Promise<void> {
+    const row = this.homeLinkRow(title);
+    await row.waitFor({ state: "visible", timeout: 15_000 });
+    await row
+      .getByRole("button", { name: /link actions/i })
+      .first()
+      .click();
+  }
+
+  private async homeLinkMenuPick(name: RegExp): Promise<void> {
+    const item = this.page.getByRole("menuitem", { name }).first();
+    await item.waitFor({ state: "visible", timeout: 15_000 });
+    await item.click();
+  }
+
+  async homeEditQuickLink(currentTitle: string, nextTitle: string, nextUrl: string): Promise<void> {
+    await this.homeLinkRowMenu(currentTitle);
+    await this.homeLinkMenuPick(/edit/i);
+    await this.homeLinkDialog().waitFor({ state: "visible", timeout: 15_000 });
+    await this.homeLinkFormFill(nextTitle, nextUrl);
+    await this.homeLinkDialog()
+      .getByRole("button", { name: /save link/i })
+      .first()
+      .click();
+  }
+
+  async homeDeleteQuickLink(title: string): Promise<void> {
+    await this.homeLinkRowMenu(title);
+    await this.homeLinkMenuPick(/delete|remove/i);
   }
 
   async homeLinkDialogError(): Promise<string | null> {
-    return todo("homeLinkDialogError");
+    const dialog = this.homeLinkDialog();
+    if ((await dialog.count()) === 0) return null;
+    const alert = dialog.getByRole("alert").first();
+    if ((await alert.count()) === 0) return null;
+    const text = (await alert.innerText()).trim();
+    return text === "" ? null : text;
   }
 
-  async homeCopyQuickLink(_title: string): Promise<void> {
-    return todo("homeCopyQuickLink");
+  async homeCopyQuickLink(title: string): Promise<void> {
+    // The page writes through the async clipboard API, which needs the
+    // permission before the click, not just before the read.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.homeLinkRowMenu(title);
+    await this.homeLinkMenuPick(/copy/i);
   }
 
   async homeReadClipboard(): Promise<string> {
-    return todo("homeReadClipboard");
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
 
-  async homeOpenQuickLinkPopup(_title: string): Promise<string | null> {
-    return todo("homeOpenQuickLinkPopup");
+  async homeOpenQuickLinkPopup(title: string): Promise<string | null> {
+    // The row's anchor opens the saved address in a new tab.
+    const row = this.homeLinkRow(title);
+    await row.waitFor({ state: "visible", timeout: 15_000 });
+    const anchor = row.getByRole("link").first();
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 15_000 }).catch(() => null),
+      anchor.click(),
+    ]);
+    if (popup === null) return null;
+    await popup.waitForLoadState("domcontentloaded").catch(() => undefined);
+    return popup.url();
   }
 
   async homeLinkDialogOpen(): Promise<boolean> {
-    return todo("homeLinkDialogOpen");
+    return (await this.page.locator('[role="dialog"] input:visible').count()) > 0;
   }
 
   async homeCancelLinkDialog(): Promise<void> {
-    return todo("homeCancelLinkDialog");
+    await this.homeLinkDialog()
+      .getByRole("button", { name: /cancel/i })
+      .first()
+      .click();
   }
 
   private homeRecentsSection(): Locator {
