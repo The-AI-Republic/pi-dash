@@ -20,6 +20,14 @@ describe("Toast", () => {
     expect(screen.getByText("Issue updated")).toBeInTheDocument();
   });
 
+  it("exposes the stack under a stable test id for the parity driver", async () => {
+    const manager = setup();
+    expect(screen.getByTestId("toast-stack")).toBeInTheDocument();
+    showToast(manager, { title: "Saved", timeout: 0 });
+    await screen.findByText("Saved");
+    expect(screen.getByTestId("toast-stack")).toHaveTextContent("Saved");
+  });
+
   it("runs the action and dismisses", async () => {
     const user = userEvent.setup();
     const manager = setup();

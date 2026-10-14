@@ -62,4 +62,24 @@ describe("Menu", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
   });
+
+  it("renders leading icons and keys repeated labels by item key", () => {
+    const onSelect = vi.fn();
+    render(
+      <Menu
+        trigger={<Button>Projects</Button>}
+        items={[
+          { label: "Web", itemKey: "p1", icon: <i data-testid="mark-p1" />, onSelect },
+          { label: "Web", itemKey: "p2", icon: <i data-testid="mark-p2" />, onSelect },
+        ]}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Projects" }));
+    const rows = screen.getAllByRole("menuitem", { name: "Web" });
+    expect(rows).toHaveLength(2);
+    expect(screen.getByTestId("mark-p1")).toBeInTheDocument();
+    expect(screen.getByTestId("mark-p2")).toBeInTheDocument();
+    fireEvent.click(rows[1]!);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+  });
 });

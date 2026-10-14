@@ -918,6 +918,13 @@ describe("issue contracts", () => {
     const parsed = await getIssue(client, "acme", UUID2, UUID);
     expect(parsed.name).toBe("Fix login");
     expect(parsed.has_open_blockers).toBe(false);
+    expect(parsed.is_epic).toBeUndefined();
+  });
+
+  it("parses the epic marker when the detail carries it", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json({ ...issueDetail, is_epic: true }) });
+    const parsed = await getIssue(client, "acme", UUID2, UUID);
+    expect(parsed.is_epic).toBe(true);
   });
 
   it("hits the detail URL", async () => {
@@ -1632,6 +1639,33 @@ describe("project lifecycle contracts", () => {
     expect(read.sort_order).toBe(65535);
     const updated = await updateProjectUserProperties(client, "acme", UUID2, { sort_order: 1 });
     expect(updated.sort_order).toBe(1);
+  });
+
+  it("patches project navigation preferences", async () => {
+    const projectProps = {
+      ...workspaceProps,
+      project: UUID2,
+      preferences: { navigation: { default_tab: "work_items", hide_in_more_menu: [] } },
+      sort_order: 65535,
+    };
+    const navigation = { default_tab: "cycles", hide_in_more_menu: ["pages"] };
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({
+        body: JSON.stringify(
+          call.init.method === "PATCH" ? { ...projectProps, preferences: { navigation } } : projectProps
+        ),
+      });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateProjectUserProperties(client, "acme", UUID2, {
+      preferences: { navigation },
+    });
+    expect(updated.preferences).toEqual({ navigation });
+    const patch = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patch?.init.body).toBe(JSON.stringify({ preferences: { navigation } }));
   });
 });
 

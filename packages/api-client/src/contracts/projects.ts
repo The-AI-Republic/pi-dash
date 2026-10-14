@@ -352,8 +352,10 @@ export async function updateWorkspaceUserProperties(
 
 /**
  * Project-level display properties for the caller (issue filters, layout,
- * sort order). GET and PATCH
- * /api/workspaces/<slug>/projects/<id>/user-properties/.
+ * navigation preferences, sort order). GET and PATCH
+ * /api/workspaces/<slug>/projects/<id>/user-properties/. PATCH merges the
+ * given keys; preference writes carry the full preferences object so
+ * sibling branches survive.
  */
 export const ProjectUserProperties = z.object({
   id: uuid(),
@@ -387,7 +389,7 @@ export async function updateProjectUserProperties(
   client: ApiClient,
   slug: string,
   projectId: string,
-  patch: Partial<Pick<ProjectUserProperties, "sort_order">>
+  patch: Partial<Pick<ProjectUserProperties, "sort_order" | "preferences">>
 ): Promise<ProjectUserProperties> {
   const path = `/api/workspaces/${slug}/projects/${projectId}/user-properties/`;
   const envelope = await client.sendJson<unknown>("PATCH", path, { json: patch });

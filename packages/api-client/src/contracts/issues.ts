@@ -35,6 +35,9 @@ const issueCoreFields = {
   created_by: z.nullable(z.string()),
   updated_by: z.nullable(z.string()),
   is_draft: z.boolean(),
+  // Epic marker for the project tab highlight (SHELL-076): only some
+  // serializers send it, so readers treat absence as a plain work item.
+  is_epic: z.optional(z.boolean()),
   archived_at: nullableDateTime(),
 };
 

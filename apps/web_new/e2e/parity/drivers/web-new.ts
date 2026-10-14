@@ -939,10 +939,12 @@ export class WebNewDriver implements ParityDriver {
     const submit = this.page.locator("form").getByRole("button", { name: "Reset password" });
     await submit.click();
     await Promise.race([
-      this.page.waitForURL((url) => url.href !== before, { timeout: 60_000 }).then(
-        () => true,
-        () => false
-      ),
+      this.page
+        .waitForURL((url) => url.href !== before, { timeout: 60_000 })
+        .then(
+          () => true,
+          () => false
+        ),
       this.page
         .getByRole("alert")
         .first()
@@ -1096,12 +1098,30 @@ export class WebNewDriver implements ParityDriver {
     return todo("contentPaddingLeft");
   }
 
+  private tabStrip() {
+    return this.page.locator('[data-testid="project-tab-strip"]');
+  }
+
   async projectTabs(): Promise<Array<{ name: string; href: string }>> {
-    return todo("projectTabs");
+    // Project tab strip (NEWFRONT-291): visible tabs only. The overflow
+    // popover renders at the document level, outside the strip.
+    const links = this.tabStrip().getByRole("link");
+    const count = await links.count();
+    const tabs: Array<{ name: string; href: string }> = [];
+    for (let index = 0; index < count; index += 1) {
+      const link = links.nth(index);
+      const name = ((await link.textContent()) ?? "").trim().replace(/\s+/g, " ");
+      if (name === "") continue;
+      tabs.push({ name, href: (await link.getAttribute("href")) ?? "" });
+    }
+    return tabs;
   }
 
   async activeTabName(): Promise<string | null> {
-    return todo("activeTabName");
+    const active = this.tabStrip().locator('a[aria-current="page"]');
+    if ((await active.count()) === 0) return null;
+    const name = ((await active.first().textContent()) ?? "").trim().replace(/\s+/g, " ");
+    return name === "" ? null : name;
   }
 
   async editionBadgePresent(): Promise<boolean> {
@@ -1189,75 +1209,117 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async projectHeaderText(): Promise<string | null> {
-    return todo("projectHeaderText");
+    // Project header (NEWFRONT-291): the switcher trigger names the
+    // current project, avatar initials included in the raw text.
+    const trigger = this.page.locator('[data-testid="project-switcher-trigger"]');
+    if ((await trigger.count()) === 0) return null;
+    const text = ((await trigger.first().textContent()) ?? "").trim().replace(/\s+/g, " ");
+    return text === "" ? null : text;
   }
 
   async projectHeaderTruncated(): Promise<boolean> {
-    return todo("projectHeaderTruncated");
+    const line = this.page.locator('[data-testid="project-switcher-name"]');
+    if ((await line.count()) === 0) return false;
+    return await line.first().evaluate((node) => {
+      const element = node as HTMLElement;
+      return element.scrollWidth > element.clientWidth && getComputedStyle(element).textOverflow === "ellipsis";
+    });
   }
 
   async openProjectSwitcher(): Promise<void> {
-    return todo("openProjectSwitcher");
+    await this.page.locator('[data-testid="project-switcher-trigger"]').first().click();
   }
 
   async switcherOptionNames(): Promise<string[]> {
-    return todo("switcherOptionNames");
+    // Avatar initials ride in aria-hidden marks; only the label text
+    // counts toward the option name.
+    const names = await this.page.getByRole("menuitem").evaluateAll((items) =>
+      items.map((item) => {
+        const parts: string[] = [];
+        item.childNodes.forEach((node) => {
+          if (node.nodeType === Node.TEXT_NODE) parts.push(node.textContent ?? "");
+          else if (node instanceof HTMLElement && node.getAttribute("aria-hidden") !== "true") {
+            parts.push(node.textContent ?? "");
+          }
+        });
+        return parts.join("").trim().replace(/\s+/g, " ");
+      })
+    );
+    return names.filter((name) => name.length > 0);
   }
 
-  async chooseSwitcherOption(): Promise<void> {
-    return todo("chooseSwitcherOption");
+  async chooseSwitcherOption(name: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name }).first().click();
   }
 
   async openProjectActions(): Promise<void> {
-    return todo("openProjectActions");
+    await this.page.locator('[data-testid="project-actions-trigger"]').first().click();
   }
 
   async projectActionNames(): Promise<string[]> {
-    return todo("projectActionNames");
+    const texts = await this.page.getByRole("menuitem").allTextContents();
+    return texts.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text.length > 0);
   }
 
-  async clickProjectAction(): Promise<void> {
-    return todo("clickProjectAction");
+  async clickProjectAction(name: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name }).first().click();
   }
 
   async readClipboardText(): Promise<string> {
-    return todo("readClipboardText");
+    return await this.page.evaluate(() => navigator.clipboard.readText());
   }
 
   async toastText(): Promise<string | null> {
-    return todo("toastText");
+    const stack = this.page.locator('[data-testid="toast-stack"]');
+    if ((await stack.count()) === 0) return null;
+    const text = ((await stack.first().textContent()) ?? "").trim().replace(/\s+/g, " ");
+    return text === "" ? null : text;
   }
 
-  async rightClickTab(): Promise<void> {
-    return todo("rightClickTab");
+  async rightClickTab(name: string): Promise<void> {
+    await this.tabStrip().getByRole("link", { name, exact: true }).click({ button: "right" });
   }
 
   async contextMenuItems(): Promise<string[]> {
-    return todo("contextMenuItems");
+    // Kit menus unmount with their trigger, so the open menu owns every
+    // item on the page.
+    const texts = await this.page.getByRole("menuitem").allTextContents();
+    return texts.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text.length > 0);
   }
 
-  async clickContextMenuItem(): Promise<void> {
-    return todo("clickContextMenuItem");
+  async clickContextMenuItem(name: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name }).first().click();
   }
 
   async openOverflowMenu(): Promise<void> {
-    return todo("openOverflowMenu");
+    await this.page.locator('[data-testid="tab-overflow-trigger"]').first().click();
   }
 
   async overflowTriggerPresent(): Promise<boolean> {
-    return todo("overflowTriggerPresent");
+    const trigger = this.page.locator('[data-testid="tab-overflow-trigger"]');
+    if ((await trigger.count()) === 0) return false;
+    return await trigger.first().isVisible();
   }
 
   async overflowRowNames(): Promise<string[]> {
-    return todo("overflowRowNames");
+    const menu = this.page.locator('[data-testid="tab-overflow-menu"]');
+    if ((await menu.count()) === 0) return [];
+    const texts = await menu.getByRole("link").allTextContents();
+    return texts.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text.length > 0);
   }
 
-  async restoreOverflowTab(): Promise<void> {
-    return todo("restoreOverflowTab");
+  async restoreOverflowTab(name: string): Promise<void> {
+    const menu = this.page.locator('[data-testid="tab-overflow-menu"]');
+    const row = menu
+      .locator("> div")
+      .filter({ has: menu.getByRole("link", { name, exact: true }) })
+      .first();
+    await row.hover();
+    await row.getByTitle("Show").click();
   }
 
-  async setViewportSize(): Promise<void> {
-    return todo("setViewportSize");
+  async setViewportSize(width: number, height: number): Promise<void> {
+    await this.page.setViewportSize({ width, height });
   }
 
   async openNotifications(): Promise<void> {
@@ -2235,15 +2297,20 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async hoverProjectHeader(): Promise<void> {
-    return todo("hoverProjectHeader");
+    await this.page.locator('[data-testid="project-switcher-trigger"]').first().hover();
   }
 
-  async projectNameVisibleCount(): Promise<number> {
-    return todo("projectNameVisibleCount");
+  async projectNameVisibleCount(name: string): Promise<number> {
+    return await this.page.getByText(name, { exact: false }).count();
   }
 
   async projectActionDialogHeading(): Promise<string | null> {
-    return todo("projectActionDialogHeading");
+    // Kit dialog titles render h2; toasts share the dialog role but
+    // never carry a heading, so the h2 scopes to real dialogs.
+    const heading = this.page.locator('[role="dialog"] h2').first();
+    if ((await heading.count()) === 0) return null;
+    const text = ((await heading.textContent()) ?? "").trim().replace(/\s+/g, " ");
+    return text === "" ? null : text;
   }
 
   async activeCyclesHeaderVisible(): Promise<boolean> {
@@ -2251,7 +2318,8 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async errorNoticeVisible(): Promise<boolean> {
-    return todo("errorNoticeVisible");
+    const notice = this.page.getByText("Something went wrong");
+    return (await notice.count()) > 0 && (await notice.first().isVisible());
   }
 
   // Activity feed stubs (NEWFRONT-114). Mirror of the interface additions;
