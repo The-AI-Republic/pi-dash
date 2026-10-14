@@ -92,6 +92,13 @@ desktop/src-tauri/dist/
   copy-link code in `apps/web` must call `copyShareUrl()` from
   `@/utils/share-url`, never `copyUrlToClipboard()` from `@pi-dash/utils`;
   `tests/desktop/desktop-share-url.test.ts` fails the build otherwise.
+- `apps/web/core/utils/live-server-location.ts` — where the Pages editor's
+  live (collaboration) server is: `VITE_LIVE_BASE_URL` if baked, else the
+  server's `VITE_API_BASE_URL`, under `VITE_LIVE_BASE_PATH` (default `/live`,
+  the self-hosted proxy's mount). The web version falls back to the page
+  origin, which here would make `tauri://localhost/collaboration` — a URL
+  WebSocket rejects without the close event the editor needs to fall back
+  to saving over REST, so an uncached page never leaves its loader.
 - `apps/web/core/components/issues/issue-detail/issue-detail-quick-actions.tsx`,
   `issue-layouts/quick-action-dropdowns/helper.tsx` and
   `peek-overview/header.tsx` — the three copy-link paths, routed through
