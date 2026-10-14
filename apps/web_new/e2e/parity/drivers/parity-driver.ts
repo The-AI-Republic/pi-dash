@@ -8343,6 +8343,88 @@ export interface ParityDriver {
   /** Image-page presence snapshot (bug-pinned until main#523 lands). */
   adminImageFacts(): Promise<AdminImageFacts>;
 
+  // --- Admin loop jobs + runners (NEWFRONT-445, ADM-051..061 + ADM-080). ---
+  /** Loop-list page snapshot (header, skeleton, empty state, table chrome). */
+  adminLoopListFacts(): Promise<AdminLoopListFacts>;
+  /** Loop jobs as rendered in the list table, top to bottom. */
+  adminLoopRows(): Promise<AdminLoopRow[]>;
+  /** Set the enabled switch of the row with `slug` to `on`. */
+  adminLoopSetEnabled(slug: string, on: boolean): Promise<void>;
+  /** Press the loop-list New-job action. */
+  adminLoopOpenCreate(): Promise<void>;
+  /** Loop job create/edit modal snapshot. */
+  adminLoopModalFacts(): Promise<AdminLoopModalFacts>;
+  /** Fill the given modal fields (minRole picks the matching option). */
+  adminLoopModalFill(fields: Partial<AdminLoopModalFields>): Promise<void>;
+  /** Press the modal Save control. */
+  adminLoopModalSave(): Promise<void>;
+  /** Press the modal Cancel control. */
+  adminLoopModalCancel(): Promise<void>;
+  /** Loop job detail page snapshot (stats, skip filter, targets chrome). */
+  adminLoopDetailFacts(): Promise<AdminLoopDetailFacts>;
+  /** Loop targets as rendered in the detail table, top to bottom. */
+  adminLoopDetailRows(): Promise<AdminLoopTargetRow[]>;
+  /** Pick a skip-reason filter option on the detail page ("" resets to all). */
+  adminLoopSetSkipFilter(reason: string): Promise<void>;
+  /** Press the detail Edit action. */
+  adminLoopOpenEdit(): Promise<void>;
+  /** Press the detail Delete action. */
+  adminLoopDelete(): Promise<void>;
+  /** Start spying on loop-jobs list reads. */
+  adminStartLoopJobsSpy(): Promise<void>;
+  /** Loop-jobs list read URLs seen since the spy started. */
+  adminLoopJobsUrls(): Promise<string[]>;
+  /** Delay loop-jobs list reads by `ms`. */
+  adminDelayLoopJobsFetch(ms: number): Promise<void>;
+  /** Fail loop-jobs list reads with HTTP 500. */
+  adminFailLoopJobsFetch(): Promise<void>;
+  /** Answer loop-jobs list reads with an empty list. */
+  adminStubEmptyLoopJobs(): Promise<void>;
+  /** Clear the loop-jobs list read fault. */
+  adminClearLoopJobsFetchFault(): Promise<void>;
+  /** Start spying on loop-job detail reads. */
+  adminStartLoopJobSpy(): Promise<void>;
+  /** Loop-job detail read URLs seen since the spy started. */
+  adminLoopJobUrls(): Promise<string[]>;
+  /** Delay loop-job detail reads by `ms`. */
+  adminDelayLoopJobFetch(ms: number): Promise<void>;
+  /** Fail loop-job detail reads with HTTP 500. */
+  adminFailLoopJobFetch(): Promise<void>;
+  /** Clear the loop-job detail read fault. */
+  adminClearLoopJobFetchFault(): Promise<void>;
+  /** Start spying on loop-targets reads. */
+  adminStartLoopTargetsSpy(): Promise<void>;
+  /** Loop-targets read URLs seen since the spy started. */
+  adminLoopTargetsUrls(): Promise<string[]>;
+  /** Start spying on loop-job creates. */
+  adminStartLoopJobCreateSpy(): Promise<void>;
+  /** Loop-job create request bodies seen since the spy started. */
+  adminLoopJobCreateBodies(): Promise<unknown[]>;
+  /** Fail loop-job creates with HTTP 500. */
+  adminFailLoopJobCreate(): Promise<void>;
+  /** Clear the loop-job create fault. */
+  adminClearLoopJobCreateFault(): Promise<void>;
+  /** Start spying on loop-job updates. */
+  adminStartLoopJobUpdateSpy(): Promise<void>;
+  /** Loop-job update request bodies seen since the spy started. */
+  adminLoopJobUpdateBodies(): Promise<unknown[]>;
+  /** Fail loop-job updates with HTTP 500. */
+  adminFailLoopJobUpdate(): Promise<void>;
+  /** Delay loop-job updates by `ms`. */
+  adminDelayLoopJobUpdate(ms: number): Promise<void>;
+  /** Clear the loop-job update fault. */
+  adminClearLoopJobUpdateFault(): Promise<void>;
+  /** Start spying on loop-job deletes. */
+  adminStartLoopJobDeleteSpy(): Promise<void>;
+  /** Loop-job delete count seen since the spy started. */
+  adminLoopJobDeleteCount(): Promise<number>;
+  /** Fail loop-job deletes with HTTP 500. */
+  adminFailLoopJobDelete(): Promise<void>;
+  /** Clear the loop-job delete fault. */
+  adminClearLoopJobDeleteFault(): Promise<void>;
+  /** Runners presence snapshot (bug-pinned until the runners page lands). */
+  adminRunnersFacts(): Promise<AdminRunnersFacts>;
+
   // --- Space board access & routing (NEWFRONT-447, SPC-001..009). ---
   /** Open an arbitrary in-app path (unknown-path routing, SPC-009). */
   spaceAccessOpenPath(path: string): Promise<void>;
@@ -12421,4 +12503,154 @@ export interface AdminImageFacts {
   saveVisible: boolean;
   /** Whether the image loading skeleton is showing. */
   skeletonVisible: boolean;
+}
+
+// --- Admin loop jobs + runners oracle types (NEWFRONT-445, ADM-051..061 + ADM-080). ---
+
+/** One loop job row as rendered in the list table (NEWFRONT-445, ADM-051/052). */
+export interface AdminLoopRow {
+  /** Job name as rendered. */
+  name: string;
+  /** Name link target (job detail path), or null when absent. */
+  href: string | null;
+  /** Job slug as rendered. */
+  slug: string;
+  /** Recurrence rule as rendered. */
+  rrule: string;
+  /** Minimum-role label as rendered. */
+  minRoleLabel: string;
+  /** Whether the row shows the job as builtin. */
+  builtin: boolean;
+  /** Whether the row's enabled switch is on. */
+  enabled: boolean;
+}
+
+/** Loop-list page snapshot (NEWFRONT-445, ADM-051/053/054/055). */
+export interface AdminLoopListFacts {
+  /** Whether the loop header title is showing. */
+  titleVisible: boolean;
+  /** Whether the loop header description is showing. */
+  descriptionVisible: boolean;
+  /** Whether the New-job action is showing. */
+  createVisible: boolean;
+  /** Whether the list loading skeleton is showing. */
+  skeletonVisible: boolean;
+  /** List skeleton bar count (zero when the skeleton hides). */
+  skeletonRows: number;
+  /** List skeleton bar heights as rendered, top to bottom. */
+  skeletonHeights: string[];
+  /** Whether the empty-state message is showing. */
+  emptyVisible: boolean;
+  /** Empty-state message text, or null when hidden. */
+  emptyText: string | null;
+  /** Whether the jobs table is showing. */
+  tableVisible: boolean;
+  /** Table column headers as rendered, left to right. */
+  headers: string[];
+}
+
+/** Loop job modal field values (NEWFRONT-445, ADM-055/056/057). */
+export interface AdminLoopModalFields {
+  /** Slug field value. */
+  slug: string;
+  /** Admin-name field value. */
+  name: string;
+  /** User-facing-name field value. */
+  publicName: string;
+  /** User-facing-description field value. */
+  publicDescription: string;
+  /** Prompt field value. */
+  prompt: string;
+  /** Minimum-role option value, or null when none matches. */
+  minRole: number | null;
+  /** Timezone field value. */
+  tzid: string;
+  /** Recurrence-rule field value. */
+  rrule: string;
+}
+
+/** Loop job create/edit modal snapshot (NEWFRONT-445, ADM-055/056/057). */
+export interface AdminLoopModalFacts {
+  /** Whether the modal is showing. */
+  open: boolean;
+  /** Modal title as rendered ("New job" / "Edit job"), or null when closed. */
+  title: string | null;
+  /** Current field values (blanks when closed). */
+  fields: AdminLoopModalFields;
+  /** Whether the slug field is disabled. */
+  slugDisabled: boolean;
+  /** Whether the Save control is disabled. */
+  saveDisabled: boolean;
+  /** Whether the Cancel control is showing. */
+  cancelVisible: boolean;
+  /** Whether the modal body scrolls within a capped height. */
+  bodyScrollable: boolean;
+  /** Modal body max-height as rendered, or null when uncapped/absent. */
+  bodyMaxHeight: string | null;
+}
+
+/** Loop job stat tiles as rendered (NEWFRONT-445, ADM-058). */
+export interface AdminLoopStats {
+  /** Targets tile value. */
+  targets: number;
+  /** Completed (24h) tile value. */
+  completed: number;
+  /** Failed (24h) tile value. */
+  failed: number;
+  /** Skipped (24h) tile value. */
+  skipped: number;
+}
+
+/** Loop job detail page snapshot (NEWFRONT-445, ADM-058/059/060/061). */
+export interface AdminLoopDetailFacts {
+  /** Detail header title as rendered, or null when the header hides. */
+  title: string | null;
+  /** Detail header description as rendered, or null when the header hides. */
+  description: string | null;
+  /** Whether the detail loading skeleton is showing. */
+  skeletonVisible: boolean;
+  /** Detail skeleton bar heights as rendered, top to bottom. */
+  skeletonHeights: string[];
+  /** Whether the Edit action is showing. */
+  editVisible: boolean;
+  /** Whether the Delete action is showing. */
+  deleteVisible: boolean;
+  /** Skip-reason filter option values as rendered ("" first for all). */
+  skipOptions: string[];
+  /** Selected skip-reason filter value ("" for all). */
+  skipSelected: string;
+  /** Stat tiles, or null when the page shows none. */
+  stats: AdminLoopStats | null;
+  /** Whether the targets table is showing. */
+  targetsTableVisible: boolean;
+  /** Targets table column headers as rendered, left to right. */
+  targetsHeaders: string[];
+  /** Whether the no-targets placeholder row is showing. */
+  targetsEmptyVisible: boolean;
+  /** No-targets placeholder text, or null when hidden. */
+  targetsEmptyText: string | null;
+}
+
+/** One loop target row as rendered in the detail table (NEWFRONT-445, ADM-058). */
+export interface AdminLoopTargetRow {
+  /** Workspace slug as rendered. */
+  workspace: string;
+  /** User email as rendered. */
+  user: string;
+  /** Next-run cell text as rendered. */
+  nextRun: string;
+  /** Last-run status cell text as rendered. */
+  lastRun: string;
+  /** Last-run tokens cell text as rendered. */
+  tokens: string;
+  /** Last skip reason cell text as rendered. */
+  lastSkip: string;
+}
+
+/** Runners presence snapshot (NEWFRONT-445, ADM-080; bug-pinned until the page lands). */
+export interface AdminRunnersFacts {
+  /** Whether the sidebar Runners entry is showing. */
+  sidebarEntryVisible: boolean;
+  /** Sidebar Runners entry target, or null when absent. */
+  sidebarHref: string | null;
 }

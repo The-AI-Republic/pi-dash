@@ -42,8 +42,15 @@ import type {
   AdminFailureFacts,
   AdminGeneralFacts,
   AdminImageFacts,
+  AdminLoopDetailFacts,
+  AdminLoopListFacts,
+  AdminLoopModalFacts,
+  AdminLoopModalFields,
+  AdminLoopRow,
+  AdminLoopTargetRow,
   AdminNotFoundFacts,
   AdminRootBranch,
+  AdminRunnersFacts,
   AdminSetupFacts,
   AdminSetupFields,
   AdminSignInFacts,
@@ -52217,6 +52224,642 @@ export class WebDriver implements ParityDriver {
       keyFieldVisible,
       saveVisible,
       skeletonVisible,
+    };
+  }
+
+  // --- Admin loop jobs + runners (NEWFRONT-445, ADM-051..061 + ADM-080). ---
+  // The loop list is a plain table under a titled header; the empty state
+  // is an inline paragraph and the skeletons are status nodes with two
+  // bars each. The modal fields carry wrapping labels; the detail header
+  // title/description are the first text column of the header block, the
+  // stat tiles pair each label with its leading value, and the skip
+  // filter is the page's only select.
+
+  private adminLoopRouteInstalled = false;
+  private adminLoopJobsUrlsSeen: string[] = [];
+  private adminLoopJobsFetchFault: { mode: "none" | "delay" | "fail" | "empty"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminLoopJobUrlsSeen: string[] = [];
+  private adminLoopJobFetchFault: { mode: "none" | "delay" | "fail"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminLoopTargetsUrlsSeen: string[] = [];
+  private adminLoopJobCreateBodiesSeen: unknown[] = [];
+  private adminLoopJobCreateFault: "none" | "fail" = "none";
+  private adminLoopJobUpdateBodiesSeen: unknown[] = [];
+  private adminLoopJobUpdateFault: { mode: "none" | "fail" | "delay"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminLoopJobDeleteCountSeen = 0;
+  private adminLoopJobDeleteFault: "none" | "fail" = "none";
+
+  /** Install the loop-jobs route (list/detail/targets spies plus mutation faults) once per page. */
+  private async adminEnsureLoopRoute(): Promise<void> {
+    if (this.adminLoopRouteInstalled) return;
+    this.adminLoopRouteInstalled = true;
+    await this.page.route(
+      (url) => url.pathname.replace(/\/+$/, "").startsWith("/api/instances/loop/jobs"),
+      async (route) => {
+        const method = route.request().method();
+        const path = route.request().url();
+        const pathname = new URL(path).pathname.replace(/\/+$/, "");
+        const isList = pathname === "/api/instances/loop/jobs";
+        const isTargets = pathname.endsWith("/targets");
+        const isDetail = !isList && !isTargets;
+        if (method === "GET" && isList) {
+          const fault = this.adminLoopJobsFetchFault;
+          if (fault.mode === "fail") {
+            this.adminLoopJobsUrlsSeen.push(path);
+            await route.fulfill({
+              status: 500,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "parity-probe-failure" }),
+            });
+            return;
+          }
+          if (fault.mode === "empty") {
+            this.adminLoopJobsUrlsSeen.push(path);
+            await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+            return;
+          }
+          if (fault.mode === "delay") {
+            await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+          }
+          this.adminLoopJobsUrlsSeen.push(path);
+          await route.continue();
+          return;
+        }
+        if (method === "GET" && isDetail) {
+          const fault = this.adminLoopJobFetchFault;
+          if (fault.mode === "fail") {
+            this.adminLoopJobUrlsSeen.push(path);
+            await route.fulfill({
+              status: 500,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "parity-probe-failure" }),
+            });
+            return;
+          }
+          if (fault.mode === "delay") {
+            await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+          }
+          this.adminLoopJobUrlsSeen.push(path);
+          await route.continue();
+          return;
+        }
+        if (method === "GET" && isTargets) {
+          this.adminLoopTargetsUrlsSeen.push(path);
+          await route.continue();
+          return;
+        }
+        if (method === "POST" && isList) {
+          this.adminLoopJobCreateBodiesSeen.push(this.adminPostDataJson(route));
+          if (this.adminLoopJobCreateFault === "fail") {
+            await route.fulfill({
+              status: 500,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "parity-probe-failure" }),
+            });
+            return;
+          }
+          const createResponse = await route.fetch();
+          await route.fulfill({ response: createResponse });
+          return;
+        }
+        if (method === "PATCH" && isDetail) {
+          this.adminLoopJobUpdateBodiesSeen.push(this.adminPostDataJson(route));
+          if (this.adminLoopJobUpdateFault.mode === "fail") {
+            await route.fulfill({
+              status: 500,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "parity-probe-failure" }),
+            });
+            return;
+          }
+          if (this.adminLoopJobUpdateFault.mode === "delay") {
+            await new Promise((resolve) => setTimeout(resolve, this.adminLoopJobUpdateFault.delayMs));
+          }
+          const updateResponse = await route.fetch();
+          await route.fulfill({ response: updateResponse });
+          return;
+        }
+        if (method === "DELETE" && isDetail) {
+          this.adminLoopJobDeleteCountSeen += 1;
+          if (this.adminLoopJobDeleteFault === "fail") {
+            await route.fulfill({
+              status: 500,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "parity-probe-failure" }),
+            });
+            return;
+          }
+          await route.continue();
+          return;
+        }
+        await route.continue();
+      }
+    );
+  }
+
+  /** Bar heights of the first visible skeleton in `scope`, top to bottom. */
+  private async adminSkeletonHeights(scope: Locator): Promise<string[]> {
+    const statuses = scope.locator('[role="status"]');
+    const total = await statuses.count();
+    for (let i = 0; i < total; i++) {
+      if (!(await statuses.nth(i).isVisible())) continue;
+      const bars = statuses.nth(i).locator(":scope > *");
+      const count = await bars.count();
+      const heights: string[] = [];
+      for (let b = 0; b < count; b++) {
+        heights.push(await bars.nth(b).evaluate((el) => (el as HTMLElement).style.height));
+      }
+      return heights;
+    }
+    return [];
+  }
+
+  async adminLoopListFacts(): Promise<AdminLoopListFacts> {
+    const main = this.page.locator("main");
+    const title = main.getByText("Loop — Auto Project Management", { exact: true });
+    const titleVisible = (await title.count()) > 0 && (await title.first().isVisible());
+    const description = main.getByText("Scheduled AI jobs that run as each user");
+    const descriptionVisible = (await description.count()) > 0 && (await description.first().isVisible());
+    const create = main.getByRole("button", { name: "New job", exact: true });
+    const createVisible = (await create.count()) > 0 && (await create.first().isVisible());
+    const skeletonHeights = await this.adminSkeletonHeights(main);
+    const empty = main.getByText("No jobs yet. Create one to get started.", { exact: true });
+    const emptyVisible = (await empty.count()) > 0 && (await empty.first().isVisible());
+    const table = main.locator("table");
+    const tableVisible = (await table.count()) > 0 && (await table.first().isVisible());
+    const headers: string[] = [];
+    if (tableVisible) {
+      const cells = table.first().locator("thead th");
+      const count = await cells.count();
+      for (let i = 0; i < count; i++) {
+        headers.push((await cells.nth(i).innerText()).trim());
+      }
+    }
+    return {
+      titleVisible,
+      descriptionVisible,
+      createVisible,
+      skeletonVisible: skeletonHeights.length > 0,
+      skeletonRows: skeletonHeights.length,
+      skeletonHeights,
+      emptyVisible,
+      emptyText: emptyVisible ? (await empty.first().innerText()).trim() : null,
+      tableVisible,
+      headers,
+    };
+  }
+
+  async adminLoopRows(): Promise<AdminLoopRow[]> {
+    const main = this.page.locator("main");
+    const rows = main.locator("table tbody tr");
+    const total = await rows.count();
+    const out: AdminLoopRow[] = [];
+    for (let i = 0; i < total; i++) {
+      const row = rows.nth(i);
+      if (!(await row.isVisible())) continue;
+      const cells = row.locator(":scope > td");
+      if ((await cells.count()) < 6) continue;
+      const link = cells.nth(0).locator("a").first();
+      const toggle = row.getByRole("switch").first();
+      out.push({
+        name: (await cells.nth(0).innerText()).trim(),
+        href: (await link.count()) === 0 ? null : await link.getAttribute("href"),
+        slug: (await cells.nth(1).innerText()).trim(),
+        rrule: (await cells.nth(2).innerText()).trim(),
+        minRoleLabel: (await cells.nth(3).innerText()).trim(),
+        builtin: (await cells.nth(4).innerText()).trim() === "Yes",
+        enabled: (await toggle.count()) > 0 && (await toggle.getAttribute("aria-checked")) === "true",
+      });
+    }
+    return out;
+  }
+
+  async adminLoopSetEnabled(slug: string, on: boolean): Promise<void> {
+    const main = this.page.locator("main");
+    const rows = main.locator("table tbody tr");
+    const total = await rows.count();
+    for (let i = 0; i < total; i++) {
+      const row = rows.nth(i);
+      const cells = row.locator(":scope > td");
+      if ((await cells.count()) < 6) continue;
+      if ((await cells.nth(1).innerText()).trim() !== slug) continue;
+      const toggle = row.getByRole("switch").first();
+      if ((await toggle.getAttribute("aria-checked")) === String(on)) return;
+      await toggle.click();
+      return;
+    }
+    throw new Error(`[parity] no loop row with slug ${slug}.`);
+  }
+
+  async adminLoopOpenCreate(): Promise<void> {
+    await this.page.locator("main").getByRole("button", { name: "New job", exact: true }).click();
+  }
+
+  async adminLoopModalFacts(): Promise<AdminLoopModalFacts> {
+    // One atomic in-page snapshot: serial locator reads inside the
+    // dialog scope hang (role-scoped label resolution never settles),
+    // so labels, values, buttons and scroll state read alike in a
+    // single evaluate. Labels wrap their controls; the title heading is
+    // the visibility witness (the dialog root itself is zero-size).
+    const snap = await this.page.evaluate(() => {
+      const shut = {
+        open: false,
+        title: null as string | null,
+        fields: {
+          slug: "",
+          name: "",
+          publicName: "",
+          publicDescription: "",
+          prompt: "",
+          minRole: null as number | null,
+          tzid: "",
+          rrule: "",
+        },
+        slugDisabled: false,
+        saveDisabled: false,
+        cancelVisible: false,
+        bodyScrollable: false,
+        bodyMaxHeight: null as string | null,
+      };
+      const shown = (el: Element | null): boolean => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && getComputedStyle(el).visibility !== "hidden";
+      };
+      // Toasts also carry role="dialog", so the loop modal is the
+      // titled one, never the first match.
+      let dialog: Element | null = null;
+      let headingEl: Element | null = null;
+      for (const candidate of document.querySelectorAll('[role="dialog"]')) {
+        const h3 = candidate.querySelector("h3");
+        const text = (h3?.textContent ?? "").trim();
+        if ((text === "New job" || text === "Edit job") && shown(h3)) {
+          dialog = candidate;
+          headingEl = h3;
+          break;
+        }
+      }
+      if (dialog === null || headingEl === null) return shut;
+      const title = ((headingEl as HTMLElement).innerText ?? "").trim();
+      if (title !== "New job" && title !== "Edit job") return shut;
+      const labelText = (label: Element): string => {
+        for (const node of label.childNodes) {
+          if (node.nodeType === Node.TEXT_NODE && (node.textContent ?? "").trim() !== "") {
+            return (node.textContent ?? "").trim();
+          }
+        }
+        return "";
+      };
+      const fields = { ...shut.fields };
+      let slugDisabled = false;
+      for (const label of dialog.querySelectorAll("label")) {
+        const control = label.querySelector("input, textarea, select");
+        if (
+          !(control instanceof HTMLInputElement) &&
+          !(control instanceof HTMLTextAreaElement) &&
+          !(control instanceof HTMLSelectElement)
+        )
+          continue;
+        const value = control.value;
+        switch (labelText(label)) {
+          case "Slug":
+            fields.slug = value;
+            slugDisabled = control.disabled;
+            break;
+          case "Admin name":
+            fields.name = value;
+            break;
+          case "User-facing name":
+            fields.publicName = value;
+            break;
+          case "User-facing description":
+            fields.publicDescription = value;
+            break;
+          case "Prompt":
+            fields.prompt = value;
+            break;
+          case "Min role": {
+            const parsed = Number.parseInt(value, 10);
+            fields.minRole = Number.isNaN(parsed) ? null : parsed;
+            break;
+          }
+          case "Timezone":
+            fields.tzid = value;
+            break;
+          default:
+            break;
+        }
+        if (labelText(label).startsWith("Recurrence")) fields.rrule = value;
+      }
+      const buttons = [...dialog.querySelectorAll("button")];
+      const save = buttons.find((item) => (item.innerText ?? "").trim() === "Save") ?? null;
+      const cancel = buttons.find((item) => (item.innerText ?? "").trim() === "Cancel") ?? null;
+      let bodyMaxHeight: string | null = null;
+      let bodyScrollable = false;
+      for (const div of dialog.querySelectorAll("div")) {
+        const style = window.getComputedStyle(div);
+        if (style.maxHeight !== "none") {
+          bodyMaxHeight = style.maxHeight;
+          bodyScrollable = style.overflowY === "auto" || style.overflowY === "scroll";
+          break;
+        }
+      }
+      return {
+        open: true,
+        title,
+        fields,
+        slugDisabled,
+        saveDisabled: save === null ? false : save.disabled,
+        cancelVisible: shown(cancel),
+        bodyScrollable,
+        bodyMaxHeight,
+      };
+    });
+    return snap;
+  }
+
+  /** Loop modal dialog scope (toasts share the dialog role, so the title disambiguates). */
+  private adminLoopDialog(): Locator {
+    return this.page.locator('[role="dialog"]', {
+      has: this.page.locator("h3", { hasText: /^(New job|Edit job)$/ }),
+    });
+  }
+
+  /** One modal field control by its wrapping label text (aria label queries hang on textareas). */
+  private adminLoopField(label: string, control: "input" | "textarea"): Locator {
+    return this.adminLoopDialog().locator("label", { hasText: label }).locator(control);
+  }
+
+  async adminLoopModalFill(fields: Partial<AdminLoopModalFields>): Promise<void> {
+    // Forced: the textarea fills land but their stability check never
+    // settles inside the scrolling modal body, so actionability waits
+    // out the clock after the value is already in place.
+    const root = this.adminLoopDialog();
+    if (fields.slug !== undefined) await root.getByLabel("Slug", { exact: true }).fill(fields.slug, { force: true });
+    if (fields.name !== undefined)
+      await root.getByLabel("Admin name", { exact: true }).fill(fields.name, { force: true });
+    if (fields.publicName !== undefined)
+      await root.getByLabel("User-facing name", { exact: true }).fill(fields.publicName, { force: true });
+    if (fields.publicDescription !== undefined)
+      await this.adminLoopField("User-facing description", "textarea").fill(fields.publicDescription, { force: true });
+    if (fields.prompt !== undefined)
+      await this.adminLoopField("Prompt", "textarea").fill(fields.prompt, { force: true });
+    // The role select is the modal's only select; getByLabel never
+    // settles on it, so it resolves by element name instead.
+    if (fields.minRole !== undefined && fields.minRole !== null)
+      await root.locator("select").selectOption(String(fields.minRole));
+    if (fields.tzid !== undefined)
+      await root.getByLabel("Timezone", { exact: true }).fill(fields.tzid, { force: true });
+    if (fields.rrule !== undefined) await root.getByLabel(/Recurrence/).fill(fields.rrule, { force: true });
+  }
+
+  async adminLoopModalSave(): Promise<void> {
+    await this.adminLoopDialog().getByRole("button", { name: "Save", exact: true }).click();
+  }
+
+  async adminLoopModalCancel(): Promise<void> {
+    await this.adminLoopDialog().getByRole("button", { name: "Cancel", exact: true }).click();
+  }
+
+  /** Read one stat tile value by its label, or null when the tiles hide. */
+  private async adminLoopStatValue(label: string): Promise<number | null> {
+    const node = this.page.locator("main").getByText(label, { exact: true });
+    if ((await node.count()) === 0 || !(await node.first().isVisible())) return null;
+    const raw = await node.first().locator("..").locator(":scope > div").first().innerText();
+    const parsed = Number.parseInt(raw.trim(), 10);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  async adminLoopDetailFacts(): Promise<AdminLoopDetailFacts> {
+    const main = this.page.locator("main");
+    // The breadcrumb trail also carries border-b; the page header is the
+    // bordered block without list items.
+    const header = main
+      .locator("div.border-b")
+      .filter({ hasNot: this.page.locator("li") })
+      .first();
+    const headerVisible = (await header.count()) > 0 && (await header.isVisible());
+    const headerText = header.locator(":scope > div").first();
+    const titleNode = headerText.locator(":scope > div").first();
+    const descNode = headerText.locator(":scope > div").nth(1);
+    const skeletonHeights = await this.adminSkeletonHeights(main);
+    const edit = main.getByRole("button", { name: "Edit", exact: true });
+    const editVisible = (await edit.count()) > 0 && (await edit.first().isVisible());
+    const del = main.getByRole("button", { name: "Delete", exact: true });
+    const deleteVisible = (await del.count()) > 0 && (await del.first().isVisible());
+    const skip = main.locator("select").first();
+    const skipVisible = (await skip.count()) > 0 && (await skip.isVisible());
+    const skipOptions: string[] = [];
+    if (skipVisible) {
+      const options = skip.locator("option");
+      const count = await options.count();
+      for (let i = 0; i < count; i++) {
+        skipOptions.push((await options.nth(i).getAttribute("value")) ?? "");
+      }
+    }
+    const targets = await this.adminLoopStatValue("Targets");
+    const completed = await this.adminLoopStatValue("Completed (24h)");
+    const failed = await this.adminLoopStatValue("Failed (24h)");
+    const skipped = await this.adminLoopStatValue("Skipped (24h)");
+    const table = main.locator("table");
+    const targetsTableVisible = (await table.count()) > 0 && (await table.first().isVisible());
+    const targetsHeaders: string[] = [];
+    if (targetsTableVisible) {
+      const cells = table.first().locator("thead th");
+      const count = await cells.count();
+      for (let i = 0; i < count; i++) {
+        targetsHeaders.push((await cells.nth(i).innerText()).trim());
+      }
+    }
+    const empty = main.getByText("No targets yet.", { exact: true });
+    const targetsEmptyVisible = (await empty.count()) > 0 && (await empty.first().isVisible());
+    return {
+      title: !headerVisible || (await titleNode.count()) === 0 ? null : (await titleNode.innerText()).trim(),
+      description: !headerVisible || (await descNode.count()) === 0 ? null : (await descNode.innerText()).trim(),
+      skeletonVisible: skeletonHeights.length > 0,
+      skeletonHeights,
+      editVisible,
+      deleteVisible,
+      skipOptions,
+      skipSelected: skipVisible ? await skip.inputValue() : "",
+      stats:
+        targets === null || completed === null || failed === null || skipped === null
+          ? null
+          : { targets, completed, failed, skipped },
+      targetsTableVisible,
+      targetsHeaders,
+      targetsEmptyVisible,
+      targetsEmptyText: targetsEmptyVisible ? (await empty.first().innerText()).trim() : null,
+    };
+  }
+
+  async adminLoopDetailRows(): Promise<AdminLoopTargetRow[]> {
+    const main = this.page.locator("main");
+    const rows = main.locator("table tbody tr");
+    const total = await rows.count();
+    const out: AdminLoopTargetRow[] = [];
+    for (let i = 0; i < total; i++) {
+      const row = rows.nth(i);
+      if (!(await row.isVisible())) continue;
+      const cells = row.locator(":scope > td");
+      if ((await cells.count()) < 6) continue;
+      out.push({
+        workspace: (await cells.nth(0).innerText()).trim(),
+        user: (await cells.nth(1).innerText()).trim(),
+        nextRun: (await cells.nth(2).innerText()).trim(),
+        lastRun: (await cells.nth(3).innerText()).trim(),
+        tokens: (await cells.nth(4).innerText()).trim(),
+        lastSkip: (await cells.nth(5).innerText()).trim(),
+      });
+    }
+    return out;
+  }
+
+  async adminLoopSetSkipFilter(reason: string): Promise<void> {
+    await this.page.locator("main").locator("select").first().selectOption(reason);
+  }
+
+  async adminLoopOpenEdit(): Promise<void> {
+    await this.page.locator("main").getByRole("button", { name: "Edit", exact: true }).click();
+  }
+
+  async adminLoopDelete(): Promise<void> {
+    await this.page.locator("main").getByRole("button", { name: "Delete", exact: true }).click();
+  }
+
+  async adminStartLoopJobsSpy(): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobsUrlsSeen = [];
+  }
+
+  async adminLoopJobsUrls(): Promise<string[]> {
+    return [...this.adminLoopJobsUrlsSeen];
+  }
+
+  async adminDelayLoopJobsFetch(ms: number): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobsFetchFault = { mode: "delay", delayMs: ms };
+  }
+
+  async adminFailLoopJobsFetch(): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobsFetchFault = { mode: "fail", delayMs: 0 };
+  }
+
+  async adminStubEmptyLoopJobs(): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobsFetchFault = { mode: "empty", delayMs: 0 };
+  }
+
+  async adminClearLoopJobsFetchFault(): Promise<void> {
+    this.adminLoopJobsFetchFault = { mode: "none", delayMs: 0 };
+  }
+
+  async adminStartLoopJobSpy(): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobUrlsSeen = [];
+  }
+
+  async adminLoopJobUrls(): Promise<string[]> {
+    return [...this.adminLoopJobUrlsSeen];
+  }
+
+  async adminDelayLoopJobFetch(ms: number): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobFetchFault = { mode: "delay", delayMs: ms };
+  }
+
+  async adminFailLoopJobFetch(): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobFetchFault = { mode: "fail", delayMs: 0 };
+  }
+
+  async adminClearLoopJobFetchFault(): Promise<void> {
+    this.adminLoopJobFetchFault = { mode: "none", delayMs: 0 };
+  }
+
+  async adminStartLoopTargetsSpy(): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopTargetsUrlsSeen = [];
+  }
+
+  async adminLoopTargetsUrls(): Promise<string[]> {
+    return [...this.adminLoopTargetsUrlsSeen];
+  }
+
+  async adminStartLoopJobCreateSpy(): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobCreateBodiesSeen = [];
+  }
+
+  async adminLoopJobCreateBodies(): Promise<unknown[]> {
+    return [...this.adminLoopJobCreateBodiesSeen];
+  }
+
+  async adminFailLoopJobCreate(): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobCreateFault = "fail";
+  }
+
+  async adminClearLoopJobCreateFault(): Promise<void> {
+    this.adminLoopJobCreateFault = "none";
+  }
+
+  async adminStartLoopJobUpdateSpy(): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobUpdateBodiesSeen = [];
+  }
+
+  async adminLoopJobUpdateBodies(): Promise<unknown[]> {
+    return [...this.adminLoopJobUpdateBodiesSeen];
+  }
+
+  async adminFailLoopJobUpdate(): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobUpdateFault = { mode: "fail", delayMs: 0 };
+  }
+
+  async adminDelayLoopJobUpdate(ms: number): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobUpdateFault = { mode: "delay", delayMs: ms };
+  }
+
+  async adminClearLoopJobUpdateFault(): Promise<void> {
+    this.adminLoopJobUpdateFault = { mode: "none", delayMs: 0 };
+  }
+
+  async adminStartLoopJobDeleteSpy(): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobDeleteCountSeen = 0;
+  }
+
+  async adminLoopJobDeleteCount(): Promise<number> {
+    return this.adminLoopJobDeleteCountSeen;
+  }
+
+  async adminFailLoopJobDelete(): Promise<void> {
+    await this.adminEnsureLoopRoute();
+    this.adminLoopJobDeleteFault = "fail";
+  }
+
+  async adminClearLoopJobDeleteFault(): Promise<void> {
+    this.adminLoopJobDeleteFault = "none";
+  }
+
+  async adminRunnersFacts(): Promise<AdminRunnersFacts> {
+    const sidebarEntry = this.page.getByRole("link", { name: /Runners/ });
+    const sidebarEntryVisible = (await sidebarEntry.count()) > 0 && (await sidebarEntry.first().isVisible());
+    return {
+      sidebarEntryVisible,
+      sidebarHref: !sidebarEntryVisible ? null : await sidebarEntry.first().getAttribute("href"),
     };
   }
 

@@ -21266,3 +21266,336 @@ export async function serverAdminDeleteWorkspacesBySlugPrefix(prefix: string): P
   const match = /PARITY_DELETED:(\d+)/.exec(out);
   return match === null ? 0 : Number.parseInt(match[1] ?? "0", 10);
 }
+
+// --- Instance-admin loop jobs + runners server helpers (NEWFRONT-445, ADM-051..061 + ADM-080). ---
+
+/** One loop job as the instance-admin API reports it. */
+export interface ServerAdminLoopJob {
+  id: string;
+  slug: string;
+  name: string;
+  publicName: string;
+  publicDescription: string;
+  prompt: string;
+  minRole: number;
+  enabled: boolean;
+  isBuiltin: boolean;
+  dtstart: string | null;
+  rrule: string;
+  tzid: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  /** 24h rollup; present on detail reads, absent on list reads. */
+  stats: { targetCount: number; completed: number; failed: number; skipped: number } | null;
+}
+
+function toServerAdminLoopJob(row: Record<string, unknown>): ServerAdminLoopJob {
+  const stats = row["stats"] as Record<string, unknown> | null | undefined;
+  return {
+    id: typeof row["id"] === "string" ? row["id"] : "",
+    slug: typeof row["slug"] === "string" ? row["slug"] : "",
+    name: typeof row["name"] === "string" ? row["name"] : "",
+    publicName: typeof row["public_name"] === "string" ? row["public_name"] : "",
+    publicDescription: typeof row["public_description"] === "string" ? row["public_description"] : "",
+    prompt: typeof row["prompt"] === "string" ? row["prompt"] : "",
+    minRole: typeof row["min_role"] === "number" ? row["min_role"] : 0,
+    enabled: row["enabled"] === true,
+    isBuiltin: row["is_builtin"] === true,
+    dtstart: typeof row["dtstart"] === "string" ? row["dtstart"] : null,
+    rrule: typeof row["rrule"] === "string" ? row["rrule"] : "",
+    tzid: typeof row["tzid"] === "string" ? row["tzid"] : "",
+    createdAt: typeof row["created_at"] === "string" ? row["created_at"] : null,
+    updatedAt: typeof row["updated_at"] === "string" ? row["updated_at"] : null,
+    stats:
+      stats !== null && stats !== undefined && typeof stats["target_count"] === "number"
+        ? {
+            targetCount: stats["target_count"],
+            completed: typeof stats["completed"] === "number" ? stats["completed"] : 0,
+            failed: typeof stats["failed"] === "number" ? stats["failed"] : 0,
+            skipped: typeof stats["skipped"] === "number" ? stats["skipped"] : 0,
+          }
+        : null,
+  };
+}
+
+/** One loop target row as the instance-admin API reports it. */
+export interface ServerAdminLoopTarget {
+  id: string;
+  workspaceSlug: string | null;
+  userEmail: string | null;
+  nextRunAt: string | null;
+  lastSkippedAt: string | null;
+  lastSkipReason: string;
+  lastRun: {
+    status: string;
+    errorCode: string;
+    modelUsed: string;
+    totalTokens: number | null;
+    completedAt: string | null;
+  } | null;
+}
+
+function toServerAdminLoopTarget(row: Record<string, unknown>): ServerAdminLoopTarget {
+  const run = row["last_run"] as Record<string, unknown> | null | undefined;
+  return {
+    id: typeof row["id"] === "string" ? row["id"] : "",
+    workspaceSlug: typeof row["workspace_slug"] === "string" ? row["workspace_slug"] : null,
+    userEmail: typeof row["user_email"] === "string" ? row["user_email"] : null,
+    nextRunAt: typeof row["next_run_at"] === "string" ? row["next_run_at"] : null,
+    lastSkippedAt: typeof row["last_skipped_at"] === "string" ? row["last_skipped_at"] : null,
+    lastSkipReason: typeof row["last_skip_reason"] === "string" ? row["last_skip_reason"] : "",
+    lastRun:
+      run === null || run === undefined
+        ? null
+        : {
+            status: typeof run["status"] === "string" ? run["status"] : "",
+            errorCode: typeof run["error_code"] === "string" ? run["error_code"] : "",
+            modelUsed: typeof run["model_used"] === "string" ? run["model_used"] : "",
+            totalTokens: typeof run["total_tokens"] === "number" ? run["total_tokens"] : null,
+            completedAt: typeof run["completed_at"] === "string" ? run["completed_at"] : null,
+          },
+  };
+}
+
+/**
+ * List loop jobs as GET /api/instances/loop/jobs/ reports them (a bare
+ * array, newest first, without stats). Throws unless the read lands.
+ */
+export async function serverAdminListLoopJobs(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAdminLoopJob[]> {
+  const res = await fetch(`${apiBase}/api/instances/loop/jobs/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) throw new Error(`[parity] loop jobs read failed with HTTP ${res.status}.`);
+  const body = (await res.json()) as unknown;
+  if (!Array.isArray(body)) throw new Error("[parity] loop jobs read carried no array.");
+  return body.map((row) => toServerAdminLoopJob((row ?? {}) as Record<string, unknown>));
+}
+
+/**
+ * Read one loop job as GET /api/instances/loop/jobs/<id>/ reports it
+ * (with the 24h stats rollup). Resolves null on 404; throws otherwise
+ * unless the read lands.
+ */
+export async function serverAdminGetLoopJob(
+  sessionCookie: string,
+  jobId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAdminLoopJob | null> {
+  const res = await fetch(`${apiBase}/api/instances/loop/jobs/${encodeURIComponent(jobId)}/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`[parity] loop job read failed with HTTP ${res.status}.`);
+  return toServerAdminLoopJob((await res.json()) as Record<string, unknown>);
+}
+
+/** Writable loop-job fields for create/update probes. */
+export interface ServerAdminLoopJobInput {
+  slug?: string;
+  name?: string;
+  publicName?: string;
+  publicDescription?: string;
+  prompt?: string;
+  minRole?: number;
+  enabled?: boolean;
+  rrule?: string;
+  tzid?: string;
+}
+
+function loopJobInputBody(input: ServerAdminLoopJobInput): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (input.slug !== undefined) body["slug"] = input.slug;
+  if (input.name !== undefined) body["name"] = input.name;
+  if (input.publicName !== undefined) body["public_name"] = input.publicName;
+  if (input.publicDescription !== undefined) body["public_description"] = input.publicDescription;
+  if (input.prompt !== undefined) body["prompt"] = input.prompt;
+  if (input.minRole !== undefined) body["min_role"] = input.minRole;
+  if (input.enabled !== undefined) body["enabled"] = input.enabled;
+  if (input.rrule !== undefined) body["rrule"] = input.rrule;
+  if (input.tzid !== undefined) body["tzid"] = input.tzid;
+  return body;
+}
+
+/**
+ * Create a loop job via POST /api/instances/loop/jobs/. Throws unless the
+ * server reports the created row.
+ */
+export async function serverAdminCreateLoopJob(
+  sessionCookie: string,
+  input: ServerAdminLoopJobInput,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAdminLoopJob> {
+  const res = await fetch(`${apiBase}/api/instances/loop/jobs/`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...serverAdminCsrfHeaders(sessionCookie) },
+    body: JSON.stringify(loopJobInputBody(input)),
+  });
+  if (res.status !== 201) throw new Error(`[parity] loop job create failed with HTTP ${res.status}.`);
+  return toServerAdminLoopJob((await res.json()) as Record<string, unknown>);
+}
+
+/**
+ * Update a loop job via PATCH /api/instances/loop/jobs/<id>/. Throws unless
+ * the server reports the updated row.
+ */
+export async function serverAdminUpdateLoopJob(
+  sessionCookie: string,
+  jobId: string,
+  input: ServerAdminLoopJobInput,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAdminLoopJob> {
+  const res = await fetch(`${apiBase}/api/instances/loop/jobs/${encodeURIComponent(jobId)}/`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", ...serverAdminCsrfHeaders(sessionCookie) },
+    body: JSON.stringify(loopJobInputBody(input)),
+  });
+  if (!res.ok) throw new Error(`[parity] loop job update failed with HTTP ${res.status}.`);
+  return toServerAdminLoopJob((await res.json()) as Record<string, unknown>);
+}
+
+/**
+ * Delete a loop job via DELETE /api/instances/loop/jobs/<id>/. Throws
+ * unless the server confirms.
+ */
+export async function serverAdminDeleteLoopJob(
+  sessionCookie: string,
+  jobId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await fetch(`${apiBase}/api/instances/loop/jobs/${encodeURIComponent(jobId)}/`, {
+    method: "DELETE",
+    headers: { ...serverAdminCsrfHeaders(sessionCookie) },
+  });
+  if (res.status !== 204 && res.status !== 200) {
+    throw new Error(`[parity] loop job delete failed with HTTP ${res.status}.`);
+  }
+}
+
+/** One page of loop targets as the instance-admin API reports it. */
+export interface ServerAdminLoopTargetsPage {
+  page: number;
+  results: ServerAdminLoopTarget[];
+}
+
+/**
+ * List a job's targets as GET /api/instances/loop/jobs/<id>/targets/
+ * reports them. Throws unless the read lands.
+ */
+export async function serverAdminListLoopTargets(
+  sessionCookie: string,
+  jobId: string,
+  params: { page?: number; skipReason?: string } = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerAdminLoopTargetsPage> {
+  const query = new URLSearchParams();
+  if (params.page !== undefined) query.set("page", String(params.page));
+  if (params.skipReason !== undefined && params.skipReason !== "") query.set("skip_reason", params.skipReason);
+  const suffix = query.toString() === "" ? "" : `?${query.toString()}`;
+  const res = await fetch(`${apiBase}/api/instances/loop/jobs/${encodeURIComponent(jobId)}/targets/${suffix}`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] loop targets read failed with HTTP ${res.status}.`);
+  const body = (await res.json()) as { page?: unknown; results?: unknown[] };
+  const rows = Array.isArray(body.results) ? body.results : [];
+  return {
+    page: typeof body.page === "number" ? body.page : 1,
+    results: rows.map((row) => toServerAdminLoopTarget((row ?? {}) as Record<string, unknown>)),
+  };
+}
+
+/**
+ * Delete every loop job whose slug starts with the given prefix (test
+ * cleanup). Resolves with the deleted count. Refuses an empty prefix so
+ * the seeded builtin job is never at risk.
+ */
+export async function serverAdminDeleteLoopJobsBySlugPrefix(prefix: string): Promise<number> {
+  if (prefix === "") throw new Error("[parity] loop job cleanup prefix must not be empty.");
+  const out = await serverAdminShell(
+    `from pi_dash.db.models import LoopJob\n` +
+      `rows = LoopJob.objects.filter(slug__startswith=${JSON.stringify(prefix)})\n` +
+      `count = rows.count()\n` +
+      `rows.delete()\n` +
+      `print("PARITY_DELETED:" + str(count))\n` +
+      `print("PARITY_DELETE_OK")\n`
+  );
+  if (!out.includes("PARITY_DELETE_OK")) throw new Error("[parity] loop job cleanup produced no receipt.");
+  const match = /PARITY_DELETED:(\d+)/.exec(out);
+  return match === null ? 0 : Number.parseInt(match[1] ?? "0", 10);
+}
+
+/** Input for creating one loop target edge (test fixture). */
+export interface ServerAdminLoopTargetInput {
+  jobSlug: string;
+  workspaceSlug: string;
+  userEmail: string;
+  /** Hours from now for next_run_at; null leaves it unset. Defaults to 1. */
+  nextRunInHours?: number | null;
+  /** Skip reason to record; "" leaves the edge unskipped. Defaults to "". */
+  skipReason?: string;
+  /** Stamp last_skipped_at now when a reason is given. Defaults to true. */
+  skippedNow?: boolean;
+}
+
+/**
+ * Create one loop target edge (job x workspace x user) via the Django
+ * shell — targets have no write API; reconcile owns them in production.
+ * Replaces any live edge for the same triple so retries converge.
+ * Resolves with the target id. Throws unless the create lands.
+ */
+export async function serverAdminCreateLoopTarget(input: ServerAdminLoopTargetInput): Promise<string> {
+  const nextRun = input.nextRunInHours === undefined ? 1 : input.nextRunInHours;
+  const reason = input.skipReason ?? "";
+  const skippedNow = input.skippedNow ?? true;
+  const out = await serverAdminShell(
+    `from datetime import timedelta\n` +
+      `from django.utils import timezone\n` +
+      `from pi_dash.db.models import LoopJob, LoopTarget, User, Workspace\n` +
+      `job = LoopJob.objects.get(slug=${JSON.stringify(input.jobSlug)}, deleted_at__isnull=True)\n` +
+      `ws = Workspace.objects.get(slug=${JSON.stringify(input.workspaceSlug)})\n` +
+      `user = User.objects.get(email=${JSON.stringify(input.userEmail)})\n` +
+      `LoopTarget.objects.filter(job=job, workspace=ws, user=user, deleted_at__isnull=True).delete()\n` +
+      `at = (timezone.now() + timedelta(hours=${JSON.stringify(nextRun ?? 0)})) if ${nextRun === null ? "False" : "True"} else None\n` +
+      `skipped = timezone.now() if (${JSON.stringify(reason)} != "" and ${skippedNow ? "True" : "False"}) else None\n` +
+      `t = LoopTarget.objects.create(job=job, workspace=ws, user=user, next_run_at=at, last_skip_reason=${JSON.stringify(reason)}, last_skipped_at=skipped)\n` +
+      `print("PARITY_TARGET:" + str(t.id))\n` +
+      `print("PARITY_TARGET_OK")\n`
+  );
+  if (!out.includes("PARITY_TARGET_OK")) throw new Error("[parity] loop target create produced no receipt.");
+  const match = /PARITY_TARGET:([0-9a-f-]+)/.exec(out);
+  if (match === null) throw new Error("[parity] loop target create carried no id.");
+  return match[1] ?? "";
+}
+
+/**
+ * Delete every loop target whose job slug starts with the given prefix
+ * (test cleanup). Resolves with the deleted count. Refuses an empty
+ * prefix so seeded edges are never at risk.
+ */
+export async function serverAdminDeleteLoopTargetsByJobSlugPrefix(prefix: string): Promise<number> {
+  if (prefix === "") throw new Error("[parity] loop target cleanup prefix must not be empty.");
+  const out = await serverAdminShell(
+    `from pi_dash.db.models import LoopTarget\n` +
+      `rows = LoopTarget.objects.filter(job__slug__startswith=${JSON.stringify(prefix)})\n` +
+      `count = rows.count()\n` +
+      `rows.delete()\n` +
+      `print("PARITY_DELETED:" + str(count))\n` +
+      `print("PARITY_DELETE_OK")\n`
+  );
+  if (!out.includes("PARITY_DELETE_OK")) throw new Error("[parity] loop target cleanup produced no receipt.");
+  const match = /PARITY_DELETED:(\d+)/.exec(out);
+  return match === null ? 0 : Number.parseInt(match[1] ?? "0", 10);
+}
+
+/**
+ * Probe the instance runners endpoint (GET /api/instances/runners/).
+ * Resolves with the raw HTTP status so absence pins can assert it
+ * without throwing. Throws only when the request itself fails.
+ */
+export async function serverAdminRunnersEndpointStatus(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<number> {
+  const res = await fetch(`${apiBase}/api/instances/runners/`, { headers: { cookie: sessionCookie } });
+  return res.status;
+}
