@@ -32,6 +32,7 @@ import {
   serverRunners,
   serverUnpinIssuePod,
   serverWorkspaceId,
+  serverWorkspacePods,
   signInSession,
   type ParityCreatedRun,
 } from "../helpers/api";
@@ -851,7 +852,11 @@ test(
 
     await test.step("tiles match the server pod by pod", async () => {
       const session = await signInSession(seed.email, seed.password);
-      const server = await serverPods(seed.projectId, session);
+      // Workspace overview, workspace list: the page renders every pod in
+      // the workspace, so a project-scoped list breaks once another project
+      // owns pods (the ARC scratch project the add-runner specs leave).
+      const workspaceId = await serverWorkspaceId(seed.workspaceSlug, seed.projectId, session);
+      const server = await serverWorkspacePods(workspaceId, session);
       expect(server.length).toBeGreaterThan(0);
       await expect
         .poll(() => driver.runnersPodTiles().then((tiles) => tiles.map((tile) => tile.name)), { timeout: 60_000 })

@@ -37,6 +37,7 @@ import {
   serverPublishBoardFacts,
   serverRepositoryStatus,
   serverSearchIssueNames,
+  serverWorkspacePods,
   type AuthedSession,
 } from "./api";
 
@@ -1005,6 +1006,62 @@ describe("serverSearchIssueNames", () => {
     stubStatus = 500;
     await expect(serverSearchIssueNames("ws", "project-1", "alp", "session=x", apiBase)).rejects.toThrow(
       "[parity] issue search failed with HTTP 500."
+    );
+  });
+});
+
+describe("serverWorkspacePods", () => {
+  it("lists the workspace pods and maps rows with defaults", async () => {
+    stubRaw = JSON.stringify([
+      {
+        id: "pod-1",
+        name: "PAR_pod_1",
+        description: "seed pod",
+        is_default: true,
+        project: "project-1",
+        project_identifier: "PAR",
+        runner_count: 5,
+      },
+      { id: "pod-2", name: "ARC701429_pod_1" },
+    ]);
+    const rows = await serverWorkspacePods("ws-1", "session=x", apiBase);
+    expect(rows).toEqual([
+      {
+        id: "pod-1",
+        name: "PAR_pod_1",
+        description: "seed pod",
+        isDefault: true,
+        project: "project-1",
+        projectIdentifier: "PAR",
+        runnerCount: 5,
+      },
+      {
+        id: "pod-2",
+        name: "ARC701429_pod_1",
+        description: "",
+        isDefault: false,
+        project: "",
+        projectIdentifier: "",
+        runnerCount: 0,
+      },
+    ]);
+    expect(stubSeen).toHaveLength(1);
+    expect(stubSeen[0]?.method).toBe("GET");
+    expect(stubSeen[0]?.url).toBe("/api/runners/pods/?workspace=ws-1");
+  });
+
+  it("throws when a row carries no string id/name", async () => {
+    stubRaw = JSON.stringify([{ id: "pod-3", name: 42 }]);
+    await expect(serverWorkspacePods("ws-1", "session=x", apiBase)).rejects.toThrow(
+      "[parity] pod row carried no string id/name."
+    );
+  });
+
+  it("throws when the list read fails", async () => {
+    stubStatus = 500;
+    stubRaw = "boom";
+    await expect(serverWorkspacePods("ws-1", "session=x", apiBase)).rejects.toThrow(
+      "[parity] pod list failed with HTTP 500."
     );
   });
 });
