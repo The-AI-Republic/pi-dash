@@ -13,9 +13,11 @@ import { createAppClient, resetAppClient } from "../../core/api/client.js";
 import { useSessionStore } from "../../core/session/store.js";
 import {
   FINISH_FAILURE_TITLE,
+  TOUR_COMPLETE_FAILED_TITLE,
   useAcceptWorkspaceInvitations,
   useApproveDeviceCode,
   useCheckWorkspaceSlug,
+  useCompleteTour,
   useCreateJoinRequest,
   useCreateWorkspace,
   useFinishOnboarding,
@@ -766,5 +768,74 @@ describe("useSendWorkspaceInvites", () => {
     expect(message).toBe("Invitations sent");
     expect(posted).toEqual({ emails: [{ email: "sam@example.com", role: 15 }] });
     expect(seen).toContain("POST https://api.test/api/workspaces/acme/invitations/");
+  });
+});
+
+describe("useCompleteTour", () => {
+  it("flips the tour flag and stamps the cached profile", async () => {
+    const seen: string[] = [];
+    let posted: unknown;
+    createAppClient(
+      "https://api.test",
+      stubTransport(async (url, init) => {
+        seen.push(`${init.method} ${url}`);
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        if (url.endsWith("/api/users/me/tour-completed/")) {
+          posted = JSON.parse(init.body as string);
+          return { status: 200, body: JSON.stringify({ message: "Tour completed" }), url };
+        }
+        return { status: 200, body: "{}", url };
+      })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["session", "profile"], { ...PROFILE_FIXTURE, is_tour_completed: false });
+    const { result } = renderHook(() => useCompleteTour(), { wrapper: wrapper(queryClient) });
+
+    await act(async () => {
+      await result.current.mutateAsync();
+    });
+    expect(posted).toEqual({ is_tour_completed: true });
+    expect(seen).toContain("PATCH https://api.test/api/users/me/tour-completed/");
+    expect((queryClient.getQueryData(["session", "profile"]) as { is_tour_completed: boolean }).is_tour_completed).toBe(
+      true
+    );
+  });
+
+  it("leaves a missing cached profile missing", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport(async (url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        return { status: 200, body: JSON.stringify({ message: "Tour completed" }), url };
+      })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useCompleteTour(), { wrapper: wrapper(queryClient) });
+
+    await act(async () => {
+      await result.current.mutateAsync();
+    });
+    expect(queryClient.getQueryData(["session", "profile"])).toBeUndefined();
+  });
+
+  it("toasts and rejects when the write fails, keeping the cached flag", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport(async (url) => {
+        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
+        return { status: 500, body: JSON.stringify({ detail: "boom" }), url };
+      })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["session", "profile"], { ...PROFILE_FIXTURE, is_tour_completed: false });
+    const { result } = renderHook(() => useCompleteTour(), { wrapper: wrapper(queryClient) });
+
+    await act(async () => {
+      await expect(result.current.mutateAsync()).rejects.toThrow();
+    });
+    expect(notifyError).toHaveBeenCalledWith(TOUR_COMPLETE_FAILED_TITLE, expect.any(String));
+    expect((queryClient.getQueryData(["session", "profile"]) as { is_tour_completed: boolean }).is_tour_completed).toBe(
+      false
+    );
   });
 });

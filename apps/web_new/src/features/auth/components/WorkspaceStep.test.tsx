@@ -166,6 +166,7 @@ function renderStep(options: {
   invitations?: WorkspaceInvitationList;
   joinRequests?: WorkspaceJoinRequestList;
   joinAnswer?: unknown;
+  creationDisabled?: boolean | "omit";
 }): StepHarness {
   const advances: ({ skipInvites?: boolean } | undefined)[] = [];
   const pushAdvance = (advanceOptions: { skipInvites?: boolean } | undefined): void => {
@@ -200,12 +201,15 @@ function renderStep(options: {
     })
   );
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  const creationDisabled = options.creationDisabled === "omit" ? undefined : (options.creationDisabled ?? false);
+  const disabledProp = creationDisabled === undefined ? {} : { creationDisabled };
   const view = render(
     <QueryClientProvider client={queryClient}>
       <WorkspaceStep
         onAdvance={pushAdvance}
         invitations={options.invitations ?? []}
         joinRequests={options.joinRequests ?? []}
+        {...disabledProp}
       />
     </QueryClientProvider>
   );
@@ -214,7 +218,12 @@ function renderStep(options: {
     rerender: (invitations, joinRequests) => {
       view.rerender(
         <QueryClientProvider client={queryClient}>
-          <WorkspaceStep onAdvance={pushAdvance} invitations={invitations} joinRequests={joinRequests} />
+          <WorkspaceStep
+            onAdvance={pushAdvance}
+            invitations={invitations}
+            joinRequests={joinRequests}
+            {...disabledProp}
+          />
         </QueryClientProvider>
       );
     },
@@ -231,6 +240,26 @@ describe("WorkspaceStep", () => {
     expect(screen.getByRole("heading", { name: "Create your workspace" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Join by admin email" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Join with an invite" })).not.toBeInTheDocument();
+  });
+
+  it("treats an omitted creation flag as enabled", () => {
+    renderStep({ creationDisabled: "omit" });
+    expect(screen.getByRole("heading", { name: "Create your workspace" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Workspace creation is turned off" })).not.toBeInTheDocument();
+  });
+
+  it("replaces the create view with the restricted notice when creation is disabled", () => {
+    renderStep({ creationDisabled: true });
+    expect(screen.getByRole("heading", { name: "Workspace creation is turned off" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Create your workspace" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Join by admin email" })).toBeInTheDocument();
+  });
+
+  it("moves from the restricted notice into the join-by-email view", async () => {
+    const user = userEvent.setup();
+    renderStep({ creationDisabled: true });
+    await user.click(screen.getByRole("button", { name: "Join by admin email" }));
+    expect(screen.getByRole("heading", { name: "Request workspace access" })).toBeInTheDocument();
   });
 
   it("defaults to the invites view when invitations exist", () => {

@@ -14,6 +14,7 @@ import {
   approveDeviceCode,
   checkEmail,
   checkWorkspaceSlug,
+  completeTour,
   createWorkspace,
   createWorkspaceJoinRequest,
   deactivateAccount,
@@ -249,6 +250,31 @@ export function useSendWorkspaceInvites() {
     mutationFn: async (input: { slug: string; emails: WorkspaceInvitee[] }): Promise<string> => {
       const result = await sendWorkspaceInvitations(getAppClient(), input.slug, { emails: input.emails });
       return result.message;
+    },
+  });
+}
+
+export const TOUR_COMPLETE_FAILED_TITLE = "Could not save the tour";
+
+/**
+ * Complete the first-run product tour (AUTH-042): flip the profile flag,
+ * then stamp the cached profile so the overlay closes at once. A failed
+ * write toasts the server detail and rejects, leaving the overlay up so
+ * the user can retry the dismissal.
+ */
+export function useCompleteTour() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (): Promise<void> => {
+      try {
+        await completeTour(getAppClient(), { is_tour_completed: true });
+      } catch (error) {
+        notifyError(TOUR_COMPLETE_FAILED_TITLE, (error as Error).message);
+        throw error;
+      }
+      queryClient.setQueryData<Profile>(sessionKeys.profile, (current) =>
+        current === undefined ? current : { ...current, is_tour_completed: true }
+      );
     },
   });
 }

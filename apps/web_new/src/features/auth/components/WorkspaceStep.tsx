@@ -20,6 +20,7 @@ import {
   selectPendingJoinRequest,
   type WorkspaceStepView,
 } from "../workspace.js";
+import { InOnboardingCreationNotice } from "./InOnboardingCreationNotice.js";
 import { WorkspaceCreateForm } from "./WorkspaceCreateForm.js";
 import { WorkspaceInvitesView } from "./WorkspaceInvitesView.js";
 import { WorkspaceJoinByEmailView } from "./WorkspaceJoinByEmailView.js";
@@ -29,9 +30,20 @@ export interface WorkspaceStepProps {
   onAdvance: (options?: { skipInvites?: boolean }) => void;
   invitations: WorkspaceInvitationList;
   joinRequests: WorkspaceJoinRequestList;
+  /**
+   * True when the instance config disables workspace creation (AUTH-041):
+   * the create view is replaced by the inline restricted notice steering
+   * to joining. Absent reads as enabled.
+   */
+  creationDisabled?: boolean | undefined;
 }
 
-export function WorkspaceStep({ onAdvance, invitations, joinRequests }: WorkspaceStepProps): React.ReactElement {
+export function WorkspaceStep({
+  onAdvance,
+  invitations,
+  joinRequests,
+  creationDisabled = false,
+}: WorkspaceStepProps): React.ReactElement {
   // Null until the user navigates, so the default tracks late-loading data
   // (the join-request list resolves after first paint) without ever
   // clobbering manual navigation on a refetch.
@@ -79,6 +91,9 @@ export function WorkspaceStep({ onAdvance, invitations, joinRequests }: Workspac
         />
       );
     case "create":
+      if (creationDisabled) {
+        return <InOnboardingCreationNotice onJoin={() => setView("join-by-email")} />;
+      }
       return (
         <div className="flex flex-col gap-(--space-4)">
           <WorkspaceCreateForm
