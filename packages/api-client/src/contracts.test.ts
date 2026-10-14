@@ -28,6 +28,7 @@ import {
   checkWorkspaceSlug,
   createWorkspace,
   getMyWorkspaceMembership,
+  listWorkspaceMembers,
   listWorkspaces,
 } from "./contracts/workspaces.js";
 import {
@@ -695,6 +696,27 @@ describe("workspace contracts", () => {
     await expect(getMyWorkspaceMembership(nullish, "acme")).resolves.toBeNull();
     const primitive = createClient({ baseUrl: "https://api.test", transport: json("oops") });
     await expect(getMyWorkspaceMembership(primitive, "acme")).resolves.toBeNull();
+  });
+
+  it("lists workspace memberships with the nested member projection", async () => {
+    const member = {
+      id: UUID,
+      first_name: "Ada",
+      last_name: "Lovelace",
+      avatar: "",
+      avatar_url: "",
+      display_name: "Ada Lovelace",
+      is_bot: false,
+    };
+    const memberships = [
+      { id: UUID2, member, role: 20 },
+      { id: UUID, member: { ...member, email: "ada@example.com" }, role: 10 },
+    ];
+    const client = createClient({ baseUrl: "https://api.test", transport: json(memberships) });
+    const parsed = await listWorkspaceMembers(client, "acme");
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]?.member.display_name).toBe("Ada Lovelace");
+    expect(parsed[1]?.role).toBe(10);
   });
 });
 

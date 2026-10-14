@@ -9,6 +9,7 @@ import {
   checkWorkspaceSlug,
   createWorkspace,
   getMyWorkspaceMembership,
+  listWorkspaceMembers,
   listWorkspaces,
 } from "../contracts/workspaces.js";
 import { getMyProjectRoles, listProjects } from "../contracts/projects.js";
@@ -97,5 +98,18 @@ describe.skipIf(!contractEnabled)("workspace membership contract", () => {
     expect(seeded).toBeDefined();
     const roles = await getMyProjectRoles(client, CONTRACT_WORKSPACE);
     expect(roles[seeded?.id ?? ""]).toBe(20);
+  });
+});
+
+describe.skipIf(!contractEnabled)("workspace members contract", () => {
+  it("lists active memberships with the nested member projection", async () => {
+    const client = await signedIn();
+    const me = await getMe(client);
+    const members = await listWorkspaceMembers(client, CONTRACT_WORKSPACE);
+    expect(members.length).toBeGreaterThan(0);
+    const mine = members.find((membership) => membership.member.id === me.id);
+    expect(mine).toBeDefined();
+    expect(mine?.role).toBe(20);
+    expect(mine?.member.display_name.length).toBeGreaterThan(0);
   });
 });

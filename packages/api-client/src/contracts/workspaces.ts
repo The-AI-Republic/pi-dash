@@ -6,6 +6,7 @@
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { nullableUuid, uuid } from "./fields.js";
+import { UserLite } from "./users.js";
 
 export const WorkspaceLite = z.object({
   id: uuid(),
@@ -127,4 +128,31 @@ export async function getMyWorkspaceMembership(
   const body = await client.getJson<unknown>(path);
   if (body === null || typeof body !== "object" || (body as { member?: unknown }).member == null) return null;
   return client.parse(OwnWorkspaceMembership, body, `GET ${path}`);
+}
+
+/**
+ * One active workspace membership with the nested member projection. The
+ * backend answers the admin projection for privileged callers (extra email
+ * and last-login fields); the shared UserLite subset below is what
+ * readers need, so extras are ignored.
+ */
+export const WorkspaceMember = z.object({
+  id: uuid(),
+  member: UserLite,
+  role: z.number(),
+});
+export type WorkspaceMember = z.infer<typeof WorkspaceMember>;
+
+export const WorkspaceMemberList = z.array(WorkspaceMember);
+export type WorkspaceMemberList = z.infer<typeof WorkspaceMemberList>;
+
+/**
+ * GET /api/workspaces/<slug>/members/ lists the workspace's active
+ * memberships (id, nested member, role). All workspace roles may read it;
+ * the projects list filter panel offers these as lead/member options.
+ */
+export async function listWorkspaceMembers(client: ApiClient, slug: string): Promise<WorkspaceMemberList> {
+  const path = `/api/workspaces/${slug}/members/`;
+  const body = await client.getJson<unknown>(path);
+  return client.parse(WorkspaceMemberList, body, `GET ${path}`);
 }

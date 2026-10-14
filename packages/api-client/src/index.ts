@@ -69,10 +69,13 @@ export {
   Workspace,
   WorkspaceList,
   WorkspaceLite,
+  WorkspaceMember,
+  WorkspaceMemberList,
   WorkspaceSlugStatus,
   checkWorkspaceSlug,
   createWorkspace,
   getMyWorkspaceMembership,
+  listWorkspaceMembers,
   listWorkspaces,
 } from "./contracts/workspaces.js";
 export type { WorkspaceCreateInput } from "./contracts/workspaces.js";

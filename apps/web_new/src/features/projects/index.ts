@@ -72,3 +72,45 @@ export type { PublishProjectDialogProps } from "./components/PublishProjectDialo
 export { TabAreaMount } from "./components/TabAreaMount.js";
 export { TabBar } from "./components/TabBar.js";
 export type { TabBarProps } from "./components/TabBar.js";
+export { workspaceMembersQueryOptions } from "./api/members.js";
+export { ProjectsAppliedFilters } from "./components/ProjectsAppliedFilters.js";
+export type { ProjectsAppliedFiltersProps } from "./components/ProjectsAppliedFilters.js";
+export { ProjectsCustomDateDialog } from "./components/ProjectsCustomDateDialog.js";
+export type { CustomDateMode, ProjectsCustomDateDialogProps } from "./components/ProjectsCustomDateDialog.js";
+export { ProjectsFilterPanel } from "./components/ProjectsFilterPanel.js";
+export type { ProjectsFilterPanelProps } from "./components/ProjectsFilterPanel.js";
+export { ProjectsListSearch } from "./components/ProjectsListSearch.js";
+export type { ProjectsListSearchProps } from "./components/ProjectsListSearch.js";
+export { ProjectsSortMenu } from "./components/ProjectsSortMenu.js";
+export type { ProjectsSortMenuProps } from "./components/ProjectsSortMenu.js";
+export {
+  ACCESS_OPTIONS,
+  countActiveListFilters,
+  CREATED_PRESETS,
+  DEFAULT_LIST_SORT,
+  EMPTY_LIST_FILTERS,
+  filterListRows,
+  formatCreatedChip,
+  freshListFilters,
+  hasNarrowingListFilters,
+  isCustomCreatedValue,
+  LIST_SORT_OPTIONS,
+  matchesCreatedFilter,
+  matchesListFilters,
+  matchesListSearch,
+  selectMemberOptions,
+  sortDirectionLocked,
+  sortKeyLabel,
+  sortListRows,
+} from "./lib/list-display.js";
+export type {
+  ListFilters,
+  ListSort,
+  ListSortDirection,
+  ListSortKey,
+  MemberOption,
+  PersonFilterDimension,
+  ValueFilterDimension,
+} from "./lib/list-display.js";
+export { useListDisplayStore } from "./store/list-display.js";
+export type { WorkspaceListDisplay } from "./store/list-display.js";
