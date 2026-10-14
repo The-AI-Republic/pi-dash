@@ -1,15 +1,20 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   clearCommands,
+  clearPalettePages,
+  filterCommands,
   findCommand,
+  findPalettePage,
   listCommands,
   matchesShortcut,
   parseShortcut,
   registerCommands,
+  registerPalettePages,
 } from "./registry.js";
+import { resetRegisteredStores } from "../../core/session/store.js";
 import { useCommandPalette } from "./store.js";
 
 function keyEvent(key: string, modifiers: Partial<Record<"ctrl" | "meta" | "shift" | "alt", boolean>> = {}) {
@@ -23,20 +28,24 @@ function keyEvent(key: string, modifiers: Partial<Record<"ctrl" | "meta" | "shif
 }
 
 describe("command registry", () => {
-  it("registers, lists and unregisters by owner", () => {
+  afterEach(() => {
     clearCommands();
+    clearPalettePages();
+  });
+
+  it("registers, lists and unregisters by owner", () => {
     const unregister = registerCommands([
       { id: "shell.sign-out", title: "Sign out", section: "Account", run: () => undefined },
       { id: "issues.go-to-list", title: "Go to issues", run: () => undefined },
     ]);
-    expect(listCommands().map((command) => command.id)).toEqual(["shell.sign-out", "issues.go-to-list"]);
+    // General outranks Account in the pinned palette order (SHELL-087).
+    expect(listCommands().map((command) => command.id)).toEqual(["issues.go-to-list", "shell.sign-out"]);
     expect(findCommand("shell.sign-out")?.title).toBe("Sign out");
     unregister();
     expect(listCommands()).toEqual([]);
   });
 
   it("replacing an id keeps the newest entry until its own cleanup", () => {
-    clearCommands();
     const first = registerCommands([{ id: "x", title: "First", run: () => undefined }]);
     const second = registerCommands([{ id: "x", title: "Second", run: () => undefined }]);
     expect(findCommand("x")?.title).toBe("Second");
@@ -44,6 +53,26 @@ describe("command registry", () => {
     expect(findCommand("x")).toBeUndefined();
     first();
     expect(listCommands()).toEqual([]);
+  });
+
+  it("orders sections by the pinned palette order, then title", () => {
+    registerCommands([
+      { id: "help", title: "Help", section: "Help", run: () => undefined },
+      { id: "account", title: "Account", section: "Account", run: () => undefined },
+      { id: "create-b", title: "Create b", section: "Create", run: () => undefined },
+      { id: "create-a", title: "Create a", section: "Create", run: () => undefined },
+      { id: "context", title: "Context", section: "contextual", run: () => undefined },
+    ]);
+    expect(listCommands().map((command) => command.id)).toEqual(["context", "create-a", "create-b", "account", "help"]);
+  });
+
+  it("sorts unknown sections alphabetically after the pinned ones", () => {
+    registerCommands([
+      { id: "help", title: "Help", section: "Help", run: () => undefined },
+      { id: "zeta", title: "Zeta", section: "Zeta", run: () => undefined },
+      { id: "alpha", title: "Alpha", section: "Alpha", run: () => undefined },
+    ]);
+    expect(listCommands().map((command) => command.id)).toEqual(["help", "alpha", "zeta"]);
   });
 
   it("parses single chords and rejects the rest", () => {
@@ -65,7 +94,70 @@ describe("command registry", () => {
   });
 });
 
+describe("palette page registry", () => {
+  afterEach(() => {
+    clearPalettePages();
+  });
+
+  it("registers, finds and unregisters pages by owner", () => {
+    const page = {
+      id: "issues.picker",
+      placeholder: "Pick",
+      usePageState: () => ({ status: "ready" as const, options: [], emptyText: "None" }),
+    };
+    const unregister = registerPalettePages([page]);
+    expect(findPalettePage("issues.picker")).toBe(page);
+    expect(findPalettePage("missing")).toBeUndefined();
+    unregister();
+    expect(findPalettePage("issues.picker")).toBeUndefined();
+  });
+
+  it("replacing an id keeps the newest entry until its own cleanup", () => {
+    const first = registerPalettePages([
+      { id: "x", placeholder: "First", usePageState: () => ({ status: "ready" as const, options: [], emptyText: "" }) },
+    ]);
+    const second = registerPalettePages([
+      {
+        id: "x",
+        placeholder: "Second",
+        usePageState: () => ({ status: "ready" as const, options: [], emptyText: "" }),
+      },
+    ]);
+    expect(findPalettePage("x")?.placeholder).toBe("Second");
+    second();
+    expect(findPalettePage("x")).toBeUndefined();
+    first();
+    expect(findPalettePage("x")).toBeUndefined();
+  });
+});
+
+describe("filterCommands", () => {
+  it("returns the snapshot unchanged on a blank query", () => {
+    const commands = [
+      { id: "a", title: "Alpha", run: () => undefined },
+      { id: "b", title: "Beta", run: () => undefined },
+    ];
+    expect(filterCommands(commands, "   ")).toEqual(commands);
+  });
+
+  it("matches titles, hints and keywords case-insensitively", () => {
+    const commands = [
+      { id: "sign-out", title: "Sign out", keywords: ["logout", "exit"], run: () => undefined },
+      { id: "go-home", title: "Go to workspace home", hint: "Acme", run: () => undefined },
+      { id: "other", title: "Unrelated", run: () => undefined },
+    ];
+    expect(filterCommands(commands, "SIGN").map((command) => command.id)).toEqual(["sign-out"]);
+    expect(filterCommands(commands, "logo").map((command) => command.id)).toEqual(["sign-out"]);
+    expect(filterCommands(commands, "acme").map((command) => command.id)).toEqual(["go-home"]);
+    expect(filterCommands(commands, "nothing-matches").map((command) => command.id)).toEqual([]);
+  });
+});
+
 describe("command palette store", () => {
+  afterEach(() => {
+    useCommandPalette.getState().closePalette();
+  });
+
   it("opens, filters and closes with a cleared query", () => {
     useCommandPalette.getState().openPalette();
     expect(useCommandPalette.getState().open).toBe(true);
@@ -74,5 +166,42 @@ describe("command palette store", () => {
     useCommandPalette.getState().togglePalette();
     expect(useCommandPalette.getState().open).toBe(false);
     expect(useCommandPalette.getState().query).toBe("");
+  });
+
+  it("steps into and back from sub-pages with a cleared query", () => {
+    const store = useCommandPalette.getState();
+    store.openPalette();
+    store.setQuery("proj");
+    store.openPage("issues.picker");
+    expect(useCommandPalette.getState().page).toBe("issues.picker");
+    expect(useCommandPalette.getState().query).toBe("");
+    useCommandPalette.getState().setQuery("at");
+    useCommandPalette.getState().closePage();
+    expect(useCommandPalette.getState().page).toBeNull();
+    expect(useCommandPalette.getState().query).toBe("");
+  });
+
+  it("resets the page and the search scope on sign-out", () => {
+    const store = useCommandPalette.getState();
+    store.openPalette();
+    store.setQuery("par");
+    store.openPage("issues.picker");
+    store.setWorkspaceSearch(true);
+    resetRegisteredStores();
+    expect(useCommandPalette.getState()).toMatchObject({ open: false, query: "", page: null, workspaceSearch: false });
+  });
+
+  it("resets the page and the search scope on every close and open", () => {
+    const store = useCommandPalette.getState();
+    store.openPalette();
+    store.openPage("issues.picker");
+    store.setWorkspaceSearch(true);
+    useCommandPalette.getState().closePalette();
+    expect(useCommandPalette.getState()).toMatchObject({ open: false, query: "", page: null, workspaceSearch: false });
+    useCommandPalette.getState().openPalette();
+    expect(useCommandPalette.getState()).toMatchObject({ open: true, query: "", page: null, workspaceSearch: false });
+    useCommandPalette.getState().setWorkspaceSearch(true);
+    useCommandPalette.getState().togglePalette();
+    expect(useCommandPalette.getState()).toMatchObject({ open: false, query: "", page: null, workspaceSearch: false });
   });
 });

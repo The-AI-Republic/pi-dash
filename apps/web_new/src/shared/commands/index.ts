@@ -4,11 +4,24 @@
 
 export {
   clearCommands,
+  clearPalettePages,
+  filterCommands,
   findCommand,
+  findPalettePage,
   listCommands,
   matchesShortcut,
   parseShortcut,
   registerCommands,
+  registerPalettePages,
 } from "./registry.js";
-export type { PidashCommand } from "./registry.js";
+export type { PalettePage, PalettePageOption, PalettePageState, PidashCommand } from "./registry.js";
+export {
+  countSearchHits,
+  groupSearchResults,
+  paletteSearchKeys,
+  paletteSearchQueryOptions,
+  useDebouncedValue,
+  PALETTE_SEARCH_DEBOUNCE_MS,
+} from "./search.js";
+export type { PaletteSearchParams, PaletteSearchScope, SearchResultGroup, SearchResultHit } from "./search.js";
 export { useCommandPalette } from "./store.js";

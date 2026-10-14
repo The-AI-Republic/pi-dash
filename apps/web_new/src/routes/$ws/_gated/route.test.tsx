@@ -9,13 +9,17 @@ import { isRedirect } from "@tanstack/react-router";
 import type * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { PidashCommand } from "../../../shared/commands/index.js";
+import type { PidashCommand, SearchResultHit } from "../../../shared/commands/index.js";
 
 const harness = vi.hoisted(() => ({
   commands: [] as PidashCommand[],
   landing: "/",
   signOutError: null as Error | null,
   settled: false,
+  matches: [{ params: {} }] as Array<{ params: Record<string, unknown> }>,
+  searchScope: null as { workspaceSlug: string; projectId: string | null } | null,
+  titleBarScope: null as { workspaceSlug: string; projectId: string | null } | null,
+  onSelectSearchResult: null as ((hit: SearchResultHit) => void) | null,
 }));
 
 // Shell-query stand-in: this suite owns the layout wiring (sign-out entry
@@ -29,7 +33,7 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
 // reads; route creation, redirects and the Route hooks stay real.
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
-  return { ...original, useRouterState: () => [{ params: {} }], Outlet: () => null };
+  return { ...original, useRouterState: () => harness.matches, Outlet: () => null };
 });
 
 // The sign-out mutation resolves to a controllable landing (or throws);
@@ -62,16 +66,26 @@ vi.mock("../../../features/auth/api.js", async (importOriginal) => {
   };
 });
 
-// Shell-chrome stand-ins: capture the registered commands and expose the
-// sidebar sign-out entry as a button; layout and palette stay untested here.
+// Shell-chrome stand-ins: capture the registered commands and the palette
+// search wiring, and expose the sidebar sign-out entry as a button; layout
+// and palette stay untested here.
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
   const React = await import("react");
   return {
     ...original,
-    AppShell: (props: { commands?: PidashCommand[]; sidebar?: React.ReactNode; children?: React.ReactNode }) => {
+    AppShell: (props: {
+      commands?: PidashCommand[];
+      topBar?: React.ReactNode;
+      sidebar?: React.ReactNode;
+      children?: React.ReactNode;
+      searchScope: { workspaceSlug: string; projectId: string | null };
+      onSelectSearchResult: (hit: SearchResultHit) => void;
+    }) => {
       harness.commands = [...(props.commands ?? [])];
-      return React.createElement("div", null, props.sidebar, props.children);
+      harness.searchScope = props.searchScope;
+      harness.onSelectSearchResult = props.onSelectSearchResult;
+      return React.createElement("div", null, props.topBar, props.sidebar, props.children);
     },
     Sidebar: (props: { userLabel: string; onSignOut: () => void }) =>
       React.createElement(
@@ -79,7 +93,10 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
         { type: "button", "aria-label": `Sign out ${props.userLabel}`, onClick: props.onSignOut },
         "Sign out"
       ),
-    TitleBar: () => null,
+    TitleBar: (props: { searchScope: { workspaceSlug: string; projectId: string | null } }) => {
+      harness.titleBarScope = props.searchScope;
+      return null;
+    },
   };
 });
 
@@ -180,6 +197,10 @@ describe("gated layout shell wiring", () => {
     harness.landing = "/";
     harness.signOutError = null;
     harness.settled = false;
+    harness.matches = [{ params: {} }];
+    harness.searchScope = null;
+    harness.titleBarScope = null;
+    harness.onSelectSearchResult = null;
     vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme" });
     vi.spyOn(Route, "useNavigate").mockReturnValue(navigate as never);
     vi.spyOn(Route, "useRouteContext").mockReturnValue({ apiClient: {} } as never);
@@ -224,5 +245,35 @@ describe("gated layout shell wiring", () => {
     await user.click(screen.getByRole("button", { name: "Sign out Ada" }));
     await waitFor(() => expect(harness.settled).toBe(true));
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("passes the workspace scope to the shell and the top bar", () => {
+    renderShell();
+    expect(harness.searchScope).toEqual({ workspaceSlug: "acme", projectId: null });
+    expect(harness.titleBarScope).toEqual({ workspaceSlug: "acme", projectId: null });
+  });
+
+  it("scopes the palette search to the child project", () => {
+    harness.matches = [{ params: {} }, { params: { projectId: "p1" } }];
+    renderShell();
+    expect(harness.searchScope).toEqual({ workspaceSlug: "acme", projectId: "p1" });
+    expect(harness.titleBarScope).toEqual({ workspaceSlug: "acme", projectId: "p1" });
+  });
+
+  it("navigates palette server hits through the shared resolver", () => {
+    renderShell();
+    const select = harness.onSelectSearchResult;
+    if (!select) throw new Error("expected the search-result handler");
+    select({
+      key: "issue:x",
+      entity: "issue",
+      title: "Fix login",
+      path: "ATL-12",
+      raw: { sequence_id: 12, project__identifier: "ATL", project_id: "p1" },
+    });
+    expect(navigate).toHaveBeenCalledWith({
+      to: "/$ws/browse/$issueKey",
+      params: { ws: "acme", issueKey: "ATL-12" },
+    });
   });
 });

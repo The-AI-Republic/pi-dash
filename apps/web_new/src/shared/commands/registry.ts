@@ -3,7 +3,10 @@
 // See the LICENSE file for details.
 // Command registry (Architecture > shared/commands). Screens register the
 // commands they own while mounted; the palette reads a snapshot. Shortcuts
-// are single chords ("mod+k", "mod+shift+p"); sequences arrive with Power K.
+// are single chords ("mod+k", "mod+shift+p"); two-key sequences arrive with
+// the palette entries slice (NEWFRONT-293), which owns the sequenced entries.
+// Sub-pages (entity pickers, preference lists) register beside their commands
+// and render through the palette's generic page view (shell spec, SHELL-082).
 
 export interface PidashCommand {
   /** Stable id, namespaced by owner ("shell.sign-out", "issues.go-to-list"). */
@@ -16,6 +19,17 @@ export interface PidashCommand {
   section?: string | undefined;
   /** Single-chord shortcut, e.g. "mod+k". Rendered as a Kbd hint. */
   shortcut?: string | undefined;
+  /**
+   * Alternate match terms for the blank-query substring filter (SHELL-085),
+   * e.g. ["logout", "exit"] for sign-out. Never shown, only matched.
+   */
+  keywords?: string[] | undefined;
+  /**
+   * Sub-page to open when the command activates, instead of running `run`.
+   * The page id must be registered with registerPalettePages by the same
+   * owner; sibling palette slices register their pickers on top of this.
+   */
+  page?: string | undefined;
   run: () => void | Promise<void>;
 }
 
@@ -38,10 +52,35 @@ export function registerCommands(entries: PidashCommand[]): () => void {
   };
 }
 
-/** Snapshot of every registered command, sorted by section then title. */
+/**
+ * Palette section order (shell spec, SHELL-087): contextual groups first,
+ * help last. Matched case-insensitively; unknown sections sort
+ * alphabetically after the pinned ones.
+ */
+const SECTION_ORDER = [
+  "contextual",
+  "create",
+  "navigation",
+  "general",
+  "settings",
+  "account",
+  "miscellaneous",
+  "preferences",
+  "help",
+];
+
+function sectionRank(section: string): number {
+  const rank = SECTION_ORDER.indexOf(section.toLowerCase());
+  return rank === -1 ? SECTION_ORDER.length : rank;
+}
+
+/** Snapshot of every registered command, in palette section order then title. */
 export function listCommands(): PidashCommand[] {
   return [...commands.values()].sort(
-    (a, b) => (a.section ?? "General").localeCompare(b.section ?? "General") || a.title.localeCompare(b.title)
+    (a, b) =>
+      sectionRank(a.section ?? "General") - sectionRank(b.section ?? "General") ||
+      (a.section ?? "General").localeCompare(b.section ?? "General") ||
+      a.title.localeCompare(b.title)
   );
 }
 
@@ -52,6 +91,91 @@ export function findCommand(id: string): PidashCommand | undefined {
 /** Drop every registration. Sign-out and tests only. */
 export function clearCommands(): void {
   commands.clear();
+}
+
+/** One activatable row on a palette sub-page (a picker hit, an option). */
+export interface PalettePageOption {
+  /** Stable id within the page. */
+  id: string;
+  /** Shown in the palette. */
+  title: string;
+  /** Secondary hint, e.g. the entity's project. */
+  hint?: string | undefined;
+  /**
+   * Runs on activation. The page stays open afterwards unless the option
+   * closes it through the palette store itself, so multi-change pickers
+   * (SHELL-090) keep their state across picks.
+   */
+  run: () => void | Promise<void>;
+}
+
+/** What a sub-page shows for the current query (shell spec, SHELL-093). */
+export interface PalettePageState {
+  /** "loading" spins; "ready" lists options or the empty line. Failures
+   * surface as ready-with-no-options, never as an error (SHELL-093). */
+  status: "loading" | "ready";
+  /** Options matching the query, in display order. */
+  options: PalettePageOption[];
+  /** Plain line shown when ready with zero options, e.g. "No labels found". */
+  emptyText: string;
+}
+
+/**
+ * A palette sub-page: an entity picker or option list behind a command.
+ * The owner registers the page beside its command and filters/loads inside
+ * usePageState with its own data hooks; the palette renders the result
+ * through the generic page view (spinner, options, empty line).
+ */
+export interface PalettePage {
+  /** Stable id, namespaced by owner ("issues.project-picker"). */
+  id: string;
+  /** Input placeholder while on this page; differs from the root prompt. */
+  placeholder: string;
+  usePageState: (query: string) => PalettePageState;
+}
+
+const pages = new Map<string, PalettePage>();
+
+/**
+ * Register sub-pages for the lifetime of the caller. Returns an unregister
+ * function; React screens call it as their effect cleanup.
+ */
+export function registerPalettePages(entries: PalettePage[]): () => void {
+  for (const entry of entries) {
+    pages.set(entry.id, entry);
+  }
+  return () => {
+    for (const entry of entries) {
+      if (pages.get(entry.id) === entry) {
+        pages.delete(entry.id);
+      }
+    }
+  };
+}
+
+export function findPalettePage(id: string): PalettePage | undefined {
+  return pages.get(id);
+}
+
+/** Drop every page registration. Sign-out and tests only. */
+export function clearPalettePages(): void {
+  pages.clear();
+}
+
+/**
+ * Substring filter over command titles plus alternate keywords (SHELL-085).
+ * The hint (navigation destination) matches too; a blank query returns
+ * the snapshot unchanged.
+ */
+export function filterCommands(commands: PidashCommand[], query: string): PidashCommand[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [...commands];
+  return commands.filter(
+    (command) =>
+      command.title.toLowerCase().includes(needle) ||
+      (command.hint ?? "").toLowerCase().includes(needle) ||
+      (command.keywords ?? []).some((keyword) => keyword.toLowerCase().includes(needle))
+  );
 }
 
 interface Chord {

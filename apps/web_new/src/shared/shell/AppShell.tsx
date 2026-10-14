@@ -11,7 +11,14 @@
 import { ToastHost } from "@pidash/kit";
 import * as React from "react";
 
-import { matchesShortcut, registerCommands, useCommandPalette, type PidashCommand } from "../commands/index.js";
+import {
+  matchesShortcut,
+  registerCommands,
+  useCommandPalette,
+  type PaletteSearchScope,
+  type PidashCommand,
+  type SearchResultHit,
+} from "../commands/index.js";
 import { CommandPalette } from "./CommandPalette.js";
 import { useSessionExpiredRedirect } from "./expiredRedirect.js";
 import { getToastManager } from "./toaster.js";
@@ -21,6 +28,10 @@ export interface AppShellProps {
   sidebar: React.ReactNode;
   /** Global commands owned by the current screen (sign-out, navigation). */
   commands?: PidashCommand[];
+  /** Where the palette searches; null renders it commands-only. */
+  searchScope: PaletteSearchScope | null;
+  /** Runs when a palette server hit activates (route-owned navigation). */
+  onSelectSearchResult: (hit: SearchResultHit) => void;
   /** Optional far-left strip; mounted by the rail slice, suppressed otherwise. */
   rail?: React.ReactNode;
   /** Slide-over panels beside the outlet (overflow lists, detail peeks). */
@@ -36,6 +47,8 @@ export function AppShell({
   topBar,
   sidebar,
   commands = [],
+  searchScope,
+  onSelectSearchResult,
   rail,
   slideOver,
   dialogs,
@@ -74,7 +87,7 @@ export function AppShell({
           </aside>
         ) : null}
       </div>
-      <CommandPalette />
+      <CommandPalette scope={searchScope} onSelectSearchResult={onSelectSearchResult} />
       <ToastHost manager={getToastManager()} />
       {dialogs}
     </div>
