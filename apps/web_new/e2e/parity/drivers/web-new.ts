@@ -26,6 +26,7 @@ import type {
   AdminEmailFormFacts,
   AdminEmailSecurity,
   AdminFailureFacts,
+  AdminFooterControl,
   AdminGeneralFacts,
   AdminHamburgerFacts,
   AdminHelpFacts,
@@ -14673,6 +14674,9 @@ export class WebNewDriver implements ParityDriver {
   }
   async adminSidebarEntryTooltip(_href: string, _name: string): Promise<string | null> {
     return todo("adminSidebarEntryTooltip");
+  }
+  async adminFooterTooltip(_control: AdminFooterControl, _label: string): Promise<string | null> {
+    return todo("adminFooterTooltip");
   }
   async adminSidebarToggleCollapse(): Promise<void> {
     return todo("adminSidebarToggleCollapse");

@@ -446,6 +446,22 @@ test(
 );
 
 test(
+  specTitle(["ADM-067"], "collapsed footer controls show hover labels, expanded redirect shows none"),
+  { tag: specTags(["ADM-067"]) },
+  async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
+    await openDashboard(driver, seed);
+    await ensureExpanded(driver);
+    // Expanded, the redirect link carries its own text, so its tooltip
+    // stays disabled.
+    expect(await driver.adminFooterTooltip("redirect", "Redirect to Pi Dash")).toBe(null);
+    await driver.adminSidebarToggleCollapse();
+    expect(await driver.adminFooterTooltip("redirect", "Redirect to Pi Dash")).toBe("Redirect to Pi Dash");
+    expect(await driver.adminFooterTooltip("help", "Help")).toBe("Help");
+    expect(await driver.adminFooterTooltip("toggle", "Toggle sidebar")).toBe("Toggle sidebar");
+  }
+);
+
+test(
   specTitle(["ADM-068"], "hamburger shows on small screens and opens the off-canvas sidebar"),
   { tag: specTags(["ADM-068"]) },
   async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {

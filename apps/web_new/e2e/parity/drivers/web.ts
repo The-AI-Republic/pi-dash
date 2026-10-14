@@ -48,6 +48,7 @@ import type {
   AdminEmailFormFacts,
   AdminEmailSecurity,
   AdminFailureFacts,
+  AdminFooterControl,
   AdminGeneralFacts,
   AdminHamburgerFacts,
   AdminHelpFacts,
@@ -52966,6 +52967,25 @@ export class WebDriver implements ParityDriver {
     // Same portal mechanics as the breadcrumb tooltip: label-scoped to
     // the tooltip's text node, since an empty portal always mounts.
     const tip = this.page.locator("div[data-base-ui-portal] p", { hasText: name });
+    try {
+      // A present tooltip shows in well under a second; an absent one
+      // never shows, so the miss path uses a short timeout.
+      await tip.waitFor({ state: "visible", timeout: 3000 });
+    } catch {
+      return null;
+    }
+    return (await tip.first().innerText()).trim() || null;
+  }
+
+  async adminFooterTooltip(control: AdminFooterControl, label: string): Promise<string | null> {
+    const footer = this.adminShellHelpFooter();
+    // DOM order, not roles: collapsed, the redirect link is icon-only.
+    const target =
+      control === "redirect" ? footer.locator("a").first() : footer.getByRole("button").nth(control === "help" ? 0 : 1);
+    await target.hover({ timeout: WebDriver.WAIT_MS });
+    // Same portal mechanics as the entry tooltip: label-scoped to
+    // the tooltip's text node, since an empty portal always mounts.
+    const tip = this.page.locator("div[data-base-ui-portal] p", { hasText: label });
     try {
       // A present tooltip shows in well under a second; an absent one
       // never shows, so the miss path uses a short timeout.

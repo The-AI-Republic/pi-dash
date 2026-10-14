@@ -8432,6 +8432,8 @@ export interface ParityDriver {
   adminSidebarFollowEntry(name: string): Promise<void>;
   /** Hover the sidebar entry at `href`; resolve with its hover-label text (null when none shows). */
   adminSidebarEntryTooltip(href: string, name: string): Promise<string | null>;
+  /** Hover the help-footer `control`; resolve with its hover-label text (null when none shows). */
+  adminFooterTooltip(control: AdminFooterControl, label: string): Promise<string | null>;
   /** Toggle the sidebar through the help-section collapse control. */
   adminSidebarToggleCollapse(): Promise<void>;
   /** Click outside the sidebar (mobile auto-collapse probe, ADM-063). */
@@ -12798,6 +12800,9 @@ export interface AdminHelpFacts {
   /** Popover version footer text, or null when closed. */
   versionText: string | null;
 }
+
+/** Help-footer control carrying a collapsed hover label (NEWFRONT-446, ADM-067). */
+export type AdminFooterControl = "redirect" | "help" | "toggle";
 
 /** Mobile hamburger snapshot (NEWFRONT-446, ADM-068). */
 export interface AdminHamburgerFacts {
