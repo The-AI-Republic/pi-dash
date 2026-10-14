@@ -1540,60 +1540,163 @@ export class WebNewDriver implements ParityDriver {
 
   // --- NEWFRONT-123 (home) stubs: mirror of the oracle driver additions. ---
 
-  async homeOpen(_workspaceSlug: string): Promise<void> {
-    return todo("homeOpen");
+  // Home top half (NEWFRONT-278, rows SHELL-003-010): greeting, tour,
+  // assistant card and quickstart probes against the new dashboard DOM.
+  // Widget, link, recents and chrome probes stay stubs for NEWFRONT-279
+  // and NEWFRONT-280, which extend this section without touching these.
+  private async gotoHome(url: string): Promise<void> {
+    // Settles when the greeting, the assistant card, the quickstart
+    // panel or the tour overlay shows up; the dev server compiles the
+    // route on first visit, so the navigation is retried once on a
+    // slow first paint.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await this.page.goto(url);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await this.page
+        .locator('#home-greeting, #home-assistant-card, #home-quickstart, [role="dialog"]')
+        .first()
+        .waitFor({ timeout: 90_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (settled) return;
+    }
+    throw new Error(`[parity] home dashboard never settled at ${this.page.url()}.`);
+  }
+
+  async homeOpen(workspaceSlug: string): Promise<void> {
+    await this.gotoHome(`/${workspaceSlug}/`);
   }
 
   async homeGreetingHeading(): Promise<string | null> {
-    return todo("homeGreetingHeading");
+    const heading = this.page.locator("#home-greeting").first();
+    if ((await heading.count()) === 0) return null;
+    const text = (await heading.innerText()).trim();
+    return text === "" ? null : text;
   }
 
   async homeDateLine(): Promise<string | null> {
-    return todo("homeDateLine");
+    const line = this.page.locator("#home-date-line").first();
+    if ((await line.count()) === 0) return null;
+    const text = (await line.innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  private homeTourOverlay(): Locator {
+    // The product-tour dialog: the welcome card offers starting or
+    // declining, each stop offers Back/Next, and the last stop finishes
+    // into project creation. Scoping on those controls keeps middle
+    // stops visible too.
+    return this.page.locator('[role="dialog"]').filter({
+      has: this.page.getByRole("button", {
+        name: /take the tour|explore on my own|close the tour|^next$|^back$|start your first project/i,
+      }),
+    });
   }
 
   async homeTourVisible(): Promise<boolean> {
-    return todo("homeTourVisible");
+    return (await this.homeTourOverlay().first().count()) > 0;
   }
 
   async homeTourAdvance(): Promise<void> {
-    return todo("homeTourAdvance");
+    const overlay = this.homeTourOverlay().first();
+    const start = overlay.getByRole("button", { name: /take the tour/i }).first();
+    if ((await start.count()) > 0) {
+      await start.click();
+      return;
+    }
+    const next = overlay.getByRole("button", { name: /^next$/i }).first();
+    if ((await next.count()) > 0) {
+      await next.click();
+      return;
+    }
+    await overlay
+      .getByRole("button", { name: /start your first project/i })
+      .first()
+      .click();
   }
 
   async homeTourDismiss(): Promise<void> {
-    return todo("homeTourDismiss");
+    const overlay = this.homeTourOverlay().first();
+    const decline = overlay.getByRole("button", { name: /explore on my own/i }).first();
+    if ((await decline.count()) > 0) {
+      await decline.click();
+      return;
+    }
+    await overlay
+      .getByRole("button", { name: /close the tour/i })
+      .first()
+      .click();
+  }
+
+  private homeAssistantCard(): Locator {
+    return this.page.locator("#home-assistant-card");
   }
 
   async homeAssistantState(): Promise<"hidden" | "setup" | "ready"> {
-    return todo("homeAssistantState");
+    const card = this.homeAssistantCard().first();
+    if ((await card.count()) === 0) return "hidden";
+    const state = await card.getAttribute("data-assistant-state");
+    return state === "setup" ? "setup" : "ready";
   }
 
   async homeAssistantSuggestions(): Promise<string[]> {
-    return todo("homeAssistantSuggestions");
+    const card = this.homeAssistantCard().first();
+    if ((await card.count()) === 0) return [];
+    const texts = await card.locator("[data-suggestion]").allTextContents();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
+  }
+
+  private homeQuickstartPanel(): Locator {
+    return this.page.locator("#home-quickstart");
   }
 
   async homeQuickstartVisible(): Promise<boolean> {
-    return todo("homeQuickstartVisible");
+    return (await this.homeQuickstartPanel().first().count()) > 0;
   }
 
   async homeQuickstartTitles(): Promise<string[]> {
-    return todo("homeQuickstartTitles");
+    const panel = this.homeQuickstartPanel().first();
+    if ((await panel.count()) === 0) return [];
+    const texts = await panel.locator("h3").allTextContents();
+    return [...new Set(texts.map((text) => text.trim()).filter((text) => text.length > 0))];
   }
 
   async homeQuickstartCreateEnabled(): Promise<boolean> {
-    return todo("homeQuickstartCreateEnabled");
+    if (!(await this.homeQuickstartVisible())) return false;
+    const actions = await this.homeQuickstartActionTexts();
+    return actions.some((text) => /get started/i.test(text));
   }
 
   async homeQuickstartDismiss(): Promise<void> {
-    return todo("homeQuickstartDismiss");
+    const panel = this.homeQuickstartPanel().first();
+    await panel
+      .getByRole("button", { name: /^dismiss$/i })
+      .first()
+      .click();
   }
 
-  async homeQuickstartCardDone(_title: string): Promise<boolean> {
-    return todo("homeQuickstartCardDone");
+  async homeQuickstartCardDone(title: string): Promise<boolean> {
+    // A finished card swaps its action for a done marker and carries the
+    // verdict on a data flag; absence of any action is NOT done, since
+    // forbidden actions also render nothing clickable.
+    const panel = this.homeQuickstartPanel().first();
+    if ((await panel.count()) === 0) return false;
+    const card = panel
+      .locator("[data-card]")
+      .filter({ has: this.page.getByRole("heading", { name: title }) })
+      .last();
+    if ((await card.count()) === 0) return false;
+    return (await card.getAttribute("data-done")) === "true";
   }
 
   async homeQuickstartActionTexts(): Promise<string[]> {
-    return todo("homeQuickstartActionTexts");
+    const panel = this.homeQuickstartPanel().first();
+    if ((await panel.count()) === 0) return [];
+    const links = await panel.getByRole("link").allTextContents();
+    const buttons = await panel.getByRole("button").allTextContents();
+    return [...links, ...buttons]
+      .map((text) => text.trim())
+      .filter((text) => text.length > 0 && !/^dismiss$/i.test(text));
   }
 
   async homeWidgetTitles(): Promise<string[]> {
@@ -1705,7 +1808,8 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async homeReload(): Promise<void> {
-    return todo("homeReload");
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
   async homeOpenIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
