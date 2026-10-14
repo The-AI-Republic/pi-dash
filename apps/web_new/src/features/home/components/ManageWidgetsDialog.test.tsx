@@ -31,11 +31,16 @@ function seed(): HomePreferenceList {
 function stubPreferences(
   current: HomePreferenceList,
   writes: Array<{ url: string; body: unknown }>,
-  failPatch: boolean
+  failPatch: boolean,
+  getImpl?: (call: number) => unknown
 ) {
+  let getCalls = 0;
   createAppClient("https://api.test", (async (url: string, init?: { method?: string; body?: string }) => {
     const method = init?.method ?? "GET";
     if (method === "GET" && url.endsWith("/home-preferences/")) {
+      getCalls += 1;
+      const override = getImpl?.(getCalls);
+      if (override !== undefined) return override as never;
       return {
         status: 200,
         url,
@@ -221,7 +226,9 @@ describe("ManageWidgetsDialog", () => {
 
   it("drops a drag silently when the map unloads mid-drag", async () => {
     const writes: Array<{ url: string; body: unknown }> = [];
-    stubPreferences(seed(), writes, false);
+    // The seed resolves once; the unload's refetch hangs, freezing the
+    // pending window the drop lands in.
+    stubPreferences(seed(), writes, false, (call) => (call > 1 ? new Promise<never>(() => {}) : undefined));
     const client = renderDialog();
     await waitFor(() => expect(switchNames()).toEqual(["Quicklinks", "Recents"]));
     layoutRows([0, 40]);
@@ -231,13 +238,21 @@ describe("ManageWidgetsDialog", () => {
     fireEvent.mouseMove(rows[1] as HTMLElement, { clientY: 74 });
     expect(switchNames()).toEqual(["Recents", "Quicklinks"]);
 
-    // The map unloads before release: the drop plans against no rows and
-    // writes nothing instead of crashing on the missing data.
+    // The map unloads before release and the dialog re-renders pending:
+    // the skeleton assertion pins the re-render (a bare removeQueries
+    // leaves the last render — and its drop closure — untouched, and the
+    // stale drop plans a real reorder and writes). The drop then plans
+    // against no rows and stays silent.
     act(() => {
-      client.removeQueries({ queryKey: widgetPrefsKeys.list("acme") });
+      void client.resetQueries({ queryKey: widgetPrefsKeys.list("acme") });
     });
+    await waitFor(() => expect(screen.queryByTestId("manage-widgets-skeleton")).not.toBeNull());
     fireEvent.mouseUp(window);
 
+    // Flush the mutation queue: a stale drop would land its PATCH here.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
     expect(writes).toEqual([]);
     expect(notifySuccess).not.toHaveBeenCalled();
     expect(notifyError).not.toHaveBeenCalled();
