@@ -279,6 +279,21 @@ describe("RecentsWidget", () => {
     expect(screen.getByTestId("recents-empty")).toHaveTextContent("No recent activity");
   });
 
+  it("shows each filtered slice its own empty art", async () => {
+    createAppClient("https://api.test", stubTransport([]));
+    const queryClient = testClient();
+    seedFeed(queryClient, "all", []);
+    seedFeed(queryClient, "issue", []);
+    seedFeed(queryClient, "project", []);
+    await renderWidget(queryClient);
+
+    const filter = () => screen.getByRole("combobox", { name: "Filter recents" });
+    fireEvent.change(filter(), { target: { value: "issue" } });
+    expect(screen.getByTestId("recents-empty")).toHaveTextContent("No recently viewed work items");
+    fireEvent.change(filter(), { target: { value: "project" } });
+    expect(screen.getByTestId("recents-empty")).toHaveTextContent("No recently viewed projects");
+  });
+
   it("caps long feeds behind the expander", async () => {
     createAppClient("https://api.test", stubTransport([]));
     const queryClient = testClient();
