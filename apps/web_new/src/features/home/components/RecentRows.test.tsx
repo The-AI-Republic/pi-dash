@@ -75,6 +75,21 @@ describe("RecentIssueRow", () => {
     expect(screen.queryByText("urgent")).not.toBeInTheDocument();
   });
 
+  it("renders the status name without a color override", () => {
+    render(
+      <RecentIssueRow
+        workspaceSlug="acme"
+        visitedAt={VISITED_AT}
+        issue={issue()}
+        stateName="In progress"
+        stateColor={null}
+        fallbackIdentifier={null}
+        onPreview={vi.fn()}
+      />
+    );
+    expect(screen.getByText("In progress")).toBeInTheDocument();
+  });
+
   it("falls back to the project list identifier", () => {
     render(
       <RecentIssueRow

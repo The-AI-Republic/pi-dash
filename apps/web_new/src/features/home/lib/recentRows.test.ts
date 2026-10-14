@@ -91,6 +91,23 @@ describe("parseRecentRow", () => {
     expect(row?.entity).toMatchObject({ kind: "issue", title: "ABC-12", issueId: "ABC-12" });
   });
 
+  it("treats empty-string fields as missing", () => {
+    const row = parseRecentRow(
+      visit({
+        entity_name: "issue",
+        entity_identifier: "ABC-12",
+        entity_data: { name: "", project_id: "", project_identifier: "", priority: "" },
+      })
+    );
+    expect(row?.entity).toMatchObject({
+      kind: "issue",
+      title: "ABC-12",
+      projectId: null,
+      projectIdentifier: null,
+      priority: null,
+    });
+  });
+
   it("skips work items with neither a name nor an identifier", () => {
     expect(parseRecentRow(visit({ entity_name: "issue", entity_identifier: "", entity_data: {} }))).toBeNull();
   });
