@@ -5983,12 +5983,25 @@ export class WebDriver implements ParityDriver {
       .fill(query, { timeout: WebDriver.actionTimeout });
   }
   async setFavoritesOpen(open: boolean): Promise<void> {
-    if ((await this.isFavoritesOpen()) !== open) {
+    // Verify and re-drive: the section mounts asynchronously after the
+    // favorites fetch (it hides while empty), so a read of "closed" may
+    // mean "not rendered yet". The click below then waits for the toggle
+    // and can land after the section appears already open (its open flag
+    // persists across reloads), closing it instead of opening it. A
+    // remount between the read and the click can also swallow the click.
+    // Re-reading and driving again converges on the wanted state.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      if ((await this.isFavoritesOpen()) === open) return;
       const aside = await this.readyAside();
       await aside
         .getByRole("button", { name: /favorites menu/i })
         .first()
-        .click({ timeout: WebDriver.actionTimeout });
+        .click({ timeout: WebDriver.actionTimeout })
+        .catch(() => {});
+      await this.page.waitForTimeout(2000);
+    }
+    if ((await this.isFavoritesOpen()) !== open) {
+      throw new Error(`[parity] favorites section never reached open=${open}.`);
     }
   }
   async setMoreSectionOpen(open: boolean): Promise<void> {
