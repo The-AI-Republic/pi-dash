@@ -45,7 +45,7 @@ export const ProjectInboxHeader = observer(function ProjectInboxHeader() {
   return (
     <Header>
       <Header.LeftItem>
-        <div className="flex flex-grow items-center gap-4">
+        <div className="flex flex-grow items-center gap-4" data-testid="intake-breadcrumb">
           <Breadcrumbs isLoading={currentProjectDetailsLoader === "init-loader"}>
             <CommonProjectBreadcrumbs workspaceSlug={workspaceSlug?.toString()} projectId={projectId?.toString()} />
             <Breadcrumbs.Item
