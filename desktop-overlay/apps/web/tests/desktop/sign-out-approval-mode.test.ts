@@ -55,19 +55,26 @@ async function bootSignedIn(userId: string) {
 }
 
 /**
- * What the native transport answers once the server has signed the user out:
- * the view redirects to the hosted web app, which it refuses to follow.
+ * A client that satisfies both editions' `performSignOut` (this file runs
+ * against the cloud overlay too): the OSS one reads the CSRF token through
+ * `requestCSRFToken` and posts to the session-logout view, whose redirect to
+ * the hosted web app the native transport refuses — its success signal; the
+ * cloud one reads it through `get` and posts to the JSON sign-out endpoint,
+ * which answers without a redirect. Held in a variable so neither edition's
+ * `SignOutClient` type rejects the other's members.
  */
-async function signOutPost(): Promise<never> {
-  throw new Error("API redirect is not allowed");
-}
+const signOutClient = {
+  requestCSRFToken: async () => ({ csrf_token: "csrf" }),
+  get: async () => ({ data: { csrf_token: "csrf" } }),
+  post: async (url: string) => {
+    if (url === "/auth/sign-out/") throw new Error("API redirect is not allowed");
+    return {};
+  },
+};
 
 async function signOut() {
   const { performSignOut } = await import("@/services/auth-signout");
-  await performSignOut(
-    { requestCSRFToken: async () => ({ csrf_token: "csrf" }), post: signOutPost },
-    "http://localhost:18002"
-  );
+  await performSignOut(signOutClient, "http://localhost:18002");
 }
 
 beforeEach(() => {
