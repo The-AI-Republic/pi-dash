@@ -1,18 +1,18 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Project card (SHELL-032 through SHELL-035). Identity, visibility,
+// Project card (SHELL-032 through SHELL-039). Identity, visibility,
 // description fallback, member stack and favorite star on a header row
 // with quick actions — deliberately no cover slot (target per main#523).
 // Presentational: the list view feeds the member directory, the star
-// entitlement and the favorite toggle through props, so this renders
-// without providers. Clicks route members into the work-items view,
-// intercept outsiders toward joining, and never fire on archived cards.
-// The restore/delete dialogs arrive with NEWFRONT-284; until their
-// handlers are passed, those menu entries stay hidden.
+// entitlement, the favorite toggle and the lifecycle dialogs through
+// props, so this renders without providers. Clicks route members into
+// the work-items view, intercept outsiders toward joining, and never
+// fire on archived cards. Archived cards collapse to a muted branch
+// with inline restore and delete for project admins.
 import { Link } from "@tanstack/react-router";
 import type { ProjectDetails, WorkspaceMember } from "@pidash/api-client";
-import { ContextMenu, IconButton, Menu } from "@pidash/kit";
+import { ContextMenu, IconButton, Menu, cn } from "@pidash/kit";
 import { Check, Ellipsis, Lock, Settings, Star } from "lucide-react";
 import * as React from "react";
 
@@ -44,9 +44,11 @@ export interface ProjectCardProps {
   /** Favorite write in flight for this card. */
   starPending?: boolean | undefined;
   onToggleFavorite?: ((project: ProjectDetails) => void) | undefined;
-  /** Restore dialog wired (NEWFRONT-284). Absent, the entry hides. */
+  /** Archive dialog opener. Absent, the entry hides. */
+  onArchive?: ((project: ProjectDetails) => void) | undefined;
+  /** Restore dialog opener. Absent, the entry and footer action hide. */
   onRestore?: ((project: ProjectDetails) => void) | undefined;
-  /** Delete dialog wired (NEWFRONT-284). Absent, the entry hides. */
+  /** Delete dialog opener. Absent, the entry and footer action hide. */
   onDelete?: ((project: ProjectDetails) => void) | undefined;
   /** Post-join landing; defaults to a full-page load of the address. */
   onNavigate?: ((href: string) => void) | undefined;
@@ -67,6 +69,45 @@ function halt(event: React.SyntheticEvent): void {
   event.stopPropagation();
 }
 
+/** Inline footer actions on archived cards (SHELL-038): restore and delete for project admins. */
+function ArchivedCardActions({
+  onRestoreClick,
+  onDeleteClick,
+}: {
+  onRestoreClick: (() => void) | null;
+  onDeleteClick: (() => void) | null;
+}): React.ReactElement | null {
+  if (onRestoreClick === null && onDeleteClick === null) return null;
+  return (
+    <span className="flex items-center gap-(--space-3)">
+      {onRestoreClick === null ? null : (
+        <button
+          type="button"
+          onClick={(event) => {
+            halt(event);
+            onRestoreClick();
+          }}
+          className="text-body cursor-pointer font-medium text-(--accent) hover:underline"
+        >
+          Restore
+        </button>
+      )}
+      {onDeleteClick === null ? null : (
+        <button
+          type="button"
+          onClick={(event) => {
+            halt(event);
+            onDeleteClick();
+          }}
+          className="text-body cursor-pointer font-medium text-(--danger) hover:underline"
+        >
+          Delete
+        </button>
+      )}
+    </span>
+  );
+}
+
 export function ProjectCard({
   workspaceSlug,
   project,
@@ -74,6 +115,7 @@ export function ProjectCard({
   canStar = false,
   starPending = false,
   onToggleFavorite,
+  onArchive,
   onRestore,
   onDelete,
   onNavigate,
@@ -82,6 +124,7 @@ export function ProjectCard({
   const archived = project.archived_at !== null;
   const isMember = project.member_role !== null;
   const isAuthorized = isProjectAuthorized(project.member_role);
+  const isAdmin = isProjectAdmin(project.member_role);
   const navigate = onNavigate ?? ((href: string) => globalThis.window.location.assign(href));
   const issuesPath = projectIssuesPath(workspaceSlug, project.id);
   const settingsPath = projectSettingsPath(workspaceSlug, project.id);
@@ -111,14 +154,17 @@ export function ProjectCard({
     }
   }
 
+  const archiveAction = onArchive === undefined ? null : () => onArchive(project);
   const restoreAction = onRestore === undefined ? null : () => onRestore(project);
   const deleteAction = onDelete === undefined ? null : () => onDelete(project);
+  const footerRestore = archived && isAdmin ? restoreAction : null;
+  const footerDelete = archived && isAdmin ? deleteAction : null;
   const entries = selectCardMenuEntries(
     {
       archived,
       isMember,
       isAuthorized,
-      isAdmin: isProjectAdmin(project.member_role),
+      isAdmin,
     },
     {
       onSettings: () => globalThis.window.location.assign(settingsPath),
@@ -127,6 +173,7 @@ export function ProjectCard({
       onCopyLink: () => void copyLink(),
       onRestore: restoreAction,
       onDelete: deleteAction,
+      onArchive: archiveAction,
     }
   );
 
@@ -147,8 +194,12 @@ export function ProjectCard({
       params={{ ws: workspaceSlug, projectId: project.id }}
       search={{}}
       data-testid="project-card"
+      data-archived={archived || undefined}
       onClick={onCardClick}
-      className="flex w-full flex-col gap-(--space-3) rounded-(--radius-card) border border-(--border) bg-(--surface) p-(--space-4) hover:border-(--accent)"
+      className={cn(
+        "flex w-full flex-col gap-(--space-3) rounded-(--radius-card) border border-(--border) bg-(--surface) p-(--space-4)",
+        archived ? "opacity-75" : "hover:border-(--accent)"
+      )}
     >
       <div className="flex items-center gap-(--space-3)">
         <ProjectLogo logoProps={project.logo_props} identifier={project.identifier} />
@@ -203,7 +254,9 @@ export function ProjectCard({
           <ProjectMemberStack members={stack} />
           {archived ? <span className="text-caption font-medium text-(--text-muted)">Archived</span> : null}
         </span>
-        {archived ? null : isAuthorized ? (
+        {archived ? (
+          <ArchivedCardActions onRestoreClick={footerRestore} onDeleteClick={footerDelete} />
+        ) : isAuthorized ? (
           <IconButton
             label={`${project.name} settings`}
             size="small"

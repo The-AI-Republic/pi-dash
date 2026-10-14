@@ -1554,6 +1554,28 @@ describe("project lifecycle contracts", () => {
     expect(parsed.identifiers).toEqual([]);
   });
 
+  it("posts the full create payload the dialog assembles", async () => {
+    const transport = stubbedApi(() => ({ status: 201, body: details }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const input = {
+      name: "Contract",
+      identifier: "CT",
+      description: "Team space",
+      network: 2,
+      project_lead: null,
+      logo_props: { in_use: "emoji", emoji: { value: "🌊" } },
+      timezone: "Asia/Singapore",
+      cycle_view: false,
+      module_view: false,
+      issue_views_view: false,
+      page_view: false,
+      intake_view: false,
+    };
+    await createProject(client, "acme", input);
+    const createCall = transport.calls.find((call) => call.url.endsWith("/projects/"));
+    expect(createCall?.init.body).toBe(JSON.stringify(input));
+  });
+
   it("deletes, unarchives and leaves by status", async () => {
     const transport = stubbedApi(() => ({ status: 204, body: null }));
     const client = createClient({ baseUrl: "https://api.test", transport });

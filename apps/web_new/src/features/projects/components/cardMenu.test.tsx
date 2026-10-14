@@ -17,6 +17,7 @@ const CALLBACKS: CardMenuCallbacks = {
   onCopyLink: vi.fn(),
   onRestore: vi.fn(),
   onDelete: vi.fn(),
+  onArchive: vi.fn(),
 };
 
 function standing(overrides: Partial<CardMenuStanding> = {}): CardMenuStanding {
@@ -34,9 +35,19 @@ function labels(entries: ReturnType<typeof selectCardMenuEntries>): string[] {
 }
 
 describe("selectCardMenuEntries", () => {
-  it("offers settings and copy-link to project admins and members, never join", () => {
-    expect(labels(selectCardMenuEntries(standing(), CALLBACKS))).toEqual(["Settings", "Copy link"]);
+  it("offers settings, copy-link and archive to project admins, never join", () => {
+    expect(labels(selectCardMenuEntries(standing(), CALLBACKS))).toEqual(["Settings", "Copy link", "Archive"]);
+  });
+
+  it("withholds archive from members without the admin standing", () => {
     expect(labels(selectCardMenuEntries(standing({ isAdmin: false }), CALLBACKS))).toEqual(["Settings", "Copy link"]);
+  });
+
+  it("hides archive until its dialog is wired", () => {
+    expect(labels(selectCardMenuEntries(standing(), { ...CALLBACKS, onArchive: null }))).toEqual([
+      "Settings",
+      "Copy link",
+    ]);
   });
 
   it("offers join, open-in-tab and copy-link to outsiders", () => {
@@ -89,12 +100,14 @@ describe("selectCardMenuEntries", () => {
       onCopyLink: vi.fn(),
       onRestore: vi.fn(),
       onDelete: vi.fn(),
+      onArchive: vi.fn(),
     };
     for (const entry of selectCardMenuEntries(standing(), callbacks)) {
       if ("onSelect" in entry) entry.onSelect();
     }
     expect(callbacks.onSettings).toHaveBeenCalledTimes(1);
     expect(callbacks.onCopyLink).toHaveBeenCalledTimes(1);
+    expect(callbacks.onArchive).toHaveBeenCalledTimes(1);
     for (const entry of selectCardMenuEntries(
       standing({ isMember: false, isAuthorized: false, isAdmin: false }),
       callbacks

@@ -9,10 +9,12 @@
 // The loader warms the assistant card reads so first paint settles with
 // data; the widget-map read stays off the loader so the dashboard
 // skeleton shows on first paint. The component composes the
-// cross-feature projects read features cannot make themselves.
+// cross-feature projects read features cannot make themselves, and
+// hosts the shared create-project dialog for the quickstart card.
 
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
+import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { WorkspaceHomeTour } from "../../../features/auth/index.js";
@@ -22,7 +24,11 @@ import {
   HomeWidgetStack,
   homeThreadsQueryOptions,
 } from "../../../features/home/index.js";
-import { projectsQueryOptions } from "../../../features/projects/index.js";
+import {
+  CreateProjectDialog,
+  projectsQueryOptions,
+  workspaceMembersQueryOptions,
+} from "../../../features/projects/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/")({
   loader: async ({ context, params }) => {
@@ -41,13 +47,22 @@ export const Route = createFileRoute("/$ws/_gated/")({
   component: function WorkspaceHomeComponent() {
     const params = Route.useParams();
     const projects = useQuery(projectsQueryOptions(getAppClient(), params.ws));
+    const memberships = useQuery(workspaceMembersQueryOptions(getAppClient(), params.ws));
+    const [createOpen, setCreateOpen] = React.useState(false);
     return (
       <>
         <WorkspaceHomeTour />
         <HomeDashboard
           workspaceSlug={params.ws}
           projects={projects.data}
+          onCreateProject={() => setCreateOpen(true)}
           widgets={<HomeWidgetStack workspaceSlug={params.ws} projects={projects.data} />}
+        />
+        <CreateProjectDialog
+          workspaceSlug={params.ws}
+          members={memberships.data}
+          open={createOpen}
+          onOpenChange={setCreateOpen}
         />
       </>
     );
