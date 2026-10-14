@@ -710,13 +710,16 @@ describe("workspace contracts", () => {
     };
     const memberships = [
       { id: UUID2, member, role: 20 },
-      { id: UUID, member: { ...member, email: "ada@example.com" }, role: 10 },
+      { id: UUID, member: { ...member, email: "ada@example.com", avatar_url: null }, role: 10 },
     ];
-    const client = createClient({ baseUrl: "https://api.test", transport: json(memberships) });
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(memberships) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
     const parsed = await listWorkspaceMembers(client, "acme");
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/workspaces/acme/members/");
     expect(parsed).toHaveLength(2);
     expect(parsed[0]?.member.display_name).toBe("Ada Lovelace");
     expect(parsed[1]?.role).toBe(10);
+    expect(parsed[1]?.member.avatar_url).toBeNull();
   });
 });
 

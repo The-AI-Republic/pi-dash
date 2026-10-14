@@ -58,7 +58,7 @@ function Chip({
 function personName(members: WorkspaceMember[], id: string): { name: string; src: string } | null {
   const found = members.find((membership) => membership.member.id === id);
   if (!found) return null;
-  return { name: found.member.display_name, src: found.member.avatar_url };
+  return { name: found.member.display_name, src: found.member.avatar_url ?? "" };
 }
 
 interface ChipModel {

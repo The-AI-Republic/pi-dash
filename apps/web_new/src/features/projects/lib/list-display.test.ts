@@ -411,4 +411,11 @@ describe("selectMemberOptions", () => {
     const options = selectMemberOptions([...memberships, bot], { applied: [], selfId: null, query: "" });
     expect(options.map((option) => option.id)).toEqual(["u1", "u3", "u2"]);
   });
+
+  it("maps a missing avatar to an empty source", () => {
+    const noAvatar = member("u4", "No Avatar");
+    noAvatar.member.avatar_url = null;
+    const options = selectMemberOptions([noAvatar], { applied: [], selfId: null, query: "" });
+    expect(options[0]?.avatarUrl).toBe("");
+  });
 });

@@ -78,13 +78,17 @@ export async function markOnboarded(client: ApiClient, input: { is_onboarded: bo
   return client.parse(OnboardResult, envelope.data, `PATCH ${path}`);
 }
 
-/** Small user projection embedded in members, issues and activity. */
+/**
+ * Small user projection embedded in members, issues and activity. The
+ * backend answers null for users who never set an avatar, so the URL
+ * leg stays nullable (matches the avatar_url model property).
+ */
 export const UserLite = z.object({
   id: uuid(),
   first_name: z.string(),
   last_name: z.string(),
   avatar: z.string(),
-  avatar_url: z.string(),
+  avatar_url: z.nullable(z.string()),
   display_name: z.string(),
   is_bot: z.boolean(),
 });

@@ -8,6 +8,11 @@ import * as React from "react";
 import type { Workspace } from "@pidash/api-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@tanstack/react-router")>();
+  return { ...original, useNavigate: () => vi.fn() };
+});
+
 import { createAppClient, resetAppClient } from "../../../../../core/api/client.js";
 import { sessionKeys } from "../../../../../core/session/index.js";
 import { projectKeys } from "../../../../../features/projects/index.js";

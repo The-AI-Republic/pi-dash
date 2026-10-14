@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import type { Me, ProjectDetails, Workspace, WorkspaceMember } from "@pidash/api-client";
@@ -11,10 +11,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Stand-in for the router Link: navigation is TanStack's own tested
 // behavior. What this suite owns is the view wiring.
+const { navigateMock } = vi.hoisted(() => ({ navigateMock: vi.fn() }));
 vi.mock("@tanstack/react-router", () => ({
   Link: (props: { params?: Record<string, string>; children?: React.ReactNode }) => (
     <a href={`/acme/projects/${props.params?.["projectId"] ?? ""}/issues`}>{props.children}</a>
   ),
+  useNavigate: () => navigateMock,
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
@@ -24,6 +26,8 @@ import { useListDisplayStore } from "../store/list-display.js";
 import { ProjectsListView } from "./ProjectsListView.js";
 
 const WS_ID = "123e4567-e89b-12d3-a456-426614174000";
+const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
+const MEMBER_ID = "323e4567-e89b-12d3-a456-426614174002";
 
 function project(name: string, overrides: Partial<ProjectDetails> = {}): ProjectDetails {
   return {
@@ -109,8 +113,17 @@ function renderView(args: {
   members?: WorkspaceMember[];
   me?: boolean;
   slug?: string;
+  transport?: (
+    url: string,
+    init?: { method?: string }
+  ) => Promise<{
+    status: number;
+    url: string;
+    headers: { get: () => null };
+    text: () => Promise<string>;
+  }>;
 }) {
-  createAppClient("https://api.test", () => new Promise<never>(() => {}));
+  createAppClient("https://api.test", (args.transport ?? (() => new Promise<never>(() => {}))) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const slug = args.slug ?? "acme";
   if (args.details !== undefined) queryClient.setQueryData(projectKeys.details(slug), args.details);
@@ -128,8 +141,37 @@ function cardNames(): string[] {
   return screen.getAllByRole("heading").map((heading) => heading.textContent ?? "");
 }
 
+function csrfThen(
+  calls: string[],
+  handler: (url: string, method: string) => { status: number; body: string }
+): (
+  url: string,
+  init?: { method?: string }
+) => Promise<{
+  status: number;
+  url: string;
+  headers: { get: () => null };
+  text: () => Promise<string>;
+}> {
+  return async (url: string, init?: { method?: string }) => {
+    const method = init?.method ?? "GET";
+    calls.push(`${method} ${url}`);
+    if (url.endsWith("/auth/get-csrf-token/")) {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ csrf_token: "csrf" }),
+      };
+    }
+    const { status, body } = handler(url, method);
+    return { status, url, headers: { get: () => null }, text: async () => body };
+  };
+}
+
 beforeEach(() => {
   useListDisplayStore.setState({ displays: {}, searchQuery: "", activeWorkspace: null });
+  navigateMock.mockClear();
 });
 
 afterEach(() => {
@@ -277,5 +319,69 @@ describe("ProjectsListView", () => {
 
     expect(cardNames()).toEqual(["Bravo", "Alpha"]);
     expect(useListDisplayStore.getState().displayFor("globex").sort.key).toBe("name");
+  });
+
+  it("stars for editors and resolves member names through the directory", () => {
+    renderView({
+      details: [project("Alpha", { members: [MEMBER_ID] })],
+      members: [member(MEMBER_ID, "Ada Lovelace")],
+      role: 15,
+    });
+
+    expect(screen.getByTestId("project-card-star")).toHaveAttribute("aria-label", "Add Alpha to favorites");
+    expect(screen.getByRole("img", { name: "Ada Lovelace" })).not.toBeNull();
+  });
+
+  it("hides the star from guests", () => {
+    renderView({
+      details: [project("Alpha", { members: [MEMBER_ID] })],
+      members: [member(MEMBER_ID, "Ada")],
+      role: 5,
+    });
+
+    expect(screen.queryByTestId("project-card-star")).toBeNull();
+  });
+
+  it("toggles the star through the favorite endpoint", async () => {
+    const calls: string[] = [];
+    renderView({
+      details: [project("Alpha")],
+      role: 15,
+      transport: csrfThen(calls, (url, method) => {
+        if (method === "POST" && url.includes("/user-favorite-projects/")) return { status: 204, body: "" };
+        return { status: 404, body: "{}" };
+      }),
+    });
+
+    fireEvent.click(screen.getByTestId("project-card-star"));
+    await waitFor(() =>
+      expect(calls.some((call) => call.startsWith("POST") && call.includes("/user-favorite-projects/"))).toBe(true)
+    );
+  });
+
+  it("joins from the card, navigates inside, and flips the card to member state", async () => {
+    const calls: string[] = [];
+    const joined = project("Alpha", { member_role: 15 });
+    renderView({
+      details: [project("Alpha", { member_role: null })],
+      members: [member(MEMBER_ID, "Ada")],
+      role: 15,
+      transport: csrfThen(calls, (url, method) => {
+        if (method === "POST" && url.endsWith("/projects/invitations/")) {
+          return { status: 201, body: JSON.stringify({ message: "joined" }) };
+        }
+        if (url.endsWith("/projects/details/")) return { status: 200, body: JSON.stringify([joined]) };
+        if (url.endsWith("/members/")) return { status: 200, body: JSON.stringify([member(MEMBER_ID, "Ada")]) };
+        return { status: 404, body: "{}" };
+      }),
+    });
+
+    expect(screen.getByRole("button", { name: "Join" })).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Join" }));
+    fireEvent.click(screen.getByRole("button", { name: "Join Project" }));
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith({ to: `/acme/projects/${PROJECT_ID}/issues` }));
+    expect(calls.some((call) => call.startsWith("POST") && call.includes("/projects/invitations/"))).toBe(true);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Join" })).toBeNull());
+    expect(screen.getByRole("button", { name: "Alpha settings" })).not.toBeNull();
   });
 });
