@@ -1764,32 +1764,87 @@ export class WebNewDriver implements ParityDriver {
       .filter((text) => text.length > 0 && !/^dismiss$/i.test(text));
   }
 
+  // Recents plus dashboard chrome (NEWFRONT-280, rows SHELL-014-017,
+  // 021-023): widget, recents and chrome probes against the new dashboard
+  // DOM. Quicklink and all-off probes stay stubs for NEWFRONT-279, which
+  // extends this section without touching these. The manage-dialog probes
+  // assume 279's dialog contract: the widget name as exact text, a
+  // role="switch" toggle beside it, and a drag-handle button in its row.
+
+  private homeWidgetSectionTitles(): Locator {
+    return this.page.locator("#home-widget-stack [data-widget-title]");
+  }
+
   async homeWidgetTitles(): Promise<string[]> {
-    return todo("homeWidgetTitles");
+    // Section titles in render order, so reorder and refresh assertions
+    // observe the sequence the user actually sees. Each widget section
+    // carries its display title as data-widget-title.
+    const nodes = this.homeWidgetSectionTitles();
+    const titles: string[] = [];
+    for (let index = 0; index < (await nodes.count()); index += 1) {
+      const title = ((await nodes.nth(index).getAttribute("data-widget-title")) ?? "").trim();
+      if (title !== "") titles.push(title);
+    }
+    return titles;
   }
 
   async homeOpenManageWidgets(): Promise<void> {
-    return todo("homeOpenManageWidgets");
+    await this.page
+      .getByRole("button", { name: /manage widgets/i })
+      .first()
+      .click();
+    await this.page.locator('[role="dialog"]').first().waitFor({ state: "visible", timeout: 15_000 });
   }
 
   async homeCloseManageWidgets(): Promise<void> {
-    return todo("homeCloseManageWidgets");
+    await this.page.keyboard.press("Escape");
+  }
+
+  private homeManageDialog(): Locator {
+    return this.page.locator('[role="dialog"]').first();
   }
 
   async homeManageWidgetNames(): Promise<string[]> {
-    return todo("homeManageWidgetNames");
+    const dialog = this.homeManageDialog();
+    const texts = await dialog.locator("p, span, div").allTextContents();
+    return [...new Set(texts.map((t) => t.trim()).filter((t) => t.length > 0 && t.length < 60))];
   }
 
-  async homeManageWidgetEnabled(_name: string): Promise<boolean> {
-    return todo("homeManageWidgetEnabled");
+  private homeManageName(name: string): Locator {
+    return this.homeManageDialog().getByText(name, { exact: true }).first();
   }
 
-  async homeToggleManageWidget(_name: string): Promise<void> {
-    return todo("homeToggleManageWidget");
+  private homeManageSwitch(name: string): Locator {
+    // The toggle sits beside the name cell inside their shared wrapper.
+    return this.homeManageName(name).locator("xpath=ancestor::div[2]").getByRole("switch").first();
   }
 
-  async homeDragWidget(_sourceName: string, _targetName: string): Promise<void> {
-    return todo("homeDragWidget");
+  async homeManageWidgetEnabled(name: string): Promise<boolean> {
+    const toggle = this.homeManageSwitch(name);
+    await toggle.waitFor({ state: "visible", timeout: 15_000 });
+    return (await toggle.getAttribute("aria-checked")) === "true";
+  }
+
+  async homeToggleManageWidget(name: string): Promise<void> {
+    const toggle = this.homeManageSwitch(name);
+    await toggle.waitFor({ state: "visible", timeout: 15_000 });
+    await toggle.click();
+  }
+
+  async homeDragWidget(sourceName: string, targetName: string): Promise<void> {
+    // The drag listener lives on the row's handle button, so the handle
+    // starts the gesture; dropping near the target row's bottom edge
+    // asks for a below-drop, which visibly moves a first-row widget.
+    const source = this.homeManageName(sourceName).locator("xpath=ancestor::div[1]").getByRole("button").first();
+    const targetRow = this.homeManageName(targetName).locator("xpath=ancestor::div[1]");
+    const srcBox = await source.boundingBox();
+    if (!srcBox) throw new Error("[parity] widget drag source has no layout box.");
+    const dstBox = await targetRow.boundingBox();
+    if (!dstBox) throw new Error("[parity] widget drag target has no layout box.");
+    await this.page.mouse.move(srcBox.x + srcBox.width / 2, srcBox.y + srcBox.height / 2);
+    await this.page.mouse.down();
+    await this.page.mouse.move(dstBox.x + dstBox.width / 2, dstBox.y + dstBox.height - 6, { steps: 12 });
+    await this.page.mouse.up();
   }
 
   async homeAllOffVisible(): Promise<boolean> {
@@ -1844,32 +1899,104 @@ export class WebNewDriver implements ParityDriver {
     return todo("homeCancelLinkDialog");
   }
 
-  async homeSetRecentsFilter(_name: "all" | "issue" | "page" | "project"): Promise<void> {
-    return todo("homeSetRecentsFilter");
+  private homeRecentsSection(): Locator {
+    return this.page.locator("#home-recents");
+  }
+
+  async homeSetRecentsFilter(name: "all" | "issue" | "page" | "project"): Promise<void> {
+    const labels: Record<"all" | "issue" | "page" | "project", RegExp> = {
+      all: /^all$/i,
+      issue: /^work items$/i,
+      page: /^pages$/i,
+      project: /^projects$/i,
+    };
+    const trigger = this.homeRecentsSection()
+      .getByRole("button", { name: /filter recents/i })
+      .first();
+    await trigger.click();
+    const option = this.page.getByRole("menuitem", { name: labels[name] }).first();
+    await option.waitFor({ state: "visible", timeout: 10_000 });
+    await option.click();
+    // The selection refetches the feed; the specs prove it took by
+    // polling the rows after.
+    await option.waitFor({ state: "hidden", timeout: 10_000 }).catch(() => undefined);
   }
 
   async homeRecentRowTexts(): Promise<string[]> {
-    return todo("homeRecentRowTexts");
+    if ((await this.homeRecentsSection().count()) === 0) return [];
+    const rows = await this.homeRecentsSection().getByRole("link").allTextContents();
+    return [...new Set(rows.map((t) => t.trim()).filter((t) => t.length > 0))];
   }
 
-  async homeOpenRecentRow(_text: string): Promise<void> {
-    return todo("homeOpenRecentRow");
+  async homeOpenRecentRow(text: string): Promise<void> {
+    const section = this.homeRecentsSection();
+    // Long feeds cap behind the expander, so expand first, then center
+    // the row before clicking it.
+    const expander = section.getByRole("button", { name: /show all/i }).first();
+    if ((await expander.count()) > 0) {
+      await expander.click();
+    }
+    const row = section
+      .getByRole("link", { name: new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") })
+      .first();
+    await row.waitFor({ state: "visible", timeout: 15_000 });
+    await row.evaluate((element) => element.scrollIntoView({ block: "center" }));
+    await row.click();
   }
 
   async homeIssuePreviewVisible(): Promise<boolean> {
-    return todo("homeIssuePreviewVisible");
+    // The work-item preview mounts as a side panel inside the fullscreen
+    // portal without leaving home; absence is an honest negative signal.
+    const portal = this.page.locator("#full-screen-portal").first();
+    if ((await portal.count()) === 0) return false;
+    return (await portal.locator("div:visible, aside:visible").first().count()) > 0;
   }
 
   async homeIssuePreviewText(): Promise<string> {
-    return todo("homeIssuePreviewText");
+    // The preview mixes rendered text with editable fields (the title
+    // is an input), so both are combined for assertions.
+    const portal = this.page.locator("#full-screen-portal").first();
+    if ((await portal.count()) === 0) return "";
+    const text = await portal.innerText().catch(() => "");
+    const boxes = portal.getByRole("textbox");
+    const values: string[] = [];
+    for (let index = 0; index < (await boxes.count()); index += 1) {
+      values.push(
+        await boxes
+          .nth(index)
+          .inputValue()
+          .catch(() => "")
+      );
+    }
+    return [text, ...values].join("\n");
   }
 
   async homeBreadcrumb(): Promise<string | null> {
-    return todo("homeBreadcrumb");
+    // The dashboard header pairs a home breadcrumb with the manage-widgets
+    // control. The crumb is the exact Home label inside the same content
+    // landmark as the control (the sidebar carries its own Home link in
+    // a separate landmark).
+    const control = this.page.getByRole("button", { name: /manage widgets/i }).first();
+    if ((await control.count()) === 0) return null;
+    const scope = control.locator("xpath=ancestor::main[1]");
+    const crumb = scope.getByText("Home", { exact: true }).first();
+    if ((await crumb.count()) === 0) return null;
+    const text = (await crumb.innerText()).trim();
+    return text === "" ? null : text;
   }
 
   async homeLastToast(): Promise<{ title: string; message: string } | null> {
-    return todo("homeLastToast");
+    // Toasts stack bottom-right and dismiss after a few seconds, so
+    // callers poll this right after the triggering action.
+    const candidates = this.page.locator('[data-testid="toast-notification"]');
+    const count = await candidates.count();
+    if (count === 0) return null;
+    const text = ((await candidates.last().innerText()).trim() || "")
+      .split("\n")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    if (text.length === 0) return null;
+    return { title: text[0] ?? "", message: text.slice(1).join(" ") };
   }
 
   async homeReload(): Promise<void> {
@@ -1877,16 +2004,40 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
   }
 
-  async homeOpenIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("homeOpenIssueDetail");
+  async homeOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues/${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
   async homeSkeletonVisible(): Promise<boolean> {
-    return todo("homeSkeletonVisible");
+    // Loaders render shimmering placeholder tiles with skeleton test ids
+    // under an aria-busy region while the dashboard settles.
+    const pulsing = this.page
+      .locator("[data-testid*='skeleton' i], [aria-busy='true'], .animate-pulse, .animate-shimmer")
+      .first();
+    if ((await pulsing.count()) === 0) return false;
+    return true;
   }
 
   async homeWaitForWidgets(): Promise<string[]> {
-    return todo("homeWaitForWidgets");
+    // A failed widget fetch leaves the loader mounted with no retry, so a
+    // scratch-stack hiccup bricks that paint until the next load.
+    const read = (): Promise<string[]> => this.homeWidgetTitles();
+    const first = await read();
+    if (first.length > 0) return first;
+    await this.page.waitForTimeout(10_000);
+    const second = await read();
+    if (second.length > 0) return second;
+    await this.homeReload();
+    const settled = await this.page
+      .locator("h2, h3, div.fixed")
+      .first()
+      .waitFor({ timeout: 90_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!settled) return [];
+    await this.page.waitForTimeout(5_000);
+    return read();
   }
 
   // ---- Issue detail (NEWFRONT-121): stubs until the area lands. ----

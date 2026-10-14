@@ -49,6 +49,7 @@ function ToastCard({ toast, manager }: { toast: ToastItem; manager: ToastHostMan
   return (
     <BaseToast.Root
       toast={toast}
+      data-testid="toast-notification"
       onKeyDown={(event) => {
         if (event.key === "Escape") manager.close(toast.id);
       }}

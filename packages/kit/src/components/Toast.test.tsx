@@ -18,6 +18,7 @@ describe("Toast", () => {
     showToast(manager, { title: "Saved", description: "Issue updated", timeout: 0 });
     expect(await screen.findByText("Saved")).toBeInTheDocument();
     expect(screen.getByText("Issue updated")).toBeInTheDocument();
+    expect(screen.getByTestId("toast-notification")).toContainElement(screen.getByText("Saved"));
   });
 
   it("exposes the stack under a stable test id for the parity driver", async () => {
