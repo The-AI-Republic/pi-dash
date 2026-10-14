@@ -54,9 +54,20 @@ async function bootSignedIn(userId: string) {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/**
+ * What the native transport answers once the server has signed the user out:
+ * the view redirects to the hosted web app, which it refuses to follow.
+ */
+async function signOutPost(): Promise<never> {
+  throw new Error("API redirect is not allowed");
+}
+
 async function signOut() {
   const { performSignOut } = await import("@/services/auth-signout");
-  await performSignOut({ requestCSRFToken: async () => ({ csrf_token: "csrf" }) }, "http://localhost:18002");
+  await performSignOut(
+    { requestCSRFToken: async () => ({ csrf_token: "csrf" }), post: signOutPost },
+    "http://localhost:18002"
+  );
 }
 
 beforeEach(() => {
@@ -67,8 +78,8 @@ beforeEach(() => {
   sessionStorage.clear();
   document.body.innerHTML = "";
   Object.assign(window, { __TAURI__: { core: { invoke } } });
-  // The sign-out form POST is a real navigation; there is nowhere to go here.
-  vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(() => {});
+  // Sign-out ends on a full navigation to the bundle; there is nowhere to go here.
+  vi.spyOn(window.location, "replace").mockImplementation(() => {});
 });
 
 describe("approval mode across a desktop sign-out", () => {
