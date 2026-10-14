@@ -7,6 +7,7 @@ import { ApiError } from "../errors.js";
 import {
   addFavoriteProject,
   archiveProject,
+  checkProjectIdentifier,
   createProject,
   deleteProject,
   getProject,
@@ -20,6 +21,7 @@ import {
   listProjects,
   removeFavoriteProject,
   unarchiveProject,
+  updateProject,
   updateProjectUserProperties,
   updateWorkspaceUserProperties,
 } from "../contracts/projects.js";
@@ -88,12 +90,15 @@ describe.skipIf(!contractEnabled)("reference contracts", () => {
 });
 
 /**
- * Fresh name/identifier per run: project delete is a soft delete and the
+ * Fresh name/identifier per call: project delete is a soft delete and the
  * backend reserves identifiers (and names) of deleted rows, so reusing a
- * fixed identifier would collide with earlier runs' leftovers.
+ * fixed identifier would collide with earlier runs' leftovers. The counter
+ * keeps two calls in the same millisecond apart (Date.now alone collides).
  */
+let lifecycleNonce = 0;
 function lifecycleProject(): { name: string; identifier: string } {
-  const suffix = Date.now().toString(36).toUpperCase().slice(-6);
+  lifecycleNonce += 1;
+  const suffix = `${Date.now().toString(36).toUpperCase().slice(-6)}${lifecycleNonce.toString(36).toUpperCase()}`;
   return { name: `Contract Lifecycle ${suffix}`, identifier: `CTLC${suffix}` };
 }
 
@@ -200,6 +205,76 @@ describe.skipIf(!contractEnabled)("project lifecycle contract", () => {
     await expect(joinProjects(probe, CONTRACT_WORKSPACE, [projectId])).resolves.toEqual({
       message: "Projects joined successfully",
     });
+  });
+});
+
+describe.skipIf(!contractEnabled)("project update contract", () => {
+  it("patches a project's name and description", async () => {
+    const input = lifecycleProject();
+    await cleanupLifecycleProject(client, input.identifier);
+    const created = await createProject(client, CONTRACT_WORKSPACE, input);
+    try {
+      const renamed = `Contract Renamed ${input.identifier}`;
+      const updated = await updateProject(client, CONTRACT_WORKSPACE, created.id, {
+        name: renamed,
+        description: "Patched by the contract test.",
+      });
+      expect(updated.id).toBe(created.id);
+      expect(updated.name).toBe(renamed);
+      expect(updated.description).toBe("Patched by the contract test.");
+      expect(updated.identifier).toBe(input.identifier);
+    } finally {
+      await deleteProject(client, CONTRACT_WORKSPACE, created.id).catch(() => 0);
+    }
+  });
+
+  it("refuses updates to archived projects with a 400", async () => {
+    const input = lifecycleProject();
+    await cleanupLifecycleProject(client, input.identifier);
+    const created = await createProject(client, CONTRACT_WORKSPACE, input);
+    try {
+      await archiveProject(client, CONTRACT_WORKSPACE, created.id);
+      const error = await updateProject(client, CONTRACT_WORKSPACE, created.id, {
+        description: "Should not land.",
+      }).then(
+        () => null,
+        (caught: unknown) => caught
+      );
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).status).toBe(400);
+    } finally {
+      await unarchiveProject(client, CONTRACT_WORKSPACE, created.id).catch(() => 0);
+      await deleteProject(client, CONTRACT_WORKSPACE, created.id).catch(() => 0);
+    }
+  });
+});
+
+describe.skipIf(!contractEnabled)("project identifier contract", () => {
+  it("reports a reserved identifier and a free name", async () => {
+    const input = lifecycleProject();
+    await cleanupLifecycleProject(client, input.identifier);
+    const created = await createProject(client, CONTRACT_WORKSPACE, input);
+    try {
+      // Creation reserves the identifier; the check upper-cases the query.
+      const taken = await checkProjectIdentifier(client, CONTRACT_WORKSPACE, input.identifier.toLowerCase());
+      expect(taken.exists).toBeGreaterThanOrEqual(1);
+      expect(taken.identifiers.some((row) => row.name === input.identifier && row.project === created.id)).toBe(true);
+      const freeName = `ZZ${Date.now().toString(36).toUpperCase().slice(-6)}`;
+      const free = await checkProjectIdentifier(client, CONTRACT_WORKSPACE, freeName);
+      expect(free.exists).toBe(0);
+      expect(free.identifiers).toEqual([]);
+    } finally {
+      await deleteProject(client, CONTRACT_WORKSPACE, created.id).catch(() => 0);
+    }
+  });
+
+  it("rejects a missing name with a 400", async () => {
+    const error = await checkProjectIdentifier(client, CONTRACT_WORKSPACE, "").then(
+      () => null,
+      (caught: unknown) => caught
+    );
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(400);
   });
 });
 
