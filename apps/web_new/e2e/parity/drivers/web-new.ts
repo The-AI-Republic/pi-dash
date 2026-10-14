@@ -14671,6 +14671,9 @@ export class WebNewDriver implements ParityDriver {
   async adminSidebarFollowEntry(_name: string): Promise<void> {
     return todo("adminSidebarFollowEntry");
   }
+  async adminSidebarEntryTooltip(_href: string, _name: string): Promise<string | null> {
+    return todo("adminSidebarEntryTooltip");
+  }
   async adminSidebarToggleCollapse(): Promise<void> {
     return todo("adminSidebarToggleCollapse");
   }

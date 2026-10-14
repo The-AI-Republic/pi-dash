@@ -52960,6 +52960,22 @@ export class WebDriver implements ParityDriver {
     }
   }
 
+  async adminSidebarEntryTooltip(href: string, name: string): Promise<string | null> {
+    const link = this.adminShellSidebar().locator(`div.scrollbar-sm a[href="${href}"]`).first();
+    await link.hover({ timeout: WebDriver.WAIT_MS });
+    // Same portal mechanics as the breadcrumb tooltip: label-scoped to
+    // the tooltip's text node, since an empty portal always mounts.
+    const tip = this.page.locator("div[data-base-ui-portal] p", { hasText: name });
+    try {
+      // A present tooltip shows in well under a second; an absent one
+      // never shows, so the miss path uses a short timeout.
+      await tip.waitFor({ state: "visible", timeout: 3000 });
+    } catch {
+      return null;
+    }
+    return (await tip.first().innerText()).trim() || null;
+  }
+
   async adminSidebarToggleCollapse(): Promise<void> {
     const before = (await this.adminSidebarFacts()).collapsed;
     // Help first, collapse second: the footer's only two buttons, in
@@ -53134,19 +53150,24 @@ export class WebDriver implements ParityDriver {
   }
 
   private adminConfigFetchSeen = 0;
-  private adminConfigFetchRouteInstalled = false;
+  private adminConfigFetchSpyInstalled = false;
 
   async adminStartConfigFetchSpy(): Promise<void> {
     this.adminConfigFetchSeen = 0;
-    if (this.adminConfigFetchRouteInstalled) return;
-    this.adminConfigFetchRouteInstalled = true;
-    await this.page.route(
-      (url) => url.pathname.replace(/\/+$/, "") === "/api/instances/configurations",
-      async (route) => {
-        this.adminConfigFetchSeen += 1;
-        await route.continue();
+    if (this.adminConfigFetchSpyInstalled) return;
+    this.adminConfigFetchSpyInstalled = true;
+    // A passive listener, not a route: the sibling PATCH spy routes this
+    // same URL, and only one route handler runs per request — the
+    // listener counts beside it instead of racing it.
+    this.page.on("request", (request) => {
+      try {
+        if (new URL(request.url()).pathname.replace(/\/+$/, "") === "/api/instances/configurations") {
+          this.adminConfigFetchSeen += 1;
+        }
+      } catch {
+        // Non-HTTP(S) URLs (data:, about:) never match the spy path.
       }
-    );
+    });
   }
 
   async adminConfigFetchCount(): Promise<number> {

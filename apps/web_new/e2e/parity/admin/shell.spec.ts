@@ -32,7 +32,8 @@
 // breakpoint a header hamburger opens the off-canvas rail (the open rail
 // covers the control, so closing goes through the footer control or an
 // outside tap). Nothing updates live: the settings pages share
-// one cached configurations read with no sockets, streams or polling.
+// one cached configurations read with no sockets, streams or polling,
+// while list mutations revalidate their read explicitly.
 // The console has no drag sources, file inputs, import/export or
 // desktop affordances, no bespoke shortcuts, and loop deletion goes
 // through immediately while workspaces offer no deletion at all.
@@ -236,6 +237,21 @@ test(
       await sleep(250);
     }
     await waitForSidebarX(driver, "closed");
+  }
+);
+
+test(
+  specTitle(["ADM-063"], "collapsed icons show hover labels, expanded entries show none"),
+  { tag: specTags(["ADM-063"]) },
+  async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
+    await openDashboard(driver, seed);
+    await ensureExpanded(driver);
+    // Labeled entries carry no hover tooltip.
+    expect(await driver.adminSidebarEntryTooltip("/god-mode/general/", "General")).toBe(null);
+    await driver.adminSidebarToggleCollapse();
+    for (const [name, slug] of SIDEBAR_ORDER) {
+      expect(await driver.adminSidebarEntryTooltip(`/god-mode/${slug}/`, name)).toBe(name);
+    }
   }
 );
 
@@ -487,6 +503,56 @@ test(
     await sleep(5000);
     expect(await driver.adminConfigFetchCount()).toBe(fetches);
     expect(await driver.adminTransportFacts()).toEqual({ websockets: 0, eventStreams: 0 });
+  }
+);
+
+test(
+  specTitle(["ADM-069"], "loop modal save explicitly revalidates the jobs list read"),
+  { tag: specTags(["ADM-069"]) },
+  async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
+    const session = await serverAdminSession(seed.email, seed.password);
+    const slug = uniqueSlug("parity-446-reval");
+    try {
+      await openDashboard(driver, seed);
+      await driver.adminOpenPath("/loop/");
+      await waitForSidebar(driver);
+      await expect
+        .poll(
+          async () => {
+            const facts = await driver.adminLoopListFacts();
+            return facts.tableVisible || facts.emptyVisible;
+          },
+          { timeout: 15_000 }
+        )
+        .toBe(true);
+      await driver.adminStartLoopJobsSpy();
+      await sleep(1000);
+      const baseline = (await driver.adminLoopJobsUrls()).length;
+      await driver.adminLoopOpenCreate();
+      await driver.adminLoopModalFill({
+        slug,
+        name: `Probe job ${slug}`,
+        publicName: `Probe public ${slug}`,
+        publicDescription: `Probe description ${slug}`,
+        prompt: `Probe prompt ${slug}`,
+        minRole: 20,
+        tzid: "UTC",
+        rrule: "FREQ=DAILY;BYHOUR=3;BYMINUTE=0",
+      });
+      await driver.adminLoopModalSave();
+      // The saved row appears through one explicit list refetch — and
+      // nothing else refires the read over the window.
+      await expect.poll(async () => (await driver.adminLoopModalFacts()).open, { timeout: 15_000 }).toBe(false);
+      await expect
+        .poll(async () => (await driver.adminLoopRows()).some((row) => row.slug === slug), { timeout: 15_000 })
+        .toBe(true);
+      expect((await driver.adminLoopJobsUrls()).length).toBe(baseline + 1);
+      await sleep(2000);
+      expect((await driver.adminLoopJobsUrls()).length).toBe(baseline + 1);
+      expect((await serverAdminListLoopJobs(session)).some((job) => job.slug === slug)).toBe(true);
+    } finally {
+      await serverAdminDeleteLoopJobsBySlugPrefix("parity-446-reval");
+    }
   }
 );
 

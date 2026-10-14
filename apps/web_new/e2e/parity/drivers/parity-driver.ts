@@ -8430,6 +8430,8 @@ export interface ParityDriver {
   adminSidebarFacts(): Promise<AdminSidebarFacts>;
   /** Follow the sidebar entry named `name`; resolves once the dashboard settles. */
   adminSidebarFollowEntry(name: string): Promise<void>;
+  /** Hover the sidebar entry at `href`; resolve with its hover-label text (null when none shows). */
+  adminSidebarEntryTooltip(href: string, name: string): Promise<string | null>;
   /** Toggle the sidebar through the help-section collapse control. */
   adminSidebarToggleCollapse(): Promise<void>;
   /** Click outside the sidebar (mobile auto-collapse probe, ADM-063). */
