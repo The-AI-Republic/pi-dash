@@ -256,6 +256,7 @@ describe("matchesCreatedFilter", () => {
   });
 
   it("rejects malformed values and timestamps", () => {
+    expect(matchesCreatedFilter("2026-10-14T03:00:00Z", "today;custom", today)).toBe(false);
     expect(matchesCreatedFilter("2026-10-14T03:00:00Z", "2026-10-10;during", today)).toBe(false);
     expect(matchesCreatedFilter("2026-10-14T03:00:00Z", "someday;after", today)).toBe(false);
     expect(matchesCreatedFilter("2026-10-14T03:00:00Z", "2026-10-10", today)).toBe(false);
