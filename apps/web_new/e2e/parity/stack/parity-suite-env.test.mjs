@@ -23,6 +23,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 const upScript = join(here, "parity-up.sh");
 const envScript = join(here, "parity-env.sh");
 
+// NEWFRONT-497: the runs* docker-exec helpers (runsShell via
+// runsApiContainer) read PARITY_CONTAINER_PREFIX alone, so the suite-env
+// block must carry the resolved prefix too — exporting just the printed
+// block broke namespaced runs with "No such container" without it.
+const PREFIX_DERIVATION = 'PARITY_CONTAINER_PREFIX="${PARITY_CONTAINER_PREFIX:-${PARITY_PROJECT:-parity19}}"';
+
 const EXPECTED_DERIVATIONS = new Map([
   ["PARITY_API_CONTAINER", 'PARITY_API_CONTAINER="${PARITY_API_CONTAINER:-${PARITY_CONTAINER_PREFIX:-parity19}-api}"'],
   [
@@ -107,5 +113,64 @@ describe("parity-up.sh suite-env block (NEWFRONT-472)", () => {
 
   it("falls back to exactly the legacy parity19 names", () => {
     assert.deepEqual(resolvedContainers({}), ["parity19-api", "parity19-redis"]);
+  });
+});
+
+function prefixDerivationLine(text) {
+  const found = text.split("\n").filter((line) => line.startsWith('PARITY_CONTAINER_PREFIX="'));
+  assert.equal(found.length, 1, "parity-up.sh must derive PARITY_CONTAINER_PREFIX exactly once");
+  assert.equal(found[0], PREFIX_DERIVATION, "prefix must derive from the project with explicit-wins");
+  return found[0];
+}
+
+// Resolves the container prefix the way parity-up.sh does: the resolver
+// first (same eval), then the script's own derivation line, verbatim.
+// `extra` seeds the ambient environment past a clean PARITY_* slate.
+function resolvedPrefix(extra) {
+  const text = readFileSync(upScript, "utf8");
+  const derivation = prefixDerivationLine(text);
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("PARITY_")) delete env[key];
+  }
+  Object.assign(env, extra);
+  const quotedEnv = `'${envScript.replaceAll("'", "'\\''")}'`;
+  const program = [`eval "$(${quotedEnv} 2>/dev/null)"`, derivation, `printf '%s\\n' "$PARITY_CONTAINER_PREFIX"`].join(
+    "\n"
+  );
+  const out = execFileSync("bash", ["-c", program], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return out.trim();
+}
+
+describe("parity-up.sh suite-env block carries PARITY_CONTAINER_PREFIX (NEWFRONT-497)", () => {
+  it("prints the prefix export in the suite-env block", () => {
+    const text = readFileSync(upScript, "utf8");
+    const marker = text.indexOf("suite env for this stack");
+    assert.ok(marker >= 0, "parity-up.sh must print a suite-env block");
+    const block = text.slice(marker);
+    assert.ok(
+      block.includes(`echo "export PARITY_CONTAINER_PREFIX='$PARITY_CONTAINER_PREFIX'"`),
+      "suite-env block must print PARITY_CONTAINER_PREFIX"
+    );
+  });
+
+  it("derives the prefix before the block prints, from the project", () => {
+    const text = readFileSync(upScript, "utf8");
+    const marker = text.indexOf("suite env for this stack");
+    const at = text.indexOf(PREFIX_DERIVATION);
+    assert.ok(at >= 0, "parity-up.sh must carry the prefix derivation line");
+    assert.ok(at < marker, "prefix derivation must run before the suite-env block prints");
+  });
+
+  it("resolves the namespaced prefix from PARITY_NS", () => {
+    assert.equal(resolvedPrefix({ PARITY_NS: "40" }), "parity40");
+  });
+
+  it("lets an explicit prefix win over the derivation", () => {
+    assert.equal(resolvedPrefix({ PARITY_NS: "40", PARITY_CONTAINER_PREFIX: "other" }), "other");
+  });
+
+  it("falls back to exactly the legacy parity19 prefix", () => {
+    assert.equal(resolvedPrefix({}), "parity19");
   });
 });
