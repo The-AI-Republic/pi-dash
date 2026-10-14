@@ -44,6 +44,8 @@ export { createKitToastManager, showToast, ToastHost } from "./components/Toast"
 export type { ShowToastOptions, ToastHostManager } from "./components/Toast";
 export { Tooltip } from "./components/Tooltip";
 export type { TooltipProps } from "./components/Tooltip";
+export { UpgradePill } from "./components/UpgradePill";
+export type { UpgradePillProps, UpgradePillSize } from "./components/UpgradePill";
 export { VirtualList } from "./components/VirtualList";
 export type { VirtualListProps } from "./components/VirtualList";
 export { cn } from "./lib/cn";

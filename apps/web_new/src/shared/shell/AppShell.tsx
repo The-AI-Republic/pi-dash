@@ -85,7 +85,10 @@ export function AppShell({
       <div className="flex min-h-0 flex-1">
         {rail}
         {sidebarCollapsed ? null : sidebar}
-        <main className="min-w-0 flex-1 overflow-auto" aria-label="Content">
+        <main
+          className={rail ? "min-w-0 flex-1 overflow-auto" : "min-w-0 flex-1 overflow-auto pl-(--space-4)"}
+          aria-label="Content"
+        >
           {children}
         </main>
         {slideOver ? (

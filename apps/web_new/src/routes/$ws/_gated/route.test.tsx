@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { isRedirect } from "@tanstack/react-router";
 import type * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,33 +25,49 @@ const harness = vi.hoisted(() => ({
   landing: "/",
   signOutError: null as Error | null,
   settled: false,
-  matches: [{ params: {} }] as Array<{ params: Record<string, unknown> }>,
   searchScope: null as { workspaceSlug: string; projectId: string | null } | null,
-  titleBarScope: null as { workspaceSlug: string; projectId: string | null } | null,
+  searchBoxScope: null as { workspaceSlug: string; projectId: string | null } | null,
   onSelectSearchResult: null as ((hit: SearchResultHit) => void) | null,
   role: 15,
   creationDisabled: false,
   projectViews: { cycle_view: true, module_view: true, issue_views_view: true, page_view: true, inbox_view: true },
   fetched: [] as string[],
   navigated: [] as unknown[],
+  topBar: null as null | {
+    workspaceSlug: string;
+    section: string;
+    currentPath: string;
+    sidebarCollapsed: boolean;
+    sidebarToggleEnabled: boolean;
+    onToggleSidebar: () => void;
+    unreadTotal: number;
+    unreadMentions: number;
+  },
+  sidebarCollapsed: false,
+  rail: undefined as unknown,
+  routerState: {
+    matches: [{ params: {} }],
+    location: { pathname: "/acme/projects/p1/issues" },
+  } as { matches: Array<{ params: Record<string, unknown> }>; location: { pathname: string } },
 }));
 
 // Shell-query stand-in: this suite owns the layout wiring (sign-out entry
-// points through the shared action), not data fetching.
+// points through the shared action, top chrome props), not data fetching.
 vi.mock("@tanstack/react-query", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-query")>();
-  return { ...original, useSuspenseQuery: vi.fn() };
+  return { ...original, useSuspenseQuery: vi.fn(), useQuery: vi.fn() };
 });
 
-// Router stand-ins: only the outlet and the matches selector the layout
-// reads; route creation, redirects and the Route hooks stay real. The
+// Router stand-ins: the outlet plus the selectors the layout reads
+// (matches for the active project, location for rail active states);
+// route creation, redirects and the Route hooks stay real. The
 // global navigate stand-in serves lazily mounted dialogs (the layout
 // itself navigates through Route.useNavigate, spied per test).
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
   return {
     ...original,
-    useRouterState: () => harness.matches,
+    useRouterState: (args: { select: (state: unknown) => unknown }) => args.select(harness.routerState),
     Outlet: () => null,
     useNavigate: () => (target: unknown) => harness.navigated.push(target),
   };
@@ -87,9 +103,10 @@ vi.mock("../../../features/auth/api.js", async (importOriginal) => {
   };
 });
 
-// Shell-chrome stand-ins: capture the registered commands and the palette
-// search wiring, and expose the sidebar sign-out entry as a button; layout
-// and palette stay untested here.
+// Shell-chrome stand-ins: capture the registered commands, the palette
+// search wiring, the top-bar wiring and the rail node, and expose the
+// sidebar sign-out entry as a button; the chrome components own their own
+// suites. Stores stay real.
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
   const React = await import("react");
@@ -99,6 +116,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       commands?: PidashCommand[];
       topBar?: React.ReactNode;
       sidebar?: React.ReactNode;
+      rail?: React.ReactNode;
       children?: React.ReactNode;
       searchScope: { workspaceSlug: string; projectId: string | null };
       onSelectSearchResult: (hit: SearchResultHit) => void;
@@ -106,10 +124,17 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       harness.commands = [...(props.commands ?? [])];
       harness.searchScope = props.searchScope;
       harness.onSelectSearchResult = props.onSelectSearchResult;
+      harness.rail = props.rail;
       return React.createElement("div", null, props.topBar, props.sidebar, props.children);
     },
-    Sidebar: (props: { userLabel: string; onSignOut: () => void; onDeactivateAccount: () => void }) =>
-      React.createElement(
+    Sidebar: (props: {
+      userLabel: string;
+      onSignOut: () => void;
+      onDeactivateAccount: () => void;
+      collapsed?: boolean;
+    }) => {
+      harness.sidebarCollapsed = props.collapsed ?? false;
+      return React.createElement(
         React.Fragment,
         null,
         React.createElement(
@@ -118,16 +143,23 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
           "Sign out"
         ),
         React.createElement("button", { type: "button", onClick: props.onDeactivateAccount }, "Deactivate account")
-      ),
-    TitleBar: (props: { searchScope: { workspaceSlug: string; projectId: string | null } }) => {
-      harness.titleBarScope = props.searchScope;
+      );
+    },
+    TopBarSearch: (props: { scope: { workspaceSlug: string; projectId: string | null } | null }) => {
+      harness.searchBoxScope = props.scope;
       return null;
+    },
+    TopBar: (props: NonNullable<typeof harness.topBar> & { searchBox?: React.ReactNode }) => {
+      harness.topBar = { ...props };
+      return React.createElement("div", { "data-testid": "topbar-standin" }, props.searchBox);
     },
   };
 });
 
 import { createAppClient } from "../../../core/api/index.js";
+import { edition } from "../../../core/edition/index.js";
 import { platform } from "../../../core/platform/index.js";
+import { useRailState, useShellChrome } from "../../../shared/shell/index.js";
 import { Route } from "./route.js";
 
 function PageProbe({ page, query }: { page: PalettePage; query: string }) {
@@ -213,10 +245,37 @@ describe("gated layout guard", () => {
   });
 });
 
+describe("gated layout loader", () => {
+  it("prefetches workspaces, projects and the unread count", async () => {
+    const seen: Array<readonly unknown[]> = [];
+    const args = {
+      context: {
+        apiClient: {},
+        queryClient: {
+          ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
+            seen.push(options.queryKey);
+            return [];
+          },
+        },
+      },
+      params: { ws: "acme" },
+    } as never;
+    const loader = Route.options.loader;
+    if (typeof loader !== "function") throw new Error("missing loader");
+    await loader(args);
+    expect(seen).toEqual([
+      ["session", "workspaces"],
+      ["ws", "acme", "projects", "list"],
+      ["ws", "acme", "notifications", "unread"],
+    ]);
+  });
+});
+
 describe("gated layout shell wiring", () => {
   const navigate = vi.fn();
+  let mounted: { unmount: () => void } | null = null;
 
-  function stubShellQueries(): void {
+  function stubShellQueries(unread: unknown = undefined): void {
     const suspenseQuery = vi.mocked(useSuspenseQuery) as unknown as {
       mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => { data: unknown }) => void;
     };
@@ -227,6 +286,8 @@ describe("gated layout shell wiring", () => {
       }
       return { data: [{ id: "p1", name: "Atlas", identifier: "ATL", ...harness.projectViews }] };
     });
+    const plainQuery = vi.mocked(useQuery) as unknown as { mockImplementation: (run: () => { data: unknown }) => void };
+    plainQuery.mockImplementation(() => ({ data: unread }));
   }
 
   function stubClientQueries(): void {
@@ -281,7 +342,7 @@ describe("gated layout shell wiring", () => {
     const Component = Route.options.component;
     if (!Component) throw new Error("gated layout has no component");
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
+    mounted = render(
       <QueryClientProvider client={queryClient}>
         <Component />
       </QueryClientProvider>
@@ -299,15 +360,27 @@ describe("gated layout shell wiring", () => {
     command.run();
   }
 
+  function resetChrome(): void {
+    useShellChrome.setState({ sidebarCollapsed: false, peekOpen: false });
+    useRailState.setState({ density: "labeled", undockedByWorkspace: {} });
+    globalThis.localStorage.clear();
+    delete edition.flags["app-rail"];
+    delete edition.flags["sidebar-toggle"];
+    delete edition.rail;
+    harness.topBar = null;
+    harness.sidebarCollapsed = false;
+    harness.rail = undefined;
+    harness.routerState = { matches: [{ params: {} }], location: { pathname: "/acme/projects/p1/issues" } };
+  }
+
   beforeEach(() => {
     navigate.mockClear();
     harness.commands = [];
     harness.landing = "/";
     harness.signOutError = null;
     harness.settled = false;
-    harness.matches = [{ params: {} }];
     harness.searchScope = null;
-    harness.titleBarScope = null;
+    harness.searchBoxScope = null;
     harness.onSelectSearchResult = null;
     harness.role = 15;
     harness.creationDisabled = false;
@@ -320,6 +393,7 @@ describe("gated layout shell wiring", () => {
     };
     harness.fetched = [];
     harness.navigated = [];
+    resetChrome();
     vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme" });
     vi.spyOn(Route, "useNavigate").mockReturnValue(navigate as never);
     vi.spyOn(Route, "useRouteContext").mockReturnValue({ apiClient: {} } as never);
@@ -330,7 +404,12 @@ describe("gated layout shell wiring", () => {
   afterEach(() => {
     clearCommands();
     clearPalettePages();
+    // Unmount before the store reset: the reset notifies subscribers,
+    // and a subscriber rendering after the spies come down throws.
+    mounted?.unmount();
+    mounted = null;
     vi.restoreAllMocks();
+    resetChrome();
   });
 
   it("registers the shell sign-out command naming the signed-in user", () => {
@@ -372,7 +451,7 @@ describe("gated layout shell wiring", () => {
   });
 
   it("registers the project jumps inside a project without the archives jump", async () => {
-    harness.matches = [{ params: {} }, { params: { projectId: "p1" } }];
+    harness.routerState.matches = [{ params: {} }, { params: { projectId: "p1" } }];
     renderShell();
     await waitFor(() =>
       expect(commandIds()).toEqual([
@@ -405,7 +484,7 @@ describe("gated layout shell wiring", () => {
   });
 
   it("hides flag-gated project jumps when their tabs are off", async () => {
-    harness.matches = [{ params: {} }, { params: { projectId: "p1" } }];
+    harness.routerState.matches = [{ params: {} }, { params: { projectId: "p1" } }];
     harness.projectViews = {
       cycle_view: false,
       module_view: false,
@@ -608,14 +687,17 @@ describe("gated layout shell wiring", () => {
   it("passes the workspace scope to the shell and the top bar", () => {
     renderShell();
     expect(harness.searchScope).toEqual({ workspaceSlug: "acme", projectId: null });
-    expect(harness.titleBarScope).toEqual({ workspaceSlug: "acme", projectId: null });
+    expect(harness.searchBoxScope).toEqual({ workspaceSlug: "acme", projectId: null });
   });
 
   it("scopes the palette search to the child project", () => {
-    harness.matches = [{ params: {} }, { params: { projectId: "p1" } }];
+    harness.routerState = {
+      matches: [{ params: {} }, { params: { projectId: "p1" } }],
+      location: { pathname: "/acme/projects/p1/issues" },
+    };
     renderShell();
     expect(harness.searchScope).toEqual({ workspaceSlug: "acme", projectId: "p1" });
-    expect(harness.titleBarScope).toEqual({ workspaceSlug: "acme", projectId: "p1" });
+    expect(harness.searchBoxScope).toEqual({ workspaceSlug: "acme", projectId: "p1" });
   });
 
   it("navigates palette server hits through the shared resolver", () => {
@@ -633,5 +715,84 @@ describe("gated layout shell wiring", () => {
       to: "/$ws/browse/$issueKey",
       params: { ws: "acme", issueKey: "ATL-12" },
     });
+  });
+
+  it("wires the top bar with zero counts while the inbox loads", () => {
+    renderShell();
+    expect(harness.topBar).toMatchObject({
+      workspaceSlug: "acme",
+      section: "",
+      currentPath: "/acme/projects/p1/issues",
+      sidebarCollapsed: false,
+      sidebarToggleEnabled: true,
+      unreadTotal: 0,
+      unreadMentions: 0,
+    });
+    expect(harness.sidebarCollapsed).toBe(false);
+  });
+
+  it("names the active project section from the route match", () => {
+    harness.routerState = {
+      matches: [{ params: { projectId: "p1" } }],
+      location: { pathname: "/acme/projects/p1/issues" },
+    };
+    renderShell();
+    expect(harness.topBar?.section).toBe("Atlas");
+  });
+
+  it("forwards the unread count once loaded", () => {
+    stubShellQueries({ total_unread_notifications_count: 4, mention_unread_notifications_count: 1 });
+    renderShell();
+    expect(harness.topBar).toMatchObject({ unreadTotal: 4, unreadMentions: 1 });
+  });
+
+  it("toggles collapse and clears peek through the bar", () => {
+    useShellChrome.setState({ peekOpen: true, sidebarCollapsed: false });
+    renderShell();
+    expect(harness.topBar).not.toBeNull();
+    act(() => {
+      harness.topBar?.onToggleSidebar();
+    });
+    expect(useShellChrome.getState().peekOpen).toBe(false);
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
+    act(() => {
+      harness.topBar?.onToggleSidebar();
+    });
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
+  });
+
+  it("hides the toggle when the edition gates it", () => {
+    edition.flags["sidebar-toggle"] = false;
+    renderShell();
+    expect(harness.topBar?.sidebarToggleEnabled).toBe(false);
+  });
+
+  it("suppresses the rail on OSS builds", () => {
+    edition.rail = [{ id: "projects", label: "Projects", to: "/acme/" }];
+    renderShell();
+    expect(harness.rail).toBeUndefined();
+  });
+
+  it("mounts the rail with edition dock items once enabled", () => {
+    edition.flags["app-rail"] = true;
+    edition.rail = [{ id: "projects", label: "Projects", to: "/acme/" }];
+    renderShell();
+    const rail = harness.rail as React.ReactElement<{
+      workspaceSlug: string;
+      currentPath: string;
+      dockItems: Array<{ id: string; label: string; to: string; icon: React.ReactNode }>;
+    }>;
+    expect(rail.props.workspaceSlug).toBe("acme");
+    expect(rail.props.currentPath).toBe("/acme/projects/p1/issues");
+    expect(rail.props.dockItems).toHaveLength(1);
+    expect(rail.props.dockItems[0]).toMatchObject({ id: "projects", label: "Projects", to: "/acme/" });
+    expect(rail.props.dockItems[0]?.icon).toBeDefined();
+  });
+
+  it("drops the rail once the workspace undocks it", () => {
+    edition.flags["app-rail"] = true;
+    useRailState.setState({ undockedByWorkspace: { acme: true } });
+    renderShell();
+    expect(harness.rail).toBeUndefined();
   });
 });

@@ -36,6 +36,17 @@ export interface SidebarProps {
    * Absent, the menu offers sign-out only.
    */
   onDeactivateAccount?: () => void;
+  /**
+   * Collapsed shell (SHELL-066): a zero-width strip that keeps the
+   * landmark mounted (and inert) so the toggle has something to reopen.
+   */
+  collapsed?: boolean;
+  /**
+   * Desktop update control mount (SHELL-102, from parity/specs/shell.md
+   * §5): the Desktop area renders its waiting-update button here; the
+   * shell owns only the mount point beside the account area.
+   */
+  updateControl?: React.ReactNode;
 }
 
 export function Sidebar({
@@ -48,13 +59,20 @@ export function Sidebar({
   userLabel,
   onSignOut,
   onDeactivateAccount,
+  collapsed = false,
+  updateControl,
 }: SidebarProps): React.ReactElement {
   const active = workspaces.find((workspace) => workspace.slug === activeSlug) ?? null;
   return (
     <aside
       id="main-sidebar"
       aria-label="Workspace navigation"
-      className="flex w-60 shrink-0 flex-col gap-(--space-4) border-r border-(--border) bg-(--surface) p-(--space-4)"
+      inert={collapsed}
+      className={
+        collapsed
+          ? "flex w-0 shrink-0 flex-col overflow-hidden border-r border-(--border) bg-(--surface)"
+          : "flex w-60 shrink-0 flex-col gap-(--space-4) border-r border-(--border) bg-(--surface) p-(--space-4)"
+      }
     >
       <Menu
         trigger={
@@ -105,6 +123,7 @@ export function Sidebar({
       <div className="flex items-center gap-(--space-2) border-t border-(--border) pt-(--space-4)">
         <Avatar name={userLabel} size="small" />
         <span className="text-body min-w-0 flex-1 truncate text-(--text-muted)">{userLabel}</span>
+        {updateControl}
         <Menu
           trigger={
             <Button variant="ghost" size="small" aria-label="Account actions">

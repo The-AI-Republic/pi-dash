@@ -21,6 +21,14 @@ export interface SidebarItem {
   to: string;
 }
 
+/**
+ * Well-known edition flags read by the shell (SHELL-063, SHELL-066, from
+ * parity/specs/shell.md §5). Flags stay opt-in per key: an absent key
+ * means the community default, never an error.
+ */
+export const APP_RAIL_FLAG = "app-rail";
+export const SIDEBAR_TOGGLE_FLAG = "sidebar-toggle";
+
 /** Extra settings section contributed by an edition. */
 export interface SettingsSection {
   id: string;
@@ -63,6 +71,8 @@ export interface Edition {
   id: "oss" | string;
   routes?: RouteExtension[];
   sidebar?: SidebarItem[];
+  /** Far-left rail dock entries; the rail mounts only with APP_RAIL_FLAG. */
+  rail?: SidebarItem[];
   settingsSections?: SettingsSection[];
   auth?: AuthProviderExtension[];
   /** Request middleware, e.g. token refresh. Runs inside the api client. */

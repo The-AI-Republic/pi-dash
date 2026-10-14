@@ -3,8 +3,9 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import { edition } from "./index.js";
+import { isAppRailEnabled, isSidebarToggleEnabled, edition } from "./index.js";
 import { edition as ossEdition } from "./oss.js";
+import type { Edition } from "./types.js";
 
 describe("edition", () => {
   it("resolves the OSS edition through the index", () => {
@@ -15,6 +16,7 @@ describe("edition", () => {
   it("contributes no cloud surface", () => {
     expect(edition.routes ?? []).toEqual([]);
     expect(edition.sidebar ?? []).toEqual([]);
+    expect(edition.rail ?? []).toEqual([]);
     expect(edition.settingsSections ?? []).toEqual([]);
     // The four native providers are backend-native, not a cloud extra: the
     // instance flags alone decide which buttons show (AUTH-003).
@@ -31,5 +33,23 @@ describe("edition", () => {
 
   it("leaves the cloud god-mode entry absent (ADM-074: OSS renders the bootstrap gate)", () => {
     expect(edition.slots?.godModeCloudEntry).toBeUndefined();
+  });
+});
+
+describe("shell edition gates", () => {
+  const flags = (entries: Record<string, boolean>): Edition => ({ id: "test", flags: entries });
+
+  it("suppresses the rail unless the edition opts in", () => {
+    expect(isAppRailEnabled(flags({}))).toBe(false);
+    expect(isAppRailEnabled(flags({ "app-rail": false }))).toBe(false);
+    expect(isAppRailEnabled(flags({ "app-rail": true }))).toBe(true);
+    expect(isAppRailEnabled(edition)).toBe(false);
+  });
+
+  it("mounts the sidebar toggle unless the edition opts out", () => {
+    expect(isSidebarToggleEnabled(flags({}))).toBe(true);
+    expect(isSidebarToggleEnabled(flags({ "sidebar-toggle": true }))).toBe(true);
+    expect(isSidebarToggleEnabled(flags({ "sidebar-toggle": false }))).toBe(false);
+    expect(isSidebarToggleEnabled(edition)).toBe(true);
   });
 });

@@ -91,6 +91,14 @@ describe("AppShell", () => {
     expect(screen.queryByRole("complementary", { name: "Slide-over" })).toBeNull();
   });
 
+  it("pads content while the rail stays suppressed and reclaims it with the rail (SHELL-099)", () => {
+    const { unmount } = render(shell());
+    expect(screen.getByRole("main").className).toContain("pl-(--space-4)");
+    unmount();
+    render(shell({ rail: <nav aria-label="App rail">rail</nav> }));
+    expect(screen.getByRole("main").className).not.toContain("pl-(--space-4)");
+  });
+
   it("toggles the palette on the mod+k shortcut", async () => {
     const user = userEvent.setup();
     render(shell());
