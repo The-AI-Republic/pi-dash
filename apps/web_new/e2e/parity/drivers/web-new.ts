@@ -244,6 +244,8 @@ import type {
   CloudAssistantAddFill,
   CloudAssistantAddFormFacts,
   CloudAssistantConnectionFacts,
+  WsSettingsApiTokenBackup,
+  WsSettingsApiTokenRow,
 } from "./parity-driver";
 
 function todo(target: string): never {
@@ -16291,5 +16293,108 @@ export class WebNewDriver implements ParityDriver {
       return null;
     }
     return ((await alert.first().innerText()) ?? "").trim() || null;
+  }
+
+  // --- Personal access tokens oracle (NEWFRONT-413, WSET-025..028).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract.
+  async wsSettingsApiTokenOpenTokens(_cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("wsSettingsApiTokenOpenTokens");
+  }
+  async wsSettingsApiTokenOpenViaSidebar(_cookies: ParityBrowserCookie[]): Promise<void> {
+    return todo("wsSettingsApiTokenOpenViaSidebar");
+  }
+  async wsSettingsApiTokenHeading(): Promise<string | null> {
+    return todo("wsSettingsApiTokenHeading");
+  }
+  async wsSettingsApiTokenAddVisible(): Promise<boolean> {
+    return todo("wsSettingsApiTokenAddVisible");
+  }
+  async wsSettingsApiTokenLoaderSeen(): Promise<boolean> {
+    return todo("wsSettingsApiTokenLoaderSeen");
+  }
+  async wsSettingsApiTokenEmptyVisible(): Promise<boolean> {
+    return todo("wsSettingsApiTokenEmptyVisible");
+  }
+  async wsSettingsApiTokenEmptyCreate(): Promise<void> {
+    return todo("wsSettingsApiTokenEmptyCreate");
+  }
+  async wsSettingsApiTokenOpenCreate(): Promise<void> {
+    return todo("wsSettingsApiTokenOpenCreate");
+  }
+  async wsSettingsApiTokenRows(): Promise<WsSettingsApiTokenRow[]> {
+    return todo("wsSettingsApiTokenRows");
+  }
+  async wsSettingsApiTokenPageText(): Promise<string> {
+    return todo("wsSettingsApiTokenPageText");
+  }
+  async wsSettingsApiTokenDialogOpen(): Promise<boolean> {
+    return todo("wsSettingsApiTokenDialogOpen");
+  }
+  async wsSettingsApiTokenFillTitle(_title: string): Promise<void> {
+    return todo("wsSettingsApiTokenFillTitle");
+  }
+  async wsSettingsApiTokenFillDescription(_text: string): Promise<void> {
+    return todo("wsSettingsApiTokenFillDescription");
+  }
+  async wsSettingsApiTokenTitleError(): Promise<string | null> {
+    return todo("wsSettingsApiTokenTitleError");
+  }
+  async wsSettingsApiTokenPresetOptions(): Promise<string[]> {
+    return todo("wsSettingsApiTokenPresetOptions");
+  }
+  async wsSettingsApiTokenPickPreset(_label: string): Promise<void> {
+    return todo("wsSettingsApiTokenPickPreset");
+  }
+  async wsSettingsApiTokenExpiryTriggerText(): Promise<string> {
+    return todo("wsSettingsApiTokenExpiryTriggerText");
+  }
+  async wsSettingsApiTokenExpiryTriggerDisabled(): Promise<boolean> {
+    return todo("wsSettingsApiTokenExpiryTriggerDisabled");
+  }
+  async wsSettingsApiTokenExpiryPreview(): Promise<string | null> {
+    return todo("wsSettingsApiTokenExpiryPreview");
+  }
+  async wsSettingsApiTokenToggleNeverExpires(): Promise<void> {
+    return todo("wsSettingsApiTokenToggleNeverExpires");
+  }
+  async wsSettingsApiTokenPickCustomDayNextMonth(_day: string): Promise<void> {
+    return todo("wsSettingsApiTokenPickCustomDayNextMonth");
+  }
+  async wsSettingsApiTokenCustomFloor(): Promise<{ todayDisabled: boolean; tomorrowEnabled: boolean }> {
+    return todo("wsSettingsApiTokenCustomFloor");
+  }
+  async wsSettingsApiTokenSubmit(): Promise<void> {
+    return todo("wsSettingsApiTokenSubmit");
+  }
+  async wsSettingsApiTokenSubmitAndCaptureBackup(): Promise<WsSettingsApiTokenBackup> {
+    return todo("wsSettingsApiTokenSubmitAndCaptureBackup");
+  }
+  async wsSettingsApiTokenCancelCreate(): Promise<void> {
+    return todo("wsSettingsApiTokenCancelCreate");
+  }
+  async wsSettingsApiTokenRevealHeading(): Promise<string | null> {
+    return todo("wsSettingsApiTokenRevealHeading");
+  }
+  async wsSettingsApiTokenRevealValue(): Promise<string | null> {
+    return todo("wsSettingsApiTokenRevealValue");
+  }
+  async wsSettingsApiTokenRevealExpiryLine(): Promise<string | null> {
+    return todo("wsSettingsApiTokenRevealExpiryLine");
+  }
+  async wsSettingsApiTokenRevealCopy(): Promise<string> {
+    return todo("wsSettingsApiTokenRevealCopy");
+  }
+  async wsSettingsApiTokenRevealClose(): Promise<void> {
+    return todo("wsSettingsApiTokenRevealClose");
+  }
+  async wsSettingsApiTokenDeleteDialogText(_label: string): Promise<string> {
+    return todo("wsSettingsApiTokenDeleteDialogText");
+  }
+  async wsSettingsApiTokenDeleteCancel(): Promise<void> {
+    return todo("wsSettingsApiTokenDeleteCancel");
+  }
+  async wsSettingsApiTokenDeleteConfirm(_label: string): Promise<void> {
+    return todo("wsSettingsApiTokenDeleteConfirm");
   }
 }

@@ -26,6 +26,8 @@ import {
   exportsSubmitStatus,
   pagesLiveOracleBase,
   profileActivityExportCsv,
+  serverApiTokens,
+  serverCreateApiToken,
   serverPageRecord,
   serverPublishBoardFacts,
   type AuthedSession,
@@ -743,5 +745,124 @@ describe("analyticsProjectStateColors", () => {
     stubRaw = JSON.stringify({ data: [] });
     const rows = await analyticsProjectStateColors(analyticsSession(), "anl-ws", "p1");
     expect(rows).toEqual([]);
+  });
+});
+
+// Personal-access-token list + full-field create (NEWFRONT-413,
+// WSET-025/026/027/028): request shaping and row mapping against the
+// stub, so the live specs only prove server behavior. The list maps
+// every row through userApiTokenOf; the create posts only the fields
+// the caller provided and resolves with the one-time secret.
+describe("serverApiTokens", () => {
+  it("maps rows through with defaults for missing optional fields", async () => {
+    stubRaw = JSON.stringify([
+      {
+        id: "tok-1",
+        label: "ci-token",
+        description: "runs the suite",
+        expired_at: "2030-06-15T12:00:00Z",
+        is_active: true,
+      },
+      { id: "tok-2", label: "bare-token" },
+    ]);
+    const rows = await serverApiTokens("session=x", apiBase);
+    expect(rows).toEqual([
+      {
+        id: "tok-1",
+        label: "ci-token",
+        description: "runs the suite",
+        expiredAt: "2030-06-15T12:00:00Z",
+        active: true,
+        hasToken: false,
+      },
+      {
+        id: "tok-2",
+        label: "bare-token",
+        description: "",
+        expiredAt: null,
+        active: false,
+        hasToken: false,
+      },
+    ]);
+    expect(stubSeen).toHaveLength(1);
+    expect(stubSeen[0]?.method).toBe("GET");
+    expect(stubSeen[0]?.url).toBe("/api/users/api-tokens/");
+  });
+
+  it("flags a row carrying the raw secret and a null expiry", async () => {
+    stubRaw = JSON.stringify([
+      {
+        id: "tok-3",
+        label: "fresh-token",
+        description: "",
+        expired_at: null,
+        is_active: true,
+        token: "pd_raw_secret",
+      },
+    ]);
+    const rows = await serverApiTokens("session=x", apiBase);
+    expect(rows).toEqual([
+      {
+        id: "tok-3",
+        label: "fresh-token",
+        description: "",
+        expiredAt: null,
+        active: true,
+        hasToken: true,
+      },
+    ]);
+  });
+
+  it("throws when a row carries no string id/label", async () => {
+    stubRaw = JSON.stringify([{ id: "tok-4", label: 42 }]);
+    await expect(serverApiTokens("session=x", apiBase)).rejects.toThrow(
+      "[parity] api-token row carried no string id/label."
+    );
+  });
+
+  it("throws when the list read fails", async () => {
+    stubStatus = 500;
+    stubRaw = "boom";
+    await expect(serverApiTokens("session=x", apiBase)).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("serverCreateApiToken", () => {
+  it("posts a label-only body and resolves with the id plus secret", async () => {
+    payload = { id: "tok-5", label: "label-only", token: "pd_secret_5" };
+    const created = await serverCreateApiToken("session=x", { label: "label-only" }, apiBase);
+    expect(created).toEqual({ id: "tok-5", token: "pd_secret_5" });
+    expect(stubSeen).toHaveLength(1);
+    expect(stubSeen[0]?.method).toBe("POST");
+    expect(stubSeen[0]?.url).toBe("/api/users/api-tokens/");
+    expect(JSON.parse(stubSeen[0]?.body ?? "")).toEqual({ label: "label-only" });
+  });
+
+  it("includes description and expiry only when provided", async () => {
+    payload = { id: "tok-6", label: "full", token: "pd_secret_6" };
+    const created = await serverCreateApiToken(
+      "session=x",
+      { label: "full", description: "d", expiredAt: "2030-01-01T00:00:00Z" },
+      apiBase
+    );
+    expect(created).toEqual({ id: "tok-6", token: "pd_secret_6" });
+    expect(JSON.parse(stubSeen[0]?.body ?? "")).toEqual({
+      label: "full",
+      description: "d",
+      expired_at: "2030-01-01T00:00:00Z",
+    });
+  });
+
+  it("throws when the create response carries no id/token", async () => {
+    payload = { id: "tok-7", label: "no-secret" };
+    await expect(serverCreateApiToken("session=x", { label: "no-secret" }, apiBase)).rejects.toThrow(
+      "[parity] api-token create response carried no id/token."
+    );
+  });
+
+  it("throws when the create fails", async () => {
+    stubStatus = 500;
+    stubRaw = "boom";
+    await expect(serverCreateApiToken("session=x", { label: "x" }, apiBase)).rejects.toThrow(/HTTP 500/);
   });
 });
