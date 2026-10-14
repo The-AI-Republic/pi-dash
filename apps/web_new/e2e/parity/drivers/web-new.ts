@@ -1904,22 +1904,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async homeSetRecentsFilter(name: "all" | "issue" | "page" | "project"): Promise<void> {
-    const labels: Record<"all" | "issue" | "page" | "project", RegExp> = {
-      all: /^all$/i,
-      issue: /^work items$/i,
-      page: /^pages$/i,
-      project: /^projects$/i,
-    };
-    const trigger = this.homeRecentsSection()
-      .getByRole("button", { name: /filter recents/i })
+    // Native dropdown (a floating menu would cost the size budget): the
+    // option values are the filter keys.
+    const select = this.homeRecentsSection()
+      .getByRole("combobox", { name: /filter recents/i })
       .first();
-    await trigger.click();
-    const option = this.page.getByRole("menuitem", { name: labels[name] }).first();
-    await option.waitFor({ state: "visible", timeout: 10_000 });
-    await option.click();
-    // The selection refetches the feed; the specs prove it took by
-    // polling the rows after.
-    await option.waitFor({ state: "hidden", timeout: 10_000 }).catch(() => undefined);
+    await select.selectOption(name);
   }
 
   async homeRecentRowTexts(): Promise<string[]> {

@@ -10,10 +10,11 @@
 
 import { useQueries } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { ChevronDown, FileText, Folder, History, SquareKanban } from "lucide-react";
+import { FileText, Folder, History, SquareKanban } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import * as React from "react";
 
-import { Button, Menu, Skeleton } from "@pidash/kit";
+import { Button, Skeleton } from "@pidash/kit";
 import type { ProjectList } from "@pidash/api-client";
 import { getAppClient } from "../../../core/api/client.js";
 import { PeekPanel } from "../../../shared/shell/index.js";
@@ -26,7 +27,6 @@ import {
   indexStateLists,
   issueKeyLabel,
   parseRecentRows,
-  RECENT_FILTER_LABELS,
   RECENT_FILTERS,
   recentProjectIds,
   resolveIssueState,
@@ -38,24 +38,27 @@ import { RecentIssueRow, RecentPageRow, RecentProjectRow } from "./RecentRows.js
 /** Rows before the feed caps behind the expander. */
 const COLLAPSED_ROWS = 5;
 
-const EMPTY_ART: Record<RecentFilter, { icon: React.ReactNode; heading: string; body: string }> = {
+// Pure data: icon components (not elements) so the module stays
+// side-effect-free and tree-shakes out of route chains that only use the
+// feature's query options (performance budget: initial JS ≤ 220 KB).
+const EMPTY_ART: Record<RecentFilter, { icon: LucideIcon; heading: string; body: string }> = {
   all: {
-    icon: <History size={20} strokeWidth={1.5} aria-hidden="true" />,
+    icon: History,
     heading: "No recent activity",
     body: "Pages, projects and work items you open will show up here.",
   },
   issue: {
-    icon: <SquareKanban size={20} strokeWidth={1.5} aria-hidden="true" />,
+    icon: SquareKanban,
     heading: "No recently viewed work items",
     body: "Work items you open will show up here.",
   },
   page: {
-    icon: <FileText size={20} strokeWidth={1.5} aria-hidden="true" />,
+    icon: FileText,
     heading: "No recently viewed pages",
     body: "Pages you open will show up here.",
   },
   project: {
-    icon: <Folder size={20} strokeWidth={1.5} aria-hidden="true" />,
+    icon: Folder,
     heading: "No recently viewed projects",
     body: "Projects you open will show up here.",
   },
@@ -63,6 +66,7 @@ const EMPTY_ART: Record<RecentFilter, { icon: React.ReactNode; heading: string; 
 
 function RecentsEmptyState({ filter }: { filter: RecentFilter }): React.ReactElement {
   const art = EMPTY_ART[filter];
+  const Icon = art.icon;
   return (
     <div
       data-testid="recents-empty"
@@ -72,7 +76,7 @@ function RecentsEmptyState({ filter }: { filter: RecentFilter }): React.ReactEle
         aria-hidden="true"
         className="grid size-10 place-items-center rounded-(--radius-full) bg-(--subtle) text-(--text-muted)"
       >
-        {art.icon}
+        <Icon size={20} strokeWidth={1.5} aria-hidden="true" />
       </span>
       <p className="text-emphasis text-(--text)">{art.heading}</p>
       <p className="text-body text-(--text-muted)">{art.body}</p>
@@ -139,8 +143,6 @@ export function RecentsWidget({
     void navigate({ to: href });
   };
 
-  const activeLabel = RECENT_FILTER_LABELS[filter];
-
   return (
     <section
       id="home-recents"
@@ -151,21 +153,25 @@ export function RecentsWidget({
     >
       <div className="flex items-center justify-between gap-(--space-3)">
         <h2 className="text-emphasis text-(--text)">Recents</h2>
-        <Menu
-          trigger={
-            <Button variant="secondary" size="small" aria-label={`Filter recents, showing ${activeLabel}`}>
-              <span>{activeLabel}</span>
-              <ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />
-            </Button>
-          }
-          items={RECENT_FILTERS.map((entry) => ({
-            label: entry.label,
-            onSelect: () => {
-              setFilter(entry.key);
-              setExpanded(false);
-            },
-          }))}
-        />
+        {/* Native dropdown: the floating kit Menu would pull its popup
+            runtime into the initial route chain (performance budget:
+            initial JS at most 220 KB gzipped). */}
+        <select
+          aria-label="Filter recents"
+          value={filter}
+          onChange={(event) => {
+            const next = RECENT_FILTERS.find((entry) => entry.key === event.target.value)?.key ?? "all";
+            setFilter(next);
+            setExpanded(false);
+          }}
+          className="text-body rounded-(--radius-control) border border-(--border) bg-(--surface) px-(--space-3) py-(--space-1) text-(--text)"
+        >
+          {RECENT_FILTERS.map((entry) => (
+            <option key={entry.key} value={entry.key}>
+              {entry.label}
+            </option>
+          ))}
+        </select>
       </div>
       {visits.isPending ? (
         <div data-testid="recents-skeleton" aria-busy="true" className="flex flex-col gap-(--space-2)">

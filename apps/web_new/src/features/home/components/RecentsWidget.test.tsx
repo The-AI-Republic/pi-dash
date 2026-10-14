@@ -213,7 +213,7 @@ describe("RecentsWidget", () => {
     expect(screen.getByText("WEB-7")).toBeInTheDocument();
     expect(screen.getByText("In progress")).toBeInTheDocument();
     expect(screen.getAllByText("just now").length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: "Filter recents, showing All" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Filter recents" })).toHaveValue("all");
     expect(screen.queryByRole("button", { name: /show all/i })).not.toBeInTheDocument();
   });
 
@@ -238,25 +238,36 @@ describe("RecentsWidget", () => {
     ]);
     await renderWidget(queryClient);
 
-    const trigger = () => screen.getByRole("button", { name: /filter recents/i });
-    const pick = (label: string) => {
-      fireEvent.click(trigger());
-      fireEvent.click(screen.getByRole("menuitem", { name: label }));
+    const filter = () => screen.getByRole("combobox", { name: "Filter recents" });
+    const pick = (key: string) => {
+      fireEvent.change(filter(), { target: { value: key } });
     };
 
-    pick("Work items");
-    expect(screen.getByRole("button", { name: "Filter recents, showing Work items" })).toBeInTheDocument();
+    pick("issue");
+    expect(filter()).toHaveValue("issue");
     expect(screen.getByText("Parity second issue")).toBeInTheDocument();
     expect(screen.queryByText("Parity first issue")).not.toBeInTheDocument();
 
-    pick("Pages");
+    pick("page");
     expect(screen.getByTestId("recents-empty")).toHaveTextContent("No recently viewed pages");
     expect(screen.queryByTestId("recent-row")).not.toBeInTheDocument();
 
-    pick("Projects");
+    pick("project");
     expect(screen.getByText("Website")).toBeInTheDocument();
 
-    pick("All");
+    pick("all");
+    expect(screen.getByText("Parity first issue")).toBeInTheDocument();
+  });
+
+  it("falls back to All on an unknown filter value", async () => {
+    createAppClient("https://api.test", stubTransport([]));
+    const queryClient = testClient();
+    seedFeed(queryClient, "all", [makeVisit("visit-1", "issue", issuePayload())]);
+    await renderWidget(queryClient);
+
+    const filter = screen.getByRole("combobox", { name: "Filter recents" });
+    fireEvent.change(filter, { target: { value: "bogus" } });
+    expect(filter).toHaveValue("all");
     expect(screen.getByText("Parity first issue")).toBeInTheDocument();
   });
 
@@ -302,12 +313,11 @@ describe("RecentsWidget", () => {
     seedFeed(queryClient, "issue", [makeVisit("visit-9", "issue", issuePayload({ name: "Lone issue" }))]);
     await renderWidget(queryClient);
 
+    const filter = () => screen.getByRole("combobox", { name: "Filter recents" });
     fireEvent.click(screen.getByRole("button", { name: "Show all" }));
-    fireEvent.click(screen.getByRole("button", { name: /filter recents/i }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Work items" }));
+    fireEvent.change(filter(), { target: { value: "issue" } });
     expect(screen.getByText("Lone issue")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /filter recents/i }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "All" }));
+    fireEvent.change(filter(), { target: { value: "all" } });
     expect(screen.getByRole("button", { name: "Show all" })).toBeInTheDocument();
   });
 
@@ -346,7 +356,7 @@ describe("RecentsWidget", () => {
     const router = await renderWidget(queryClient);
 
     await user.click(screen.getByTestId("recent-row"));
-    const panel = screen.getByTestId("issue-preview");
+    const panel = await screen.findByTestId("issue-preview");
     expect(document.getElementById(FULL_SCREEN_PORTAL_ID)).toContainElement(panel);
     expect(screen.getByRole("textbox", { name: "Work item title" })).toHaveValue("Parity first issue");
     expect(within(panel).getByText("ABC-12")).toBeInTheDocument();
@@ -367,7 +377,7 @@ describe("RecentsWidget", () => {
     await renderWidget(queryClient);
 
     await user.click(screen.getByTestId("recent-row"));
-    const field = screen.getByRole("textbox", { name: "Work item title" });
+    const field = await screen.findByRole("textbox", { name: "Work item title" });
     await user.clear(field);
     await user.type(field, "Renamed issue{Enter}");
     await waitFor(() => expect(seen.some((request) => request.method === "PATCH")).toBe(true));
@@ -387,7 +397,7 @@ describe("RecentsWidget", () => {
     await renderWidget(queryClient);
 
     await user.click(screen.getByTestId("recent-row"));
-    const field = screen.getByRole("textbox", { name: "Work item title" });
+    const field = await screen.findByRole("textbox", { name: "Work item title" });
     await user.clear(field);
     await user.type(field, "Local draft{Enter}");
     expect(field).toHaveValue("Local draft");

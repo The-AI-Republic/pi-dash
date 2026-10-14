@@ -3,24 +3,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { RecentIssueData, RecentPageData, RecentProjectData } from "../lib/recentRows.js";
 import { RecentIssueRow, RecentPageRow, RecentProjectRow } from "./RecentRows.js";
-
-// Base UI tooltips never open on hover under jsdom (no hover-capable
-// pointer), so the popup mechanics stay kit-tested and this suite proves
-// the seam this slice owns: the content handed to the tooltip.
-vi.mock("@pidash/kit", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@pidash/kit")>();
-  return {
-    ...actual,
-    Tooltip: ({ children, content }: { children: React.ReactNode; content: string }) => (
-      <span data-tooltip-content={content}>{children}</span>
-    ),
-  };
-});
 
 function minutesAgo(minutes: number): string {
   return new Date(Date.now() - minutes * 60_000).toISOString();
@@ -85,10 +71,7 @@ describe("RecentIssueRow", () => {
         onPreview={vi.fn()}
       />
     );
-    expect(screen.getByText("Urgent").closest("[data-tooltip-content]")).toHaveAttribute(
-      "data-tooltip-content",
-      "Urgent"
-    );
+    expect(screen.getByText("Urgent").closest("[title]")).toHaveAttribute("title", "Urgent");
     expect(screen.queryByText("urgent")).not.toBeInTheDocument();
   });
 

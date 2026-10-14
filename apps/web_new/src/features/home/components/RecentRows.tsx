@@ -12,7 +12,7 @@
 import * as React from "react";
 import { FileText, Folder, SquareKanban, User } from "lucide-react";
 
-import { Avatar, Badge, Tooltip } from "@pidash/kit";
+import { Avatar, Badge } from "@pidash/kit";
 import { formatRelativeVisitTime } from "../lib/relativeTime.js";
 import { priorityDisplayLabel, priorityTone } from "../lib/priority.js";
 import {
@@ -43,10 +43,13 @@ function PriorityMark({ priority }: { priority: string | null }): React.ReactEle
   if (priority === null) return null;
   const label = priorityDisplayLabel(priority);
   if (label === null) return null;
+  // Native title tooltip: the floating kit Tooltip would pull its popup
+  // runtime into the initial route chain (performance budget: initial JS
+  // at most 220 KB gzipped), and the label it repeats is already visible.
   return (
-    <Tooltip content={label}>
+    <span title={label}>
       <Badge tone={priorityTone(priority)}>{label}</Badge>
-    </Tooltip>
+    </span>
   );
 }
 
