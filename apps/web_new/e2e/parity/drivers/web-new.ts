@@ -21,8 +21,15 @@ import type {
   AdminFailureFacts,
   AdminGeneralFacts,
   AdminImageFacts,
+  AdminLoopDetailFacts,
+  AdminLoopListFacts,
+  AdminLoopModalFacts,
+  AdminLoopModalFields,
+  AdminLoopRow,
+  AdminLoopTargetRow,
   AdminNotFoundFacts,
   AdminRootBranch,
+  AdminRunnersFacts,
   AdminSetupFacts,
   AdminSetupFields,
   AdminSignInFacts,
@@ -14521,6 +14528,128 @@ export class WebNewDriver implements ParityDriver {
   }
   async adminImageFacts(): Promise<AdminImageFacts> {
     return todo("adminImageFacts");
+  }
+
+  // --- Admin loop jobs + runners (NEWFRONT-445, ADM-051..061 + ADM-080). ---
+  async adminLoopListFacts(): Promise<AdminLoopListFacts> {
+    return todo("adminLoopListFacts");
+  }
+  async adminLoopRows(): Promise<AdminLoopRow[]> {
+    return todo("adminLoopRows");
+  }
+  async adminLoopSetEnabled(_slug: string, _on: boolean): Promise<void> {
+    return todo("adminLoopSetEnabled");
+  }
+  async adminLoopOpenCreate(): Promise<void> {
+    return todo("adminLoopOpenCreate");
+  }
+  async adminLoopModalFacts(): Promise<AdminLoopModalFacts> {
+    return todo("adminLoopModalFacts");
+  }
+  async adminLoopModalFill(_fields: Partial<AdminLoopModalFields>): Promise<void> {
+    return todo("adminLoopModalFill");
+  }
+  async adminLoopModalSave(): Promise<void> {
+    return todo("adminLoopModalSave");
+  }
+  async adminLoopModalCancel(): Promise<void> {
+    return todo("adminLoopModalCancel");
+  }
+  async adminLoopDetailFacts(): Promise<AdminLoopDetailFacts> {
+    return todo("adminLoopDetailFacts");
+  }
+  async adminLoopDetailRows(): Promise<AdminLoopTargetRow[]> {
+    return todo("adminLoopDetailRows");
+  }
+  async adminLoopSetSkipFilter(_reason: string): Promise<void> {
+    return todo("adminLoopSetSkipFilter");
+  }
+  async adminLoopOpenEdit(): Promise<void> {
+    return todo("adminLoopOpenEdit");
+  }
+  async adminLoopDelete(): Promise<void> {
+    return todo("adminLoopDelete");
+  }
+  async adminStartLoopJobsSpy(): Promise<void> {
+    return todo("adminStartLoopJobsSpy");
+  }
+  async adminLoopJobsUrls(): Promise<string[]> {
+    return todo("adminLoopJobsUrls");
+  }
+  async adminDelayLoopJobsFetch(_ms: number): Promise<void> {
+    return todo("adminDelayLoopJobsFetch");
+  }
+  async adminFailLoopJobsFetch(): Promise<void> {
+    return todo("adminFailLoopJobsFetch");
+  }
+  async adminStubEmptyLoopJobs(): Promise<void> {
+    return todo("adminStubEmptyLoopJobs");
+  }
+  async adminClearLoopJobsFetchFault(): Promise<void> {
+    return todo("adminClearLoopJobsFetchFault");
+  }
+  async adminStartLoopJobSpy(): Promise<void> {
+    return todo("adminStartLoopJobSpy");
+  }
+  async adminLoopJobUrls(): Promise<string[]> {
+    return todo("adminLoopJobUrls");
+  }
+  async adminDelayLoopJobFetch(_ms: number): Promise<void> {
+    return todo("adminDelayLoopJobFetch");
+  }
+  async adminFailLoopJobFetch(): Promise<void> {
+    return todo("adminFailLoopJobFetch");
+  }
+  async adminClearLoopJobFetchFault(): Promise<void> {
+    return todo("adminClearLoopJobFetchFault");
+  }
+  async adminStartLoopTargetsSpy(): Promise<void> {
+    return todo("adminStartLoopTargetsSpy");
+  }
+  async adminLoopTargetsUrls(): Promise<string[]> {
+    return todo("adminLoopTargetsUrls");
+  }
+  async adminStartLoopJobCreateSpy(): Promise<void> {
+    return todo("adminStartLoopJobCreateSpy");
+  }
+  async adminLoopJobCreateBodies(): Promise<unknown[]> {
+    return todo("adminLoopJobCreateBodies");
+  }
+  async adminFailLoopJobCreate(): Promise<void> {
+    return todo("adminFailLoopJobCreate");
+  }
+  async adminClearLoopJobCreateFault(): Promise<void> {
+    return todo("adminClearLoopJobCreateFault");
+  }
+  async adminStartLoopJobUpdateSpy(): Promise<void> {
+    return todo("adminStartLoopJobUpdateSpy");
+  }
+  async adminLoopJobUpdateBodies(): Promise<unknown[]> {
+    return todo("adminLoopJobUpdateBodies");
+  }
+  async adminFailLoopJobUpdate(): Promise<void> {
+    return todo("adminFailLoopJobUpdate");
+  }
+  async adminDelayLoopJobUpdate(_ms: number): Promise<void> {
+    return todo("adminDelayLoopJobUpdate");
+  }
+  async adminClearLoopJobUpdateFault(): Promise<void> {
+    return todo("adminClearLoopJobUpdateFault");
+  }
+  async adminStartLoopJobDeleteSpy(): Promise<void> {
+    return todo("adminStartLoopJobDeleteSpy");
+  }
+  async adminLoopJobDeleteCount(): Promise<number> {
+    return todo("adminLoopJobDeleteCount");
+  }
+  async adminFailLoopJobDelete(): Promise<void> {
+    return todo("adminFailLoopJobDelete");
+  }
+  async adminClearLoopJobDeleteFault(): Promise<void> {
+    return todo("adminClearLoopJobDeleteFault");
+  }
+  async adminRunnersFacts(): Promise<AdminRunnersFacts> {
+    return todo("adminRunnersFacts");
   }
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
   async spaceChromeNavbarIdentity(): Promise<SpaceChromeNavbarIdentity> {
