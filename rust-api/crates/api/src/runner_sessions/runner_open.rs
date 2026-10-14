@@ -1838,11 +1838,18 @@ async fn open_redeliver(
 /// `runner_runs::view_response` precedent): additive only — a
 /// response that already carries `Allow` (Django's own stamp on a
 /// proxied arm, or the D-13 auth denial's) passes through untouched,
+/// as does anything the Django proxy answered (marked
+/// [`crate::edge::ProxiedUpstream`] — Django's own bytes, including
+/// the `Allow`-less framework 404 on non-canonical path segments),
 /// and so do the two non-view statuses, 500 (Django's HTML error
 /// page) and 502 (the edge's dead-upstream answer). Both handlers
 /// below exit through this wrapper.
 fn view_response(mut response: Response, allow: &'static str) -> Response {
     if response.headers().contains_key(header::ALLOW)
+        || response
+            .extensions()
+            .get::<crate::edge::ProxiedUpstream>()
+            .is_some()
         || response.status() == StatusCode::INTERNAL_SERVER_ERROR
         || response.status() == StatusCode::BAD_GATEWAY
     {

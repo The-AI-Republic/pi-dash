@@ -248,15 +248,21 @@ pub(crate) const ALLOW_APPROVAL_DECIDE: &str = "POST, OPTIONS";
 pub(crate) const ALLOW_RUNNER_METRICS: &str = "GET, HEAD, OPTIONS";
 
 /// Stamp a view's DRF `Allow` on a view-rendered response. Additive
-/// only: a response that already carries `Allow` (Django's own stamp
-/// on a proxied arm) passes through untouched, and so do the two
-/// non-view statuses — 500 (Django renders its HTML error page, which
-/// carries no `Allow`) and 502 (the edge's dead-upstream answer, never
-/// a view response). Every handler below exits through this wrapper,
-/// so success and 4xx arms (auth denials included) all carry the
-/// view's value with no per-arm bookkeeping.
+/// only: a response that already carries `Allow` passes through
+/// untouched, as does anything the Django proxy answered (marked
+/// [`crate::edge::ProxiedUpstream`] — Django's own bytes, including
+/// the `Allow`-less framework 404 on non-canonical path segments),
+/// and so do the two non-view statuses — 500 (Django renders its
+/// HTML error page, which carries no `Allow`) and 502 (the edge's
+/// dead-upstream answer, never a view response). Every handler below
+/// exits through this wrapper, so success and 4xx arms (auth denials
+/// included) all carry the view's value with no per-arm bookkeeping.
 pub(crate) fn view_response(mut response: Response, allow: &'static str) -> Response {
     if response.headers().contains_key(header::ALLOW)
+        || response
+            .extensions()
+            .get::<crate::edge::ProxiedUpstream>()
+            .is_some()
         || response.status() == StatusCode::INTERNAL_SERVER_ERROR
         || response.status() == StatusCode::BAD_GATEWAY
     {
