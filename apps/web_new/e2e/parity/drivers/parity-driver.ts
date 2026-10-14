@@ -10246,7 +10246,113 @@ export interface WsSettingsMemberRowFacts {
   wsSettingsApiTokenDeleteCancel(): Promise<void>;
   /** Delete a row through its confirmation; resolves once the row is gone. */
   wsSettingsApiTokenDeleteConfirm(label: string): Promise<void>;
+  // --- Project settings General tab (NEWFRONT-389, PSET-005–012). Observed
+  // --- on the running old app: one long admin form (cover banner with
+  // --- overlapping emblem, name, description, repository row with its own
+  // --- bind button, base branch, execution-target picker, ticking switch
+  // --- with budget plus no-cap and cadence controls, identifier, network
+  // --- and timezone pickers, submit, creation stamp) with a skeleton while
+  // --- the details load; non-admins get the same tab dimmed and inert with
+  // --- no danger zone; archive and delete live in the danger zone below the
+  // --- form, restore mode opens from the project card. Appended; existing
+  // --- methods above are untouched per the shared driver contract.
+  /** Open a project's settings General tab; resolves once it settles. */
+  settingsGeneralOpen(workspaceSlug: string, projectId: string): Promise<void>;
+  /** Whether the general form (as opposed to skeleton or restriction) shows. */
+  settingsGeneralFormVisible(): Promise<boolean>;
+  /** Whether the loading skeleton shows. */
+  settingsGeneralSkeletonVisible(): Promise<boolean>;
+  /** Whether the danger zone (archive/delete rows) renders below the form. */
+  settingsGeneralDangerVisible(): Promise<boolean>;
+  /** Whether the tab renders dimmed (the non-admin inert presentation). */
+  settingsGeneralFormDimmed(): Promise<boolean>;
+  /** Current value of a general-tab text field. */
+  settingsGeneralFieldValue(field: SettingsGeneralField): Promise<string>;
+  /** Whether a general-tab field is currently disabled. */
+  settingsGeneralFieldDisabled(field: SettingsGeneralField): Promise<boolean>;
+  /** Inline field error text, or "" when the field shows none. */
+  settingsGeneralFieldError(field: SettingsGeneralField): Promise<string>;
+  /** Fill a general-tab text field (replacing its content). */
+  settingsGeneralFill(field: SettingsGeneralField, value: string): Promise<void>;
+  /** Whether the cover banner renders on the tab. */
+  settingsGeneralCoverVisible(): Promise<boolean>;
+  /** Banner headline text (project name plus identifier line). */
+  settingsGeneralHeaderText(): Promise<string>;
+  /** Visibility network label as rendered. */
+  settingsGeneralNetworkText(): Promise<string>;
+  /** Timezone value as rendered. */
+  settingsGeneralTimezoneText(): Promise<string>;
+  /** Creation-timestamp line as rendered. */
+  settingsGeneralCreatedText(): Promise<string>;
+  /** Selected execution-target value. */
+  settingsGeneralExecutorValue(): Promise<string>;
+  /** Whether an execution-target option is disabled. */
+  settingsGeneralExecutorOptionDisabled(value: string): Promise<boolean>;
+  /** Pick an execution target. */
+  settingsGeneralSetExecutor(value: string): Promise<void>;
+  /** Whether the automated-run master switch is on. */
+  settingsGeneralTickingOn(): Promise<boolean>;
+  /** Flip the automated-run master switch. */
+  settingsGeneralSetTicking(on: boolean): Promise<void>;
+  /** Run-budget input value as rendered ("" while no-cap shows its marker). */
+  settingsGeneralBudgetValue(): Promise<string>;
+  /** Fill the run-budget input. */
+  settingsGeneralSetBudget(value: string): Promise<void>;
+  /** Tick or untick the no-cap toggle. */
+  settingsGeneralSetNoCap(on: boolean): Promise<void>;
+  /** Cadence picker text as rendered (preset label or custom marker). */
+  settingsGeneralCadenceText(): Promise<string>;
+  /** Pick a cadence preset by its visible label. */
+  settingsGeneralSetCadence(label: string): Promise<void>;
+  /** Submit the form; resolves once the save settles (toast shown). */
+  settingsGeneralSave(): Promise<void>;
+  /** Repository bind control state: disabled bound pill vs clickable bind. */
+  settingsGeneralBindState(): Promise<"bound" | "bind">;
+  /** Click the repository Bind button; resolves once it settles. */
+  settingsGeneralBind(): Promise<void>;
+  /** Open the emblem picker. */
+  settingsGeneralEmblemOpen(): Promise<void>;
+  /** Whether the emblem picker is currently open. */
+  settingsGeneralEmblemPickerVisible(): Promise<boolean>;
+  /** Pick the emoji `char` in the open emblem picker. */
+  settingsGeneralEmblemPick(char: string): Promise<void>;
+  /** Open the cover picker ("Change cover"). */
+  settingsGeneralCoverOpen(): Promise<void>;
+  /** Cover picker tab titles in display order. */
+  settingsGeneralCoverTabNames(): Promise<string[]>;
+  /** How many bundled gallery images the cover picker offers. */
+  settingsGeneralCoverGalleryCount(): Promise<number>;
+  /** Pick a bundled gallery image by index; resolves once the picker closes. */
+  settingsGeneralCoverPickGallery(index: number): Promise<void>;
+  /** Upload a cover file through the picker's upload tab. */
+  settingsGeneralCoverUpload(file: { name: string; mime: string; bytes: string }): Promise<void>;
+  /** Open the delete confirmation from the danger zone (phrase fill and submit reuse the shared delete-dialog methods). */
+  settingsGeneralOpenDelete(): Promise<void>;
+  /** Fill the project-name confirmation inside the delete dialog (scoped: the form behind shares the placeholder). */
+  settingsGeneralFillDeleteName(text: string): Promise<void>;
+  /** Archive/restore confirm dialog text (heading plus body), or "" while closed. */
+  settingsGeneralConfirmModalText(): Promise<string>;
+  /** Abort project-scoped fetches so the tab stays on its skeleton; pair with the release below. */
+  settingsGeneralStallDetails(): Promise<void>;
+  /** Release a stall installed above; the tab proceeds to the form. */
+  settingsGeneralReleaseStall(): Promise<void>;
+  /** Fail the save-time cover upload so the abort path can be observed; pair with the release below. */
+  settingsGeneralStallCoverUpload(): Promise<void>;
+  /** Release a cover-upload stall installed above. */
+  settingsGeneralReleaseCoverUpload(): Promise<void>;
+  // Archive/restore entries, card reads, toasts and the delete phrase
+  // fill reuse the sibling areas' methods (openArchiveProjectDialog,
+  // clickCardRestore, confirmArchive/confirmRestore,
+  // visibleProjectCardNames, isToastVisible,
+  // fillDeleteConfirmPhrase/isDeleteSubmitDisabled/submitDelete): same
+  // controls, no fork. The confirm-modal text and the delete name fill
+  // are this block's own: the shared body reader sees neither the
+  // heading nor a closed modal, and the shared name fill collides with
+  // the form behind the dialog.
 }
+
+/** General-tab text field addressed by the settingsGeneral field methods (NEWFRONT-389). */
+export type SettingsGeneralField = "name" | "description" | "identifier" | "repoUrl" | "baseBranch" | "budget";
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
 export interface PagesBlocksInlineImage {
