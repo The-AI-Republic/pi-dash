@@ -25,6 +25,7 @@ import {
   type Request,
   type Route,
 } from "@playwright/test";
+import { sessionBrowserCookies, signInSessionRetry } from "../helpers/api";
 import { parityOracleAdminUrl } from "../helpers/parity-env";
 import type {
   AdminAbsenceFacts,
@@ -987,15 +988,18 @@ export class WebDriver implements ParityDriver {
   // link to "/{workspaceSlug}/profile/{memberId}" showing "@Display Name".
 
   /**
-   * Sign in with the shared flow and verify the session actually landed.
-   * The shared sign-in posts the native form, and the backend rejects
-   * valid credentials intermittently while sibling parity runs hammer the
-   * shared scratch stack, so this retries the whole flow for up to 90
-   * seconds: leaving the entry route proves the login POST went through,
-   * and the sidebar printing the account email proves whose session it
-   * is. Calls the shared methods; never edits them. Bounded at 60 seconds so
-   * a scenario still fits the suite's per-test budget alongside its poll
-   * waits; a window needing longer is broken for every scenario anyway.
+   * Sign in and verify the session actually landed. The browser form flow
+   * is slow under sibling contention (openEntry plus the shared sign-in
+   * measured 54s against a 45s cap on both oracles, NEWFRONT-357), so the
+   * fast path mints a session through the API and plants its cookies —
+   * the same sessionBrowserCookies setup the cloud and space scenarios
+   * use — then proves the landing the same way the UI flow does: leaving
+   * the entry route proves the session went through, and the sidebar
+   * printing the account email proves whose session it is. When the API
+   * path fails, the UI flow runs as fallback with a budget that fits
+   * observed slow runs. Calls the shared methods; never edits them.
+   * Bounded at 240 seconds overall so a scenario still fits the suite's
+   * per-test budget alongside its poll waits.
    */
   /**
    * One sign-in attempt bounded wall-clock: the shared methods carry no
@@ -1017,11 +1021,32 @@ export class WebDriver implements ParityDriver {
   }
 
   async mentionsEnsureSignedIn(email: string, password: string): Promise<void> {
-    const deadline = Date.now() + 60_000;
+    const deadline = Date.now() + 240_000;
     let lastError = "no attempt finished";
+    try {
+      await this.mentionsAttempt(
+        async () => {
+          const session = await signInSessionRetry(email, password);
+          await this.page.context().clearCookies();
+          await this.page.context().addCookies(sessionBrowserCookies(session));
+          await this.page.goto("/", { timeout: 60_000 });
+          await this.page.waitForURL((url) => url.pathname !== "/", { timeout: 30_000 });
+          await this.page.getByText(email).first().waitFor({ timeout: 30_000 });
+        },
+        120_000,
+        "API-session sign-in"
+      );
+      return;
+    } catch (error) {
+      lastError = String(error).split("\n")[0] ?? String(error);
+    }
     let attempts = 0;
-    while (Date.now() < deadline && attempts < 3) {
+    while (Date.now() < deadline && attempts < 2) {
       attempts += 1;
+      // A capped attempt keeps running after its timer fires, so a retry
+      // must not fight it for the page: when the previous attempt landed
+      // late, take the win instead of starting another sign-in over it.
+      if (attempts > 1 && (await this.mentionsLanded(email))) return;
       try {
         await this.mentionsAttempt(
           async () => {
@@ -1030,15 +1055,32 @@ export class WebDriver implements ParityDriver {
             await this.page.waitForURL((url) => url.pathname !== "/", { timeout: 15_000 });
             await this.page.getByText(email).first().waitFor({ timeout: 15_000 });
           },
-          45_000,
-          `sign-in attempt ${attempts}`
+          150_000,
+          `UI sign-in attempt ${attempts}`
         );
         return;
       } catch (error) {
         lastError = String(error).split("\n")[0] ?? String(error);
       }
     }
-    throw new Error(`[parity] sign-in as ${email} did not land (attempts: ${attempts}): ${lastError}`);
+    // The last attempt may have landed after its cap; check before failing.
+    if (await this.mentionsLanded(email)) return;
+    throw new Error(`[parity] sign-in as ${email} did not land (ui attempts: ${attempts}): ${lastError}`);
+  }
+
+  /**
+   * Short probe for an already-landed session: the workspace chrome plus
+   * the account email, without driving anything. Used between attempts so
+   * a retry never fights a previous attempt that landed late.
+   */
+  private async mentionsLanded(email: string): Promise<boolean> {
+    if ((await this.page.locator("#main-sidebar").count()) === 0) return false;
+    try {
+      await this.page.getByText(email).first().waitFor({ timeout: 10_000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async mentionsOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
