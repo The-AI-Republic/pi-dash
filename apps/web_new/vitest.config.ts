@@ -32,6 +32,7 @@ export default defineConfig({
       "src/**/*.test.tsx",
       "checks/check-similarity.test.mjs",
       "checks/check-oracle-build.test.mjs",
+      "checks/check-boundaries.test.mjs",
       "e2e/parity/helpers/parity-env.test.ts",
       "e2e/parity/helpers/parity-guard.test.ts",
       "e2e/parity/helpers/api.test.ts",

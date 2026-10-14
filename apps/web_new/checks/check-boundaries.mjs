@@ -8,7 +8,7 @@
 // point (suite URLs derive through helpers/parity-env.ts).
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, posix, relative, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const appSrc = join(root, "apps", "web_new", "src");
@@ -75,8 +75,12 @@ function walk(dir) {
   }
 }
 
-for (const tree of ["apps/web_new", "packages/kit", "packages/api-client"]) {
-  walk(join(root, tree));
+// Collected inside main() so importing this module (e.g. from the
+// self-test) has no side effect; see the CLI guard at the bottom.
+function collectSourceFiles() {
+  for (const tree of ["apps/web_new", "packages/kit", "packages/api-client"]) {
+    walk(join(root, tree));
+  }
 }
 
 // --- per-file checks -------------------------------------------------------
@@ -96,6 +100,20 @@ function layerOf(srcRel) {
   const head = srcRel.split("/")[0];
   if (["routes", "features", "shared", "core"].includes(head)) return head;
   return "other";
+}
+
+// A feature imports another feature only through its barrel: index.ts on
+// disk, spelled index.js in import specifiers per the repo's ESM style
+// (NEWFRONT-498). Both spellings below name the same file, so both pass.
+// Pure: takes src-relative posix paths, returns the failure message or null
+// when the import is allowed.
+function crossFeatureFailure(fromSrcRel, toSrcRel) {
+  const toParts = toSrcRel.split("/");
+  const toFeature = toParts[1];
+  const fromFeature = fromSrcRel.split("/")[1];
+  if (toFeature === undefined || toFeature === fromFeature) return null;
+  if (toParts.length === 3 && (toParts[2] === "index.ts" || toParts[2] === "index.js")) return null;
+  return `cross-feature import must go through features/${toFeature}/index.ts`;
 }
 
 function checkFile(full) {
@@ -139,19 +157,11 @@ function checkFile(full) {
       failures.push(`${rel}: ${fromLayer} must not import from ${toLayer} ("${spec}")`);
       continue;
     }
-    // A feature imports another feature only through its index.ts.
+    // A feature imports another feature only through its barrel.
     if (fromLayer === "features" && toLayer === "features") {
-      const fromFeature = importerRel.split("/")[1];
-      const toParts = importerRel.split("/");
-      const toFeature = toParts[1];
-      const fromSelf = relative(appSrc, full).split(sep).join(posix.sep).split("/")[1];
-      // Sources address the index with the ESM `.js` specifier for the
-      // `.ts` file; both spellings name the same index module.
-      const throughIndex = toParts.length === 3 && (toParts[2] === "index.ts" || toParts[2] === "index.js");
-      if (toFeature !== fromSelf && !throughIndex && toFeature !== undefined) {
-        void fromFeature;
-        failures.push(`${rel}: cross-feature import must go through features/${toFeature}/index.ts ("${spec}")`);
-      }
+      const fromSrcRel = relative(appSrc, full).split(sep).join(posix.sep);
+      const failure = crossFeatureFailure(fromSrcRel, importerRel);
+      if (failure !== null) failures.push(`${rel}: ${failure} ("${spec}")`);
     }
   }
 
@@ -184,11 +194,23 @@ function checkFile(full) {
   }
 }
 
-for (const file of sourceFiles) checkFile(file);
+function main() {
+  collectSourceFiles();
+  for (const file of sourceFiles) checkFile(file);
 
-if (failures.length > 0) {
-  console.error("Import boundary check failed:");
-  for (const failure of failures) console.error(`  - ${failure}`);
-  process.exit(1);
+  if (failures.length > 0) {
+    console.error("Import boundary check failed:");
+    for (const failure of failures) console.error(`  - ${failure}`);
+    process.exit(1);
+  }
+  console.log(`Import boundary check passed (${sourceFiles.length} files).`);
 }
-console.log(`Import boundary check passed (${sourceFiles.length} files).`);
+
+// Run as a CLI when invoked directly (`node .../check-boundaries.mjs`);
+// stay a pure module when imported (e.g. by the self-test), so importing
+// has no side effect.
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}
+
+export { crossFeatureFailure };
