@@ -2,9 +2,11 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Workspace home wiring (NEWFRONT-278). The route keeps the tour seam
-// mounted, hands its path params plus the projects read to the dashboard,
-// and warms the assistant card reads in its loader; the dashboard's
+// Workspace home wiring (NEWFRONT-278, NEWFRONT-280). The route keeps the
+// tour seam mounted, hands its path params plus the projects read to the
+// dashboard with the widget stack in its `widgets` slot, and warms the
+// assistant card reads in its loader; the widget-map read stays off the
+// loader so first paint shows the dashboard skeleton. The dashboard's
 // sections belong to the home feature, so this suite only proves the
 // composition and the loader's cache writes.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -32,9 +34,18 @@ vi.mock("../../../features/home/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../features/home/index.js")>();
   return {
     ...actual,
-    HomeDashboard: (props: { workspaceSlug: string; projects: unknown }) => (
+    HomeDashboard: (props: { workspaceSlug: string; projects: unknown; widgets?: React.ReactNode }) => (
       <div
         data-testid="home-dashboard"
+        data-slug={props.workspaceSlug}
+        data-projects={props.projects === undefined ? "loading" : "ready"}
+      >
+        {props.widgets}
+      </div>
+    ),
+    HomeWidgetStack: (props: { workspaceSlug: string; projects: unknown }) => (
+      <div
+        data-testid="widget-stack"
         data-slug={props.workspaceSlug}
         data-projects={props.projects === undefined ? "loading" : "ready"}
       />
@@ -42,7 +53,7 @@ vi.mock("../../../features/home/index.js", async (importOriginal) => {
   };
 });
 
-import { homeKeys } from "../../../features/home/index.js";
+import { homeKeys, widgetPrefsKeys } from "../../../features/home/index.js";
 import { projectKeys } from "../../../features/projects/index.js";
 import { Route } from "./index.js";
 
@@ -114,12 +125,15 @@ afterEach(() => {
 });
 
 describe("workspace home route", () => {
-  it("mounts the tour seam and the dashboard with its params and projects", async () => {
+  it("mounts the tour seam, the dashboard, and the widget stack with their params", async () => {
     renderHome();
     expect(await screen.findByTestId("tour-seam")).toBeInTheDocument();
     const dashboard = screen.getByTestId("home-dashboard");
     expect(dashboard).toHaveAttribute("data-slug", "acme");
     expect(dashboard).toHaveAttribute("data-projects", "ready");
+    const stack = screen.getByTestId("widget-stack");
+    expect(stack).toHaveAttribute("data-slug", "acme");
+    expect(stack).toHaveAttribute("data-projects", "ready");
   });
 
   it("warms the assistant card reads in its loader", async () => {
@@ -146,5 +160,21 @@ describe("workspace home route", () => {
     await expect(loader({ context: { queryClient, apiClient }, params: { ws: "acme" } } as never)).resolves.toEqual({});
     expect(queryClient.getQueryData(homeKeys.threads("acme"))).toBeUndefined();
     expect(queryClient.getQueryData(homeKeys.assistantConfig("acme"))).toBeUndefined();
+  });
+
+  it("leaves the widget-map read off the loader so first paint shows the skeleton", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const seen: string[] = [];
+    const apiClient = stubApiClient((url: string) => {
+      seen.push(url);
+      if (url.endsWith("/ai-assistant/threads/")) return [THREAD];
+      if (url.endsWith("/ai-assistant/config/")) return CONFIG;
+      throw new Error(`unexpected ${url}`);
+    });
+    const loader = Route.options.loader;
+    if (typeof loader !== "function") throw new Error("missing loader");
+    await loader({ context: { queryClient, apiClient }, params: { ws: "acme" } } as never);
+    expect(queryClient.getQueryData(widgetPrefsKeys.list("acme"))).toBeUndefined();
+    expect(seen.some((url) => url.includes("/home-preferences/"))).toBe(false);
   });
 });
