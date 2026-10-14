@@ -14,11 +14,12 @@
     "NEWFRONT-20": { "reason": "F-09 coexistence routing", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
     "NEWFRONT-21": { "reason": "F-10 baseline numbers", "paths": ["^\\.ai_design/new_frontend_implementation/design\\.md$"] },
     "NEWFRONT-92": { "reason": "M-01 desktop switch", "paths": ["^desktop/", "^desktop-overlay/"] },
-    "NEWFRONT-104": { "reason": "D17 nested pages backend", "paths": ["^apps/api/pi_dash/app/views/page/", "^apps/api/pi_dash/app/serializers/page\\.py$", "^apps/api/pi_dash/app/urls/page\\.py$", "^apps/api/pi_dash/tests/"] }
+    "NEWFRONT-104": { "reason": "D17 nested pages backend", "paths": ["^apps/api/pi_dash/app/views/page/", "^apps/api/pi_dash/app/serializers/page\\.py$", "^apps/api/pi_dash/app/urls/page\\.py$", "^apps/api/pi_dash/tests/"] },
+    "NEWFRONT-491": { "reason": "auth area gate proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] }
   },
   "oracleIssues": {
     "$comment": "Oracle issues may add data-testid attributes to the old apps, nothing else.",
-    "ids": ["NEWFRONT-24","NEWFRONT-26","NEWFRONT-28","NEWFRONT-30","NEWFRONT-32","NEWFRONT-34","NEWFRONT-36","NEWFRONT-38","NEWFRONT-40","NEWFRONT-42","NEWFRONT-44","NEWFRONT-46","NEWFRONT-48","NEWFRONT-50","NEWFRONT-52","NEWFRONT-54","NEWFRONT-56","NEWFRONT-58","NEWFRONT-60","NEWFRONT-62","NEWFRONT-64","NEWFRONT-66","NEWFRONT-68","NEWFRONT-95","NEWFRONT-97","NEWFRONT-198","NEWFRONT-199","NEWFRONT-200","NEWFRONT-201","NEWFRONT-202"],
+    "ids": ["NEWFRONT-24","NEWFRONT-26","NEWFRONT-28","NEWFRONT-30","NEWFRONT-32","NEWFRONT-34","NEWFRONT-36","NEWFRONT-38","NEWFRONT-40","NEWFRONT-42","NEWFRONT-44","NEWFRONT-46","NEWFRONT-48","NEWFRONT-50","NEWFRONT-52","NEWFRONT-54","NEWFRONT-56","NEWFRONT-58","NEWFRONT-60","NEWFRONT-62","NEWFRONT-64","NEWFRONT-66","NEWFRONT-68","NEWFRONT-95","NEWFRONT-97","NEWFRONT-198","NEWFRONT-199","NEWFRONT-200","NEWFRONT-201","NEWFRONT-202","NEWFRONT-249","NEWFRONT-255","NEWFRONT-389","NEWFRONT-413","NEWFRONT-427","NEWFRONT-429"],
     "paths": ["^apps/(web|admin|space)/"],
     "testidOnly": true
   }
