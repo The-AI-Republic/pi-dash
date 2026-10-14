@@ -5,6 +5,14 @@
 
 export { projectKeys } from "./api/keys.js";
 export {
+  FAVORITE_ADDED_TITLE,
+  FAVORITE_FAILED_TITLE,
+  FAVORITE_REMOVED_TITLE,
+  selectPendingProjectId,
+  useToggleFavoriteProject,
+} from "./api/mutations.js";
+export type { ToggleFavoriteInput } from "./api/mutations.js";
+export {
   projectDetailsQueryOptions,
   projectPropertiesQueryOptions,
   projectsQueryOptions,
@@ -12,8 +20,16 @@ export {
   useWorkspaceProperties,
   workspacePropertiesQueryOptions,
 } from "./api/queries.js";
-export { ProjectCard } from "./components/ProjectCard.js";
+export { JoinProjectDialog } from "./components/JoinProjectDialog.js";
+export type { JoinProjectDialogProps } from "./components/JoinProjectDialog.js";
+export { ProjectCard, PROJECT_NETWORK_PRIVATE, formatCreationDate } from "./components/ProjectCard.js";
 export type { ProjectCardProps } from "./components/ProjectCard.js";
+export { ProjectLogo, selectLogoGlyph } from "./components/ProjectLogo.js";
+export type { ProjectLogoProps } from "./components/ProjectLogo.js";
+export { ProjectMemberStack, MEMBER_STACK_CAP, selectStackSplit } from "./components/ProjectMemberStack.js";
+export type { MemberStackEntry, ProjectMemberStackProps } from "./components/ProjectMemberStack.js";
+export { projectIssuesPath, projectSettingsPath, selectCardMenuEntries } from "./components/cardMenu.js";
+export type { CardMenuCallbacks, CardMenuStanding } from "./components/cardMenu.js";
 export { ProjectsEmptyState } from "./components/ProjectsEmptyState.js";
 export type { ProjectsEmptyStateProps, ProjectsEmptyVariant } from "./components/ProjectsEmptyState.js";
 export { ProjectsListHeader } from "./components/ProjectsListHeader.js";

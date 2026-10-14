@@ -2,18 +2,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Data-connected projects list (SHELL-024, SHELL-025, SHELL-028
-// through SHELL-031). Subscribes to the shared workspace collection,
+// through SHELL-032). Subscribes to the shared workspace collection,
 // the membership options and the caller's workspace role, narrows and
 // orders the rows through the display store, and mounts the sort,
-// filter, pills and search controls into the screen slots. The routes
-// stay thin: they resolve the workspace slug and mount this view.
-
+// filter, pills and search controls into the screen slots. Each card
+// renders through the card renderer, which feeds it the member
+// directory, the star entitlement and the favorite toggle; joins land
+// through client-side navigation. The routes stay thin: they resolve
+// the workspace slug and mount this view. NEWFRONT-284 replaces the
+// card renderer with its own dialog wiring; it reuses these same hooks.
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
+import type { ProjectDetails } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { useMe, usePermissions } from "../../../core/session/index.js";
 import { workspaceMembersQueryOptions } from "../api/members.js";
+import { useToggleFavoriteProject } from "../api/mutations.js";
 import { projectDetailsQueryOptions } from "../api/queries.js";
 import {
   DEFAULT_LIST_SORT,
@@ -23,6 +29,7 @@ import {
   sortListRows,
 } from "../lib/list-display.js";
 import { useListDisplayStore } from "../store/list-display.js";
+import { ProjectCard } from "./ProjectCard.js";
 import { ProjectsAppliedFilters } from "./ProjectsAppliedFilters.js";
 import { ProjectsFilterPanel } from "./ProjectsFilterPanel.js";
 import { ProjectsListScreen, selectViewRows } from "./ProjectsListScreen.js";
@@ -53,6 +60,8 @@ export function ProjectsListView({ workspaceSlug, archived = false }: ProjectsLi
   const removeFilterDimension = useListDisplayStore((state) => state.removeFilterDimension);
   const clearListFilters = useListDisplayStore((state) => state.clearListFilters);
   const setSearchQuery = useListDisplayStore((state) => state.setSearchQuery);
+  const navigate = useNavigate();
+  const favorite = useToggleFavoriteProject();
 
   React.useEffect(() => {
     useListDisplayStore.getState().trackWorkspace(workspaceSlug);
@@ -63,12 +72,28 @@ export function ProjectsListView({ workspaceSlug, archived = false }: ProjectsLi
     return sortListRows(filterListRows(selectViewRows(details.data, archived), filters, searchQuery), sort);
   }, [details.data, archived, filters, searchQuery, sort]);
 
+  const handleNavigate = React.useCallback((href: string) => void navigate({ to: href }), [navigate]);
+  const renderCard = React.useCallback(
+    (project: ProjectDetails) => (
+      <ProjectCard
+        workspaceSlug={workspaceSlug}
+        project={project}
+        members={memberships.data}
+        canStar={canEdit}
+        starPending={favorite.pendingProjectId === project.id}
+        onToggleFavorite={(row) => favorite.mutate({ workspaceSlug, project: row })}
+        onNavigate={handleNavigate}
+      />
+    ),
+    [workspaceSlug, memberships.data, canEdit, favorite.mutate, favorite.pendingProjectId, handleNavigate]
+  );
   return (
     <ProjectsListScreen
       workspaceSlug={workspaceSlug}
       archived={archived}
       collection={details.data}
       canCreate={canEdit}
+      renderCard={renderCard}
       searchQuery={searchQuery}
       {...(rows === undefined ? {} : { projects: rows })}
       hasActiveFilters={hasNarrowingListFilters(filters)}

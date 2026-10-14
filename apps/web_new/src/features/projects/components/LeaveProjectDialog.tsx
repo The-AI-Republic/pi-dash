@@ -1,9 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Leave-project dialog (parity/specs/shell.md §7, SHELL-073). Leaving is
-// confirmed by typing the project ritual phrase, then the membership ends
-// and the member lands back on the projects list.
+// Leave-project dialog (parity/specs/shell.md §7, SHELL-073; flow owned
+// by SHELL-036). Leaving is confirmed twice: the exact project name,
+// then the ritual phrase. Wrong entries block with corrective errors;
+// correct entries end the membership and land back on the projects
+// list. One canonical dialog for every surface (tab chrome, sidebar,
+// settings) that offers leaving.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { leaveProject } from "@pidash/api-client";
@@ -38,12 +41,17 @@ export function LeaveProjectDialog({
   onNavigate,
 }: LeaveProjectDialogProps): React.ReactElement {
   const queryClient = useQueryClient();
+  const [typedName, setTypedName] = React.useState("");
   const [confirm, setConfirm] = React.useState("");
-  const armed = confirm === LEAVE_CONFIRM_PHRASE;
+  const [nameError, setNameError] = React.useState<string | null>(null);
+  const [phraseError, setPhraseError] = React.useState<string | null>(null);
 
-  // Fresh phrase per visit: reopening never inherits a stale confirmation.
+  // Fresh confirmations per visit: reopening never inherits stale input.
   React.useEffect(() => {
+    setTypedName("");
     setConfirm("");
+    setNameError(null);
+    setPhraseError(null);
   }, [open]);
 
   const leave = useMutation({
@@ -63,6 +71,20 @@ export function LeaveProjectDialog({
     },
   });
 
+  function submit(): void {
+    if (typedName !== projectName) {
+      setNameError(`Enter the project name "${projectName}" exactly as shown.`);
+      return;
+    }
+    setNameError(null);
+    if (confirm !== LEAVE_CONFIRM_PHRASE) {
+      setPhraseError(`Type "${LEAVE_CONFIRM_PHRASE}" exactly to confirm leaving.`);
+      return;
+    }
+    setPhraseError(null);
+    leave.mutate();
+  }
+
   return (
     <Dialog
       title="Leave project"
@@ -74,23 +96,28 @@ export function LeaveProjectDialog({
           <Button variant="secondary" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button
-            variant="primary"
-            disabled={!armed || leave.isPending}
-            loading={leave.isPending}
-            onClick={() => leave.mutate()}
-          >
+          <Button variant="primary" disabled={leave.isPending} loading={leave.isPending} onClick={submit}>
             {leave.isPending ? "Leaving…" : "Leave project"}
           </Button>
         </>
       }
     >
-      <Input
-        label={`To confirm, type ${LEAVE_CONFIRM_PHRASE} below:`}
-        value={confirm}
-        onChange={(event) => setConfirm(event.target.value)}
-        placeholder={`Enter '${LEAVE_CONFIRM_PHRASE.toLowerCase()}'`}
-      />
+      <div className="flex flex-col gap-(--space-4)">
+        <Input
+          label={`Enter the project name ${projectName} to continue:`}
+          value={typedName}
+          onChange={(event) => setTypedName(event.target.value)}
+          placeholder="Enter the project name"
+          {...(nameError === null ? {} : { error: nameError })}
+        />
+        <Input
+          label={`To confirm, type ${LEAVE_CONFIRM_PHRASE} below:`}
+          value={confirm}
+          onChange={(event) => setConfirm(event.target.value)}
+          placeholder={`Enter '${LEAVE_CONFIRM_PHRASE.toLowerCase()}'`}
+          {...(phraseError === null ? {} : { error: phraseError })}
+        />
+      </div>
     </Dialog>
   );
 }

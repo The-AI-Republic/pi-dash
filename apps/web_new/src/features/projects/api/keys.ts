@@ -10,7 +10,7 @@ export const projectKeys = {
   all: (workspaceSlug: string) => [...workspaceScope(workspaceSlug), "projects"] as const,
   list: (workspaceSlug: string) => [...projectKeys.all(workspaceSlug), "list"] as const,
   details: (workspaceSlug: string) => [...projectKeys.all(workspaceSlug), "details"] as const,
-  /** Active workspace memberships (lead/member filter options). */
+  /** Active workspace memberships (lead/member filter options, card avatars). */
   members: (workspaceSlug: string) => [...projectKeys.all(workspaceSlug), "members"] as const,
   /** The caller's workspace display properties (list mode, caps). */
   workspaceProperties: (workspaceSlug: string) => [...workspaceScope(workspaceSlug), "user-properties"] as const,

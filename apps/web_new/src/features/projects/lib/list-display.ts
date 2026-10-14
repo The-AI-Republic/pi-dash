@@ -258,7 +258,7 @@ export function selectMemberOptions(
     .map((membership) => ({
       id: membership.member.id,
       displayName: membership.member.display_name,
-      avatarUrl: membership.member.avatar_url,
+      avatarUrl: membership.member.avatar_url ?? "",
       self: args.selfId !== null && membership.member.id === args.selfId,
       applied: args.applied.includes(membership.member.id),
     }))

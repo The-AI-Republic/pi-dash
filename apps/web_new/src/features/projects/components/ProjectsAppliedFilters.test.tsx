@@ -29,7 +29,8 @@ const MEMBERS = [member("u1", "Ada Lovelace"), member("u2", "Grace Hopper")];
 
 function setup(
   filters: ListFilters,
-  counts: { filteredCount: number; totalCount: number } = { filteredCount: 1, totalCount: 2 }
+  counts: { filteredCount: number; totalCount: number } = { filteredCount: 1, totalCount: 2 },
+  members: WorkspaceMember[] = MEMBERS
 ) {
   const handlers = {
     onRemoveMyProjects: vi.fn(),
@@ -40,7 +41,7 @@ function setup(
   render(
     <ProjectsAppliedFilters
       filters={filters}
-      members={MEMBERS}
+      members={members}
       filteredCount={counts.filteredCount}
       totalCount={counts.totalCount}
       onRemoveMyProjects={handlers.onRemoveMyProjects}
@@ -109,6 +110,14 @@ describe("ProjectsAppliedFilters", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Remove After Oct 01, 2026" }));
     expect(handlers.onRemoveValue).toHaveBeenCalledWith("createdAt", "2026-10-01;after");
+  });
+
+  it("pills people who never set an avatar", () => {
+    const noAvatar = member("u3", "No Avatar");
+    noAvatar.member.avatar_url = null;
+    setup({ ...freshListFilters(), lead: ["u3"] }, undefined, [noAvatar]);
+
+    expect(screen.getByText("No Avatar")).not.toBeNull();
   });
 
   it("omits groups whose values cannot label", () => {

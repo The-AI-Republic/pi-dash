@@ -15,6 +15,7 @@ export {
   useDocumentHead,
 } from "./document.js";
 export type { DocumentHead, OverlayPortalProps, OverlayRootId } from "./document.js";
+export { FAVORITES_SECTION_OPEN_KEY, isFavoritesSectionOpen, setFavoritesSectionOpen } from "./favorites.js";
 export { NOT_FOUND_ART, NOT_FOUND_ROBOTS, NOT_FOUND_TITLE, NotFoundPage } from "./NotFoundPage.js";
 export { PeekPanel } from "./PeekPanel.js";
 export type { PeekPanelProps } from "./PeekPanel.js";

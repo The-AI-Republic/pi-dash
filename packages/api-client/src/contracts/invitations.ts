@@ -116,8 +116,8 @@ export async function sendWorkspaceInvitations(
 }
 
 /**
- * The join-request requester. Shaped like UserLite except avatar_url,
- * which is null for users who never set an avatar.
+ * The join-request requester. Same shape as UserLite, including the
+ * nullable avatar_url for users who never set an avatar.
  */
 export const JoinRequestRequester = z.object({
   id: uuid(),

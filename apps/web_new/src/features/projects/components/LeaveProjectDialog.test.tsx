@@ -70,21 +70,32 @@ afterEach(() => {
 });
 
 describe("LeaveProjectDialog", () => {
-  it("arms the leave button on the exact confirmation phrase", async () => {
+  it("blocks a wrong project name with a corrective error", async () => {
     const user = userEvent.setup();
-    setup();
-    const leave = screen.getByRole("button", { name: "Leave project" });
-    expect(leave).toBeDisabled();
-    await user.type(screen.getByLabelText(/To confirm/), "Leave");
-    expect(leave).toBeDisabled();
-    await user.type(screen.getByLabelText(/To confirm/), " Project");
-    expect(leave).toBeEnabled();
+    const { calls } = setup();
+    await user.type(screen.getByLabelText(/Enter the project name/), "Wrong Name");
+    await user.type(screen.getByLabelText(/To confirm/), LEAVE_CONFIRM_PHRASE);
+    fireEvent.click(screen.getByRole("button", { name: "Leave project" }));
+    expect(screen.getByText(/exactly as shown/)).toBeInTheDocument();
+    expect(calls.some((url) => url.includes("/members/leave/"))).toBe(false);
+  });
+
+  it("blocks a wrong confirmation phrase once the name matches", async () => {
+    const user = userEvent.setup();
+    const { calls } = setup();
+    await user.type(screen.getByLabelText(/Enter the project name/), "Web");
+    await user.type(screen.getByLabelText(/To confirm/), "leave");
+    fireEvent.click(screen.getByRole("button", { name: "Leave project" }));
+    expect(screen.queryByText(/exactly as shown/)).toBeNull();
+    expect(screen.getByText(/exactly to confirm leaving/)).toBeInTheDocument();
+    expect(calls.some((url) => url.includes("/members/leave/"))).toBe(false);
   });
 
   it("leaves, toasts, closes and lands on the projects list", async () => {
     const user = userEvent.setup();
     const onNavigate = vi.fn();
     const { calls, onOpenChange } = setup(204, onNavigate);
+    await user.type(screen.getByLabelText(/Enter the project name/), "Web");
     await user.type(screen.getByLabelText(/To confirm/), LEAVE_CONFIRM_PHRASE);
     fireEvent.click(screen.getByRole("button", { name: "Leave project" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Left the project", expect.any(String)));
@@ -97,6 +108,7 @@ describe("LeaveProjectDialog", () => {
     const user = userEvent.setup();
     const onNavigate = vi.fn();
     const { onOpenChange } = setup(400, onNavigate);
+    await user.type(screen.getByLabelText(/Enter the project name/), "Web");
     await user.type(screen.getByLabelText(/To confirm/), LEAVE_CONFIRM_PHRASE);
     fireEvent.click(screen.getByRole("button", { name: "Leave project" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't leave the project", expect.any(String)));
@@ -105,7 +117,7 @@ describe("LeaveProjectDialog", () => {
     expect(onNavigate).not.toHaveBeenCalled();
   });
 
-  it("clears the phrase between visits", async () => {
+  it("clears the confirmations between visits", async () => {
     const user = userEvent.setup();
     stubClient(204);
     const onOpenChange = vi.fn();
@@ -122,8 +134,10 @@ describe("LeaveProjectDialog", () => {
         />
       </QueryClientProvider>
     );
+    await user.type(screen.getByLabelText(/Enter the project name/), "Wrong Name");
     await user.type(screen.getByLabelText(/To confirm/), LEAVE_CONFIRM_PHRASE);
-    expect(screen.getByLabelText(/To confirm/)).toHaveValue(LEAVE_CONFIRM_PHRASE);
+    fireEvent.click(screen.getByRole("button", { name: "Leave project" }));
+    expect(screen.getByText(/exactly as shown/)).toBeInTheDocument();
     view.rerender(
       <QueryClientProvider client={queryClient}>
         <LeaveProjectDialog
@@ -148,7 +162,9 @@ describe("LeaveProjectDialog", () => {
         />
       </QueryClientProvider>
     );
+    expect(screen.getByLabelText(/Enter the project name/)).toHaveValue("");
     expect(screen.getByLabelText(/To confirm/)).toHaveValue("");
+    expect(screen.queryByText(/exactly as shown/)).toBeNull();
   });
 
   it("disables the leave button with a progress label while leaving", async () => {
@@ -183,6 +199,7 @@ describe("LeaveProjectDialog", () => {
         />
       </QueryClientProvider>
     );
+    await user.type(screen.getByLabelText(/Enter the project name/), "Web");
     await user.type(screen.getByLabelText(/To confirm/), LEAVE_CONFIRM_PHRASE);
     fireEvent.click(screen.getByRole("button", { name: "Leave project" }));
     const leaving = await screen.findByRole("button", { name: "Leaving…" });
