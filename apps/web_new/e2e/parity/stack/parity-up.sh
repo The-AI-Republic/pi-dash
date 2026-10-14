@@ -281,7 +281,12 @@ echo "[parity] oracle is warm"
 # The older docker-exec helpers (apiShell, desktopRuntimeShell, redis)
 # default to the parity19-* container names with no namespace
 # derivation, so the suite-env block must carry the resolved names
-# (NEWFRONT-472). Explicit settings still win.
+# (NEWFRONT-472). The runs* family instead reads PARITY_CONTAINER_PREFIX
+# alone (runsApiContainer), so the block must carry the prefix too —
+# without it, exporting just the printed block breaks namespaced runs
+# with "No such container" (NEWFRONT-497). Explicit settings still win.
+export PARITY_CONTAINER_PREFIX
+PARITY_CONTAINER_PREFIX="${PARITY_CONTAINER_PREFIX:-${PARITY_PROJECT:-parity19}}"
 export PARITY_API_CONTAINER
 PARITY_API_CONTAINER="${PARITY_API_CONTAINER:-${PARITY_CONTAINER_PREFIX:-parity19}-api}"
 export PARITY_REDIS_CONTAINER
@@ -297,6 +302,7 @@ fi
 echo "export PARITY_SEED_FILE='$PARITY_SEED_FILE'"
 echo "export PARITY_API_URL='$PARITY_API_URL'"
 echo "export PARITY_ORACLE_URL='$PARITY_ORACLE_URL'"
+echo "export PARITY_CONTAINER_PREFIX='$PARITY_CONTAINER_PREFIX'"
 echo "export PARITY_API_CONTAINER='$PARITY_API_CONTAINER'"
 echo "export PARITY_REDIS_CONTAINER='$PARITY_REDIS_CONTAINER'"
 echo "export PARITY_ORACLE_ADMIN_URL='$PARITY_ORACLE_ADMIN_URL'"
