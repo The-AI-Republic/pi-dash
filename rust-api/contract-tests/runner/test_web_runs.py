@@ -13,6 +13,8 @@ import uuid
 
 import pytest
 
+from _harness.auth import login_session
+from _harness.http import api_client
 from _harness.web import web_post
 
 WEB = "/api/runners"
@@ -100,6 +102,74 @@ def test_web_run_detail_unknown_is_404(user_client):
     response = user_client.get(f"{WEB}/runs/00000000-0000-0000-0000-000000000000/")
     assert response.status_code == 404
     assert response.json() == {"error": "not found"}
+
+
+def test_web_run_detail_null_issue_creator_is_200(user_client, seeder, daemon_world, machine_flow):
+    """A run bound to an issue with NULL created_by still reads 200 (PIDASHCONV-1049).
+
+    ``issues.created_by_id`` is nullable; Django dereferences
+    ``run.work_item.created_by_id`` → None and continues to the remaining
+    grants. The NULL column must not read as a missed join (500).
+    """
+    issue = seeder.create_issue(daemon_world["workspace"]["id"], daemon_world["project"]["id"])
+    assert (
+        seeder.db.fetchval("SELECT created_by_id FROM issues WHERE id = %s", (issue["id"],))
+        is None
+    )
+    run = seeder.create_daemon_run(
+        daemon_world["owner"]["id"], daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"], machine_flow["runner_id"],
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET work_item_id = %s WHERE id = %s", (issue["id"], run["id"])
+    )
+    response = user_client.get(f"{WEB}/runs/{run['id']}/")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert RUN_KEYS <= set(body)
+    assert body["id"] == run["id"]
+
+
+def test_web_run_detail_null_issue_creator_keeps_assignee_grant(
+    settings, seeder, daemon_world, machine_flow
+):
+    """A live assignee still views the run when the issue creator is NULL (PIDASHCONV-1049).
+
+    Django's work-item arm (``runs.py:107-116``) falls through from the
+    ``created_by_id == user`` miss (None never equals) to the live
+    through-model assignee check — the NULL creator must not disable it.
+    """
+    member = seeder.create_user()
+    seeder.create_member(daemon_world["workspace"]["id"], member["id"])
+    issue = seeder.create_issue(daemon_world["workspace"]["id"], daemon_world["project"]["id"])
+    assignee_row_id = str(uuid.uuid4())
+    seeder.db.execute(
+        "INSERT INTO issue_assignees (created_at, updated_at, id, assignee_id,"
+        " created_by_id, issue_id, project_id, updated_by_id, workspace_id)"
+        " VALUES (now(),now(),%s,%s,%s,%s,%s,%s,%s)",
+        (
+            assignee_row_id, member["id"], daemon_world["owner"]["id"],
+            issue["id"], daemon_world["project"]["id"],
+            daemon_world["owner"]["id"], daemon_world["workspace"]["id"],
+        ),
+    )
+    seeder.track.add("issue_assignees", assignee_row_id)
+    run = seeder.create_daemon_run(
+        daemon_world["owner"]["id"], daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"], machine_flow["runner_id"],
+    )
+    # Runner-less: the private-runner gate never applies, so the assignee
+    # grant is the only path to 200 for this actor (not the run creator,
+    # not a workspace admin).
+    seeder.db.execute(
+        "UPDATE agent_run SET work_item_id = %s, runner_id = NULL WHERE id = %s",
+        (issue["id"], run["id"]),
+    )
+    with api_client(settings.base_url) as client:
+        login_session(client, email=member["email"], password=member["password"])
+        response = client.get(f"{WEB}/runs/{run['id']}/")
+    assert response.status_code == 200, response.text
+    assert response.json()["id"] == run["id"]
 
 
 def test_web_runs_create_requires_prompt(user_client):

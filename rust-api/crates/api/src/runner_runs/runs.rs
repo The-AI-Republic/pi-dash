@@ -411,6 +411,7 @@ pub fn run_detail_sql() -> String {
             r#"SELECT {runs}, "#,
             r#""runner"."owner_id" AS "gate_runner_owner_id", "#,
             r#""runner"."visibility" AS "gate_runner_visibility", "#,
+            r#""issues"."id" AS "gate_work_item_id", "#,
             r#""issues"."created_by_id" AS "gate_work_item_created_by_id" "#,
             r#"FROM "agent_run" "#,
             r#"LEFT OUTER JOIN "runner" ON ("agent_run"."runner_id" = "runner"."id") "#,
@@ -994,13 +995,19 @@ async fn view_facts_for(
     runner_owner_id: Option<Uuid>,
     runner_visibility: Option<i16>,
     work_item_created_by_id: Option<Uuid>,
+    work_item_row_id: Option<Uuid>,
 ) -> Result<guards::RunViewFacts, Response> {
     // Runner set but the join missed (FK violation): Django raises on
-    // `run.runner.owner_id` — a 500.
+    // `run.runner.owner_id` — a 500. `runner.owner_id` is NOT NULL, so a
+    // NULL here can only be the missed join, never a present row.
     if run.runner_id.is_some() && runner_owner_id.is_none() {
         return Err(server_error());
     }
-    if run.work_item_id.is_some() && work_item_created_by_id.is_none() {
+    // The miss signal is row presence, not the creator column:
+    // `issues.created_by_id` is nullable, so a present row with a NULL
+    // creator (Django reads `run.work_item.created_by_id` → None and
+    // continues, `runs.py:108`) must not 500.
+    if run.work_item_id.is_some() && work_item_row_id.is_none() {
         return Err(server_error());
     }
     let role = workspace_role(pool, run.workspace_id, actor_id).await?;
@@ -1017,7 +1024,12 @@ async fn view_facts_for(
             visible_to_requester: visible,
         }
     });
-    let work_item_created_by_requester = work_item_created_by_id.map(|creator| creator == actor_id);
+    // `None` iff no work item (`runs.py:107` skips the whole arm). A
+    // present row with a NULL creator is `Some(false)` — the creator
+    // grant misses but the live-assignee grant below still applies.
+    let work_item_created_by_requester = run
+        .work_item_id
+        .map(|_| work_item_created_by_id == Some(actor_id));
     let live_assignee = match run.work_item_id {
         Some(issue_id) => has_live_assignee(pool, issue_id, actor_id).await?,
         None => false,
@@ -1038,6 +1050,7 @@ pub struct GuardedRun {
     pub runner_owner_id: Option<Uuid>,
     pub runner_visibility: Option<i16>,
     pub work_item_created_by_id: Option<Uuid>,
+    pub work_item_row_id: Option<Uuid>,
 }
 
 /// `select_related("runner", "work_item").filter(id).first()`.
@@ -1065,11 +1078,15 @@ pub async fn fetch_guarded_run(
     let work_item_created_by_id: Option<Uuid> = row
         .try_get("gate_work_item_created_by_id")
         .map_err(|_| server_error())?;
+    let work_item_row_id: Option<Uuid> = row
+        .try_get("gate_work_item_id")
+        .map_err(|_| server_error())?;
     Ok(Some(GuardedRun {
         run,
         runner_owner_id,
         runner_visibility,
         work_item_created_by_id,
+        work_item_row_id,
     }))
 }
 
@@ -1108,6 +1125,7 @@ pub async fn run_detail(
         guarded.runner_owner_id,
         guarded.runner_visibility,
         guarded.work_item_created_by_id,
+        guarded.work_item_row_id,
     )
     .await
     {
@@ -1322,6 +1340,7 @@ pub async fn cancel_run(
         guarded.runner_owner_id,
         guarded.runner_visibility,
         guarded.work_item_created_by_id,
+        guarded.work_item_row_id,
     )
     .await
     {
@@ -1631,6 +1650,7 @@ pub async fn release_pin(
         guarded.runner_owner_id,
         guarded.runner_visibility,
         guarded.work_item_created_by_id,
+        guarded.work_item_row_id,
     )
     .await
     {
