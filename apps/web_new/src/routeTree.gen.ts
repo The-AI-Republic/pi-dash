@@ -29,7 +29,9 @@ import { Route as AccountsSignUpRouteImport } from "./routes/accounts/sign-up";
 import { Route as AuthDeviceRouteImport } from "./routes/auth/device";
 import { Route as WsGatedIndexRouteImport } from "./routes/$ws/_gated/index";
 import { Route as WsGatedBrowseIssueKeyRouteImport } from "./routes/$ws/_gated/browse/$issueKey";
+import { Route as WsGatedProjectsIndexRouteImport } from "./routes/$ws/_gated/projects/index";
 import { Route as WsGatedProjectsProjectIdRouteRouteImport } from "./routes/$ws/_gated/projects/$projectId/route";
+import { Route as WsGatedProjectsArchivesIndexRouteImport } from "./routes/$ws/_gated/projects/archives/index";
 import { Route as WsGatedProjectsProjectIdIssuesIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/issues/index";
 
 const IndexRoute = IndexRouteImport.update({
@@ -131,9 +133,19 @@ const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
   path: "/browse/$issueKey",
   getParentRoute: () => WsGatedRouteRoute,
 } as any);
+const WsGatedProjectsIndexRoute = WsGatedProjectsIndexRouteImport.update({
+  id: "/projects/",
+  path: "/projects/",
+  getParentRoute: () => WsGatedRouteRoute,
+} as any);
 const WsGatedProjectsProjectIdRouteRoute = WsGatedProjectsProjectIdRouteRouteImport.update({
   id: "/projects/$projectId",
   path: "/projects/$projectId",
+  getParentRoute: () => WsGatedRouteRoute,
+} as any);
+const WsGatedProjectsArchivesIndexRoute = WsGatedProjectsArchivesIndexRouteImport.update({
+  id: "/projects/archives/",
+  path: "/projects/archives/",
   getParentRoute: () => WsGatedRouteRoute,
 } as any);
 const WsGatedProjectsProjectIdIssuesIndexRoute = WsGatedProjectsProjectIdIssuesIndexRouteImport.update({
@@ -163,6 +175,8 @@ export interface FileRoutesByFullPath {
   "/$ws/": typeof WsGatedIndexRoute;
   "/$ws/projects/$projectId": typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
   "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
+  "/$ws/projects/": typeof WsGatedProjectsIndexRoute;
+  "/$ws/projects/archives/": typeof WsGatedProjectsArchivesIndexRoute;
   "/$ws/projects/$projectId/issues/": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
 }
 export interface FileRoutesByTo {
@@ -185,6 +199,8 @@ export interface FileRoutesByTo {
   "/auth/device": typeof AuthDeviceRoute;
   "/$ws/projects/$projectId": typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
   "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
+  "/$ws/projects": typeof WsGatedProjectsIndexRoute;
+  "/$ws/projects/archives": typeof WsGatedProjectsArchivesIndexRoute;
   "/$ws/projects/$projectId/issues": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
 }
 export interface FileRoutesById {
@@ -210,6 +226,8 @@ export interface FileRoutesById {
   "/$ws/_gated/": typeof WsGatedIndexRoute;
   "/$ws/_gated/projects/$projectId": typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
   "/$ws/_gated/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
+  "/$ws/_gated/projects/": typeof WsGatedProjectsIndexRoute;
+  "/$ws/_gated/projects/archives/": typeof WsGatedProjectsArchivesIndexRoute;
   "/$ws/_gated/projects/$projectId/issues/": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
 }
 export interface FileRouteTypes {
@@ -235,6 +253,8 @@ export interface FileRouteTypes {
     | "/$ws/"
     | "/$ws/projects/$projectId"
     | "/$ws/browse/$issueKey"
+    | "/$ws/projects/"
+    | "/$ws/projects/archives/"
     | "/$ws/projects/$projectId/issues/";
   fileRoutesByTo: FileRoutesByTo;
   to:
@@ -257,6 +277,8 @@ export interface FileRouteTypes {
     | "/auth/device"
     | "/$ws/projects/$projectId"
     | "/$ws/browse/$issueKey"
+    | "/$ws/projects"
+    | "/$ws/projects/archives"
     | "/$ws/projects/$projectId/issues";
   id:
     | "__root__"
@@ -281,6 +303,8 @@ export interface FileRouteTypes {
     | "/$ws/_gated/"
     | "/$ws/_gated/projects/$projectId"
     | "/$ws/_gated/browse/$issueKey"
+    | "/$ws/_gated/projects/"
+    | "/$ws/_gated/projects/archives/"
     | "/$ws/_gated/projects/$projectId/issues/";
   fileRoutesById: FileRoutesById;
 }
@@ -445,11 +469,25 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof WsGatedBrowseIssueKeyRouteImport;
       parentRoute: typeof WsGatedRouteRoute;
     };
+    "/$ws/_gated/projects/": {
+      id: "/$ws/_gated/projects/";
+      path: "/projects";
+      fullPath: "/$ws/projects/";
+      preLoaderRoute: typeof WsGatedProjectsIndexRouteImport;
+      parentRoute: typeof WsGatedRouteRoute;
+    };
     "/$ws/_gated/projects/$projectId": {
       id: "/$ws/_gated/projects/$projectId";
       path: "/projects/$projectId";
       fullPath: "/$ws/projects/$projectId";
       preLoaderRoute: typeof WsGatedProjectsProjectIdRouteRouteImport;
+      parentRoute: typeof WsGatedRouteRoute;
+    };
+    "/$ws/_gated/projects/archives/": {
+      id: "/$ws/_gated/projects/archives/";
+      path: "/projects/archives";
+      fullPath: "/$ws/projects/archives/";
+      preLoaderRoute: typeof WsGatedProjectsArchivesIndexRouteImport;
       parentRoute: typeof WsGatedRouteRoute;
     };
     "/$ws/_gated/projects/$projectId/issues/": {
@@ -478,12 +516,16 @@ interface WsGatedRouteRouteChildren {
   WsGatedIndexRoute: typeof WsGatedIndexRoute;
   WsGatedProjectsProjectIdRouteRoute: typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
   WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute;
+  WsGatedProjectsIndexRoute: typeof WsGatedProjectsIndexRoute;
+  WsGatedProjectsArchivesIndexRoute: typeof WsGatedProjectsArchivesIndexRoute;
 }
 
 const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedIndexRoute: WsGatedIndexRoute,
   WsGatedProjectsProjectIdRouteRoute: WsGatedProjectsProjectIdRouteRouteWithChildren,
   WsGatedBrowseIssueKeyRoute: WsGatedBrowseIssueKeyRoute,
+  WsGatedProjectsIndexRoute: WsGatedProjectsIndexRoute,
+  WsGatedProjectsArchivesIndexRoute: WsGatedProjectsArchivesIndexRoute,
 };
 
 const WsGatedRouteRouteWithChildren = WsGatedRouteRoute._addFileChildren(WsGatedRouteRouteChildren);

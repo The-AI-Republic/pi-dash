@@ -7,6 +7,8 @@ export { Avatar } from "./components/Avatar";
 export type { AvatarProps, AvatarSize } from "./components/Avatar";
 export { Badge } from "./components/Badge";
 export type { BadgeProps, BadgeTone } from "./components/Badge";
+export { Breadcrumbs, BREADCRUMB_LONG_LABEL_LENGTH } from "./components/Breadcrumbs";
+export type { BreadcrumbEntry, BreadcrumbsProps } from "./components/Breadcrumbs";
 export { Button } from "./components/Button";
 export type { ButtonProps, ButtonSize, ButtonVariant } from "./components/Button";
 export { Dialog } from "./components/Dialog";
