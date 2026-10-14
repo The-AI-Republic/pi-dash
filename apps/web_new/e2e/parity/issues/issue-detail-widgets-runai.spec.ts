@@ -1,14 +1,17 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Oracle scenarios: Run AI and Comment & Run (NEWFRONT-121, Part C). Each
-// scenario pins its issue to a scenario-owned empty pod, so dispatch
-// deterministically reports failure (no runner in that pod can serve it);
-// these scenarios pin that graceful-failure path plus the comment-first
-// ordering. Against scenario-owned issues, green on apps/web first.
+// Oracle scenarios: Run AI and Comment & Run (NEWFRONT-121, Part C). The
+// ISS-192 scenario pins its issue to a scenario-owned empty pod, so
+// dispatch deterministically reports failure (no runner in that pod can
+// serve it); the seeded default pod enrolls runners, so an unpinned
+// issue would dispatch successfully instead. The ISS-193 continuation
+// needs no pin: a fresh issue has no prior run, so its dispatch fails
+// before runner eligibility is ever consulted. Against scenario-owned
+// issues, green on apps/web first.
 // Rows: ISS-192, ISS-193.
 import { test, expect } from "../fixtures";
-import { createPod, deletePod, issueComments, patchIssue, recentRuns, signInSession } from "../helpers/api";
+import { createPod, deletePod, fetchIssue, issueComments, patchIssue, recentRuns, signInSession } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 import { dropIssue, ownIssue, signIn } from "./detail-support";
 
@@ -22,13 +25,15 @@ test(
     // dispatch successfully; pin the scenario-owned issue to a
     // scenario-owned empty pod instead, which has no runners by
     // construction and restores the deterministic graceful-failure premise.
-    const emptyPod = await createPod(seed.projectId, session, `Oracle runai empty ${Date.now()}`);
+    const emptyPod = await createPod(seed.projectId, session, `orunai-empty-${Date.now()}`);
     const issue = await ownIssue(seed, session, `Oracle runai ${Date.now()}`);
     try {
-      const pinned = await patchIssue(seed.workspaceSlug, seed.projectId, issue.id, session, {
+      // The PATCH response is narrow, so the pin is read back with a GET.
+      await patchIssue(seed.workspaceSlug, seed.projectId, issue.id, session, {
         assigned_pod_id: emptyPod.id,
       });
-      expect(pinned["assigned_pod_id"]).toBe(emptyPod.id);
+      const pin = (await fetchIssue(seed.workspaceSlug, seed.projectId, issue.id, session))["assigned_pod_id"];
+      expect(pin).toBe(emptyPod.id);
       await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(issue.name);
       await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
@@ -58,16 +63,8 @@ test(
     await signIn(driver, seed);
     const session = await signInSession(seed.email, seed.password);
     const ts = Date.now();
-    // Same empty-pod premise as ISS-192 above: without the pin the seeded
-    // runners would serve the continuation dispatch and the failure toast
-    // below would never fire.
-    const emptyPod = await createPod(seed.projectId, session, `Oracle commentrun empty ${ts}`);
     const issue = await ownIssue(seed, session, `Oracle commentrun ${ts}`);
     try {
-      const pinned = await patchIssue(seed.workspaceSlug, seed.projectId, issue.id, session, {
-        assigned_pod_id: emptyPod.id,
-      });
-      expect(pinned["assigned_pod_id"]).toBe(emptyPod.id);
       await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(issue.name);
       await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
@@ -96,11 +93,7 @@ test(
         expect((await recentRuns(session)).filter((row) => row["work_item"] === issue.id)).toHaveLength(0);
       });
     } finally {
-      try {
-        await dropIssue(seed, session, issue.id);
-      } finally {
-        await deletePod(emptyPod.id, session).catch(() => undefined);
-      }
+      await dropIssue(seed, session, issue.id);
     }
   }
 );
