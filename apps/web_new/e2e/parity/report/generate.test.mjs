@@ -43,6 +43,36 @@ function fixtureInventory() {
   return dir;
 }
 
+function fixtureInventoryWithDrops() {
+  const dir = fixtureInventory();
+  writeFileSync(
+    join(dir, "retired.md"),
+    [
+      "# Retired",
+      "",
+      "| ID | Capability | Parity test | Status |",
+      "| --- | --- | --- | --- |",
+      "| RTD-001 | First retired thing | | dropped by NEWFRONT-1 (D7 exception) |",
+      "| RTD-002 | Second retired thing | | dropped by NEWFRONT-1 (D7 exception) |",
+      "",
+    ].join("\n")
+  );
+  writeFileSync(
+    join(dir, "mixed.md"),
+    [
+      "# Mixed",
+      "",
+      "| ID | Capability | Parity test | Status |",
+      "| --- | --- | --- | --- |",
+      "| MXD-001 | Live green row | mixed/a.spec.ts | oracle green |",
+      "| MXD-002 | Live todo row | | todo |",
+      "| MXD-003 | Dropped row | | dropped by NEWFRONT-2 |",
+      "",
+    ].join("\n")
+  );
+  return dir;
+}
+
 function generate(inventoryDir) {
   const out = join(mkdtempSync(join(tmpdir(), "parity-report-out-")), "report.md");
   execFileSync(process.execPath, [generator, "--inventory", inventoryDir, "--out", out], {
@@ -74,5 +104,28 @@ describe("parity report generator", () => {
     }
     // WDG-002 is todo with no runs, so the per-row table omits it entirely.
     assert.ok(!report.includes("| WDG-002 |"));
+  });
+
+  it("renders a fully-dropped area as dropped with no per-row table", () => {
+    const report = generate(fixtureInventoryWithDrops());
+    assert.match(report, /^## retired — dropped by decision \(2 rows out of scope\)$/m);
+    assert.match(report, /^Dropped by decision; no scenarios expected\.$/m);
+    for (const id of ["RTD-001", "RTD-002"]) {
+      assert.ok(!report.includes(`| ${id} |`), `dropped row ${id} must not appear`);
+    }
+  });
+
+  it("excludes dropped rows from a partially-dropped area's denominators", () => {
+    const report = generate(fixtureInventoryWithDrops());
+    assert.match(report, /^## mixed — 1\/2 oracle green, 0\/2 new green, 1 dropped$/m);
+    assert.match(report, /^\| MXD-001 \| green \| — \|/m);
+    assert.ok(!report.includes("| MXD-003 |"));
+  });
+
+  it("excludes dropped rows from the totals and reports the dropped count", () => {
+    const report = generate(fixtureInventoryWithDrops());
+    // Live rows: 3 widgets + 2 mixed; green: WDG-001, WDG-003, MXD-001.
+    assert.match(report, /^Total: 3\/5 oracle green, 0\/5 new green\.$/m);
+    assert.match(report, /^Dropped by decision, out of scope: 3\.$/m);
   });
 });
