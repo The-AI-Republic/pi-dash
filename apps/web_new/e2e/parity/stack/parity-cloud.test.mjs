@@ -24,6 +24,7 @@ const downScript = join(here, "parity-down.sh");
 const cloudLib = join(here, "lib", "parity-cloud.sh");
 const apiDockerfile = join(here, "Dockerfile.api-cloud");
 const oracleDockerfile = join(here, "Dockerfile.oracle-cloud-prod");
+const adminCloudDockerfile = join(here, "Dockerfile.oracle-admin-cloud-prod");
 const oracleNginxConf = join(here, "nginx-oracle-cloud.conf");
 const cloudSeed = join(here, "seed", "seed_cloud.py");
 const webNewGitignore = join(here, "..", "..", "..", ".gitignore");
@@ -134,9 +135,9 @@ describe("cloud oracle stack (NEWFRONT-436)", () => {
     assert.ok(!cloud.includes("ports:"), "the cloud oracle serves through the proxy only, like oracle-prod");
   });
 
-  it("keeps both cloud services behind the cloud profile", () => {
+  it("keeps all cloud services behind the cloud profile", () => {
     const text = readFileSync(composeFile, "utf8");
-    for (const service of ["api-cloud", "oracle-cloud-prod"]) {
+    for (const service of ["api-cloud", "oracle-cloud-prod", "oracle-admin-cloud-prod"]) {
       assert.ok(
         serviceBlock(text, service).includes('profiles: ["cloud"]'),
         `${service} must stay out of a bare compose up`
@@ -200,6 +201,48 @@ describe("cloud oracle stack (NEWFRONT-436)", () => {
     );
   });
 
+  it("defines oracle-admin-cloud-prod as a static nginx oracle on the shared admin alias", () => {
+    const text = readFileSync(composeFile, "utf8");
+    const admin = serviceBlock(text, "oracle-admin-cloud-prod");
+    assert.ok(
+      admin.includes("dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-admin-cloud-prod"),
+      "the cloud admin oracle builds from its own Dockerfile"
+    );
+    assert.ok(!admin.includes("ports:"), "the cloud admin oracle serves through the proxy only, like oracle-prod");
+    assert.ok(
+      admin.includes("oracle-admin-upstream"),
+      "the cloud admin oracle answers the shared alias, so the proxy needs no per-edition admin upstream"
+    );
+    assert.ok(
+      admin.includes("parity19}-oracle-admin-cloud-prod:local"),
+      "the image tag interpolates the container prefix with the legacy default"
+    );
+  });
+
+  it("builds the cloud admin oracle from OSS admin sources plus one overlay layer", () => {
+    const text = readFileSync(adminCloudDockerfile, "utf8");
+    assert.ok(text.includes("COPY apps/admin apps/admin"), "the cloud admin oracle tracks the old admin app itself");
+    assert.ok(
+      text.includes(".cloud-staging/ee-overlay/apps/admin/ apps/admin/"),
+      "the overlay admin file lands on the matching OSS path"
+    );
+    assert.ok(!text.match(/^COPY \. \./m), "no blanket repo copy in the cloud admin oracle image");
+    // Same layering discipline as the web cloud oracle: install, then
+    // overlay, then package builds.
+    const installAt = text.indexOf("pnpm install");
+    const overlayAt = text.indexOf(".cloud-staging/ee-overlay/apps/admin/");
+    const buildAt = text.indexOf("tsdown --no-dts");
+    assert.ok(
+      installAt >= 0 && overlayAt > installAt && buildAt > overlayAt,
+      "install, then overlay, then package builds"
+    );
+    assert.ok(
+      text.includes("apps/admin/nginx/nginx.conf /etc/nginx/nginx.conf"),
+      "the cloud admin oracle serves through the admin nginx config"
+    );
+    assert.ok(text.includes("EXPOSE 3000"), "serves the compose-expected port");
+  });
+
   it("serves prerendered marketing pages directly with an SPA fallback", () => {
     const text = readFileSync(oracleNginxConf, "utf8");
     assert.ok(
@@ -217,7 +260,24 @@ describe("cloud oracle stack (NEWFRONT-436)", () => {
     assert.ok(text.includes("oracle-cloud-prod:3000"), "cloud bring-up points the proxy at the cloud oracle");
     assert.ok(text.includes("has no cloud oracle yet"), "cloud+dev refuses instead of silently serving prod");
     assert.ok(text.includes('exec -T "$API_SERVICE"'), "migrate, bootstrap and seed follow the selected API");
-    assert.ok(text.includes('WARM_ROUTES="/ /home /login"'), "the cloud oracle warms its marketing surface");
+    assert.ok(
+      text.includes('WARM_ROUTES="/ /home /login /god-mode/"'),
+      "the cloud oracle warms its marketing surface plus the cloud admin entry"
+    );
+    // The admin oracle follows the edition (NEWFRONT-446): the OSS admin
+    // build would serve the wrong entry gate on a cloud stack.
+    assert.ok(
+      text.includes('ORACLE_ADMIN_SERVICE="oracle-admin-cloud-prod"'),
+      "cloud bring-up points the admin mount at the overlaid admin oracle"
+    );
+    assert.ok(
+      text.includes("oracle-admin-cloud-prod:3000"),
+      "cloud bring-up points the admin upstream at the overlaid admin oracle"
+    );
+    assert.ok(
+      text.includes("for admin_service in oracle-admin oracle-admin-prod oracle-admin-cloud-prod"),
+      "bring-up stops every non-selected admin oracle so the shared alias never splits traffic"
+    );
     assert.ok(
       text.includes("up -d --no-deps pg redis mq minio api-cloud"),
       "cloud up names every service and skips OSS deps"
@@ -327,7 +387,13 @@ describe("cloud oracle stack (NEWFRONT-436)", () => {
   it("resolves and stages a complete overlay checkout", () => {
     const overlay = mkdtempSync(join(tmpdir(), "parity-cloud-overlay-"));
     try {
-      for (const sub of ["ee-overlay/apps/web", "ee-overlay/apps/api", "ee-overlay/packages", "pi_dash_cloud"]) {
+      for (const sub of [
+        "ee-overlay/apps/web",
+        "ee-overlay/apps/api",
+        "ee-overlay/apps/admin",
+        "ee-overlay/packages",
+        "pi_dash_cloud",
+      ]) {
         mkdirSync(join(overlay, sub), { recursive: true });
       }
       writeFileSync(join(overlay, ".oss-pin"), "pinned-sha\n");
@@ -341,7 +407,13 @@ describe("cloud oracle stack (NEWFRONT-436)", () => {
       const output = execFileSync("bash", ["-c", script], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
       assert.ok(output.includes("cloud overlay staged"), `staging must announce itself, got: ${output}`);
       assert.ok(output.includes("pinned-sha"), "staging must print the pinned OSS SHA for provenance");
-      for (const sub of ["ee-overlay/apps/web", "ee-overlay/apps/api", "ee-overlay/packages", "pi_dash_cloud"]) {
+      for (const sub of [
+        "ee-overlay/apps/web",
+        "ee-overlay/apps/api",
+        "ee-overlay/apps/admin",
+        "ee-overlay/packages",
+        "pi_dash_cloud",
+      ]) {
         assert.ok(existsSync(join(here, ".cloud-staging", sub)), `staging must carry ${sub}`);
       }
     } finally {
@@ -361,7 +433,13 @@ describe("cloud oracle stack (NEWFRONT-436)", () => {
       const fakeStack = join(root, "repo", "apps", "web_new", "e2e", "parity", "stack");
       mkdirSync(fakeStack, { recursive: true });
       const overlay = join(root, "private-pi-dash");
-      for (const sub of ["ee-overlay/apps/web", "ee-overlay/apps/api", "ee-overlay/packages", "pi_dash_cloud"]) {
+      for (const sub of [
+        "ee-overlay/apps/web",
+        "ee-overlay/apps/api",
+        "ee-overlay/apps/admin",
+        "ee-overlay/packages",
+        "pi_dash_cloud",
+      ]) {
         mkdirSync(join(overlay, sub), { recursive: true });
       }
       writeFileSync(join(overlay, ".oss-pin"), "pinned-sha\n");
@@ -418,6 +496,10 @@ describe("cloud oracle stack (NEWFRONT-436)", () => {
         stderr.includes("missing 'ee-overlay/apps/api'"),
         `refusal must name the missing subtree, got: ${stderr}`
       );
+      assert.ok(
+        stderr.includes("missing 'ee-overlay/apps/admin'"),
+        `refusal must name the missing admin subtree, got: ${stderr}`
+      );
     } finally {
       rmSync(overlay, { recursive: true, force: true });
     }
@@ -450,9 +532,11 @@ describe("cloud oracle stack (NEWFRONT-436)", () => {
       const bare = composeConfigServices([]);
       assert.ok(!bare.includes("api-cloud"), "bare config must not select api-cloud");
       assert.ok(!bare.includes("oracle-cloud-prod"), "bare config must not select oracle-cloud-prod");
+      assert.ok(!bare.includes("oracle-admin-cloud-prod"), "bare config must not select oracle-admin-cloud-prod");
       const cloud = composeConfigServices(["cloud"]);
       assert.ok(cloud.includes("api-cloud"), "the cloud profile must select api-cloud");
       assert.ok(cloud.includes("oracle-cloud-prod"), "the cloud profile must select oracle-cloud-prod");
+      assert.ok(cloud.includes("oracle-admin-cloud-prod"), "the cloud profile must select oracle-admin-cloud-prod");
     }
   );
 });

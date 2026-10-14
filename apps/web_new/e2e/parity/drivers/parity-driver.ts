@@ -8425,6 +8425,68 @@ export interface ParityDriver {
   /** Runners presence snapshot (bug-pinned until the runners page lands). */
   adminRunnersFacts(): Promise<AdminRunnersFacts>;
 
+  // --- Admin dashboard shell + negatives (NEWFRONT-446, ADM-062..073). ---
+  /** Sidebar entries with active state, plus collapse facts. */
+  adminSidebarFacts(): Promise<AdminSidebarFacts>;
+  /** Follow the sidebar entry named `name`; resolves once the dashboard settles. */
+  adminSidebarFollowEntry(name: string): Promise<void>;
+  /** Toggle the sidebar through the help-section collapse control. */
+  adminSidebarToggleCollapse(): Promise<void>;
+  /** Click outside the sidebar (mobile auto-collapse probe, ADM-063). */
+  adminSidebarOutsideClick(): Promise<void>;
+  /** Account dropdown facts (identity row plus opened-menu contents). */
+  adminAccountFacts(): Promise<AdminAccountFacts>;
+  /** Open the account dropdown (avatar when expanded, icon button when collapsed). */
+  adminAccountOpen(): Promise<void>;
+  /** Header breadcrumb trail facts. */
+  adminBreadcrumbFacts(): Promise<AdminBreadcrumbFacts>;
+  /** Hover the crumb labeled `label`; resolve with its tooltip text (long labels). */
+  adminBreadcrumbTooltip(label: string): Promise<string | null>;
+  /** Help-section facts (redirect link, popover links, version). */
+  adminHelpFacts(): Promise<AdminHelpFacts>;
+  /** Open the help popover. */
+  adminHelpOpen(): Promise<void>;
+  /** Mobile hamburger facts. */
+  adminHamburgerFacts(): Promise<AdminHamburgerFacts>;
+  /** Toggle the sidebar through the header hamburger. */
+  adminHamburgerToggle(): Promise<void>;
+  /** Start counting instance-configuration fetches (shared-cache probe). */
+  adminStartConfigFetchSpy(): Promise<void>;
+  /** Instance-configuration fetch count since the spy started. */
+  adminConfigFetchCount(): Promise<number>;
+  /** Start counting realtime transports (websockets, event streams). */
+  adminStartTransportSpy(): Promise<void>;
+  /** Realtime transport counts since the spy started. */
+  adminTransportFacts(): Promise<AdminTransportFacts>;
+  /** Dashboard absence scan: drag sources, file inputs, transfer and desktop controls. */
+  adminAbsenceFacts(): Promise<AdminAbsenceFacts>;
+  /** Press `keys` with body focus; report navigation/dialog side effects. */
+  adminShortcutProbe(keys: string[]): Promise<AdminShortcutProbeFacts>;
+  /** Delete the open loop job while watching for confirmation dialogs. */
+  adminLoopDeleteWatchDialogs(): Promise<AdminDeleteWatchFacts>;
+  /** Workspace-page delete-control scan. */
+  adminWorkspaceDeleteFacts(): Promise<AdminWorkspaceDeleteFacts>;
+
+  // --- Admin cloud entry gate (NEWFRONT-446, ADM-074..079). ---
+  /** Cloud home-entry branch snapshot. */
+  adminCloudHomeFacts(): Promise<AdminCloudHomeFacts>;
+  /** Wait until the cloud home entry settles on `branch`. */
+  adminCloudWaitForHomeBranch(branch: AdminCloudHomeBranch): Promise<void>;
+  /** Open the admin root with `cookies` planted (cloud sessions). */
+  adminCloudOpenRootWithCookies(cookies: ParityBrowserCookie[]): Promise<void>;
+  /** Fail the next `times` admin-check reads with `status`, then pass through. */
+  adminCloudFailAdminCheck(times: number, status: number): Promise<void>;
+  /** Fail the next `times` auth-probe reads with `status`, then pass through. */
+  adminCloudFailAuthProbe(times: number, status: number): Promise<void>;
+  /** Delay the next admin-check read by `ms` (one-shot; the spinner then shows deterministically). */
+  adminCloudDelayAdminCheck(ms: number): Promise<void>;
+  /** Admin-check + probe request counts since the last spy start. */
+  adminCloudGateFetchCounts(): Promise<AdminCloudGateFetchCounts>;
+  /** Start counting the gate's admin-check + probe reads. */
+  adminCloudStartGateFetchSpy(): Promise<void>;
+  /** Click the gate's retry control. */
+  adminCloudRetry(): Promise<void>;
+
   // --- Space board access & routing (NEWFRONT-447, SPC-001..009). ---
   /** Open an arbitrary in-app path (unknown-path routing, SPC-009). */
   spaceAccessOpenPath(path: string): Promise<void>;
@@ -12653,4 +12715,161 @@ export interface AdminRunnersFacts {
   sidebarEntryVisible: boolean;
   /** Sidebar Runners entry target, or null when absent. */
   sidebarHref: string | null;
+}
+
+/** One dashboard sidebar entry (NEWFRONT-446, ADM-062). */
+export interface AdminSidebarEntry {
+  /** Entry name as rendered. */
+  name: string;
+  /** Entry description as rendered (empty when collapsed to icons). */
+  description: string;
+  /** Entry target href. */
+  href: string;
+  /** Whether the entry carries the active highlight. */
+  active: boolean;
+}
+
+/** Sidebar navigation + collapse snapshot (NEWFRONT-446, ADM-062/063). */
+export interface AdminSidebarFacts {
+  /** Menu entries in render order. */
+  entries: AdminSidebarEntry[];
+  /** Whether the sidebar is collapsed to the icon rail. */
+  collapsed: boolean;
+  /** Persisted collapse flag, or null when nothing is stored yet. */
+  persistedCollapsed: boolean | null;
+  /** Sidebar left edge in CSS pixels (negative when off-canvas). */
+  x: number | null;
+}
+
+/** Account dropdown snapshot (NEWFRONT-446, ADM-064). */
+export interface AdminAccountFacts {
+  /** Whether the admin label row is showing. */
+  labelVisible: boolean;
+  /** Whether the avatar control is showing. */
+  avatarVisible: boolean;
+  /** Whether the dropdown menu is open. */
+  menuOpen: boolean;
+  /** Account email shown in the open menu, or null when closed. */
+  email: string | null;
+  /** Theme menu item label, or null when closed. */
+  themeItemLabel: string | null;
+  /** Whether the sign-out control is showing in the open menu. */
+  signOutVisible: boolean;
+  /** Sign-out form action, or null when closed. */
+  signOutAction: string | null;
+  /** Whether the sign-out form carries a CSRF token. */
+  csrfTokenPresent: boolean;
+}
+
+/** One header breadcrumb (NEWFRONT-446, ADM-066). */
+export interface AdminBreadcrumbItem {
+  /** Crumb label as rendered. */
+  label: string;
+  /** Crumb target href, or null when the crumb is not a link. */
+  href: string | null;
+}
+
+/** Header breadcrumb trail snapshot (NEWFRONT-446, ADM-066). */
+export interface AdminBreadcrumbFacts {
+  /** Crumbs in render order, leading with the settings entry. */
+  items: AdminBreadcrumbItem[];
+}
+
+/** One help-popover link (NEWFRONT-446, ADM-067). */
+export interface AdminHelpLink {
+  /** Link name as rendered. */
+  name: string;
+  /** Link target href. */
+  href: string | null;
+  /** Link target attribute, or null when unset. */
+  target: string | null;
+}
+
+/** Sidebar help-section snapshot (NEWFRONT-446, ADM-067). */
+export interface AdminHelpFacts {
+  /** Main-app redirect link href. */
+  redirectHref: string | null;
+  /** Whether the help popover is open. */
+  popoverOpen: boolean;
+  /** Popover links in render order (empty when closed). */
+  links: AdminHelpLink[];
+  /** Popover version footer text, or null when closed. */
+  versionText: string | null;
+}
+
+/** Mobile hamburger snapshot (NEWFRONT-446, ADM-068). */
+export interface AdminHamburgerFacts {
+  /** Whether the hamburger control is visible at the current viewport. */
+  visible: boolean;
+}
+
+/** Realtime transport counts (NEWFRONT-446, ADM-069). */
+export interface AdminTransportFacts {
+  /** WebSocket connections opened since the spy started. */
+  websockets: number;
+  /** Event-stream requests seen since the spy started. */
+  eventStreams: number;
+}
+
+/** Dashboard absence scan (NEWFRONT-446, ADM-070/072). */
+export interface AdminAbsenceFacts {
+  /** Elements marked draggable. */
+  draggable: number;
+  /** File inputs. */
+  fileInputs: number;
+  /** Buttons/links offering import or export. */
+  transferControls: number;
+  /** Buttons/links mentioning the desktop app. */
+  desktopMentions: number;
+}
+
+/** Keyboard-shortcut probe outcome (NEWFRONT-446, ADM-071). */
+export interface AdminShortcutProbeFacts {
+  /** Path before the key presses. */
+  pathBefore: string;
+  /** Path after the key presses. */
+  pathAfter: string;
+  /** Dialogs that opened during the key presses. */
+  dialogsOpened: number;
+}
+
+/** Confirmation-dialog watch outcome (NEWFRONT-446, ADM-073). */
+export interface AdminDeleteWatchFacts {
+  /** Native dialogs that fired during the delete. */
+  nativeDialogs: number;
+  /** In-page dialogs that appeared during the delete. */
+  modalDialogs: number;
+}
+
+/** Workspace-page delete-control scan (NEWFRONT-446, ADM-073). */
+export interface AdminWorkspaceDeleteFacts {
+  /** Buttons/links offering workspace deletion. */
+  deleteControls: number;
+}
+
+/** Cloud home-entry branches (NEWFRONT-446, ADM-074..079). */
+export type AdminCloudHomeBranch = "spinner" | "denied" | "error";
+
+/** Cloud home-entry snapshot (NEWFRONT-446, ADM-074..079). */
+export interface AdminCloudHomeFacts {
+  /** Which entry branch is showing. */
+  branch: AdminCloudHomeBranch;
+  /** Branch heading text. */
+  heading: string | null;
+  /** Denied-screen way-back link href (denied branch only). */
+  deniedHref: string | null;
+  /** Whether the retry control is showing (error branch only). */
+  retryVisible: boolean;
+  /** Password fields on the page (always zero on the cloud gate). */
+  passwordFields: number;
+  /** Setup-form fields on the page (always zero on the cloud gate). */
+  setupFields: number;
+}
+
+/** Cloud gate request counts (NEWFRONT-446, ADM-078/079). */
+export interface AdminCloudGateFetchCounts {
+  /** Admin-check reads since the spy started. */
+  adminCheck: number;
+  /** Auth-probe reads since the spy started. */
+  probe: number;
 }

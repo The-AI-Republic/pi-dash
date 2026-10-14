@@ -44,7 +44,11 @@ parity_cloud_resolve_overlay() {
   fi
   local missing=0
   local sub
-  for sub in ee-overlay/apps/web ee-overlay/apps/api ee-overlay/packages pi_dash_cloud .oss-pin; do
+  # ee-overlay/apps/admin is the one-file cloud home-page override the
+  # cloud admin oracle swaps in (NEWFRONT-446); the checkout carries it
+  # next to the web/api subtrees, so requiring it breaks no existing
+  # checkout.
+  for sub in ee-overlay/apps/web ee-overlay/apps/api ee-overlay/apps/admin ee-overlay/packages pi_dash_cloud .oss-pin; do
     if [ ! -e "$dir/$sub" ]; then
       echo "[parity] cloud overlay at '$dir' is missing '$sub'" >&2
       missing=1
@@ -75,6 +79,7 @@ parity_cloud_stage_overlay() {
   mkdir -p "$staging/ee-overlay/apps" "$staging/ee-overlay/packages"
   cp -a "$dir/ee-overlay/apps/web" "$staging/ee-overlay/apps/web"
   cp -a "$dir/ee-overlay/apps/api" "$staging/ee-overlay/apps/api"
+  cp -a "$dir/ee-overlay/apps/admin" "$staging/ee-overlay/apps/admin"
   cp -a "$dir/ee-overlay/packages" "$staging/ee-overlay/packages"
   cp -a "$dir/pi_dash_cloud" "$staging/pi_dash_cloud"
   local head="unknown"

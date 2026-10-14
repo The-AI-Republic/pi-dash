@@ -27,6 +27,8 @@ import {
 } from "@playwright/test";
 import { parityOracleAdminUrl } from "../helpers/parity-env";
 import type {
+  AdminAbsenceFacts,
+  AdminAccountFacts,
   AdminAccountMenuFacts,
   AdminAiFacts,
   AdminAuthCopyFact,
@@ -35,12 +37,21 @@ import type {
   AdminAuthLandingFacts,
   AdminAuthMethodCard,
   AdminAuthProviderFacts,
+  AdminBreadcrumbFacts,
+  AdminBreadcrumbItem,
+  AdminCloudGateFetchCounts,
+  AdminCloudHomeBranch,
+  AdminCloudHomeFacts,
+  AdminDeleteWatchFacts,
   AdminEmailFacts,
   AdminEmailFields,
   AdminEmailFormFacts,
   AdminEmailSecurity,
   AdminFailureFacts,
   AdminGeneralFacts,
+  AdminHamburgerFacts,
+  AdminHelpFacts,
+  AdminHelpLink,
   AdminImageFacts,
   AdminLoopDetailFacts,
   AdminLoopListFacts,
@@ -53,9 +64,14 @@ import type {
   AdminRunnersFacts,
   AdminSetupFacts,
   AdminSetupFields,
+  AdminShortcutProbeFacts,
+  AdminSidebarEntry,
+  AdminSidebarFacts,
   AdminSignInFacts,
   AdminTestEmailFacts,
+  AdminTransportFacts,
   AdminWorkspaceCreateFacts,
+  AdminWorkspaceDeleteFacts,
   AdminWorkspaceListFacts,
   AdminWorkspaceRow,
   ApprovalCard,
@@ -50793,7 +50809,10 @@ export class WebDriver implements ParityDriver {
   async adminThemeFacts(): Promise<{ stored: string | null; resolved: "light" | "dark" }> {
     return this.page.evaluate(() => {
       const stored = window.localStorage.getItem("theme");
-      const resolved = window.document.documentElement.classList.contains("dark") ? "dark" : "light";
+      // Resolved mode lives on data-theme (observed: the toggle flips
+      // data-theme and color-scheme, never a dark class) — NEWFRONT-446.
+      const root = window.document.documentElement;
+      const resolved = root.getAttribute("data-theme") === "dark" || root.classList.contains("dark") ? "dark" : "light";
       return { stored, resolved };
     });
   }
@@ -52861,6 +52880,478 @@ export class WebDriver implements ParityDriver {
       sidebarEntryVisible,
       sidebarHref: !sidebarEntryVisible ? null : await sidebarEntry.first().getAttribute("href"),
     };
+  }
+
+  // --- Admin dashboard shell + negatives (NEWFRONT-446, ADM-062..073). ---
+  // Every selector below was observed on the running old admin console.
+  // The sidebar carries no landmarks: the menu is the icon-rail scroll
+  // container, the help footer is the only bordered-top strip, the
+  // header is main's first block, and the account menu is child 1's
+  // headless-ui menu (avatar trigger when expanded, icon trigger when
+  // collapsed).
+
+  /** Dashboard sidebar root. */
+  private adminShellSidebar(): Locator {
+    return this.page.locator("div.fixed.inset-y-0").first();
+  }
+
+  /** Sidebar menu entry links (name + description, or icon-only when collapsed). */
+  private adminShellMenuLinks(): Locator {
+    return this.adminShellSidebar().locator("div.scrollbar-sm a[href]");
+  }
+
+  /** Sidebar help footer (redirect link, help and collapse controls). */
+  private adminShellHelpFooter(): Locator {
+    return this.adminShellSidebar().locator("div.border-t").first();
+  }
+
+  /** Dashboard header (hamburger plus breadcrumb trail). */
+  private adminShellHeader(): Locator {
+    return this.page.locator("main > div").first();
+  }
+
+  async adminSidebarFacts(): Promise<AdminSidebarFacts> {
+    const links = this.adminShellMenuLinks();
+    const total = await links.count();
+    const entries: AdminSidebarEntry[] = [];
+    for (let i = 0; i < total; i++) {
+      const link = links.nth(i);
+      const lines = (await link.innerText())
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== "");
+      // The active highlight is an exact class token on the entry's
+      // inner node: a substring match would also catch the inactive
+      // pseudo-variant (active:bg-...) every entry carries.
+      const classes = await link
+        .locator("div")
+        .evaluateAll((divs) => divs.map((div) => div.getAttribute("class") ?? ""));
+      entries.push({
+        name: lines[0] ?? "",
+        description: lines.slice(1).join(" "),
+        href: (await link.getAttribute("href")) ?? "",
+        active: classes.some((cls) => cls.split(/\s+/).includes("!bg-layer-transparent-active")),
+      });
+    }
+    // Collapsed entries render the icon alone, so an empty first entry
+    // reads the collapse state without depending on the persisted flag.
+    const firstText = total === 0 ? "" : (await links.first().innerText()).trim();
+    const persistedRaw = await this.page.evaluate(() => window.localStorage.getItem("god_mode_sidebar_collapsed"));
+    return {
+      entries,
+      collapsed: total > 0 && firstText === "",
+      persistedCollapsed: persistedRaw === null ? null : persistedRaw === "true",
+      x: (await this.adminShellSidebar().boundingBox())?.x ?? null,
+    };
+  }
+
+  async adminSidebarFollowEntry(name: string): Promise<void> {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const link = this.adminShellMenuLinks().filter({ hasText: new RegExp(escaped) });
+    await link.first().click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      const facts = await this.adminSidebarFacts();
+      if (facts.entries.some((entry) => entry.name === name && entry.active)) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] sidebar entry ${JSON.stringify(name)} never activated.`);
+      }
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async adminSidebarToggleCollapse(): Promise<void> {
+    const before = (await this.adminSidebarFacts()).collapsed;
+    // Help first, collapse second: the footer's only two buttons, in
+    // source order.
+    await this.adminShellHelpFooter().getByRole("button").nth(1).click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.adminSidebarFacts()).collapsed !== before) return;
+      if (Date.now() >= deadline) throw new Error("[parity] sidebar collapse toggle never flipped.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async adminSidebarOutsideClick(): Promise<void> {
+    const box = await this.page.locator("main").boundingBox();
+    if (!box) throw new Error("[parity] dashboard main has no box to click outside into.");
+    // Top-right of the header: the breadcrumbs hug the left, so this
+    // lands on empty header chrome — an outside click with no navigation.
+    await this.page.mouse.click(box.x + box.width - 40, box.y + 30);
+  }
+
+  async adminAccountFacts(): Promise<AdminAccountFacts> {
+    const heading = this.page.getByText("Instance admin", { exact: true });
+    const labelVisible = (await heading.count()) > 0 && (await heading.first().isVisible());
+    const triggers = this.page.locator('button[id^="headlessui-menu-button-"]');
+    let avatarVisible = false;
+    for (let i = 0; i < (await triggers.count()); i++) {
+      if (await triggers.nth(i).isVisible()) {
+        avatarVisible = true;
+        break;
+      }
+    }
+    const menu = this.page.getByRole("menu");
+    const menuOpen = (await menu.count()) > 0 && (await menu.first().isVisible());
+    if (!menuOpen) {
+      return {
+        labelVisible,
+        avatarVisible,
+        menuOpen,
+        email: null,
+        themeItemLabel: null,
+        signOutVisible: false,
+        signOutAction: null,
+        csrfTokenPresent: false,
+      };
+    }
+    const shared = await this.adminAccountMenuFacts();
+    const signOut = menu.getByRole("menuitem", { name: "Sign out" });
+    const form = signOut.locator("xpath=ancestor::form[1]");
+    const token = form.locator('input[name="csrfmiddlewaretoken"]');
+    return {
+      labelVisible,
+      avatarVisible,
+      menuOpen,
+      email: shared.email,
+      themeItemLabel: shared.themeLabel,
+      signOutVisible: shared.signOutVisible,
+      signOutAction: (await form.count()) === 0 ? null : await form.first().getAttribute("action"),
+      csrfTokenPresent: (await token.count()) > 0 && ((await token.first().getAttribute("value")) ?? "") !== "",
+    };
+  }
+
+  async adminAccountOpen(): Promise<void> {
+    const menu = this.page.getByRole("menu");
+    if ((await menu.count()) > 0 && (await menu.first().isVisible())) return;
+    // Expanded renders two menu buttons: the icon one (whose items only
+    // mount when collapsed) and the avatar one carrying the admin
+    // initial — the avatar opens the menu. Collapsed renders the icon
+    // trigger alone, which then owns the menu.
+    const triggers = this.page.locator('button[id^="headlessui-menu-button-"]');
+    let target: Locator | null = null;
+    for (let i = 0; i < (await triggers.count()); i++) {
+      const trigger = triggers.nth(i);
+      if (!(await trigger.isVisible())) continue;
+      if (((await trigger.innerText()).trim() ?? "") !== "") {
+        target = trigger;
+        break;
+      }
+      target ??= trigger;
+    }
+    if (target === null) throw new Error("[parity] no visible account menu trigger.");
+    await target.click({ timeout: WebDriver.WAIT_MS });
+    try {
+      await menu.waitFor({ state: "visible", timeout: 5_000 });
+    } catch {
+      // Toggle race: when the first click landed on an open menu it
+      // closed it instead, so a second click reopens it.
+      await target.click({ timeout: WebDriver.WAIT_MS });
+      await menu.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    }
+  }
+
+  async adminBreadcrumbFacts(): Promise<AdminBreadcrumbFacts> {
+    const items = this.adminShellHeader().locator("li");
+    const total = await items.count();
+    const crumbs: AdminBreadcrumbItem[] = [];
+    for (let i = 0; i < total; i++) {
+      const item = items.nth(i);
+      const link = item.locator("a");
+      crumbs.push({
+        label: (await item.innerText()).trim(),
+        href: (await link.count()) === 0 ? null : await link.first().getAttribute("href"),
+      });
+    }
+    return { items: crumbs };
+  }
+
+  async adminBreadcrumbTooltip(label: string): Promise<string | null> {
+    const crumb = this.adminShellHeader().locator("li", { hasText: label }).first();
+    await crumb.hover({ timeout: WebDriver.WAIT_MS });
+    // Label-scoped to the tooltip's text node: the page always mounts
+    // an empty tooltip portal, and the portal shell itself is zero-size
+    // (its popup positions absolutely), so only the opened text reads.
+    const tip = this.page.locator("div[data-base-ui-portal] p", { hasText: label });
+    try {
+      await tip.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    } catch {
+      return null;
+    }
+    return (await tip.first().innerText()).trim() || null;
+  }
+
+  async adminHelpOpen(): Promise<void> {
+    const footer = this.adminShellHelpFooter();
+    await footer.getByRole("button").nth(0).click({ timeout: WebDriver.WAIT_MS });
+    await footer.getByRole("link", { name: "Documentation" }).waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+  }
+
+  async adminHelpFacts(): Promise<AdminHelpFacts> {
+    // DOM order, not roles: collapsed, the redirect link is icon-only.
+    const footer = this.adminShellHelpFooter();
+    const redirect = footer.locator("a").first();
+    // The popover links open externally; the redirect link does not, so
+    // the target attribute tells them apart with no DOM-order coupling.
+    const links = footer.locator('a[target="_blank"]');
+    const total = await links.count();
+    const open = total > 0 && (await links.first().isVisible());
+    const out: AdminHelpLink[] = [];
+    if (open) {
+      for (let i = 0; i < total; i++) {
+        const link = links.nth(i);
+        out.push({
+          name: (await link.innerText()).trim(),
+          href: await link.getAttribute("href"),
+          target: await link.getAttribute("target"),
+        });
+      }
+    }
+    const version = footer.getByText(/Version:/);
+    return {
+      redirectHref: (await redirect.count()) === 0 ? null : await redirect.first().getAttribute("href"),
+      popoverOpen: open,
+      links: out,
+      versionText: !open || (await version.count()) === 0 ? null : (await version.first().innerText()).trim(),
+    };
+  }
+
+  async adminHamburgerFacts(): Promise<AdminHamburgerFacts> {
+    const toggle = this.adminShellHeader().getByRole("button");
+    return { visible: (await toggle.count()) > 0 && (await toggle.first().isVisible()) };
+  }
+
+  async adminHamburgerToggle(): Promise<void> {
+    const before = (await this.adminSidebarFacts()).collapsed;
+    await this.adminShellHeader().getByRole("button").first().click({ timeout: WebDriver.WAIT_MS });
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.adminSidebarFacts()).collapsed !== before) return;
+      if (Date.now() >= deadline) throw new Error("[parity] hamburger toggle never flipped the sidebar.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  private adminConfigFetchSeen = 0;
+  private adminConfigFetchRouteInstalled = false;
+
+  async adminStartConfigFetchSpy(): Promise<void> {
+    this.adminConfigFetchSeen = 0;
+    if (this.adminConfigFetchRouteInstalled) return;
+    this.adminConfigFetchRouteInstalled = true;
+    await this.page.route(
+      (url) => url.pathname.replace(/\/+$/, "") === "/api/instances/configurations",
+      async (route) => {
+        this.adminConfigFetchSeen += 1;
+        await route.continue();
+      }
+    );
+  }
+
+  async adminConfigFetchCount(): Promise<number> {
+    return this.adminConfigFetchSeen;
+  }
+
+  private adminTransportWsSeen = 0;
+  private adminTransportStreamsSeen = 0;
+  private adminTransportSpyInstalled = false;
+
+  async adminStartTransportSpy(): Promise<void> {
+    this.adminTransportWsSeen = 0;
+    this.adminTransportStreamsSeen = 0;
+    if (this.adminTransportSpyInstalled) return;
+    this.adminTransportSpyInstalled = true;
+    this.page.on("websocket", () => {
+      this.adminTransportWsSeen += 1;
+    });
+    this.page.on("request", (request) => {
+      if ((request.headers()["accept"] ?? "").includes("text/event-stream")) {
+        this.adminTransportStreamsSeen += 1;
+      }
+    });
+  }
+
+  async adminTransportFacts(): Promise<AdminTransportFacts> {
+    return { websockets: this.adminTransportWsSeen, eventStreams: this.adminTransportStreamsSeen };
+  }
+
+  async adminAbsenceFacts(): Promise<AdminAbsenceFacts> {
+    // Word boundaries: bare /import/ would also match "important".
+    const transfer = /\bimport\b|\bexport\b/i;
+    const desktop = /\bdesktop\b/i;
+    const transferButtons = this.page.getByRole("button", { name: transfer });
+    const transferLinks = this.page.getByRole("link", { name: transfer });
+    const desktopButtons = this.page.getByRole("button", { name: desktop });
+    const desktopLinks = this.page.getByRole("link", { name: desktop });
+    return {
+      draggable: await this.page.locator('[draggable="true"]').count(),
+      fileInputs: await this.page.locator('input[type="file"]').count(),
+      transferControls: (await transferButtons.count()) + (await transferLinks.count()),
+      desktopMentions: (await desktopButtons.count()) + (await desktopLinks.count()),
+    };
+  }
+
+  async adminShortcutProbe(keys: string[]): Promise<AdminShortcutProbeFacts> {
+    const pathBefore = await this.adminCurrentPath();
+    const dialogsBefore = await this.page.getByRole("dialog").count();
+    for (const key of keys) {
+      await this.page.keyboard.press(key);
+      await this.page.waitForTimeout(150);
+    }
+    return {
+      pathBefore,
+      pathAfter: await this.adminCurrentPath(),
+      dialogsOpened: Math.max(0, (await this.page.getByRole("dialog").count()) - dialogsBefore),
+    };
+  }
+
+  async adminLoopDeleteWatchDialogs(): Promise<AdminDeleteWatchFacts> {
+    let nativeDialogs = 0;
+    const onDialog = async (dialog: import("@playwright/test").Dialog): Promise<void> => {
+      nativeDialogs += 1;
+      await dialog.dismiss();
+    };
+    this.page.on("dialog", onDialog);
+    try {
+      await this.page.locator("main").getByRole("button", { name: "Delete", exact: true }).click();
+      // A gating confirm would still be open here: toasts carry the
+      // dialog role too, but only a confirm carries buttons.
+      const gated = this.page.getByRole("dialog").filter({ has: this.page.getByRole("button") });
+      const modalDialogs = await gated.count();
+      await this.page.waitForURL("**/god-mode/loop/", { timeout: WebDriver.WAIT_MS });
+      return { nativeDialogs, modalDialogs };
+    } finally {
+      this.page.off("dialog", onDialog);
+    }
+  }
+
+  async adminWorkspaceDeleteFacts(): Promise<AdminWorkspaceDeleteFacts> {
+    const pattern = /\bdelete\b|\bremove\b/i;
+    const buttons = this.page.getByRole("button", { name: pattern });
+    const links = this.page.getByRole("link", { name: pattern });
+    return { deleteControls: (await buttons.count()) + (await links.count()) };
+  }
+
+  // --- Admin cloud entry gate (NEWFRONT-446, ADM-074..079). ---
+  // The overlaid home page resolves entry from the admin check plus the
+  // auth probe; these routes count both reads and inject the transient
+  // faults the retry rows pin, then pass through for recovery.
+
+  private adminCloudAdminCheckSeen = 0;
+  private adminCloudProbeSeen = 0;
+  private adminCloudAdminCheckFault = { times: 0, status: 500 };
+  private adminCloudProbeFault = { times: 0, status: 500 };
+  private adminCloudAdminCheckDelayMs = 0;
+  private adminCloudGateRoutesInstalled = false;
+
+  private async adminCloudEnsureGateRoutes(): Promise<void> {
+    if (this.adminCloudGateRoutesInstalled) return;
+    this.adminCloudGateRoutesInstalled = true;
+    await this.page.route(
+      (url) => url.pathname.replace(/\/+$/, "") === "/api/instances/admins/me",
+      async (route) => {
+        this.adminCloudAdminCheckSeen += 1;
+        if (this.adminCloudAdminCheckDelayMs > 0) {
+          const wait = this.adminCloudAdminCheckDelayMs;
+          this.adminCloudAdminCheckDelayMs = 0;
+          await new Promise((resolve) => setTimeout(resolve, wait));
+        }
+        if (this.adminCloudAdminCheckFault.times > 0) {
+          this.adminCloudAdminCheckFault.times -= 1;
+          await route.fulfill({
+            status: this.adminCloudAdminCheckFault.status,
+            contentType: "application/json",
+            body: "{}",
+          });
+          return;
+        }
+        await route.continue();
+      }
+    );
+    await this.page.route(
+      (url) => url.pathname.replace(/\/+$/, "") === "/api/auth/me",
+      async (route) => {
+        this.adminCloudProbeSeen += 1;
+        if (this.adminCloudProbeFault.times > 0) {
+          this.adminCloudProbeFault.times -= 1;
+          await route.fulfill({
+            status: this.adminCloudProbeFault.status,
+            contentType: "application/json",
+            body: "{}",
+          });
+          return;
+        }
+        await route.continue();
+      }
+    );
+  }
+
+  async adminCloudHomeFacts(): Promise<AdminCloudHomeFacts> {
+    const denied = this.page.getByRole("heading", { name: "Access denied" });
+    const deniedVisible = (await denied.count()) > 0 && (await denied.first().isVisible());
+    const error = this.page.getByRole("heading", { name: "Something went wrong" });
+    const errorVisible = !deniedVisible && (await error.count()) > 0 && (await error.first().isVisible());
+    const retry = this.page.getByRole("button", { name: "Try again" });
+    const deniedLink = this.page.getByRole("link", { name: "Return to Pi Dash" });
+    const heading = this.page.locator("h1").first();
+    return {
+      branch: deniedVisible ? "denied" : errorVisible ? "error" : "spinner",
+      heading: (await heading.count()) === 0 ? null : (await heading.first().innerText()).trim() || null,
+      deniedHref:
+        !deniedVisible || (await deniedLink.count()) === 0 ? null : await deniedLink.first().getAttribute("href"),
+      retryVisible: (await retry.count()) > 0 && (await retry.first().isVisible()),
+      passwordFields: await this.page.locator('input[type="password"]').count(),
+      setupFields: await this.page.getByLabel("First name").count(),
+    };
+  }
+
+  async adminCloudWaitForHomeBranch(branch: AdminCloudHomeBranch): Promise<void> {
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.adminCloudHomeFacts()).branch === branch) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] cloud gate never settled on ${JSON.stringify(branch)}.`);
+      }
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async adminCloudOpenRootWithCookies(cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.page.context().addCookies(cookies);
+    await this.adminOpenRoot();
+  }
+
+  async adminCloudStartGateFetchSpy(): Promise<void> {
+    await this.adminCloudEnsureGateRoutes();
+    this.adminCloudAdminCheckSeen = 0;
+    this.adminCloudProbeSeen = 0;
+    this.adminCloudAdminCheckFault = { times: 0, status: 500 };
+    this.adminCloudProbeFault = { times: 0, status: 500 };
+    this.adminCloudAdminCheckDelayMs = 0;
+  }
+
+  async adminCloudGateFetchCounts(): Promise<AdminCloudGateFetchCounts> {
+    return { adminCheck: this.adminCloudAdminCheckSeen, probe: this.adminCloudProbeSeen };
+  }
+
+  async adminCloudFailAdminCheck(times: number, status: number): Promise<void> {
+    await this.adminCloudEnsureGateRoutes();
+    this.adminCloudAdminCheckFault = { times, status };
+  }
+
+  async adminCloudFailAuthProbe(times: number, status: number): Promise<void> {
+    await this.adminCloudEnsureGateRoutes();
+    this.adminCloudProbeFault = { times, status };
+  }
+
+  async adminCloudDelayAdminCheck(ms: number): Promise<void> {
+    await this.adminCloudEnsureGateRoutes();
+    this.adminCloudAdminCheckDelayMs = ms;
+  }
+
+  async adminCloudRetry(): Promise<void> {
+    await this.page.getByRole("button", { name: "Try again" }).click({ timeout: WebDriver.WAIT_MS });
   }
 
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---

@@ -352,6 +352,27 @@ services:
         aliases:
           - oracle-admin-upstream
 
+  # Cloud-edition admin oracle (NEWFRONT-446). The old admin console as
+  # a production build with the private overlay's single admin file
+  # swapped on top (Dockerfile.oracle-admin-cloud-prod), served as
+  # static files by nginx on :3000 like `oracle-admin-prod`. Selected
+  # with PARITY_ORACLE_EDITION=cloud; parity-up.sh points
+  # ORACLE_ADMIN_SERVICE here. Behind the `cloud` profile like
+  # `oracle-cloud-prod`, and on the shared `oracle-admin-upstream`
+  # alias so the proxy needs no per-edition admin upstream.
+  oracle-admin-cloud-prod:
+    build:
+      context: ../../../../..
+      dockerfile: apps/web_new/e2e/parity/stack/Dockerfile.oracle-admin-cloud-prod
+    image: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-admin-cloud-prod:local
+    container_name: ${PARITY_CONTAINER_PREFIX:-parity19}-oracle-admin-cloud-prod
+    mem_limit: 512m
+    profiles: ["cloud"]
+    networks:
+      default:
+        aliases:
+          - oracle-admin-upstream
+
   # Background task worker (NEWFRONT-115). The API queues mention
   # extraction, mention links and notifications as celery tasks; without a
   # consumer those rows never materialize, so mention/notification oracle
