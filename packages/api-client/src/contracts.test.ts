@@ -43,6 +43,7 @@ import {
 import {
   addFavoriteProject,
   archiveProject,
+  checkProjectIdentifier,
   createProject,
   deleteProject,
   getMyProjectRoles,
@@ -57,6 +58,7 @@ import {
   listProjects,
   removeFavoriteProject,
   unarchiveProject,
+  updateProject,
   updateProjectUserProperties,
   updateWorkspaceUserProperties,
 } from "./contracts/projects.js";
@@ -1520,6 +1522,36 @@ describe("project lifecycle contracts", () => {
     expect(created.id).toBe(UUID2);
     const createCall = transport.calls.find((call) => call.url.endsWith("/projects/"));
     expect(createCall?.init.body).toBe(JSON.stringify({ name: "Contract", identifier: "CT" }));
+  });
+
+  it("patches a project and parses the updated row", async () => {
+    const transport = stubbedApi(() => ({ status: 200, body: { ...details, description: "Updated" } }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateProject(client, "acme", UUID2, { description: "Updated" });
+    expect(updated.id).toBe(UUID2);
+    expect(updated.description).toBe("Updated");
+    const patchCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(patchCall?.init.method).toBe("PATCH");
+    expect(patchCall?.init.body).toBe(JSON.stringify({ description: "Updated" }));
+  });
+
+  it("checks identifier availability and parses matches", async () => {
+    const check = { exists: 1, identifiers: [{ id: 7, name: "CT", project: UUID2 }] };
+    const transport = stubbedApi(() => ({ status: 200, body: check }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await checkProjectIdentifier(client, "acme", "ct");
+    expect(parsed.exists).toBe(1);
+    expect(parsed.identifiers[0]?.project).toBe(UUID2);
+    const checkCall = transport.calls.find((call) => call.url.includes("/project-identifiers/"));
+    expect(checkCall?.url).toContain("name=ct");
+  });
+
+  it("reports a free identifier as zero matches", async () => {
+    const transport = stubbedApi(() => ({ status: 200, body: { exists: 0, identifiers: [] } }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await checkProjectIdentifier(client, "acme", "ZZZFREE");
+    expect(parsed.exists).toBe(0);
+    expect(parsed.identifiers).toEqual([]);
   });
 
   it("deletes, unarchives and leaves by status", async () => {

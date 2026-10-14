@@ -170,6 +170,65 @@ export async function deleteProject(client: ApiClient, slug: string, projectId: 
   return response.status;
 }
 
+export interface ProjectUpdateInput {
+  name?: string;
+  identifier?: string;
+  description?: string;
+  network?: number;
+  project_lead?: string | null;
+  timezone?: string;
+  emoji?: string | null;
+  repo_url?: string;
+  base_branch?: string;
+}
+
+/**
+ * PATCH /api/workspaces/<slug>/projects/<id>/ answers 200 with the updated
+ * row in the list-serializer shape (the same shape create returns).
+ * Workspace and project admins only (403 otherwise); archived projects
+ * refuse with 400.
+ */
+export async function updateProject(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  input: ProjectUpdateInput
+): Promise<ProjectDetails> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: input });
+  return client.parse(ProjectDetails, envelope.data, `PATCH ${path}`);
+}
+
+/** One reserved identifier row: integer id, upper-cased name, owning project. */
+export const ProjectIdentifierMatch = z.object({
+  id: z.number(),
+  name: z.string(),
+  project: uuid(),
+});
+export type ProjectIdentifierMatch = z.infer<typeof ProjectIdentifierMatch>;
+
+/**
+ * Identifier-availability answer: `exists` counts the reservations for the
+ * name and `identifiers` carries them (empty when the name is free). The
+ * server upper-cases the query; a missing name 400s.
+ */
+export const ProjectIdentifierCheck = z.object({
+  exists: z.number(),
+  identifiers: z.array(ProjectIdentifierMatch),
+});
+export type ProjectIdentifierCheck = z.infer<typeof ProjectIdentifierCheck>;
+
+/** GET /api/workspaces/<slug>/project-identifiers/?name= — availability check. */
+export async function checkProjectIdentifier(
+  client: ApiClient,
+  slug: string,
+  name: string
+): Promise<ProjectIdentifierCheck> {
+  const path = `/api/workspaces/${slug}/project-identifiers/`;
+  const body = await client.getJson<unknown>(path, { query: { name } });
+  return client.parse(ProjectIdentifierCheck, body, `GET ${path}`);
+}
+
 export const ProjectArchiveResult = z.object({
   archived_at: z.string(),
 });

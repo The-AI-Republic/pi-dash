@@ -113,6 +113,8 @@ export {
   ProjectDetail,
   ProjectDetails,
   ProjectDetailsList,
+  ProjectIdentifierCheck,
+  ProjectIdentifierMatch,
   ProjectInvitation,
   ProjectInvitationList,
   ProjectRoleMap,
@@ -120,6 +122,7 @@ export {
   WorkspaceUserProperties,
   addFavoriteProject,
   archiveProject,
+  checkProjectIdentifier,
   createProject,
   deleteProject,
   getMyProjectRoles,
@@ -133,10 +136,11 @@ export {
   listProjectInvitations,
   removeFavoriteProject,
   unarchiveProject,
+  updateProject,
   updateProjectUserProperties,
   updateWorkspaceUserProperties,
 } from "./contracts/projects.js";
-export type { ProjectCreateInput } from "./contracts/projects.js";
+export type { ProjectCreateInput, ProjectUpdateInput } from "./contracts/projects.js";
 export {
   DashboardActivityBucket,
   DashboardCompletedBucket,
