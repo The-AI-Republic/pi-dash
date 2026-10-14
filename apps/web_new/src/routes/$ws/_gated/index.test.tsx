@@ -10,7 +10,7 @@
 // sections belong to the home feature, so this suite only proves the
 // composition and the loader's cache writes.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import {
   createMemoryHistory,
   createRootRouteWithContext,
@@ -34,13 +34,23 @@ vi.mock("../../../features/home/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../features/home/index.js")>();
   return {
     ...actual,
-    HomeDashboard: (props: { workspaceSlug: string; projects: unknown; widgets?: React.ReactNode }) => (
+    HomeDashboard: (props: {
+      workspaceSlug: string;
+      projects: unknown;
+      widgets?: React.ReactNode;
+      onCreateProject?: () => void;
+    }) => (
       <div
         data-testid="home-dashboard"
         data-slug={props.workspaceSlug}
         data-projects={props.projects === undefined ? "loading" : "ready"}
       >
         {props.widgets}
+        {props.onCreateProject === undefined ? null : (
+          <button type="button" data-testid="quickstart-create" onClick={props.onCreateProject}>
+            quickstart create
+          </button>
+        )}
       </div>
     ),
     HomeWidgetStack: (props: { workspaceSlug: string; projects: unknown }) => (
@@ -134,6 +144,18 @@ describe("workspace home route", () => {
     const stack = screen.getByTestId("widget-stack");
     expect(stack).toHaveAttribute("data-slug", "acme");
     expect(stack).toHaveAttribute("data-projects", "ready");
+  });
+
+  it("hosts the shared create dialog for the quickstart card", async () => {
+    renderHome();
+    expect(await screen.findByTestId("quickstart-create")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "New project" })).toBeNull();
+
+    fireEvent.click(screen.getByTestId("quickstart-create"));
+    expect(screen.getByRole("heading", { name: "New project" })).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("heading", { name: "New project" })).toBeNull();
   });
 
   it("warms the assistant card reads in its loader", async () => {

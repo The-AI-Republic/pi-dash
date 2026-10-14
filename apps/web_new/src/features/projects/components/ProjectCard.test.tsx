@@ -384,6 +384,27 @@ describe("ProjectCard menus", () => {
     expect(menuNames()).toEqual(["Settings", "Copy link"]);
   });
 
+  it("offers archive to project admins on active cards once wired", () => {
+    renderCard({ onArchive: () => undefined }, project({ member_role: 20 }));
+
+    openOverflow();
+    expect(menuNames()).toEqual(["Settings", "Copy link", "Archive"]);
+  });
+
+  it("withholds archive from members without the admin standing", () => {
+    renderCard({ onArchive: () => undefined }, project({ member_role: 15 }));
+
+    openOverflow();
+    expect(menuNames()).toEqual(["Settings", "Copy link"]);
+  });
+
+  it("withholds archive until its dialog is wired", () => {
+    renderCard({}, project({ member_role: 20 }));
+
+    openOverflow();
+    expect(menuNames()).toEqual(["Settings", "Copy link"]);
+  });
+
   it("offers join, open-in-tab and copy-link to outsiders", () => {
     renderCard({}, project({ member_role: null }));
 
@@ -493,6 +514,15 @@ describe("ProjectCard menus", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     expect(onDelete).toHaveBeenCalledWith(expect.objectContaining({ id: PROJECT_ID }));
   });
+
+  it("dispatches archive to its dialog", () => {
+    const onArchive = vi.fn();
+    renderCard({ onArchive }, project({ member_role: 20 }));
+
+    openOverflow();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Archive" }));
+    expect(onArchive).toHaveBeenCalledWith(expect.objectContaining({ id: PROJECT_ID }));
+  });
 });
 
 describe("ProjectCard footer", () => {
@@ -518,15 +548,71 @@ describe("ProjectCard footer", () => {
     expect(screen.getByRole("heading", { name: "Join Project?" })).not.toBeNull();
   });
 
-  it("marks archived cards with no footer actions", () => {
+  it("mutes archived cards with the archived marker", () => {
     renderCard(
       { onRestore: () => undefined, onDelete: () => undefined },
       project({ archived_at: "2024-05-06T07:08:09Z", member_role: 20 })
     );
 
     expect(screen.getByText("Archived")).not.toBeNull();
+    expect(screen.getByTestId("project-card").className).toContain("opacity-75");
+    expect(screen.getByTestId("project-card").className).not.toContain("hover:border-(--accent)");
     expect(screen.queryByRole("button", { name: "Website relaunch settings" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Join" })).toBeNull();
+  });
+
+  it("keeps active cards interactive", () => {
+    renderCard({}, project({ member_role: 15 }));
+
+    expect(screen.queryByText("Archived")).toBeNull();
+    expect(screen.getByTestId("project-card").className).toContain("hover:border-(--accent)");
+    expect(screen.getByTestId("project-card").className).not.toContain("opacity-75");
+  });
+
+  it("offers admins inline restore and delete on archived cards", () => {
+    const onRestore = vi.fn();
+    const onDelete = vi.fn();
+    renderCard({ onRestore, onDelete }, project({ archived_at: "2024-05-06T07:08:09Z", member_role: 20 }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    expect(onRestore).toHaveBeenCalledWith(expect.objectContaining({ id: PROJECT_ID }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(onDelete).toHaveBeenCalledWith(expect.objectContaining({ id: PROJECT_ID }));
+    expect(assign).not.toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "Join Project?" })).toBeNull();
+  });
+
+  it("shows each footer action only once its dialog is wired", () => {
+    renderCard({ onRestore: () => undefined }, project({ archived_at: "2024-05-06T07:08:09Z", member_role: 20 }));
+
+    expect(screen.getByRole("button", { name: "Restore" })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  });
+
+  it("shows the delete footer action without restore", () => {
+    renderCard({ onDelete: () => undefined }, project({ archived_at: "2024-05-06T07:08:09Z", member_role: 20 }));
+
+    expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Delete" })).not.toBeNull();
+  });
+
+  it("hides footer actions from non-admins and until wired", () => {
+    renderCard(
+      { onRestore: () => undefined, onDelete: () => undefined },
+      project({ archived_at: "2024-05-06T07:08:09Z", member_role: 5 })
+    );
+
+    expect(screen.getByText("Archived")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  });
+
+  it("hides footer actions on archived cards until wired", () => {
+    renderCard({}, project({ archived_at: "2024-05-06T07:08:09Z", member_role: 20 }));
+
+    expect(screen.getByText("Archived")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Restore" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
   });
 });
 

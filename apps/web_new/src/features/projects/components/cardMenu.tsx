@@ -1,13 +1,14 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Project card menu (SHELL-034). One entry list feeds both the header
-// quick-actions menu and the right-click menu: settings for project
-// admins and members, join plus open-in-tab for outsiders, restore and
+// Project card menu (SHELL-034, SHELL-037). One entry list feeds both
+// the header quick-actions menu and the right-click menu: settings
+// for project admins and members, join plus open-in-tab for
+// outsiders, archive for project admins on active cards, restore and
 // delete for project admins on archived cards, copy-link for everyone
 // on active cards. Labels are the parity contract the gate asserts.
 import type { MenuEntry } from "@pidash/kit";
-import { ArchiveRestore, ExternalLink, Link2, Settings, Trash2, UserPlus } from "lucide-react";
+import { Archive, ArchiveRestore, ExternalLink, Link2, Settings, Trash2, UserPlus } from "lucide-react";
 import * as React from "react";
 
 export interface CardMenuStanding {
@@ -17,7 +18,7 @@ export interface CardMenuStanding {
   isMember: boolean;
   /** Admin or member standing: settings, no join prompt. */
   isAuthorized: boolean;
-  /** Project admin: restore and delete on archived cards. */
+  /** Project admin: archive on active cards, restore/delete on archived. */
   isAdmin: boolean;
 }
 
@@ -26,10 +27,12 @@ export interface CardMenuCallbacks {
   onJoin: () => void;
   onOpenInNewTab: () => void;
   onCopyLink: () => void;
-  /** Null until NEWFRONT-284 wires the dialog; the entry hides. */
+  /** Null until the restore dialog wires up; the entry hides. */
   onRestore: (() => void) | null;
-  /** Null until NEWFRONT-284 wires the dialog; the entry hides. */
+  /** Null until the delete dialog wires up; the entry hides. */
   onDelete: (() => void) | null;
+  /** Null until the archive dialog wires up; the entry hides. */
+  onArchive: (() => void) | null;
 }
 
 /** Entries the standing permits, in menu order. */
@@ -59,6 +62,13 @@ export function selectCardMenuEntries(standing: CardMenuStanding, callbacks: Car
       label: "Copy link",
       icon: <Link2 size={16} strokeWidth={1.5} aria-hidden="true" />,
       onSelect: callbacks.onCopyLink,
+    });
+  }
+  if (!standing.archived && standing.isAdmin && callbacks.onArchive !== null) {
+    entries.push({
+      label: "Archive",
+      icon: <Archive size={16} strokeWidth={1.5} aria-hidden="true" />,
+      onSelect: callbacks.onArchive,
     });
   }
   if (standing.archived && standing.isAdmin && callbacks.onRestore !== null) {

@@ -18,11 +18,24 @@ import { FAVORITES_SECTION_OPEN_KEY } from "../../../shared/shell/favorites.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { projectKeys } from "./keys.js";
 import {
+  ARCHIVE_FAILED_TITLE,
+  ARCHIVED_TITLE,
+  CREATED_TITLE,
+  DELETE_FAILED_TITLE,
+  DELETED_TITLE,
   FAVORITE_ADDED_TITLE,
   FAVORITE_FAILED_TITLE,
   FAVORITE_REMOVED_TITLE,
+  RESTORE_FAILED_TITLE,
+  RESTORED_TITLE,
   selectPendingProjectId,
+  useArchiveProject,
+  useCreateProject,
+  useDeleteProject,
+  useRestoreProject,
   useToggleFavoriteProject,
+  type CreateProjectInput,
+  type ProjectLifecycleInput,
   type ToggleFavoriteInput,
 } from "./mutations.js";
 
@@ -288,5 +301,193 @@ describe("selectPendingProjectId", () => {
 
   it("pins null on a pending mutation without variables", () => {
     expect(selectPendingProjectId(true, undefined)).toBeNull();
+  });
+});
+
+function stubLifecycle(args: { status?: number; calls?: string[]; bodies?: string[] } = {}) {
+  const calls = args.calls ?? [];
+  const bodies = args.bodies ?? [];
+  const status = args.status ?? 200;
+  createAppClient("https://api.test", (async (url: string, init?: { method?: string; body?: string }) => {
+    const method = init?.method ?? "GET";
+    calls.push(`${method} ${url}`);
+    if (typeof init?.body === "string") bodies.push(init.body);
+    if (url.endsWith("/auth/get-csrf-token/")) {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ csrf_token: "csrf" }),
+      };
+    }
+    if (url.includes("/archive/")) {
+      return {
+        status,
+        url,
+        headers: { get: () => null },
+        text: async () =>
+          status >= 200 && status < 300 && method === "POST"
+            ? JSON.stringify({ archived_at: "2026-10-14T00:00:00Z" })
+            : "{}",
+      };
+    }
+    if (method === "POST" && url.endsWith("/projects/")) {
+      return {
+        status: status === 200 ? 201 : status,
+        url,
+        headers: { get: () => null },
+        text: async () => (status >= 200 && status < 300 ? JSON.stringify(project()) : "{}"),
+      };
+    }
+    return { status: status === 200 ? 204 : status, url, headers: { get: () => null }, text: async () => "{}" };
+  }) as never);
+  return { calls, bodies };
+}
+
+const LIFECYCLE: ProjectLifecycleInput = {
+  workspaceSlug: "acme",
+  projectId: PROJECT_ID,
+  projectName: "Website relaunch",
+};
+
+const CREATE_INPUT: CreateProjectInput = {
+  workspaceSlug: "acme",
+  payload: { name: "Nebula", identifier: "NEB", network: 2 },
+};
+
+function LifecycleProbe({
+  hook,
+  input,
+  label,
+}: {
+  hook: () => { mutate: (input: never) => void };
+  input: unknown;
+  label: string;
+}) {
+  const mutation = hook();
+  return (
+    <button type="button" onClick={() => mutation.mutate(input as never)}>
+      {label}
+    </button>
+  );
+}
+
+function renderLifecycle(hook: () => { mutate: (input: never) => void }, input: unknown, label: string) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(projectKeys.details("acme"), [project()]);
+  render(
+    <QueryClientProvider client={queryClient}>
+      <LifecycleProbe hook={hook} input={input} label={label} />
+    </QueryClientProvider>
+  );
+  return queryClient;
+}
+
+async function expectInvalidated(queryClient: QueryClient) {
+  await waitFor(() => expect(queryClient.getQueryState(projectKeys.details("acme"))?.isInvalidated).toBe(true));
+}
+
+describe("useArchiveProject", () => {
+  it("archives, toasts and marks the workspace stale", async () => {
+    const { calls } = stubLifecycle();
+    const queryClient = renderLifecycle(useArchiveProject, LIFECYCLE, "archive it");
+
+    fireEvent.click(screen.getByRole("button", { name: "archive it" }));
+    await waitFor(() =>
+      expect(notifySuccess).toHaveBeenCalledWith(ARCHIVED_TITLE, "Website relaunch has been archived successfully")
+    );
+    expect(calls.some((call) => call.startsWith("POST") && call.includes(`/projects/${PROJECT_ID}/archive/`))).toBe(
+      true
+    );
+    await expectInvalidated(queryClient);
+  });
+
+  it("toasts a failure and still marks the workspace stale", async () => {
+    stubLifecycle({ status: 400 });
+    const queryClient = renderLifecycle(useArchiveProject, LIFECYCLE, "archive it");
+
+    fireEvent.click(screen.getByRole("button", { name: "archive it" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(ARCHIVE_FAILED_TITLE, expect.any(String)));
+    expect(notifySuccess).not.toHaveBeenCalled();
+    await expectInvalidated(queryClient);
+  });
+});
+
+describe("useRestoreProject", () => {
+  it("restores, toasts and marks the workspace stale", async () => {
+    const { calls } = stubLifecycle();
+    const queryClient = renderLifecycle(useRestoreProject, LIFECYCLE, "restore it");
+
+    fireEvent.click(screen.getByRole("button", { name: "restore it" }));
+    await waitFor(() =>
+      expect(notifySuccess).toHaveBeenCalledWith(RESTORED_TITLE, "You can find Website relaunch in your projects.")
+    );
+    expect(calls.some((call) => call.startsWith("DELETE") && call.includes(`/projects/${PROJECT_ID}/archive/`))).toBe(
+      true
+    );
+    await expectInvalidated(queryClient);
+  });
+
+  it("toasts a failure without a success notice", async () => {
+    stubLifecycle({ status: 400 });
+    renderLifecycle(useRestoreProject, LIFECYCLE, "restore it");
+
+    fireEvent.click(screen.getByRole("button", { name: "restore it" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(RESTORE_FAILED_TITLE, expect.any(String)));
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe("useDeleteProject", () => {
+  it("deletes, toasts and marks the workspace stale", async () => {
+    const { calls } = stubLifecycle();
+    const queryClient = renderLifecycle(useDeleteProject, LIFECYCLE, "delete it");
+
+    fireEvent.click(screen.getByRole("button", { name: "delete it" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(DELETED_TITLE, "Project deleted successfully."));
+    expect(
+      calls.some(
+        (call) =>
+          call.startsWith("DELETE") &&
+          call.includes(`/projects/${PROJECT_ID}/`) &&
+          !call.includes("/archive/") &&
+          !call.includes("/members/leave/")
+      )
+    ).toBe(true);
+    await expectInvalidated(queryClient);
+  });
+
+  it("toasts a failure without a success notice", async () => {
+    stubLifecycle({ status: 400 });
+    renderLifecycle(useDeleteProject, LIFECYCLE, "delete it");
+
+    fireEvent.click(screen.getByRole("button", { name: "delete it" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(DELETE_FAILED_TITLE, expect.any(String)));
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe("useCreateProject", () => {
+  it("creates with one POST, toasts and marks the workspace stale", async () => {
+    const { calls, bodies } = stubLifecycle();
+    const queryClient = renderLifecycle(useCreateProject, CREATE_INPUT, "create it");
+
+    fireEvent.click(screen.getByRole("button", { name: "create it" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(CREATED_TITLE, "Project created successfully"));
+    const posts = calls.filter((call) => call.startsWith("POST") && call.endsWith("/projects/"));
+    expect(posts).toHaveLength(1);
+    expect(bodies).toHaveLength(1);
+    expect(JSON.parse(bodies[0] ?? "{}")).toMatchObject({ name: "Nebula", identifier: "NEB" });
+    await expectInvalidated(queryClient);
+  });
+
+  it("never toasts a failure — the dialog maps it onto fields", async () => {
+    stubLifecycle({ status: 400 });
+    const queryClient = renderLifecycle(useCreateProject, CREATE_INPUT, "create it");
+
+    fireEvent.click(screen.getByRole("button", { name: "create it" }));
+    await expectInvalidated(queryClient);
+    expect(notifySuccess).not.toHaveBeenCalled();
+    expect(notifyError).not.toHaveBeenCalled();
   });
 });

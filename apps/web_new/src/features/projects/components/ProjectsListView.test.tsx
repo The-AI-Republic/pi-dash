@@ -359,6 +359,66 @@ describe("ProjectsListView", () => {
     );
   });
 
+  it("opens the shared create dialog from the header button", () => {
+    renderView({
+      details: [project("Alpha")],
+      members: [member(MEMBER_ID, "Ada")],
+      role: 15,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Project/ }));
+    expect(screen.getByRole("heading", { name: "New project" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Project lead" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("opens the shared create dialog from the empty-state action", () => {
+    renderView({ details: [], role: 15 });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start your first project" }));
+    expect(screen.getByRole("heading", { name: "New project" })).not.toBeNull();
+  });
+
+  it("holds the lead picker until members resolve", () => {
+    renderView({ details: [], role: 15 });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start your first project" }));
+    expect(screen.getByRole("button", { name: "Project lead" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("opens the archive dialog from the card menu", () => {
+    renderView({ details: [project("Alpha", { member_role: 20 })], role: 20 });
+
+    fireEvent.click(screen.getByTestId("project-card-actions"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Archive" }));
+    expect(screen.getByRole("heading", { name: "Archive Alpha" })).not.toBeNull();
+  });
+
+  it("opens the restore dialog from the archived footer", () => {
+    renderView({
+      archived: true,
+      role: 20,
+      details: [project("Shelved", { archived_at: "2024-05-06T07:08:09Z", member_role: 20 })],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    expect(screen.getByRole("heading", { name: "Restore Shelved" })).not.toBeNull();
+  });
+
+  it("opens the delete dialog from the archived footer and closes it again", () => {
+    renderView({
+      archived: true,
+      role: 20,
+      details: [project("Shelved", { archived_at: "2024-05-06T07:08:09Z", member_role: 20 })],
+    });
+    expect(screen.queryByRole("heading", { name: "Delete project" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(screen.getByRole("heading", { name: "Delete project" })).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("heading", { name: "Delete project" })).toBeNull();
+  });
+
   it("joins from the card, navigates inside, and flips the card to member state", async () => {
     const calls: string[] = [];
     const joined = project("Alpha", { member_role: 15 });

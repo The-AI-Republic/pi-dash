@@ -5,13 +5,24 @@
 
 export { projectKeys } from "./api/keys.js";
 export {
+  ARCHIVE_FAILED_TITLE,
+  ARCHIVED_TITLE,
+  CREATED_TITLE,
+  DELETE_FAILED_TITLE,
+  DELETED_TITLE,
   FAVORITE_ADDED_TITLE,
   FAVORITE_FAILED_TITLE,
   FAVORITE_REMOVED_TITLE,
+  RESTORE_FAILED_TITLE,
+  RESTORED_TITLE,
   selectPendingProjectId,
+  useArchiveProject,
+  useCreateProject,
+  useDeleteProject,
+  useRestoreProject,
   useToggleFavoriteProject,
 } from "./api/mutations.js";
-export type { ToggleFavoriteInput } from "./api/mutations.js";
+export type { CreateProjectInput, ProjectLifecycleInput, ToggleFavoriteInput } from "./api/mutations.js";
 export {
   projectDetailsQueryOptions,
   projectPropertiesQueryOptions,
@@ -22,6 +33,12 @@ export {
 } from "./api/queries.js";
 export { JoinProjectDialog } from "./components/JoinProjectDialog.js";
 export type { JoinProjectDialogProps } from "./components/JoinProjectDialog.js";
+export { CreateProjectDialog } from "./components/CreateProjectDialog.js";
+export type { CreateProjectDialogProps } from "./components/CreateProjectDialog.js";
+export { DeleteProjectDialog, DELETE_CONFIRM_PHRASE } from "./components/DeleteProjectDialog.js";
+export type { DeleteProjectDialogProps } from "./components/DeleteProjectDialog.js";
+export { ProjectArchiveDialog, selectArchiveBody } from "./components/ProjectArchiveDialog.js";
+export type { ArchiveDialogMode, ProjectArchiveDialogProps } from "./components/ProjectArchiveDialog.js";
 export { ProjectCard, PROJECT_NETWORK_PRIVATE, formatCreationDate } from "./components/ProjectCard.js";
 export type { ProjectCardProps } from "./components/ProjectCard.js";
 export { ProjectLogo, selectLogoGlyph } from "./components/ProjectLogo.js";
@@ -130,3 +147,24 @@ export type {
 } from "./lib/list-display.js";
 export { useListDisplayStore } from "./store/list-display.js";
 export type { WorkspaceListDisplay } from "./store/list-display.js";
+export {
+  buildCreateLogoProps,
+  buildCreatePayload,
+  CREATE_DEFAULT_ICON,
+  CREATE_ICON_CHOICES,
+  CREATE_IDENTIFIER_MAX_LENGTH,
+  CREATE_NAME_MAX_LENGTH,
+  CREATE_NETWORK_PRIVATE,
+  CREATE_NETWORK_PUBLIC,
+  deriveProjectIdentifier,
+  IDENTIFIER_TAKEN_CODE,
+  IDENTIFIER_TAKEN_MESSAGE,
+  NAME_TAKEN_CODE,
+  NAME_TAKEN_MESSAGE,
+  pickCreateIcon,
+  resolveBrowserTimezone,
+  sanitizeProjectIdentifier,
+  selectCreateFieldErrors,
+  validateCreateFields,
+} from "./lib/project-create.js";
+export type { CreateFieldErrors, CreateFieldValues, CreatePayloadValues } from "./lib/project-create.js";

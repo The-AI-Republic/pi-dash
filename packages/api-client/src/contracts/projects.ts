@@ -148,6 +148,14 @@ export interface ProjectCreateInput {
   identifier: string;
   description?: string;
   network?: number;
+  project_lead?: string | null;
+  logo_props?: Record<string, unknown>;
+  timezone?: string;
+  cycle_view?: boolean;
+  module_view?: boolean;
+  issue_views_view?: boolean;
+  page_view?: boolean;
+  intake_view?: boolean;
 }
 
 /**
