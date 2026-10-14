@@ -39,6 +39,7 @@ export default defineConfig({
       "e2e/parity/helpers/seed-settle.test.ts",
       "e2e/parity/drivers/web-toast.test.ts",
       "e2e/parity/helpers/calendar-dates.test.ts",
+      "e2e/parity/drivers/web-favorites.test.ts",
     ],
   },
 });
