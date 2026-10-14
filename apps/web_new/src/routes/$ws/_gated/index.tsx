@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Workspace home dashboard (NEWFRONT-278 top half, NEWFRONT-280 widget
-// stack). Renders the dashboard composition inside the gated shell: the
-// tour seam stays mounted above it, and the widget stack — dashboard
-// chrome plus the recents section — fills the dashboard's `widgets`
-// slot. NEWFRONT-279 fills the quicklinks and manage-widgets slots.
-// The loader warms the assistant card reads so first paint settles with
-// data; the widget-map read stays off the loader so the dashboard
+// stack, NEWFRONT-279 quicklinks plus widget management). Renders the
+// dashboard composition inside the gated shell: the tour seam stays
+// mounted above it, and the widget stack — dashboard chrome with the
+// recents and quicklinks sections — fills the dashboard's `widgets`
+// slot. The loader warms the assistant card reads so first paint settles
+// with data; the widget-map read stays off the loader so the dashboard
 // skeleton shows on first paint. The component composes the
 // cross-feature projects read features cannot make themselves, and
 // hosts the shared create-project dialog for the quickstart card.
@@ -19,10 +19,13 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { WorkspaceHomeTour } from "../../../features/auth/index.js";
 import {
+  HomeAllOffState,
   HomeDashboard,
   homeAssistantConfigQueryOptions,
   HomeWidgetStack,
   homeThreadsQueryOptions,
+  ManageWidgetsDialog,
+  QuicklinksWidget,
 } from "../../../features/home/index.js";
 import {
   CreateProjectDialog,
@@ -56,7 +59,15 @@ export const Route = createFileRoute("/$ws/_gated/")({
           workspaceSlug={params.ws}
           projects={projects.data}
           onCreateProject={() => setCreateOpen(true)}
-          widgets={<HomeWidgetStack workspaceSlug={params.ws} projects={projects.data} />}
+          widgets={
+            <HomeWidgetStack
+              workspaceSlug={params.ws}
+              projects={projects.data}
+              quicklinks={<QuicklinksWidget workspaceSlug={params.ws} />}
+              manageWidgets={(controls) => <ManageWidgetsDialog workspaceSlug={params.ws} {...controls} />}
+              emptyState={<HomeAllOffState />}
+            />
+          }
         />
         <CreateProjectDialog
           workspaceSlug={params.ws}
