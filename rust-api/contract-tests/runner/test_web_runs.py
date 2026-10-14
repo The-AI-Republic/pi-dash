@@ -2,8 +2,9 @@
 
 Paginated "my runs" list, detail (+ ``include_events``), cancel (local
 finalize vs cancel-requested fan-out), release-pin escape hatch, and the
-re-tick budget grant. POST create paths need dispatch infra, so creation is
-pinned through its validation errors.
+re-tick budget grant. POST create covers all three dispatch tails
+(direct, ``run_ai``, ``comment_and_run``): 201 shapes, validation arms,
+queue/rollback behavior, and Django's filter-coercion edges.
 """
 
 from __future__ import annotations
@@ -188,3 +189,355 @@ def test_web_run_release_pin_rejects_unpinned(user_client, daemon_run):
     response = web_post(user_client, f"{WEB}/runs/{daemon_run['id']}/release-pin/", {})
     assert response.status_code == 409
     assert response.json() == {"error": "run not queued"}
+
+
+def _ticking_issue(seeder, daemon_world):
+    state = seeder.create_state(
+        daemon_world["workspace"]["id"], daemon_world["project"]["id"],
+        name="In Progress", group="started",
+    )
+    return seeder.create_issue(
+        daemon_world["workspace"]["id"], daemon_world["project"]["id"], state["id"]
+    )
+
+
+def test_web_runs_create_direct_freeform_201(user_client, seeder, daemon_world):
+    response = web_post(
+        user_client, f"{WEB}/runs/",
+        {"prompt": "hello free", "workspace": daemon_world["workspace"]["id"]},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert RUN_KEYS <= set(body)
+    assert body["status"] == "queued"
+    assert body["executor_kind"] == "local_runner"
+    assert body["prompt"] == "hello free"
+    assert body["work_item"] is None
+    assert body["pod"] == daemon_world["pod"]["id"]
+    assert body["created_by"] == daemon_world["owner"]["id"]
+    assert body["runner"] is None and body["owner"] is None
+    assert body["tool_calls"] == []
+    row = seeder.db.fetchone(
+        "SELECT trigger, phase_kind, run_config, required_capabilities,"
+        " prompt_manifest, dispatch_attempts FROM agent_run WHERE id = %s",
+        (body["id"],),
+    )
+    assert row["trigger"] == "direct" and row["phase_kind"] == ""
+    assert row["run_config"] == {} and row["required_capabilities"] == []
+    assert row["prompt_manifest"] is None and row["dispatch_attempts"] == 0
+
+
+def test_web_runs_create_direct_issue_201(user_client, seeder, daemon_world):
+    issue = _ticking_issue(seeder, daemon_world)
+    response = web_post(
+        user_client, f"{WEB}/runs/",
+        {
+            "prompt": "hello issue",
+            "workspace": daemon_world["workspace"]["id"],
+            "work_item": issue["id"],
+            "run_config": {"a": 1},
+            "required_capabilities": ["x"],
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert RUN_KEYS <= set(body)
+    assert body["work_item"] == issue["id"]
+    assert body["prompt"] == "hello issue"
+    row = seeder.db.fetchone(
+        "SELECT run_config, required_capabilities FROM agent_run WHERE id = %s",
+        (body["id"],),
+    )
+    assert row["run_config"] == {"a": 1} and row["required_capabilities"] == ["x"]
+    # The active-run guardrail: a second direct dispatch on the issue 409s.
+    again = web_post(
+        user_client, f"{WEB}/runs/",
+        {
+            "prompt": "second",
+            "workspace": daemon_world["workspace"]["id"],
+            "work_item": issue["id"],
+        },
+    )
+    assert again.status_code == 409
+    assert again.json() == {
+        "error": "work item already has an active run", "code": "active_run_exists",
+    }
+
+
+def test_web_runs_create_direct_validation(user_client, seeder, daemon_world):
+    ws = daemon_world["workspace"]["id"]
+    missing_ws = web_post(user_client, f"{WEB}/runs/", {"prompt": "hi"})
+    assert missing_ws.status_code == 400
+    assert missing_ws.json() == {"error": "workspace is required", "code": "workspace_required"}
+    # Another workspace the caller never joined.
+    outsider = seeder.create_user()
+    foreign_ws = seeder.create_workspace(outsider["id"])
+    foreign = web_post(user_client, f"{WEB}/runs/", {"prompt": "hi", "workspace": foreign_ws["id"]})
+    assert foreign.status_code == 403
+    assert foreign.json() == {
+        "error": "caller is not a member of the target workspace",
+        "code": "not_workspace_member",
+    }
+    fake_issue = web_post(
+        user_client, f"{WEB}/runs/",
+        {"prompt": "hi", "workspace": ws, "work_item": str(uuid.uuid4())},
+    )
+    assert fake_issue.status_code == 400
+    assert fake_issue.json() == {"error": "work_item does not exist", "code": "work_item_missing"}
+    fake_pod = web_post(
+        user_client, f"{WEB}/runs/",
+        {"prompt": "hi", "workspace": ws, "pod": str(uuid.uuid4())},
+    )
+    assert fake_pod.status_code == 400
+    assert fake_pod.json() == {
+        "error": "pod does not exist or has been deleted", "code": "pod_missing",
+    }
+    # No pod anywhere: a second project without a default pod disables the
+    # single-project back-compat leg.
+    seeder.create_project(ws)
+    nopod = web_post(user_client, f"{WEB}/runs/", {"prompt": "hi", "workspace": ws})
+    assert nopod.status_code == 409
+    assert nopod.json() == {
+        "error": "no pod available; ensure the issue has a project with a default pod",
+        "code": "no_pod_available",
+    }
+
+
+def test_web_runs_create_direct_coercions(user_client, seeder, daemon_world):
+    """Django `filter()` coercion: ints ride `UUID(int=)`, garbage 500s."""
+    ws = daemon_world["workspace"]["id"]
+    issue = _ticking_issue(seeder, daemon_world)
+    ws_int = web_post(user_client, f"{WEB}/runs/", {"prompt": "hi", "workspace": 123})
+    assert ws_int.status_code == 403
+    assert ws_int.json()["code"] == "not_workspace_member"
+    wi_int = web_post(
+        user_client, f"{WEB}/runs/",
+        {"prompt": "hi", "workspace": ws, "work_item": 123},
+    )
+    assert wi_int.status_code == 400
+    assert wi_int.json()["code"] == "work_item_missing"
+    pod_int = web_post(
+        user_client, f"{WEB}/runs/", {"prompt": "hi", "workspace": ws, "pod": 123}
+    )
+    assert pod_int.status_code == 400
+    assert pod_int.json()["code"] == "pod_missing"
+    for bad in ("nope", 1.5, [1], {"a": 1}):
+        response = web_post(
+            user_client, f"{WEB}/runs/",
+            {"prompt": "hi", "workspace": ws, "work_item": bad},
+        )
+        assert response.status_code == 500, bad
+    triggered = web_post(
+        user_client, f"{WEB}/runs/",
+        {"prompt": "hi", "workspace": ws, "triggered_by": 123},
+    )
+    assert triggered.status_code == 500
+    # Non-canonical workspace text passes membership (the filter coerces)
+    # but fails the `str() != str()` consistency comparisons.
+    upper = web_post(
+        user_client, f"{WEB}/runs/",
+        {"prompt": "hi", "workspace": ws.upper(), "work_item": issue["id"]},
+    )
+    assert upper.status_code == 400
+    assert upper.json()["code"] == "work_item_workspace_mismatch"
+    # Capabilities/config store verbatim on the local path, uninspected.
+    stored = web_post(
+        user_client, f"{WEB}/runs/",
+        {
+            "prompt": "hi", "workspace": ws,
+            "required_capabilities": "abc", "run_config": 5,
+        },
+    )
+    assert stored.status_code == 201, stored.text
+    row = seeder.db.fetchone(
+        "SELECT required_capabilities, run_config FROM agent_run WHERE id = %s",
+        (stored.json()["id"],),
+    )
+    assert row["required_capabilities"] == "abc" and row["run_config"] == 5
+
+
+def test_web_runs_create_prompt_str_coercion(user_client, seeder, daemon_world):
+    """Non-string prompts save as Python `str()` (probed)."""
+    ws = daemon_world["workspace"]["id"]
+    for prompt, saved in [
+        (5, "5"), (True, "True"), (1.5, "1.5"), (1e16, "1e+16"),
+        ([1, 2], "[1, 2]"), ({"a": 1}, "{'a': 1}"),
+    ]:
+        response = web_post(user_client, f"{WEB}/runs/", {"prompt": prompt, "workspace": ws})
+        assert response.status_code == 201, prompt
+        assert response.json()["prompt"] == saved, prompt
+
+
+def test_web_runs_create_runai_validation(user_client, seeder, daemon_world):
+    missing = web_post(user_client, f"{WEB}/runs/", {"triggered_by": "run_ai"})
+    assert missing.status_code == 400
+    assert missing.json() == {"error": "work_item is required for run_ai"}
+    fake = web_post(
+        user_client, f"{WEB}/runs/",
+        {"triggered_by": "run_ai", "work_item": str(uuid.uuid4())},
+    )
+    assert fake.status_code == 404
+    assert fake.json() == {"error": "issue not found"}
+    # Ints coerce via `UUID(int=)` and miss — a 404, not a 500.
+    coerce = web_post(user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": 123})
+    assert coerce.status_code == 404
+    outsider = seeder.create_user()
+    foreign_ws = seeder.create_workspace(outsider["id"])
+    foreign_project = seeder.create_project(foreign_ws["id"])
+    foreign_state = seeder.create_state(foreign_ws["id"], foreign_project["id"])
+    foreign_issue = seeder.create_issue(foreign_ws["id"], foreign_project["id"], foreign_state["id"])
+    walled = web_post(
+        user_client, f"{WEB}/runs/",
+        {"triggered_by": "run_ai", "work_item": foreign_issue["id"]},
+    )
+    assert walled.status_code == 404
+
+
+def test_web_runs_create_runai_no_runner_409_rolls_back(user_client, seeder, daemon_world):
+    """Without a runner the preflight bounces — and the web atomic rolls
+    the bounce (state move, comment, re-time) back: the 409 is traceless."""
+    issue = _ticking_issue(seeder, daemon_world)
+    before = seeder.db.fetchone(
+        "SELECT state_id FROM issues WHERE id = %s", (issue["id"],)
+    )
+    response = web_post(
+        user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
+    )
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "could not dispatch — issue may already have an active run, or no pod is available"
+    }
+    after = seeder.db.fetchone("SELECT state_id FROM issues WHERE id = %s", (issue["id"],))
+    assert after["state_id"] == before["state_id"]
+    assert seeder.db.fetchone(
+        "SELECT id FROM issue_comments WHERE issue_id = %s", (issue["id"],)
+    ) is None
+    assert seeder.db.fetchone(
+        "SELECT id FROM issue_agent_ticker WHERE issue_id = %s", (issue["id"],)
+    ) is None
+    assert seeder.db.fetchone(
+        "SELECT id FROM agent_run WHERE work_item_id = %s", (issue["id"],)
+    ) is None
+
+
+def test_web_runs_create_runai_201(user_client, seeder, daemon_world, machine_flow):
+    issue = _ticking_issue(seeder, daemon_world)
+    response = web_post(
+        user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert RUN_KEYS <= set(body)
+    assert body["work_item"] == issue["id"]
+    assert body["status"] == "queued" and body["executor_kind"] == "local_runner"
+    assert body["prompt"]  # the phase template rendered server-side
+    row = seeder.db.fetchone(
+        "SELECT trigger, prompt_manifest FROM agent_run WHERE id = %s", (body["id"],)
+    )
+    assert row["trigger"] == "run_ai" and row["prompt_manifest"] is not None
+
+
+def test_web_runs_create_runai_queued_202(user_client, seeder, daemon_world):
+    issue = _ticking_issue(seeder, daemon_world)
+    seeder.create_agent_run(
+        daemon_world["workspace"]["id"], daemon_world["owner"]["id"],
+        daemon_world["pod"]["id"], issue["id"], status="running",
+    )
+    response = web_post(
+        user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
+    )
+    assert response.status_code == 202
+    assert response.json() == {
+        "queued": True,
+        "reason": "free-entry-queued",
+        "detail": "a run is active on this work item; the next run is queued and starts when it ends",
+    }
+    ticker = seeder.db.fetchone(
+        "SELECT pending_entry, pending_entry_free, pending_entry_actor_id,"
+        " pending_entry_trigger FROM issue_agent_ticker WHERE issue_id = %s",
+        (issue["id"],),
+    )
+    assert ticker["pending_entry"] is True and ticker["pending_entry_free"] is True
+    assert str(ticker["pending_entry_actor_id"]) == daemon_world["owner"]["id"]
+    assert ticker["pending_entry_trigger"] == "run_ai"
+
+
+def test_web_runs_create_comment_run_no_prior_409(user_client, seeder, daemon_world, machine_flow):
+    issue = _ticking_issue(seeder, daemon_world)
+    response = web_post(
+        user_client, f"{WEB}/runs/",
+        {"triggered_by": "comment_and_run", "work_item": issue["id"]},
+    )
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "could not dispatch — issue may already have an active run,"
+        " or no prior run / pod is available"
+    }
+
+
+def test_web_runs_create_comment_run_201(user_client, seeder, daemon_world, machine_flow):
+    issue = _ticking_issue(seeder, daemon_world)
+    prior = seeder.create_agent_run(
+        daemon_world["workspace"]["id"], daemon_world["owner"]["id"],
+        daemon_world["pod"]["id"], issue["id"], status="completed",
+    )
+    response = web_post(
+        user_client, f"{WEB}/runs/",
+        {"triggered_by": "comment_and_run", "work_item": issue["id"]},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert RUN_KEYS <= set(body)
+    assert body["work_item"] == issue["id"]
+    assert body["status"] == "queued"
+    row = seeder.db.fetchone(
+        "SELECT trigger, parent_run_id FROM agent_run WHERE id = %s", (body["id"],)
+    )
+    assert row["trigger"] == "comment_and_run"
+    # A fresh session off the terminal prior: no parent pin.
+    assert row["parent_run_id"] is None
+
+
+def test_web_runs_create_comment_run_queued_202(user_client, seeder, daemon_world):
+    issue = _ticking_issue(seeder, daemon_world)
+    seeder.create_agent_run(
+        daemon_world["workspace"]["id"], daemon_world["owner"]["id"],
+        daemon_world["pod"]["id"], issue["id"], status="running",
+    )
+    response = web_post(
+        user_client, f"{WEB}/runs/",
+        {"triggered_by": "comment_and_run", "work_item": issue["id"]},
+    )
+    assert response.status_code == 202
+    assert response.json()["reason"] == "free-entry-queued"
+    ticker = seeder.db.fetchone(
+        "SELECT pending_entry_trigger FROM issue_agent_ticker WHERE issue_id = %s",
+        (issue["id"],),
+    )
+    assert ticker["pending_entry_trigger"] == "comment_and_run"
+
+
+def test_web_runs_create_soft_deleted_issue(user_client, seeder, daemon_world):
+    """Direct reads the default manager (400); `run_ai` reads
+    `all_objects` and proceeds."""
+    issue = _ticking_issue(seeder, daemon_world)
+    seeder.create_agent_run(
+        daemon_world["workspace"]["id"], daemon_world["owner"]["id"],
+        daemon_world["pod"]["id"], issue["id"], status="running",
+    )
+    seeder.db.execute("UPDATE issues SET deleted_at = now() WHERE id = %s", (issue["id"],))
+    direct = web_post(
+        user_client, f"{WEB}/runs/",
+        {
+            "prompt": "hi",
+            "workspace": daemon_world["workspace"]["id"],
+            "work_item": issue["id"],
+        },
+    )
+    assert direct.status_code == 400
+    assert direct.json()["code"] == "work_item_missing"
+    runai = web_post(
+        user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
+    )
+    assert runai.status_code == 202
+    assert runai.json()["reason"] == "free-entry-queued"
