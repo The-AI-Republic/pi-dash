@@ -4,7 +4,9 @@
 // Parity report generator (NEWFRONT-19). Joins the feature inventory
 // (one row per capability, with its Status column) with the latest
 // Playwright JSON results (tagged scenario titles per project) into one
-// markdown report: per area, inventory rows by oracle/new green. Runs in CI
+// markdown report: per area, inventory rows by oracle/new green. Rows whose
+// Status reads dropped are out of scope: fully-dropped areas render as
+// dropped, partial drops are excluded from the denominators. Runs in CI
 // without any stack; the results file is optional, so the report stays
 // useful before the first scenario lands.
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -59,6 +61,9 @@ function parseInventory() {
       rows.push({
         area,
         id,
+        // Dropped by a recorded product decision (e.g. stickies): out of
+        // scope, excluded from the green counts and the per-row table.
+        dropped: status.includes("dropped"),
         oracle: status.includes("oracle green") || status.includes("new green"),
         fresh: status.includes("new green"),
         // Built in apps/web_new and unit-tested, but not yet run through the
@@ -115,6 +120,8 @@ const areas = [...new Set(inventory.map((row) => row.area))].sort();
 let oracleTotal = 0;
 let freshTotal = 0;
 let builtTotal = 0;
+let liveTotal = 0;
+let droppedTotal = 0;
 const out = [
   "# Parity report",
   "",
@@ -124,17 +131,26 @@ const out = [
 
 for (const area of areas) {
   const areaRows = inventory.filter((row) => row.area === area);
-  const oracle = areaRows.filter((row) => row.oracle).length;
-  const fresh = areaRows.filter((row) => row.fresh).length;
-  const built = areaRows.filter((row) => row.built).length;
+  const dropped = areaRows.filter((row) => row.dropped).length;
+  const live = areaRows.filter((row) => !row.dropped);
+  const oracle = live.filter((row) => row.oracle).length;
+  const fresh = live.filter((row) => row.fresh).length;
+  const built = live.filter((row) => row.built).length;
   oracleTotal += oracle;
   freshTotal += fresh;
   builtTotal += built;
+  liveTotal += live.length;
+  droppedTotal += dropped;
+  if (live.length === 0) {
+    out.push(`## ${area} — dropped by decision (${areaRows.length} rows out of scope)`, "");
+    out.push("Dropped by decision; no scenarios expected.", "");
+    continue;
+  }
   out.push(
-    `## ${area} — ${oracle}/${areaRows.length} oracle green, ${fresh}/${areaRows.length} new green${built > 0 ? `, ${built} built (parity pending)` : ""}`,
+    `## ${area} — ${oracle}/${live.length} oracle green, ${fresh}/${live.length} new green${built > 0 ? `, ${built} built (parity pending)` : ""}${dropped > 0 ? `, ${dropped} dropped` : ""}`,
     ""
   );
-  const lit = areaRows.filter(
+  const lit = live.filter(
     (row) => row.oracle || row.built || runById.has(`${row.id}|oracle`) || runById.has(`${row.id}|new`)
   );
   if (lit.length === 0) {
@@ -153,8 +169,9 @@ for (const area of areas) {
   out.push("");
 }
 
-out.push(`Total: ${oracleTotal}/${inventory.length} oracle green, ${freshTotal}/${inventory.length} new green.`, "");
-if (builtTotal > 0) out.push(`Built, parity pending: ${builtTotal}/${inventory.length}.`, "");
+out.push(`Total: ${oracleTotal}/${liveTotal} oracle green, ${freshTotal}/${liveTotal} new green.`, "");
+if (builtTotal > 0) out.push(`Built, parity pending: ${builtTotal}/${liveTotal}.`, "");
+if (droppedTotal > 0) out.push(`Dropped by decision, out of scope: ${droppedTotal}.`, "");
 const report = out.join("\n");
 
 if (outFile === null) process.stdout.write(report);

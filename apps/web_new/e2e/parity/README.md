@@ -76,7 +76,9 @@ Row status, in the inventory's Status cell: `not started`, then
 implements the row in `apps/web_new` appends `built` (`oracle green,
 built`); slices are unit-tested and do not run the parity suite. The
 area gate runs the area's scenarios against `apps/web_new` once and turns
-passing rows into `new green`. The report counts all three.
+passing rows into `new green`. The report counts all three. A row dropped
+by a recorded product decision carries Status `dropped ...` (citing the
+decision); dropped rows are out of scope and the report excludes them.
 
 ## Extending the driver
 
