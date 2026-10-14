@@ -14,7 +14,9 @@ const issue = m ? `NEWFRONT-${m[1]}` : null;
 
 const rules = [{ source: "NEWFRONT-1 allowlist", paths: cfg.base }];
 if (issue && cfg.issues[issue]) rules.push({ source: `${issue} (${cfg.issues[issue].reason})`, ...cfg.issues[issue] });
-if (issue && cfg.oracleIssues.ids.includes(issue)) rules.push({ source: `${issue} (oracle selectors)`, ...cfg.oracleIssues });
+// Every NEWFRONT issue may add or remove data-testid attributes in the old apps (testidOnly keeps it to
+// exactly that), so oracle work no longer waits for its issue to be listed (NEWFRONT-106).
+if (issue) rules.push({ source: `${issue} (oracle selectors)`, ...cfg.oracleIssues });
 
 // A file with every data-testid attribute removed and all whitespace dropped. Two versions
 // of a file that differ only by data-testid attributes (and the line breaks a formatter adds
