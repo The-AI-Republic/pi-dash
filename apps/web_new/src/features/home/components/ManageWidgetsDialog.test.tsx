@@ -3,13 +3,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HomePreferenceList, HomeWidgetKey } from "@pidash/api-client";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { widgetPrefsKeys } from "../api/widgetPrefs.js";
 import { ManageWidgetsDialog } from "./ManageWidgetsDialog.js";
 
 vi.mock("../../../shared/shell/index.js", () => ({
@@ -66,12 +67,14 @@ function stubPreferences(
   }) as never);
 }
 
-function renderDialog(): void {
+function renderDialog(): QueryClient {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <QueryClientProvider client={client}>
       <ManageWidgetsDialog workspaceSlug="acme" open onOpenChange={() => {}} />
     </QueryClientProvider>
   );
+  return client;
 }
 
 function switchNames(): string[] {
@@ -188,6 +191,53 @@ describe("ManageWidgetsDialog", () => {
     fireEvent.mouseUp(window);
 
     await waitFor(() => expect(screen.getByRole("switch", { name: "Quicklinks" })).toBeInTheDocument());
+    expect(writes).toEqual([]);
+    expect(notifySuccess).not.toHaveBeenCalled();
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("steers a drag across two rows before dropping home", async () => {
+    const writes: Array<{ url: string; body: unknown }> = [];
+    stubPreferences(seed(), writes, false);
+    renderDialog();
+    await waitFor(() => expect(switchNames()).toEqual(["Quicklinks", "Recents"]));
+    layoutRows([0, 40]);
+
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Reorder Quicklinks" }));
+    // First move: below the lower row's middle, so Quicklinks drops to the bottom.
+    fireEvent.mouseMove(screen.getAllByRole("listitem")[1] as HTMLElement, { clientY: 74 });
+    expect(switchNames()).toEqual(["Recents", "Quicklinks"]);
+    // Second move: back above the top row's middle, steering home again. The
+    // order updater now starts from the live order instead of the query rows.
+    fireEvent.mouseMove(screen.getAllByRole("listitem")[0] as HTMLElement, { clientY: 45 });
+    expect(switchNames()).toEqual(["Quicklinks", "Recents"]);
+    fireEvent.mouseUp(window);
+
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Quicklinks" })).toBeInTheDocument());
+    expect(writes).toEqual([]);
+    expect(notifySuccess).not.toHaveBeenCalled();
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("drops a drag silently when the map unloads mid-drag", async () => {
+    const writes: Array<{ url: string; body: unknown }> = [];
+    stubPreferences(seed(), writes, false);
+    const client = renderDialog();
+    await waitFor(() => expect(switchNames()).toEqual(["Quicklinks", "Recents"]));
+    layoutRows([0, 40]);
+
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Reorder Quicklinks" }));
+    const rows = screen.getAllByRole("listitem");
+    fireEvent.mouseMove(rows[1] as HTMLElement, { clientY: 74 });
+    expect(switchNames()).toEqual(["Recents", "Quicklinks"]);
+
+    // The map unloads before release: the drop plans against no rows and
+    // writes nothing instead of crashing on the missing data.
+    act(() => {
+      client.removeQueries({ queryKey: widgetPrefsKeys.list("acme") });
+    });
+    fireEvent.mouseUp(window);
+
     expect(writes).toEqual([]);
     expect(notifySuccess).not.toHaveBeenCalled();
     expect(notifyError).not.toHaveBeenCalled();

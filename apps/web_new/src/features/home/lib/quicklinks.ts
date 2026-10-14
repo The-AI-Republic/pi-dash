@@ -22,7 +22,7 @@ export type QuickLinkValidation = { ok: true; value: NormalizedQuickLink } | { o
 
 const SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 
-/** Trim the address, completing a missing scheme the way the server does. */
+/** Trim the address, defaulting a missing scheme to https. */
 export function normalizeQuickLinkAddress(raw: string): string {
   const trimmed = raw.trim();
   if (trimmed === "" || SCHEME_PATTERN.test(trimmed)) return trimmed;

@@ -52,6 +52,13 @@ describe("validateQuickLinkForm", () => {
     });
   });
 
+  it("accepts a plain http address untouched", () => {
+    expect(validateQuickLinkForm({ address: "http://example.com/docs", name: "" })).toEqual({
+      ok: true,
+      value: { url: "http://example.com/docs", title: "" },
+    });
+  });
+
   it("accepts a bare host with a completed scheme", () => {
     expect(validateQuickLinkForm({ address: "example.com", name: "" })).toEqual({
       ok: true,
