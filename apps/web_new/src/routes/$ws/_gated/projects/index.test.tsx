@@ -23,10 +23,12 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
 import { sessionKeys } from "../../../../core/session/index.js";
 import { projectKeys } from "../../../../features/projects/index.js";
-import { ProjectsListRoute, Route } from "./index.js";
+import { Route } from "./index.js";
 
 function renderList(): void {
   vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme" });
+  const Component = Route.options.component;
+  if (!Component) throw new Error("projects route has no component");
   createAppClient("https://api.test", () => new Promise<never>(() => {}));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(projectKeys.details("acme"), [
@@ -44,7 +46,7 @@ function renderList(): void {
   ]);
   render(
     <QueryClientProvider client={queryClient}>
-      <ProjectsListRoute />
+      <Component />
     </QueryClientProvider>
   );
 }

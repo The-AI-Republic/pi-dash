@@ -11,10 +11,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../../../core/api/client.js";
 import { sessionKeys } from "../../../../../core/session/index.js";
 import { projectKeys } from "../../../../../features/projects/index.js";
-import { ArchivedProjectsRoute, Route } from "./index.js";
+import { Route } from "./index.js";
 
 function renderArchives(): void {
   vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme" });
+  const Component = Route.options.component;
+  if (!Component) throw new Error("archives route has no component");
   createAppClient("https://api.test", () => new Promise<never>(() => {}));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(projectKeys.details("acme"), []);
@@ -30,7 +32,7 @@ function renderArchives(): void {
   ]);
   render(
     <QueryClientProvider client={queryClient}>
-      <ArchivedProjectsRoute />
+      <Component />
     </QueryClientProvider>
   );
 }

@@ -150,6 +150,11 @@ describe("sortListRows", () => {
     expect(names(sortListRows(rows, { key: "manual", direction: "descending" }))).toEqual(["A", "B"]);
   });
 
+  it("keeps collection order for rows sharing a manual slot", () => {
+    const rows = [project("Second", { sort_order: 100 }), project("First", { sort_order: 100 })];
+    expect(names(sortListRows(rows, { key: "manual", direction: "ascending" }))).toEqual(["Second", "First"]);
+  });
+
   it("orders names case-insensitively and stably", () => {
     const rows = [
       project("delta", { id: "a" }),
@@ -397,5 +402,12 @@ describe("selectMemberOptions", () => {
 
   it("matches nothing on a nonsense query", () => {
     expect(selectMemberOptions(memberships, { applied: [], selfId: "u1", query: "zzz" })).toEqual([]);
+  });
+
+  it("excludes bots from the options", () => {
+    const bot = member("u9", "Helper Bot");
+    bot.member.is_bot = true;
+    const options = selectMemberOptions([...memberships, bot], { applied: [], selfId: null, query: "" });
+    expect(options.map((option) => option.id)).toEqual(["u1", "u3", "u2"]);
   });
 });

@@ -254,7 +254,7 @@ export function selectMemberOptions(
 ): MemberOption[] {
   const needle = args.query.toLowerCase();
   return memberships
-    .filter((membership) => membership.member.display_name.toLowerCase().includes(needle))
+    .filter((membership) => !membership.member.is_bot && membership.member.display_name.toLowerCase().includes(needle))
     .map((membership) => ({
       id: membership.member.id,
       displayName: membership.member.display_name,
