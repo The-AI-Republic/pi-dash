@@ -145,6 +145,17 @@ async function issueIdByName(seed: ParitySeedFacts, projectId: string, cookie: s
   return found.id;
 }
 
+/**
+ * ISO day (YYYY-MM-DD) `offset` days from today. Cycles that must stay
+ * active (membership calls reject completed cycles) are dated relative to
+ * the run date so the scenarios never rot.
+ */
+function isoDay(offset: number): string {
+  const at = new Date();
+  at.setUTCDate(at.getUTCDate() + offset);
+  return at.toISOString().slice(0, 10);
+}
+
 test(
   specTitle(["ISS-028"], "kanban grouped columns, None column and ungrouped single column"),
   { tag: specTags(["ISS-028"]) },
@@ -654,8 +665,8 @@ test(
       seed.workspaceSlug,
       seed.projectId,
       `KB cycle ${suffix}`,
-      "2026-10-20",
-      "2026-11-20",
+      isoDay(14),
+      isoDay(45),
       owner.cookie
     );
     const firstId = await issueIdByName(seed, seed.projectId, owner.cookie, seed.issueNames[0] ?? "");
@@ -919,8 +930,8 @@ test(
       seed.workspaceSlug,
       projectId,
       memberName,
-      "2026-09-15",
-      "2026-11-15",
+      isoDay(14),
+      isoDay(45),
       owner.cookie
     );
     const moduleId = await serverCreateModule(seed.workspaceSlug, projectId, memberName, owner.cookie);
