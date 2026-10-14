@@ -222,8 +222,11 @@ import type {
   PageExportFile,
   PageExportFocusFacts,
   PageExportRow,
+  SettingsProfileCustomTheme,
   SettingsProfileGeneralField,
+  SettingsProfileLocale,
   SettingsProfileSecurityField,
+  SettingsProfileTheme,
   WsSettingsMemberRowFacts,
   SpaceBoardGroupFacts,
   SpaceBoardCardFacts,
@@ -57907,5 +57910,369 @@ export class WebDriver implements ParityDriver {
 
   async settingsGeneralReleaseCoverUpload(): Promise<void> {
     await this.page.unroute(WebDriver.generalCoverUploadRoute);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Profile preferences + own activity (NEWFRONT-427, PROF-016..019).
+  // ---------------------------------------------------------------------------
+
+  private static readonly settingsProfileThemeLabels: Record<SettingsProfileTheme, string> = {
+    system: "System preference",
+    light: "Light",
+    dark: "Dark",
+    "light-contrast": "Light high contrast",
+    "dark-contrast": "Dark high contrast",
+    custom: "Custom theme",
+  };
+
+  /** One preferences-tab row: the h4 title's grandparent owns the control. */
+  private settingsProfileRow(title: string): Locator {
+    return this.page.getByRole("heading", { name: title, exact: true }).locator("xpath=../..");
+  }
+
+  private settingsProfileRowButton(title: string): Locator {
+    return this.settingsProfileRow(title).getByRole("button").first();
+  }
+
+  private async settingsProfileWaitToast(match: RegExp): Promise<void> {
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      const text = (await this.toastText().catch(() => null)) ?? "";
+      if (match.test(text)) return;
+      if (Date.now() > deadline)
+        throw new Error(`[parity] toast never matched ${String(match)}: last seen ${JSON.stringify(text)}.`);
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  private async settingsProfileWaitThemeValue(want: SettingsProfileTheme | null): Promise<void> {
+    const wantLabel = want === null ? "Select your theme" : WebDriver.settingsProfileThemeLabels[want];
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      const text = await this.settingsProfileRowButton("Theme")
+        .textContent({ timeout: 5_000 })
+        .catch(() => null);
+      if (text !== null && text.includes(wantLabel)) return;
+      if (Date.now() > deadline) throw new Error(`[parity] theme switch never settled on ${wantLabel}.`);
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async settingsProfileOpenPreferences(): Promise<void> {
+    await this.page.goto("/settings/profile/preferences", { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.settingsProfileRowButton("Theme").waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async settingsProfileOpenActivity(): Promise<void> {
+    const feedWait = this.page
+      .waitForResponse(
+        (response) => response.request().method() === "GET" && response.url().includes("/api/users/me/activities/"),
+        { timeout: WebDriver.WAIT_MS }
+      )
+      .catch(() => null);
+    await this.page.goto("/settings/profile/activity", { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await feedWait;
+    await this.page.waitForFunction(
+      () =>
+        document.querySelector('img[src*="activity-"]') !== null ||
+        document.querySelectorAll('[data-testid="settings-activity-list"] ul > *').length > 0,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async settingsProfileThemeValue(): Promise<SettingsProfileTheme | null> {
+    const label = ((await this.settingsProfileRowButton("Theme").textContent({ timeout: WebDriver.WAIT_MS })) ?? "")
+      .trim()
+      .replace(/\s+/g, " ");
+    const entries = Object.entries(WebDriver.settingsProfileThemeLabels) as [SettingsProfileTheme, string][];
+    // Exact first: "Light high contrast" contains "Light", so a naive
+    // substring scan misreads the contrast variants as their base theme.
+    const exact = entries.find(([, text]) => label === text)?.[0] ?? null;
+    if (exact !== null) return exact;
+    const longestFirst = [...entries].sort((a, b) => b[1].length - a[1].length);
+    return longestFirst.find(([, text]) => label.includes(text))?.[0] ?? null;
+  }
+
+  async settingsProfileSetTheme(theme: SettingsProfileTheme): Promise<void> {
+    const before = await this.settingsProfileThemeValue();
+    const label = WebDriver.settingsProfileThemeLabels[theme];
+    await this.page.evaluate(() => {
+      (window as unknown as { __parityThemeGen?: string }).__parityThemeGen = "before";
+    });
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/profile/"),
+      { timeout: WebDriver.WAIT_MS }
+    );
+    await this.settingsProfileRowButton("Theme").click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: label, exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await saveWait;
+    // A saved theme reloads (the marker goes with the old document); a
+    // failed save toasts instead and the store rolls back without reloading.
+    await this.page.waitForFunction(
+      () =>
+        (window as unknown as { __parityThemeGen?: string }).__parityThemeGen === undefined ||
+        (document.querySelector('[aria-label="Notifications"]')?.textContent ?? "").includes("Failed"),
+      { timeout: WebDriver.WAIT_MS }
+    );
+    const reloaded: boolean = await this.page.evaluate(
+      () => (window as unknown as { __parityThemeGen?: string }).__parityThemeGen === undefined
+    );
+    if (reloaded) {
+      await this.settingsProfileRowButton("Theme").waitFor({ timeout: WebDriver.WAIT_MS });
+      await this.settingsProfileWaitThemeValue(theme);
+    } else {
+      await this.settingsProfileWaitThemeValue(before);
+    }
+  }
+
+  async settingsProfileAppliedTheme(): Promise<string | null> {
+    return this.page.evaluate(() => document.documentElement.getAttribute("data-theme"));
+  }
+
+  async settingsProfileCustomVarsApplied(): Promise<boolean> {
+    return this.page.evaluate(() => {
+      const style = document.documentElement.getAttribute("style") ?? "";
+      return style.includes("--brand-") && style.includes("--neutral-");
+    });
+  }
+
+  async settingsProfileCustomDesignerVisible(): Promise<boolean> {
+    return (await this.page.locator('input[name="primary"]').count()) > 0;
+  }
+
+  async settingsProfileCustomDesignerValues(): Promise<SettingsProfileCustomTheme> {
+    const primary = await this.page.locator('input[name="primary"]').first().inputValue({ timeout: WebDriver.WAIT_MS });
+    const background = await this.page
+      .locator('input[name="background"]')
+      .first()
+      .inputValue({ timeout: WebDriver.WAIT_MS });
+    const darkPalette = await this.page
+      .getByRole("radio", { name: "Dark mode" })
+      .first()
+      .isChecked({ timeout: WebDriver.WAIT_MS });
+    return { primary, background, darkPalette };
+  }
+
+  async settingsProfilePreviewCustomColor(field: "primary" | "background", hex: string): Promise<string | null> {
+    const input = this.page.locator(`input[name="${field}"]`).first();
+    const before = await input.evaluate((el) => (el as HTMLElement).style.backgroundColor || "");
+    await input.fill(hex, { timeout: WebDriver.WAIT_MS });
+    // The swatch behind the field previews the typed color before any save.
+    const deadline = Date.now() + WebDriver.WAIT_MS;
+    for (;;) {
+      const color = await input.evaluate((el) => (el as HTMLElement).style.backgroundColor || "");
+      if (color !== "" && color !== before) return color;
+      if (Date.now() > deadline) throw new Error(`[parity] custom ${field} swatch never previewed ${hex}.`);
+      await this.page.waitForTimeout(100);
+    }
+  }
+
+  async settingsProfileSetCustomPalette(dark: boolean): Promise<void> {
+    await this.page
+      .getByRole("radio", { name: dark ? "Dark mode" : "Light mode" })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async settingsProfileSaveCustomTheme(): Promise<void> {
+    await this.page.evaluate(() => {
+      (window as unknown as { __parityThemeGen?: string }).__parityThemeGen = "before";
+    });
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/profile/"),
+      { timeout: WebDriver.WAIT_MS }
+    );
+    await this.page.getByRole("button", { name: "Set theme" }).first().click({ timeout: WebDriver.WAIT_MS });
+    await saveWait;
+    // The designer toasts "Reloading to apply changes..." then reloads after a beat.
+    await this.page.waitForFunction(
+      () => (window as unknown as { __parityThemeGen?: string }).__parityThemeGen === undefined,
+      { timeout: WebDriver.WAIT_MS }
+    );
+    await this.page.locator('input[name="primary"]').first().waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async settingsProfileFailProfileSaves(status: number): Promise<void> {
+    await this.page.route("**/api/users/me/profile/", async (route) => {
+      if (route.request().method() === "PATCH") {
+        await route.fulfill({
+          status,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "parity-injected failure" }),
+        });
+      } else {
+        await route.continue();
+      }
+    });
+  }
+
+  async settingsProfileClearProfileSaveFailure(): Promise<void> {
+    await this.page.unroute("**/api/users/me/profile/");
+  }
+
+  async settingsProfileLocaleValues(): Promise<SettingsProfileLocale> {
+    const read = async (title: string): Promise<string | null> => {
+      const text = ((await this.settingsProfileRowButton(title).textContent({ timeout: WebDriver.WAIT_MS })) ?? "")
+        .trim()
+        .replace(/\s+/g, " ");
+      return text === "" ? null : text;
+    };
+    return {
+      language: await read("Language"),
+      timezone: await read("Timezone"),
+      weekStart: await read("First day of the week"),
+    };
+  }
+
+  async settingsProfileSetTimezone(timezone: string): Promise<void> {
+    // Options show "{offset} {label}", never the IANA value, and every
+    // offset contains "UTC" — so resolve the value to its display label
+    // through the same endpoint the picker reads, then match that label.
+    // UTC is not server-fed; its option reads exactly "UTC".
+    const zones = await this.page.evaluate(async () => {
+      const res = await fetch("/api/timezones/");
+      return (await res.json()) as {
+        timezones: { value: string; label: string; utc_offset: string }[];
+      };
+    });
+    const entry = zones.timezones.find((zone) => zone.value === timezone);
+    const saveWait = this.page.waitForResponse(
+      (response) => {
+        if (response.request().method() !== "PATCH") return false;
+        const url = response.url();
+        return url.includes("/api/users/me/") && !url.includes("/api/users/me/profile");
+      },
+      { timeout: WebDriver.WAIT_MS }
+    );
+    await this.settingsProfileRowButton("Timezone").click({ timeout: WebDriver.WAIT_MS });
+    if (entry === undefined) {
+      if (timezone !== "UTC") throw new Error(`[parity] unknown timezone ${timezone}.`);
+      await this.page.getByPlaceholder("Search").first().fill("UTC", { timeout: WebDriver.WAIT_MS });
+      await this.page.getByRole("option", { name: "UTC", exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    } else {
+      await this.page.getByPlaceholder("Search").first().fill(entry.label, { timeout: WebDriver.WAIT_MS });
+      await this.page.getByRole("option", { name: entry.label }).first().click({ timeout: WebDriver.WAIT_MS });
+    }
+    await saveWait;
+    await this.settingsProfileWaitToast(/Timezone updated successfully/i);
+  }
+
+  async settingsProfileSetLanguage(language: string): Promise<void> {
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/profile/"),
+      { timeout: WebDriver.WAIT_MS }
+    );
+    await this.settingsProfileRowButton("Language").click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: language, exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await saveWait;
+    await this.settingsProfileWaitToast(/Language updated successfully/i);
+  }
+
+  async settingsProfileSetWeekStart(day: string): Promise<void> {
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/profile/"),
+      { timeout: WebDriver.WAIT_MS }
+    );
+    await this.settingsProfileRowButton("First day of the week").click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: day, exact: true }).click({ timeout: WebDriver.WAIT_MS });
+    await saveWait;
+    await this.settingsProfileWaitToast(/First day of the week updated successfully/i);
+  }
+
+  async settingsProfileOpenHome(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page
+      .getByRole("heading", { name: /Good (morning|afternoon|evening)/ })
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async settingsProfileGreetingClockText(): Promise<string | null> {
+    const heading = this.page.getByRole("heading", { name: /Good (morning|afternoon|evening)/ }).first();
+    const text = await heading
+      .locator("xpath=..")
+      .textContent({ timeout: WebDriver.WAIT_MS })
+      .catch(() => null);
+    return text === null ? null : text.trim().replace(/\s+/g, " ");
+  }
+
+  async settingsProfileOpenMemberProfile(workspaceSlug: string, userId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/profile/${userId}`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    // The sidebar clock settles with the profile payload.
+    await this.page
+      .getByText(/\d{2}:\d{2}/)
+      .first()
+      .waitFor({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async settingsProfileSidebarClockText(): Promise<string | null> {
+    // The clock renders "HH:MM <timezone>" beside the Timezone label.
+    const row = this.page.getByText("Timezone", { exact: true }).locator("xpath=..");
+    const text = await row.textContent({ timeout: WebDriver.WAIT_MS }).catch(() => null);
+    return text === null ? null : text.trim().replace(/\s+/g, " ");
+  }
+
+  async settingsProfileCalendarDayOrder(): Promise<string[]> {
+    const cells = this.page.locator(
+      'xpath=//div[text()="Sun" or text()="Mon" or text()="Tue" or text()="Wed" or text()="Thu" or text()="Fri" or text()="Sat"]'
+    );
+    await cells.first().waitFor({ timeout: WebDriver.WAIT_MS });
+    return cells.allInnerTexts();
+  }
+
+  async settingsProfileOwnActivityEntryCount(): Promise<number> {
+    return this.page.getByTestId("settings-activity-list").locator("ul > *").count();
+  }
+
+  async settingsProfileOwnActivityLoadMoreVisible(): Promise<boolean> {
+    return this.page
+      .getByRole("button", { name: "Load more", exact: true })
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  async settingsProfileOwnActivityLoadMore(): Promise<void> {
+    const before = await this.settingsProfileOwnActivityEntryCount();
+    const pageWait = this.page.waitForResponse(
+      (response) => response.request().method() === "GET" && response.url().includes("/api/users/me/activities/"),
+      { timeout: WebDriver.WAIT_MS }
+    );
+    await this.page
+      .getByRole("button", { name: "Load more", exact: true })
+      .first()
+      .click({ timeout: WebDriver.WAIT_MS });
+    await pageWait;
+    await this.page.waitForFunction(
+      (wantMore) => document.querySelectorAll('[data-testid="settings-activity-list"] ul > *').length > wantMore,
+      before,
+      { timeout: WebDriver.WAIT_MS }
+    );
+  }
+
+  async settingsProfileOwnActivityEmptyIllustration(): Promise<string | null> {
+    const img = this.page.locator('img[src*="activity-"]').first();
+    if ((await img.count()) === 0) return null;
+    return img.getAttribute("src");
+  }
+
+  async settingsProfileCycleUserTimezoneDates(): Promise<{ start: string | null; end: string | null }> {
+    // The analytics sidebar's date-range button shows the merged range
+    // ("Nov 10 - 17, 2026"); hovering it reveals the "In your timezone"
+    // tooltip with each stored date rendered in the member timezone.
+    const trigger = this.page
+      .locator("button")
+      .filter({ hasText: /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/ })
+      .first();
+    await trigger.hover({ timeout: WebDriver.WAIT_MS });
+    const heading = this.page.getByText("In your timezone", { exact: true }).first();
+    await heading.waitFor({ timeout: WebDriver.WAIT_MS });
+    const text = ((await heading.locator("xpath=..").textContent()) ?? "").replace(/\s+/g, " ");
+    const dates = text.match(/[A-Z][a-z]{2} \d{2}, \d{4}/g) ?? [];
+    return { start: dates[0] ?? null, end: dates[1] ?? null };
   }
 }

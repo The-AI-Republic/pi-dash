@@ -21860,3 +21860,90 @@ export async function serverSearchIssueNames(
     .map((row) => (row as Record<string, unknown>)["name"])
     .filter((name): name is string => typeof name === "string");
 }
+
+// ---------------------------------------------------------------------------
+// Profile preferences + own activity reads (NEWFRONT-427, PROF-016..019).
+// Theme, locale and own-activity state as the server knows them, backing the
+// preferences and own-activity oracle scenarios. Appended; existing helpers
+// above are untouched per the shared contract.
+// ---------------------------------------------------------------------------
+
+/** Theme object the profile endpoint stores (NEWFRONT-427, PROF-016). */
+export interface ServerProfileTheme {
+  theme?: string;
+  primary?: string;
+  background?: string;
+  darkPalette?: boolean;
+}
+
+/** Signed-in user's theme object, as the server knows it. */
+export async function serverProfileTheme(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerProfileTheme> {
+  const res = await fetch(`${apiBase}/api/users/me/profile/`, { headers: { cookie: sessionCookie } });
+  if (!res.ok) throw new Error(`[parity] profile read failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as { theme?: unknown };
+  const theme = (row.theme ?? {}) as Record<string, unknown>;
+  const out: ServerProfileTheme = {};
+  if (typeof theme["theme"] === "string") out.theme = theme["theme"] as string;
+  if (typeof theme["primary"] === "string") out.primary = theme["primary"] as string;
+  if (typeof theme["background"] === "string") out.background = theme["background"] as string;
+  if (typeof theme["darkPalette"] === "boolean") out.darkPalette = theme["darkPalette"] as boolean;
+  return out;
+}
+
+/** Signed-in user's locale choices, as the server knows them (NEWFRONT-427, PROF-017). */
+export interface ServerProfileLocale {
+  language?: string;
+  start_of_the_week?: number;
+  user_timezone?: string;
+}
+
+/** Language plus week start from the profile, timezone from the user record. */
+export async function serverProfileLocale(
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerProfileLocale> {
+  const [profileRes, userRes] = await Promise.all([
+    fetch(`${apiBase}/api/users/me/profile/`, { headers: { cookie: sessionCookie } }),
+    fetch(`${apiBase}/api/users/me/`, { headers: { cookie: sessionCookie } }),
+  ]);
+  if (!profileRes.ok) throw new Error(`[parity] profile read failed with HTTP ${profileRes.status}.`);
+  if (!userRes.ok) throw new Error(`[parity] users/me read failed with HTTP ${userRes.status}.`);
+  const profile = (await profileRes.json()) as Record<string, unknown>;
+  const user = (await userRes.json()) as Record<string, unknown>;
+  const out: ServerProfileLocale = {};
+  if (typeof profile["language"] === "string") out.language = profile["language"];
+  if (typeof profile["start_of_the_week"] === "number") out.start_of_the_week = profile["start_of_the_week"];
+  if (typeof user["user_timezone"] === "string") out.user_timezone = user["user_timezone"];
+  return out;
+}
+
+/** One page of the own-activity feed (NEWFRONT-427, PROF-019). */
+export interface ServerOwnActivityPage {
+  results: unknown[];
+  total_pages: number;
+  total_results: number;
+}
+
+/** Own cross-workspace activity through the endpoint the settings tab reads. */
+export async function serverOwnActivities(
+  sessionCookie: string,
+  cursor?: string,
+  perPage = 100,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ServerOwnActivityPage> {
+  const params = new URLSearchParams({ per_page: String(perPage) });
+  if (cursor !== undefined) params.set("cursor", cursor);
+  const res = await fetch(`${apiBase}/api/users/me/activities/?${params.toString()}`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] own-activity read failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as Record<string, unknown>;
+  return {
+    results: Array.isArray(row["results"]) ? row["results"] : [],
+    total_pages: typeof row["total_pages"] === "number" ? row["total_pages"] : 0,
+    total_results: typeof row["total_results"] === "number" ? row["total_results"] : 0,
+  };
+}

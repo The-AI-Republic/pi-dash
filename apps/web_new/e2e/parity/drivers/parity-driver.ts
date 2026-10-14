@@ -10349,6 +10349,78 @@ export interface WsSettingsMemberRowFacts {
   // are this block's own: the shared body reader sees neither the
   // heading nor a closed modal, and the shared name fill collides with
   // the form behind the dialog.
+
+  // ---------------------------------------------------------------------------
+  // Profile preferences + own activity (NEWFRONT-427, PROF-016..019).
+  // The preferences tab (theme switcher with custom-color designer, language /
+  // timezone / week-start selectors), cross-screen reads proving those choices
+  // reshape other screens (home greeting clock, profile sidebar clock, issue
+  // calendar day order, cycle "in your timezone" dates), and the settings
+  // activity tab (paged own history with a themed empty state). The
+  // notifications tab needs no methods here: the
+  // PROF-018 scenario reuses the notificationsEmail* methods (NEWFRONT-201).
+  // Appended; existing entries above are untouched per the shared contract.
+  // ---------------------------------------------------------------------------
+
+  /** Open the profile-settings preferences tab; resolves once the theme control settles. */
+  settingsProfileOpenPreferences(): Promise<void>;
+  /** Open the profile-settings activity tab; resolves once entries or the empty state settle. */
+  settingsProfileOpenActivity(): Promise<void>;
+  /** Current theme choice as the switcher shows it, or null while unset. */
+  settingsProfileThemeValue(): Promise<SettingsProfileTheme | null>;
+  /** Pick a theme; resolves once the save settles and the app re-applies it. */
+  settingsProfileSetTheme(theme: SettingsProfileTheme): Promise<void>;
+  /** Theme marker the document currently applies, or null when absent. */
+  settingsProfileAppliedTheme(): Promise<string | null>;
+  /** Whether custom-theme CSS variables are currently applied to the document. */
+  settingsProfileCustomVarsApplied(): Promise<boolean>;
+  /** Whether the custom-color designer renders (custom theme only). */
+  settingsProfileCustomDesignerVisible(): Promise<boolean>;
+  /** Current custom-designer field values. */
+  settingsProfileCustomDesignerValues(): Promise<SettingsProfileCustomTheme>;
+  /** Type a hex color into one designer field without saving; resolves with the field's live swatch color. */
+  settingsProfilePreviewCustomColor(field: "primary" | "background", hex: string): Promise<string | null>;
+  /** Pick the custom designer's light/dark palette without saving. */
+  settingsProfileSetCustomPalette(dark: boolean): Promise<void>;
+  /** Save the custom designer; resolves once the save settles and the app re-applies it. */
+  settingsProfileSaveCustomTheme(): Promise<void>;
+  /** Fail subsequent profile-save PATCH calls with `status` (test hook). */
+  settingsProfileFailProfileSaves(status: number): Promise<void>;
+  /** Release failed profile-save PATCH calls (test hook). */
+  settingsProfileClearProfileSaveFailure(): Promise<void>;
+  /** Current language, timezone and week-start labels as the selectors show them. */
+  settingsProfileLocaleValues(): Promise<SettingsProfileLocale>;
+  /** Pick a timezone; resolves once the save toast settles. */
+  settingsProfileSetTimezone(timezone: string): Promise<void>;
+  /** Pick an interface language; resolves once the save toast settles. */
+  settingsProfileSetLanguage(language: string): Promise<void>;
+  /** Pick a week-start day; resolves once the save toast settles. */
+  settingsProfileSetWeekStart(day: string): Promise<void>;
+  /** Open the workspace home; resolves once the greeting settles. */
+  settingsProfileOpenHome(workspaceSlug: string): Promise<void>;
+  /** Greeting clock line on the workspace home, or null when absent. */
+  settingsProfileGreetingClockText(): Promise<string | null>;
+  /** Open one member's profile page; resolves once the sidebar settles. */
+  settingsProfileOpenMemberProfile(workspaceSlug: string, userId: string): Promise<void>;
+  /** Profile-sidebar clock line (time plus timezone), or null when absent. */
+  settingsProfileSidebarClockText(): Promise<string | null>;
+  /** Calendar week-header day labels in display order (current page must show a calendar layout). */
+  settingsProfileCalendarDayOrder(): Promise<string[]>;
+  /** Rendered own-activity entries on the settings activity tab. */
+  settingsProfileOwnActivityEntryCount(): Promise<number>;
+  /** Whether the activity tab's load-more control renders. */
+  settingsProfileOwnActivityLoadMoreVisible(): Promise<boolean>;
+  /** Click load-more; resolves once the next page renders. */
+  settingsProfileOwnActivityLoadMore(): Promise<void>;
+  /** Empty-state illustration src on the activity tab, or null when entries render. */
+  settingsProfileOwnActivityEmptyIllustration(): Promise<string | null>;
+  /**
+   * Stored cycle dates as the "In your timezone" tooltip renders them.
+   * The current page must be a cycle detail page; hovers the analytics
+   * sidebar's date range and reads the tooltip (each date "MMM dd, yyyy",
+   * or null when the tooltip shows none).
+   */
+  settingsProfileCycleUserTimezoneDates(): Promise<{ start: string | null; end: string | null }>;
 }
 
 /** General-tab text field addressed by the settingsGeneral field methods (NEWFRONT-389). */
@@ -13084,4 +13156,27 @@ export interface WsSettingsApiTokenBackup {
   fileName: string;
   /** File bytes decoded as UTF-8 text. */
   content: string;
+}
+
+/** Theme choices the preferences tab offers (NEWFRONT-427, PROF-016). */
+export type SettingsProfileTheme = "system" | "light" | "dark" | "light-contrast" | "dark-contrast" | "custom";
+
+/** Custom-color designer field values (NEWFRONT-427, PROF-016). */
+export interface SettingsProfileCustomTheme {
+  /** Brand hex color as typed (with leading `#`). */
+  primary: string;
+  /** Neutral hex color as typed (with leading `#`). */
+  background: string;
+  /** Whether the dark palette is selected. */
+  darkPalette: boolean;
+}
+
+/** Locale selector labels as shown (NEWFRONT-427, PROF-017). */
+export interface SettingsProfileLocale {
+  /** Language label, or null when the selector shows none. */
+  language: string | null;
+  /** Timezone label, or null when the selector shows none. */
+  timezone: string | null;
+  /** Week-start label, or null when the selector shows none. */
+  weekStart: string | null;
 }

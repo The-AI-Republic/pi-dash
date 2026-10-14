@@ -200,8 +200,11 @@ import type {
   PageExportFile,
   PageExportFocusFacts,
   PageExportRow,
+  SettingsProfileCustomTheme,
   SettingsProfileGeneralField,
+  SettingsProfileLocale,
   SettingsProfileSecurityField,
+  SettingsProfileTheme,
   WsSettingsMemberRowFacts,
   SpaceBoardGroupFacts,
   SpaceBoardCardFacts,
@@ -16698,5 +16701,91 @@ export class WebNewDriver implements ParityDriver {
   }
   async settingsGeneralReleaseCoverUpload(): Promise<void> {
     return todo("settingsGeneralReleaseCoverUpload");
+  }
+
+  // Profile preferences + own activity (NEWFRONT-427, PROF-016..019). Stubs:
+  // the area gate implements these against apps/web_new.
+  // ---------------------------------------------------------------------------
+
+  async settingsProfileOpenPreferences(): Promise<void> {
+    return todo("settingsProfileOpenPreferences");
+  }
+  async settingsProfileOpenActivity(): Promise<void> {
+    return todo("settingsProfileOpenActivity");
+  }
+  async settingsProfileThemeValue(): Promise<SettingsProfileTheme | null> {
+    return todo("settingsProfileThemeValue");
+  }
+  async settingsProfileSetTheme(_theme: SettingsProfileTheme): Promise<void> {
+    return todo("settingsProfileSetTheme");
+  }
+  async settingsProfileAppliedTheme(): Promise<string | null> {
+    return todo("settingsProfileAppliedTheme");
+  }
+  async settingsProfileCustomVarsApplied(): Promise<boolean> {
+    return todo("settingsProfileCustomVarsApplied");
+  }
+  async settingsProfileCustomDesignerVisible(): Promise<boolean> {
+    return todo("settingsProfileCustomDesignerVisible");
+  }
+  async settingsProfileCustomDesignerValues(): Promise<SettingsProfileCustomTheme> {
+    return todo("settingsProfileCustomDesignerValues");
+  }
+  async settingsProfilePreviewCustomColor(_field: "primary" | "background", _hex: string): Promise<string | null> {
+    return todo("settingsProfilePreviewCustomColor");
+  }
+  async settingsProfileSetCustomPalette(_dark: boolean): Promise<void> {
+    return todo("settingsProfileSetCustomPalette");
+  }
+  async settingsProfileSaveCustomTheme(): Promise<void> {
+    return todo("settingsProfileSaveCustomTheme");
+  }
+  async settingsProfileFailProfileSaves(_status: number): Promise<void> {
+    return todo("settingsProfileFailProfileSaves");
+  }
+  async settingsProfileClearProfileSaveFailure(): Promise<void> {
+    return todo("settingsProfileClearProfileSaveFailure");
+  }
+  async settingsProfileLocaleValues(): Promise<SettingsProfileLocale> {
+    return todo("settingsProfileLocaleValues");
+  }
+  async settingsProfileSetTimezone(_timezone: string): Promise<void> {
+    return todo("settingsProfileSetTimezone");
+  }
+  async settingsProfileSetLanguage(_language: string): Promise<void> {
+    return todo("settingsProfileSetLanguage");
+  }
+  async settingsProfileSetWeekStart(_day: string): Promise<void> {
+    return todo("settingsProfileSetWeekStart");
+  }
+  async settingsProfileOpenHome(_workspaceSlug: string): Promise<void> {
+    return todo("settingsProfileOpenHome");
+  }
+  async settingsProfileGreetingClockText(): Promise<string | null> {
+    return todo("settingsProfileGreetingClockText");
+  }
+  async settingsProfileOpenMemberProfile(_workspaceSlug: string, _userId: string): Promise<void> {
+    return todo("settingsProfileOpenMemberProfile");
+  }
+  async settingsProfileSidebarClockText(): Promise<string | null> {
+    return todo("settingsProfileSidebarClockText");
+  }
+  async settingsProfileCalendarDayOrder(): Promise<string[]> {
+    return todo("settingsProfileCalendarDayOrder");
+  }
+  async settingsProfileOwnActivityEntryCount(): Promise<number> {
+    return todo("settingsProfileOwnActivityEntryCount");
+  }
+  async settingsProfileOwnActivityLoadMoreVisible(): Promise<boolean> {
+    return todo("settingsProfileOwnActivityLoadMoreVisible");
+  }
+  async settingsProfileOwnActivityLoadMore(): Promise<void> {
+    return todo("settingsProfileOwnActivityLoadMore");
+  }
+  async settingsProfileOwnActivityEmptyIllustration(): Promise<string | null> {
+    return todo("settingsProfileOwnActivityEmptyIllustration");
+  }
+  async settingsProfileCycleUserTimezoneDates(): Promise<{ start: string | null; end: string | null }> {
+    return todo("settingsProfileCycleUserTimezoneDates");
   }
 }
