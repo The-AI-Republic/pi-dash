@@ -56,4 +56,18 @@ describe("shell chrome state", () => {
     expect(reloaded.useShellChrome.getState().peekOpen).toBe(true);
     reloaded.useShellChrome.setState({ sidebarCollapsed: false, peekOpen: false });
   });
+
+  it.each([
+    "{oops",
+    "42",
+    "null",
+    '{"sidebarCollapsed":"yes","peekOpen":false}',
+    '{"sidebarCollapsed":true,"peekOpen":"no"}',
+  ])("falls back to defaults on the stored payload %s", async (payload) => {
+    globalThis.localStorage.setItem(STORAGE_KEY, payload);
+    vi.resetModules();
+    const reloaded = await import("./chromeState.js");
+    expect(reloaded.useShellChrome.getState().sidebarCollapsed).toBe(false);
+    expect(reloaded.useShellChrome.getState().peekOpen).toBe(false);
+  });
 });

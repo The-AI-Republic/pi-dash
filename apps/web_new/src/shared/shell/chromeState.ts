@@ -8,9 +8,8 @@
 // state, and the old app likewise keeps its collapse and peek flags in
 // local storage across sign-out.
 import { create } from "zustand";
-import { createJSONStorage, persist } from "zustand/middleware";
 
-import { preferenceStorage } from "./preferenceStorage.js";
+import { loadPreference, storePreference } from "./preferenceStorage.js";
 
 interface ShellChromeState {
   sidebarCollapsed: boolean;
@@ -21,20 +20,29 @@ interface ShellChromeState {
   clearPeek: () => void;
 }
 
-export const useShellChrome = create<ShellChromeState>()(
-  persist(
-    (set) => ({
-      sidebarCollapsed: false,
-      peekOpen: false,
-      setSidebarCollapsed: (collapsed: boolean) => set({ sidebarCollapsed: collapsed }),
-      toggleSidebarCollapsed: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
-      setPeekOpen: (open: boolean) => set({ peekOpen: open }),
-      clearPeek: () => set({ peekOpen: false }),
-    }),
-    {
-      name: "pidash:shell-chrome",
-      storage: createJSONStorage(() => preferenceStorage()),
-      partialize: (state) => ({ sidebarCollapsed: state.sidebarCollapsed, peekOpen: state.peekOpen }),
-    }
-  )
-);
+interface ShellChromeSnapshot {
+  sidebarCollapsed: boolean;
+  peekOpen: boolean;
+}
+
+const STORAGE_KEY = "pidash:shell-chrome";
+
+function isSnapshot(value: unknown): value is ShellChromeSnapshot {
+  if (typeof value !== "object" || value === null) return false;
+  const snapshot = value as Record<string, unknown>;
+  return typeof snapshot.sidebarCollapsed === "boolean" && typeof snapshot.peekOpen === "boolean";
+}
+
+const initial = loadPreference(STORAGE_KEY, { sidebarCollapsed: false, peekOpen: false }, isSnapshot);
+
+export const useShellChrome = create<ShellChromeState>()((set) => ({
+  ...initial,
+  setSidebarCollapsed: (collapsed: boolean) => set({ sidebarCollapsed: collapsed }),
+  toggleSidebarCollapsed: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+  setPeekOpen: (open: boolean) => set({ peekOpen: open }),
+  clearPeek: () => set({ peekOpen: false }),
+}));
+
+useShellChrome.subscribe((state) => {
+  storePreference(STORAGE_KEY, { sidebarCollapsed: state.sidebarCollapsed, peekOpen: state.peekOpen });
+});

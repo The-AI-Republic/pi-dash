@@ -55,4 +55,20 @@ describe("rail state", () => {
     expect(reloaded.isRailUndocked(reloaded.useRailState.getState(), "acme")).toBe(true);
     reloaded.useRailState.setState({ density: "labeled", undockedByWorkspace: {} });
   });
+
+  it.each([
+    "{oops",
+    "7",
+    "null",
+    '{"density":"wide","undockedByWorkspace":{}}',
+    '{"density":"icons","undockedByWorkspace":7}',
+    '{"density":"icons","undockedByWorkspace":null}',
+    '{"density":"icons","undockedByWorkspace":{"acme":"yes"}}',
+  ])("falls back to defaults on the stored payload %s", async (payload) => {
+    globalThis.localStorage.setItem(STORAGE_KEY, payload);
+    vi.resetModules();
+    const reloaded = await import("./railState.js");
+    expect(reloaded.useRailState.getState().density).toBe("labeled");
+    expect(reloaded.isRailUndocked(reloaded.useRailState.getState(), "acme")).toBe(false);
+  });
 });

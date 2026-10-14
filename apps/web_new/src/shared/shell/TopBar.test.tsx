@@ -69,13 +69,14 @@ describe("sidebar toggle", () => {
     renderBar({ onToggleSidebar });
     const toggle = screen.getByRole("button", { name: "Collapse sidebar" });
     expect(toggle).toHaveAttribute("data-testid", "sidebar-toggle");
+    expect(toggle).toHaveAttribute("title", "Collapse sidebar");
     await user.click(toggle);
     expect(onToggleSidebar).toHaveBeenCalledTimes(1);
   });
 
   it("offers to expand while collapsed", () => {
     renderBar({ sidebarCollapsed: true });
-    expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Expand sidebar" })).toHaveAttribute("title", "Expand sidebar");
     expect(screen.queryByRole("button", { name: "Collapse sidebar" })).not.toBeInTheDocument();
   });
 

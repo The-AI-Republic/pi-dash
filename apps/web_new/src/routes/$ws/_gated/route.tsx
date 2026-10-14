@@ -40,7 +40,6 @@ import {
   TopBarSearch,
   useRailState,
   useShellChrome,
-  WorkspaceRail,
   type RailDockItem,
 } from "../../../shared/shell/index.js";
 import { resolveSearchTarget } from "./searchTarget.js";
@@ -64,6 +63,12 @@ const LazyDeactivateAccountDialog = React.lazy(() =>
   import("../../../features/auth/components/DeactivateAccountDialog.js").then((module) => ({
     default: module.DeactivateAccountDialog,
   }))
+);
+// The rail mounts only on rail-enabled editions, so it rides a lazy chunk
+// instead of the initial-JS chain (size budget); AppShell suspends around
+// the rail slot while it loads.
+const WorkspaceRail = React.lazy(() =>
+  import("../../../shared/shell/WorkspaceRail.js").then((module) => ({ default: module.WorkspaceRail }))
 );
 
 export const Route = createFileRoute("/$ws/_gated")({
@@ -91,7 +96,10 @@ export const Route = createFileRoute("/$ws/_gated")({
     await Promise.all([
       context.queryClient.ensureQueryData(workspacesQueryOptions(context.apiClient)),
       context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws)),
-      context.queryClient.ensureQueryData(unreadNotificationsQueryOptions(context.apiClient, params.ws)),
+      context.queryClient
+        .ensureQueryData(unreadNotificationsQueryOptions(context.apiClient, params.ws))
+        // The unread dot is optional chrome: a failing count must not fail the shell.
+        .catch(() => undefined),
     ]);
   },
   component: function GatedWorkspaceLayoutComponent() {

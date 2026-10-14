@@ -6,9 +6,8 @@
 // No network calls; both persist per device and skip the sign-out reset
 // list like the other chrome preferences.
 import { create } from "zustand";
-import { createJSONStorage, persist } from "zustand/middleware";
 
-import { preferenceStorage } from "./preferenceStorage.js";
+import { loadPreference, storePreference } from "./preferenceStorage.js";
 
 /** Rail strip density: captions under the icons, or icons alone. */
 export type RailDensity = "labeled" | "icons";
@@ -20,22 +19,33 @@ interface RailState {
   setUndocked: (workspaceSlug: string, undocked: boolean) => void;
 }
 
-export const useRailState = create<RailState>()(
-  persist(
-    (set) => ({
-      density: "labeled",
-      undockedByWorkspace: {},
-      setDensity: (density: RailDensity) => set({ density }),
-      setUndocked: (workspaceSlug: string, undocked: boolean) =>
-        set((state) => ({ undockedByWorkspace: { ...state.undockedByWorkspace, [workspaceSlug]: undocked } })),
-    }),
-    {
-      name: "pidash:rail",
-      storage: createJSONStorage(() => preferenceStorage()),
-      partialize: (state) => ({ density: state.density, undockedByWorkspace: state.undockedByWorkspace }),
-    }
-  )
-);
+interface RailSnapshot {
+  density: RailDensity;
+  undockedByWorkspace: Record<string, boolean>;
+}
+
+const STORAGE_KEY = "pidash:rail";
+
+function isSnapshot(value: unknown): value is RailSnapshot {
+  if (typeof value !== "object" || value === null) return false;
+  const snapshot = value as Record<string, unknown>;
+  if (snapshot.density !== "labeled" && snapshot.density !== "icons") return false;
+  if (typeof snapshot.undockedByWorkspace !== "object" || snapshot.undockedByWorkspace === null) return false;
+  return Object.values(snapshot.undockedByWorkspace).every((entry) => typeof entry === "boolean");
+}
+
+const initial = loadPreference(STORAGE_KEY, { density: "labeled", undockedByWorkspace: {} }, isSnapshot);
+
+export const useRailState = create<RailState>()((set) => ({
+  ...initial,
+  setDensity: (density: RailDensity) => set({ density }),
+  setUndocked: (workspaceSlug: string, undocked: boolean) =>
+    set((state) => ({ undockedByWorkspace: { ...state.undockedByWorkspace, [workspaceSlug]: undocked } })),
+}));
+
+useRailState.subscribe((state) => {
+  storePreference(STORAGE_KEY, { density: state.density, undockedByWorkspace: state.undockedByWorkspace });
+});
 
 /** True once the workspace undocked its rail; docked everywhere by default. */
 export function isRailUndocked(state: Pick<RailState, "undockedByWorkspace">, workspaceSlug: string): boolean {

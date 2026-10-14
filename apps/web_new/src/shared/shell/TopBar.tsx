@@ -12,7 +12,7 @@
 // inbox dot rule and the star link. No edition badge mounts here.
 // On desktop (platform.window present) the header doubles as the
 // window drag region, like TitleBar.
-import { IconButton, Tooltip } from "@pidash/kit";
+import { IconButton } from "@pidash/kit";
 import { Inbox, PanelLeft, Star } from "lucide-react";
 import * as React from "react";
 
@@ -81,11 +81,12 @@ export function TopBar({
       <div className="flex flex-1 items-center gap-(--space-2)">
         {workspaceMenu}
         {showToggle ? (
-          <Tooltip content={toggleHint}>
-            <IconButton label={toggleHint} data-testid="sidebar-toggle" onClick={onToggleSidebar}>
-              <PanelLeft size={16} strokeWidth={1.5} aria-hidden="true" />
-            </IconButton>
-          </Tooltip>
+          // Native title, not the kit Tooltip: the toggle is the only
+          // tooltip user in the shell, and the floating-positioning
+          // subtree would ride the initial-JS chain (size budget).
+          <IconButton label={toggleHint} title={toggleHint} data-testid="sidebar-toggle" onClick={onToggleSidebar}>
+            <PanelLeft size={16} strokeWidth={1.5} aria-hidden="true" />
+          </IconButton>
         ) : null}
       </div>
       <div className="flex shrink-0 items-center">{searchBox}</div>

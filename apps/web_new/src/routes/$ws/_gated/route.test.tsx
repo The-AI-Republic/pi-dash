@@ -8,6 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { isRedirect } from "@tanstack/react-router";
 import type * as React from "react";
+import { Suspense } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -268,6 +269,24 @@ describe("gated layout loader", () => {
       ["ws", "acme", "projects", "list"],
       ["ws", "acme", "notifications", "unread"],
     ]);
+  });
+
+  it("still resolves when the unread-count prefetch fails", async () => {
+    const args = {
+      context: {
+        apiClient: {},
+        queryClient: {
+          ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
+            if (options.queryKey[2] === "notifications") throw new Error("unread down");
+            return [];
+          },
+        },
+      },
+      params: { ws: "acme" },
+    } as never;
+    const loader = Route.options.loader;
+    if (typeof loader !== "function") throw new Error("missing loader");
+    await expect(loader(args)).resolves.toBeUndefined();
   });
 });
 
@@ -794,5 +813,19 @@ describe("gated layout shell wiring", () => {
     useRailState.setState({ undockedByWorkspace: { acme: true } });
     renderShell();
     expect(harness.rail).toBeUndefined();
+  });
+
+  it("loads the rail strip on demand once enabled", async () => {
+    edition.flags["app-rail"] = true;
+    edition.rail = [{ id: "projects", label: "Projects", to: "/acme/" }];
+    renderShell();
+    const rail = harness.rail as React.ReactElement;
+    expect(rail).toBeDefined();
+    const strip = render(<Suspense fallback={null}>{rail}</Suspense>);
+    try {
+      expect(await screen.findByRole("link", { name: "Settings" })).toHaveAttribute("href", "/acme/settings");
+    } finally {
+      strip.unmount();
+    }
   });
 });
