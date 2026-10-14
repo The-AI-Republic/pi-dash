@@ -5,7 +5,7 @@
   the signed-in user can create, edit inline, recolour, reorder by drag, search and delete.
 - ID prefix: `STK-`
 - Editions: oss, cloud, desktop
-- Status of this file: dropped — see the drop note below (was: draft for human signoff-3 via NEWFRONT-10)
+- Status of this file: dropped — see the drop note below (was: draft for human sign-off (H-signoff-3 via NEWFRONT-10))
 - Dropped by decision, not built: the whole area is dropped from `apps/web_new` by
   owner decision (2026-10-14, NEWFRONT-58), a deliberate exception to D7 ("No area is
   dropped"), because Pi Dash already hides Stickies from users (PDASHOSS01-7: the old
