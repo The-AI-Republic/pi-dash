@@ -541,3 +541,53 @@ def test_web_runs_create_soft_deleted_issue(user_client, seeder, daemon_world):
     )
     assert runai.status_code == 202
     assert runai.json()["reason"] == "free-entry-queued"
+
+
+def test_web_runs_create_direct_coercion_mismatch_order(user_client, seeder, daemon_world):
+    """Django's work-item `str()` check fires before pod resolution."""
+    ws = daemon_world["workspace"]["id"]
+    issue = _ticking_issue(seeder, daemon_world)
+    upper = ws.upper()
+    # Missing pod + non-canonical workspace: the work-item check wins.
+    missing = web_post(
+        user_client, f"{WEB}/runs/",
+        {
+            "prompt": "hi", "workspace": upper, "work_item": issue["id"],
+            "pod": str(uuid.uuid4()),
+        },
+    )
+    assert missing.status_code == 400
+    assert missing.json()["code"] == "work_item_workspace_mismatch"
+    # Foreign pod (exists, another workspace): same — work-item check first.
+    outsider = seeder.create_user()
+    foreign_ws = seeder.create_workspace(outsider["id"])
+    foreign_project = seeder.create_project(foreign_ws["id"])
+    foreign_pod = seeder.create_pod(foreign_ws["id"], foreign_project["id"])
+    foreign = web_post(
+        user_client, f"{WEB}/runs/",
+        {
+            "prompt": "hi", "workspace": upper, "work_item": issue["id"],
+            "pod": foreign_pod["id"],
+        },
+    )
+    assert foreign.status_code == 400
+    assert foreign.json()["code"] == "work_item_workspace_mismatch"
+    # Control: canonical text keeps the pod errors.
+    canon_missing = web_post(
+        user_client, f"{WEB}/runs/",
+        {
+            "prompt": "hi", "workspace": ws, "work_item": issue["id"],
+            "pod": str(uuid.uuid4()),
+        },
+    )
+    assert canon_missing.status_code == 400
+    assert canon_missing.json()["code"] == "pod_missing"
+    canon_foreign = web_post(
+        user_client, f"{WEB}/runs/",
+        {
+            "prompt": "hi", "workspace": ws, "work_item": issue["id"],
+            "pod": foreign_pod["id"],
+        },
+    )
+    assert canon_foreign.status_code == 400
+    assert canon_foreign.json()["code"] == "pod_workspace_mismatch"

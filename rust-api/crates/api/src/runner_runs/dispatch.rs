@@ -646,9 +646,13 @@ fn py_float_repr(value: f64) -> String {
             "0.0".to_owned()
         };
     }
-    // Rust `{:?}` is shortest round-trip too; reformat its `1e16`/`1e-5`
-    // shapes into Python's `1e+16`/`1e-05` + fixed-notation rules.
-    let debug = format!("{value:?}");
+    // Ryū digits (`serde_json`, like every other `py_float_repr` twin):
+    // Rust `{:?}` (Grisu) picks a different last digit than CPython on
+    // rare shortest-ties; Ryū matches `repr()` digit-for-digit
+    // (differential-tested, review PIDASHCONV-1041). Reformat its
+    // `1e16`/`1e-5` shapes into Python's `1e+16`/`1e-05` +
+    // fixed-notation rules.
+    let debug = serde_json::to_string(&value).expect("finite float formats");
     let (mantissa, exp10) = match debug.split_once(['e', 'E']) {
         Some((mantissa, exp)) => (mantissa, exp.parse::<i32>().unwrap_or(0)),
         None => (debug.as_str(), 0),
@@ -760,12 +764,25 @@ fn py_str_json(raw: &Value) -> String {
     match raw {
         Value::String(text) => text.clone(),
         Value::Number(number) => {
-            if number.as_i64().is_some() || number.as_u64().is_some() {
-                number.to_string()
+            if let Some(int) = number.as_i64() {
+                // Display the value, not the literal: `-0` is `0`.
+                int.to_string()
+            } else if let Some(uint) = number.as_u64() {
+                uint.to_string()
             } else {
-                match number.as_f64() {
-                    Some(float) => py_float_repr(float),
-                    None => number.to_string(),
+                let text = number.to_string();
+                // Integers past `u64` keep their exact text
+                // (`arbitrary_precision` is on); `str()` of a Python int
+                // is exact, so never route them through `f64` (review,
+                // PIDASHCONV-1041).
+                let digits = text.strip_prefix('-').unwrap_or(&text);
+                if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                    text
+                } else {
+                    match number.as_f64() {
+                        Some(float) => py_float_repr(float),
+                        None => text,
+                    }
                 }
             }
         }
@@ -1130,15 +1147,21 @@ pub async fn post_direct(
     .await
     {
         Ok(ctx) => ctx,
-        Err(ValidationError::Invalid(
-            error @ (RunCreationError::NoPodAvailable | RunCreationError::PodProjectMismatch),
-        )) if workspace_raw != workspace_id.to_string() => {
-            // Django's `str() != str()` comparisons fire before pod
-            // resolution reaches these errors — remap (probed).
-            return run_creation_denial(&match (work_item_id.is_some(), &error) {
-                (true, _) => RunCreationError::WorkItemWorkspaceMismatch,
-                (false, RunCreationError::NoPodAvailable) => RunCreationError::NoPodAvailable,
-                (false, _) => RunCreationError::PodWorkspaceMismatch,
+        Err(ValidationError::Invalid(error))
+            if workspace_raw != workspace_id.to_string() && work_item_id.is_some() =>
+        {
+            // Django's work-item `str() != str()` check
+            // (`validation.py:87-92`) fires before pod resolution, so with
+            // a work item every pod error under a non-canonical workspace
+            // reads as the work-item mismatch (review, PIDASHCONV-1041).
+            return run_creation_denial(&match error {
+                RunCreationError::NoPodAvailable
+                | RunCreationError::PodProjectMismatch
+                | RunCreationError::PodMissing
+                | RunCreationError::PodWorkspaceMismatch => {
+                    RunCreationError::WorkItemWorkspaceMismatch
+                }
+                other => other,
             });
         }
         Err(ValidationError::Invalid(error)) => return run_creation_denial(&error),
@@ -1715,6 +1738,12 @@ mod dispatch_tests {
             (2.0, "2.0"),
             (10.0, "10.0"),
             (-1.5e-7, "-1.5e-07"),
+            // Shortest-ties where Grisu (`{:?}`) picks a different last
+            // digit than CPython; Ryū matches (review, PIDASHCONV-1041).
+            (1058518298511673.2, "1058518298511673.2"),
+            (-764100621116182.2, "-764100621116182.2"),
+            (575579265198138.2, "575579265198138.2"),
+            (29750839840935.562, "29750839840935.562"),
         ];
         for (value, expected) in cases {
             assert_eq!(py_float_repr(value), expected, "{value:?}");
@@ -1746,6 +1775,13 @@ mod dispatch_tests {
         map.insert("b".to_owned(), json!(1));
         map.insert("a".to_owned(), json!(2));
         assert_eq!(py_str_json(&Value::Object(map)), "{'b': 1, 'a': 2}");
+        // Integers render by value, never via `f64` (review,
+        // PIDASHCONV-1041): `-0` is `0`, past-`u64` text stays exact.
+        assert_eq!(py_str_json(&serde_json::from_str("-0").unwrap()), "0");
+        let wide: Value = serde_json::from_str("1267650600228229401496703205376").unwrap();
+        assert_eq!(py_str_json(&wide), "1267650600228229401496703205376");
+        let neg_wide: Value = serde_json::from_str("-1267650600228229401496703205376").unwrap();
+        assert_eq!(py_str_json(&neg_wide), "-1267650600228229401496703205376");
     }
 
     #[test]
