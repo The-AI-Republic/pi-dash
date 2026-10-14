@@ -77,6 +77,46 @@ describe("Sidebar", () => {
     expect(screen.getByText("No projects yet.")).toBeInTheDocument();
   });
 
+  it("omits deactivation from the account menu without a handler", async () => {
+    const user = userEvent.setup();
+    render(
+      <Sidebar
+        workspaces={WORKSPACES}
+        activeSlug="acme"
+        onSelectWorkspace={() => undefined}
+        projects={PROJECTS}
+        activeProjectId="p1"
+        onSelectProject={() => undefined}
+        userLabel="ada@example.com"
+        onSignOut={() => undefined}
+      />
+    );
+    await user.click(screen.getByRole("button", { name: "Account actions" }));
+    expect(await screen.findByRole("menuitem", { name: "Sign out" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Deactivate account" })).not.toBeInTheDocument();
+  });
+
+  it("fires the deactivation handler from the account menu", async () => {
+    const user = userEvent.setup();
+    const onDeactivateAccount = vi.fn();
+    render(
+      <Sidebar
+        workspaces={WORKSPACES}
+        activeSlug="acme"
+        onSelectWorkspace={() => undefined}
+        projects={PROJECTS}
+        activeProjectId="p1"
+        onSelectProject={() => undefined}
+        userLabel="ada@example.com"
+        onSignOut={() => undefined}
+        onDeactivateAccount={onDeactivateAccount}
+      />
+    );
+    await user.click(screen.getByRole("button", { name: "Account actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Deactivate account" }));
+    expect(onDeactivateAccount).toHaveBeenCalledTimes(1);
+  });
+
   it("mounts the navigation landmark under the stable sidebar id", () => {
     const { container } = render(
       <Sidebar

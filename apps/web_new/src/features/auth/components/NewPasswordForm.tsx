@@ -38,7 +38,7 @@ export function NewPasswordForm({ email, submitLabel, pending, onSubmit }: NewPa
 
   return (
     <form onSubmit={submit} className="flex flex-col gap-(--space-4)">
-      {email === undefined ? null : <Input label="Work email" value={email} disabled />}
+      {email === undefined ? null : <Input label="Work email" value={email} disabled placeholder="name@company.com" />}
       <Input
         label="New password"
         type={showPassword ? "text" : "password"}

@@ -33,9 +33,24 @@ describe("isMigratedPath", () => {
     expect(isMigratedPath("/", ["/"])).toBe(true);
   });
 
-  it("defaults to the bundled list, which starts empty", () => {
-    expect(MIGRATED_ROUTE_PREFIXES).toEqual([]);
-    expect(isMigratedPath("/sign-in")).toBe(false);
+  it("defaults to the bundled list, which area gates extend", () => {
+    expect(MIGRATED_ROUTE_PREFIXES).toEqual(
+      expect.arrayContaining([
+        "/sign-in",
+        "/sign-up",
+        "/accounts",
+        "/auth/device",
+        "/invitations",
+        "/workspace-invitations",
+        "/onboarding",
+        "/create-workspace",
+        "/signin",
+        "/login",
+        "/register",
+      ])
+    );
+    expect(isMigratedPath("/sign-in")).toBe(true);
+    expect(isMigratedPath("/acme/projects/1/issues")).toBe(false);
   });
 });
 

@@ -57057,7 +57057,10 @@ export class WebDriver implements ParityDriver {
   // --- desktop build: the home page renders the failure alert above the
   // --- card, and the community card offers the browser hand-off.
   async authDesktopUnavailableCardVisible(): Promise<boolean> {
-    return this.page.getByRole("heading", { name: "Desktop sign-in isn't available yet" }).isVisible();
+    // The desktop bundle boots client-side; settle before judging visibility.
+    const heading = this.page.getByRole("heading", { name: "Desktop sign-in isn't available yet" });
+    await heading.waitFor({ state: "visible", timeout: 20000 }).catch(() => undefined);
+    return heading.isVisible();
   }
 
   async authDesktopBrowserActionLabel(): Promise<string | null> {

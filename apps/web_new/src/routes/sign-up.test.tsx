@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient } from "@tanstack/react-query";
-import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
+import { createMemoryHistory, createRouter, isRedirect, RouterProvider } from "@tanstack/react-router";
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -56,38 +56,6 @@ function stubTransport(handler: (url: string, init: TransportInit) => StubRoute)
   };
 }
 
-const ME = JSON.stringify({
-  id: "11111111-1111-4111-8111-111111111111",
-  email: "ada@example.com",
-  username: "ada",
-  first_name: "Ada",
-  last_name: "Lovelace",
-  display_name: "Ada Lovelace",
-  avatar: "",
-  avatar_url: null,
-  cover_image: null,
-  cover_image_url: null,
-  date_joined: "2026-01-01T00:00:00.000Z",
-  user_timezone: "UTC",
-  is_active: true,
-  is_bot: false,
-  is_email_verified: true,
-  is_password_autoset: false,
-  last_login_medium: "password",
-  last_login_time: null,
-});
-
-const WORKSPACES = JSON.stringify([
-  {
-    id: "22222222-2222-4222-8222-222222222222",
-    name: "Acme",
-    slug: "acme",
-    logo_url: null,
-    total_members: 1,
-    role: 20,
-  },
-]);
-
 function guardContext(handler: (url: string) => StubRoute): { queryClient: QueryClient; apiClient: ApiClient } {
   const apiClient = createAppClient(
     "https://api.test",
@@ -95,20 +63,6 @@ function guardContext(handler: (url: string) => StubRoute): { queryClient: Query
   );
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return { queryClient, apiClient };
-}
-
-interface ThrownRedirect extends Response {
-  options: { to?: unknown; params?: unknown };
-}
-
-async function catchRedirect(promise: Promise<unknown>): Promise<ThrownRedirect> {
-  try {
-    await promise;
-  } catch (error) {
-    expect(error).toBeInstanceOf(Response);
-    return error as ThrownRedirect;
-  }
-  throw new Error("expected the guard to redirect");
 }
 
 describe("parseSignUpSearch", () => {
@@ -136,55 +90,75 @@ describe("parseSignUpSearch", () => {
 });
 
 describe("redirectSignedInUser", () => {
-  afterEach(() => {
-    resetAppClient();
-  });
+  const me = { is_password_autoset: false };
+  const onboarded = { is_onboarded: true };
+
+  function stubInput(values: Record<string, unknown>, search: Record<string, unknown> = {}) {
+    return {
+      context: {
+        apiClient: {},
+        queryClient: {
+          ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
+            const value = values[options.queryKey[1] as string];
+            if (value instanceof Error) throw value;
+            if (value === undefined) throw new Error("no fixture");
+            return value;
+          },
+        },
+      },
+      search,
+    } as never;
+  }
+
+  async function landingOf(args: never): Promise<string> {
+    try {
+      await redirectSignedInUser(args);
+    } catch (error) {
+      expect(isRedirect(error)).toBe(true);
+      return (error as unknown as { options: { href: string } }).options.href;
+    }
+    expect.unreachable("expected a redirect");
+  }
 
   it("lets signed-out visitors through to the card", async () => {
-    const context = guardContext((url) => {
-      if (url.endsWith("/api/users/me/")) throw new Error("signed out");
-      throw new Error(`unexpected ${url}`);
-    });
-    await expect(redirectSignedInUser({ context, search: {} })).resolves.toEqual({});
+    await expect(redirectSignedInUser(stubInput({ me: new Error("signed out") }))).resolves.toEqual({});
   });
 
-  it("sends signed-in visitors to their return path first", async () => {
-    const context = guardContext((url) => {
-      if (url.endsWith("/api/users/me/")) return { body: ME, url };
-      throw new Error(`unexpected ${url}`);
-    });
-    const redirect = await catchRedirect(
-      redirectSignedInUser({ context, search: { next_path: "/acme/projects/p1/issues" } })
+  it("sends finished members to their return path first", async () => {
+    await expect(
+      landingOf(stubInput({ me, profile: onboarded }, { next_path: "/acme/projects/p1/issues" }))
+    ).resolves.toBe("/acme/projects/p1/issues");
+  });
+
+  it("sends finished members to their last workspace, not the first in the list", async () => {
+    const settings = { workspace: { last_workspace_slug: "beta", fallback_workspace_slug: null } };
+    const workspaces = [{ slug: "acme" }, { slug: "beta" }];
+    await expect(landingOf(stubInput({ me, profile: onboarded, settings, workspaces }))).resolves.toBe("/beta");
+  });
+
+  it("falls back to the fallback workspace when the last one is gone", async () => {
+    const settings = { workspace: { last_workspace_slug: "gone", fallback_workspace_slug: "acme" } };
+    const workspaces = [{ slug: "acme" }];
+    await expect(landingOf(stubInput({ me, profile: onboarded, settings, workspaces }))).resolves.toBe("/acme");
+  });
+
+  it("sends finished members with nowhere to go to workspace creation", async () => {
+    const settings = { workspace: { last_workspace_slug: null, fallback_workspace_slug: null } };
+    await expect(landingOf(stubInput({ me, profile: onboarded, settings, workspaces: [] }))).resolves.toBe(
+      "/create-workspace"
     );
-    expect(redirect.headers.get("Location")).toBe("/acme/projects/p1/issues");
   });
 
-  it("sends signed-in visitors without a return path to their first workspace", async () => {
-    const context = guardContext((url) => {
-      if (url.endsWith("/api/users/me/")) return { body: ME, url };
-      if (url.endsWith("/api/users/me/workspaces/")) return { body: WORKSPACES, url };
-      throw new Error(`unexpected ${url}`);
-    });
-    const redirect = await catchRedirect(redirectSignedInUser({ context, search: {} }));
-    expect(redirect.options.to).toBe("/$ws");
-    expect(redirect.options.params).toEqual({ ws: "acme" });
+  it("sends finished members to workspace creation when the landing reads fail", async () => {
+    const failed = new Error("landing reads unavailable");
+    await expect(
+      landingOf(stubInput({ me, profile: onboarded, settings: failed, workspaces: failed }))
+    ).resolves.toBe("/create-workspace");
   });
 
-  it("renders the card for signed-in visitors with nowhere to go", async () => {
-    const context = guardContext((url) => {
-      if (url.endsWith("/api/users/me/")) return { body: ME, url };
-      if (url.endsWith("/api/users/me/workspaces/")) return { body: "[]", url };
-      throw new Error(`unexpected ${url}`);
-    });
-    await expect(redirectSignedInUser({ context, search: {} })).resolves.toEqual({});
-  });
-
-  it("renders the card when the workspace list fails to load", async () => {
-    const context = guardContext((url) => {
-      if (url.endsWith("/api/users/me/")) return { body: ME, url };
-      throw new Error("workspaces unavailable");
-    });
-    await expect(redirectSignedInUser({ context, search: {} })).resolves.toEqual({});
+  it("sends unfinished members to onboarding", async () => {
+    const profile = { is_onboarded: false, onboarding_step: {} };
+    await expect(landingOf(stubInput({ me, profile }))).resolves.toBe("/onboarding");
   });
 });
 

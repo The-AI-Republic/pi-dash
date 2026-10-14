@@ -48,30 +48,30 @@ describe("CrossAppLink", () => {
   });
 
   it("flips a link when its prefix joins the list", () => {
-    const { rerender } = render(<CrossAppLink to="/sign-in">Sign in</CrossAppLink>);
-    expect(screen.getByRole("link", { name: "Sign in" })).not.toHaveAttribute("data-router-link");
+    const { rerender } = render(<CrossAppLink to="/acme/projects/1/issues">Issues</CrossAppLink>);
+    expect(screen.getByRole("link", { name: "Issues" })).not.toHaveAttribute("data-router-link");
     rerender(
-      <CrossAppLink to="/sign-in" prefixes={["/sign-in"]}>
-        Sign in
+      <CrossAppLink to="/acme/projects/1/issues" prefixes={["/acme"]}>
+        Issues
       </CrossAppLink>
     );
-    expect(screen.getByRole("link", { name: "Sign in" })).toHaveAttribute("data-router-link");
+    expect(screen.getByRole("link", { name: "Issues" })).toHaveAttribute("data-router-link");
   });
 
   it("forwards a ref to the anchor", () => {
     const seen: Array<HTMLAnchorElement | null> = [];
     render(
       <CrossAppLink
-        to="/invitations"
+        to="/acme/projects/1/issues"
         ref={(element) => {
           seen.push(element);
         }}
       >
-        Invitations
+        Issues
       </CrossAppLink>
     );
     expect(seen).toHaveLength(1);
     expect(seen[0]?.tagName).toBe("A");
-    expect(seen[0]).toHaveAttribute("href", "/invitations");
+    expect(seen[0]).toHaveAttribute("href", "/acme/projects/1/issues");
   });
 });

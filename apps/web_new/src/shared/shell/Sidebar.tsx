@@ -30,6 +30,12 @@ export interface SidebarProps {
   onSelectProject: (projectId: string) => void;
   userLabel: string;
   onSignOut: () => void;
+  /**
+   * Opens the deactivate-account dialog. Interim placement (AUTH-019): the
+   * settings page (NEWFRONT-90) relocates this trigger when it lands.
+   * Absent, the menu offers sign-out only.
+   */
+  onDeactivateAccount?: () => void;
 }
 
 export function Sidebar({
@@ -41,6 +47,7 @@ export function Sidebar({
   onSelectProject,
   userLabel,
   onSignOut,
+  onDeactivateAccount,
 }: SidebarProps): React.ReactElement {
   const active = workspaces.find((workspace) => workspace.slug === activeSlug) ?? null;
   return (
@@ -104,7 +111,12 @@ export function Sidebar({
               <LogOut size={16} strokeWidth={1.5} aria-hidden="true" />
             </Button>
           }
-          items={[{ label: "Sign out", onSelect: onSignOut }]}
+          items={[
+            { label: "Sign out", onSelect: onSignOut },
+            ...(onDeactivateAccount === undefined
+              ? []
+              : [{ label: "Deactivate account", onSelect: onDeactivateAccount }]),
+          ]}
         />
       </div>
       <p className="text-caption flex items-center gap-(--space-2) px-(--space-2) text-(--text-muted)">

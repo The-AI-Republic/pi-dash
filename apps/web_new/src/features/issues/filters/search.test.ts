@@ -2,22 +2,23 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
-import { DEFAULT_ISSUE_SEARCH, parseIssueSearch } from "./search.js";
+import { parseIssueSearch } from "./search.js";
 
 describe("issue search", () => {
-  it("defaults an empty search to the list layout", () => {
-    expect(parseIssueSearch({})).toEqual({ layout: "list" });
-    expect(parseIssueSearch(undefined)).toEqual(DEFAULT_ISSUE_SEARCH);
+  it("leaves an empty search absent so the param stays out of the URL", () => {
+    expect(parseIssueSearch({})).toEqual({});
+    expect(parseIssueSearch(undefined)).toEqual({});
   });
 
-  it("keeps the compact layout", () => {
+  it("keeps explicit layouts", () => {
     expect(parseIssueSearch({ layout: "compact" })).toEqual({ layout: "compact" });
+    expect(parseIssueSearch({ layout: "list" })).toEqual({ layout: "list" });
   });
 
-  it("falls back to defaults on unknown layouts and shapes", () => {
-    expect(parseIssueSearch({ layout: "board" })).toEqual(DEFAULT_ISSUE_SEARCH);
-    expect(parseIssueSearch({ layout: 42 })).toEqual(DEFAULT_ISSUE_SEARCH);
-    expect(parseIssueSearch("list")).toEqual(DEFAULT_ISSUE_SEARCH);
-    expect(parseIssueSearch(null)).toEqual(DEFAULT_ISSUE_SEARCH);
+  it("falls back to absent on unknown layouts and shapes", () => {
+    expect(parseIssueSearch({ layout: "board" })).toEqual({});
+    expect(parseIssueSearch({ layout: 42 })).toEqual({});
+    expect(parseIssueSearch("list")).toEqual({});
+    expect(parseIssueSearch(null)).toEqual({});
   });
 });

@@ -256,14 +256,20 @@ test(
 // Oracle truth for NEWFRONT-130: a malformed uid crashes the native reset
 // POST (HTTP 500) instead of returning to the banner flow. Intended per
 // AUTH-013: an explanatory invalid-token banner. Locked here so the fix has
-// a regression test.
+// a regression test. The new app ships the fix, so the web_new leg asserts
+// the intended banner instead of the escape (gate-aligned target behavior,
+// NEWFRONT-491).
 test(
   specTitle(["AUTH-013"], "bug: malformed reset uid escapes the banner flow (NEWFRONT-130)"),
   { tag: specTags(["AUTH-013"]) },
   async ({ driver, seed }) => {
-    await test.step("no banner; the raw endpoint answers instead", async () => {
+    await test.step("malformed uid: escape on the old app, invalid-token banner on the new app", async () => {
       await driver.openResetPassword({ uid: "AAAA", token: "bogus-token", email: seed.email });
       await driver.submitNewPassword(STRONG_PASSWORD, STRONG_PASSWORD);
+      if (driver.target === "web_new") {
+        await expect.poll(() => driver.authBanner(), { timeout: 30_000 }).toMatch(/invalid password token/i);
+        return;
+      }
       expect(await driver.authBanner()).toBeNull();
       expect(await driver.currentPath()).toContain("/auth/reset-password/");
     });

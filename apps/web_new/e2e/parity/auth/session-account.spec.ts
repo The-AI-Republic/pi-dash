@@ -294,16 +294,21 @@ test(
 
     await test.step("the confirmation names the account and workspace", async () => {
       await expect.poll(() => driver.showsText(seed.email), POLL_60).toBe(true);
-      await expect.poll(() => driver.showsText(seed.workspaceSlug), POLL_60).toBe(true);
+      // The server resolves the approval workspace from the approver's
+      // memberships, so read the expected slug back instead of assuming
+      // the seed workspace: other specs (AUTH-026) add workspaces to the
+      // seed owner, and same-user re-approval is idempotent by design
+      // (the approve view only flips `consumed` when the CLI polls for
+      // its token).
+      const recorded = await approveDeviceCode(session, code);
+      expect(recorded.email).toBe(seed.email);
+      expect(recorded.workspace).not.toBeNull();
+      await expect.poll(() => driver.showsText(recorded.workspace ?? ""), POLL_60).toBe(true);
     });
 
     await test.step("the server recorded the approval", async () => {
-      // Same-user re-approval is idempotent by design (the approve view
-      // only flips `consumed` when the CLI polls for its token), while a
-      // different user must be rejected — together proving the code is
-      // approved as the seed owner.
-      const again = await approveDeviceCode(session, code);
-      expect(again.email).toBe(seed.email);
+      // A different user must be rejected, proving the code is approved
+      // as the seed owner.
       const other = await createAccountSession(throwawayEmail("parity-device-other"), THROWAWAY_PASSWORD);
       await expect(approveDeviceCode(other, code)).rejects.toThrow();
     });

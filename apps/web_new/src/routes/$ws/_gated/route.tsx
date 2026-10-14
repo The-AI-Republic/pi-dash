@@ -11,6 +11,7 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Outlet, redirect, useRouterState } from "@tanstack/react-router";
 import type * as React from "react";
+import { useState } from "react";
 
 import {
   decidePageGate,
@@ -21,7 +22,12 @@ import {
   selectWorkspace,
   workspacesQueryOptions,
 } from "../../../core/session/index.js";
-import { runSignOutAction, signOutCommand, useSignOut } from "../../../features/auth/index.js";
+import {
+  DeactivateAccountDialog,
+  runSignOutAction,
+  signOutCommand,
+  useSignOut,
+} from "../../../features/auth/index.js";
 import { projectsQueryOptions } from "../../../features/projects/index.js";
 import { useCommandPalette } from "../../../shared/commands/index.js";
 import { AppShell, Sidebar, TitleBar } from "../../../shared/shell/index.js";
@@ -109,6 +115,7 @@ function WorkspaceShell({
   const { data: me } = useSuspenseQuery(meQueryOptions(context.apiClient));
   const { data: workspaces } = useSuspenseQuery(workspacesQueryOptions(context.apiClient));
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, workspaceSlug));
+  const [deactivateOpen, setDeactivateOpen] = useState(false);
 
   const workspace = selectWorkspace(workspaces, workspaceSlug);
   const activeProject = projects.find((project) => project.id === childProjectId) ?? null;
@@ -144,9 +151,11 @@ function WorkspaceShell({
           onSelectProject={onSelectProject}
           userLabel={userLabel}
           onSignOut={onSignOut}
+          onDeactivateAccount={() => setDeactivateOpen(true)}
         />
       }
     >
+      <DeactivateAccountDialog open={deactivateOpen} onOpenChange={setDeactivateOpen} email={me.email} />
       <Outlet />
     </AppShell>
   );

@@ -11,4 +11,4 @@ export { BrowseDetail, BrowseUnknownKey } from "./components/BrowseDetail.js";
 export type { BrowseDetailProps } from "./components/BrowseDetail.js";
 export { IssueList } from "./components/IssueList.js";
 export type { IssueListProps } from "./components/IssueList.js";
-export { DEFAULT_ISSUE_SEARCH, IssueLayout, IssueSearch, parseIssueSearch } from "./filters/search.js";
+export { IssueLayout, IssueSearch, parseIssueSearch } from "./filters/search.js";

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig, type ProxyOptions } from "vite";
 
 const target = process.env.PIDASH_TARGET === "desktop" ? "desktop" : "web";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -21,6 +21,33 @@ const webBaseUrl = process.env.PIDASH_WEB_BASE_URL ?? null;
 // Static SPA only (D9). One bundle per target; the desktop bundle is loaded
 // by the Tauri shell. No file swapping: platform differences live behind
 // core/platform (F-04), selected here at build time.
+
+/**
+ * Point proxied redirects back at the dev server. Native auth views answer
+ * with absolute locations at the backend's configured web base; the client
+ * follows them with fetch, which fails cross-origin. Rewriting the host to
+ * the incoming request's host restores the single-origin production shape.
+ */
+const rewriteRedirectToDevOrigin: NonNullable<ProxyOptions["configure"]> = (proxy) => {
+  proxy.on("proxyRes", (proxyRes, req) => {
+    const location = proxyRes.headers["location"];
+    if (typeof location !== "string" || location.length === 0) return;
+    let target: URL;
+    try {
+      target = new URL(location);
+    } catch {
+      return;
+    }
+    // Only backend-local redirects (the app itself on loopback); provider
+    // hand-offs to external hosts pass through untouched.
+    if (!["localhost", "127.0.0.1", "[::1]"].includes(target.hostname)) return;
+    const host = req.headers?.["host"];
+    if (typeof host !== "string" || host.length === 0 || target.host === host) return;
+    target.host = host;
+    target.protocol = "http:";
+    proxyRes.headers["location"] = target.toString();
+  });
+};
 export default defineConfig(({ mode }) => {
   const buildTarget = mode === "desktop" || target === "desktop" ? "desktop" : "web";
   return {
@@ -66,8 +93,28 @@ export default defineConfig(({ mode }) => {
       proxy: {
         // Keep the browser Host: Django compares it against Origin for
         // native form views, and the session cookie stays host-only.
-        "/auth": { target: apiOrigin, changeOrigin: false },
-        "/api": { target: apiOrigin, changeOrigin: false },
+        // Rewrite redirect targets to the dev origin: the backend answers
+        // native form POSTs with absolute locations at its configured web
+        // base (the deployed origin, or the parity oracle in tests), and a
+        // split-origin dev server would otherwise follow them cross-origin
+        // into a CORS failure. Production serves app and API on one origin,
+        // so this only restores that topology for `pnpm dev`.
+        // The client owns /auth/device (device approval page): bypass the
+        // proxy for it so the SPA serves the route (production Caddy routes
+        // the same prefix to the app, not the API).
+        "/auth": {
+          target: apiOrigin,
+          changeOrigin: false,
+          configure: rewriteRedirectToDevOrigin,
+          bypass: (req) => {
+            // Serve the app shell for client-owned paths (the browser URL
+            // is untouched, so client routing still sees /auth/device).
+            const pathname = (req.url ?? "").split("?", 1)[0];
+            if (pathname === "/auth/device" || pathname === "/auth/device/") return "/index.html";
+            return undefined;
+          },
+        },
+        "/api": { target: apiOrigin, changeOrigin: false, configure: rewriteRedirectToDevOrigin },
       },
     },
     build: {
