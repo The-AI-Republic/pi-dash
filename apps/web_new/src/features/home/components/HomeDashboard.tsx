@@ -50,7 +50,10 @@ export function HomeDashboard({
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-(--space-8) px-(--space-6) py-(--space-8)">
       <HomeGreeting />
       <HomeAssistantCard workspaceSlug={workspaceSlug} />
+      {/* Remount per workspace so the checklist re-reads that workspace's
+          dismissal and visit flags instead of keeping the previous one's. */}
       <QuickstartGuide
+        key={workspaceSlug}
         workspaceSlug={workspaceSlug}
         projects={projects}
         {...(onCreateProject === undefined ? {} : { onCreateProject })}

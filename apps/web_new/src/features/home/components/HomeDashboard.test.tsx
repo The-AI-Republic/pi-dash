@@ -15,10 +15,11 @@ import { homeKeys } from "../api/keys.js";
 import { HomeDashboard } from "./HomeDashboard.js";
 
 function renderDashboard(options: {
+  workspaceSlug?: string;
   seedWorkspace?: boolean;
   widgets?: React.ReactNode;
   onCreateProject?: () => void;
-}): void {
+}): { rerenderAt: (workspaceSlug: string) => void } {
   setSessionClient({
     getJson: () => new Promise<never>(() => {}),
     parse: (_schema: unknown, data: unknown) => data,
@@ -40,6 +41,14 @@ function renderDashboard(options: {
         total_members: 1,
         role: ROLE_ADMIN,
       },
+      {
+        id: "123e4567-e89b-12d3-a456-426614174009",
+        name: "Beta",
+        slug: "beta",
+        logo_url: null,
+        total_members: 1,
+        role: ROLE_ADMIN,
+      },
     ]);
     queryClient.setQueryData(sessionKeys.me, {
       id: "123e4567-e89b-12d3-a456-426614174000",
@@ -51,25 +60,29 @@ function renderDashboard(options: {
       language: "en",
       is_tour_completed: true,
     });
-    queryClient.setQueryData(homeKeys.threads("acme"), []);
-    queryClient.setQueryData(homeKeys.assistantConfig("acme"), {
-      provider_kind: "openai",
-      base_url: "https://api.test",
-      model_name: "",
-      has_api_key: false,
-      last_verified_at: null,
-    });
+    for (const slug of ["acme", "beta"]) {
+      queryClient.setQueryData(homeKeys.threads(slug), []);
+      queryClient.setQueryData(homeKeys.assistantConfig(slug), {
+        provider_kind: "openai",
+        base_url: "https://api.test",
+        model_name: "",
+        has_api_key: false,
+        last_verified_at: null,
+      });
+    }
   }
-  render(
+  const renderAt = (slug: string): React.ReactElement => (
     <QueryClientProvider client={queryClient}>
       <HomeDashboard
-        workspaceSlug="acme"
+        workspaceSlug={slug}
         projects={[]}
         {...(options.onCreateProject === undefined ? {} : { onCreateProject: options.onCreateProject })}
         {...(options.widgets === undefined ? {} : { widgets: options.widgets })}
       />
     </QueryClientProvider>
   );
+  const rendered = render(renderAt(options.workspaceSlug ?? "acme"));
+  return { rerenderAt: (slug: string) => rendered.rerender(renderAt(slug)) };
 }
 
 beforeEach(() => {
@@ -104,5 +117,16 @@ describe("HomeDashboard", () => {
     renderDashboard({ seedWorkspace: false });
     expect(screen.queryByRole("heading")).not.toBeInTheDocument();
     expect(document.title).toContain("acme");
+  });
+
+  it("re-reads per-workspace quickstart flags when the workspace changes", async () => {
+    const user = userEvent.setup();
+    const { rerenderAt } = renderDashboard({});
+    expect(screen.getByRole("region", { name: "Quickstart checklist" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByRole("region", { name: "Quickstart checklist" })).not.toBeInTheDocument();
+    rerenderAt("beta");
+    expect(document.title).toContain("Beta");
+    expect(screen.getByRole("region", { name: "Quickstart checklist" })).toBeInTheDocument();
   });
 });
