@@ -81,6 +81,7 @@ export const CyclesViewHeader = observer(function CyclesViewHeader(props: Props)
         <IconButton
           variant="ghost"
           size="lg"
+          data-testid="cycles-search-toggle"
           onClick={() => {
             setIsSearchOpen(true);
             inputRef.current?.focus();
