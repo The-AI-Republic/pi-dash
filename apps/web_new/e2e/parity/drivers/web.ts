@@ -58520,7 +58520,9 @@ export class WebDriver implements ParityDriver {
   }
 
   private cyclesSearchInput(): Locator {
-    return this.page.locator('input[placeholder="Search"]:visible');
+    // Scoped to the expanded search box: the filters popover carries its
+    // own Search field, and a page-global read matches both while open.
+    return this.page.locator('div.w-64 input[placeholder="Search"]:visible');
   }
 
   private cyclesFiltersButton(): Locator {
@@ -58589,7 +58591,10 @@ export class WebDriver implements ParityDriver {
   }
 
   async cyclesGroupToggle(section: string): Promise<void> {
-    await this.page.locator("button", { hasText: new RegExp(`^${section}`) }).first().click();
+    await this.page
+      .locator("button", { hasText: new RegExp(`^${section}`) })
+      .first()
+      .click();
   }
 
   async cyclesGroupExpanded(section: string): Promise<boolean> {
@@ -58774,6 +58779,14 @@ export class WebDriver implements ParityDriver {
   }
 
   async cyclesFiltersClose(): Promise<void> {
+    // The toggle click resolves before headlessui mounts the panel; a bare
+    // count-check can miss a slow mount, skip the Escape, and leave the
+    // panel open. Let any in-flight open land before deciding.
+    try {
+      await this.cyclesFiltersPanel().waitFor({ state: "attached", timeout: 2_000 });
+    } catch {
+      // Panel never opened; the count check below returns immediately.
+    }
     if ((await this.cyclesFiltersPanel().count()) === 0) return;
     await this.page.keyboard.press("Escape");
     await this.cyclesFiltersPanel().waitFor({ state: "detached", timeout: WebDriver.OPEN_MS });
