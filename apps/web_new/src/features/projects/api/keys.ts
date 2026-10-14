@@ -9,4 +9,5 @@ import { workspaceScope } from "../../../core/query/client.js";
 export const projectKeys = {
   all: (workspaceSlug: string) => [...workspaceScope(workspaceSlug), "projects"] as const,
   list: (workspaceSlug: string) => [...projectKeys.all(workspaceSlug), "list"] as const,
+  details: (workspaceSlug: string) => [...projectKeys.all(workspaceSlug), "details"] as const,
 };
