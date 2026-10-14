@@ -80,6 +80,7 @@ use crate::middleware::SessionHandle;
 use crate::runner_runs::json_response;
 use crate::runner_runs::pool_of;
 use crate::runner_runs::server_error;
+use crate::runner_runs::view_response;
 use crate::state::AppState;
 
 use super::parse_uuid;
@@ -242,6 +243,18 @@ async fn serialize_projects(
 // ---------------------------------------------------------------------------
 
 async fn get_projects(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extension: Option<Extension<SessionHandle>>,
+    Query(params): Query<crate::license::QueryMap>,
+) -> Response {
+    view_response(
+        get_projects_inner(State(state), headers, extension, Query(params)).await,
+        auth::ALLOW_GET,
+    )
+}
+
+async fn get_projects_inner(
     State(state): State<AppState>,
     headers: HeaderMap,
     extension: Option<Extension<SessionHandle>>,

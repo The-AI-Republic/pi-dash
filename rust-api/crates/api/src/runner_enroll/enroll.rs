@@ -49,7 +49,7 @@ use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{ConnectInfo, Extension, Path, State};
-use axum::http::{header, HeaderMap, Request, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
@@ -143,6 +143,32 @@ pub fn server_error() -> Response {
         StatusCode::INTERNAL_SERVER_ERROR,
         SERVER_ERROR_BODY.to_owned(),
     )
+}
+
+/// DRF `Allow` for the GET-only health probe
+/// (`APIView.default_response_headers`: `allowed_methods` in
+/// `http_method_names` order; HEAD rides with GET). The six POST-only
+/// views in this file reuse [`enroll_auth::ALLOW_POST`].
+const ALLOW_HEALTH: &str = "GET, HEAD, OPTIONS";
+
+/// Stamp a view's DRF `Allow` on a view-rendered response (the
+/// `runner_runs::view_response` precedent): additive only — a
+/// response that already carries `Allow` (Django's own stamp on a
+/// proxied arm) passes through untouched, and so do the two non-view
+/// statuses, 500 (Django's HTML error page) and 502 (the edge's
+/// dead-upstream answer). Every handler below exits through this
+/// wrapper.
+fn view_response(mut response: Response, allow: &'static str) -> Response {
+    if response.headers().contains_key(header::ALLOW)
+        || response.status() == StatusCode::INTERNAL_SERVER_ERROR
+        || response.status() == StatusCode::BAD_GATEWAY
+    {
+        return response;
+    }
+    response
+        .headers_mut()
+        .insert(header::ALLOW, HeaderValue::from_static(allow));
+    response
 }
 
 /// `{"error": name}` (view-inline 4xx bodies).
@@ -1497,6 +1523,10 @@ fn unix_now_secs() -> i64 {
 /// `HealthEndpoint.get` (`register.py:23-28`): AllowAny + the inherited
 /// anon throttle, no DB touch.
 pub async fn health(State(state): State<AppState>, req: Request<axum::body::Body>) -> Response {
+    view_response(health_inner(State(state), req).await, ALLOW_HEALTH)
+}
+
+async fn health_inner(State(state): State<AppState>, req: Request<axum::body::Body>) -> Response {
     let remote_addr = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -1515,6 +1545,16 @@ pub async fn health(State(state): State<AppState>, req: Request<axum::body::Body
 /// serializer gate, one-time-token redeem tx, refresh+access mint,
 /// dev-machine attach, optional rename, machine-token bootstrap.
 pub async fn enroll_runner(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    view_response(
+        enroll_runner_inner(State(state), req).await,
+        enroll_auth::ALLOW_POST,
+    )
+}
+
+async fn enroll_runner_inner(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
 ) -> Response {
@@ -1814,6 +1854,16 @@ pub async fn create_runner(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    view_response(
+        create_runner_inner(State(state), req).await,
+        enroll_auth::ALLOW_POST,
+    )
+}
+
+async fn create_runner_inner(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> Response {
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
         Err(response) => return response,
@@ -2104,6 +2154,18 @@ pub async fn machine_token_ticket(
     Path(workspace_raw): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    view_response(
+        machine_token_ticket_inner(State(state), extension, Path(workspace_raw), req).await,
+        enroll_auth::ALLOW_POST,
+    )
+}
+
+async fn machine_token_ticket_inner(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(workspace_raw): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
     let Some(ws_uuid) = strict_uuid(&workspace_raw) else {
         return crate::edge::proxy(State(state.clone()), req).await;
     };
@@ -2189,6 +2251,16 @@ fn payload_uuid(payload: &Value, key: &str) -> Result<Uuid, Response> {
 /// get+delete fallback, payload/user/workspace errors
 /// (400/401/410), `_maybe_mint` or 409, 201 body.
 pub async fn machine_token_redeem(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    view_response(
+        machine_token_redeem_inner(State(state), req).await,
+        enroll_auth::ALLOW_POST,
+    )
+}
+
+async fn machine_token_redeem_inner(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
 ) -> Response {
@@ -2325,6 +2397,16 @@ pub async fn runner_invite(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
 ) -> Response {
+    view_response(
+        runner_invite_inner(State(state), extension).await,
+        enroll_auth::ALLOW_POST,
+    )
+}
+
+async fn runner_invite_inner(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+) -> Response {
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
         Err(response) => return response,
@@ -2343,6 +2425,18 @@ pub async fn runner_invite(
 /// auth runs — so the gate falls through to Django, which renders
 /// its own 404.
 pub async fn runner_revive(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(runner_raw): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    view_response(
+        runner_revive_inner(State(state), extension, Path(runner_raw), req).await,
+        enroll_auth::ALLOW_POST,
+    )
+}
+
+async fn runner_revive_inner(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(runner_raw): Path<String>,

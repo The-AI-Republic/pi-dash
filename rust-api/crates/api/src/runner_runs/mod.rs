@@ -183,7 +183,7 @@ pub mod signals;
 pub mod sse;
 
 use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::Router;
 use http_body_util::BodyExt as _;
@@ -229,6 +229,43 @@ pub fn server_error() -> Response {
         StatusCode::INTERNAL_SERVER_ERROR,
         SERVER_ERROR_BODY.to_owned(),
     )
+}
+
+/// DRF `Allow` values (`APIView.default_response_headers`: each view's
+/// `allowed_methods` in `http_method_names` order, stamped on error
+/// responses too via `finalize_response`). HEAD rides with GET
+/// (Django's `View.setup` binds `head = get`), OPTIONS always served.
+pub(crate) const ALLOW_RUNS: &str = "GET, POST, HEAD, OPTIONS";
+pub(crate) const ALLOW_RUN_DETAIL: &str = "GET, HEAD, OPTIONS";
+pub(crate) const ALLOW_RETICK: &str = "POST, OPTIONS";
+pub(crate) const ALLOW_RUN_CANCEL: &str = "POST, OPTIONS";
+pub(crate) const ALLOW_RELEASE_PIN: &str = "POST, OPTIONS";
+/// All twelve `Run*Endpoint` daemon views (`run_endpoints.py`) are
+/// post-only, so they share one value.
+pub(crate) const ALLOW_RUN_DAEMON: &str = "POST, OPTIONS";
+pub(crate) const ALLOW_APPROVALS: &str = "GET, HEAD, OPTIONS";
+pub(crate) const ALLOW_APPROVAL_DECIDE: &str = "POST, OPTIONS";
+pub(crate) const ALLOW_RUNNER_METRICS: &str = "GET, HEAD, OPTIONS";
+
+/// Stamp a view's DRF `Allow` on a view-rendered response. Additive
+/// only: a response that already carries `Allow` (Django's own stamp
+/// on a proxied arm) passes through untouched, and so do the two
+/// non-view statuses — 500 (Django renders its HTML error page, which
+/// carries no `Allow`) and 502 (the edge's dead-upstream answer, never
+/// a view response). Every handler below exits through this wrapper,
+/// so success and 4xx arms (auth denials included) all carry the
+/// view's value with no per-arm bookkeeping.
+pub(crate) fn view_response(mut response: Response, allow: &'static str) -> Response {
+    if response.headers().contains_key(header::ALLOW)
+        || response.status() == StatusCode::INTERNAL_SERVER_ERROR
+        || response.status() == StatusCode::BAD_GATEWAY
+    {
+        return response;
+    }
+    response
+        .headers_mut()
+        .insert(header::ALLOW, HeaderValue::from_static(allow));
+    response
 }
 
 // ---------------------------------------------------------------------------

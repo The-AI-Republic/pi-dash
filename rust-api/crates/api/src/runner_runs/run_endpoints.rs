@@ -64,8 +64,8 @@ use pidash_types::runner_runs::{
 
 use super::{
     authenticate_daemon, frame_model, frame_text, json_response, pool_of, py_truthy,
-    read_request_data, resolve_runner_for_run, server_error, truncate_chars, DaemonRunner,
-    LivePorts, RunnerPorts,
+    read_request_data, resolve_runner_for_run, server_error, truncate_chars, view_response,
+    DaemonRunner, LivePorts, RunnerPorts, ALLOW_RUN_DAEMON,
 };
 use crate::state::AppState;
 
@@ -1540,6 +1540,17 @@ pub async fn run_accept(
     Path(run_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    view_response(
+        run_accept_inner(State(state), Path(run_id), headers).await,
+        ALLOW_RUN_DAEMON,
+    )
+}
+
+async fn run_accept_inner(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, &headers).await
     {
         Ok(preamble) => preamble,
@@ -1602,6 +1613,17 @@ pub async fn run_queued(
     Path(run_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    view_response(
+        run_queued_inner(State(state), Path(run_id), headers).await,
+        ALLOW_RUN_DAEMON,
+    )
+}
+
+async fn run_queued_inner(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     let (pool, _runner, _run_id, _key) =
         match daemon_preamble_nobody(&state, &run_id, &headers).await {
             Ok(preamble) => preamble,
@@ -1615,6 +1637,17 @@ pub async fn run_queued(
 /// lock, cancel check, then the `RUNNING` stamp with thread ids,
 /// session metadata, and the optional model.
 pub async fn run_started(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    view_response(
+        run_started_inner(State(state), Path(run_id), req).await,
+        ALLOW_RUN_DAEMON,
+    )
+}
+
+async fn run_started_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     req: Request<axum::body::Body>,
@@ -1736,6 +1769,17 @@ pub async fn run_started(
 /// for late batches); inside, the per-batch dedupe guards the
 /// per-`seq` upserts.
 pub async fn run_events(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    view_response(
+        run_events_inner(State(state), Path(run_id), req).await,
+        ALLOW_RUN_DAEMON,
+    )
+}
+
+async fn run_events_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     req: Request<axum::body::Body>,
@@ -1863,6 +1907,17 @@ pub async fn run_events(
 /// dedupe, lock, cancel check, then the approval upsert (which
 /// resets the row to `PENDING`) and the run to `AWAITING_APPROVAL`.
 pub async fn run_approval(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    view_response(
+        run_approval_inner(State(state), Path(run_id), req).await,
+        ALLOW_RUN_DAEMON,
+    )
+}
+
+async fn run_approval_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     req: Request<axum::body::Body>,
@@ -2010,6 +2065,17 @@ pub async fn run_awaiting_reauth(
     Path(run_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    view_response(
+        run_awaiting_reauth_inner(State(state), Path(run_id), headers).await,
+        ALLOW_RUN_DAEMON,
+    )
+}
+
+async fn run_awaiting_reauth_inner(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, &headers).await
     {
         Ok(preamble) => preamble,
@@ -2063,6 +2129,17 @@ pub async fn run_awaiting_reauth(
 /// dedupe, then the terminal finalize (which carries its own
 /// first-writer-wins lock — no `_lock_non_terminal` here).
 pub async fn run_completed(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    view_response(
+        run_completed_inner(State(state), Path(run_id), req).await,
+        ALLOW_RUN_DAEMON,
+    )
+}
+
+async fn run_completed_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     req: Request<axum::body::Body>,
@@ -2140,6 +2217,17 @@ pub async fn run_completed(
 /// lock, cancel check, then the pause path (phase-1 update, phase-2
 /// comment, post-commit drain).
 pub async fn run_paused(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    view_response(
+        run_paused_inner(State(state), Path(run_id), req).await,
+        ALLOW_RUN_DAEMON,
+    )
+}
+
+async fn run_paused_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     req: Request<axum::body::Body>,
@@ -2227,6 +2315,17 @@ pub async fn run_paused(
 /// `assign_rejected_busy` re-queue (or satisfy a pending cancel),
 /// `refusal` finalizes `REFUSED`, anything else finalizes `FAILED`.
 pub async fn run_failed(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    view_response(
+        run_failed_inner(State(state), Path(run_id), req).await,
+        ALLOW_RUN_DAEMON,
+    )
+}
+
+async fn run_failed_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     req: Request<axum::body::Body>,
@@ -2418,6 +2517,17 @@ pub async fn run_cancelled(
     Path(run_id): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    view_response(
+        run_cancelled_inner(State(state), Path(run_id), req).await,
+        ALLOW_RUN_DAEMON,
+    )
+}
+
+async fn run_cancelled_inner(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
     let (pool, preamble) = match daemon_preamble(&state, &run_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
@@ -2489,6 +2599,17 @@ pub async fn run_resumed(
     Path(run_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    view_response(
+        run_resumed_inner(State(state), Path(run_id), headers).await,
+        ALLOW_RUN_DAEMON,
+    )
+}
+
+async fn run_resumed_inner(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, &headers).await
     {
         Ok(preamble) => preamble,
@@ -2543,6 +2664,17 @@ pub async fn run_resumed(
 /// Redis. No transaction (nothing writes to Postgres); any Redis
 /// failure — missing client included — is 503 `redis_unavailable`.
 pub async fn run_stream_upgrade(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    view_response(
+        run_stream_upgrade_inner(State(state), Path(run_id), req).await,
+        ALLOW_RUN_DAEMON,
+    )
+}
+
+async fn run_stream_upgrade_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     req: Request<axum::body::Body>,

@@ -131,7 +131,7 @@ pub const AUTHENTICATE_HEADER_BEARER: &str = "Bearer";
 /// `finalize_response`, `views.py:418-446,508`): the view's
 /// `allowed_methods` joined with `", "`. `APIView` always serves
 /// `OPTIONS`, so every value ends with `, OPTIONS`.
-pub const ALLOW_GET: &str = "GET, OPTIONS";
+pub const ALLOW_GET: &str = "GET, HEAD, OPTIONS";
 /// DRF `Allow` for POST-only views (see [`ALLOW_GET`]).
 pub const ALLOW_POST: &str = "POST, OPTIONS";
 /// DRF `Allow` for DELETE-only views (see [`ALLOW_GET`]).
@@ -1367,7 +1367,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(headers.get(header::WWW_AUTHENTICATE).unwrap(), "Bearer");
-        assert_eq!(headers.get(header::ALLOW).unwrap(), "GET, OPTIONS");
+        assert_eq!(headers.get(header::ALLOW).unwrap(), "GET, HEAD, OPTIONS");
         assert_eq!(body, r#"{"detail":"Given API token is not valid"}"#);
     }
 
@@ -1384,7 +1384,7 @@ mod tests {
             response_parts(not_authenticated_response(Some("Bearer"), ALLOW_GET)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(headers.get(header::WWW_AUTHENTICATE).unwrap(), "Bearer");
-        assert_eq!(headers.get(header::ALLOW).unwrap(), "GET, OPTIONS");
+        assert_eq!(headers.get(header::ALLOW).unwrap(), "GET, HEAD, OPTIONS");
         assert_eq!(
             body,
             r#"{"detail":"Authentication credentials were not provided."}"#

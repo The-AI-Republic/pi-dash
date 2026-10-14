@@ -271,6 +271,7 @@ def test_list_workspaces_known_bug(user_api, space):
     # 400. The Rust port must reproduce the 400 until the bug is fixed.
     res = user_api.get("/api/workspaces/")
     assert res.status_code == 400
+    assert res.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert res.json() == {"error": "The required key does not exist."}
 
 

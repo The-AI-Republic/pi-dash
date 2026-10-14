@@ -122,7 +122,7 @@
 use std::time::Instant;
 
 use axum::extract::{Path, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
@@ -1834,6 +1834,26 @@ async fn open_redeliver(
     Ok(session_kernel::plan_redeliver(&facts).map(Value::Object))
 }
 
+/// Stamp a view's DRF `Allow` on a view-rendered response (the
+/// `runner_runs::view_response` precedent): additive only — a
+/// response that already carries `Allow` (Django's own stamp on a
+/// proxied arm, or the D-13 auth denial's) passes through untouched,
+/// and so do the two non-view statuses, 500 (Django's HTML error
+/// page) and 502 (the edge's dead-upstream answer). Both handlers
+/// below exit through this wrapper.
+fn view_response(mut response: Response, allow: &'static str) -> Response {
+    if response.headers().contains_key(header::ALLOW)
+        || response.status() == StatusCode::INTERNAL_SERVER_ERROR
+        || response.status() == StatusCode::BAD_GATEWAY
+    {
+        return response;
+    }
+    response
+        .headers_mut()
+        .insert(header::ALLOW, HeaderValue::from_static(allow));
+    response
+}
+
 /// `POST runners/<rid>/sessions/` — open a session for one runner
 /// (`sessions.py:132-285`).
 ///
@@ -1843,6 +1863,17 @@ async fn open_redeliver(
 /// effects, the Redis side effects, resume/redeliver, and the 201
 /// welcome body.
 pub async fn runner_session_open(
+    State(state): State<AppState>,
+    Path(raw_rid): Path<String>,
+    req: Request,
+) -> Response {
+    view_response(
+        runner_session_open_inner(State(state), Path(raw_rid), req).await,
+        ALLOW_POST,
+    )
+}
+
+async fn runner_session_open_inner(
     State(state): State<AppState>,
     Path(raw_rid): Path<String>,
     req: Request,
@@ -2028,6 +2059,17 @@ pub async fn runner_session_open(
 /// autocommits, exactly as the source's transactionless view. The
 /// body is never read, so even malformed JSON still 204s.
 pub async fn runner_session_delete(
+    State(state): State<AppState>,
+    Path((raw_rid, raw_sid)): Path<(String, String)>,
+    req: Request,
+) -> Response {
+    view_response(
+        runner_session_delete_inner(State(state), Path((raw_rid, raw_sid)), req).await,
+        ALLOW_DELETE,
+    )
+}
+
+async fn runner_session_delete_inner(
     State(state): State<AppState>,
     Path((raw_rid, raw_sid)): Path<(String, String)>,
     req: Request,

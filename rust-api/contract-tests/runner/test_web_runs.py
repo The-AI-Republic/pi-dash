@@ -36,6 +36,7 @@ RUN_KEYS = {
 def test_web_runs_list_shape(user_client, daemon_run):
     response = user_client.get(f"{WEB}/runs/")
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     body = response.json()
     assert set(body) == {"results", "count", "total_count", "total_pages", "page", "per_page"}
     assert body["total_count"] == 1 and body["count"] == 1
@@ -50,6 +51,7 @@ def test_web_runs_list_shape(user_client, daemon_run):
 def test_web_runs_list_denies_anonymous(anon_client):
     response = anon_client.get(f"{WEB}/runs/")
     assert response.status_code == 401
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert response.json() == {"detail": "Authentication credentials were not provided."}
 
 
@@ -66,16 +68,20 @@ def test_web_runs_list_hides_foreign_runs(user_client, seeder):
     foreign = seeder.create_daemon_run(
         other_owner["id"], other_ws["id"], other_pod["id"], other_runner["id"]
     )
-    body = user_client.get(f"{WEB}/runs/").json()
+    listed = user_client.get(f"{WEB}/runs/")
+    assert listed.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    body = listed.json()
     assert foreign["id"] not in [r["id"] for r in body["results"]]
     detail = user_client.get(f"{WEB}/runs/{foreign['id']}/")
     # Cross-workspace runs read as 404 — existence must not leak.
     assert detail.status_code == 404
+    assert detail.headers["allow"] == "GET, HEAD, OPTIONS"
 
 
 def test_web_run_detail_shape(user_client, daemon_run):
     response = user_client.get(f"{WEB}/runs/{daemon_run['id']}/")
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     body = response.json()
     assert RUN_KEYS <= set(body)
     assert body["id"] == daemon_run["id"]
@@ -93,6 +99,7 @@ def test_web_run_detail_include_events(user_client, machine_client, daemon_run, 
         f"{WEB}/runs/{daemon_run['id']}/", params={"include_events": "1"}
     )
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     events = response.json()["events"]
     assert [(e["seq"], e["kind"]) for e in events] == [(1, "log")]
     assert set(events[0]) == {"id", "seq", "kind", "payload", "created_at"}
@@ -101,6 +108,7 @@ def test_web_run_detail_include_events(user_client, machine_client, daemon_run, 
 def test_web_run_detail_unknown_is_404(user_client):
     response = user_client.get(f"{WEB}/runs/00000000-0000-0000-0000-000000000000/")
     assert response.status_code == 404
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     assert response.json() == {"error": "not found"}
 
 
@@ -175,6 +183,7 @@ def test_web_run_detail_null_issue_creator_keeps_assignee_grant(
 def test_web_runs_create_requires_prompt(user_client):
     response = web_post(user_client, f"{WEB}/runs/", {})
     assert response.status_code == 400
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert response.json() == {"error": "prompt is required"}
 
 
@@ -185,26 +194,32 @@ def test_web_runs_create_rejects_malformed_work_item(user_client, daemon_world):
         {"prompt": "hi", "workspace": daemon_world["workspace"]["id"], "work_item": "nope"},
     )
     assert response.status_code == 500
+    # Raw-500 arm (ported Django bug): no Allow on either backend.
+    assert "allow" not in response.headers
 
 
 def test_web_retick_validates_input(user_client):
     missing = web_post(user_client, f"{WEB}/re-tick/", {})
     assert missing.status_code == 400
+    assert missing.headers["allow"] == "POST, OPTIONS"
     assert missing.json() == {"error": "work_item is required for re-tick"}
     # Re-tick guards the UUID parse (the create path above does not).
     malformed = web_post(user_client, f"{WEB}/re-tick/", {"work_item": "nope"})
     assert malformed.status_code == 400
+    assert malformed.headers["allow"] == "POST, OPTIONS"
     assert malformed.json() == {"error": "invalid work_item UUID format"}
     unknown = web_post(
         user_client, f"{WEB}/re-tick/", {"work_item": str(uuid.uuid4())}
     )
     assert unknown.status_code == 404
+    assert unknown.headers["allow"] == "POST, OPTIONS"
     assert unknown.json() == {"error": "issue not found"}
 
 
 def test_web_run_cancel_shape(user_client, daemon_run, seeder):
     response = web_post(user_client, f"{WEB}/runs/{daemon_run['id']}/cancel/", {})
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "POST, OPTIONS"
     body = response.json()
     assert RUN_KEYS <= set(body)
     # Assigned local run on an offline runner: cancel-requested, fan-out
@@ -226,6 +241,7 @@ def test_web_run_cancel_terminal_is_409(user_client, seeder, daemon_world, machi
     )
     response = web_post(user_client, f"{WEB}/runs/{run['id']}/cancel/", {})
     assert response.status_code == 409
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"error": "run already terminal", "code": "run_already_terminal"}
 
 
@@ -234,6 +250,7 @@ def test_web_run_cancel_unknown_is_404(user_client):
         user_client, f"{WEB}/runs/00000000-0000-0000-0000-000000000000/cancel/", {}
     )
     assert response.status_code == 404
+    assert response.headers["allow"] == "POST, OPTIONS"
 
 
 def test_web_run_release_pin_shape(user_client, seeder, daemon_world, machine_flow):
@@ -247,6 +264,7 @@ def test_web_run_release_pin_shape(user_client, seeder, daemon_world, machine_fl
     )
     response = web_post(user_client, f"{WEB}/runs/{run['id']}/release-pin/", {})
     assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert (
         seeder.db.fetchval(
             "SELECT pinned_runner_id FROM agent_run WHERE id = %s", (run["id"],)
@@ -258,6 +276,7 @@ def test_web_run_release_pin_shape(user_client, seeder, daemon_world, machine_fl
 def test_web_run_release_pin_rejects_unpinned(user_client, daemon_run):
     response = web_post(user_client, f"{WEB}/runs/{daemon_run['id']}/release-pin/", {})
     assert response.status_code == 409
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"error": "run not queued"}
 
 
@@ -277,6 +296,7 @@ def test_web_runs_create_direct_freeform_201(user_client, seeder, daemon_world):
         {"prompt": "hello free", "workspace": daemon_world["workspace"]["id"]},
     )
     assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     body = response.json()
     assert RUN_KEYS <= set(body)
     assert body["status"] == "queued"
@@ -310,6 +330,7 @@ def test_web_runs_create_direct_issue_201(user_client, seeder, daemon_world):
         },
     )
     assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     body = response.json()
     assert RUN_KEYS <= set(body)
     assert body["work_item"] == issue["id"]
@@ -329,6 +350,7 @@ def test_web_runs_create_direct_issue_201(user_client, seeder, daemon_world):
         },
     )
     assert again.status_code == 409
+    assert again.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert again.json() == {
         "error": "work item already has an active run", "code": "active_run_exists",
     }
@@ -338,12 +360,14 @@ def test_web_runs_create_direct_validation(user_client, seeder, daemon_world):
     ws = daemon_world["workspace"]["id"]
     missing_ws = web_post(user_client, f"{WEB}/runs/", {"prompt": "hi"})
     assert missing_ws.status_code == 400
+    assert missing_ws.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert missing_ws.json() == {"error": "workspace is required", "code": "workspace_required"}
     # Another workspace the caller never joined.
     outsider = seeder.create_user()
     foreign_ws = seeder.create_workspace(outsider["id"])
     foreign = web_post(user_client, f"{WEB}/runs/", {"prompt": "hi", "workspace": foreign_ws["id"]})
     assert foreign.status_code == 403
+    assert foreign.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert foreign.json() == {
         "error": "caller is not a member of the target workspace",
         "code": "not_workspace_member",
@@ -353,12 +377,14 @@ def test_web_runs_create_direct_validation(user_client, seeder, daemon_world):
         {"prompt": "hi", "workspace": ws, "work_item": str(uuid.uuid4())},
     )
     assert fake_issue.status_code == 400
+    assert fake_issue.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert fake_issue.json() == {"error": "work_item does not exist", "code": "work_item_missing"}
     fake_pod = web_post(
         user_client, f"{WEB}/runs/",
         {"prompt": "hi", "workspace": ws, "pod": str(uuid.uuid4())},
     )
     assert fake_pod.status_code == 400
+    assert fake_pod.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert fake_pod.json() == {
         "error": "pod does not exist or has been deleted", "code": "pod_missing",
     }
@@ -367,6 +393,7 @@ def test_web_runs_create_direct_validation(user_client, seeder, daemon_world):
     seeder.create_project(ws)
     nopod = web_post(user_client, f"{WEB}/runs/", {"prompt": "hi", "workspace": ws})
     assert nopod.status_code == 409
+    assert nopod.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert nopod.json() == {
         "error": "no pod available; ensure the issue has a project with a default pod",
         "code": "no_pod_available",
@@ -379,17 +406,20 @@ def test_web_runs_create_direct_coercions(user_client, seeder, daemon_world):
     issue = _ticking_issue(seeder, daemon_world)
     ws_int = web_post(user_client, f"{WEB}/runs/", {"prompt": "hi", "workspace": 123})
     assert ws_int.status_code == 403
+    assert ws_int.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert ws_int.json()["code"] == "not_workspace_member"
     wi_int = web_post(
         user_client, f"{WEB}/runs/",
         {"prompt": "hi", "workspace": ws, "work_item": 123},
     )
     assert wi_int.status_code == 400
+    assert wi_int.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert wi_int.json()["code"] == "work_item_missing"
     pod_int = web_post(
         user_client, f"{WEB}/runs/", {"prompt": "hi", "workspace": ws, "pod": 123}
     )
     assert pod_int.status_code == 400
+    assert pod_int.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert pod_int.json()["code"] == "pod_missing"
     for bad in ("nope", 1.5, [1], {"a": 1}):
         response = web_post(
@@ -397,11 +427,13 @@ def test_web_runs_create_direct_coercions(user_client, seeder, daemon_world):
             {"prompt": "hi", "workspace": ws, "work_item": bad},
         )
         assert response.status_code == 500, bad
+        assert "allow" not in response.headers, bad
     triggered = web_post(
         user_client, f"{WEB}/runs/",
         {"prompt": "hi", "workspace": ws, "triggered_by": 123},
     )
     assert triggered.status_code == 500
+    assert "allow" not in triggered.headers
     # Non-canonical workspace text passes membership (the filter coerces)
     # but fails the `str() != str()` consistency comparisons.
     upper = web_post(
@@ -409,6 +441,7 @@ def test_web_runs_create_direct_coercions(user_client, seeder, daemon_world):
         {"prompt": "hi", "workspace": ws.upper(), "work_item": issue["id"]},
     )
     assert upper.status_code == 400
+    assert upper.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert upper.json()["code"] == "work_item_workspace_mismatch"
     # Capabilities/config store verbatim on the local path, uninspected.
     stored = web_post(
@@ -419,6 +452,7 @@ def test_web_runs_create_direct_coercions(user_client, seeder, daemon_world):
         },
     )
     assert stored.status_code == 201, stored.text
+    assert stored.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     row = seeder.db.fetchone(
         "SELECT required_capabilities, run_config FROM agent_run WHERE id = %s",
         (stored.json()["id"],),
@@ -435,22 +469,26 @@ def test_web_runs_create_prompt_str_coercion(user_client, seeder, daemon_world):
     ]:
         response = web_post(user_client, f"{WEB}/runs/", {"prompt": prompt, "workspace": ws})
         assert response.status_code == 201, prompt
+        assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS", prompt
         assert response.json()["prompt"] == saved, prompt
 
 
 def test_web_runs_create_runai_validation(user_client, seeder, daemon_world):
     missing = web_post(user_client, f"{WEB}/runs/", {"triggered_by": "run_ai"})
     assert missing.status_code == 400
+    assert missing.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert missing.json() == {"error": "work_item is required for run_ai"}
     fake = web_post(
         user_client, f"{WEB}/runs/",
         {"triggered_by": "run_ai", "work_item": str(uuid.uuid4())},
     )
     assert fake.status_code == 404
+    assert fake.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert fake.json() == {"error": "issue not found"}
     # Ints coerce via `UUID(int=)` and miss — a 404, not a 500.
     coerce = web_post(user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": 123})
     assert coerce.status_code == 404
+    assert coerce.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     outsider = seeder.create_user()
     foreign_ws = seeder.create_workspace(outsider["id"])
     foreign_project = seeder.create_project(foreign_ws["id"])
@@ -461,6 +499,7 @@ def test_web_runs_create_runai_validation(user_client, seeder, daemon_world):
         {"triggered_by": "run_ai", "work_item": foreign_issue["id"]},
     )
     assert walled.status_code == 404
+    assert walled.headers["allow"] == "GET, POST, HEAD, OPTIONS"
 
 
 def test_web_runs_create_runai_no_runner_409_rolls_back(user_client, seeder, daemon_world):
@@ -474,6 +513,7 @@ def test_web_runs_create_runai_no_runner_409_rolls_back(user_client, seeder, dae
         user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
     )
     assert response.status_code == 409
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert response.json() == {
         "error": "could not dispatch — issue may already have an active run, or no pod is available"
     }
@@ -496,6 +536,7 @@ def test_web_runs_create_runai_201(user_client, seeder, daemon_world, machine_fl
         user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
     )
     assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     body = response.json()
     assert RUN_KEYS <= set(body)
     assert body["work_item"] == issue["id"]
@@ -517,6 +558,7 @@ def test_web_runs_create_runai_queued_202(user_client, seeder, daemon_world):
         user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
     )
     assert response.status_code == 202
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert response.json() == {
         "queued": True,
         "reason": "free-entry-queued",
@@ -539,6 +581,7 @@ def test_web_runs_create_comment_run_no_prior_409(user_client, seeder, daemon_wo
         {"triggered_by": "comment_and_run", "work_item": issue["id"]},
     )
     assert response.status_code == 409
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert response.json() == {
         "error": "could not dispatch — issue may already have an active run,"
         " or no prior run / pod is available"
@@ -556,6 +599,7 @@ def test_web_runs_create_comment_run_201(user_client, seeder, daemon_world, mach
         {"triggered_by": "comment_and_run", "work_item": issue["id"]},
     )
     assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     body = response.json()
     assert RUN_KEYS <= set(body)
     assert body["work_item"] == issue["id"]
@@ -579,6 +623,7 @@ def test_web_runs_create_comment_run_queued_202(user_client, seeder, daemon_worl
         {"triggered_by": "comment_and_run", "work_item": issue["id"]},
     )
     assert response.status_code == 202
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert response.json()["reason"] == "free-entry-queued"
     ticker = seeder.db.fetchone(
         "SELECT pending_entry_trigger FROM issue_agent_ticker WHERE issue_id = %s",
@@ -605,11 +650,13 @@ def test_web_runs_create_soft_deleted_issue(user_client, seeder, daemon_world):
         },
     )
     assert direct.status_code == 400
+    assert direct.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert direct.json()["code"] == "work_item_missing"
     runai = web_post(
         user_client, f"{WEB}/runs/", {"triggered_by": "run_ai", "work_item": issue["id"]}
     )
     assert runai.status_code == 202
+    assert runai.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert runai.json()["reason"] == "free-entry-queued"
 
 
@@ -627,6 +674,7 @@ def test_web_runs_create_direct_coercion_mismatch_order(user_client, seeder, dae
         },
     )
     assert missing.status_code == 400
+    assert missing.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert missing.json()["code"] == "work_item_workspace_mismatch"
     # Foreign pod (exists, another workspace): same — work-item check first.
     outsider = seeder.create_user()
@@ -641,6 +689,7 @@ def test_web_runs_create_direct_coercion_mismatch_order(user_client, seeder, dae
         },
     )
     assert foreign.status_code == 400
+    assert foreign.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert foreign.json()["code"] == "work_item_workspace_mismatch"
     # Control: canonical text keeps the pod errors.
     canon_missing = web_post(
@@ -651,6 +700,7 @@ def test_web_runs_create_direct_coercion_mismatch_order(user_client, seeder, dae
         },
     )
     assert canon_missing.status_code == 400
+    assert canon_missing.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert canon_missing.json()["code"] == "pod_missing"
     canon_foreign = web_post(
         user_client, f"{WEB}/runs/",
@@ -660,4 +710,5 @@ def test_web_runs_create_direct_coercion_mismatch_order(user_client, seeder, dae
         },
     )
     assert canon_foreign.status_code == 400
+    assert canon_foreign.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert canon_foreign.json()["code"] == "pod_workspace_mismatch"

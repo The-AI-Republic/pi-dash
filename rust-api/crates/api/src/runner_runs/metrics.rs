@@ -11,7 +11,7 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 
-use super::{json_response, pool_of, SERVER_ERROR_BODY};
+use super::{json_response, pool_of, view_response, ALLOW_RUNNER_METRICS, SERVER_ERROR_BODY};
 use crate::state::AppState;
 
 /// Exact content type (`metrics.py:105`): scrapers require it.
@@ -87,6 +87,10 @@ pub fn metrics_body(
 /// `GET /api/v1/runner/metrics/`: the five gauges as `text/plain`.
 /// AllowAny — no session lookup at all (`authentication_classes = []`).
 pub async fn metrics(State(state): State<AppState>) -> Response {
+    view_response(metrics_inner(State(state)).await, ALLOW_RUNNER_METRICS)
+}
+
+async fn metrics_inner(State(state): State<AppState>) -> Response {
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
         Err(response) => return response,

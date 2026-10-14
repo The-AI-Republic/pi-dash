@@ -25,6 +25,7 @@ pytestmark = pytest.mark.contract
 def _open_runner_session(client, runner_id: str, **body) -> dict:
     response = client.post(f"{DAEMON}/runners/{runner_id}/sessions/", json=body or {})
     assert response.status_code == 201, response.text
+    assert response.headers["allow"] == "POST, OPTIONS"
     return response.json()
 
 
@@ -72,6 +73,7 @@ def test_daemon_runner_session_open_rejects_cross_runner(settings, enrolled, see
     with bearer_client(settings.base_url, enrolled["access_token"]) as client:
         response = client.post(f"{DAEMON}/runners/{other['id']}/sessions/", json={})
     assert response.status_code == 401
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"detail": "runner_id_mismatch"}
 
 
@@ -80,6 +82,7 @@ def test_daemon_runner_session_open_requires_auth(anon_client, machine_flow):
     # 403 runner_id_mismatch (never 401 — nothing raised AuthenticationFailed).
     response = anon_client.post(f"{DAEMON}/runners/{machine_flow['runner_id']}/sessions/", json={})
     assert response.status_code == 403
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json() == {"error": "runner_id_mismatch"}
 
 
@@ -90,6 +93,7 @@ def test_daemon_runner_session_open_rejects_old_protocol(machine_client, machine
         headers={"X-Runner-Protocol-Version": "1"},
     )
     assert response.status_code == 426
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json()["error"] == "protocol_version_unsupported"
 
 
@@ -99,6 +103,7 @@ def test_daemon_runner_session_open_rejects_project_mismatch(machine_client, mac
         json={"project_slug": "some-other-project"},
     )
     assert response.status_code == 409
+    assert response.headers["allow"] == "POST, OPTIONS"
     assert response.json()["error"] == "project_mismatch"
     assert response.json()["expected"]
 
@@ -109,11 +114,13 @@ def test_daemon_runner_session_delete_shape(machine_client, machine_flow):
         f"{DAEMON}/runners/{machine_flow['runner_id']}/sessions/{opened['session_id']}/"
     )
     assert response.status_code == 204
+    assert response.headers["allow"] == "DELETE, OPTIONS"
     # Idempotent: deleting an unknown session id is still 204.
     again = machine_client.delete(
         f"{DAEMON}/runners/{machine_flow['runner_id']}/sessions/{uuid.uuid4()}/"
     )
     assert again.status_code == 204
+    assert again.headers["allow"] == "DELETE, OPTIONS"
 
 
 def test_daemon_runner_session_poll_shape(machine_client, machine_flow):

@@ -18,12 +18,14 @@ pytestmark = pytest.mark.contract
 def test_daemon_health_shape(settings, anon_client):
     response = anon_client.get(f"{DAEMON}/health/")
     assert response.status_code == 200
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     assert response.json() == {"ok": True, "protocol_version": 3}
 
 
 def test_daemon_metrics_shape_and_content_type(settings, anon_client):
     response = anon_client.get(f"{DAEMON}/metrics/")
     assert response.status_code == 200
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     assert response.headers["content-type"] == "text/plain; version=0.0.4"
     body = response.text
     for gauge in (
@@ -55,6 +57,7 @@ def test_daemon_metrics_counts_reflect_seeded_state(seeder, daemon_world, anon_c
 
     response = anon_client.get(f"{DAEMON}/metrics/")
     assert response.status_code == 200
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
     values = {}
     for line in response.text.splitlines():
         if line.startswith("pi_dash_") and not line.startswith("#"):
@@ -72,3 +75,4 @@ def test_daemon_health_no_auth_header_sent(settings):
         assert "authorization" not in {k.lower() for k in client.headers}
         response = client.get(f"{DAEMON}/health/")
         assert response.status_code == 200
+        assert response.headers["allow"] == "GET, HEAD, OPTIONS"

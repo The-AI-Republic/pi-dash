@@ -87,3 +87,6 @@ def test_daemon_redeem_non_object_ticket_is_500(anon_client, blob):
     finally:
         rdb.delete(key)
     assert response.status_code == 500, response.text
+    # Raw-500 arms carry no Allow on either backend (Django's HTML error
+    # page has none; the Rust wrapper skips 500s).
+    assert "allow" not in response.headers
