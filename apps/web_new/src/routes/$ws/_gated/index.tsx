@@ -1,12 +1,15 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Workspace home dashboard (NEWFRONT-278). Renders the dashboard top half
-// (greeting, assistant card, quickstart) inside the gated shell: the tour
-// seam stays mounted above it, and the widget slot below fills in with
-// the sibling home slices (NEWFRONT-279, NEWFRONT-280). The loader warms
-// the assistant card reads so first paint settles with data; the component
-// composes the cross-feature projects read features cannot make themselves.
+// Workspace home dashboard (NEWFRONT-278 top half, NEWFRONT-280 widget
+// stack). Renders the dashboard composition inside the gated shell: the
+// tour seam stays mounted above it, and the widget stack — dashboard
+// chrome plus the recents section — fills the dashboard's `widgets`
+// slot. NEWFRONT-279 fills the quicklinks and manage-widgets slots.
+// The loader warms the assistant card reads so first paint settles with
+// data; the widget-map read stays off the loader so the dashboard
+// skeleton shows on first paint. The component composes the
+// cross-feature projects read features cannot make themselves.
 
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
@@ -16,6 +19,7 @@ import { WorkspaceHomeTour } from "../../../features/auth/index.js";
 import {
   HomeDashboard,
   homeAssistantConfigQueryOptions,
+  HomeWidgetStack,
   homeThreadsQueryOptions,
 } from "../../../features/home/index.js";
 import { projectsQueryOptions } from "../../../features/projects/index.js";
@@ -40,7 +44,11 @@ export const Route = createFileRoute("/$ws/_gated/")({
     return (
       <>
         <WorkspaceHomeTour />
-        <HomeDashboard workspaceSlug={params.ws} projects={projects.data} />
+        <HomeDashboard
+          workspaceSlug={params.ws}
+          projects={projects.data}
+          widgets={<HomeWidgetStack workspaceSlug={params.ws} projects={projects.data} />}
+        />
       </>
     );
   },
