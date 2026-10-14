@@ -70,6 +70,13 @@ describe("resolveSearchTarget", () => {
     }
   );
 
+  it("lands page hits on their first listed project tab", () => {
+    const tab = { to: "/$ws/projects/$projectId/issues", params: { ws: "acme", projectId: PROJECT_ID } };
+    expect(resolveSearchTarget(hit("page", { project_ids: [PROJECT_ID] }), "acme")).toEqual(tab);
+    expect(resolveSearchTarget(hit("page", { project_ids: ["", 42, PROJECT_ID] }), "acme")).toEqual(tab);
+    expect(resolveSearchTarget(hit("page", { project_id: PROJECT_ID, project_ids: [ISSUE_ID] }), "acme")).toEqual(tab);
+  });
+
   it("falls back home when the row is unreadable", () => {
     const home = { to: "/$ws", params: { ws: "acme" } };
     expect(resolveSearchTarget(hit("cycle", {}), "acme")).toEqual(home);
@@ -77,5 +84,9 @@ describe("resolveSearchTarget", () => {
     expect(resolveSearchTarget(hit("project", { id: "" }), "acme")).toEqual(home);
     expect(resolveSearchTarget(hit("issue", undefined), "acme")).toEqual(home);
     expect(resolveSearchTarget(hit("issue", { id: 42 }), "acme")).toEqual(home);
+    expect(resolveSearchTarget(hit("page", {}), "acme")).toEqual(home);
+    expect(resolveSearchTarget(hit("page", { project_ids: [] }), "acme")).toEqual(home);
+    expect(resolveSearchTarget(hit("page", { project_ids: [42, ""] }), "acme")).toEqual(home);
+    expect(resolveSearchTarget(hit("page", { project_ids: "nope" }), "acme")).toEqual(home);
   });
 });

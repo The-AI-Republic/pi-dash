@@ -327,6 +327,11 @@ describe("CommandPalette sub-pages (SHELL-093)", () => {
     expect(run).toHaveBeenCalledOnce();
     expect(useCommandPalette.getState().open).toBe(true);
     expect(screen.getByRole("listbox", { name: "Options" })).toBeInTheDocument();
+    await user.hover(screen.getByRole("option", { name: /Atlas/ }));
+    expect(screen.getByRole("option", { name: /Atlas/ })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("option", { name: /Atlas/ }));
+    expect(run).toHaveBeenCalledOnce();
+    expect(useCommandPalette.getState().open).toBe(true);
   });
 });
 

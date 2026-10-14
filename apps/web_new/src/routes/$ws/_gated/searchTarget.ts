@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Palette server-hit navigation (shell spec, SHELL-084). Maps a grouped
-// search hit to the route the app navigates to. Entities whose areas have
-// landed go deep — issues through the browse route, projects to their
-// tracking tab, workspaces home. Entities without new-app routes yet (the
-// cycle, module, view, page and intake areas are Backlog epics) land on the
-// closest existing surface, the project tracking tab; the owning area
-// deepens its case when its routes land. Hits with unreadable rows fall
-// back to the workspace home rather than navigating nowhere.
+// search hit to the route the app navigates to. Issues and intake items go
+// deep through the browse route, projects to their tracking tab, workspaces
+// home. Cycle, module, view and page hits land on their project's tracking
+// tab (pages carry project_ids, the rest project_id) until their areas land
+// their own routes; the owning area deepens its case then. Hits with
+// unreadable rows fall back to the workspace home rather than navigating
+// nowhere.
 
 import type { SearchResultHit } from "../../../shared/commands/index.js";
 
@@ -22,8 +22,17 @@ function text(row: Record<string, unknown>, field: string): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function firstProjectId(row: Record<string, unknown>): string | null {
+  const direct = text(row, "project_id");
+  if (direct !== null) return direct;
+  const list = row["project_ids"];
+  if (!Array.isArray(list)) return null;
+  const first = list.find((entry): entry is string => typeof entry === "string" && entry.length > 0);
+  return first ?? null;
+}
+
 function projectFallback(row: Record<string, unknown>, workspaceSlug: string, home: SearchTarget): SearchTarget {
-  const projectId = text(row, "project_id");
+  const projectId = firstProjectId(row);
   if (projectId !== null) {
     return { to: "/$ws/projects/$projectId/issues", params: { ws: workspaceSlug, projectId } };
   }
