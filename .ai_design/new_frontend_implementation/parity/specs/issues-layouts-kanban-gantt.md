@@ -50,8 +50,8 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
   title rotated and the count; cards are hidden.
 - In swimlane mode clicking a lane header toggles that lane's cards; the
   chevron points down while collapsed and up while expanded.
-- Both collapse states persist per user as part of the kanban filters (kept
-  server-side with the user's issue filters, updated whenever a toggle flips).
+- Both collapse states persist per user in localStorage with the kanban
+  filters (the local filter keys, updated whenever a toggle flips).
 - The show-empty display filter (default on) hides zero-count columns and
   lanes when off.
 
@@ -146,7 +146,7 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
   width (week widest, quarter narrowest). The zoom is session-local: it is
   neither persisted nor deep-linked. Switching levels re-centers the chart on
   today. Weekend columns are tinted; the week's start day comes from the user
-  profile. Month is the initial level.
+  profile. Week is the initial level.
 - Today re-renders the current zoom and scrolls so today is centered. The
   current-date column is highlighted in every zoom. Mounting the chart
   auto-centers today.
@@ -169,8 +169,10 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
   silent no-op — no warning toast exists anywhere in the old frontend,
   so the row's toast clause is corrected to the silent-suppression
   design (an inventory inaccuracy, not an old bug).
-- While loading, the sidebar shows skeleton rows and the header a loading
-  label; the load-more sentinel renders as a pulsing placeholder.
+- While loading, the layout-level loader covers the fetch while the chart
+  mounts with data (sidebar skeletons paint at most one frame behind it).
+  An empty project shows the first-run state with no chart; the load-more
+  sentinel renders as a pulsing placeholder.
 
 ### Bars: move, resize, add (ISS-051–ISS-055)
 
