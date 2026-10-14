@@ -40,4 +40,26 @@ describe("ContextMenu", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
+
+  it("renders separators, icons and disabled rows keyed apart", () => {
+    const onSelect = vi.fn();
+    render(
+      <ContextMenu
+        trigger={<span>Tab</span>}
+        items={[
+          { label: "Web", itemKey: "p1", icon: <i data-testid="mark-p1" />, onSelect },
+          { separator: true },
+          { label: "Web", itemKey: "p2", icon: <i data-testid="mark-p2" />, onSelect, disabled: true },
+        ]}
+      />
+    );
+    fireEvent.contextMenu(screen.getByText("Tab"));
+    expect(screen.getByRole("separator")).toBeInTheDocument();
+    expect(screen.getByTestId("mark-p1")).toBeInTheDocument();
+    expect(screen.getByTestId("mark-p2")).toBeInTheDocument();
+    const rows = screen.getAllByRole("menuitem", { name: "Web" });
+    expect(rows).toHaveLength(2);
+    fireEvent.click(rows[0]!);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+  });
 });

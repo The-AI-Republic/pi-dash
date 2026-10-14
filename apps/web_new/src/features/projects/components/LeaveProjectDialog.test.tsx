@@ -151,6 +151,46 @@ describe("LeaveProjectDialog", () => {
     expect(screen.getByLabelText(/To confirm/)).toHaveValue("");
   });
 
+  it("disables the leave button with a progress label while leaving", async () => {
+    const user = userEvent.setup();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ csrf_token: "csrf" }),
+        };
+      }
+      await gate;
+      return { status: 204, url, headers: { get: () => null }, text: async () => "" };
+    }) as never);
+    const onOpenChange = vi.fn();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LeaveProjectDialog
+          workspaceSlug="acme"
+          projectId={PROJECT_ID}
+          projectName="Web"
+          open
+          onOpenChange={onOpenChange}
+          onNavigate={() => undefined}
+        />
+      </QueryClientProvider>
+    );
+    await user.type(screen.getByLabelText(/To confirm/), LEAVE_CONFIRM_PHRASE);
+    fireEvent.click(screen.getByRole("button", { name: "Leave project" }));
+    const leaving = await screen.findByRole("button", { name: "Leaving…" });
+    expect(leaving).toBeDisabled();
+    release();
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Left the project", expect.any(String)));
+  });
+
   it("cancels without leaving", async () => {
     const user = userEvent.setup();
     const { calls, onOpenChange } = setup();

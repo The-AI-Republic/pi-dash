@@ -107,7 +107,7 @@ function userPropertiesPayload() {
   };
 }
 
-function renderBrowse(known: boolean): void {
+function renderBrowse(known: boolean, isEpic?: boolean): void {
   const apiClient = createAppClient("https://api.test", async (url) => {
     let status = 404;
     let body = "{}";
@@ -151,7 +151,7 @@ function renderBrowse(known: boolean): void {
       body = JSON.stringify([projectRow()]);
     } else if (url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 200;
-      body = JSON.stringify(issueRow());
+      body = JSON.stringify(isEpic === undefined ? issueRow() : { ...issueRow(), is_epic: isEpic });
     }
     return { status, url, headers: { get: () => null }, text: async () => body };
   });
@@ -203,5 +203,13 @@ describe("browse route", () => {
     renderBrowse(false);
     await screen.findByRole("heading", { name: "No work item matches this address" });
     expect(screen.queryByTestId("project-tab-strip")).not.toBeInTheDocument();
+  });
+
+  it("highlights nothing for an epic while no epic tab renders", async () => {
+    renderBrowse(true, true);
+    await screen.findByTestId("project-tab-strip");
+    expect(screen.getByRole("heading", { name: "Fix login" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Work Items" })).not.toHaveAttribute("aria-current");
+    expect(document.querySelectorAll('[aria-current="page"]')).toHaveLength(0);
   });
 });

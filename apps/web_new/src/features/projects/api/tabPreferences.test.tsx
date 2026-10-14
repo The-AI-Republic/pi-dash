@@ -190,10 +190,10 @@ describe("useTabPreferences", () => {
   });
 
   it("restores a hidden tab silently", async () => {
-    const h = renderHandle({ navigation: { default_tab: "work_items", hide_in_more_menu: ["pages"] } });
-    await waitFor(() => expect(h.prefsText()).toBe("success|work_items|pages"));
+    const h = renderHandle({ navigation: { default_tab: "work_items", hide_in_more_menu: ["pages", "views"] } });
+    await waitFor(() => expect(h.prefsText()).toBe("success|work_items|pages,views"));
     h.handle().showTab("pages");
-    await waitFor(() => expect(h.prefsText()).toBe("success|work_items|"));
+    await waitFor(() => expect(h.prefsText()).toBe("success|work_items|views"));
     expect(notifySuccess).not.toHaveBeenCalled();
   });
 
