@@ -6,7 +6,7 @@
 //! what [`register_fire_tick`] consumes here, so no fan-out is dropped or
 //! double-run across the handoff.
 //!
-//! # Claim shape (`agent_ticker.py:97-242`)
+//! # Claim shape (`agent_ticker.py:98-281`)
 //!
 //! One transaction locks the ticker row (`SELECT ... FOR UPDATE`, locking
 //! only our own row — the Python `select_for_update(of=("self",))`) and
@@ -14,19 +14,22 @@
 //! columns the way `select_related("issue", "issue__state",
 //! "issue__project")` does (related rows are read, never locked). After
 //! the lock the row is re-checked (missing → `False`, disabled → `False`,
-//! `next_run_at` `None`-or-future → `False`), then the cap gate runs
-//! (`effective_max_ticks` mirrored as `pool + granted + waited`, `-1`
-//! infinite — [`pidash_db::tasks_ticker::models::INFINITE_MAX_TICKS`]; a
-//! non-free claim at cap disarms with `pool_spent` iff a pending entry is
-//! owed, else `cap_hit`, and returns `False`).
+//! `next_run_at` `None`-or-future → `False`), then the switch gate (a
+//! non-free claim with `user_disabled` set or the project flag off disarms
+//! with `user_disabled`/`""` and returns `False` without spending a tick),
+//! then the cap gate runs (`effective_max_ticks` mirrored as
+//! `pool + granted + waited`, `-1` infinite —
+//! [`pidash_db::tasks_ticker::models::INFINITE_MAX_TICKS`]; a non-free claim
+//! at cap disarms with `pool_spent` iff a pending entry is owed, else
+//! `cap_hit`, and returns `False`).
 //!
 //! Pre-claim skips (non-ticking state, active run, no prior run) leave
 //! `next_run_at` unchanged and spend no budget. The clock advance captures
 //! every `prev_*` value, charges `used + 1` unless the claim is free,
 //! stamps `last_tick_at`, clears the pending entry, and schedules
 //! `next_run_at = now + interval + jitter`, disarming on cap-hit,
-//! spent-pool-free, user-disabled, or project-ticking-off exactly as the
-//! Python branches do.
+//! spent-pool-free, or — for free claims only — user-disabled and
+//! project-ticking-off, exactly as the Python branches do.
 //!
 //! # Seam (D-12 owns the callees)
 //!
@@ -42,7 +45,7 @@
 //! visibility rule); a `None` dispatch re-acquires the row lock and
 //! restores every `prev_*` field *except* `last_tick_at`, which is
 //! intentionally kept as the "we attempted a tick" observability stamp
-//! (`agent_ticker.py:257-258`).
+//! (`agent_ticker.py:296-297`).
 //!
 //! # Replayable core
 //!
@@ -84,10 +87,10 @@ pub use super::scan::FIRE_TICK_TASK;
 pub const TRIGGER_TICK: &str = "tick";
 /// Trigger for a human-started Run AI entry (`scheduling.py:865`,
 /// `AgentRunTrigger.RUN_AI`); also the fallback when a free claim carries
-/// an empty stored trigger (`agent_ticker.py:190`).
+/// an empty stored trigger (`agent_ticker.py:227`).
 pub const TRIGGER_RUN_AI: &str = "run_ai";
 
-/// Project tick columns read with the claim (`agent_ticker.py:100`,
+/// Project tick columns read with the claim (`agent_ticker.py:101`,
 /// `select_related("issue__project")`). Every field is `Option` because
 /// the Python reads go through `getattr` defaults when the project row
 /// lacks the field.
@@ -106,7 +109,7 @@ pub struct ProjectTickCols {
 }
 
 /// The ticker row as claimed under lock, plus the issue/project ids the
-/// seam needs (`agent_ticker.py:98-103`).
+/// seam needs (`agent_ticker.py:99-104`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TickerSnapshot {
     /// `used` — machine-started runs consumed (only `fire_tick` writes it).
@@ -141,15 +144,15 @@ pub struct TickerSnapshot {
 /// no seam reads).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeamAnswers {
-    /// `is_ticking_state(issue.state)` (`agent_ticker.py:150`).
+    /// `is_ticking_state(issue.state)` (`agent_ticker.py:187`).
     pub ticking_state: bool,
-    /// `_active_run_for(issue) is not None` (`:160`).
+    /// `_active_run_for(issue) is not None` (`:197`).
     pub active_run: bool,
-    /// `_latest_prior_run(issue) is None` → `!prior_run` (`:166`).
+    /// `_latest_prior_run(issue) is None` → `!prior_run` (`:203`).
     pub prior_run: bool,
-    /// Stage-resolved tick interval in seconds (`:204`).
+    /// Stage-resolved tick interval in seconds (`:241`).
     pub interval_seconds: i64,
-    /// `jitter_seconds(interval)` draw (`:205`).
+    /// `jitter_seconds(interval)` draw (`:242`).
     pub jitter_seconds: f64,
 }
 
@@ -157,26 +160,26 @@ pub struct SeamAnswers {
 /// registry/mapping lookups; async methods touch the database through the
 /// implementor's own pool handle (never the claim transaction).
 pub trait FireTickSeam: Send + Sync {
-    /// `orchestration.agent_phases.is_ticking_state` (`agent_ticker.py:150`).
+    /// `orchestration.agent_phases.is_ticking_state` (`agent_ticker.py:187`).
     fn is_ticking_state(&self, state_id: Option<Uuid>) -> bool;
 
-    /// `ticker.effective_interval_seconds()` (`:204`): the stage→column
+    /// `ticker.effective_interval_seconds()` (`:241`): the stage→column
     /// resolution plus the project-column read with the stage default.
     fn tick_interval_seconds(&self, state_id: Option<Uuid>, project: &ProjectTickCols) -> i64;
 
-    /// `_active_run_for(issue) is not None` (`:160`).
+    /// `_active_run_for(issue) is not None` (`:197`).
     fn has_active_run(
         &self,
         issue_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<bool, sqlx::Error>> + Send + '_>>;
 
-    /// `_latest_prior_run(issue) is not None` (`:166`).
+    /// `_latest_prior_run(issue) is not None` (`:203`).
     fn has_prior_run(
         &self,
         issue_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<bool, sqlx::Error>> + Send + '_>>;
 
-    /// `dispatch_continuation_run(issue, triggered_by, actor)` (`:253`):
+    /// `dispatch_continuation_run(issue, triggered_by, actor)` (`:292`):
     /// the created run's id, or `None` when dispatch declines (active run
     /// raced in, no pod, no creator, eligibility bounce).
     fn dispatch_continuation_run(
@@ -188,7 +191,7 @@ pub trait FireTickSeam: Send + Sync {
 }
 
 /// Render a bool the way Python `%s` does (`True`/`False`): the dispatch
-/// log line keeps the exact field text (`agent_ticker.py:297-305`).
+/// log line keeps the exact field text (`agent_ticker.py:336-344`).
 pub fn py_bool(value: bool) -> &'static str {
     if value {
         "True"
@@ -208,28 +211,39 @@ pub fn effective_max_ticks(pool: i32, granted: i32, waited: i32) -> i32 {
     pool + granted + waited
 }
 
-/// Outcome of the post-lock re-checks plus the cap gate
-/// (`agent_ticker.py:104-145`), before any seam read.
+/// Outcome of the post-lock re-checks plus the switch and cap gates
+/// (`agent_ticker.py:104-182`), before any seam read.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PreDecision {
     /// Return `False`; the row is untouched.
     Skip,
-    /// The pool is spent: write the disarm row and return `False`.
-    CapDisarm {
-        /// `pool_spent` iff a pending entry is owed, else `cap_hit` (`:127-129`).
+    /// Ticking was switched off: write the disarm row and return `False`
+    /// without spending a tick (`:129-155`).
+    SwitchDisarm {
+        /// `user_disabled` iff the per-issue switch is set, else `none` (`:133-135`).
         disarm_reason: TickerDisarmReason,
     },
-    /// Past the gate: gather seam answers, then [`build_claim`].
+    /// The pool is spent: write the disarm row and return `False`.
+    CapDisarm {
+        /// `pool_spent` iff a pending entry is owed, else `cap_hit` (`:164-166`).
+        disarm_reason: TickerDisarmReason,
+    },
+    /// Past the gates: gather seam answers, then [`build_claim`].
     Proceed {
-        /// `pending_entry AND pending_entry_free` (`:119`).
+        /// `pending_entry AND pending_entry_free` (`:120`).
         free_claim: bool,
         /// Mirrored `effective_max_ticks()`.
         cap: i32,
     },
 }
 
-/// Post-lock re-checks and cap gate (`agent_ticker.py:104-145`).
-pub fn precheck(ticker: &TickerSnapshot, pool: i32, now: &DateTime<Utc>) -> PreDecision {
+/// Post-lock re-checks, switch gate, cap gate (`agent_ticker.py:104-182`).
+pub fn precheck(
+    ticker: &TickerSnapshot,
+    pool: i32,
+    project_ticking_enabled: bool,
+    now: &DateTime<Utc>,
+) -> PreDecision {
     if !ticker.enabled {
         return PreDecision::Skip;
     }
@@ -240,6 +254,18 @@ pub fn precheck(ticker: &TickerSnapshot, pool: i32, now: &DateTime<Utc>) -> PreD
     // A pending entry fires even on a spent pool when it is free
     // (human-started); the cap check below only ever stops timer ticks.
     let free_claim = ticker.pending_entry && ticker.pending_entry_free;
+    // The switches stop the clock *before* the claim, not one tick later:
+    // rows armed while the project switch was on must not fire once it is
+    // turned off (`:129-155`). A queued human entry still fires — the post-
+    // claim branch below disarms the clock after it dispatches.
+    if !free_claim && (ticker.user_disabled || !project_ticking_enabled) {
+        let disarm_reason = if ticker.user_disabled {
+            TickerDisarmReason::UserDisabled
+        } else {
+            TickerDisarmReason::None
+        };
+        return PreDecision::SwitchDisarm { disarm_reason };
+    }
     let cap = effective_max_ticks(pool, ticker.granted, ticker.waited);
     if !free_claim && cap != INFINITE_MAX_TICKS && ticker.used >= cap {
         // A queued (counting) entry that finds the pool spent — the
@@ -256,28 +282,28 @@ pub fn precheck(ticker: &TickerSnapshot, pool: i32, now: &DateTime<Utc>) -> PreD
 }
 
 /// A claimed tick: the row writes plus the dispatch arguments
-/// (`agent_ticker.py:179-242`). `prev_*` is the full rollback image;
-/// `last_tick_at` is deliberately *not* part of it (`:257-258`).
+/// (`agent_ticker.py:216-281`). `prev_*` is the full rollback image;
+/// `last_tick_at` is deliberately *not* part of it (`:296-297`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClaimTicket {
-    /// `used + 1`, unless the claim is free (`:194-195`).
+    /// `used + 1`, unless the claim is free (`:231-232`).
     pub used: i32,
-    /// `now + interval + jitter` (`:204-205`).
+    /// `now + interval + jitter` (`:241-242`).
     pub next_run_at: DateTime<Utc>,
     /// `false` when a disarm branch fired, else the (enabled) current value.
     pub enabled: bool,
     /// Raw stored string: new reason on a disarm branch, current otherwise.
     pub disarm_reason: String,
-    /// Pending actor on a free claim, else `None` (`:189`).
+    /// Pending actor on a free claim, else `None` (`:226`).
     pub claim_actor: Option<Uuid>,
     /// Pending trigger (or `run_ai` when empty) on a free claim, else
-    /// `tick` (`:190`).
+    /// `tick` (`:227`).
     pub claim_trigger: String,
-    /// The `:119` free-claim bit, for the dispatch log line.
+    /// The `:120` free-claim bit, for the dispatch log line.
     pub free_claim: bool,
-    /// `used >= cap` after charging (`:207-209`), for the log line.
+    /// `used >= cap` after charging (`:244-246`), for the log line.
     pub cap_hit_now: bool,
-    /// Rollback image (`:179-186`).
+    /// Rollback image (`:216-223`).
     pub prev_used: i32,
     pub prev_next_run_at: Option<DateTime<Utc>>,
     pub prev_enabled: bool,
@@ -288,7 +314,7 @@ pub struct ClaimTicket {
     pub prev_pending_entry_trigger: String,
 }
 
-/// Pre-claim skips plus the clock advance (`agent_ticker.py:150-242`).
+/// Pre-claim skips plus the clock advance (`agent_ticker.py:187-281`).
 /// Returns `None` when a skip fires (`False`, row untouched).
 pub fn build_claim(
     ticker: &TickerSnapshot,
@@ -343,8 +369,10 @@ pub fn build_claim(
         // deferred to the run-terminate hook (§4.4.1).
         (false, TickerDisarmReason::CapHit.as_str().to_owned())
     } else if ticker.user_disabled || !project_ticking_enabled {
-        // A queued human entry fires even on a switched-off clock, but no
-        // timer tick may follow it.
+        // Free claims only — a timer tick on a switched-off clock never
+        // reaches the claim (see the pre-claim switch check above). A
+        // queued human entry fires because the human asked for this
+        // run, but no timer tick may follow it.
         let reason = if ticker.user_disabled {
             TickerDisarmReason::UserDisabled
         } else {
@@ -375,11 +403,13 @@ pub fn build_claim(
 }
 
 /// Full pure decision: [`precheck`] then the seam-gated [`build_claim`]
-/// (`agent_ticker.py:104-242`). The fixture replay entry point.
+/// (`agent_ticker.py:105-281`). The fixture replay entry point.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FireDecision {
     /// Return `False`; the row is untouched.
     Skip,
+    /// Write the switch-disarm row, then return `False` without spending.
+    SwitchDisarm { disarm_reason: TickerDisarmReason },
     /// Write the cap-disarm row, then return `False`.
     CapDisarm { disarm_reason: TickerDisarmReason },
     /// Row writes to apply, then dispatch outside the transaction.
@@ -393,8 +423,9 @@ pub fn decide(
     now: &DateTime<Utc>,
     answers: &SeamAnswers,
 ) -> FireDecision {
-    match precheck(ticker, pool, now) {
+    match precheck(ticker, pool, project_ticking_enabled, now) {
         PreDecision::Skip => FireDecision::Skip,
+        PreDecision::SwitchDisarm { disarm_reason } => FireDecision::SwitchDisarm { disarm_reason },
         PreDecision::CapDisarm { disarm_reason } => FireDecision::CapDisarm { disarm_reason },
         PreDecision::Proceed { free_claim, cap } => match build_claim(
             ticker,
@@ -410,9 +441,9 @@ pub fn decide(
     }
 }
 
-/// Rollback image for a `None` dispatch (`agent_ticker.py:259-291`): every
+/// Rollback image for a `None` dispatch (`agent_ticker.py:298-330`): every
 /// `prev_*` field restored, `last_tick_at` intentionally kept at the claim
-/// time passed in (observability, `:257-258`). Fields the claim never
+/// time passed in (observability, `:296-297`). Fields the claim never
 /// writes (`granted`, `waited`, `user_disabled`) carry over from `before`.
 pub fn rollback_snapshot(
     before: &TickerSnapshot,
@@ -436,10 +467,10 @@ pub fn rollback_snapshot(
 }
 
 /// Lock and read the ticker plus its related rows
-/// (`agent_ticker.py:98-103`: `select_for_update(of=("self",))` with
+/// (`agent_ticker.py:99-104`: `select_for_update(of=("self",))` with
 /// `select_related("issue", "issue__state", "issue__project")`). Only the
 /// ticker row is locked; the issue/project rows are read unlocked, exactly
-/// like the Python. Returns `None` when the row is missing (`:104-105`).
+/// like the Python. Returns `None` when the row is missing (`:105-106`).
 async fn read_claim(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ticker_id: Uuid,
@@ -528,10 +559,11 @@ impl sqlx::FromRow<'_, sqlx::postgres::PgRow> for ProjectTickCols {
     }
 }
 
-/// Pre-claim cap-disarm write (`agent_ticker.py:126-144`): `enabled`,
-/// `disarm_reason`, the four pending columns, `updated_at`. `used`,
-/// `next_run_at` and `last_tick_at` are untouched.
-async fn write_cap_disarm(
+/// Pre-claim disarm write (`agent_ticker.py:140-150` switch, `:171-181`
+/// cap — same columns): `enabled`, `disarm_reason`, the four pending
+/// columns, `updated_at`. `used`, `next_run_at` and `last_tick_at` are
+/// untouched.
+async fn write_preclaim_disarm(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ticker_id: Uuid,
     disarm_reason: TickerDisarmReason,
@@ -553,7 +585,7 @@ async fn write_cap_disarm(
     Ok(())
 }
 
-/// Clock-advance write (`agent_ticker.py:229-242`): `used`, `last_tick_at`,
+/// Clock-advance write (`agent_ticker.py:268-281`): `used`, `last_tick_at`,
 /// `next_run_at`, `enabled`, `disarm_reason`, the four pending columns,
 /// `updated_at`.
 async fn write_claim(
@@ -583,7 +615,7 @@ async fn write_claim(
     Ok(())
 }
 
-/// Rollback write (`agent_ticker.py:279-291`): every `prev_*` field.
+/// Rollback write (`agent_ticker.py:318-330`): every `prev_*` field.
 /// `last_tick_at` is *not* written — the claim-time stamp stays.
 async fn write_rollback(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -615,7 +647,7 @@ async fn write_rollback(
     Ok(())
 }
 
-/// Per-ticker worker (`agent_ticker.py:77-306`).
+/// Per-ticker worker (`agent_ticker.py:78-345`).
 ///
 /// Returns `true` iff a continuation run was dispatched. `now` is the
 /// firing instant (`timezone.now()`); the jitter draw comes from `rng`
@@ -636,10 +668,19 @@ pub async fn fire_tick(
     let pool_size = pool_size_or_default(read.project.pool);
     let ticking_enabled = read.project.ticking_enabled.unwrap_or(true);
 
-    match precheck(snapshot, pool_size, &now) {
+    match precheck(snapshot, pool_size, ticking_enabled, &now) {
         PreDecision::Skip => Ok(false),
+        PreDecision::SwitchDisarm { disarm_reason } => {
+            write_preclaim_disarm(&mut tx, ticker_id, disarm_reason, &now).await?;
+            tx.commit().await?;
+            tracing::info!(
+                "agent_ticker.fire_tick: skip issue={} reason=ticking-switched-off",
+                read.issue_id,
+            );
+            Ok(false)
+        }
         PreDecision::CapDisarm { disarm_reason } => {
-            write_cap_disarm(&mut tx, ticker_id, disarm_reason, &now).await?;
+            write_preclaim_disarm(&mut tx, ticker_id, disarm_reason, &now).await?;
             tx.commit().await?;
             Ok(false)
         }
@@ -679,7 +720,7 @@ pub async fn fire_tick(
             tx.commit().await?;
 
             // Dispatch outside the transaction so the ticker write is
-            // visible to other tx-bounded readers (`:244-247`).
+            // visible to other tx-bounded readers (`:283-286`).
             let run = seam
                 .dispatch_continuation_run(read.issue_id, &ticket.claim_trigger, ticket.claim_actor)
                 .await?;
@@ -874,7 +915,7 @@ mod tests {
         );
     }
 
-    // FX-TICKER-04 (`bgtasks/agent_ticker.py:77-306`): every recorded case
+    // FX-TICKER-04 (`bgtasks/agent_ticker.py:78-345`): every recorded case
     // replays through [`decide`] to the recorded after-row, the recorded
     // `fire_result`, and (on dispatch) the recorded trigger. `True` comes
     // out only when a run was dispatched.
@@ -884,14 +925,14 @@ mod tests {
         assert_eq!(fx["now"].as_str().unwrap(), "2026-09-28T12:00:00+00:00");
         let now = frozen();
         let cases = fx["cases"].as_array().unwrap();
-        assert_eq!(cases.len(), 12);
+        assert_eq!(cases.len(), 15);
         for case in cases {
             let name = case["name"].as_str().unwrap();
             let before = snapshot_from(&case["before"]);
             let after = snapshot_from(&case["after"]);
             let pool = case["before"]["pool"].as_i64().unwrap() as i32;
             let fire_result = case["fire_result"].as_bool().unwrap();
-            // recheck-missing (`:104-105`) never reaches the decision: the
+            // recheck-missing (`:105-106`) never reaches the decision: the
             // locked read finds no row, the probe row stays untouched.
             if name == "recheck-missing" {
                 assert!(!fire_result, "{name}: fires False");
@@ -905,14 +946,19 @@ mod tests {
             if name == "preclaim-no-prior-run" {
                 answers.prior_run = false;
             }
-            let decision = decide(&before, pool, true, &now, &answers);
+            let ticking_enabled = case["before"]
+                .get("project_ticking_enabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let decision = decide(&before, pool, ticking_enabled, &now, &answers);
             match decision {
                 FireDecision::Skip => {
                     assert!(!fire_result, "{name}: skip fires False");
                     assert_snapshot_eq(&after, &before, name);
                 }
-                FireDecision::CapDisarm { disarm_reason } => {
-                    assert!(!fire_result, "{name}: cap disarm fires False");
+                FireDecision::CapDisarm { disarm_reason }
+                | FireDecision::SwitchDisarm { disarm_reason } => {
+                    assert!(!fire_result, "{name}: pre-claim disarm fires False");
                     assert!(!after.enabled, "{name}: disarmed");
                     assert_eq!(
                         after.disarm_reason,
@@ -956,9 +1002,9 @@ mod tests {
                         "{name}: prev_trigger"
                     );
                     if name == "dispatch-none-rollback" {
-                        // Mocked dispatch `None` (`:254-296`): every field
+                        // Mocked dispatch `None` (`:293-335`): every field
                         // restored except `last_tick_at`, which stays at the
-                        // claim time (`:257-258`).
+                        // claim time (`:296-297`).
                         assert!(!fire_result, "{name}: rollback fires False");
                         let rolled = rollback_snapshot(&before, &ticket, now);
                         assert_snapshot_eq(&rolled, &after, name);
@@ -979,7 +1025,7 @@ mod tests {
                     assert!(!after.pending_entry_free, "{name}: pending-free cleared");
                     // Branch pins from the trace lines.
                     match name {
-                        name if name == "happy-tick" || name == "user-disabled-disarm" => {
+                        name if name == "happy-tick" => {
                             assert_eq!(after.used, before.used + 1, "{name}: charged");
                         }
                         _ => {}
@@ -989,6 +1035,12 @@ mod tests {
                         assert_eq!(after.used, before.used, "{name}: free run unspent");
                         assert!(ticket.cap_hit_now, "{name}: cap_hit");
                         assert_eq!(after.disarm_reason, "pool_spent", "{name}: not cap_hit");
+                    }
+                    if name == "switch-off-free-entry-fires" {
+                        assert!(ticket.free_claim, "{name}: free");
+                        assert_eq!(after.used, before.used, "{name}: free run unspent");
+                        assert!(!ticket.enabled, "{name}: disarmed after dispatch");
+                        assert_eq!(after.disarm_reason, "", "{name}: NONE, not USER_DISABLED");
                     }
                     if name == "clock-advance-cap-edge" {
                         assert!(ticket.cap_hit_now, "{name}: cap_hit");
@@ -1000,7 +1052,7 @@ mod tests {
     }
 
     // The fixture has no non-ticking-state case; the Python early return
-    // (`:150-151`) still applies and leaves the row untouched.
+    // (`:187-188`) still applies and leaves the row untouched.
     #[test]
     fn non_ticking_state_skips_without_touching_row() {
         let before = TickerSnapshot {
@@ -1097,12 +1149,12 @@ mod tests {
         );
     }
 
-    // A project with ticking switched off fires the queued entry once, then
-    // disarms with NONE (not USER_DISABLED); a user-disabled clock disarms
-    // with USER_DISABLED (`agent_ticker.py:221-227`).
+    // A timer tick on a switched-off clock never reaches the claim: the
+    // project switch disarms with NONE, the per-issue switch with
+    // USER_DISABLED (`agent_ticker.py:129-155`).
     #[test]
-    fn project_ticking_off_disarms_with_none() {
-        let before = TickerSnapshot {
+    fn switch_off_stops_timer_tick_before_the_claim() {
+        let timer = TickerSnapshot {
             used: 0,
             granted: 0,
             waited: 0,
@@ -1116,12 +1168,59 @@ mod tests {
             pending_entry_actor_id: None,
             pending_entry_trigger: String::new(),
         };
-        let ticket = match decide(&before, 10, false, &frozen(), &firing_answers()) {
-            FireDecision::Claimed(ticket) => ticket,
-            other => panic!("queued entry must fire once, got {other:?}"),
+        assert_eq!(
+            decide(&timer, 10, false, &frozen(), &firing_answers()),
+            FireDecision::SwitchDisarm {
+                disarm_reason: TickerDisarmReason::None
+            }
+        );
+        // A counting (agent-queued) entry is machine-started: stopped too.
+        let mut counting = timer.clone();
+        counting.pending_entry = true;
+        assert_eq!(
+            decide(&counting, 10, false, &frozen(), &firing_answers()),
+            FireDecision::SwitchDisarm {
+                disarm_reason: TickerDisarmReason::None
+            }
+        );
+        let mut user_off = timer.clone();
+        user_off.user_disabled = true;
+        assert_eq!(
+            decide(&user_off, 10, true, &frozen(), &firing_answers()),
+            FireDecision::SwitchDisarm {
+                disarm_reason: TickerDisarmReason::UserDisabled
+            }
+        );
+    }
+
+    // A queued human entry fires even on a switched-off clock (the human
+    // asked for this run), but the clock disarms after it dispatches so no
+    // timer tick follows (`agent_ticker.py:258-266`).
+    #[test]
+    fn switch_off_free_entry_fires_then_disarms() {
+        let free = TickerSnapshot {
+            used: 0,
+            granted: 0,
+            waited: 0,
+            user_disabled: false,
+            next_run_at: Some(frozen() - chrono::Duration::seconds(1)),
+            last_tick_at: None,
+            enabled: true,
+            disarm_reason: String::new(),
+            pending_entry: true,
+            pending_entry_free: true,
+            pending_entry_actor_id: None,
+            pending_entry_trigger: String::new(),
         };
+        let ticket = match decide(&free, 10, false, &frozen(), &firing_answers()) {
+            FireDecision::Claimed(ticket) => ticket,
+            other => panic!("free entry must fire once, got {other:?}"),
+        };
+        assert!(ticket.free_claim);
+        assert_eq!(ticket.used, 0);
         assert!(!ticket.enabled);
         assert_eq!(ticket.disarm_reason, "");
+        assert_eq!(ticket.claim_trigger, TRIGGER_RUN_AI);
     }
 
     #[test]

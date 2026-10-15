@@ -1,13 +1,14 @@
 {
-  "_trace": "bgtasks/agent_ticker.py:77-306 per-case traces in each record",
-  "_method": "live fire_tick on pidash_ticker_fx; T0 frozen; jitter_seconds mocked to 0.0; dispatch_continuation_run REAL except dispatch-none-rollback case (mocked None); drain stubbed, on_commit eager",
+  "_trace": "bgtasks/agent_ticker.py:78-345 per-case traces in each record",
+  "_method": "live fire_tick on pidash_ticker_fx; T0 frozen; jitter_seconds mocked to 0.0; dispatch_continuation_run REAL except dispatch-none-rollback case (mocked None); drain stubbed, on_commit eager; switch-off cases (7c355595) transcribed from tests/unit/bg_tasks/test_agent_ticker.py assertions",
   "now": "2026-09-28T12:00:00+00:00",
   "cases": [
     {
       "name": "happy-tick",
-      "trace": "bgtasks/agent_ticker.py:97-105 claim; 179-205 clock advance; 253 dispatch",
+      "trace": "bgtasks/agent_ticker.py:98-106 claim; 216-242 clock advance; 292 dispatch",
       "before": {
         "pool": 10,
+        "project_ticking_enabled": true,
         "used": 0,
         "granted": 0,
         "waited": 0,
@@ -48,9 +49,10 @@
     },
     {
       "name": "recheck-missing",
-      "trace": "bgtasks/agent_ticker.py:104-105",
+      "trace": "bgtasks/agent_ticker.py:105-106",
       "before": {
         "pool": 10,
+        "project_ticking_enabled": true,
         "used": 0,
         "granted": 0,
         "waited": 0,
@@ -84,9 +86,10 @@
     },
     {
       "name": "recheck-disabled",
-      "trace": "bgtasks/agent_ticker.py:109-110",
+      "trace": "bgtasks/agent_ticker.py:110-111",
       "before": {
         "pool": 10,
+        "project_ticking_enabled": true,
         "used": 0,
         "granted": 0,
         "waited": 0,
@@ -119,9 +122,10 @@
     },
     {
       "name": "recheck-future",
-      "trace": "bgtasks/agent_ticker.py:112-113",
+      "trace": "bgtasks/agent_ticker.py:113-114",
       "before": {
         "pool": 10,
+        "project_ticking_enabled": true,
         "used": 0,
         "granted": 0,
         "waited": 0,
@@ -154,9 +158,10 @@
     },
     {
       "name": "cap-disarm-cap-hit",
-      "trace": "bgtasks/agent_ticker.py:121-145 (POOL_SPENT vs CAP_HIT :127-129)",
+      "trace": "bgtasks/agent_ticker.py:158-182 (POOL_SPENT vs CAP_HIT :164-166)",
       "before": {
         "pool": 10,
+        "project_ticking_enabled": true,
         "used": 10,
         "granted": 0,
         "waited": 0,
@@ -189,9 +194,10 @@
     },
     {
       "name": "cap-disarm-pool-spent",
-      "trace": "bgtasks/agent_ticker.py:121-145",
+      "trace": "bgtasks/agent_ticker.py:158-182",
       "before": {
         "pool": 8,
+        "project_ticking_enabled": true,
         "used": 8,
         "granted": 0,
         "waited": 0,
@@ -224,9 +230,10 @@
     },
     {
       "name": "preclaim-active-run",
-      "trace": "bgtasks/agent_ticker.py:160-165",
+      "trace": "bgtasks/agent_ticker.py:197-202",
       "before": {
         "pool": 10,
+        "project_ticking_enabled": true,
         "used": 0,
         "granted": 0,
         "waited": 0,
@@ -259,9 +266,10 @@
     },
     {
       "name": "preclaim-no-prior-run",
-      "trace": "bgtasks/agent_ticker.py:166-171",
+      "trace": "bgtasks/agent_ticker.py:203-208",
       "before": {
         "pool": 10,
+        "project_ticking_enabled": true,
         "used": 0,
         "granted": 0,
         "waited": 0,
@@ -294,9 +302,10 @@
     },
     {
       "name": "clock-advance-cap-edge",
-      "trace": "bgtasks/agent_ticker.py:194-220 (used+1; cap_hit disarm :216-220)",
+      "trace": "bgtasks/agent_ticker.py:231-257 (used+1; cap_hit disarm :253-257)",
       "before": {
         "pool": 10,
+        "project_ticking_enabled": true,
         "used": 9,
         "granted": 0,
         "waited": 0,
@@ -333,9 +342,10 @@
     },
     {
       "name": "free-claim-spent-pool",
-      "trace": "bgtasks/agent_ticker.py:119,210-215 (free run, POOL_SPENT, used unspent)",
+      "trace": "bgtasks/agent_ticker.py:120,247-252 (free run, POOL_SPENT, used unspent)",
       "before": {
         "pool": 10,
+        "project_ticking_enabled": true,
         "used": 10,
         "granted": 0,
         "waited": 0,
@@ -372,9 +382,10 @@
     },
     {
       "name": "user-disabled-disarm",
-      "trace": "bgtasks/agent_ticker.py:221-227 (fires, then USER_DISABLED disarm)",
+      "trace": "bgtasks/agent_ticker.py:129-155 pre-claim switch check (7c355595): user_disabled disarms, no spend, no dispatch",
       "before": {
         "pool": 10,
+        "project_ticking_enabled": true,
         "used": 0,
         "granted": 0,
         "waited": 0,
@@ -388,15 +399,123 @@
         "pending_entry_actor_id": null,
         "pending_entry_trigger": ""
       },
-      "fire_result": true,
+      "fire_result": false,
       "after": {
         "pool": 10,
-        "used": 1,
+        "used": 0,
         "granted": 0,
         "waited": 0,
         "enabled": false,
         "disarm_reason": "user_disabled",
         "user_disabled": true,
+        "next_run_at": "2026-09-28T11:59:59+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor_id": null,
+        "pending_entry_trigger": ""
+      }
+    },
+    {
+      "name": "switch-off-project-timer",
+      "trace": "bgtasks/agent_ticker.py:129-155 pre-claim switch check (7c355595): project off, timer tick disarms, no spend, no dispatch",
+      "before": {
+        "pool": 10,
+        "project_ticking_enabled": false,
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "enabled": true,
+        "disarm_reason": "",
+        "user_disabled": false,
+        "next_run_at": "2026-09-28T11:59:59+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor_id": null,
+        "pending_entry_trigger": ""
+      },
+      "fire_result": false,
+      "after": {
+        "pool": 10,
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "enabled": false,
+        "disarm_reason": "",
+        "user_disabled": false,
+        "next_run_at": "2026-09-28T11:59:59+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor_id": null,
+        "pending_entry_trigger": ""
+      }
+    },
+    {
+      "name": "switch-off-project-counting-entry",
+      "trace": "bgtasks/agent_ticker.py:129-155 pre-claim switch check (7c355595): agent-queued (counting) entry is machine-started, stopped like a timer tick",
+      "before": {
+        "pool": 10,
+        "project_ticking_enabled": false,
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "enabled": true,
+        "disarm_reason": "",
+        "user_disabled": false,
+        "next_run_at": "2026-09-28T11:59:59+00:00",
+        "last_tick_at": null,
+        "pending_entry": true,
+        "pending_entry_free": false,
+        "pending_entry_actor_id": null,
+        "pending_entry_trigger": ""
+      },
+      "fire_result": false,
+      "after": {
+        "pool": 10,
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "enabled": false,
+        "disarm_reason": "",
+        "user_disabled": false,
+        "next_run_at": "2026-09-28T11:59:59+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor_id": null,
+        "pending_entry_trigger": ""
+      }
+    },
+    {
+      "name": "switch-off-free-entry-fires",
+      "trace": "bgtasks/agent_ticker.py:258-266 post-claim switch branch (7c355595): queued human entry fires, then NONE disarm",
+      "before": {
+        "pool": 10,
+        "project_ticking_enabled": false,
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "enabled": true,
+        "disarm_reason": "",
+        "user_disabled": false,
+        "next_run_at": "2026-09-28T11:59:59+00:00",
+        "last_tick_at": null,
+        "pending_entry": true,
+        "pending_entry_free": true,
+        "pending_entry_actor_id": null,
+        "pending_entry_trigger": ""
+      },
+      "fire_result": true,
+      "after": {
+        "pool": 10,
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "enabled": false,
+        "disarm_reason": "",
+        "user_disabled": false,
         "next_run_at": "2026-09-28T15:00:00+00:00",
         "last_tick_at": "2026-09-28T12:00:00+00:00",
         "pending_entry": false,
@@ -405,15 +524,16 @@
         "pending_entry_trigger": ""
       },
       "dispatched_run": {
-        "trigger": "tick",
+        "trigger": "run_ai",
         "phase_kind": "coding-task"
       }
     },
     {
       "name": "dispatch-none-rollback",
-      "trace": "bgtasks/agent_ticker.py:254-296 (used/next_run_at/enabled/disarm/pending* restored; last_tick_at NOT restored :257-258)",
+      "trace": "bgtasks/agent_ticker.py:293-335 (used/next_run_at/enabled/disarm/pending* restored; last_tick_at NOT restored :296-297)",
       "before": {
         "pool": 10,
+        "project_ticking_enabled": true,
         "used": 4,
         "granted": 0,
         "waited": 0,
