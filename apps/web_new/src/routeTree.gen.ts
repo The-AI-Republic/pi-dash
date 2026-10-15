@@ -32,6 +32,7 @@ import { Route as GodModeIndexRouteImport } from './routes/god-mode/index'
 import { Route as GodModeSplatRouteImport } from './routes/god-mode/$'
 import { Route as GodModeDashboardRouteRouteImport } from './routes/god-mode/_dashboard/route'
 import { Route as WsGatedIndexRouteImport } from './routes/$ws/_gated/index'
+import { Route as GodModeDashboardGeneralRouteImport } from './routes/god-mode/_dashboard/general'
 import { Route as WsGatedBrowseIssueKeyRouteImport } from './routes/$ws/_gated/browse/$issueKey'
 import { Route as WsGatedProjectsIndexRouteImport } from './routes/$ws/_gated/projects/index'
 import { Route as WsGatedProjectsProjectIdRouteRouteImport } from './routes/$ws/_gated/projects/$projectId/route'
@@ -158,6 +159,11 @@ const WsGatedIndexRoute = WsGatedIndexRouteImport.update({
   path: '/',
   getParentRoute: () => WsGatedRouteRoute,
 } as any)
+const GodModeDashboardGeneralRoute = GodModeDashboardGeneralRouteImport.update({
+  id: '/general',
+  path: '/general',
+  getParentRoute: () => GodModeDashboardRouteRoute,
+} as any)
 const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
   id: '/browse/$issueKey',
   path: '/browse/$issueKey',
@@ -250,6 +256,7 @@ export interface FileRoutesByFullPath {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
+  '/god-mode/general': typeof GodModeDashboardGeneralRoute
   '/$ws/': typeof WsGatedIndexRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
@@ -284,6 +291,7 @@ export interface FileRoutesByTo {
   '/accounts/sign-up': typeof AccountsSignUpRoute
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
+  '/god-mode/general': typeof GodModeDashboardGeneralRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
   '/$ws/projects': typeof WsGatedProjectsIndexRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdIndexRoute
@@ -311,7 +319,7 @@ export interface FileRoutesById {
   '/signin': typeof SigninRoute
   '/workspace-invitations': typeof WorkspaceInvitationsRoute
   '/$ws/_gated': typeof WsGatedRouteRouteWithChildren
-  '/god-mode/_dashboard': typeof GodModeDashboardRouteRoute
+  '/god-mode/_dashboard': typeof GodModeDashboardRouteRouteWithChildren
   '/$ws/$': typeof WsSplatRoute
   '/accounts/forgot-password': typeof AccountsForgotPasswordRoute
   '/accounts/reset-password': typeof AccountsResetPasswordRoute
@@ -320,6 +328,7 @@ export interface FileRoutesById {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
+  '/god-mode/_dashboard/general': typeof GodModeDashboardGeneralRoute
   '/$ws/_gated/': typeof WsGatedIndexRoute
   '/$ws/_gated/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   '/$ws/_gated/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
@@ -357,6 +366,7 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/god-mode/'
+    | '/god-mode/general'
     | '/$ws/'
     | '/$ws/projects/$projectId'
     | '/$ws/browse/$issueKey'
@@ -391,6 +401,7 @@ export interface FileRouteTypes {
     | '/accounts/sign-up'
     | '/auth/device'
     | '/god-mode/$'
+    | '/god-mode/general'
     | '/$ws/browse/$issueKey'
     | '/$ws/projects'
     | '/$ws/projects/$projectId'
@@ -426,6 +437,7 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/god-mode/'
+    | '/god-mode/_dashboard/general'
     | '/$ws/_gated/'
     | '/$ws/_gated/projects/$projectId'
     | '/$ws/_gated/browse/$issueKey'
@@ -624,6 +636,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedIndexRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
+    '/god-mode/_dashboard/general': {
+      id: '/god-mode/_dashboard/general'
+      path: '/general'
+      fullPath: '/god-mode/general'
+      preLoaderRoute: typeof GodModeDashboardGeneralRouteImport
+      parentRoute: typeof GodModeDashboardRouteRoute
+    }
     '/$ws/_gated/browse/$issueKey': {
       id: '/$ws/_gated/browse/$issueKey'
       path: '/browse/$issueKey'
@@ -780,14 +799,27 @@ const WsRouteRouteChildren: WsRouteRouteChildren = {
 const WsRouteRouteWithChildren =
   WsRouteRoute._addFileChildren(WsRouteRouteChildren)
 
+interface GodModeDashboardRouteRouteChildren {
+  GodModeDashboardGeneralRoute: typeof GodModeDashboardGeneralRoute
+}
+
+const GodModeDashboardRouteRouteChildren: GodModeDashboardRouteRouteChildren = {
+  GodModeDashboardGeneralRoute: GodModeDashboardGeneralRoute,
+}
+
+const GodModeDashboardRouteRouteWithChildren =
+  GodModeDashboardRouteRoute._addFileChildren(
+    GodModeDashboardRouteRouteChildren,
+  )
+
 interface GodModeRouteRouteChildren {
-  GodModeDashboardRouteRoute: typeof GodModeDashboardRouteRoute
+  GodModeDashboardRouteRoute: typeof GodModeDashboardRouteRouteWithChildren
   GodModeSplatRoute: typeof GodModeSplatRoute
   GodModeIndexRoute: typeof GodModeIndexRoute
 }
 
 const GodModeRouteRouteChildren: GodModeRouteRouteChildren = {
-  GodModeDashboardRouteRoute: GodModeDashboardRouteRoute,
+  GodModeDashboardRouteRoute: GodModeDashboardRouteRouteWithChildren,
   GodModeSplatRoute: GodModeSplatRoute,
   GodModeIndexRoute: GodModeIndexRoute,
 }

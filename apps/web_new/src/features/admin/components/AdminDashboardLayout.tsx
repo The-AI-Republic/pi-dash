@@ -10,6 +10,8 @@
 // pathless route, never around it.
 import * as React from "react";
 
+import { ToastHost } from "@pidash/kit";
+import { getToastManager } from "../../../shared/shell/index.js";
 import { applyStoredAdminTheme } from "../theme.js";
 import { AdminDashboardGuard } from "./AdminGuards.js";
 import { AdminHeader } from "./AdminHeader.js";
@@ -31,6 +33,7 @@ export function AdminDashboardLayout({ children }: { children: React.ReactNode }
           </div>
         </main>
         <FirstWorkspacePopup />
+        <ToastHost manager={getToastManager()} />
       </div>
     </AdminDashboardGuard>
   );

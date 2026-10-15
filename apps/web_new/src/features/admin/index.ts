@@ -17,11 +17,31 @@ export {
   isSidebarEntryActive,
 } from "./adminShell.js";
 export type { AdminCrumb, AdminSidebarEntryDef } from "./adminShell.js";
-export { useAdminCsrfToken, useAdminSession, useInstanceBootstrap } from "./hooks.js";
+export {
+  useAdminCsrfToken,
+  useAdminSession,
+  useInstanceAdmins,
+  useInstanceBootstrap,
+  useUpdateGeneralSettings,
+} from "./hooks.js";
+export {
+  firstAdminEmail,
+  GENERAL_NAME_REQUIRED_MESSAGE,
+  GENERAL_SAVE_BUSY_LABEL,
+  GENERAL_SAVE_FAILURE_LOG,
+  GENERAL_SAVE_IDLE_LABEL,
+  GENERAL_SAVE_SUCCESS_MESSAGE,
+  GENERAL_SAVE_SUCCESS_TITLE,
+  GENERAL_TELEMETRY_DOC_URL,
+  isGeneralNameValid,
+  mergeGeneralSettingsIntoBootstrap,
+  resolveTelemetryPrefill,
+} from "./generalSettings.js";
 export {
   adminCsrfQueryOptions,
   adminKeys,
   adminSessionQueryOptions,
+  instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
 } from "./queries.js";
 export {
@@ -70,6 +90,7 @@ export {
   InstanceFailureScreen,
   reloadEntryPage,
 } from "./components/InstanceFailureScreen.js";
+export { AdminGeneralSettingsPage, GENERAL_SETTINGS_TITLE } from "./components/AdminGeneralSettingsPage.js";
 export { AdminSetupForm, resolveSetupPrefill, SETUP_POST_PATH, SETUP_TITLE } from "./components/AdminSetupForm.js";
 export type { SetupPrefill } from "./components/AdminSetupForm.js";
 export { AdminSignInForm, SIGN_IN_POST_PATH, SIGN_IN_TITLE } from "./components/AdminSignInForm.js";
