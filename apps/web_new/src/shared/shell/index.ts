@@ -24,7 +24,7 @@ export { Sidebar } from "./Sidebar.js";
 export type { SidebarProject, SidebarProps, SidebarWorkspace } from "./Sidebar.js";
 export { TitleBar } from "./TitleBar.js";
 export type { TitleBarProps } from "./TitleBar.js";
-export { REPOSITORY_URL, TopBar } from "./TopBar.js";
+export { TopBar } from "./TopBar.js";
 export type { TopBarProps } from "./TopBar.js";
 export { TopBarSearch, TOPBAR_SEARCH_PLACEHOLDER } from "./TopBarSearch.js";
 export type { TopBarSearchProps } from "./TopBarSearch.js";

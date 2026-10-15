@@ -305,8 +305,24 @@ describe("gated layout shell wiring", () => {
       }
       return { data: [{ id: "p1", name: "Atlas", identifier: "ATL", ...harness.projectViews }] };
     });
-    const plainQuery = vi.mocked(useQuery) as unknown as { mockImplementation: (run: () => { data: unknown }) => void };
-    plainQuery.mockImplementation(() => ({ data: unread }));
+    // Plain queries serve the unread dot (default) plus the membership and
+    // instance reads the palette entries perform through the session hooks.
+    // The entries' own suite proves the real fetch; here the mock stands in
+    // with the same shapes the fetch stub below serves, and records the
+    // membership read the guest test waits on.
+    const plainQuery = vi.mocked(useQuery) as unknown as {
+      mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => { data: unknown }) => void;
+    };
+    plainQuery.mockImplementation((options) => {
+      if (options.queryKey[0] === "session" && options.queryKey[1] === "workspaces") {
+        harness.fetched.push("https://api.test/api/users/me/workspaces/");
+        return { data: [{ id: "w1", slug: "acme", name: "Acme", role: harness.role }] };
+      }
+      if (options.queryKey[0] === "instance") {
+        return { data: { is_workspace_creation_disabled: harness.creationDisabled } };
+      }
+      return { data: unread };
+    });
   }
 
   function stubClientQueries(): void {

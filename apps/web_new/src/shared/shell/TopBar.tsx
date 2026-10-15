@@ -17,10 +17,8 @@ import { Inbox, PanelLeft, Star } from "lucide-react";
 import * as React from "react";
 
 import { platform } from "../../core/platform/index.js";
+import { REPOSITORY_URL } from "./RepoStar.js";
 import { useWindowTitle } from "./windowTitle.js";
-
-/** Product repository behind the top-bar star link. */
-export const REPOSITORY_URL = "https://github.com/The-AI-Republic/pi-dash";
 
 export interface TopBarProps {
   workspaceSlug: string;
