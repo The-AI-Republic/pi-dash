@@ -1193,7 +1193,9 @@ already owns the conditional (if the seeded backend still 404s it
 files a PDASHOSS01 backend issue blocking NEWFRONT-518 instead of
 stubbing). No stub endpoint, no mock page: until the backend lands,
 the slice stays blocked and `/god-mode/runners/` falls through to
-not-found.
+not-found. Probed 2026-10-15 on `web-new-dev` tip: the endpoint still
+404s, so NEWFRONT-503 filed PDASHOSS01-303 blocking NEWFRONT-518 and
+landed workspaces+loop only.
 
 ## 12. F-06/F-09 reuse map
 

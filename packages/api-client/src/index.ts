@@ -240,3 +240,37 @@ export { ModuleUpdate, updateModule } from "./contracts/modules.js";
 export type { ModulePatch } from "./contracts/modules.js";
 export { PageUpdate, updatePage } from "./contracts/pages.js";
 export type { PagePatch } from "./contracts/pages.js";
+export {
+  AdminWorkspace,
+  AdminWorkspaceListResponse,
+  AdminWorkspaceOwner,
+  InstanceWorkspaceSlugStatus,
+  checkInstanceWorkspaceSlug,
+  createInstanceWorkspace,
+  listInstanceWorkspaces,
+} from "./contracts/admin-workspaces.js";
+export type { InstanceWorkspaceCreateInput } from "./contracts/admin-workspaces.js";
+export {
+  LOOP_MIN_ROLES,
+  LOOP_SKIP_REASONS,
+  LoopJob,
+  LoopJobDetail,
+  LoopJobList,
+  LoopJobStats,
+  LoopTarget,
+  LoopTargetLastRun,
+  LoopTargetsPage,
+  createLoopJob,
+  deleteLoopJob,
+  getLoopJob,
+  listLoopJobs,
+  listLoopTargets,
+  updateLoopJob,
+} from "./contracts/admin-loop.js";
+export type {
+  LoopJobCreateInput,
+  LoopJobPatchInput,
+  LoopMinRole,
+  LoopSkipReason,
+  LoopTargetsQuery,
+} from "./contracts/admin-loop.js";

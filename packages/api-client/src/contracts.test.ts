@@ -100,6 +100,19 @@ import { uploadUserAvatar } from "./contracts/assets.js";
 import { updateCycle } from "./contracts/cycles.js";
 import { updateModule } from "./contracts/modules.js";
 import { updatePage } from "./contracts/pages.js";
+import {
+  checkInstanceWorkspaceSlug,
+  createInstanceWorkspace,
+  listInstanceWorkspaces,
+} from "./contracts/admin-workspaces.js";
+import {
+  createLoopJob,
+  deleteLoopJob,
+  getLoopJob,
+  listLoopJobs,
+  listLoopTargets,
+  updateLoopJob,
+} from "./contracts/admin-loop.js";
 import { fakeResponse, recordingTransport } from "./client.test.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
@@ -1953,5 +1966,202 @@ describe("assets contracts", () => {
     expect(seen[0]?.url).toBe("https://uploads.test/signed");
     expect(seen[0]?.init.method).toBe("POST");
     expect(seen[0]?.init.body).toBeInstanceOf(FormData);
+  });
+});
+
+describe("instance-admin workspace contracts", () => {
+  const row = {
+    id: UUID,
+    name: "Acme",
+    slug: "acme",
+    logo: null,
+    logo_asset: null,
+    logo_url: null,
+    owner: { id: UUID2, email: "root@example.com", first_name: "Root", last_name: "Admin" },
+    organization_size: "2-10",
+    timezone: "UTC",
+    background_color: "#fff",
+    total_projects: 2,
+    total_members: 3,
+    created_by: UUID2,
+    updated_by: null,
+    created_at: "2024-01-02T03:04:05Z",
+    updated_at: "2024-01-02T03:04:05Z",
+  };
+
+  it("parses the cursor-paginated workspace list", async () => {
+    const page = {
+      grouped_by: null,
+      sub_grouped_by: null,
+      total_count: 1,
+      next_cursor: "10:1:0",
+      prev_cursor: "10:0:0",
+      next_page_results: false,
+      prev_page_results: false,
+      count: 1,
+      total_results: 1,
+      results: [row],
+    };
+    const client = createClient({ baseUrl: "https://api.test", transport: json(page) });
+    const parsed = await listInstanceWorkspaces(client);
+    expect(parsed.total_count).toBe(1);
+    expect(parsed.results[0]?.owner?.email).toBe("root@example.com");
+  });
+
+  it("sends the cursor only when set", async () => {
+    const page = {
+      grouped_by: null,
+      sub_grouped_by: null,
+      total_count: 0,
+      next_cursor: "10:1:0",
+      prev_cursor: "10:0:0",
+      next_page_results: false,
+      prev_page_results: true,
+      count: 0,
+      total_results: 0,
+      results: [],
+    };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(page) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await listInstanceWorkspaces(client);
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/instances/workspaces/");
+    await listInstanceWorkspaces(client, "10:1:0");
+    expect(transport.calls[1]?.url).toBe("https://api.test/api/instances/workspaces/?cursor=10%3A1%3A0");
+    await listInstanceWorkspaces(client, "");
+    expect(transport.calls[2]?.url).toBe("https://api.test/api/instances/workspaces/");
+  });
+
+  it("checks slug availability through the query param", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify({ status: false }) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await checkInstanceWorkspaceSlug(client, "acme");
+    expect(parsed).toEqual({ status: false });
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/instances/workspace-slug-check/?slug=acme");
+  });
+
+  it("creates a workspace without an owner field and parses the row", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 201, body: JSON.stringify(row) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const created = await createInstanceWorkspace(client, {
+      name: "Acme",
+      slug: "acme",
+      organization_size: "2-10",
+    });
+    expect(created.slug).toBe("acme");
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe("https://api.test/api/instances/workspaces/");
+    expect(postCall?.init.body).toBe(JSON.stringify({ name: "Acme", slug: "acme", organization_size: "2-10" }));
+  });
+});
+
+describe("instance-admin loop contracts", () => {
+  const job = {
+    id: UUID,
+    slug: "daily-digest",
+    name: "Daily digest",
+    public_name: "Daily digest",
+    public_description: "A summary.",
+    prompt: "Summarize.",
+    min_role: 15,
+    enabled: true,
+    is_builtin: false,
+    dtstart: "2024-01-02T03:04:05+00:00",
+    rrule: "FREQ=DAILY;BYHOUR=2",
+    tzid: "UTC",
+    created_at: "2024-01-02T03:04:05+00:00",
+    updated_at: "2024-01-02T03:04:05+00:00",
+  };
+
+  it("parses the job list", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([job]) });
+    const parsed = await listLoopJobs(client);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.prompt).toBe("Summarize.");
+  });
+
+  it("creates a job and parses the created row", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 201, body: JSON.stringify(job) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const created = await createLoopJob(client, {
+      slug: "daily-digest",
+      name: "Daily digest",
+      public_name: "Daily digest",
+      prompt: "Summarize.",
+      rrule: "FREQ=DAILY;BYHOUR=2",
+    });
+    expect(created.slug).toBe("daily-digest");
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe("https://api.test/api/instances/loop/jobs/");
+  });
+
+  it("parses the detail read with its stats rollup", async () => {
+    const detail = { ...job, stats: { target_count: 1, completed: 0, failed: 0, skipped: 1 } };
+    const client = createClient({ baseUrl: "https://api.test", transport: json(detail) });
+    const parsed = await getLoopJob(client, UUID);
+    expect(parsed.stats.skipped).toBe(1);
+  });
+
+  it("patches a job and parses the updated row", async () => {
+    const updated = { ...job, enabled: false };
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ body: JSON.stringify(updated) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await updateLoopJob(client, UUID, { enabled: false });
+    expect(parsed.enabled).toBe(false);
+    const patchCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patchCall?.url).toBe(`https://api.test/api/instances/loop/jobs/${UUID}/`);
+    expect(patchCall?.init.body).toBe(JSON.stringify({ enabled: false }));
+  });
+
+  it("deletes a job and reports the status", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 204, body: "" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const status = await deleteLoopJob(client, UUID);
+    expect(status).toBe(204);
+    const deleteCall = transport.calls.find((call) => call.init.method === "DELETE");
+    expect(deleteCall?.url).toBe(`https://api.test/api/instances/loop/jobs/${UUID}/`);
+  });
+
+  it("parses the targets page and sends skip_reason only when set", async () => {
+    const page = {
+      page: 1,
+      results: [
+        {
+          id: UUID2,
+          workspace_slug: "acme",
+          user_email: "ada@example.com",
+          next_run_at: null,
+          last_skipped_at: "2024-01-02T03:04:05+00:00",
+          last_skip_reason: "user_disabled",
+          last_run: null,
+        },
+      ],
+    };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(page) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listLoopTargets(client, UUID);
+    expect(parsed.results[0]?.last_skip_reason).toBe("user_disabled");
+    expect(transport.calls[0]?.url).toBe(`https://api.test/api/instances/loop/jobs/${UUID}/targets/`);
+    await listLoopTargets(client, UUID, { skipReason: "user_disabled" });
+    expect(transport.calls[1]?.url).toBe(
+      `https://api.test/api/instances/loop/jobs/${UUID}/targets/?skip_reason=user_disabled`
+    );
+    await listLoopTargets(client, UUID, { skipReason: "" });
+    expect(transport.calls[2]?.url).toBe(`https://api.test/api/instances/loop/jobs/${UUID}/targets/`);
   });
 });
