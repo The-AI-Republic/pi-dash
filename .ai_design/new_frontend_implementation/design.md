@@ -622,6 +622,17 @@ Plane-derived and stay AGPL until handled separately.
 
 A PR over budget fails; raising a budget needs a note in this doc.
 
+Initial JS exception (NEWFRONT-248, 2026-10-15): enforcing the initial-JS
+budget on every PR parked finished slices whenever an earlier slice used up
+the shared headroom, so it now has two numbers. The target (220 KB gzipped
+since NEWFRONT-196; 150 KB above was the first estimate) shapes composition:
+the shell's first screen loads only the frame, and modals, palettes, settings
+and page features load through `import()`. CI reports the target on every PR
+without blocking. Each area gate records the reading and files a diet issue
+when it is over the target; the acceptance pass (NEWFRONT-11) requires it to
+be met. A PR fails only above the 260 KB ceiling, which catches an accidental
+large eager import.
+
 ### 13.2 Structural checks
 
 - Import-boundary lint (§5.3), including the `@pi-dash/*` ban.
