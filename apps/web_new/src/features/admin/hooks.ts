@@ -98,7 +98,8 @@ export function useAdminSession() {
 /**
  * The shared configurations key map every settings page reads. One
  * fetch for the console lifetime; saves merge the answered rows back
- * into it, so pages always render stored state.
+ * into it or refresh it through explicit invalidation, so pages
+ * always render stored state.
  */
 export function useInstanceConfigurations() {
   return useQuery(instanceConfigurationsQueryOptions(getAppClient()));

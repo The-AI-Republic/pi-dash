@@ -32,6 +32,7 @@ import { Route as GodModeIndexRouteImport } from './routes/god-mode/index'
 import { Route as GodModeSplatRouteImport } from './routes/god-mode/$'
 import { Route as GodModeDashboardRouteRouteImport } from './routes/god-mode/_dashboard/route'
 import { Route as WsGatedIndexRouteImport } from './routes/$ws/_gated/index'
+import { Route as GodModeDashboardAiRouteImport } from './routes/god-mode/_dashboard/ai'
 import { Route as GodModeDashboardAuthenticationRouteImport } from './routes/god-mode/_dashboard/authentication'
 import { Route as GodModeDashboardEmailRouteImport } from './routes/god-mode/_dashboard/email'
 import { Route as GodModeDashboardGeneralRouteImport } from './routes/god-mode/_dashboard/general'
@@ -162,6 +163,11 @@ const WsGatedIndexRoute = WsGatedIndexRouteImport.update({
   path: '/',
   getParentRoute: () => WsGatedRouteRoute,
 } as any)
+const GodModeDashboardAiRoute = GodModeDashboardAiRouteImport.update({
+  id: '/ai',
+  path: '/ai',
+  getParentRoute: () => GodModeDashboardRouteRoute,
+} as any)
 const GodModeDashboardAuthenticationRoute =
   GodModeDashboardAuthenticationRouteImport.update({
     id: '/authentication',
@@ -275,6 +281,7 @@ export interface FileRoutesByFullPath {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
+  '/god-mode/ai': typeof GodModeDashboardAiRoute
   '/god-mode/authentication': typeof GodModeDashboardAuthenticationRoute
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
@@ -313,6 +320,7 @@ export interface FileRoutesByTo {
   '/accounts/sign-up': typeof AccountsSignUpRoute
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
+  '/god-mode/ai': typeof GodModeDashboardAiRoute
   '/god-mode/authentication': typeof GodModeDashboardAuthenticationRoute
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
@@ -353,6 +361,7 @@ export interface FileRoutesById {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
+  '/god-mode/_dashboard/ai': typeof GodModeDashboardAiRoute
   '/god-mode/_dashboard/authentication': typeof GodModeDashboardAuthenticationRoute
   '/god-mode/_dashboard/email': typeof GodModeDashboardEmailRoute
   '/god-mode/_dashboard/general': typeof GodModeDashboardGeneralRoute
@@ -394,6 +403,7 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/god-mode/'
+    | '/god-mode/ai'
     | '/god-mode/authentication'
     | '/god-mode/email'
     | '/god-mode/general'
@@ -432,6 +442,7 @@ export interface FileRouteTypes {
     | '/accounts/sign-up'
     | '/auth/device'
     | '/god-mode/$'
+    | '/god-mode/ai'
     | '/god-mode/authentication'
     | '/god-mode/email'
     | '/god-mode/general'
@@ -471,6 +482,7 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/god-mode/'
+    | '/god-mode/_dashboard/ai'
     | '/god-mode/_dashboard/authentication'
     | '/god-mode/_dashboard/email'
     | '/god-mode/_dashboard/general'
@@ -673,6 +685,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedIndexRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
+    '/god-mode/_dashboard/ai': {
+      id: '/god-mode/_dashboard/ai'
+      path: '/ai'
+      fullPath: '/god-mode/ai'
+      preLoaderRoute: typeof GodModeDashboardAiRouteImport
+      parentRoute: typeof GodModeDashboardRouteRoute
+    }
     '/god-mode/_dashboard/authentication': {
       id: '/god-mode/_dashboard/authentication'
       path: '/authentication'
@@ -858,6 +877,7 @@ const WsRouteRouteWithChildren =
   WsRouteRoute._addFileChildren(WsRouteRouteChildren)
 
 interface GodModeDashboardRouteRouteChildren {
+  GodModeDashboardAiRoute: typeof GodModeDashboardAiRoute
   GodModeDashboardAuthenticationRoute: typeof GodModeDashboardAuthenticationRoute
   GodModeDashboardEmailRoute: typeof GodModeDashboardEmailRoute
   GodModeDashboardGeneralRoute: typeof GodModeDashboardGeneralRoute
@@ -865,6 +885,7 @@ interface GodModeDashboardRouteRouteChildren {
 }
 
 const GodModeDashboardRouteRouteChildren: GodModeDashboardRouteRouteChildren = {
+  GodModeDashboardAiRoute: GodModeDashboardAiRoute,
   GodModeDashboardAuthenticationRoute: GodModeDashboardAuthenticationRoute,
   GodModeDashboardEmailRoute: GodModeDashboardEmailRoute,
   GodModeDashboardGeneralRoute: GodModeDashboardGeneralRoute,

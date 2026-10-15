@@ -1047,3 +1047,44 @@ describe("useCheckEmailCredentials", () => {
     await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
   });
 });
+
+function AiConfigurationsProbe(): React.ReactElement {
+  const query = useInstanceConfigurations();
+  if (query.isPending) return <div data-testid="probe">loading</div>;
+  if (query.isError) return <div data-testid="probe">failed</div>;
+  return <div data-testid="probe">{query.data.map((row) => row.key).join(",")}</div>;
+}
+
+describe("useInstanceConfigurations", () => {
+  const rows = [
+    {
+      id: "11111111-1111-4111-8111-111111111111",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      created_by: null,
+      updated_by: null,
+      deleted_at: null,
+      key: "LLM_MODEL",
+      value: "gpt-4o",
+      category: "ai",
+      is_encrypted: false,
+      source: "db",
+      is_managed: true,
+    },
+  ];
+
+  it("reads the shared key map through the app client", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport({ "/api/instances/configurations/": { status: 200, body: rows } })
+    );
+    renderProbe(AiConfigurationsProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("LLM_MODEL"));
+  });
+
+  it("surfaces fetch failures instead of retrying", async () => {
+    createAppClient("https://api.test", stubTransport({}));
+    renderProbe(AiConfigurationsProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
+  });
+});
