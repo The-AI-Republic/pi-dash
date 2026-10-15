@@ -490,7 +490,7 @@
     },
     {
       "name": "switch-off-free-entry-fires",
-      "trace": "bgtasks/agent_ticker.py:258-264 post-claim switch branch (7c355595): queued human entry fires, then NONE disarm",
+      "trace": "bgtasks/agent_ticker.py:258-266 post-claim switch branch (7c355595): queued human entry fires, then NONE disarm",
       "before": {
         "pool": 10,
         "project_ticking_enabled": false,

@@ -1195,7 +1195,7 @@ mod tests {
 
     // A queued human entry fires even on a switched-off clock (the human
     // asked for this run), but the clock disarms after it dispatches so no
-    // timer tick follows (`agent_ticker.py:258-264`).
+    // timer tick follows (`agent_ticker.py:258-266`).
     #[test]
     fn switch_off_free_entry_fires_then_disarms() {
         let free = TickerSnapshot {
