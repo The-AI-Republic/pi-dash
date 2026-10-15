@@ -3025,6 +3025,97 @@ mod tests {
 
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]
     #[tokio::test]
+    async fn live_fire_tick_claim_dispatches() {
+        // PIDASHCONV-1070: the claim path (`read_claim` →
+        // `ProjectTickCols::from_row`) decoded the INT4 project cadence
+        // columns as `Option<i64>`, so every live tick died pre-gate
+        // with an INT4/INT8 mismatch (PIDASHCONV-1068 fixed the decode;
+        // this test keeps it fixed). No earlier live test read the
+        // claim — they all dispatch past it — so fire one full tick
+        // through the shim and assert the dispatch outcome.
+        let _serial = LIVE_SERIAL.lock().await;
+        let pool = pool().await;
+        let graph = seed_graph(&pool, "tick1070").await;
+        ensure_agent_user(&pool).await;
+        let prior = seed_run(
+            &pool,
+            &graph,
+            "completed",
+            "tick",
+            "local_runner",
+            "coding-task",
+            None,
+            json!({}),
+            graph.user,
+            now() - chrono::Duration::hours(1),
+        )
+        .await;
+        let ticker = seed_ticker(&pool, graph.issue, &TickerSeed::default()).await;
+        let states: HashMap<Uuid, StateView> = [
+            ("In Progress", "started"),
+            ("In Review", "review"),
+            ("Done", "completed"),
+        ]
+        .into_iter()
+        .map(|(name, group)| {
+            (
+                graph.states[name],
+                StateView {
+                    id: graph.states[name],
+                    name: name.to_owned(),
+                    group: group.to_owned(),
+                },
+            )
+        })
+        .collect();
+        let states = Arc::new(states);
+        let shim = FireTickShim::new(
+            pool.clone(),
+            Arc::new(deps),
+            Arc::new(FakeMatcher { answer: true }),
+            {
+                let states = states.clone();
+                Arc::new(move |id: Option<Uuid>| id.and_then(|id| states.get(&id).cloned()))
+            },
+        );
+        let seam: Arc<dyn FireTickSeam> = Arc::new(shim);
+        use rand08::SeedableRng as _;
+        let mut rng = rand08::rngs::StdRng::seed_from_u64(1070);
+        let fired =
+            crate::tasks_ticker::fire_tick::fire_tick(&pool, &seam, ticker, now(), &mut rng)
+                .await
+                .expect("fire_tick succeeds on live INT4 columns");
+        assert!(fired, "a due tick with a prior run dispatches");
+        // The claim spent one of the pool and re-armed in the future.
+        let (used, next_run_at): (i32, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT used, next_run_at FROM issue_agent_ticker WHERE id = $1")
+                .bind(ticker)
+                .fetch_one(&pool)
+                .await
+                .expect("read ticker");
+        assert_eq!(used, TickerSeed::default().used + 1);
+        assert!(
+            next_run_at.is_some_and(|next| next > now()),
+            "re-armed past the firing instant"
+        );
+        // The dispatch continued the prior run (same shape as A3).
+        let runs: Vec<(Uuid, String, String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT id, status, trigger, parent_run_id FROM agent_run \
+             WHERE work_item_id = $1 ORDER BY created_at",
+        )
+        .bind(graph.issue)
+        .fetch_all(&pool)
+        .await
+        .expect("read runs");
+        assert_eq!(runs.len(), 2);
+        let (status, trigger, parent) = (&runs[1].1, &runs[1].2, runs[1].3);
+        assert_eq!(status, "queued");
+        assert_eq!(trigger, "tick");
+        assert_eq!(parent, Some(prior));
+    }
+
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    #[tokio::test]
     async fn live_unknown_triggered_by_stamps_raw() {
         // Django passes `triggered_by` to the builders unstamped and
         // unvalidated (`scheduling.py:1206/1214`, `trigger: str`): the
