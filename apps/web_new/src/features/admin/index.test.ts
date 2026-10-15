@@ -61,6 +61,7 @@ import {
   AUTH_LANDING_TITLE,
   AUTH_METHOD_ENABLE_KEYS,
   AUTH_METHODS,
+  AdminLoopJobsPage,
   buildAdminCrumbs,
   canDisableAuthMethod,
   INSTANCE_FAILURE_ART,
@@ -78,12 +79,15 @@ import {
   isSetupSubmittable,
   isSidebarEntryActive,
   isStrengthMeterVisible,
+  LOOP_MIN_ROLE_LABELS,
+  loopJobsQueryOptions,
   mergeConfigurationRows,
   mergeGeneralSettingsIntoBootstrap,
   PERSON_NAME_MAX_LENGTH,
   readStoredAdminTheme,
   registerAdminStoreReset,
   reloadEntryPage,
+  resolveLoopMinRoleLabel,
   resetAdminClientState,
   resetAdminStores,
   resolveSetupError,
@@ -98,6 +102,7 @@ import {
   CONFIG_SAVE_FAILED_LOG,
   ENABLE_SIGNUP_KEY,
   toConfigMap,
+  toggleLoopJobMutationOptions,
   useAdminCsrfToken,
   useAdminSession,
   useAdminSidebarStore,
@@ -106,6 +111,8 @@ import {
   useInstanceAdmins,
   useInstanceBootstrap,
   useInstanceConfigurations,
+  useLoopJobs,
+  useToggleLoopJob,
   useUpdateGeneralSettings,
   useUpdateInstanceConfigurations,
 } from "./index.js";
@@ -137,6 +144,7 @@ describe("admin barrel", () => {
       isSetupSubmittable,
       isSidebarEntryActive,
       isStrengthMeterVisible,
+      loopJobsQueryOptions,
       mergeConfigurationRows,
       mergeGeneralSettingsIntoBootstrap,
       readStoredAdminTheme,
@@ -144,11 +152,13 @@ describe("admin barrel", () => {
       reloadEntryPage,
       resetAdminClientState,
       resetAdminStores,
+      resolveLoopMinRoleLabel,
       resolveSetupError,
       resolveSetupPrefill,
       resolveSignInBanners,
       resolveTelemetryPrefill,
       toConfigMap,
+      toggleLoopJobMutationOptions,
     ]) {
       expect(typeof fn).toBe("function");
     }
@@ -161,6 +171,8 @@ describe("admin barrel", () => {
       useInstanceAdmins,
       useInstanceBootstrap,
       useInstanceConfigurations,
+      useLoopJobs,
+      useToggleLoopJob,
       useUpdateGeneralSettings,
       useUpdateInstanceConfigurations,
     ]) {
@@ -178,6 +190,7 @@ describe("admin barrel", () => {
       AdminHeader,
       AdminHelpSection,
       AdminHomeGuard,
+      AdminLoopJobsPage,
       AdminNotFoundScreen,
       AdminSetupForm,
       AdminSidebar,
@@ -193,6 +206,7 @@ describe("admin barrel", () => {
     expect(adminQueryDefaults).toBeDefined();
     expect(AUTH_METHODS.length).toBe(6);
     expect(AUTH_METHOD_ENABLE_KEYS.length).toBe(6);
+    expect(LOOP_MIN_ROLE_LABELS).toEqual({ 20: "Admin", 15: "Member", 5: "Guest" });
     expect(ADMIN_NARROW_VIEWPORT_PX).toBeGreaterThan(0);
     expect(ADMIN_SEGMENT_LABELS).toBeDefined();
     expect(ADMIN_SIDEBAR_ENTRIES.length).toBeGreaterThan(0);

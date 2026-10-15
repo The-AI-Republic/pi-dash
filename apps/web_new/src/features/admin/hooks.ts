@@ -1,24 +1,29 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Admin data hooks (Data layer page). Components read the instance
-// bootstrap and the native-POST forgery token through these, never
-// through raw client calls.
+// Admin data hooks (Data layer page). Components read server data and
+// flip the loop toggles through these, never through raw client calls.
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { mutationOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { QueryClient } from "@tanstack/react-query";
 import {
   cloudSignInUrl,
   updateInstance,
   updateInstanceConfigurations,
+  updateLoopJob,
+  type ApiClient,
   type InstanceBootstrap,
   type InstanceConfigurationList,
   type InstancePatch,
+  type LoopJobList,
 } from "@pidash/api-client";
 import * as React from "react";
 
 import { getAppClient } from "../../core/api/client.js";
-import { notifySuccess } from "../../shared/shell/index.js";
+import { applyOptimisticUpdate, type Rollback } from "../../core/query/optimistic.js";
+import { notifyError, notifySuccess } from "../../shared/shell/index.js";
 import type { CloudEntrySessionState } from "./cloudEntry.js";
+import { LOOP_TOGGLE_FAILURE_MESSAGE, LOOP_TOGGLE_FAILURE_TITLE } from "./loopJobs.js";
 import {
   GENERAL_SAVE_FAILURE_LOG,
   GENERAL_SAVE_SUCCESS_MESSAGE,
@@ -33,6 +38,7 @@ import {
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
+  loopJobsQueryOptions,
   mergeConfigurationRows,
 } from "./queries.js";
 
@@ -153,4 +159,45 @@ export function useCloudEntryRetry(): () => void {
     void queryClient.resetQueries({ queryKey: adminKeys.cloudProbe });
     void queryClient.resetQueries({ queryKey: adminKeys.session });
   }, [queryClient]);
+}
+
+/** The loop jobs list the loop pages render (ADM-051). */
+export function useLoopJobs() {
+  return useQuery(loopJobsQueryOptions(getAppClient()));
+}
+
+export interface LoopJobToggle {
+  id: string;
+  enabled: boolean;
+}
+
+interface ToggleMutationContext {
+  rollback: Rollback;
+}
+
+export function toggleLoopJobMutationOptions(client: ApiClient, queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: (toggle: LoopJobToggle) => updateLoopJob(client, toggle.id, { enabled: toggle.enabled }),
+    onMutate: (toggle: LoopJobToggle): ToggleMutationContext => ({
+      rollback: applyOptimisticUpdate<LoopJobList>(queryClient, adminKeys.loopJobs, (previous) =>
+        previous?.map((job) => (job.id === toggle.id ? { ...job, enabled: toggle.enabled } : job))
+      ),
+    }),
+    onError: (_error: unknown, _toggle: LoopJobToggle, context: ToggleMutationContext | undefined) => {
+      context?.rollback();
+      notifyError(LOOP_TOGGLE_FAILURE_TITLE, LOOP_TOGGLE_FAILURE_MESSAGE);
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: adminKeys.loopJobs });
+    },
+  });
+}
+
+/**
+ * Flips one job's enabled flag with an optimistic paint (ADM-052).
+ * Silent on success; a failed write rolls back with an error notice
+ * and the list revalidates once settled either way.
+ */
+export function useToggleLoopJob() {
+  return useMutation(toggleLoopJobMutationOptions(getAppClient(), useQueryClient()));
 }

@@ -15,6 +15,7 @@ import {
   getInstanceBootstrap,
   listInstanceAdmins,
   listInstanceConfigurations,
+  listLoopJobs,
   probeCloudAuthSession,
   type ApiClient,
   type InstanceConfigurationList,
@@ -34,6 +35,8 @@ export const adminKeys = {
   cloudProbe: ["admin", "cloud", "probe"],
   /** The shared configurations key map every settings page reads. */
   configurations: ["admin", "configurations"],
+  /** The loop jobs list the loop pages read and revalidate. */
+  loopJobs: ["admin", "loop", "jobs"],
 } as const;
 
 /**
@@ -124,6 +127,23 @@ export function instanceConfigurationsQueryOptions(client: ApiClient) {
   return queryOptions({
     queryKey: adminKeys.configurations,
     queryFn: () => listInstanceConfigurations(client),
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}
+
+/**
+ * The loop jobs list (ADM-051): one cached read per page lifetime —
+ * no retry, no focus or reconnect refetch, never stale — refreshed
+ * only by explicit revalidation after a mutation (spec §0.6). Every
+ * loop mutation invalidates this key on settle.
+ */
+export function loopJobsQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: adminKeys.loopJobs,
+    queryFn: () => listLoopJobs(client),
     staleTime: Number.POSITIVE_INFINITY,
     retry: false,
     refetchOnWindowFocus: false,

@@ -85,4 +85,53 @@ describe("Switch", () => {
     rerender(<Switch defaultChecked aria-label="Notify me" disabled className="extra-class" />);
     expect(screen.getByRole("switch", { name: "Notify me" })).toHaveAttribute("data-disabled");
   });
+
+  it("exposes the label as its accessible name with the checked state", () => {
+    render(<Switch checked label="Enable job" onCheckedChange={() => {}} />);
+    const control = screen.getByRole("switch", { name: "Enable job" });
+    expect(control.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("reports unchecked when off", () => {
+    render(<Switch checked={false} label="Enable job" onCheckedChange={() => {}} />);
+    expect(screen.getByRole("switch", { name: "Enable job" }).getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("notifies with the flipped state on click", async () => {
+    const user = userEvent.setup();
+    const onCheckedChange = vi.fn();
+    render(<Switch checked={false} label="Enable job" onCheckedChange={onCheckedChange} />);
+    await user.click(screen.getByRole("switch", { name: "Enable job" }));
+    expect(onCheckedChange).toHaveBeenCalledWith(true);
+  });
+
+  it("flips with the keyboard", async () => {
+    const user = userEvent.setup();
+    const onCheckedChange = vi.fn();
+    render(<Switch checked label="Enable job" onCheckedChange={onCheckedChange} />);
+    const control = screen.getByRole("switch", { name: "Enable job" });
+    control.focus();
+    await user.keyboard(" ");
+    expect(onCheckedChange).toHaveBeenCalledWith(false);
+  });
+
+  it("stays silent and marked when disabled", async () => {
+    const user = userEvent.setup();
+    const onCheckedChange = vi.fn();
+    render(<Switch checked={false} label="Enable job" onCheckedChange={onCheckedChange} disabled />);
+    const control = screen.getByRole("switch", { name: "Enable job" });
+    expect(control.hasAttribute("data-disabled")).toBe(true);
+    await user.click(control);
+    expect(onCheckedChange).not.toHaveBeenCalled();
+  });
+
+  it("carries the visible focus ring classes", () => {
+    render(<Switch checked={false} label="Enable job" onCheckedChange={() => {}} />);
+    expect(screen.getByRole("switch", { name: "Enable job" }).className).toContain("focus-visible:outline-2");
+  });
+
+  it("passes extra classes through", () => {
+    render(<Switch checked={false} label="Enable job" onCheckedChange={() => {}} className="extra" />);
+    expect(screen.getByRole("switch", { name: "Enable job" }).className).toContain("extra");
+  });
 });

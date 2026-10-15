@@ -12,6 +12,7 @@ import {
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
+  loopJobsQueryOptions,
   mergeConfigurationRows,
 } from "./queries.js";
 import * as adminQueries from "./queries.js";
@@ -39,6 +40,7 @@ describe("admin keys", () => {
     expect(adminKeys.session).toEqual(["admin", "session"]);
     expect(adminKeys.cloudProbe).toEqual(["admin", "cloud", "probe"]);
     expect(adminKeys.configurations).toEqual(["admin", "configurations"]);
+    expect(adminKeys.loopJobs).toEqual(["admin", "loop", "jobs"]);
   });
 });
 
@@ -235,5 +237,25 @@ describe("shared admin query defaults", () => {
       expect(options.refetchOnReconnect, `${name} never refetches on reconnect`).toBe(false);
       expect(options.refetchInterval ?? false, `${name} never polls`).toBe(false);
     }
+  });
+});
+
+describe("loop jobs query", () => {
+  it("reads the job list through the client", async () => {
+    const jobs = [{ slug: "probe-job" }];
+    const getJson = vi.fn(async () => jobs);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = loopJobsQueryOptions(fakeClient);
+    expect(options.queryKey).toEqual(adminKeys.loopJobs);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(jobs);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/loop/jobs/");
+  });
+
+  it("never retries, refetches, or goes stale (spec §0.6 admin shape)", () => {
+    const options = loopJobsQueryOptions({} as never);
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
   });
 });

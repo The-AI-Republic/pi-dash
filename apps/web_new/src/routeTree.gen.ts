@@ -34,6 +34,7 @@ import { Route as GodModeDashboardRouteRouteImport } from './routes/god-mode/_da
 import { Route as WsGatedIndexRouteImport } from './routes/$ws/_gated/index'
 import { Route as GodModeDashboardAuthenticationRouteImport } from './routes/god-mode/_dashboard/authentication'
 import { Route as GodModeDashboardGeneralRouteImport } from './routes/god-mode/_dashboard/general'
+import { Route as GodModeDashboardLoopRouteImport } from './routes/god-mode/_dashboard/loop'
 import { Route as WsGatedBrowseIssueKeyRouteImport } from './routes/$ws/_gated/browse/$issueKey'
 import { Route as WsGatedProjectsIndexRouteImport } from './routes/$ws/_gated/projects/index'
 import { Route as WsGatedProjectsProjectIdRouteRouteImport } from './routes/$ws/_gated/projects/$projectId/route'
@@ -171,6 +172,11 @@ const GodModeDashboardGeneralRoute = GodModeDashboardGeneralRouteImport.update({
   path: '/general',
   getParentRoute: () => GodModeDashboardRouteRoute,
 } as any)
+const GodModeDashboardLoopRoute = GodModeDashboardLoopRouteImport.update({
+  id: '/loop',
+  path: '/loop',
+  getParentRoute: () => GodModeDashboardRouteRoute,
+} as any)
 const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
   id: '/browse/$issueKey',
   path: '/browse/$issueKey',
@@ -265,6 +271,7 @@ export interface FileRoutesByFullPath {
   '/god-mode/': typeof GodModeIndexRoute
   '/god-mode/authentication': typeof GodModeDashboardAuthenticationRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
+  '/god-mode/loop': typeof GodModeDashboardLoopRoute
   '/$ws/': typeof WsGatedIndexRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
@@ -301,6 +308,7 @@ export interface FileRoutesByTo {
   '/god-mode/$': typeof GodModeSplatRoute
   '/god-mode/authentication': typeof GodModeDashboardAuthenticationRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
+  '/god-mode/loop': typeof GodModeDashboardLoopRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
   '/$ws/projects': typeof WsGatedProjectsIndexRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdIndexRoute
@@ -339,6 +347,7 @@ export interface FileRoutesById {
   '/god-mode/': typeof GodModeIndexRoute
   '/god-mode/_dashboard/authentication': typeof GodModeDashboardAuthenticationRoute
   '/god-mode/_dashboard/general': typeof GodModeDashboardGeneralRoute
+  '/god-mode/_dashboard/loop': typeof GodModeDashboardLoopRoute
   '/$ws/_gated/': typeof WsGatedIndexRoute
   '/$ws/_gated/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   '/$ws/_gated/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
@@ -378,6 +387,7 @@ export interface FileRouteTypes {
     | '/god-mode/'
     | '/god-mode/authentication'
     | '/god-mode/general'
+    | '/god-mode/loop'
     | '/$ws/'
     | '/$ws/projects/$projectId'
     | '/$ws/browse/$issueKey'
@@ -414,6 +424,7 @@ export interface FileRouteTypes {
     | '/god-mode/$'
     | '/god-mode/authentication'
     | '/god-mode/general'
+    | '/god-mode/loop'
     | '/$ws/browse/$issueKey'
     | '/$ws/projects'
     | '/$ws/projects/$projectId'
@@ -451,6 +462,7 @@ export interface FileRouteTypes {
     | '/god-mode/'
     | '/god-mode/_dashboard/authentication'
     | '/god-mode/_dashboard/general'
+    | '/god-mode/_dashboard/loop'
     | '/$ws/_gated/'
     | '/$ws/_gated/projects/$projectId'
     | '/$ws/_gated/browse/$issueKey'
@@ -663,6 +675,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GodModeDashboardGeneralRouteImport
       parentRoute: typeof GodModeDashboardRouteRoute
     }
+    '/god-mode/_dashboard/loop': {
+      id: '/god-mode/_dashboard/loop'
+      path: '/loop'
+      fullPath: '/god-mode/loop'
+      preLoaderRoute: typeof GodModeDashboardLoopRouteImport
+      parentRoute: typeof GodModeDashboardRouteRoute
+    }
     '/$ws/_gated/browse/$issueKey': {
       id: '/$ws/_gated/browse/$issueKey'
       path: '/browse/$issueKey'
@@ -822,11 +841,13 @@ const WsRouteRouteWithChildren =
 interface GodModeDashboardRouteRouteChildren {
   GodModeDashboardAuthenticationRoute: typeof GodModeDashboardAuthenticationRoute
   GodModeDashboardGeneralRoute: typeof GodModeDashboardGeneralRoute
+  GodModeDashboardLoopRoute: typeof GodModeDashboardLoopRoute
 }
 
 const GodModeDashboardRouteRouteChildren: GodModeDashboardRouteRouteChildren = {
   GodModeDashboardAuthenticationRoute: GodModeDashboardAuthenticationRoute,
   GodModeDashboardGeneralRoute: GodModeDashboardGeneralRoute,
+  GodModeDashboardLoopRoute: GodModeDashboardLoopRoute,
 }
 
 const GodModeDashboardRouteRouteWithChildren =
