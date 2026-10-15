@@ -307,6 +307,38 @@ describe("SidebarShell", () => {
     expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
   });
 
+  it("lets the top-bar toggle flip the floating sidebar closed", () => {
+    narrowMatches = true;
+    // Wired like the gated route's onToggleSidebar: peek clears, then
+    // the click flips. The nested icon mirrors the real toggle's svg.
+    render(
+      <>
+        <button
+          type="button"
+          data-testid="sidebar-toggle"
+          onClick={() => {
+            useShellChrome.getState().clearPeek();
+            useShellChrome.getState().toggleSidebarCollapsed();
+          }}
+        >
+          <span data-testid="sidebar-toggle-icon">Toggle</span>
+        </button>
+        {shell()}
+      </>
+    );
+    act(() => {
+      useShellChrome.getState().toggleSidebarCollapsed();
+    });
+    // The pointerdown lands first, outside the aside: it must fall
+    // through, or the click would flip the sidebar back open.
+    fireEvent.pointerDown(screen.getByTestId("sidebar-toggle-icon"));
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
+    fireEvent.pointerDown(screen.getByTestId("sidebar-toggle"));
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
+    fireEvent.click(screen.getByTestId("sidebar-toggle"));
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
+  });
+
   it("drives named panels from independent snapshots", () => {
     const { unmount } = render(
       <>

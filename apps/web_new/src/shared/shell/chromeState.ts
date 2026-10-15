@@ -81,7 +81,7 @@ export function createSidebarPanelStore(panel: string) {
   const store = create<SidebarPanelState>()((set) => ({
     ...loadSidebarPanel(panel),
     setSidebarCollapsed: (collapsed: boolean) => set({ sidebarCollapsed: collapsed }),
-    toggleSidebarCollapsed: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+    toggleSidebarCollapsed: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed, peekOpen: false })),
     setPeekOpen: (open: boolean) => set({ peekOpen: open }),
     clearPeek: () => set({ peekOpen: false }),
     setSidebarWidth: (width: number) => set({ sidebarWidth: clampSidebarWidth(width) }),

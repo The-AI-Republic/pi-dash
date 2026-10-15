@@ -48,6 +48,12 @@ describe("shell chrome state", () => {
     expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
   });
 
+  it("clears peek on any toggle", () => {
+    useShellChrome.getState().setPeekOpen(true);
+    useShellChrome.getState().toggleSidebarCollapsed();
+    expect(useShellChrome.getState().peekOpen).toBe(false);
+  });
+
   it("opens and clears peek", () => {
     useShellChrome.getState().setPeekOpen(true);
     expect(useShellChrome.getState().peekOpen).toBe(true);

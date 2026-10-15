@@ -105,11 +105,15 @@ export function SidebarShell({
   }, [narrow, store]);
 
   // The floating sidebar dismisses on outside presses; the docked one
-  // ignores them.
+  // ignores them. Presses on the top-bar toggle fall through: the toggle
+  // flips collapse on click, so collapsing here first would make the
+  // click reopen the sidebar instead.
   React.useEffect(() => {
     if (!narrow || collapsed) return;
     const onPointerDown = (event: PointerEvent): void => {
-      if (!asideRef.current!.contains(event.target as Node)) {
+      const target = event.target as Element;
+      if (target.closest('[data-testid="sidebar-toggle"]') !== null) return;
+      if (!asideRef.current!.contains(target)) {
         store.getState().clearPeek();
         store.getState().setSidebarCollapsed(true);
       }
