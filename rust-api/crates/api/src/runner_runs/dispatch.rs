@@ -1098,6 +1098,17 @@ async fn render_cloud_free_prompt(
     Ok((turn.text, manifest))
 }
 
+/// The direct-create llm gate through the installed assistant seam
+/// (`user_has_llm_config`, `agent_execution.py:69-80`): the CE default
+/// answers the BYOK key bit; the overlay routes OpenHub/Codex/BYOK
+/// through the same single switch point Pi Dash AI uses (PIDASHCONV-1051).
+async fn direct_gate_allows(state: &AppState, actor_id: Uuid, has_key: bool) -> bool {
+    state
+        .assistant_seam()
+        .has_usable_llm_config(actor_id, has_key)
+        .await
+}
+
 /// Direct create (`runs.py:238-345`): the falsy-prompt 400 is answered
 /// by the caller; everything from `validate_run_creation` down runs
 /// here. Parse (falsy/None/coerce per the Django `filter()` rules,
@@ -1234,7 +1245,16 @@ pub async fn post_direct(
         Vec::new()
     };
     let capability_refs: Vec<&str> = capabilities.iter().map(String::as_str).collect();
-    let has_llm = assistant_seams::has_usable_llm_config(scope.has_llm_key);
+    // Only the cloud arm consults the llm gate (`creation.py:33-39`):
+    // like capabilities above, consult the installed seam only when
+    // the pre-resolve lands on the cloud path, so local and managed
+    // creates never pay for the overlay's reads (and a resolution
+    // failure still raises in the driver before any gate verdict).
+    let has_llm = if pre_resolved == Some(AgentExecutorKind::CloudAgent) {
+        direct_gate_allows(state, actor_id, scope.has_llm_key).await
+    } else {
+        false
+    };
     let profile = assistant_seams::agent_model_profile_for_user(scope.has_llm_key);
     let llm_profile = LlmProfile {
         available: profile.available,
@@ -1849,5 +1869,56 @@ mod dispatch_tests {
         assert!(convert_capabilities(&json!(5)).is_err());
         assert!(convert_capabilities(&json!([5])).is_err());
         assert!(convert_capabilities(&json!([{"a": 1}])).is_err());
+    }
+
+    /// Overlay-shaped seam: a keyless user still counts as configured
+    /// (the gateway lane, not BYOK).
+    #[derive(Debug)]
+    struct GatewaySeam;
+
+    impl pidash_services::extensions::AssistantModelSeam for GatewaySeam {
+        fn has_usable_llm_config(
+            &self,
+            user_id: Uuid,
+            has_api_key: bool,
+        ) -> pidash_services::extensions::SeamFuture<'_, bool> {
+            let _ = (user_id, has_api_key);
+            Box::pin(async move { true })
+        }
+
+        fn generate_title(
+            &self,
+            request: pidash_services::extensions::TitleRequest,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            Result<String, pidash_services::extensions::TitleError>,
+        > {
+            let _ = request;
+            Box::pin(async move { Ok("seam title".to_owned()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_gate_uses_the_installed_seam() {
+        let state = AppState::new("test").with_assistant_seam(std::sync::Arc::new(GatewaySeam));
+        assert!(
+            direct_gate_allows(&state, Uuid::new_v4(), false).await,
+            "an installed seam that accepts the user must open the gate without a key"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_gate_keeps_the_ce_default() {
+        // No `with_assistant_seam`: the default CE seam answers the key
+        // bit exactly like the pre-seam free function did.
+        let state = AppState::new("test");
+        assert!(
+            direct_gate_allows(&state, Uuid::new_v4(), true).await,
+            "CE still admits a keyed creator"
+        );
+        assert!(
+            !direct_gate_allows(&state, Uuid::new_v4(), false).await,
+            "CE still refuses a keyless creator (the 409 path)"
+        );
     }
 }

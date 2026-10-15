@@ -356,6 +356,31 @@ def test_web_runs_create_direct_issue_201(user_client, seeder, daemon_world):
     }
 
 
+def test_web_runs_create_direct_cloud_not_configured_409(user_client, seeder, daemon_world):
+    """Cloud-requested direct create with the instance switch off (PIDASHCONV-1051).
+
+    Contract CI runs both backends with CLOUD_AGENT_ENABLED off, so the
+    executor-resolution arm — not the creator llm gate — answers here. This
+    pins the exact pre-gate 409 bytes around the seam consult: the llm gate
+    itself is pinned by the Rust seam tests (CE default answers the key bit,
+    an installed seam wins), since no HTTP path reaches it flags-off.
+    """
+    seeder.db.execute(
+        "UPDATE projects SET default_agent_executor = 'cloud_agent' WHERE id = %s",
+        (daemon_world["project"]["id"],),
+    )
+    response = web_post(
+        user_client, f"{WEB}/runs/",
+        {"prompt": "hello cloud", "workspace": daemon_world["workspace"]["id"]},
+    )
+    assert response.status_code == 409, response.text
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    assert response.json() == {
+        "error": "Pi Dash Cloud Agent is not currently available",
+        "code": "cloud_agent_unavailable",
+    }
+
+
 def test_web_runs_create_direct_validation(user_client, seeder, daemon_world):
     ws = daemon_world["workspace"]["id"]
     missing_ws = web_post(user_client, f"{WEB}/runs/", {"prompt": "hi"})

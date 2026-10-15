@@ -37,11 +37,12 @@
 //! * `PodRunnerMatcher` is implemented live over the merged D-14 guards
 //!   helpers (`eligible_owner_ids`, `POD_HAS_RUNNER_MANAGED_SQL`,
 //!   `pod_has_runner_general_sql`, `ISSUE_ASSIGNEE_IDS_SQL`).
-//! * `has_usable_llm_config` / `managed_llm_profile` close over LLM-key
-//!   presence pre-fetched for the actor plus every fallback-creator
-//!   candidate (issue creator, project lead, default assignee, live
-//!   assignees) — the only users the drivers ever query — decided through
-//!   the `assistant::seams` pure functions over the
+//! * `has_usable_llm_config` closes over per-user verdicts from the
+//!   installed assistant seam over LLM-key presence pre-fetched for the
+//!   actor plus every fallback-creator candidate (issue creator, project
+//!   lead, default assignee, live assignees) — the only users the drivers
+//!   ever query; `managed_llm_profile` closes over the same presence
+//!   decided through the `assistant::seams` pure function over the
 //!   `assistant_user_llm_config` row.
 //! * `extra_toolsets_enabled` is `false`, exactly as CE
 //!   (`ee/cloud_agent/toolsets.py:23-32`).
@@ -1055,18 +1056,31 @@ async fn fetch_presence(
     Ok(Arc::new(fetch_llm_presence(pool, &universe).await?))
 }
 
-/// The `has_usable_llm_config` closure over pre-fetched presence. A user
-/// outside the pre-fetched universe (only reachable through a concurrent
-/// insert between the prefetch and the driver) answers keyless, the same
-/// as a missing config row.
-pub fn has_key_fn(
-    presence: Arc<HashMap<Uuid, bool>>,
-) -> impl Fn(Uuid) -> bool + Clone + Send + Sync {
-    move |uid: Uuid| -> bool {
-        pidash_services::assistant::seams::has_usable_llm_config(
-            presence.get(&uid).copied().unwrap_or(false),
-        )
+/// The `has_usable_llm_config` verdicts for the creator universe: one
+/// installed-seam consult per user over the pre-fetched key bits
+/// (`user_has_llm_config`, `agent_execution.py:69-80`). The CE default
+/// answers the key bit; the overlay routes OpenHub/Codex/BYOK through
+/// the same single switch point Pi Dash AI uses (PIDASHCONV-1051).
+async fn gate_verdicts(state: &AppState, presence: &HashMap<Uuid, bool>) -> HashMap<Uuid, bool> {
+    let mut verdicts = HashMap::with_capacity(presence.len());
+    for (uid, has_key) in presence {
+        verdicts.insert(
+            *uid,
+            state
+                .assistant_seam()
+                .has_usable_llm_config(*uid, *has_key)
+                .await,
+        );
     }
+    verdicts
+}
+
+/// The `has_usable_llm_config` closure over pre-fetched verdicts. A user
+/// outside the pre-fetched universe (only reachable through a concurrent
+/// insert between the prefetch and the driver) answers closed, the same
+/// as a missing config row.
+pub fn gate_fn(verdicts: Arc<HashMap<Uuid, bool>>) -> impl Fn(Uuid) -> bool + Clone + Send + Sync {
+    move |uid: Uuid| -> bool { verdicts.get(&uid).copied().unwrap_or(false) }
 }
 
 /// The `managed_llm_profile` closure over pre-fetched presence.
@@ -1110,12 +1124,13 @@ pub async fn dispatch_deps(
     Denial,
 > {
     let presence = fetch_presence(pool, actor_id, issue, project).await?;
+    let verdicts = Arc::new(gate_verdicts(state, &presence).await);
     Ok((
         pidash_jobs::orchestration::StoreDeps {
             cloud: state.settings().cloud_agent.clone(),
             managed: state.settings().managed_runner.clone(),
             cache: RequestCache::default(),
-            has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
+            has_usable_llm_config: gate_fn(verdicts),
             toolsets: state.toolsets().clone(),
             llm_profile: profile_fn(presence),
             now_unix_secs,
@@ -2000,5 +2015,68 @@ mod tests {
         assert!(cut.is_char_boundary(cut.len()));
         let short = "x".repeat(2000);
         assert_eq!(truncate_note(&short), Some(short));
+    }
+
+    /// Overlay-shaped seam: a keyless user still counts as configured
+    /// (the gateway lane, not BYOK).
+    #[derive(Debug)]
+    struct GatewaySeam;
+
+    impl pidash_services::extensions::AssistantModelSeam for GatewaySeam {
+        fn has_usable_llm_config(
+            &self,
+            user_id: Uuid,
+            has_api_key: bool,
+        ) -> pidash_services::extensions::SeamFuture<'_, bool> {
+            let _ = (user_id, has_api_key);
+            Box::pin(async move { true })
+        }
+
+        fn generate_title(
+            &self,
+            request: pidash_services::extensions::TitleRequest,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            Result<String, pidash_services::extensions::TitleError>,
+        > {
+            let _ = request;
+            Box::pin(async move { Ok("seam title".to_owned()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn deps_verdicts_use_the_installed_seam() {
+        let state = AppState::new("test").with_assistant_seam(std::sync::Arc::new(GatewaySeam));
+        let keyless = Uuid::new_v4();
+        let presence = HashMap::from([(keyless, false)]);
+        let verdicts = gate_verdicts(&state, &presence).await;
+        assert_eq!(
+            verdicts.get(&keyless),
+            Some(&true),
+            "an installed seam that accepts the user must open the gate without a key"
+        );
+        let gate = gate_fn(Arc::new(verdicts));
+        assert!(gate(keyless));
+        assert!(
+            !gate(Uuid::new_v4()),
+            "a user outside the universe still answers closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn deps_verdicts_keep_the_ce_default() {
+        // No `with_assistant_seam`: the default CE seam answers each key
+        // bit exactly like the pre-seam free function did.
+        let state = AppState::new("test");
+        let keyed = Uuid::new_v4();
+        let keyless = Uuid::new_v4();
+        let presence = HashMap::from([(keyed, true), (keyless, false)]);
+        let verdicts = gate_verdicts(&state, &presence).await;
+        assert_eq!(verdicts.get(&keyed), Some(&true));
+        assert_eq!(verdicts.get(&keyless), Some(&false));
+        let gate = gate_fn(Arc::new(verdicts));
+        assert!(gate(keyed));
+        assert!(!gate(keyless));
+        assert!(!gate(Uuid::new_v4()));
     }
 }

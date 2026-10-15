@@ -41,7 +41,7 @@ use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
 use pidash_db::tx::Transaction as DbTransaction;
 use pidash_jobs::dispatch::{dispatch_agent_run, DispatchDecision};
 use pidash_services::dispatch::{consume_admission_token, DeferredConsume};
-use pidash_services::extensions::CloudAgentToolsetsSeam;
+use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::runner_runs::finalization as finalize_kernel;
 
 use crate::project_move_handoff::{drain_publish_effects, HandoffStore, RedisAdmissionCache};
@@ -58,6 +58,7 @@ pub(crate) struct SpanCreationDeps {
     pub(crate) cache: RedisAdmissionCache,
     pub(crate) now_unix_secs: i64,
     pub(crate) toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    pub(crate) assistant_seam: Arc<dyn AssistantModelSeam>,
 }
 
 impl SpanCreationDeps {
@@ -73,6 +74,7 @@ impl SpanCreationDeps {
             },
             now_unix_secs: unix_now_secs(),
             toolsets: state.toolsets().clone(),
+            assistant_seam: state.assistant_seam().clone(),
         }
     }
 }
@@ -107,6 +109,7 @@ pub(crate) fn handoff_store<'t, 'p>(
         deps.cache.clone(),
         deps.now_unix_secs,
         deps.toolsets.clone(),
+        deps.assistant_seam.clone(),
     )
 }
 
