@@ -84,6 +84,16 @@ def _run_row(seeder, run_id):
     )
 
 
+def _set_runner_status(seeder, runner_id, status):
+    seeder.db.execute("UPDATE runner SET status = %s WHERE id = %s", (status, runner_id))
+
+
+def _mark_managed(seeder, run_id):
+    seeder.db.execute(
+        "UPDATE agent_run SET executor_kind = 'managed_runner' WHERE id = %s", (run_id,)
+    )
+
+
 def test_release_unpins_stale_and_clears_parent_thread(
     seeder, daemon_world, machine_flow, broker
 ):
@@ -307,3 +317,294 @@ def test_fail_skips_live_runner(seeder, daemon_world, machine_flow, broker):
 
     time.sleep(5)
     assert _run_row(seeder, run["id"])["status"] == "running"
+
+
+def test_release_unpins_never_heartbeated(seeder, daemon_world, machine_flow, broker):
+    """A NULL heartbeat counts as silent: the pin is released."""
+    run = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="queued",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET pinned_runner_id = %s, runner_id = NULL WHERE id = %s",
+        (machine_flow["runner_id"], run["id"]),
+    )
+    _set_runner_status(seeder, machine_flow["runner_id"], "offline")
+    _set_heartbeat(seeder, machine_flow["runner_id"], "NULL")
+    _set_run_times(seeder, run["id"], "now() - interval '10 minutes'")
+
+    _fire(RELEASE_TASK, broker)
+
+    def released():
+        row = _run_row(seeder, run["id"])
+        return row if row["pinned_runner_id"] is None else None
+
+    wait_for_condition(released, timeout=TIMEOUT, what="pin released")
+
+
+def test_release_skips_managed_run(seeder, daemon_world, machine_flow, broker):
+    """Managed-executor runs keep their pins; a local control proves the sweep ran."""
+    managed = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="queued",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET pinned_runner_id = %s, runner_id = NULL WHERE id = %s",
+        (machine_flow["runner_id"], managed["id"]),
+    )
+    _mark_managed(seeder, managed["id"])
+    _set_run_times(seeder, managed["id"], "now() - interval '10 minutes'")
+    control = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="queued",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET pinned_runner_id = %s, runner_id = NULL WHERE id = %s",
+        (machine_flow["runner_id"], control["id"]),
+    )
+    _set_run_times(seeder, control["id"], "now() - interval '10 minutes'")
+    _set_runner_status(seeder, machine_flow["runner_id"], "offline")
+    _set_heartbeat(seeder, machine_flow["runner_id"], "now() - interval '10 minutes'")
+
+    _fire(RELEASE_TASK, broker)
+
+    def control_released():
+        row = _run_row(seeder, control["id"])
+        return row if row["pinned_runner_id"] is None else None
+
+    wait_for_condition(control_released, timeout=TIMEOUT, what="control pin released")
+    assert (
+        str(_run_row(seeder, managed["id"])["pinned_runner_id"]) == machine_flow["runner_id"]
+    )
+
+
+def test_release_waits_out_grace(seeder, daemon_world, machine_flow, broker):
+    """120s of silence is under the 300s grace: the pin stays (Django's blip case)."""
+    blip = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="queued",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET pinned_runner_id = %s, runner_id = NULL WHERE id = %s",
+        (machine_flow["runner_id"], blip["id"]),
+    )
+    _set_run_times(seeder, blip["id"], "now() - interval '10 minutes'")
+    _set_runner_status(seeder, machine_flow["runner_id"], "offline")
+    _set_heartbeat(seeder, machine_flow["runner_id"], "now() - interval '120 seconds'")
+    gone = seeder.enroll_runner(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        f"apd_en_{seeder.tag}xgone",
+    )
+    _set_runner_status(seeder, gone["id"], "offline")
+    _set_heartbeat(seeder, gone["id"], "now() - interval '10 minutes'")
+    control = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        gone["id"],
+        status="queued",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET pinned_runner_id = %s, runner_id = NULL WHERE id = %s",
+        (gone["id"], control["id"]),
+    )
+    _set_run_times(seeder, control["id"], "now() - interval '10 minutes'")
+
+    _fire(RELEASE_TASK, broker)
+
+    def control_released():
+        row = _run_row(seeder, control["id"])
+        return row if row["pinned_runner_id"] is None else None
+
+    wait_for_condition(control_released, timeout=TIMEOUT, what="control pin released")
+    assert str(_run_row(seeder, blip["id"])["pinned_runner_id"]) == machine_flow["runner_id"]
+
+
+def test_fail_finishes_never_heartbeated(seeder, daemon_world, machine_flow, broker):
+    """A NULL heartbeat counts as silent: the BUSY run is failed with the stamp."""
+    run = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="assigned",
+    )
+    _set_run_times(seeder, run["id"], "now() - interval '2 hours'", "now() - interval '2 hours'")
+    _set_runner_status(seeder, machine_flow["runner_id"], "offline")
+    _set_heartbeat(seeder, machine_flow["runner_id"], "NULL")
+
+    _fire(FAIL_TASK, broker)
+
+    def finished():
+        row = _run_row(seeder, run["id"])
+        return row if row["status"] == "failed" else None
+
+    row = wait_for_condition(finished, timeout=TIMEOUT, what="stale run failed")
+    assert row["error_code"] == RUNNER_OFFLINE
+    assert row["ended_at"] is not None
+
+
+def test_fail_skips_managed_run(seeder, daemon_world, machine_flow, broker):
+    """Managed-executor runs keep running; a local control proves the sweep ran."""
+    managed = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="running",
+    )
+    _mark_managed(seeder, managed["id"])
+    _set_run_times(
+        seeder, managed["id"], "now() - interval '2 hours'", "now() - interval '2 hours'"
+    )
+    control = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="running",
+    )
+    _set_run_times(
+        seeder, control["id"], "now() - interval '2 hours'", "now() - interval '2 hours'"
+    )
+    _set_runner_status(seeder, machine_flow["runner_id"], "offline")
+    _set_heartbeat(seeder, machine_flow["runner_id"], "now() - interval '2 hours'")
+
+    _fire(FAIL_TASK, broker)
+
+    def control_finished():
+        row = _run_row(seeder, control["id"])
+        return row if row["status"] == "failed" else None
+
+    wait_for_condition(control_finished, timeout=TIMEOUT, what="control run failed")
+    assert _run_row(seeder, managed["id"])["status"] == "running"
+
+
+def test_fail_frees_pod_queue_for_live_runner(seeder, daemon_world, machine_flow, broker):
+    """The post-sweep drain hands a waiting queued run to a live runner."""
+    alive = seeder.enroll_runner(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        f"apd_en_{seeder.tag}xalive",
+    )
+    _set_heartbeat(seeder, alive["id"], "now()")
+    seeder.db.execute("UPDATE runner SET status = 'online' WHERE id = %s", (alive["id"],))
+    stranded = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="running",
+    )
+    _set_run_times(
+        seeder, stranded["id"], "now() - interval '2 hours'", "now() - interval '2 hours'"
+    )
+    queued = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="queued",
+    )
+    seeder.db.execute("UPDATE agent_run SET runner_id = NULL WHERE id = %s", (queued["id"],))
+    _set_runner_status(seeder, machine_flow["runner_id"], "offline")
+    _set_heartbeat(seeder, machine_flow["runner_id"], "now() - interval '2 hours'")
+
+    _fire(FAIL_TASK, broker)
+
+    def stranded_failed():
+        row = _run_row(seeder, stranded["id"])
+        return row if row["status"] == "failed" else None
+
+    wait_for_condition(stranded_failed, timeout=TIMEOUT, what="stranded run failed")
+
+    def handed_off():
+        row = _run_row(seeder, queued["id"])
+        if row["status"] == "assigned" and str(row["runner_id"]) == alive["id"]:
+            return row
+        return None
+
+    wait_for_condition(handed_off, timeout=TIMEOUT, what="queued run handed to live runner")
+
+
+def test_fail_waits_out_grace(seeder, daemon_world, machine_flow, broker):
+    """45min of silence is under the 1h grace: a sleeping laptop keeps its run."""
+    asleep = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="running",
+    )
+    _set_run_times(
+        seeder, asleep["id"], "now() - interval '2 hours'", "now() - interval '2 hours'"
+    )
+    _set_runner_status(seeder, machine_flow["runner_id"], "offline")
+    _set_heartbeat(seeder, machine_flow["runner_id"], "now() - interval '2700 seconds'")
+    gone = seeder.enroll_runner(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        f"apd_en_{seeder.tag}xgone",
+    )
+    _set_runner_status(seeder, gone["id"], "offline")
+    _set_heartbeat(seeder, gone["id"], "now() - interval '2 hours'")
+    control = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        gone["id"],
+        status="running",
+    )
+    _set_run_times(
+        seeder, control["id"], "now() - interval '2 hours'", "now() - interval '2 hours'"
+    )
+
+    _fire(FAIL_TASK, broker)
+
+    def control_finished():
+        row = _run_row(seeder, control["id"])
+        return row if row["status"] == "failed" else None
+
+    wait_for_condition(control_finished, timeout=TIMEOUT, what="control run failed")
+    assert _run_row(seeder, asleep["id"])["status"] == "running"
+
+
+@pytest.mark.parametrize("status", ["assigned", "awaiting_approval", "awaiting_reauth"])
+def test_fail_finishes_busy_statuses(seeder, daemon_world, machine_flow, broker, status):
+    """Every non-running BUSY status terminates with the offline stamp."""
+    run = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status=status,
+    )
+    _set_run_times(seeder, run["id"], "now() - interval '2 hours'", "now() - interval '2 hours'")
+    _set_runner_status(seeder, machine_flow["runner_id"], "offline")
+    _set_heartbeat(seeder, machine_flow["runner_id"], "now() - interval '2 hours'")
+
+    _fire(FAIL_TASK, broker)
+
+    def finished():
+        row = _run_row(seeder, run["id"])
+        return row if row["status"] == "failed" else None
+
+    row = wait_for_condition(finished, timeout=TIMEOUT, what=f"{status} run failed")
+    assert row["error_code"] == RUNNER_OFFLINE
+    assert row["ended_at"] is not None

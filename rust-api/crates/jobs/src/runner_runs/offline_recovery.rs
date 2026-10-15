@@ -603,6 +603,14 @@ pub fn register_offline_recovery_tasks(
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use chrono::Utc;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    use super::super::sweeps_chat::SeamError;
     use super::*;
 
     #[test]
@@ -636,5 +644,86 @@ mod tests {
         assert_eq!(run_fail_secs_raw(Some("60")), 60);
         assert_eq!(run_fail_secs_raw(Some("0")), 0);
         assert_eq!(run_fail_secs_raw(Some("bad")), 3600);
+    }
+
+    /// Seams that must never fire: the disabled sweep returns before
+    /// any seam (or DB) use.
+    struct NeverSeams;
+
+    impl RunnerRunsSeams for NeverSeams {
+        fn drain_runner(
+            &self,
+            _runner_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
+            panic!("disabled sweep must not drain")
+        }
+        fn drain_pod(
+            &self,
+            _pod_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
+            panic!("disabled sweep must not drain")
+        }
+        fn dispatch_waiting(
+            &self,
+            _workspace_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
+            panic!("disabled sweep must not dispatch")
+        }
+        fn complete_project_move_handoff(
+            &self,
+            _run_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
+            panic!("disabled sweep must not hand off")
+        }
+        fn disarm_on_terminal_signal(
+            &self,
+            _run_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
+            panic!("disabled sweep must not disarm")
+        }
+        fn apply_deferred_pause(
+            &self,
+            _run_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
+            panic!("disabled sweep must not pause")
+        }
+        fn agent_system_user(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Uuid, SeamError>> + Send + '_>> {
+            panic!("disabled sweep must not comment")
+        }
+        fn publish_chat_event(
+            &self,
+            _channel: String,
+            _payload: String,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
+            panic!("disabled sweep must not publish")
+        }
+    }
+
+    /// `grace <= 0` disables the sweep (`override_settings` cases in
+    /// Django's file). The pool points at a refused port, so `Ok(0)`
+    /// proves the early return precedes all DB use; the seams panic
+    /// on any call.
+    #[tokio::test]
+    async fn disabled_sweeps_return_zero_without_touching_db() {
+        let pool =
+            PgPool::connect_lazy("postgres://127.0.0.1:1/pidash_disabled_test").expect("lazy pool");
+        let seams = NeverSeams;
+        let now = Utc::now();
+        for grace in [0, -1] {
+            assert_eq!(
+                release_pins_on_offline_runners(&pool, &seams, &now, grace)
+                    .await
+                    .expect("release disabled"),
+                0
+            );
+            assert_eq!(
+                fail_runs_on_offline_runners(&pool, &seams, &now, grace)
+                    .await
+                    .expect("fail disabled"),
+                0
+            );
+        }
     }
 }

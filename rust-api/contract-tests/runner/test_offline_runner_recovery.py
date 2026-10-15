@@ -157,3 +157,17 @@ def test_poll_live_run_stays_quiet(machine_client, machine_flow, daemon_world, s
         if frame.get("run_id") == run["id"]
     ]
     assert cancels == []
+
+
+def test_poll_reaper_cancelled_run_stays_quiet(
+    machine_client, machine_flow, daemon_world, seeder
+):
+    run = _seed_claim(seeder, daemon_world, machine_flow, status="cancelled")
+    opened = _open_runner_session(machine_client, machine_flow["runner_id"])
+    stream = _poll_once(machine_client, machine_flow, opened["session_id"], run["id"])
+    cancels = [
+        frame
+        for frame in _cancel_frames(stream, machine_flow["runner_id"])
+        if frame.get("run_id") == run["id"]
+    ]
+    assert cancels == []
