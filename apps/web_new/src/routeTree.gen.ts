@@ -37,6 +37,7 @@ import { Route as GodModeDashboardAuthenticationRouteRouteImport } from './route
 import { Route as GodModeDashboardEmailRouteImport } from './routes/god-mode/_dashboard/email'
 import { Route as GodModeDashboardGeneralRouteImport } from './routes/god-mode/_dashboard/general'
 import { Route as GodModeDashboardLoopRouteImport } from './routes/god-mode/_dashboard/loop'
+import { Route as GodModeDashboardWorkspaceRouteImport } from './routes/god-mode/_dashboard/workspace'
 import { Route as WsGatedBrowseIssueKeyRouteImport } from './routes/$ws/_gated/browse/$issueKey'
 import { Route as WsGatedProjectsIndexRouteImport } from './routes/$ws/_gated/projects/index'
 import { Route as WsGatedProjectsProjectIdRouteRouteImport } from './routes/$ws/_gated/projects/$projectId/route'
@@ -194,6 +195,12 @@ const GodModeDashboardLoopRoute = GodModeDashboardLoopRouteImport.update({
   path: '/loop',
   getParentRoute: () => GodModeDashboardRouteRoute,
 } as any)
+const GodModeDashboardWorkspaceRoute =
+  GodModeDashboardWorkspaceRouteImport.update({
+    id: '/workspace',
+    path: '/workspace',
+    getParentRoute: () => GodModeDashboardRouteRoute,
+  } as any)
 const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
   id: '/browse/$issueKey',
   path: '/browse/$issueKey',
@@ -321,6 +328,7 @@ export interface FileRoutesByFullPath {
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
   '/god-mode/loop': typeof GodModeDashboardLoopRoute
+  '/god-mode/workspace': typeof GodModeDashboardWorkspaceRoute
   '/$ws/': typeof WsGatedIndexRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
@@ -364,6 +372,7 @@ export interface FileRoutesByTo {
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
   '/god-mode/loop': typeof GodModeDashboardLoopRoute
+  '/god-mode/workspace': typeof GodModeDashboardWorkspaceRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
   '/god-mode/authentication/gitea': typeof GodModeDashboardAuthenticationGiteaRoute
   '/god-mode/authentication/github': typeof GodModeDashboardAuthenticationGithubRoute
@@ -410,6 +419,7 @@ export interface FileRoutesById {
   '/god-mode/_dashboard/email': typeof GodModeDashboardEmailRoute
   '/god-mode/_dashboard/general': typeof GodModeDashboardGeneralRoute
   '/god-mode/_dashboard/loop': typeof GodModeDashboardLoopRoute
+  '/god-mode/_dashboard/workspace': typeof GodModeDashboardWorkspaceRoute
   '/$ws/_gated/': typeof WsGatedIndexRoute
   '/$ws/_gated/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   '/$ws/_gated/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
@@ -457,6 +467,7 @@ export interface FileRouteTypes {
     | '/god-mode/email'
     | '/god-mode/general'
     | '/god-mode/loop'
+    | '/god-mode/workspace'
     | '/$ws/'
     | '/$ws/projects/$projectId'
     | '/$ws/browse/$issueKey'
@@ -500,6 +511,7 @@ export interface FileRouteTypes {
     | '/god-mode/email'
     | '/god-mode/general'
     | '/god-mode/loop'
+    | '/god-mode/workspace'
     | '/$ws/browse/$issueKey'
     | '/god-mode/authentication/gitea'
     | '/god-mode/authentication/github'
@@ -545,6 +557,7 @@ export interface FileRouteTypes {
     | '/god-mode/_dashboard/email'
     | '/god-mode/_dashboard/general'
     | '/god-mode/_dashboard/loop'
+    | '/god-mode/_dashboard/workspace'
     | '/$ws/_gated/'
     | '/$ws/_gated/projects/$projectId'
     | '/$ws/_gated/browse/$issueKey'
@@ -783,6 +796,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GodModeDashboardLoopRouteImport
       parentRoute: typeof GodModeDashboardRouteRoute
     }
+    '/god-mode/_dashboard/workspace': {
+      id: '/god-mode/_dashboard/workspace'
+      path: '/workspace'
+      fullPath: '/god-mode/workspace'
+      preLoaderRoute: typeof GodModeDashboardWorkspaceRouteImport
+      parentRoute: typeof GodModeDashboardRouteRoute
+    }
     '/$ws/_gated/browse/$issueKey': {
       id: '/$ws/_gated/browse/$issueKey'
       path: '/browse/$issueKey'
@@ -1007,6 +1027,7 @@ interface GodModeDashboardRouteRouteChildren {
   GodModeDashboardEmailRoute: typeof GodModeDashboardEmailRoute
   GodModeDashboardGeneralRoute: typeof GodModeDashboardGeneralRoute
   GodModeDashboardLoopRoute: typeof GodModeDashboardLoopRoute
+  GodModeDashboardWorkspaceRoute: typeof GodModeDashboardWorkspaceRoute
 }
 
 const GodModeDashboardRouteRouteChildren: GodModeDashboardRouteRouteChildren = {
@@ -1016,6 +1037,7 @@ const GodModeDashboardRouteRouteChildren: GodModeDashboardRouteRouteChildren = {
   GodModeDashboardEmailRoute: GodModeDashboardEmailRoute,
   GodModeDashboardGeneralRoute: GodModeDashboardGeneralRoute,
   GodModeDashboardLoopRoute: GodModeDashboardLoopRoute,
+  GodModeDashboardWorkspaceRoute: GodModeDashboardWorkspaceRoute,
 }
 
 const GodModeDashboardRouteRouteWithChildren =

@@ -8,16 +8,25 @@ import type { InstanceBootstrap, InstancePatch, LoopJobList, Transport, Transpor
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createAppClient, resetAppClient } from "../../core/api/client.js";
+const toastHarness = vi.hoisted(() => ({ close: vi.fn(), progressId: "progress-toast" }));
 
 const { notifyErrorMock } = vi.hoisted(() => ({ notifyErrorMock: vi.fn() }));
 
 vi.mock("../../shared/shell/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../shared/shell/index.js")>();
-  return { ...actual, notifyError: notifyErrorMock, notifySuccess: vi.fn() };
+  return {
+    ...actual,
+    getToastManager: () => ({ close: toastHarness.close }),
+    notifyError: notifyErrorMock,
+    notifySuccess: vi.fn(),
+  };
 });
 
-import { notifyError, notifySuccess } from "../../shared/shell/index.js";
+vi.mock("@pidash/kit", () => ({ showToast: vi.fn(() => toastHarness.progressId) }));
+
+import { showToast } from "@pidash/kit";
+import { createAppClient, resetAppClient } from "../../core/api/client.js";
+import { getToastManager, notifyError, notifySuccess } from "../../shared/shell/index.js";
 import type { CloudEntrySessionState } from "./cloudEntry.js";
 import {
   SMTP_ENABLED_KEY,
@@ -58,7 +67,9 @@ import {
   useInstanceAdmins,
   useInstanceBootstrap,
   useInstanceConfigurations,
+  useInstanceWorkspaces,
   useLoopJobs,
+  useRestrictWorkspaceCreation,
   useSaveSmtpConfig,
   useUpdateGeneralSettings,
   useUpdateInstanceConfigurations,
@@ -96,6 +107,7 @@ afterEach(() => {
   resetAppClient();
   vi.mocked(notifySuccess).mockClear();
   vi.restoreAllMocks();
+  vi.clearAllMocks();
 });
 
 function BootstrapProbe(): React.ReactElement {
@@ -1185,5 +1197,224 @@ describe("updateLoopJobMutationOptions", () => {
     expect(invalidate).toHaveBeenCalledTimes(2);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: adminKeys.loopJobs });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: adminKeys.loopJobDetail("job-1") });
+  });
+});
+
+function workspaceRow(slug: string, name: string): Record<string, unknown> {
+  return {
+    id: "55555555-5555-4555-8555-555555555555",
+    name,
+    slug,
+    logo: null,
+    logo_asset: null,
+    logo_url: null,
+    owner: {
+      id: "66666666-6666-4666-8666-666666666666",
+      email: "owner@example.com",
+      first_name: "Ow",
+      last_name: "Ner",
+    },
+    organization_size: "2-10",
+    timezone: "UTC",
+    background_color: "#ffffff",
+    total_projects: 2,
+    total_members: 3,
+    created_by: null,
+    updated_by: null,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  };
+}
+
+function workspacePage(results: Record<string, unknown>[], nextCursor: string): Record<string, unknown> {
+  return {
+    grouped_by: null,
+    sub_grouped_by: null,
+    total_count: results.length,
+    next_cursor: nextCursor,
+    prev_cursor: "",
+    next_page_results: nextCursor !== "",
+    prev_page_results: false,
+    count: results.length,
+    total_results: results.length,
+    results,
+  };
+}
+
+function ConfigProbe(): React.ReactElement {
+  const query = useInstanceConfigurations();
+  if (query.isPending) return <div data-testid="probe">loading</div>;
+  if (query.isError) return <div data-testid="probe">failed</div>;
+  return (
+    <div data-testid="probe">
+      {query.data.find((row) => row.key === "DISABLE_WORKSPACE_CREATION")?.value ?? "absent"}
+    </div>
+  );
+}
+
+describe("useInstanceConfigurations", () => {
+  it("reads the shared key map through the app client", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport({
+        "/api/instances/configurations/": { status: 200, body: [configRow("DISABLE_WORKSPACE_CREATION", "0")] },
+      })
+    );
+    renderProbe(ConfigProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("0"));
+  });
+
+  it("surfaces fetch failures instead of retrying", async () => {
+    createAppClient("https://api.test", stubTransport({}));
+    renderProbe(ConfigProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
+  });
+});
+
+function WorkspacesProbe(): React.ReactElement {
+  const query = useInstanceWorkspaces();
+  if (query.isPending) return <div data-testid="probe">loading</div>;
+  if (query.isError) return <div data-testid="probe">failed</div>;
+  const names = query.data.pages.flatMap((page) => page.results.map((row) => row.name)).join(",");
+  return (
+    <div>
+      <div data-testid="probe">{names}</div>
+      <div data-testid="more">{query.hasNextPage ? "more" : "done"}</div>
+      <button type="button" data-testid="next" onClick={() => void query.fetchNextPage()}>
+        next
+      </button>
+    </div>
+  );
+}
+
+describe("useInstanceWorkspaces", () => {
+  it("appends the next page through the cursor without refetching the first", async () => {
+    const seen: string[] = [];
+    const transport: Transport = (url) => {
+      seen.push(url);
+      const cursor = new URL(url, "https://api.test").searchParams.get("cursor");
+      const body =
+        cursor === null
+          ? workspacePage([workspaceRow("acme", "Acme")], "cursor-2")
+          : workspacePage([workspaceRow("globex", "Globex")], "");
+      return Promise.resolve({
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify(body)),
+      });
+    };
+    createAppClient("https://api.test", transport);
+    renderProbe(WorkspacesProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("Acme"));
+    expect(screen.getByTestId("more")).toHaveTextContent("more");
+    fireEvent.click(screen.getByTestId("next"));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("Acme,Globex"));
+    expect(screen.getByTestId("more")).toHaveTextContent("done");
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).not.toContain("cursor=");
+    expect(seen[1]).toContain("cursor=cursor-2");
+  });
+
+  it("surfaces fetch failures instead of retrying", async () => {
+    createAppClient("https://api.test", stubTransport({}));
+    renderProbe(WorkspacesProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
+  });
+});
+
+function RestrictProbe(): React.ReactElement {
+  const mutation = useRestrictWorkspaceCreation();
+  return (
+    <div>
+      <div data-testid="probe">
+        {mutation.isPending ? "saving" : mutation.isError ? "failed" : mutation.isSuccess ? "saved" : "idle"}
+      </div>
+      <button type="button" data-testid="save-on" onClick={() => mutation.mutate(true)}>
+        on
+      </button>
+      <button type="button" data-testid="save-off" onClick={() => mutation.mutate(false)}>
+        off
+      </button>
+    </div>
+  );
+}
+
+function renderRestrictProbe(queryClient: QueryClient): void {
+  render(
+    <QueryClientProvider client={queryClient}>
+      <RestrictProbe />
+    </QueryClientProvider>
+  );
+}
+
+describe("useRestrictWorkspaceCreation", () => {
+  const bodies: Array<{ method: string; body: string | undefined }> = [];
+
+  function patchClient(status: number, answer: unknown): QueryClient {
+    bodies.length = 0;
+    const transport: Transport = (url, init) => {
+      const path = new URL(url, "https://api.test").pathname;
+      if (init.method === "PATCH" && path === "/api/instances/configurations/") {
+        bodies.push({ method: init.method, body: init.body });
+        return Promise.resolve({
+          status,
+          url,
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify(answer)),
+        });
+      }
+      return Promise.resolve({
+        status: 404,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify({ detail: "not found" })),
+      });
+    };
+    createAppClient("https://api.test", transport);
+    return new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  }
+
+  it("saves a single-key write with a progress notice resolving to success", async () => {
+    const queryClient = patchClient(200, [configRow("DISABLE_WORKSPACE_CREATION", "1")]);
+    queryClient.setQueryData(adminKeys.configurations, [
+      configRow("DISABLE_WORKSPACE_CREATION", "0"),
+      configRow("OTHER", "kept"),
+    ]);
+    renderRestrictProbe(queryClient);
+    fireEvent.click(screen.getByTestId("save-on"));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("saved"));
+    expect(bodies).toEqual([{ method: "PATCH", body: JSON.stringify({ DISABLE_WORKSPACE_CREATION: "1" }) }]);
+    const manager = getToastManager();
+    expect(showToast).toHaveBeenCalledWith(manager, { title: "Saving configuration", timeout: 0 });
+    expect(toastHarness.close).toHaveBeenCalledWith(toastHarness.progressId);
+    expect(notifySuccess).toHaveBeenCalledWith("Success", "Configuration saved successfully");
+    expect(notifyError).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(adminKeys.configurations)).toEqual([
+      { ...configRow("DISABLE_WORKSPACE_CREATION", "1") },
+      { ...configRow("OTHER", "kept") },
+    ]);
+  });
+
+  it("encodes switching back to open as the zero flag", async () => {
+    const queryClient = patchClient(200, [configRow("DISABLE_WORKSPACE_CREATION", "0")]);
+    renderRestrictProbe(queryClient);
+    fireEvent.click(screen.getByTestId("save-off"));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("saved"));
+    expect(bodies).toEqual([{ method: "PATCH", body: JSON.stringify({ DISABLE_WORKSPACE_CREATION: "0" }) }]);
+    expect(notifySuccess).toHaveBeenCalledWith("Success", "Configuration saved successfully");
+  });
+
+  it("reports a failed save and keeps the stored value", async () => {
+    const queryClient = patchClient(500, { detail: "boom" });
+    queryClient.setQueryData(adminKeys.configurations, [configRow("DISABLE_WORKSPACE_CREATION", "0")]);
+    renderRestrictProbe(queryClient);
+    fireEvent.click(screen.getByTestId("save-on"));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
+    expect(bodies).toHaveLength(1);
+    expect(toastHarness.close).toHaveBeenCalledWith(toastHarness.progressId);
+    expect(notifyError).toHaveBeenCalledWith("Error", "Failed to save configuration");
+    expect(notifySuccess).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(adminKeys.configurations)).toEqual([configRow("DISABLE_WORKSPACE_CREATION", "0")]);
   });
 });

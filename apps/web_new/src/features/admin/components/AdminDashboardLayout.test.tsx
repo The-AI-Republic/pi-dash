@@ -19,6 +19,7 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { notifySuccess } from "../../../shared/shell/index.js";
 import { adminKeys } from "../queries.js";
 import { resetAdminStores } from "../stores.js";
 import { ADMIN_THEME_KEY } from "../theme.js";
@@ -131,5 +132,13 @@ describe("AdminDashboardLayout", () => {
     await waitFor(() => expect(screen.getByTestId("entry")).toBeInTheDocument());
     expect(screen.queryByTestId("admin-dashboard")).not.toBeInTheDocument();
     expect(pathname()).toBe("/god-mode/");
+  });
+
+  it("renders page notices through the mounted toast host", async () => {
+    renderLayout(ADMIN, true);
+    await waitFor(() => expect(screen.getByTestId("admin-dashboard")).toBeInTheDocument());
+    notifySuccess("Success", "Configuration saved successfully");
+    await waitFor(() => expect(screen.getByTestId("toast-notification")).toBeInTheDocument());
+    expect(screen.getByTestId("toast-notification")).toHaveTextContent("Configuration saved successfully");
   });
 });

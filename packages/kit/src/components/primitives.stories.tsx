@@ -6,6 +6,7 @@ import { Badge } from "./Badge";
 import { Kbd } from "./Kbd";
 import { Skeleton } from "./Skeleton";
 import { Spinner } from "./Spinner";
+import { Switch } from "./Switch";
 
 export const Loaders = (): React.ReactElement => (
   <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
@@ -53,5 +54,13 @@ export const People = (): React.ReactElement => (
     <Avatar name="Ada Lovelace" size="small" />
     <Avatar name="Ada Lovelace" size="medium" />
     <Avatar name="Grace Hopper" size="large" />
+  </div>
+);
+
+export const Toggles = (): React.ReactElement => (
+  <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+    <Switch checked={false} label="Off" onCheckedChange={() => {}} />
+    <Switch checked label="On" onCheckedChange={() => {}} />
+    <Switch checked={false} label="Disabled" disabled onCheckedChange={() => {}} />
   </div>
 );

@@ -12,8 +12,10 @@ import {
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
+  instanceWorkspacesQueryOptions,
   loopJobsQueryOptions,
   mergeConfigurationRows,
+  selectNextWorkspaceCursor,
 } from "./queries.js";
 import * as adminQueries from "./queries.js";
 
@@ -42,6 +44,7 @@ describe("admin keys", () => {
     expect(adminKeys.configurations).toEqual(["admin", "configurations"]);
     expect(adminKeys.loopJobs).toEqual(["admin", "loop", "jobs"]);
     expect(adminKeys.loopJobDetail("job-1")).toEqual(["admin", "loop", "job", "job-1"]);
+    expect(adminKeys.workspaces).toEqual(["admin", "workspaces"]);
   });
 });
 
@@ -287,5 +290,76 @@ describe("instance configurations query", () => {
     expect(options.refetchOnReconnect).toBe(false);
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
     expect("refetchInterval" in options ? options.refetchInterval : undefined).toBeUndefined();
+  });
+});
+
+describe("instance configurations query", () => {
+  it("reads the whole key map through the client", async () => {
+    const rows = [{ key: "DISABLE_WORKSPACE_CREATION", value: "0" }];
+    const getJson = vi.fn(async () => rows);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = instanceConfigurationsQueryOptions(fakeClient);
+    expect(options.queryKey).toEqual(adminKeys.configurations);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(rows);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/configurations/");
+  });
+
+  it("never retries, refetches, or goes stale (ADM-069 shared fetch)", () => {
+    const options = instanceConfigurationsQueryOptions({} as never);
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("selectNextWorkspaceCursor", () => {
+  const page = (nextPageResults: boolean, nextCursor: string) =>
+    ({ next_page_results: nextPageResults, next_cursor: nextCursor }) as never;
+
+  it("follows the cursor while further results exist", () => {
+    expect(selectNextWorkspaceCursor(page(true, "cursor-2"))).toBe("cursor-2");
+  });
+
+  it("ends the list when no further results exist", () => {
+    expect(selectNextWorkspaceCursor(page(false, "cursor-2"))).toBe(undefined);
+  });
+
+  it("ends the list when the cursor is empty", () => {
+    expect(selectNextWorkspaceCursor(page(true, ""))).toBe(undefined);
+  });
+});
+
+describe("instance workspaces query", () => {
+  it("reads the first page without a cursor", async () => {
+    const envelope = { results: [], next_page_results: false, next_cursor: "" };
+    const getJson = vi.fn(async () => envelope);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = instanceWorkspacesQueryOptions(fakeClient);
+    expect(options.queryKey).toEqual(adminKeys.workspaces);
+    expect(options.initialPageParam).toBe(undefined);
+    await expect(options.queryFn?.({ pageParam: undefined } as never)).resolves.toEqual(envelope);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/workspaces/", {
+      query: { cursor: undefined },
+    });
+  });
+
+  it("reads later pages with the cursor", async () => {
+    const envelope = { results: [], next_page_results: false, next_cursor: "" };
+    const getJson = vi.fn(async () => envelope);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = instanceWorkspacesQueryOptions(fakeClient);
+    await expect(options.queryFn?.({ pageParam: "cursor-2" } as never)).resolves.toEqual(envelope);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/workspaces/", {
+      query: { cursor: "cursor-2" },
+    });
+  });
+
+  it("never retries, refetches, or goes stale (ADM-038 single-shot pages)", () => {
+    const options = instanceWorkspacesQueryOptions({} as never);
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
   });
 });

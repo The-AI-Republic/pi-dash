@@ -35,6 +35,7 @@ import {
   AdminSidebar,
   AdminSignInForm,
   AdminSignOutForm,
+  AdminWorkspacePage,
   adminKeys,
   adminQueryDefaults,
   adminSessionQueryOptions,
@@ -44,9 +45,16 @@ import {
   auditAdminToggles,
   COMPANY_NAME_MAX_LENGTH,
   CloudAdminEntry,
+  CONFIG_SAVE_FAILURE_MESSAGE,
+  CONFIG_SAVE_FAILURE_TITLE,
+  CONFIG_SAVE_PROGRESS_TITLE,
+  CONFIG_SAVE_SUCCESS_MESSAGE,
+  CONFIG_SAVE_SUCCESS_TITLE,
   configValueMap,
   decideAdminGuard,
+  DISABLE_WORKSPACE_CREATION_KEY,
   EMAIL_PAGE_TITLE,
+  encodeWorkspaceCreationRestricted,
   FIRST_WORKSPACE_CREATE_PATH,
   firstAdminEmail,
   FirstWorkspacePopup,
@@ -100,6 +108,7 @@ import {
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
+  instanceWorkspacesQueryOptions,
   LLM_API_KEY,
   LLM_MODEL_KEY,
   isCompanyNameText,
@@ -113,6 +122,7 @@ import {
   isSetupSubmittable,
   isSidebarEntryActive,
   isStrengthMeterVisible,
+  isWorkspaceCreationRestricted,
   LOOP_MIN_ROLE_LABELS,
   loopJobsQueryOptions,
   mergeConfigurationRows,
@@ -147,6 +157,8 @@ import {
   resolveSetupPrefill,
   resolveSignInBanners,
   resolveTelemetryPrefill,
+  selectConfigurationValue,
+  selectNextWorkspaceCursor,
   SETUP_POST_PATH,
   SETUP_TITLE,
   SIGN_IN_POST_PATH,
@@ -172,6 +184,13 @@ import {
   useUpdateGeneralSettings,
   useUpdateInstanceConfigurations,
   useUpdateLoopJob,
+  useInstanceWorkspaces,
+  useRestrictWorkspaceCreation,
+  WORKSPACE_CREATE_PATH,
+  WORKSPACE_LIST_SKELETON_ROWS,
+  WORKSPACE_SLUG_TOOLTIP,
+  WorkspaceCreationToggle,
+  WorkspaceList,
 } from "./index.js";
 
 describe("admin barrel", () => {
@@ -197,11 +216,13 @@ describe("admin barrel", () => {
       decodeSyncFlag,
       draftValue,
       encodeSyncFlag,
+      encodeWorkspaceCreationRestricted,
       firstAdminEmail,
       formatConfigFlag,
       instanceAdminsQueryOptions,
       instanceBootstrapQueryOptions,
       instanceConfigurationsQueryOptions,
+      instanceWorkspacesQueryOptions,
       selectAiSettings,
       isCompanyNameText,
       isConfigFlagOn,
@@ -214,6 +235,7 @@ describe("admin barrel", () => {
       isSetupSubmittable,
       isSidebarEntryActive,
       isStrengthMeterVisible,
+      isWorkspaceCreationRestricted,
       loopJobsQueryOptions,
       mergeConfigurationRows,
       mergeGeneralSettingsIntoBootstrap,
@@ -238,6 +260,8 @@ describe("admin barrel", () => {
       toggleLoopJobMutationOptions,
       createLoopJobMutationOptions,
       updateLoopJobMutationOptions,
+      selectConfigurationValue,
+      selectNextWorkspaceCursor,
     ]) {
       expect(typeof fn).toBe("function");
     }
@@ -250,7 +274,9 @@ describe("admin barrel", () => {
       useInstanceAdmins,
       useInstanceBootstrap,
       useInstanceConfigurations,
+      useInstanceWorkspaces,
       useLoopJobs,
+      useRestrictWorkspaceCreation,
       useSaveAiSettings,
       useToggleLoopJob,
       useCreateLoopJob,
@@ -286,9 +312,12 @@ describe("admin barrel", () => {
       AdminSidebar,
       AdminSignInForm,
       AdminSignOutForm,
+      AdminWorkspacePage,
       CloudAdminEntry,
       FirstWorkspacePopup,
       InstanceFailureScreen,
+      WorkspaceCreationToggle,
+      WorkspaceList,
     ]) {
       expect(component).toBeDefined();
     }
@@ -321,6 +350,12 @@ describe("admin barrel", () => {
       CONFIG_SAVE_FAILED_LOG,
       EMAIL_PAGE_TITLE,
       ENABLE_SIGNUP_KEY,
+      CONFIG_SAVE_FAILURE_MESSAGE,
+      CONFIG_SAVE_FAILURE_TITLE,
+      CONFIG_SAVE_PROGRESS_TITLE,
+      CONFIG_SAVE_SUCCESS_MESSAGE,
+      CONFIG_SAVE_SUCCESS_TITLE,
+      DISABLE_WORKSPACE_CREATION_KEY,
       FIRST_WORKSPACE_CREATE_PATH,
       GENERAL_NAME_REQUIRED_MESSAGE,
       GENERAL_SAVE_BUSY_LABEL,
@@ -352,8 +387,11 @@ describe("admin barrel", () => {
       SIGN_IN_POST_PATH,
       SIGN_IN_TITLE,
       SIGN_OUT_POST_PATH,
+      WORKSPACE_CREATE_PATH,
+      WORKSPACE_SLUG_TOOLTIP,
     ]) {
       expect(text.length).toBeGreaterThan(0);
     }
+    expect(WORKSPACE_LIST_SKELETON_ROWS).toBeGreaterThan(0);
   });
 });

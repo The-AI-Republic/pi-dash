@@ -8,15 +8,17 @@
 // entry gate owns the bootstrap read; later slices add their queries
 // under the same root.
 
-import { queryOptions } from "@tanstack/react-query";
+import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import {
   getAdminSession,
   getCsrfToken,
   getInstanceBootstrap,
   listInstanceAdmins,
   listInstanceConfigurations,
+  listInstanceWorkspaces,
   listLoopJobs,
   probeCloudAuthSession,
+  type AdminWorkspaceListResponse,
   type ApiClient,
   type InstanceConfigurationList,
 } from "@pidash/api-client";
@@ -43,6 +45,8 @@ export const adminKeys = {
    * (NEWFRONT-517) hangs its query off this key.
    */
   loopJobDetail: (jobId: string) => ["admin", "loop", "job", jobId],
+  /** The cursor-paginated instance workspace list. */
+  workspaces: ["admin", "workspaces"],
 } as const;
 
 /**
@@ -124,11 +128,22 @@ export function cloudAuthProbeQueryOptions(client: ApiClient) {
 }
 
 /**
+ * The next workspace-list cursor (ADM-040): the page reporting further
+ * results carries the cursor to fetch; anything else ends the list. An
+ * empty cursor reads as no further page — the list read treats it as
+ * the first page, so following it would re-read what is shown.
+ */
+export function selectNextWorkspaceCursor(lastPage: AdminWorkspaceListResponse): string | undefined {
+  if (!lastPage.next_page_results || lastPage.next_cursor === "") return undefined;
+  return lastPage.next_cursor;
+}
+
+/**
  * The configurations key map every settings page shares (ADM-019/022,
- * ADM-024/036, ADM-046): one fetch per ADM-069 — never stale, never
+ * ADM-024/036, ADM-046, ADM-069): one fetch — never stale, never
  * refetched behind the pages' backs. Saves merge the answered rows
- * back in (see mergeConfigurationRows) or refresh the key through
- * explicit invalidation.
+ * back in (see mergeConfigurationRows) instead of refetching; only an
+ * explicit mutation-side revalidation refreshes it.
  */
 export function instanceConfigurationsQueryOptions(client: ApiClient) {
   return queryOptions({
@@ -175,6 +190,22 @@ export function mergeConfigurationRows(
     if (!merged.some((existing) => existing.key === row.key)) merged.push(row);
   }
   return merged;
+}
+
+/**
+ * The instance workspace list (ADM-038, ADM-040): cursor-paginated, ten
+ * per page. Pages append; nothing already shown is refetched. Same
+ * single-shot caching as the other admin reads.
+ */
+export function instanceWorkspacesQueryOptions(client: ApiClient) {
+  return infiniteQueryOptions({
+    queryKey: adminKeys.workspaces,
+    queryFn: ({ pageParam }: { pageParam: string | undefined }) => listInstanceWorkspaces(client, pageParam),
+    getNextPageParam: selectNextWorkspaceCursor,
+    initialPageParam: undefined as string | undefined,
+    ...adminQueryDefaults,
+    retry: false,
+  });
 }
 
 /**

@@ -4,7 +4,7 @@
 // Admin data hooks (Data layer page). Components read server data and
 // flip the loop toggles through these, never through raw client calls.
 
-import { mutationOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { mutationOptions, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { QueryClient } from "@tanstack/react-query";
 import {
   checkEmailCredentials,
@@ -22,11 +22,12 @@ import {
   type LoopJobList,
   type LoopJobPatchInput,
 } from "@pidash/api-client";
+import { showToast } from "@pidash/kit";
 import * as React from "react";
 
 import { getAppClient } from "../../core/api/client.js";
 import { applyOptimisticUpdate, type Rollback } from "../../core/query/optimistic.js";
-import { notifyError, notifySuccess } from "../../shared/shell/index.js";
+import { getToastManager, notifyError, notifySuccess } from "../../shared/shell/index.js";
 import type { CloudEntrySessionState } from "./cloudEntry.js";
 import { BLANKED_MAIL_KEYS, SMTP_ENABLED_KEY, type ConfigValueMap } from "./emailConfig.js";
 import { LOOP_TOGGLE_FAILURE_MESSAGE, LOOP_TOGGLE_FAILURE_TITLE } from "./loopJobs.js";
@@ -45,9 +46,19 @@ import {
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
+  instanceWorkspacesQueryOptions,
   loopJobsQueryOptions,
   mergeConfigurationRows,
 } from "./queries.js";
+import {
+  CONFIG_SAVE_FAILURE_MESSAGE,
+  CONFIG_SAVE_FAILURE_TITLE,
+  CONFIG_SAVE_PROGRESS_TITLE,
+  CONFIG_SAVE_SUCCESS_MESSAGE,
+  CONFIG_SAVE_SUCCESS_TITLE,
+  DISABLE_WORKSPACE_CREATION_KEY,
+  encodeWorkspaceCreationRestricted,
+} from "./workspace.js";
 
 /**
  * The single instance-info read the entry gate branches on. Pending
@@ -154,6 +165,48 @@ export function useCloudAuthProbe(session: CloudEntrySessionState) {
  */
 export function useCloudSignInUrl(returnTo: string): string {
   return cloudSignInUrl(getAppClient().baseUrl, returnTo);
+}
+
+/**
+ * The instance workspace list (ADM-038, ADM-040): cursor-paginated, ten
+ * per page. `fetchNextPage` appends; nothing shown is refetched.
+ */
+export function useInstanceWorkspaces() {
+  return useInfiniteQuery(instanceWorkspacesQueryOptions(getAppClient()));
+}
+
+/**
+ * Flip the workspace-creation restriction (ADM-037): a single-key
+ * configuration write with a progress notice resolving to success or
+ * failure. Success folds the server answer into the shared cache so
+ * the switch (and every settings page) re-reads the stored value; a
+ * failed save keeps the stored value and the switch re-enables.
+ */
+export function useRestrictWorkspaceCreation() {
+  const queryClient = useQueryClient();
+  return useMutation<InstanceConfigurationList, Error, boolean>({
+    mutationFn: async (restricted) => {
+      const manager = getToastManager();
+      const progressId = showToast(manager, { title: CONFIG_SAVE_PROGRESS_TITLE, timeout: 0 });
+      try {
+        const rows = await updateInstanceConfigurations(getAppClient(), {
+          [DISABLE_WORKSPACE_CREATION_KEY]: encodeWorkspaceCreationRestricted(restricted),
+        });
+        manager.close(progressId);
+        notifySuccess(CONFIG_SAVE_SUCCESS_TITLE, CONFIG_SAVE_SUCCESS_MESSAGE);
+        return rows;
+      } catch (error) {
+        manager.close(progressId);
+        notifyError(CONFIG_SAVE_FAILURE_TITLE, CONFIG_SAVE_FAILURE_MESSAGE);
+        throw error;
+      }
+    },
+    onSuccess: (rows) => {
+      queryClient.setQueryData<InstanceConfigurationList | undefined>(adminKeys.configurations, (cached) =>
+        mergeConfigurationRows(cached, rows)
+      );
+    },
+  });
 }
 
 /**

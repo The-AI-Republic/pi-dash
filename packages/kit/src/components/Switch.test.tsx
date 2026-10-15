@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { Switch } from "./Switch";
@@ -133,5 +133,50 @@ describe("Switch", () => {
   it("passes extra classes through", () => {
     render(<Switch checked={false} label="Enable job" onCheckedChange={() => {}} className="extra" />);
     expect(screen.getByRole("switch", { name: "Enable job" }).className).toContain("extra");
+  });
+
+  it("exposes the on state to assistive technology", () => {
+    render(<Switch checked label="Email updates" onCheckedChange={() => {}} />);
+    const control = screen.getByRole("switch", { name: "Email updates" });
+    expect(control).toHaveAttribute("aria-checked", "true");
+    expect(control).toHaveAttribute("data-checked");
+    expect(control).not.toBeDisabled();
+  });
+
+  it("exposes the off state without the checked marker", () => {
+    render(<Switch checked={false} label="Email updates" onCheckedChange={() => {}} />);
+    const control = screen.getByRole("switch", { name: "Email updates" });
+    expect(control).toHaveAttribute("aria-checked", "false");
+    expect(control).not.toHaveAttribute("data-checked");
+  });
+
+  it("reports the flipped state on user input", () => {
+    const onCheckedChange = vi.fn();
+    render(<Switch checked={false} label="Email updates" onCheckedChange={onCheckedChange} />);
+    fireEvent.click(screen.getByRole("switch", { name: "Email updates" }));
+    expect(onCheckedChange).toHaveBeenCalledWith(true);
+  });
+
+  it("stays silent when disabled", () => {
+    const onCheckedChange = vi.fn();
+    render(<Switch checked={false} label="Email updates" disabled onCheckedChange={onCheckedChange} />);
+    const control = screen.getByRole("switch", { name: "Email updates" });
+    expect(control).toHaveAttribute("aria-disabled", "true");
+    expect(control).toHaveAttribute("data-disabled");
+    fireEvent.click(control);
+    expect(onCheckedChange).not.toHaveBeenCalled();
+  });
+
+  it("renders without a handler or label", () => {
+    render(<Switch checked />);
+    const control = screen.getByRole("switch");
+    expect(control).toBeInTheDocument();
+    expect(control).not.toHaveAttribute("aria-label");
+    fireEvent.click(control);
+  });
+
+  it("accepts an extra class", () => {
+    render(<Switch checked label="Email updates" className="extra-class" />);
+    expect(screen.getByRole("switch", { name: "Email updates" })).toHaveClass("extra-class");
   });
 });
