@@ -197,6 +197,8 @@ pub struct RunnerSettings {
     pub long_poll_interval_secs: i64,
     pub access_token_ttl_secs: i64,
     pub offline_threshold_secs: i64,
+    pub offline_pin_release_secs: i64,
+    pub offline_run_fail_secs: i64,
     pub offline_stream_ttl_secs: i64,
     pub offline_stream_maxlen: i64,
     pub stream_min_retention_secs: i64,
@@ -1084,6 +1086,10 @@ impl Settings {
                     .req_int("ACCESS_TOKEN_TTL_SECS", ConfigValue::from(3600))?,
                 offline_threshold_secs: ctx
                     .req_int("RUNNER_OFFLINE_THRESHOLD_SECS", ConfigValue::from(50))?,
+                offline_pin_release_secs: ctx
+                    .req_int("RUNNER_OFFLINE_PIN_RELEASE_SECS", ConfigValue::from(300))?,
+                offline_run_fail_secs: ctx
+                    .req_int("RUNNER_OFFLINE_RUN_FAIL_SECS", ConfigValue::from(3600))?,
                 offline_stream_ttl_secs: ctx
                     .req_int("OFFLINE_STREAM_TTL_SECS", ConfigValue::from(86400))?,
                 offline_stream_maxlen: ctx
@@ -1326,6 +1332,8 @@ impl Settings {
             "LONG_POLL_INTERVAL_SECS",
             "ACCESS_TOKEN_TTL_SECS",
             "RUNNER_OFFLINE_THRESHOLD_SECS",
+            "RUNNER_OFFLINE_PIN_RELEASE_SECS",
+            "RUNNER_OFFLINE_RUN_FAIL_SECS",
             "OFFLINE_STREAM_TTL_SECS",
             "OFFLINE_STREAM_MAXLEN",
             "RUNNER_STREAM_MIN_RETENTION_SECS",

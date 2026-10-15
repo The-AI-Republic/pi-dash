@@ -579,21 +579,29 @@ async fn reap_stale_busy_runs(
         .map_err(|_| server_error())?;
     let statuses = session_kernel::reapable_statuses(false);
 
-    // `:211-241`: the cancel retry registers before the early-return
-    // gate below, so it fires even when nothing reaps.
+    // `:211-241` (`70d684af`): the cancel retry registers before
+    // the early-return gate below, so it fires even when nothing
+    // reaps. The claim probe reads the reported run's status +
+    // error code: `cancellation_pending` while still pending, else
+    // `run_already_<status>` when the offline sweep finalized it.
     let mut retry_cancel = None;
     if let Some(in_flight) = in_flight_id {
-        let exists = sqlx::query_scalar::<_, i32>(session_kernel::CANCEL_REQUESTED_EXISTS_SQL)
+        let claimed: Option<(String, String)> = sqlx::query_as(session_kernel::IN_FLIGHT_CLAIM_SQL)
             .bind(in_flight)
             .bind(runner_id)
             .fetch_optional(&mut **tx)
             .await
             .map_err(heartbeat_error)?;
-        if session_kernel::should_schedule_cancel_retry(true, exists.is_some(), false) {
-            retry_cancel = Some(SessionEffect::RetryCancelDelivery {
-                runner_id,
-                message: session_kernel::cancel_retry_message(&in_flight.to_string()),
-            });
+        if let Some((status, error_code)) = claimed.as_ref() {
+            if let Some(reason) = session_kernel::cancel_reason_for_claim(status, error_code) {
+                retry_cancel = Some(SessionEffect::RetryCancelDelivery {
+                    runner_id,
+                    message: session_kernel::cancel_retry_message_with_reason(
+                        &in_flight.to_string(),
+                        &reason,
+                    ),
+                });
+            }
         }
     }
 

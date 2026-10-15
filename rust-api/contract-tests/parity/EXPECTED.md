@@ -22,7 +22,7 @@ Counts (2026-10-15, `pi_dash.settings.test`):
 - Routes: 528 Django rows — 521 OWNED, 7 MISSING (all listed below),
   9 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
 - Jobs: 85 tasks — 54 OWNED, 31 proxied by design, 0 MISSING;
-  beat 26/26 OWNED.
+  beat 28/28 OWNED (26 same-cadence + 2 rust-ahead drift).
 
 ## Routes
 
@@ -290,7 +290,17 @@ PROXIED :: pi_dash.bgtasks.workspace_invitation_task.workspace_invitation :: dja
 
 ## Beat
 
-26/26 entries OWNED: same task, same cadence (the four
+28/28 entries OWNED: same task, same cadence (the four
 settings-backed intervals match Django's `pi_dash.settings.test`
-values: 10/30/300/30s). Any beat drift fails the check structurally —
-there is no "expected beat miss" list.
+values: 10/30/300/30s), plus 2 rust-ahead drift entries whose task +
+cadence match the pinned main-commit truth in
+`RUST_AHEAD_BEAT_ENTRIES` (`job_inventory.py`):
+
+- `runner-release-pins-on-offline-runners` and
+  `runner-fail-runs-on-offline-runners` (PIDASHCONV-1063 @ 70d684af):
+  exist on origin/main; the checkout's frozen Django predates them.
+  The check reports `ahead-map-stale` once Django gains the entries
+  (PIDASHCONV-1055 merge) — delete the map rows then.
+
+Any other beat drift fails the check structurally — there is no
+"expected beat miss" list.

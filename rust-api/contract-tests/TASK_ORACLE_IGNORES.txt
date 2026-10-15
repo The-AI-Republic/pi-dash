@@ -30,3 +30,14 @@ assistant/test_turn_errors.py
 loop/test_worker.py
 orchestration/test_beat_schedule.py
 orchestration/test_ticker_tasks.py
+# Stage-8 drift (PIDASHCONV-1055 audit): these files assert behavior that
+# exists only on origin/main. The matrix serves Django from the checkout
+# (frozen, predates the drift), so the Django run cannot pass until
+# PIDASHCONV-1055 merges main into rust-dev. Each file passes locally
+# against main-Django + Rust (see its issue PR). At the merge: delete the
+# recovery line (it needs no worker); move the sweeps line to the
+# worker-plane oracle pytest selection in rust-api-contract-tests.yml
+# (it needs a worker, like assistant/test_tasks_turn.py).
+# (Process note on PIDASHCONV-1.)
+runner/test_offline_runner_recovery.py
+runner/test_offline_runner_sweeps.py

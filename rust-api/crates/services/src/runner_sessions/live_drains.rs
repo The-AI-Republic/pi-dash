@@ -409,6 +409,8 @@ mod tests {
             long_poll_interval_secs: 25,
             access_token_ttl_secs: 3600,
             offline_threshold_secs: 90,
+            offline_pin_release_secs: 300,
+            offline_run_fail_secs: 3600,
             offline_stream_ttl_secs: 86400,
             offline_stream_maxlen: 1000,
             stream_min_retention_secs: 3600,

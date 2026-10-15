@@ -867,7 +867,42 @@ pub fn stale_pairs_sql(
 
 /// In-flight cancel-requested existence probe (`:213-217`,
 /// `reap_poll_path.sql[0]`): `$1` in-flight id, `$2` runner id.
+/// Superseded on the poll path by [`IN_FLIGHT_CLAIM_SQL`]
+/// (`70d684af`); kept pinned to the fixture (no executor reads it
+/// anymore).
 pub const CANCEL_REQUESTED_EXISTS_SQL: &str = "SELECT 1 AS \"a\" FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"runner_id\" = $2 AND \"agent_run\".\"status\" = 'cancel_requested') LIMIT 1";
+
+/// `error_code` on runs that `runner.fail_runs_on_offline_runners`
+/// moved to a terminal status (FAILED, or CANCELLED for a pending
+/// cancellation) (`session_service.py`, `70d684af`).
+pub const RUNNER_OFFLINE_ERROR_CODE: &str = "runner_offline";
+
+/// In-flight claim probe (`70d684af`): the reported run's `status`
+/// and `error_code` (`filter(id, runner).values("status",
+/// "error_code").first()`). `$1` in-flight id, `$2` runner id.
+/// Replaces [`CANCEL_REQUESTED_EXISTS_SQL`] on the poll path so a
+/// daemon that returns to a sweep-finalized run is told to stop.
+pub const IN_FLIGHT_CLAIM_SQL: &str = "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_code\" FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"runner_id\" = $2) ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1";
+
+/// The cancel reason for a claimed in-flight run (`70d684af`):
+/// `cancellation_pending` while the run is still
+/// `CANCEL_REQUESTED`, else `run_already_<status>` when the offline
+/// sweep finalized it (FAILED or CANCELLED with
+/// [`RUNNER_OFFLINE_ERROR_CODE`]) — the issue may already have a
+/// replacement run elsewhere. `None` schedules no retry. The
+/// `CANCEL_REQUESTED` arm wins, exactly as the source's `if`/`elif`
+/// order.
+pub fn cancel_reason_for_claim(status: &str, error_code: &str) -> Option<String> {
+    if status == AgentRunStatus::CancelRequested.value() {
+        return Some("cancellation_pending".to_owned());
+    }
+    if (status == AgentRunStatus::Failed.value() || status == AgentRunStatus::Cancelled.value())
+        && error_code == RUNNER_OFFLINE_ERROR_CODE
+    {
+        return Some(format!("run_already_{status}"));
+    }
+    None
+}
 
 /// Whether the poll schedules the cancel redelivery
 /// (`:211-241`): only when an in-flight id parsed, the run is
@@ -888,14 +923,18 @@ pub fn should_schedule_cancel_retry(
 /// `cancellation_pending` — differs from the reconnect reason the
 /// redeliver path uses.
 pub fn cancel_retry_message(run_id: &str) -> Map<String, Value> {
+    cancel_retry_message_with_reason(run_id, "cancellation_pending")
+}
+
+/// The cancel frame with an explicit reason (`70d684af`
+/// generalizes the retry to `run_already_<status>` for runs the
+/// offline sweep finalized while the daemon was silent).
+pub fn cancel_retry_message_with_reason(run_id: &str, reason: &str) -> Map<String, Value> {
     let mut msg = Map::with_capacity(4);
     msg.insert("v".to_string(), Value::from(1));
     msg.insert("type".to_string(), Value::String("cancel".to_string()));
     msg.insert("run_id".to_string(), Value::String(run_id.to_string()));
-    msg.insert(
-        "reason".to_string(),
-        Value::String("cancellation_pending".to_string()),
-    );
+    msg.insert("reason".to_string(), Value::String(reason.to_string()));
     msg
 }
 
@@ -2458,6 +2497,51 @@ mod tests {
             cancel_retry_error_line("run-1", "boom"),
             "session_service: failed to redeliver cancellation for run run-1: boom"
         );
+    }
+
+    #[test]
+    fn offline_claim_reasons_follow_70d684af() {
+        assert_eq!(RUNNER_OFFLINE_ERROR_CODE, "runner_offline");
+        assert_eq!(
+            IN_FLIGHT_CLAIM_SQL,
+            "SELECT \"agent_run\".\"status\", \"agent_run\".\"error_code\" FROM \"agent_run\" \
+             WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"runner_id\" = $2) \
+             ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1",
+        );
+        // Still pending: the old reason.
+        assert_eq!(
+            cancel_reason_for_claim("cancel_requested", ""),
+            Some("cancellation_pending".to_owned())
+        );
+        // Sweep-finalized while the daemon was silent: told to stop.
+        assert_eq!(
+            cancel_reason_for_claim("failed", "runner_offline"),
+            Some("run_already_failed".to_owned())
+        );
+        assert_eq!(
+            cancel_reason_for_claim("cancelled", "runner_offline"),
+            Some("run_already_cancelled".to_owned())
+        );
+        // Same statuses, another cause: quiet (heartbeat-reaped runs and
+        // plain cancellations never redeliver).
+        assert_eq!(cancel_reason_for_claim("failed", "heartbeat_reaped"), None);
+        assert_eq!(cancel_reason_for_claim("failed", ""), None);
+        assert_eq!(cancel_reason_for_claim("cancelled", ""), None);
+        // Live statuses: quiet.
+        assert_eq!(cancel_reason_for_claim("running", ""), None);
+        assert_eq!(cancel_reason_for_claim("running", "runner_offline"), None);
+        // The CANCEL_REQUESTED arm wins over the stamp (source if/elif order).
+        assert_eq!(
+            cancel_reason_for_claim("cancel_requested", "runner_offline"),
+            Some("cancellation_pending".to_owned())
+        );
+        // Reason lands in the frame verbatim.
+        let msg = cancel_retry_message_with_reason("run-1", "run_already_failed");
+        assert_eq!(
+            msg.get("reason").and_then(Value::as_str),
+            Some("run_already_failed")
+        );
+        assert_eq!(msg.get("run_id").and_then(Value::as_str), Some("run-1"));
     }
 
     // -- live-state upsert ----------------------------------------------
