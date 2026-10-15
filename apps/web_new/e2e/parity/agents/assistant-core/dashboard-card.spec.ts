@@ -18,7 +18,7 @@ import {
 } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 import { schedulerHarness } from "../support";
-import { API_KEY_REMINDER, DUMMY_PROVIDER, assistantToast, dismissTour } from "./support";
+import { API_KEY_REMINDER, DUMMY_PROVIDER, assistantToast, dismissTour, dismissTourIfReturned } from "./support";
 
 const ROWS = ["AGT-048"];
 
@@ -95,6 +95,10 @@ test(
       await expect.poll(() => driver.assistantCardVisible(), { timeout: 60_000 }).toBe(true);
       const draft = `card hello ${tag}`;
       await driver.assistantCardFillDraft(draft);
+      // The production build can re-show the dismissed tour on a later
+      // Home load (NEWFRONT-372); clear it when it returns so the Ask
+      // click is not blocked by its backdrop.
+      await dismissTourIfReturned(driver);
       await driver.assistantCardClickAsk();
       let path = "";
       await expect
@@ -118,6 +122,8 @@ test(
       // The keyless card still renders its entry; recents prove it.
       expect((await driver.assistantCardRecents()).length).toBeGreaterThan(0);
       await driver.assistantCardFillDraft(`blocked ${tag}`);
+      // Same re-shown tour guard as the Ask step above (NEWFRONT-372).
+      await dismissTourIfReturned(driver);
       await driver.assistantCardClickAsk();
       const message = await assistantToast(driver, "API key required");
       expect(message).toBe(API_KEY_REMINDER);
