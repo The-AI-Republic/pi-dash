@@ -98,7 +98,8 @@ use pidash_services::runner_runs::guards;
 use crate::app_issues::{query_last, QueryMap};
 use crate::middleware::SessionHandle;
 use crate::runner_runs::runs::{
-    decode_run, render_list_row, run_select_list, tool_calls_for_many, total_pages, PodMiniStrings,
+    binding_details_for_many, decode_run, render_list_row, run_select_list, tool_calls_for_many,
+    total_pages, PodMiniStrings,
 };
 use crate::state::AppState;
 
@@ -665,14 +666,29 @@ pub async fn binding_runs(
         Ok(grouped) => grouped,
         Err(response) => return response,
     };
-    let empty_calls = Vec::new();
-    let results: Vec<Value> = runs
+    let binding_ids: Vec<Uuid> = runs
         .iter()
-        .map(|(run, pod)| {
-            let calls = tool_calls.get(&run.id).unwrap_or(&empty_calls);
-            render_list_row(run, pod, calls)
-        })
+        .filter_map(|(run, _)| run.scheduler_binding_id)
         .collect();
+    let bindings = match binding_details_for_many(pool, &binding_ids).await {
+        Ok(grouped) => grouped,
+        Err(response) => return response,
+    };
+    let empty_calls = Vec::new();
+    let mut results: Vec<Value> = Vec::with_capacity(runs.len());
+    for (run, pod) in &runs {
+        let calls = tool_calls.get(&run.id).unwrap_or(&empty_calls);
+        // Set-but-unresolvable binding id: Django raises on the FK
+        // access — a 500, never a null detail.
+        let binding = match run.scheduler_binding_id {
+            None => None,
+            Some(binding_id) => match bindings.get(&binding_id) {
+                Some(detail) => Some(detail),
+                None => return Denial::ServerError.into_response(),
+            },
+        };
+        results.push(render_list_row(run, pod, calls, binding));
+    }
     // `count` is the page length, not the total (`views.py:363`).
     let count = results.len();
     let body = serde_json::json!({
