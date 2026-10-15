@@ -14,8 +14,10 @@ import {
   getCsrfToken,
   getInstanceBootstrap,
   listInstanceAdmins,
+  listInstanceConfigurations,
   probeCloudAuthSession,
   type ApiClient,
+  type InstanceConfigurationList,
 } from "@pidash/api-client";
 
 export const adminKeys = {
@@ -30,6 +32,8 @@ export const adminKeys = {
   session: ["admin", "session"],
   /** The cloud entry's one-shot auth probe (cloud only). */
   cloudProbe: ["admin", "cloud", "probe"],
+  /** The shared configurations key map every settings page reads. */
+  configurations: ["admin", "configurations"],
 } as const;
 
 /**
@@ -108,6 +112,38 @@ export function cloudAuthProbeQueryOptions(client: ApiClient) {
     ...adminQueryDefaults,
     retry: false,
   });
+}
+
+/**
+ * The configurations key map every settings page shares (ADM-024,
+ * ADM-036): one fetch, never stale, never refetched behind the pages'
+ * backs. Saves merge the answered rows back in (see
+ * mergeConfigurationRows) instead of refetching.
+ */
+export function instanceConfigurationsQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: adminKeys.configurations,
+    queryFn: () => listInstanceConfigurations(client),
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}
+
+/**
+ * Fold answered rows into the cached key map by key, so a save re-seeds
+ * the pages from stored state without a refetch. Rows the server did
+ * not answer keep their cached values; an empty cache starts from the
+ * answer alone.
+ */
+export function mergeConfigurationRows(
+  current: InstanceConfigurationList | undefined,
+  updated: InstanceConfigurationList
+): InstanceConfigurationList {
+  if (current === undefined) return [...updated];
+  const answered = new Map(updated.map((row) => [row.key, row]));
+  return current.map((row) => answered.get(row.key) ?? row);
 }
 
 /**

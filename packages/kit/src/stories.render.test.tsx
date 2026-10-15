@@ -18,6 +18,7 @@ import * as dialogStories from "./components/Dialog.stories";
 import * as emptyStateStories from "./components/EmptyState.stories";
 import * as overlaysStories from "./components/overlays.stories";
 import * as primitivesStories from "./components/primitives.stories";
+import * as switchStories from "./components/Switch.stories";
 import * as toastStories from "./components/Toast.stories";
 import * as virtualListStories from "./components/VirtualList.stories";
 
@@ -30,6 +31,7 @@ const modules: Record<string, Record<string, unknown>> = {
   "EmptyState.stories": emptyStateStories,
   "overlays.stories": overlaysStories,
   "primitives.stories": primitivesStories,
+  "Switch.stories": switchStories,
   "Toast.stories": toastStories,
   "VirtualList.stories": virtualListStories,
 };

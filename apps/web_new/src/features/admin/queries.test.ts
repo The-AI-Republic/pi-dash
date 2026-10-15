@@ -11,6 +11,8 @@ import {
   cloudAuthProbeQueryOptions,
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
+  instanceConfigurationsQueryOptions,
+  mergeConfigurationRows,
 } from "./queries.js";
 import * as adminQueries from "./queries.js";
 
@@ -36,6 +38,7 @@ describe("admin keys", () => {
     expect(adminKeys.csrf).toEqual(["admin", "csrf"]);
     expect(adminKeys.session).toEqual(["admin", "session"]);
     expect(adminKeys.cloudProbe).toEqual(["admin", "cloud", "probe"]);
+    expect(adminKeys.configurations).toEqual(["admin", "configurations"]);
   });
 });
 
@@ -113,6 +116,55 @@ describe("admin session query", () => {
     expect(options.refetchOnWindowFocus).toBe(false);
     expect(options.refetchOnReconnect).toBe(false);
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("instance configurations query", () => {
+  const row = (key: string, value: string | null) => ({
+    id: "33333333-3333-4333-8333-333333333333",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    created_by: null,
+    updated_by: null,
+    deleted_at: null,
+    key,
+    value,
+    category: "AUTHENTICATION",
+    is_encrypted: false,
+    source: "db" as const,
+    is_managed: false,
+  });
+
+  it("reads the key map through the client", async () => {
+    const rows = [row("ENABLE_SIGNUP", "1")];
+    const getJson = vi.fn(async () => rows);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = instanceConfigurationsQueryOptions(fakeClient);
+    expect(options.queryKey).toEqual(adminKeys.configurations);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(rows);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/configurations/");
+  });
+
+  it("never retries, refetches, or goes stale (shared single fetch)", () => {
+    const options = instanceConfigurationsQueryOptions({} as never);
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("merges answered rows over the cached map by key", () => {
+    const current = [row("ENABLE_SIGNUP", "1"), row("ENABLE_MAGIC_LINK_LOGIN", "0")];
+    const updated = [{ ...row("ENABLE_MAGIC_LINK_LOGIN", "1"), updated_at: "2026-02-02T00:00:00Z" }];
+    expect(mergeConfigurationRows(current, updated)).toEqual([
+      row("ENABLE_SIGNUP", "1"),
+      { ...row("ENABLE_MAGIC_LINK_LOGIN", "1"), updated_at: "2026-02-02T00:00:00Z" },
+    ]);
+  });
+
+  it("starts an empty cache from the answer alone", () => {
+    const updated = [row("ENABLE_SIGNUP", "0")];
+    expect(mergeConfigurationRows(undefined, updated)).toEqual(updated);
   });
 });
 

@@ -6,7 +6,14 @@
 // through raw client calls.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { cloudSignInUrl, updateInstance, type InstanceBootstrap, type InstancePatch } from "@pidash/api-client";
+import {
+  cloudSignInUrl,
+  updateInstance,
+  updateInstanceConfigurations,
+  type InstanceBootstrap,
+  type InstanceConfigurationList,
+  type InstancePatch,
+} from "@pidash/api-client";
 import * as React from "react";
 
 import { getAppClient } from "../../core/api/client.js";
@@ -25,6 +32,8 @@ import {
   cloudAuthProbeQueryOptions,
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
+  instanceConfigurationsQueryOptions,
+  mergeConfigurationRows,
 } from "./queries.js";
 
 /**
@@ -75,6 +84,40 @@ export function useUpdateGeneralSettings() {
  */
 export function useAdminSession() {
   return useQuery(adminSessionQueryOptions(getAppClient()));
+}
+
+/**
+ * The shared configurations key map every settings page reads. One
+ * fetch for the console lifetime; saves merge the answered rows back
+ * into it, so pages always render stored state.
+ */
+export function useInstanceConfigurations() {
+  return useQuery(instanceConfigurationsQueryOptions(getAppClient()));
+}
+
+/** Console line for a failed configurations write, pinned by the parity scenarios. */
+export const CONFIG_SAVE_FAILED_LOG = "Error updating the instance configurations";
+
+/**
+ * The shared configurations PATCH (ADM-023, ADM-025): writes a partial
+ * string map, folds the answered rows into the cached key map so saved
+ * pages turn clean, and logs failures to the console. Pages attach
+ * their own notices per mutate call; the hook owns only the shared
+ * cache merge and the failure log.
+ */
+export function useUpdateInstanceConfigurations() {
+  const queryClient = useQueryClient();
+  return useMutation<InstanceConfigurationList, Error, Record<string, string>>({
+    mutationFn: (patch) => updateInstanceConfigurations(getAppClient(), patch),
+    onSuccess: (updated) => {
+      queryClient.setQueryData<InstanceConfigurationList | undefined>(adminKeys.configurations, (current) =>
+        mergeConfigurationRows(current, updated)
+      );
+    },
+    onError: (error) => {
+      console.error(CONFIG_SAVE_FAILED_LOG, error);
+    },
+  });
 }
 
 /**
