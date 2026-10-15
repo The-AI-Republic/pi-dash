@@ -58,6 +58,7 @@ function input(overrides: Partial<WorkItemContextInput> = {}): WorkItemContextIn
       copyId: () => undefined,
       copyTitle: () => undefined,
       copyUrl: () => undefined,
+      close: () => undefined,
     },
     ...overrides,
   };
@@ -165,6 +166,35 @@ describe("selectWorkItemContext", () => {
     assignee.usePageState("ada").options[0]!.run();
     expect(updateFields).toHaveBeenCalledWith({ assignee_ids: [ME_ID] });
     expect(assignee.usePageState("zzz").options).toHaveLength(0);
+  });
+
+  it("closes on single-change picks and stays open on multi-change picks", () => {
+    const close = vi.fn();
+    const { pages } = selectWorkItemContext(input({ actions: { ...input().actions, close } }));
+    const runFirst = (placeholder: string): void => {
+      pages
+        .find((page) => page.placeholder === placeholder)!
+        .usePageState("")
+        .options[0]!.run();
+    };
+    for (const placeholder of ["Change state", "Change priority", "Change estimate", "Add to cycle"]) {
+      close.mockClear();
+      runFirst(placeholder);
+      expect(close).toHaveBeenCalledTimes(1);
+    }
+    // Unchanged picks no-op the write but still confirm by closing.
+    close.mockClear();
+    pages
+      .find((page) => page.placeholder === "Change priority")!
+      .usePageState("")
+      .options.find((option) => option.id === "medium")!
+      .run();
+    expect(close).toHaveBeenCalledTimes(1);
+    for (const placeholder of ["Assign to", "Add labels", "Add to modules"]) {
+      close.mockClear();
+      runFirst(placeholder);
+      expect(close).not.toHaveBeenCalled();
+    }
   });
 
   it("toggles assignees, labels, modules and the self assignment", () => {

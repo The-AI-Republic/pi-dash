@@ -8,13 +8,13 @@
 // thin module contracts; full module ownership stays in the modules
 // area.
 
-import { MODULE_STATUSES } from "@pidash/api-client";
+import { MODULE_STATUSES, type ModuleStatus } from "@pidash/api-client";
 
 import type { PalettePage, PalettePageOption, PalettePageState, PidashCommand } from "../../commands/registry.js";
 import type { NamedProjectMember } from "./api.js";
 import { canEditInProject, CONTEXT_INDICATORS, CONTEXT_SECTIONS, type ProjectStanding } from "./types.js";
 
-const STATUS_TITLES: Record<string, string> = {
+const STATUS_TITLES: Record<ModuleStatus, string> = {
   backlog: "Backlog",
   planned: "Planned",
   "in-progress": "In Progress",
@@ -38,6 +38,11 @@ export interface ModuleContextInput {
   setStatus: (status: string) => void;
   toggleFavorite: () => void;
   copyUrl: () => void;
+  /**
+   * Close the palette. The single-change status picker calls this on
+   * every pick; the member picker stays open across toggles.
+   */
+  close: () => void;
 }
 
 export interface ModuleContextSelection {
@@ -105,10 +110,11 @@ export function selectModuleContext(input: ModuleContextInput): ModuleContextSel
       usePageState: readyState(
         MODULE_STATUSES.map((status) => ({
           id: status,
-          title: STATUS_TITLES[status] ?? status,
+          title: STATUS_TITLES[status],
           selected: status === input.status,
           run: () => {
             if (status !== input.status) input.setStatus(status);
+            input.close();
           },
         })),
         "No statuses found",

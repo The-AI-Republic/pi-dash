@@ -90,7 +90,6 @@ function BrowseIssueDetail({
     moduleIds: issue.module_ids,
     isEpic: issue.is_epic ?? false,
     parentId: issue.parent_id,
-    createdBy: issue.created_by,
     archived: issue.archived_at !== null,
     estimatesEnabled: project?.estimate !== null && project?.estimate !== undefined,
     cycleView: project?.cycle_view ?? false,

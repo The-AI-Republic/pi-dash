@@ -99,10 +99,15 @@ function sectionRank(section: string): number {
   return rank === -1 ? SECTION_ORDER.length : rank;
 }
 
-/** Snapshot of every registered command, in palette section order then title. */
+/**
+ * Snapshot of every registered command: context-marked commands first
+ * (SHELL-087/090: the entity group appears ahead of the generic groups),
+ * then palette section order, then title.
+ */
 export function listCommands(): PidashCommand[] {
   return [...commands.values()].sort(
     (a, b) =>
+      Number(b.context !== undefined) - Number(a.context !== undefined) ||
       sectionRank(a.section ?? "General") - sectionRank(b.section ?? "General") ||
       (a.section ?? "General").localeCompare(b.section ?? "General") ||
       a.title.localeCompare(b.title)
@@ -247,14 +252,35 @@ interface Chord {
   key: string;
 }
 
-/** Parse "mod+shift+k" into its parts. Returns null when malformed. */
+/**
+ * Named non-printable keys a chord may end in (matched against
+ * KeyboardEvent.key case-insensitively, e.g. "mod+backspace" for the
+ * work-item Delete entry, SHELL-090).
+ */
+const NAMED_KEYS = new Set([
+  "backspace",
+  "delete",
+  "enter",
+  "escape",
+  "tab",
+  "arrowup",
+  "arrowdown",
+  "arrowleft",
+  "arrowright",
+]);
+
+/**
+ * Parse "mod+shift+k" into its parts. The key is one printable
+ * character or a named non-printable key; anything else is malformed
+ * and returns null.
+ */
 export function parseShortcut(shortcut: string): Chord | null {
   const parts = shortcut
     .toLowerCase()
     .split("+")
     .map((part) => part.trim());
   const key = parts.pop();
-  if (!key || key.length !== 1) return null;
+  if (!key || (key.length !== 1 && !NAMED_KEYS.has(key))) return null;
   const rest = new Set(parts);
   if (rest.size !== parts.length) return null;
   for (const part of rest) {

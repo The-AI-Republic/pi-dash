@@ -65,25 +65,42 @@ export function useGlobalShortcuts(): void {
         return;
       }
       if (isTypingTarget(event.target)) return;
+      const bare = !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+      if (bare && event.key.length === 1) {
+        // Bare keys accumulate a two-key sequence first: a registered
+        // sequence wins over any single-key chord on its second key
+        // (SHELL-090: "op" still opens the project picker on entity
+        // screens with a bare "p" command). Single-key chords fire only
+        // as the first accumulated key.
+        sequence = `${sequence}${event.key.toLowerCase()}`.slice(-2);
+        const sequenced = findCommandBySequence(sequence);
+        if (sequenced) {
+          event.preventDefault();
+          clearWindow();
+          fireCommand(sequenced, { openPalette, openPage });
+          return;
+        }
+        if (sequence.length === 1) {
+          const chord = listCommands().find(
+            (command) => command.shortcut !== undefined && matchesShortcut(event, command.shortcut)
+          );
+          if (chord) {
+            event.preventDefault();
+            clearWindow();
+            fireCommand(chord, { openPalette, openPage });
+            return;
+          }
+        }
+        armWindow();
+        return;
+      }
       const chord = listCommands().find(
         (command) => command.shortcut !== undefined && matchesShortcut(event, command.shortcut)
       );
       if (chord) {
         event.preventDefault();
         fireCommand(chord, { openPalette, openPage });
-        return;
       }
-      const bare = !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
-      if (!bare || event.key.length !== 1) return;
-      sequence = `${sequence}${event.key.toLowerCase()}`.slice(-2);
-      const sequenced = findCommandBySequence(sequence);
-      if (sequenced) {
-        event.preventDefault();
-        clearWindow();
-        fireCommand(sequenced, { openPalette, openPage });
-        return;
-      }
-      armWindow();
     };
 
     globalThis.window.addEventListener("keydown", onKeyDown);

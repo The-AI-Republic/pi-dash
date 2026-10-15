@@ -120,8 +120,57 @@
   --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.6);
 }
 
+/* High-contrast pair (SHELL-095): extreme text/background distance with
+   stronger borders and accents, so every text pair clears WCAG AA. */
+[data-theme="light-contrast"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --subtle: #f4f4f5;
+  --border: #52525b;
+  --text: #000000;
+  --text-muted: #3f3f46;
+  --accent: #3f46a8;
+  --accent-hover: #333a8f;
+  --accent-subtle: #e0e4f7;
+  --on-accent: #ffffff;
+  --success: #1e6e3e;
+  --warning: #8a5a00;
+  --danger: #b3261e;
+}
+
+[data-theme="dark-contrast"] {
+  color-scheme: dark;
+  --bg: #000000;
+  --surface: #0a0a0a;
+  --subtle: #17171a;
+  --border: #a1a1aa;
+  --text: #ffffff;
+  --text-muted: #c9c9ce;
+  --accent: #a5abf5;
+  --accent-hover: #b9bef7;
+  --accent-subtle: #23264d;
+  --on-accent: #000000;
+  --success: #6fdd9a;
+  --warning: #f0b95a;
+  --danger: #ff7a7f;
+  --shadow-popover: 0 4px 16px rgb(0 0 0 / 0.5);
+  --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.6);
+}
+
+/* Custom palettes (SHELL-095): the engine writes the custom variables
+   beside the mark; unset variables fall back to the light accents. */
+[data-theme="custom"] {
+  --bg: var(--theme-custom-background, #ffffff);
+  --accent: var(--theme-custom-primary, #5e6ad2);
+  --accent-hover: var(--theme-custom-primary, #5e6ad2);
+  --on-accent: #ffffff;
+}
+
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  :root:not([data-theme="light"]):not([data-theme="light-contrast"]):not([data-theme="dark-contrast"]):not(
+      [data-theme="custom"]
+    ) {
     color-scheme: dark;
     --bg: #0b0b0d;
     --surface: #121214;

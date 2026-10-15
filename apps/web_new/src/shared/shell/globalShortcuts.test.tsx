@@ -139,6 +139,49 @@ describe("useGlobalShortcuts", () => {
     }
   });
 
+  it("fires a bare single-key chord as the first accumulated key", () => {
+    const run = vi.fn();
+    const unregister = registerCommands([{ id: "ctx.state", title: "Change state", shortcut: "s", run }]);
+    try {
+      render(<Probe />);
+      expect(press(window, { key: "s" })).toBe(true);
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      unregister();
+    }
+  });
+
+  it("prefers a two-key sequence over a bare chord on its second key", () => {
+    const sequenced = vi.fn();
+    const chorded = vi.fn();
+    const unregister = registerCommands([
+      { id: "shell.open-project", title: "Open a project", sequence: "op", run: sequenced },
+      { id: "ctx.priority", title: "Change priority", shortcut: "p", run: chorded },
+    ]);
+    try {
+      render(<Probe />);
+      press(window, { key: "o" });
+      expect(press(window, { key: "p" })).toBe(true);
+      expect(sequenced).toHaveBeenCalledTimes(1);
+      expect(chorded).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+    }
+  });
+
+  it("never fires a bare chord as the second accumulated key", () => {
+    const run = vi.fn();
+    const unregister = registerCommands([{ id: "ctx.state", title: "Change state", shortcut: "s", run }]);
+    try {
+      render(<Probe />);
+      press(window, { key: "x" });
+      press(window, { key: "s" });
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+    }
+  });
+
   it("forgets partial sequences after the idle window", () => {
     const run = vi.fn();
     const unregister = registerCommands([{ id: "shell.go-home", title: "Go to home", sequence: "gh", run }]);

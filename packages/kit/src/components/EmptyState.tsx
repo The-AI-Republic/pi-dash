@@ -171,11 +171,11 @@ function DetailedBody(
         props.className
       )}
     >
-      <Artwork art={props.art} scheme={props.scheme} title={props.title} className="h-36 w-36" />
       <h3 className="flex flex-col items-center gap-(--space-2) text-center">
         <span className="text-h3 text-(--text)">{props.title}</span>
         {props.description ? <span className="text-body text-(--text-muted)">{props.description}</span> : null}
       </h3>
+      <Artwork art={props.art} scheme={props.scheme} title={props.title} className="h-36 w-36" />
       {props.primaryAction || props.secondaryAction ? (
         <div className="flex items-center gap-(--space-4)">
           {props.primaryAction ? (

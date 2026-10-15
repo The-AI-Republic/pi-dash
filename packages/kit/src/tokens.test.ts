@@ -38,6 +38,9 @@ function block(selector: string): Map<string, string> {
 
 const light = block(":root");
 const dark = block('[data-theme="dark"]');
+const lightContrast = block('[data-theme="light-contrast"]');
+const darkContrast = block('[data-theme="dark-contrast"]');
+const custom = block('[data-theme="custom"]');
 
 function luminance(hex: string): number {
   const channels = [1, 3, 5].map((i) => {
@@ -87,6 +90,35 @@ describe("tokens.css", () => {
     expect(dark.get("--danger")).toBe("#f2555a");
   });
 
+  it("carries the high-contrast pair (SHELL-095)", () => {
+    expect(lightContrast.get("--bg")).toBe("#ffffff");
+    expect(lightContrast.get("--text")).toBe("#000000");
+    expect(lightContrast.get("--text-muted")).toBe("#3f3f46");
+    expect(lightContrast.get("--border")).toBe("#52525b");
+    expect(lightContrast.get("--accent")).toBe("#3f46a8");
+    expect(lightContrast.get("--on-accent")).toBe("#ffffff");
+    expect(darkContrast.get("--bg")).toBe("#000000");
+    expect(darkContrast.get("--text")).toBe("#ffffff");
+    expect(darkContrast.get("--text-muted")).toBe("#c9c9ce");
+    expect(darkContrast.get("--border")).toBe("#a1a1aa");
+    expect(darkContrast.get("--accent")).toBe("#a5abf5");
+    expect(darkContrast.get("--on-accent")).toBe("#000000");
+  });
+
+  it("maps the custom theme to the engine's palette variables (SHELL-095)", () => {
+    expect(custom.get("--bg")).toBe("var(--theme-custom-background, #ffffff)");
+    expect(custom.get("--accent")).toBe("var(--theme-custom-primary, #5e6ad2)");
+    expect(custom.get("--accent-hover")).toBe("var(--theme-custom-primary, #5e6ad2)");
+    expect(custom.get("--on-accent")).toBe("#ffffff");
+  });
+
+  it("keeps explicit pins ahead of the OS-follow fallback", () => {
+    expect(css).toContain(
+      ':root:not([data-theme="light"]):not([data-theme="light-contrast"])' +
+        ':not([data-theme="dark-contrast"]):not([data-theme="custom"])'
+    );
+  });
+
   it("defines type, spacing, shape, elevation, and motion tokens", () => {
     expect(light.get("--font-ui")).toContain("Inter");
     expect(light.get("--text-base-size")).toBe("13px");
@@ -110,22 +142,22 @@ describe("tokens.css", () => {
     expect(comfortable.get("--row-height")).toBe("32px");
   });
 
-  it("meets WCAG AA for body text in both themes", () => {
-    for (const theme of [light, dark]) {
+  it("meets WCAG AA for body text in every theme", () => {
+    for (const theme of [light, dark, lightContrast, darkContrast]) {
       expect(contrast(theme.get("--text")!, theme.get("--bg")!)).toBeGreaterThanOrEqual(4.5);
       expect(contrast(theme.get("--text")!, theme.get("--surface")!)).toBeGreaterThanOrEqual(4.5);
       expect(contrast(theme.get("--text-muted")!, theme.get("--bg")!)).toBeGreaterThanOrEqual(4.5);
     }
   });
 
-  it("meets WCAG AA for labels on filled actions in both themes", () => {
-    for (const theme of [light, dark]) {
+  it("meets WCAG AA for labels on filled actions in every theme", () => {
+    for (const theme of [light, dark, lightContrast, darkContrast]) {
       expect(contrast(theme.get("--on-accent")!, theme.get("--accent")!)).toBeGreaterThanOrEqual(4.5);
     }
   });
 
-  it("meets WCAG AA for accent links on the background in both themes", () => {
-    for (const theme of [light, dark]) {
+  it("meets WCAG AA for accent links on the background in every theme", () => {
+    for (const theme of [light, dark, lightContrast, darkContrast]) {
       expect(contrast(theme.get("--accent")!, theme.get("--bg")!)).toBeGreaterThanOrEqual(4.5);
     }
   });

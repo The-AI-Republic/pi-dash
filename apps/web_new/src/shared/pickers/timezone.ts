@@ -1,67 +1,24 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Timezone preference data (shell spec, SHELL-097). The zone list is
-// global reference data; the update writes the account's user_timezone
-// with the confirmed toast. The palette's Change-timezone page and the
-// profile timezone section share this module.
+// Timezone picker shaping (shell spec, SHELL-097). Option grouping and
+// filtering live here; the zone list query and the account write are
+// the shared preference module's, re-exported so picker callers have
+// one import. The palette's Change-timezone page and the profile
+// timezone section share the same cache and mutation.
 
-import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { listTimezones, updateMyTimezone, type ApiClient, type TimezoneEntry } from "@pidash/api-client";
+import { useQuery } from "@tanstack/react-query";
+import type { TimezoneEntry } from "@pidash/api-client";
 
 import { getAppClient } from "../../core/api/client.js";
-import { REFERENCE_STALE_TIME_MS } from "../../core/query/client.js";
-import { sessionKeys } from "../../core/session/queries.js";
-import type { Me } from "@pidash/api-client";
-import { notifyError, notifySuccess } from "../shell/toaster.js";
+import { timezonesQueryOptions, useUpdateTimezone } from "../shell/preferences.js";
 
-export const timezoneKeys = {
-  all: ["timezones"] as const,
-  list: ["timezones", "list"] as const,
-};
-
-/** The full zone list. Global reference data: long stale, no refetch. */
-export function timezoneListQueryOptions(client: ApiClient) {
-  return queryOptions({
-    queryKey: timezoneKeys.list,
-    queryFn: () => listTimezones(client),
-    staleTime: REFERENCE_STALE_TIME_MS,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-  });
-}
+export { timezonesQueryOptions, useUpdateTimezone };
+export type { TimezoneMutationHandlers as UpdateTimezoneHandlers } from "../shell/preferences.js";
 
 /** Read the zone list through the app client. */
 export function useTimezones() {
-  return useQuery(timezoneListQueryOptions(getAppClient()));
-}
-
-export interface UpdateTimezoneHandlers {
-  onSuccess?: (timezone: string) => void;
-  onError?: (error: Error) => void;
-}
-
-/**
- * Persist the account timezone. Confirms with the pinned toast, keeps
- * the signed-in user cache in sync, and toasts failures; the handlers
- * let callers react on top (the palette page closes on success).
- */
-export function useUpdateTimezone(handlers: UpdateTimezoneHandlers = {}) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (timezone: string) => updateMyTimezone(getAppClient(), timezone),
-    onSuccess: (row, timezone) => {
-      queryClient.setQueryData<Me | undefined>(sessionKeys.me, (previous) =>
-        previous === undefined ? previous : { ...previous, user_timezone: row.user_timezone }
-      );
-      notifySuccess("Timezone updated successfully.");
-      handlers.onSuccess?.(timezone);
-    },
-    onError: (error: Error) => {
-      notifyError("Couldn't update the timezone", error.message);
-      handlers.onError?.(error);
-    },
-  });
+  return useQuery(timezonesQueryOptions(getAppClient()));
 }
 
 /** One selectable zone row: duplicate values merge into one option. */

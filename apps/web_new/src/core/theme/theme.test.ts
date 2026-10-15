@@ -79,12 +79,28 @@ describe("theme model", () => {
       value: "custom",
       custom: { primary: "#ffffff", background: "#000000", darkPalette: false },
     });
-    expect(buildThemeBag("light")).toEqual({ theme: "light" });
-    expect(buildThemeBag("custom")).toEqual({ theme: "custom" });
-    expect(buildThemeBag("custom", { primary: "#a", background: "#b", darkPalette: false })).toEqual({
+    expect(buildThemeBag("light", undefined)).toEqual({ theme: "light" });
+    expect(buildThemeBag("custom", undefined)).toEqual({ theme: "custom" });
+    expect(buildThemeBag("custom", { primary: "#a", background: "#b", darkPalette: false }, undefined)).toEqual({
       theme: "custom",
       primary: "#a",
       background: "#b",
+      darkPalette: false,
+    });
+  });
+
+  it("carries the cached bag over so theme switches keep a saved custom palette", () => {
+    const cached = { theme: "custom", primary: "#a", background: "#b", darkPalette: true };
+    expect(buildThemeBag("dark", undefined, cached)).toEqual({
+      theme: "dark",
+      primary: "#a",
+      background: "#b",
+      darkPalette: true,
+    });
+    expect(buildThemeBag("custom", { primary: "#c", background: "#d", darkPalette: false }, cached)).toEqual({
+      theme: "custom",
+      primary: "#c",
+      background: "#d",
       darkPalette: false,
     });
   });

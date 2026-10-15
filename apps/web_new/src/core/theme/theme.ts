@@ -111,8 +111,22 @@ export function readThemeBag(bag: Record<string, unknown> | null | undefined): T
   return { value, custom: { primary, background, darkPalette: bag["darkPalette"] === true } };
 }
 
-/** Build the profile theme bag the server stores. */
-export function buildThemeBag(value: ThemeValue, custom?: CustomPalette | undefined): Record<string, unknown> {
-  if (value !== "custom" || custom === undefined) return { theme: value };
-  return { theme: value, primary: custom.primary, background: custom.background, darkPalette: custom.darkPalette };
+/**
+ * Build the profile theme bag the server stores. Existing keys carry
+ * over, so switching between stock themes never wipes a saved custom
+ * palette (and switching to custom keeps the stored value's company).
+ */
+export function buildThemeBag(
+  value: ThemeValue,
+  custom: CustomPalette | undefined,
+  existing: Record<string, unknown> = {}
+): Record<string, unknown> {
+  if (value !== "custom" || custom === undefined) return { ...existing, theme: value };
+  return {
+    ...existing,
+    theme: value,
+    primary: custom.primary,
+    background: custom.background,
+    darkPalette: custom.darkPalette,
+  };
 }

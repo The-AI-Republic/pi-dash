@@ -12,6 +12,7 @@ import type { IssuePatch } from "@pidash/api-client";
 import * as React from "react";
 
 import { registerCommands, registerPalettePages } from "../../commands/registry.js";
+import { useCommandPalette } from "../../commands/store.js";
 import { notifyError, notifySuccess } from "../toaster.js";
 import {
   selectNamedProjectMembers,
@@ -62,7 +63,6 @@ export interface WorkItemPaletteInput {
   moduleIds: string[];
   isEpic: boolean;
   parentId: string | null;
-  createdBy: string | null;
   archived: boolean;
   estimatesEnabled: boolean;
   cycleView: boolean;
@@ -154,6 +154,7 @@ export function useWorkItemPaletteContext(input: WorkItemPaletteInput): WorkItem
       ),
     []
   );
+  const close = React.useCallback(() => useCommandPalette.getState().closePalette(), []);
 
   const selection = React.useMemo(
     () =>
@@ -177,7 +178,17 @@ export function useWorkItemPaletteContext(input: WorkItemPaletteInput): WorkItem
         subscribed: subscription.data?.subscribed ?? false,
         standing: input.standing,
         pickers,
-        actions: { updateFields, addToCycle, setModules, toggleSubscription, openDelete, copyId, copyTitle, copyUrl },
+        actions: {
+          updateFields,
+          addToCycle,
+          setModules,
+          toggleSubscription,
+          openDelete,
+          copyId,
+          copyTitle,
+          copyUrl,
+          close,
+        },
       }),
     [
       input.workspaceSlug,
@@ -207,6 +218,7 @@ export function useWorkItemPaletteContext(input: WorkItemPaletteInput): WorkItem
       copyId,
       copyTitle,
       copyUrl,
+      close,
     ]
   );
 
@@ -347,6 +359,7 @@ export function useModulePaletteContext(input: ModulePaletteInput): void {
       ),
     []
   );
+  const close = React.useCallback(() => useCommandPalette.getState().closePalette(), []);
 
   const selection = React.useMemo(
     () =>
@@ -364,6 +377,7 @@ export function useModulePaletteContext(input: ModulePaletteInput): void {
         setStatus,
         toggleFavorite,
         copyUrl,
+        close,
       }),
     [
       input.moduleId,
@@ -380,6 +394,7 @@ export function useModulePaletteContext(input: ModulePaletteInput): void {
       setStatus,
       toggleFavorite,
       copyUrl,
+      close,
     ]
   );
   React.useEffect(() => registerCommands(selection.commands), [selection.commands]);

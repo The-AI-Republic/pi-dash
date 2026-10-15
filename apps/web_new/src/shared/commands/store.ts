@@ -28,7 +28,10 @@ interface CommandPaletteState {
   /** Step back to the root list; the query clears (SHELL-083). */
   closePage: () => void;
   setWorkspaceSearch: (workspaceSearch: boolean) => void;
-  /** Hide the contextual group and chip until the next open. */
+  /**
+   * Hide the contextual group and chip until the next open, stepping
+   * back to the root list so a contextual sub-page never orphans.
+   */
   dismissContext: () => void;
 }
 
@@ -45,7 +48,7 @@ export const useCommandPalette = create<CommandPaletteState>()((set) => ({
   openPage: (page: string) => set({ page, query: "" }),
   closePage: () => set({ page: null, query: "" }),
   setWorkspaceSearch: (workspaceSearch: boolean) => set({ workspaceSearch }),
-  dismissContext: () => set({ contextDismissed: true }),
+  dismissContext: () => set({ contextDismissed: true, page: null, query: "" }),
 }));
 
 registerStoreReset(() => {

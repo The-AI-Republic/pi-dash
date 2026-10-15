@@ -86,7 +86,7 @@ const WORK_ITEM_INPUT = {
   moduleIds: [] as string[],
   isEpic: false,
   parentId: null,
-  createdBy: null,
+  // (createdBy removed: the delete flow authorizes server-side via 403.)
   archived: false,
   estimatesEnabled: true,
   cycleView: true,

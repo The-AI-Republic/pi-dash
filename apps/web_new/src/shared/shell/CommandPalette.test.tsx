@@ -615,4 +615,36 @@ describe("CommandPalette context chip (SHELL-090/091)", () => {
     expect(screen.getByRole("option", { name: "Triage" })).toHaveTextContent("✓");
     expect(screen.getByRole("option", { name: "Done" })).not.toHaveTextContent("✓");
   });
+
+  it("steps back to the root list when the chip clears from a sub-page", async () => {
+    const user = userEvent.setup();
+    registerCommands([
+      {
+        id: "ctx.state",
+        title: "Change state",
+        section: "Work item actions",
+        context: CONTEXT,
+        page: "ctx.state-page",
+        run: () => undefined,
+      },
+    ]);
+    registerPalettePages([
+      {
+        id: "ctx.state-page",
+        placeholder: "Change state",
+        usePageState: (): PalettePageState => ({
+          status: "ready",
+          options: [{ id: "a", title: "Triage", run: () => undefined }],
+          emptyText: "No states found",
+        }),
+      },
+    ]);
+    renderPalette({ scope: null });
+    await screen.findByRole("listbox", { name: "Commands" });
+    await user.click(screen.getByRole("option", { name: "Change state" }));
+    await screen.findByRole("listbox", { name: "Options" });
+    await user.click(screen.getByRole("button", { name: "Clear context (Backspace)" }));
+    await screen.findByRole("listbox", { name: "Commands" });
+    expect(screen.queryByRole("option", { name: "Change state" })).not.toBeInTheDocument();
+  });
 });

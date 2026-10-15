@@ -142,7 +142,7 @@ describe("detailed tier", () => {
   it("renders text-first with primary and secondary actions", () => {
     const primary = vi.fn();
     const secondary = vi.fn();
-    render(
+    const { container } = render(
       <EmptyState
         variant="detailed"
         title="Feature off"
@@ -152,6 +152,8 @@ describe("detailed tier", () => {
         secondaryAction={{ label: "Learn more", onSelect: secondary }}
       />
     );
+    const order = Array.from(container.firstElementChild!.children).map((child) => child.tagName);
+    expect(order).toEqual(["H3", "IMG", "DIV"]);
     fireEvent.click(screen.getByRole("button", { name: "Enable" }));
     fireEvent.click(screen.getByRole("button", { name: "Learn more" }));
     expect(primary).toHaveBeenCalledTimes(1);

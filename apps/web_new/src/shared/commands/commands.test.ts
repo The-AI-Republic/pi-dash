@@ -78,13 +78,37 @@ describe("command registry", () => {
     expect(listCommands().map((command) => command.id)).toEqual(["help", "alpha", "zeta"]);
   });
 
+  it("ranks context-marked commands ahead of every generic group", () => {
+    const context = { kind: "work-item" as const, indicator: "Work item", subject: "ACME-1" };
+    registerCommands([
+      { id: "create", title: "Create", section: "Create", run: () => undefined },
+      {
+        id: "ctx.copy",
+        title: "Copy URL",
+        section: "Work item actions",
+        context,
+        run: () => undefined,
+      },
+      {
+        id: "ctx.state",
+        title: "Change state",
+        section: "Work item actions",
+        context,
+        run: () => undefined,
+      },
+    ]);
+    expect(listCommands().map((command) => command.id)).toEqual(["ctx.state", "ctx.copy", "create"]);
+  });
+
   it("parses single chords and rejects the rest", () => {
     expect(parseShortcut("mod+k")).toEqual({ mod: true, shift: false, alt: false, key: "k" });
     expect(parseShortcut("Mod+Shift+P")).toEqual({ mod: true, shift: true, alt: false, key: "p" });
+    expect(parseShortcut("mod+Backspace")).toEqual({ mod: true, shift: false, alt: false, key: "backspace" });
     expect(parseShortcut("")).toBeNull();
     expect(parseShortcut("g i")).toBeNull();
     expect(parseShortcut("mod+mod+k")).toBeNull();
     expect(parseShortcut("cmd+k")).toBeNull();
+    expect(parseShortcut("mod+spacebar")).toBeNull();
   });
 
   it("matches mod on either ctrl or meta", () => {
@@ -94,6 +118,13 @@ describe("command registry", () => {
     expect(matchesShortcut(keyEvent("k"), "mod+k")).toBe(false);
     expect(matchesShortcut(keyEvent("k", { ctrl: true, shift: true }), "mod+k")).toBe(false);
     expect(matchesShortcut(keyEvent("k", { ctrl: true }), "nonsense-chord")).toBe(false);
+  });
+
+  it("matches named non-printable keys case-insensitively", () => {
+    expect(matchesShortcut(keyEvent("Backspace", { meta: true }), "mod+backspace")).toBe(true);
+    expect(matchesShortcut(keyEvent("Backspace", { ctrl: true }), "mod+backspace")).toBe(true);
+    expect(matchesShortcut(keyEvent("Backspace"), "mod+backspace")).toBe(false);
+    expect(matchesShortcut(keyEvent("Delete", { meta: true }), "mod+backspace")).toBe(false);
   });
 });
 

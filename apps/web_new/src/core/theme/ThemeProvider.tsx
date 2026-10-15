@@ -109,15 +109,16 @@ export function ThemeProvider({ children, notifyError }: ThemeProviderProps): Re
     },
   });
 
+  const cachedBag = profileQuery.data?.theme;
   const setTheme = React.useCallback(
     (value: ThemeValue, custom: CustomPalette | undefined = undefined) => {
       const next = value === "custom" ? custom : undefined;
       setChoice({ value, custom: next });
       setResolved(applyChoice(value, next));
       writeStoredTheme(value);
-      save.mutate(buildThemeBag(value, next));
+      save.mutate(buildThemeBag(value, next, cachedBag ?? {}));
     },
-    [save]
+    [save, cachedBag]
   );
 
   // Boot mark plus OS tracking while the system choice holds. The OS

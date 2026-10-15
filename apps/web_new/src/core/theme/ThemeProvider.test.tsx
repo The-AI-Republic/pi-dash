@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -190,6 +190,36 @@ describe("ThemeProvider", () => {
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("light");
     await waitFor(() => expect(patches).toEqual([{ theme: "light" }]));
+  });
+
+  it("merges picks over the cached bag and sends a bare bag before the profile lands", async () => {
+    const user = userEvent.setup();
+    matchMediaStub(false);
+    const cached = { theme: "custom", primary: "#a", background: "#b", darkPalette: true };
+    const merged = harness({ profile: cached });
+    const first = render(
+      <QueryClientProvider client={merged.queryClient}>
+        <ThemeProvider notifyError={() => undefined}>
+          <ValueProbe />
+        </ThemeProvider>
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(screen.getByTestId("value")).toHaveTextContent("custom"));
+    await user.click(screen.getByRole("button", { name: "pick light" }));
+    await waitFor(() => expect(merged.patches).toEqual([{ ...cached, theme: "light" }]));
+    first.unmount();
+
+    // Before the profile lands there is nothing to merge over.
+    const bare = harness({ profile: { theme: "system" } });
+    render(
+      <QueryClientProvider client={bare.queryClient}>
+        <ThemeProvider notifyError={() => undefined}>
+          <ValueProbe />
+        </ThemeProvider>
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "pick light" }));
+    await waitFor(() => expect(bare.patches).toEqual([{ theme: "light" }]));
   });
 
   it("tracks the OS while system holds and stops after leaving it", async () => {

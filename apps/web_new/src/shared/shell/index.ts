@@ -53,20 +53,15 @@ export {
   PREFERENCES_FAILED_TITLE,
   PREFERENCES_UPDATED_TITLE,
   THEME_CHOICES,
-  THEME_FAILED_TITLE,
-  THEME_UPDATED_MESSAGE,
-  THEME_UPDATED_TITLE,
   TIMEZONE_FAILED_TITLE,
   TIMEZONE_UPDATED_TITLE,
   preferenceKeys,
-  reloadApp,
   timezonesQueryOptions,
   useUpdateFirstDay,
   useUpdateLanguage,
-  useUpdateTheme,
   useUpdateTimezone,
 } from "./preferences.js";
-export type { PreferenceChoice } from "./preferences.js";
+export type { PreferenceChoice, TimezoneMutationHandlers } from "./preferences.js";
 export { groupBoundCommands, ShortcutsDialog } from "./ShortcutsDialog.js";
 export type { ShortcutGroup } from "./ShortcutsDialog.js";
 export { useShortcutsDialog } from "./shortcutsDialogStore.js";

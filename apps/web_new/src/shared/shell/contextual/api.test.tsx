@@ -251,9 +251,6 @@ describe("useWorkItemMutations", () => {
         <button type="button" onClick={() => mutations.addToCycle.mutate("cycle-1")}>
           add-cycle
         </button>
-        <button type="button" onClick={() => mutations.removeFromCycle.mutate("cycle-1")}>
-          remove-cycle
-        </button>
         <button type="button" onClick={() => mutations.setModules.mutate({ modules: ["module-1"] })}>
           set-modules
         </button>
@@ -288,13 +285,11 @@ describe("useWorkItemMutations", () => {
     );
     await click("update");
     await click("add-cycle");
-    await click("remove-cycle");
     await click("set-modules");
     await click("subscribe");
-    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(4));
     expect(calls.some((call) => call.method === "PATCH" && call.url.includes("/issues/"))).toBe(true);
     expect(calls.some((call) => call.method === "POST" && call.url.includes("/cycle-issues/"))).toBe(true);
-    expect(calls.some((call) => call.method === "DELETE" && call.url.includes("/cycle-issues/"))).toBe(true);
     expect(calls.some((call) => call.method === "POST" && call.url.endsWith("/modules/"))).toBe(true);
     expect(await screen.findByText("Subscribed to work item notifications.")).toBeInTheDocument();
     await click("unsubscribe");

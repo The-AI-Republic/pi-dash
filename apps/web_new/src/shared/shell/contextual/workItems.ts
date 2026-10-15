@@ -46,6 +46,12 @@ export interface WorkItemContextActions {
   copyId: () => void;
   copyTitle: () => void;
   copyUrl: () => void;
+  /**
+   * Close the palette. Single-change pickers (state, priority,
+   * estimate, cycle) call this on every pick; the multi-change
+   * pickers (assignee, labels, modules) stay open across picks.
+   */
+  close: () => void;
 }
 
 export interface WorkItemContextInput {
@@ -149,6 +155,7 @@ export function selectWorkItemContext(input: WorkItemContextInput): WorkItemCont
           selected: state.id === input.stateId,
           run: () => {
             if (state.id !== input.stateId) input.actions.updateFields({ state_id: state.id });
+            input.actions.close();
           },
         })),
         "No states found",
@@ -167,6 +174,7 @@ export function selectWorkItemContext(input: WorkItemContextInput): WorkItemCont
           selected: priority === input.priority,
           run: () => {
             if (priority !== input.priority) input.actions.updateFields({ priority });
+            input.actions.close();
           },
         })),
         "No priorities found",
@@ -222,6 +230,7 @@ export function selectWorkItemContext(input: WorkItemContextInput): WorkItemCont
         selected: point.id === current,
         run: () => {
           if (point.id !== current) input.actions.updateFields({ estimate_point: point.id });
+          input.actions.close();
         },
       }));
       pointOptions.unshift({
@@ -230,6 +239,7 @@ export function selectWorkItemContext(input: WorkItemContextInput): WorkItemCont
         selected: current === null,
         run: () => {
           if (current !== null) input.actions.updateFields({ estimate_point: null });
+          input.actions.close();
         },
       });
       pages.push({
@@ -251,6 +261,7 @@ export function selectWorkItemContext(input: WorkItemContextInput): WorkItemCont
             selected: cycle.id === input.cycleId,
             run: () => {
               if (cycle.id !== input.cycleId) input.actions.addToCycle(cycle.id);
+              input.actions.close();
             },
           })),
           "No cycles found",

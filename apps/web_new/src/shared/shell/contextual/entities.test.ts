@@ -77,6 +77,7 @@ describe("selectModuleContext", () => {
       setStatus: () => undefined,
       toggleFavorite: () => undefined,
       copyUrl: () => undefined,
+      close: () => undefined,
       ...overrides,
     };
   }
@@ -136,6 +137,47 @@ describe("selectModuleContext", () => {
     commands.find((command) => command.title === "Copy URL")!.run();
     expect(toggleFavorite).toHaveBeenCalledTimes(1);
     expect(copyUrl).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks every command with the module context, including copy-URL", () => {
+    for (const selection of [
+      selectModuleContext(moduleInput()),
+      selectModuleContext(moduleInput({ standing: { memberRole: 5, archived: false } })),
+    ]) {
+      expect(selection.commands.length).toBeGreaterThan(0);
+      expect(
+        selection.commands.every(
+          (command) =>
+            command.context?.kind === "module" &&
+            command.context.indicator === "Module" &&
+            command.context.subject === "Auth"
+        )
+      ).toBe(true);
+    }
+  });
+
+  it("closes on status picks and stays open on member toggles", () => {
+    const close = vi.fn();
+    const { pages } = selectModuleContext(moduleInput({ close }));
+    pages
+      .find((page) => page.placeholder === "Change status")!
+      .usePageState("")
+      .options.find((option) => option.id === "in-progress")!
+      .run();
+    expect(close).toHaveBeenCalledTimes(1);
+    close.mockClear();
+    pages
+      .find((page) => page.placeholder === "Change status")!
+      .usePageState("")
+      .options.find((option) => option.id === "backlog")!
+      .run();
+    expect(close).toHaveBeenCalledTimes(1);
+    close.mockClear();
+    pages
+      .find((page) => page.placeholder === "Change members")!
+      .usePageState("")
+      .options[0]!.run();
+    expect(close).not.toHaveBeenCalled();
   });
 });
 
@@ -231,6 +273,38 @@ describe("selectPageContext", () => {
       pageInput({ capabilities: { lock: false, changeAccess: false, archive: false, favorite: false } })
     );
     expect(none.map((command) => command.title)).toEqual(["Copy URL"]);
+  });
+});
+
+describe("entity context markers", () => {
+  it("marks every cycle and page command with its context, including copy-URL", () => {
+    const cycles = selectCycleContext({
+      cycleId: "cycle-1",
+      cycleName: "Sprint 1",
+      archived: false,
+      favorite: false,
+      standing: { memberRole: 15, archived: false },
+      toggleFavorite: () => undefined,
+      copyUrl: () => undefined,
+    });
+    expect(cycles.length).toBeGreaterThan(0);
+    expect(cycles.every((command) => command.context?.kind === "cycle")).toBe(true);
+    const pages = selectPageContext({
+      pageId: "page-1",
+      pageName: "Roadmap",
+      locked: false,
+      access: 0,
+      archived: false,
+      favorite: false,
+      capabilities: { lock: true, changeAccess: true, archive: true, favorite: true },
+      setLocked: () => undefined,
+      setAccess: () => undefined,
+      setArchived: () => undefined,
+      toggleFavorite: () => undefined,
+      copyUrl: () => undefined,
+    });
+    expect(pages.length).toBeGreaterThan(0);
+    expect(pages.every((command) => command.context?.kind === "page")).toBe(true);
   });
 });
 

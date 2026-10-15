@@ -29,7 +29,6 @@ import {
   listStates,
   listWorkspaceMembers,
   lockPage,
-  removeIssueFromCycle,
   removePageFavorite,
   restorePage,
   setIssueModules,
@@ -239,12 +238,6 @@ export function useWorkItemMutations(scope: WorkItemScope) {
     onSuccess: () => void scope.refresh(),
     onError: (error: Error) => notifyError(`Couldn't update the ${noun}.`, error.message),
   });
-  const removeFromCycle = useMutation({
-    mutationFn: async (cycleId: string) =>
-      removeIssueFromCycle(client, scope.workspaceSlug, scope.projectId, cycleId, scope.issueId),
-    onSuccess: () => void scope.refresh(),
-    onError: (error: Error) => notifyError(`Couldn't update the ${noun}.`, error.message),
-  });
   const setModules = useMutation({
     mutationFn: async (input: { modules: string[]; removed_modules?: string[] }) =>
       setIssueModules(client, scope.workspaceSlug, scope.projectId, scope.issueId, input),
@@ -275,7 +268,7 @@ export function useWorkItemMutations(scope: WorkItemScope) {
       }
     },
   });
-  return { updateFields, addToCycle, removeFromCycle, setModules, toggleSubscription, remove };
+  return { updateFields, addToCycle, setModules, toggleSubscription, remove };
 }
 
 export interface EntityScope extends ContextualRefresh {
