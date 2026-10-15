@@ -966,8 +966,10 @@ pub(crate) async fn binding_detail_for(
 }
 
 /// Fetch tool calls for many runs, grouped by run (list prefetch).
+/// Shared with the scheduler binding-runs endpoint (PIDASHCONV-1059),
+/// which renders the same list shape over a binding-scoped page.
 #[allow(clippy::result_large_err)]
-async fn tool_calls_for_many(
+pub(crate) async fn tool_calls_for_many(
     pool: &PgPool,
     run_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Vec<AgentRunToolCall>>, Response> {
@@ -1006,7 +1008,8 @@ pub(crate) fn render_detail(
 }
 
 /// Render one run through the list shape (`error_diagnostic` is null).
-fn render_list_row(
+/// Shared with the scheduler binding-runs endpoint (PIDASHCONV-1059).
+pub(crate) fn render_list_row(
     run: &AgentRun,
     pod: &PodMiniStrings,
     tool_calls: &[AgentRunToolCall],

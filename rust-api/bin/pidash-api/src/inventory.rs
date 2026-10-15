@@ -483,6 +483,8 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/scheduler-bindings/{binding_id}/",
         owned: &["GET", "PATCH", "DELETE"], proxied: &["POST", "PUT", "HEAD", "OPTIONS"] },
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/scheduler-bindings/{binding_id}/runs/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/search-issues/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/states/",

@@ -30,6 +30,7 @@
 //! | `scheduler-bindings/<id>/` | GET | [`Gate::ProjectOpen`] (`views.py:233-236`) | yes |
 //! | `scheduler-bindings/<id>/` | PATCH/DELETE | [`Gate::ProjectAdmin`] (`views.py:251,280`) | yes |
 //! | `scheduler-bindings/occurrences/` | GET | [`Gate::ProjectOpen`] (`occurrences.py:71-74`) | NO (quirk) |
+//! | `scheduler-bindings/<id>/runs/` | GET | [`Gate::ProjectOpen`] (`views.py:323-325`, `474123e5`) | yes |
 //!
 //! Gate order (preserved, not redesigned — F36-09 `check_order`):
 //! DRF session authentication ([`crate::license::resolve_actor`], the
@@ -38,7 +39,7 @@
 //! decorator runs before the handler body. Anonymous callers 401 before
 //! any gate; denied members 403 through the decorator's fallthrough
 //! body (`base.py:81-84`; the decorator defines no per-route message);
-//! the flag guard 404s after the gate on the 4 CRUD routes only.
+//! the flag guard 404s after the gate on the 5 CRUD routes only.
 //!
 //! Response shapes (handlers render [`Denial`]; recorded here so the
 //! matrix has one home):
@@ -48,7 +49,7 @@
 //!   `NotAuthenticated` (pinned by every contract suite's `ANON`).
 //! * Denied member: 403
 //!   [`crate::permissions::PERMISSION_DENIED_BODY`] (reused by reference).
-//! * Disabled instance on the 4 CRUD routes: 404 [`DISABLED_BODY`].
+//! * Disabled instance on the 5 CRUD routes: 404 [`DISABLED_BODY`].
 //! * Unknown workspace slug: 403, never 404 — the gate runs before any
 //!   object lookup
 //!   (`test_unknown_workspace_slug_denied`).
@@ -69,7 +70,7 @@
 //! Ported quirks (translate, don't redesign):
 //!
 //! * The occurrences endpoint never calls `_feature_enabled`
-//!   (`occurrences.py:63-78`): with `SCHEDULER_ENABLED=false` the 4 CRUD
+//!   (`occurrences.py:63-78`): with `SCHEDULER_ENABLED=false` the 5 CRUD
 //!   routes 404 while occurrences keeps serving 200.
 //! * The PROJECT-level workspace-admin bypass still requires an active
 //!   project-membership row (kernel branch, `base.py:63-78`); a
@@ -97,7 +98,7 @@ use crate::state::AppState;
 pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
 /// Exact bytes of `_disabled_response` (404, `views.py:36-40`): what the
-/// 4 CRUD routes answer when `SCHEDULER_ENABLED` is false. The
+/// 5 CRUD routes answer when `SCHEDULER_ENABLED` is false. The
 /// occurrences route has no flag check (ported quirk) and never renders
 /// this body.
 pub const DISABLED_BODY: &str = r#"{"error":"Project scheduler is disabled on this instance"}"#;
@@ -242,6 +243,13 @@ pub static GATES: &[RouteGate] = &[
         gate: Gate::ProjectOpen,
         flag_check: false,
         source: "occurrences.py:71-75 (no _feature_enabled call — quirk)",
+    },
+    RouteGate {
+        method: "GET",
+        path: "workspaces/<slug>/projects/<project_id>/scheduler-bindings/<uuid:binding_id>/runs/",
+        gate: Gate::ProjectOpen,
+        flag_check: true,
+        source: "views.py:319-322 (474123e5, binding run history)",
     },
 ];
 
@@ -625,9 +633,9 @@ pub fn feature_enabled(settings: &Settings) -> bool {
     settings.scheduler_enabled
 }
 
-/// Run the flag guard after [`resolve_gate`] on the 4 CRUD routes: a
+/// Run the flag guard after [`resolve_gate`] on the 5 CRUD routes: a
 /// disabled instance answers 404 [`DISABLED_BODY`] instead of the
-/// handler body (`views.py:56,76,96,115,137,173,190,238,253,282`). The
+/// handler body (`views.py:56,76,96,115,137,173,190,238,253,282,324`). The
 /// occurrences handler must NOT call this (ported quirk: the Python
 /// endpoint never checks the flag).
 pub fn ensure_feature_enabled(settings: &Settings) -> Result<(), Denial> {
@@ -721,17 +729,20 @@ mod tests {
         assert_eq!(Gate::ProjectAdmin.level(), AllowLevel::Project);
     }
 
-    /// F36-09 `routes`: 11 (route, method) rows over the 5 URL routes,
-    /// each carrying the decorator its Python method carries.
+    /// F36-09 `routes` + the `474123e5` binding-runs row (PIDASHCONV-1059):
+    /// 12 (route, method) rows over the 6 URL routes, each carrying the
+    /// decorator its Python method carries.
     #[test]
     fn gate_table_pins_every_row() {
-        assert_eq!(GATES.len(), 11);
+        assert_eq!(GATES.len(), 12);
         let sched_list = "workspaces/<slug>/schedulers/";
         let sched_detail = "workspaces/<slug>/schedulers/<uuid:scheduler_id>/";
         let bind_list = "workspaces/<slug>/projects/<project_id>/scheduler-bindings/";
         let bind_detail =
             "workspaces/<slug>/projects/<project_id>/scheduler-bindings/<uuid:binding_id>/";
         let occ = "workspaces/<slug>/projects/<project_id>/scheduler-bindings/occurrences/";
+        let runs =
+            "workspaces/<slug>/projects/<project_id>/scheduler-bindings/<uuid:binding_id>/runs/";
         let cases = [
             ("GET", sched_list, Gate::WorkspaceOpen, true),
             ("POST", sched_list, Gate::WorkspaceAdmin, true),
@@ -744,6 +755,7 @@ mod tests {
             ("PATCH", bind_detail, Gate::ProjectAdmin, true),
             ("DELETE", bind_detail, Gate::ProjectAdmin, true),
             ("GET", occ, Gate::ProjectOpen, false),
+            ("GET", runs, Gate::ProjectOpen, true),
         ];
         for (method, path, gate, flag) in cases {
             let row = gate_for(method, path).expect("every matrix row resolves");
@@ -771,7 +783,7 @@ mod tests {
         }
     }
 
-    /// F36-09 `tenant_cases`: anonymous 401s before any gate on all 11 rows.
+    /// F36-09 `tenant_cases`: anonymous 401s before any gate on all 12 rows.
     #[test]
     fn anonymous_denies_before_any_gate() {
         for row in GATES {

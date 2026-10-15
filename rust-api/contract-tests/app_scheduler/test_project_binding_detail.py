@@ -2,7 +2,11 @@
 
 from . import seed_scheduler as seed_s
 from .test_project_bindings import BINDING_KEYS, _install, _scheduler, bind_list
-from .test_workspace_schedulers import sched_list
+
+BINDING_DETAIL_KEYS = BINDING_KEYS | {
+    "resolved_prompt", "run_count", "scheduler_source",
+    "scheduler_is_enabled",
+}
 
 
 def bind_detail(world, bid):
@@ -20,7 +24,7 @@ def test_get_shape(org):
     _, binding = _installed(org)
     r = org.request("GET", bind_detail(org, binding["id"]), "admin")
     assert r.status_code == 200
-    assert set(r.json().keys()) == BINDING_KEYS
+    assert set(r.json().keys()) == BINDING_DETAIL_KEYS
     assert r.json()["id"] == binding["id"]
 
 
