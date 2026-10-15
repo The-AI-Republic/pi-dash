@@ -134,4 +134,76 @@ describe("Sidebar", () => {
     // The parity drivers and the shell contract locate the sidebar by this id.
     expect(container.querySelector("#main-sidebar")).toBe(landmark);
   });
+
+  it("collapses to an inert zero-width strip that keeps the landmark mounted", () => {
+    const { container } = render(
+      <Sidebar
+        workspaces={WORKSPACES}
+        activeSlug="acme"
+        onSelectWorkspace={() => undefined}
+        projects={PROJECTS}
+        activeProjectId={null}
+        onSelectProject={() => undefined}
+        userLabel="ada@example.com"
+        onSignOut={() => undefined}
+        collapsed
+      />
+    );
+    const landmark = container.querySelector("#main-sidebar");
+    expect(landmark?.className).toContain("w-0");
+    expect(landmark?.className).toContain("overflow-hidden");
+    expect(landmark?.className).not.toContain("w-60");
+    expect(landmark).toHaveAttribute("inert");
+  });
+
+  it("expands interactive by default", () => {
+    const { container } = render(
+      <Sidebar
+        workspaces={WORKSPACES}
+        activeSlug="acme"
+        onSelectWorkspace={() => undefined}
+        projects={PROJECTS}
+        activeProjectId={null}
+        onSelectProject={() => undefined}
+        userLabel="ada@example.com"
+        onSignOut={() => undefined}
+      />
+    );
+    const landmark = container.querySelector("#main-sidebar");
+    expect(landmark?.className).toContain("w-60");
+    expect(landmark).not.toHaveAttribute("inert");
+  });
+
+  it("renders the desktop update mount beside the account area when provided", () => {
+    render(
+      <Sidebar
+        workspaces={WORKSPACES}
+        activeSlug="acme"
+        onSelectWorkspace={() => undefined}
+        projects={[]}
+        activeProjectId={null}
+        onSelectProject={() => undefined}
+        userLabel="ada@example.com"
+        onSignOut={() => undefined}
+        updateControl={<button type="button">Install update</button>}
+      />
+    );
+    expect(screen.getByRole("button", { name: "Install update" })).toBeInTheDocument();
+  });
+
+  it("mounts no update control on web builds (SHELL-102)", () => {
+    render(
+      <Sidebar
+        workspaces={WORKSPACES}
+        activeSlug="acme"
+        onSelectWorkspace={() => undefined}
+        projects={[]}
+        activeProjectId={null}
+        onSelectProject={() => undefined}
+        userLabel="ada@example.com"
+        onSignOut={() => undefined}
+      />
+    );
+    expect(screen.queryByRole("button", { name: /update/i })).not.toBeInTheDocument();
+  });
 });

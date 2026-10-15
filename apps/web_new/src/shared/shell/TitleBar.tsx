@@ -15,6 +15,7 @@ import { platform } from "../../core/platform/index.js";
 import type { PaletteSearchScope, SearchResultHit } from "../commands/index.js";
 import { RepoStar } from "./RepoStar.js";
 import { TopBarSearch } from "./TopBarSearch.js";
+import { useWindowTitle } from "./windowTitle.js";
 
 export interface TitleBarProps {
   workspaceName: string;
@@ -36,9 +37,7 @@ export function TitleBar({
   const desktop = platform.window;
   const title = section ? `${section} — Pi Dash` : "Pi Dash";
 
-  React.useEffect(() => {
-    desktop?.setTitle(title);
-  }, [desktop, title]);
+  useWindowTitle(title);
 
   return (
     <header

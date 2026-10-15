@@ -4,7 +4,7 @@
 // Self-contained API mocks for the perf specs (NEWFRONT-21). The payloads
 // follow the @pidash/api-client contracts; the app parses every one with
 // zod at runtime, so a malformed mock fails the spec loudly instead of
-// silently rendering nothing. Anything outside the eight endpoints the
+// silently rendering nothing. Anything outside the nine endpoints the
 // issue-list slice calls is aborted, keeping the specs hermetic: a new
 // endpoint shows up as a failure that updates these mocks.
 import type { Page } from "@playwright/test";
@@ -18,6 +18,7 @@ import type {
   Project,
   ProjectDetail,
   ProjectRoleMap,
+  UnreadNotifications,
   Workspace,
 } from "@pidash/api-client";
 
@@ -167,6 +168,11 @@ export function mockProjectRoles(): ProjectRoleMap {
   return { [PERF_PROJECT_ID]: 15 };
 }
 
+/** An empty inbox: the top-bar dot stays off while the specs measure rows. */
+export function mockUnreadNotifications(): UnreadNotifications {
+  return { total_unread_notifications_count: 0, mention_unread_notifications_count: 0 };
+}
+
 const PRIORITIES: IssueListItem["priority"][] = ["urgent", "high", "medium", "low", "none"];
 
 export function mockIssue(index: number): IssueListItem {
@@ -251,6 +257,7 @@ export async function installApiMocks(
   const projectDetailPath = `/api/workspaces/${PERF_WORKSPACE_SLUG}/projects/${PERF_PROJECT_ID}/`;
   const membershipPath = `/api/workspaces/${PERF_WORKSPACE_SLUG}/workspace-members/me/`;
   const rolesPath = `/api/users/me/workspaces/${PERF_WORKSPACE_SLUG}/project-roles/`;
+  const unreadPath = `/api/workspaces/${PERF_WORKSPACE_SLUG}/users/notifications/unread/`;
   await page.route(
     (url) => url.pathname === projectDetailPath,
     (route) => route.fulfill(jsonFulfill(mockProjectDetail()))
@@ -263,6 +270,10 @@ export async function installApiMocks(
     (url) => url.pathname === rolesPath,
     (route) => route.fulfill(jsonFulfill(mockProjectRoles()))
   );
+  await page.route(
+    (url) => url.pathname === unreadPath,
+    (route) => route.fulfill(jsonFulfill(mockUnreadNotifications()))
+  );
   const known = new Set([
     "/api/users/me/",
     "/api/users/me/profile/",
@@ -272,6 +283,7 @@ export async function installApiMocks(
     projectDetailPath,
     membershipPath,
     rolesPath,
+    unreadPath,
   ]);
   await page.route(
     (url) =>

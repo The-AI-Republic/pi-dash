@@ -6,12 +6,17 @@
 // return path, unfinished members funnel to onboarding, and only onboarded
 // members render. The workspace catch-all (`/$ws/$`) is not a child of
 // this layout, so unknown addresses render the illustrated not-found page
-// with or without a session.
+// with or without a session. Top frame chrome (SHELL-063-066, 099-102,
+// from parity/specs/shell.md §5): the top bar, the collapsible sidebar
+// and the edition-gated rail compose here; the palette search box and
+// the menu mounts arrive with their owning slices.
 
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Outlet, redirect, useRouterState } from "@tanstack/react-router";
+import { LayoutGrid } from "lucide-react";
 import * as React from "react";
 
+import { edition, isAppRailEnabled, isSidebarToggleEnabled } from "../../../core/edition/index.js";
 import { platform } from "../../../core/platform/index.js";
 import {
   CREATE_WORKSPACE_PATH,
@@ -24,9 +29,19 @@ import {
   workspacesQueryOptions,
 } from "../../../core/session/index.js";
 import { runSignOutAction, signOutCommand, useSignOut } from "../../../features/auth/index.js";
+import { unreadNotificationsQueryOptions } from "../../../features/notifications/index.js";
 import { projectsQueryOptions } from "../../../features/projects/index.js";
 import type { SearchResultHit } from "../../../shared/commands/index.js";
-import { AppShell, Sidebar, TitleBar } from "../../../shared/shell/index.js";
+import {
+  AppShell,
+  isRailUndocked,
+  Sidebar,
+  TopBar,
+  TopBarSearch,
+  useRailState,
+  useShellChrome,
+  type RailDockItem,
+} from "../../../shared/shell/index.js";
 import { resolveSearchTarget } from "./searchTarget.js";
 
 // Deferred below the initial shell chain (Quality gates budget): the
@@ -48,6 +63,12 @@ const LazyDeactivateAccountDialog = React.lazy(() =>
   import("../../../features/auth/components/DeactivateAccountDialog.js").then((module) => ({
     default: module.DeactivateAccountDialog,
   }))
+);
+// The rail mounts only on rail-enabled editions, so it rides a lazy chunk
+// instead of the initial-JS chain (size budget); AppShell suspends around
+// the rail slot while it loads.
+const WorkspaceRail = React.lazy(() =>
+  import("../../../shared/shell/WorkspaceRail.js").then((module) => ({ default: module.WorkspaceRail }))
 );
 
 export const Route = createFileRoute("/$ws/_gated")({
@@ -75,17 +96,23 @@ export const Route = createFileRoute("/$ws/_gated")({
     await Promise.all([
       context.queryClient.ensureQueryData(workspacesQueryOptions(context.apiClient)),
       context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws)),
+      context.queryClient
+        .ensureQueryData(unreadNotificationsQueryOptions(context.apiClient, params.ws))
+        // The unread dot is optional chrome: a failing count must not fail the shell.
+        .catch(() => undefined),
     ]);
   },
   component: function GatedWorkspaceLayoutComponent() {
     const params = Route.useParams();
     const navigate = Route.useNavigate();
     const matches = useRouterState({ select: (state) => state.matches });
+    const pathname = useRouterState({ select: (state) => state.location.pathname });
     const signOut = useSignOut();
 
     return (
       <WorkspaceShell
         workspaceSlug={params.ws}
+        currentPath={pathname}
         childProjectId={lastParam(matches, "projectId")}
         onSelectWorkspace={(slug) => navigate({ to: "/$ws", params: { ws: slug } })}
         onSelectProject={(projectId) =>
@@ -116,6 +143,7 @@ function lastParam(matches: Array<{ params: Record<string, unknown> }>, name: st
 
 function WorkspaceShell({
   workspaceSlug,
+  currentPath,
   childProjectId,
   onSelectWorkspace,
   onSelectProject,
@@ -124,6 +152,7 @@ function WorkspaceShell({
   onSignOut,
 }: {
   workspaceSlug: string;
+  currentPath: string;
   childProjectId: string | null;
   onSelectWorkspace: (slug: string) => void;
   onSelectProject: (projectId: string) => void;
@@ -137,10 +166,25 @@ function WorkspaceShell({
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, workspaceSlug));
   const [deactivateOpen, setDeactivateOpen] = React.useState(false);
   const [createProjectOpen, setCreateProjectOpen] = React.useState(false);
+  const { data: unread } = useQuery(unreadNotificationsQueryOptions(context.apiClient, workspaceSlug));
+  const sidebarCollapsed = useShellChrome((state) => state.sidebarCollapsed);
+  const clearPeek = useShellChrome((state) => state.clearPeek);
+  const toggleSidebarCollapsed = useShellChrome((state) => state.toggleSidebarCollapsed);
+  const undocked = useRailState((state) => isRailUndocked(state, workspaceSlug));
 
   const workspace = selectWorkspace(workspaces, workspaceSlug);
   const activeProject = projects.find((project) => project.id === childProjectId) ?? null;
   const userLabel = me.display_name || me.email;
+  const dockItems: RailDockItem[] = (edition.rail ?? []).map((entry) => ({
+    id: entry.id,
+    label: entry.label,
+    to: entry.to,
+    icon: <LayoutGrid size={20} strokeWidth={1.5} aria-hidden="true" />,
+  }));
+  const rail =
+    isAppRailEnabled(edition) && !undocked ? (
+      <WorkspaceRail workspaceSlug={workspaceSlug} currentPath={currentPath} dockItems={dockItems} />
+    ) : undefined;
 
   const searchScope = { workspaceSlug, projectId: childProjectId };
 
@@ -150,12 +194,19 @@ function WorkspaceShell({
       searchScope={searchScope}
       onSelectSearchResult={onSelectSearchResult}
       topBar={
-        <TitleBar
-          workspaceName={workspace?.name ?? workspaceSlug}
+        <TopBar
+          workspaceSlug={workspaceSlug}
           section={activeProject?.name ?? ""}
-          userLabel={userLabel}
-          searchScope={searchScope}
-          onSelectSearchResult={onSelectSearchResult}
+          currentPath={currentPath}
+          sidebarCollapsed={sidebarCollapsed}
+          sidebarToggleEnabled={isSidebarToggleEnabled(edition)}
+          onToggleSidebar={() => {
+            clearPeek();
+            toggleSidebarCollapsed();
+          }}
+          unreadTotal={unread?.total_unread_notifications_count ?? 0}
+          unreadMentions={unread?.mention_unread_notifications_count ?? 0}
+          searchBox={<TopBarSearch scope={searchScope} onSelectSearchResult={onSelectSearchResult} />}
         />
       }
       sidebar={
@@ -169,8 +220,10 @@ function WorkspaceShell({
           userLabel={userLabel}
           onSignOut={onSignOut}
           onDeactivateAccount={() => setDeactivateOpen(true)}
+          collapsed={sidebarCollapsed}
         />
       }
+      rail={rail}
     >
       {deactivateOpen ? (
         <React.Suspense fallback={null}>

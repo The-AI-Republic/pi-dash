@@ -13,4 +13,6 @@ export type {
   SidebarItem,
   SlotComponents,
 } from "./types.js";
+export { APP_RAIL_FLAG, SIDEBAR_TOGGLE_FLAG } from "./types.js";
+export { isAppRailEnabled, isSidebarToggleEnabled } from "./flags.js";
 export { edition } from "@pidash/edition";

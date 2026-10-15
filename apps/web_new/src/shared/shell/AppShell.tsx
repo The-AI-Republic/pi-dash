@@ -83,9 +83,13 @@ export function AppShell({
     <div className="flex h-screen flex-col bg-(--bg) text-(--text)">
       {topBar}
       <div className="flex min-h-0 flex-1">
-        {rail}
+        {/* The workspace route lazy-loads the rail (size budget); the slot stays sync. */}
+        <React.Suspense fallback={null}>{rail}</React.Suspense>
         {sidebarCollapsed ? null : sidebar}
-        <main className="min-w-0 flex-1 overflow-auto" aria-label="Content">
+        <main
+          className={rail ? "min-w-0 flex-1 overflow-auto" : "min-w-0 flex-1 overflow-auto pl-(--space-4)"}
+          aria-label="Content"
+        >
           {children}
         </main>
         {slideOver ? (
