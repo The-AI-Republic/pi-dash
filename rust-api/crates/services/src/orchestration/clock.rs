@@ -2021,10 +2021,7 @@ mod tests {
         for (name, outcome) in [
             ("R1_done_keeps_ticking", "done"),
             ("R1_blocked_keeps_ticking", "blocked"),
-            (
-                "R1_waiting_on_human_keeps_ticking",
-                "waiting_on_human",
-            ),
+            ("R1_waiting_on_human_keeps_ticking", "waiting_on_human"),
             ("R1_progressed_keeps_ticking", "progressed"),
             (
                 "R1_waiting_on_external_keeps_ticking",
