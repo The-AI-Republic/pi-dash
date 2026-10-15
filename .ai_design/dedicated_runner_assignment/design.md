@@ -576,9 +576,9 @@ Neither is on `main`; neither is changed here. Follow-up issues are filed in the
 
 The schema is additive and NULL means "today", so the migrations ship at any time. The risk is a window in which the API accepts `assigned_runner` but dispatch does not honour it: a saved choice that dispatch ignores would be a lie. The order:
 
-1. **HA-2a — model, migrations and read fields** (§6, the read side of §14.1 and §14.2, §14.7 for `assigned_pod`). Nothing can set `assigned_runner` yet; every row stays NULL. The project field of §6.6 is writable here: it changes nothing until a runner can be dedicated.
+1. **HA-2a (PDASHOSS01-304) — model, migrations and read fields** (§6, the read side of §14.1 and §14.2, §14.7 for `assigned_pod`). Nothing can set `assigned_runner` yet; every row stays NULL. The project field of §6.6 is writable here: it changes nothing until a runner can be dedicated.
 2. **HA-3 — dispatch and lifecycle** (§9 to §13), built against the model of HA-2a and tested by setting the field directly in tests.
-3. **HA-2b — the write path for `assigned_runner`** (§7, §8, §13.2, the write side of §14.1 and §14.2) lands only after HA-3's dispatch is on `main`.
+3. **HA-2b (PDASHOSS01-305) — the write path for `assigned_runner`** (§7, §8, §13.2, the write side of §14.1 and §14.2) lands only after HA-3's dispatch is on `main`.
 4. HA-4 and HA-5 build on HA-2b. HA-6 last.
 
 This order is recorded as relations, not only in this text: HA-2b is `blocked_by` HA-3, and HA-3 is `blocked_by` HA-2a (not the whole of HA-2). Merging HA-2b and HA-3 in one PR also satisfies the rule.
