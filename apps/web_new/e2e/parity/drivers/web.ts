@@ -27202,21 +27202,140 @@ export class WebDriver implements ParityDriver {
     await this.cyclesFavoriteButton(name).first().click({ timeout: WebDriver.OPEN_MS });
   }
 
+  /**
+   * Click the row marker until it reads `want`, re-clicking at most once
+   * and only while the row and `isServerFavorite` agree the toggle never
+   * happened (NEWFRONT-367). The row occasionally swallows a toggle click,
+   * but retrying blindly double-drives: a delayed first handler plus a
+   * second click reads the optimistic flip as the opposite toggle, and the
+   * old app's remove path resolves without a server call when the favorite
+   * entry is still optimistic, leaving server-true/row-false permanently.
+   * The row flips in the click handler's synchronous prefix, so a flip
+   * proves the drive landed; when the server flipped but the row never did,
+   * a second toggle would corrupt, so this throws instead of clicking.
+   */
+  async cyclesRowFavoriteToggleConverge(
+    name: string,
+    want: "starred" | "unstarred",
+    isServerFavorite: () => Promise<boolean>,
+    rowPollMs: number
+  ): Promise<void> {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if ((await this.cyclesRowFavoriteState(name)) === want) return;
+      await this.cyclesRowFavoriteToggle(name);
+      if (await this.cyclesRowFavoritePollWant(name, want, rowPollMs)) return;
+      if ((await isServerFavorite()) === (want === "starred")) {
+        throw new Error(
+          `[parity] cycle row ${name} never showed ${want} although the server did; refusing another toggle.`
+        );
+      }
+    }
+    throw new Error(`[parity] cycle row ${name} never showed ${want} after 2 toggles.`);
+  }
+
+  /** Poll the row marker for `want`, resolving false once `rowPollMs` elapses. */
+  private async cyclesRowFavoritePollWant(
+    name: string,
+    want: "starred" | "unstarred",
+    rowPollMs: number
+  ): Promise<boolean> {
+    const started = Date.now();
+    for (;;) {
+      if ((await this.cyclesRowFavoriteState(name)) === want) return true;
+      if (Date.now() - started >= rowPollMs) return false;
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  /**
+   * Drive the row marker to `want` and hold the agreement until it sticks
+   * (NEWFRONT-367). A toggle that lands between the page's list reads is
+   * overwritten when a stale read returns, so after the drive this keeps
+   * comparing the row against `isServerFavorite`: a row/server split is
+   * healed with a reconciling toggle (an add while unstarred resolves
+   * against the existing favorite entry instead of duplicating it), a
+   * flipped row with a pending server waits, and only twelve consecutive
+   * agreeing reads return. Anything else throws instead of toggling blind.
+   */
+  async cyclesRowFavoriteSettleAgreement(
+    name: string,
+    want: "starred" | "unstarred",
+    isServerFavorite: () => Promise<boolean>,
+    rowPollMs: number
+  ): Promise<void> {
+    await this.cyclesRowFavoriteToggleConverge(name, want, isServerFavorite, rowPollMs);
+    const wantState = want === "starred";
+    const started = Date.now();
+    let stable = 0;
+    let extras = 0;
+    for (;;) {
+      const row = await this.cyclesRowFavoriteState(name);
+      const server = await isServerFavorite();
+      if (row === want && server === wantState) {
+        stable += 1;
+        if (stable >= 12) return;
+      } else if (row === want) {
+        stable = 0;
+      } else if (server === wantState) {
+        stable = 0;
+        if (extras >= 2) {
+          throw new Error(
+            `[parity] cycle row ${name} never showed ${want} although the server did; refusing further toggles.`
+          );
+        }
+        await this.cyclesRowFavoriteToggle(name);
+        extras += 1;
+      } else {
+        stable = 0;
+        if (extras >= 2) {
+          throw new Error(`[parity] cycle row ${name} never settled on ${want} after 2 reconciling toggles.`);
+        }
+        await this.cyclesRowFavoriteToggle(name);
+        extras += 1;
+      }
+      if (Date.now() - started >= rowPollMs) {
+        throw new Error(`[parity] cycle row ${name} never settled on ${want} within ${rowPollMs}ms.`);
+      }
+      await this.page.waitForTimeout(250);
+    }
+  }
+
   private cyclesFavoriteDelayMs = 0;
   private cyclesFavoriteRouteArmed = false;
 
+  /**
+   * Hold the cycle-favorite create for `delayMs`. Do not use around the row
+   * toggle: holding the write widens the race between the toggle and the
+   * page's list reads (a stale read overwrites the optimistic flip), which
+   * the settle agreement heals instead.
+   */
   async cyclesDelayFavoriteWrites(delayMs: number): Promise<void> {
     this.cyclesFavoriteDelayMs = delayMs;
     if (this.cyclesFavoriteRouteArmed) return;
     this.cyclesFavoriteRouteArmed = true;
     await this.page.route(
-      (url) => url.pathname.includes("/user-favorite-cycles/"),
+      (url) => url.pathname.includes("/user-favorites/"),
       async (route) => {
+        // The row star writes through the workspace favorites endpoint, so
+        // only the cycle-favorite create is held; reads, removes and other
+        // creates continue immediately.
         const wait = this.cyclesFavoriteDelayMs;
-        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+        if (wait > 0 && route.request().method() === "POST" && WebDriver.isCycleFavoriteCreate(route)) {
+          await new Promise((resolve) => setTimeout(resolve, wait));
+        }
         await route.continue();
       }
     );
+  }
+
+  /** Whether `route` carries a cycle-favorite create body (non-JSON bodies never match). */
+  private static isCycleFavoriteCreate(route: Route): boolean {
+    try {
+      const body = route.request().postDataJSON() as { entity_type?: unknown } | null;
+      return (body?.entity_type ?? null) === "cycle";
+    } catch {
+      return false;
+    }
   }
 
   async cyclesClearFavoriteDelays(): Promise<void> {

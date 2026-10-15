@@ -601,60 +601,47 @@ test(
       expect(await driver.cyclesRowFavoriteState(name)).toBe("unstarred");
 
       await test.step("adding toasts progress, then the outcome, and marks the row", async () => {
-        // The row occasionally swallows a toggle click (the click returns
-        // but no request goes out), so a toggle with no loading toast and
-        // no server flip is retried once; the server guard keeps a landed
-        // click from toggling back.
-        await driver.cyclesDelayFavoriteWrites(3000);
-        try {
-          for (let attempt = 1; attempt <= 2; attempt++) {
-            await driver.cyclesRowFavoriteToggle(name);
-            const sawLoading = await expect
-              .poll(
-                async () => {
-                  const toast = await driver.rulesLastToast();
-                  return toast ? `${toast.title} ${toast.message}` : "";
-                },
-                { timeout: 15_000 }
-              )
-              .toMatch(/adding/i)
-              .then(
-                () => true,
-                () => false
-              );
-            if (sawLoading) break;
-            if (await serverCycleIsFavorite(seed.workspaceSlug, projectId, cycleId, session)) break;
-          }
-          await expect
-            .poll(
-              async () => {
-                const toast = await driver.rulesLastToast();
-                return toast ? `${toast.title} ${toast.message}` : "";
-              },
-              { timeout: 30_000 }
-            )
-            .toMatch(/added/i);
-        } finally {
-          await driver.cyclesClearFavoriteDelays();
-        }
+        // Single-drive converge (a blind retry would double-drive), then the
+        // outcome toast and the server flip, then a settling agreement: the
+        // toggle lands between the page's list reads, and a stale read that
+        // returns afterwards overwrites the optimistic flip, so the marker
+        // is only asserted once the row and the server agree it stuck. The
+        // write is deliberately not held back here: holding it widens that
+        // race instead of narrowing it.
+        await driver.cyclesRowFavoriteToggleConverge(
+          name,
+          "starred",
+          () => serverCycleIsFavorite(seed.workspaceSlug, projectId, cycleId, session),
+          30_000
+        );
+        await expect
+          .poll(
+            async () => {
+              const toast = await driver.rulesLastToast();
+              return toast ? `${toast.title} ${toast.message}` : "";
+            },
+            { timeout: 30_000 }
+          )
+          .toMatch(/added/i);
         await expect
           .poll(() => serverCycleIsFavorite(seed.workspaceSlug, projectId, cycleId, session), { timeout: 30_000 })
           .toBe(true);
+        await driver.cyclesRowFavoriteSettleAgreement(
+          name,
+          "starred",
+          () => serverCycleIsFavorite(seed.workspaceSlug, projectId, cycleId, session),
+          30_000
+        );
         await expect.poll(() => driver.cyclesRowFavoriteState(name), { timeout: 30_000 }).toBe("starred");
       });
 
       await test.step("removing toasts the outcome and unmarks the row", async () => {
-        for (let attempt = 1; attempt <= 2; attempt++) {
-          await driver.cyclesRowFavoriteToggle(name);
-          const removed = await expect
-            .poll(() => serverCycleIsFavorite(seed.workspaceSlug, projectId, cycleId, session), { timeout: 15_000 })
-            .toBe(false)
-            .then(
-              () => true,
-              () => false
-            );
-          if (removed) break;
-        }
+        await driver.cyclesRowFavoriteToggleConverge(
+          name,
+          "unstarred",
+          () => serverCycleIsFavorite(seed.workspaceSlug, projectId, cycleId, session),
+          30_000
+        );
         await expect
           .poll(
             async () => {
@@ -670,7 +657,6 @@ test(
           .toBe(false);
       });
     } finally {
-      await driver.cyclesClearFavoriteDelays().catch(() => undefined);
       await cyclesUnfavoriteCycle(seed.workspaceSlug, projectId, cycleId, session).catch(() => undefined);
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
     }
@@ -706,17 +692,12 @@ test(
       });
 
       await test.step("favoriting the cycle surfaces the section with the entry", async () => {
-        for (let attempt = 1; attempt <= 2; attempt++) {
-          await driver.cyclesRowFavoriteToggle(name);
-          const added = await expect
-            .poll(() => serverCycleIsFavorite(seed.workspaceSlug, projectId, cycleId, session), { timeout: 15_000 })
-            .toBe(true)
-            .then(
-              () => true,
-              () => false
-            );
-          if (added) break;
-        }
+        await driver.cyclesRowFavoriteToggleConverge(
+          name,
+          "starred",
+          () => serverCycleIsFavorite(seed.workspaceSlug, projectId, cycleId, session),
+          30_000
+        );
         await expect
           .poll(
             async () => {

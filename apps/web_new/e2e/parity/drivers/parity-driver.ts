@@ -5160,6 +5160,26 @@ export interface ParityDriver {
   cyclesRowFavoriteState(name: string): Promise<"starred" | "unstarred" | "absent">;
   /** Click the favorite marker on the live-list row `name`. */
   cyclesRowFavoriteToggle(name: string): Promise<void>;
+  /**
+   * Click the row marker until it reads `want`, re-clicking at most once and only while the row
+   * and `isServerFavorite` agree the toggle never happened; throws instead of double-driving.
+   */
+  cyclesRowFavoriteToggleConverge(
+    name: string,
+    want: "starred" | "unstarred",
+    isServerFavorite: () => Promise<boolean>,
+    rowPollMs: number
+  ): Promise<void>;
+  /**
+   * Drive the row marker to `want`, then hold the row/server agreement until it sticks,
+   * healing stale-read overwrites with reconciling toggles; throws instead of toggling blind.
+   */
+  cyclesRowFavoriteSettleAgreement(
+    name: string,
+    want: "starred" | "unstarred",
+    isServerFavorite: () => Promise<boolean>,
+    rowPollMs: number
+  ): Promise<void>;
   /** Hold favorite POST/DELETE writes for `delayMs` so progress toasts stay observable. */
   cyclesDelayFavoriteWrites(delayMs: number): Promise<void>;
   /** Remove favorite-write delays installed by cyclesDelayFavoriteWrites. */
