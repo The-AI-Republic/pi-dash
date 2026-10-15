@@ -157,7 +157,24 @@ jobs:
       - run: pnpm --filter @pidash/kit build
       - run: pnpm --filter @pidash/api-client build
       - run: pnpm --filter web_new build
+      # Fails only above the 260 KB initial-JS ceiling (and the CSS budget).
       - run: pnpm --filter web_new size
+      # The 220 KB target is reported, never blocking; area gates act on it (NEWFRONT-248).
+      - name: initial JS against the 220 KB target (report only, never blocks)
+        working-directory: apps/web_new
+        env:
+          SIZE_TARGET: "1"
+        run: |
+          pnpm exec size-limit --json > "$RUNNER_TEMP/size.json" || true
+          node -e '
+            const fs = require("node:fs");
+            for (const entry of JSON.parse(fs.readFileSync(process.argv[1], "utf8"))) {
+              const line = `${entry.name}: ${(entry.size / 1000).toFixed(2)} kB${entry.passed ? "" : " (over the target)"}`;
+              console.log(line);
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${line}\n`);
+              if (!entry.passed) console.log(`::warning title=Size target::${line}. Not blocking; the area gate files a diet issue.`);
+            }
+          ' "$RUNNER_TEMP/size.json"
 
   coverage-audit:
     name: coverage audit (report only, never blocks)
