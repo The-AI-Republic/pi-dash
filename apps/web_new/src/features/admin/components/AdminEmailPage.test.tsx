@@ -262,16 +262,16 @@ describe("AdminEmailPage", () => {
     }) as Transport);
     renderPage();
     await waitFor(() => expect(screen.getByTestId("admin-email-toggle")).toHaveAttribute("aria-checked", "true"));
-    expect(screen.getByTestId("admin-email-toggle")).not.toBeDisabled();
+    expect(screen.getByTestId("admin-email-toggle")).not.toHaveAttribute("aria-disabled", "true");
     fireEvent.click(screen.getByTestId("admin-email-toggle"));
-    await waitFor(() => expect(screen.getByTestId("admin-email-toggle")).toBeDisabled());
+    await waitFor(() => expect(screen.getByTestId("admin-email-toggle")).toHaveAttribute("aria-disabled", "true"));
     gate.resolve({
       status: 200,
       url: "https://api.test/api/instances/configurations/disable-email-feature/",
       headers: { get: () => null },
       text: () => Promise.resolve(""),
     });
-    await waitFor(() => expect(screen.getByTestId("admin-email-toggle")).not.toBeDisabled());
+    await waitFor(() => expect(screen.getByTestId("admin-email-toggle")).not.toHaveAttribute("aria-disabled", "true"));
   });
 
   it("reveals the stored values from a disabled start and hides again on save without enable", async () => {
