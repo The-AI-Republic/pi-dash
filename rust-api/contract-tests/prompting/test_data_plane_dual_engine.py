@@ -8,12 +8,20 @@ sides together when a section body changes.
 
 Also locks the fixture meaning on the Python side (FIX-render goldens
 reproduce live) and the data-mirror integrity (``rust-api`` mirrors are
-byte-identical to ``apps/api`` sources; normalized bodies match the
+byte-identical to the Django sources; normalized bodies match the
 fixture ``body_sha256`` values).
+
+The Django side defaults to this checkout's ``apps/api``. When the
+checkout's Django is older than the port (rust-dev's ``apps/api`` is
+frozen while drift issues port from ``origin/main``), point
+``PIDASH_DJANGO_PROMPTING_DIR`` at the Django-best prompting tree —
+a worktree of ``origin/main`` at or after the fixtures' ``ported_from`` —
+so the comparison runs against the Django the port follows.
 """
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -21,7 +29,13 @@ from jinja2 import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 
 REPO = Path(__file__).resolve().parents[3]
-SECTIONS_DIR = REPO / "apps/api/pi_dash/prompting/sections"
+PROMPTING_DIR = Path(
+    os.environ.get(
+        "PIDASH_DJANGO_PROMPTING_DIR", REPO / "apps/api/pi_dash/prompting"
+    )
+)
+SECTIONS_DIR = PROMPTING_DIR / "sections"
+RECIPES_PATH = PROMPTING_DIR / "recipes.py"
 MIRROR_DIR = REPO / "rust-api/crates/services/src/prompting/sections"
 FIXTURES_DIR = REPO / "rust-api/fixtures/prompting"
 
@@ -63,7 +77,7 @@ def section_body(path: Path) -> str:
 
 def test_mirrors_are_byte_identical_to_sources():
     sources = sorted(SECTIONS_DIR.glob("*.md"))
-    assert len(sources) == 38
+    assert len(sources) == 39
     for source in sources:
         mirror = MIRROR_DIR / source.name
         assert mirror.is_file(), f"mirror missing for {source.name}"
@@ -76,7 +90,7 @@ def test_fixture_registry_matches_sources():
     fixture = json.loads((FIXTURES_DIR / "FIX-registry.json").read_text())
     assert fixture["bugs"] == []
     entries = fixture["data"]["registry"]["sections"]
-    assert fixture["data"]["registry"]["section_count"] == 38 == len(entries)
+    assert fixture["data"]["registry"]["section_count"] == 39 == len(entries)
     for entry in entries:
         body = section_body(SECTIONS_DIR / f"{entry['key']}.md")
         assert len(body) == entry["body_len"], entry["key"]
@@ -143,7 +157,7 @@ def test_recipe_goldens_match_sources():
     """
     import ast
 
-    source = (REPO / "apps/api/pi_dash/prompting/recipes.py").read_text()
+    source = RECIPES_PATH.read_text()
     module = ast.parse(source)
     # Module-level `NAME = "..."` string constants (the KIND_* names the
     # recipe tables reference).

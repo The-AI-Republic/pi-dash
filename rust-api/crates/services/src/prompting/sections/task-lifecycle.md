@@ -9,8 +9,8 @@ This issue is a **task with a goal**, and In Progress / In Review / In Test are 
 
 ```
 In Progress ──► In Review ──► In Test ──► Done
-     ▲              │             │         (human only)
-     └──────────────┴─────────────┘
+     ▲              │             │         (a human closes it — an agent only
+     └──────────────┴─────────────┘          where the project explicitly allows)
           a run may send the task back with an open-items list
 ```
 
@@ -21,9 +21,9 @@ Each run is a fresh session. The **workpad** (its `### Path to done` block in pa
 | Stage | Finished when | Next state chosen by the run |
 |---|---|---|
 | In Progress | **every** planned part is built and validated — a PR is open for each part (or the non-code answer is posted); acceptance criteria are written to the workpad | → In Review |
-| In Review | no unresolved findings against the work product | → In Test (clean) · → In Progress (real defects, listed as open items) · stay In Review (waiting on a human reviewer / nothing changed) |
-| In Test | every acceptance criterion is verified from the user's side | stay In Test (pass — a human closes it) · → In Progress (defects, listed as open items) |
-| Done / Cancelled | — | **a human decides.** You never move an issue to a `completed` or `cancelled` state. |
+| In Review | no unresolved findings against the work product | → In Test (clean) · → In Progress (real defects, listed as open items) · stay In Review (waiting on CI or the PR — keep ticking · waiting on a human reviewer — `--stop-ticking`) |
+| In Test | every acceptance criterion is verified from the user's side | stay In Test (pass — a human closes it) · → Done (pass, **only** where the project explicitly lets agents merge and close) · → In Progress (defects, listed as open items) |
+| Done / Cancelled | — | **a human decides.** You never move an issue to a `completed` or `cancelled` state on your own; the one exception is a test pass in a project that explicitly lets agents merge and close. |
 
 **Multi-part issues stay In Progress until the whole issue is done.** When a run records a multi-part plan in the workpad, opening a PR for one part does **not** finish the In Progress stage. The issue moves to In Review only when every planned part is built and the acceptance criteria are covered; until then a run delivers as many parts as it can and reports `progressed` (or `waiting_on_external` when only a merge is left). This keeps a partial implementation from firing a review run that could only report "not done".
 
@@ -44,4 +44,4 @@ Each run is a fresh session. The **workpad** (its `### Path to done` block in pa
 
 When this issue has open blockers, they are information, not a gate — read them and decide for yourself whether the work can proceed (see "Work item relationships"). If it can, proceed and record the assumption. If it cannot, write down which blocker and why, call `pidash issue wait {{ issue.identifier }}`, and yield `waiting_on_external`: the wait buys back this run's tick, so it costs no budget, and the next tick asks you again. Nothing watches the blocker for you — a blocker closing starts no run, and no one reads your workpad — so each tick you re-read and re-decide.{% if tick.wait_allowance | default(none) is not none and tick.wait_allowance == 0 %} **Your wait allowance is spent**: further waiting comes out of the pool above, so if you are still blocked, tell the human in a comment instead of waiting again.{% endif %}{% if tick.spent %}
 
-**The pool is spent — this is the last run.** No agent run will follow this one, whatever state you leave the issue in, until a human acts. Prefer leaving the task hand-off-able — workpad complete, findings listed, work pushed — over starting something you cannot finish. Still move the issue to its truthful state, then tell the human in a comment: what you found, that no agent run will follow, and the ways forward — fix it by hand, press **Run AI** or reply with **Comment & Run** for one free run, or press **Re-tick** to give the clock back (Re-tick works from In Progress, In Review, In Test, and from Paused if Pi Dash parks the issue there). Report `waiting_on_human`. Never press Re-tick yourself — it is a human's call.{% endif %}{% if tick.clock_live %} While the issue stays in its current state, Pi Dash re-invokes the agent about every {{ tick.interval_human }}.{% endif %}{% else %}This issue has no ticking clock yet. Runs a human starts are free; runs the ticking system starts count against the issue's pool.{% endif %}
+**The pool is spent — this is the last run.** No agent run will follow this one, whatever state you leave the issue in, until a human acts. Prefer leaving the task hand-off-able — workpad complete, findings listed, work pushed — over starting something you cannot finish. Still move the issue to its truthful state, then tell the human in a comment: what you found, that no agent run will follow, and the ways forward — fix it by hand, press **Run AI** or reply with **Comment & Run** for one free run, or press **Re-tick** to give the clock back (Re-tick works from In Progress, In Review, In Test, and from Paused if Pi Dash parks the issue there). Report `waiting_on_human` (the spent pool has already stopped the clock, so no `--stop-ticking` is needed). Never press Re-tick yourself — it is a human's call.{% endif %}{% if tick.clock_live %} While the issue stays in its current state, Pi Dash re-invokes the agent about every {{ tick.interval_human }}.{% endif %}{% else %}This issue has no ticking clock yet. Runs a human starts are free; runs the ticking system starts count against the issue's pool.{% endif %}

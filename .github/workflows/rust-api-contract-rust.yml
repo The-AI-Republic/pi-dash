@@ -232,6 +232,23 @@ jobs:
             echo "DJANGO_SERVER=runserver" >> "$GITHUB_ENV"
           fi
 
+      # The prompting suite's dual-engine file tests compare the Rust
+      # section mirrors against the Django prompting tree they were
+      # ported from. The checkout's apps/api can be older than the port
+      # (drift issues port from origin/main while rust-dev's apps/api is
+      # frozen), so provision a detached worktree of origin/main at the
+      # pinned ported_from SHA and point the suite at it. Other suites
+      # ignore the variable. (PIDASHCONV-1058; retire once PIDASHCONV-1055
+      # merges main into rust-dev and the same-checkout default catches
+      # up with the fixtures.)
+      - name: Provision origin/main prompting tree for prompting suite
+        if: matrix.suite == 'prompting'
+        run: |
+          SHA=$(python3 -c "import json; print(json.load(open('rust-api/fixtures/prompting/FIX-registry.json'))['ported_from'])")
+          git fetch origin "$SHA" --depth=1
+          git worktree add --detach /tmp/pi-dash-main "$SHA"
+          echo "PIDASH_DJANGO_PROMPTING_DIR=/tmp/pi-dash-main/apps/api/pi_dash/prompting" >> "$GITHUB_ENV"
+
       - name: Start live Django server
         working-directory: apps/api
         run: |

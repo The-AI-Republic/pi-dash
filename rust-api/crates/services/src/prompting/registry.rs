@@ -211,6 +211,10 @@ const SECTION_FILES: &[(&str, &str)] = &[
         include_str!("sections/cloud-issue-context.md"),
     ),
     (
+        "cloud-project-context.md",
+        include_str!("sections/cloud-project-context.md"),
+    ),
+    (
         "cloud-review-intro.md",
         include_str!("sections/cloud-review-intro.md"),
     ),
