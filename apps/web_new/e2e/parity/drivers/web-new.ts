@@ -8948,6 +8948,22 @@ export class WebNewDriver implements ParityDriver {
   async cyclesRowFavoriteToggle(_name: string): Promise<void> {
     return todo("cyclesRowFavoriteToggle");
   }
+  async cyclesRowFavoriteToggleConverge(
+    _name: string,
+    _want: "starred" | "unstarred",
+    _isServerFavorite: () => Promise<boolean>,
+    _rowPollMs: number
+  ): Promise<void> {
+    return todo("cyclesRowFavoriteToggleConverge");
+  }
+  async cyclesRowFavoriteSettleAgreement(
+    _name: string,
+    _want: "starred" | "unstarred",
+    _isServerFavorite: () => Promise<boolean>,
+    _rowPollMs: number
+  ): Promise<void> {
+    return todo("cyclesRowFavoriteSettleAgreement");
+  }
   async cyclesDelayFavoriteWrites(_delayMs: number): Promise<void> {
     return todo("cyclesDelayFavoriteWrites");
   }
