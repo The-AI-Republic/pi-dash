@@ -1,8 +1,10 @@
 -- queries/scheduler_sql.sql
 -- Scheduler definition reads/writes record: SQL shape + write effects.
 -- Source: app/views/scheduler/views.py:46-157. Ported-from: 01a93e17216faea7bfc156b0f864cbbe420d1c52.
+-- R7 added from OSS main 3db73752 (PDASHOSS01-221, PIDASHCONV-1066).
 -- Method: str(queryset.query) under pi_dash.settings.test (Postgres dialect,
--- no DB round-trip); literals replaced with :placeholders below.
+-- no DB round-trip); literals replaced with :placeholders below. R7 is the
+-- executed .exists() text (CaptureQueriesContext), same placeholder rule.
 --
 -- R1 list (:59-68): workspace scope via resolved Workspace row, annotation,
 --   ORDER BY name. Soft-deleted schedulers excluded by the default
@@ -23,6 +25,10 @@
 --   the inline UPDATE exists so the API view is consistent immediately.
 -- R6 fallback COUNT (serializers/scheduler.py:108): COUNT(*) over the
 --   scheduler's non-deleted bindings (manager NULL-guard + explicit NULL-guard).
+-- R7 validate_slug (serializers/scheduler.py:113-134, main 3db73752):
+--   .exists() over filter(workspace, slug); manager NULL-guard only
+--   (tombstoned slugs reusable); slug sorts before workspace_id (Q
+--   alphabetical kwargs). PATCH appends AND NOT (id = :scheduler_id).
 
 -- R1 scheduler list (:59-68)
 SELECT "schedulers"."created_at", "schedulers"."updated_at", "schedulers"."created_by_id", "schedulers"."updated_by_id", "schedulers"."deleted_at", "schedulers"."id", "schedulers"."workspace_id", "schedulers"."slug", "schedulers"."name", "schedulers"."description", "schedulers"."prompt", "schedulers"."source", "schedulers"."is_enabled", "schedulers"."color", COUNT("scheduler_bindings"."id") FILTER (WHERE "scheduler_bindings"."deleted_at" IS NULL) AS "_active_binding_count" FROM "schedulers" LEFT OUTER JOIN "scheduler_bindings" ON ("schedulers"."id" = "scheduler_bindings"."scheduler_id") WHERE ("schedulers"."deleted_at" IS NULL AND "schedulers"."workspace_id" = :workspace_id) GROUP BY "schedulers"."id" ORDER BY "schedulers"."name" ASC;
@@ -46,3 +52,6 @@ COMMIT;
 
 -- R6 active_binding_count fallback (serializers/scheduler.py:108)
 SELECT COUNT(*) AS "__count" FROM "scheduler_bindings" WHERE ("scheduler_bindings"."deleted_at" IS NULL AND "scheduler_bindings"."scheduler_id" = :scheduler_id AND "scheduler_bindings"."deleted_at" IS NULL);
+
+-- R7 slug-unique check (serializers/scheduler.py:113-134): create form; PATCH splices AND NOT ("schedulers"."id" = :scheduler_id) inside the parens
+SELECT 1 AS "a" FROM "schedulers" WHERE ("schedulers"."deleted_at" IS NULL AND "schedulers"."slug" = :slug AND "schedulers"."workspace_id" = :workspace_id) LIMIT 1;

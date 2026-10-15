@@ -12,9 +12,13 @@
 //! dependency, so handlers translate each `:name` to a positional `$n`
 //! in [`*_PARAMS`] order when binding via `sqlx`.
 //!
-//! Sources (drift baseline `01a93e17`):
+//! Sources (drift baseline `01a93e17`; R7 from OSS `main` `3db73752`,
+//! PIDASHCONV-1066):
 //! - `app/views/scheduler/views.py:46-157` — scheduler list/detail
 //!   reads, create, PATCH, delete cascade.
+//! - `app/serializers/scheduler.py:113-134` — `validate_slug` R7
+//!   duplicate check (PDASHOSS01-221; absent at the baseline, where a
+//!   duplicate fell through to the `IntegrityError` branch).
 //! - `app/views/scheduler/views.py:163-291` — binding list/detail reads,
 //!   install, PATCH, uninstall.
 //! - `app/serializers/scheduler.py:108` — `active_binding_count`
@@ -122,6 +126,44 @@ pub const ACTIVE_BINDING_COUNT_SQL: &str = "SELECT COUNT(*) AS \"__count\" FROM 
 
 /// Bind order for [`ACTIVE_BINDING_COUNT_SQL`].
 pub const ACTIVE_BINDING_COUNT_PARAMS: &[&str] = &["scheduler_id"];
+
+/// R7 slug-unique check (`SchedulerSerializer.validate_slug`,
+/// `serializers/scheduler.py:113-134`, OSS `main` `3db73752`): the
+/// `.exists()` over `Scheduler.objects.filter(workspace=..., slug=...)`
+/// — the soft-delete manager's NULL guard only (no double guard like
+/// R6/BR4), so tombstoned slugs stay reusable, matching the
+/// `scheduler_unique_workspace_slug_when_active` condition. `slug`
+/// precedes `workspace_id`: DRF passes both in one `filter()` call and
+/// `Q` sorts kwargs alphabetically (verified via
+/// `CaptureQueriesContext` on `origin/main`, PIDASHCONV-1066).
+pub const SCHEDULER_SLUG_UNIQUE_CHECK_SQL: &str = "SELECT 1 AS \"a\" FROM \"schedulers\" WHERE (\"schedulers\".\"deleted_at\" IS NULL AND \"schedulers\".\"slug\" = :slug AND \"schedulers\".\"workspace_id\" = :workspace_id) LIMIT 1;";
+
+/// Bind order for [`SCHEDULER_SLUG_UNIQUE_CHECK_SQL`].
+pub const SCHEDULER_SLUG_UNIQUE_CHECK_PARAMS: &[&str] = &["slug", "workspace_id"];
+
+/// R7 self-row exclusion on PATCH (`.exclude(pk=self.instance.pk)`):
+/// spliced inside the WHERE parens (before the closing paren) so the
+/// row being patched never matches itself. See
+/// [`scheduler_slug_unique_check_sql`].
+pub const SCHEDULER_SLUG_UNIQUE_CHECK_PATCH_EXCLUSION: &str =
+    "AND NOT (\"schedulers\".\"id\" = :scheduler_id)";
+
+/// Bind order for the PATCH form of [`SCHEDULER_SLUG_UNIQUE_CHECK_SQL`].
+pub const SCHEDULER_SLUG_UNIQUE_CHECK_PATCH_PARAMS: &[&str] =
+    &["slug", "workspace_id", "scheduler_id"];
+
+/// R7 with or without the PATCH self-row exclusion. `false` returns
+/// [`SCHEDULER_SLUG_UNIQUE_CHECK_SQL`] byte-for-byte (create path).
+pub fn scheduler_slug_unique_check_sql(exclude_scheduler: bool) -> String {
+    if !exclude_scheduler {
+        return SCHEDULER_SLUG_UNIQUE_CHECK_SQL.to_owned();
+    }
+    SCHEDULER_SLUG_UNIQUE_CHECK_SQL.replacen(
+        ") LIMIT 1;",
+        &format!(" {SCHEDULER_SLUG_UNIQUE_CHECK_PATCH_EXCLUSION}) LIMIT 1;"),
+        1,
+    )
+}
 
 /// One annotated scheduler row (R1/R2): the reused
 /// [`scheduler::Scheduler`] plus the `_active_binding_count` annotation
@@ -756,6 +798,10 @@ mod tests {
                 "COMMIT;".to_owned(),
             ]
         );
+        assert_eq!(
+            section_statement(&sql, "-- R7 slug-unique check"),
+            SCHEDULER_SLUG_UNIQUE_CHECK_SQL
+        );
     }
 
     #[test]
@@ -871,6 +917,7 @@ mod tests {
             SCHEDULER_DETAIL_SQL,
             SCHEDULER_DELETE_LOOKUP_SQL,
             ACTIVE_BINDING_COUNT_SQL,
+            SCHEDULER_SLUG_UNIQUE_CHECK_SQL,
             BINDING_LIST_SQL,
             BINDING_DETAIL_SQL,
             INSTALL_PROJECT_LOOKUP_SQL,
@@ -917,6 +964,19 @@ mod tests {
                 .count(),
             2
         );
+        // R7 carries the manager guard exactly once (no explicit
+        // second filter), and `slug` sorts before `workspace_id`
+        // (Q-object alphabetical kwargs).
+        assert_eq!(
+            SCHEDULER_SLUG_UNIQUE_CHECK_SQL
+                .matches("deleted_at\" IS NULL")
+                .count(),
+            1
+        );
+        assert!(
+            SCHEDULER_SLUG_UNIQUE_CHECK_SQL.find("\"slug\" = :slug")
+                < SCHEDULER_SLUG_UNIQUE_CHECK_SQL.find("\"workspace_id\" = :workspace_id")
+        );
         // Ported quirk 4: the cascade UPDATE touches deleted_at only.
         assert_eq!(
             SCHEDULER_DELETE_BINDINGS_SQL
@@ -941,6 +1001,10 @@ mod tests {
             ),
             (SCHEDULER_SOFT_DELETE_SQL, SCHEDULER_SOFT_DELETE_PARAMS),
             (ACTIVE_BINDING_COUNT_SQL, ACTIVE_BINDING_COUNT_PARAMS),
+            (
+                SCHEDULER_SLUG_UNIQUE_CHECK_SQL,
+                SCHEDULER_SLUG_UNIQUE_CHECK_PARAMS,
+            ),
             (BINDING_LIST_SQL, BINDING_LIST_PARAMS),
             (BINDING_DETAIL_SQL, BINDING_DETAIL_PARAMS),
             (INSTALL_PROJECT_LOOKUP_SQL, INSTALL_PROJECT_LOOKUP_PARAMS),
@@ -966,6 +1030,20 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(binding_unique_check_sql(false), BINDING_UNIQUE_CHECK_SQL);
+        // The PATCH slug check adds exactly the self-row exclusion.
+        let slug_patch = scheduler_slug_unique_check_sql(true);
+        assert!(slug_patch.contains(SCHEDULER_SLUG_UNIQUE_CHECK_PATCH_EXCLUSION));
+        assert_eq!(
+            placeholders_in(&slug_patch),
+            SCHEDULER_SLUG_UNIQUE_CHECK_PATCH_PARAMS
+                .iter()
+                .map(|p| (*p).to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            scheduler_slug_unique_check_sql(false),
+            SCHEDULER_SLUG_UNIQUE_CHECK_SQL
+        );
     }
 
     #[test]
