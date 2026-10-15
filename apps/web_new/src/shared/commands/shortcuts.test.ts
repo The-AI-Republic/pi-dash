@@ -31,4 +31,9 @@ describe("typing guard", () => {
     expect(isTypingTarget("not-an-element" as unknown as EventTarget)).toBe(false);
     expect(isTypingTarget({} as EventTarget)).toBe(false);
   });
+
+  it("honours the contenteditable attribute without the DOM flag", () => {
+    expect(isTypingTarget({ getAttribute: () => "true" } as unknown as EventTarget)).toBe(true);
+    expect(isTypingTarget({ tagName: "DIV", getAttribute: () => null } as unknown as EventTarget)).toBe(false);
+  });
 });

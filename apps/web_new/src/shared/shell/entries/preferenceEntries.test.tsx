@@ -30,7 +30,7 @@ import {
 
 const USER_ID = "123e4567-e89b-12d3-a456-426614174000";
 
-function stubClient(args: { bodies?: string[]; timezonesGate?: Promise<void> } = {}) {
+function stubClient(args: { bodies?: string[]; timezonesGate?: Promise<void>; timezonesStatus?: number } = {}) {
   const bodies = args.bodies ?? [];
   createAppClient("https://api.test", (async (url: string, init?: { method?: string; body?: unknown }) => {
     if (typeof init?.body === "string") bodies.push(`${init?.method ?? "GET"} ${url} ${init.body}`);
@@ -92,17 +92,20 @@ function stubClient(args: { bodies?: string[]; timezonesGate?: Promise<void> } =
     }
     if (url.endsWith("/api/timezones/")) {
       if (args.timezonesGate) await args.timezonesGate;
+      const status = args.timezonesStatus ?? 200;
       return {
-        status: 200,
+        status,
         url,
         headers: { get: () => null },
         text: async () =>
-          JSON.stringify({
-            timezones: [
-              { utc_offset: "+01:00", gmt_offset: "GMT+1", value: "Europe/Paris", label: "Paris" },
-              { utc_offset: "+09:00", gmt_offset: "GMT+9", value: "Asia/Tokyo", label: "Tokyo" },
-            ],
-          }),
+          status === 200
+            ? JSON.stringify({
+                timezones: [
+                  { utc_offset: "+01:00", gmt_offset: "GMT+1", value: "Europe/Paris", label: "Paris" },
+                  { utc_offset: "+09:00", gmt_offset: "GMT+9", value: "Asia/Tokyo", label: "Tokyo" },
+                ],
+              })
+            : JSON.stringify({ detail: "no" }),
       };
     }
     return { status: 404, url, headers: { get: () => null }, text: async () => "{}" };
@@ -209,6 +212,12 @@ describe("timezone picker page", () => {
     renderPage(timezonePickerPage(), "tok");
     await waitFor(() => expect(screen.getByRole("button", { name: "Tokyo" })).not.toBeNull());
     expect(screen.queryByRole("button", { name: "Paris" })).toBeNull();
+  });
+
+  it("renders the empty line when the zone list fails", async () => {
+    stubClient({ timezonesStatus: 500 });
+    renderPage(timezonePickerPage(), "");
+    await waitFor(() => expect(screen.getByText("empty:No timezones found")).not.toBeNull());
   });
 });
 

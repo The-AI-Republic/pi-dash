@@ -45,6 +45,16 @@ describe("chord glyphs", () => {
     vi.stubGlobal("navigator", undefined);
     expect(isMacPlatform()).toBe(false);
   });
+
+  it("treats a navigator without a platform string as non-Mac", () => {
+    vi.stubGlobal("navigator", {});
+    expect(isMacPlatform()).toBe(false);
+  });
+
+  it("covers every modifier alias on both platforms", () => {
+    expect(formatChordKeys("meta+cmd+option", true)).toEqual(["⌘", "⌘", "⌥"]);
+    expect(formatChordKeys("ctrl+alt", false)).toEqual(["Ctrl", "Alt"]);
+  });
 });
 
 describe("groupBoundCommands", () => {

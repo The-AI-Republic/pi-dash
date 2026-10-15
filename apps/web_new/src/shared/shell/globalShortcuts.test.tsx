@@ -171,6 +171,22 @@ describe("useGlobalShortcuts", () => {
     }
   });
 
+  it("ignores control- and alt-modified keys without feeding the sequence", () => {
+    const run = vi.fn();
+    const unregister = registerCommands([{ id: "shell.go-home", title: "Go to home", sequence: "gh", run }]);
+    try {
+      render(<Probe />);
+      press(window, { key: "g" });
+      expect(press(window, { key: "q", ctrlKey: true })).toBe(false);
+      expect(press(window, { key: "y", altKey: true })).toBe(false);
+      expect(run).not.toHaveBeenCalled();
+      press(window, { key: "h" });
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      unregister();
+    }
+  });
+
   it("detaches on unmount", () => {
     const run = vi.fn();
     const unregister = registerCommands([
