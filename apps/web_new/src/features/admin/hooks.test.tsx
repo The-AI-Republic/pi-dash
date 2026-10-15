@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { InstanceBootstrap, InstancePatch, LoopJobList, Transport, TransportInit } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
 
@@ -17,8 +17,18 @@ vi.mock("../../shared/shell/index.js", async (importOriginal) => {
   return { ...actual, notifyError: notifyErrorMock, notifySuccess: vi.fn() };
 });
 
-import { notifySuccess } from "../../shared/shell/index.js";
+import { notifyError, notifySuccess } from "../../shared/shell/index.js";
 import type { CloudEntrySessionState } from "./cloudEntry.js";
+import {
+  SMTP_ENABLED_KEY,
+  SMTP_FROM_KEY,
+  SMTP_HOST_KEY,
+  SMTP_PASSWORD_KEY,
+  SMTP_PORT_KEY,
+  SMTP_SSL_KEY,
+  SMTP_TLS_KEY,
+  SMTP_USER_KEY,
+} from "./emailConfig.js";
 import {
   GENERAL_SAVE_FAILURE_LOG,
   GENERAL_SAVE_SUCCESS_MESSAGE,
@@ -27,15 +37,27 @@ import {
 import {
   CONFIG_SAVE_FAILED_LOG,
   toggleLoopJobMutationOptions,
+  configValueMap,
+  EMAIL_DISABLE_ERROR_LOG,
+  EMAIL_DISABLE_FAILED_MESSAGE,
+  EMAIL_DISABLE_FAILED_TITLE,
+  EMAIL_DISABLED_TOAST_MESSAGE,
+  EMAIL_DISABLED_TOAST_TITLE,
+  SMTP_SAVE_ERROR_LOG,
+  SMTP_SAVE_TOAST_MESSAGE,
+  SMTP_SAVE_TOAST_TITLE,
   useAdminCsrfToken,
   useAdminSession,
+  useCheckEmailCredentials,
   useCloudAuthProbe,
   useCloudEntryRetry,
   useCloudSignInUrl,
+  useDisableEmailFeature,
   useInstanceAdmins,
   useInstanceBootstrap,
   useInstanceConfigurations,
   useLoopJobs,
+  useSaveSmtpConfig,
   useUpdateGeneralSettings,
   useUpdateInstanceConfigurations,
 } from "./hooks.js";
@@ -62,6 +84,10 @@ function renderProbe(Probe: () => React.ReactElement): void {
     </QueryClientProvider>
   );
 }
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 afterEach(() => {
   resetAppClient();
@@ -332,6 +358,73 @@ describe("useInstanceAdmins", () => {
   });
 });
 
+function smtpRow(key: string, value: string | null) {
+  return {
+    id: "00000000-0000-4000-8000-000000000001",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    created_by: null,
+    updated_by: null,
+    deleted_at: null,
+    key,
+    value,
+    category: "smtp",
+    is_encrypted: false,
+    source: "db",
+    is_managed: false,
+  };
+}
+
+const STORED_SMTP = [
+  smtpRow(SMTP_HOST_KEY, "smtp.example.com"),
+  smtpRow(SMTP_PORT_KEY, "587"),
+  smtpRow(SMTP_FROM_KEY, "team@example.com"),
+  smtpRow(SMTP_USER_KEY, "mailer"),
+  smtpRow(SMTP_PASSWORD_KEY, "secret"),
+  smtpRow(SMTP_TLS_KEY, "1"),
+  smtpRow(SMTP_SSL_KEY, "0"),
+  smtpRow(SMTP_ENABLED_KEY, "1"),
+];
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+function recordingTransport(
+  routes: Record<string, { status: number; body: unknown }>,
+  calls: Array<{ method: string | undefined; path: string; body: unknown }>
+): Transport {
+  return (url, options) => {
+    const path = new URL(url, "https://api.test").pathname;
+    calls.push({
+      method: options?.method,
+      path,
+      body: options?.body === undefined ? undefined : JSON.parse(options.body as string),
+    });
+    const route = routes[path] ?? { status: 404, body: { detail: "not found" } };
+    return Promise.resolve({
+      status: route.status,
+      url,
+      headers: { get: () => null },
+      text: () => Promise.resolve(JSON.stringify(route.body)),
+    });
+  };
+}
+
+function renderWithClient(Probe: () => React.ReactElement): QueryClient {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <Probe />
+    </QueryClientProvider>
+  );
+  return queryClient;
+}
+
 function SaveProbe({ patch }: { patch: InstancePatch }): React.ReactElement {
   const saving = useUpdateGeneralSettings();
   return (
@@ -500,6 +593,12 @@ describe("useInstanceConfigurations", () => {
     );
     renderProbe(ConfigurationsProbe);
     await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("signup:1"));
+  });
+
+  it("surfaces fetch failures instead of retrying", async () => {
+    createAppClient("https://api.test", stubTransport({}));
+    renderProbe(ConfigurationsProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
   });
 });
 
@@ -705,5 +804,246 @@ describe("toggleLoopJobMutationOptions", () => {
     options.onSettled?.(undefined, null, { id: "job-1", enabled: false }, undefined, {} as never);
     expect(invalidate).toHaveBeenCalledTimes(1);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: adminKeys.loopJobs });
+  });
+});
+
+describe("configValueMap", () => {
+  it("maps rows by key", () => {
+    expect(configValueMap(STORED_SMTP as never)).toEqual({
+      [SMTP_HOST_KEY]: "smtp.example.com",
+      [SMTP_PORT_KEY]: "587",
+      [SMTP_FROM_KEY]: "team@example.com",
+      [SMTP_USER_KEY]: "mailer",
+      [SMTP_PASSWORD_KEY]: "secret",
+      [SMTP_TLS_KEY]: "1",
+      [SMTP_SSL_KEY]: "0",
+      [SMTP_ENABLED_KEY]: "1",
+    });
+  });
+
+  it("maps a missing read to an empty map", () => {
+    expect(configValueMap(undefined)).toEqual({});
+  });
+});
+
+function SmtpSaveProbe({ patch }: { patch: Record<string, string> }): React.ReactElement {
+  const save = useSaveSmtpConfig();
+  return (
+    <>
+      <button type="button" data-testid="fire" onClick={() => save.mutate(patch)}>
+        fire
+      </button>
+      <div data-testid="probe">{save.isPending ? "saving" : save.isSuccess ? "saved" : "idle"}</div>
+    </>
+  );
+}
+
+describe("useSaveSmtpConfig", () => {
+  const patch = { [SMTP_HOST_KEY]: "smtp.example.com", [SMTP_ENABLED_KEY]: "1" };
+
+  it("persists the patch, merges the answered rows, and toasts success", async () => {
+    const calls: Array<{ method: string | undefined; path: string; body: unknown }> = [];
+    createAppClient(
+      "https://api.test",
+      recordingTransport(
+        {
+          "/api/instances/configurations/": {
+            status: 200,
+            body: [smtpRow(SMTP_HOST_KEY, "smtp.example.com"), smtpRow(SMTP_ENABLED_KEY, "1")],
+          },
+        },
+        calls
+      )
+    );
+    const queryClient = renderWithClient(() => <SmtpSaveProbe patch={patch} />);
+    queryClient.setQueryData(adminKeys.configurations, STORED_SMTP);
+    fireEvent.click(screen.getByTestId("fire"));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("saved"));
+    expect(calls.filter((call) => call.method === "PATCH")).toEqual([
+      { method: "PATCH", path: "/api/instances/configurations/", body: patch },
+    ]);
+    const cached = queryClient.getQueryData(adminKeys.configurations) as Array<{ key: string; value: string }>;
+    expect(cached.find((row) => row.key === SMTP_HOST_KEY)?.value).toBe("smtp.example.com");
+    expect(cached.find((row) => row.key === SMTP_TLS_KEY)?.value).toBe("1");
+    expect(notifySuccess).toHaveBeenCalledWith(SMTP_SAVE_TOAST_TITLE, SMTP_SAVE_TOAST_MESSAGE);
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("logs a failed save to the console with no notice (ADM-019 quirk)", async () => {
+    const errors: unknown[][] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args);
+    });
+    createAppClient(
+      "https://api.test",
+      stubTransport({ "/api/instances/configurations/": { status: 500, body: { detail: "gone" } } })
+    );
+    const queryClient = renderWithClient(() => <SmtpSaveProbe patch={patch} />);
+    queryClient.setQueryData(adminKeys.configurations, STORED_SMTP);
+    fireEvent.click(screen.getByTestId("fire"));
+    await waitFor(() => expect(errors.length).toBe(1));
+    expect(errors[0]?.[0]).toBe(SMTP_SAVE_ERROR_LOG);
+    expect(notifySuccess).not.toHaveBeenCalled();
+    expect(notifyError).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(adminKeys.configurations)).toEqual(STORED_SMTP);
+  });
+});
+
+function DisableProbe(): React.ReactElement {
+  const disable = useDisableEmailFeature();
+  return (
+    <>
+      <button type="button" data-testid="fire" onClick={() => disable.mutate(undefined)}>
+        fire
+      </button>
+      <div data-testid="probe">{disable.isPending ? "disabling" : disable.isSuccess ? "disabled" : "idle"}</div>
+    </>
+  );
+}
+
+function cachedSmtp(queryClient: QueryClient): Record<string, string | null> {
+  const cached = queryClient.getQueryData(adminKeys.configurations) as Array<{
+    key: string;
+    value: string | null;
+  }>;
+  return Object.fromEntries(cached.map((row) => [row.key, row.value]));
+}
+
+describe("useDisableEmailFeature", () => {
+  it("blanks the mail values optimistically while keeping the security pair", async () => {
+    const gate = deferred<{ status: number; url: string; headers: { get: () => null }; text: () => Promise<string> }>();
+    createAppClient("https://api.test", ((url: string) => {
+      const path = new URL(url, "https://api.test").pathname;
+      if (path === "/api/instances/configurations/disable-email-feature/") return gate.promise;
+      return Promise.resolve({
+        status: 404,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify({ detail: "not found" })),
+      });
+    }) as Transport);
+    const queryClient = renderWithClient(DisableProbe);
+    queryClient.setQueryData(adminKeys.configurations, STORED_SMTP);
+    fireEvent.click(screen.getByTestId("fire"));
+    // The blanking lands before the call resolves.
+    await waitFor(() => expect(cachedSmtp(queryClient)[SMTP_ENABLED_KEY]).toBe("0"));
+    expect(cachedSmtp(queryClient)).toEqual({
+      [SMTP_HOST_KEY]: "",
+      [SMTP_PORT_KEY]: "",
+      [SMTP_FROM_KEY]: "",
+      [SMTP_USER_KEY]: "",
+      [SMTP_PASSWORD_KEY]: "",
+      [SMTP_TLS_KEY]: "1",
+      [SMTP_SSL_KEY]: "0",
+      [SMTP_ENABLED_KEY]: "0",
+    });
+    gate.resolve({
+      status: 200,
+      url: "https://api.test/api/instances/configurations/disable-email-feature/",
+      headers: { get: () => null },
+      text: () => Promise.resolve(""),
+    });
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("disabled"));
+    expect(notifySuccess).toHaveBeenCalledWith(EMAIL_DISABLED_TOAST_TITLE, EMAIL_DISABLED_TOAST_MESSAGE);
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("restores the values and toasts the error when the call fails (NEWFRONT-476 intent)", async () => {
+    const errors: unknown[][] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args);
+    });
+    createAppClient(
+      "https://api.test",
+      stubTransport({
+        "/api/instances/configurations/disable-email-feature/": {
+          status: 400,
+          body: { error: "Failed to disable email configuration" },
+        },
+      })
+    );
+    const queryClient = renderWithClient(DisableProbe);
+    queryClient.setQueryData(adminKeys.configurations, STORED_SMTP);
+    fireEvent.click(screen.getByTestId("fire"));
+    await waitFor(() => expect(notifyError).toHaveBeenCalled());
+    expect(notifyError).toHaveBeenCalledWith(EMAIL_DISABLE_FAILED_TITLE, EMAIL_DISABLE_FAILED_MESSAGE);
+    expect(notifySuccess).not.toHaveBeenCalled();
+    expect(errors[0]?.[0]).toBe(EMAIL_DISABLE_ERROR_LOG);
+    expect(queryClient.getQueryData(adminKeys.configurations)).toEqual(STORED_SMTP);
+  });
+
+  it("still toasts the error when nothing was cached to restore", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    createAppClient("https://api.test", stubTransport({}));
+    const queryClient = renderWithClient(DisableProbe);
+    fireEvent.click(screen.getByTestId("fire"));
+    await waitFor(() => expect(notifyError).toHaveBeenCalled());
+    expect(notifyError).toHaveBeenCalledWith(EMAIL_DISABLE_FAILED_TITLE, EMAIL_DISABLE_FAILED_MESSAGE);
+    expect(queryClient.getQueryData(adminKeys.configurations)).toEqual([]);
+  });
+
+  it("still toasts the error when the optimistic update itself throws", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    createAppClient(
+      "https://api.test",
+      stubTransport({
+        "/api/instances/configurations/disable-email-feature/": { status: 200, body: null },
+      })
+    );
+    const queryClient = renderWithClient(DisableProbe);
+    queryClient.setQueryData(adminKeys.configurations, STORED_SMTP);
+    vi.spyOn(queryClient, "cancelQueries").mockRejectedValueOnce(new Error("cancel gone"));
+    fireEvent.click(screen.getByTestId("fire"));
+    await waitFor(() => expect(notifyError).toHaveBeenCalled());
+    expect(notifyError).toHaveBeenCalledWith(EMAIL_DISABLE_FAILED_TITLE, EMAIL_DISABLE_FAILED_MESSAGE);
+  });
+});
+
+function CheckProbe({ receiver }: { receiver: string }): React.ReactElement {
+  const check = useCheckEmailCredentials();
+  return (
+    <>
+      <button type="button" data-testid="fire" onClick={() => check.mutate(receiver)}>
+        fire
+      </button>
+      <div data-testid="probe">
+        {check.isPending ? "sending" : check.isSuccess ? check.data.message : check.isError ? "failed" : "idle"}
+      </div>
+    </>
+  );
+}
+
+describe("useCheckEmailCredentials", () => {
+  it("posts the receiver address and resolves the confirmation", async () => {
+    const calls: Array<{ method: string | undefined; path: string; body: unknown }> = [];
+    createAppClient(
+      "https://api.test",
+      recordingTransport(
+        { "/api/instances/email-credentials-check/": { status: 200, body: { message: "Email successfully sent." } } },
+        calls
+      )
+    );
+    renderWithClient(() => <CheckProbe receiver="admin@example.com" />);
+    fireEvent.click(screen.getByTestId("fire"));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("Email successfully sent."));
+    expect(calls.filter((call) => call.method === "POST")).toEqual([
+      {
+        method: "POST",
+        path: "/api/instances/email-credentials-check/",
+        body: { receiver_email: "admin@example.com" },
+      },
+    ]);
+  });
+
+  it("surfaces the server failure to the caller", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport({
+        "/api/instances/email-credentials-check/": { status: 400, body: { error: "Receiver email is required" } },
+      })
+    );
+    renderWithClient(() => <CheckProbe receiver="" />);
+    fireEvent.click(screen.getByTestId("fire"));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
   });
 });

@@ -168,6 +168,14 @@ describe("instance configurations query", () => {
     const updated = [row("ENABLE_SIGNUP", "0")];
     expect(mergeConfigurationRows(undefined, updated)).toEqual(updated);
   });
+
+  it("appends answered rows for unknown keys", () => {
+    const current = [row("ENABLE_SIGNUP", "1")];
+    expect(mergeConfigurationRows(current, [row("EMAIL_HOST", "new.example.com")])).toEqual([
+      row("ENABLE_SIGNUP", "1"),
+      row("EMAIL_HOST", "new.example.com"),
+    ]);
+  });
 });
 
 describe("admin CSRF query", () => {
