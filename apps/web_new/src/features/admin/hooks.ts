@@ -9,6 +9,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import {
   checkEmailCredentials,
   cloudSignInUrl,
+  createLoopJob,
   disableEmailFeature,
   updateInstance,
   updateInstanceConfigurations,
@@ -17,7 +18,9 @@ import {
   type InstanceBootstrap,
   type InstanceConfigurationList,
   type InstancePatch,
+  type LoopJobCreateInput,
   type LoopJobList,
+  type LoopJobPatchInput,
 } from "@pidash/api-client";
 import * as React from "react";
 
@@ -27,6 +30,7 @@ import { notifyError, notifySuccess } from "../../shared/shell/index.js";
 import type { CloudEntrySessionState } from "./cloudEntry.js";
 import { BLANKED_MAIL_KEYS, SMTP_ENABLED_KEY, type ConfigValueMap } from "./emailConfig.js";
 import { LOOP_TOGGLE_FAILURE_MESSAGE, LOOP_TOGGLE_FAILURE_TITLE } from "./loopJobs.js";
+import { LOOP_JOB_SAVE_FAILED_TITLE, resolveLoopJobSaveError } from "./loopJobModal.js";
 import {
   GENERAL_SAVE_FAILURE_LOG,
   GENERAL_SAVE_SUCCESS_MESSAGE,
@@ -288,6 +292,18 @@ export function useDisableEmailFeature() {
   });
 }
 
+export function createLoopJobMutationOptions(client: ApiClient, queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: (input: LoopJobCreateInput) => createLoopJob(client, input),
+    onError: (error: unknown) => {
+      notifyError(LOOP_JOB_SAVE_FAILED_TITLE, resolveLoopJobSaveError(error));
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: adminKeys.loopJobs });
+    },
+  });
+}
+
 /**
  * Send the test email (ADM-021): POST the receiver address and report the
  * outcome. The check grades the stored configuration, so callers open it
@@ -298,4 +314,40 @@ export function useCheckEmailCredentials() {
   return useMutation({
     mutationFn: (receiverEmail: string) => checkEmailCredentials(client, receiverEmail),
   });
+}
+
+/**
+ * Saves the create modal (ADM-055). Silent on success — the modal
+ * closes and the caller re-reads the revalidated list; a failed save
+ * raises the server-text notice and keeps the modal open.
+ */
+export function useCreateLoopJob() {
+  return useMutation(createLoopJobMutationOptions(getAppClient(), useQueryClient()));
+}
+
+export interface LoopJobUpdate {
+  id: string;
+  patch: LoopJobPatchInput;
+}
+
+export function updateLoopJobMutationOptions(client: ApiClient, queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: (update: LoopJobUpdate) => updateLoopJob(client, update.id, update.patch),
+    onError: (error: unknown) => {
+      notifyError(LOOP_JOB_SAVE_FAILED_TITLE, resolveLoopJobSaveError(error));
+    },
+    onSettled: (_data: unknown, _error: unknown, update: LoopJobUpdate) => {
+      void queryClient.invalidateQueries({ queryKey: adminKeys.loopJobs });
+      void queryClient.invalidateQueries({ queryKey: adminKeys.loopJobDetail(update.id) });
+    },
+  });
+}
+
+/**
+ * Saves the edit modal (ADM-056). The list and the edited job both
+ * revalidate on settle, so the list and the detail converge; failures
+ * behave like the create save.
+ */
+export function useUpdateLoopJob() {
+  return useMutation(updateLoopJobMutationOptions(getAppClient(), useQueryClient()));
 }

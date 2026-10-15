@@ -46,10 +46,13 @@ export {
 export type { AuthMethodDef, AuthMethodKey, ConfigMap } from "./authMethods.js";
 export {
   CONFIG_SAVE_FAILED_LOG,
+  createLoopJobMutationOptions,
   toggleLoopJobMutationOptions,
   configValueMap,
+  updateLoopJobMutationOptions,
   useAdminCsrfToken,
   useAdminSession,
+  useCreateLoopJob,
   useInstanceAdmins,
   useInstanceBootstrap,
   useInstanceConfigurations,
@@ -57,8 +60,9 @@ export {
   useToggleLoopJob,
   useUpdateGeneralSettings,
   useUpdateInstanceConfigurations,
+  useUpdateLoopJob,
 } from "./hooks.js";
-export type { LoopJobToggle } from "./hooks.js";
+export type { LoopJobToggle, LoopJobUpdate } from "./hooks.js";
 export {
   firstAdminEmail,
   GENERAL_NAME_REQUIRED_MESSAGE,
@@ -121,6 +125,7 @@ export { AdminBrandLoader } from "./components/AdminBrandLoader.js";
 export { AdminDashboardLayout } from "./components/AdminDashboardLayout.js";
 export { AdminEmailPage, EMAIL_PAGE_TITLE } from "./components/AdminEmailPage.js";
 export { AdminEntryGate } from "./components/AdminEntryGate.js";
+export { AdminLoopJobModal } from "./components/AdminLoopJobModal.js";
 export { AdminLoopJobsPage } from "./components/AdminLoopJobsPage.js";
 export type { AdminEntrySearch } from "./components/AdminEntryGate.js";
 export { AdminDashboardGuard, AdminHomeGuard } from "./components/AdminGuards.js";

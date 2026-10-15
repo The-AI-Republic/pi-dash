@@ -1,20 +1,22 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Loop jobs list page (ADM-051–054, from parity/specs/admin.md
-// §7.1–7.4): header, jobs table with inline enabled toggles, the
-// inline empty paragraph, and the loading skeleton. The create/edit
-// modal slice (NEWFRONT-516) adds the header New-job action; the
-// detail slice (NEWFRONT-517) owns /god-mode/loop/<id>/, which the
-// name links below already target. Strings marked oracle-pinned are
-// asserted verbatim by e2e/parity/admin/loop.spec.ts.
+// Loop jobs list page (ADM-051–055, from parity/specs/admin.md
+// §7.1–7.5): header with the New-job action, jobs table with inline
+// enabled toggles, the inline empty paragraph, and the loading
+// skeleton. The detail slice (NEWFRONT-517) owns
+// /god-mode/loop/<id>/, which the name links below already target.
+// Strings marked oracle-pinned are asserted verbatim by
+// e2e/parity/admin/loop.spec.ts.
 import { Link } from "@tanstack/react-router";
 import { Button, Skeleton, Switch } from "@pidash/kit";
 import type { LoopJobList } from "@pidash/api-client";
 import * as React from "react";
 
 import { useLoopJobs, useToggleLoopJob, type LoopJobToggle } from "../hooks.js";
+import { LOOP_JOB_MODAL_CREATE_TITLE } from "../loopJobModal.js";
 import { LOOP_LIST_EMPTY_TEXT, resolveLoopMinRoleLabel } from "../loopJobs.js";
+import { AdminLoopJobModal } from "./AdminLoopJobModal.js";
 
 /** Page heading; the suite pins its presence, not its wording. */
 export const LOOP_JOBS_HEADING = "Loop jobs";
@@ -137,6 +139,7 @@ function LoopJobsError({ onRetry }: { onRetry: () => void }): React.ReactElement
 export function AdminLoopJobsPage(): React.ReactElement {
   const jobs = useLoopJobs();
   const toggle = useToggleLoopJob();
+  const [createOpen, setCreateOpen] = React.useState(false);
   let body: React.ReactElement;
   if (jobs.isPending) {
     body = <LoopJobsSkeleton />;
@@ -166,11 +169,29 @@ export function AdminLoopJobsPage(): React.ReactElement {
   }
   return (
     <div data-testid="loop-jobs-page" className="w-full p-(--space-6)">
-      <div className="mb-(--space-4)">
-        <h1 className="text-h2 text-(--text)">{LOOP_JOBS_HEADING}</h1>
-        <p className="text-body text-(--text-muted)">{LOOP_JOBS_DESCRIPTION}</p>
+      <div className="mb-(--space-4) flex items-start justify-between gap-(--space-4)">
+        <div>
+          <h1 className="text-h2 text-(--text)">{LOOP_JOBS_HEADING}</h1>
+          <p className="text-body text-(--text-muted)">{LOOP_JOBS_DESCRIPTION}</p>
+        </div>
+        <Button
+          variant="primary"
+          onClick={() => {
+            setCreateOpen(true);
+          }}
+          data-testid="loop-jobs-create"
+        >
+          {LOOP_JOB_MODAL_CREATE_TITLE}
+        </Button>
       </div>
       {body}
+      {createOpen ? (
+        <AdminLoopJobModal
+          onClose={() => {
+            setCreateOpen(false);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

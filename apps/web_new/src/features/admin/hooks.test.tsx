@@ -36,6 +36,7 @@ import {
 } from "./generalSettings.js";
 import {
   CONFIG_SAVE_FAILED_LOG,
+  createLoopJobMutationOptions,
   toggleLoopJobMutationOptions,
   configValueMap,
   EMAIL_DISABLE_ERROR_LOG,
@@ -46,6 +47,7 @@ import {
   SMTP_SAVE_ERROR_LOG,
   SMTP_SAVE_TOAST_MESSAGE,
   SMTP_SAVE_TOAST_TITLE,
+  updateLoopJobMutationOptions,
   useAdminCsrfToken,
   useAdminSession,
   useCheckEmailCredentials,
@@ -62,6 +64,7 @@ import {
   useUpdateInstanceConfigurations,
 } from "./hooks.js";
 import { LOOP_TOGGLE_FAILURE_MESSAGE, LOOP_TOGGLE_FAILURE_TITLE } from "./loopJobs.js";
+import { LOOP_JOB_SAVE_FAILED_TITLE } from "./loopJobModal.js";
 import { adminKeys } from "./queries.js";
 
 function stubTransport(routes: Record<string, { status: number; body: unknown }>): Transport {
@@ -1086,5 +1089,101 @@ describe("useInstanceConfigurations", () => {
     createAppClient("https://api.test", stubTransport({}));
     renderProbe(AiConfigurationsProbe);
     await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
+  });
+});
+
+describe("createLoopJobMutationOptions", () => {
+  function stubClient() {
+    const sendJson = vi.fn(async () => ({ data: {}, status: 201, url: "https://api.test/" }));
+    const client = { sendJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    return { client, sendJson };
+  }
+
+  function createInput() {
+    return {
+      slug: "probe-job",
+      name: "Probe job",
+      public_name: "Probe public",
+      public_description: "Probe description",
+      prompt: "Probe prompt",
+      min_role: 20,
+      rrule: "FREQ=DAILY;BYHOUR=3;BYMINUTE=0",
+      tzid: "UTC",
+    };
+  }
+
+  it("posts the create body through the contract", async () => {
+    const { client, sendJson } = stubClient();
+    const options = createLoopJobMutationOptions(client, new QueryClient());
+    await options.mutationFn?.(createInput(), {} as never);
+    expect(sendJson).toHaveBeenCalledWith("POST", "/api/instances/loop/jobs/", { json: createInput() });
+  });
+
+  it("toasts the server text on failure", () => {
+    const options = createLoopJobMutationOptions(stubClient().client, new QueryClient());
+    options.onError?.(new Error("parity-probe-failure"), createInput(), undefined, {} as never);
+    expect(notifyErrorMock).toHaveBeenCalledWith(LOOP_JOB_SAVE_FAILED_TITLE, "parity-probe-failure");
+  });
+
+  it("falls back when the failure carries no text", () => {
+    const options = createLoopJobMutationOptions(stubClient().client, new QueryClient());
+    options.onError?.(null, createInput(), undefined, {} as never);
+    expect(notifyErrorMock).toHaveBeenCalledWith(LOOP_JOB_SAVE_FAILED_TITLE, "Check the fields and try again.");
+  });
+
+  it("stays silent on success", () => {
+    const options = createLoopJobMutationOptions(stubClient().client, new QueryClient());
+    expect(options.onSuccess).toBeUndefined();
+  });
+
+  it("revalidates the list once settled", () => {
+    const queryClient = new QueryClient();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const options = createLoopJobMutationOptions(stubClient().client, queryClient);
+    options.onSettled?.(undefined, null, createInput(), undefined, {} as never);
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: adminKeys.loopJobs });
+  });
+});
+
+describe("updateLoopJobMutationOptions", () => {
+  function stubClient() {
+    const sendJson = vi.fn(async () => ({ data: {}, status: 200, url: "https://api.test/" }));
+    const client = { sendJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    return { client, sendJson };
+  }
+
+  function update() {
+    return { id: "job-1", patch: { name: "Renamed" } };
+  }
+
+  it("patches the job through the contract", async () => {
+    const { client, sendJson } = stubClient();
+    const options = updateLoopJobMutationOptions(client, new QueryClient());
+    await options.mutationFn?.(update(), {} as never);
+    expect(sendJson).toHaveBeenCalledWith("PATCH", "/api/instances/loop/jobs/job-1/", {
+      json: { name: "Renamed" },
+    });
+  });
+
+  it("toasts the server text on failure", () => {
+    const options = updateLoopJobMutationOptions(stubClient().client, new QueryClient());
+    options.onError?.(new Error("parity-probe-failure"), update(), undefined, {} as never);
+    expect(notifyErrorMock).toHaveBeenCalledWith(LOOP_JOB_SAVE_FAILED_TITLE, "parity-probe-failure");
+  });
+
+  it("stays silent on success", () => {
+    const options = updateLoopJobMutationOptions(stubClient().client, new QueryClient());
+    expect(options.onSuccess).toBeUndefined();
+  });
+
+  it("revalidates the list and the edited job once settled", () => {
+    const queryClient = new QueryClient();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const options = updateLoopJobMutationOptions(stubClient().client, queryClient);
+    options.onSettled?.(undefined, null, update(), undefined, {} as never);
+    expect(invalidate).toHaveBeenCalledTimes(2);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: adminKeys.loopJobs });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: adminKeys.loopJobDetail("job-1") });
   });
 });

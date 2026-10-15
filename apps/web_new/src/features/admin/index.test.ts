@@ -72,10 +72,12 @@ import {
   AUTH_LANDING_TITLE,
   AUTH_METHOD_ENABLE_KEYS,
   AUTH_METHODS,
+  AdminLoopJobModal,
   AdminLoopJobsPage,
   buildAdminCrumbs,
   buildAiSettingsPatch,
   canDisableAuthMethod,
+  createLoopJobMutationOptions,
   INSTANCE_FAILURE_ART,
   INSTANCE_FAILURE_TITLE,
   InstanceFailureScreen,
@@ -119,10 +121,12 @@ import {
   ENABLE_SIGNUP_KEY,
   toConfigMap,
   toggleLoopJobMutationOptions,
+  updateLoopJobMutationOptions,
   useAdminCsrfToken,
   useAdminSession,
   useAdminSidebarStore,
   useAdminThemeStore,
+  useCreateLoopJob,
   useFirstWorkspaceStore,
   useInstanceAdmins,
   useInstanceBootstrap,
@@ -132,6 +136,7 @@ import {
   useToggleLoopJob,
   useUpdateGeneralSettings,
   useUpdateInstanceConfigurations,
+  useUpdateLoopJob,
 } from "./index.js";
 
 describe("admin barrel", () => {
@@ -181,6 +186,8 @@ describe("admin barrel", () => {
       resolveTelemetryPrefill,
       toConfigMap,
       toggleLoopJobMutationOptions,
+      createLoopJobMutationOptions,
+      updateLoopJobMutationOptions,
     ]) {
       expect(typeof fn).toBe("function");
     }
@@ -196,8 +203,10 @@ describe("admin barrel", () => {
       useLoopJobs,
       useSaveAiSettings,
       useToggleLoopJob,
+      useCreateLoopJob,
       useUpdateGeneralSettings,
       useUpdateInstanceConfigurations,
+      useUpdateLoopJob,
     ]) {
       expect(typeof hook).toBe("function");
     }
@@ -215,6 +224,7 @@ describe("admin barrel", () => {
       AdminHeader,
       AdminHelpSection,
       AdminHomeGuard,
+      AdminLoopJobModal,
       AdminLoopJobsPage,
       AdminNotFoundScreen,
       AdminSetupForm,

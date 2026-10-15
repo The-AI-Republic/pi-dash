@@ -37,6 +37,12 @@ export const adminKeys = {
   configurations: ["admin", "configurations"],
   /** The loop jobs list the loop pages read and revalidate. */
   loopJobs: ["admin", "loop", "jobs"],
+  /**
+   * The one-job read the loop detail page renders (ADM-056/058). The
+   * edit modal already invalidates it on settle; the detail slice
+   * (NEWFRONT-517) hangs its query off this key.
+   */
+  loopJobDetail: (jobId: string) => ["admin", "loop", "job", jobId],
 } as const;
 
 /**
