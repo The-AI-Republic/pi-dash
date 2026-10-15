@@ -215,6 +215,58 @@ describe("AdminEmailForm", () => {
     expect(screen.queryByTestId("admin-email-save-first-hint")).not.toBeInTheDocument();
   });
 
+  it("patches every text field through to the save under its own key", async () => {
+    const calls: unknown[] = [];
+    const typed = {
+      ...SAVED_VALUES,
+      host: "smtp2.example.com",
+      port: "2525",
+      from: "alerts@example.com",
+      user: "courier",
+      password: "rotated",
+    };
+    const answered = rowsFor(typed, "1");
+    createAppClient("https://api.test", ((url: string, options?: { method?: string; body?: string }) => {
+      const path = new URL(url, "https://api.test").pathname;
+      if (options?.method === "PATCH" && path === "/api/instances/configurations/") {
+        calls.push(options.body === undefined ? undefined : JSON.parse(options.body));
+        return Promise.resolve({
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify(answered)),
+        });
+      }
+      return Promise.resolve({
+        status: 404,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify({ detail: "not found" })),
+      });
+    }) as Transport);
+    const onSaved = vi.fn();
+    renderForm(SAVED_VALUES, onSaved);
+    fill("admin-email-host", "smtp2.example.com");
+    fill("admin-email-port", "2525");
+    fill("admin-email-from", "alerts@example.com");
+    fill("admin-email-user", "courier");
+    fill("admin-email-password", "rotated");
+    fireEvent.click(screen.getByTestId("admin-email-save"));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    expect(calls).toEqual([
+      {
+        [SMTP_HOST_KEY]: "smtp2.example.com",
+        [SMTP_PORT_KEY]: "2525",
+        [SMTP_FROM_KEY]: "alerts@example.com",
+        [SMTP_USER_KEY]: "courier",
+        [SMTP_PASSWORD_KEY]: "rotated",
+        [SMTP_TLS_KEY]: "1",
+        [SMTP_SSL_KEY]: "0",
+        [SMTP_ENABLED_KEY]: "1",
+      },
+    ]);
+  });
+
   it("swaps the save label while the write is in flight and ignores a second submit", async () => {
     const gate = deferred<{ status: number; url: string; headers: { get: () => null }; text: () => Promise<string> }>();
     let patches = 0;
