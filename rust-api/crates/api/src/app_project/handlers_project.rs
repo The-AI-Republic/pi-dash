@@ -3772,7 +3772,22 @@ async fn validate_one_field(
                 i64::from(i32::MIN),
                 i64::from(i32::MAX),
             ) {
-                Ok(number) => out.agent_default_interval_seconds = Some(number),
+                Ok(number) => {
+                    // PDASHOSS01-220 `validate_agent_default_interval_seconds`
+                    // (L1): `ProjectSerializer`-only — PUT's
+                    // `ProjectListSerializer` has no such methods, like
+                    // name/identifier above.
+                    if mode != ValidateMode::Full {
+                        if let Err(error) =
+                            pidash_services::app_project::ser_project::check_agent_cadence_seconds(
+                                number,
+                            )
+                        {
+                            return fail(error.detail().to_owned());
+                        }
+                    }
+                    out.agent_default_interval_seconds = Some(number);
+                }
                 Err(message) => return fail(message),
             }
         }
@@ -3782,7 +3797,20 @@ async fn validate_one_field(
                 i64::from(i32::MIN),
                 i64::from(i32::MAX),
             ) {
-                Ok(number) => out.agent_default_max_ticks = Some(number),
+                Ok(number) => {
+                    // PDASHOSS01-220 `validate_agent_default_max_ticks`
+                    // (L1): `ProjectSerializer`-only, like above.
+                    if mode != ValidateMode::Full {
+                        if let Err(error) =
+                            pidash_services::app_project::ser_project::check_agent_default_max_ticks(
+                                number,
+                            )
+                        {
+                            return fail(error.detail().to_owned());
+                        }
+                    }
+                    out.agent_default_max_ticks = Some(number);
+                }
                 Err(message) => return fail(message),
             }
         }
@@ -3792,7 +3820,21 @@ async fn validate_one_field(
                 i64::from(i32::MIN),
                 i64::from(i32::MAX),
             ) {
-                Ok(number) => out.agent_review_default_interval_seconds = Some(number),
+                Ok(number) => {
+                    // PDASHOSS01-220
+                    // `validate_agent_review_default_interval_seconds`
+                    // (L1): `ProjectSerializer`-only, like above.
+                    if mode != ValidateMode::Full {
+                        if let Err(error) =
+                            pidash_services::app_project::ser_project::check_agent_cadence_seconds(
+                                number,
+                            )
+                        {
+                            return fail(error.detail().to_owned());
+                        }
+                    }
+                    out.agent_review_default_interval_seconds = Some(number);
+                }
                 Err(message) => return fail(message),
             }
         }
@@ -3802,7 +3844,21 @@ async fn validate_one_field(
                 i64::from(i32::MIN),
                 i64::from(i32::MAX),
             ) {
-                Ok(number) => out.agent_test_default_interval_seconds = Some(number),
+                Ok(number) => {
+                    // PDASHOSS01-220
+                    // `validate_agent_test_default_interval_seconds`
+                    // (L1): `ProjectSerializer`-only, like above.
+                    if mode != ValidateMode::Full {
+                        if let Err(error) =
+                            pidash_services::app_project::ser_project::check_agent_cadence_seconds(
+                                number,
+                            )
+                        {
+                            return fail(error.detail().to_owned());
+                        }
+                    }
+                    out.agent_test_default_interval_seconds = Some(number);
+                }
                 Err(message) => return fail(message),
             }
         }
