@@ -12285,7 +12285,6 @@ export async function serverAddCycleFavorite(
   if (!res.ok) throw new Error(`[parity] cycle favorite add failed with HTTP ${res.status}.`);
 }
 
-
 /**
  * Archived-issues list read without throwing (NEWFRONT-223, ARCH-008
  * guest branch): status plus the rows when the read succeeds. Guests
@@ -12568,6 +12567,18 @@ export async function serverPods(
   apiBase: string = apiBaseFromEnv()
 ): Promise<ParityPodRow[]> {
   const res = await authedApi(`/runners/pods/?project=${projectId}`, sessionCookie, undefined, apiBase);
+  requireOk(res, "pod list");
+  const rows = (await res.json()) as Array<Record<string, unknown>>;
+  return rows.map(podRowOf);
+}
+
+/** Every pod of one workspace, in API order (what the workspace overview renders). */
+export async function serverWorkspacePods(
+  workspaceId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityPodRow[]> {
+  const res = await authedApi(`/runners/pods/?workspace=${workspaceId}`, sessionCookie, undefined, apiBase);
   requireOk(res, "pod list");
   const rows = (await res.json()) as Array<Record<string, unknown>>;
   return rows.map(podRowOf);
