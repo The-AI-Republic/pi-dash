@@ -309,6 +309,10 @@ RUST_ONLY_JUSTIFICATIONS = {
     "/api/v1/workspaces/{slug}/issues/{segment}/": "single-param capture of Django's compound {project_identifier}-{issue_identifier} (alias)",
     "/api/v1/workspaces/{slug}/work-items/{segment}/": "single-param capture of Django's compound {project_identifier}-{issue_identifier} (alias)",
     "/api/workspaces/{slug}/work-items/{tail}/": "single-param capture of Django's compound {project_identifier}-{issue_identifier} (alias)",
+    "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/": "stage-8 drift PIDASHCONV-1061: live on origin/main (04920ea3), rust-dev Django frozen until PIDASHCONV-1055 syncs; delete when merged",
+    "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/": "stage-8 drift PIDASHCONV-1061: live on origin/main (04920ea3), rust-dev Django frozen until PIDASHCONV-1055 syncs; delete when merged",
+    "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/runs/": "stage-8 drift PIDASHCONV-1061: live on origin/main (04920ea3), rust-dev Django frozen until PIDASHCONV-1055 syncs; delete when merged",
+    "/api/v1/workspaces/{slug}/schedulers/": "stage-8 drift PIDASHCONV-1061: live on origin/main (04920ea3), rust-dev Django frozen until PIDASHCONV-1055 syncs; delete when merged",
 }
 
 

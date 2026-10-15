@@ -17,10 +17,10 @@ line, sorted); the prose around them is for reviewers. Never add a
 `G0`/`W0` line: unclassified rows must be resolved by hand, given a gap
 id, and filed as a fix issue first.
 
-Counts (2026-10-10, `pi_dash.settings.test`):
+Counts (2026-10-15, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 521 OWNED, 7 MISSING (all listed below),
-  5 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
+  9 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
 - Jobs: 85 tasks — 54 OWNED, 31 proxied by design, 0 MISSING;
   beat 26/26 OWNED.
 
@@ -117,7 +117,7 @@ G6 :: /api/workspaces/{slug}/workspace-themes/ :: PUT:serves-but-django-405;PATC
 G6 :: /api/workspaces/{slug}/workspace-themes/{pk}/ :: POST:serves-but-django-405;PUT:serves-but-django-405
 ```
 
-### Rust-only routes (5, all justified in-script)
+### Rust-only routes (9, all justified in-script)
 
 New Rust-only surface fails the check until a justification is added to
 `RUST_ONLY_JUSTIFICATIONS` in `route_inventory.py` (reviewed). Current:
@@ -133,6 +133,12 @@ New Rust-only surface fails the check until a justification is added to
   Django's compound `{project_identifier}-{issue_identifier}` (the
   `ALIASES` join; dashless segments proxy so Django answers its own
   404 — behaviorally exact, hence not rust-only).
+- The four v1 scheduler read routes (`.../schedulers/`,
+  `.../projects/{project_id}/schedulers[/{scheduler_id}[/runs]]/`) —
+  stage-8 drift (PIDASHCONV-1061): live on `origin/main` (04920ea3) but
+  rust-dev's Django is frozen pre-drift, so the check sees them as
+  Rust-only until PIDASHCONV-1055 syncs `main` into `rust-dev` (then
+  they reclassify to OWNED and the justifications are deleted).
 
 ## Jobs
 

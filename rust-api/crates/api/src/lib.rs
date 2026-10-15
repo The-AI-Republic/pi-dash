@@ -64,6 +64,7 @@ pub mod v1_cli_auth;
 pub mod v1_cycles_modules;
 pub mod v1_openapi;
 pub mod v1_projects;
+pub mod v1_schedulers;
 pub mod v1_work_items;
 pub mod web;
 
