@@ -61,6 +61,23 @@ def _runs(issue):
     return db.fetchone(get_database_url(), "SELECT count(*) AS n FROM agent_run WHERE work_item_id=%s", (issue,))["n"]
 
 
+def _switchable(w, alias, **ticker_fields):
+    """Issue with a completed prior run, so only the ticking switch can stop
+    the tick (no-prior-run would skip first and hide the disarm)."""
+    issue = world.make_issue(w, alias, "In Progress")
+    world.set_ticker(issue, **ticker_fields)
+    _due(issue)
+    pod = world.make_pod(w.workspace_id, w.project_id)
+    world.make_run(issue, w.workspace_id, w.user_id, pod, status="completed")
+    return issue
+
+
+def _project_switch_off(project_id):
+    db.execute(get_database_url(),
+               "UPDATE projects SET agent_ticking_enabled=false WHERE id=%s",
+               (project_id,))
+
+
 def test_scan_fans_out_one_fire_per_due_ticker(api_client):
     w, _ = api_client
     a = _claimable(w, "scan-a")
@@ -175,3 +192,69 @@ def test_fire_tick_eta_gates_execution(api_client):
     _wait_settled(issue, what="fire_tick settles after ETA execution")
     assert _ticker(issue)["used"] == 0
     assert _runs(issue) == 1
+
+
+def test_fire_tick_project_switch_off_disarms_without_spending(api_client):
+    """PDASHOSS01-220 (7c355595): a timer tick on a project whose ticking was
+    switched off disarms pre-claim — no budget spent, no run dispatched."""
+    w, _ = api_client
+    issue = _switchable(w, "switchoff")
+    prev_next = _ticker(issue)["next_run_at"]
+    _project_switch_off(w.project_id)
+    broker.purge()
+
+    broker.publish_task(FIRE, args=(str(_ticker(issue)["id"]),))
+    db.wait_for_condition(lambda: _ticker(issue)["enabled"] is False,
+                          what="switch-off disarm lands")
+    _drain()
+
+    tick = _ticker(issue)
+    assert tick["used"] == 0
+    assert tick["enabled"] is False
+    assert tick["disarm_reason"] == ""
+    assert tick["next_run_at"] == prev_next
+    assert tick["last_tick_at"] is None
+    assert tick["pending_entry"] is False
+    assert _runs(issue) == 1  # only the seeded prior run
+
+
+def test_fire_tick_switch_off_stops_counting_entry(api_client):
+    """An agent-queued (counting) entry is machine-started: the switch stops
+    it like a timer tick and clears the queue."""
+    w, _ = api_client
+    issue = _switchable(w, "switchcount", pending_entry=True, pending_entry_free=False)
+    _project_switch_off(w.project_id)
+    broker.purge()
+
+    broker.publish_task(FIRE, args=(str(_ticker(issue)["id"]),))
+    db.wait_for_condition(lambda: _ticker(issue)["enabled"] is False,
+                          what="switch-off disarm lands")
+    _drain()
+
+    tick = _ticker(issue)
+    assert tick["used"] == 0
+    assert tick["enabled"] is False
+    assert tick["disarm_reason"] == ""
+    assert tick["pending_entry"] is False
+    assert tick["pending_entry_free"] is False
+    assert _runs(issue) == 1  # only the seeded prior run
+
+
+def test_fire_tick_user_disabled_disarms_without_spending(api_client):
+    """The per-issue switch: same rule as the project one, disarming with
+    user_disabled."""
+    w, _ = api_client
+    issue = _switchable(w, "useroff", user_disabled=True)
+    broker.purge()
+
+    broker.publish_task(FIRE, args=(str(_ticker(issue)["id"]),))
+    db.wait_for_condition(lambda: _ticker(issue)["enabled"] is False,
+                          what="user-disabled disarm lands")
+    _drain()
+
+    tick = _ticker(issue)
+    assert tick["used"] == 0
+    assert tick["enabled"] is False
+    assert tick["disarm_reason"] == "user_disabled"
+    assert tick["last_tick_at"] is None
+    assert _runs(issue) == 1  # only the seeded prior run
