@@ -1064,4 +1064,19 @@ describe("serverWorkspacePods", () => {
       "[parity] pod list failed with HTTP 500."
     );
   });
+
+  it("defaults the API base from the environment", async () => {
+    stubRaw = JSON.stringify([{ id: "pod-4", name: "PAR_pod_1" }]);
+    const prior = process.env.PARITY_API_URL;
+    process.env.PARITY_API_URL = apiBase;
+    try {
+      const rows = await serverWorkspacePods("ws-1", "session=x");
+      expect(rows.map((row) => row.name)).toEqual(["PAR_pod_1"]);
+      expect(stubSeen).toHaveLength(1);
+      expect(stubSeen[0]?.url).toBe("/api/runners/pods/?workspace=ws-1");
+    } finally {
+      if (prior === undefined) delete process.env.PARITY_API_URL;
+      else process.env.PARITY_API_URL = prior;
+    }
+  });
 });
