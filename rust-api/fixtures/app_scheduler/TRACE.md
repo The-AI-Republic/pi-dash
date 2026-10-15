@@ -34,3 +34,10 @@ queries fixtures reference those tables only through SQL + rows.
 - `handlers/scheduler_io.golden.json` — F36-10 — `app/views/scheduler/views.py:46-157` (list :55-72, create :75-85 incl. IntegrityError race backstop via `app/views/base.py:211-240`, detail GET :95-111, PATCH :114-133, DELETE :136-157); shapes F36-01, SQL F36-04, gates F36-09. PIDASHCONV-1066 repoints both `duplicate_slug` bodies at the R7 field error (`app/serializers/scheduler.py:113-134`, OSS main `3db73752`).
 - `handlers/binding_io.golden.json` — F36-11 — `app/views/scheduler/views.py:163-291` (list :172-186, install :189-224, detail GET :237-249, PATCH :252-278, uninstall :281-291); shapes F36-02/F36-03, SQL F36-05, gates F36-09.
 - `handlers/occurrences_io.golden.json` — F36-12 — `app/views/scheduler/occurrences.py:63-208` (project check :78, window :80-103, envelope :201-207); window F36-07, merge F36-08, gates F36-09.
+
+## Drift 474123e5 (PIDASHCONV-1059, stage 8)
+
+- `serializers/binding_shapes.golden.json` gains `detail_fields` (29) + `detail_read_only_fields` (18) + `resolved_prompt_vectors` (4) — `app/serializers/scheduler.py:292-331` (replayed by the shape tests, not record-only).
+- `queries/binding_sql.sql` gains R9 (detail run-count) + R10 (runs count/page) and the R2 select_related erratum — `app/views/scheduler/views.py:303-370`.
+- `guards/permissions.golden.json`: 6 URL routes / 9 (route, method) gates; `GET .../<uuid:binding_id>/runs/` carries the project A/M/G gate + the flag check (`views.py:319-324`).
+- `handlers/binding_io.golden.json` gains the runs action — `views.py:303-370` (envelope, gate, 404).

@@ -3,7 +3,8 @@
 //! Scheduler + binding serializer shapes (D-36, stage 5).
 //!
 //! Ports `apps/api/pi_dash/app/serializers/scheduler.py:1-268` (drift
-//! baseline `01a93e17`):
+//! baseline `01a93e17`), plus the `474123e5` detail serializer
+//! (`:289-331`, PIDASHCONV-1059):
 //! - `SchedulerSerializer` (`:74-112`): the 12-field list, the read-only
 //!   set, `active_binding_count` (the annotated `_active_binding_count`
 //!   when present, else a count query over non-deleted bindings — the
@@ -19,6 +20,13 @@
 //!   (`:206-216`), `validate_extra_context` (`:218-223`), and cross-field
 //!   `validate` (`:225-268`: scheduler/project lock, rrule+dtstart
 //!   re-check, pod-must-belong-to-project).
+//! - `SchedulerBindingDetailSerializer` (`:292-331`, `474123e5`): the
+//!   29-field list (25 + `resolved_prompt`, `run_count`,
+//!   `scheduler_source`, `scheduler_is_enabled`), the 18-key effective
+//!   read-only set, and `get_resolved_prompt` composed through the
+//!   prompting layer's `build_scheduler_task_body` +
+//!   `outcome_mode_directive` (the `run_count` query itself lives in
+//!   the handlers, next to the other per-object dereferences).
 //!
 //! Fixture oracles: F36-01
 //! (`rust-api/fixtures/app_scheduler/serializers/scheduler_shapes.golden.json`),
@@ -155,6 +163,82 @@ pub fn binding_read_only_fields() -> Vec<&'static str> {
     let mut fields = BINDING_META_READ_ONLY_FIELDS.to_vec();
     fields.extend_from_slice(BINDING_DECLARED_READ_ONLY_FIELDS);
     fields
+}
+
+/// `SchedulerBindingDetailSerializer.Meta.fields` (drift port of
+/// `474123e5`, `app/serializers/scheduler.py:292-331`): the 25 list
+/// fields plus the 4 detail-only reads, appended in Meta order
+/// (`SchedulerBindingSerializer.Meta.fields + [...]`). Served by the
+/// binding GET detail and the PATCH response — never by list/install.
+pub const BINDING_DETAIL_FIELDS: &[&str] = &[
+    "id",
+    "scheduler",
+    "scheduler_slug",
+    "scheduler_name",
+    "scheduler_color",
+    "project",
+    "workspace",
+    "dtstart",
+    "tzid",
+    "rrule",
+    "rdates",
+    "exdates",
+    "extra_context",
+    "enabled",
+    "outcome_mode",
+    "pod",
+    "pod_name",
+    "next_run_at",
+    "last_run",
+    "last_run_status",
+    "last_run_ended_at",
+    "last_error",
+    "actor",
+    "created_at",
+    "updated_at",
+    "resolved_prompt",
+    "run_count",
+    "scheduler_source",
+    "scheduler_is_enabled",
+];
+
+/// Detail-only read-only additions (`scheduler.py:313-318`).
+pub const BINDING_DETAIL_EXTRA_READ_ONLY_FIELDS: &[&str] = &[
+    "resolved_prompt",
+    "run_count",
+    "scheduler_source",
+    "scheduler_is_enabled",
+];
+
+/// The effective detail read-only set (18 keys): the base 14 plus the
+/// 4 detail extras. Pinned here as the shape oracle; handlers ignore
+/// these keys structurally (only known writable fields are read, so
+/// read-only and unknown keys sent by the client are silently ignored).
+pub fn binding_detail_read_only_fields() -> Vec<&'static str> {
+    let mut fields = binding_read_only_fields();
+    fields.extend_from_slice(BINDING_DETAIL_EXTRA_READ_ONLY_FIELDS);
+    fields
+}
+
+/// `get_resolved_prompt` (`scheduler.py:320-324`): the exact prompt the
+/// dispatched agent receives, composed via `build_scheduler_task_body`
+/// — scheduler prompt, per-install extra context, then the
+/// outcome-mode directive; stripped, empties dropped, joined with blank
+/// lines. Unknown outcome modes fall back to the create-issue directive
+/// (`outcome_mode_directive`, `db/models/scheduler.py:96-104`), so a
+/// stale row still dispatches with work-mode guidance. The composition
+/// lives here (not in handlers) so the strip/join parity is pinned by
+/// the golden vectors below.
+pub fn resolved_prompt_for(
+    scheduler_prompt: &str,
+    extra_context: &str,
+    outcome_mode: &str,
+) -> String {
+    crate::prompting::context::build_scheduler_task_body(
+        scheduler_prompt,
+        extra_context,
+        crate::prompting::context::outcome_mode_directive(outcome_mode),
+    )
 }
 
 /// `EXTRA_CONTEXT_MAX_LENGTH = 16 * 1024` (`scheduler.py:27`).
@@ -1453,6 +1537,76 @@ mod tests {
         let mut fields = BINDING_SERIALIZER_FIELDS.to_vec();
         fields.sort_unstable();
         assert_eq!(rendered, fields);
+    }
+
+    #[test]
+    fn detail_fields_match_golden_in_order() {
+        let parsed = golden(F36_02);
+        let expected = str_list(&parsed["detail_fields"]);
+        assert_eq!(expected.len(), 29);
+        assert_eq!(BINDING_DETAIL_FIELDS.len(), 29);
+        assert_eq!(BINDING_DETAIL_FIELDS, expected.as_slice());
+        // The 25 list fields first, in list order, then the 4 extras.
+        assert_eq!(&BINDING_DETAIL_FIELDS[..25], BINDING_SERIALIZER_FIELDS);
+        assert_eq!(
+            &BINDING_DETAIL_FIELDS[25..],
+            BINDING_DETAIL_EXTRA_READ_ONLY_FIELDS
+        );
+    }
+
+    #[test]
+    fn detail_effective_read_only_is_18() {
+        let parsed = golden(F36_02);
+        let golden_effective = str_list(&parsed["detail_read_only_fields"]);
+        assert_eq!(golden_effective.len(), 18);
+        let mut effective = binding_detail_read_only_fields();
+        assert_eq!(effective.len(), 18);
+        effective.sort_unstable();
+        let mut golden_sorted = golden_effective;
+        golden_sorted.sort_unstable();
+        assert_eq!(effective, golden_sorted);
+        for key in &effective {
+            assert!(BINDING_DETAIL_FIELDS.contains(key));
+        }
+    }
+
+    #[test]
+    fn resolved_prompt_vectors_match_golden() {
+        let parsed = golden(F36_02);
+        let vectors = parsed["resolved_prompt_vectors"]
+            .as_array()
+            .expect("golden carries resolved_prompt vectors");
+        assert_eq!(vectors.len(), 4);
+        for vector in vectors {
+            let input = &vector["in"];
+            let got = resolved_prompt_for(
+                input["scheduler_prompt"].as_str().unwrap(),
+                input["extra_context"].as_str().unwrap(),
+                input["outcome_mode"].as_str().unwrap(),
+            );
+            if let Some(want) = vector.get("want").and_then(Value::as_str) {
+                assert_eq!(got, want, "exact composition");
+            }
+            if let Some(prefix) = vector.get("want_prefix").and_then(Value::as_str) {
+                assert!(
+                    got.starts_with(prefix),
+                    "prefix mismatch:\n{got}\n!starts_with\n{prefix}"
+                );
+            }
+            if let Some(suffix) = vector.get("want_suffix").and_then(Value::as_str) {
+                assert!(
+                    got.ends_with(suffix),
+                    "suffix mismatch:\n{got}\n!ends_with\n{suffix}"
+                );
+            }
+        }
+        // Unknown modes fall back to the create-issue directive (the
+        // golden's stale-mode vector pins the prefix; pin the full
+        // fallback equality here).
+        assert_eq!(
+            resolved_prompt_for("p", "", "stale-mode"),
+            resolved_prompt_for("p", "", "create_issue")
+        );
     }
 
     #[test]

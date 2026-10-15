@@ -70,3 +70,25 @@ UPDATE "scheduler_bindings" SET "updated_at" = :now, "updated_by_id" = :user_id,
 
 -- R8 uninstall (:290): soft-delete (updated_at/updated_by refreshed by save(); async cascade task also enqueued)
 UPDATE "scheduler_bindings" SET "deleted_at" = :now, "updated_at" = :now2, "updated_by_id" = :user_id WHERE "scheduler_bindings"."id" = :binding_id;
+
+-- R9 detail run-count (474123e5 :326-327, get_run_count = obj.agent_runs.count())
+SELECT COUNT(*) AS "__count" FROM "agent_run" WHERE "agent_run"."scheduler_binding_id" = :binding_id;
+
+-- R10 binding-runs count (:356; qs.count() trims the select_related joins
+-- except the runner leg the WHERE needs; no DISTINCT - every join is
+-- many-to-one so nothing fans out)
+SELECT COUNT(*) AS "__count" FROM "agent_run" LEFT OUTER JOIN "runner" ON ("agent_run"."runner_id" = "runner"."id") WHERE ("agent_run"."scheduler_binding_id" = :binding_id AND ("agent_run"."runner_id" IS NULL OR "runner"."owner_id" = :user_id OR "agent_run"."created_by_id" = :user_id));
+
+-- R10 binding-runs page (:357-359): the 41-column agent_run image (same
+-- column order as R1's agent_run segment) plus pod/pod__project, newest
+-- first, LIMIT/OFFSET. Django additionally INNER JOINs scheduler_bindings
+-- + schedulers (select_related leg); result-identical no-ops (WHERE pins
+-- one existing binding; both joins follow non-null FKs with no deleted_at
+-- scope), so Rust omits those legs until PIDASHCONV-1060 reads them.
+SELECT <agent_run.* 41 cols>, "pod"."id" AS "mini_id", "pod"."name" AS "mini_name", "pod"."is_default" AS "mini_is_default", "pod"."project_id" AS "mini_project_id", "projects"."identifier" AS "mini_project_identifier" FROM "agent_run" LEFT OUTER JOIN "runner" ON ("agent_run"."runner_id" = "runner"."id") INNER JOIN "pod" ON ("agent_run"."pod_id" = "pod"."id") INNER JOIN "projects" ON ("pod"."project_id" = "projects"."id") WHERE ("agent_run"."scheduler_binding_id" = :binding_id AND ("agent_run"."runner_id" IS NULL OR "runner"."owner_id" = :user_id OR "agent_run"."created_by_id" = :user_id)) ORDER BY "agent_run"."created_at" DESC LIMIT :limit OFFSET :offset;
+
+-- R2 erratum (474123e5 :246-251): the detail GET lookup is now
+-- SchedulerBinding.objects.select_related("scheduler", "last_run", "pod")
+-- (one query instead of 1+3 dereferences). Same data, so the rendered
+-- bytes are unchanged; Rust keeps the dereference queries (port the
+-- queries' data, not the count - the R2 note above still holds).

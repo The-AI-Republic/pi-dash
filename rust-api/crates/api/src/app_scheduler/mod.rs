@@ -18,7 +18,7 @@
 //! The handler shells (`handlers_sched.rs`, `handlers_bind.rs`,
 //! `handlers_occ.rs`, PIDASHCONV-633…635) land in this module and call
 //! [`gate::resolve_gate`], then [`gate::ensure_feature_enabled`] on the
-//! 4 CRUD routes (never on occurrences — ported quirk, see
+//! 5 CRUD routes (never on occurrences — ported quirk, see
 //! [`gate::DISABLED_BODY`).
 //!
 //! Shared request plumbing (`pool_of`, [`resolve_project_id`],
@@ -190,6 +190,13 @@ pub fn routes() -> Router<AppState> {
                     .patch(handlers_bind::binding_patch)
                     .delete(handlers_bind::binding_uninstall),
                 &["PUT", "POST", "HEAD", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/scheduler-bindings/{binding_id}/runs/",
+            owned(
+                axum::routing::get(handlers_bind::binding_runs),
+                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
 }

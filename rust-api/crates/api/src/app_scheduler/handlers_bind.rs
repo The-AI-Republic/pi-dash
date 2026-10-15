@@ -80,7 +80,7 @@
 //! from `UUIDField.error_messages`). The escape only happens at the
 //! view-level scheduler guard. True behavior is ported here.
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
@@ -93,8 +93,14 @@ use uuid::Uuid;
 
 use pidash_db::tasks_ticker::models::{scheduler, scheduler_binding};
 use pidash_services::app_scheduler::{queries, shape};
+use pidash_services::runner_runs::guards;
 
+use crate::app_issues::{query_last, QueryMap};
 use crate::middleware::SessionHandle;
+use crate::runner_runs::runs::{
+    binding_details_for_many, decode_run, render_list_row, run_select_list, tool_calls_for_many,
+    total_pages, PodMiniStrings,
+};
 use crate::state::AppState;
 
 use super::gate;
@@ -544,6 +550,219 @@ pub async fn binding_uninstall(
         .status(StatusCode::NO_CONTENT)
         .body(axum::body::Body::empty())
         .expect("empty 204 response")
+}
+
+/// `GET .../scheduler-bindings/<uuid>/runs/` (`474123e5`,
+/// `views.py:303-370`): the binding's run history, newest first,
+/// page-number paginated with the runs-list envelope. Readable by any
+/// project role (the binding GET gate + the feature flag); a binding
+/// outside the project or workspace 404s. Rows pass the private-runner
+/// gate (`runner IS NULL OR runner.owner = me OR created_by = me`) and
+/// render through the shared runs-list shape (`error_diagnostic` null).
+pub async fn binding_runs(
+    State(state): State<AppState>,
+    Path((slug, project_raw, binding_raw)): Path<(String, String, String)>,
+    Query(query): Query<QueryMap>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    let Ok(binding_id) = binding_raw.parse::<Uuid>() else {
+        // URL resolution precedes auth: a non-UUID id proxies to Django's
+        // resolver 404 (the `app_pages` precedent).
+        return crate::edge::proxy(State(state), req).await;
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(response) => return response,
+    };
+    let (resolved, project_id) = match resolve_binding_request(
+        pool,
+        &state,
+        &slug,
+        &project_raw,
+        gate::Gate::ProjectOpen,
+        extension,
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    // `get_object_or_404` precedes pagination: a foreign binding 404s
+    // even with garbage `page`/`per_page`.
+    if let Err(response) = require_binding(pool, &binding_id, &project_id, &slug).await {
+        return response;
+    }
+    let page_raw = query_last(&query, "page");
+    let per_page_raw = query_last(&query, "per_page");
+    let (page, per_page) = guards::parse_pagination(page_raw.as_deref(), per_page_raw.as_deref());
+    let total_count: i64 = match sqlx::query_scalar(&binding_runs_count_sql())
+        .bind(binding_id)
+        .bind(resolved.user_id)
+        .bind(resolved.user_id)
+        .fetch_one(pool)
+        .await
+    {
+        Ok(count) => count,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let pages = total_pages(total_count, per_page);
+    // `page` is unbounded (`max(1, huge)`); saturate the offset into
+    // `i64` — a huge page reads an empty slice either way.
+    let offset = i128::from(page - 1) * i128::from(per_page);
+    let offset = offset.min(i128::from(i64::MAX)) as i64;
+    let rows = match sqlx::query(&binding_runs_page_sql())
+        .bind(binding_id)
+        .bind(resolved.user_id)
+        .bind(resolved.user_id)
+        .bind(per_page)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let mut runs: Vec<(pidash_db::runner_runs::AgentRun, PodMiniStrings)> =
+        Vec::with_capacity(rows.len());
+    for row in &rows {
+        let run = match decode_run(row, 0) {
+            Ok(run) => run,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        let mini_id: Uuid = match row.try_get("mini_id") {
+            Ok(id) => id,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        let mini_name: String = match row.try_get("mini_name") {
+            Ok(name) => name,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        let mini_is_default: bool = match row.try_get("mini_is_default") {
+            Ok(flag) => flag,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        let mini_project_id: Uuid = match row.try_get("mini_project_id") {
+            Ok(id) => id,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        let mini_project_identifier: String = match row.try_get("mini_project_identifier") {
+            Ok(identifier) => identifier,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        runs.push((
+            run,
+            PodMiniStrings {
+                id: mini_id.to_string(),
+                name: mini_name,
+                is_default: mini_is_default,
+                project: mini_project_id.to_string(),
+                project_identifier: mini_project_identifier,
+            },
+        ));
+    }
+    let run_ids: Vec<Uuid> = runs.iter().map(|(run, _)| run.id).collect();
+    let tool_calls = match tool_calls_for_many(pool, &run_ids).await {
+        Ok(grouped) => grouped,
+        Err(response) => return response,
+    };
+    let binding_ids: Vec<Uuid> = runs
+        .iter()
+        .filter_map(|(run, _)| run.scheduler_binding_id)
+        .collect();
+    let bindings = match binding_details_for_many(pool, &binding_ids).await {
+        Ok(grouped) => grouped,
+        Err(response) => return response,
+    };
+    let empty_calls = Vec::new();
+    let mut results: Vec<Value> = Vec::with_capacity(runs.len());
+    for (run, pod) in &runs {
+        let calls = tool_calls.get(&run.id).unwrap_or(&empty_calls);
+        // Set-but-unresolvable binding id: Django raises on the FK
+        // access — a 500, never a null detail.
+        let binding = match run.scheduler_binding_id {
+            None => None,
+            Some(binding_id) => match bindings.get(&binding_id) {
+                Some(detail) => Some(detail),
+                None => return Denial::ServerError.into_response(),
+            },
+        };
+        results.push(render_list_row(run, pod, calls, binding));
+    }
+    // `count` is the page length, not the total (`views.py:363`).
+    let count = results.len();
+    let body = serde_json::json!({
+        "results": results,
+        "count": count,
+        "total_count": total_count,
+        "total_pages": pages,
+        "page": page,
+        "per_page": per_page,
+    });
+    json_response(StatusCode::OK, body.to_string())
+}
+
+/// Binding-runs WHERE (`views.py:339-348`): this binding's runs passing
+/// the private-runner gate. Params `$1..=$3`: binding, requester,
+/// requester.
+fn binding_runs_where() -> String {
+    r#"("agent_run"."scheduler_binding_id" = $1 AND ("agent_run"."runner_id" IS NULL OR "runner"."owner_id" = $2 OR "agent_run"."created_by_id" = $3))"#.to_owned()
+}
+
+/// Binding-runs count (`views.py:356`): Django counts over the trimmed
+/// joins (only the runner leg survives — the WHERE needs it); no
+/// `DISTINCT` (every join is many-to-one, so nothing fans out).
+fn binding_runs_count_sql() -> String {
+    format!(
+        r#"SELECT COUNT(*) AS "__count" FROM "agent_run" LEFT OUTER JOIN "runner" ON ("agent_run"."runner_id" = "runner"."id") WHERE {where_}"#,
+        where_ = binding_runs_where(),
+    )
+}
+
+/// Binding-runs page (`views.py:353-359`): the 41-column run image plus
+/// the pod-mini columns, `-created_at`, `LIMIT $4` / `OFFSET $5`.
+/// Django's page additionally INNER JOINs `scheduler_bindings` +
+/// `schedulers` (the `scheduler_binding__scheduler` select_related
+/// leg); those joins are result-identical no-ops here — the WHERE pins
+/// `scheduler_binding_id` to one existing row and both joins follow
+/// non-null FKs with no `deleted_at` scope — and the current shape
+/// reads nothing from them, so the page carries only the legs the
+/// WHERE and the shape need. (PIDASHCONV-1060 renders the joined
+/// scheduler columns; it extends this SELECT, not the row set.)
+fn binding_runs_page_sql() -> String {
+    format!(
+        concat!(
+            r#"SELECT {runs}, "pod"."id" AS "mini_id", "#,
+            r#""pod"."name" AS "mini_name", "#,
+            r#""pod"."is_default" AS "mini_is_default", "#,
+            r#""pod"."project_id" AS "mini_project_id", "#,
+            r#""projects"."identifier" AS "mini_project_identifier" "#,
+            r#"FROM "agent_run" "#,
+            r#"LEFT OUTER JOIN "runner" ON ("agent_run"."runner_id" = "runner"."id") "#,
+            r#"INNER JOIN "pod" ON ("agent_run"."pod_id" = "pod"."id") "#,
+            r#"INNER JOIN "projects" ON ("pod"."project_id" = "projects"."id") "#,
+            r#"WHERE {where_} "#,
+            r#"ORDER BY "agent_run"."created_at" DESC LIMIT $4 OFFSET $5"#,
+        ),
+        runs = run_select_list(),
+        where_ = binding_runs_where(),
+    )
+}
+
+/// The binding lookup shared by the runs endpoint: `Ok(())` when the
+/// row exists in this project + workspace, else the 404/error response.
+#[allow(clippy::result_large_err)]
+async fn require_binding(
+    pool: &PgPool,
+    binding_id: &Uuid,
+    project_id: &Uuid,
+    slug: &str,
+) -> Result<(), Response> {
+    match fetch_binding_detail(pool, binding_id, project_id, slug).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(Denial::NotFound(NOT_FOUND_BINDING_BODY).into_response()),
+        Err(denial) => Err(denial.into_response()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2560,17 +2779,54 @@ async fn uninstall_binding(
 /// `_base_manager`, which carries no tombstone filter — a soft-deleted
 /// row still renders its values (verified live against Django). A miss
 /// (hard-deleted row, unreachable except races) renders nulls.
+/// Scheduler display columns through the BASE manager (no
+/// `deleted_at` scope — forward joins never filter): the list shape's
+/// slug/name/color plus the detail shape's prompt/source/is_enabled
+/// (`474123e5`, `scheduler.py:292-331`). A miss renders nulls on every
+/// path (the `_base_manager` rule); the FK guards it in practice.
+struct SchedulerDisplay {
+    slug: String,
+    name: String,
+    color: String,
+    prompt: String,
+    source: String,
+    is_enabled: bool,
+}
+
 async fn fetch_scheduler_display(
     pool: &PgPool,
     scheduler_id: &Uuid,
-) -> Result<Option<(String, String, String)>, Denial> {
-    let row: Option<(String, String, String)> =
-        sqlx::query_as(r#"SELECT s.slug, s.name, s.color FROM schedulers s WHERE s.id = $1"#)
-            .bind(scheduler_id)
-            .fetch_optional(pool)
+) -> Result<Option<SchedulerDisplay>, Denial> {
+    let row: Option<(String, String, String, String, String, bool)> = sqlx::query_as(
+        r#"SELECT s.slug, s.name, s.color, s.prompt, s.source, s.is_enabled FROM schedulers s WHERE s.id = $1"#,
+    )
+    .bind(scheduler_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(
+        |(slug, name, color, prompt, source, is_enabled)| SchedulerDisplay {
+            slug,
+            name,
+            color,
+            prompt,
+            source,
+            is_enabled,
+        },
+    ))
+}
+
+/// `get_run_count` (`scheduler.py:326-327`): `obj.agent_runs.count()` —
+/// `COUNT(*)` over `agent_run` for this binding (`AgentRun` has no
+/// `deleted_at`, so no scope). Param: `$1` the binding id.
+async fn fetch_binding_run_count(pool: &PgPool, binding_id: &Uuid) -> Result<i64, Denial> {
+    let count: i64 =
+        sqlx::query_scalar(r#"SELECT COUNT(*) AS "__count" FROM "agent_run" WHERE "agent_run"."scheduler_binding_id" = $1"#)
+            .bind(binding_id)
+            .fetch_one(pool)
             .await
             .map_err(|_| Denial::ServerError)?;
-    Ok(row)
+    Ok(count)
 }
 
 /// Last-run display columns for one id (`agent_run` has no `deleted_at`
@@ -2620,13 +2876,27 @@ fn render_datetime_opt(instant: &Option<DateTime<Utc>>, timezone: &Tz) -> Value 
         .unwrap_or(Value::Null)
 }
 
+/// The 4 detail-only values (`SchedulerBindingDetailSerializer`,
+/// `474123e5`): `resolved_prompt` (always a string),
+/// `run_count`, and the scheduler's `source` / `is_enabled` (`None`
+/// renders null — the scheduler-miss rule, mirroring slug/name/color).
+struct BindingDetailExtra<'a> {
+    resolved_prompt: String,
+    run_count: i64,
+    scheduler_source: Option<&'a str>,
+    scheduler_is_enabled: Option<bool>,
+}
+
 /// Assemble one binding row in `BINDING_SERIALIZER_FIELDS` order (pinned
-/// against [`shape::BINDING_SERIALIZER_FIELDS`] in tests).
+/// against [`shape::BINDING_SERIALIZER_FIELDS`] in tests). `detail` is
+/// `Some` on the detail GET / PATCH response only, appending the 4
+/// detail keys in [`shape::BINDING_DETAIL_FIELDS`] order (list/install
+/// pass `None` — their 25-key bodies are unchanged).
 #[allow(clippy::too_many_arguments)]
 fn render_binding_object(
     id: &Uuid,
     scheduler_id: &Uuid,
-    scheduler_display: &Option<(String, String, String)>,
+    scheduler_display: &Option<SchedulerDisplay>,
     project_id: &Option<Uuid>,
     workspace_id: &Uuid,
     dtstart: &DateTime<Utc>,
@@ -2648,15 +2918,16 @@ fn render_binding_object(
     created_at: &DateTime<Utc>,
     updated_at: &DateTime<Utc>,
     timezone: &Tz,
+    detail: Option<&BindingDetailExtra<'_>>,
 ) -> String {
-    let mut row = Map::with_capacity(shape::BINDING_SERIALIZER_FIELDS.len());
+    let mut row = Map::with_capacity(shape::BINDING_DETAIL_FIELDS.len());
     row.insert("id".to_owned(), render_uuid(id));
     row.insert("scheduler".to_owned(), render_uuid(scheduler_id));
     let (slug, name, color) = match scheduler_display {
-        Some((slug, name, color)) => (
-            Value::String(slug.clone()),
-            Value::String(name.clone()),
-            Value::String(color.clone()),
+        Some(display) => (
+            Value::String(display.slug.clone()),
+            Value::String(display.name.clone()),
+            Value::String(display.color.clone()),
         ),
         None => (Value::Null, Value::Null, Value::Null),
     };
@@ -2718,6 +2989,27 @@ fn render_binding_object(
         "updated_at".to_owned(),
         Value::String(crate::serializer::render_datetime_in(updated_at, timezone)),
     );
+    if let Some(extra) = detail {
+        row.insert(
+            "resolved_prompt".to_owned(),
+            Value::String(extra.resolved_prompt.clone()),
+        );
+        row.insert("run_count".to_owned(), Value::from(extra.run_count));
+        row.insert(
+            "scheduler_source".to_owned(),
+            extra
+                .scheduler_source
+                .map(|source| Value::String(source.to_owned()))
+                .unwrap_or(Value::Null),
+        );
+        row.insert(
+            "scheduler_is_enabled".to_owned(),
+            extra
+                .scheduler_is_enabled
+                .map(Value::Bool)
+                .unwrap_or(Value::Null),
+        );
+    }
     serde_json::to_string(&Value::Object(row)).expect("serializable row")
 }
 
@@ -2727,11 +3019,15 @@ fn render_binding_object(
 /// 500s (QUIRK-orphan-run's list half: `None.status` → `AttributeError`).
 fn render_binding_row(row: &queries::BindingListRow, timezone: &Tz) -> Result<String, Denial> {
     let binding = &row.binding;
-    let scheduler_display = Some((
-        row.scheduler.slug.clone(),
-        row.scheduler.name.clone(),
-        row.scheduler.color.clone(),
-    ));
+    let sched = &row.scheduler;
+    let scheduler_display = Some(SchedulerDisplay {
+        slug: sched.slug.clone(),
+        name: sched.name.clone(),
+        color: sched.color.clone(),
+        prompt: sched.prompt.clone(),
+        source: sched.source.clone(),
+        is_enabled: sched.is_enabled,
+    });
     let pod_name: Option<String> = match (&binding.pod_id, &row.pod) {
         (None, _) => None,
         (Some(_), Some(pod)) => {
@@ -2778,12 +3074,14 @@ fn render_binding_row(row: &queries::BindingListRow, timezone: &Tz) -> Result<St
         &binding.created_at,
         &binding.updated_at,
         timezone,
+        None,
     ))
 }
 
-/// Render one detail/install/PATCH row: the BR2 row plus the serializer's
+/// Render one detail/PATCH row: the BR2 row plus the serializer's
 /// per-object dereferences (default-manager semantics — the detail half
-/// of QUIRK-list-detail-pod and QUIRK-orphan-run).
+/// of QUIRK-list-detail-pod and QUIRK-orphan-run) plus the 4 detail-only
+/// keys (`SchedulerBindingDetailSerializer`, `474123e5`).
 async fn render_detail_binding(
     pool: &PgPool,
     row: &scheduler_binding::SchedulerBinding,
@@ -2804,6 +3102,28 @@ async fn render_detail_binding(
     let pod_name = match row.pod_id {
         None => None,
         Some(pod_id) => fetch_pod_display(pool, &pod_id).await?,
+    };
+    // A missing scheduler renders nulls for the joined columns (the
+    // scheduler-miss rule, mirroring slug/name/color); the prompt
+    // composes with an empty scheduler part. Unreachable in practice —
+    // the FK guards it — but the rule keeps every path total.
+    let scheduler_prompt = scheduler_display
+        .as_ref()
+        .map(|display| display.prompt.as_str())
+        .unwrap_or("");
+    let resolved_prompt = shape::resolved_prompt_for(
+        scheduler_prompt,
+        row.extra_context.as_str(),
+        row.outcome_mode.as_str(),
+    );
+    let run_count = fetch_binding_run_count(pool, &row.id).await?;
+    let extra = BindingDetailExtra {
+        resolved_prompt,
+        run_count,
+        scheduler_source: scheduler_display
+            .as_ref()
+            .map(|display| display.source.as_str()),
+        scheduler_is_enabled: scheduler_display.as_ref().map(|display| display.is_enabled),
     };
     Ok(render_binding_object(
         &row.id,
@@ -2830,6 +3150,7 @@ async fn render_detail_binding(
         &row.created_at,
         &row.updated_at,
         timezone,
+        Some(&extra),
     ))
 }
 
@@ -2842,7 +3163,14 @@ fn render_saved_binding(
     timezone: &Tz,
 ) -> String {
     let row = &saved.row;
-    let scheduler_display = Some((sched.slug.clone(), sched.name.clone(), sched.color.clone()));
+    let scheduler_display = Some(SchedulerDisplay {
+        slug: sched.slug.clone(),
+        name: sched.name.clone(),
+        color: sched.color.clone(),
+        prompt: sched.prompt.clone(),
+        source: sched.source.clone(),
+        is_enabled: sched.is_enabled,
+    });
     render_binding_object(
         &row.id,
         &row.scheduler_id,
@@ -2868,6 +3196,7 @@ fn render_saved_binding(
         &row.created_at,
         &row.updated_at,
         timezone,
+        None,
     )
 }
 
@@ -3095,10 +3424,18 @@ mod tests {
     #[test]
     fn render_key_order_matches_serializer_fields() {
         let id = Uuid::parse_str("68ad4deb-fc7c-4531-b5ce-376263af21e3").unwrap();
+        let display = || SchedulerDisplay {
+            slug: "s".to_owned(),
+            name: "n".to_owned(),
+            color: "c".to_owned(),
+            prompt: "p".to_owned(),
+            source: "builtin".to_owned(),
+            is_enabled: true,
+        };
         let rendered = render_binding_object(
             &id,
             &id,
-            &Some(("s".to_owned(), "n".to_owned(), "c".to_owned())),
+            &Some(display()),
             &Some(id),
             &id,
             &utc(2026, 1, 2, 3, 4, 5),
@@ -3120,6 +3457,7 @@ mod tests {
             &utc(2026, 1, 2, 3, 4, 5),
             &utc(2026, 1, 2, 3, 4, 5),
             &chrono_tz::UTC,
+            None,
         );
         let parsed: Value = serde_json::from_str(&rendered).expect("valid json");
         let keys: Vec<&str> = parsed
@@ -3136,6 +3474,134 @@ mod tests {
         assert_eq!(parsed["enabled"], true);
         assert_eq!(parsed["last_run"], Value::Null);
         assert_eq!(parsed["pod_name"], Value::Null);
+    }
+
+    #[test]
+    fn render_detail_appends_four_keys_in_order() {
+        let id = Uuid::parse_str("68ad4deb-fc7c-4531-b5ce-376263af21e3").unwrap();
+        let display = Some(SchedulerDisplay {
+            slug: "nightly".to_owned(),
+            name: "Nightly".to_owned(),
+            color: "#10b981".to_owned(),
+            prompt: "Audit.".to_owned(),
+            source: "manifest".to_owned(),
+            is_enabled: false,
+        });
+        let extra = BindingDetailExtra {
+            resolved_prompt: "Audit.\n\n## Work mode: create issues".to_owned(),
+            run_count: 7,
+            scheduler_source: display.as_ref().map(|d| d.source.as_str()),
+            scheduler_is_enabled: display.as_ref().map(|d| d.is_enabled),
+        };
+        let rendered = render_binding_object(
+            &id,
+            &id,
+            &display,
+            &Some(id),
+            &id,
+            &utc(2026, 1, 2, 3, 4, 5),
+            "UTC",
+            "",
+            &Value::Array(vec![]),
+            &Value::Array(vec![]),
+            "",
+            true,
+            "create_issue",
+            &None,
+            &None,
+            &None,
+            &None,
+            None,
+            None,
+            "",
+            &Some(id),
+            &utc(2026, 1, 2, 3, 4, 5),
+            &utc(2026, 1, 2, 3, 4, 5),
+            &chrono_tz::UTC,
+            Some(&extra),
+        );
+        let parsed: Value = serde_json::from_str(&rendered).expect("valid json");
+        let keys: Vec<&str> = parsed
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, shape::BINDING_DETAIL_FIELDS);
+        assert_eq!(
+            parsed["resolved_prompt"],
+            "Audit.\n\n## Work mode: create issues"
+        );
+        assert_eq!(parsed["run_count"], 7);
+        assert_eq!(parsed["scheduler_source"], "manifest");
+        assert_eq!(parsed["scheduler_is_enabled"], false);
+    }
+
+    #[test]
+    fn render_detail_scheduler_miss_nulls_joined_columns() {
+        let id = Uuid::nil();
+        let extra = BindingDetailExtra {
+            resolved_prompt: "prompt".to_owned(),
+            run_count: 0,
+            scheduler_source: None,
+            scheduler_is_enabled: None,
+        };
+        let rendered = render_binding_object(
+            &id,
+            &id,
+            &None,
+            &None,
+            &id,
+            &utc(2026, 1, 2, 3, 4, 5),
+            "UTC",
+            "",
+            &Value::Array(vec![]),
+            &Value::Array(vec![]),
+            "",
+            true,
+            "create_issue",
+            &None,
+            &None,
+            &None,
+            &None,
+            None,
+            None,
+            "",
+            &None,
+            &utc(2026, 1, 2, 3, 4, 5),
+            &utc(2026, 1, 2, 3, 4, 5),
+            &chrono_tz::UTC,
+            Some(&extra),
+        );
+        let parsed: Value = serde_json::from_str(&rendered).expect("valid json");
+        assert_eq!(parsed["scheduler_slug"], Value::Null);
+        assert_eq!(parsed["scheduler_source"], Value::Null);
+        assert_eq!(parsed["scheduler_is_enabled"], Value::Null);
+        assert_eq!(parsed["resolved_prompt"], "prompt");
+        assert_eq!(parsed["run_count"], 0);
+    }
+
+    #[test]
+    fn binding_runs_sql_carries_gate_params_and_order() {
+        let count = binding_runs_count_sql();
+        assert!(
+            count.contains(
+                r#"LEFT OUTER JOIN "runner" ON ("agent_run"."runner_id" = "runner"."id")"#
+            ),
+            "{count}"
+        );
+        assert!(
+            count.contains(r#"("agent_run"."scheduler_binding_id" = $1 AND ("agent_run"."runner_id" IS NULL OR "runner"."owner_id" = $2 OR "agent_run"."created_by_id" = $3))"#),
+            "{count}"
+        );
+        let page = binding_runs_page_sql();
+        assert!(page.contains(r#""pod"."id" AS "mini_id""#), "{page}");
+        assert!(
+            page.contains(r#"ORDER BY "agent_run"."created_at" DESC LIMIT $4 OFFSET $5"#),
+            "{page}"
+        );
+        // The run image opens the SELECT so `decode_run(row, 0)` applies.
+        assert!(page.starts_with("SELECT \"agent_run\"."), "{page}");
     }
 
     #[test]
@@ -3166,6 +3632,7 @@ mod tests {
             &utc(2026, 7, 2, 12, 0, 0),
             &utc(2026, 7, 2, 12, 0, 0),
             &zone,
+            None,
         );
         let parsed: Value = serde_json::from_str(&rendered).expect("valid json");
         // July in New York is EDT (-04:00); only +00:00 renders `Z`.

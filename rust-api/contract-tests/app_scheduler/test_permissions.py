@@ -57,6 +57,9 @@ def seeded(org):
         "GET /occurrences/": (
             "GET",
             f"/api/workspaces/{slug}/projects/{pid}/scheduler-bindings/occurrences/"),
+        "GET /bindings/<id>/runs/": (
+            "GET",
+            f"/api/workspaces/{slug}/projects/{pid}/scheduler-bindings/{binding['id']}/runs/"),
     }
 
 
@@ -105,7 +108,8 @@ def test_binding_writes_admin_only(org, seeded):
 
 def test_reads_open_to_all_project_roles(org, seeded):
     for name in ("GET /schedulers/", "GET /bindings/",
-                 "GET /bindings/<id>/", "GET /occurrences/"):
+                 "GET /bindings/<id>/", "GET /occurrences/",
+                 "GET /bindings/<id>/runs/"):
         method, path = seeded[name]
         for role in ("admin", "member", "guest"):
             assert org.request(method, path, role).status_code == 200, (name, role)
