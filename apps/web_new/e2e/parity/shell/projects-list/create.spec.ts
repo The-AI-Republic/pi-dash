@@ -70,6 +70,14 @@ test(
     });
 
     await test.step("a reused short code yields a field-specific error", async () => {
+      // Let the name-duplicate notice clear before submitting: the error
+      // reader returns the first visible notice, so while the name notice
+      // is still up the identifier notice is only observable in the
+      // sub-second window after the name notice expires — a window the
+      // poll's backoff spacing (up to 1s) routinely misses on the fast
+      // production oracle (NEWFRONT-361). Waiting keeps the same
+      // assertion; it only removes the incidental toast overlap.
+      await expect.poll(() => driver.isToastVisible("name is already taken")).toBe(false);
       const existing = await projectByName(owner, ws.slug, "Nebula Craft");
       await driver.fillCreateProjectName("Another Craft");
       await driver.fillCreateProjectShortCode(existing!.identifier);
@@ -124,15 +132,20 @@ test(
     // empty state is not what we are exercising here.
     await createProjectViaApi(owner, ws.slug, { name: "Cover Anchor", identifier: "CVAN" });
 
-    // Make the bundled cover images unreachable so the cover upload fails.
-    // Scoped to the cover-images path (the app's own JS chunks also live
-    // under /assets/), and letting Vite's own module-transform requests
-    // through: aborting those would stop the app from booting.
-    await driver.page.route("**/assets/cover-images/**", async (route) => {
-      if (route.request().url().includes("?import")) {
-        await route.continue();
-      } else {
+    // Fail the cover upload at the asset-service grant so the submit takes
+    // the degraded-cover path. Aborting the grant POST (rather than the
+    // bundled-image fetch) is build-independent: dev serves bundled covers
+    // from a path containing `assets/cover-images`, but the production
+    // build flattens them to `/assets/<name>-<hash>.jpg` (NEWFRONT-361),
+    // so a fetch-leg abort only injects the failure on dev. The pattern
+    // matches only the single-segment grant URL (status PATCH and bulk
+    // POSTs carry extra segments), and the POST guard keeps boot-time
+    // GETs untouched.
+    await driver.page.route("**/api/assets/v2/workspaces/*/", async (route) => {
+      if (route.request().method() === "POST") {
         await route.abort();
+      } else {
+        await route.continue();
       }
     });
 
