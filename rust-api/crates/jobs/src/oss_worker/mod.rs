@@ -290,7 +290,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // beat entries fire the sweeps and the L6 handlers exist with
     // live seam providers (`oss_worker::runner_seams::RunnerSeams`
     // over the PIDASHCONV-862 executors), so the Rust worker owns
-    // all eleven — otherwise the runs are lost at switchover
+    // all thirteen — otherwise the runs are lost at switchover
     // (parity gap W-runner, plus the four dormant names the
     // registers also own).
     let redis = match ctx
@@ -324,6 +324,11 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         registry,
         ctx.pools.primary().clone(),
         runner_seams.clone(),
+        runner_seams.clone(),
+    );
+    crate::runner_runs::register_offline_recovery_tasks(
+        registry,
+        ctx.pools.primary().clone(),
         runner_seams,
     );
     // D-11 execution tasks (PIDASHCONV-832; kept in sync with
@@ -405,7 +410,7 @@ mod tests {
 
     /// PIDASHCONV-918: the helper owns exactly the OSS task set — the
     /// same const union the binary's `mirror_registry_matches_tasks_table`
-    /// pins (54 names), while the Python-owned sentinels stay
+    /// pins (56 names), while the Python-owned sentinels stay
     /// unregistered. `Pools::primary_only` over a lazy pool keeps the
     /// test hermetic: registration constructs handlers without I/O, and
     /// none of them runs here.
@@ -469,7 +474,7 @@ mod tests {
         expected.extend(crate::runner_runs::TASK_NAMES);
         expected.insert(crate::tasks_mail::SEND_EMAIL_NOTIFICATION_TASK);
         expected.insert(crate::tasks_mail::STACK_EMAIL_NOTIFICATION_TASK);
-        assert_eq!(expected.len(), 54, "worker-owned count drifted");
+        assert_eq!(expected.len(), 56, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");

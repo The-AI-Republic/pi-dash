@@ -59,6 +59,7 @@
 pub mod drain;
 pub mod guards;
 pub mod live_drains;
+pub mod offline_recovery;
 pub mod pubsub;
 pub mod session_service;
 pub mod usage;
@@ -71,15 +72,22 @@ pub use drain::{
     POD_COLUMNS, SELECT_RUNNER_IN_POD_SQL,
 };
 pub use live_drains::{drain_for_runner_by_id, drain_pod_by_id, DrainError, PoolPubsubStore};
+pub use offline_recovery::{
+    clear_parent_thread_sql, clear_pin_sql, offline_fail_detail, release_pin_lock_select,
+    runner_silent_lock_select, silent_runner_ids_select, stuck_queued_run_ids_select,
+    sweep_cancel_barrier_stamped_sql, sweep_stale_cancel_ids_sql, sweep_stale_cancel_pods_sql,
+    sweep_stale_pairs_sql,
+};
 pub use pubsub::{
     close_runner_session, send_connection_revoke, send_runner_remove, send_runner_revoke,
     send_to_machine, send_to_runner, PubsubStore, SendOutcome, CLOSE_ACTIVE_SESSIONS_SQL,
     CLOSE_RUNNER_SESSION_DEFAULT_CODE, FORCE_CLOSE_REASON,
 };
 pub use session_service::{
-    agent_capabilities, cancel_barrier_update_sql, cancel_retry_error_line, cancel_retry_message,
-    drain_pod_ids, effective_cutoff, invalid_run_id_warning, live_state_update_sql,
-    merge_dev_metadata, parse_heartbeat_ts, parse_in_flight_id, parse_optional_uuid, parse_skip_id,
+    agent_capabilities, cancel_barrier_update_sql, cancel_reason_for_claim,
+    cancel_retry_error_line, cancel_retry_message, cancel_retry_message_with_reason, drain_pod_ids,
+    effective_cutoff, invalid_run_id_warning, live_state_update_sql, merge_dev_metadata,
+    parse_heartbeat_ts, parse_in_flight_id, parse_optional_uuid, parse_skip_id,
     plan_drain_after_commit, plan_hello_update, plan_live_state_upsert, plan_reap_finalize,
     plan_redeliver, plan_resume_ack, reap_error_detail, reapable_statuses, redeliver_assign_sql,
     redeliver_cancel_sql, resolve_runner_slug_sql, resolve_slug, resume_ack_lookup_sql,
@@ -87,8 +95,9 @@ pub use session_service::{
     stale_cancel_pod_ids_sql, stale_pairs_sql, HeartbeatError, HelloFacts, HelloPlan,
     LiveStateFacts, LiveStatePlan, RedeliverAssignFacts, RedeliverFacts, ResumeAckFacts,
     SessionEffect, SlugFacts, ASSIGN_DELIVERY_GRACE_SECS, CANCEL_REQUESTED_EXISTS_SQL,
-    HELLO_UPDATE_NO_CAPABILITIES_SQL, HELLO_UPDATE_SQL, LIVE_STATE_COLUMNS, LIVE_STATE_INSERT_SQL,
-    LIVE_STATE_SELECT_SQL, LLM_MODEL_MAX_CHARS, MARK_RUNNER_OFFLINE_SQL, MARK_RUNNER_ONLINE_SQL,
-    OFFLINE_GRACE_SECS, REAP_ERROR_CODE, RESUME_ACK_LAST_SEQ_SQL, SNAPSHOT_FIELDS,
+    HELLO_UPDATE_NO_CAPABILITIES_SQL, HELLO_UPDATE_SQL, IN_FLIGHT_CLAIM_SQL, LIVE_STATE_COLUMNS,
+    LIVE_STATE_INSERT_SQL, LIVE_STATE_SELECT_SQL, LLM_MODEL_MAX_CHARS, MARK_RUNNER_OFFLINE_SQL,
+    MARK_RUNNER_ONLINE_SQL, OFFLINE_GRACE_SECS, REAP_ERROR_CODE, RESUME_ACK_LAST_SEQ_SQL,
+    RUNNER_OFFLINE_ERROR_CODE, SNAPSHOT_FIELDS,
 };
 pub use usage::{coerce_token, normalize_usage, BIGINT_MAX, CANONICAL_USAGE_KEYS};

@@ -295,6 +295,32 @@ DEAD_TASKS = {
     "pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email",
 }
 
+# Beat entries Rust owns ahead of the checkout's frozen Django
+# (stage-8 drift: the entry exists on origin/main but rust-dev's
+# apps/api predates it). Each maps entry name -> the main-commit
+# truth: {"task", "cadence", "issue", "commit"}, where "cadence" is
+# the _format_schedule rendering of main's entry. A rust-only entry
+# in this map diffs OWNED only when the Rust task + cadence match the
+# pinned truth; any mismatch is beat drift. When PIDASHCONV-1055
+# merges main into rust-dev, Django gains the entry and the map row
+# goes stale (the check fails until the row is deleted).
+RUST_AHEAD_BEAT_ENTRIES = {
+    # PIDASHCONV-1063: 70d684af "Recover agent runs stranded on
+    # offline runners" — every-minute sweeps.
+    "runner-release-pins-on-offline-runners": {
+        "task": "runner.release_pins_on_offline_runners",
+        "cadence": "crontab(minute=*/1 hour=* day_of_month=* month_of_year=* day_of_week=*)",
+        "issue": "PIDASHCONV-1063",
+        "commit": "70d684af",
+    },
+    "runner-fail-runs-on-offline-runners": {
+        "task": "runner.fail_runs_on_offline_runners",
+        "cadence": "crontab(minute=*/1 hour=* day_of_month=* month_of_year=* day_of_week=*)",
+        "issue": "PIDASHCONV-1063",
+        "commit": "70d684af",
+    },
+}
+
 # Beat cadence the Rust entry must equal, rendered deterministically.
 def _rust_cadence_string(entry: dict) -> str:
     cadence = entry["cadence"]
@@ -337,6 +363,22 @@ def diff_jobs(django: dict, rust: dict) -> dict:
         task_rows.append(_diff_task(name, task, own))
     beat_rows = []
     for entry in django["beat"]:
+        if entry["name"] in RUST_AHEAD_BEAT_ENTRIES:
+            # Main merged into the checkout: the ahead-map row is
+            # stale — delete it so the normal comparison applies.
+            ahead = RUST_AHEAD_BEAT_ENTRIES[entry["name"]]
+            beat_rows.append(
+                {
+                    "entry": entry["name"],
+                    "task": entry["task"],
+                    "django_cadence": entry["cadence"],
+                    "rust_cadence": "-",
+                    "task_owner": owner.get(entry["task"], "-"),
+                    "disposition": "MISSING",
+                    "detail": f"ahead-map-stale ({ahead['issue']} landed? delete the map row)",
+                }
+            )
+            continue
         rust_entry = rust_schedule.get(entry["name"])
         if rust_entry is None:
             beat_rows.append(
@@ -370,6 +412,32 @@ def diff_jobs(django: dict, rust: dict) -> dict:
         )
     for name in sorted(set(rust_schedule) - {e["name"] for e in django["beat"]}):
         entry = rust_schedule[name]
+        ahead = RUST_AHEAD_BEAT_ENTRIES.get(name)
+        if ahead is not None:
+            # Drift-ahead: Rust must match main's pinned truth, not
+            # merely exist.
+            problems = []
+            if entry["task"] != ahead["task"]:
+                problems.append(f"ahead-task:{entry['task']}")
+            rust_cadence = _rust_cadence_string(entry)
+            if not _cadences_equal(ahead["cadence"], entry["cadence"]):
+                problems.append(f"ahead-cadence:{rust_cadence}")
+            beat_rows.append(
+                {
+                    "entry": name,
+                    "task": entry["task"],
+                    "django_cadence": ahead["cadence"],
+                    "rust_cadence": rust_cadence,
+                    "task_owner": owner.get(entry["task"], "-"),
+                    "disposition": "MISSING" if problems else "OWNED",
+                    "detail": (
+                        ";".join(problems)
+                        if problems
+                        else f"rust-ahead ({ahead['issue']} @ {ahead['commit']})"
+                    ),
+                }
+            )
+            continue
         beat_rows.append(
             {
                 "entry": name,

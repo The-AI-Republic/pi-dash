@@ -415,12 +415,20 @@ impl CreationSeam for HandoffStore<'_, '_> {
     }
 
     async fn runner(&mut self, runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(RUNNER_SELECT_SQL)
-            .bind(runner_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        Ok(row.map(|(id, pod_id, status)| RunnerView { id, pod_id, status }))
+        let row: Option<(Uuid, Uuid, String, Option<DateTime<Utc>>)> =
+            sqlx::query_as(RUNNER_SELECT_SQL)
+                .bind(runner_id)
+                .fetch_optional(&mut **self.tx.inner())
+                .await
+                .map_err(Self::db)?;
+        Ok(
+            row.map(|(id, pod_id, status, last_heartbeat_at)| RunnerView {
+                id,
+                pod_id,
+                status,
+                last_heartbeat_at,
+            }),
+        )
     }
 
     async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {

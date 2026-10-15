@@ -2133,7 +2133,7 @@ mod tests {
         for task in l6a {
             assert!(registry.owns(task), "{task} registered");
         }
-        assert_eq!(crate::runner_runs::TASK_NAMES.len(), 11);
+        assert_eq!(crate::runner_runs::TASK_NAMES.len(), 13);
         assert!(crate::runner_runs::is_runner_runs_task(EXPIRE_TASK));
         assert!(crate::runner_runs::is_runner_runs_task(
             "runner.reconcile_stalled_runs"

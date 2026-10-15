@@ -3,7 +3,7 @@
 //! Beat-equivalent schedule: which task fires, and when.
 //!
 //! Transcribes `app.conf.beat_schedule` from `apps/api/pi_dash/celery.py`
-//! — both the 22-entry literal dict and the 4 settings-backed entries
+//! — both the 24-entry literal dict and the 4 settings-backed entries
 //! registered in `_register_settings_backed_beat_entries` — into data the
 //! scheduler loop in [`crate::scheduler`] evaluates every tick.
 //!
@@ -192,7 +192,7 @@ pub enum ScheduleError {
     BadCron { spec: String },
 }
 
-/// The 22 literal entries of `app.conf.beat_schedule` in
+/// The 24 literal entries of `app.conf.beat_schedule` in
 /// `apps/api/pi_dash/celery.py`, in file order.
 ///
 /// Note the two `delete_old_s3_link` entries (`01:30` and `03:45`): both
@@ -268,6 +268,19 @@ pub fn literal_schedule() -> Vec<BeatEntry> {
         BeatEntry {
             name: "runner-mark-offline-runners",
             task: "runner.mark_offline_runners",
+            cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
+        },
+        // Recover runs stranded on a runner that stopped heartbeating;
+        // without these a stranded run blocks its issue indefinitely
+        // (`70d684af`).
+        BeatEntry {
+            name: "runner-release-pins-on-offline-runners",
+            task: "runner.release_pins_on_offline_runners",
+            cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
+        },
+        BeatEntry {
+            name: "runner-fail-runs-on-offline-runners",
+            task: "runner.fail_runs_on_offline_runners",
             cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
         },
         BeatEntry {
@@ -355,7 +368,7 @@ fn env_secs(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// The full schedule: the 22 literal entries plus the 4 settings-backed
+/// The full schedule: the 24 literal entries plus the 4 settings-backed
 /// entries with their Django-setting environment overrides applied
 /// (`CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS`,
 /// `CLOUD_AGENT_SWEEP_INTERVAL_SECONDS`,
@@ -460,9 +473,9 @@ mod tests {
     }
 
     #[test]
-    fn literal_schedule_has_all_22_entries() {
+    fn literal_schedule_has_all_24_entries() {
         let schedule = literal_schedule();
-        assert_eq!(schedule.len(), 22);
+        assert_eq!(schedule.len(), 24);
         let names: Vec<_> = schedule.iter().map(|e| e.name).collect();
         for expected in [
             "check-every-five-minutes-to-send-email-notifications",
@@ -479,6 +492,8 @@ mod tests {
             "check-every-day-to-delete-exporter-history",
             "runner-expire-stale-approvals",
             "runner-mark-offline-runners",
+            "runner-release-pins-on-offline-runners",
+            "runner-fail-runs-on-offline-runners",
             "runner-reconcile-stalled-runs",
             "runner-sweep-agent-chat-state",
             "assistant-sweep-stale-turns",
@@ -506,7 +521,7 @@ mod tests {
             std::env::remove_var(var);
         }
         let schedule = beat_schedule();
-        assert_eq!(schedule.len(), 26);
+        assert_eq!(schedule.len(), 28);
         let find = |name: &str| schedule.iter().find(|e| e.name == name).expect(name);
         assert_eq!(
             find("cloud-agent-scan-queued-runs").cadence,

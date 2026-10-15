@@ -317,6 +317,8 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("LONG_POLL_INTERVAL_SECS", V::from(25)),
         ("ACCESS_TOKEN_TTL_SECS", V::from(3600)),
         ("RUNNER_OFFLINE_THRESHOLD_SECS", V::from(50)),
+        ("RUNNER_OFFLINE_PIN_RELEASE_SECS", V::from(300)),
+        ("RUNNER_OFFLINE_RUN_FAIL_SECS", V::from(3600)),
         ("OFFLINE_STREAM_TTL_SECS", V::from(86400)),
         ("OFFLINE_STREAM_MAXLEN", V::from(1000)),
         ("RUNNER_STREAM_MIN_RETENTION_SECS", V::from(3600)),

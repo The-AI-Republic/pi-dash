@@ -2862,6 +2862,7 @@ mod tests {
                 id: uid(0x55),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                last_heartbeat_at: Some(frozen_now()),
             },
         );
         let outcome = handle_issue_comment(&mut seam, &comment_req(Some(uid(0x40)), now))

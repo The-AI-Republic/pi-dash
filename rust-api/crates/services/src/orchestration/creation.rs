@@ -86,9 +86,11 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Value};
 use uuid::Uuid;
+
+use crate::runner_sessions::guards::HEARTBEAT_GRACE_SECS;
 
 use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::is_terminal_status;
@@ -149,6 +151,9 @@ pub const SUPPRESSED_ISSUE_MOVED_AGAIN: &str = "issue_moved_again";
 /// `RunnerStatus.REVOKED` (`runner/models.py:183`): fixture-pinned
 /// literal — runner models are unmerged (no D-13/D-15 edge).
 pub const RUNNER_STATUS_REVOKED: &str = "revoked";
+/// `RunnerStatus.OFFLINE` (`70d684af`): an offline runner is no longer
+/// an eligible pin target, like a revoked one.
+pub const RUNNER_STATUS_OFFLINE: &str = "offline";
 
 /// `AgentRunStatus.QUEUED` for the INSERT literal.
 pub const STATUS_QUEUED: &str = "queued";
@@ -242,7 +247,8 @@ pub fn run_select_sql() -> String {
 
 /// The parent's runner for pinning (`service.py:538-540`:
 /// `parent.runner`). `$1` is the runner id.
-pub const RUNNER_SELECT_SQL: &str = "SELECT id, pod_id, status FROM runner WHERE id = $1";
+pub const RUNNER_SELECT_SQL: &str =
+    "SELECT id, pod_id, status, last_heartbeat_at FROM runner WHERE id = $1";
 
 /// The assigned pod (`service.py:329`): the default `Pod.objects`
 /// manager excludes soft-deleted rows (`runner/models.py:42-49`). `$1`
@@ -575,13 +581,16 @@ impl RunView {
 }
 
 /// The consumed `runner` projection ([`RUNNER_SELECT_SQL`]). The status
-/// stays a string: runner models are unmerged, so `revoked` is the
-/// fixture-pinned [`RUNNER_STATUS_REVOKED`] literal (no D-13/D-15 edge).
+/// stays a string: runner models are unmerged, so `revoked`/`offline`
+/// are the fixture-pinned [`RUNNER_STATUS_REVOKED`] /
+/// [`RUNNER_STATUS_OFFLINE`] literals (no D-13/D-15 edge).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerView {
     pub id: Uuid,
     pub pod_id: Uuid,
     pub status: String,
+    /// `70d684af`: the pin check needs the heartbeat freshness.
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
 }
 
 /// The consumed `pod` projection (live rows only, per `PodManager`).
@@ -848,12 +857,28 @@ pub fn run_config_for_issue(
 }
 
 /// The runner to pin a follow-up to (`_pinned_runner_for`,
-/// `service.py:528-547`): the parent's runner when still eligible.
-/// `runner` is `None` when the parent has no runner; `target_pod_id`
-/// is the run's pod (`None` skips the pod check).
-pub fn pinned_runner_for(runner: Option<&RunnerView>, target_pod_id: Option<Uuid>) -> Option<Uuid> {
+/// `service.py:528-547`, `70d684af`): the parent's runner when still
+/// eligible. `runner` is `None` when the parent has no runner;
+/// `target_pod_id` is the run's pod (`None` skips the pod check).
+///
+/// A runner that is offline, or has no fresh heartbeat, is not
+/// eligible: only the pinned runner may take a pinned run, so pinning
+/// to a runner that is gone would park the run in QUEUED and block
+/// every later run on the issue. A BUSY runner is alive and stays
+/// eligible; the pinned run waits for it.
+pub fn pinned_runner_for(
+    runner: Option<&RunnerView>,
+    target_pod_id: Option<Uuid>,
+    now: DateTime<Utc>,
+) -> Option<Uuid> {
     let runner = runner?;
-    if runner.status == RUNNER_STATUS_REVOKED {
+    if runner.status == RUNNER_STATUS_REVOKED || runner.status == RUNNER_STATUS_OFFLINE {
+        return None;
+    }
+    if runner
+        .last_heartbeat_at
+        .is_none_or(|hb| hb < now - Duration::seconds(HEARTBEAT_GRACE_SECS))
+    {
         return None;
     }
     if target_pod_id.is_some_and(|pod| runner.pod_id != pod) {
@@ -1439,7 +1464,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
         if let Some(parent) = effective_parent.as_ref() {
             if let Some(runner_id) = parent.runner_id {
                 let runner = seam.runner(runner_id).await?;
-                computed_pin = pinned_runner_for(runner.as_ref(), Some(req.pod_id));
+                computed_pin = pinned_runner_for(runner.as_ref(), Some(req.pod_id), req.now);
             }
         }
     }
@@ -1531,7 +1556,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
     let mut computed_pin = None;
     if let Some(runner_id) = req.parent.runner_id {
         let runner = seam.runner(runner_id).await?;
-        computed_pin = pinned_runner_for(runner.as_ref(), Some(req.pod_id));
+        computed_pin = pinned_runner_for(runner.as_ref(), Some(req.pod_id), req.now);
     }
     let automatic = is_automatic_issue_trigger(&req.trigger);
     let flags = seam.user_flags(req.creator_id).await?;
@@ -2547,29 +2572,85 @@ mod tests {
     }
 
     #[test]
-    fn pin_matrix_matches_m1_m5() {
+    fn pin_matrix_matches_m1_m9() {
+        let clock = now();
         let runner = RunnerView {
             id: uid(0x60),
             pod_id: uid(0x50),
             status: "online".to_owned(),
+            last_heartbeat_at: Some(clock),
         };
         // M1: no runner.
-        assert_eq!(pinned_runner_for(None, Some(uid(0x50))), None);
+        assert_eq!(pinned_runner_for(None, Some(uid(0x50)), clock), None);
         // M2: revoked.
         let revoked = RunnerView {
             status: RUNNER_STATUS_REVOKED.to_owned(),
             ..runner.clone()
         };
-        assert_eq!(pinned_runner_for(Some(&revoked), Some(uid(0x50))), None);
+        assert_eq!(
+            pinned_runner_for(Some(&revoked), Some(uid(0x50)), clock),
+            None
+        );
         // M3: pod mismatch.
-        assert_eq!(pinned_runner_for(Some(&runner), Some(uid(0x51))), None);
+        assert_eq!(
+            pinned_runner_for(Some(&runner), Some(uid(0x51)), clock),
+            None
+        );
         // M4: eligible.
         assert_eq!(
-            pinned_runner_for(Some(&runner), Some(uid(0x50))),
+            pinned_runner_for(Some(&runner), Some(uid(0x50)), clock),
             Some(uid(0x60))
         );
         // M5: no target pod skips the check.
-        assert_eq!(pinned_runner_for(Some(&runner), None), Some(uid(0x60)));
+        assert_eq!(
+            pinned_runner_for(Some(&runner), None, clock),
+            Some(uid(0x60))
+        );
+        // M6 (`70d684af`): offline.
+        let offline = RunnerView {
+            status: RUNNER_STATUS_OFFLINE.to_owned(),
+            ..runner.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&offline), Some(uid(0x50)), clock),
+            None
+        );
+        // M7: stale heartbeat (silent past the grace).
+        let stale = RunnerView {
+            last_heartbeat_at: Some(clock - chrono::Duration::seconds(3600)),
+            ..runner.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&stale), Some(uid(0x50)), clock),
+            None
+        );
+        // M8: never heartbeated.
+        let never = RunnerView {
+            last_heartbeat_at: None,
+            ..runner.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&never), Some(uid(0x50)), clock),
+            None
+        );
+        // M9: busy but fresh stays eligible (the pinned run waits for it).
+        let busy = RunnerView {
+            status: "busy".to_owned(),
+            ..runner.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&busy), Some(uid(0x50)), clock),
+            Some(uid(0x60))
+        );
+        // Boundary: exactly at the grace is fresh (strict `<`).
+        let edge = RunnerView {
+            last_heartbeat_at: Some(clock - chrono::Duration::seconds(HEARTBEAT_GRACE_SECS)),
+            ..runner.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&edge), Some(uid(0x50)), clock),
+            Some(uid(0x60))
+        );
     }
 
     #[test]
@@ -2912,6 +2993,7 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                last_heartbeat_at: Some(now()),
             },
         );
         let outcome = create_and_dispatch_run(&mut seam, &dispatch_req(Some(parent)))
@@ -2938,6 +3020,7 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                last_heartbeat_at: Some(now()),
             },
         );
         let mut req = dispatch_req(Some(parent));
@@ -3058,6 +3141,7 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                last_heartbeat_at: Some(now()),
             },
         );
         let outcome = create_continuation_run(&mut seam, &continuation_req(parent))
@@ -3122,6 +3206,7 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                last_heartbeat_at: Some(now()),
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
@@ -3148,6 +3233,7 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                last_heartbeat_at: Some(now()),
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
