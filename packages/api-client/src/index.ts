@@ -192,10 +192,15 @@ export {
   IssueListResponse,
   IssueRelationsSummary,
   IssueSubscription,
+  MembershipWriteResult,
   SubscriptionStatus,
+  addIssueToCycle,
+  deleteIssue,
   getIssue,
   getSubscriptionStatus,
   listIssues,
+  removeIssueFromCycle,
+  setIssueModules,
   subscribeIssue,
   unsubscribeIssue,
   updateIssue,
@@ -238,12 +243,40 @@ export {
   listAssistantThreads,
 } from "./contracts/assistant.js";
 export { UnreadNotifications, getUnreadNotifications } from "./contracts/notifications.js";
-export { CycleUpdate, updateCycle } from "./contracts/cycles.js";
+export { CycleList, CycleListItem, CycleUpdate, listCycles, updateCycle } from "./contracts/cycles.js";
 export type { CyclePatch } from "./contracts/cycles.js";
-export { ModuleUpdate, updateModule } from "./contracts/modules.js";
-export type { ModulePatch } from "./contracts/modules.js";
-export { PageUpdate, updatePage } from "./contracts/pages.js";
+export {
+  MODULE_STATUSES,
+  ModuleList,
+  ModuleListItem,
+  ModuleUpdate,
+  listModules,
+  updateModule,
+} from "./contracts/modules.js";
+export type { ModulePatch, ModuleStatus } from "./contracts/modules.js";
+export {
+  PAGE_ACCESS_PRIVATE,
+  PAGE_ACCESS_PUBLIC,
+  PageArchiveResult,
+  PageUpdate,
+  addPageFavorite,
+  archivePage,
+  lockPage,
+  removePageFavorite,
+  restorePage,
+  setPageAccess,
+  unlockPage,
+  updatePage,
+} from "./contracts/pages.js";
 export type { PagePatch } from "./contracts/pages.js";
+export {
+  ESTIMATE_SYSTEM_TIME,
+  Estimate,
+  EstimateList,
+  EstimatePoint,
+  listProjectEstimates,
+  selectActiveEstimate,
+} from "./contracts/estimates.js";
 export {
   AdminWorkspace,
   AdminWorkspaceListResponse,

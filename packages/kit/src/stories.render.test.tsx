@@ -15,6 +15,7 @@ import * as fieldsStories from "./components/fields.stories";
 import * as iconButtonStories from "./components/IconButton.stories";
 import * as menuStories from "./components/Menu.stories";
 import * as dialogStories from "./components/Dialog.stories";
+import * as emptyStateStories from "./components/EmptyState.stories";
 import * as overlaysStories from "./components/overlays.stories";
 import * as primitivesStories from "./components/primitives.stories";
 import * as toastStories from "./components/Toast.stories";
@@ -26,6 +27,7 @@ const modules: Record<string, Record<string, unknown>> = {
   "IconButton.stories": iconButtonStories,
   "Menu.stories": menuStories,
   "Dialog.stories": dialogStories,
+  "EmptyState.stories": emptyStateStories,
   "overlays.stories": overlaysStories,
   "primitives.stories": primitivesStories,
   "Toast.stories": toastStories,

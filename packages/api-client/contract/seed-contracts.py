@@ -302,6 +302,25 @@ def seed():
     )
     note("project-page", f"{project.identifier}/{page.name}", project_page_created)
 
+    from pi_dash.db.models import Estimate, EstimatePoint  # noqa: E402
+
+    estimate, estimate_created = Estimate.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract estimate",
+        defaults={"type": "points", "last_used": True},
+    )
+    note("estimate", estimate.name, estimate_created)
+    for key, value in ((1, "1"), (2, "2"), (3, "3")):
+        _, point_created = EstimatePoint.objects.get_or_create(
+            workspace=workspace,
+            project=project,
+            estimate=estimate,
+            key=key,
+            defaults={"value": value, "description": ""},
+        )
+        note("estimate-point", f"{estimate.name}/{value}", point_created)
+
     # Instance-admin console (NEWFRONT-502): a dedicated admin user plus
     # the InstanceAdmin link the admins/me and admins-list contracts
     # prove, and the configuration key rows the configurations and email

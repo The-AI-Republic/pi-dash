@@ -57,7 +57,12 @@ import { resolveLanding } from "../../core/session/guards.js";
 import { sessionKeys } from "../../core/session/queries.js";
 import { useSessionStore } from "../../core/session/store.js";
 import { markInitialColorScheme, notifyError, notifySuccess } from "../../shared/shell/index.js";
-import { finishProfileStamp } from "./onboarding.js";
+// NOTE (NEWFRONT-294, size gate): finishProfileStamp stays behind a dynamic
+// import so the onboarding flow module never joins the initial bundle — the
+// finish mutation only runs from the onboarding route's gesture.
+async function loadFinishProfileStamp(): Promise<typeof import("./onboarding.js").finishProfileStamp> {
+  return (await import("./onboarding.js")).finishProfileStamp;
+}
 import { authKeys } from "./queries.js";
 import { performSignOut } from "./signOut.js";
 
@@ -297,7 +302,7 @@ export function useFinishOnboarding() {
       const client = getAppClient();
       const workspaces = queryClient.getQueryData<WorkspaceList>(sessionKeys.workspaces);
       try {
-        await updateProfile(client, finishProfileStamp(workspaces));
+        await updateProfile(client, (await loadFinishProfileStamp())(workspaces));
         await markOnboarded(client, { is_onboarded: true });
         const [profile, settings] = await Promise.all([getProfile(client), getMeSettings(client)]);
         queryClient.setQueryData<Profile>(sessionKeys.profile, { ...profile, is_onboarded: true });

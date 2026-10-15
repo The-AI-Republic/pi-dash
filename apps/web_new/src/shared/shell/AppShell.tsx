@@ -13,11 +13,11 @@ import * as React from "react";
 
 import {
   registerCommands,
+  useCommandPalette,
   type PaletteSearchScope,
   type PidashCommand,
   type SearchResultHit,
 } from "../commands/index.js";
-import { CommandPalette } from "./CommandPalette.js";
 import { useSessionExpiredRedirect } from "./expiredRedirect.js";
 import { useGlobalShortcuts } from "./globalShortcuts.js";
 import { useShortcutsDialog } from "./shortcutsDialogStore.js";
@@ -28,6 +28,13 @@ import { getToastManager } from "./toaster.js";
 // dialog content loads on first open (shell spec, SHELL-094).
 const LazyShortcutsDialog = React.lazy(() =>
   import("./ShortcutsDialog.js").then((module) => ({ default: module.ShortcutsDialog }))
+);
+
+// The palette UI splits off the initial bundle (size gate): it mounts on
+// first open and stays mounted after, so later opens and exit animations
+// behave exactly as if it had always been there.
+const LazyPalette = React.lazy(() =>
+  import("./CommandPalette.js").then((module) => ({ default: module.CommandPalette }))
 );
 
 export interface AppShellProps {
@@ -60,11 +67,17 @@ export function AppShell({
   children,
 }: AppShellProps): React.ReactElement {
   useGlobalShortcuts();
+  const paletteOpen = useCommandPalette((state) => state.open);
+  const [paletteMounted, setPaletteMounted] = React.useState(paletteOpen);
   useSessionExpiredRedirect();
   const sidebarCollapsed = useSidebarCollapsed((state) => state.collapsed);
   const shortcutsOpen = useShortcutsDialog((state) => state.open);
 
   React.useEffect(() => registerCommands(commands), [commands]);
+
+  React.useEffect(() => {
+    if (paletteOpen) setPaletteMounted(true);
+  }, [paletteOpen]);
 
   return (
     <div className="flex h-screen flex-col bg-(--bg) text-(--text)">
@@ -81,7 +94,11 @@ export function AppShell({
           </aside>
         ) : null}
       </div>
-      <CommandPalette scope={searchScope} onSelectSearchResult={onSelectSearchResult} />
+      {paletteMounted ? (
+        <React.Suspense fallback={null}>
+          <LazyPalette scope={searchScope} onSelectSearchResult={onSelectSearchResult} />
+        </React.Suspense>
+      ) : null}
       {shortcutsOpen ? (
         <React.Suspense fallback={null}>
           <LazyShortcutsDialog />

@@ -59,6 +59,7 @@ export function PaletteOption({
   hint,
   shortcut,
   sequence,
+  selected,
   onHover,
   onSelect,
 }: {
@@ -67,6 +68,7 @@ export function PaletteOption({
   hint?: string | undefined;
   shortcut?: string | undefined;
   sequence?: string | undefined;
+  selected?: boolean | undefined;
   onHover: () => void;
   onSelect: () => void;
 }): React.ReactElement {
@@ -88,6 +90,11 @@ export function PaletteOption({
         {hint ? <span className="text-caption max-w-40 truncate text-(--text-muted)">{hint}</span> : null}
         {sequence ? <SequenceBadge sequence={sequence} /> : null}
         {shortcut ? <Kbd keys={shortcut.split("+")} /> : null}
+        {selected === true ? (
+          <span aria-hidden="true" className="shrink-0 text-(--accent)">
+            ✓
+          </span>
+        ) : null}
       </button>
     </li>
   );

@@ -19,6 +19,7 @@ export { FAVORITES_SECTION_OPEN_KEY, isFavoritesSectionOpen, setFavoritesSection
 export { NOT_FOUND_ART, NOT_FOUND_ROBOTS, NOT_FOUND_TITLE, NotFoundPage } from "./NotFoundPage.js";
 export { PeekPanel } from "./PeekPanel.js";
 export type { PeekPanelProps } from "./PeekPanel.js";
+export { REPOSITORY_URL, RepoStar, starIconSrc } from "./RepoStar.js";
 export { Sidebar } from "./Sidebar.js";
 export type { SidebarProject, SidebarProps, SidebarWorkspace } from "./Sidebar.js";
 export { TitleBar } from "./TitleBar.js";

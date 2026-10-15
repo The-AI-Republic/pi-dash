@@ -8,6 +8,22 @@
 // (entity pickers, preference lists) register beside their commands and
 // render through the palette's generic page view (shell spec, SHELL-082).
 
+/**
+ * Contextual marker (shell spec, SHELL-090/091). Commands registered by
+ * an entity screen carry the entity family plus the chip label and
+ * subject name. The palette filters marked commands out while the
+ * context is dismissed and renders the chip from the first marked
+ * command.
+ */
+export interface PaletteCommandContext {
+  /** Entity family that registered the command. */
+  kind: "work-item" | "cycle" | "module" | "page";
+  /** Short entity label for the chip ("Work item"). */
+  indicator: string;
+  /** Subject name for the chip (route key or entity name). */
+  subject: string;
+}
+
 export interface PidashCommand {
   /** Stable id, namespaced by owner ("shell.sign-out", "issues.go-to-list"). */
   id: string;
@@ -37,6 +53,8 @@ export interface PidashCommand {
    * owner; sibling palette slices register their pickers on top of this.
    */
   page?: string | undefined;
+  /** Set when an entity screen registered the command for its subject. */
+  context?: PaletteCommandContext | undefined;
   run: () => void | Promise<void>;
 }
 
@@ -131,6 +149,8 @@ export interface PalettePageOption {
   title: string;
   /** Secondary hint, e.g. the entity's project. */
   hint?: string | undefined;
+  /** Marks the current selection (check shown; pickers re-read on refresh). */
+  selected?: boolean | undefined;
   /**
    * Runs on activation. The page stays open afterwards unless the option
    * closes it through the palette store itself, so multi-change pickers

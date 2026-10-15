@@ -23,7 +23,7 @@ import {
   selectWorkspace,
   workspacesQueryOptions,
 } from "../../../core/session/index.js";
-import { DeactivateAccountDialog, runSignOutAction, signOutCommand, useSignOut } from "../../../features/auth/index.js";
+import { runSignOutAction, signOutCommand, useSignOut } from "../../../features/auth/index.js";
 import { projectsQueryOptions } from "../../../features/projects/index.js";
 import type { SearchResultHit } from "../../../shared/commands/index.js";
 import { AppShell, Sidebar, TitleBar } from "../../../shared/shell/index.js";
@@ -40,6 +40,13 @@ const WorkspacePaletteEntries = React.lazy(() =>
 const ProjectCreateEntry = React.lazy(() =>
   import("../../../features/projects/components/ProjectCreateEntry.js").then((module) => ({
     default: module.ProjectCreateEntry,
+  }))
+);
+// The deactivate dialog splits off the initial bundle (size gate): it only
+// renders (and loads) once the user opens it from the account menu.
+const LazyDeactivateAccountDialog = React.lazy(() =>
+  import("../../../features/auth/components/DeactivateAccountDialog.js").then((module) => ({
+    default: module.DeactivateAccountDialog,
   }))
 );
 
@@ -165,7 +172,15 @@ function WorkspaceShell({
         />
       }
     >
-      <DeactivateAccountDialog open={deactivateOpen} onOpenChange={setDeactivateOpen} email={me.email} />
+      {deactivateOpen ? (
+        <React.Suspense fallback={null}>
+          <LazyDeactivateAccountDialog
+            open={deactivateOpen}
+            onOpenChange={setDeactivateOpen}
+            email={me.email}
+          />
+        </React.Suspense>
+      ) : null}
       <React.Suspense fallback={null}>
         <WorkspacePaletteEntries
           workspaceSlug={workspaceSlug}

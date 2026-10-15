@@ -11,12 +11,13 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { RouterContext } from "../../../__root.js";
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
+import { clearCommands, clearPalettePages, findCommand, listCommands } from "../../../../shared/commands/index.js";
 import { Route } from "./$issueKey.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
@@ -211,5 +212,19 @@ describe("browse route", () => {
     expect(screen.getByRole("heading", { name: "Fix login" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Work Items" })).not.toHaveAttribute("aria-current");
     expect(document.querySelectorAll('[aria-current="page"]')).toHaveLength(0);
+  });
+
+  it("registers the work-item contextual group for the resolved issue", async () => {
+    renderBrowse(true);
+    await screen.findByTestId("project-tab-strip");
+    // The stub answers no project details, so only the copy entries show.
+    await waitFor(() => expect(findCommand(`context.work-item.${ISSUE_ID}.copy-id`)).toBeDefined());
+    const titles = listCommands().map((command) => command.title);
+    expect(titles).toContain("Copy ID");
+    expect(titles).toContain("Copy title");
+    expect(titles).toContain("Copy URL");
+    expect(titles).not.toContain("Change state");
+    clearCommands();
+    clearPalettePages();
   });
 });

@@ -98,9 +98,20 @@ import { getProfile, listTimezones, updateMyTimezone, updateProfile } from "./co
 import { createAssistantThread, getLlmConfig, listAssistantThreads } from "./contracts/assistant.js";
 import { getUnreadNotifications } from "./contracts/notifications.js";
 import { uploadUserAvatar } from "./contracts/assets.js";
-import { updateCycle } from "./contracts/cycles.js";
-import { updateModule } from "./contracts/modules.js";
-import { updatePage } from "./contracts/pages.js";
+import { listCycles, updateCycle } from "./contracts/cycles.js";
+import { listModules, updateModule } from "./contracts/modules.js";
+import {
+  addPageFavorite,
+  archivePage,
+  lockPage,
+  removePageFavorite,
+  restorePage,
+  setPageAccess,
+  unlockPage,
+  updatePage,
+} from "./contracts/pages.js";
+import { listProjectEstimates, selectActiveEstimate } from "./contracts/estimates.js";
+import { addIssueToCycle, deleteIssue, removeIssueFromCycle, setIssueModules } from "./contracts/issues.js";
 import {
   checkInstanceWorkspaceSlug,
   createInstanceWorkspace,
@@ -129,6 +140,7 @@ import {
   updateInstanceConfigurations,
 } from "./contracts/instance.js";
 import { fakeResponse, recordingTransport } from "./client.test.js";
+import type { RecordedCall } from "./client.test.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const UUID2 = "223e4567-e89b-12d3-a456-426614174001";
@@ -1323,6 +1335,92 @@ describe("thin entity update contracts", () => {
     expect((await updateCycle(client, "acme", UUID2, UUID, { name: "Cycle" })).project_id).toBe(UUID2);
     expect((await updateModule(client, "acme", UUID2, UUID, { name: "Module" })).name).toBe("Module");
     expect((await updatePage(client, "acme", UUID2, UUID, { name: "Page" })).project_ids).toEqual([UUID2]);
+  });
+});
+
+describe("thin contextual palette contracts", () => {
+  function shellClient(handler: (call: RecordedCall) => { body: string }) {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse(handler(call));
+    });
+    return { client: createClient({ baseUrl: "https://api.test", transport }), transport };
+  }
+
+  it("deletes an issue and posts the membership writes", async () => {
+    const { client, transport } = shellClient((call) => ({
+      body: JSON.stringify(call.init.method === "POST" ? { message: "success" } : {}),
+    }));
+    await deleteIssue(client, "acme", UUID2, UUID);
+    const added = await addIssueToCycle(client, "acme", UUID2, UUID, UUID2);
+    expect(added).toEqual({ message: "success" });
+    await removeIssueFromCycle(client, "acme", UUID2, UUID, UUID2);
+    const modules = await setIssueModules(client, "acme", UUID2, UUID2, { modules: [UUID], removed_modules: [] });
+    expect(modules).toEqual({ message: "success" });
+    const urls = transport.calls.map((call) => `${call.init.method} ${call.url}`);
+    expect(urls.some((line) => line.startsWith("DELETE") && line.endsWith(`/issues/${UUID}/`))).toBe(true);
+    expect(urls.some((line) => line.startsWith("POST") && line.includes("/cycle-issues/"))).toBe(true);
+    expect(urls.some((line) => line.startsWith("DELETE") && line.includes("/cycle-issues/"))).toBe(true);
+    expect(urls.some((line) => line.startsWith("POST") && line.endsWith(`/issues/${UUID2}/modules/`))).toBe(true);
+  });
+
+  it("lists cycles, modules and estimates for the pickers", async () => {
+    const cycles = [{ id: UUID, project_id: UUID2, name: "Sprint 1", is_favorite: false, total_issues: 3 }];
+    const modules = [
+      { id: UUID, project_id: UUID2, name: "Auth", status: "backlog", is_favorite: true, total_issues: 1 },
+    ];
+    const estimates = [
+      {
+        id: UUID,
+        name: "Fibonacci",
+        type: "points",
+        last_used: true,
+        points: [
+          { id: UUID2, key: 1, value: "1" },
+          { id: UUID, key: 2, value: "2" },
+        ],
+      },
+    ];
+    const { client } = shellClient((call) => ({
+      body: JSON.stringify(
+        call.url.includes("/cycles/") ? cycles : call.url.includes("/modules/") ? modules : estimates
+      ),
+    }));
+    const listedCycles = await listCycles(client, "acme", UUID2);
+    expect(listedCycles).toEqual([{ id: UUID, project_id: UUID2, name: "Sprint 1", is_favorite: false }]);
+    const listedModules = await listModules(client, "acme", UUID2);
+    expect(listedModules).toEqual([
+      { id: UUID, project_id: UUID2, name: "Auth", status: "backlog", is_favorite: true },
+    ]);
+    const listedEstimates = await listProjectEstimates(client, "acme", UUID2);
+    expect(listedEstimates).toHaveLength(1);
+    expect(selectActiveEstimate(listedEstimates)?.points).toHaveLength(2);
+    expect(selectActiveEstimate([])).toBeUndefined();
+    expect(selectActiveEstimate([{ ...listedEstimates[0]!, last_used: false }])).toBeUndefined();
+  });
+
+  it("drives the page lock, access, archive and favorite endpoints", async () => {
+    const { client, transport } = shellClient((call) => ({
+      body: JSON.stringify(call.url.endsWith("/archive/") ? { archived_at: "2026-10-15T00:00:00Z" } : {}),
+    }));
+    await lockPage(client, "acme", UUID2, UUID);
+    await unlockPage(client, "acme", UUID2, UUID);
+    await setPageAccess(client, "acme", UUID2, UUID, 1);
+    const archived = await archivePage(client, "acme", UUID2, UUID);
+    expect(archived).toEqual({ archived_at: "2026-10-15T00:00:00Z" });
+    await restorePage(client, "acme", UUID2, UUID);
+    await addPageFavorite(client, "acme", UUID2, UUID);
+    await removePageFavorite(client, "acme", UUID2, UUID);
+    const urls = transport.calls.map((call) => `${call.init.method} ${call.url}`);
+    expect(urls.some((line) => line.startsWith("POST") && line.endsWith(`/pages/${UUID}/lock/`))).toBe(true);
+    expect(urls.some((line) => line.startsWith("DELETE") && line.endsWith(`/pages/${UUID}/lock/`))).toBe(true);
+    expect(urls.some((line) => line.startsWith("POST") && line.endsWith(`/pages/${UUID}/access/`))).toBe(true);
+    expect(urls.some((line) => line.startsWith("POST") && line.endsWith(`/pages/${UUID}/archive/`))).toBe(true);
+    expect(urls.some((line) => line.startsWith("DELETE") && line.endsWith(`/pages/${UUID}/archive/`))).toBe(true);
+    expect(urls.some((line) => line.startsWith("POST") && line.includes(`/favorite-pages/${UUID}/`))).toBe(true);
+    expect(urls.some((line) => line.startsWith("DELETE") && line.includes(`/favorite-pages/${UUID}/`))).toBe(true);
   });
 });
 
