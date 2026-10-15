@@ -49,7 +49,6 @@ export {
 export { PAGE_URL_COPIED_TITLE, PAGE_URL_COPY_FAILED_TITLE, copyCurrentPageUrl } from "./clipboard.js";
 export {
   FIRST_DAY_CHOICES,
-  LANGUAGE_CHOICES,
   PREFERENCES_FAILED_TITLE,
   PREFERENCES_UPDATED_TITLE,
   THEME_CHOICES,
@@ -58,7 +57,6 @@ export {
   preferenceKeys,
   timezonesQueryOptions,
   useUpdateFirstDay,
-  useUpdateLanguage,
   useUpdateTimezone,
 } from "./preferences.js";
 export type { PreferenceChoice, TimezoneMutationHandlers } from "./preferences.js";

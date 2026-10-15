@@ -3,13 +3,14 @@
 // See the LICENSE file for details.
 // Palette preference entries (shell spec, SHELL-088/095-097). Four
 // commands, each opening a sub-page: theme, timezone, first day of
-// week and language. Theme picks go through the appearance engine
-// (immediate re-skin, no reload); the other three persist through the
-// shared preference mutations.
+// week and language. Theme and language picks go through their
+// engines (immediate re-skin and re-render, no reload); the other two
+// persist through the shared preference mutations.
 
 import { useQuery } from "@tanstack/react-query";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { useLocale } from "../../../core/i18n/index.js";
 import { useTheme } from "../../../core/theme/index.js";
 import {
   filterPageOptions,
@@ -20,11 +21,9 @@ import {
 } from "../../commands/index.js";
 import {
   FIRST_DAY_CHOICES,
-  LANGUAGE_CHOICES,
   THEME_CHOICES,
   timezonesQueryOptions,
   useUpdateFirstDay,
-  useUpdateLanguage,
   useUpdateTimezone,
 } from "../preferences.js";
 
@@ -161,16 +160,16 @@ export function languagePickerPage(): PalettePage {
     placeholder: "Choose a language",
     usePageState: (query: string): PalettePageState => {
       const closePalette = useCommandPalette((state) => state.closePalette);
-      const update = useUpdateLanguage();
+      const { setLanguage, supported } = useLocale();
       return {
         status: "ready",
         options: filterPageOptions(
-          LANGUAGE_CHOICES.map((choice) => ({
-            id: choice.value,
+          supported.map((choice) => ({
+            id: choice.tag,
             title: choice.label,
             run: () => {
               closePalette();
-              update.mutate({ language: choice.value });
+              setLanguage(choice.tag);
             },
           })),
           query

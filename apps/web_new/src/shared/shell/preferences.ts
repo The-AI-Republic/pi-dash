@@ -4,10 +4,11 @@
 // Preference reads and writes (shell spec, SHELL-088/095-097). The
 // palette's four preference entries and their sub-pages run through
 // here; the appearance surfaces reuse the same mutations and option
-// lists instead of forking them. Theme picks go through the engine
-// (core/theme setTheme: immediate re-skin, dual persist, no reload);
-// the other three persist with confirmation toasts and error toasts
-// on failure.
+// lists instead of forking them. Theme and language picks go through
+// their engines (core/theme setTheme, core/i18n setLanguage:
+// immediate re-skin and re-render, dual persist, no reload); the
+// other two persist with confirmation toasts and error toasts on
+// failure.
 
 import { useMutation, useQueryClient, queryOptions } from "@tanstack/react-query";
 import { listTimezones, updateMyTimezone, updateProfile, type ApiClient, type Me } from "@pidash/api-client";
@@ -45,13 +46,6 @@ export const FIRST_DAY_CHOICES: Array<PreferenceChoice<number>> = [
   { value: 6, label: "Saturday" },
 ];
 
-/**
- * Language options the palette offers (SHELL-088). The open-source build
- * ships English only; fuller builds expand this list with the language
- * slice (NEWFRONT-294, SHELL-096).
- */
-export const LANGUAGE_CHOICES: Array<PreferenceChoice<string>> = [{ value: "en", label: "English" }];
-
 export const PREFERENCES_UPDATED_TITLE = "Preferences updated";
 export const PREFERENCES_FAILED_TITLE = "Couldn't update preferences";
 /** Timezone confirmation, pinned by the SHELL-097 oracle scenario. */
@@ -83,32 +77,6 @@ export function useUpdateFirstDay() {
       const client = getAppClient();
       try {
         const profile = await updateProfile(client, { start_of_the_week: input.startOfWeek });
-        notifySuccess(PREFERENCES_UPDATED_TITLE);
-        return profile;
-      } catch (error) {
-        notifyError(PREFERENCES_FAILED_TITLE, failureMessage(error));
-        throw error;
-      }
-    },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: sessionKeys.profile });
-    },
-  });
-}
-
-/**
- * Persist the interface language to the profile (SHELL-088). The document
- * language flips at once; the full shell re-render belongs to the
- * language slice (NEWFRONT-294, SHELL-096).
- */
-export function useUpdateLanguage() {
-  const queryClient = useQueryClient();
-  return useMutation<unknown, Error, { language: string }>({
-    mutationFn: async (input) => {
-      const client = getAppClient();
-      try {
-        const profile = await updateProfile(client, { language: input.language });
-        document.documentElement.lang = input.language;
         notifySuccess(PREFERENCES_UPDATED_TITLE);
         return profile;
       } catch (error) {

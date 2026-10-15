@@ -14,6 +14,13 @@ vi.mock("../toaster.js", async (importOriginal) => {
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import {
+  LANGUAGE_STORAGE_KEY,
+  LanguageProvider,
+  registerLocale,
+  resetLocalesForTests,
+  useLocale,
+} from "../../../core/i18n/index.js";
 import { THEME_STORAGE_KEY, ThemeProvider } from "../../../core/theme/index.js";
 import { useCommandPalette, type PalettePage } from "../../commands/index.js";
 import { notifyError, notifySuccess } from "../toaster.js";
@@ -131,10 +138,17 @@ function PageProbe({ page, query }: { page: PalettePage; query: string }) {
   );
 }
 
+function LocaleTagProbe(): React.ReactElement {
+  const locale = useLocale();
+  return <p data-testid="locale-tag">{locale.tag}</p>;
+}
+
 afterEach(() => {
   resetAppClient();
+  resetLocalesForTests();
   useCommandPalette.getState().closePalette();
   document.documentElement.removeAttribute("data-theme");
+  document.documentElement.removeAttribute("lang");
   window.localStorage.clear();
   vi.mocked(notifySuccess).mockClear();
   vi.mocked(notifyError).mockClear();
@@ -148,7 +162,10 @@ function renderPage(page: PalettePage, query: string) {
   render(
     <QueryClientProvider client={testClient()}>
       <ThemeProvider notifyError={vi.mocked(notifyError)}>
-        <PageProbe page={page} query={query} />
+        <LanguageProvider notifyError={vi.mocked(notifyError)}>
+          <LocaleTagProbe />
+          <PageProbe page={page} query={query} />
+        </LanguageProvider>
       </ThemeProvider>
     </QueryClientProvider>
   );
@@ -257,14 +274,48 @@ describe("first-day picker page", () => {
 });
 
 describe("language picker page", () => {
-  it("persists the language on pick", async () => {
+  it("lists the engine offer and persists the pick through the engine", async () => {
     const bodies = stubClient();
     useCommandPalette.getState().openPalette();
     renderPage(languagePickerPage(), "");
     expect(languagePickerPage().placeholder).toBe("Choose a language");
+    // The OSS build offers English only (SHELL-096).
+    expect(screen.getByRole("button", { name: "English" })).not.toBeNull();
+    expect(screen.getAllByRole("button")).toHaveLength(1);
+    await waitFor(() => expect(screen.getByTestId("locale-tag")).toHaveTextContent("en"));
     fireEvent.click(screen.getByRole("button", { name: "English" }));
     expect(useCommandPalette.getState().open).toBe(false);
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Preferences updated"));
+    // Engine effects land at once: document stamp, local persist, tag.
+    expect(document.documentElement.getAttribute("lang")).toBe("en");
+    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("en");
+    expect(screen.getByTestId("locale-tag")).toHaveTextContent("en");
+    await waitFor(() => expect(bodies).toHaveLength(1));
     expect(JSON.parse(bodies[0]!.split(" ").slice(2).join(" "))).toEqual({ language: "en" });
+    // The engine toasts failures only; a successful switch stays silent.
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("re-renders subscribers when a fuller build offers another locale", async () => {
+    registerLocale({ tag: "fr", label: "French" });
+    const bodies = stubClient();
+    useCommandPalette.getState().openPalette();
+    renderPage(languagePickerPage(), "");
+    await waitFor(() => expect(screen.getByTestId("locale-tag")).toHaveTextContent("en"));
+    fireEvent.click(screen.getByRole("button", { name: "French" }));
+    expect(useCommandPalette.getState().open).toBe(false);
+    expect(document.documentElement.getAttribute("lang")).toBe("fr");
+    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("fr");
+    expect(screen.getByTestId("locale-tag")).toHaveTextContent("fr");
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(JSON.parse(bodies[0]!.split(" ").slice(2).join(" "))).toEqual({ language: "fr" });
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("filters languages", () => {
+    registerLocale({ tag: "fr", label: "French" });
+    stubClient();
+    renderPage(languagePickerPage(), "fre");
+    expect(screen.getByRole("button", { name: "French" })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "English" })).toBeNull();
   });
 });

@@ -17,7 +17,6 @@ import { sessionKeys } from "../../core/session/queries.js";
 import { notifyError, notifySuccess } from "./toaster.js";
 import {
   FIRST_DAY_CHOICES,
-  LANGUAGE_CHOICES,
   PREFERENCES_FAILED_TITLE,
   PREFERENCES_UPDATED_TITLE,
   THEME_CHOICES,
@@ -25,7 +24,6 @@ import {
   TIMEZONE_UPDATED_TITLE,
   timezonesQueryOptions,
   useUpdateFirstDay,
-  useUpdateLanguage,
   useUpdateTimezone,
 } from "./preferences.js";
 
@@ -133,13 +131,12 @@ function testClient() {
 afterEach(() => {
   resetAppClient();
   document.documentElement.removeAttribute("data-theme");
-  document.documentElement.lang = "";
   vi.mocked(notifySuccess).mockClear();
   vi.mocked(notifyError).mockClear();
 });
 
 describe("preference option lists", () => {
-  it("offers the engine-supported themes, seven days and OSS English", () => {
+  it("offers the engine-supported themes and seven days", () => {
     expect(THEME_CHOICES).toEqual([
       { value: "system", label: "System preference" },
       { value: "light", label: "Light" },
@@ -159,7 +156,6 @@ describe("preference option lists", () => {
     ]);
     // Sunday is zero on the server (SHELL-088).
     expect(FIRST_DAY_CHOICES.map((choice) => choice.value)).toEqual([0, 1, 2, 3, 4, 5, 6]);
-    expect(LANGUAGE_CHOICES).toEqual([{ value: "en", label: "English" }]);
   });
 });
 
@@ -197,49 +193,6 @@ describe("useUpdateFirstDay", () => {
     render(
       <QueryClientProvider client={testClient()}>
         <DayProbe />
-      </QueryClientProvider>
-    );
-    fireEvent.click(screen.getByRole("button"));
-    await waitFor(() => expect(screen.getByRole("button")).toHaveTextContent("outcome:failed"));
-    expect(notifyError).toHaveBeenCalledWith(PREFERENCES_FAILED_TITLE, expect.any(String));
-  });
-});
-
-describe("useUpdateLanguage", () => {
-  function LanguageProbe({ failing }: { failing: boolean }) {
-    const update = useUpdateLanguage();
-    const [outcome, setOutcome] = React.useState("idle");
-    return (
-      <button
-        type="button"
-        onClick={() => {
-          update.mutate({ language: "en" }, { onError: () => setOutcome("failed"), onSuccess: () => setOutcome("ok") });
-        }}
-      >
-        outcome:{outcome}:{failing ? "x" : "y"}
-      </button>
-    );
-  }
-
-  it("persists the language, flips the document language and toasts", async () => {
-    const bodies = stubClient();
-    render(
-      <QueryClientProvider client={testClient()}>
-        <LanguageProbe failing={false} />
-      </QueryClientProvider>
-    );
-    fireEvent.click(screen.getByRole("button"));
-    await waitFor(() => expect(screen.getByRole("button")).toHaveTextContent("outcome:ok"));
-    expect(JSON.parse(bodies[0]!.split(" ").slice(2).join(" "))).toEqual({ language: "en" });
-    expect(document.documentElement.lang).toBe("en");
-    expect(notifySuccess).toHaveBeenCalledWith(PREFERENCES_UPDATED_TITLE);
-  });
-
-  it("toasts language failures", async () => {
-    stubClient({ profileStatus: 500 });
-    render(
-      <QueryClientProvider client={testClient()}>
-        <LanguageProbe failing />
       </QueryClientProvider>
     );
     fireEvent.click(screen.getByRole("button"));
