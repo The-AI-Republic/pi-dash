@@ -1030,6 +1030,138 @@ mod tests {
         assert_eq!(user_id_for_run(false, Some(USER_ID)), None);
     }
 
+    /// Compose `kind` with Django's own populated sample context
+    /// (`test_composer.py::_ctx(kind)` = `sample_contexts(kind)[0]`).
+    fn composed_text(kind: &str) -> String {
+        let ctx = crate::prompting::validation::sample_contexts(kind)
+            .into_iter()
+            .next()
+            .expect("populated sample first");
+        compose(kind, None, None, &OverrideIndex::new(), &ctx, None, None)
+            .unwrap_or_else(|err| panic!("{kind} composes: {}", err.message()))
+            .text
+    }
+
+    // Ticking semantics: outcomes are informational; only --stop-ticking
+    // stops the clock (PDASHOSS01-250, 07bb896a). Ports of the new and
+    // changed cases in `test_composer.py`.
+
+    #[test]
+    fn ending_run_outcomes_never_stop_the_clock() {
+        for kind in [
+            recipes::KIND_CODING_TASK,
+            recipes::KIND_REVIEW,
+            recipes::KIND_TEST,
+        ] {
+            let body = composed_text(kind);
+            assert!(
+                body.contains("No outcome stops the issue's ticking clock"),
+                "{kind} says no outcome stops the clock"
+            );
+            assert!(
+                body.contains("**this run's turn is done**"),
+                "{kind} defines done as this run's turn"
+            );
+            assert!(body.contains("--stop-ticking"), "{kind} names the flag");
+            assert!(
+                body.contains("### Stopping the clock — `--stop-ticking`"),
+                "{kind} carries the stop block"
+            );
+            assert!(
+                body.contains("Never send it while work remains that a later run could pick up."),
+                "{kind} carries the never-send rule"
+            );
+            // The legacy inference lines are gone.
+            for stale in [
+                "the clock stops until a human acts",
+                "The clock for this stage stops",
+                "it is approved / verified and stays where it is",
+                "Without it the clock guesses",
+            ] {
+                assert!(
+                    !body.contains(stale),
+                    "{kind} dropped the legacy line: {stale}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn waiting_on_external_applies_in_every_stage() {
+        for kind in [
+            recipes::KIND_CODING_TASK,
+            recipes::KIND_REVIEW,
+            recipes::KIND_TEST,
+        ] {
+            let body = composed_text(kind);
+            assert!(
+                body.contains("applies in **every** stage"),
+                "{kind} documents every-stage waits"
+            );
+            assert!(
+                !body.contains("In Progress is waiting on CI or a merge"),
+                "{kind} dropped the In-Progress-only line"
+            );
+        }
+    }
+
+    #[test]
+    fn review_kind_splits_external_wait_from_human_wait() {
+        let body = composed_text(recipes::KIND_REVIEW);
+        assert!(body.contains("**waiting on CI or the PR**"));
+        assert!(body.contains("**keep the clock ticking**"));
+        assert!(body.contains("`waiting_on_human --stop-ticking`"));
+        assert!(body.contains("`done --stop-ticking`"));
+        assert!(!body.contains("waiting on a human reviewer / nothing changed"));
+    }
+
+    #[test]
+    fn test_kind_pass_stops_clock_explicitly_or_moves_on() {
+        let body = composed_text(recipes::KIND_TEST);
+        assert!(body.contains("`done --stop-ticking`"));
+        assert!(body.contains("explicitly lets agents merge and close"));
+        assert!(!body.contains("--state \"Done\""));
+        assert!(body.contains("**nothing changed, waiting on CI or a dependency**"));
+        assert!(body.contains("**nothing changed, waiting on a human**"));
+        assert!(body.contains("`waiting_on_external`"));
+    }
+
+    #[test]
+    fn blocking_flow_stops_clock_for_humans_not_issues() {
+        for kind in [
+            recipes::KIND_CODING_TASK,
+            recipes::KIND_REVIEW,
+            recipes::KIND_TEST,
+        ] {
+            let body = composed_text(kind);
+            assert!(
+                body.contains("--outcome blocked --stop-ticking"),
+                "{kind} stops the clock for human blocks"
+            );
+            assert!(
+                body.contains("When what blocks you is **another issue**, do not stop the clock"),
+                "{kind} keeps ticking for issue blocks"
+            );
+        }
+    }
+
+    #[test]
+    fn session_framing_review_tick_routes_nothing_changed_by_cause() {
+        let body = composed_text(recipes::KIND_REVIEW);
+        assert!(body.contains("automatically by the issue's ticker"));
+        assert!(!body.contains("emit `noop`"));
+        assert!(body.contains("report the outcome that says *why* nothing changed"));
+        assert!(body.contains("keep the clock ticking so a later run re-checks"));
+    }
+
+    #[test]
+    fn coding_task_split_gate_parks_parent_in_todo() {
+        let body = composed_text(recipes::KIND_CODING_TASK);
+        assert!(body.contains("do **not** split a child further (depth 1)"));
+        assert!(body.contains("Move the parent to **Todo**"));
+        assert!(body.contains("the clock would keep ticking and burn the parent's budget"));
+    }
+
     #[test]
     fn attribution_without_context_returns_detail() {
         // No context disables the probe (`composer.py:253-254`); with no

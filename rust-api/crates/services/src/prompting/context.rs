@@ -2366,6 +2366,94 @@ mod tests {
         }
     }
 
+    // Cloud scheduler identity (PDASHOSS01-218, 1d7be107). Ports of the
+    // new cases in `test_scheduler_composer.py`: the Cloud recipe renders
+    // the same scheduler/project identity block the local
+    // scheduler-intro renders.
+
+    #[test]
+    fn cloud_scheduler_turn_renders_project_and_scheduler_identity() {
+        let mut input = scheduler_input();
+        input.project_description = Some("Internal admin tool for billing operators.".to_owned());
+        let ctx = build_scheduler_context(&input);
+        let index = composer::OverrideIndex::new();
+        let out =
+            build_scheduler_turn(&ctx, &index, Some("ws-1"), Some("cloud_agent"), 1).expect("turn");
+        assert!(!out.text.contains("{{") && !out.text.contains("{%"));
+        assert!(out.text.contains("FX"));
+        assert!(out.text.contains("Project"));
+        assert!(out
+            .text
+            .contains("Internal admin tool for billing operators."));
+        assert!(out.text.contains("Security Audit"));
+        assert!(out.text.contains("`security-audit`"));
+        assert!(out.text.contains("- Purpose: Scans."));
+        assert!(out.text.contains("run-1"));
+        match out.manifest.expect("manifest") {
+            PromptManifest::Versioned {
+                executor_kind,
+                sections,
+                ..
+            } => {
+                assert_eq!(executor_kind, "cloud_agent");
+                assert!(
+                    sections
+                        .iter()
+                        .any(|s| s["section_key"] == "cloud-project-context"),
+                    "manifest carries the new locked section"
+                );
+            }
+            PromptManifest::BareList(_) => panic!("cloud stamps a versioned dict"),
+        }
+    }
+
+    #[test]
+    fn cloud_project_context_renders_exact_block() {
+        // Dual-engine parity: this is the byte-exact Jinja2 output for the
+        // same context (probe /tmp/fx1058_dual.py against the main
+        // worktree; both engines strip the single trailing newline).
+        let section =
+            crate::prompting::registry::get_section("cloud-project-context").expect("registered");
+        let ctx = serde_json::json!({
+            "project": {
+                "identifier": "FX",
+                "name": "Project",
+                "description": "Internal admin tool for billing operators.",
+            },
+            "scheduler": {
+                "slug": "security-audit",
+                "name": "Security Audit",
+                "description": "Scans.",
+            },
+            "run": {"id": "run-1"},
+        });
+        let out = crate::prompting::renderer::render(&section.default_body, &ctx).expect("renders");
+        assert_eq!(
+            out,
+            "## Scheduled-run context\n\
+             \n\
+             - Scheduler: Security Audit (`security-audit`)\n\
+             - Purpose: Scans.\n\
+             - Project: Project (FX)\n\
+             - Project description: Internal admin tool for billing operators.\n\
+             - Run id: run-1"
+        );
+    }
+
+    #[test]
+    fn cloud_scheduler_turn_omits_empty_project_description() {
+        for description in [None, Some(String::new())] {
+            let mut input = scheduler_input();
+            input.project_description = description;
+            let ctx = build_scheduler_context(&input);
+            let index = composer::OverrideIndex::new();
+            let out = build_scheduler_turn(&ctx, &index, Some("ws-1"), Some("cloud_agent"), 1)
+                .expect("turn");
+            assert!(!out.text.contains("Project description:"));
+            assert!(out.text.contains("Project: Project (FX)"));
+        }
+    }
+
     #[test]
     fn manifest_shapes_serialize() {
         let bare = PromptManifest::BareList(vec![json!({"a": 1})]).to_json();
