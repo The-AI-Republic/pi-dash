@@ -9,7 +9,13 @@
 // under the same root.
 
 import { queryOptions } from "@tanstack/react-query";
-import { getAdminSession, getCsrfToken, getInstanceBootstrap, type ApiClient } from "@pidash/api-client";
+import {
+  getAdminSession,
+  getCsrfToken,
+  getInstanceBootstrap,
+  probeCloudAuthSession,
+  type ApiClient,
+} from "@pidash/api-client";
 
 export const adminKeys = {
   root: ["admin"],
@@ -19,6 +25,8 @@ export const adminKeys = {
   csrf: ["admin", "csrf"],
   /** The admin session check the guards branch on. */
   session: ["admin", "session"],
+  /** The cloud entry's one-shot auth probe (cloud only). */
+  cloudProbe: ["admin", "cloud", "probe"],
 } as const;
 
 /**
@@ -47,6 +55,25 @@ export function adminSessionQueryOptions(client: ApiClient) {
   return queryOptions({
     queryKey: adminKeys.session,
     queryFn: () => getAdminSession(client),
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}
+
+/**
+ * The cloud entry's one-shot auth probe (ADM-079): classifies a genuine
+ * admin-check 403 into authenticated, anonymous, or inconclusive. The
+ * hook enables it only on that verdict, so it fires exactly there —
+ * never on success and never on a transient check failure. One shot
+ * like the check: no retry, no focus or reconnect refetch, never
+ * stale. Retry resets it alongside the check so a fresh 403 re-probes.
+ */
+export function cloudAuthProbeQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: adminKeys.cloudProbe,
+    queryFn: () => probeCloudAuthSession(client),
     staleTime: Number.POSITIVE_INFINITY,
     retry: false,
     refetchOnWindowFocus: false,

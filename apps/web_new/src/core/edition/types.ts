@@ -47,6 +47,16 @@ export interface SlotComponents {
    * check instead of passing silently.
    */
   desktopSignInCard?: ComponentType;
+  /**
+   * Cloud god-mode entry (ADM-074-079, NEWFRONT-519; Decisions D19).
+   * Editions whose server authenticates instance admins over OIDC fill
+   * this with the authorization resolver (the admin feature's
+   * CloudAdminEntry: spinner, OIDC bounce, terminal denied, or retryable
+   * error — never a password or setup form). The OSS edition leaves it
+   * absent and the god-mode entry renders the bootstrap gate instead.
+   * The name is stable across editions; a rename is a breaking change.
+   */
+  godModeCloudEntry?: ComponentType;
 }
 
 export interface Edition {

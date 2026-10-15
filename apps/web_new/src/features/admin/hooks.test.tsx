@@ -3,13 +3,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Transport } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
-import { useAdminCsrfToken, useAdminSession, useInstanceBootstrap } from "./hooks.js";
+import type { CloudEntrySessionState } from "./cloudEntry.js";
+import {
+  useAdminCsrfToken,
+  useAdminSession,
+  useCloudAuthProbe,
+  useCloudEntryRetry,
+  useCloudSignInUrl,
+  useInstanceBootstrap,
+} from "./hooks.js";
+import { adminKeys } from "./queries.js";
 
 function stubTransport(routes: Record<string, { status: number; body: unknown }>): Transport {
   return (url) => {
@@ -164,5 +173,92 @@ describe("useAdminSession", () => {
     createAppClient("https://api.test", stubTransport({}));
     renderProbe(SessionProbe);
     await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
+  });
+});
+
+function ProbeStatusProbe({ session }: { session: CloudEntrySessionState }): React.ReactElement {
+  const query = useCloudAuthProbe(session);
+  return <div data-testid={`probe-${session}`}>{query.fetchStatus}</div>;
+}
+
+function ProbeGatingProbe(): React.ReactElement {
+  const states: CloudEntrySessionState[] = ["pending", "admin", "anonymous", "forbidden", "error"];
+  return (
+    <>
+      {states.map((session) => (
+        <ProbeStatusProbe key={session} session={session} />
+      ))}
+    </>
+  );
+}
+
+describe("useCloudAuthProbe", () => {
+  const probeUser = {
+    id: "user-1",
+    email: "user@example.com",
+    display_name: "User",
+    first_name: "User",
+    last_name: "Person",
+    avatar: "https://cdn.test/avatar.png",
+  };
+
+  it("fires exactly on a forbidden verdict", async () => {
+    const seen: string[] = [];
+    createAppClient("https://api.test", ((url: string) => {
+      seen.push(new URL(url, "https://api.test").pathname);
+      return Promise.resolve({
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify(probeUser)),
+      });
+    }) as Transport);
+    renderProbe(ProbeGatingProbe);
+    await waitFor(() => expect(screen.getByTestId("probe-forbidden")).toHaveTextContent("idle"));
+    expect(seen).toEqual(["/api/auth/me/"]);
+    for (const session of ["pending", "admin", "anonymous", "error"]) {
+      expect(screen.getByTestId(`probe-${session}`)).toHaveTextContent("idle");
+    }
+  });
+});
+
+function SignInUrlProbe(): React.ReactElement {
+  return <div data-testid="probe">{useCloudSignInUrl("/god-mode/loop/3/?tab=targets")}</div>;
+}
+
+describe("useCloudSignInUrl", () => {
+  it("builds the sign-in entry against the app base with the encoded return", () => {
+    createAppClient("https://api.test/", stubTransport({}));
+    render(<SignInUrlProbe />);
+    expect(screen.getByTestId("probe")).toHaveTextContent(
+      "https://api.test/api/auth/sign-in/?return_to=%2Fgod-mode%2Floop%2F3%2F%3Ftab%3Dtargets"
+    );
+  });
+});
+
+function RetryProbe(): React.ReactElement {
+  const retry = useCloudEntryRetry();
+  return (
+    <button data-testid="probe" type="button" onClick={retry}>
+      retry
+    </button>
+  );
+}
+
+describe("useCloudEntryRetry", () => {
+  it("resets the check and the probe verdicts to pending", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(adminKeys.session, { kind: "anonymous" });
+    queryClient.setQueryData(adminKeys.cloudProbe, { kind: "inconclusive" });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RetryProbe />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByTestId("probe"));
+    await waitFor(() => {
+      expect(queryClient.getQueryState(adminKeys.session)?.data).toBeUndefined();
+      expect(queryClient.getQueryState(adminKeys.cloudProbe)?.data).toBeUndefined();
+    });
   });
 });

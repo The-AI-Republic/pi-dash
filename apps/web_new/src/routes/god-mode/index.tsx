@@ -1,13 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// God-mode entry route (ADM-001, from parity/specs/admin.md §1.1): the
-// OSS bootstrap gate. Redirect prefill and error params pass through
-// verbatim; the gate resolves the branch and the forms read them.
+// God-mode entry route (ADM-001, from parity/specs/admin.md §1.1; the
+// cloud edition swaps the screen per §10.1): the OSS bootstrap gate by
+// default, or the edition's cloud entry resolver when one is slotted.
+// Redirect prefill and error params pass through verbatim; the gate
+// resolves the branch and the forms read them.
 
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
+import { edition } from "../../core/edition/index.js";
 import { asString } from "../../core/session/index.js";
 import { AdminEntryGate, AdminHomeGuard, type AdminEntrySearch } from "../../features/admin/index.js";
 
@@ -40,11 +43,12 @@ export const Route = createFileRoute("/god-mode/")({
 
 function GodModeEntryComponent(): React.ReactElement {
   const search = Route.useSearch();
-  // The home guard (ADM-009) replace-navigates a signed-in admin to
-  // general settings and shows the loader while the check resolves.
+  // The cloud edition fills the slot with its OIDC resolver (ADM-074);
+  // OSS leaves it absent and renders the bootstrap gate. Either way the
+  // home guard (ADM-009) replace-navigates a signed-in admin to general
+  // settings and shows the loader while the check resolves.
+  const CloudEntry = edition.slots?.godModeCloudEntry;
   return (
-    <AdminHomeGuard>
-      <AdminEntryGate search={search} />
-    </AdminHomeGuard>
+    <AdminHomeGuard>{CloudEntry === undefined ? <AdminEntryGate search={search} /> : <CloudEntry />}</AdminHomeGuard>
   );
 }

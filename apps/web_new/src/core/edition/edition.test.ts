@@ -28,4 +28,8 @@ describe("edition", () => {
     expect(edition.flags).toEqual({});
     expect(edition.slots ?? {}).toEqual({});
   });
+
+  it("leaves the cloud god-mode entry absent (ADM-074: OSS renders the bootstrap gate)", () => {
+    expect(edition.slots?.godModeCloudEntry).toBeUndefined();
+  });
 });

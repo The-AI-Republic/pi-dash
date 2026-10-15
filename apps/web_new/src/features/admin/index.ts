@@ -53,3 +53,4 @@ export {
 export { AdminSetupForm, resolveSetupPrefill, SETUP_POST_PATH, SETUP_TITLE } from "./components/AdminSetupForm.js";
 export type { SetupPrefill } from "./components/AdminSetupForm.js";
 export { AdminSignInForm, SIGN_IN_POST_PATH, SIGN_IN_TITLE } from "./components/AdminSignInForm.js";
+export { CloudAdminEntry } from "./components/CloudAdminEntry.js";
