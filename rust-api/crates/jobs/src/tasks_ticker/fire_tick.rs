@@ -93,7 +93,9 @@ pub const TRIGGER_RUN_AI: &str = "run_ai";
 /// Project tick columns read with the claim (`agent_ticker.py:101`,
 /// `select_related("issue__project")`). Every field is `Option` because
 /// the Python reads go through `getattr` defaults when the project row
-/// lacks the field.
+/// lacks the field. The cadence columns are INT4 (`models.IntegerField`),
+/// so the intervals decode as `Option<i32>`; the seam widens to `i64`
+/// at the boundary ([`FireTickSeam::tick_interval_seconds`]).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ProjectTickCols {
     /// `agent_default_max_ticks` (`None` → [`pool_size_or_default`]).
@@ -101,11 +103,11 @@ pub struct ProjectTickCols {
     /// `agent_ticking_enabled` (`None` → `true`).
     pub ticking_enabled: Option<bool>,
     /// `agent_default_interval_seconds` (In Progress rhythm).
-    pub interval_default: Option<i64>,
+    pub interval_default: Option<i32>,
     /// `agent_review_default_interval_seconds` (In Review rhythm).
-    pub interval_review: Option<i64>,
+    pub interval_review: Option<i32>,
     /// `agent_test_default_interval_seconds` (In Test rhythm).
-    pub interval_test: Option<i64>,
+    pub interval_test: Option<i32>,
 }
 
 /// The ticker row as claimed under lock, plus the issue/project ids the
@@ -549,12 +551,19 @@ pub struct ClaimRead {
 impl sqlx::FromRow<'_, sqlx::postgres::PgRow> for ProjectTickCols {
     fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
+        // The tick-policy columns are INT4: decode at INT4 width (an
+        // `Option<i64>` decode fails live with an INT4/INT8 mismatch).
+        let pool: Option<i32> = row.try_get("agent_default_max_ticks")?;
+        let ticking_enabled: Option<bool> = row.try_get("agent_ticking_enabled")?;
+        let interval_default: Option<i32> = row.try_get("agent_default_interval_seconds")?;
+        let interval_review: Option<i32> = row.try_get("agent_review_default_interval_seconds")?;
+        let interval_test: Option<i32> = row.try_get("agent_test_default_interval_seconds")?;
         Ok(Self {
-            pool: row.try_get("agent_default_max_ticks")?,
-            ticking_enabled: row.try_get("agent_ticking_enabled")?,
-            interval_default: row.try_get("agent_default_interval_seconds")?,
-            interval_review: row.try_get("agent_review_default_interval_seconds")?,
-            interval_test: row.try_get("agent_test_default_interval_seconds")?,
+            pool,
+            ticking_enabled,
+            interval_default,
+            interval_review,
+            interval_test,
         })
     }
 }

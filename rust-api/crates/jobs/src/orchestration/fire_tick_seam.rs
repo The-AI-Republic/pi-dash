@@ -1057,13 +1057,15 @@ pub fn shim_tick_interval_seconds(state: Option<&StateView>, project: &ProjectTi
         name: s.name.as_str(),
     });
     let fields = cadence_fields_for(state_ref.as_ref());
-    let value = match fields.project_interval {
+    let value: Option<i32> = match fields.project_interval {
         "agent_default_interval_seconds" => project.interval_default,
         "agent_review_default_interval_seconds" => project.interval_review,
         "agent_test_default_interval_seconds" => project.interval_test,
         _ => None,
     };
-    pidash_db::tasks_ticker::resolve_project_interval(value)
+    // The cadence columns decode at INT4 width; widen to i64 for the
+    // pure resolver (same boundary rule as `map_policy` above).
+    pidash_db::tasks_ticker::resolve_project_interval(value.map(i64::from))
 }
 
 /// Ticking-state verdict shared by the shim.
