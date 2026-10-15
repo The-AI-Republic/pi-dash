@@ -46,5 +46,6 @@ v1_cli_auth
 v1_cycles_modules
 v1_openapi
 v1_projects
+v1_schedulers
 v1_work_items
 web_edge
