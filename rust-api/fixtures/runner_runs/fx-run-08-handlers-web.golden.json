@@ -38,6 +38,8 @@
    "agent_metadata": {},
    "runner": null,
    "work_item": "1f27eef2-7715-4a8a-9ef5-6c37dff01bdd",
+   "scheduler_binding": null,
+   "scheduler_binding_detail": null,
    "pod": "0d56022e-5c01-4b6d-8d9b-99a53b470e86",
    "pod_detail": {
     "id": "0d56022e-5c01-4b6d-8d9b-99a53b470e86",
@@ -129,6 +131,12 @@
   "project_scope": [
    "0cdfd679-573e-46b5-b797-6997fe38d82d"
   ],
+  "scheduler_binding_malformed": {
+   "status": 400,
+   "body": {
+    "error": "invalid scheduler_binding UUID format"
+   }
+  },
   "as_other": [
    "8dbd5acc-b3ce-4259-91b2-570768a0b918",
    "393b6bed-a7a4-4be8-b793-ad5a45d7189c",
@@ -200,6 +208,8 @@
    "agent_metadata",
    "runner",
    "work_item",
+   "scheduler_binding",
+   "scheduler_binding_detail",
    "pod",
    "pod_detail",
    "created_by",
@@ -415,6 +425,8 @@
     "agent_metadata": {},
     "runner": "e39ef475-5212-4de8-a5d0-e5fe8fd01f7b",
     "work_item": "0b52ade5-3aa5-45ac-a515-6e37a64b4b1a",
+    "scheduler_binding": null,
+    "scheduler_binding_detail": null,
     "pod": "dd43f0eb-d975-431d-b661-8925300ae608",
     "pod_detail": {
      "id": "dd43f0eb-d975-431d-b661-8925300ae608",

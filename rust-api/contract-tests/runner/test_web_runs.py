@@ -9,6 +9,7 @@ queue/rollback behavior, and Django's filter-coercion edges.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 
 import pytest
@@ -25,7 +26,8 @@ pytestmark = pytest.mark.contract
 RUN_KEYS = {
     "id", "status", "executor_kind", "dispatch_attempts", "cancel_requested_at",
     "cancel_reason", "prompt", "thread_id", "agent_metadata", "runner",
-    "work_item", "pod", "pod_detail", "created_by", "owner", "created_at",
+    "work_item", "scheduler_binding", "scheduler_binding_detail",
+    "pod", "pod_detail", "created_by", "owner", "created_at",
     "assigned_at", "queue_position", "started_at", "ended_at", "done_payload",
     "error", "error_code", "error_diagnostic", "refusal_category", "llm_model",
     "input_tokens", "output_tokens", "total_tokens", "usage", "tool_plan",
@@ -46,6 +48,8 @@ def test_web_runs_list_shape(user_client, daemon_run):
     assert run["id"] == daemon_run["id"]
     assert run["status"] == "assigned"
     assert run["pod_detail"]["project_identifier"] is not None
+    assert run["scheduler_binding"] is None
+    assert run["scheduler_binding_detail"] is None
 
 
 def test_web_runs_list_denies_anonymous(anon_client):
@@ -86,6 +90,8 @@ def test_web_run_detail_shape(user_client, daemon_run):
     assert RUN_KEYS <= set(body)
     assert body["id"] == daemon_run["id"]
     assert "events" not in body
+    assert body["scheduler_binding"] is None
+    assert body["scheduler_binding_detail"] is None
 
 
 def test_web_run_detail_include_events(user_client, machine_client, daemon_run, seeder):
@@ -737,3 +743,207 @@ def test_web_runs_create_direct_coercion_mismatch_order(user_client, seeder, dae
     assert canon_foreign.status_code == 400
     assert canon_foreign.headers["allow"] == "GET, POST, HEAD, OPTIONS"
     assert canon_foreign.json()["code"] == "pod_workspace_mismatch"
+
+
+# ---------------------------------------------------------------------------
+# Scheduler-fired runs (PDASHOSS01-223, PIDASHCONV-1060)
+# ---------------------------------------------------------------------------
+
+
+def _seed_scheduler(seeder, workspace_id, slug):
+    """One scheduler definition. Column list mirrors the legacy harness
+    ``Seed.scheduler`` (``db/models/scheduler.py:107``)."""
+    sched_id = str(uuid.uuid4())
+    name = f"CT1060 {slug}"
+    seeder.db.execute(
+        """INSERT INTO schedulers
+           (id, workspace_id, slug, name, description, prompt, source,
+            is_enabled, color, created_at, updated_at)
+           VALUES (%s,%s,%s,%s,'contract scheduler','Audit the project.',
+                   'builtin',true,'#3b82f6',now(),now())""",
+        (sched_id, workspace_id, slug, name),
+    )
+    seeder.track.add("schedulers", sched_id)
+    return {"id": sched_id, "slug": slug, "name": name}
+
+
+def _seed_binding(seeder, workspace_id, project_id, scheduler_id, actor_id):
+    """One install of a scheduler onto a project (``db/models/scheduler.py:154``)."""
+    binding_id = str(uuid.uuid4())
+    seeder.db.execute(
+        """INSERT INTO scheduler_bindings
+           (id, workspace_id, project_id, scheduler_id, actor_id, dtstart,
+            tzid, rrule, rdates, exdates, extra_context, enabled, last_error,
+            outcome_mode, created_at, updated_at)
+           VALUES (%s,%s,%s,%s,%s,now(),
+                   'UTC','','[]','[]','',true,'',
+                   'create_issue',now(),now())""",
+        (binding_id, workspace_id, project_id, scheduler_id, actor_id),
+    )
+    seeder.track.add("scheduler_bindings", binding_id)
+    return {"id": binding_id}
+
+
+def _seed_scheduler_run(seeder, daemon_world, binding_id, *, status="completed"):
+    """A runner-less, issue-less run fired by a scheduler binding.
+
+    Mirrors Django's ``_make_run`` (``test_binding_runs.py:102``): workspace,
+    creator, pod and ``scheduler_binding`` set, no runner, no work item.
+    """
+    run_id = str(uuid.uuid4())
+    seeder.db.execute(
+        """INSERT INTO agent_run
+           (id, workspace_id, created_by_id, pod_id, scheduler_binding_id,
+            status, prompt, trigger, executor_kind, run_config,
+            required_capabilities, thread_id, agent_metadata, tool_plan,
+            usage, dispatch_attempts, error, refusal_category, llm_model,
+            cancel_reason, error_code, phase_kind, created_at)
+           VALUES (%s,%s,%s,%s,%s,
+                   %s,'','scheduler','local_runner','{}',
+                   '[]','{}','{}','{}',
+                   '{}',0,'','','',
+                   '','','',now())""",
+        (
+            run_id, daemon_world["workspace"]["id"], daemon_world["owner"]["id"],
+            daemon_world["pod"]["id"], binding_id, status,
+        ),
+    )
+    seeder.track.add("agent_run", run_id)
+    return {"id": run_id}
+
+
+def _scheduler_world(seeder, daemon_world, slug):
+    sched = _seed_scheduler(seeder, daemon_world["workspace"]["id"], f"{slug}-{seeder.tag}")
+    binding = _seed_binding(
+        seeder, daemon_world["workspace"]["id"], daemon_world["project"]["id"],
+        sched["id"], daemon_world["owner"]["id"],
+    )
+    return {"scheduler": sched, "binding": binding}
+
+
+@contextlib.contextmanager
+def _login_as(settings, user):
+    with api_client(settings.base_url) as client:
+        login_session(client, email=user["email"], password=user["password"])
+        yield client
+
+
+def test_web_runs_list_scheduler_binding_detail_shape(
+    user_client, seeder, daemon_world, daemon_run
+):
+    """Scheduler-fired rows render ``scheduler_binding_detail`` exactly."""
+    world = _scheduler_world(seeder, daemon_world, "nightly-audit")
+    run = _seed_scheduler_run(seeder, daemon_world, world["binding"]["id"])
+    body = user_client.get(f"{WEB}/runs/").json()
+    rows = {r["id"]: r for r in body["results"]}
+    assert rows[daemon_run["id"]]["scheduler_binding"] is None
+    assert rows[daemon_run["id"]]["scheduler_binding_detail"] is None
+    row = rows[run["id"]]
+    assert row["scheduler_binding"] == world["binding"]["id"]
+    assert row["scheduler_binding_detail"] == {
+        "id": world["binding"]["id"],
+        "scheduler_name": world["scheduler"]["name"],
+        "scheduler_slug": world["scheduler"]["slug"],
+        "project": daemon_world["project"]["id"],
+    }
+
+
+def test_web_run_detail_visible_to_project_member_for_scheduler_run(
+    settings, seeder, daemon_world
+):
+    """Port of ``test_run_detail_visible_to_project_member_for_scheduler_run``.
+
+    The member is neither creator, runner owner, assignee nor admin — the
+    scheduler-binding project grant (``runs.py:117``) is their only path.
+    """
+    world = _scheduler_world(seeder, daemon_world, "nightly-audit")
+    run = _seed_scheduler_run(seeder, daemon_world, world["binding"]["id"])
+    member = seeder.create_user()
+    seeder.create_member(daemon_world["workspace"]["id"], member["id"])
+    seeder.create_project_member(
+        daemon_world["workspace"]["id"], daemon_world["project"]["id"],
+        member["id"], role=15,
+    )
+    with _login_as(settings, member) as client:
+        response = client.get(f"{WEB}/runs/{run['id']}/")
+    assert response.status_code == 200, response.text
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
+    assert response.json()["scheduler_binding_detail"]["scheduler_slug"] == (
+        world["scheduler"]["slug"]
+    )
+
+
+def test_web_run_detail_hidden_from_workspace_member_outside_project(
+    settings, seeder, daemon_world
+):
+    """Port of ``test_run_detail_hidden_from_workspace_member_outside_project``."""
+    world = _scheduler_world(seeder, daemon_world, "nightly-audit")
+    run = _seed_scheduler_run(seeder, daemon_world, world["binding"]["id"])
+    outsider = seeder.create_user()
+    seeder.create_member(daemon_world["workspace"]["id"], outsider["id"])
+    with _login_as(settings, outsider) as client:
+        response = client.get(f"{WEB}/runs/{run['id']}/")
+    assert response.status_code == 404
+    assert response.headers["allow"] == "GET, HEAD, OPTIONS"
+    assert response.json() == {"error": "not found"}
+
+
+def test_web_runs_list_filters_by_scheduler_binding(user_client, seeder, daemon_world):
+    """Port of ``test_global_runs_list_filters_by_scheduler_binding``."""
+    first = _scheduler_world(seeder, daemon_world, "nightly-audit")
+    second = _scheduler_world(seeder, daemon_world, "weekly-report")
+    mine = _seed_scheduler_run(seeder, daemon_world, first["binding"]["id"])
+    _seed_scheduler_run(seeder, daemon_world, second["binding"]["id"])
+    body = user_client.get(
+        f"{WEB}/runs/", params={"scheduler_binding": first["binding"]["id"]}
+    ).json()
+    assert [r["id"] for r in body["results"]] == [mine["id"]]
+    assert body["total_count"] == 1
+    # An empty value scopes nothing (Django ``if scheduler_binding_id:``).
+    unfiltered = user_client.get(f"{WEB}/runs/", params={"scheduler_binding": ""}).json()
+    assert unfiltered["total_count"] == 2
+
+
+def test_web_runs_list_rejects_malformed_scheduler_binding(user_client):
+    """Port of ``test_global_runs_list_rejects_malformed_scheduler_binding``."""
+    response = user_client.get(f"{WEB}/runs/", params={"scheduler_binding": "not-a-uuid"})
+    assert response.status_code == 400
+    assert response.headers["allow"] == "GET, POST, HEAD, OPTIONS"
+    assert response.json() == {"error": "invalid scheduler_binding UUID format"}
+
+
+def test_web_run_detail_soft_deleted_binding_still_renders(
+    settings, user_client, seeder, daemon_world
+):
+    """Runs of an uninstalled binding stay visible and attributed.
+
+    The FK resolves through the base manager (no ``deleted_at`` scope), so
+    the detail keeps rendering and the project grant keeps applying.
+    """
+    world = _scheduler_world(seeder, daemon_world, "nightly-audit")
+    run = _seed_scheduler_run(seeder, daemon_world, world["binding"]["id"])
+    member = seeder.create_user()
+    seeder.create_member(daemon_world["workspace"]["id"], member["id"])
+    seeder.create_project_member(
+        daemon_world["workspace"]["id"], daemon_world["project"]["id"],
+        member["id"], role=15,
+    )
+    seeder.db.execute(
+        "UPDATE scheduler_bindings SET deleted_at = now() WHERE id = %s",
+        (world["binding"]["id"],),
+    )
+    detail = user_client.get(f"{WEB}/runs/{run['id']}/")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["scheduler_binding_detail"] == {
+        "id": world["binding"]["id"],
+        "scheduler_name": world["scheduler"]["name"],
+        "scheduler_slug": world["scheduler"]["slug"],
+        "project": daemon_world["project"]["id"],
+    }
+    with _login_as(settings, member) as client:
+        member_view = client.get(f"{WEB}/runs/{run['id']}/")
+    assert member_view.status_code == 200, member_view.text
+    filtered = user_client.get(
+        f"{WEB}/runs/", params={"scheduler_binding": world["binding"]["id"]}
+    ).json()
+    assert [r["id"] for r in filtered["results"]] == [run["id"]]

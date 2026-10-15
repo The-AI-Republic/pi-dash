@@ -64,8 +64,9 @@ use pidash_types::orchestration::{
 };
 
 use super::runs::{
-    fetch_guarded_run, is_workspace_member, issue_lookup_sql, parse_py_uuid, pod_mini_for,
-    py_truthy_json, render_detail, tool_calls_for, workspace_role, ISSUE_NOT_FOUND_BODY,
+    binding_detail_for, fetch_guarded_run, is_workspace_member, issue_lookup_sql, parse_py_uuid,
+    pod_mini_for, py_truthy_json, render_detail, tool_calls_for, workspace_role,
+    ISSUE_NOT_FOUND_BODY,
 };
 use super::{json_response, server_error};
 use crate::state::AppState;
@@ -556,7 +557,11 @@ async fn render_created_run(pool: &PgPool, run_id: Uuid) -> Response {
         Ok(calls) => calls,
         Err(response) => return response,
     };
-    let payload = render_detail(&guarded.run, &pod, &tool_calls);
+    let binding = match binding_detail_for(pool, &guarded.run).await {
+        Ok(binding) => binding,
+        Err(response) => return response,
+    };
+    let payload = render_detail(&guarded.run, &pod, &tool_calls, binding.as_ref());
     json_response(StatusCode::CREATED, payload.to_string())
 }
 
