@@ -103,14 +103,20 @@ def seed():
     note("user", user.email, user_created)
 
     # Instance admin: the god-mode contract suites (NEWFRONT-502/503) sign in
-    # as the seed user, so that user holds an InstanceAdmin grant. Repaired
-    # (not just created) so re-seeding restores the grant after a test run
-    # consumes it.
-    _, admin_created = InstanceAdmin.objects.update_or_create(
+    # as the seed user, so that user holds an InstanceAdmin grant. Revived
+    # through all_objects: the NEWFRONT-502 sign-up dance soft-deletes every
+    # admin link, and the unique pair blocks re-creating a soft-deleted row,
+    # so a plain update_or_create would crash on re-seed after a dance run.
+    owner_link, admin_created = InstanceAdmin.all_objects.get_or_create(
         instance=instance,
         user=user,
         defaults={"role": 20, "is_verified": True},
     )
+    if owner_link.deleted_at is not None or owner_link.role != 20 or not owner_link.is_verified:
+        owner_link.deleted_at = None
+        owner_link.role = 20
+        owner_link.is_verified = True
+        owner_link.save(update_fields=["deleted_at", "role", "is_verified"])
     note("instance-admin", user.email, admin_created)
 
     workspace, workspace_created = Workspace.objects.get_or_create(
@@ -295,6 +301,100 @@ def seed():
         page=page,
     )
     note("project-page", f"{project.identifier}/{page.name}", project_page_created)
+
+    # Instance-admin console (NEWFRONT-502): a dedicated admin user plus
+    # the InstanceAdmin link the admins/me and admins-list contracts
+    # prove, and the configuration key rows the configurations and email
+    # contracts round-trip. PATCH only touches keys that already have
+    # rows, so every key the contract tests write must exist here.
+    # Everything is repaired (not just created) so re-seeding restores
+    # the fixtures after a run blanks or consumes them.
+
+    # Crash backstop for the sign-up dance: a run that dies mid-dance
+    # leaves throwaway admin links behind and may leave the instance
+    # renamed. Clear the orphans first so a fresh run starts from just
+    # the two seed admin links (seed user plus dedicated admin).
+    InstanceAdmin.objects.filter(user__email__startswith="contract-admin-signup-").delete()
+    User.objects.filter(email__startswith="contract-admin-signup-").delete()
+    if instance.instance_name != "contract-seed" or not instance.is_telemetry_enabled:
+        instance.instance_name = "contract-seed"
+        instance.is_telemetry_enabled = True
+        instance.save(update_fields=["instance_name", "is_telemetry_enabled"])
+        note("instance-restored", instance.pk, False)
+
+    admin, admin_created = User.objects.get_or_create(
+        email="contract.admin@example.com",
+        defaults={
+            "username": "contract.admin",
+            "first_name": "Contract",
+            "last_name": "Admin",
+            "is_active": True,
+        },
+    )
+    if admin_created or not admin.check_password(SEED_PASSWORD):
+        admin.password = make_password(SEED_PASSWORD)
+        admin.is_active = True
+        admin.save()
+    note("user", admin.email, admin_created)
+
+    # Revived through all_objects: the sign-up dance soft-deletes this
+    # link, and the unique pair blocks re-creating it, so a plain
+    # get_or_create would crash on re-seed after a dance run.
+    seed_link, admin_link_created = InstanceAdmin.all_objects.get_or_create(
+        instance=instance,
+        user=admin,
+        defaults={"role": 20},
+    )
+    if seed_link.deleted_at is not None or seed_link.role != 20:
+        seed_link.deleted_at = None
+        seed_link.role = 20
+        seed_link.save(update_fields=["deleted_at", "role"])
+    note("instance-admin", admin.email, admin_link_created)
+
+    # EMAIL_HOST repeats the earlier get_or_create on purpose: the
+    # disable-email contract blanks it, and update_or_create repairs the
+    # value on re-seed. LLM_API_KEY stays unencrypted here so the seed
+    # needs no encryption key; the shape is identical either way.
+    for key, value, category in (
+        ("ENABLE_SMTP", "1", "SMTP"),
+        ("EMAIL_HOST", "contract-smtp.invalid", "SMTP"),
+        ("EMAIL_PORT", "1025", "SMTP"),
+        ("EMAIL_FROM", "contract-admin@example.com", "SMTP"),
+        ("EMAIL_HOST_USER", "contract-smtp-user", "SMTP"),
+        ("EMAIL_HOST_PASSWORD", "contract-smtp-pass", "SMTP"),
+        ("EMAIL_USE_TLS", "1", "SMTP"),
+        ("EMAIL_USE_SSL", "0", "SMTP"),
+        ("ENABLE_SIGNUP", "1", "AUTHENTICATION"),
+        ("ENABLE_MAGIC_LINK_LOGIN", "1", "AUTHENTICATION"),
+        ("ENABLE_EMAIL_PASSWORD", "1", "AUTHENTICATION"),
+        ("IS_GOOGLE_ENABLED", "0", "AUTHENTICATION"),
+        ("IS_GITHUB_ENABLED", "0", "AUTHENTICATION"),
+        ("IS_GITLAB_ENABLED", "0", "AUTHENTICATION"),
+        ("IS_GITEA_ENABLED", "0", "AUTHENTICATION"),
+        ("GOOGLE_CLIENT_ID", "", "GOOGLE"),
+        ("GOOGLE_CLIENT_SECRET", "", "GOOGLE"),
+        ("ENABLE_GOOGLE_SYNC", "0", "GOOGLE"),
+        ("GITHUB_CLIENT_ID", "", "GITHUB"),
+        ("GITHUB_CLIENT_SECRET", "", "GITHUB"),
+        ("GITHUB_ORGANIZATION_ID", "", "GITHUB"),
+        ("ENABLE_GITHUB_SYNC", "0", "GITHUB"),
+        ("GITLAB_HOST", "", "GITLAB"),
+        ("GITLAB_CLIENT_ID", "", "GITLAB"),
+        ("GITLAB_CLIENT_SECRET", "", "GITLAB"),
+        ("ENABLE_GITLAB_SYNC", "0", "GITLAB"),
+        ("GITEA_HOST", "", "GITEA"),
+        ("GITEA_CLIENT_ID", "", "GITEA"),
+        ("GITEA_CLIENT_SECRET", "", "GITEA"),
+        ("ENABLE_GITEA_SYNC", "0", "GITEA"),
+        ("DISABLE_WORKSPACE_CREATION", "0", "WORKSPACE_MANAGEMENT"),
+        ("LLM_MODEL", "contract-model", "AI"),
+        ("LLM_API_KEY", "contract-key-not-encrypted", "AI"),
+    ):
+        _, row_created = InstanceConfiguration.objects.update_or_create(
+            key=key,
+            defaults={"value": value, "category": category, "is_encrypted": False},
+        )
+        note("instance-config", key, row_created)
 
     return {
         "email": user.email,
