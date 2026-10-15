@@ -3,13 +3,14 @@
 // See the LICENSE file for details.
 // Authentication landing route (ADM-023–026, ADM-036, from
 // parity/specs/admin.md §4): the open-sign-up switch plus the method
-// registry inside the dashboard guard and shell.
+// registry inside the dashboard guard and shell. The index child of the
+// authentication layout; provider sub-pages are its siblings.
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { AdminAuthLanding } from "../../../features/admin/index.js";
+import { AdminAuthLanding } from "../../../../features/admin/index.js";
 
-export const Route = createFileRoute("/god-mode/_dashboard/authentication")({
+export const Route = createFileRoute("/god-mode/_dashboard/authentication/")({
   component: AuthenticationRoute,
 });
 
