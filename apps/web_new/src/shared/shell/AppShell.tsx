@@ -21,7 +21,6 @@ import {
 import { useSessionExpiredRedirect } from "./expiredRedirect.js";
 import { useGlobalShortcuts } from "./globalShortcuts.js";
 import { useShortcutsDialog } from "./shortcutsDialogStore.js";
-import { useSidebarCollapsed } from "./sidebarCollapsed.js";
 import { getToastManager } from "./toaster.js";
 
 // Deferred below the initial shell chain (Quality gates budget): the
@@ -70,7 +69,6 @@ export function AppShell({
   const paletteOpen = useCommandPalette((state) => state.open);
   const [paletteMounted, setPaletteMounted] = React.useState(paletteOpen);
   useSessionExpiredRedirect();
-  const sidebarCollapsed = useSidebarCollapsed((state) => state.collapsed);
   const shortcutsOpen = useShortcutsDialog((state) => state.open);
 
   React.useEffect(() => registerCommands(commands), [commands]);
@@ -82,10 +80,12 @@ export function AppShell({
   return (
     <div className="flex h-screen flex-col bg-(--bg) text-(--text)">
       {topBar}
-      <div className="flex min-h-0 flex-1">
+      {/* Positioned: the floating sidebar and its peek overlay anchor here, below the top bar. */}
+      <div className="relative flex min-h-0 flex-1">
         {/* The workspace route lazy-loads the rail (size budget); the slot stays sync. */}
         <React.Suspense fallback={null}>{rail}</React.Suspense>
-        {sidebarCollapsed ? null : sidebar}
+        {/* The sidebar renders its own collapsed strip (SHELL-067/068), so the slot always stays mounted. */}
+        {sidebar}
         <main
           className={rail ? "min-w-0 flex-1 overflow-auto" : "min-w-0 flex-1 overflow-auto pl-(--space-4)"}
           aria-label="Content"

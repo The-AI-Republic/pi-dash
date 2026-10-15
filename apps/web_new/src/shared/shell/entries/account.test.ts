@@ -9,13 +9,13 @@ vi.mock("../clipboard.js", () => ({ copyCurrentPageUrl: vi.fn().mockResolvedValu
 
 import type { PidashCommand } from "../../commands/index.js";
 import { copyCurrentPageUrl } from "../clipboard.js";
+import { SIDEBAR_DEFAULT_WIDTH, useShellChrome } from "../chromeState.js";
 import { useShortcutsDialog } from "../shortcutsDialogStore.js";
-import { useSidebarCollapsed } from "../sidebarCollapsed.js";
 import { useTopSearchFocus } from "../topSearchFocus.js";
 import { DOCS_URL, FORUM_URL, REPORT_BUG_URL, buildAccountCommands } from "./account.js";
 
 afterEach(() => {
-  useSidebarCollapsed.setState({ collapsed: false });
+  useShellChrome.setState({ sidebarCollapsed: false, peekOpen: false, sidebarWidth: SIDEBAR_DEFAULT_WIDTH });
   useTopSearchFocus.setState({ request: 0 });
   useShortcutsDialog.getState().closeShortcuts();
   vi.mocked(copyCurrentPageUrl).mockClear();
@@ -45,8 +45,10 @@ describe("account entries", () => {
     const entries = byId(buildAccountCommands({ onWorkspaceInvites, onOpenExternal: () => undefined }));
     entries.get("shell.workspace-invites")!.run();
     expect(onWorkspaceInvites).toHaveBeenCalledTimes(1);
+    useShellChrome.setState({ peekOpen: true });
     entries.get("shell.toggle-sidebar")!.run();
-    expect(useSidebarCollapsed.getState().collapsed).toBe(true);
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
+    expect(useShellChrome.getState().peekOpen).toBe(false);
     entries.get("shell.copy-page-url")!.run();
     expect(copyCurrentPageUrl).toHaveBeenCalledTimes(1);
     entries.get("shell.focus-search")!.run();

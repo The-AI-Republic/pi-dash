@@ -63,6 +63,13 @@ export {
 } from "./api/tabPreferences.js";
 export type { TabPreferencesHandle } from "./api/tabPreferences.js";
 export {
+  selectProjectListCap,
+  useProjectListCap,
+  useUpdateProjectLimit,
+  useUpdateProjectNavMode,
+} from "./api/displayPreferences.js";
+export type { ProjectLimitHandle, ProjectNavMode, ProjectNavModeHandle } from "./api/displayPreferences.js";
+export {
   countFittingTabs,
   DEFAULT_TAB_KEY,
   EPIC_TAB_KEY,
