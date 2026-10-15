@@ -33,7 +33,7 @@ use pidash_services::assistant::seams as assistant_seams;
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile, UserFlags as SvcUserFlags,
 };
-use pidash_services::extensions::CloudAgentToolsetsSeam;
+use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::creation::{
     self as creation_kernel, active_run_sql, latest_prior_run_sql, run_insert_returning_sql,
     run_lock_sql, run_select_sql, user_id_for_run, ASSIGNED_POD_SELECT_SQL,
@@ -205,6 +205,7 @@ pub(crate) struct HandoffStore<'t, 'p> {
     cache: RedisAdmissionCache,
     now_unix_secs: i64,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    assistant_seam: Arc<dyn AssistantModelSeam>,
     dispatches: Vec<Uuid>,
     deferred: Vec<DeferredConsume>,
     terminal_effects: Vec<Uuid>,
@@ -220,6 +221,7 @@ impl<'t, 'p> HandoffStore<'t, 'p> {
         cache: RedisAdmissionCache,
         now_unix_secs: i64,
         toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+        assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
         Self {
             tx,
@@ -229,6 +231,7 @@ impl<'t, 'p> HandoffStore<'t, 'p> {
             cache,
             now_unix_secs,
             toolsets,
+            assistant_seam,
             dispatches: Vec::new(),
             deferred: Vec::new(),
             terminal_effects: Vec::new(),
@@ -591,7 +594,16 @@ impl CreationSeam for HandoffStore<'_, '_> {
                 reason_code: mapped.reason_code,
             }
         };
-        let has_llm = assistant_seams::has_usable_llm_config(has_key);
+        // The driver short-circuits a missing actor before consulting
+        // the closure, so only a present actor consults the seam (and a
+        // missing one never pays for the overlay's reads). Clone the seam
+        // out: the store is `!Sync`, so the consult must not borrow
+        // `self` across the await.
+        let assistant_seam = self.assistant_seam.clone();
+        let has_llm = match actor_id {
+            Some(id) => twin_gate_allows(&assistant_seam, id, has_key).await,
+            None => false,
+        };
         let Self {
             pool,
             cache,
@@ -747,6 +759,23 @@ async fn twin_has_api_key(pool: &PgPool, user_id: Uuid) -> Result<bool, String> 
         .try_get("api_key_encrypted")
         .map_err(|error| error.to_string())?;
     Ok(key.is_some_and(|key| !key.is_empty()))
+}
+
+/// The handoff llm gate through the installed assistant seam
+/// (`user_has_llm_config`, `agent_execution.py:69-80`): the CE default
+/// answers the BYOK key bit; the overlay routes OpenHub/Codex/BYOK
+/// through the same single switch point Pi Dash AI uses (PIDASHCONV-1051).
+/// A free function over the cloned seam: the store is `!Sync` (it owns
+/// the span transaction), so the consult must not borrow `self` across
+/// the await, or the handlers' futures stop being `Send`.
+async fn twin_gate_allows(
+    assistant_seam: &Arc<dyn AssistantModelSeam>,
+    actor_id: Uuid,
+    has_key: bool,
+) -> bool {
+    assistant_seam
+        .has_usable_llm_config(actor_id, has_key)
+        .await
 }
 
 fn twin_db(error: sqlx::Error) -> CreationError {
@@ -1396,6 +1425,7 @@ pub(crate) async fn complete_project_move_handoff(
         cache,
         unix_now_secs(),
         state.toolsets().clone(),
+        state.assistant_seam().clone(),
     );
     let outcome = creation_kernel::complete_project_move_handoff(&mut store, run_id, now_micros())
         .await
@@ -1553,10 +1583,104 @@ mod tests {
             },
             unix_now_secs(),
             state.toolsets().clone(),
+            state.assistant_seam().clone(),
         );
         assert_eq!(
             store.extra_toolsets_schema_tool(),
             "acme_get_tool_schema".to_owned()
+        );
+        let (tx, _, _, _, _) = store.into_parts();
+        tx.rollback().await.expect("rollback");
+    }
+
+    /// Overlay-shaped seam: a keyless user still counts as configured
+    /// (the gateway lane, not BYOK).
+    #[derive(Debug)]
+    struct GatewaySeam;
+
+    impl AssistantModelSeam for GatewaySeam {
+        fn has_usable_llm_config(
+            &self,
+            user_id: Uuid,
+            has_api_key: bool,
+        ) -> pidash_services::extensions::SeamFuture<'_, bool> {
+            let _ = (user_id, has_api_key);
+            Box::pin(async move { true })
+        }
+
+        fn generate_title(
+            &self,
+            request: pidash_services::extensions::TitleRequest,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            Result<String, pidash_services::extensions::TitleError>,
+        > {
+            let _ = request;
+            Box::pin(async move { Ok("seam title".to_owned()) })
+        }
+    }
+
+    async fn live_store<'a>(pool: &'a sqlx::PgPool, state: &AppState) -> HandoffStore<'a, 'a> {
+        let settings = state.settings();
+        let tx = DbTransaction::begin(pool).await.expect("begin");
+        HandoffStore::new(
+            tx,
+            pool,
+            settings.cloud_agent.clone(),
+            settings.managed_runner.clone(),
+            RedisAdmissionCache {
+                client: redis_client(state),
+            },
+            unix_now_secs(),
+            state.toolsets().clone(),
+            state.assistant_seam().clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn live_twin_gate_uses_the_installed_seam() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let state = AppState::with_edge("0.1.0", EdgeHandle::for_tests("http://127.0.0.1:1"))
+            .with_assistant_seam(Arc::new(GatewaySeam));
+        let store = live_store(&pool, &state).await;
+        assert!(
+            twin_gate_allows(&store.assistant_seam, Uuid::new_v4(), false).await,
+            "an installed seam that accepts the user must open the twin gate without a key"
+        );
+        let (tx, _, _, _, _) = store.into_parts();
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_twin_gate_keeps_the_ce_default() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        // No `with_assistant_seam`: the default CE seam answers the key
+        // bit exactly like the pre-seam free function did.
+        let state = AppState::with_edge("0.1.0", EdgeHandle::for_tests("http://127.0.0.1:1"));
+        let store = live_store(&pool, &state).await;
+        assert!(
+            twin_gate_allows(&store.assistant_seam, Uuid::new_v4(), true).await,
+            "CE still admits a keyed handoff actor"
+        );
+        assert!(
+            !twin_gate_allows(&store.assistant_seam, Uuid::new_v4(), false).await,
+            "CE still refuses a keyless handoff actor"
         );
         let (tx, _, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
