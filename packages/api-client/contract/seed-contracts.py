@@ -60,7 +60,7 @@ def seed():
         WorkspaceMember,
     )
     from pi_dash.db.models.state import DEFAULT_STATES  # noqa: E402
-    from pi_dash.license.models.instance import Instance, InstanceConfiguration  # noqa: E402
+    from pi_dash.license.models.instance import Instance, InstanceAdmin, InstanceConfiguration  # noqa: E402
 
     created = []
 
@@ -101,6 +101,17 @@ def seed():
         user.is_active = True
         user.save()
     note("user", user.email, user_created)
+
+    # Instance admin: the god-mode contract suites (NEWFRONT-502/503) sign in
+    # as the seed user, so that user holds an InstanceAdmin grant. Repaired
+    # (not just created) so re-seeding restores the grant after a test run
+    # consumes it.
+    _, admin_created = InstanceAdmin.objects.update_or_create(
+        instance=instance,
+        user=user,
+        defaults={"role": 20, "is_verified": True},
+    )
+    note("instance-admin", user.email, admin_created)
 
     workspace, workspace_created = Workspace.objects.get_or_create(
         slug=SEED_WORKSPACE_SLUG,

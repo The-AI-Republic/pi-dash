@@ -93,3 +93,43 @@ export async function sharedSignedIn(): Promise<ApiClient> {
   }
   return sharedClient;
 }
+
+let sharedAdminClient: ApiClient | null = null;
+
+/**
+ * One admin-signed-in session for the god-mode suites (NEWFRONT-502/503).
+ * Admin endpoints live under /api/instances/, which the session middleware
+ * reads through the admin-session-id cookie — a member session (session-id)
+ * authenticates as anonymous there. This signs in through the native admin
+ * form POST and returns a client whose jar carries the admin grant.
+ */
+export async function sharedAdminSignedIn(): Promise<ApiClient> {
+  if (!sharedAdminClient) {
+    if (!contractEnabled) throw new Error("PIDASH_CONTRACT_BASE_URL is not set");
+    const jar = new Map<string, string>();
+    const transport = contractTransport(jar);
+    const client = createClient({ baseUrl: CONTRACT_BASE_URL, transport, validate: true });
+    // Warm the jar with a CSRF token (same endpoint the member flow uses).
+    const tokenBody = await client.getJson<{ csrf_token: string }>("/auth/get-csrf-token/", { csrf: false });
+    const token = tokenBody.csrf_token;
+    const form = new URLSearchParams({ email: CONTRACT_EMAIL, password: CONTRACT_PASSWORD }).toString();
+    // POST via the transport directly: the success redirect lands on a
+    // frontend path Django answers 404, which client.post would throw on
+    // before we can read the landing URL. The transport returns it.
+    const response = await transport(`${CONTRACT_BASE_URL}/api/instances/admins/sign-in/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-CSRFTOKEN": token,
+      },
+      body: form,
+      credentials: "include",
+    });
+    const query = response.url.includes("?") ? response.url.slice(response.url.indexOf("?") + 1) : "";
+    const code = new URLSearchParams(query).get("error_code");
+    if (code) throw new Error(`contract admin sign-in failed: ${code} ${response.url}`);
+    if (!jar.has("admin-session-id")) throw new Error("contract admin sign-in set no admin session");
+    sharedAdminClient = client;
+  }
+  return sharedAdminClient;
+}
