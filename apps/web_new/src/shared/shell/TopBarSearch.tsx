@@ -31,6 +31,7 @@ import {
 } from "../commands/index.js";
 import { usePaletteKeys } from "./paletteKeys.js";
 import { groupCommands, PaletteOption, type PaletteRow } from "./paletteRows.js";
+import { useTopSearchFocus } from "./topSearchFocus.js";
 
 /** The always-visible top-bar field prompt (SHELL-081). */
 export const TOPBAR_SEARCH_PLACEHOLDER = "Search commands...";
@@ -49,11 +50,24 @@ export function TopBarSearch({ scope, onSelectSearchResult }: TopBarSearchProps)
   const openPalette = useCommandPalette((state) => state.openPalette);
   const openPage = useCommandPalette((state) => state.openPage);
   const containerRef = React.useRef<HTMLDivElement>(null);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const focusRequest = useTopSearchFocus((state) => state.request);
+  const mounted = React.useRef(false);
 
   const close = React.useCallback(() => {
     setOpen(false);
     setTerm("");
   }, []);
+
+  // The palette's focus entry bumps the counter; focusing opens the panel
+  // through the input's own onFocus (SHELL-089). Skipped on mount.
+  React.useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
+    inputRef.current?.focus();
+  }, [focusRequest]);
 
   React.useEffect(() => {
     if (modalOpen) close();
@@ -147,6 +161,7 @@ export function TopBarSearch({ scope, onSelectSearchResult }: TopBarSearchProps)
   return (
     <div ref={containerRef} className="relative w-full max-w-md">
       <input
+        ref={inputRef}
         type="text"
         aria-label="Search commands"
         placeholder={TOPBAR_SEARCH_PLACEHOLDER}
@@ -178,6 +193,7 @@ export function TopBarSearch({ scope, onSelectSearchResult }: TopBarSearchProps)
                       title={command.title}
                       hint={command.hint}
                       shortcut={command.shortcut}
+                      sequence={command.sequence}
                       onHover={() => setActiveIndex(index)}
                       onSelect={() => activate(index)}
                     />

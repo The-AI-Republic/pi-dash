@@ -6,8 +6,11 @@ import {
   clearCommands,
   clearPalettePages,
   filterCommands,
+  filterPageOptions,
   findCommand,
+  findCommandBySequence,
   findPalettePage,
+  listBoundCommands,
   listCommands,
   matchesShortcut,
   parseShortcut,
@@ -150,6 +153,45 @@ describe("filterCommands", () => {
     expect(filterCommands(commands, "logo").map((command) => command.id)).toEqual(["sign-out"]);
     expect(filterCommands(commands, "acme").map((command) => command.id)).toEqual(["go-home"]);
     expect(filterCommands(commands, "nothing-matches").map((command) => command.id)).toEqual([]);
+  });
+
+  it("finds sequenced commands case-insensitively, and nothing unregistered", () => {
+    const unregister = registerCommands([
+      { id: "shell.open-project", title: "Open a project", sequence: "op", run: () => undefined },
+      { id: "shell.plain", title: "Plain", run: () => undefined },
+    ]);
+    try {
+      expect(findCommandBySequence("op")?.id).toBe("shell.open-project");
+      expect(findCommandBySequence("OP")?.id).toBe("shell.open-project");
+      expect(findCommandBySequence("zz")).toBeUndefined();
+    } finally {
+      unregister();
+    }
+  });
+
+  it("filters page options by title and hint, blank returns all", () => {
+    const options = [
+      { id: "a", title: "Website relaunch", hint: "WEB", run: () => undefined },
+      { id: "b", title: "Mobile app", run: () => undefined },
+    ];
+    expect(filterPageOptions(options, "   ").map((option) => option.id)).toEqual(["a", "b"]);
+    expect(filterPageOptions(options, "web").map((option) => option.id)).toEqual(["a"]);
+    expect(filterPageOptions(options, "mobile").map((option) => option.id)).toEqual(["b"]);
+    expect(filterPageOptions(options, "zzz")).toEqual([]);
+  });
+
+  it("lists only chord- or sequence-bound commands, in palette order", () => {
+    const unregister = registerCommands([
+      { id: "help.bound", title: "Bound", section: "Help", shortcut: "mod+/", run: () => undefined },
+      { id: "plain", title: "Plain", run: () => undefined },
+      { id: "create.bound", title: "Bound", section: "Create", sequence: "np", run: () => undefined },
+    ]);
+    try {
+      // Create outranks Help in the pinned palette order (SHELL-087).
+      expect(listBoundCommands().map((command) => command.id)).toEqual(["create.bound", "help.bound"]);
+    } finally {
+      unregister();
+    }
   });
 });
 

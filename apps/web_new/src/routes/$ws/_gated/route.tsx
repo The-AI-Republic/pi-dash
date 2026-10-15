@@ -10,10 +10,11 @@
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Outlet, redirect, useRouterState } from "@tanstack/react-router";
-import type * as React from "react";
-import { useState } from "react";
+import * as React from "react";
 
+import { platform } from "../../../core/platform/index.js";
 import {
+  CREATE_WORKSPACE_PATH,
   decidePageGate,
   isOnboardedProfile,
   loadGateInputs,
@@ -22,16 +23,25 @@ import {
   selectWorkspace,
   workspacesQueryOptions,
 } from "../../../core/session/index.js";
-import {
-  DeactivateAccountDialog,
-  runSignOutAction,
-  signOutCommand,
-  useSignOut,
-} from "../../../features/auth/index.js";
+import { DeactivateAccountDialog, runSignOutAction, signOutCommand, useSignOut } from "../../../features/auth/index.js";
 import { projectsQueryOptions } from "../../../features/projects/index.js";
 import type { SearchResultHit } from "../../../shared/commands/index.js";
 import { AppShell, Sidebar, TitleBar } from "../../../shared/shell/index.js";
 import { resolveSearchTarget } from "./searchTarget.js";
+
+// Deferred below the initial shell chain (Quality gates budget): the
+// palette catalogs register once their chunk lands, and the creation
+// dialog loads on first open (shell spec §8, SHELL-086-089).
+const WorkspacePaletteEntries = React.lazy(() =>
+  import("../../../shared/shell/entries/WorkspaceEntries.js").then((module) => ({
+    default: module.WorkspacePaletteEntries,
+  }))
+);
+const ProjectCreateEntry = React.lazy(() =>
+  import("../../../features/projects/components/ProjectCreateEntry.js").then((module) => ({
+    default: module.ProjectCreateEntry,
+  }))
+);
 
 export const Route = createFileRoute("/$ws/_gated")({
   beforeLoad: async ({ context, location }) => {
@@ -75,6 +85,7 @@ export const Route = createFileRoute("/$ws/_gated")({
           navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: params.ws, projectId }, search: {} })
         }
         onSelectSearchResult={(hit: SearchResultHit) => navigate(resolveSearchTarget(hit, params.ws))}
+        onNavigateHref={(href: string) => navigate({ href })}
         onSignOut={() => {
           void runSignOutAction(
             () => signOut.mutateAsync(),
@@ -102,6 +113,7 @@ function WorkspaceShell({
   onSelectWorkspace,
   onSelectProject,
   onSelectSearchResult,
+  onNavigateHref,
   onSignOut,
 }: {
   workspaceSlug: string;
@@ -109,13 +121,15 @@ function WorkspaceShell({
   onSelectWorkspace: (slug: string) => void;
   onSelectProject: (projectId: string) => void;
   onSelectSearchResult: (hit: SearchResultHit) => void;
+  onNavigateHref: (href: string) => void;
   onSignOut: () => void;
 }): React.ReactElement {
   const context = Route.useRouteContext();
   const { data: me } = useSuspenseQuery(meQueryOptions(context.apiClient));
   const { data: workspaces } = useSuspenseQuery(workspacesQueryOptions(context.apiClient));
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, workspaceSlug));
-  const [deactivateOpen, setDeactivateOpen] = useState(false);
+  const [deactivateOpen, setDeactivateOpen] = React.useState(false);
+  const [createProjectOpen, setCreateProjectOpen] = React.useState(false);
 
   const workspace = selectWorkspace(workspaces, workspaceSlug);
   const activeProject = projects.find((project) => project.id === childProjectId) ?? null;
@@ -125,16 +139,7 @@ function WorkspaceShell({
 
   return (
     <AppShell
-      commands={[
-        signOutCommand({ userLabel, onSignOut }),
-        {
-          id: "shell.go-home",
-          title: "Go to workspace home",
-          hint: workspace?.name ?? workspaceSlug,
-          section: "Navigation",
-          run: () => onSelectWorkspace(workspaceSlug),
-        },
-      ]}
+      commands={[signOutCommand({ userLabel, onSignOut })]}
       searchScope={searchScope}
       onSelectSearchResult={onSelectSearchResult}
       topBar={
@@ -161,6 +166,47 @@ function WorkspaceShell({
       }
     >
       <DeactivateAccountDialog open={deactivateOpen} onOpenChange={setDeactivateOpen} email={me.email} />
+      <React.Suspense fallback={null}>
+        <WorkspacePaletteEntries
+          workspaceSlug={workspaceSlug}
+          workspaceName={workspace?.name ?? workspaceSlug}
+          project={
+            activeProject === null
+              ? null
+              : {
+                  id: activeProject.id,
+                  name: activeProject.name,
+                  views: {
+                    cycleView: activeProject.cycle_view,
+                    moduleView: activeProject.module_view,
+                    issueViewsView: activeProject.issue_views_view,
+                    pageView: activeProject.page_view,
+                    inboxView: activeProject.inbox_view,
+                  },
+                }
+          }
+          projects={projects.map((project) => ({
+            id: project.id,
+            name: project.name,
+            identifier: project.identifier,
+          }))}
+          workspaces={workspaces.map((entry) => ({ id: entry.id, name: entry.name, slug: entry.slug }))}
+          onOpenCreateProject={() => setCreateProjectOpen(true)}
+          onCreateWorkspace={() => onNavigateHref(CREATE_WORKSPACE_PATH)}
+          onNavigate={onNavigateHref}
+          onWorkspaceInvites={() => onNavigateHref("/invitations")}
+          onOpenExternal={(url: string) => void platform.openExternal(url)}
+          onSelectWorkspace={onSelectWorkspace}
+          onSelectProject={onSelectProject}
+        />
+        {createProjectOpen ? (
+          <ProjectCreateEntry
+            workspaceSlug={workspaceSlug}
+            open={createProjectOpen}
+            onOpenChange={setCreateProjectOpen}
+          />
+        ) : null}
+      </React.Suspense>
       <Outlet />
     </AppShell>
   );

@@ -1,0 +1,66 @@
+// @vitest-environment jsdom
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Palette account, utility and help entries (shell spec, SHELL-089).
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../clipboard.js", () => ({ copyCurrentPageUrl: vi.fn().mockResolvedValue(undefined) }));
+
+import type { PidashCommand } from "../../commands/index.js";
+import { copyCurrentPageUrl } from "../clipboard.js";
+import { useShortcutsDialog } from "../shortcutsDialogStore.js";
+import { useSidebarCollapsed } from "../sidebarCollapsed.js";
+import { useTopSearchFocus } from "../topSearchFocus.js";
+import { DOCS_URL, FORUM_URL, REPORT_BUG_URL, buildAccountCommands } from "./account.js";
+
+afterEach(() => {
+  useSidebarCollapsed.setState({ collapsed: false });
+  useTopSearchFocus.setState({ request: 0 });
+  useShortcutsDialog.getState().closeShortcuts();
+  vi.mocked(copyCurrentPageUrl).mockClear();
+});
+
+function byId(commands: PidashCommand[]): Map<string, PidashCommand> {
+  return new Map(commands.map((command) => [command.id, command]));
+}
+
+describe("account entries", () => {
+  it("lists the account, utility and help entries with their chords", () => {
+    const commands = buildAccountCommands({ onWorkspaceInvites: () => undefined, onOpenExternal: () => undefined });
+    expect(commands.map((command) => [command.id, command.title, command.section, command.shortcut])).toEqual([
+      ["shell.workspace-invites", "Workspace invites", "Account", undefined],
+      ["shell.toggle-sidebar", "Toggle app sidebar", "Miscellaneous", "mod+b"],
+      ["shell.copy-page-url", "Copy current page URL", "Miscellaneous", "mod+shift+c"],
+      ["shell.focus-search", "Focus search input", "Miscellaneous", "mod+f"],
+      ["shell.open-shortcuts", "Open keyboard shortcuts", "Help", "mod+/"],
+      ["shell.docs", "Open Pi Dash documentation", "Help", undefined],
+      ["shell.forum", "Join our Forum", "Help", undefined],
+      ["shell.report-bug", "Report a bug", "Help", undefined],
+    ]);
+  });
+
+  it("routes invites, toggles the sidebar, copies, focuses and opens the viewer", () => {
+    const onWorkspaceInvites = vi.fn();
+    const entries = byId(buildAccountCommands({ onWorkspaceInvites, onOpenExternal: () => undefined }));
+    entries.get("shell.workspace-invites")!.run();
+    expect(onWorkspaceInvites).toHaveBeenCalledTimes(1);
+    entries.get("shell.toggle-sidebar")!.run();
+    expect(useSidebarCollapsed.getState().collapsed).toBe(true);
+    entries.get("shell.copy-page-url")!.run();
+    expect(copyCurrentPageUrl).toHaveBeenCalledTimes(1);
+    entries.get("shell.focus-search")!.run();
+    expect(useTopSearchFocus.getState().request).toBe(1);
+    entries.get("shell.open-shortcuts")!.run();
+    expect(useShortcutsDialog.getState().open).toBe(true);
+  });
+
+  it("opens the help links outside the app", () => {
+    const onOpenExternal = vi.fn();
+    const entries = byId(buildAccountCommands({ onWorkspaceInvites: () => undefined, onOpenExternal }));
+    entries.get("shell.docs")!.run();
+    entries.get("shell.forum")!.run();
+    entries.get("shell.report-bug")!.run();
+    expect(onOpenExternal.mock.calls.map((call) => call[0])).toEqual([DOCS_URL, FORUM_URL, REPORT_BUG_URL]);
+  });
+});

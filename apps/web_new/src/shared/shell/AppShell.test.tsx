@@ -21,6 +21,8 @@ import { createAppClient } from "../../core/api/index.js";
 import { useCommandPalette } from "../commands/index.js";
 import { useSessionStore } from "../../core/session/store.js";
 import { AppShell } from "./AppShell.js";
+import { useShortcutsDialog } from "./shortcutsDialogStore.js";
+import { useSidebarCollapsed } from "./sidebarCollapsed.js";
 
 function shell(slots: Partial<React.ComponentProps<typeof AppShell>> = {}): React.ReactElement {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -52,6 +54,8 @@ afterEach(() => {
   navigate.mockClear();
   useSessionStore.setState({ status: "unknown", returnUrl: null });
   useCommandPalette.getState().closePalette();
+  useSidebarCollapsed.setState({ collapsed: false });
+  useShortcutsDialog.getState().closeShortcuts();
 });
 
 describe("AppShell", () => {
@@ -128,6 +132,24 @@ describe("AppShell", () => {
     await user.keyboard("/");
     await user.keyboard("k");
     expect(screen.queryByRole("listbox", { name: "Commands" })).toBeNull();
+  });
+
+  it("hides the sidebar while collapsed (SHELL-089)", () => {
+    render(shell());
+    expect(screen.getByRole("complementary", { name: "Workspace navigation" })).not.toBeNull();
+    act(() => {
+      useSidebarCollapsed.getState().setCollapsed(true);
+    });
+    expect(screen.queryByRole("complementary", { name: "Workspace navigation" })).toBeNull();
+  });
+
+  it("mounts the shortcuts dialog closed (SHELL-094)", async () => {
+    render(shell());
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).toBeNull();
+    act(() => {
+      useShortcutsDialog.getState().openShortcuts();
+    });
+    expect(await screen.findByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeNull();
   });
 
   it("redirects to sign-in once when the session expires", () => {
