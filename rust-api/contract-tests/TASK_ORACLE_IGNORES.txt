@@ -12,6 +12,12 @@
 # Coverage of the excluded files (unchanged by V-02):
 #   assistant/test_tasks_turn.py           -> worker-plane oracle job in
 #                                             rust-api-contract-tests.yml
+#   assistant/test_turn_errors.py          -> worker-plane oracle job in
+#                                             rust-api-contract-tests.yml
+#                                             (PIDASHCONV-1062; live test needs
+#                                             a worker, static tests need the
+#                                             pinned-main worktree that job
+#                                             provisions)
 #   loop/test_worker.py                    -> no CI coverage (local gate only)
 #   orchestration/test_beat_schedule.py    -> no CI coverage (local gate only)
 #   orchestration/test_ticker_tasks.py     -> no CI coverage (local gate only)
@@ -20,6 +26,7 @@
 # worker plus LOOP_RECONCILE_EVERY_MINUTES=1 (loop), neither of which fits
 # the HTTP matrix job shape.)
 assistant/test_tasks_turn.py
+assistant/test_turn_errors.py
 loop/test_worker.py
 orchestration/test_beat_schedule.py
 orchestration/test_ticker_tasks.py
