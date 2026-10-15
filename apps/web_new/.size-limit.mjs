@@ -4,8 +4,9 @@
 // Size-limit budgets (Quality gates; run: pnpm --filter web_new size, after
 // pnpm build:web). The JS budget covers shell + first route only: the chain
 // is resolved from the web manifest, so lazy route chunks never move the
-// reading and chunk hashes can rotate freely. Budgets: initial JS 220 KB
-// gzipped (NEWFRONT-196), initial CSS 30 KB gzipped.
+// reading and chunk hashes can rotate freely. Budgets: initial JS 224 KB
+// gzipped (220 KB from NEWFRONT-196, raised for the shell slices; NEWFRONT-523
+// wins it back), initial CSS 30 KB gzipped.
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,7 +35,7 @@ export default [
   {
     name: "web initial JS (shell + first route)",
     path: initialJs,
-    limit: "220 KB",
+    limit: "224 KB",
     gzip: true,
   },
   {
