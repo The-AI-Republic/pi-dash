@@ -416,6 +416,8 @@ The runner-move guard (`runner/views/runners.py`) refuses a move while a non-ter
 
   "A runner that could serve the issue" is `pod_has_runner_for_issue_principal(pod, issue, run.created_by_id)`: non-revoked, not `desktop_bundled`, and owned by the run's creator, the issue's creator or a current assignee. A bare "non-revoked runner" check is not enough: a pod whose only other runners are desktop-bundled, or private to users not on the issue, would pass it, and the un-pinned run would sit in the shared queue that no runner serves, with no `dispatch_wait` (it has no pin) and no bounce. The same check is what the replacement run's preflight applies in step 2, so steps 2 and 3 cannot disagree.
 
+  When the issue has no queued run, the same order applies with `run_creator_id=None` (the function then counts only the issue's creator and current assignees): step 2 only changes `assigned_pod` and creates no run, and step 3 moves the issue to Backlog only if it is in a ticking state, as for `fail_to_backlog`.
+
   The system comment names the runner, the reason, and the pod the issue now uses.
 
 Both outcomes write the activity entry for the cleared runner (§14.7), and for a changed pod. The running run, if any, is cancelled as today in both cases.
