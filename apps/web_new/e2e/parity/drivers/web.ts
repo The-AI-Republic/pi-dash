@@ -27654,8 +27654,64 @@ export class WebDriver implements ParityDriver {
   }
 
   async modulesToggleStar(name: string): Promise<void> {
+    await this.modulesAwaitFetchQuiescent();
     await this.modulesStar(this.modulesRowRoot(name)).click({ timeout: WebDriver.WAIT_MS });
     await expect.poll(async () => this.modulesLastToast(), { timeout: WebDriver.WAIT_MS }).not.toBeNull();
+  }
+
+  // --- Modules list fetch settle (NEWFRONT-370). Appended; sibling
+  // --- methods above are untouched. The modules list fires its collection
+  // --- fetch twice on load (a second round trails the first by ~0.1s) and
+  // --- merges every response over the store, so a star click that lands
+  // --- between the row render and the trailing response gets its optimistic
+  // --- update clobbered by stale data: server true, toast green, row hollow
+  // --- (and a late clobber can even flip a later toggle back onto the add
+  // --- path). Settling before the click removes the hazard: nothing stale
+  // --- is in flight anymore, and nothing on this page refetches the list
+  // --- afterwards.
+
+  private static readonly MODULES_SETTLE_TICK_MS = 100;
+
+  private static readonly MODULES_SETTLE_QUIET_TICKS = 10;
+
+  private static readonly MODULES_SETTLE_MAX_TICKS = 300;
+
+  private static modulesFetchUrl(url: string): boolean {
+    return url.includes("/modules/");
+  }
+
+  private async modulesAwaitFetchQuiescent(): Promise<void> {
+    let pending = 0;
+    let quiet = 0;
+    const onRequest = (request: { url(): string }): void => {
+      if (!WebDriver.modulesFetchUrl(request.url())) return;
+      pending += 1;
+      quiet = 0;
+    };
+    // Terminal for every request exactly once, so the count cannot drift;
+    // a landed response also restarts the quiet window, since the store
+    // merge it triggers is exactly what the toggle must not race.
+    const onSettled = (request: { url(): string }): void => {
+      if (!WebDriver.modulesFetchUrl(request.url())) return;
+      pending = Math.max(0, pending - 1);
+      quiet = 0;
+    };
+    this.page.on("request", onRequest);
+    this.page.on("requestfinished", onSettled);
+    this.page.on("requestfailed", onSettled);
+    try {
+      for (let tick = 0; tick < WebDriver.MODULES_SETTLE_MAX_TICKS; tick++) {
+        if (pending === 0) quiet += 1;
+        else quiet = 0;
+        if (quiet >= WebDriver.MODULES_SETTLE_QUIET_TICKS) return;
+        await this.page.waitForTimeout(WebDriver.MODULES_SETTLE_TICK_MS);
+      }
+      throw new Error("[parity] modules list fetches never settled; refusing a clobber-prone star toggle.");
+    } finally {
+      this.page.off("request", onRequest);
+      this.page.off("requestfinished", onSettled);
+      this.page.off("requestfailed", onSettled);
+    }
   }
 
   async modulesFavoritesExpanded(): Promise<boolean> {
