@@ -309,7 +309,7 @@ The matcher's tier rank, per run, given `last_dedicated` = "the last run this ru
 
 Inside a rank, oldest `created_at` first, as today. With `last_dedicated` false the ranks are identical to today's `_is_mine` annotation.
 
-**What the runner served last is derived, not stored.** `last_dedicated` is the `pin_kind` of the runner's most recent run by `assigned_at` (one indexed lookup, §6.5), read inside `next_for_runner` before the queue query. When `next_for_runner` runs, the runner is idle, so that run is terminal or paused. A run's `pin_kind` does not change after assignment: a release (§12.2) and a re-point (§13.2) both happen only while the run is `QUEUED`, so a released run counts as shared work, which is what it was. A runner with no runs yet counts as `last_dedicated` false.
+**What the runner served last is derived, not stored.** `last_dedicated` is true when the runner's most recent run by `assigned_at` (filtered to `assigned_at IS NOT NULL`, since Postgres sorts NULLs first in a descending order; one indexed lookup, §6.5) has `pinned_runner` set and `pin_kind = dedicated`, read inside `next_for_runner` before the queue query. When `next_for_runner` runs, the runner is idle, so that run is terminal or paused. A run's `pin_kind` does not change after assignment: a release (§12.2) and a re-point (§13.2) both happen only while the run is `QUEUED`, so a released run counts as shared work, which is what it was. A runner with no runs yet counts as `last_dedicated` false.
 
 Rejected: a stored `Runner.last_served_kind`. It would have to be written by every assignment path (`drain_pod`, `drain_for_runner`, the session-open drain), and it can drift from the runs it summarises. The derived value cannot.
 
@@ -410,9 +410,11 @@ The runner-move guard (`runner/views/runners.py`) refuses a move while a non-ter
 
 - **`fail_to_backlog` (default).** The issue's queued run is failed with `error_code = "dedicated_runner_revoked"` instead of being un-pinned. The issue moves to Backlog through the existing bounce (`orchestration/scheduling.py:_bounce_issue_no_eligible_runner`, reason `dedicated-runner-revoked`), whose system comment (a new message for this reason) names the runner and says it was revoked or deleted and that a person must choose a new runner or the pod. This applies whether or not the issue had a queued run: an issue in a ticking state is moved to Backlog so no tick creates a run on a squad the user did not choose. An issue in another state (Backlog, Todo, Done, …) only gets the cleared assignment and the comment.
 - **`fall_back`.** The issue is routed to a squad, in this order:
-  1. Its own pod, if that pod still has a non-revoked runner after this revoke. The queued run is un-pinned and served by the pod's shared queue (today's revoke behaviour).
-  2. Otherwise the project's default pod (`Pod.default_for_project`), if it has a non-revoked runner. `assigned_pod` is set to it in the same transaction. `AgentRun.pod` is immutable, so the queued run is cancelled and, on commit, a replacement is created in the default pod through `_create_and_dispatch_run`, as the project-move handoff does.
+  1. Its own pod, if that pod still has a runner that could serve the issue after this revoke. The queued run is un-pinned and served by the pod's shared queue (today's revoke behaviour).
+  2. Otherwise the project's default pod (`Pod.default_for_project`), if it has such a runner. `assigned_pod` is set to it in the same transaction. `AgentRun.pod` is immutable, so the queued run is cancelled and, on commit, a replacement is created in the default pod through `_create_and_dispatch_run`, as the project-move handoff does.
   3. Otherwise the existing no-eligible-runner bounce applies: back to Backlog with its comment (reason `no-eligible-runner`).
+
+  "A runner that could serve the issue" is `pod_has_runner_for_issue_principal(pod, issue, run.created_by_id)`: non-revoked, not `desktop_bundled`, and owned by the run's creator, the issue's creator or a current assignee. A bare "non-revoked runner" check is not enough: a pod whose only other runners are desktop-bundled, or private to users not on the issue, would pass it, and the un-pinned run would sit in the shared queue that no runner serves, with no `dispatch_wait` (it has no pin) and no bounce. The same check is what the replacement run's preflight applies in step 2, so steps 2 and 3 cannot disagree.
 
   The system comment names the runner, the reason, and the pod the issue now uses.
 
