@@ -327,6 +327,12 @@ test(
     test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
     await resetPrefs(seed.workspaceSlug, seed.projectId, session);
+    // The state must exist before the page loads: the app fetches the
+    // states list once at load and never refetches it, so creating after
+    // openAuthenticated races the load fetch (NEWFRONT-522: the dev oracle
+    // seals [Todo] while prod usually lands the fetch after the create).
+    const stateName = `Parity Doing ${uniqueSuffix()}`;
+    const stateId = await serverCreateState(seed.workspaceSlug, seed.projectId, stateName, "started", session);
     await driver.openAuthenticated(
       `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
       sessionBrowserCookies(session)
@@ -334,8 +340,6 @@ test(
     const first = seed.issueNames[0] ?? "";
     const rows = await serverIssues(seed.workspaceSlug, seed.projectId, session);
     const firstId = rows.find((row) => row.name === first)?.id ?? "";
-    const stateName = `Parity Doing ${uniqueSuffix()}`;
-    const stateId = await serverCreateState(seed.workspaceSlug, seed.projectId, stateName, "started", session);
     try {
       expect(await driver.layoutsRowCanEditState(first)).toEqual(true);
       expect(await driver.layoutsRowState(first)).toEqual("Todo");
