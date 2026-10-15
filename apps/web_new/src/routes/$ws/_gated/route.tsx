@@ -29,8 +29,9 @@ import {
   useSignOut,
 } from "../../../features/auth/index.js";
 import { projectsQueryOptions } from "../../../features/projects/index.js";
-import { useCommandPalette } from "../../../shared/commands/index.js";
+import type { SearchResultHit } from "../../../shared/commands/index.js";
 import { AppShell, Sidebar, TitleBar } from "../../../shared/shell/index.js";
+import { resolveSearchTarget } from "./searchTarget.js";
 
 export const Route = createFileRoute("/$ws/_gated")({
   beforeLoad: async ({ context, location }) => {
@@ -63,7 +64,6 @@ export const Route = createFileRoute("/$ws/_gated")({
     const params = Route.useParams();
     const navigate = Route.useNavigate();
     const matches = useRouterState({ select: (state) => state.matches });
-    const openPalette = useCommandPalette((state) => state.openPalette);
     const signOut = useSignOut();
 
     return (
@@ -74,7 +74,7 @@ export const Route = createFileRoute("/$ws/_gated")({
         onSelectProject={(projectId) =>
           navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: params.ws, projectId }, search: {} })
         }
-        onOpenPalette={openPalette}
+        onSelectSearchResult={(hit: SearchResultHit) => navigate(resolveSearchTarget(hit, params.ws))}
         onSignOut={() => {
           void runSignOutAction(
             () => signOut.mutateAsync(),
@@ -101,14 +101,14 @@ function WorkspaceShell({
   childProjectId,
   onSelectWorkspace,
   onSelectProject,
-  onOpenPalette,
+  onSelectSearchResult,
   onSignOut,
 }: {
   workspaceSlug: string;
   childProjectId: string | null;
   onSelectWorkspace: (slug: string) => void;
   onSelectProject: (projectId: string) => void;
-  onOpenPalette: () => void;
+  onSelectSearchResult: (hit: SearchResultHit) => void;
   onSignOut: () => void;
 }): React.ReactElement {
   const context = Route.useRouteContext();
@@ -121,6 +121,8 @@ function WorkspaceShell({
   const activeProject = projects.find((project) => project.id === childProjectId) ?? null;
   const userLabel = me.display_name || me.email;
 
+  const searchScope = { workspaceSlug, projectId: childProjectId };
+
   return (
     <AppShell
       commands={[
@@ -129,16 +131,19 @@ function WorkspaceShell({
           id: "shell.go-home",
           title: "Go to workspace home",
           hint: workspace?.name ?? workspaceSlug,
-          section: "Navigate",
+          section: "Navigation",
           run: () => onSelectWorkspace(workspaceSlug),
         },
       ]}
+      searchScope={searchScope}
+      onSelectSearchResult={onSelectSearchResult}
       topBar={
         <TitleBar
           workspaceName={workspace?.name ?? workspaceSlug}
           section={activeProject?.name ?? ""}
           userLabel={userLabel}
-          onOpenPalette={onOpenPalette}
+          searchScope={searchScope}
+          onSelectSearchResult={onSelectSearchResult}
         />
       }
       sidebar={

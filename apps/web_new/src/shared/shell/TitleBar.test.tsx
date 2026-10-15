@@ -5,18 +5,39 @@
 // TitleBar desktop chrome (NEWFRONT-18): the drag region, the macOS
 // traffic-light inset and the native title sync all key off
 // platform.window, so the web build renders plain chrome.
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import * as React from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createAppClient } from "../../core/api/index.js";
 import { platform, type TitleBarApi } from "../../core/platform/index.js";
 import { platform as desktopPlatform } from "../../core/platform/tauri.js";
 import { TitleBar } from "./TitleBar.js";
 
 function renderBar(section = "Issues"): void {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <TitleBar workspaceName="Acme" section={section} userLabel="ada@example.com" onOpenPalette={() => undefined} />
+    <QueryClientProvider client={queryClient}>
+      <TitleBar
+        workspaceName="Acme"
+        section={section}
+        userLabel="ada@example.com"
+        searchScope={null}
+        onSelectSearchResult={() => undefined}
+      />
+    </QueryClientProvider>
   );
 }
+
+beforeEach(() => {
+  createAppClient("https://api.test", async (url) => ({
+    status: 200,
+    url,
+    headers: { get: () => null },
+    text: async () => JSON.stringify({ results: {} }),
+  }));
+});
 
 describe("TitleBar platform chrome", () => {
   const hadWindow = platform.window;
@@ -54,6 +75,19 @@ describe("TitleBar platform chrome", () => {
     expect(header).toHaveAttribute("data-tauri-drag-region");
     expect(header.className).not.toContain("pl-20");
     expect(setTitle).toHaveBeenCalledWith("Pi Dash");
+  });
+});
+
+describe("TitleBar search box", () => {
+  it("mounts the always-visible palette search field (SHELL-081)", () => {
+    const hadWindow = platform.window;
+    delete platform.window;
+    try {
+      renderBar();
+      expect(screen.getByPlaceholderText("Search commands...")).toBeInTheDocument();
+    } finally {
+      if (hadWindow !== undefined) platform.window = hadWindow;
+    }
   });
 });
 

@@ -2,26 +2,36 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Title bar area (Architecture > shared/shell). Brand and workspace crumb
-// on the left, the palette trigger in the middle, the signed-in user on
+// on the left, the palette search box in the middle, the signed-in user on
 // the right. On desktop (platform.window present) the header is also the
 // window drag region, indented for the macOS traffic lights, and it mirrors
 // the location in the native window title. The web build renders plain
 // chrome: no drag region, no inset, no title sync.
 
-import { Avatar, Button, Kbd } from "@pidash/kit";
-import { Search } from "lucide-react";
+import { Avatar } from "@pidash/kit";
 import * as React from "react";
 
 import { platform } from "../../core/platform/index.js";
+import type { PaletteSearchScope, SearchResultHit } from "../commands/index.js";
+import { TopBarSearch } from "./TopBarSearch.js";
 
 export interface TitleBarProps {
   workspaceName: string;
   section: string;
   userLabel: string;
-  onOpenPalette: () => void;
+  /** Where the search box searches; null renders it commands-only. */
+  searchScope: PaletteSearchScope | null;
+  /** Runs when a server hit activates (route-owned navigation). */
+  onSelectSearchResult: (hit: SearchResultHit) => void;
 }
 
-export function TitleBar({ workspaceName, section, userLabel, onOpenPalette }: TitleBarProps): React.ReactElement {
+export function TitleBar({
+  workspaceName,
+  section,
+  userLabel,
+  searchScope,
+  onSelectSearchResult,
+}: TitleBarProps): React.ReactElement {
   const desktop = platform.window;
   const title = section ? `${section} — Pi Dash` : "Pi Dash";
 
@@ -52,11 +62,7 @@ export function TitleBar({ workspaceName, section, userLabel, onOpenPalette }: T
         ) : null}
       </div>
       <div className="flex flex-1 justify-center">
-        <Button variant="secondary" size="small" onClick={onOpenPalette} aria-label="Open command palette">
-          <Search size={16} strokeWidth={1.5} aria-hidden="true" />
-          <span className="text-(--text-muted)">Commands</span>
-          <Kbd keys={["mod", "K"]} />
-        </Button>
+        <TopBarSearch scope={searchScope} onSelectSearchResult={onSelectSearchResult} />
       </div>
       <div className="flex items-center gap-(--space-2)">
         <Avatar name={userLabel} size="small" />

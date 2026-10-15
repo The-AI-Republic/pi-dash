@@ -2,10 +2,11 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const navigate = vi.fn();
 
@@ -16,21 +17,36 @@ vi.mock("@tanstack/react-router", () => ({
   useRouter: () => ({ state: { location: { href: "/acme/" } }, navigate }),
 }));
 
+import { createAppClient } from "../../core/api/index.js";
 import { useCommandPalette } from "../commands/index.js";
 import { useSessionStore } from "../../core/session/store.js";
 import { AppShell } from "./AppShell.js";
 
 function shell(slots: Partial<React.ComponentProps<typeof AppShell>> = {}): React.ReactElement {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return (
-    <AppShell
-      topBar={<header>top bar</header>}
-      sidebar={<aside aria-label="Workspace navigation">sidebar</aside>}
-      {...slots}
-    >
-      <p>page content</p>
-    </AppShell>
+    <QueryClientProvider client={queryClient}>
+      <AppShell
+        topBar={<header>top bar</header>}
+        sidebar={<aside aria-label="Workspace navigation">sidebar</aside>}
+        searchScope={null}
+        onSelectSearchResult={() => undefined}
+        {...slots}
+      >
+        <p>page content</p>
+      </AppShell>
+    </QueryClientProvider>
   );
 }
+
+beforeEach(() => {
+  createAppClient("https://api.test", async (url) => ({
+    status: 200,
+    url,
+    headers: { get: () => null },
+    text: async () => JSON.stringify({ results: {} }),
+  }));
+});
 
 afterEach(() => {
   navigate.mockClear();
@@ -76,6 +92,42 @@ describe("AppShell", () => {
     render(shell());
     await user.keyboard("{Control>}k{/Control}");
     expect(await screen.findByRole("listbox", { name: "Commands" })).not.toBeNull();
+  });
+
+  it("opens the palette from inside a text field without navigating (SHELL-080)", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AppShell
+          topBar={<header>top bar</header>}
+          sidebar={<aside aria-label="Workspace navigation">sidebar</aside>}
+          searchScope={null}
+          onSelectSearchResult={() => undefined}
+        >
+          <label>
+            Note
+            <input type="text" />
+          </label>
+        </AppShell>
+      </QueryClientProvider>
+    );
+    const field = screen.getByLabelText("Note");
+    await user.click(field);
+    await user.type(field, "abc");
+    await user.keyboard("{Control>}k{/Control}");
+    const listbox = await screen.findByRole("listbox", { name: "Commands" });
+    expect(listbox).not.toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+    expect((field as HTMLInputElement).value).toBe("abc");
+  });
+
+  it("ignores unmodified keys: no slash or bare-key entry (SHELL-080)", async () => {
+    const user = userEvent.setup();
+    render(shell());
+    await user.keyboard("/");
+    await user.keyboard("k");
+    expect(screen.queryByRole("listbox", { name: "Commands" })).toBeNull();
   });
 
   it("redirects to sign-in once when the session expires", () => {
