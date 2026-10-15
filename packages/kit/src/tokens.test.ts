@@ -113,7 +113,10 @@ describe("tokens.css", () => {
   });
 
   it("keeps explicit pins ahead of the OS-follow fallback", () => {
-    expect(css).toContain(
+    // Whitespace-insensitive: the commit formatter wraps the long
+    // selector, so compare against the compacted stylesheet.
+    const compact = css.replace(/\s+/g, "");
+    expect(compact).toContain(
       ':root:not([data-theme="light"]):not([data-theme="light-contrast"])' +
         ':not([data-theme="dark-contrast"]):not([data-theme="custom"])'
     );
