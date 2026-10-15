@@ -13,6 +13,7 @@ import * as React from "react";
 
 import { platform } from "../../core/platform/index.js";
 import type { PaletteSearchScope, SearchResultHit } from "../commands/index.js";
+import { RepoStar } from "./RepoStar.js";
 import { TopBarSearch } from "./TopBarSearch.js";
 
 export interface TitleBarProps {
@@ -64,7 +65,8 @@ export function TitleBar({
       <div className="flex flex-1 justify-center">
         <TopBarSearch scope={searchScope} onSelectSearchResult={onSelectSearchResult} />
       </div>
-      <div className="flex items-center gap-(--space-2)">
+      <div className="flex items-center gap-(--space-3)">
+        <RepoStar />
         <Avatar name={userLabel} size="small" />
         <span className="text-body hidden max-w-40 truncate text-(--text-muted) sm:inline">{userLabel}</span>
       </div>

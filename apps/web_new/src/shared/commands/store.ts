@@ -17,6 +17,8 @@ interface CommandPaletteState {
   page: string | null;
   /** True widens server search from the project to the workspace (SHELL-084). */
   workspaceSearch: boolean;
+  /** The entity context is dismissed (chip + contextual group hidden). */
+  contextDismissed: boolean;
   openPalette: () => void;
   closePalette: () => void;
   togglePalette: () => void;
@@ -26,19 +28,27 @@ interface CommandPaletteState {
   /** Step back to the root list; the query clears (SHELL-083). */
   closePage: () => void;
   setWorkspaceSearch: (workspaceSearch: boolean) => void;
+  /**
+   * Hide the contextual group and chip until the next open, stepping
+   * back to the root list so a contextual sub-page never orphans.
+   */
+  dismissContext: () => void;
 }
 
-const initial = { open: false, query: "", page: null as string | null, workspaceSearch: false };
+const fresh = { query: "", page: null as string | null, workspaceSearch: false, contextDismissed: false };
+
+const initial = { open: false, ...fresh };
 
 export const useCommandPalette = create<CommandPaletteState>()((set) => ({
   ...initial,
-  openPalette: () => set({ open: true, query: "", page: null, workspaceSearch: false }),
-  closePalette: () => set({ open: false, query: "", page: null, workspaceSearch: false }),
-  togglePalette: () => set((state) => ({ open: !state.open, query: "", page: null, workspaceSearch: false })),
+  openPalette: () => set({ open: true, ...fresh }),
+  closePalette: () => set({ open: false, ...fresh }),
+  togglePalette: () => set((state) => ({ open: !state.open, ...fresh })),
   setQuery: (query: string) => set({ query }),
   openPage: (page: string) => set({ page, query: "" }),
   closePage: () => set({ page: null, query: "" }),
   setWorkspaceSearch: (workspaceSearch: boolean) => set({ workspaceSearch }),
+  dismissContext: () => set({ contextDismissed: true, page: null, query: "" }),
 }));
 
 registerStoreReset(() => {

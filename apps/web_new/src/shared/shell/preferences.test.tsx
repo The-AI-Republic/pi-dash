@@ -17,20 +17,13 @@ import { sessionKeys } from "../../core/session/queries.js";
 import { notifyError, notifySuccess } from "./toaster.js";
 import {
   FIRST_DAY_CHOICES,
-  LANGUAGE_CHOICES,
   PREFERENCES_FAILED_TITLE,
   PREFERENCES_UPDATED_TITLE,
   THEME_CHOICES,
-  THEME_FAILED_TITLE,
-  THEME_UPDATED_MESSAGE,
-  THEME_UPDATED_TITLE,
   TIMEZONE_FAILED_TITLE,
   TIMEZONE_UPDATED_TITLE,
-  reloadApp,
   timezonesQueryOptions,
   useUpdateFirstDay,
-  useUpdateLanguage,
-  useUpdateTheme,
   useUpdateTimezone,
 } from "./preferences.js";
 
@@ -138,17 +131,19 @@ function testClient() {
 afterEach(() => {
   resetAppClient();
   document.documentElement.removeAttribute("data-theme");
-  document.documentElement.lang = "";
   vi.mocked(notifySuccess).mockClear();
   vi.mocked(notifyError).mockClear();
 });
 
 describe("preference option lists", () => {
-  it("offers the engine-supported themes, seven days and OSS English", () => {
+  it("offers the engine-supported themes and seven days", () => {
     expect(THEME_CHOICES).toEqual([
       { value: "system", label: "System preference" },
       { value: "light", label: "Light" },
       { value: "dark", label: "Dark" },
+      { value: "light-contrast", label: "Light high contrast" },
+      { value: "dark-contrast", label: "Dark high contrast" },
+      { value: "custom", label: "Custom theme" },
     ]);
     expect(FIRST_DAY_CHOICES.map((choice) => choice.label)).toEqual([
       "Sunday",
@@ -161,73 +156,6 @@ describe("preference option lists", () => {
     ]);
     // Sunday is zero on the server (SHELL-088).
     expect(FIRST_DAY_CHOICES.map((choice) => choice.value)).toEqual([0, 1, 2, 3, 4, 5, 6]);
-    expect(LANGUAGE_CHOICES).toEqual([{ value: "en", label: "English" }]);
-  });
-});
-
-describe("useUpdateTheme", () => {
-  function ThemeProbe({ reload }: { reload: () => void }) {
-    const update = useUpdateTheme({ reload });
-    const [outcome, setOutcome] = React.useState("idle");
-    return (
-      <button
-        type="button"
-        onClick={() => {
-          update.mutate({ theme: "dark" }, { onError: () => setOutcome("failed"), onSuccess: () => setOutcome("ok") });
-        }}
-      >
-        outcome:{outcome}
-      </button>
-    );
-  }
-
-  it("applies at once, persists the merged bag, toasts and reloads", async () => {
-    const bodies = stubClient();
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    queryClient.setQueryData(sessionKeys.profile, profileBody({ theme: { theme: "light", primary: "#fff" } }));
-    const reload = vi.fn();
-    render(
-      <QueryClientProvider client={queryClient}>
-        <ThemeProbe reload={reload} />
-      </QueryClientProvider>
-    );
-    fireEvent.click(screen.getByRole("button"));
-    await waitFor(() => expect(screen.getByRole("button")).toHaveTextContent("outcome:ok"));
-    // Applied immediately, before the network settles.
-    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
-    expect(bodies).toHaveLength(1);
-    expect(JSON.parse(bodies[0]!.split(" ").slice(2).join(" "))).toEqual({
-      theme: { theme: "dark", primary: "#fff" },
-    });
-    expect(notifySuccess).toHaveBeenCalledWith(THEME_UPDATED_TITLE, THEME_UPDATED_MESSAGE);
-    expect(reload).toHaveBeenCalledTimes(1);
-  });
-
-  it("sends a bare theme bag when no profile is cached", async () => {
-    const bodies = stubClient();
-    const reload = vi.fn();
-    render(
-      <QueryClientProvider client={testClient()}>
-        <ThemeProbe reload={reload} />
-      </QueryClientProvider>
-    );
-    fireEvent.click(screen.getByRole("button"));
-    await waitFor(() => expect(screen.getByRole("button")).toHaveTextContent("outcome:ok"));
-    expect(JSON.parse(bodies[0]!.split(" ").slice(2).join(" "))).toEqual({ theme: { theme: "dark" } });
-  });
-
-  it("toasts and reports failure without reloading", async () => {
-    stubClient({ profileStatus: 500 });
-    const reload = vi.fn();
-    render(
-      <QueryClientProvider client={testClient()}>
-        <ThemeProbe reload={reload} />
-      </QueryClientProvider>
-    );
-    fireEvent.click(screen.getByRole("button"));
-    await waitFor(() => expect(screen.getByRole("button")).toHaveTextContent("outcome:failed"));
-    expect(notifyError).toHaveBeenCalledWith(THEME_FAILED_TITLE, expect.any(String));
-    expect(reload).not.toHaveBeenCalled();
   });
 });
 
@@ -265,49 +193,6 @@ describe("useUpdateFirstDay", () => {
     render(
       <QueryClientProvider client={testClient()}>
         <DayProbe />
-      </QueryClientProvider>
-    );
-    fireEvent.click(screen.getByRole("button"));
-    await waitFor(() => expect(screen.getByRole("button")).toHaveTextContent("outcome:failed"));
-    expect(notifyError).toHaveBeenCalledWith(PREFERENCES_FAILED_TITLE, expect.any(String));
-  });
-});
-
-describe("useUpdateLanguage", () => {
-  function LanguageProbe({ failing }: { failing: boolean }) {
-    const update = useUpdateLanguage();
-    const [outcome, setOutcome] = React.useState("idle");
-    return (
-      <button
-        type="button"
-        onClick={() => {
-          update.mutate({ language: "en" }, { onError: () => setOutcome("failed"), onSuccess: () => setOutcome("ok") });
-        }}
-      >
-        outcome:{outcome}:{failing ? "x" : "y"}
-      </button>
-    );
-  }
-
-  it("persists the language, flips the document language and toasts", async () => {
-    const bodies = stubClient();
-    render(
-      <QueryClientProvider client={testClient()}>
-        <LanguageProbe failing={false} />
-      </QueryClientProvider>
-    );
-    fireEvent.click(screen.getByRole("button"));
-    await waitFor(() => expect(screen.getByRole("button")).toHaveTextContent("outcome:ok"));
-    expect(JSON.parse(bodies[0]!.split(" ").slice(2).join(" "))).toEqual({ language: "en" });
-    expect(document.documentElement.lang).toBe("en");
-    expect(notifySuccess).toHaveBeenCalledWith(PREFERENCES_UPDATED_TITLE);
-  });
-
-  it("toasts language failures", async () => {
-    stubClient({ profileStatus: 500 });
-    render(
-      <QueryClientProvider client={testClient()}>
-        <LanguageProbe failing />
       </QueryClientProvider>
     );
     fireEvent.click(screen.getByRole("button"));
@@ -360,6 +245,55 @@ describe("useUpdateTimezone", () => {
     await waitFor(() => expect(screen.getByRole("button")).toHaveTextContent("outcome:failed"));
     expect(notifyError).toHaveBeenCalledWith(TIMEZONE_FAILED_TITLE, expect.any(String));
   });
+
+  it("notifies handlers and syncs the user cache on success", async () => {
+    stubClient();
+    const queryClient = testClient();
+    queryClient.setQueryData(sessionKeys.me, {
+      id: USER_ID,
+      email: "ada@example.com",
+      user_timezone: "America/New_York",
+    });
+    const seen: string[] = [];
+    function HandledProbe() {
+      const update = useUpdateTimezone({ onSuccess: (timezone) => seen.push(timezone) });
+      return (
+        <button type="button" onClick={() => update.mutate({ timezone: "Asia/Tokyo" })}>
+          save
+        </button>
+      );
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <HandledProbe />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "save" }));
+    await waitFor(() => expect(seen).toEqual(["Asia/Tokyo"]));
+    expect(notifySuccess).toHaveBeenCalledWith(TIMEZONE_UPDATED_TITLE);
+    expect(queryClient.getQueryData(sessionKeys.me)).toMatchObject({ user_timezone: "Europe/Paris" });
+  });
+
+  it("reports failures to the error handler", async () => {
+    stubClient({ meStatus: 500 });
+    const errors: Error[] = [];
+    function FailingProbe() {
+      const update = useUpdateTimezone({ onError: (error) => errors.push(error) });
+      return (
+        <button type="button" onClick={() => update.mutate({ timezone: "Asia/Tokyo" })}>
+          save
+        </button>
+      );
+    }
+    render(
+      <QueryClientProvider client={testClient()}>
+        <FailingProbe />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "save" }));
+    await waitFor(() => expect(errors).toHaveLength(1));
+    expect(notifyError).toHaveBeenCalledWith(TIMEZONE_FAILED_TITLE, expect.any(String));
+  });
 });
 
 describe("timezones query", () => {
@@ -378,19 +312,5 @@ describe("timezones query", () => {
       </QueryClientProvider>
     );
     await waitFor(() => expect(screen.getByText("zones:Europe/Paris")).not.toBeNull());
-  });
-});
-
-describe("reloadApp", () => {
-  it("reloads the page", () => {
-    const reload = vi.fn();
-    const location = window.location;
-    Object.defineProperty(window, "location", { value: { ...location, reload }, writable: true });
-    try {
-      reloadApp();
-      expect(reload).toHaveBeenCalledTimes(1);
-    } finally {
-      Object.defineProperty(window, "location", { value: location, writable: true });
-    }
   });
 });

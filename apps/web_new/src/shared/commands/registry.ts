@@ -8,6 +8,22 @@
 // (entity pickers, preference lists) register beside their commands and
 // render through the palette's generic page view (shell spec, SHELL-082).
 
+/**
+ * Contextual marker (shell spec, SHELL-090/091). Commands registered by
+ * an entity screen carry the entity family plus the chip label and
+ * subject name. The palette filters marked commands out while the
+ * context is dismissed and renders the chip from the first marked
+ * command.
+ */
+export interface PaletteCommandContext {
+  /** Entity family that registered the command. */
+  kind: "work-item" | "cycle" | "module" | "page";
+  /** Short entity label for the chip ("Work item"). */
+  indicator: string;
+  /** Subject name for the chip (route key or entity name). */
+  subject: string;
+}
+
 export interface PidashCommand {
   /** Stable id, namespaced by owner ("shell.sign-out", "issues.go-to-list"). */
   id: string;
@@ -37,6 +53,8 @@ export interface PidashCommand {
    * owner; sibling palette slices register their pickers on top of this.
    */
   page?: string | undefined;
+  /** Set when an entity screen registered the command for its subject. */
+  context?: PaletteCommandContext | undefined;
   run: () => void | Promise<void>;
 }
 
@@ -81,10 +99,15 @@ function sectionRank(section: string): number {
   return rank === -1 ? SECTION_ORDER.length : rank;
 }
 
-/** Snapshot of every registered command, in palette section order then title. */
+/**
+ * Snapshot of every registered command: context-marked commands first
+ * (SHELL-087/090: the entity group appears ahead of the generic groups),
+ * then palette section order, then title.
+ */
 export function listCommands(): PidashCommand[] {
   return [...commands.values()].sort(
     (a, b) =>
+      Number(b.context !== undefined) - Number(a.context !== undefined) ||
       sectionRank(a.section ?? "General") - sectionRank(b.section ?? "General") ||
       (a.section ?? "General").localeCompare(b.section ?? "General") ||
       a.title.localeCompare(b.title)
@@ -131,6 +154,8 @@ export interface PalettePageOption {
   title: string;
   /** Secondary hint, e.g. the entity's project. */
   hint?: string | undefined;
+  /** Marks the current selection (check shown; pickers re-read on refresh). */
+  selected?: boolean | undefined;
   /**
    * Runs on activation. The page stays open afterwards unless the option
    * closes it through the palette store itself, so multi-change pickers
@@ -227,14 +252,35 @@ interface Chord {
   key: string;
 }
 
-/** Parse "mod+shift+k" into its parts. Returns null when malformed. */
+/**
+ * Named non-printable keys a chord may end in (matched against
+ * KeyboardEvent.key case-insensitively, e.g. "mod+backspace" for the
+ * work-item Delete entry, SHELL-090).
+ */
+const NAMED_KEYS = new Set([
+  "backspace",
+  "delete",
+  "enter",
+  "escape",
+  "tab",
+  "arrowup",
+  "arrowdown",
+  "arrowleft",
+  "arrowright",
+]);
+
+/**
+ * Parse "mod+shift+k" into its parts. The key is one printable
+ * character or a named non-printable key; anything else is malformed
+ * and returns null.
+ */
 export function parseShortcut(shortcut: string): Chord | null {
   const parts = shortcut
     .toLowerCase()
     .split("+")
     .map((part) => part.trim());
   const key = parts.pop();
-  if (!key || key.length !== 1) return null;
+  if (!key || (key.length !== 1 && !NAMED_KEYS.has(key))) return null;
   const rest = new Set(parts);
   if (rest.size !== parts.length) return null;
   for (const part of rest) {

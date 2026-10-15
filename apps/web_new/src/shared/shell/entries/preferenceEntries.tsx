@@ -1,14 +1,17 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Palette preference entries (shell spec, SHELL-088). Four commands, each
-// opening a sub-page: theme, timezone, first day of week and language.
-// Picks persist through the shared preference mutations; the appearance
-// surfaces (NEWFRONT-294) reuse those mutations for their own pickers.
+// Palette preference entries (shell spec, SHELL-088/095-097). Four
+// commands, each opening a sub-page: theme, timezone, first day of
+// week and language. Theme and language picks go through their
+// engines (immediate re-skin and re-render, no reload); the other two
+// persist through the shared preference mutations.
 
 import { useQuery } from "@tanstack/react-query";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { useLocale } from "../../../core/i18n/index.js";
+import { useTheme } from "../../../core/theme/index.js";
 import {
   filterPageOptions,
   useCommandPalette,
@@ -18,12 +21,9 @@ import {
 } from "../../commands/index.js";
 import {
   FIRST_DAY_CHOICES,
-  LANGUAGE_CHOICES,
   THEME_CHOICES,
   timezonesQueryOptions,
   useUpdateFirstDay,
-  useUpdateLanguage,
-  useUpdateTheme,
   useUpdateTimezone,
 } from "../preferences.js";
 
@@ -76,7 +76,7 @@ export function themePickerPage(): PalettePage {
     placeholder: "Choose a theme",
     usePageState: (query: string): PalettePageState => {
       const closePalette = useCommandPalette((state) => state.closePalette);
-      const update = useUpdateTheme();
+      const { setTheme } = useTheme();
       return {
         status: "ready",
         options: filterPageOptions(
@@ -85,7 +85,7 @@ export function themePickerPage(): PalettePage {
             title: choice.label,
             run: () => {
               closePalette();
-              update.mutate({ theme: choice.value });
+              setTheme(choice.value);
             },
           })),
           query
@@ -99,7 +99,7 @@ export function themePickerPage(): PalettePage {
 export function timezonePickerPage(): PalettePage {
   return {
     id: TIMEZONE_PAGE_ID,
-    placeholder: "Search timezones",
+    placeholder: "Change timezone",
     usePageState: (query: string): PalettePageState => {
       const closePalette = useCommandPalette((state) => state.closePalette);
       const update = useUpdateTimezone();
@@ -160,16 +160,16 @@ export function languagePickerPage(): PalettePage {
     placeholder: "Choose a language",
     usePageState: (query: string): PalettePageState => {
       const closePalette = useCommandPalette((state) => state.closePalette);
-      const update = useUpdateLanguage();
+      const { setLanguage, supported } = useLocale();
       return {
         status: "ready",
         options: filterPageOptions(
-          LANGUAGE_CHOICES.map((choice) => ({
-            id: choice.value,
+          supported.map((choice) => ({
+            id: choice.tag,
             title: choice.label,
             run: () => {
               closePalette();
-              update.mutate({ language: choice.value });
+              setLanguage(choice.tag);
             },
           })),
           query

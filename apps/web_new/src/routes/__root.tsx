@@ -12,7 +12,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRootRouteWithContext, Outlet } from "@tanstack/react-router";
 import * as React from "react";
 
-import { NotFoundPage, markInitialColorScheme, useDocumentHead } from "../shared/shell/index.js";
+import { LanguageProvider } from "../core/i18n/LanguageProvider.js";
+import { ThemeProvider } from "../core/theme/ThemeProvider.js";
+import { NotFoundPage, markInitialColorScheme, notifyError, useDocumentHead } from "../shared/shell/index.js";
 
 export interface RouterContext {
   queryClient: QueryClient;
@@ -29,7 +31,11 @@ export const Route = createRootRouteWithContext<RouterContext>()({
     }, []);
     return (
       <QueryClientProvider client={context.queryClient}>
-        <Outlet />
+        <ThemeProvider notifyError={notifyError}>
+          <LanguageProvider notifyError={notifyError}>
+            <Outlet />
+          </LanguageProvider>
+        </ThemeProvider>
       </QueryClientProvider>
     );
   },

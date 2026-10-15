@@ -17,7 +17,13 @@ export {
   registerCommands,
   registerPalettePages,
 } from "./registry.js";
-export type { PalettePage, PalettePageOption, PalettePageState, PidashCommand } from "./registry.js";
+export type {
+  PaletteCommandContext,
+  PalettePage,
+  PalettePageOption,
+  PalettePageState,
+  PidashCommand,
+} from "./registry.js";
 export { formatSequenceKeys, isTypingTarget } from "./shortcuts.js";
 export {
   countSearchHits,

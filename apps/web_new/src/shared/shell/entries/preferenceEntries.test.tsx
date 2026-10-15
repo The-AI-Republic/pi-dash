@@ -6,7 +6,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../toaster.js", async (importOriginal) => {
   const original = await importOriginal<Record<string, unknown>>();
@@ -14,8 +14,16 @@ vi.mock("../toaster.js", async (importOriginal) => {
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import {
+  LANGUAGE_STORAGE_KEY,
+  LanguageProvider,
+  registerLocale,
+  resetLocalesForTests,
+  useLocale,
+} from "../../../core/i18n/index.js";
+import { THEME_STORAGE_KEY, ThemeProvider } from "../../../core/theme/index.js";
 import { useCommandPalette, type PalettePage } from "../../commands/index.js";
-import { notifySuccess } from "../toaster.js";
+import { notifyError, notifySuccess } from "../toaster.js";
 import {
   FIRST_DAY_PAGE_ID,
   LANGUAGE_PAGE_ID,
@@ -130,19 +138,20 @@ function PageProbe({ page, query }: { page: PalettePage; query: string }) {
   );
 }
 
-const reload = vi.fn();
-
-beforeEach(() => {
-  const location = window.location;
-  Object.defineProperty(window, "location", { value: { ...location, reload }, writable: true, configurable: true });
-});
+function LocaleTagProbe(): React.ReactElement {
+  const locale = useLocale();
+  return <p data-testid="locale-tag">{locale.tag}</p>;
+}
 
 afterEach(() => {
   resetAppClient();
+  resetLocalesForTests();
   useCommandPalette.getState().closePalette();
   document.documentElement.removeAttribute("data-theme");
+  document.documentElement.removeAttribute("lang");
+  window.localStorage.clear();
   vi.mocked(notifySuccess).mockClear();
-  reload.mockClear();
+  vi.mocked(notifyError).mockClear();
 });
 
 function testClient() {
@@ -152,7 +161,12 @@ function testClient() {
 function renderPage(page: PalettePage, query: string) {
   render(
     <QueryClientProvider client={testClient()}>
-      <PageProbe page={page} query={query} />
+      <ThemeProvider notifyError={vi.mocked(notifyError)}>
+        <LanguageProvider notifyError={vi.mocked(notifyError)}>
+          <LocaleTagProbe />
+          <PageProbe page={page} query={query} />
+        </LanguageProvider>
+      </ThemeProvider>
     </QueryClientProvider>
   );
 }
@@ -169,16 +183,34 @@ describe("preference entries", () => {
 });
 
 describe("theme picker page", () => {
-  it("applies, persists and reloads on pick", async () => {
+  it("lists every engine option and applies the pick immediately without reloading", async () => {
     const bodies = stubClient();
+    window.localStorage.setItem(THEME_STORAGE_KEY, "dark");
     useCommandPalette.getState().openPalette();
     renderPage(themePickerPage(), "");
     expect(themePickerPage().placeholder).toBe("Choose a theme");
+    for (const label of [
+      "System preference",
+      "Light",
+      "Dark",
+      "Light high contrast",
+      "Dark high contrast",
+      "Custom theme",
+    ]) {
+      expect(screen.getByRole("button", { name: label })).not.toBeNull();
+    }
+    // Let the provider's one-time server sync land before picking (the
+    // stub profile carries an empty bag, so the stored dark falls back
+    // to following the OS); otherwise the sync would yank the pick back.
+    await waitFor(() => expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("system"));
     fireEvent.click(screen.getByRole("button", { name: "Dark" }));
     expect(useCommandPalette.getState().open).toBe(false);
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Theme updated", expect.any(String)));
+    // Applied immediately, before the network settles; no reload.
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
+    await waitFor(() => expect(bodies).toHaveLength(1));
     expect(JSON.parse(bodies[0]!.split(" ").slice(2).join(" "))).toEqual({ theme: { theme: "dark" } });
-    expect(reload).toHaveBeenCalledTimes(1);
+    expect(notifySuccess).not.toHaveBeenCalled();
   });
 
   it("filters to the empty line", () => {
@@ -197,13 +229,13 @@ describe("timezone picker page", () => {
     const bodies = stubClient({ timezonesGate: gate });
     useCommandPalette.getState().openPalette();
     renderPage(timezonePickerPage(), "");
-    expect(timezonePickerPage().placeholder).toBe("Search timezones");
+    expect(timezonePickerPage().placeholder).toBe("Change timezone");
     expect(screen.getByText("loading:No timezones found")).not.toBeNull();
     release();
     await waitFor(() => expect(screen.getByRole("button", { name: "Paris" })).not.toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "Tokyo" }));
     expect(useCommandPalette.getState().open).toBe(false);
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Timezone updated"));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Timezone updated successfully."));
     expect(JSON.parse(bodies[0]!.split(" ").slice(2).join(" "))).toEqual({ user_timezone: "Asia/Tokyo" });
   });
 
@@ -242,14 +274,48 @@ describe("first-day picker page", () => {
 });
 
 describe("language picker page", () => {
-  it("persists the language on pick", async () => {
+  it("lists the engine offer and persists the pick through the engine", async () => {
     const bodies = stubClient();
     useCommandPalette.getState().openPalette();
     renderPage(languagePickerPage(), "");
     expect(languagePickerPage().placeholder).toBe("Choose a language");
+    // The OSS build offers English only (SHELL-096).
+    expect(screen.getByRole("button", { name: "English" })).not.toBeNull();
+    expect(screen.getAllByRole("button")).toHaveLength(1);
+    await waitFor(() => expect(screen.getByTestId("locale-tag")).toHaveTextContent("en"));
     fireEvent.click(screen.getByRole("button", { name: "English" }));
     expect(useCommandPalette.getState().open).toBe(false);
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Preferences updated"));
+    // Engine effects land at once: document stamp, local persist, tag.
+    expect(document.documentElement.getAttribute("lang")).toBe("en");
+    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("en");
+    expect(screen.getByTestId("locale-tag")).toHaveTextContent("en");
+    await waitFor(() => expect(bodies).toHaveLength(1));
     expect(JSON.parse(bodies[0]!.split(" ").slice(2).join(" "))).toEqual({ language: "en" });
+    // The engine toasts failures only; a successful switch stays silent.
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("re-renders subscribers when a fuller build offers another locale", async () => {
+    registerLocale({ tag: "fr", label: "French" });
+    const bodies = stubClient();
+    useCommandPalette.getState().openPalette();
+    renderPage(languagePickerPage(), "");
+    await waitFor(() => expect(screen.getByTestId("locale-tag")).toHaveTextContent("en"));
+    fireEvent.click(screen.getByRole("button", { name: "French" }));
+    expect(useCommandPalette.getState().open).toBe(false);
+    expect(document.documentElement.getAttribute("lang")).toBe("fr");
+    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("fr");
+    expect(screen.getByTestId("locale-tag")).toHaveTextContent("fr");
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(JSON.parse(bodies[0]!.split(" ").slice(2).join(" "))).toEqual({ language: "fr" });
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("filters languages", () => {
+    registerLocale({ tag: "fr", label: "French" });
+    stubClient();
+    renderPage(languagePickerPage(), "fre");
+    expect(screen.getByRole("button", { name: "French" })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "English" })).toBeNull();
   });
 });

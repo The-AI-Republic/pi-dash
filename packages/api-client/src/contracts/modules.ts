@@ -24,6 +24,34 @@ export interface ModulePatch {
   description?: string;
   start_date?: string | null;
   target_date?: string | null;
+  status?: string;
+  member_ids?: string[];
+}
+
+/** Module workflow states offered by the palette's Change-status picker. */
+export const MODULE_STATUSES = ["backlog", "planned", "in-progress", "paused", "completed", "cancelled"] as const;
+export type ModuleStatus = (typeof MODULE_STATUSES)[number];
+
+/**
+ * Thin module row for the shell: the palette's Add-to-modules picker
+ * lists names. The server already excludes archived modules. Full
+ * module ownership stays in the modules area.
+ */
+export const ModuleListItem = z.object({
+  id: uuid(),
+  project_id: uuid(),
+  name: z.string(),
+  status: z.string(),
+  is_favorite: z.boolean(),
+});
+export type ModuleListItem = z.infer<typeof ModuleListItem>;
+
+export const ModuleList = z.array(ModuleListItem);
+export type ModuleList = z.infer<typeof ModuleList>;
+
+export async function listModules(client: ApiClient, slug: string, projectId: string): Promise<ModuleList> {
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/modules/`);
+  return client.parse(ModuleList, body, `GET modules ${projectId}`);
 }
 
 export async function updateModule(

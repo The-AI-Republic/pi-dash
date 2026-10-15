@@ -19,6 +19,7 @@ export { FAVORITES_SECTION_OPEN_KEY, isFavoritesSectionOpen, setFavoritesSection
 export { NOT_FOUND_ART, NOT_FOUND_ROBOTS, NOT_FOUND_TITLE, NotFoundPage } from "./NotFoundPage.js";
 export { PeekPanel } from "./PeekPanel.js";
 export type { PeekPanelProps } from "./PeekPanel.js";
+export { REPOSITORY_URL, RepoStar, starIconSrc } from "./RepoStar.js";
 export { Sidebar } from "./Sidebar.js";
 export type { SidebarProject, SidebarProps, SidebarWorkspace } from "./Sidebar.js";
 export { TitleBar } from "./TitleBar.js";
@@ -48,24 +49,17 @@ export {
 export { PAGE_URL_COPIED_TITLE, PAGE_URL_COPY_FAILED_TITLE, copyCurrentPageUrl } from "./clipboard.js";
 export {
   FIRST_DAY_CHOICES,
-  LANGUAGE_CHOICES,
   PREFERENCES_FAILED_TITLE,
   PREFERENCES_UPDATED_TITLE,
   THEME_CHOICES,
-  THEME_FAILED_TITLE,
-  THEME_UPDATED_MESSAGE,
-  THEME_UPDATED_TITLE,
   TIMEZONE_FAILED_TITLE,
   TIMEZONE_UPDATED_TITLE,
   preferenceKeys,
-  reloadApp,
   timezonesQueryOptions,
   useUpdateFirstDay,
-  useUpdateLanguage,
-  useUpdateTheme,
   useUpdateTimezone,
 } from "./preferences.js";
-export type { PreferenceChoice } from "./preferences.js";
+export type { PreferenceChoice, TimezoneMutationHandlers } from "./preferences.js";
 export { groupBoundCommands, ShortcutsDialog } from "./ShortcutsDialog.js";
 export type { ShortcutGroup } from "./ShortcutsDialog.js";
 export { useShortcutsDialog } from "./shortcutsDialogStore.js";

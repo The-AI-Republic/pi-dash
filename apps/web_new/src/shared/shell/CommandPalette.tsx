@@ -2,16 +2,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Centered command-palette modal (Architecture > shared/shell; shell spec
-// §8, SHELL-080/082-085/093). Reads the shared command registry, filters by
-// title plus keywords, and pairs the commands with debounced server search.
-// Sub-pages (pickers, option lists) render through the generic page view.
-// DOM contract for the area-gate driver (NEWFRONT-295): role=dialog; the
-// input placeholder is PALETTE_ROOT_PLACEHOLDER on root and the page's own
-// prompt on a sub-page; one role=listbox ("Commands" on root, "Options" on
-// a page); rows are role=option with a single aria-selected=true; group and
-// result headings are plain text; the results heading pulses (aria-busy plus
-// animate-pulse) mid-flight; the footer scope control is role=switch named
-// "Workspace level"; the no-hits row is the option "No results found".
+// §8, SHELL-080/082-085/090-093). Reads the shared command registry,
+// filters by title plus keywords, and pairs the commands with debounced
+// server search. Sub-pages (pickers, option lists) render through the
+// generic page view. Entity screens register contextual commands (marked
+// with their family and subject); the modal names the subject in a chip
+// above the input, hides the chip plus the group on dismiss, and resets
+// the dismissal on every open. DOM contract for the area-gate driver
+// (NEWFRONT-295): role=dialog; the input placeholder is
+// PALETTE_ROOT_PLACEHOLDER on root and the page's own prompt on a
+// sub-page; one role=listbox ("Commands" on root, "Options" on a page);
+// rows are role=option with a single aria-selected=true; group and
+// result headings are plain text; the results heading pulses (aria-busy
+// plus animate-pulse) mid-flight; the footer scope control is role=switch
+// named "Workspace level"; the no-hits row is the option "No results
+// found"; the context chip names "indicator · subject" with a clear
+// button named "Clear context (Backspace)".
 
 import { useQuery } from "@tanstack/react-query";
 import { Dialog, Input, Spinner } from "@pidash/kit";
@@ -33,6 +39,7 @@ import {
   type SearchResultGroup,
   type SearchResultHit,
 } from "../commands/index.js";
+import { ContextChip } from "./contextual/chip.js";
 import { usePaletteKeys } from "./paletteKeys.js";
 import { groupCommands, PaletteOption, type PaletteRow } from "./paletteRows.js";
 
@@ -49,11 +56,21 @@ export interface CommandPaletteProps {
 export function CommandPalette({ scope, onSelectSearchResult }: CommandPaletteProps): React.ReactElement {
   const open = useCommandPalette((state) => state.open);
   const pageId = useCommandPalette((state) => state.page);
+  const dismissed = useCommandPalette((state) => state.contextDismissed);
   const closePalette = useCommandPalette((state) => state.closePalette);
+  const dismissContext = useCommandPalette((state) => state.dismissContext);
   const page = pageId === null ? undefined : findPalettePage(pageId);
+  // The registry snapshots per open like the root view below.
+  const subject = React.useMemo(
+    () => listCommands().find((command) => command.context !== undefined)?.context,
+    [open, pageId]
+  );
 
   return (
     <Dialog title="Commands" open={open} onOpenChange={(next) => (next ? undefined : closePalette())}>
+      {subject !== undefined && !dismissed ? (
+        <ContextChip indicator={subject.indicator} subject={subject.subject} onClear={dismissContext} />
+      ) : null}
       {page === undefined ? (
         <RootView scope={scope} onSelectSearchResult={onSelectSearchResult} />
       ) : (
@@ -73,12 +90,22 @@ function RootView({
   const open = useCommandPalette((state) => state.open);
   const query = useCommandPalette((state) => state.query);
   const workspaceSearch = useCommandPalette((state) => state.workspaceSearch);
+  const dismissed = useCommandPalette((state) => state.contextDismissed);
   const setQuery = useCommandPalette((state) => state.setQuery);
   const closePalette = useCommandPalette((state) => state.closePalette);
   const openPage = useCommandPalette((state) => state.openPage);
   const setWorkspaceSearch = useCommandPalette((state) => state.setWorkspaceSearch);
+  const dismissContext = useCommandPalette((state) => state.dismissContext);
 
-  const commands = React.useMemo(() => filterCommands(listCommands(), query), [query, open]);
+  const commands = React.useMemo(() => {
+    const visible = filterCommands(listCommands(), query);
+    return dismissed ? visible.filter((command) => command.context === undefined) : visible;
+  }, [query, open, dismissed]);
+  const hasContext = React.useMemo(
+    () => !dismissed && listCommands().some((command) => command.context !== undefined),
+    // Snapshots with the command list above.
+    [query, open, dismissed]
+  );
   const debounced = useDebouncedValue(query, PALETTE_SEARCH_DEBOUNCE_MS);
   const canSearch = scope !== null && debounced.trim().length > 0;
   // Clearing hides the section at once instead of trailing the debounce.
@@ -137,6 +164,8 @@ function RootView({
     onActivate: activate,
     onClearQuery: () => setQuery(""),
     onDismiss: closePalette,
+    // Backspace on an empty root query dismisses the entity context.
+    onStepBack: hasContext ? dismissContext : undefined,
   });
 
   const grouped = React.useMemo(() => groupCommands(commands), [commands]);
@@ -307,6 +336,7 @@ function PageView({ page }: { page: PalettePage }): React.ReactElement {
                 active={index === activeIndex}
                 title={option.title}
                 hint={option.hint}
+                selected={option.selected}
                 onHover={() => setActiveIndex(index)}
                 onSelect={() => activate(index)}
               />

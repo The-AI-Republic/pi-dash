@@ -3910,20 +3910,36 @@ export class WebNewDriver implements ParityDriver {
     return todo("shortcutsDialogCommandTitles");
   }
 
+  // Repo-star action (NEWFRONT-294, SHELL-103). The new top bar mounts
+  // the same named link with a theme-adaptive icon image.
   async repoStarLinkAttributes(): Promise<{ href: string; target: string; rel: string } | null> {
-    return todo("repoStarLinkAttributes");
+    const link = this.page.getByRole("link", { name: /Star us on GitHub/i }).first();
+    if ((await link.count()) === 0) return null;
+    return {
+      href: (await link.getAttribute("href")) ?? "",
+      target: (await link.getAttribute("target")) ?? "",
+      rel: (await link.getAttribute("rel")) ?? "",
+    };
   }
 
   async repoStarIconSrc(): Promise<string | null> {
-    return todo("repoStarIconSrc");
+    const img = this.page
+      .getByRole("link", { name: /Star us on GitHub/i })
+      .first()
+      .locator("img")
+      .first();
+    if ((await img.count()) === 0) return null;
+    return img.getAttribute("src");
   }
 
+  // Preferences (NEWFRONT-294, SHELL-095/096). The applied theme is the
+  // <html> data-theme attribute; the interface language is the root lang.
   async documentTheme(): Promise<string> {
-    return todo("documentTheme");
+    return (await this.page.locator("html").getAttribute("data-theme")) ?? "";
   }
 
   async documentLang(): Promise<string> {
-    return todo("documentLang");
+    return (await this.page.locator("html").getAttribute("lang")) ?? "";
   }
 
   async paletteHasText(_text: string): Promise<boolean> {
@@ -3995,32 +4011,81 @@ export class WebNewDriver implements ParityDriver {
     return todo("closeTopBarViaOutsideClick");
   }
 
-  // Shared empty-state kit tiers (NEWFRONT-127, SHELL-104). Throwing stubs
-  // per the shared driver contract.
-  async titledEmptyState(_title: string): Promise<{
+  // Shared empty-state kit tiers (NEWFRONT-294, SHELL-104). The reader
+  // scopes to the box carrying the given exact title text, mirroring the
+  // oracle queries against the new kit's rendered structure.
+  private emptyStateBox(title: string): Locator {
+    return this.page.getByText(title, { exact: true }).first().locator("xpath=ancestor::div[.//img or .//button][1]");
+  }
+
+  async titledEmptyState(title: string): Promise<{
     description: string | null;
     imageSrc: string | null;
     buttons: string[];
   } | null> {
-    return todo("titledEmptyState");
+    const titleEl = this.page.getByText(title, { exact: true }).first();
+    if (!(await this.isShown(titleEl))) return null;
+    const box = this.emptyStateBox(title);
+    if ((await box.count()) === 0) return null;
+    const img = box.locator("img").first();
+    const buttonTexts = await box.getByRole("button").allTextContents();
+    let description: string | null = null;
+    const para = box.locator("p").first();
+    if (await this.isShown(para)) {
+      description = ((await para.textContent()) ?? "").replace(/\s+/g, " ").trim() || null;
+    } else {
+      const spans = box.locator("span");
+      for (let i = 0, n = await spans.count(); i < n; i += 1) {
+        const candidate = spans.nth(i);
+        if ((await candidate.locator("xpath=ancestor::button[1]").count()) > 0) continue;
+        const text = ((await candidate.textContent()) ?? "").replace(/\s+/g, " ").trim();
+        if (text.length > 0 && text !== title) {
+          description = text;
+          break;
+        }
+      }
+    }
+    return {
+      description,
+      imageSrc: (await this.isShown(img)) ? await img.getAttribute("src") : null,
+      buttons: buttonTexts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0),
+    };
   }
 
-  async clickEmptyStateAction(_title: string, _label: string): Promise<void> {
-    return todo("clickEmptyStateAction");
+  async clickEmptyStateAction(title: string, label: string): Promise<void> {
+    const button = this.emptyStateBox(title).getByRole("button", { name: label }).first();
+    await button.waitFor({ timeout: 60_000 });
+    await button.click();
   }
 
-  async typeInIssueSearchModal(_text: string): Promise<void> {
-    return todo("typeInIssueSearchModal");
+  async typeInIssueSearchModal(text: string): Promise<void> {
+    const input = this.page.getByPlaceholder("Type to search").first();
+    await input.waitFor({ timeout: 60_000 });
+    await input.pressSequentially(text);
   }
 
-  // Cover-image primitive (NEWFRONT-127, SHELL-105). Throwing stubs per the
-  // shared driver contract.
+  // Cover-image primitive (NEWFRONT-294, SHELL-105). The new app renders no
+  // cover slots (target per main#523), so these reads observe whatever the
+  // projects list renders — the negative row asserts they stay empty.
+  private coverProjectCards(): Locator {
+    return this.page
+      .locator('a[href*="/projects/"][href*="/issues"]')
+      .filter({ has: this.page.locator("img, .animate-pulse") });
+  }
+
   async projectCardCoverSrcs(): Promise<(string | null)[]> {
-    return todo("projectCardCoverSrcs");
+    const cards = this.coverProjectCards();
+    const count = await cards.count();
+    const srcs: (string | null)[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const img = cards.nth(i).locator("img").first();
+      srcs.push((await this.isShown(img)) ? await img.getAttribute("src") : null);
+    }
+    return srcs;
   }
 
   async projectCardCoverShimmerVisible(): Promise<boolean> {
-    return todo("projectCardCoverShimmerVisible");
+    return this.isShown(this.coverProjectCards().locator(".animate-pulse").first());
   }
 
   // --- Projects list + lifecycle (NEWFRONT-124, SHELL-024..045) stubs. ---

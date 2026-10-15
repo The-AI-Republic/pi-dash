@@ -524,3 +524,127 @@ describe("CommandPalette no-hits row (SHELL-093)", () => {
     expect(screen.queryByText(/error|failed|unreachable/i)).not.toBeInTheDocument();
   });
 });
+
+describe("CommandPalette context chip (SHELL-090/091)", () => {
+  const CONTEXT = { kind: "work-item" as const, indicator: "Work item", subject: "ACME-12" };
+
+  it("names the subject and groups its commands", async () => {
+    registerCommands([
+      { id: "ctx.state", title: "Change state", section: "Work item actions", context: CONTEXT, run: () => undefined },
+      { id: "shell.sign-out", title: "Sign out", run: () => undefined },
+    ]);
+    renderPalette({ scope: null });
+    await screen.findByRole("listbox", { name: "Commands" });
+    expect(screen.getByText("Work item")).toBeInTheDocument();
+    expect(screen.getByText("ACME-12")).toBeInTheDocument();
+    expect(screen.getByText("Work item actions")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Change state" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Sign out" })).toBeInTheDocument();
+  });
+
+  it("hides the chip and group on clear and restores them on reopen", async () => {
+    const user = userEvent.setup();
+    registerCommands([
+      { id: "ctx.state", title: "Change state", section: "Work item actions", context: CONTEXT, run: () => undefined },
+      { id: "shell.sign-out", title: "Sign out", run: () => undefined },
+    ]);
+    renderPalette({ scope: null });
+    await screen.findByRole("listbox", { name: "Commands" });
+    await user.click(screen.getByRole("button", { name: "Clear context (Backspace)" }));
+    expect(screen.queryByText("ACME-12")).not.toBeInTheDocument();
+    expect(screen.queryByText("Work item actions")).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Change state" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Sign out" })).toBeInTheDocument();
+    useCommandPalette.getState().closePalette();
+    useCommandPalette.getState().openPalette();
+    expect(await screen.findByText("ACME-12")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Change state" })).toBeInTheDocument();
+  });
+
+  it("dismisses the context on Backspace with an empty query", async () => {
+    const user = userEvent.setup();
+    registerCommands([
+      { id: "ctx.state", title: "Change state", section: "Work item actions", context: CONTEXT, run: () => undefined },
+    ]);
+    renderPalette({ scope: null });
+    await screen.findByRole("listbox", { name: "Commands" });
+    await user.click(screen.getByLabelText("Filter commands"));
+    await user.keyboard("{Backspace}");
+    expect(screen.queryByText("ACME-12")).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Change state" })).not.toBeInTheDocument();
+  });
+
+  it("renders no chip without contextual commands", async () => {
+    registerCommands([{ id: "shell.sign-out", title: "Sign out", run: () => undefined }]);
+    renderPalette({ scope: null });
+    await screen.findByRole("listbox", { name: "Commands" });
+    expect(screen.queryByRole("button", { name: "Clear context (Backspace)" })).not.toBeInTheDocument();
+  });
+
+  it("marks selected picker options with a check", async () => {
+    const user = userEvent.setup();
+    registerCommands([
+      {
+        id: "ctx.state",
+        title: "Change state",
+        section: "Work item actions",
+        context: CONTEXT,
+        page: "ctx.state-page",
+        run: () => undefined,
+      },
+    ]);
+    registerPalettePages([
+      {
+        id: "ctx.state-page",
+        placeholder: "Change state",
+        usePageState: (): PalettePageState => ({
+          status: "ready",
+          options: [
+            { id: "a", title: "Triage", selected: true, run: () => undefined },
+            { id: "b", title: "Done", run: () => undefined },
+          ],
+          emptyText: "No states found",
+        }),
+      },
+    ]);
+    renderPalette({ scope: null });
+    await screen.findByRole("listbox", { name: "Commands" });
+    await user.click(screen.getByRole("option", { name: "Change state" }));
+    const options = await screen.findByRole("listbox", { name: "Options" });
+    expect(options).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Triage" })).toHaveTextContent("✓");
+    expect(screen.getByRole("option", { name: "Done" })).not.toHaveTextContent("✓");
+  });
+
+  it("steps back to the root list when the chip clears from a sub-page", async () => {
+    const user = userEvent.setup();
+    registerCommands([
+      {
+        id: "ctx.state",
+        title: "Change state",
+        section: "Work item actions",
+        context: CONTEXT,
+        page: "ctx.state-page",
+        run: () => undefined,
+      },
+    ]);
+    registerPalettePages([
+      {
+        id: "ctx.state-page",
+        placeholder: "Change state",
+        usePageState: (): PalettePageState => ({
+          status: "ready",
+          options: [{ id: "a", title: "Triage", run: () => undefined }],
+          emptyText: "No states found",
+        }),
+      },
+    ]);
+    renderPalette({ scope: null });
+    await screen.findByRole("listbox", { name: "Commands" });
+    await user.click(screen.getByRole("option", { name: "Change state" }));
+    await screen.findByRole("listbox", { name: "Options" });
+    await user.click(screen.getByRole("button", { name: "Clear context (Backspace)" }));
+    await screen.findByRole("listbox", { name: "Commands" });
+    expect(screen.queryByRole("option", { name: "Change state" })).not.toBeInTheDocument();
+  });
+});

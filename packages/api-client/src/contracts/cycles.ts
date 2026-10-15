@@ -20,6 +20,27 @@ export const CycleUpdate = z.object({
 });
 export type CycleUpdate = z.infer<typeof CycleUpdate>;
 
+/**
+ * Thin cycle row for the shell: the palette's Add-to-cycle picker lists
+ * names. The server already excludes archived cycles. Full cycle
+ * ownership stays in the cycles area.
+ */
+export const CycleListItem = z.object({
+  id: uuid(),
+  project_id: uuid(),
+  name: z.string(),
+  is_favorite: z.boolean(),
+});
+export type CycleListItem = z.infer<typeof CycleListItem>;
+
+export const CycleList = z.array(CycleListItem);
+export type CycleList = z.infer<typeof CycleList>;
+
+export async function listCycles(client: ApiClient, slug: string, projectId: string): Promise<CycleList> {
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/cycles/`);
+  return client.parse(CycleList, body, `GET cycles ${projectId}`);
+}
+
 export interface CyclePatch {
   name?: string;
   description?: string;
