@@ -112,6 +112,31 @@ export async function dismissTour(driver: Pick<ParityDriver, "isTourWelcomeVisib
   await expect.poll(() => driver.isTourWelcomeVisible(), { timeout: 30_000 }).toBe(false);
 }
 
+/**
+ * Clear the product tour when it returns on a later Home visit. The
+ * production build can re-show the dismissed welcome (NEWFRONT-372: a
+ * stale profile refetch resolves is_tour_completed=false after the
+ * dismiss PATCH persisted true, so the modal returns and its backdrop
+ * blocks later clicks; the dev build masks it). The tour is scenario
+ * setup, never asserted behavior here, so re-dismissing keeps every
+ * assertion intact. Resolves without touching the page when the tour
+ * stays gone.
+ */
+export async function dismissTourIfReturned(
+  driver: Pick<ParityDriver, "isTourWelcomeVisible" | "declineTour">
+): Promise<void> {
+  let returned = false;
+  try {
+    await expect.poll(() => driver.isTourWelcomeVisible(), { timeout: 10_000 }).toBe(true);
+    returned = true;
+  } catch {
+    // The tour stayed dismissed; nothing to clear.
+  }
+  if (!returned) return;
+  await driver.declineTour();
+  await expect.poll(() => driver.isTourWelcomeVisible(), { timeout: 30_000 }).toBe(false);
+}
+
 /** Poll skipped-server notice lines until `match` holds. */
 export async function expectNoticeLines(
   driver: Pick<ParityDriver, "assistantNoticeLines">,
