@@ -9,7 +9,7 @@
 // under the same root.
 
 import { queryOptions } from "@tanstack/react-query";
-import { getCsrfToken, getInstanceBootstrap, type ApiClient } from "@pidash/api-client";
+import { getAdminSession, getCsrfToken, getInstanceBootstrap, type ApiClient } from "@pidash/api-client";
 
 export const adminKeys = {
   root: ["admin"],
@@ -17,6 +17,8 @@ export const adminKeys = {
   bootstrap: ["admin", "instance", "bootstrap"],
   /** The forgery token the native auth POSTs carry as a hidden field. */
   csrf: ["admin", "csrf"],
+  /** The admin session check the guards branch on. */
+  session: ["admin", "session"],
 } as const;
 
 /**
@@ -28,6 +30,23 @@ export function instanceBootstrapQueryOptions(client: ApiClient) {
   return queryOptions({
     queryKey: adminKeys.bootstrap,
     queryFn: () => getInstanceBootstrap(client),
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}
+
+/**
+ * The admin session check the guards branch on (ADM-009): issued once
+ * per page lifetime — no retry, no focus or reconnect refetch — and
+ * never stale. Anonymous reads as anonymous, a revoked grant as
+ * forbidden, and transient failures throw so guards fail closed.
+ */
+export function adminSessionQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: adminKeys.session,
+    queryFn: () => getAdminSession(client),
     staleTime: Number.POSITIVE_INFINITY,
     retry: false,
     refetchOnWindowFocus: false,

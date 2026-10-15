@@ -6,9 +6,11 @@ import { render, screen } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// Stand-in for the gate: branch selection belongs to the admin area.
-// What this suite owns is the search schema plus prop passing.
+// Stand-ins for the gate and guard: branch selection and session
+// bouncing belong to the admin area. What this suite owns is the search
+// schema plus prop passing and the guard wrap.
 vi.mock("../../features/admin/index.js", () => ({
+  AdminHomeGuard: ({ children }: { children: React.ReactNode }) => <div data-testid="admin-home-guard">{children}</div>,
   AdminEntryGate: ({ search }: { search: Record<string, string | undefined> }) => (
     <div
       data-testid="admin-gate"
@@ -87,6 +89,11 @@ describe("god-mode entry route component", () => {
     if (!Component) throw new Error("god-mode entry route has no component");
     render(<Component />);
   }
+
+  it("wraps the gate in the home guard", () => {
+    renderEntry({});
+    expect(screen.getByTestId("admin-home-guard")).toContainElement(screen.getByTestId("admin-gate"));
+  });
 
   it("passes the redirect search through to the gate", () => {
     renderEntry({ email: "a@example.com", error_code: "5175", error_message: "failed" });

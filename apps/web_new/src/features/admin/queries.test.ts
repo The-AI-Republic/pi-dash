@@ -3,13 +3,19 @@
 // See the LICENSE file for details.
 import { describe, expect, it, vi } from "vitest";
 
-import { adminCsrfQueryOptions, adminKeys, instanceBootstrapQueryOptions } from "./queries.js";
+import {
+  adminCsrfQueryOptions,
+  adminKeys,
+  adminSessionQueryOptions,
+  instanceBootstrapQueryOptions,
+} from "./queries.js";
 
 describe("admin keys", () => {
   it("roots the admin subtree outside the member roots", () => {
     expect(adminKeys.root).toEqual(["admin"]);
     expect(adminKeys.bootstrap).toEqual(["admin", "instance", "bootstrap"]);
     expect(adminKeys.csrf).toEqual(["admin", "csrf"]);
+    expect(adminKeys.session).toEqual(["admin", "session"]);
   });
 });
 
@@ -26,6 +32,43 @@ describe("instance bootstrap query", () => {
 
   it("never retries, refetches, or goes stale (ADM-001 single fetch)", () => {
     const options = instanceBootstrapQueryOptions({} as never);
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("admin session query", () => {
+  const adminMe = {
+    id: "22222222-2222-4222-8222-222222222222",
+    avatar: "https://cdn.test/avatar.png",
+    avatar_url: null,
+    cover_image: null,
+    date_joined: "2026-01-01T00:00:00Z",
+    display_name: "Admin",
+    email: "admin@example.com",
+    first_name: "Admin",
+    last_name: "User",
+    is_active: true,
+    is_bot: false,
+    is_email_verified: true,
+    user_timezone: "UTC",
+    username: "admin",
+    is_password_autoset: false,
+  };
+
+  it("reads the admin check through the client", async () => {
+    const getJson = vi.fn(async () => adminMe);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = adminSessionQueryOptions(fakeClient);
+    expect(options.queryKey).toEqual(adminKeys.session);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual({ kind: "admin", admin: adminMe });
+    expect(getJson).toHaveBeenCalledWith("/api/instances/admins/me/");
+  });
+
+  it("never retries, refetches, or goes stale (ADM-009 single check)", () => {
+    const options = adminSessionQueryOptions({} as never);
     expect(options.retry).toBe(false);
     expect(options.refetchOnWindowFocus).toBe(false);
     expect(options.refetchOnReconnect).toBe(false);

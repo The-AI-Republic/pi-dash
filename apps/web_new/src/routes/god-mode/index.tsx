@@ -9,7 +9,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
 import { asString } from "../../core/session/index.js";
-import { AdminEntryGate, type AdminEntrySearch } from "../../features/admin/index.js";
+import { AdminEntryGate, AdminHomeGuard, type AdminEntrySearch } from "../../features/admin/index.js";
 
 /** Search schema: unknown or empty params fall back to absent. */
 export function parseAdminEntrySearch(raw: Record<string, unknown>): AdminEntrySearch {
@@ -40,5 +40,11 @@ export const Route = createFileRoute("/god-mode/")({
 
 function GodModeEntryComponent(): React.ReactElement {
   const search = Route.useSearch();
-  return <AdminEntryGate search={search} />;
+  // The home guard (ADM-009) replace-navigates a signed-in admin to
+  // general settings and shows the loader while the check resolves.
+  return (
+    <AdminHomeGuard>
+      <AdminEntryGate search={search} />
+    </AdminHomeGuard>
+  );
 }

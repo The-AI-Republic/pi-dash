@@ -9,7 +9,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
-import { useAdminCsrfToken, useInstanceBootstrap } from "./hooks.js";
+import { useAdminCsrfToken, useAdminSession, useInstanceBootstrap } from "./hooks.js";
 
 function stubTransport(routes: Record<string, { status: number; body: unknown }>): Transport {
   return (url) => {
@@ -116,5 +116,53 @@ describe("useAdminCsrfToken", () => {
     );
     renderProbe(CsrfProbe);
     await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("token-1"));
+  });
+});
+
+function SessionProbe(): React.ReactElement {
+  const query = useAdminSession();
+  if (query.isPending) return <div data-testid="probe">resolving</div>;
+  if (query.isError) return <div data-testid="probe">failed</div>;
+  return <div data-testid="probe">{query.data.kind}</div>;
+}
+
+describe("useAdminSession", () => {
+  const adminMe = {
+    id: "22222222-2222-4222-8222-222222222222",
+    avatar: "https://cdn.test/avatar.png",
+    avatar_url: null,
+    cover_image: null,
+    date_joined: "2026-01-01T00:00:00Z",
+    display_name: "Admin",
+    email: "admin@example.com",
+    first_name: "Admin",
+    last_name: "User",
+    is_active: true,
+    is_bot: false,
+    is_email_verified: true,
+    user_timezone: "UTC",
+    username: "admin",
+    is_password_autoset: false,
+  };
+
+  it("reads the admin verdict through the app client", async () => {
+    createAppClient("https://api.test", stubTransport({ "/api/instances/admins/me/": { status: 200, body: adminMe } }));
+    renderProbe(SessionProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("admin"));
+  });
+
+  it("maps a rejected check to the anonymous branch", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport({ "/api/instances/admins/me/": { status: 401, body: { detail: "anonymous" } } })
+    );
+    renderProbe(SessionProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("anonymous"));
+  });
+
+  it("surfaces a failed check instead of retrying", async () => {
+    createAppClient("https://api.test", stubTransport({}));
+    renderProbe(SessionProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
   });
 });
