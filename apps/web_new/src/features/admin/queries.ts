@@ -118,9 +118,9 @@ export function cloudAuthProbeQueryOptions(client: ApiClient) {
 }
 
 /**
- * The configurations key map every settings page shares (ADM-024,
- * ADM-036): one fetch, never stale, never refetched behind the pages'
- * backs. Saves merge the answered rows back in (see
+ * The configurations key map every settings page shares (ADM-019/022,
+ * ADM-024/036): one fetch per ADM-069 — never stale, never refetched
+ * behind the pages' backs. Saves merge the answered rows back in (see
  * mergeConfigurationRows) instead of refetching.
  */
 export function instanceConfigurationsQueryOptions(client: ApiClient) {
@@ -154,8 +154,8 @@ export function loopJobsQueryOptions(client: ApiClient) {
 /**
  * Fold answered rows into the cached key map by key, so a save re-seeds
  * the pages from stored state without a refetch. Rows the server did
- * not answer keep their cached values; an empty cache starts from the
- * answer alone.
+ * not answer keep their cached values; answered rows for unknown keys
+ * append; an empty cache starts from the answer alone.
  */
 export function mergeConfigurationRows(
   current: InstanceConfigurationList | undefined,
@@ -163,7 +163,11 @@ export function mergeConfigurationRows(
 ): InstanceConfigurationList {
   if (current === undefined) return [...updated];
   const answered = new Map(updated.map((row) => [row.key, row]));
-  return current.map((row) => answered.get(row.key) ?? row);
+  const merged = current.map((row) => answered.get(row.key) ?? row);
+  for (const row of updated) {
+    if (!merged.some((existing) => existing.key === row.key)) merged.push(row);
+  }
+  return merged;
 }
 
 /**

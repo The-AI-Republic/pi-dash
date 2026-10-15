@@ -19,6 +19,8 @@ export {
   isSidebarEntryActive,
 } from "./adminShell.js";
 export type { AdminCrumb, AdminSidebarEntryDef } from "./adminShell.js";
+export { formatConfigFlag, parseConfigFlag } from "./emailConfig.js";
+export type { ConfigValueMap, EmailFormValues, EmailSecurityChoice } from "./emailConfig.js";
 export {
   AUTH_METHOD_ENABLE_KEYS,
   AUTH_METHODS,
@@ -32,6 +34,7 @@ export type { AuthMethodDef, AuthMethodKey, ConfigMap } from "./authMethods.js";
 export {
   CONFIG_SAVE_FAILED_LOG,
   toggleLoopJobMutationOptions,
+  configValueMap,
   useAdminCsrfToken,
   useAdminSession,
   useInstanceAdmins,
@@ -102,6 +105,7 @@ export { AdminAuthMethodCard } from "./components/AdminAuthMethodCard.js";
 export type { AdminAuthMethodCardProps } from "./components/AdminAuthMethodCard.js";
 export { AdminBrandLoader } from "./components/AdminBrandLoader.js";
 export { AdminDashboardLayout } from "./components/AdminDashboardLayout.js";
+export { AdminEmailPage, EMAIL_PAGE_TITLE } from "./components/AdminEmailPage.js";
 export { AdminEntryGate } from "./components/AdminEntryGate.js";
 export { AdminLoopJobsPage } from "./components/AdminLoopJobsPage.js";
 export type { AdminEntrySearch } from "./components/AdminEntryGate.js";
