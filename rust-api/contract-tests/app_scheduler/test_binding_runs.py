@@ -274,3 +274,7 @@ def test_patch_response_carries_detail_keys(org):
         "resolved_prompt", "run_count", "scheduler_source",
         "scheduler_is_enabled",
     }
+    # PATCH renders the post-save row through the detail shape: the
+    # prompt composes from the install defaults (prompt "x", empty
+    # extra context, create_issue directive).
+    assert body["resolved_prompt"].startswith("x\n\n## Work mode: create issues")

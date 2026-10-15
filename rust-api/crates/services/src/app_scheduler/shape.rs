@@ -211,8 +211,9 @@ pub const BINDING_DETAIL_EXTRA_READ_ONLY_FIELDS: &[&str] = &[
 ];
 
 /// The effective detail read-only set (18 keys): the base 14 plus the
-/// 4 detail extras. Handlers use this for membership on PATCH (keys
-/// sent by the client are silently ignored).
+/// 4 detail extras. Pinned here as the shape oracle; handlers ignore
+/// these keys structurally (only known writable fields are read, so
+/// read-only and unknown keys sent by the client are silently ignored).
 pub fn binding_detail_read_only_fields() -> Vec<&'static str> {
     let mut fields = binding_read_only_fields();
     fields.extend_from_slice(BINDING_DETAIL_EXTRA_READ_ONLY_FIELDS);
