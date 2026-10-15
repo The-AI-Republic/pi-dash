@@ -57,7 +57,7 @@ export function AdminLoopJobModal({
 
   const onSubmit = (event: React.FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
-    if (!isLoopJobSaveEnabled(fields)) return;
+    if (!isLoopJobSaveEnabled(fields) || saving) return;
     if (job === undefined) {
       creating.mutate(buildLoopJobCreateInput(fields), {
         onSuccess: () => {

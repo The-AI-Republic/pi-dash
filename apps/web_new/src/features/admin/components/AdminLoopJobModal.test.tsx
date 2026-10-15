@@ -229,6 +229,28 @@ describe("AdminLoopJobModal create", () => {
     await waitFor(() => expect(harness.onClose).toHaveBeenCalledTimes(1));
   });
 
+  it("ignores a second submit while a save is in flight", async () => {
+    const user = userEvent.setup();
+    let release!: () => void;
+    const saveGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const harness = await renderModal({ saveGate });
+    await user.type(screen.getByLabelText(LOOP_JOB_FIELD_LABELS.slug), "probe-job");
+    await user.type(screen.getByLabelText(LOOP_JOB_FIELD_LABELS.name), "Probe job");
+    await user.type(screen.getByLabelText(LOOP_JOB_FIELD_LABELS.publicName), "Probe public");
+    await user.type(screen.getByLabelText(LOOP_JOB_FIELD_LABELS.prompt), "Probe prompt");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save" })).toBeDisabled());
+    // Implicit submissions (Enter in a field) bypass the disabled
+    // button, so they must be dropped while saving too.
+    fireEvent.submit(screen.getByTestId("loop-job-modal-form"));
+    fireEvent.submit(screen.getByTestId("loop-job-modal-form"));
+    release();
+    await waitFor(() => expect(harness.onClose).toHaveBeenCalledTimes(1));
+    expect(harness.posts).toHaveLength(1);
+  });
+
   it("sends nothing when submitted with blank fields", async () => {
     const harness = await renderModal({});
     fireEvent.submit(screen.getByTestId("loop-job-modal-form"));
