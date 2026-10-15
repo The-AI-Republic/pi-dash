@@ -39,7 +39,7 @@ import {
   workspacesQueryOptions,
 } from "../core/session/queries.js";
 import { InviteMembersStep, WorkspaceStep } from "../features/auth/index.js";
-import { myInvitationsQueryOptions } from "../features/auth/queries.js";
+import { myInvitationsQueryOptions } from "../features/auth/invitations.js";
 import { Route } from "./onboarding.js";
 
 function throwingClient(): ApiClient {

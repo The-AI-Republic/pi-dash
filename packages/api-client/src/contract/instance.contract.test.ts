@@ -10,7 +10,7 @@
 // dance runs last because it unseats the seed admin link, which only
 // re-seeding can restore (the API cannot reseat a soft-deleted link).
 import { describe, expect, it } from "vitest";
-import { getInstanceBootstrap } from "../contracts/auth.js";
+import { getInstanceBootstrap } from "../contracts/auth-entry.js";
 import {
   adminSignIn,
   adminSignOut,

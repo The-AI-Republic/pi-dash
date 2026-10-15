@@ -23,14 +23,7 @@ export {
   useToggleFavoriteProject,
 } from "./api/mutations.js";
 export type { CreateProjectInput, ProjectLifecycleInput, ToggleFavoriteInput } from "./api/mutations.js";
-export {
-  projectDetailsQueryOptions,
-  projectPropertiesQueryOptions,
-  projectsQueryOptions,
-  useProjectProperties,
-  useWorkspaceProperties,
-  workspacePropertiesQueryOptions,
-} from "./api/queries.js";
+export { projectDetailsQueryOptions, projectsQueryOptions } from "./api/queries.js";
 export { JoinProjectDialog } from "./components/JoinProjectDialog.js";
 export type { JoinProjectDialogProps } from "./components/JoinProjectDialog.js";
 export { CreateProjectDialog } from "./components/CreateProjectDialog.js";
@@ -59,7 +52,15 @@ export type {
 } from "./components/ProjectsListScreen.js";
 export { ProjectsListView } from "./components/ProjectsListView.js";
 export type { ProjectsListViewProps } from "./components/ProjectsListView.js";
-export { applyNavigationPrefs, mergeNavigationPrefs, useTabPreferences } from "./api/tabPreferences.js";
+export {
+  applyNavigationPrefs,
+  mergeNavigationPrefs,
+  projectPropertiesQueryOptions,
+  useProjectProperties,
+  useTabPreferences,
+  useWorkspaceProperties,
+  workspacePropertiesQueryOptions,
+} from "./api/tabPreferences.js";
 export type { TabPreferencesHandle } from "./api/tabPreferences.js";
 export {
   countFittingTabs,

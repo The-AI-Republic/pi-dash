@@ -6,32 +6,26 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./errors.js";
 import { createClient } from "./client.js";
+import { deactivateAccount, getInstanceConfig, signOut } from "./contracts/auth.js";
 import {
   approveDeviceCode,
   checkEmail,
-  deactivateAccount,
   generateMagicCode,
   getCsrfToken,
   getInstanceBootstrap,
-  getInstanceConfig,
   parseAuthRedirectResult,
   requestPasswordReset,
   resetPassword,
   setPassword,
   signIn,
   signInWithMagicCode,
-  signOut,
   signUp,
   signUpWithMagicCode,
-} from "./contracts/auth.js";
-import { getMe, getMeSettings, markOnboarded, updateMe } from "./contracts/users.js";
-import {
-  checkWorkspaceSlug,
-  createWorkspace,
-  getMyWorkspaceMembership,
-  listWorkspaceMembers,
-  listWorkspaces,
-} from "./contracts/workspaces.js";
+} from "./contracts/auth-entry.js";
+import { getMe, getMeSettings } from "./contracts/users.js";
+import { markOnboarded, updateMe } from "./contracts/user-writes.js";
+import { getMyWorkspaceMembership, listWorkspaces } from "./contracts/workspaces.js";
+import { checkWorkspaceSlug, createWorkspace, listWorkspaceMembers } from "./contracts/workspace-management.js";
 import {
   acceptWorkspaceInvitations,
   answerWorkspaceInvitation,
@@ -42,27 +36,29 @@ import {
   sendWorkspaceInvitations,
 } from "./contracts/invitations.js";
 import {
+  getMyProjectRoles,
+  getProject,
+  getProjectUserProperties,
+  getWorkspaceUserProperties,
+  listProjectDetails,
+  listProjects,
+} from "./contracts/projects.js";
+import {
   addFavoriteProject,
   archiveProject,
   checkProjectIdentifier,
   createProject,
   deleteProject,
-  getMyProjectRoles,
-  getProject,
-  getProjectUserProperties,
-  getWorkspaceUserProperties,
   joinProjects,
   leaveProject,
   listFavoriteProjects,
-  listProjectDetails,
   listProjectInvitations,
-  listProjects,
   removeFavoriteProject,
   unarchiveProject,
   updateProject,
   updateProjectUserProperties,
   updateWorkspaceUserProperties,
-} from "./contracts/projects.js";
+} from "./contracts/project-management.js";
 import {
   completeTour,
   createQuickLink,
@@ -76,14 +72,8 @@ import {
   updateQuickLink,
 } from "./contracts/home.js";
 import { listLabels, listMembers, listStates } from "./contracts/reference.js";
-import {
-  getIssue,
-  getSubscriptionStatus,
-  listIssues,
-  subscribeIssue,
-  unsubscribeIssue,
-  updateIssue,
-} from "./contracts/issues.js";
+import { getIssue, listIssues } from "./contracts/issues.js";
+import { getSubscriptionStatus, subscribeIssue, unsubscribeIssue, updateIssue } from "./contracts/issue-actions.js";
 import {
   createFavorite,
   deleteFavorite,
@@ -94,7 +84,8 @@ import {
   updateSidebarPreferences,
 } from "./contracts/sidebar.js";
 import { searchWorkspace } from "./contracts/search.js";
-import { getProfile, listTimezones, updateMyTimezone, updateProfile } from "./contracts/profile.js";
+import { getProfile, updateProfile } from "./contracts/profile.js";
+import { listTimezones, updateMyTimezone } from "./contracts/locale.js";
 import { createAssistantThread, getLlmConfig, listAssistantThreads } from "./contracts/assistant.js";
 import { getUnreadNotifications } from "./contracts/notifications.js";
 import { uploadUserAvatar } from "./contracts/assets.js";
@@ -111,7 +102,7 @@ import {
   updatePage,
 } from "./contracts/pages.js";
 import { listProjectEstimates, selectActiveEstimate } from "./contracts/estimates.js";
-import { addIssueToCycle, deleteIssue, removeIssueFromCycle, setIssueModules } from "./contracts/issues.js";
+import { addIssueToCycle, deleteIssue, removeIssueFromCycle, setIssueModules } from "./contracts/issue-actions.js";
 import {
   checkInstanceWorkspaceSlug,
   createInstanceWorkspace,

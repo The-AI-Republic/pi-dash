@@ -5,28 +5,30 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { ApiError } from "../errors.js";
 import {
+  getProject,
+  getProjectUserProperties,
+  getWorkspaceUserProperties,
+  listProjectDetails,
+  listProjects,
+} from "../contracts/projects.js";
+import {
   addFavoriteProject,
   archiveProject,
   checkProjectIdentifier,
   createProject,
   deleteProject,
-  getProject,
-  getProjectUserProperties,
-  getWorkspaceUserProperties,
   joinProjects,
   leaveProject,
   listFavoriteProjects,
-  listProjectDetails,
   listProjectInvitations,
-  listProjects,
   removeFavoriteProject,
   unarchiveProject,
   updateProject,
   updateProjectUserProperties,
   updateWorkspaceUserProperties,
-} from "../contracts/projects.js";
+} from "../contracts/project-management.js";
 import { listLabels, listMembers, listStates } from "../contracts/reference.js";
-import { signIn } from "../contracts/auth.js";
+import { signIn } from "../contracts/auth-entry.js";
 import {
   CONTRACT_EMAIL,
   CONTRACT_PASSWORD,

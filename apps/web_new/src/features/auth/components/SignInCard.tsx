@@ -36,7 +36,7 @@ import {
 } from "../authErrors.js";
 import { isStrongSecret } from "../passwordStrength.js";
 import { resolveSignInProviders } from "../providers.js";
-import { useWorkspaceInvitation } from "../queries.js";
+import { useWorkspaceInvitation } from "../invitations.js";
 import { PasswordStrengthHint } from "./PasswordStrengthHint.js";
 
 export interface SignInCardProps {

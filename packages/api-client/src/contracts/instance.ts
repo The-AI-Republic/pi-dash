@@ -9,7 +9,8 @@
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { isApiError } from "../errors.js";
-import { InstanceDetails, SignInResult, SignOutResult, parseAuthRedirectResult } from "./auth.js";
+import { SignOutResult } from "./auth.js";
+import { InstanceDetails, SignInResult, parseAuthRedirectResult } from "./auth-entry.js";
 import { nullableDateTime, nullableUuid, uuid } from "./fields.js";
 
 export interface InstancePatch {

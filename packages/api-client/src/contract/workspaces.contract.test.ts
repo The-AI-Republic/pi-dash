@@ -5,13 +5,8 @@
 // live Django.
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../errors.js";
-import {
-  checkWorkspaceSlug,
-  createWorkspace,
-  getMyWorkspaceMembership,
-  listWorkspaceMembers,
-  listWorkspaces,
-} from "../contracts/workspaces.js";
+import { getMyWorkspaceMembership, listWorkspaces } from "../contracts/workspaces.js";
+import { checkWorkspaceSlug, createWorkspace, listWorkspaceMembers } from "../contracts/workspace-management.js";
 import { getMyProjectRoles, listProjects } from "../contracts/projects.js";
 import { getMe } from "../contracts/users.js";
 import { CONTRACT_PROJECT_IDENTIFIER, CONTRACT_WORKSPACE, contractEnabled, sharedSignedIn } from "./setup.js";

@@ -21,9 +21,7 @@ import { WorkspaceHomeTour } from "../../../features/auth/index.js";
 import {
   HomeAllOffState,
   HomeDashboard,
-  homeAssistantConfigQueryOptions,
   HomeWidgetStack,
-  homeThreadsQueryOptions,
   ManageWidgetsDialog,
   QuicklinksWidget,
 } from "../../../features/home/index.js";
@@ -35,6 +33,12 @@ import {
 
 export const Route = createFileRoute("/$ws/_gated/")({
   loader: async ({ context, params }) => {
+    // NOTE (NEWFRONT-523, size gate): the assistant reads stay behind a
+    // dynamic import so the home query modules never join the initial
+    // bundle — this loader only runs on dashboard navigation, after first
+    // paint. The loader still resolves before render, as before.
+    const { homeAssistantConfigQueryOptions, homeThreadsQueryOptions } =
+      await import("../../../features/home/index.js");
     // Tolerated reads: guests and failures resolve through the assistant
     // card gates, which render nothing until their data is present.
     await Promise.all([

@@ -6,7 +6,7 @@
 // every suite skips so CI stays green.
 import { ApiClient, createClient } from "../client.js";
 import type { Transport } from "../client.js";
-import { signIn } from "../contracts/auth.js";
+import { signIn } from "../contracts/auth-entry.js";
 
 export const CONTRACT_BASE_URL = process.env["PIDASH_CONTRACT_BASE_URL"] ?? "";
 export const CONTRACT_EMAIL = process.env["PIDASH_CONTRACT_EMAIL"] ?? "contract.tester@example.com";

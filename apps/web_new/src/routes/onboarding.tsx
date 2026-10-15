@@ -17,7 +17,7 @@ import {
   loadLandingTarget,
   workspacesQueryOptions,
 } from "../core/session/index.js";
-import { InviteMembersStep, myInvitationsQueryOptions, OnboardingFlow, WorkspaceStep } from "../features/auth/index.js";
+import { InviteMembersStep, OnboardingFlow, WorkspaceStep } from "../features/auth/index.js";
 import { getToastManager, useSessionExpiredRedirect } from "../shared/shell/index.js";
 
 export const Route = createFileRoute("/onboarding")({
@@ -36,6 +36,11 @@ export const Route = createFileRoute("/onboarding")({
     if (decision.action === "landing") {
       throw redirect({ href: await loadLandingTarget(context.queryClient, context.apiClient) });
     }
+    // NOTE (NEWFRONT-523, size gate): the invitations read stays behind a
+    // dynamic import so the invitation query module never joins the
+    // initial bundle — this gate only runs on onboarding navigation, after
+    // first paint. The gate still resolves before render, as before.
+    const { myInvitationsQueryOptions } = await import("../features/auth/index.js");
     // Prefetch the flow's reads; failures fall back to empty inside the flow.
     await Promise.all([
       context.queryClient.ensureQueryData(workspacesQueryOptions(context.apiClient)).catch(() => undefined),

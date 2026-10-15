@@ -8,21 +8,19 @@
 // fixture user (set-password needs a passwordless-style account); tests
 // that create accounts use unique throwaway addresses per run.
 import { describe, expect, it } from "vitest";
+import { deactivateAccount, getInstanceConfig, signOut } from "../contracts/auth.js";
 import {
   approveDeviceCode,
   checkEmail,
-  deactivateAccount,
   generateMagicCode,
   getCsrfToken,
-  getInstanceConfig,
   requestPasswordReset,
   resetPassword,
   setPassword,
   signIn,
-  signOut,
   signUp,
   signUpWithMagicCode,
-} from "../contracts/auth.js";
+} from "../contracts/auth-entry.js";
 import { getMe } from "../contracts/users.js";
 import { ApiError } from "../errors.js";
 import {

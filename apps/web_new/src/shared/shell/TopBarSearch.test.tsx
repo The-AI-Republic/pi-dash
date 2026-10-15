@@ -106,8 +106,8 @@ describe("TopBarSearch (SHELL-081)", () => {
     await user.click(input);
     expect(screen.getByRole("listbox", { name: "Top bar search results" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Sign out" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Go to workspace home" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "Sign out" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "Go to workspace home" })).toBeInTheDocument();
   });
 
   it("filters commands as the term types", async () => {
@@ -119,7 +119,7 @@ describe("TopBarSearch (SHELL-081)", () => {
     renderBox({ scope: null });
     await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
     await user.type(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER), "interface theme");
-    expect(screen.getByRole("option", { name: "Change interface theme" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "Change interface theme" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Sign out" })).not.toBeInTheDocument();
   });
 
@@ -175,7 +175,7 @@ describe("TopBarSearch (SHELL-081)", () => {
     registerCommands([{ id: "theme", title: "Change interface theme", run }]);
     renderBox({ scope: null });
     await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
-    await user.click(screen.getByRole("option", { name: "Change interface theme" }));
+    await user.click(await screen.findByRole("option", { name: "Change interface theme" }));
     expect(run).toHaveBeenCalledOnce();
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
@@ -189,7 +189,7 @@ describe("TopBarSearch (SHELL-081)", () => {
     ]);
     renderBox({ scope: null });
     await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
-    await screen.findByRole("listbox", { name: "Top bar search results" });
+    await screen.findByRole("option", { name: "Beta" });
     await user.keyboard("{ArrowDown}");
     expect(document.querySelector('[role="option"][aria-selected="true"]')).toHaveTextContent("Beta");
     await user.keyboard("{Enter}");
@@ -211,7 +211,7 @@ describe("TopBarSearch (SHELL-081)", () => {
     ]);
     renderBox({ scope: null });
     await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
-    await user.click(screen.getByRole("option", { name: "Open a project" }));
+    await user.click(await screen.findByRole("option", { name: "Open a project" }));
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     expect(useCommandPalette.getState().open).toBe(true);
     expect(useCommandPalette.getState().page).toBe("test.project-picker");
@@ -303,7 +303,7 @@ describe("TopBarSearch server results (SHELL-081/084/085/093)", () => {
     registerCommands([{ id: "shell.sign-out", title: "Sign out", run: () => undefined }]);
     const { calls } = renderBox();
     await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
-    expect(screen.getByRole("option", { name: "Sign out" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "Sign out" })).toBeInTheDocument();
     expect(screen.queryByText(/Search results for/)).not.toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 700));
     expect(calls).toHaveLength(0);

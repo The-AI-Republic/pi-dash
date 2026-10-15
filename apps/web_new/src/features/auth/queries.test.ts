@@ -2,15 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { describe, expect, it, vi } from "vitest";
-import {
-  authKeys,
-  invitationQueryOptions,
-  membershipQueryOptions,
-  myInvitationsQueryOptions,
-  myJoinRequestsQueryOptions,
-  projectQueryOptions,
-  projectRolesQueryOptions,
-} from "./queries.js";
+import { invitationQueryOptions, myInvitationsQueryOptions, myJoinRequestsQueryOptions } from "./invitations.js";
+import { authKeys, membershipQueryOptions, projectQueryOptions, projectRolesQueryOptions } from "./queries.js";
 
 describe("invitation query", () => {
   it("keys one invitation by slug and id", () => {

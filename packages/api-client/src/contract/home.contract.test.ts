@@ -4,7 +4,7 @@
 // Contract: home endpoints (dashboard, preferences, quick links,
 // recent visits, tour flag) against live Django.
 import { beforeAll, describe, expect, it } from "vitest";
-import { signIn } from "../contracts/auth.js";
+import { signIn } from "../contracts/auth-entry.js";
 import {
   completeTour,
   createQuickLink,

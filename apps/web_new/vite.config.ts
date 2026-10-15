@@ -122,6 +122,20 @@ export default defineConfig(({ mode }) => {
       emptyOutDir: true,
       sourcemap: false,
       chunkSizeWarningLimit: 200,
+      rollupOptions: {
+        treeshake: {
+          // The projects list-display store and its math are side-effect-free
+          // (the sign-out registration lives in the list view's effect), so
+          // lazy-only use must not pin them into the initial bundle through
+          // the feature barrel (NEWFRONT-523, size gate). Every other module
+          // keeps the default: a blanket false reshapes the TanStack route
+          // splits the size gate keys on.
+          moduleSideEffects: (id) =>
+            id.includes("features/projects/store/list-display.") || id.includes("features/projects/lib/list-display.")
+              ? false
+              : true,
+        },
+      },
       // The size gate (.size-limit.mjs) resolves the initial route chain
       // from this manifest, so chunk hashes can rotate without touching
       // the budget config (NEWFRONT-190).

@@ -15,7 +15,8 @@ import * as React from "react";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { useAnswerWorkspaceInvitation } from "../api.js";
 import { decideSingleInvitationView, INVITATION_IGNORE_LANDING, resolveSingleAcceptLanding } from "../invitations.js";
-import { useViewerEmail, useWorkspaceInvitation } from "../queries.js";
+import { useWorkspaceInvitation } from "../invitations.js";
+import { useViewerEmail } from "../queries.js";
 
 export const SINGLE_INVITATION_TITLE = "Workspace invitation";
 export const GITHUB_STAR_URL = "https://github.com/The-AI-Republic/pi-dash";

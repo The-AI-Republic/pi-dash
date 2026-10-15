@@ -18,71 +18,61 @@ export type {
   TransportInit,
   TransportResponse,
 } from "./client.js";
+export { InstanceConfig, deactivateAccount, getInstanceConfig, signOut } from "./contracts/auth.js";
+export type { SignOutResult } from "./contracts/auth.js";
 export {
   CsrfTokenResponse,
   DeviceApproveResponse,
   EmailCheckResponse,
   ForgotPasswordResponse,
   InstanceBootstrap,
-  InstanceConfig,
   InstanceDetails,
   InstanceInfo,
   MagicGenerateResponse,
   SetPasswordResult,
   approveDeviceCode,
   checkEmail,
-  deactivateAccount,
   generateMagicCode,
   getCsrfToken,
   getInstanceBootstrap,
-  getInstanceConfig,
   parseAuthRedirectResult,
   requestPasswordReset,
   resetPassword,
   setPassword,
   signIn,
   signInWithMagicCode,
-  signOut,
   signUp,
   signUpWithMagicCode,
-} from "./contracts/auth.js";
+} from "./contracts/auth-entry.js";
 export type {
   MagicSignInInput,
   MagicSignUpInput,
   ResetPasswordInput,
   SignInInput,
   SignInResult,
-  SignOutResult,
   SignUpInput,
-} from "./contracts/auth.js";
+} from "./contracts/auth-entry.js";
+export { Me, MeSettings, MeSettingsWorkspace, UserLite, getMe, getMeSettings } from "./contracts/users.js";
+export { MeUpdate, markOnboarded, updateMe } from "./contracts/user-writes.js";
+export type { MePatch } from "./contracts/user-writes.js";
 export {
-  Me,
-  MeSettings,
-  MeSettingsWorkspace,
-  MeUpdate,
-  UserLite,
-  getMe,
-  getMeSettings,
-  markOnboarded,
-  updateMe,
-} from "./contracts/users.js";
-export type { MePatch } from "./contracts/users.js";
-export {
-  CreatedWorkspace,
   OwnWorkspaceMembership,
   Workspace,
   WorkspaceList,
   WorkspaceLite,
+  getMyWorkspaceMembership,
+  listWorkspaces,
+} from "./contracts/workspaces.js";
+export {
+  CreatedWorkspace,
   WorkspaceMember,
   WorkspaceMemberList,
   WorkspaceSlugStatus,
   checkWorkspaceSlug,
   createWorkspace,
-  getMyWorkspaceMembership,
   listWorkspaceMembers,
-  listWorkspaces,
-} from "./contracts/workspaces.js";
-export type { WorkspaceCreateInput } from "./contracts/workspaces.js";
+} from "./contracts/workspace-management.js";
+export type { WorkspaceCreateInput } from "./contracts/workspace-management.js";
 export {
   BulkInviteResult,
   InvitationAnswer,
@@ -108,43 +98,45 @@ export type {
 } from "./contracts/invitations.js";
 export { Project, ProjectList, ProjectLite, listProjects } from "./contracts/projects.js";
 export {
+  ProjectDetail,
+  ProjectDetails,
+  ProjectDetailsList,
+  ProjectRoleMap,
+  ProjectUserProperties,
+  WorkspaceUserProperties,
+  getMyProjectRoles,
+  getProject,
+  getProjectUserProperties,
+  getWorkspaceUserProperties,
+  listProjectDetails,
+} from "./contracts/projects.js";
+export {
   FavoriteProject,
   FavoriteProjectList,
   InvitationProject,
   InvitationWorkspace,
   JoinProjectsResult,
   ProjectArchiveResult,
-  ProjectDetail,
-  ProjectDetails,
-  ProjectDetailsList,
   ProjectIdentifierCheck,
   ProjectIdentifierMatch,
   ProjectInvitation,
   ProjectInvitationList,
-  ProjectRoleMap,
-  ProjectUserProperties,
-  WorkspaceUserProperties,
   addFavoriteProject,
   archiveProject,
   checkProjectIdentifier,
   createProject,
   deleteProject,
-  getMyProjectRoles,
-  getProject,
-  getProjectUserProperties,
-  getWorkspaceUserProperties,
   joinProjects,
   leaveProject,
   listFavoriteProjects,
-  listProjectDetails,
   listProjectInvitations,
   removeFavoriteProject,
   unarchiveProject,
   updateProject,
   updateProjectUserProperties,
   updateWorkspaceUserProperties,
-} from "./contracts/projects.js";
-export type { ProjectCreateInput, ProjectUpdateInput } from "./contracts/projects.js";
+} from "./contracts/project-management.js";
+export type { ProjectCreateInput, ProjectUpdateInput } from "./contracts/project-management.js";
 export {
   DashboardActivityBucket,
   DashboardCompletedBucket,
@@ -191,21 +183,24 @@ export {
   IssueListItem,
   IssueListResponse,
   IssueRelationsSummary,
+  getIssue,
+  listIssues,
+} from "./contracts/issues.js";
+export type { IssueListQuery } from "./contracts/issues.js";
+export {
   IssueSubscription,
   MembershipWriteResult,
   SubscriptionStatus,
   addIssueToCycle,
   deleteIssue,
-  getIssue,
   getSubscriptionStatus,
-  listIssues,
   removeIssueFromCycle,
   setIssueModules,
   subscribeIssue,
   unsubscribeIssue,
   updateIssue,
-} from "./contracts/issues.js";
-export type { IssueListQuery, IssuePatch } from "./contracts/issues.js";
+} from "./contracts/issue-actions.js";
+export type { IssuePatch } from "./contracts/issue-actions.js";
 export {
   Favorite,
   FavoriteList,
@@ -223,17 +218,9 @@ export {
 export type { FavoriteCreate, FavoritePatch, SidebarPreferencePatch } from "./contracts/sidebar.js";
 export { SEARCH_ENTITIES, SearchResults, searchWorkspace } from "./contracts/search.js";
 export type { SearchEntity, WorkspaceSearchQuery } from "./contracts/search.js";
-export {
-  MeTimezone,
-  Profile,
-  TimezoneEntry,
-  TimezoneList,
-  getProfile,
-  listTimezones,
-  updateMyTimezone,
-  updateProfile,
-} from "./contracts/profile.js";
+export { Profile, getProfile, updateProfile } from "./contracts/profile.js";
 export type { ProfilePatch } from "./contracts/profile.js";
+export { MeTimezone, TimezoneEntry, TimezoneList, listTimezones, updateMyTimezone } from "./contracts/locale.js";
 export {
   AssistantThread,
   AssistantThreadList,

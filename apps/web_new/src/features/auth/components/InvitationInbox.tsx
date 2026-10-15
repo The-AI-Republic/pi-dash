@@ -17,12 +17,9 @@ import * as React from "react";
 
 import { notifyError, useDocumentHead } from "../../../shared/shell/index.js";
 import { useAcceptWorkspaceInvitations, useUpdateProfile } from "../api.js";
-import {
-  selectBatchLandingTarget,
-  selectInvitationRoleLabel,
-  toggleInvitationSelection,
-} from "../invitations.js";
-import { authKeys, useMyWorkspaceInvitations } from "../queries.js";
+import { selectBatchLandingTarget, selectInvitationRoleLabel, toggleInvitationSelection } from "../invitations.js";
+import { useMyWorkspaceInvitations } from "../invitations.js";
+import { authKeys } from "../queries.js";
 
 export const INVITATIONS_TITLE = "Workspace invitations";
 export const NO_INVITES_ART = "/illustrations/no-invites.svg";

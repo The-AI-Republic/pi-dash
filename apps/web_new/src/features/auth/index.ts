@@ -31,7 +31,6 @@ export {
   usePasswordSignUp,
   useSendWorkspaceInvites,
   useSetPassword,
-  useSignOut,
   useSwitchAccount,
   useUpdateMe,
   useUpdateProfile,
@@ -55,16 +54,15 @@ export { isStrongSecret, secretCriteria } from "./passwordStrength.js";
 export type { SecretCriterion } from "./passwordStrength.js";
 export { resolveSignInProviders } from "./providers.js";
 export type { ResolveProvidersOptions, SignInProvider } from "./providers.js";
+export { authKeys, useViewerEmail } from "./queries.js";
 export {
-  authKeys,
   invitationQueryOptions,
   myInvitationsQueryOptions,
   myJoinRequestsQueryOptions,
   useMyWorkspaceInvitations,
   useMyWorkspaceJoinRequests,
-  useViewerEmail,
   useWorkspaceInvitation,
-} from "./queries.js";
+} from "./invitations.js";
 export {
   advanceOnboardingStep,
   AVATAR_MAX_BYTES,
@@ -124,6 +122,7 @@ export {
 export type { WorkspaceStepView } from "./workspace.js";
 
 export { performSignOut, SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE, signOutLandingTarget } from "./signOut.js";
+export { useSignOut } from "./signOut.js";
 export {
   describeDeviceApprovalFailure,
   DEVICE_APPROVE_FAILED_MESSAGE,
