@@ -77,25 +77,25 @@
 //!
 //! # Ported bugs (also listed in the PR)
 //!
-//! * `claim_pending_for_new_session` never terminates on a non-empty
-//!   PEL in Python: `justid=True` makes redis-py return
+//! * `claim_pending_for_new_session` used to spin forever on a
+//!   non-empty PEL in Python: `justid=True` made redis-py return
 //!   `response[1]` (the flat id list), discarding the cursor, so
-//!   the loop mistakes `result[0]` (a stream id) for the cursor and
-//!   re-issues `XAUTOCLAIM` from the same id forever while
-//!   accumulating `len()` of id strings as the count
-//!   (TRACE.md bug 3; `claim_pending_nonempty_spins`: 18721
-//!   iterations in 1.5s, never returns; production pins
-//!   redis==5.0.4 so this is live). A line-by-line port would wedge
-//!   the server the same way the Python hang wedges the HTTP
-//!   worker, so the Rust loop reads the cursor the server actually
-//!   returns, paginates to `0-0`, and returns the claimed count.
+//!   the loop mistook `result[0]` (a stream id) for the cursor and
+//!   re-issued `XAUTOCLAIM` from the same id forever
+//!   (TRACE.md bug 3; production hang 2026-10-04..06). The Rust
+//!   loop never ported the spin: it reads the cursor the server
+//!   actually returns and paginates to `0-0`. Django then fixed it
+//!   the same way in `64842e19` (PR #1184, 2026-10-06) — no
+//!   `justid`, so the real cursor is read, plus an error-log bail
+//!   returning the count so far when the cursor fails to advance.
+//!   Rust carries the same guard, so the former "one known
+//!   divergence" (spin vs terminate-and-claim) is retired: both
+//!   sides terminate and claim, and the
+//!   `delete_consumer`-after-`0-0` branch is reachable on both.
 //!   Every *terminating* Python trace still replays exactly: empty
 //!   PEL returns `0` with no `DELCONSUMER` (the old consumer is
 //!   kept — `claim_pending_empty_pel`), transport errors return the
-//!   count so far, `None` returns `0`. The non-empty-PEL
-//!   behavior (spin vs terminate-and-claim) is the one known
-//!   divergence, and the `delete_consumer`-after-`0-0` branch —
-//!   unreachable in Python — becomes reachable here.
+//!   count so far, `None` returns `0`.
 //! * `claim_pending_for_new_session` runs even when `old_consumer`
 //!   is `None` (`outbox.py:297-305` — deliberate: `XAUTOCLAIM`
 //!   scans the whole group PEL; the fixture's `None`-consumer spin
@@ -490,7 +490,9 @@ fn parse_autoclaim(reply: &redis::Value) -> Option<(String, Vec<Vec<u8>>)> {
 /// old consumer was named. An empty claim page returns the count so
 /// far *without* deleting (Python's `if not result: return
 /// claimed`), so an empty PEL keeps the old consumer. Transport or
-/// shape failures log and return the count so far, never `Err`.
+/// shape failures log and return the count so far, never `Err`. A
+/// cursor that does not advance bails the same way (error log,
+/// count so far — Django `64842e19`).
 pub async fn claim_pending_for_new_session(
     client: Option<&redis::Client>,
     runner_id: &str,
@@ -548,6 +550,17 @@ pub async fn claim_pending_for_new_session(
             if let Some(old) = old_consumer.filter(|name| !name.is_empty()) {
                 delete_consumer_with(&mut connection, runner_id, old).await;
             }
+            return claimed;
+        }
+        if next_cursor == cursor {
+            // A cursor that does not advance can never terminate the
+            // scan; bail with the count so far rather than spin on
+            // Redis (Django `64842e19`).
+            tracing::error!(
+                runner_id,
+                %cursor,
+                "xautoclaim cursor did not advance for runner"
+            );
             return claimed;
         }
         cursor = next_cursor;
@@ -1924,6 +1937,109 @@ mod tests {
             claim_pending_for_new_session(Some(&client), &rid, None, "consumer-new", 0).await;
         assert_eq!(claimed, 0);
         assert_eq!(recorded(&log).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn mock_claim_single_full_page_terminates_with_delete() {
+        // Port of Django's
+        // test_claim_pending_terminates_against_redis_py_reply_shape
+        // (64842e19): one full page — cursor 0-0 plus two ids —
+        // terminates after a single XAUTOCLAIM and deletes the old
+        // consumer. Rust keeps sending JUSTID (redis-rs parses the
+        // real cursor from the raw reply, unlike redis-py's JUSTID
+        // parser), so the scripted reply is the raw [cursor, ids]
+        // shape.
+        let rid = fresh_id();
+        let sk = keys::stream_key(&rid);
+        let gn = keys::group_name(&rid);
+        let page = resp_array(vec![
+            resp_str("0-0"),
+            resp_array(vec![resp_str("1-0"), resp_str("2-0")]),
+        ]);
+        let (client, log) = start_mock(vec![page, resp_int(1)]);
+        let claimed = claim_pending_for_new_session(
+            Some(&client),
+            &rid,
+            Some("consumer-old"),
+            "consumer-new",
+            0,
+        )
+        .await;
+        assert_eq!(claimed, 2);
+        assert_eq!(
+            recorded(&log),
+            vec![
+                argv([
+                    "XAUTOCLAIM",
+                    sk.as_str(),
+                    gn.as_str(),
+                    "consumer-new",
+                    "0",
+                    "0-0",
+                    "COUNT",
+                    "200",
+                    "JUSTID"
+                ]),
+                argv([
+                    "XGROUP",
+                    "DELCONSUMER",
+                    sk.as_str(),
+                    gn.as_str(),
+                    "consumer-old"
+                ]),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_claim_bails_when_cursor_does_not_advance() {
+        // Port of Django's
+        // test_claim_pending_bails_when_cursor_does_not_advance
+        // (64842e19): the first page moves 0-0 -> 5-0, the second
+        // repeats it, so the loop bails with the count so far and no
+        // DELCONSUMER. Exactly two XAUTOCLAIMs (Django's "one script
+        // entry left" assert) prove the bail rather than a spin.
+        let rid = fresh_id();
+        let sk = keys::stream_key(&rid);
+        let gn = keys::group_name(&rid);
+        let page = || resp_array(vec![resp_str("5-0"), resp_array(vec![resp_str("5-0")])]);
+        let (client, log) = start_mock(vec![page(), page()]);
+        let claimed = claim_pending_for_new_session(
+            Some(&client),
+            &rid,
+            Some("consumer-old"),
+            "consumer-new",
+            0,
+        )
+        .await;
+        assert_eq!(claimed, 2);
+        assert_eq!(
+            recorded(&log),
+            vec![
+                argv([
+                    "XAUTOCLAIM",
+                    sk.as_str(),
+                    gn.as_str(),
+                    "consumer-new",
+                    "0",
+                    "0-0",
+                    "COUNT",
+                    "200",
+                    "JUSTID"
+                ]),
+                argv([
+                    "XAUTOCLAIM",
+                    sk.as_str(),
+                    gn.as_str(),
+                    "consumer-new",
+                    "0",
+                    "5-0",
+                    "COUNT",
+                    "200",
+                    "JUSTID"
+                ]),
+            ]
+        );
     }
 
     #[tokio::test]
