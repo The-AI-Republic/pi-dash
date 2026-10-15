@@ -4,19 +4,33 @@
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { Transport } from "@pidash/api-client";
+import type { InstanceBootstrap, InstancePatch, Transport, TransportInit } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
+
+vi.mock("../../shared/shell/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../shared/shell/index.js")>();
+  return { ...original, notifySuccess: vi.fn() };
+});
+
+import { notifySuccess } from "../../shared/shell/index.js";
 import type { CloudEntrySessionState } from "./cloudEntry.js";
+import {
+  GENERAL_SAVE_FAILURE_LOG,
+  GENERAL_SAVE_SUCCESS_MESSAGE,
+  GENERAL_SAVE_SUCCESS_TITLE,
+} from "./generalSettings.js";
 import {
   useAdminCsrfToken,
   useAdminSession,
   useCloudAuthProbe,
   useCloudEntryRetry,
   useCloudSignInUrl,
+  useInstanceAdmins,
   useInstanceBootstrap,
+  useUpdateGeneralSettings,
 } from "./hooks.js";
 import { adminKeys } from "./queries.js";
 
@@ -43,6 +57,8 @@ function renderProbe(Probe: () => React.ReactElement): void {
 
 afterEach(() => {
   resetAppClient();
+  vi.mocked(notifySuccess).mockClear();
+  vi.restoreAllMocks();
 });
 
 function BootstrapProbe(): React.ReactElement {
@@ -260,5 +276,185 @@ describe("useCloudEntryRetry", () => {
       expect(queryClient.getQueryState(adminKeys.session)?.data).toBeUndefined();
       expect(queryClient.getQueryState(adminKeys.cloudProbe)?.data).toBeUndefined();
     });
+  });
+});
+
+function AdminsProbe(): React.ReactElement {
+  const query = useInstanceAdmins();
+  if (query.isPending) return <div data-testid="probe">loading</div>;
+  if (query.isError) return <div data-testid="probe">failed</div>;
+  return <div data-testid="probe">{query.data.map((entry) => entry.user_detail.email).join(",")}</div>;
+}
+
+describe("useInstanceAdmins", () => {
+  const adminRow = {
+    id: "33333333-3333-4333-8333-333333333333",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    created_by: null,
+    updated_by: null,
+    deleted_at: null,
+    user: "44444444-4444-4444-8444-444444444444",
+    instance: "55555555-5555-4555-8555-555555555555",
+    role: 1,
+    is_verified: true,
+    user_detail: {
+      id: "44444444-4444-4444-8444-444444444444",
+      first_name: "Ada",
+      last_name: "Admin",
+      avatar: "",
+      avatar_url: null,
+      is_bot: false,
+      display_name: "Ada Admin",
+      email: "ada@example.com",
+      last_login_medium: "password",
+    },
+  };
+
+  it("lists the admins through the app client", async () => {
+    createAppClient("https://api.test", stubTransport({ "/api/instances/admins/": { status: 200, body: [adminRow] } }));
+    renderProbe(AdminsProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("ada@example.com"));
+  });
+
+  it("surfaces fetch failures instead of retrying", async () => {
+    createAppClient("https://api.test", stubTransport({}));
+    renderProbe(AdminsProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
+  });
+});
+
+function SaveProbe({ patch }: { patch: InstancePatch }): React.ReactElement {
+  const saving = useUpdateGeneralSettings();
+  return (
+    <button data-testid="probe" data-state={saving.status} type="button" onClick={() => saving.mutate(patch)}>
+      save
+    </button>
+  );
+}
+
+/** The stored row the PATCH answers (parsed strictly, so fully shaped). */
+function storedRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "55555555-5555-4555-8555-555555555555",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    created_by: null,
+    updated_by: null,
+    deleted_at: null,
+    instance_name: "Renamed",
+    whitelist_emails: null,
+    instance_id: "instance-1",
+    current_version: "1.0.0",
+    latest_version: null,
+    edition: "oss",
+    domain: "example.test",
+    last_checked_at: "2026-01-01T00:00:00Z",
+    namespace: null,
+    is_telemetry_enabled: false,
+    is_support_required: false,
+    is_setup_done: true,
+    is_signup_screen_visited: true,
+    is_verified: false,
+    is_test: false,
+    is_current_version_deprecated: false,
+    ...overrides,
+  };
+}
+
+describe("useUpdateGeneralSettings", () => {
+  interface SeenWrite {
+    method: string;
+    path: string;
+    body: unknown;
+  }
+
+  function renderSave(options: { patchStatus?: number; bootstrap?: InstanceBootstrap }): {
+    queryClient: QueryClient;
+    writes: SeenWrite[];
+  } {
+    const writes: SeenWrite[] = [];
+    const transport: Transport = async (url: string, init: TransportInit) => {
+      const path = new URL(url, "https://api.test").pathname;
+      if (path === "/auth/get-csrf-token/") {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify({ csrf_token: "csrf-1" })),
+        };
+      }
+      if (path === "/api/instances/" && init.method === "PATCH") {
+        writes.push({ method: init.method, path, body: JSON.parse(init.body ?? "{}") });
+        return {
+          status: options.patchStatus ?? 200,
+          url,
+          headers: { get: () => null },
+          text: () =>
+            Promise.resolve(
+              (options.patchStatus ?? 200) === 200 ? JSON.stringify(storedRow()) : JSON.stringify({ detail: "boom" })
+            ),
+        };
+      }
+      return {
+        status: 404,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify({ detail: "not found" })),
+      };
+    };
+    createAppClient("https://api.test", transport);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    if (options.bootstrap !== undefined) queryClient.setQueryData(adminKeys.bootstrap, options.bootstrap);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <SaveProbe patch={{ instance_name: "Renamed", is_telemetry_enabled: false }} />
+      </QueryClientProvider>
+    );
+    return { queryClient, writes };
+  }
+
+  function cachedBootstrap(): InstanceBootstrap {
+    return {
+      config: { enable_signup: true },
+      instance: { ...storedRow({ instance_name: "Pi Dash", is_telemetry_enabled: true }), workspaces_exist: true },
+    } as InstanceBootstrap;
+  }
+
+  it("saves name plus telemetry, merges the answer, and raises the notice", async () => {
+    const { queryClient, writes } = renderSave({ bootstrap: cachedBootstrap() });
+    fireEvent.click(screen.getByTestId("probe"));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveAttribute("data-state", "success"));
+    expect(writes).toEqual([
+      { method: "PATCH", path: "/api/instances/", body: { instance_name: "Renamed", is_telemetry_enabled: false } },
+    ]);
+    const cached = queryClient.getQueryData<InstanceBootstrap>(adminKeys.bootstrap);
+    expect(cached?.instance.instance_name).toBe("Renamed");
+    expect(cached?.instance.is_telemetry_enabled).toBe(false);
+    expect(cached?.instance.workspaces_exist).toBe(true);
+    expect(notifySuccess).toHaveBeenCalledWith(GENERAL_SAVE_SUCCESS_TITLE, GENERAL_SAVE_SUCCESS_MESSAGE);
+    expect(notifySuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("still raises the notice when no bootstrap is cached", async () => {
+    const { queryClient, writes } = renderSave({});
+    fireEvent.click(screen.getByTestId("probe"));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveAttribute("data-state", "success"));
+    expect(writes).toHaveLength(1);
+    expect(queryClient.getQueryData(adminKeys.bootstrap)).toBeUndefined();
+    expect(notifySuccess).toHaveBeenCalledWith(GENERAL_SAVE_SUCCESS_TITLE, GENERAL_SAVE_SUCCESS_MESSAGE);
+  });
+
+  it("logs the failure and shows no notice (ADM-017 log-only quirk)", async () => {
+    const errors: unknown[][] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args);
+    });
+    renderSave({ bootstrap: cachedBootstrap(), patchStatus: 500 });
+    fireEvent.click(screen.getByTestId("probe"));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveAttribute("data-state", "error"));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.[0]).toBe(GENERAL_SAVE_FAILURE_LOG);
+    expect(notifySuccess).not.toHaveBeenCalled();
   });
 });

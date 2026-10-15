@@ -13,6 +13,7 @@ import {
   getAdminSession,
   getCsrfToken,
   getInstanceBootstrap,
+  listInstanceAdmins,
   probeCloudAuthSession,
   type ApiClient,
 } from "@pidash/api-client";
@@ -21,6 +22,8 @@ export const adminKeys = {
   root: ["admin"],
   /** The single instance-info read the entry gate branches on. */
   bootstrap: ["admin", "instance", "bootstrap"],
+  /** The admins list the general page reads its first email from. */
+  admins: ["admin", "instance", "admins"],
   /** The forgery token the native auth POSTs carry as a hidden field. */
   csrf: ["admin", "csrf"],
   /** The admin session check the guards branch on. */
@@ -38,6 +41,22 @@ export function instanceBootstrapQueryOptions(client: ApiClient) {
   return queryOptions({
     queryKey: adminKeys.bootstrap,
     queryFn: () => getInstanceBootstrap(client),
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}
+
+/**
+ * The instance admins list (ADM-014): read once per page lifetime —
+ * no retry, no focus or reconnect refetch — and never stale. A failed
+ * read surfaces through the page's error block with a retry.
+ */
+export function instanceAdminsQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: adminKeys.admins,
+    queryFn: () => listInstanceAdmins(client),
     staleTime: Number.POSITIVE_INFINITY,
     retry: false,
     refetchOnWindowFocus: false,

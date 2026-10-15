@@ -8,6 +8,7 @@ import {
   adminKeys,
   adminSessionQueryOptions,
   cloudAuthProbeQueryOptions,
+  instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
 } from "./queries.js";
 
@@ -15,6 +16,7 @@ describe("admin keys", () => {
   it("roots the admin subtree outside the member roots", () => {
     expect(adminKeys.root).toEqual(["admin"]);
     expect(adminKeys.bootstrap).toEqual(["admin", "instance", "bootstrap"]);
+    expect(adminKeys.admins).toEqual(["admin", "instance", "admins"]);
     expect(adminKeys.csrf).toEqual(["admin", "csrf"]);
     expect(adminKeys.session).toEqual(["admin", "session"]);
     expect(adminKeys.cloudProbe).toEqual(["admin", "cloud", "probe"]);
@@ -34,6 +36,26 @@ describe("instance bootstrap query", () => {
 
   it("never retries, refetches, or goes stale (ADM-001 single fetch)", () => {
     const options = instanceBootstrapQueryOptions({} as never);
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("instance admins query", () => {
+  it("lists the admins through the client exactly once", async () => {
+    const admins = [{ user_detail: { email: "ada@example.com" } }];
+    const getJson = vi.fn(async () => admins);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = instanceAdminsQueryOptions(fakeClient);
+    expect(options.queryKey).toEqual(adminKeys.admins);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(admins);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/admins/");
+  });
+
+  it("never retries, refetches, or goes stale (ADM-014 single read)", () => {
+    const options = instanceAdminsQueryOptions({} as never);
     expect(options.retry).toBe(false);
     expect(options.refetchOnWindowFocus).toBe(false);
     expect(options.refetchOnReconnect).toBe(false);

@@ -5,17 +5,25 @@
 // bootstrap and the native-POST forgery token through these, never
 // through raw client calls.
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { cloudSignInUrl } from "@pidash/api-client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { cloudSignInUrl, updateInstance, type InstanceBootstrap, type InstancePatch } from "@pidash/api-client";
 import * as React from "react";
 
 import { getAppClient } from "../../core/api/client.js";
+import { notifySuccess } from "../../shared/shell/index.js";
 import type { CloudEntrySessionState } from "./cloudEntry.js";
+import {
+  GENERAL_SAVE_FAILURE_LOG,
+  GENERAL_SAVE_SUCCESS_MESSAGE,
+  GENERAL_SAVE_SUCCESS_TITLE,
+  mergeGeneralSettingsIntoBootstrap,
+} from "./generalSettings.js";
 import {
   adminCsrfQueryOptions,
   adminKeys,
   adminSessionQueryOptions,
   cloudAuthProbeQueryOptions,
+  instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
 } from "./queries.js";
 
@@ -31,6 +39,33 @@ export function useInstanceBootstrap() {
 /** The forgery token the native setup/sign-in POSTs carry. */
 export function useAdminCsrfToken() {
   return useQuery(adminCsrfQueryOptions(getAppClient()));
+}
+
+/** The admins list the general page reads its first email from. */
+export function useInstanceAdmins() {
+  return useQuery(instanceAdminsQueryOptions(getAppClient()));
+}
+
+/**
+ * The general-settings shared save (ADM-017): one PATCH carrying the
+ * name plus the telemetry flag. Success folds the answer into the
+ * cached bootstrap and raises the success notice; failure only logs —
+ * the accepted log-only quirk, so no notice and the server untouched.
+ */
+export function useUpdateGeneralSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: InstancePatch) => updateInstance(getAppClient(), patch),
+    onSuccess: (updated) => {
+      queryClient.setQueryData<InstanceBootstrap>(adminKeys.bootstrap, (old) =>
+        old === undefined ? old : mergeGeneralSettingsIntoBootstrap(old, updated)
+      );
+      notifySuccess(GENERAL_SAVE_SUCCESS_TITLE, GENERAL_SAVE_SUCCESS_MESSAGE);
+    },
+    onError: (error) => {
+      console.error(GENERAL_SAVE_FAILURE_LOG, error);
+    },
+  });
 }
 
 /**
