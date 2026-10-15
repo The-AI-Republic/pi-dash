@@ -49,9 +49,9 @@ use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
 use pidash_services::dispatch::{AdmissionCache, LlmProfile};
-use pidash_services::extensions::CloudAgentToolsetsSeam;
 #[cfg(test)]
 use pidash_services::extensions::NoExtraToolsets;
+use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::clock::{self as clock, ClockIssue, ClockWrite, RunEndedRef};
 use pidash_types::orchestration::{StateRef, TickerEventKind};
 
@@ -143,9 +143,37 @@ async fn fetch_presence(
 
 /// The `has_usable_llm_config` closure over pre-fetched presence. A
 /// user outside the map answers keyless, the same as a missing
-/// config row.
+/// config row. Only the pause executor still uses this: the pause
+/// path creates no runs, so its universe stays empty and the closure
+/// is unread (identical under any seam).
 fn has_key_fn(presence: Arc<HashMap<Uuid, bool>>) -> impl Fn(Uuid) -> bool + Clone + Send + Sync {
     move |uid: Uuid| -> bool { has_usable_llm_config(presence.get(&uid).copied().unwrap_or(false)) }
+}
+
+/// The `has_usable_llm_config` verdicts for the pre-fetched
+/// universe: one installed-seam consult per user over the key bits
+/// (`user_has_llm_config`, `agent_execution.py:69-80`). The CE default
+/// answers the key bit; the overlay routes OpenHub/Codex/BYOK through
+/// the same single switch point Pi Dash AI uses (PIDASHCONV-1051,
+/// installed worker-side in PIDASHCONV-1054). The worker closures are
+/// sync, so the async consult happens here at prefetch time and the
+/// driver reads the verdict map.
+async fn gate_verdicts(
+    seam: &Arc<dyn AssistantModelSeam>,
+    presence: &HashMap<Uuid, bool>,
+) -> HashMap<Uuid, bool> {
+    let mut verdicts = HashMap::with_capacity(presence.len());
+    for (uid, has_key) in presence {
+        verdicts.insert(*uid, seam.has_usable_llm_config(*uid, *has_key).await);
+    }
+    verdicts
+}
+
+/// The `has_usable_llm_config` closure over pre-fetched verdicts. A
+/// user outside the pre-fetched universe answers closed, the same as
+/// a missing config row.
+fn gate_fn(verdicts: Arc<HashMap<Uuid, bool>>) -> impl Fn(Uuid) -> bool + Clone + Send + Sync {
+    move |uid: Uuid| -> bool { verdicts.get(&uid).copied().unwrap_or(false) }
 }
 
 /// The `managed_llm_profile` closure over pre-fetched presence.
@@ -193,25 +221,27 @@ async fn drain_terminal_effects(
 // ---------------------------------------------------------------------------
 
 /// `complete_project_move_handoff(run_id)` with live inputs: the
-/// source run's creator presence, a per-call [`RunnerSeamCache`],
-/// and `now`. Answers the replacement run id (`None` on every
-/// early-out: unknown run, non-terminal source, no marker, moved
-/// again, no pod).
+/// source run's creator presence, the installed assistant seam's
+/// llm-gate verdicts over it, a per-call [`RunnerSeamCache`], and
+/// `now`. Answers the replacement run id (`None` on every early-out:
+/// unknown run, non-terminal source, no marker, moved again, no pod).
 pub async fn complete_project_move_handoff_live(
     pool: &PgPool,
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
     run_id: Uuid,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    assistant_seam: Arc<dyn AssistantModelSeam>,
 ) -> Result<Option<Uuid>, CreationJobsError> {
     let actor = run_creator(pool, run_id).await?;
     let universe = actor.into_iter().collect::<Vec<_>>();
     let presence = Arc::new(fetch_presence(pool, &universe).await?);
+    let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
     let deps = StoreDeps {
         cloud: cloud.clone(),
         managed: managed.clone(),
         cache: RunnerSeamCache::default(),
-        has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
+        has_usable_llm_config: gate_fn(verdicts),
         toolsets,
         llm_profile: profile_fn(presence),
         now_unix_secs: Utc::now().timestamp(),
@@ -450,6 +480,88 @@ mod tests {
         assert!(!keyless.available);
     }
 
+    /// Overlay-shaped seam: a keyless user still counts as configured
+    /// (the gateway lane, not BYOK).
+    #[derive(Debug)]
+    struct GatewaySeam;
+
+    impl AssistantModelSeam for GatewaySeam {
+        fn has_usable_llm_config(
+            &self,
+            user_id: Uuid,
+            has_api_key: bool,
+        ) -> pidash_services::extensions::SeamFuture<'_, bool> {
+            let _ = (user_id, has_api_key);
+            Box::pin(async move { true })
+        }
+
+        fn generate_title(
+            &self,
+            request: pidash_services::extensions::TitleRequest,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            Result<String, pidash_services::extensions::TitleError>,
+        > {
+            let _ = request;
+            Box::pin(async move { Ok("seam title".to_owned()) })
+        }
+    }
+
+    /// The trait defaults with a canned title: the CE behaviour lives
+    /// in the defaults (the api crate's `CeAssistantSeam` only adds
+    /// the title transport), so this pins the default surface.
+    #[derive(Debug)]
+    struct DefaultSeam;
+
+    impl AssistantModelSeam for DefaultSeam {
+        fn generate_title(
+            &self,
+            request: pidash_services::extensions::TitleRequest,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            Result<String, pidash_services::extensions::TitleError>,
+        > {
+            let _ = request;
+            Box::pin(async move { Ok("canned".to_owned()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn handoff_verdicts_use_the_installed_seam() {
+        let seam: Arc<dyn AssistantModelSeam> = Arc::new(GatewaySeam);
+        let keyless = Uuid::new_v4();
+        let presence = HashMap::from([(keyless, false)]);
+        let verdicts = gate_verdicts(&seam, &presence).await;
+        assert_eq!(
+            verdicts.get(&keyless),
+            Some(&true),
+            "an installed seam that accepts the user must open the gate without a key"
+        );
+        let gate = gate_fn(Arc::new(verdicts));
+        assert!(gate(keyless));
+        assert!(
+            !gate(Uuid::new_v4()),
+            "a user outside the universe still answers closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_verdicts_keep_the_ce_default() {
+        // No installed seam: the CE default answers each key bit
+        // exactly like the pre-seam free function did.
+        let seam: Arc<dyn AssistantModelSeam> = Arc::new(DefaultSeam);
+        let keyed = Uuid::new_v4();
+        let keyless = Uuid::new_v4();
+        let presence = HashMap::from([(keyed, true), (keyless, false)]);
+        let verdicts = gate_verdicts(&seam, &presence).await;
+        assert_eq!(verdicts.get(&keyed), Some(&true));
+        assert_eq!(verdicts.get(&keyless), Some(&false));
+        let gate = gate_fn(Arc::new(verdicts));
+        assert!(gate(keyed));
+        assert!(!gate(keyless));
+        assert!(!gate(Uuid::new_v4()));
+    }
+
     #[test]
     fn seam_sql_parses() {
         for sql in [
@@ -544,6 +656,7 @@ mod tests {
             &managed,
             Uuid::new_v4(),
             Arc::new(NoExtraToolsets),
+            Arc::new(DefaultSeam),
         )
         .await
         .expect("unknown run is Ok");

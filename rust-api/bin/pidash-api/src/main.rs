@@ -218,6 +218,14 @@ async fn worker(concurrency: u32) -> MainResult {
     }
     let fire_tick_states =
         pidash_jobs::orchestration::LiveFireTickSeam::load_states(pools.primary()).await?;
+    // The CE assistant seam: the same default `serve` installs on the
+    // app state, so worker-side runs-creation gates answer exactly as
+    // the serve-side gates do (PIDASHCONV-1054). The cloud binary
+    // installs its overlay implementation here instead.
+    let assistant_seam =
+        std::sync::Arc::new(pidash_api::assistant::model_seam::CeAssistantSeam::new(
+            std::sync::Arc::new(settings.clone()),
+        ));
     pidash_jobs::register_oss_handlers(
         &mut registry,
         &pidash_jobs::OssWorkerCtx {
@@ -226,6 +234,7 @@ async fn worker(concurrency: u32) -> MainResult {
             mongo,
             fire_tick_states,
             seed_dir: seed_data_dir(),
+            assistant_seam,
         },
     )?;
     let worker_config = pidash_jobs::WorkerConfig {

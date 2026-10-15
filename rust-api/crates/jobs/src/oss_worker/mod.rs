@@ -52,7 +52,7 @@ use uuid::Uuid;
 use pidash_db::config::Settings;
 use pidash_db::tasks_cleanup::cleanup_queries::MongoSink;
 use pidash_db::Pools;
-use pidash_services::extensions::NoExtraToolsets;
+use pidash_services::extensions::{AssistantModelSeam, NoExtraToolsets};
 
 use crate::orchestration::StateView;
 use crate::worker::Registry;
@@ -75,6 +75,11 @@ pub struct OssWorkerCtx {
     pub fire_tick_states: HashMap<Uuid, StateView>,
     /// Seed-data dir for `workspace_seed` (`SEED_DIR` env or `seeds/`).
     pub seed_dir: PathBuf,
+    /// The assistant model-provider seam the worker-side
+    /// runs-creation gates consult (tick, scheduler, handoff
+    /// executor). The OSS binary installs the CE default; the cloud
+    /// binary installs its overlay implementation.
+    pub assistant_seam: std::sync::Arc<dyn AssistantModelSeam>,
 }
 
 /// Register every OSS-owned task handler on `registry`.
@@ -95,6 +100,24 @@ pub struct OssWorkerCtx {
 /// use pidash_jobs::oss_worker::{register_oss_handlers, OssWorkerCtx};
 /// use pidash_jobs::worker::Registry;
 ///
+/// // The trait defaults with a canned title: the CE behaviour lives
+/// // in the defaults.
+/// #[derive(Debug)]
+/// struct DefaultSeam;
+///
+/// impl pidash_services::extensions::AssistantModelSeam for DefaultSeam {
+///     fn generate_title(
+///         &self,
+///         request: pidash_services::extensions::TitleRequest,
+///     ) -> pidash_services::extensions::SeamFuture<
+///         '_,
+///         Result<String, pidash_services::extensions::TitleError>,
+///     > {
+///         let _ = request;
+///         Box::pin(async move { Ok("canned".to_owned()) })
+///     }
+/// }
+///
 /// # #[tokio::main]
 /// # async fn main() {
 /// // `connect_lazy` never touches the network (it needs a Tokio
@@ -112,6 +135,7 @@ pub struct OssWorkerCtx {
 ///     mongo: None,
 ///     fire_tick_states: HashMap::new(),
 ///     seed_dir: std::env::temp_dir(),
+///     assistant_seam: std::sync::Arc::new(DefaultSeam),
 /// };
 /// register_oss_handlers(&mut registry, &ctx).expect("mail seams build");
 /// assert!(registry.owns(pidash_jobs::assistant::SWEEP_TASK));
@@ -212,6 +236,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.settings.managed_runner.clone(),
             ctx.fire_tick_states.clone(),
             std::sync::Arc::new(NoExtraToolsets),
+            ctx.assistant_seam.clone(),
         )),
     );
     crate::tasks_ticker::fire_binding::register_fire_binding(
@@ -222,6 +247,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.settings.cloud_agent.clone(),
             ctx.settings.managed_runner.clone(),
             std::sync::Arc::new(NoExtraToolsets),
+            ctx.assistant_seam.clone(),
         ),
     );
     // D-07 send/stack (PIDASHCONV-865; kept in sync with
@@ -287,6 +313,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         redis,
         &ctx.settings,
         std::sync::Arc::new(NoExtraToolsets),
+        ctx.assistant_seam.clone(),
     ));
     crate::runner_runs::register_runner_runs_tasks(
         registry,
@@ -357,6 +384,25 @@ mod tests {
     use super::*;
     use crate::worker::{route_for, Route};
 
+    /// The trait defaults with a canned title: the CE behaviour lives
+    /// in the defaults (the api crate's `CeAssistantSeam` only adds
+    /// the title transport).
+    #[derive(Debug)]
+    struct DefaultSeam;
+
+    impl AssistantModelSeam for DefaultSeam {
+        fn generate_title(
+            &self,
+            request: pidash_services::extensions::TitleRequest,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            Result<String, pidash_services::extensions::TitleError>,
+        > {
+            let _ = request;
+            Box::pin(async move { Ok("canned".to_owned()) })
+        }
+    }
+
     /// PIDASHCONV-918: the helper owns exactly the OSS task set — the
     /// same const union the binary's `mirror_registry_matches_tasks_table`
     /// pins (54 names), while the Python-owned sentinels stay
@@ -379,6 +425,7 @@ mod tests {
             mongo: None,
             fire_tick_states: HashMap::new(),
             seed_dir: std::env::temp_dir(),
+            assistant_seam: std::sync::Arc::new(DefaultSeam),
         };
         let mut registry = Registry::new();
         register_oss_handlers(&mut registry, &ctx).expect("mail seams build");

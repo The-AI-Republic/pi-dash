@@ -38,7 +38,7 @@ use crate::runner_runs::sweeps_runs::{
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings, Settings};
 use pidash_db::orchestration::workpad::get_agent_system_user;
 use pidash_db::runner_sessions::outbox::{self as session_outbox, OutboxError};
-use pidash_services::extensions::CloudAgentToolsetsSeam;
+use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::runner_sessions::live_drains::{
     drain_for_runner_by_id, drain_pod_by_id, PoolPubsubStore,
 };
@@ -56,19 +56,21 @@ pub struct RunnerSeams {
     cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    assistant_seam: Arc<dyn AssistantModelSeam>,
 }
 
 impl RunnerSeams {
     /// Build the providers from the worker pool, the shared Redis
     /// client (the `LivePorts::new` shape — `None` when `REDIS_URL`
     /// is unset or unparsable), the resolved [`Settings`], and the
-    /// injected cloud-agent toolsets seam. No I/O: everything is
-    /// stored for the per-call effects.
+    /// injected cloud-agent toolsets and assistant seams. No I/O:
+    /// everything is stored for the per-call effects.
     pub fn new(
         pool: PgPool,
         redis: Option<redis::Client>,
         settings: &Settings,
         toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+        assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
         Self {
             pool,
@@ -77,6 +79,7 @@ impl RunnerSeams {
             cloud: settings.cloud_agent.clone(),
             managed: settings.managed_runner.clone(),
             toolsets,
+            assistant_seam,
         }
     }
 }
@@ -159,6 +162,7 @@ impl RunnerRunsSeams for RunnerSeams {
                 &self.managed,
                 run_id,
                 self.toolsets.clone(),
+                self.assistant_seam.clone(),
             )
             .await
             .map(|_| ())

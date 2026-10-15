@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
 use pidash_db::orchestration::runs::{active_run_sql, latest_prior_run_sql};
-use pidash_services::extensions::CloudAgentToolsetsSeam;
+use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 
 use super::creation_jobs::StoreDeps;
 use super::fire_tick_seam::{
@@ -31,20 +31,21 @@ use super::fire_tick_seam::{
     DispatchJobsError, StateView,
 };
 use super::live_inputs::{
-    creator_universe, fetch_presence, has_key_fn, profile_fn, CallCache, JobsMatcher,
+    creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, CallCache, JobsMatcher,
 };
 use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 
 /// Live [`FireTickSeam`]: pool + dispatch settings + the boot-loaded
-/// state map + the injected toolsets seam. One value serves every fire;
-/// per-fire inputs (presence, cache, `now`) are built inside the async
-/// methods.
+/// state map + the injected toolsets and assistant seams. One value
+/// serves every fire; per-fire inputs (presence, llm-gate verdicts,
+/// cache, `now`) are built inside the async methods.
 pub struct LiveFireTickSeam {
     pool: PgPool,
     cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
     states: Arc<HashMap<Uuid, StateView>>,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    assistant_seam: Arc<dyn AssistantModelSeam>,
 }
 
 impl LiveFireTickSeam {
@@ -54,6 +55,7 @@ impl LiveFireTickSeam {
         managed: ManagedRunnerSettings,
         states: HashMap<Uuid, StateView>,
         toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+        assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
         Self {
             pool,
@@ -61,6 +63,7 @@ impl LiveFireTickSeam {
             managed,
             states: Arc::new(states),
             toolsets,
+            assistant_seam,
         }
     }
 
@@ -119,16 +122,18 @@ impl FireTickSeam for LiveFireTickSeam {
         let cloud = self.cloud.clone();
         let managed = self.managed.clone();
         let toolsets = self.toolsets.clone();
+        let assistant_seam = self.assistant_seam.clone();
         let matcher = JobsMatcher::new(pool.clone());
         let triggered_by = triggered_by.to_owned();
         Box::pin(async move {
             let universe = creator_universe(&pool, actor, issue_id).await?;
             let presence = Arc::new(fetch_presence(&pool, &universe).await?);
+            let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
             let deps = StoreDeps {
                 cloud,
                 managed,
                 cache: CallCache::default(),
-                has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
+                has_usable_llm_config: gate_fn(verdicts),
                 toolsets,
                 llm_profile: profile_fn(presence),
                 now_unix_secs: Utc::now().timestamp(),
@@ -170,6 +175,25 @@ mod tests {
         }
     }
 
+    /// The trait defaults with a canned title: the CE behaviour lives
+    /// in the defaults (the api crate's `CeAssistantSeam` only adds
+    /// the title transport).
+    #[derive(Debug)]
+    struct DefaultSeam;
+
+    impl AssistantModelSeam for DefaultSeam {
+        fn generate_title(
+            &self,
+            request: pidash_services::extensions::TitleRequest,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            Result<String, pidash_services::extensions::TitleError>,
+        > {
+            let _ = request;
+            Box::pin(async move { Ok("canned".to_owned()) })
+        }
+    }
+
     fn seam() -> LiveFireTickSeam {
         let pool = PgPool::connect_lazy("postgres://localhost:1/unused").expect("lazy pool builds");
         let states = [
@@ -181,13 +205,14 @@ mod tests {
         .map(|state| (state.id, state))
         .collect();
         let settings = pidash_db::config::Settings::test_defaults();
-        LiveFireTickSeam {
+        LiveFireTickSeam::new(
             pool,
-            cloud: settings.cloud_agent,
-            managed: settings.managed_runner,
-            states: Arc::new(states),
-            toolsets: Arc::new(NoExtraToolsets),
-        }
+            settings.cloud_agent,
+            settings.managed_runner,
+            states,
+            Arc::new(NoExtraToolsets),
+            Arc::new(DefaultSeam),
+        )
     }
 
     #[tokio::test]

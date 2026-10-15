@@ -39,7 +39,7 @@ use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::admission::AdmissionCache;
 use pidash_services::dispatch::LlmProfile;
-use pidash_services::extensions::CloudAgentToolsetsSeam;
+use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
     CreationError, PodView, RenderedTurn, RunView, BUNDLE_WORKSPACE_SQL,
@@ -60,7 +60,7 @@ use super::fire_tick_seam::{
     DispatchJobsError, DispatchOutcome,
 };
 use super::live_inputs::{
-    fetch_presence, has_key_fn, order_universe, profile_fn, project_leads, CallCache,
+    fetch_presence, gate_fn, gate_verdicts, order_universe, profile_fn, project_leads, CallCache,
 };
 use crate::tasks_ticker::fire_binding::{
     BindingForDispatch, DispatchRun, SchedulerDispatch, SchedulerDispatchResult,
@@ -513,7 +513,8 @@ fn to_dispatch_result(
 
 /// Build the live [`SchedulerDispatch`]: each call prefetches
 /// presence for the binding's creator chain (actor, project lead,
-/// default assignee), runs the jobs driver, and maps the outcome. A
+/// default assignee), consults the installed assistant seam for the
+/// llm-gate verdicts, runs the jobs driver, and maps the outcome. A
 /// transport-level failure outside the `(run, fail_reason)` contract
 /// is `Err` (task failure).
 pub fn live_scheduler_dispatch(
@@ -521,12 +522,14 @@ pub fn live_scheduler_dispatch(
     cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    assistant_seam: Arc<dyn AssistantModelSeam>,
 ) -> SchedulerDispatch {
     Arc::new(move |binding: BindingForDispatch| {
         let pool = pool.clone();
         let cloud = cloud.clone();
         let managed = managed.clone();
         let toolsets = toolsets.clone();
+        let assistant_seam = assistant_seam.clone();
         Box::pin(async move {
             let now = Utc::now();
             let (lead, default) = match binding.project_id {
@@ -541,11 +544,12 @@ pub fn live_scheduler_dispatch(
                     .await
                     .map_err(|error| error.to_string())?,
             );
+            let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
             let deps = StoreDeps {
                 cloud,
                 managed,
                 cache: CallCache::default(),
-                has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
+                has_usable_llm_config: gate_fn(verdicts),
                 toolsets,
                 llm_profile: profile_fn(presence),
                 now_unix_secs: now.timestamp(),

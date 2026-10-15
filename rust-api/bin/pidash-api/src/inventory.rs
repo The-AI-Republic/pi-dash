@@ -1854,6 +1854,11 @@ mod tests {
         // state map, and the live scheduler dispatch. Construction
         // does no I/O, so the lazy pool suffices.
         let dispatch_settings = pidash_db::config::Settings::test_defaults();
+        // The same CE assistant seam `worker()` installs (PIDASHCONV-1054).
+        let dispatch_assistant_seam =
+            std::sync::Arc::new(pidash_api::assistant::model_seam::CeAssistantSeam::new(
+                std::sync::Arc::new(dispatch_settings.clone()),
+            ));
         pidash_jobs::tasks_ticker::fire_tick::register_fire_tick(
             &mut registry,
             pool.clone(),
@@ -1863,6 +1868,7 @@ mod tests {
                 dispatch_settings.managed_runner.clone(),
                 std::collections::HashMap::new(),
                 std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+                dispatch_assistant_seam.clone(),
             )),
         );
         pidash_jobs::tasks_ticker::fire_binding::register_fire_binding(
@@ -1873,6 +1879,7 @@ mod tests {
                 dispatch_settings.cloud_agent,
                 dispatch_settings.managed_runner,
                 std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+                dispatch_assistant_seam,
             ),
         );
         pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pool.clone());
@@ -1885,6 +1892,9 @@ mod tests {
             None,
             &runner_settings,
             std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+            std::sync::Arc::new(pidash_api::assistant::model_seam::CeAssistantSeam::new(
+                std::sync::Arc::new(runner_settings.clone()),
+            )),
         ));
         pidash_jobs::runner_runs::register_runner_runs_tasks(
             &mut registry,
