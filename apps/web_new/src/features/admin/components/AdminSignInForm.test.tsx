@@ -85,6 +85,7 @@ describe("AdminSignInForm", () => {
     renderForm();
     const toggle = screen.getByTestId("admin-sign-in-toggle-password");
     const password = screen.getByLabelText("Password");
+    expect(toggle).toHaveAttribute("tabindex", "-1");
     expect(password).toHaveAttribute("type", "password");
     fireEvent.click(toggle);
     expect(password).toHaveAttribute("type", "text");

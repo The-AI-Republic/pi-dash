@@ -33,6 +33,22 @@ export const adminKeys = {
 } as const;
 
 /**
+ * Shared fetch behavior every admin query spreads (ADM-069, from
+ * parity/specs/admin.md §0.6): entries never go stale, so
+ * client-side hops reuse the cache instead of re-issuing reads;
+ * window focus and reconnects never refetch; and no polling interval
+ * exists. Lists refresh only through explicit invalidation after a
+ * mutation. Mount refetch stays on by design: an invalidated entry
+ * must re-read when its page mounts again.
+ */
+export const adminQueryDefaults = {
+  staleTime: Number.POSITIVE_INFINITY,
+  refetchOnWindowFocus: false,
+  refetchOnReconnect: false,
+  refetchInterval: false,
+} as const;
+
+/**
  * The instance bootstrap the entry gate branches on (ADM-001): issued
  * exactly once — no retry, no focus or reconnect refetch — and never
  * stale, so remounts reuse it instead of re-issuing the read.
@@ -41,10 +57,8 @@ export function instanceBootstrapQueryOptions(client: ApiClient) {
   return queryOptions({
     queryKey: adminKeys.bootstrap,
     queryFn: () => getInstanceBootstrap(client),
-    staleTime: Number.POSITIVE_INFINITY,
+    ...adminQueryDefaults,
     retry: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
   });
 }
 
@@ -74,10 +88,8 @@ export function adminSessionQueryOptions(client: ApiClient) {
   return queryOptions({
     queryKey: adminKeys.session,
     queryFn: () => getAdminSession(client),
-    staleTime: Number.POSITIVE_INFINITY,
+    ...adminQueryDefaults,
     retry: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
   });
 }
 
@@ -93,10 +105,8 @@ export function cloudAuthProbeQueryOptions(client: ApiClient) {
   return queryOptions({
     queryKey: adminKeys.cloudProbe,
     queryFn: () => probeCloudAuthSession(client),
-    staleTime: Number.POSITIVE_INFINITY,
+    ...adminQueryDefaults,
     retry: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
   });
 }
 
@@ -108,7 +118,6 @@ export function adminCsrfQueryOptions(client: ApiClient) {
   return queryOptions({
     queryKey: adminKeys.csrf,
     queryFn: () => getCsrfToken(client),
-    staleTime: Number.POSITIVE_INFINITY,
-    refetchOnWindowFocus: false,
+    ...adminQueryDefaults,
   });
 }

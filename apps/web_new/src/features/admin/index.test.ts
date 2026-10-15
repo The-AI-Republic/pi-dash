@@ -27,9 +27,12 @@ import {
   AdminSignInForm,
   AdminSignOutForm,
   adminKeys,
+  adminQueryDefaults,
   adminSessionQueryOptions,
   applyAdminThemePreference,
   applyStoredAdminTheme,
+  auditAdminAbsence,
+  auditAdminToggles,
   COMPANY_NAME_MAX_LENGTH,
   CloudAdminEntry,
   decideAdminGuard,
@@ -101,6 +104,8 @@ describe("admin barrel", () => {
       adminSessionQueryOptions,
       applyAdminThemePreference,
       applyStoredAdminTheme,
+      auditAdminAbsence,
+      auditAdminToggles,
       buildAdminCrumbs,
       decideAdminGuard,
       firstAdminEmail,
@@ -160,6 +165,7 @@ describe("admin barrel", () => {
       expect(component).toBeDefined();
     }
     expect(adminKeys).toBeDefined();
+    expect(adminQueryDefaults).toBeDefined();
     expect(ADMIN_NARROW_VIEWPORT_PX).toBeGreaterThan(0);
     expect(ADMIN_SEGMENT_LABELS).toBeDefined();
     expect(ADMIN_SIDEBAR_ENTRIES.length).toBeGreaterThan(0);

@@ -6,11 +6,27 @@ import { describe, expect, it, vi } from "vitest";
 import {
   adminCsrfQueryOptions,
   adminKeys,
+  adminQueryDefaults,
   adminSessionQueryOptions,
   cloudAuthProbeQueryOptions,
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
 } from "./queries.js";
+import * as adminQueries from "./queries.js";
+
+/** The no-live-update shape every admin query factory must resolve. */
+interface AdminPinnedQueryOptions {
+  staleTime: unknown;
+  refetchOnWindowFocus: unknown;
+  refetchOnReconnect: unknown;
+  refetchInterval: unknown;
+}
+
+type AdminQueryFactory = (client: never) => AdminPinnedQueryOptions;
+
+function isAdminQueryFactory(entry: [string, unknown]): entry is [string, AdminQueryFactory] {
+  return entry[0].endsWith("QueryOptions") && typeof entry[1] === "function";
+}
 
 describe("admin keys", () => {
   it("roots the admin subtree outside the member roots", () => {
@@ -143,5 +159,29 @@ describe("cloud auth probe query", () => {
     expect(options.refetchOnWindowFocus).toBe(false);
     expect(options.refetchOnReconnect).toBe(false);
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("shared admin query defaults", () => {
+  it("pins a cache that never polls and never refetches behind the page", () => {
+    expect(adminQueryDefaults.staleTime).toBe(Number.POSITIVE_INFINITY);
+    expect(adminQueryDefaults.refetchOnWindowFocus).toBe(false);
+    expect(adminQueryDefaults.refetchOnReconnect).toBe(false);
+    expect(adminQueryDefaults.refetchInterval).toBe(false);
+  });
+
+  it("covers every admin query factory, present and future (ADM-069)", () => {
+    // Factories take the client first, so a bare client resolves the
+    // shape even for factories whose later params build the key. A new
+    // factory that needs more than the client updates this call.
+    const factories = (Object.entries(adminQueries) as [string, unknown][]).filter(isAdminQueryFactory);
+    expect(factories.length).toBeGreaterThan(0);
+    for (const [name, factory] of factories) {
+      const options = factory({} as never);
+      expect(options.staleTime, `${name} never goes stale`).toBe(Number.POSITIVE_INFINITY);
+      expect(options.refetchOnWindowFocus, `${name} never refetches on focus`).toBe(false);
+      expect(options.refetchOnReconnect, `${name} never refetches on reconnect`).toBe(false);
+      expect(options.refetchInterval ?? false, `${name} never polls`).toBe(false);
+    }
   });
 });

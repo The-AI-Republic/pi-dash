@@ -8,6 +8,8 @@ export { GOD_MODE_ENTRY, resolveSetupError, resolveSignInBanners } from "./admin
 export type { SetupError, SetupErrorPlacement, SignInBanners, SignInMappedBanner } from "./adminErrors.js";
 export { decideAdminGuard, GOD_MODE_GENERAL } from "./adminGuards.js";
 export type { AdminGuardDecision, AdminGuardTree } from "./adminGuards.js";
+export { auditAdminAbsence, auditAdminToggles } from "./adminInvariants.js";
+export type { AdminAbsenceAudit, AdminToggleAudit } from "./adminInvariants.js";
 export {
   ADMIN_NARROW_VIEWPORT_PX,
   ADMIN_SEGMENT_LABELS,
@@ -40,6 +42,7 @@ export {
 export {
   adminCsrfQueryOptions,
   adminKeys,
+  adminQueryDefaults,
   adminSessionQueryOptions,
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
