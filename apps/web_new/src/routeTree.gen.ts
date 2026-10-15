@@ -27,6 +27,7 @@ import { Route as AccountsResetPasswordRouteImport } from "./routes/accounts/res
 import { Route as AccountsSetPasswordRouteImport } from "./routes/accounts/set-password";
 import { Route as AccountsSignUpRouteImport } from "./routes/accounts/sign-up";
 import { Route as AuthDeviceRouteImport } from "./routes/auth/device";
+import { Route as GodModeIndexRouteImport } from "./routes/god-mode/index";
 import { Route as WsGatedIndexRouteImport } from "./routes/$ws/_gated/index";
 import { Route as WsGatedBrowseIssueKeyRouteImport } from "./routes/$ws/_gated/browse/$issueKey";
 import { Route as WsGatedProjectsIndexRouteImport } from "./routes/$ws/_gated/projects/index";
@@ -130,6 +131,11 @@ const AuthDeviceRoute = AuthDeviceRouteImport.update({
   path: "/auth/device",
   getParentRoute: () => rootRouteImport,
 } as any);
+const GodModeIndexRoute = GodModeIndexRouteImport.update({
+  id: "/god-mode/",
+  path: "/god-mode/",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const WsGatedIndexRoute = WsGatedIndexRouteImport.update({
   id: "/",
   path: "/",
@@ -214,6 +220,7 @@ export interface FileRoutesByFullPath {
   "/accounts/set-password": typeof AccountsSetPasswordRoute;
   "/accounts/sign-up": typeof AccountsSignUpRoute;
   "/auth/device": typeof AuthDeviceRoute;
+  "/god-mode/": typeof GodModeIndexRoute;
   "/$ws/": typeof WsGatedIndexRoute;
   "/$ws/projects/$projectId": typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
   "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
@@ -246,6 +253,7 @@ export interface FileRoutesByTo {
   "/accounts/set-password": typeof AccountsSetPasswordRoute;
   "/accounts/sign-up": typeof AccountsSignUpRoute;
   "/auth/device": typeof AuthDeviceRoute;
+  "/god-mode": typeof GodModeIndexRoute;
   "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
   "/$ws/projects": typeof WsGatedProjectsIndexRoute;
   "/$ws/projects/$projectId": typeof WsGatedProjectsProjectIdIndexRoute;
@@ -278,6 +286,7 @@ export interface FileRoutesById {
   "/accounts/set-password": typeof AccountsSetPasswordRoute;
   "/accounts/sign-up": typeof AccountsSignUpRoute;
   "/auth/device": typeof AuthDeviceRoute;
+  "/god-mode/": typeof GodModeIndexRoute;
   "/$ws/_gated/": typeof WsGatedIndexRoute;
   "/$ws/_gated/projects/$projectId": typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
   "/$ws/_gated/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
@@ -312,6 +321,7 @@ export interface FileRouteTypes {
     | "/accounts/set-password"
     | "/accounts/sign-up"
     | "/auth/device"
+    | "/god-mode/"
     | "/$ws/"
     | "/$ws/projects/$projectId"
     | "/$ws/browse/$issueKey"
@@ -344,6 +354,7 @@ export interface FileRouteTypes {
     | "/accounts/set-password"
     | "/accounts/sign-up"
     | "/auth/device"
+    | "/god-mode"
     | "/$ws/browse/$issueKey"
     | "/$ws/projects"
     | "/$ws/projects/$projectId"
@@ -375,6 +386,7 @@ export interface FileRouteTypes {
     | "/accounts/set-password"
     | "/accounts/sign-up"
     | "/auth/device"
+    | "/god-mode/"
     | "/$ws/_gated/"
     | "/$ws/_gated/projects/$projectId"
     | "/$ws/_gated/browse/$issueKey"
@@ -407,6 +419,7 @@ export interface RootRouteChildren {
   AccountsSetPasswordRoute: typeof AccountsSetPasswordRoute;
   AccountsSignUpRoute: typeof AccountsSignUpRoute;
   AuthDeviceRoute: typeof AuthDeviceRoute;
+  GodModeIndexRoute: typeof GodModeIndexRoute;
 }
 
 declare module "@tanstack/react-router" {
@@ -535,6 +548,13 @@ declare module "@tanstack/react-router" {
       path: "/auth/device";
       fullPath: "/auth/device";
       preLoaderRoute: typeof AuthDeviceRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/god-mode/": {
+      id: "/god-mode/";
+      path: "/god-mode";
+      fullPath: "/god-mode/";
+      preLoaderRoute: typeof GodModeIndexRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/$ws/_gated/": {
@@ -704,5 +724,6 @@ const rootRouteChildren: RootRouteChildren = {
   AccountsSetPasswordRoute: AccountsSetPasswordRoute,
   AccountsSignUpRoute: AccountsSignUpRoute,
   AuthDeviceRoute: AuthDeviceRoute,
+  GodModeIndexRoute: GodModeIndexRoute,
 };
 export const routeTree = rootRouteImport._addFileChildren(rootRouteChildren)._addFileTypes<FileRouteTypes>();
