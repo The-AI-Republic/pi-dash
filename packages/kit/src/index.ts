@@ -38,6 +38,8 @@ export { Skeleton } from "./components/Skeleton";
 export type { SkeletonProps } from "./components/Skeleton";
 export { Spinner } from "./components/Spinner";
 export type { SpinnerProps, SpinnerSize } from "./components/Spinner";
+export { Switch } from "./components/Switch";
+export type { SwitchProps } from "./components/Switch";
 export { Textarea } from "./components/Textarea";
 export type { TextareaProps } from "./components/Textarea";
 export { createKitToastManager, showToast, ToastHost } from "./components/Toast";

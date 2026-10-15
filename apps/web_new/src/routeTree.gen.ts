@@ -32,6 +32,7 @@ import { Route as GodModeIndexRouteImport } from './routes/god-mode/index'
 import { Route as GodModeSplatRouteImport } from './routes/god-mode/$'
 import { Route as GodModeDashboardRouteRouteImport } from './routes/god-mode/_dashboard/route'
 import { Route as WsGatedIndexRouteImport } from './routes/$ws/_gated/index'
+import { Route as GodModeDashboardAuthenticationRouteImport } from './routes/god-mode/_dashboard/authentication'
 import { Route as GodModeDashboardGeneralRouteImport } from './routes/god-mode/_dashboard/general'
 import { Route as WsGatedBrowseIssueKeyRouteImport } from './routes/$ws/_gated/browse/$issueKey'
 import { Route as WsGatedProjectsIndexRouteImport } from './routes/$ws/_gated/projects/index'
@@ -159,6 +160,12 @@ const WsGatedIndexRoute = WsGatedIndexRouteImport.update({
   path: '/',
   getParentRoute: () => WsGatedRouteRoute,
 } as any)
+const GodModeDashboardAuthenticationRoute =
+  GodModeDashboardAuthenticationRouteImport.update({
+    id: '/authentication',
+    path: '/authentication',
+    getParentRoute: () => GodModeDashboardRouteRoute,
+  } as any)
 const GodModeDashboardGeneralRoute = GodModeDashboardGeneralRouteImport.update({
   id: '/general',
   path: '/general',
@@ -256,6 +263,7 @@ export interface FileRoutesByFullPath {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
+  '/god-mode/authentication': typeof GodModeDashboardAuthenticationRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
   '/$ws/': typeof WsGatedIndexRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
@@ -291,6 +299,7 @@ export interface FileRoutesByTo {
   '/accounts/sign-up': typeof AccountsSignUpRoute
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
+  '/god-mode/authentication': typeof GodModeDashboardAuthenticationRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
   '/$ws/projects': typeof WsGatedProjectsIndexRoute
@@ -328,6 +337,7 @@ export interface FileRoutesById {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
+  '/god-mode/_dashboard/authentication': typeof GodModeDashboardAuthenticationRoute
   '/god-mode/_dashboard/general': typeof GodModeDashboardGeneralRoute
   '/$ws/_gated/': typeof WsGatedIndexRoute
   '/$ws/_gated/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
@@ -366,6 +376,7 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/god-mode/'
+    | '/god-mode/authentication'
     | '/god-mode/general'
     | '/$ws/'
     | '/$ws/projects/$projectId'
@@ -401,6 +412,7 @@ export interface FileRouteTypes {
     | '/accounts/sign-up'
     | '/auth/device'
     | '/god-mode/$'
+    | '/god-mode/authentication'
     | '/god-mode/general'
     | '/$ws/browse/$issueKey'
     | '/$ws/projects'
@@ -437,6 +449,7 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/god-mode/'
+    | '/god-mode/_dashboard/authentication'
     | '/god-mode/_dashboard/general'
     | '/$ws/_gated/'
     | '/$ws/_gated/projects/$projectId'
@@ -636,6 +649,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedIndexRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
+    '/god-mode/_dashboard/authentication': {
+      id: '/god-mode/_dashboard/authentication'
+      path: '/authentication'
+      fullPath: '/god-mode/authentication'
+      preLoaderRoute: typeof GodModeDashboardAuthenticationRouteImport
+      parentRoute: typeof GodModeDashboardRouteRoute
+    }
     '/god-mode/_dashboard/general': {
       id: '/god-mode/_dashboard/general'
       path: '/general'
@@ -800,10 +820,12 @@ const WsRouteRouteWithChildren =
   WsRouteRoute._addFileChildren(WsRouteRouteChildren)
 
 interface GodModeDashboardRouteRouteChildren {
+  GodModeDashboardAuthenticationRoute: typeof GodModeDashboardAuthenticationRoute
   GodModeDashboardGeneralRoute: typeof GodModeDashboardGeneralRoute
 }
 
 const GodModeDashboardRouteRouteChildren: GodModeDashboardRouteRouteChildren = {
+  GodModeDashboardAuthenticationRoute: GodModeDashboardAuthenticationRoute,
   GodModeDashboardGeneralRoute: GodModeDashboardGeneralRoute,
 }
 

@@ -20,11 +20,24 @@ export {
 } from "./adminShell.js";
 export type { AdminCrumb, AdminSidebarEntryDef } from "./adminShell.js";
 export {
+  AUTH_METHOD_ENABLE_KEYS,
+  AUTH_METHODS,
+  canDisableAuthMethod,
+  ENABLE_SIGNUP_KEY,
+  isConfigFlagOn,
+  isMethodConfigured,
+  toConfigMap,
+} from "./authMethods.js";
+export type { AuthMethodDef, AuthMethodKey, ConfigMap } from "./authMethods.js";
+export {
+  CONFIG_SAVE_FAILED_LOG,
   useAdminCsrfToken,
   useAdminSession,
   useInstanceAdmins,
   useInstanceBootstrap,
+  useInstanceConfigurations,
   useUpdateGeneralSettings,
+  useUpdateInstanceConfigurations,
 } from "./hooks.js";
 export {
   firstAdminEmail,
@@ -46,6 +59,8 @@ export {
   adminSessionQueryOptions,
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
+  instanceConfigurationsQueryOptions,
+  mergeConfigurationRows,
 } from "./queries.js";
 export {
   acceptCompanyName,
@@ -76,6 +91,9 @@ export {
 } from "./theme.js";
 export type { AdminThemeMode } from "./theme.js";
 export { AdminAccountMenu } from "./components/AdminAccountMenu.js";
+export { AdminAuthLanding, AUTH_LANDING_TITLE } from "./components/AdminAuthLanding.js";
+export { AdminAuthMethodCard } from "./components/AdminAuthMethodCard.js";
+export type { AdminAuthMethodCardProps } from "./components/AdminAuthMethodCard.js";
 export { AdminBrandLoader } from "./components/AdminBrandLoader.js";
 export { AdminDashboardLayout } from "./components/AdminDashboardLayout.js";
 export { AdminEntryGate } from "./components/AdminEntryGate.js";

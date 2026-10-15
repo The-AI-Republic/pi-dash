@@ -23,6 +23,7 @@ import {
   GENERAL_SAVE_SUCCESS_TITLE,
 } from "./generalSettings.js";
 import {
+  CONFIG_SAVE_FAILED_LOG,
   useAdminCsrfToken,
   useAdminSession,
   useCloudAuthProbe,
@@ -30,7 +31,9 @@ import {
   useCloudSignInUrl,
   useInstanceAdmins,
   useInstanceBootstrap,
+  useInstanceConfigurations,
   useUpdateGeneralSettings,
+  useUpdateInstanceConfigurations,
 } from "./hooks.js";
 import { adminKeys } from "./queries.js";
 
@@ -456,5 +459,132 @@ describe("useUpdateGeneralSettings", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]?.[0]).toBe(GENERAL_SAVE_FAILURE_LOG);
     expect(notifySuccess).not.toHaveBeenCalled();
+  });
+});
+
+function configRow(key: string, value: string | null) {
+  return {
+    id: "33333333-3333-4333-8333-333333333333",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    created_by: null,
+    updated_by: null,
+    deleted_at: null,
+    key,
+    value,
+    category: "AUTHENTICATION",
+    is_encrypted: false,
+    source: "db",
+    is_managed: false,
+  };
+}
+
+function ConfigurationsProbe(): React.ReactElement {
+  const query = useInstanceConfigurations();
+  if (query.isPending) return <div data-testid="probe">loading</div>;
+  if (query.isError) return <div data-testid="probe">failed</div>;
+  const signup = query.data.find((row) => row.key === "ENABLE_SIGNUP")?.value ?? "missing";
+  return <div data-testid="probe">signup:{signup}</div>;
+}
+
+describe("useInstanceConfigurations", () => {
+  it("reads the shared key map through the client", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport({ "/api/instances/configurations/": { status: 200, body: [configRow("ENABLE_SIGNUP", "1")] } })
+    );
+    renderProbe(ConfigurationsProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("signup:1"));
+  });
+});
+
+function ConfigurationsSaveProbe({ patch }: { patch: Record<string, string> }): React.ReactElement {
+  const save = useUpdateInstanceConfigurations();
+  return (
+    <button data-testid="probe" type="button" onClick={() => save.mutate(patch)}>
+      {save.isPending ? "saving" : "save"}
+    </button>
+  );
+}
+
+function stubSavingTransport(args: { patchStatus: number; patchBody: unknown; calls: string[] }): Transport {
+  return (async (url: string, init?: { method?: string; body?: string }) => {
+    const method = init?.method ?? "GET";
+    args.calls.push(`${method} ${new URL(url, "https://api.test").pathname}`);
+    if (url.endsWith("/auth/get-csrf-token/")) {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify({ csrf_token: "csrf" })),
+      };
+    }
+    if (url.endsWith("/api/instances/configurations/") && method === "PATCH") {
+      return {
+        status: args.patchStatus,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify(args.patchBody)),
+      };
+    }
+    return { status: 404, url, headers: { get: () => null }, text: () => Promise.resolve("{}") };
+  }) as Transport;
+}
+
+describe("useUpdateInstanceConfigurations", () => {
+  it("patches one key and merges the answered rows into the cache", async () => {
+    const calls: string[] = [];
+    createAppClient(
+      "https://api.test",
+      stubSavingTransport({ patchStatus: 200, patchBody: [configRow("ENABLE_SIGNUP", "0")], calls })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(adminKeys.configurations, [
+      configRow("ENABLE_SIGNUP", "1"),
+      configRow("ENABLE_MAGIC_LINK_LOGIN", "1"),
+    ]);
+    const errored = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ConfigurationsSaveProbe patch={{ ENABLE_SIGNUP: "0" }} />
+        </QueryClientProvider>
+      );
+      fireEvent.click(screen.getByTestId("probe"));
+      await waitFor(() => {
+        const cached = queryClient.getQueryData(adminKeys.configurations) as Array<{ key: string; value: string }>;
+        expect(cached.find((row) => row.key === "ENABLE_SIGNUP")?.value).toBe("0");
+      });
+      const cached = queryClient.getQueryData(adminKeys.configurations) as Array<{ key: string; value: string }>;
+      expect(cached.find((row) => row.key === "ENABLE_MAGIC_LINK_LOGIN")?.value).toBe("1");
+      expect(calls).toContain("PATCH /api/instances/configurations/");
+      expect(errored).not.toHaveBeenCalled();
+    } finally {
+      errored.mockRestore();
+    }
+  });
+
+  it("logs the pinned line and keeps the cache on failure", async () => {
+    const calls: string[] = [];
+    createAppClient(
+      "https://api.test",
+      stubSavingTransport({ patchStatus: 500, patchBody: { detail: "boom" }, calls })
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(adminKeys.configurations, [configRow("ENABLE_SIGNUP", "1")]);
+    const errored = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ConfigurationsSaveProbe patch={{ ENABLE_SIGNUP: "0" }} />
+        </QueryClientProvider>
+      );
+      fireEvent.click(screen.getByTestId("probe"));
+      await waitFor(() => expect(errored).toHaveBeenCalledWith(CONFIG_SAVE_FAILED_LOG, expect.anything()));
+      const cached = queryClient.getQueryData(adminKeys.configurations) as Array<{ key: string; value: string }>;
+      expect(cached.find((row) => row.key === "ENABLE_SIGNUP")?.value).toBe("1");
+    } finally {
+      errored.mockRestore();
+    }
   });
 });

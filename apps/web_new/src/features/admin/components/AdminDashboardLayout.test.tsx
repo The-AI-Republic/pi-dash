@@ -100,6 +100,12 @@ describe("AdminDashboardLayout", () => {
     expect(screen.queryByTestId("admin-first-workspace-popup")).not.toBeInTheDocument();
   });
 
+  it("hosts the toast stack for page notices", async () => {
+    renderLayout(ADMIN, true);
+    await waitFor(() => expect(screen.getByTestId("toast-stack")).toBeInTheDocument());
+    expect(screen.getByTestId("admin-dashboard")).toContainElement(screen.getByTestId("toast-stack"));
+  });
+
   it("applies the stored theme on mount", async () => {
     window.localStorage.setItem(ADMIN_THEME_KEY, "dark");
     renderLayout(ADMIN, true);

@@ -12,6 +12,8 @@ import {
   acceptCompanyName,
   acceptPersonName,
   AdminAccountMenu,
+  AdminAuthLanding,
+  AdminAuthMethodCard,
   AdminBrandLoader,
   AdminDashboardGuard,
   AdminDashboardLayout,
@@ -56,19 +58,27 @@ import {
   ADMIN_SIDEBAR_COLLAPSED_KEY,
   ADMIN_SIDEBAR_ENTRIES,
   ADMIN_THEME_KEY,
+  AUTH_LANDING_TITLE,
+  AUTH_METHOD_ENABLE_KEYS,
+  AUTH_METHODS,
   buildAdminCrumbs,
+  canDisableAuthMethod,
   INSTANCE_FAILURE_ART,
   INSTANCE_FAILURE_TITLE,
   InstanceFailureScreen,
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
+  instanceConfigurationsQueryOptions,
   isCompanyNameText,
+  isConfigFlagOn,
   isGeneralNameValid,
+  isMethodConfigured,
   isMismatchVisible,
   isPersonNameText,
   isSetupSubmittable,
   isSidebarEntryActive,
   isStrengthMeterVisible,
+  mergeConfigurationRows,
   mergeGeneralSettingsIntoBootstrap,
   PERSON_NAME_MAX_LENGTH,
   readStoredAdminTheme,
@@ -85,6 +95,9 @@ import {
   SIGN_IN_POST_PATH,
   SIGN_IN_TITLE,
   SIGN_OUT_POST_PATH,
+  CONFIG_SAVE_FAILED_LOG,
+  ENABLE_SIGNUP_KEY,
+  toConfigMap,
   useAdminCsrfToken,
   useAdminSession,
   useAdminSidebarStore,
@@ -92,7 +105,9 @@ import {
   useFirstWorkspaceStore,
   useInstanceAdmins,
   useInstanceBootstrap,
+  useInstanceConfigurations,
   useUpdateGeneralSettings,
+  useUpdateInstanceConfigurations,
 } from "./index.js";
 
 describe("admin barrel", () => {
@@ -107,17 +122,22 @@ describe("admin barrel", () => {
       auditAdminAbsence,
       auditAdminToggles,
       buildAdminCrumbs,
+      canDisableAuthMethod,
       decideAdminGuard,
       firstAdminEmail,
       instanceAdminsQueryOptions,
       instanceBootstrapQueryOptions,
+      instanceConfigurationsQueryOptions,
       isCompanyNameText,
+      isConfigFlagOn,
       isGeneralNameValid,
+      isMethodConfigured,
       isMismatchVisible,
       isPersonNameText,
       isSetupSubmittable,
       isSidebarEntryActive,
       isStrengthMeterVisible,
+      mergeConfigurationRows,
       mergeGeneralSettingsIntoBootstrap,
       readStoredAdminTheme,
       registerAdminStoreReset,
@@ -128,6 +148,7 @@ describe("admin barrel", () => {
       resolveSetupPrefill,
       resolveSignInBanners,
       resolveTelemetryPrefill,
+      toConfigMap,
     ]) {
       expect(typeof fn).toBe("function");
     }
@@ -139,12 +160,16 @@ describe("admin barrel", () => {
       useFirstWorkspaceStore,
       useInstanceAdmins,
       useInstanceBootstrap,
+      useInstanceConfigurations,
       useUpdateGeneralSettings,
+      useUpdateInstanceConfigurations,
     ]) {
       expect(typeof hook).toBe("function");
     }
     for (const component of [
       AdminAccountMenu,
+      AdminAuthLanding,
+      AdminAuthMethodCard,
       AdminBrandLoader,
       AdminDashboardGuard,
       AdminDashboardLayout,
@@ -166,6 +191,8 @@ describe("admin barrel", () => {
     }
     expect(adminKeys).toBeDefined();
     expect(adminQueryDefaults).toBeDefined();
+    expect(AUTH_METHODS.length).toBe(6);
+    expect(AUTH_METHOD_ENABLE_KEYS.length).toBe(6);
     expect(ADMIN_NARROW_VIEWPORT_PX).toBeGreaterThan(0);
     expect(ADMIN_SEGMENT_LABELS).toBeDefined();
     expect(ADMIN_SIDEBAR_ENTRIES.length).toBeGreaterThan(0);
@@ -176,6 +203,9 @@ describe("admin barrel", () => {
       ADMIN_NOT_FOUND_TITLE,
       ADMIN_SIDEBAR_COLLAPSED_KEY,
       ADMIN_THEME_KEY,
+      AUTH_LANDING_TITLE,
+      CONFIG_SAVE_FAILED_LOG,
+      ENABLE_SIGNUP_KEY,
       FIRST_WORKSPACE_CREATE_PATH,
       GENERAL_NAME_REQUIRED_MESSAGE,
       GENERAL_SAVE_BUSY_LABEL,
