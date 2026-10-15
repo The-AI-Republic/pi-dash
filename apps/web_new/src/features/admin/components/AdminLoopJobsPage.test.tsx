@@ -170,6 +170,19 @@ describe("AdminLoopJobsPage", () => {
     await screen.findByTestId("loop-jobs-table");
   });
 
+  it("opens the create modal from the header action and cancels cleanly (ADM-055)", async () => {
+    const user = userEvent.setup();
+    const harness = await renderPage({ jobs: [loopJob()] });
+    await screen.findByTestId("loop-jobs-table");
+    await user.click(screen.getByRole("button", { name: "New job" }));
+    expect(await screen.findByTestId("loop-job-modal-form")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "New job" })).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Slug"), "probe-cancel");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByTestId("loop-job-modal-form")).not.toBeInTheDocument());
+    expect(harness.patches).toEqual([]);
+  });
+
   it("shows two 48px skeleton bars with no table while loading (ADM-054)", async () => {
     let release!: () => void;
     const listGate = new Promise<void>((resolve) => {

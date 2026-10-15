@@ -41,6 +41,7 @@ describe("admin keys", () => {
     expect(adminKeys.cloudProbe).toEqual(["admin", "cloud", "probe"]);
     expect(adminKeys.configurations).toEqual(["admin", "configurations"]);
     expect(adminKeys.loopJobs).toEqual(["admin", "loop", "jobs"]);
+    expect(adminKeys.loopJobDetail("job-1")).toEqual(["admin", "loop", "job", "job-1"]);
   });
 });
 
