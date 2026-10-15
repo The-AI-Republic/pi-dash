@@ -62,4 +62,20 @@ describe("ContextMenu", () => {
     fireEvent.click(rows[0]!);
     expect(onSelect).toHaveBeenCalledTimes(1);
   });
+
+  it("renders custom entries as direct popup children", () => {
+    render(
+      <ContextMenu
+        trigger={<span>Tab</span>}
+        items={[
+          { custom: true, entryKey: "note", node: <span data-testid="note">Pinned tab</span> },
+          { label: "Close", onSelect: () => {} },
+        ]}
+      />
+    );
+    fireEvent.contextMenu(screen.getByText("Tab"));
+    const menu = screen.getByRole("menu");
+    expect(menu).toContainElement(screen.getByTestId("note"));
+    expect(screen.getByTestId("note").parentElement).toBe(menu);
+  });
 });

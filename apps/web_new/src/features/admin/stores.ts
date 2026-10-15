@@ -10,6 +10,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { create } from "zustand";
 
+import { readStoredSidebarCollapsed, writeStoredSidebarCollapsed } from "./adminShell.js";
 import { adminKeys } from "./queries.js";
 
 /** An admin UI store reset, registered so sign-out clears it. */
@@ -58,4 +59,32 @@ export const useFirstWorkspaceStore = create<FirstWorkspaceState>()((set) => ({
 
 registerAdminStoreReset(() => {
   useFirstWorkspaceStore.setState({ dismissed: false });
+});
+
+// --- Sidebar collapsed state (ADM-063) ---------------------------------------
+
+interface AdminSidebarState {
+  /** Narrowed to the icon rail; persisted across reloads. */
+  collapsed: boolean;
+  setCollapsed: (collapsed: boolean) => void;
+  toggleCollapsed: () => void;
+}
+
+export const useAdminSidebarStore = create<AdminSidebarState>()((set) => ({
+  collapsed: readStoredSidebarCollapsed(),
+  setCollapsed: (collapsed) => {
+    writeStoredSidebarCollapsed(collapsed);
+    set({ collapsed });
+  },
+  toggleCollapsed: () => {
+    const { collapsed, setCollapsed } = useAdminSidebarStore.getState();
+    setCollapsed(!collapsed);
+  },
+}));
+
+// Sign-out restores the persisted flag instead of clearing it: the old
+// console rebuilds the store and re-reads the preference at bootstrap,
+// so the rail keeps its width and only the theme resets to system.
+registerAdminStoreReset(() => {
+  useAdminSidebarStore.setState({ collapsed: readStoredSidebarCollapsed() });
 });

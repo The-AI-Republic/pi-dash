@@ -5,7 +5,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { Button } from "./Button";
-import { Menu } from "./Menu";
+import { isMenuCustom, isMenuSeparator, Menu } from "./Menu";
 
 function setup(onSelect: () => void = vi.fn()) {
   return render(
@@ -81,5 +81,48 @@ describe("Menu", () => {
     expect(screen.getByTestId("mark-p2")).toBeInTheDocument();
     fireEvent.click(rows[1]!);
     expect(onSelect).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders custom entries as direct popup children with no menuitem wrapper", () => {
+    const onSelect = vi.fn();
+    render(
+      <Menu
+        trigger={<Button>Account</Button>}
+        items={[
+          { custom: true, entryKey: "identity", node: <span data-testid="identity">admin@example.com</span> },
+          { label: "Switch to dark mode", onSelect },
+          {
+            custom: true,
+            entryKey: "sign-out",
+            node: (
+              <form data-testid="sign-out-form" action="/sign-out/" method="post">
+                <button type="submit" role="menuitem">
+                  Sign out
+                </button>
+              </form>
+            ),
+          },
+        ]}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Account" }));
+    const menu = screen.getByRole("menu", { name: "Account" });
+    // The identity row and the form are the popup's own children.
+    expect(menu).toContainElement(screen.getByTestId("identity"));
+    expect(menu).toContainElement(screen.getByTestId("sign-out-form"));
+    expect(screen.getByTestId("identity").parentElement).toBe(menu);
+    expect(screen.getByTestId("sign-out-form").parentElement).toBe(menu);
+    // Actions still behave, and the nested menuitem matches exactly once.
+    expect(screen.getAllByRole("menuitem", { name: "Sign out" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Switch to dark mode" }));
+    expect(onSelect).toHaveBeenCalledTimes(1);
+  });
+
+  it("classifies entries by shape", () => {
+    expect(isMenuCustom({ custom: true, entryKey: "x", node: null })).toBe(true);
+    expect(isMenuCustom({ label: "Edit", onSelect: () => {} })).toBe(false);
+    expect(isMenuCustom({ separator: true })).toBe(false);
+    expect(isMenuSeparator({ separator: true })).toBe(true);
+    expect(isMenuSeparator({ custom: true, entryKey: "x", node: null })).toBe(false);
   });
 });

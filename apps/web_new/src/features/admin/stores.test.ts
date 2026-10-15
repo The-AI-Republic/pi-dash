@@ -1,14 +1,27 @@
+// @vitest-environment jsdom
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ADMIN_SIDEBAR_COLLAPSED_KEY } from "./adminShell.js";
 import { adminKeys } from "./queries.js";
-import { registerAdminStoreReset, resetAdminClientState, resetAdminStores, useFirstWorkspaceStore } from "./stores.js";
+import {
+  registerAdminStoreReset,
+  resetAdminClientState,
+  resetAdminStores,
+  useAdminSidebarStore,
+  useFirstWorkspaceStore,
+} from "./stores.js";
 
 beforeEach(() => {
+  window.localStorage.clear();
   resetAdminStores();
+});
+
+afterEach(() => {
+  window.localStorage.clear();
 });
 
 describe("admin reset registry", () => {
@@ -46,6 +59,33 @@ describe("first-workspace flag", () => {
     expect(useFirstWorkspaceStore.getState().dismissed).toBe(true);
     resetAdminStores();
     expect(useFirstWorkspaceStore.getState().dismissed).toBe(false);
+  });
+});
+
+describe("sidebar collapsed flag", () => {
+  it("starts expanded with nothing persisted", () => {
+    expect(useAdminSidebarStore.getState().collapsed).toBe(false);
+  });
+
+  it("persists through set and toggle", () => {
+    useAdminSidebarStore.getState().setCollapsed(true);
+    expect(window.localStorage.getItem(ADMIN_SIDEBAR_COLLAPSED_KEY)).toBe("true");
+    expect(useAdminSidebarStore.getState().collapsed).toBe(true);
+    useAdminSidebarStore.getState().toggleCollapsed();
+    expect(window.localStorage.getItem(ADMIN_SIDEBAR_COLLAPSED_KEY)).toBe("false");
+    expect(useAdminSidebarStore.getState().collapsed).toBe(false);
+    useAdminSidebarStore.getState().toggleCollapsed();
+    expect(useAdminSidebarStore.getState().collapsed).toBe(true);
+  });
+
+  it("restores the persisted flag on reset instead of clearing it", () => {
+    useAdminSidebarStore.getState().setCollapsed(true);
+    // Drift the live value away from storage, as a narrow viewport
+    // could before the sign-out reset runs.
+    useAdminSidebarStore.setState({ collapsed: false });
+    resetAdminStores();
+    expect(useAdminSidebarStore.getState().collapsed).toBe(true);
+    expect(window.localStorage.getItem(ADMIN_SIDEBAR_COLLAPSED_KEY)).toBe("true");
   });
 });
 

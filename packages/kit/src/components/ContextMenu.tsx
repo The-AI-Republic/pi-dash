@@ -5,7 +5,7 @@ import { ContextMenu as BaseContextMenu } from "@base-ui-components/react/contex
 import * as React from "react";
 import { cn } from "../lib/cn";
 import { pickDefined } from "../lib/props";
-import { isMenuSeparator, type MenuEntry } from "./Menu";
+import { isMenuCustom, isMenuSeparator, type MenuEntry } from "./Menu";
 
 export interface ContextMenuProps {
   /**
@@ -38,6 +38,8 @@ export function ContextMenu({ trigger, items, open, onOpenChange }: ContextMenuP
                   role="separator"
                   className="mx-(--space-2) my-(--space-2) border-t border-(--border)"
                 />
+              ) : isMenuCustom(entry) ? (
+                <React.Fragment key={entry.entryKey}>{entry.node}</React.Fragment>
               ) : (
                 <BaseContextMenu.Item
                   key={entry.itemKey ?? entry.label}
