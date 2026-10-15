@@ -1,9 +1,10 @@
 //! Run permission guards + pagination for D-15 runner_runs (L3).
 //!
 //! Ports `apps/api/pi_dash/runner/services/permissions.py:1-137` (the
-//! predicate-SQL surface), `apps/api/pi_dash/runner/views/runs.py:67-122`
-//! (`_parse_pagination`, `_can_view_run`, `_can_cancel_run`) and the
-//! 404-not-403 denial those guards return (`runs.py:533/536/555/557/659/661`).
+//! predicate-SQL surface), `apps/api/pi_dash/runner/views/runs.py:67-137`
+//! (`_parse_pagination`, `_can_view_run` incl the scheduler-binding
+//! project grant at `:123-131`, `_can_cancel_run`) and the
+//! 404-not-403 denial those guards return (`runs.py:574/577/596/598/700/702`).
 //!
 //! # Use, don't port
 //!
@@ -193,21 +194,29 @@ pub struct RunViewFacts {
     /// so un-assignment withdraws the grant). Only consulted when a work
     /// item is set.
     pub live_assignee: bool,
-    /// `is_workspace_admin(user, run.workspace_id)` (`runs.py:117`).
+    /// Active `ProjectMember(project_id, member_id)` row exists for the
+    /// run's scheduler binding project (`runs.py:123-131`,
+    /// PDASHOSS01-223); `None` when `run.scheduler_binding_id` is unset.
+    /// The binding resolves through the base manager (soft-deleted rows
+    /// still carry their `project_id`); the membership itself uses the
+    /// default manager (`deleted_at IS NULL`) plus `is_active`.
+    pub scheduler_binding_project_member: Option<bool>,
+    /// `is_workspace_admin(user, run.workspace_id)` (`runs.py:132`).
     pub is_workspace_admin: bool,
 }
 
 /// View is allowed for the creator, the runner's owner, or a workspace
-/// admin (`runs.py:87-117`).
+/// admin (`runs.py:87-132`).
 ///
 /// Order is load-bearing and mirrors Python line for line:
 /// membership-first (a removed member sees nothing, even as
 /// `runner.owner`), creator, runner owner, the private-runner gate (a run
 /// on someone else's private machine is visible only to creator and
-/// runner owner — not to issue participants or workspace admins),
-/// work-item creator, live assignee through the through-model (a plain
-/// M2M join would ignore `deleted_at` and leave every past assignee able
-/// to view and cancel), then workspace admin.
+/// runner owner — not to issue participants, binding-project members, or
+/// workspace admins), work-item creator, live assignee through the
+/// through-model (a plain M2M join would ignore `deleted_at` and leave
+/// every past assignee able to view and cancel), scheduler-binding
+/// project member, then workspace admin.
 pub fn can_view_run(facts: &RunViewFacts) -> bool {
     if !facts.is_workspace_member {
         return false;
@@ -229,10 +238,15 @@ pub fn can_view_run(facts: &RunViewFacts) -> bool {
     if facts.work_item_created_by_requester.is_some() && facts.live_assignee {
         return true;
     }
+    // Scheduler-fired runs carry no work item, so the involvement
+    // grants above never match (`runs.py:123-131`).
+    if facts.scheduler_binding_project_member == Some(true) {
+        return true;
+    }
     facts.is_workspace_admin
 }
 
-/// Cancellation is permitted for the same set as view (`runs.py:120-122`).
+/// Cancellation is permitted for the same set as view (`runs.py:135-137`).
 pub fn can_cancel_run(facts: &RunViewFacts) -> bool {
     can_view_run(facts)
 }
@@ -323,7 +337,7 @@ pub struct Denial {
     pub body: Value,
 }
 
-/// Run lookup / guard denial (`runs.py:533/536/555/557/659/661`): 404, not
+/// Run lookup / guard denial (`runs.py:574/577/596/598/700/702`): 404, not
 /// 403 — missing and forbidden both answer `{"error": "not found"}` so
 /// callers cannot confirm run existence across workspaces. Covers the
 /// detail, cancel and release-pin endpoints.
@@ -468,6 +482,9 @@ mod tests {
             live_assignee: work_item
                 .map(|(_, assignee)| user == assignee)
                 .unwrap_or(false),
+            // FX-RUN-04 predates scheduler bindings; every matrix row
+            // reads as a non-scheduler run.
+            scheduler_binding_project_member: None,
             is_workspace_admin: admin,
         }
     }
@@ -516,6 +533,60 @@ mod tests {
                 assert!(!can_cancel_run(&facts_for(user, run)));
             }
         }
+    }
+
+    // -- scheduler-binding project grant (`runs.py:123-131`) --------------
+
+    /// A scheduler-fired run as a project member sees it: workspace
+    /// member, not the creator, runner-less, no work item.
+    fn scheduler_facts(project_member: Option<bool>) -> RunViewFacts {
+        RunViewFacts {
+            is_workspace_member: true,
+            created_by_requester: false,
+            runner: None,
+            work_item_created_by_requester: None,
+            live_assignee: false,
+            scheduler_binding_project_member: project_member,
+            is_workspace_admin: false,
+        }
+    }
+
+    #[test]
+    fn scheduler_branch_grants_binding_project_members() {
+        // Project member: the only grant on this row, and it fires.
+        assert!(can_view_run(&scheduler_facts(Some(true))));
+        assert!(can_cancel_run(&scheduler_facts(Some(true))));
+        // Outside the project: falls through to the admin check (false).
+        assert!(!can_view_run(&scheduler_facts(Some(false))));
+        assert!(!can_cancel_run(&scheduler_facts(Some(false))));
+        // No binding: the arm is skipped, like the work-item arm.
+        assert!(!can_view_run(&scheduler_facts(None)));
+    }
+
+    #[test]
+    fn scheduler_branch_loses_to_earlier_denials() {
+        // Membership-first: a removed member sees nothing even with
+        // project standing (stale `ProjectMember` rows survive workspace
+        // removal, like `IssueAssignee` rows).
+        let mut facts = scheduler_facts(Some(true));
+        facts.is_workspace_member = false;
+        assert!(!can_view_run(&facts));
+        // The private-runner gate runs before the scheduler arm: project
+        // standing never reveals a run on someone else's machine.
+        facts.is_workspace_member = true;
+        facts.runner = Some(RunRunnerGate {
+            owned_by_requester: false,
+            visible_to_requester: false,
+        });
+        assert!(!can_view_run(&facts));
+    }
+
+    #[test]
+    fn scheduler_branch_yields_to_admin_fallback() {
+        // Non-member admin still passes via the trailing admin grant.
+        let mut facts = scheduler_facts(Some(false));
+        facts.is_workspace_admin = true;
+        assert!(can_view_run(&facts));
     }
 
     // -- foundation boolean kernels vs the runner/machine matrix ----------

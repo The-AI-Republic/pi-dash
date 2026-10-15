@@ -1,28 +1,29 @@
 //! Run web endpoints (D-15, stage 5, PIDASHCONV-542).
 //!
-//! Ports `apps/api/pi_dash/runner/views/runs.py:1-695`:
+//! Ports `apps/api/pi_dash/runner/views/runs.py:1-736`:
 //!
-//! * `AgentRunListEndpoint.get` (`:131-219`) → [`list_runs`]: the "my
+//! * `AgentRunListEndpoint.get` (`:146-255`) → [`list_runs`]: the "my
 //!   runs" involvement OR (creator, runner owner, issue creator, live
 //!   assignee, workspace admin) over the member-workspace scope, the
-//!   private-runner gate, workspace/project scopes, and the
-//!   `{results,count,total_count,total_pages,page,per_page}` envelope.
-//! * `AgentRunListEndpoint.post` (`:221-345`) → [`create_run`]:
+//!   private-runner gate, workspace/project/scheduler-binding scopes,
+//!   and the `{results,count,total_count,total_pages,page,per_page}`
+//!   envelope.
+//! * `AgentRunListEndpoint.post` (`:256-503`) → [`create_run`]:
 //!   `comment_and_run` / `run_ai` / direct branches, all owned
 //!   (PIDASHCONV-1041 drives the dispatch tails through
 //!   [`super::dispatch`]); only the parser arms proxy (malformed JSON,
 //!   JSON non-objects).
-//! * `AgentReTickEndpoint.post` (`:482-523`) → [`retick`]: the missing /
+//! * `AgentReTickEndpoint.post` (`:517-560`) → [`retick`]: the missing /
 //!   malformed-UUID / not-found arms are owned; the `re_tick_ticker` tail
 //!   (D-12) proxies.
-//! * `AgentRunDetailEndpoint.get` (`:530-542`) → [`run_detail`], with
+//! * `AgentRunDetailEndpoint.get` (`:565-585`) → [`run_detail`], with
 //!   `?include_events=1`.
-//! * `AgentRunCancelEndpoint.post` (`:549-639`) → [`cancel_run`]: the
+//! * `AgentRunCancelEndpoint.post` (`:590-682`) → [`cancel_run`]: the
 //!   cloud fast-path 202, terminal 409, cloud-duplicate stamp and the
 //!   finalize-CANCELLED arm (via the L4 planners) are owned; the two arms
 //!   that fan a cancel frame out (D-14 `send_to_runner`, PIDASHCONV-553)
 //!   proxy.
-//! * `AgentRunReleasePinEndpoint.post` (`:656-695`) → [`release_pin`]:
+//! * `AgentRunReleasePinEndpoint.post` (`:697-736`) → [`release_pin`]:
 //!   the 404s and the cloud / not-queued / not-pinned 409s are owned; the
 //!   unpin itself proxies (its `on_commit` drain is D-14,
 //!   PIDASHCONV-552 — proxy-before-write, since Django re-decides under
@@ -64,6 +65,7 @@ use pidash_services::runner_enroll::serializers::shapes::PodMiniRow;
 use pidash_services::runner_runs::finalization;
 use pidash_services::runner_runs::guards;
 use pidash_services::runner_runs::shape;
+use pidash_services::runner_runs::shape::SchedulerBindingDetailRow;
 use pidash_services::runner_runs::SetValue;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, ToolCallStatus};
@@ -93,6 +95,11 @@ pub const COMMENT_RUN_WORK_ITEM_REQUIRED_BODY: &str =
 pub const RETICK_WORK_ITEM_REQUIRED_BODY: &str = r#"{"error":"work_item is required for re-tick"}"#;
 /// Re-tick with a non-UUID `work_item` (`runs.py:494-502`).
 pub const RETICK_MALFORMED_BODY: &str = r#"{"error":"invalid work_item UUID format"}"#;
+/// List with a non-UUID `?scheduler_binding=` (`runs.py:222-231`,
+/// PDASHOSS01-223): validated up front because the ORM would raise a
+/// 500 on the raw text.
+pub const SCHEDULER_BINDING_MALFORMED_BODY: &str =
+    r#"{"error":"invalid scheduler_binding UUID format"}"#;
 /// Issue lookup / membership miss on the three issue-bound creates
 /// (`runs.py:367/369/439/441/505/507`).
 pub const ISSUE_NOT_FOUND_BODY: &str = r#"{"error":"issue not found"}"#;
@@ -315,14 +322,19 @@ pub const LIST_JOINS: &str = concat!(
 );
 
 /// List `WHERE`: member-workspace scope AND the five-clause involvement
-/// OR AND the private-runner gate (`runs.py:157-173`), then the optional
-/// workspace / project scopes (`:184-197`). Params `$1..=$8` are the
+/// OR AND the private-runner gate (`runs.py:170-198`), then the optional
+/// workspace / project scopes (`:200-213`) and the scheduler-binding
+/// scope (`:215-232`). Params `$1..=$8` are the
 /// requester id (repeated); scope params follow in argument order, then
 /// `LIMIT` / `OFFSET` for the page query. `role = 20` is the admin
 /// literal (`ROLE_ADMIN`); the member subqueries carry no `is_active`
 /// filter (the view reads `WorkspaceMember.objects` directly — only the
 /// `is_workspace_member` / `workspace_role` helpers add it).
-pub fn list_where(has_workspace_scope: bool, has_project_scope: bool) -> String {
+pub fn list_where(
+    has_workspace_scope: bool,
+    has_project_scope: bool,
+    has_scheduler_binding_scope: bool,
+) -> String {
     let mut next_param = 9;
     let mut extra = String::new();
     if has_workspace_scope {
@@ -333,6 +345,15 @@ pub fn list_where(has_workspace_scope: bool, has_project_scope: bool) -> String 
     }
     if has_project_scope {
         extra.push_str(&format!(r#" AND "pod"."project_id" = ${next_param}::uuid"#));
+        next_param += 1;
+    }
+    if has_scheduler_binding_scope {
+        // The value is pre-validated (`uuid.UUID`, `:223-231`) and bound
+        // as a UUID: no `::uuid` cast, which would 500 raw-but-valid
+        // text forms (`{...}`, `urn:uuid:...`) Django accepts.
+        extra.push_str(&format!(
+            r#" AND "agent_run"."scheduler_binding_id" = ${next_param}"#
+        ));
     }
     format!(
         concat!(
@@ -352,24 +373,40 @@ pub fn list_where(has_workspace_scope: bool, has_project_scope: bool) -> String 
     )
 }
 
-/// List count (`runs.py:206`): Django counts `DISTINCT` full rows over
+/// List count (`runs.py:241`): Django counts `DISTINCT` full rows over
 /// the trimmed (LEFT-only) joins; `COUNT(DISTINCT id)` over the same
 /// `WHERE` is result-identical (`id` is the PK; the pod/project inner
 /// pair is 1:1 and fans nothing out). Binds: `$1..=$8` requester, then
 /// the raw scope strings in argument order (`::uuid` cast: invalid text
-/// errors like Django's `ValidationError`, a 500 either way).
-pub fn list_count_sql(has_workspace_scope: bool, has_project_scope: bool) -> String {
+/// errors like Django's `ValidationError`, a 500 either way), then the
+/// pre-validated binding UUID.
+pub fn list_count_sql(
+    has_workspace_scope: bool,
+    has_project_scope: bool,
+    has_scheduler_binding_scope: bool,
+) -> String {
     format!(
         r#"SELECT COUNT(DISTINCT "agent_run"."id") FROM "agent_run" {joins} WHERE {where_}"#,
         joins = LIST_JOINS,
-        where_ = list_where(has_workspace_scope, has_project_scope),
+        where_ = list_where(
+            has_workspace_scope,
+            has_project_scope,
+            has_scheduler_binding_scope
+        ),
     )
 }
 
-/// List page (`runs.py:205-209`): `DISTINCT` run image plus the pod-mini
+/// List page (`runs.py:240-244`): `DISTINCT` run image plus the pod-mini
 /// columns, `-created_at`, `LIMIT` / `OFFSET` bound last.
-pub fn list_page_sql(has_workspace_scope: bool, has_project_scope: bool) -> String {
-    let mut next_param = 9 + usize::from(has_workspace_scope) + usize::from(has_project_scope);
+pub fn list_page_sql(
+    has_workspace_scope: bool,
+    has_project_scope: bool,
+    has_scheduler_binding_scope: bool,
+) -> String {
+    let mut next_param = 9
+        + usize::from(has_workspace_scope)
+        + usize::from(has_project_scope)
+        + usize::from(has_scheduler_binding_scope);
     let limit_param = next_param;
     next_param += 1;
     let offset_param = next_param;
@@ -385,7 +422,11 @@ pub fn list_page_sql(has_workspace_scope: bool, has_project_scope: bool) -> Stri
         ),
         runs = run_select_list(),
         joins = LIST_JOINS,
-        where_ = list_where(has_workspace_scope, has_project_scope),
+        where_ = list_where(
+            has_workspace_scope,
+            has_project_scope,
+            has_scheduler_binding_scope
+        ),
         limit = limit_param,
         offset = offset_param,
     )
@@ -407,7 +448,8 @@ pub fn tool_calls_for_runs_sql() -> String {
 }
 
 /// Detail / cancel / release-pin lookup: the run image plus the guard
-/// facts (`select_related("runner", "work_item")`, `runs.py:531/553/657`).
+/// facts (`select_related("runner", "work_item")` plus the binding join
+/// the detail view spells `scheduler_binding__scheduler`, `runs.py:567`).
 /// Param: `$1` the run id.
 pub fn run_detail_sql() -> String {
     format!(
@@ -416,10 +458,16 @@ pub fn run_detail_sql() -> String {
             r#""runner"."owner_id" AS "gate_runner_owner_id", "#,
             r#""runner"."visibility" AS "gate_runner_visibility", "#,
             r#""issues"."id" AS "gate_work_item_id", "#,
-            r#""issues"."created_by_id" AS "gate_work_item_created_by_id" "#,
+            r#""issues"."created_by_id" AS "gate_work_item_created_by_id", "#,
+            r#""scheduler_bindings"."id" AS "gate_binding_id", "#,
+            r#""scheduler_bindings"."project_id" AS "gate_binding_project_id" "#,
             r#"FROM "agent_run" "#,
             r#"LEFT OUTER JOIN "runner" ON ("agent_run"."runner_id" = "runner"."id") "#,
             r#"LEFT OUTER JOIN "issues" ON ("agent_run"."work_item_id" = "issues"."id") "#,
+            // No `deleted_at` scope: the FK resolves through the base
+            // manager, so a soft-deleted binding still joins
+            // (`serializers.py:278-280`).
+            r#"LEFT OUTER JOIN "scheduler_bindings" ON ("agent_run"."scheduler_binding_id" = "scheduler_bindings"."id") "#,
             r#"WHERE "agent_run"."id" = $1 LIMIT 1"#,
         ),
         runs = run_select_list(),
@@ -437,6 +485,24 @@ pub fn membership_role_sql() -> String {
 /// grant. Params: `$1` issue, `$2` assignee.
 pub fn live_assignee_exists_sql() -> String {
     r#"SELECT EXISTS(SELECT 1 FROM "issue_assignees" WHERE ("issue_assignees"."issue_id" = $1 AND "issue_assignees"."assignee_id" = $2 AND "issue_assignees"."deleted_at" IS NULL))"#.to_owned()
+}
+
+/// Binding-project standing (`runs.py:126-130`, PDASHOSS01-223):
+/// `ProjectMember.objects.filter(project_id, member, is_active)` — the
+/// default manager, so soft-deleted rows do not count. Params: `$1`
+/// project, `$2` member.
+pub fn scheduler_project_member_exists_sql() -> String {
+    r#"SELECT EXISTS(SELECT 1 FROM "project_members" WHERE ("project_members"."project_id" = $1 AND "project_members"."member_id" = $2 AND "project_members"."deleted_at" IS NULL AND "project_members"."is_active"))"#.to_owned()
+}
+
+/// `scheduler_binding_detail` prefetch (`serializers.py:275-289`): one
+/// query for the page's bindings, mirroring
+/// `select_related("scheduler_binding__scheduler")`. Neither side
+/// carries a `deleted_at` scope (base-manager FKs on both legs), and the
+/// scheduler leg is an inner join (non-nullable FK). Param: `$1` the
+/// binding ids.
+pub fn binding_details_for_runs_sql() -> String {
+    r#"SELECT "scheduler_bindings"."id", "schedulers"."name", "schedulers"."slug", "scheduler_bindings"."project_id" FROM "scheduler_bindings" INNER JOIN "schedulers" ON ("scheduler_bindings"."scheduler_id" = "schedulers"."id") WHERE "scheduler_bindings"."id" = ANY($1)"#.to_owned()
 }
 
 /// Issue lookup for the issue-bound arms (`Issue.all_objects`, no
@@ -747,6 +813,22 @@ async fn has_live_assignee(
     Ok(exists.unwrap_or(false))
 }
 
+/// Active project membership row (`runs.py:126-130`, PDASHOSS01-223).
+#[allow(clippy::result_large_err)]
+async fn has_scheduler_project_standing(
+    pool: &PgPool,
+    project_id: Uuid,
+    member_id: Uuid,
+) -> Result<bool, Response> {
+    let exists: Option<bool> = sqlx::query_scalar(&scheduler_project_member_exists_sql())
+        .bind(project_id)
+        .bind(member_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(exists.unwrap_or(false))
+}
+
 /// Collect the request body for parse-then-proxy handlers.
 #[allow(clippy::result_large_err)]
 async fn collect_body(body: axum::body::Body) -> Result<bytes::Bytes, Response> {
@@ -800,6 +882,26 @@ pub(crate) async fn pod_mini_for(pool: &PgPool, pod_id: Uuid) -> Result<PodMiniS
     })
 }
 
+/// Binding-detail strings backing one [`SchedulerBindingDetailRow`]:
+/// UUIDs render to owned text first (the L3 view borrows `&str`).
+pub struct SchedulerBindingStrings {
+    pub id: String,
+    pub scheduler_name: String,
+    pub scheduler_slug: String,
+    pub project_id: Option<String>,
+}
+
+impl SchedulerBindingStrings {
+    pub fn as_row(&self) -> SchedulerBindingDetailRow<'_> {
+        SchedulerBindingDetailRow {
+            id: &self.id,
+            scheduler_name: &self.scheduler_name,
+            scheduler_slug: &self.scheduler_slug,
+            project_id: self.project_id.as_deref(),
+        }
+    }
+}
+
 /// Fetch one run's tool calls (no ordering — the model has none).
 #[allow(clippy::result_large_err)]
 pub(crate) async fn tool_calls_for(
@@ -809,6 +911,58 @@ pub(crate) async fn tool_calls_for(
     tool_calls_for_many(pool, &[run_id])
         .await
         .map(|mut grouped| grouped.remove(&run_id).unwrap_or_default())
+}
+
+/// Fetch binding details for many bindings, keyed by binding id (the
+/// list/detail `select_related("scheduler_binding__scheduler")`
+/// equivalent — one query, no per-row N+1).
+#[allow(clippy::result_large_err)]
+pub(crate) async fn binding_details_for_many(
+    pool: &PgPool,
+    binding_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, SchedulerBindingStrings>, Response> {
+    use std::collections::HashMap;
+    if binding_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(Uuid, String, String, Option<Uuid>)> =
+        sqlx::query_as(&binding_details_for_runs_sql())
+            .bind(binding_ids)
+            .fetch_all(pool)
+            .await
+            .map_err(|_| server_error())?;
+    let mut grouped: HashMap<Uuid, SchedulerBindingStrings> = HashMap::new();
+    for (id, scheduler_name, scheduler_slug, project_id) in rows {
+        grouped.insert(
+            id,
+            SchedulerBindingStrings {
+                id: id.to_string(),
+                scheduler_name,
+                scheduler_slug,
+                project_id: project_id.map(|project| project.to_string()),
+            },
+        );
+    }
+    Ok(grouped)
+}
+
+/// Resolve one run's binding detail, or `None` when the run has no
+/// binding. A set-but-unresolvable binding id (or a binding whose
+/// scheduler row is gone) is an FK violation: Django raises on the
+/// attribute access — a 500.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn binding_detail_for(
+    pool: &PgPool,
+    run: &AgentRun,
+) -> Result<Option<SchedulerBindingStrings>, Response> {
+    let Some(binding_id) = run.scheduler_binding_id else {
+        return Ok(None);
+    };
+    let mut grouped = binding_details_for_many(pool, &[binding_id]).await?;
+    grouped
+        .remove(&binding_id)
+        .map(Some)
+        .ok_or_else(server_error)
 }
 
 /// Fetch tool calls for many runs, grouped by run (list prefetch).
@@ -836,31 +990,41 @@ async fn tool_calls_for_many(
 }
 
 /// Render one run through the detail shape (single-object serializer:
-/// `error_diagnostic` runs the classifier).
+/// `error_diagnostic` runs the classifier). `binding` is `Some` exactly
+/// when `run.scheduler_binding_id` is set (resolved by
+/// [`binding_detail_for`] / [`binding_details_for_many`]).
 pub(crate) fn render_detail(
     run: &AgentRun,
     pod: &PodMiniStrings,
     tool_calls: &[AgentRunToolCall],
+    binding: Option<&SchedulerBindingStrings>,
 ) -> Value {
     let pod_row = pod.as_row();
-    let view = shape::run_detail_to_representation(run, &pod_row, tool_calls);
+    let binding_row = binding.map(SchedulerBindingStrings::as_row);
+    let view = shape::run_detail_to_representation(run, &pod_row, tool_calls, binding_row.as_ref());
     serde_json::to_value(&view).expect("serializable run view")
 }
 
 /// Render one run through the list shape (`error_diagnostic` is null).
-fn render_list_row(run: &AgentRun, pod: &PodMiniStrings, tool_calls: &[AgentRunToolCall]) -> Value {
+fn render_list_row(
+    run: &AgentRun,
+    pod: &PodMiniStrings,
+    tool_calls: &[AgentRunToolCall],
+    binding: Option<&SchedulerBindingStrings>,
+) -> Value {
     let pod_row = pod.as_row();
-    let view = shape::run_list_to_representation(run, &pod_row, tool_calls);
+    let binding_row = binding.map(SchedulerBindingStrings::as_row);
+    let view = shape::run_list_to_representation(run, &pod_row, tool_calls, binding_row.as_ref());
     serde_json::to_value(&view).expect("serializable run view")
 }
 
 // ---------------------------------------------------------------------------
-// `GET /api/runners/runs/` — "my runs" list (`runs.py:131-219`)
+// `GET /api/runners/runs/` — "my runs" list (`runs.py:146-254`)
 // ---------------------------------------------------------------------------
 
 /// List the caller's runs: involvement OR over the member-workspace
-/// scope, private-runner gate, workspace/project scopes, page-number
-/// pagination and the six-key envelope. Fully owned.
+/// scope, private-runner gate, workspace/project/scheduler-binding
+/// scopes, page-number pagination and the six-key envelope. Fully owned.
 pub async fn list_runs(
     State(state): State<AppState>,
     Query(query): Query<QueryMap>,
@@ -894,8 +1058,28 @@ async fn list_runs_inner(
     // `if workspace_id:` / `if project_id:` — empty strings scope nothing.
     let has_workspace_scope = workspace_scope.is_some();
     let has_project_scope = project_scope.is_some();
+    // `?scheduler_binding=` (`runs.py:221-232`): same truthiness gate,
+    // then `uuid.UUID` or the 400 — never the ORM's 500.
+    let scheduler_binding_scope =
+        match query_last(&query, "scheduler_binding").filter(|value| !value.is_empty()) {
+            None => None,
+            Some(raw) => match parse_py_uuid(&raw) {
+                Some(binding_id) => Some(binding_id),
+                None => {
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        SCHEDULER_BINDING_MALFORMED_BODY.to_owned(),
+                    );
+                }
+            },
+        };
+    let has_scheduler_binding_scope = scheduler_binding_scope.is_some();
 
-    let count_sql = list_count_sql(has_workspace_scope, has_project_scope);
+    let count_sql = list_count_sql(
+        has_workspace_scope,
+        has_project_scope,
+        has_scheduler_binding_scope,
+    );
     let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
     for _ in 0..8 {
         count_query = count_query.bind(actor.id);
@@ -905,6 +1089,9 @@ async fn list_runs_inner(
     }
     if let Some(scope) = &project_scope {
         count_query = count_query.bind(scope.as_str());
+    }
+    if let Some(binding_id) = &scheduler_binding_scope {
+        count_query = count_query.bind(binding_id);
     }
     let total_count: i64 = match count_query.fetch_one(pool).await {
         Ok(count) => count,
@@ -916,7 +1103,11 @@ async fn list_runs_inner(
     let offset = i128::from(page - 1) * i128::from(per_page);
     let offset = offset.min(i128::from(i64::MAX)) as i64;
 
-    let page_sql = list_page_sql(has_workspace_scope, has_project_scope);
+    let page_sql = list_page_sql(
+        has_workspace_scope,
+        has_project_scope,
+        has_scheduler_binding_scope,
+    );
     let mut page_query = sqlx::query(&page_sql);
     for _ in 0..8 {
         page_query = page_query.bind(actor.id);
@@ -926,6 +1117,9 @@ async fn list_runs_inner(
     }
     if let Some(scope) = &project_scope {
         page_query = page_query.bind(scope.as_str());
+    }
+    if let Some(binding_id) = &scheduler_binding_scope {
+        page_query = page_query.bind(binding_id);
     }
     let rows = match page_query.bind(per_page).bind(offset).fetch_all(pool).await {
         Ok(rows) => rows,
@@ -974,15 +1168,30 @@ async fn list_runs_inner(
         Ok(grouped) => grouped,
         Err(response) => return response,
     };
-    let empty_calls = Vec::new();
-    let results: Vec<Value> = runs
+    let binding_ids: Vec<Uuid> = runs
         .iter()
-        .map(|(run, pod)| {
-            let calls = tool_calls.get(&run.id).unwrap_or(&empty_calls);
-            render_list_row(run, pod, calls)
-        })
+        .filter_map(|(run, _)| run.scheduler_binding_id)
         .collect();
-    // `count` is the page length, not the total (`runs.py:213`).
+    let bindings = match binding_details_for_many(pool, &binding_ids).await {
+        Ok(grouped) => grouped,
+        Err(response) => return response,
+    };
+    let empty_calls = Vec::new();
+    let mut results: Vec<Value> = Vec::with_capacity(runs.len());
+    for (run, pod) in &runs {
+        let calls = tool_calls.get(&run.id).unwrap_or(&empty_calls);
+        // Set-but-unresolvable binding id: Django raises on the FK
+        // access — a 500, never a null detail.
+        let binding = match run.scheduler_binding_id {
+            None => None,
+            Some(binding_id) => match bindings.get(&binding_id) {
+                Some(detail) => Some(detail),
+                None => return server_error(),
+            },
+        };
+        results.push(render_list_row(run, pod, calls, binding));
+    }
+    // `count` is the page length, not the total (`runs.py:248`).
     let count = results.len();
     let body = serde_json::json!({
         "results": results,
@@ -996,42 +1205,47 @@ async fn list_runs_inner(
 }
 
 // ---------------------------------------------------------------------------
-// `GET /api/runners/runs/<run_id>/` — detail (`runs.py:530-542`)
+// `GET /api/runners/runs/<run_id>/` — detail (`runs.py:565-585`)
 // ---------------------------------------------------------------------------
 
 /// Guard facts resolved for one run row: membership/admin from the live
 /// role, runner facts from the joined runner, involvement from the
-/// joined issue plus the through-model assignee check.
+/// joined issue plus the through-model assignee check, scheduler
+/// standing from the joined binding's project.
 #[allow(clippy::result_large_err)]
 async fn view_facts_for(
     pool: &PgPool,
     actor_id: Uuid,
-    run: &AgentRun,
-    runner_owner_id: Option<Uuid>,
-    runner_visibility: Option<i16>,
-    work_item_created_by_id: Option<Uuid>,
-    work_item_row_id: Option<Uuid>,
+    guarded: &GuardedRun,
 ) -> Result<guards::RunViewFacts, Response> {
+    let run = &guarded.run;
     // Runner set but the join missed (FK violation): Django raises on
     // `run.runner.owner_id` — a 500. `runner.owner_id` is NOT NULL, so a
     // NULL here can only be the missed join, never a present row.
-    if run.runner_id.is_some() && runner_owner_id.is_none() {
+    if run.runner_id.is_some() && guarded.runner_owner_id.is_none() {
         return Err(server_error());
     }
     // The miss signal is row presence, not the creator column:
     // `issues.created_by_id` is nullable, so a present row with a NULL
     // creator (Django reads `run.work_item.created_by_id` → None and
     // continues, `runs.py:108`) must not 500.
-    if run.work_item_id.is_some() && work_item_row_id.is_none() {
+    if run.work_item_id.is_some() && guarded.work_item_row_id.is_none() {
+        return Err(server_error());
+    }
+    // Same for the binding (`runs.py:127` dereferences
+    // `run.scheduler_binding.project_id`): a set id with no row 500s,
+    // while a present row with a NULL project falls through (the
+    // `filter(project_id=None)` below matches nothing).
+    if run.scheduler_binding_id.is_some() && guarded.scheduler_binding_row_id.is_none() {
         return Err(server_error());
     }
     let role = workspace_role(pool, run.workspace_id, actor_id).await?;
     let runner = run.runner_id.map(|_| {
-        let owned = runner_owner_id == Some(actor_id);
+        let owned = guarded.runner_owner_id == Some(actor_id);
         let visible = can_view_runner(&RunnerFacts {
             workspace: WorkspaceId::new(run.workspace_id.to_string()),
             authenticated: true,
-            visibility: i32::from(runner_visibility.unwrap_or(0)),
+            visibility: i32::from(guarded.runner_visibility.unwrap_or(0)),
             owned_by_requester: owned,
         });
         guards::RunRunnerGate {
@@ -1044,10 +1258,22 @@ async fn view_facts_for(
     // grant misses but the live-assignee grant below still applies.
     let work_item_created_by_requester = run
         .work_item_id
-        .map(|_| work_item_created_by_id == Some(actor_id));
+        .map(|_| guarded.work_item_created_by_id == Some(actor_id));
     let live_assignee = match run.work_item_id {
         Some(issue_id) => has_live_assignee(pool, issue_id, actor_id).await?,
         None => false,
+    };
+    // `None` iff no binding (`runs.py:123` skips the whole arm). A NULL
+    // project is `Some(false)`: `filter(project_id=None)` matches
+    // nothing, so the grant misses without a query.
+    let scheduler_binding_project_member = match run.scheduler_binding_id {
+        None => None,
+        Some(_) => match guarded.scheduler_binding_project_id {
+            Some(project_id) => {
+                Some(has_scheduler_project_standing(pool, project_id, actor_id).await?)
+            }
+            None => Some(false),
+        },
     };
     Ok(guards::RunViewFacts {
         is_workspace_member: is_workspace_member(role),
@@ -1055,6 +1281,7 @@ async fn view_facts_for(
         runner,
         work_item_created_by_requester,
         live_assignee,
+        scheduler_binding_project_member,
         is_workspace_admin: is_workspace_admin(role),
     })
 }
@@ -1066,6 +1293,8 @@ pub struct GuardedRun {
     pub runner_visibility: Option<i16>,
     pub work_item_created_by_id: Option<Uuid>,
     pub work_item_row_id: Option<Uuid>,
+    pub scheduler_binding_row_id: Option<Uuid>,
+    pub scheduler_binding_project_id: Option<Uuid>,
 }
 
 /// `select_related("runner", "work_item").filter(id).first()`.
@@ -1096,12 +1325,19 @@ pub async fn fetch_guarded_run(
     let work_item_row_id: Option<Uuid> = row
         .try_get("gate_work_item_id")
         .map_err(|_| server_error())?;
+    let scheduler_binding_row_id: Option<Uuid> =
+        row.try_get("gate_binding_id").map_err(|_| server_error())?;
+    let scheduler_binding_project_id: Option<Uuid> = row
+        .try_get("gate_binding_project_id")
+        .map_err(|_| server_error())?;
     Ok(Some(GuardedRun {
         run,
         runner_owner_id,
         runner_visibility,
         work_item_created_by_id,
         work_item_row_id,
+        scheduler_binding_row_id,
+        scheduler_binding_project_id,
     }))
 }
 
@@ -1146,17 +1382,7 @@ async fn run_detail_inner(
         Ok(None) => return not_found(),
         Err(response) => return response,
     };
-    let facts = match view_facts_for(
-        pool,
-        actor.id,
-        &guarded.run,
-        guarded.runner_owner_id,
-        guarded.runner_visibility,
-        guarded.work_item_created_by_id,
-        guarded.work_item_row_id,
-    )
-    .await
-    {
+    let facts = match view_facts_for(pool, actor.id, &guarded).await {
         Ok(facts) => facts,
         Err(response) => return response,
     };
@@ -1171,7 +1397,11 @@ async fn run_detail_inner(
         Ok(calls) => calls,
         Err(response) => return response,
     };
-    let mut payload = render_detail(&guarded.run, &pod, &tool_calls);
+    let binding = match binding_detail_for(pool, &guarded.run).await {
+        Ok(binding) => binding,
+        Err(response) => return response,
+    };
+    let mut payload = render_detail(&guarded.run, &pod, &tool_calls, binding.as_ref());
     if query_last(&query, "include_events").as_deref() == Some("1") {
         let records: Vec<RunEventRecord> = match sqlx::query_as(&run_events_sql())
             .bind(guarded.run.id)
@@ -1398,17 +1628,7 @@ async fn cancel_run_inner(
         Ok(None) => return not_found(),
         Err(response) => return response,
     };
-    let facts = match view_facts_for(
-        pool,
-        actor.id,
-        &guarded.run,
-        guarded.runner_owner_id,
-        guarded.runner_visibility,
-        guarded.work_item_created_by_id,
-        guarded.work_item_row_id,
-    )
-    .await
-    {
+    let facts = match view_facts_for(pool, actor.id, &guarded).await {
         Ok(facts) => facts,
         Err(response) => return response,
     };
@@ -1475,7 +1695,11 @@ async fn render_cancelled(pool: &PgPool, run_id: Uuid, status: StatusCode) -> Re
         Ok(calls) => calls,
         Err(response) => return response,
     };
-    let payload = render_detail(&guarded.run, &pod, &tool_calls);
+    let binding = match binding_detail_for(pool, &guarded.run).await {
+        Ok(binding) => binding,
+        Err(response) => return response,
+    };
+    let payload = render_detail(&guarded.run, &pod, &tool_calls, binding.as_ref());
     json_response(status, payload.to_string())
 }
 
@@ -1720,17 +1944,7 @@ async fn release_pin_inner(
         Ok(None) => return not_found(),
         Err(response) => return response,
     };
-    let facts = match view_facts_for(
-        pool,
-        actor.id,
-        &guarded.run,
-        guarded.runner_owner_id,
-        guarded.runner_visibility,
-        guarded.work_item_created_by_id,
-        guarded.work_item_row_id,
-    )
-    .await
-    {
+    let facts = match view_facts_for(pool, actor.id, &guarded).await {
         Ok(facts) => facts,
         Err(response) => return response,
     };
@@ -2010,23 +2224,69 @@ mod tests {
 
     #[test]
     fn list_where_numbers_params() {
-        let bare = list_where(false, false);
+        let bare = list_where(false, false, false);
         for param in ["$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8"] {
             assert!(bare.contains(param), "bare has {param}");
         }
         assert!(!bare.contains("$9"));
         assert!(bare.contains(r#"U0."role" = 20"#));
         assert!(bare.contains("issue_assignees\".\"deleted_at\" IS NULL"));
-        let scoped = list_where(true, true);
+        let scoped = list_where(true, true, false);
         assert!(scoped.contains(r#""agent_run"."workspace_id" = $9::uuid"#));
         assert!(scoped.contains(r#""pod"."project_id" = $10::uuid"#));
-        let page = list_page_sql(true, true);
+        let page = list_page_sql(true, true, false);
         assert!(page.contains("LIMIT $11 OFFSET $12"));
         assert!(page.contains("SELECT DISTINCT"));
-        let page_bare = list_page_sql(false, false);
+        let page_bare = list_page_sql(false, false, false);
         assert!(page_bare.contains("LIMIT $9 OFFSET $10"));
-        let count = list_count_sql(false, false);
+        let count = list_count_sql(false, false, false);
         assert!(count.starts_with(r#"SELECT COUNT(DISTINCT "agent_run"."id")"#));
+    }
+
+    #[test]
+    fn list_where_scopes_scheduler_binding_last() {
+        // The binding scope trails the workspace/project scopes
+        // (Django chains it third, `runs.py:221-232`) and binds a
+        // pre-validated UUID — no `::uuid` cast.
+        let scoped = list_where(true, true, true);
+        assert!(scoped.contains(r#""agent_run"."workspace_id" = $9::uuid"#));
+        assert!(scoped.contains(r#""pod"."project_id" = $10::uuid"#));
+        assert!(scoped.contains(r#""agent_run"."scheduler_binding_id" = $11"#));
+        assert!(!scoped.contains("scheduler_binding_id\" = $11::uuid"));
+        let page = list_page_sql(true, true, true);
+        assert!(page.contains("LIMIT $12 OFFSET $13"));
+        let page_binding_only = list_page_sql(false, false, true);
+        assert!(page_binding_only.contains("scheduler_binding_id\" = $9"));
+        assert!(page_binding_only.contains("LIMIT $10 OFFSET $11"));
+        let bare = list_where(false, false, false);
+        assert!(!bare.contains("scheduler_binding_id"));
+    }
+
+    #[test]
+    fn scheduler_member_and_detail_sql_carry_no_binding_delete_scope() {
+        // The project-standing check is the default manager (live +
+        // active rows only); the detail prefetch is the base manager
+        // (no `deleted_at` scope on either leg).
+        let standing = scheduler_project_member_exists_sql();
+        assert!(standing.contains(r#""project_members"."project_id" = $1"#));
+        assert!(standing.contains(r#""project_members"."member_id" = $2"#));
+        assert!(standing.contains(r#""project_members"."deleted_at" IS NULL"#));
+        assert!(standing.contains(r#""project_members"."is_active"#));
+        let prefetch = binding_details_for_runs_sql();
+        assert!(!prefetch.contains("deleted_at"));
+        assert!(prefetch.contains("INNER JOIN \"schedulers\""));
+        assert!(prefetch.contains("\"scheduler_bindings\".\"id\" = ANY($1)"));
+        // The detail lookup joins the binding without a delete scope
+        // and exposes row presence separately from the nullable
+        // project column.
+        let detail = run_detail_sql();
+        assert!(detail.contains("gate_binding_id"));
+        assert!(detail.contains("gate_binding_project_id"));
+        let join = detail
+            .split("LEFT OUTER JOIN \"scheduler_bindings\"")
+            .nth(1)
+            .expect("binding join");
+        assert!(!join.contains("deleted_at"));
     }
 
     #[test]
@@ -2069,6 +2329,10 @@ mod tests {
         );
         assert_eq!(RETICK_WORK_ITEM_REQUIRED_BODY, body("/retick/missing/body"));
         assert_eq!(RETICK_MALFORMED_BODY, body("/retick/malformed/body"));
+        assert_eq!(
+            SCHEDULER_BINDING_MALFORMED_BODY,
+            body("/list/scheduler_binding_malformed/body")
+        );
         assert_eq!(ISSUE_NOT_FOUND_BODY, body("/run_ai/not_found/body"));
         assert_eq!(ISSUE_NOT_FOUND_BODY, body("/retick/not_found/body"));
         assert_eq!(RUN_ALREADY_TERMINAL_BODY, body("/cancel/terminal/body"));

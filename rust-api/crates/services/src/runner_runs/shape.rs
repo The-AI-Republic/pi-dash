@@ -2,8 +2,10 @@
 //!
 //! Ports the output shapes in `apps/api/pi_dash/runner/serializers.py`:
 //!
-//! * `AgentRunSerializer` (`:260-312`, incl the `error_diagnostic`
-//!   list-vs-detail rule at `:266-272` and the inline `tool_calls`)
+//! * `AgentRunSerializer` (`:260-330`, incl the `error_diagnostic`
+//!   list-vs-detail rule at `:266-273`, the inline `tool_calls`, and
+//!   the `scheduler_binding` / `scheduler_binding_detail` pair at
+//!   `:275-289,305-307`, PDASHOSS01-223)
 //! * `AgentRunToolCallSerializer` (`:241-257`), nested under runs
 //! * `AgentRunEventSerializer` (`:313-318`)
 //! * `ApprovalRequestSerializer` (`:320-336`)
@@ -50,9 +52,12 @@
 //! `cappr_decide_ok.approval`, `sess_list_owner` / `msg_list` keys, SSE
 //! event frames). Each `#[cfg(test)]` suite replays its section.
 //!
-//! Ported bugs: none found in these serializers on read-through beyond
-//! the D-13 `QUIRK-runner-count`, which is inherited through reuse (the
-//! count is caller-supplied; this module never computes it).
+//! Ported bugs: beyond the D-13 `QUIRK-runner-count` inherited through
+//! reuse (the count is caller-supplied; this module never computes it),
+//! `BUG-none-project`: `get_scheduler_binding_detail` renders
+//! `str(binding.project_id)` (`serializers.py:288`), and the binding's
+//! project FK is nullable, so a project-less binding renders
+//! `"project": "None"` — ported as written.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -72,8 +77,8 @@ use pidash_types::runner_runs::{error_diagnostic, RunErrorDiagnostic};
 // Wire field order (`Meta.fields` order == JSON key order)
 // ---------------------------------------------------------------------------
 
-/// `AgentRunSerializer.Meta.fields` (`serializers.py:276-309`).
-pub const RUN_WIRE_FIELDS: [&str; 32] = [
+/// `AgentRunSerializer.Meta.fields` (`serializers.py:294-329`).
+pub const RUN_WIRE_FIELDS: [&str; 34] = [
     "id",
     "status",
     "executor_kind",
@@ -85,6 +90,8 @@ pub const RUN_WIRE_FIELDS: [&str; 32] = [
     "agent_metadata",
     "runner",
     "work_item",
+    "scheduler_binding",
+    "scheduler_binding_detail",
     "pod",
     "pod_detail",
     "created_by",
@@ -275,6 +282,43 @@ pub fn tool_call_to_representation(row: &AgentRunToolCall) -> ToolCallView<'_> {
     }
 }
 
+/// `get_scheduler_binding_detail` input row (`serializers.py:275-289`,
+/// PDASHOSS01-223): the binding id + project plus the joined scheduler
+/// name/slug. Borrowed strings like [`PodMiniRow`]; the handler owns the
+/// storage and resolves soft-deleted bindings (the FK uses the base
+/// manager, so no `deleted_at` scope applies).
+pub struct SchedulerBindingDetailRow<'a> {
+    pub id: &'a str,
+    pub scheduler_name: &'a str,
+    pub scheduler_slug: &'a str,
+    /// `binding.project_id`, rendered by `str()` below. The FK is
+    /// nullable (`WorkspaceBaseModel.project`, `null=True`).
+    pub project_id: Option<&'a str>,
+}
+
+/// `get_scheduler_binding_detail` output, in wire order.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SchedulerBindingDetailView<'a> {
+    pub id: &'a str,
+    pub scheduler_name: &'a str,
+    pub scheduler_slug: &'a str,
+    pub project: &'a str,
+}
+
+/// Port of `get_scheduler_binding_detail` (`serializers.py:275-289`).
+pub fn scheduler_binding_detail_to_representation<'a>(
+    row: &'a SchedulerBindingDetailRow<'a>,
+) -> SchedulerBindingDetailView<'a> {
+    SchedulerBindingDetailView {
+        id: row.id,
+        scheduler_name: row.scheduler_name,
+        scheduler_slug: row.scheduler_slug,
+        // `BUG-none-project`: `str(binding.project_id)` renders
+        // `"None"` when the binding has no project — ported as written.
+        project: row.project_id.unwrap_or("None"),
+    }
+}
+
 /// `AgentRunSerializer.to_representation` output, in wire order.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentRunView<'a> {
@@ -289,6 +333,8 @@ pub struct AgentRunView<'a> {
     pub agent_metadata: &'a Value,
     pub runner: Option<String>,
     pub work_item: Option<String>,
+    pub scheduler_binding: Option<String>,
+    pub scheduler_binding_detail: Option<SchedulerBindingDetailView<'a>>,
     pub pod: String,
     pub pod_detail: PodMiniView<'a>,
     pub created_by: String,
@@ -312,35 +358,41 @@ pub struct AgentRunView<'a> {
     pub tool_calls: Vec<ToolCallView<'a>>,
 }
 
-/// Port of `AgentRunSerializer` for a list row (`serializers.py:260-312`
+/// Port of `AgentRunSerializer` for a list row (`serializers.py:260-330`
 /// with `many=True`): `error_diagnostic` renders `None` — the list skips
-/// the classifier's per-row scans (`serializers.py:270-271`).
+/// the classifier's per-row scans (`serializers.py:271-272`).
 ///
 /// `pod` is the caller's D-13 mini row for the run's pod (the FK is
-/// non-nullable); `tool_calls` the run's tool-call rows in render order.
+/// non-nullable); `tool_calls` the run's tool-call rows in render order;
+/// `binding` the joined binding/scheduler row, `Some` exactly when
+/// `run.scheduler_binding_id` is set (the caller 500s a missed join, like
+/// Django's FK dereference).
 pub fn run_list_to_representation<'a>(
     run: &'a AgentRun,
     pod: &'a PodMiniRow<'a>,
     tool_calls: &'a [AgentRunToolCall],
+    binding: Option<&'a SchedulerBindingDetailRow<'a>>,
 ) -> AgentRunView<'a> {
-    run_to_representation(run, pod, tool_calls, true)
+    run_to_representation(run, pod, tool_calls, binding, true)
 }
 
 /// Port of `AgentRunSerializer` for the per-run detail
-/// (`serializers.py:260-312`): `error_diagnostic` runs
-/// `classify_run_error(run.error)` (`serializers.py:272`).
+/// (`serializers.py:260-330`): `error_diagnostic` runs
+/// `classify_run_error(run.error)` (`serializers.py:273`).
 pub fn run_detail_to_representation<'a>(
     run: &'a AgentRun,
     pod: &'a PodMiniRow<'a>,
     tool_calls: &'a [AgentRunToolCall],
+    binding: Option<&'a SchedulerBindingDetailRow<'a>>,
 ) -> AgentRunView<'a> {
-    run_to_representation(run, pod, tool_calls, false)
+    run_to_representation(run, pod, tool_calls, binding, false)
 }
 
 fn run_to_representation<'a>(
     run: &'a AgentRun,
     pod: &'a PodMiniRow<'a>,
     tool_calls: &'a [AgentRunToolCall],
+    binding: Option<&'a SchedulerBindingDetailRow<'a>>,
     is_list: bool,
 ) -> AgentRunView<'a> {
     AgentRunView {
@@ -355,6 +407,8 @@ fn run_to_representation<'a>(
         agent_metadata: &run.agent_metadata,
         runner: uuid_opt_string(&run.runner_id),
         work_item: uuid_opt_string(&run.work_item_id),
+        scheduler_binding: uuid_opt_string(&run.scheduler_binding_id),
+        scheduler_binding_detail: binding.map(scheduler_binding_detail_to_representation),
         pod: uuid_string(&run.pod_id),
         pod_detail: pod_mini_to_representation(pod),
         created_by: uuid_string(&run.created_by_id),
@@ -902,7 +956,7 @@ mod tests {
             runner_id: uuid_opt(&body["runner"]),
             pinned_runner_id: None,
             work_item_id: uuid_opt(&body["work_item"]),
-            scheduler_binding_id: None,
+            scheduler_binding_id: uuid_opt(&body["scheduler_binding"]),
             parent_run_id: None,
             status: serde_json::from_value(body["status"].clone()).expect("status"),
             executor_kind: serde_json::from_value(body["executor_kind"].clone()).expect("executor"),
@@ -980,7 +1034,7 @@ mod tests {
         let run = run_row(gold);
         let mini = MiniStorage::from_detail(&gold["pod_detail"]);
         let mini_row = mini.row();
-        let view = run_detail_to_representation(&run, &mini_row, &[]);
+        let view = run_detail_to_representation(&run, &mini_row, &[], None);
         let body = serde_json::to_value(&view).expect("serializes");
         assert_eq!(keys(&body), RUN_WIRE_FIELDS);
         assert_eq!(
@@ -996,7 +1050,7 @@ mod tests {
         let run = run_row(gold);
         let mini = MiniStorage::from_detail(&gold["pod_detail"]);
         let mini_row = mini.row();
-        let view = run_list_to_representation(&run, &mini_row, &[]);
+        let view = run_list_to_representation(&run, &mini_row, &[], None);
         let body = serde_json::to_value(&view).expect("serializes");
         assert_eq!(keys(&body), RUN_WIRE_FIELDS);
         // The list pins `error_diagnostic: null` even with `error` set…
@@ -1011,10 +1065,10 @@ mod tests {
         run.error = "boom x".to_string();
         let mini = MiniStorage::from_detail(&gold["pod_detail"]);
         let mini_row = mini.row();
-        let list = serde_json::to_value(run_list_to_representation(&run, &mini_row, &[]))
+        let list = serde_json::to_value(run_list_to_representation(&run, &mini_row, &[], None))
             .expect("serializes");
         assert_eq!(list["error_diagnostic"], Value::Null);
-        let detail = serde_json::to_value(run_detail_to_representation(&run, &mini_row, &[]))
+        let detail = serde_json::to_value(run_detail_to_representation(&run, &mini_row, &[], None))
             .expect("serializes");
         assert_eq!(
             detail["error_diagnostic"],
@@ -1029,9 +1083,88 @@ mod tests {
         // …and the detail renders `None` for an empty error (the
         // classifier returns `None` there; the list rule is separate).
         run.error = String::new();
-        let detail_empty = serde_json::to_value(run_detail_to_representation(&run, &mini_row, &[]))
-            .expect("serializes");
+        let detail_empty =
+            serde_json::to_value(run_detail_to_representation(&run, &mini_row, &[], None))
+                .expect("serializes");
         assert_eq!(detail_empty["error_diagnostic"], Value::Null);
+    }
+
+    #[test]
+    fn scheduler_binding_detail_renders_in_wire_position() {
+        let gold = &fx08()["list"]["golden_row"];
+        let mut run = run_row(gold);
+        run.scheduler_binding_id = Some(uuid("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"));
+        run.work_item_id = None;
+        let mini = MiniStorage::from_detail(&gold["pod_detail"]);
+        let mini_row = mini.row();
+        let binding = SchedulerBindingDetailRow {
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            scheduler_name: "Nightly Audit",
+            scheduler_slug: "nightly-audit",
+            project_id: Some("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        };
+        let body = serde_json::to_value(run_list_to_representation(
+            &run,
+            &mini_row,
+            &[],
+            Some(&binding),
+        ))
+        .expect("serializes");
+        assert_eq!(keys(&body), RUN_WIRE_FIELDS);
+        assert_eq!(
+            body["scheduler_binding"],
+            json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        );
+        assert_eq!(
+            body["scheduler_binding_detail"],
+            json!({
+                "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "scheduler_name": "Nightly Audit",
+                "scheduler_slug": "nightly-audit",
+                "project": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            })
+        );
+        // The detail shape renders the same pair (unlike
+        // `error_diagnostic`, there is no list-vs-detail rule here).
+        let detail = serde_json::to_value(run_detail_to_representation(
+            &run,
+            &mini_row,
+            &[],
+            Some(&binding),
+        ))
+        .expect("serializes");
+        assert_eq!(
+            detail["scheduler_binding_detail"],
+            body["scheduler_binding_detail"]
+        );
+    }
+
+    #[test]
+    fn scheduler_binding_detail_none_project_renders_none_string() {
+        // `BUG-none-project`: `str(binding.project_id)` with a NULL
+        // project renders `"None"`, not null — ported as written.
+        let binding = SchedulerBindingDetailRow {
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            scheduler_name: "Nightly Audit",
+            scheduler_slug: "nightly-audit",
+            project_id: None,
+        };
+        let view = scheduler_binding_detail_to_representation(&binding);
+        let body = serde_json::to_value(&view).expect("serializes");
+        assert_eq!(body["project"], json!("None"));
+    }
+
+    #[test]
+    fn scheduler_binding_absent_renders_null_pair() {
+        let gold = &fx08()["detail"]["ok"]["body"];
+        let run = run_row(gold);
+        assert_eq!(run.scheduler_binding_id, None);
+        let mini = MiniStorage::from_detail(&gold["pod_detail"]);
+        let mini_row = mini.row();
+        let body = serde_json::to_value(run_detail_to_representation(&run, &mini_row, &[], None))
+            .expect("serializes");
+        assert_eq!(body["scheduler_binding"], Value::Null);
+        assert_eq!(body["scheduler_binding_detail"], Value::Null);
     }
 
     fn tool_call_row() -> AgentRunToolCall {
