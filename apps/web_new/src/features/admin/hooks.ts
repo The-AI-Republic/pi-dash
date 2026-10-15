@@ -8,7 +8,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { getAppClient } from "../../core/api/client.js";
-import { adminCsrfQueryOptions, instanceBootstrapQueryOptions } from "./queries.js";
+import { adminCsrfQueryOptions, adminSessionQueryOptions, instanceBootstrapQueryOptions } from "./queries.js";
 
 /**
  * The single instance-info read the entry gate branches on. Pending
@@ -22,4 +22,13 @@ export function useInstanceBootstrap() {
 /** The forgery token the native setup/sign-in POSTs carry. */
 export function useAdminCsrfToken() {
   return useQuery(adminCsrfQueryOptions(getAppClient()));
+}
+
+/**
+ * The admin login tri-state the guards branch on: pending while the
+ * check is unresolved, then admin, anonymous, or forbidden — or errored
+ * when the check itself fails, which guards read as anonymous.
+ */
+export function useAdminSession() {
+  return useQuery(adminSessionQueryOptions(getAppClient()));
 }

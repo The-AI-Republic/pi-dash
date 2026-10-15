@@ -25,6 +25,11 @@ const router = createRouter({
   routeTree,
   context: { queryClient, apiClient },
   defaultPreload: "intent",
+  // The console uses the canonical trailing-slash form
+  // (parity/specs/admin.md §0.1), which the default would strip when
+  // building locations. Preserve keeps authored URLs as-is; member
+  // links are slashless, so they are unaffected.
+  trailingSlash: "preserve",
 });
 
 declare module "@tanstack/react-router" {
