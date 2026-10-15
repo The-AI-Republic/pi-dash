@@ -72,6 +72,7 @@ test(
   async ({ driver, seed }) => {
     const session = await signInSession(seed.email, seed.password);
     const wsId = await serverWorkspaceIdBySlug(seed.workspaceSlug);
+    const before = await serverAddRunnerRunnerNames(wsId, session);
     const { identifier } = await projectFacts(seed.workspaceSlug, seed.projectId, session);
     expect(identifier).not.toBe("");
     await openSignedIn(driver, seed);
@@ -112,7 +113,7 @@ test(
     });
 
     // Server: opening the modal wrote nothing.
-    expect(await serverAddRunnerRunnerNames(wsId, session)).toEqual([]);
+    expect(await serverAddRunnerRunnerNames(wsId, session)).toEqual(before);
   }
 );
 
