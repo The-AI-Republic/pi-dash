@@ -35,15 +35,33 @@ def wait_for_registration(task_names: set[str], what: str = "worker registration
     return found
 
 
+def _is_missing_queue(exc: Exception) -> bool:
+    """True when a passive declare failed only because the queue is gone."""
+    if str(getattr(exc, "reply_code", "")) == "404":
+        return True
+    text = str(exc)
+    return "NOT_FOUND" in text or "no queue" in text
+
+
 def queue_depth(queue: str = "celery") -> int:
-    """Return the current pending-message count of a broker queue."""
+    """Return the current pending-message count of a broker queue.
+
+    A missing queue (fully drained on redis, never declared on amqp)
+    counts as 0, mirroring broker_redis._qsize_or_zero.
+    """
     from kombu import Connection
+    from kombu.exceptions import ChannelError
 
     with Connection(config.required(config.CELERY_BROKER_URL)) as conn:
         channel = conn.default_channel
-        queue_obj, message_count, _consumers = channel.queue_declare(
-            queue, passive=True
-        )
+        try:
+            queue_obj, message_count, _consumers = channel.queue_declare(
+                queue, passive=True
+            )
+        except ChannelError as exc:
+            if _is_missing_queue(exc):
+                return 0
+            raise
         return message_count
 
 
@@ -174,22 +192,33 @@ def task_received_stream(task_name: str, id_substr: str):
         with app.connection() as conn:
             recv = app.events.Receiver(conn, handlers={"task-received": _on_event})
 
+            # Small bounded captures: consume() resets its idle timer on
+            # every event, so a big capture never idles out while worker
+            # heartbeats (~2s) arrive. 10 events or 1 idle second max each.
+            _CAPTURE_LIMIT = 10
+            _CAPTURE_TIMEOUT = 1.0
+
             def collect(minimum: int = 1, timeout: float | None = None) -> list[dict]:
                 deadline = _time.monotonic() + (
                     timeout if timeout is not None else _config.TASK_TIMEOUT_SECONDS
                 )
-                while _time.monotonic() < deadline:
+
+                def _sweep() -> None:
+                    remaining = deadline - _time.monotonic()
                     try:
-                        recv.capture(limit=1000, timeout=2)
+                        recv.capture(
+                            limit=_CAPTURE_LIMIT,
+                            timeout=min(_CAPTURE_TIMEOUT, max(0.1, remaining)),
+                        )
                     except Exception:
                         pass  # idle window: no events yet; the queue holds them
+
+                while _time.monotonic() < deadline:
+                    _sweep()
                     if len(seen) >= minimum:
                         # One more sweep: siblings may publish right behind.
                         _time.sleep(_config.POLL_INTERVAL_SECONDS)
-                        try:
-                            recv.capture(limit=1000, timeout=2)
-                        except Exception:
-                            pass
+                        _sweep()
                         return list(seen)
                 raise TimeoutError(
                     f"timed out waiting for {minimum} task-received "
