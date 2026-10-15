@@ -1,7 +1,7 @@
 """Workspace scheduler detail get/patch/delete contract."""
 
 from . import seed_scheduler as seed_s
-from .test_workspace_schedulers import SCHEDULER_KEYS, sched_list
+from .test_workspace_schedulers import SCHEDULER_KEYS, SLUG_TAKEN, sched_list
 
 
 def sched_detail(world, sid):
@@ -81,7 +81,34 @@ def test_patch_duplicate_slug(org):
         json={"slug": "keep"},
     )
     assert r.status_code == 400
-    assert r.json() == {"error": "The payload is not valid"}
+    assert r.json() == SLUG_TAKEN
+
+
+def test_patch_duplicate_slug_accumulates_with_other_errors(org):
+    _create(org, slug="keep", name="Keep")
+    created = _create(org, slug="change", name="Change")
+    r = org.request(
+        "PATCH", sched_detail(org, created["id"]), "admin",
+        json={"slug": "keep", "name": "   "},
+    )
+    assert r.status_code == 400
+    assert list(r.json().keys()) == ["slug", "name"]
+    assert r.json() == {
+        **SLUG_TAKEN,
+        "name": ["This field may not be blank."],
+    }
+
+
+def test_patch_keep_own_slug(org):
+    created = _create(org, slug="mine", name="Mine")
+    # Re-saving the row's own slug excludes self: allowed.
+    r = org.request(
+        "PATCH", sched_detail(org, created["id"]), "admin",
+        json={"slug": "mine", "name": "Renamed"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["slug"] == "mine"
+    assert r.json()["name"] == "Renamed"
 
 
 def test_delete(org):

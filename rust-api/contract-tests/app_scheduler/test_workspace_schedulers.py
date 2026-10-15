@@ -14,6 +14,10 @@ SCHEDULER_KEYS = {
     "updated_at",
 }
 
+# R7 validate_slug conflict (PDASHOSS01-221): exact wire body on both
+# backends for a duplicate active slug.
+SLUG_TAKEN = {"slug": ["This slug is already in use in this workspace."]}
+
 
 def test_list_empty(org):
     r = org.request("GET", sched_list(org), "admin")
@@ -79,6 +83,53 @@ def test_create_duplicate_slug(org):
     assert org.request("POST", sched_list(org), "admin", json=payload).status_code == 201
     r = org.request("POST", sched_list(org), "admin", json=payload)
     assert r.status_code == 400
+    assert r.json() == SLUG_TAKEN
+    # The rejected write stored nothing: still exactly one scheduler.
+    r = org.request("GET", sched_list(org), "admin")
+    assert [row["slug"] for row in r.json()] == ["dup"]
+
+
+def test_create_duplicate_slug_accumulates_with_other_errors(org):
+    payload = {"slug": "dup", "name": "Dup", "prompt": "x"}
+    assert org.request("POST", sched_list(org), "admin", json=payload).status_code == 201
+    # validate_slug is field-level, so the conflict accumulates with the
+    # missing-name error; slug is declared first, so it lists first.
+    r = org.request(
+        "POST", sched_list(org), "admin",
+        json={"slug": "dup", "prompt": "x"},
+    )
+    assert r.status_code == 400
+    assert list(r.json().keys()) == ["slug", "name"]
+    assert r.json() == {
+        **SLUG_TAKEN,
+        "name": ["This field is required."],
+    }
+
+
+def test_create_slug_reusable_after_soft_delete(org):
+    payload = {"slug": "gone", "name": "Gone", "prompt": "x"}
+    r = org.request("POST", sched_list(org), "admin", json=payload)
+    assert r.status_code == 201, r.text
+    detail = f"{sched_list(org)}{r.json()['id']}/"
+    assert org.request("DELETE", detail, "admin").status_code == 204
+    # The tombstoned slug is reusable (the guard only covers active rows).
+    r = org.request("POST", sched_list(org), "admin", json=payload)
+    assert r.status_code == 201, r.text
+    assert r.json()["slug"] == "gone"
+
+
+def test_create_same_slug_other_workspace(org, pg):
+    from .conftest import make_world
+    other = make_world(pg)
+    try:
+        payload = {"slug": "shared", "name": "Shared", "prompt": "x"}
+        r = org.request("POST", sched_list(org), "admin", json=payload)
+        assert r.status_code == 201, r.text
+        # Same slug in another workspace is a different scope: allowed.
+        r = other.request("POST", sched_list(other), "admin", json=payload)
+        assert r.status_code == 201, r.text
+    finally:
+        other.close()
 
 
 def test_list_ordered_by_name_with_binding_count(org):

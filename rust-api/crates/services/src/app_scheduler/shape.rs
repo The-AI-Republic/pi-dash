@@ -41,8 +41,9 @@
 //!
 //! Out of scope (owned by sibling layers): the active-binding count query
 //! and every other read/write SQL statement (queries layer, F36-04..06);
-//! the pod existence queryset check and the `(scheduler, project)`
-//! unique-together check (both need the database; queries + handlers);
+//! the pod existence queryset check, the `(scheduler, project)`
+//! unique-together check, and the `validate_slug` EXISTS check (all need
+//! the database; queries + handlers);
 //! DRF field-level preemptions (`max_length`, `allow_blank=False`,
 //! `allow_null=False`, required, choices, boolean parsing — the handlers
 //! replicate those before calling these validators); HTTP envelopes and
@@ -164,6 +165,12 @@ pub const RDATE_EXDATE_MAX_LENGTH: usize = 256;
 
 /// `_validate_color` rejection (`scheduler.py:40-42`).
 pub const COLOR_ERROR: &str = "color must be a 7-character hex string like '#3b82f6'";
+
+/// `validate_slug` rejection (`scheduler.py:131-133`, OSS `main`
+/// `3db73752`, PDASHOSS01-221): a slug already used by another active
+/// scheduler in the workspace. The EXISTS decision needs the database
+/// (queries R7 + handlers); only the message lives here.
+pub const SLUG_UNIQUE_ERROR: &str = "This slug is already in use in this workspace.";
 
 /// Cross-field pod/project mismatch (`scheduler.py:264-267`).
 pub const POD_PROJECT_ERROR: &str = "pod must belong to the same project as this scheduler install";
@@ -1509,6 +1516,21 @@ mod tests {
         assert_eq!(validate_color("#ABCDEF\n"), Ok("#abcdef".to_owned()));
         // Interior whitespace survives the strip and fails.
         assert_eq!(validate_color("#AB CDE"), Err(COLOR_ERROR));
+    }
+
+    #[test]
+    fn slug_unique_error_body_is_wire_exact() {
+        // `validate_slug` (`scheduler.py:131-133`): the duplicate-slug
+        // wire body, byte for byte (captured from `origin/main`,
+        // PIDASHCONV-1066).
+        assert_eq!(
+            SLUG_UNIQUE_ERROR,
+            "This slug is already in use in this workspace."
+        );
+        assert_eq!(
+            field_error_body("slug", SLUG_UNIQUE_ERROR),
+            r#"{"slug":["This slug is already in use in this workspace."]}"#
+        );
     }
 
     #[test]

@@ -33,11 +33,15 @@
 //! * DELETE samples `now()` twice (`:now` for the bindings update and the
 //!   scheduler `deleted_at`, `:now2` for the scheduler `updated_at` —
 //!   `views.py:150-157`, F36-04 R5).
-//! * Duplicate slug answers 400 `{"error": "The payload is not valid"}`,
-//!   never 409: no `UniqueTogetherValidator` exists (workspace is
-//!   read-only), so the partial unique index raises `IntegrityError`,
-//!   mapped by `BaseAPIView.handle_exception`
-//!   (`app/views/base.py:211-240`, F36-10).
+//! * Duplicate slug answers 400 `{"slug": ["This slug is already in use
+//!   in this workspace."]}` (R7 `validate_slug`, OSS `main` `3db73752`,
+//!   PDASHOSS01-221): the EXISTS check runs whenever the slug's
+//!   `CharField` half passed, so the conflict merges ahead of any other
+//!   field errors (slug is declared first — F36-10). The `IntegrityError`
+//!   → `{"error": "The payload is not valid"}` branch survives only as a
+//!   check-then-write race backstop (`BaseAPIView.handle_exception`,
+//!   `app/views/base.py:211-240`, still flattens Django-side races the
+//!   same way).
 //! * A non-UUID detail id matches NO Django route, so Django's
 //!   `custom_404_view` answers 404 `{"error": "Page not found."}` before
 //!   any view code runs (F36-10 `routing_note`). The Rust route takes the
@@ -80,8 +84,9 @@ use crate::state::AppState;
 /// [`tests::not_found_body_matches_f36_10`].
 pub const SCHEDULER_NOT_FOUND_BODY: &str = r#"{"detail":"No Scheduler matches the given query."}"#;
 /// `handle_exception`'s `IntegrityError` branch (400,
-/// `app/views/base.py:220-224`): duplicate (workspace, slug) rows land
-/// here on POST and PATCH, never a 409.
+/// `app/views/base.py:220-224`): since R7 (`validate_slug`) this is only
+/// the check-then-write race backstop on POST and PATCH, never the
+/// first-line duplicate answer (and never a 409).
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// Malformed-JSON 400 message (`app_pages` precedent: DRF's `ParseError`
 /// prefix; the `serde_json` suffix is backend-specific and not ported).
@@ -516,6 +521,90 @@ pub fn validate_patch_body(body: &Value, existing: &SchedulerRow) -> Result<Sche
 }
 
 // ---------------------------------------------------------------------------
+// Slug uniqueness (R7 `validate_slug`, `scheduler.py:113-134`)
+// ---------------------------------------------------------------------------
+
+/// `validate_slug`'s input: the body's slug iff present and
+/// `CharField`-valid. DRF calls the `validate_<field>` hook only when
+/// the field's own validation passed, so missing, blank, over-long, or
+/// wrong-typed slugs — and non-dict bodies — never reach the EXISTS
+/// check (the DB constraint stays the backstop there, as in Django).
+fn candidate_slug(body: &Value) -> Option<String> {
+    let slug = body.as_object()?.get("slug")?;
+    char_field(slug, false, Some(64)).ok()
+}
+
+/// R7 slug-unique check, with or without the PATCH self-row exclusion.
+async fn slug_in_use(
+    pool: &PgPool,
+    workspace_id: &uuid::Uuid,
+    slug: &str,
+    exclude_scheduler: Option<&uuid::Uuid>,
+) -> Result<bool, Denial> {
+    let sql = queries::scheduler_slug_unique_check_sql(exclude_scheduler.is_some());
+    let params = if exclude_scheduler.is_some() {
+        queries::SCHEDULER_SLUG_UNIQUE_CHECK_PATCH_PARAMS
+    } else {
+        queries::SCHEDULER_SLUG_UNIQUE_CHECK_PARAMS
+    };
+    let sql = positional(&sql, params);
+    let mut query = sqlx::query_as::<_, (i32,)>(&sql)
+        .bind(slug)
+        .bind(workspace_id);
+    if let Some(scheduler_id) = exclude_scheduler {
+        query = query.bind(scheduler_id);
+    }
+    let row: Option<(i32,)> = query
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
+}
+
+/// The `{"slug": [...]}` conflict body, merged ahead of any other field
+/// errors (slug is the first declared field, so DRF lists it first).
+fn slug_conflict_body(prior: Map<String, Value>) -> Value {
+    let mut body = Map::with_capacity(prior.len() + 1);
+    body.insert(
+        "slug".to_owned(),
+        Value::Array(vec![Value::String(shape::SLUG_UNIQUE_ERROR.to_owned())]),
+    );
+    body.extend(prior);
+    Value::Object(body)
+}
+
+/// Run R7 after pure validation. On `Ok` a conflict denies with the
+/// lone slug body; on `Err` a conflict prepends `slug` to the field
+/// errors. The check runs only when the slug's `CharField` half passed
+/// (that's when DRF calls `validate_slug`), so missing/invalid slugs
+/// and non-dict bodies pass through untouched.
+async fn enforce_slug_unique(
+    pool: &PgPool,
+    workspace_id: &uuid::Uuid,
+    body: &Value,
+    exclude_scheduler: Option<&uuid::Uuid>,
+    validated: Result<SchedulerWrite, Value>,
+) -> Result<SchedulerWrite, Denial> {
+    match validated {
+        Ok(write) => {
+            if slug_in_use(pool, workspace_id, &write.slug, exclude_scheduler).await? {
+                return Err(Denial::BadJson(slug_conflict_body(Map::new())));
+            }
+            Ok(write)
+        }
+        Err(Value::Object(prior)) => {
+            if let Some(slug) = candidate_slug(body) {
+                if slug_in_use(pool, workspace_id, &slug, exclude_scheduler).await? {
+                    return Err(Denial::BadJson(slug_conflict_body(prior)));
+                }
+            }
+            Err(Denial::BadJson(Value::Object(prior)))
+        }
+        Err(other) => Err(Denial::BadJson(other)),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Render (`SchedulerSerializer` read half, `scheduler.py:74-112`)
 // ---------------------------------------------------------------------------
 
@@ -658,9 +747,10 @@ pub async fn scheduler_create(
         Ok(body) => body,
         Err(denial) => return denial.into_response(),
     };
-    let write = match validate_create_body(&body) {
+    let validated = validate_create_body(&body);
+    let write = match enforce_slug_unique(pool, &gate.workspace_id, &body, None, validated).await {
         Ok(write) => write,
-        Err(errors) => return Denial::BadJson(errors).into_response(),
+        Err(denial) => return denial.into_response(),
     };
     // R3 (`:79-84`): auto id/timestamps, `created_by` the request user
     // (crum), `updated_by`/`deleted_at` NULL, `source` the `'builtin'`
@@ -821,9 +911,18 @@ pub async fn scheduler_patch(
         Err(denial) => return denial.into_response(),
     };
     let record = row.record();
-    let write = match validate_patch_body(&body, &record) {
+    let validated = validate_patch_body(&body, &record);
+    let write = match enforce_slug_unique(
+        pool,
+        &gate.workspace_id,
+        &body,
+        Some(&scheduler_id),
+        validated,
+    )
+    .await
+    {
         Ok(write) => write,
-        Err(errors) => return Denial::BadJson(errors).into_response(),
+        Err(denial) => return denial.into_response(),
     };
     // R4 (`:127-133`): `save()` rewrites every writable column with the
     // merged values and refreshes `updated_at`/`updated_by_id`.
@@ -1197,6 +1296,10 @@ mod tests {
                 queries::SCHEDULER_SOFT_DELETE_SQL,
                 queries::SCHEDULER_SOFT_DELETE_PARAMS,
             ),
+            (
+                queries::SCHEDULER_SLUG_UNIQUE_CHECK_SQL,
+                queries::SCHEDULER_SLUG_UNIQUE_CHECK_PARAMS,
+            ),
         ];
         for (sql, params) in statements {
             let converted = positional(sql, params);
@@ -1222,6 +1325,21 @@ mod tests {
         assert!(converted.contains(
             "VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, 'builtin', $9, $10);"
         ));
+    }
+
+    /// The R7 PATCH form converts with the exclusion bound last
+    /// (`$3`); slug sorts before workspace (`$1`, `$2`).
+    #[test]
+    fn positional_slug_check_patch_text() {
+        let sql = queries::scheduler_slug_unique_check_sql(true);
+        let converted = positional(&sql, queries::SCHEDULER_SLUG_UNIQUE_CHECK_PATCH_PARAMS);
+        assert!(!converted.contains(':'), "no :named remnant");
+        assert!(
+            converted.ends_with(
+                "AND \"schedulers\".\"slug\" = $1 AND \"schedulers\".\"workspace_id\" = $2 AND NOT (\"schedulers\".\"id\" = $3)) LIMIT 1;"
+            ),
+            "unexpected R7 PATCH text: {converted}"
+        );
     }
 
     // -- Create validation ---------------------------------------------------
@@ -1558,6 +1676,78 @@ mod tests {
                 "color must be a 7-character hex string like '#3b82f6'"
             )
         );
+    }
+
+    // -- R7 slug uniqueness ---------------------------------------------------
+
+    /// The lone conflict body is wire-exact (captured from `origin/main`)
+    /// and equals the mandated [`shape::field_error_body`] output.
+    #[test]
+    fn slug_conflict_body_is_wire_exact() {
+        let rendered =
+            serde_json::to_string(&slug_conflict_body(Map::new())).expect("conflict JSON");
+        assert_eq!(
+            rendered,
+            r#"{"slug":["This slug is already in use in this workspace."]}"#
+        );
+        assert_eq!(
+            rendered,
+            shape::field_error_body("slug", shape::SLUG_UNIQUE_ERROR)
+        );
+    }
+
+    /// A conflict merges ahead of other field errors: slug is declared
+    /// first, so DRF lists it first (`{"slug": [...], "name": [...]}`).
+    #[test]
+    fn slug_conflict_merges_ahead_of_other_errors() {
+        let prior = errors_for(json!({"slug": "dup", "prompt": "x"}));
+        assert_eq!(
+            prior.keys().collect::<Vec<_>>(),
+            vec!["name"],
+            "only name fails; slug reached R7"
+        );
+        let merged = slug_conflict_body(prior);
+        let keys: Vec<&String> = merged.as_object().expect("object").keys().collect();
+        assert_eq!(keys, vec!["slug", "name"]);
+        assert_eq!(
+            serde_json::to_string(&merged).expect("merged JSON"),
+            r#"{"slug":["This slug is already in use in this workspace."],"name":["This field is required."]}"#
+        );
+    }
+
+    /// Every F36-10 `duplicate_slug` body (create + PATCH) equals the
+    /// conflict body, byte for byte.
+    #[test]
+    fn duplicate_slug_bodies_match_f36_10() {
+        let fixture = fixture_json(FIXTURE_SCHEDULER_IO);
+        let actions = fixture["actions"].as_array().expect("actions array");
+        let expected = slug_conflict_body(Map::new());
+        let mut checked = 0;
+        for action in actions {
+            if let Some(duplicate) = action.get("duplicate_slug") {
+                assert_eq!(duplicate["body"], expected);
+                assert_eq!(duplicate["status"], 400);
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 2, "create + PATCH duplicate bodies");
+    }
+
+    /// `validate_slug`'s input set: present and `CharField`-valid slugs
+    /// only (stripped, coerced); everything else skips the check.
+    #[test]
+    fn candidate_slug_matches_validate_slug_inputs() {
+        assert_eq!(
+            candidate_slug(&json!({"slug": "  dup  "})),
+            Some("dup".to_owned())
+        );
+        assert_eq!(candidate_slug(&json!({"slug": 5})), Some("5".to_owned()));
+        assert_eq!(candidate_slug(&json!({"name": "x"})), None);
+        assert_eq!(candidate_slug(&json!({"slug": "   "})), None);
+        assert_eq!(candidate_slug(&json!({"slug": Value::Null})), None);
+        assert_eq!(candidate_slug(&json!({"slug": ["x"]})), None);
+        assert_eq!(candidate_slug(&json!("dup")), None);
+        assert_eq!(candidate_slug(&json!(null)), None);
     }
 
     // -- PATCH validation -----------------------------------------------------
