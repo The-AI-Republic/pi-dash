@@ -268,6 +268,44 @@ describe("selectWorkItemContext", () => {
     expect(toggleSubscription).toHaveBeenCalledWith(false);
   });
 
+  it("no-ops unchanged state and estimate-point picks but still closes", () => {
+    const updateFields = vi.fn();
+    const close = vi.fn();
+    const { pages } = selectWorkItemContext(
+      input({ stateId: STATE_ID, estimatePoint: "p1", actions: { ...input().actions, updateFields, close } })
+    );
+    const state = pages.find((page) => page.placeholder === "Change state")!;
+    expect(state.usePageState("").options[0]!.selected).toBe(true);
+    state.usePageState("").options[0]!.run();
+    expect(updateFields).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledTimes(1);
+    close.mockClear();
+    const estimate = pages.find((page) => page.placeholder === "Change estimate")!;
+    estimate
+      .usePageState("")
+      .options.find((option) => option.id === "p1")!
+      .run();
+    expect(updateFields).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers only the clear row when no estimate system is active", () => {
+    const updateFields = vi.fn();
+    const close = vi.fn();
+    const { pages } = selectWorkItemContext(
+      input({
+        estimatePoint: undefined,
+        pickers: { ...input().pickers, estimates: [] },
+        actions: { ...input().actions, updateFields, close },
+      })
+    );
+    const estimate = pages.find((page) => page.placeholder === "Change estimate")!;
+    expect(estimate.usePageState("").options.map((option) => option.title)).toEqual(["No estimate"]);
+    estimate.usePageState("").options[0]!.run();
+    expect(updateFields).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   it("clears estimates and no-ops the current cycle", () => {
     const updateFields = vi.fn();
     const addToCycle = vi.fn();

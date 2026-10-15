@@ -264,6 +264,17 @@ describe("selectPageContext", () => {
     expect(setArchived).toHaveBeenCalledWith(true);
   });
 
+  it("makes public pages private and copies the URL", () => {
+    const setAccess = vi.fn();
+    const copyUrl = vi.fn();
+    const commands = selectPageContext(pageInput({ access: 0, setAccess, copyUrl }));
+    expect(commands.map((command) => command.title)).toContain("Make private");
+    commands.find((command) => command.title === "Make private")!.run();
+    expect(setAccess).toHaveBeenCalledWith(1);
+    commands.find((command) => command.title === "Copy URL")!.run();
+    expect(copyUrl).toHaveBeenCalledTimes(1);
+  });
+
   it("shows only the allowed entries", () => {
     const commands = selectPageContext(
       pageInput({ capabilities: { lock: false, changeAccess: false, archive: false, favorite: true } })

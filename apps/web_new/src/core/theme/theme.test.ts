@@ -140,5 +140,22 @@ describe("theme model", () => {
       writeStoredTheme("light-contrast");
       expect(setItem).toHaveBeenCalledWith("theme", "light-contrast");
     });
+
+    it("survives storage access denial", () => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+      Object.defineProperty(globalThis, "localStorage", {
+        get() {
+          throw new Error("denied");
+        },
+        configurable: true,
+      });
+      try {
+        expect(readStoredTheme()).toBe("system");
+        expect(() => writeStoredTheme("dark")).not.toThrow();
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor);
+        else delete (globalThis as Record<string, unknown>)["localStorage"];
+      }
+    });
   });
 });

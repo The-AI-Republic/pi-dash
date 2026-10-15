@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  applyDocumentLanguage,
   isSupportedLocale,
   readStoredLanguage,
   registerLocale,
@@ -64,8 +65,32 @@ describe("locale model", () => {
     expect(resolveInitialLanguage("en", "en")).toBe("en");
     expect(resolveInitialLanguage("fr", "en")).toBe("en");
     expect(resolveInitialLanguage("xx", undefined)).toBe("en");
+    expect(resolveInitialLanguage("xx", "yy")).toBe("en");
     registerLocale({ tag: "fr", label: "French" });
     expect(resolveInitialLanguage("fr", "en")).toBe("fr");
     expect(resolveInitialLanguage("xx", "fr")).toBe("fr");
+  });
+
+  it("stamps an explicit target element", () => {
+    const setAttribute = vi.fn();
+    applyDocumentLanguage("fr", { setAttribute } as unknown as HTMLElement);
+    expect(setAttribute).toHaveBeenCalledWith("lang", "fr");
+  });
+
+  it("survives storage access denial", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      get() {
+        throw new Error("denied");
+      },
+      configurable: true,
+    });
+    try {
+      expect(readStoredLanguage()).toBe("en");
+      expect(() => writeStoredLanguage("en")).not.toThrow();
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor);
+      else delete (globalThis as Record<string, unknown>)["localStorage"];
+    }
   });
 });

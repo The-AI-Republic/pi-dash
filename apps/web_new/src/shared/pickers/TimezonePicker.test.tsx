@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
-import { TimezonePicker } from "./TimezonePicker.js";
+import { TimezonePicker } from "./index.js";
 
 const ZONES = {
   timezones: [

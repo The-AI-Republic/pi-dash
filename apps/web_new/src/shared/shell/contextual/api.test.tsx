@@ -298,7 +298,7 @@ describe("useWorkItemMutations", () => {
 
   it("toasts update failures", async () => {
     const refresh = vi.fn();
-    const { queryClient } = harness(referenceRoutes, ["/issues/", "/cycle-issues/", "/subscribe/"]);
+    const { queryClient, calls } = harness(referenceRoutes, ["/issues/", "/cycle-issues/", "/subscribe/"]);
     render(
       <QueryClientProvider client={queryClient}>
         <ToastHost manager={getToastManager()} />
@@ -307,6 +307,13 @@ describe("useWorkItemMutations", () => {
     );
     await click("update");
     expect(await screen.findByText("Couldn't update the work item.")).toBeInTheDocument();
+    await click("add-cycle");
+    await click("set-modules");
+    await waitFor(() =>
+      expect(calls.filter((call) => call.method === "POST" && call.url.includes("/cycle-issues/"))).not.toHaveLength(0)
+    );
+    expect(calls.some((call) => call.method === "POST" && call.url.endsWith("/modules/"))).toBe(true);
+    expect(await screen.findAllByText("Couldn't update the work item.")).not.toHaveLength(0);
     await click("subscribe");
     expect(await screen.findByText("Couldn't update the subscription.")).toBeInTheDocument();
     expect(refresh).not.toHaveBeenCalled();

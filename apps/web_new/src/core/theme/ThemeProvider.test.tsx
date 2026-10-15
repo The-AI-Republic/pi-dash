@@ -157,6 +157,25 @@ describe("ThemeProvider", () => {
     await waitFor(() => expect(screen.getByTestId("scheme")).toHaveTextContent("dark:false"));
   });
 
+  it("reports a dark custom base through the resolved scheme", async () => {
+    function SchemeProbe(): React.ReactElement {
+      const scheme = useResolvedScheme();
+      return <span data-testid="scheme">{`${scheme.scheme}:${scheme.customDark}`}</span>;
+    }
+    matchMediaStub(false);
+    const { queryClient } = harness({
+      profile: { theme: "custom", primary: "#112233", background: "#445566", darkPalette: true },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider notifyError={() => undefined}>
+          <SchemeProbe />
+        </ThemeProvider>
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(screen.getByTestId("scheme")).toHaveTextContent("custom:true"));
+  });
+
   it("applies the stored choice, then syncs the server value once per user", async () => {
     matchMediaStub(false);
     window.localStorage.setItem(THEME_STORAGE_KEY, "light");

@@ -85,6 +85,12 @@ describe("artwork node branch", () => {
     expect(container.querySelector("img")).toBeNull();
     expect(screen.getByRole("heading", { level: 3 })).toHaveTextContent("Bare");
   });
+
+  it("renders nothing for undefined art", () => {
+    const { container } = render(<EmptyState variant="illustrated" title="Bare" art={undefined} />);
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByRole("heading", { level: 3 })).toHaveTextContent("Bare");
+  });
 });
 
 describe("marketing tier", () => {

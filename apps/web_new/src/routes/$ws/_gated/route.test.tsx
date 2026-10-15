@@ -33,6 +33,7 @@ const harness = vi.hoisted(() => ({
   creationDisabled: false,
   projectViews: { cycle_view: true, module_view: true, issue_views_view: true, page_view: true, inbox_view: true },
   fetched: [] as string[],
+  navigated: [] as unknown[],
 }));
 
 // Shell-query stand-in: this suite owns the layout wiring (sign-out entry
@@ -43,10 +44,17 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
 });
 
 // Router stand-ins: only the outlet and the matches selector the layout
-// reads; route creation, redirects and the Route hooks stay real.
+// reads; route creation, redirects and the Route hooks stay real. The
+// global navigate stand-in serves lazily mounted dialogs (the layout
+// itself navigates through Route.useNavigate, spied per test).
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
-  return { ...original, useRouterState: () => harness.matches, Outlet: () => null };
+  return {
+    ...original,
+    useRouterState: () => harness.matches,
+    Outlet: () => null,
+    useNavigate: () => (target: unknown) => harness.navigated.push(target),
+  };
 });
 
 // The sign-out mutation resolves to a controllable landing (or throws);
@@ -100,11 +108,16 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       harness.onSelectSearchResult = props.onSelectSearchResult;
       return React.createElement("div", null, props.topBar, props.sidebar, props.children);
     },
-    Sidebar: (props: { userLabel: string; onSignOut: () => void }) =>
+    Sidebar: (props: { userLabel: string; onSignOut: () => void; onDeactivateAccount: () => void }) =>
       React.createElement(
-        "button",
-        { type: "button", "aria-label": `Sign out ${props.userLabel}`, onClick: props.onSignOut },
-        "Sign out"
+        React.Fragment,
+        null,
+        React.createElement(
+          "button",
+          { type: "button", "aria-label": `Sign out ${props.userLabel}`, onClick: props.onSignOut },
+          "Sign out"
+        ),
+        React.createElement("button", { type: "button", onClick: props.onDeactivateAccount }, "Deactivate account")
       ),
     TitleBar: (props: { searchScope: { workspaceSlug: string; projectId: string | null } }) => {
       harness.titleBarScope = props.searchScope;
@@ -306,6 +319,7 @@ describe("gated layout shell wiring", () => {
       inbox_view: true,
     };
     harness.fetched = [];
+    harness.navigated = [];
     vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme" });
     vi.spyOn(Route, "useNavigate").mockReturnValue(navigate as never);
     vi.spyOn(Route, "useRouteContext").mockReturnValue({ apiClient: {} } as never);
@@ -504,6 +518,16 @@ describe("gated layout shell wiring", () => {
     expect(screen.queryByRole("heading", { name: "New project" })).toBeNull();
     runCommand("shell.create-project");
     expect(await screen.findByRole("heading", { name: "New project" })).not.toBeNull();
+  });
+
+  it("mounts the deactivate dialog lazily from the sidebar entry", async () => {
+    renderShell();
+    const user = userEvent.setup();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Deactivate account" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText(/only way back/)).toBeInTheDocument();
+    expect(screen.getByText("ada@example.com")).toBeInTheDocument();
   });
 
   it("routes the creation, navigation and invite entries", async () => {
