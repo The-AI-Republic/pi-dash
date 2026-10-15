@@ -7,7 +7,7 @@ import { resetRegisteredStores } from "../../../core/session/store.js";
 import { registerListDisplayReset, useListDisplayStore } from "./list-display.js";
 
 // Mirror the production wiring: the list view registers this store once
-// at module scope (see ProjectsListView), so the suite does the same.
+// from a mount effect (see ProjectsListView), so the suite does the same.
 registerListDisplayReset();
 
 beforeEach(() => {

@@ -26,11 +26,6 @@ import { useWorkItemPaletteContext } from "../../../../shared/shell/contextual/i
 
 export const Route = createFileRoute("/$ws/_gated/browse/$issueKey")({
   loader: async ({ context, params }) => {
-    // NOTE (NEWFRONT-523, size gate): the browse read stays behind a
-    // dynamic import so the browse query module never joins the initial
-    // bundle — this loader only runs on browse navigation, after first
-    // paint. The loader still resolves before render, as before.
-    const { browseIssueQueryOptions } = await import("../../../../features/issues/index.js");
     await context.queryClient.ensureQueryData(browseIssueQueryOptions(context.apiClient, params.ws, params.issueKey));
   },
   errorComponent: function BrowseError({ error, reset }: { error: unknown; reset: () => void }) {
