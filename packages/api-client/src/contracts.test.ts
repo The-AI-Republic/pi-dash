@@ -2150,12 +2150,28 @@ describe("instance-admin loop contracts", () => {
           last_skip_reason: "user_disabled",
           last_run: null,
         },
+        {
+          id: UUID,
+          workspace_slug: null,
+          user_email: null,
+          next_run_at: "2024-01-03T03:04:05+00:00",
+          last_skipped_at: null,
+          last_skip_reason: "",
+          last_run: {
+            status: "completed",
+            error_code: "",
+            model_used: "gpt-5",
+            total_tokens: 42,
+            completed_at: "2024-01-02T03:04:05+00:00",
+          },
+        },
       ],
     };
     const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(page) }));
     const client = createClient({ baseUrl: "https://api.test", transport });
     const parsed = await listLoopTargets(client, UUID);
     expect(parsed.results[0]?.last_skip_reason).toBe("user_disabled");
+    expect(parsed.results[1]?.last_run?.total_tokens).toBe(42);
     expect(transport.calls[0]?.url).toBe(`https://api.test/api/instances/loop/jobs/${UUID}/targets/`);
     await listLoopTargets(client, UUID, { skipReason: "user_disabled" });
     expect(transport.calls[1]?.url).toBe(
@@ -2163,5 +2179,7 @@ describe("instance-admin loop contracts", () => {
     );
     await listLoopTargets(client, UUID, { skipReason: "" });
     expect(transport.calls[2]?.url).toBe(`https://api.test/api/instances/loop/jobs/${UUID}/targets/`);
+    await listLoopTargets(client, UUID, { page: 2 });
+    expect(transport.calls[3]?.url).toBe(`https://api.test/api/instances/loop/jobs/${UUID}/targets/?page=2`);
   });
 });
