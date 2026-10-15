@@ -10508,8 +10508,21 @@ export class WebDriver implements ParityDriver {
     // enabled chip that opens the state dropdown. The flag is the whole
     // signal — opening the dropdown to probe it leaves shared menu state
     // behind (a toggle-close race hung RowSetState for 300s), so no click.
+    //
+    // Production-build guests settle with no chip at all (NEWFRONT-339):
+    // the chip flashes, then unmounts once permissions resolve, while the
+    // dev build keeps it disabled. A missing control cannot open its
+    // dropdown either, so a chip that never arrives reads as cannot-edit —
+    // but only after the full body wait, because members under load need
+    // the chip waited out (absence and still-loading are indistinguishable
+    // while the row settles; same absence-as-read-only contract as the
+    // sheet cells and the kanban quick-add entry).
     const chip = this.layoutsRowStateButton(issueName);
-    await chip.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS });
+    const appeared = await chip.waitFor({ timeout: WebDriver.LAYOUTS_BODY_WAIT_MS }).then(
+      () => true,
+      () => false
+    );
+    if (!appeared) return false;
     return !(await chip.isDisabled());
   }
 
