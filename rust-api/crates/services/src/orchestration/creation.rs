@@ -2572,7 +2572,7 @@ mod tests {
     }
 
     #[test]
-    fn pin_matrix_matches_m1_m9() {
+    fn pin_matrix_matches_m1_m10() {
         let clock = now();
         let runner = RunnerView {
             id: uid(0x60),
@@ -2641,6 +2641,18 @@ mod tests {
         assert_eq!(
             pinned_runner_for(Some(&busy), Some(uid(0x50)), clock),
             Some(uid(0x60))
+        );
+        // M10 (`70d684af`, Django's `(BUSY, 3600)` param): a dead runner
+        // keeps BUSY forever (`mark_offline_runners` never flips it), so
+        // the heartbeat — not the status — rules it out.
+        let busy_stale = RunnerView {
+            status: "busy".to_owned(),
+            last_heartbeat_at: Some(clock - chrono::Duration::seconds(3600)),
+            ..runner.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&busy_stale), Some(uid(0x50)), clock),
+            None
         );
         // Boundary: exactly at the grace is fresh (strict `<`).
         let edge = RunnerView {
