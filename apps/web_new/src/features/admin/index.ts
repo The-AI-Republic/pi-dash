@@ -31,14 +31,18 @@ export {
 export type { AuthMethodDef, AuthMethodKey, ConfigMap } from "./authMethods.js";
 export {
   CONFIG_SAVE_FAILED_LOG,
+  toggleLoopJobMutationOptions,
   useAdminCsrfToken,
   useAdminSession,
   useInstanceAdmins,
   useInstanceBootstrap,
   useInstanceConfigurations,
+  useLoopJobs,
+  useToggleLoopJob,
   useUpdateGeneralSettings,
   useUpdateInstanceConfigurations,
 } from "./hooks.js";
+export type { LoopJobToggle } from "./hooks.js";
 export {
   firstAdminEmail,
   GENERAL_NAME_REQUIRED_MESSAGE,
@@ -52,6 +56,7 @@ export {
   mergeGeneralSettingsIntoBootstrap,
   resolveTelemetryPrefill,
 } from "./generalSettings.js";
+export { LOOP_MIN_ROLE_LABELS, resolveLoopMinRoleLabel } from "./loopJobs.js";
 export {
   adminCsrfQueryOptions,
   adminKeys,
@@ -60,6 +65,7 @@ export {
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
+  loopJobsQueryOptions,
   mergeConfigurationRows,
 } from "./queries.js";
 export {
@@ -97,6 +103,7 @@ export type { AdminAuthMethodCardProps } from "./components/AdminAuthMethodCard.
 export { AdminBrandLoader } from "./components/AdminBrandLoader.js";
 export { AdminDashboardLayout } from "./components/AdminDashboardLayout.js";
 export { AdminEntryGate } from "./components/AdminEntryGate.js";
+export { AdminLoopJobsPage } from "./components/AdminLoopJobsPage.js";
 export type { AdminEntrySearch } from "./components/AdminEntryGate.js";
 export { AdminDashboardGuard, AdminHomeGuard } from "./components/AdminGuards.js";
 export { AdminHeader } from "./components/AdminHeader.js";

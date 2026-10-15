@@ -4,15 +4,17 @@
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { InstanceBootstrap, InstancePatch, Transport, TransportInit } from "@pidash/api-client";
+import type { InstanceBootstrap, InstancePatch, LoopJobList, Transport, TransportInit } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
 
+const { notifyErrorMock } = vi.hoisted(() => ({ notifyErrorMock: vi.fn() }));
+
 vi.mock("../../shared/shell/index.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../shared/shell/index.js")>();
-  return { ...original, notifySuccess: vi.fn() };
+  const actual = await importOriginal<typeof import("../../shared/shell/index.js")>();
+  return { ...actual, notifyError: notifyErrorMock, notifySuccess: vi.fn() };
 });
 
 import { notifySuccess } from "../../shared/shell/index.js";
@@ -24,6 +26,7 @@ import {
 } from "./generalSettings.js";
 import {
   CONFIG_SAVE_FAILED_LOG,
+  toggleLoopJobMutationOptions,
   useAdminCsrfToken,
   useAdminSession,
   useCloudAuthProbe,
@@ -32,9 +35,11 @@ import {
   useInstanceAdmins,
   useInstanceBootstrap,
   useInstanceConfigurations,
+  useLoopJobs,
   useUpdateGeneralSettings,
   useUpdateInstanceConfigurations,
 } from "./hooks.js";
+import { LOOP_TOGGLE_FAILURE_MESSAGE, LOOP_TOGGLE_FAILURE_TITLE } from "./loopJobs.js";
 import { adminKeys } from "./queries.js";
 
 function stubTransport(routes: Record<string, { status: number; body: unknown }>): Transport {
@@ -586,5 +591,119 @@ describe("useUpdateInstanceConfigurations", () => {
     } finally {
       errored.mockRestore();
     }
+  });
+});
+
+function loopJob(overrides: Partial<LoopJobList[number]> = {}): LoopJobList[number] {
+  return {
+    id: "33333333-3333-4333-8333-333333333333",
+    slug: "probe-job",
+    name: "Probe job",
+    public_name: "Probe public",
+    public_description: "Probe description",
+    prompt: "Probe prompt",
+    min_role: 15,
+    enabled: true,
+    is_builtin: false,
+    dtstart: null,
+    rrule: "FREQ=DAILY;BYHOUR=3;BYMINUTE=0",
+    tzid: "UTC",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function LoopJobsProbe(): React.ReactElement {
+  const query = useLoopJobs();
+  if (query.isPending) return <div data-testid="probe">loading</div>;
+  if (query.isError) return <div data-testid="probe">failed</div>;
+  return <div data-testid="probe">{query.data.map((job) => job.slug).join(",")}</div>;
+}
+
+describe("useLoopJobs", () => {
+  it("reads the job list through the app client", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport({ "/api/instances/loop/jobs/": { status: 200, body: [loopJob(), loopJob({ slug: "probe-two" })] } })
+    );
+    renderProbe(LoopJobsProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("probe-job,probe-two"));
+  });
+
+  it("surfaces fetch failures instead of retrying", async () => {
+    createAppClient("https://api.test", stubTransport({}));
+    renderProbe(LoopJobsProbe);
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
+  });
+});
+
+describe("toggleLoopJobMutationOptions", () => {
+  function stubClient() {
+    const sendJson = vi.fn(async () => ({ data: {}, status: 200, url: "https://api.test/" }));
+    const client = { sendJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    return { client, sendJson };
+  }
+
+  it("patches only the enabled flag through the contract", async () => {
+    const { client, sendJson } = stubClient();
+    const options = toggleLoopJobMutationOptions(client, new QueryClient());
+    await options.mutationFn?.({ id: "job-1", enabled: false }, {} as never);
+    expect(sendJson).toHaveBeenCalledWith("PATCH", "/api/instances/loop/jobs/job-1/", { json: { enabled: false } });
+  });
+
+  it("flips the one job optimistically and leaves the others alone", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(adminKeys.loopJobs, [
+      loopJob({ id: "job-1", enabled: true }),
+      loopJob({ id: "job-2", enabled: true }),
+    ]);
+    const options = toggleLoopJobMutationOptions(stubClient().client, queryClient);
+    await options.onMutate?.({ id: "job-2", enabled: false }, {} as never);
+    expect((queryClient.getQueryData(adminKeys.loopJobs) as LoopJobList).map((job) => job.enabled)).toEqual([
+      true,
+      false,
+    ]);
+  });
+
+  it("tolerates an empty cache on mutate", async () => {
+    const queryClient = new QueryClient();
+    const options = toggleLoopJobMutationOptions(stubClient().client, queryClient);
+    const context = await options.onMutate?.({ id: "job-1", enabled: false }, {} as never);
+    expect(queryClient.getQueryData(adminKeys.loopJobs)).toBeUndefined();
+    options.onError?.(new Error("denied"), { id: "job-1", enabled: false }, context, {} as never);
+    expect(queryClient.getQueryData(adminKeys.loopJobs)).toBeUndefined();
+    expect(notifyErrorMock).toHaveBeenCalledWith(LOOP_TOGGLE_FAILURE_TITLE, LOOP_TOGGLE_FAILURE_MESSAGE);
+  });
+
+  it("rolls back and toasts the pinned notice on failure", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(adminKeys.loopJobs, [loopJob({ id: "job-1", enabled: true })]);
+    const options = toggleLoopJobMutationOptions(stubClient().client, queryClient);
+    const context = await options.onMutate?.({ id: "job-1", enabled: false }, {} as never);
+    expect((queryClient.getQueryData(adminKeys.loopJobs) as LoopJobList)[0]?.enabled).toBe(false);
+    options.onError?.(new Error("denied"), { id: "job-1", enabled: false }, context, {} as never);
+    expect((queryClient.getQueryData(adminKeys.loopJobs) as LoopJobList)[0]?.enabled).toBe(true);
+    expect(notifyErrorMock).toHaveBeenCalledWith(LOOP_TOGGLE_FAILURE_TITLE, LOOP_TOGGLE_FAILURE_MESSAGE);
+  });
+
+  it("toasts even with no optimistic context to roll back", () => {
+    const options = toggleLoopJobMutationOptions(stubClient().client, new QueryClient());
+    options.onError?.(new Error("denied"), { id: "job-1", enabled: false }, undefined, {} as never);
+    expect(notifyErrorMock).toHaveBeenCalledWith(LOOP_TOGGLE_FAILURE_TITLE, LOOP_TOGGLE_FAILURE_MESSAGE);
+  });
+
+  it("stays silent on success", () => {
+    const options = toggleLoopJobMutationOptions(stubClient().client, new QueryClient());
+    expect(options.onSuccess).toBeUndefined();
+  });
+
+  it("revalidates the list once settled", () => {
+    const queryClient = new QueryClient();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const options = toggleLoopJobMutationOptions(stubClient().client, queryClient);
+    options.onSettled?.(undefined, null, { id: "job-1", enabled: false }, undefined, {} as never);
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: adminKeys.loopJobs });
   });
 });

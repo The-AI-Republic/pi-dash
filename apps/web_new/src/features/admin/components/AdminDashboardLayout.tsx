@@ -5,9 +5,10 @@
 // shell every settings page mounts in. The dashboard guard wraps the
 // tree (loader while unresolved, replace-navigation out for anyone
 // but a signed-in admin), the stored theme applies on mount so a
-// reload keeps it, the toast host renders page notices, and the
-// first-workspace popup rides above the page content. Dashboard pages
-// reach this through the `_dashboard` pathless route, never around it.
+// reload keeps it, the toast host renders page notices (ADM-023 auth
+// saves, ADM-052 loop toggle failures), and the first-workspace popup
+// rides above the page content. Dashboard pages reach this through
+// the `_dashboard` pathless route, never around it.
 import { ToastHost } from "@pidash/kit";
 import * as React from "react";
 
