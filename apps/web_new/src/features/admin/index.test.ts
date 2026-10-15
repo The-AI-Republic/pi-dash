@@ -11,13 +11,18 @@ import { describe, expect, it } from "vitest";
 import {
   acceptCompanyName,
   acceptPersonName,
+  AdminAccountMenu,
   AdminBrandLoader,
   AdminDashboardGuard,
+  AdminDashboardLayout,
   AdminEntryGate,
   adminCsrfQueryOptions,
+  AdminHeader,
+  AdminHelpSection,
   AdminHomeGuard,
   AdminNotFoundScreen,
   AdminSetupForm,
+  AdminSidebar,
   AdminSignInForm,
   AdminSignOutForm,
   adminKeys,
@@ -31,9 +36,14 @@ import {
   FirstWorkspacePopup,
   GOD_MODE_ENTRY,
   GOD_MODE_GENERAL,
+  ADMIN_NARROW_VIEWPORT_PX,
   ADMIN_NOT_FOUND_ART,
   ADMIN_NOT_FOUND_TITLE,
+  ADMIN_SEGMENT_LABELS,
+  ADMIN_SIDEBAR_COLLAPSED_KEY,
+  ADMIN_SIDEBAR_ENTRIES,
   ADMIN_THEME_KEY,
+  buildAdminCrumbs,
   INSTANCE_FAILURE_ART,
   INSTANCE_FAILURE_TITLE,
   InstanceFailureScreen,
@@ -42,6 +52,7 @@ import {
   isMismatchVisible,
   isPersonNameText,
   isSetupSubmittable,
+  isSidebarEntryActive,
   isStrengthMeterVisible,
   PERSON_NAME_MAX_LENGTH,
   readStoredAdminTheme,
@@ -59,6 +70,7 @@ import {
   SIGN_OUT_POST_PATH,
   useAdminCsrfToken,
   useAdminSession,
+  useAdminSidebarStore,
   useAdminThemeStore,
   useFirstWorkspaceStore,
   useInstanceBootstrap,
@@ -73,12 +85,14 @@ describe("admin barrel", () => {
       adminSessionQueryOptions,
       applyAdminThemePreference,
       applyStoredAdminTheme,
+      buildAdminCrumbs,
       decideAdminGuard,
       instanceBootstrapQueryOptions,
       isCompanyNameText,
       isMismatchVisible,
       isPersonNameText,
       isSetupSubmittable,
+      isSidebarEntryActive,
       isStrengthMeterVisible,
       readStoredAdminTheme,
       registerAdminStoreReset,
@@ -94,6 +108,7 @@ describe("admin barrel", () => {
     for (const hook of [
       useAdminCsrfToken,
       useAdminSession,
+      useAdminSidebarStore,
       useAdminThemeStore,
       useFirstWorkspaceStore,
       useInstanceBootstrap,
@@ -101,12 +116,17 @@ describe("admin barrel", () => {
       expect(typeof hook).toBe("function");
     }
     for (const component of [
+      AdminAccountMenu,
       AdminBrandLoader,
       AdminDashboardGuard,
+      AdminDashboardLayout,
       AdminEntryGate,
+      AdminHeader,
+      AdminHelpSection,
       AdminHomeGuard,
       AdminNotFoundScreen,
       AdminSetupForm,
+      AdminSidebar,
       AdminSignInForm,
       AdminSignOutForm,
       CloudAdminEntry,
@@ -116,11 +136,15 @@ describe("admin barrel", () => {
       expect(component).toBeDefined();
     }
     expect(adminKeys).toBeDefined();
+    expect(ADMIN_NARROW_VIEWPORT_PX).toBeGreaterThan(0);
+    expect(ADMIN_SEGMENT_LABELS).toBeDefined();
+    expect(ADMIN_SIDEBAR_ENTRIES.length).toBeGreaterThan(0);
     expect(COMPANY_NAME_MAX_LENGTH).toBeGreaterThan(0);
     expect(PERSON_NAME_MAX_LENGTH).toBeGreaterThan(0);
     for (const text of [
       ADMIN_NOT_FOUND_ART,
       ADMIN_NOT_FOUND_TITLE,
+      ADMIN_SIDEBAR_COLLAPSED_KEY,
       ADMIN_THEME_KEY,
       FIRST_WORKSPACE_CREATE_PATH,
       GOD_MODE_ENTRY,

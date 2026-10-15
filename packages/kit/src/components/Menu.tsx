@@ -20,10 +20,27 @@ export interface MenuSeparator {
   separator: true;
 }
 
-export type MenuEntry = MenuAction | MenuSeparator;
+/**
+ * Caller-rendered popup content: identity rows, embedded forms, or any
+ * node that must sit in the menu without a menuitem wrapper. The node
+ * renders as a direct popup child; menu semantics inside it (a nested
+ * menuitem, a form) are the caller's own.
+ */
+export interface MenuCustom {
+  custom: true;
+  /** React key: custom entries carry no label to key on. */
+  entryKey: string;
+  node: React.ReactNode;
+}
+
+export type MenuEntry = MenuAction | MenuSeparator | MenuCustom;
 
 export function isMenuSeparator(entry: MenuEntry): entry is MenuSeparator {
   return "separator" in entry;
+}
+
+export function isMenuCustom(entry: MenuEntry): entry is MenuCustom {
+  return "custom" in entry;
 }
 
 export interface MenuProps {
@@ -58,6 +75,8 @@ export function Menu({ trigger, items, open, onOpenChange }: MenuProps): React.R
                   role="separator"
                   className="mx-(--space-2) my-(--space-2) border-t border-(--border)"
                 />
+              ) : isMenuCustom(entry) ? (
+                <React.Fragment key={entry.entryKey}>{entry.node}</React.Fragment>
               ) : (
                 <BaseMenu.Item
                   key={entry.itemKey ?? entry.label}

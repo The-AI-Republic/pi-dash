@@ -8,6 +8,15 @@ export { GOD_MODE_ENTRY, resolveSetupError, resolveSignInBanners } from "./admin
 export type { SetupError, SetupErrorPlacement, SignInBanners, SignInMappedBanner } from "./adminErrors.js";
 export { decideAdminGuard, GOD_MODE_GENERAL } from "./adminGuards.js";
 export type { AdminGuardDecision, AdminGuardTree } from "./adminGuards.js";
+export {
+  ADMIN_NARROW_VIEWPORT_PX,
+  ADMIN_SEGMENT_LABELS,
+  ADMIN_SIDEBAR_COLLAPSED_KEY,
+  ADMIN_SIDEBAR_ENTRIES,
+  buildAdminCrumbs,
+  isSidebarEntryActive,
+} from "./adminShell.js";
+export type { AdminCrumb, AdminSidebarEntryDef } from "./adminShell.js";
 export { useAdminCsrfToken, useAdminSession, useInstanceBootstrap } from "./hooks.js";
 export {
   adminCsrfQueryOptions,
@@ -27,7 +36,13 @@ export {
   PERSON_NAME_MAX_LENGTH,
 } from "./setupValidation.js";
 export type { MismatchInput, SetupGateInput } from "./setupValidation.js";
-export { registerAdminStoreReset, resetAdminClientState, resetAdminStores, useFirstWorkspaceStore } from "./stores.js";
+export {
+  registerAdminStoreReset,
+  resetAdminClientState,
+  resetAdminStores,
+  useAdminSidebarStore,
+  useFirstWorkspaceStore,
+} from "./stores.js";
 export type { AdminStoreReset } from "./stores.js";
 export {
   ADMIN_THEME_KEY,
@@ -37,11 +52,16 @@ export {
   useAdminThemeStore,
 } from "./theme.js";
 export type { AdminThemeMode } from "./theme.js";
+export { AdminAccountMenu } from "./components/AdminAccountMenu.js";
 export { AdminBrandLoader } from "./components/AdminBrandLoader.js";
+export { AdminDashboardLayout } from "./components/AdminDashboardLayout.js";
 export { AdminEntryGate } from "./components/AdminEntryGate.js";
 export type { AdminEntrySearch } from "./components/AdminEntryGate.js";
 export { AdminDashboardGuard, AdminHomeGuard } from "./components/AdminGuards.js";
+export { AdminHeader } from "./components/AdminHeader.js";
+export { AdminHelpSection } from "./components/AdminHelpSection.js";
 export { ADMIN_NOT_FOUND_ART, ADMIN_NOT_FOUND_TITLE, AdminNotFoundScreen } from "./components/AdminNotFoundScreen.js";
+export { AdminSidebar } from "./components/AdminSidebar.js";
 export { AdminSignOutForm, SIGN_OUT_POST_PATH } from "./components/AdminSignOutForm.js";
 export { FIRST_WORKSPACE_CREATE_PATH, FirstWorkspacePopup } from "./components/FirstWorkspacePopup.js";
 export {

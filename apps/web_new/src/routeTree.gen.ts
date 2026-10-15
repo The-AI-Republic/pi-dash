@@ -8,728 +8,798 @@
 // You should NOT make any changes in this file as it will be overwritten.
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
-import { Route as rootRouteImport } from "./routes/__root";
-import { Route as IndexRouteImport } from "./routes/index";
-import { Route as WsRouteRouteImport } from "./routes/$ws/route";
-import { Route as CreateWorkspaceRouteImport } from "./routes/create-workspace";
-import { Route as InvitationsRouteImport } from "./routes/invitations";
-import { Route as LoginRouteImport } from "./routes/login";
-import { Route as OnboardingRouteImport } from "./routes/onboarding";
-import { Route as RegisterRouteImport } from "./routes/register";
-import { Route as SignInRouteImport } from "./routes/sign-in";
-import { Route as SignUpRouteImport } from "./routes/sign-up";
-import { Route as SigninRouteImport } from "./routes/signin";
-import { Route as WorkspaceInvitationsRouteImport } from "./routes/workspace-invitations";
-import { Route as WsSplatRouteImport } from "./routes/$ws/$";
-import { Route as WsGatedRouteRouteImport } from "./routes/$ws/_gated/route";
-import { Route as AccountsForgotPasswordRouteImport } from "./routes/accounts/forgot-password";
-import { Route as AccountsResetPasswordRouteImport } from "./routes/accounts/reset-password";
-import { Route as AccountsSetPasswordRouteImport } from "./routes/accounts/set-password";
-import { Route as AccountsSignUpRouteImport } from "./routes/accounts/sign-up";
-import { Route as AuthDeviceRouteImport } from "./routes/auth/device";
-import { Route as GodModeIndexRouteImport } from "./routes/god-mode/index";
-import { Route as GodModeSplatRouteImport } from "./routes/god-mode/$";
-import { Route as WsGatedIndexRouteImport } from "./routes/$ws/_gated/index";
-import { Route as WsGatedBrowseIssueKeyRouteImport } from "./routes/$ws/_gated/browse/$issueKey";
-import { Route as WsGatedProjectsIndexRouteImport } from "./routes/$ws/_gated/projects/index";
-import { Route as WsGatedProjectsProjectIdRouteRouteImport } from "./routes/$ws/_gated/projects/$projectId/route";
-import { Route as WsGatedProjectsProjectIdIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/index";
-import { Route as WsGatedProjectsArchivesIndexRouteImport } from "./routes/$ws/_gated/projects/archives/index";
-import { Route as WsGatedProjectsProjectIdCyclesIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/cycles/index";
-import { Route as WsGatedProjectsProjectIdIntakeIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/intake/index";
-import { Route as WsGatedProjectsProjectIdIssuesIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/issues/index";
-import { Route as WsGatedProjectsProjectIdModulesIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/modules/index";
-import { Route as WsGatedProjectsProjectIdPagesIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/pages/index";
-import { Route as WsGatedProjectsProjectIdSchedulersIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/schedulers/index";
-import { Route as WsGatedProjectsProjectIdViewsIndexRouteImport } from "./routes/$ws/_gated/projects/$projectId/views/index";
+import { Route as rootRouteImport } from './routes/__root'
+import { Route as IndexRouteImport } from './routes/index'
+import { Route as WsRouteRouteImport } from './routes/$ws/route'
+import { Route as CreateWorkspaceRouteImport } from './routes/create-workspace'
+import { Route as GodModeRouteRouteImport } from './routes/god-mode/route'
+import { Route as InvitationsRouteImport } from './routes/invitations'
+import { Route as LoginRouteImport } from './routes/login'
+import { Route as OnboardingRouteImport } from './routes/onboarding'
+import { Route as RegisterRouteImport } from './routes/register'
+import { Route as SignInRouteImport } from './routes/sign-in'
+import { Route as SignUpRouteImport } from './routes/sign-up'
+import { Route as SigninRouteImport } from './routes/signin'
+import { Route as WorkspaceInvitationsRouteImport } from './routes/workspace-invitations'
+import { Route as WsSplatRouteImport } from './routes/$ws/$'
+import { Route as WsGatedRouteRouteImport } from './routes/$ws/_gated/route'
+import { Route as AccountsForgotPasswordRouteImport } from './routes/accounts/forgot-password'
+import { Route as AccountsResetPasswordRouteImport } from './routes/accounts/reset-password'
+import { Route as AccountsSetPasswordRouteImport } from './routes/accounts/set-password'
+import { Route as AccountsSignUpRouteImport } from './routes/accounts/sign-up'
+import { Route as AuthDeviceRouteImport } from './routes/auth/device'
+import { Route as GodModeIndexRouteImport } from './routes/god-mode/index'
+import { Route as GodModeSplatRouteImport } from './routes/god-mode/$'
+import { Route as GodModeDashboardRouteRouteImport } from './routes/god-mode/_dashboard/route'
+import { Route as WsGatedIndexRouteImport } from './routes/$ws/_gated/index'
+import { Route as WsGatedBrowseIssueKeyRouteImport } from './routes/$ws/_gated/browse/$issueKey'
+import { Route as WsGatedProjectsIndexRouteImport } from './routes/$ws/_gated/projects/index'
+import { Route as WsGatedProjectsProjectIdRouteRouteImport } from './routes/$ws/_gated/projects/$projectId/route'
+import { Route as WsGatedProjectsProjectIdIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/index'
+import { Route as WsGatedProjectsArchivesIndexRouteImport } from './routes/$ws/_gated/projects/archives/index'
+import { Route as WsGatedProjectsProjectIdCyclesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/cycles/index'
+import { Route as WsGatedProjectsProjectIdIntakeIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/intake/index'
+import { Route as WsGatedProjectsProjectIdIssuesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/issues/index'
+import { Route as WsGatedProjectsProjectIdModulesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/modules/index'
+import { Route as WsGatedProjectsProjectIdPagesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/pages/index'
+import { Route as WsGatedProjectsProjectIdSchedulersIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/schedulers/index'
+import { Route as WsGatedProjectsProjectIdViewsIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/views/index'
 
 const IndexRoute = IndexRouteImport.update({
-  id: "/",
-  path: "/",
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const WsRouteRoute = WsRouteRouteImport.update({
-  id: "/$ws",
-  path: "/$ws",
+  id: '/$ws',
+  path: '/$ws',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const CreateWorkspaceRoute = CreateWorkspaceRouteImport.update({
-  id: "/create-workspace",
-  path: "/create-workspace",
+  id: '/create-workspace',
+  path: '/create-workspace',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
+const GodModeRouteRoute = GodModeRouteRouteImport.update({
+  id: '/god-mode',
+  path: '/god-mode',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const InvitationsRoute = InvitationsRouteImport.update({
-  id: "/invitations",
-  path: "/invitations",
+  id: '/invitations',
+  path: '/invitations',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const LoginRoute = LoginRouteImport.update({
-  id: "/login",
-  path: "/login",
+  id: '/login',
+  path: '/login',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const OnboardingRoute = OnboardingRouteImport.update({
-  id: "/onboarding",
-  path: "/onboarding",
+  id: '/onboarding',
+  path: '/onboarding',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const RegisterRoute = RegisterRouteImport.update({
-  id: "/register",
-  path: "/register",
+  id: '/register',
+  path: '/register',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const SignInRoute = SignInRouteImport.update({
-  id: "/sign-in",
-  path: "/sign-in",
+  id: '/sign-in',
+  path: '/sign-in',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const SignUpRoute = SignUpRouteImport.update({
-  id: "/sign-up",
-  path: "/sign-up",
+  id: '/sign-up',
+  path: '/sign-up',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const SigninRoute = SigninRouteImport.update({
-  id: "/signin",
-  path: "/signin",
+  id: '/signin',
+  path: '/signin',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const WorkspaceInvitationsRoute = WorkspaceInvitationsRouteImport.update({
-  id: "/workspace-invitations",
-  path: "/workspace-invitations",
+  id: '/workspace-invitations',
+  path: '/workspace-invitations',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const WsSplatRoute = WsSplatRouteImport.update({
-  id: "/$",
-  path: "/$",
+  id: '/$',
+  path: '/$',
   getParentRoute: () => WsRouteRoute,
-} as any);
+} as any)
 const WsGatedRouteRoute = WsGatedRouteRouteImport.update({
-  id: "/_gated",
+  id: '/_gated',
   getParentRoute: () => WsRouteRoute,
-} as any);
+} as any)
 const AccountsForgotPasswordRoute = AccountsForgotPasswordRouteImport.update({
-  id: "/accounts/forgot-password",
-  path: "/accounts/forgot-password",
+  id: '/accounts/forgot-password',
+  path: '/accounts/forgot-password',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const AccountsResetPasswordRoute = AccountsResetPasswordRouteImport.update({
-  id: "/accounts/reset-password",
-  path: "/accounts/reset-password",
+  id: '/accounts/reset-password',
+  path: '/accounts/reset-password',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const AccountsSetPasswordRoute = AccountsSetPasswordRouteImport.update({
-  id: "/accounts/set-password",
-  path: "/accounts/set-password",
+  id: '/accounts/set-password',
+  path: '/accounts/set-password',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const AccountsSignUpRoute = AccountsSignUpRouteImport.update({
-  id: "/accounts/sign-up",
-  path: "/accounts/sign-up",
+  id: '/accounts/sign-up',
+  path: '/accounts/sign-up',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const AuthDeviceRoute = AuthDeviceRouteImport.update({
-  id: "/auth/device",
-  path: "/auth/device",
+  id: '/auth/device',
+  path: '/auth/device',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const GodModeIndexRoute = GodModeIndexRouteImport.update({
-  id: "/god-mode/",
-  path: "/god-mode/",
-  getParentRoute: () => rootRouteImport,
-} as any);
+  id: '/',
+  path: '/',
+  getParentRoute: () => GodModeRouteRoute,
+} as any)
 const GodModeSplatRoute = GodModeSplatRouteImport.update({
-  id: "/god-mode/$",
-  path: "/god-mode/$",
-  getParentRoute: () => rootRouteImport,
-} as any);
+  id: '/$',
+  path: '/$',
+  getParentRoute: () => GodModeRouteRoute,
+} as any)
+const GodModeDashboardRouteRoute = GodModeDashboardRouteRouteImport.update({
+  id: '/_dashboard',
+  getParentRoute: () => GodModeRouteRoute,
+} as any)
 const WsGatedIndexRoute = WsGatedIndexRouteImport.update({
-  id: "/",
-  path: "/",
+  id: '/',
+  path: '/',
   getParentRoute: () => WsGatedRouteRoute,
-} as any);
+} as any)
 const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
-  id: "/browse/$issueKey",
-  path: "/browse/$issueKey",
+  id: '/browse/$issueKey',
+  path: '/browse/$issueKey',
   getParentRoute: () => WsGatedRouteRoute,
-} as any);
+} as any)
 const WsGatedProjectsIndexRoute = WsGatedProjectsIndexRouteImport.update({
-  id: "/projects/",
-  path: "/projects/",
+  id: '/projects/',
+  path: '/projects/',
   getParentRoute: () => WsGatedRouteRoute,
-} as any);
-const WsGatedProjectsProjectIdRouteRoute = WsGatedProjectsProjectIdRouteRouteImport.update({
-  id: "/projects/$projectId",
-  path: "/projects/$projectId",
-  getParentRoute: () => WsGatedRouteRoute,
-} as any);
-const WsGatedProjectsProjectIdIndexRoute = WsGatedProjectsProjectIdIndexRouteImport.update({
-  id: "/",
-  path: "/",
-  getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
-} as any);
-const WsGatedProjectsArchivesIndexRoute = WsGatedProjectsArchivesIndexRouteImport.update({
-  id: "/projects/archives/",
-  path: "/projects/archives/",
-  getParentRoute: () => WsGatedRouteRoute,
-} as any);
-const WsGatedProjectsProjectIdCyclesIndexRoute = WsGatedProjectsProjectIdCyclesIndexRouteImport.update({
-  id: "/cycles/",
-  path: "/cycles/",
-  getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
-} as any);
-const WsGatedProjectsProjectIdIntakeIndexRoute = WsGatedProjectsProjectIdIntakeIndexRouteImport.update({
-  id: "/intake/",
-  path: "/intake/",
-  getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
-} as any);
-const WsGatedProjectsProjectIdIssuesIndexRoute = WsGatedProjectsProjectIdIssuesIndexRouteImport.update({
-  id: "/issues/",
-  path: "/issues/",
-  getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
-} as any);
-const WsGatedProjectsProjectIdModulesIndexRoute = WsGatedProjectsProjectIdModulesIndexRouteImport.update({
-  id: "/modules/",
-  path: "/modules/",
-  getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
-} as any);
-const WsGatedProjectsProjectIdPagesIndexRoute = WsGatedProjectsProjectIdPagesIndexRouteImport.update({
-  id: "/pages/",
-  path: "/pages/",
-  getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
-} as any);
-const WsGatedProjectsProjectIdSchedulersIndexRoute = WsGatedProjectsProjectIdSchedulersIndexRouteImport.update({
-  id: "/schedulers/",
-  path: "/schedulers/",
-  getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
-} as any);
-const WsGatedProjectsProjectIdViewsIndexRoute = WsGatedProjectsProjectIdViewsIndexRouteImport.update({
-  id: "/views/",
-  path: "/views/",
-  getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
-} as any);
+} as any)
+const WsGatedProjectsProjectIdRouteRoute =
+  WsGatedProjectsProjectIdRouteRouteImport.update({
+    id: '/projects/$projectId',
+    path: '/projects/$projectId',
+    getParentRoute: () => WsGatedRouteRoute,
+  } as any)
+const WsGatedProjectsProjectIdIndexRoute =
+  WsGatedProjectsProjectIdIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
+  } as any)
+const WsGatedProjectsArchivesIndexRoute =
+  WsGatedProjectsArchivesIndexRouteImport.update({
+    id: '/projects/archives/',
+    path: '/projects/archives/',
+    getParentRoute: () => WsGatedRouteRoute,
+  } as any)
+const WsGatedProjectsProjectIdCyclesIndexRoute =
+  WsGatedProjectsProjectIdCyclesIndexRouteImport.update({
+    id: '/cycles/',
+    path: '/cycles/',
+    getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
+  } as any)
+const WsGatedProjectsProjectIdIntakeIndexRoute =
+  WsGatedProjectsProjectIdIntakeIndexRouteImport.update({
+    id: '/intake/',
+    path: '/intake/',
+    getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
+  } as any)
+const WsGatedProjectsProjectIdIssuesIndexRoute =
+  WsGatedProjectsProjectIdIssuesIndexRouteImport.update({
+    id: '/issues/',
+    path: '/issues/',
+    getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
+  } as any)
+const WsGatedProjectsProjectIdModulesIndexRoute =
+  WsGatedProjectsProjectIdModulesIndexRouteImport.update({
+    id: '/modules/',
+    path: '/modules/',
+    getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
+  } as any)
+const WsGatedProjectsProjectIdPagesIndexRoute =
+  WsGatedProjectsProjectIdPagesIndexRouteImport.update({
+    id: '/pages/',
+    path: '/pages/',
+    getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
+  } as any)
+const WsGatedProjectsProjectIdSchedulersIndexRoute =
+  WsGatedProjectsProjectIdSchedulersIndexRouteImport.update({
+    id: '/schedulers/',
+    path: '/schedulers/',
+    getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
+  } as any)
+const WsGatedProjectsProjectIdViewsIndexRoute =
+  WsGatedProjectsProjectIdViewsIndexRouteImport.update({
+    id: '/views/',
+    path: '/views/',
+    getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
-  "/": typeof IndexRoute;
-  "/$ws": typeof WsRouteRouteWithChildren;
-  "/create-workspace": typeof CreateWorkspaceRoute;
-  "/invitations": typeof InvitationsRoute;
-  "/login": typeof LoginRoute;
-  "/onboarding": typeof OnboardingRoute;
-  "/register": typeof RegisterRoute;
-  "/sign-in": typeof SignInRoute;
-  "/sign-up": typeof SignUpRoute;
-  "/signin": typeof SigninRoute;
-  "/workspace-invitations": typeof WorkspaceInvitationsRoute;
-  "/$ws/$": typeof WsSplatRoute;
-  "/accounts/forgot-password": typeof AccountsForgotPasswordRoute;
-  "/accounts/reset-password": typeof AccountsResetPasswordRoute;
-  "/accounts/set-password": typeof AccountsSetPasswordRoute;
-  "/accounts/sign-up": typeof AccountsSignUpRoute;
-  "/auth/device": typeof AuthDeviceRoute;
-  "/god-mode/$": typeof GodModeSplatRoute;
-  "/god-mode/": typeof GodModeIndexRoute;
-  "/$ws/": typeof WsGatedIndexRoute;
-  "/$ws/projects/$projectId": typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
-  "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
-  "/$ws/projects/": typeof WsGatedProjectsIndexRoute;
-  "/$ws/projects/$projectId/": typeof WsGatedProjectsProjectIdIndexRoute;
-  "/$ws/projects/archives/": typeof WsGatedProjectsArchivesIndexRoute;
-  "/$ws/projects/$projectId/cycles/": typeof WsGatedProjectsProjectIdCyclesIndexRoute;
-  "/$ws/projects/$projectId/intake/": typeof WsGatedProjectsProjectIdIntakeIndexRoute;
-  "/$ws/projects/$projectId/issues/": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
-  "/$ws/projects/$projectId/modules/": typeof WsGatedProjectsProjectIdModulesIndexRoute;
-  "/$ws/projects/$projectId/pages/": typeof WsGatedProjectsProjectIdPagesIndexRoute;
-  "/$ws/projects/$projectId/schedulers/": typeof WsGatedProjectsProjectIdSchedulersIndexRoute;
-  "/$ws/projects/$projectId/views/": typeof WsGatedProjectsProjectIdViewsIndexRoute;
+  '/': typeof IndexRoute
+  '/$ws': typeof WsRouteRouteWithChildren
+  '/god-mode': typeof GodModeRouteRouteWithChildren
+  '/create-workspace': typeof CreateWorkspaceRoute
+  '/invitations': typeof InvitationsRoute
+  '/login': typeof LoginRoute
+  '/onboarding': typeof OnboardingRoute
+  '/register': typeof RegisterRoute
+  '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
+  '/signin': typeof SigninRoute
+  '/workspace-invitations': typeof WorkspaceInvitationsRoute
+  '/$ws/$': typeof WsSplatRoute
+  '/accounts/forgot-password': typeof AccountsForgotPasswordRoute
+  '/accounts/reset-password': typeof AccountsResetPasswordRoute
+  '/accounts/set-password': typeof AccountsSetPasswordRoute
+  '/accounts/sign-up': typeof AccountsSignUpRoute
+  '/auth/device': typeof AuthDeviceRoute
+  '/god-mode/$': typeof GodModeSplatRoute
+  '/god-mode/': typeof GodModeIndexRoute
+  '/$ws/': typeof WsGatedIndexRoute
+  '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
+  '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
+  '/$ws/projects/': typeof WsGatedProjectsIndexRoute
+  '/$ws/projects/$projectId/': typeof WsGatedProjectsProjectIdIndexRoute
+  '/$ws/projects/archives/': typeof WsGatedProjectsArchivesIndexRoute
+  '/$ws/projects/$projectId/cycles/': typeof WsGatedProjectsProjectIdCyclesIndexRoute
+  '/$ws/projects/$projectId/intake/': typeof WsGatedProjectsProjectIdIntakeIndexRoute
+  '/$ws/projects/$projectId/issues/': typeof WsGatedProjectsProjectIdIssuesIndexRoute
+  '/$ws/projects/$projectId/modules/': typeof WsGatedProjectsProjectIdModulesIndexRoute
+  '/$ws/projects/$projectId/pages/': typeof WsGatedProjectsProjectIdPagesIndexRoute
+  '/$ws/projects/$projectId/schedulers/': typeof WsGatedProjectsProjectIdSchedulersIndexRoute
+  '/$ws/projects/$projectId/views/': typeof WsGatedProjectsProjectIdViewsIndexRoute
 }
 export interface FileRoutesByTo {
-  "/": typeof IndexRoute;
-  "/$ws": typeof WsGatedIndexRoute;
-  "/create-workspace": typeof CreateWorkspaceRoute;
-  "/invitations": typeof InvitationsRoute;
-  "/login": typeof LoginRoute;
-  "/onboarding": typeof OnboardingRoute;
-  "/register": typeof RegisterRoute;
-  "/sign-in": typeof SignInRoute;
-  "/sign-up": typeof SignUpRoute;
-  "/signin": typeof SigninRoute;
-  "/workspace-invitations": typeof WorkspaceInvitationsRoute;
-  "/$ws/$": typeof WsSplatRoute;
-  "/accounts/forgot-password": typeof AccountsForgotPasswordRoute;
-  "/accounts/reset-password": typeof AccountsResetPasswordRoute;
-  "/accounts/set-password": typeof AccountsSetPasswordRoute;
-  "/accounts/sign-up": typeof AccountsSignUpRoute;
-  "/auth/device": typeof AuthDeviceRoute;
-  "/god-mode/$": typeof GodModeSplatRoute;
-  "/god-mode": typeof GodModeIndexRoute;
-  "/$ws/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
-  "/$ws/projects": typeof WsGatedProjectsIndexRoute;
-  "/$ws/projects/$projectId": typeof WsGatedProjectsProjectIdIndexRoute;
-  "/$ws/projects/archives": typeof WsGatedProjectsArchivesIndexRoute;
-  "/$ws/projects/$projectId/cycles": typeof WsGatedProjectsProjectIdCyclesIndexRoute;
-  "/$ws/projects/$projectId/intake": typeof WsGatedProjectsProjectIdIntakeIndexRoute;
-  "/$ws/projects/$projectId/issues": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
-  "/$ws/projects/$projectId/modules": typeof WsGatedProjectsProjectIdModulesIndexRoute;
-  "/$ws/projects/$projectId/pages": typeof WsGatedProjectsProjectIdPagesIndexRoute;
-  "/$ws/projects/$projectId/schedulers": typeof WsGatedProjectsProjectIdSchedulersIndexRoute;
-  "/$ws/projects/$projectId/views": typeof WsGatedProjectsProjectIdViewsIndexRoute;
+  '/': typeof IndexRoute
+  '/$ws': typeof WsGatedIndexRoute
+  '/create-workspace': typeof CreateWorkspaceRoute
+  '/invitations': typeof InvitationsRoute
+  '/login': typeof LoginRoute
+  '/onboarding': typeof OnboardingRoute
+  '/register': typeof RegisterRoute
+  '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
+  '/signin': typeof SigninRoute
+  '/workspace-invitations': typeof WorkspaceInvitationsRoute
+  '/god-mode': typeof GodModeIndexRoute
+  '/$ws/$': typeof WsSplatRoute
+  '/accounts/forgot-password': typeof AccountsForgotPasswordRoute
+  '/accounts/reset-password': typeof AccountsResetPasswordRoute
+  '/accounts/set-password': typeof AccountsSetPasswordRoute
+  '/accounts/sign-up': typeof AccountsSignUpRoute
+  '/auth/device': typeof AuthDeviceRoute
+  '/god-mode/$': typeof GodModeSplatRoute
+  '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
+  '/$ws/projects': typeof WsGatedProjectsIndexRoute
+  '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdIndexRoute
+  '/$ws/projects/archives': typeof WsGatedProjectsArchivesIndexRoute
+  '/$ws/projects/$projectId/cycles': typeof WsGatedProjectsProjectIdCyclesIndexRoute
+  '/$ws/projects/$projectId/intake': typeof WsGatedProjectsProjectIdIntakeIndexRoute
+  '/$ws/projects/$projectId/issues': typeof WsGatedProjectsProjectIdIssuesIndexRoute
+  '/$ws/projects/$projectId/modules': typeof WsGatedProjectsProjectIdModulesIndexRoute
+  '/$ws/projects/$projectId/pages': typeof WsGatedProjectsProjectIdPagesIndexRoute
+  '/$ws/projects/$projectId/schedulers': typeof WsGatedProjectsProjectIdSchedulersIndexRoute
+  '/$ws/projects/$projectId/views': typeof WsGatedProjectsProjectIdViewsIndexRoute
 }
 export interface FileRoutesById {
-  __root__: typeof rootRouteImport;
-  "/": typeof IndexRoute;
-  "/$ws": typeof WsRouteRouteWithChildren;
-  "/create-workspace": typeof CreateWorkspaceRoute;
-  "/invitations": typeof InvitationsRoute;
-  "/login": typeof LoginRoute;
-  "/onboarding": typeof OnboardingRoute;
-  "/register": typeof RegisterRoute;
-  "/sign-in": typeof SignInRoute;
-  "/sign-up": typeof SignUpRoute;
-  "/signin": typeof SigninRoute;
-  "/workspace-invitations": typeof WorkspaceInvitationsRoute;
-  "/$ws/_gated": typeof WsGatedRouteRouteWithChildren;
-  "/$ws/$": typeof WsSplatRoute;
-  "/accounts/forgot-password": typeof AccountsForgotPasswordRoute;
-  "/accounts/reset-password": typeof AccountsResetPasswordRoute;
-  "/accounts/set-password": typeof AccountsSetPasswordRoute;
-  "/accounts/sign-up": typeof AccountsSignUpRoute;
-  "/auth/device": typeof AuthDeviceRoute;
-  "/god-mode/$": typeof GodModeSplatRoute;
-  "/god-mode/": typeof GodModeIndexRoute;
-  "/$ws/_gated/": typeof WsGatedIndexRoute;
-  "/$ws/_gated/projects/$projectId": typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
-  "/$ws/_gated/browse/$issueKey": typeof WsGatedBrowseIssueKeyRoute;
-  "/$ws/_gated/projects/": typeof WsGatedProjectsIndexRoute;
-  "/$ws/_gated/projects/$projectId/": typeof WsGatedProjectsProjectIdIndexRoute;
-  "/$ws/_gated/projects/archives/": typeof WsGatedProjectsArchivesIndexRoute;
-  "/$ws/_gated/projects/$projectId/cycles/": typeof WsGatedProjectsProjectIdCyclesIndexRoute;
-  "/$ws/_gated/projects/$projectId/intake/": typeof WsGatedProjectsProjectIdIntakeIndexRoute;
-  "/$ws/_gated/projects/$projectId/issues/": typeof WsGatedProjectsProjectIdIssuesIndexRoute;
-  "/$ws/_gated/projects/$projectId/modules/": typeof WsGatedProjectsProjectIdModulesIndexRoute;
-  "/$ws/_gated/projects/$projectId/pages/": typeof WsGatedProjectsProjectIdPagesIndexRoute;
-  "/$ws/_gated/projects/$projectId/schedulers/": typeof WsGatedProjectsProjectIdSchedulersIndexRoute;
-  "/$ws/_gated/projects/$projectId/views/": typeof WsGatedProjectsProjectIdViewsIndexRoute;
+  __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
+  '/$ws': typeof WsRouteRouteWithChildren
+  '/god-mode': typeof GodModeRouteRouteWithChildren
+  '/create-workspace': typeof CreateWorkspaceRoute
+  '/invitations': typeof InvitationsRoute
+  '/login': typeof LoginRoute
+  '/onboarding': typeof OnboardingRoute
+  '/register': typeof RegisterRoute
+  '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
+  '/signin': typeof SigninRoute
+  '/workspace-invitations': typeof WorkspaceInvitationsRoute
+  '/$ws/_gated': typeof WsGatedRouteRouteWithChildren
+  '/god-mode/_dashboard': typeof GodModeDashboardRouteRoute
+  '/$ws/$': typeof WsSplatRoute
+  '/accounts/forgot-password': typeof AccountsForgotPasswordRoute
+  '/accounts/reset-password': typeof AccountsResetPasswordRoute
+  '/accounts/set-password': typeof AccountsSetPasswordRoute
+  '/accounts/sign-up': typeof AccountsSignUpRoute
+  '/auth/device': typeof AuthDeviceRoute
+  '/god-mode/$': typeof GodModeSplatRoute
+  '/god-mode/': typeof GodModeIndexRoute
+  '/$ws/_gated/': typeof WsGatedIndexRoute
+  '/$ws/_gated/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
+  '/$ws/_gated/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
+  '/$ws/_gated/projects/': typeof WsGatedProjectsIndexRoute
+  '/$ws/_gated/projects/$projectId/': typeof WsGatedProjectsProjectIdIndexRoute
+  '/$ws/_gated/projects/archives/': typeof WsGatedProjectsArchivesIndexRoute
+  '/$ws/_gated/projects/$projectId/cycles/': typeof WsGatedProjectsProjectIdCyclesIndexRoute
+  '/$ws/_gated/projects/$projectId/intake/': typeof WsGatedProjectsProjectIdIntakeIndexRoute
+  '/$ws/_gated/projects/$projectId/issues/': typeof WsGatedProjectsProjectIdIssuesIndexRoute
+  '/$ws/_gated/projects/$projectId/modules/': typeof WsGatedProjectsProjectIdModulesIndexRoute
+  '/$ws/_gated/projects/$projectId/pages/': typeof WsGatedProjectsProjectIdPagesIndexRoute
+  '/$ws/_gated/projects/$projectId/schedulers/': typeof WsGatedProjectsProjectIdSchedulersIndexRoute
+  '/$ws/_gated/projects/$projectId/views/': typeof WsGatedProjectsProjectIdViewsIndexRoute
 }
 export interface FileRouteTypes {
-  fileRoutesByFullPath: FileRoutesByFullPath;
+  fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    | "/"
-    | "/$ws"
-    | "/create-workspace"
-    | "/invitations"
-    | "/login"
-    | "/onboarding"
-    | "/register"
-    | "/sign-in"
-    | "/sign-up"
-    | "/signin"
-    | "/workspace-invitations"
-    | "/$ws/$"
-    | "/accounts/forgot-password"
-    | "/accounts/reset-password"
-    | "/accounts/set-password"
-    | "/accounts/sign-up"
-    | "/auth/device"
-    | "/god-mode/$"
-    | "/god-mode/"
-    | "/$ws/"
-    | "/$ws/projects/$projectId"
-    | "/$ws/browse/$issueKey"
-    | "/$ws/projects/"
-    | "/$ws/projects/$projectId/"
-    | "/$ws/projects/archives/"
-    | "/$ws/projects/$projectId/cycles/"
-    | "/$ws/projects/$projectId/intake/"
-    | "/$ws/projects/$projectId/issues/"
-    | "/$ws/projects/$projectId/modules/"
-    | "/$ws/projects/$projectId/pages/"
-    | "/$ws/projects/$projectId/schedulers/"
-    | "/$ws/projects/$projectId/views/";
-  fileRoutesByTo: FileRoutesByTo;
+    | '/'
+    | '/$ws'
+    | '/god-mode'
+    | '/create-workspace'
+    | '/invitations'
+    | '/login'
+    | '/onboarding'
+    | '/register'
+    | '/sign-in'
+    | '/sign-up'
+    | '/signin'
+    | '/workspace-invitations'
+    | '/$ws/$'
+    | '/accounts/forgot-password'
+    | '/accounts/reset-password'
+    | '/accounts/set-password'
+    | '/accounts/sign-up'
+    | '/auth/device'
+    | '/god-mode/$'
+    | '/god-mode/'
+    | '/$ws/'
+    | '/$ws/projects/$projectId'
+    | '/$ws/browse/$issueKey'
+    | '/$ws/projects/'
+    | '/$ws/projects/$projectId/'
+    | '/$ws/projects/archives/'
+    | '/$ws/projects/$projectId/cycles/'
+    | '/$ws/projects/$projectId/intake/'
+    | '/$ws/projects/$projectId/issues/'
+    | '/$ws/projects/$projectId/modules/'
+    | '/$ws/projects/$projectId/pages/'
+    | '/$ws/projects/$projectId/schedulers/'
+    | '/$ws/projects/$projectId/views/'
+  fileRoutesByTo: FileRoutesByTo
   to:
-    | "/"
-    | "/$ws"
-    | "/create-workspace"
-    | "/invitations"
-    | "/login"
-    | "/onboarding"
-    | "/register"
-    | "/sign-in"
-    | "/sign-up"
-    | "/signin"
-    | "/workspace-invitations"
-    | "/$ws/$"
-    | "/accounts/forgot-password"
-    | "/accounts/reset-password"
-    | "/accounts/set-password"
-    | "/accounts/sign-up"
-    | "/auth/device"
-    | "/god-mode/$"
-    | "/god-mode"
-    | "/$ws/browse/$issueKey"
-    | "/$ws/projects"
-    | "/$ws/projects/$projectId"
-    | "/$ws/projects/archives"
-    | "/$ws/projects/$projectId/cycles"
-    | "/$ws/projects/$projectId/intake"
-    | "/$ws/projects/$projectId/issues"
-    | "/$ws/projects/$projectId/modules"
-    | "/$ws/projects/$projectId/pages"
-    | "/$ws/projects/$projectId/schedulers"
-    | "/$ws/projects/$projectId/views";
+    | '/'
+    | '/$ws'
+    | '/create-workspace'
+    | '/invitations'
+    | '/login'
+    | '/onboarding'
+    | '/register'
+    | '/sign-in'
+    | '/sign-up'
+    | '/signin'
+    | '/workspace-invitations'
+    | '/god-mode'
+    | '/$ws/$'
+    | '/accounts/forgot-password'
+    | '/accounts/reset-password'
+    | '/accounts/set-password'
+    | '/accounts/sign-up'
+    | '/auth/device'
+    | '/god-mode/$'
+    | '/$ws/browse/$issueKey'
+    | '/$ws/projects'
+    | '/$ws/projects/$projectId'
+    | '/$ws/projects/archives'
+    | '/$ws/projects/$projectId/cycles'
+    | '/$ws/projects/$projectId/intake'
+    | '/$ws/projects/$projectId/issues'
+    | '/$ws/projects/$projectId/modules'
+    | '/$ws/projects/$projectId/pages'
+    | '/$ws/projects/$projectId/schedulers'
+    | '/$ws/projects/$projectId/views'
   id:
-    | "__root__"
-    | "/"
-    | "/$ws"
-    | "/create-workspace"
-    | "/invitations"
-    | "/login"
-    | "/onboarding"
-    | "/register"
-    | "/sign-in"
-    | "/sign-up"
-    | "/signin"
-    | "/workspace-invitations"
-    | "/$ws/_gated"
-    | "/$ws/$"
-    | "/accounts/forgot-password"
-    | "/accounts/reset-password"
-    | "/accounts/set-password"
-    | "/accounts/sign-up"
-    | "/auth/device"
-    | "/god-mode/$"
-    | "/god-mode/"
-    | "/$ws/_gated/"
-    | "/$ws/_gated/projects/$projectId"
-    | "/$ws/_gated/browse/$issueKey"
-    | "/$ws/_gated/projects/"
-    | "/$ws/_gated/projects/$projectId/"
-    | "/$ws/_gated/projects/archives/"
-    | "/$ws/_gated/projects/$projectId/cycles/"
-    | "/$ws/_gated/projects/$projectId/intake/"
-    | "/$ws/_gated/projects/$projectId/issues/"
-    | "/$ws/_gated/projects/$projectId/modules/"
-    | "/$ws/_gated/projects/$projectId/pages/"
-    | "/$ws/_gated/projects/$projectId/schedulers/"
-    | "/$ws/_gated/projects/$projectId/views/";
-  fileRoutesById: FileRoutesById;
+    | '__root__'
+    | '/'
+    | '/$ws'
+    | '/god-mode'
+    | '/create-workspace'
+    | '/invitations'
+    | '/login'
+    | '/onboarding'
+    | '/register'
+    | '/sign-in'
+    | '/sign-up'
+    | '/signin'
+    | '/workspace-invitations'
+    | '/$ws/_gated'
+    | '/god-mode/_dashboard'
+    | '/$ws/$'
+    | '/accounts/forgot-password'
+    | '/accounts/reset-password'
+    | '/accounts/set-password'
+    | '/accounts/sign-up'
+    | '/auth/device'
+    | '/god-mode/$'
+    | '/god-mode/'
+    | '/$ws/_gated/'
+    | '/$ws/_gated/projects/$projectId'
+    | '/$ws/_gated/browse/$issueKey'
+    | '/$ws/_gated/projects/'
+    | '/$ws/_gated/projects/$projectId/'
+    | '/$ws/_gated/projects/archives/'
+    | '/$ws/_gated/projects/$projectId/cycles/'
+    | '/$ws/_gated/projects/$projectId/intake/'
+    | '/$ws/_gated/projects/$projectId/issues/'
+    | '/$ws/_gated/projects/$projectId/modules/'
+    | '/$ws/_gated/projects/$projectId/pages/'
+    | '/$ws/_gated/projects/$projectId/schedulers/'
+    | '/$ws/_gated/projects/$projectId/views/'
+  fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute;
-  WsRouteRoute: typeof WsRouteRouteWithChildren;
-  CreateWorkspaceRoute: typeof CreateWorkspaceRoute;
-  InvitationsRoute: typeof InvitationsRoute;
-  LoginRoute: typeof LoginRoute;
-  OnboardingRoute: typeof OnboardingRoute;
-  RegisterRoute: typeof RegisterRoute;
-  SignInRoute: typeof SignInRoute;
-  SignUpRoute: typeof SignUpRoute;
-  SigninRoute: typeof SigninRoute;
-  WorkspaceInvitationsRoute: typeof WorkspaceInvitationsRoute;
-  AccountsForgotPasswordRoute: typeof AccountsForgotPasswordRoute;
-  AccountsResetPasswordRoute: typeof AccountsResetPasswordRoute;
-  AccountsSetPasswordRoute: typeof AccountsSetPasswordRoute;
-  AccountsSignUpRoute: typeof AccountsSignUpRoute;
-  AuthDeviceRoute: typeof AuthDeviceRoute;
-  GodModeSplatRoute: typeof GodModeSplatRoute;
-  GodModeIndexRoute: typeof GodModeIndexRoute;
+  IndexRoute: typeof IndexRoute
+  WsRouteRoute: typeof WsRouteRouteWithChildren
+  GodModeRouteRoute: typeof GodModeRouteRouteWithChildren
+  CreateWorkspaceRoute: typeof CreateWorkspaceRoute
+  InvitationsRoute: typeof InvitationsRoute
+  LoginRoute: typeof LoginRoute
+  OnboardingRoute: typeof OnboardingRoute
+  RegisterRoute: typeof RegisterRoute
+  SignInRoute: typeof SignInRoute
+  SignUpRoute: typeof SignUpRoute
+  SigninRoute: typeof SigninRoute
+  WorkspaceInvitationsRoute: typeof WorkspaceInvitationsRoute
+  AccountsForgotPasswordRoute: typeof AccountsForgotPasswordRoute
+  AccountsResetPasswordRoute: typeof AccountsResetPasswordRoute
+  AccountsSetPasswordRoute: typeof AccountsSetPasswordRoute
+  AccountsSignUpRoute: typeof AccountsSignUpRoute
+  AuthDeviceRoute: typeof AuthDeviceRoute
 }
 
-declare module "@tanstack/react-router" {
+declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    "/": {
-      id: "/";
-      path: "/";
-      fullPath: "/";
-      preLoaderRoute: typeof IndexRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/$ws": {
-      id: "/$ws";
-      path: "/$ws";
-      fullPath: "/$ws";
-      preLoaderRoute: typeof WsRouteRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/create-workspace": {
-      id: "/create-workspace";
-      path: "/create-workspace";
-      fullPath: "/create-workspace";
-      preLoaderRoute: typeof CreateWorkspaceRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/invitations": {
-      id: "/invitations";
-      path: "/invitations";
-      fullPath: "/invitations";
-      preLoaderRoute: typeof InvitationsRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/login": {
-      id: "/login";
-      path: "/login";
-      fullPath: "/login";
-      preLoaderRoute: typeof LoginRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/onboarding": {
-      id: "/onboarding";
-      path: "/onboarding";
-      fullPath: "/onboarding";
-      preLoaderRoute: typeof OnboardingRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/register": {
-      id: "/register";
-      path: "/register";
-      fullPath: "/register";
-      preLoaderRoute: typeof RegisterRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/sign-in": {
-      id: "/sign-in";
-      path: "/sign-in";
-      fullPath: "/sign-in";
-      preLoaderRoute: typeof SignInRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/sign-up": {
-      id: "/sign-up";
-      path: "/sign-up";
-      fullPath: "/sign-up";
-      preLoaderRoute: typeof SignUpRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/signin": {
-      id: "/signin";
-      path: "/signin";
-      fullPath: "/signin";
-      preLoaderRoute: typeof SigninRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/workspace-invitations": {
-      id: "/workspace-invitations";
-      path: "/workspace-invitations";
-      fullPath: "/workspace-invitations";
-      preLoaderRoute: typeof WorkspaceInvitationsRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/$ws/$": {
-      id: "/$ws/$";
-      path: "/$";
-      fullPath: "/$ws/$";
-      preLoaderRoute: typeof WsSplatRouteImport;
-      parentRoute: typeof WsRouteRoute;
-    };
-    "/$ws/_gated": {
-      id: "/$ws/_gated";
-      path: "";
-      fullPath: "/$ws";
-      preLoaderRoute: typeof WsGatedRouteRouteImport;
-      parentRoute: typeof WsRouteRoute;
-    };
-    "/accounts/forgot-password": {
-      id: "/accounts/forgot-password";
-      path: "/accounts/forgot-password";
-      fullPath: "/accounts/forgot-password";
-      preLoaderRoute: typeof AccountsForgotPasswordRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/accounts/reset-password": {
-      id: "/accounts/reset-password";
-      path: "/accounts/reset-password";
-      fullPath: "/accounts/reset-password";
-      preLoaderRoute: typeof AccountsResetPasswordRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/accounts/set-password": {
-      id: "/accounts/set-password";
-      path: "/accounts/set-password";
-      fullPath: "/accounts/set-password";
-      preLoaderRoute: typeof AccountsSetPasswordRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/accounts/sign-up": {
-      id: "/accounts/sign-up";
-      path: "/accounts/sign-up";
-      fullPath: "/accounts/sign-up";
-      preLoaderRoute: typeof AccountsSignUpRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/auth/device": {
-      id: "/auth/device";
-      path: "/auth/device";
-      fullPath: "/auth/device";
-      preLoaderRoute: typeof AuthDeviceRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/god-mode/$": {
-      id: "/god-mode/$";
-      path: "/god-mode/$";
-      fullPath: "/god-mode/$";
-      preLoaderRoute: typeof GodModeSplatRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/god-mode/": {
-      id: "/god-mode/";
-      path: "/god-mode";
-      fullPath: "/god-mode/";
-      preLoaderRoute: typeof GodModeIndexRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/$ws/_gated/": {
-      id: "/$ws/_gated/";
-      path: "/";
-      fullPath: "/$ws/";
-      preLoaderRoute: typeof WsGatedIndexRouteImport;
-      parentRoute: typeof WsGatedRouteRoute;
-    };
-    "/$ws/_gated/browse/$issueKey": {
-      id: "/$ws/_gated/browse/$issueKey";
-      path: "/browse/$issueKey";
-      fullPath: "/$ws/browse/$issueKey";
-      preLoaderRoute: typeof WsGatedBrowseIssueKeyRouteImport;
-      parentRoute: typeof WsGatedRouteRoute;
-    };
-    "/$ws/_gated/projects/": {
-      id: "/$ws/_gated/projects/";
-      path: "/projects";
-      fullPath: "/$ws/projects/";
-      preLoaderRoute: typeof WsGatedProjectsIndexRouteImport;
-      parentRoute: typeof WsGatedRouteRoute;
-    };
-    "/$ws/_gated/projects/$projectId": {
-      id: "/$ws/_gated/projects/$projectId";
-      path: "/projects/$projectId";
-      fullPath: "/$ws/projects/$projectId";
-      preLoaderRoute: typeof WsGatedProjectsProjectIdRouteRouteImport;
-      parentRoute: typeof WsGatedRouteRoute;
-    };
-    "/$ws/_gated/projects/$projectId/": {
-      id: "/$ws/_gated/projects/$projectId/";
-      path: "/";
-      fullPath: "/$ws/projects/$projectId/";
-      preLoaderRoute: typeof WsGatedProjectsProjectIdIndexRouteImport;
-      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute;
-    };
-    "/$ws/_gated/projects/archives/": {
-      id: "/$ws/_gated/projects/archives/";
-      path: "/projects/archives";
-      fullPath: "/$ws/projects/archives/";
-      preLoaderRoute: typeof WsGatedProjectsArchivesIndexRouteImport;
-      parentRoute: typeof WsGatedRouteRoute;
-    };
-    "/$ws/_gated/projects/$projectId/cycles/": {
-      id: "/$ws/_gated/projects/$projectId/cycles/";
-      path: "/cycles";
-      fullPath: "/$ws/projects/$projectId/cycles/";
-      preLoaderRoute: typeof WsGatedProjectsProjectIdCyclesIndexRouteImport;
-      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute;
-    };
-    "/$ws/_gated/projects/$projectId/intake/": {
-      id: "/$ws/_gated/projects/$projectId/intake/";
-      path: "/intake";
-      fullPath: "/$ws/projects/$projectId/intake/";
-      preLoaderRoute: typeof WsGatedProjectsProjectIdIntakeIndexRouteImport;
-      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute;
-    };
-    "/$ws/_gated/projects/$projectId/issues/": {
-      id: "/$ws/_gated/projects/$projectId/issues/";
-      path: "/issues";
-      fullPath: "/$ws/projects/$projectId/issues/";
-      preLoaderRoute: typeof WsGatedProjectsProjectIdIssuesIndexRouteImport;
-      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute;
-    };
-    "/$ws/_gated/projects/$projectId/modules/": {
-      id: "/$ws/_gated/projects/$projectId/modules/";
-      path: "/modules";
-      fullPath: "/$ws/projects/$projectId/modules/";
-      preLoaderRoute: typeof WsGatedProjectsProjectIdModulesIndexRouteImport;
-      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute;
-    };
-    "/$ws/_gated/projects/$projectId/pages/": {
-      id: "/$ws/_gated/projects/$projectId/pages/";
-      path: "/pages";
-      fullPath: "/$ws/projects/$projectId/pages/";
-      preLoaderRoute: typeof WsGatedProjectsProjectIdPagesIndexRouteImport;
-      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute;
-    };
-    "/$ws/_gated/projects/$projectId/schedulers/": {
-      id: "/$ws/_gated/projects/$projectId/schedulers/";
-      path: "/schedulers";
-      fullPath: "/$ws/projects/$projectId/schedulers/";
-      preLoaderRoute: typeof WsGatedProjectsProjectIdSchedulersIndexRouteImport;
-      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute;
-    };
-    "/$ws/_gated/projects/$projectId/views/": {
-      id: "/$ws/_gated/projects/$projectId/views/";
-      path: "/views";
-      fullPath: "/$ws/projects/$projectId/views/";
-      preLoaderRoute: typeof WsGatedProjectsProjectIdViewsIndexRouteImport;
-      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute;
-    };
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$ws': {
+      id: '/$ws'
+      path: '/$ws'
+      fullPath: '/$ws'
+      preLoaderRoute: typeof WsRouteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/create-workspace': {
+      id: '/create-workspace'
+      path: '/create-workspace'
+      fullPath: '/create-workspace'
+      preLoaderRoute: typeof CreateWorkspaceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/god-mode': {
+      id: '/god-mode'
+      path: '/god-mode'
+      fullPath: '/god-mode'
+      preLoaderRoute: typeof GodModeRouteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/invitations': {
+      id: '/invitations'
+      path: '/invitations'
+      fullPath: '/invitations'
+      preLoaderRoute: typeof InvitationsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/onboarding': {
+      id: '/onboarding'
+      path: '/onboarding'
+      fullPath: '/onboarding'
+      preLoaderRoute: typeof OnboardingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/register': {
+      id: '/register'
+      path: '/register'
+      fullPath: '/register'
+      preLoaderRoute: typeof RegisterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-in': {
+      id: '/sign-in'
+      path: '/sign-in'
+      fullPath: '/sign-in'
+      preLoaderRoute: typeof SignInRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-up': {
+      id: '/sign-up'
+      path: '/sign-up'
+      fullPath: '/sign-up'
+      preLoaderRoute: typeof SignUpRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/signin': {
+      id: '/signin'
+      path: '/signin'
+      fullPath: '/signin'
+      preLoaderRoute: typeof SigninRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/workspace-invitations': {
+      id: '/workspace-invitations'
+      path: '/workspace-invitations'
+      fullPath: '/workspace-invitations'
+      preLoaderRoute: typeof WorkspaceInvitationsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$ws/$': {
+      id: '/$ws/$'
+      path: '/$'
+      fullPath: '/$ws/$'
+      preLoaderRoute: typeof WsSplatRouteImport
+      parentRoute: typeof WsRouteRoute
+    }
+    '/$ws/_gated': {
+      id: '/$ws/_gated'
+      path: ''
+      fullPath: '/$ws'
+      preLoaderRoute: typeof WsGatedRouteRouteImport
+      parentRoute: typeof WsRouteRoute
+    }
+    '/accounts/forgot-password': {
+      id: '/accounts/forgot-password'
+      path: '/accounts/forgot-password'
+      fullPath: '/accounts/forgot-password'
+      preLoaderRoute: typeof AccountsForgotPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accounts/reset-password': {
+      id: '/accounts/reset-password'
+      path: '/accounts/reset-password'
+      fullPath: '/accounts/reset-password'
+      preLoaderRoute: typeof AccountsResetPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accounts/set-password': {
+      id: '/accounts/set-password'
+      path: '/accounts/set-password'
+      fullPath: '/accounts/set-password'
+      preLoaderRoute: typeof AccountsSetPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accounts/sign-up': {
+      id: '/accounts/sign-up'
+      path: '/accounts/sign-up'
+      fullPath: '/accounts/sign-up'
+      preLoaderRoute: typeof AccountsSignUpRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/auth/device': {
+      id: '/auth/device'
+      path: '/auth/device'
+      fullPath: '/auth/device'
+      preLoaderRoute: typeof AuthDeviceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/god-mode/': {
+      id: '/god-mode/'
+      path: '/'
+      fullPath: '/god-mode/'
+      preLoaderRoute: typeof GodModeIndexRouteImport
+      parentRoute: typeof GodModeRouteRoute
+    }
+    '/god-mode/$': {
+      id: '/god-mode/$'
+      path: '/$'
+      fullPath: '/god-mode/$'
+      preLoaderRoute: typeof GodModeSplatRouteImport
+      parentRoute: typeof GodModeRouteRoute
+    }
+    '/god-mode/_dashboard': {
+      id: '/god-mode/_dashboard'
+      path: ''
+      fullPath: '/god-mode'
+      preLoaderRoute: typeof GodModeDashboardRouteRouteImport
+      parentRoute: typeof GodModeRouteRoute
+    }
+    '/$ws/_gated/': {
+      id: '/$ws/_gated/'
+      path: '/'
+      fullPath: '/$ws/'
+      preLoaderRoute: typeof WsGatedIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/browse/$issueKey': {
+      id: '/$ws/_gated/browse/$issueKey'
+      path: '/browse/$issueKey'
+      fullPath: '/$ws/browse/$issueKey'
+      preLoaderRoute: typeof WsGatedBrowseIssueKeyRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/projects/': {
+      id: '/$ws/_gated/projects/'
+      path: '/projects'
+      fullPath: '/$ws/projects/'
+      preLoaderRoute: typeof WsGatedProjectsIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/projects/$projectId': {
+      id: '/$ws/_gated/projects/$projectId'
+      path: '/projects/$projectId'
+      fullPath: '/$ws/projects/$projectId'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdRouteRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/projects/$projectId/': {
+      id: '/$ws/_gated/projects/$projectId/'
+      path: '/'
+      fullPath: '/$ws/projects/$projectId/'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdIndexRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
+    }
+    '/$ws/_gated/projects/archives/': {
+      id: '/$ws/_gated/projects/archives/'
+      path: '/projects/archives'
+      fullPath: '/$ws/projects/archives/'
+      preLoaderRoute: typeof WsGatedProjectsArchivesIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/projects/$projectId/cycles/': {
+      id: '/$ws/_gated/projects/$projectId/cycles/'
+      path: '/cycles'
+      fullPath: '/$ws/projects/$projectId/cycles/'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdCyclesIndexRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
+    }
+    '/$ws/_gated/projects/$projectId/intake/': {
+      id: '/$ws/_gated/projects/$projectId/intake/'
+      path: '/intake'
+      fullPath: '/$ws/projects/$projectId/intake/'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdIntakeIndexRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
+    }
+    '/$ws/_gated/projects/$projectId/issues/': {
+      id: '/$ws/_gated/projects/$projectId/issues/'
+      path: '/issues'
+      fullPath: '/$ws/projects/$projectId/issues/'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdIssuesIndexRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
+    }
+    '/$ws/_gated/projects/$projectId/modules/': {
+      id: '/$ws/_gated/projects/$projectId/modules/'
+      path: '/modules'
+      fullPath: '/$ws/projects/$projectId/modules/'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdModulesIndexRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
+    }
+    '/$ws/_gated/projects/$projectId/pages/': {
+      id: '/$ws/_gated/projects/$projectId/pages/'
+      path: '/pages'
+      fullPath: '/$ws/projects/$projectId/pages/'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdPagesIndexRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
+    }
+    '/$ws/_gated/projects/$projectId/schedulers/': {
+      id: '/$ws/_gated/projects/$projectId/schedulers/'
+      path: '/schedulers'
+      fullPath: '/$ws/projects/$projectId/schedulers/'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdSchedulersIndexRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
+    }
+    '/$ws/_gated/projects/$projectId/views/': {
+      id: '/$ws/_gated/projects/$projectId/views/'
+      path: '/views'
+      fullPath: '/$ws/projects/$projectId/views/'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdViewsIndexRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
+    }
   }
 }
 
 interface WsGatedProjectsProjectIdRouteRouteChildren {
-  WsGatedProjectsProjectIdIndexRoute: typeof WsGatedProjectsProjectIdIndexRoute;
-  WsGatedProjectsProjectIdCyclesIndexRoute: typeof WsGatedProjectsProjectIdCyclesIndexRoute;
-  WsGatedProjectsProjectIdIntakeIndexRoute: typeof WsGatedProjectsProjectIdIntakeIndexRoute;
-  WsGatedProjectsProjectIdIssuesIndexRoute: typeof WsGatedProjectsProjectIdIssuesIndexRoute;
-  WsGatedProjectsProjectIdModulesIndexRoute: typeof WsGatedProjectsProjectIdModulesIndexRoute;
-  WsGatedProjectsProjectIdPagesIndexRoute: typeof WsGatedProjectsProjectIdPagesIndexRoute;
-  WsGatedProjectsProjectIdSchedulersIndexRoute: typeof WsGatedProjectsProjectIdSchedulersIndexRoute;
-  WsGatedProjectsProjectIdViewsIndexRoute: typeof WsGatedProjectsProjectIdViewsIndexRoute;
+  WsGatedProjectsProjectIdIndexRoute: typeof WsGatedProjectsProjectIdIndexRoute
+  WsGatedProjectsProjectIdCyclesIndexRoute: typeof WsGatedProjectsProjectIdCyclesIndexRoute
+  WsGatedProjectsProjectIdIntakeIndexRoute: typeof WsGatedProjectsProjectIdIntakeIndexRoute
+  WsGatedProjectsProjectIdIssuesIndexRoute: typeof WsGatedProjectsProjectIdIssuesIndexRoute
+  WsGatedProjectsProjectIdModulesIndexRoute: typeof WsGatedProjectsProjectIdModulesIndexRoute
+  WsGatedProjectsProjectIdPagesIndexRoute: typeof WsGatedProjectsProjectIdPagesIndexRoute
+  WsGatedProjectsProjectIdSchedulersIndexRoute: typeof WsGatedProjectsProjectIdSchedulersIndexRoute
+  WsGatedProjectsProjectIdViewsIndexRoute: typeof WsGatedProjectsProjectIdViewsIndexRoute
 }
 
-const WsGatedProjectsProjectIdRouteRouteChildren: WsGatedProjectsProjectIdRouteRouteChildren = {
-  WsGatedProjectsProjectIdIndexRoute: WsGatedProjectsProjectIdIndexRoute,
-  WsGatedProjectsProjectIdCyclesIndexRoute: WsGatedProjectsProjectIdCyclesIndexRoute,
-  WsGatedProjectsProjectIdIntakeIndexRoute: WsGatedProjectsProjectIdIntakeIndexRoute,
-  WsGatedProjectsProjectIdIssuesIndexRoute: WsGatedProjectsProjectIdIssuesIndexRoute,
-  WsGatedProjectsProjectIdModulesIndexRoute: WsGatedProjectsProjectIdModulesIndexRoute,
-  WsGatedProjectsProjectIdPagesIndexRoute: WsGatedProjectsProjectIdPagesIndexRoute,
-  WsGatedProjectsProjectIdSchedulersIndexRoute: WsGatedProjectsProjectIdSchedulersIndexRoute,
-  WsGatedProjectsProjectIdViewsIndexRoute: WsGatedProjectsProjectIdViewsIndexRoute,
-};
+const WsGatedProjectsProjectIdRouteRouteChildren: WsGatedProjectsProjectIdRouteRouteChildren =
+  {
+    WsGatedProjectsProjectIdIndexRoute: WsGatedProjectsProjectIdIndexRoute,
+    WsGatedProjectsProjectIdCyclesIndexRoute:
+      WsGatedProjectsProjectIdCyclesIndexRoute,
+    WsGatedProjectsProjectIdIntakeIndexRoute:
+      WsGatedProjectsProjectIdIntakeIndexRoute,
+    WsGatedProjectsProjectIdIssuesIndexRoute:
+      WsGatedProjectsProjectIdIssuesIndexRoute,
+    WsGatedProjectsProjectIdModulesIndexRoute:
+      WsGatedProjectsProjectIdModulesIndexRoute,
+    WsGatedProjectsProjectIdPagesIndexRoute:
+      WsGatedProjectsProjectIdPagesIndexRoute,
+    WsGatedProjectsProjectIdSchedulersIndexRoute:
+      WsGatedProjectsProjectIdSchedulersIndexRoute,
+    WsGatedProjectsProjectIdViewsIndexRoute:
+      WsGatedProjectsProjectIdViewsIndexRoute,
+  }
 
-const WsGatedProjectsProjectIdRouteRouteWithChildren = WsGatedProjectsProjectIdRouteRoute._addFileChildren(
-  WsGatedProjectsProjectIdRouteRouteChildren
-);
+const WsGatedProjectsProjectIdRouteRouteWithChildren =
+  WsGatedProjectsProjectIdRouteRoute._addFileChildren(
+    WsGatedProjectsProjectIdRouteRouteChildren,
+  )
 
 interface WsGatedRouteRouteChildren {
-  WsGatedIndexRoute: typeof WsGatedIndexRoute;
-  WsGatedProjectsProjectIdRouteRoute: typeof WsGatedProjectsProjectIdRouteRouteWithChildren;
-  WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute;
-  WsGatedProjectsIndexRoute: typeof WsGatedProjectsIndexRoute;
-  WsGatedProjectsArchivesIndexRoute: typeof WsGatedProjectsArchivesIndexRoute;
+  WsGatedIndexRoute: typeof WsGatedIndexRoute
+  WsGatedProjectsProjectIdRouteRoute: typeof WsGatedProjectsProjectIdRouteRouteWithChildren
+  WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute
+  WsGatedProjectsIndexRoute: typeof WsGatedProjectsIndexRoute
+  WsGatedProjectsArchivesIndexRoute: typeof WsGatedProjectsArchivesIndexRoute
 }
 
 const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedIndexRoute: WsGatedIndexRoute,
-  WsGatedProjectsProjectIdRouteRoute: WsGatedProjectsProjectIdRouteRouteWithChildren,
+  WsGatedProjectsProjectIdRouteRoute:
+    WsGatedProjectsProjectIdRouteRouteWithChildren,
   WsGatedBrowseIssueKeyRoute: WsGatedBrowseIssueKeyRoute,
   WsGatedProjectsIndexRoute: WsGatedProjectsIndexRoute,
   WsGatedProjectsArchivesIndexRoute: WsGatedProjectsArchivesIndexRoute,
-};
+}
 
-const WsGatedRouteRouteWithChildren = WsGatedRouteRoute._addFileChildren(WsGatedRouteRouteChildren);
+const WsGatedRouteRouteWithChildren = WsGatedRouteRoute._addFileChildren(
+  WsGatedRouteRouteChildren,
+)
 
 interface WsRouteRouteChildren {
-  WsGatedRouteRoute: typeof WsGatedRouteRouteWithChildren;
-  WsSplatRoute: typeof WsSplatRoute;
+  WsGatedRouteRoute: typeof WsGatedRouteRouteWithChildren
+  WsSplatRoute: typeof WsSplatRoute
 }
 
 const WsRouteRouteChildren: WsRouteRouteChildren = {
   WsGatedRouteRoute: WsGatedRouteRouteWithChildren,
   WsSplatRoute: WsSplatRoute,
-};
+}
 
-const WsRouteRouteWithChildren = WsRouteRoute._addFileChildren(WsRouteRouteChildren);
+const WsRouteRouteWithChildren =
+  WsRouteRoute._addFileChildren(WsRouteRouteChildren)
+
+interface GodModeRouteRouteChildren {
+  GodModeDashboardRouteRoute: typeof GodModeDashboardRouteRoute
+  GodModeSplatRoute: typeof GodModeSplatRoute
+  GodModeIndexRoute: typeof GodModeIndexRoute
+}
+
+const GodModeRouteRouteChildren: GodModeRouteRouteChildren = {
+  GodModeDashboardRouteRoute: GodModeDashboardRouteRoute,
+  GodModeSplatRoute: GodModeSplatRoute,
+  GodModeIndexRoute: GodModeIndexRoute,
+}
+
+const GodModeRouteRouteWithChildren = GodModeRouteRoute._addFileChildren(
+  GodModeRouteRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   WsRouteRoute: WsRouteRouteWithChildren,
+  GodModeRouteRoute: GodModeRouteRouteWithChildren,
   CreateWorkspaceRoute: CreateWorkspaceRoute,
   InvitationsRoute: InvitationsRoute,
   LoginRoute: LoginRoute,
@@ -744,7 +814,7 @@ const rootRouteChildren: RootRouteChildren = {
   AccountsSetPasswordRoute: AccountsSetPasswordRoute,
   AccountsSignUpRoute: AccountsSignUpRoute,
   AuthDeviceRoute: AuthDeviceRoute,
-  GodModeSplatRoute: GodModeSplatRoute,
-  GodModeIndexRoute: GodModeIndexRoute,
-};
-export const routeTree = rootRouteImport._addFileChildren(rootRouteChildren)._addFileTypes<FileRouteTypes>();
+}
+export const routeTree = rootRouteImport
+  ._addFileChildren(rootRouteChildren)
+  ._addFileTypes<FileRouteTypes>()
