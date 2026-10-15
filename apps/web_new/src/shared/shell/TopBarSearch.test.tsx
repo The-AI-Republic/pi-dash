@@ -21,6 +21,7 @@ import {
   type SearchResultHit,
 } from "../commands/index.js";
 import { TOPBAR_SEARCH_PLACEHOLDER, TopBarSearch } from "./TopBarSearch.js";
+import { useTopSearchFocus } from "./topSearchFocus.js";
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 const ISSUE_ID = "22222222-2222-4222-8222-222222222222";
@@ -76,9 +77,22 @@ afterEach(() => {
   clearCommands();
   clearPalettePages();
   useCommandPalette.getState().closePalette();
+  useTopSearchFocus.setState({ request: 0 });
 });
 
 describe("TopBarSearch (SHELL-081)", () => {
+  it("focuses and opens the panel on a focus request (SHELL-089)", () => {
+    renderBox({ scope: null });
+    const field = screen.getByLabelText("Search commands");
+    expect(document.activeElement).not.toBe(field);
+    expect(screen.queryByRole("listbox", { name: "Top bar search results" })).toBeNull();
+    act(() => {
+      useTopSearchFocus.getState().requestTopSearchFocus();
+    });
+    expect(document.activeElement).toBe(field);
+    expect(screen.getByRole("listbox", { name: "Top bar search results" })).not.toBeNull();
+  });
+
   it("starts closed and opens an inline panel on focus", async () => {
     const user = userEvent.setup();
     registerCommands([

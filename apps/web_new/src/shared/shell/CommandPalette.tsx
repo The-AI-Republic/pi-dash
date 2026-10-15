@@ -177,6 +177,7 @@ function RootView({
                     title={command.title}
                     hint={command.hint}
                     shortcut={command.shortcut}
+                    sequence={command.sequence}
                     onHover={() => setActiveIndex(index)}
                     onSelect={() => activate(index)}
                   />

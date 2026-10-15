@@ -6,8 +6,11 @@ export {
   clearCommands,
   clearPalettePages,
   filterCommands,
+  filterPageOptions,
   findCommand,
+  findCommandBySequence,
   findPalettePage,
+  listBoundCommands,
   listCommands,
   matchesShortcut,
   parseShortcut,
@@ -15,6 +18,7 @@ export {
   registerPalettePages,
 } from "./registry.js";
 export type { PalettePage, PalettePageOption, PalettePageState, PidashCommand } from "./registry.js";
+export { formatSequenceKeys, isTypingTarget } from "./shortcuts.js";
 export {
   countSearchHits,
   groupSearchResults,

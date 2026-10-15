@@ -26,3 +26,48 @@ export type { TitleBarProps } from "./TitleBar.js";
 export { TopBarSearch, TOPBAR_SEARCH_PLACEHOLDER } from "./TopBarSearch.js";
 export type { TopBarSearchProps } from "./TopBarSearch.js";
 export { getToastManager, notifyError, notifySuccess } from "./toaster.js";
+export { buildAccountCommands, DOCS_URL, FORUM_URL, REPORT_BUG_URL } from "./entries/account.js";
+export type { AccountEntryContext } from "./entries/account.js";
+export { buildCreationCommands } from "./entries/creation.js";
+export type { CreationEntryContext } from "./entries/creation.js";
+export { buildNavigationCommands, PROJECT_PICKER_PAGE_ID, WORKSPACE_PICKER_PAGE_ID } from "./entries/navigation.js";
+export type { NavigationEntryContext, NavigationProject, NavigationProjectViews } from "./entries/navigation.js";
+export { projectPickerPage, workspacePickerPage } from "./entries/navigationPages.js";
+export type { PickerProject, PickerWorkspace } from "./entries/navigationPages.js";
+export {
+  buildPreferenceCommands,
+  FIRST_DAY_PAGE_ID,
+  firstDayPickerPage,
+  LANGUAGE_PAGE_ID,
+  languagePickerPage,
+  THEME_PAGE_ID,
+  themePickerPage,
+  TIMEZONE_PAGE_ID,
+  timezonePickerPage,
+} from "./entries/preferenceEntries.js";
+export { PAGE_URL_COPIED_TITLE, PAGE_URL_COPY_FAILED_TITLE, copyCurrentPageUrl } from "./clipboard.js";
+export {
+  FIRST_DAY_CHOICES,
+  LANGUAGE_CHOICES,
+  PREFERENCES_FAILED_TITLE,
+  PREFERENCES_UPDATED_TITLE,
+  THEME_CHOICES,
+  THEME_FAILED_TITLE,
+  THEME_UPDATED_MESSAGE,
+  THEME_UPDATED_TITLE,
+  TIMEZONE_FAILED_TITLE,
+  TIMEZONE_UPDATED_TITLE,
+  preferenceKeys,
+  reloadApp,
+  timezonesQueryOptions,
+  useUpdateFirstDay,
+  useUpdateLanguage,
+  useUpdateTheme,
+  useUpdateTimezone,
+} from "./preferences.js";
+export type { PreferenceChoice } from "./preferences.js";
+export { groupBoundCommands, ShortcutsDialog } from "./ShortcutsDialog.js";
+export type { ShortcutGroup } from "./ShortcutsDialog.js";
+export { useShortcutsDialog } from "./shortcutsDialogStore.js";
+export { useSidebarCollapsed } from "./sidebarCollapsed.js";
+export { useTopSearchFocus } from "./topSearchFocus.js";

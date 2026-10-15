@@ -3,10 +3,10 @@
 // See the LICENSE file for details.
 // Command registry (Architecture > shared/commands). Screens register the
 // commands they own while mounted; the palette reads a snapshot. Shortcuts
-// are single chords ("mod+k", "mod+shift+p"); two-key sequences arrive with
-// the palette entries slice (NEWFRONT-293), which owns the sequenced entries.
-// Sub-pages (entity pickers, preference lists) register beside their commands
-// and render through the palette's generic page view (shell spec, SHELL-082).
+// are single chords ("mod+k", "mod+shift+p"); two-key sequences ("op", "gh")
+// fire globally outside inputs (shell spec, SHELL-086/087). Sub-pages
+// (entity pickers, preference lists) register beside their commands and
+// render through the palette's generic page view (shell spec, SHELL-082).
 
 export interface PidashCommand {
   /** Stable id, namespaced by owner ("shell.sign-out", "issues.go-to-list"). */
@@ -19,6 +19,13 @@ export interface PidashCommand {
   section?: string | undefined;
   /** Single-chord shortcut, e.g. "mod+k". Rendered as a Kbd hint. */
   shortcut?: string | undefined;
+  /**
+   * Two-key sequence fired globally outside inputs, e.g. "op" opens the
+   * project picker (SHELL-086/087). Lowercase letters; matched
+   * case-insensitively. A command carries at most one of `shortcut` and
+   * `sequence` today; the shortcuts dialog lists either (SHELL-094).
+   */
+  sequence?: string | undefined;
   /**
    * Alternate match terms for the blank-query substring filter (SHELL-085),
    * e.g. ["logout", "exit"] for sign-out. Never shown, only matched.
@@ -54,13 +61,13 @@ export function registerCommands(entries: PidashCommand[]): () => void {
 
 /**
  * Palette section order (shell spec, SHELL-087): contextual groups first,
- * help last. Matched case-insensitively; unknown sections sort
- * alphabetically after the pinned ones.
+ * help last. Matched case-insensitively against the display headings;
+ * unknown sections sort alphabetically after the pinned ones.
  */
 const SECTION_ORDER = [
   "contextual",
   "create",
-  "navigation",
+  "navigate",
   "general",
   "settings",
   "account",
@@ -86,6 +93,29 @@ export function listCommands(): PidashCommand[] {
 
 export function findCommand(id: string): PidashCommand | undefined {
   return commands.get(id);
+}
+
+/**
+ * The registered command bound to a two-key sequence, matched
+ * case-insensitively (SHELL-086/087). Undefined when no live command
+ * claims the sequence — unregistered entries never fire (SHELL-092).
+ */
+export function findCommandBySequence(sequence: string): PidashCommand | undefined {
+  const needle = sequence.toLowerCase();
+  for (const command of commands.values()) {
+    if (command.sequence !== undefined && command.sequence.toLowerCase() === needle) {
+      return command;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Every registered command with a chord or a sequence, in palette order.
+ * The shortcuts dialog lists exactly these (SHELL-094).
+ */
+export function listBoundCommands(): PidashCommand[] {
+  return listCommands().filter((command) => command.shortcut !== undefined || command.sequence !== undefined);
 }
 
 /** Drop every registration. Sign-out and tests only. */
@@ -160,6 +190,18 @@ export function findPalettePage(id: string): PalettePage | undefined {
 /** Drop every page registration. Sign-out and tests only. */
 export function clearPalettePages(): void {
   pages.clear();
+}
+
+/**
+ * Substring filter over page option titles plus hints (SHELL-085/087).
+ * A blank query returns the options unchanged.
+ */
+export function filterPageOptions(options: PalettePageOption[], query: string): PalettePageOption[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [...options];
+  return options.filter(
+    (option) => option.title.toLowerCase().includes(needle) || (option.hint ?? "").toLowerCase().includes(needle)
+  );
 }
 
 /**

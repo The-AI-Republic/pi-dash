@@ -7,7 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import type { PidashCommand } from "../commands/index.js";
-import { groupCommands, PaletteOption } from "./paletteRows.js";
+import { groupCommands, PaletteOption, SequenceBadge } from "./paletteRows.js";
 
 function command(id: string, section?: string): PidashCommand {
   return { id, title: id, ...(section === undefined ? {} : { section }), run: () => undefined };
@@ -73,5 +73,30 @@ describe("PaletteOption", () => {
     const option = screen.getByRole("option", { name: "Go home" });
     expect(option).toHaveAttribute("aria-selected", "false");
     expect(option.className).not.toContain("bg-(--subtle)");
+  });
+
+  it("shows the two-key sequence chips beside the title", () => {
+    render(
+      <ul>
+        <PaletteOption
+          active={false}
+          title="Open a project"
+          sequence="op"
+          onHover={() => undefined}
+          onSelect={() => undefined}
+        />
+      </ul>
+    );
+    expect(screen.getByLabelText("O then P")).not.toBeNull();
+  });
+});
+
+describe("SequenceBadge", () => {
+  it("renders uppercase chips joined by then", () => {
+    render(<SequenceBadge sequence="gh" />);
+    const badge = screen.getByLabelText("G then H");
+    expect(badge.textContent).toContain("G");
+    expect(badge.textContent).toContain("then");
+    expect(badge.textContent).toContain("H");
   });
 });
