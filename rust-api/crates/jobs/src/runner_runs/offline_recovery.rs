@@ -151,9 +151,9 @@ async fn release_pin_atomic(
     // Same as the manual release-pin endpoint: whichever runner takes
     // the run next has no session of the parent's to resume against.
     // Parent write first, pin write second (source order).
-    if let Some(parent_id) = parent_run_id.filter(|_| {
-        parent_thread.as_deref().is_some_and(|t| !t.is_empty())
-    }) {
+    if let Some(parent_id) =
+        parent_run_id.filter(|_| parent_thread.as_deref().is_some_and(|t| !t.is_empty()))
+    {
         sqlx::query(&kernel::clear_parent_thread_sql())
             .bind(String::new())
             .bind(parent_id)
