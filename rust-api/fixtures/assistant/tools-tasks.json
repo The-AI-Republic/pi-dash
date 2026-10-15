@@ -239,7 +239,7 @@
       ]
     },
     "classify_error": {
-      "source": "apps/api/pi_dash/assistant/tasks.py:442-469",
+      "source": "apps/api/pi_dash/assistant/tasks.py:442-480 (origin/main, past #1126)",
       "vectors": {
         "payment_required": [
           "provider_out_of_credit",
@@ -266,7 +266,21 @@
           "The assistant hit an unexpected error."
         ]
       },
-      "rule": "402 read from status_code attr (never substring); credit phrases -> provider_out_of_credit"
+      "rule": "402 read from status_code attr (never substring); credit phrases -> provider_out_of_credit",
+      "typed_vectors": {
+        "source": "apps/api/pi_dash/tests/contract/assistant/test_turn_errors.py (bb3d99c6)",
+        "vectors": {
+          "quota_direct": [
+            "quota_exceeded",
+            "Plan usage is unavailable. Check Settings → Usage."
+          ],
+          "unreachable_direct": [
+            "provider_unreachable",
+            "Stream ended early."
+          ]
+        },
+        "rule": "a typed AssistantError anywhere in __cause__ returns its own (code, detail) before text matching (tasks.py:443-451); the Rust seam boundary emits AgentError::Typed for it"
+      }
     },
     "cancel_key": {
       "source": "apps/api/pi_dash/assistant/tasks.py:54-55",

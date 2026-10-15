@@ -38,9 +38,15 @@
 //! - `_model_label` (`:422-425`) → [`TurnSeam::model_label`].
 //! - `_extract_usage` (`:428-439`) → [`TurnUsage`] + [`usage_value`]
 //!   (extraction failure → `{}`, never null).
-//! - `_classify_error` (`:442-469`) → [`classify_error`], same branch order:
-//!   credit (status-code 402 read from the exception, never substring-matched)
-//!   first, then auth, unreachable, model, internal.
+//! - `_classify_error` (`:442-480` on `origin/main`, past #1126) →
+//!   [`classify_error`] for the text fallback (`:454-480`), same branch
+//!   order: credit (status-code 402 read from the exception, never
+//!   substring-matched) first, then auth, unreachable, model, internal.
+//!   The typed-first branch (`:443-451`) is the [`AgentError::Typed`] arm:
+//!   a typed failure crosses the seam already classified and is used
+//!   verbatim, never text-guessed. (Only this bullet tracks `origin/main`;
+//!   the rest of this map tracks the frozen `tasks.py` until PIDASHCONV-1055
+//!   merges `main`.)
 //! - `run_assistant_turn` (`:476-491`, `name="assistant.run_turn"`,
 //!   `acks_late=False`, `max_retries=0`, soft 300 / hard 330) →
 //!   [`RUN_TURN_TASK`] + [`register_turn_handler`]. Celery retries are
@@ -182,25 +188,25 @@ pub fn truncate_detail(detail: &str) -> &str {
 }
 
 // --------------------------------------------------------------------------- //
-// Error classification (`tasks.py:442-469`)
+// Error classification (`tasks.py:442-480` on `origin/main`, past #1126)
 // --------------------------------------------------------------------------- //
 
-/// Provider error codes (`tasks.py:458`, `provider_out_of_credit` /
+/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
 /// `provider_auth_failed` / `provider_unreachable` / `model_invalid` /
 /// `internal`).
 pub const CODE_OUT_OF_CREDIT: &str = "provider_out_of_credit";
-/// Provider error codes (`tasks.py:458`, `provider_out_of_credit` /
+/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
 /// `provider_auth_failed` / `provider_unreachable` / `model_invalid` /
 /// `internal`).
 pub const CODE_AUTH_FAILED: &str = "provider_auth_failed";
-/// Provider error codes (`tasks.py:458`, `provider_out_of_credit` /
+/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
 /// `provider_unreachable` / `model_invalid` / `internal`).
 pub const CODE_UNREACHABLE: &str = "provider_unreachable";
-/// Provider error codes (`tasks.py:458`, `provider_out_of_credit` /
+/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
 /// `provider_auth_failed` / `provider_unreachable` / `model_invalid` /
 /// `internal`).
 pub const CODE_MODEL_INVALID: &str = "model_invalid";
-/// Provider error codes (`tasks.py:458`, `provider_out_of_credit` /
+/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
 /// `provider_auth_failed` / `provider_unreachable` / `model_invalid` /
 /// `internal`).
 pub const CODE_INTERNAL: &str = "internal";
@@ -210,25 +216,30 @@ pub const CODE_ITERATION_LIMIT: &str = "iteration_limit";
 /// Soft-time-limit code (`tasks.py:489`, `SoftTimeLimitExceeded` branch).
 pub const CODE_TURN_TIMEOUT: &str = "turn_timeout";
 
-/// User-facing details, verbatim (`tasks.py:458-469`).
+/// User-facing details, verbatim (`tasks.py:469-480`).
 pub const DETAIL_OUT_OF_CREDIT: &str = "The provider rejected the request for lack of credit.";
-/// User-facing details, verbatim (`tasks.py:458-469`).
+/// User-facing details, verbatim (`tasks.py:469-480`).
 pub const DETAIL_AUTH_FAILED: &str = "Your API key was rejected by the provider.";
-/// User-facing details, verbatim (`tasks.py:458-469`).
+/// User-facing details, verbatim (`tasks.py:469-480`).
 pub const DETAIL_UNREACHABLE: &str = "Could not reach the configured provider endpoint.";
-/// User-facing details, verbatim (`tasks.py:458-469`).
+/// User-facing details, verbatim (`tasks.py:469-480`).
 pub const DETAIL_MODEL_INVALID: &str =
     "The configured model name was not accepted by the provider.";
-/// User-facing details, verbatim (`tasks.py:458-469`).
+/// User-facing details, verbatim (`tasks.py:469-480`).
 pub const DETAIL_INTERNAL: &str = "The assistant hit an unexpected error.";
 
-/// Classify a provider failure (`tasks.py:442-469`).
+/// Classify an untyped provider failure: the text fallback of
+/// `_classify_error` (`tasks.py:454-480`).
 ///
 /// `message` is `str(exc)`; `status_code` is the exception's `status_code`
 /// attribute when present. Branch order is load-bearing: credit is checked
 /// before auth, and the 402 status is read from the exception — never
 /// substring-matched, because "402" appears in request ids and token counts
-/// (`tasks.py:449-453`).
+/// (`tasks.py:460-464`).
+///
+/// Typed failures never reach this function: `_classify_error` returns an
+/// `AssistantError`'s own code/detail before text matching (`tasks.py:443-451`),
+/// and the Rust equivalent is the [`AgentError::Typed`] arm, used verbatim.
 pub fn classify_error(message: &str, status_code: Option<u16>) -> (&'static str, &'static str) {
     let text = message.to_lowercase();
     if status_code == Some(402)
@@ -742,6 +753,18 @@ pub struct ModelError {
 pub enum AgentError {
     /// `UsageLimitExceeded` → `iteration_limit` (`tasks.py:351-355`).
     UsageLimit(String),
+    /// A typed `AssistantError` raised inside the run — by a model adapter
+    /// or an ee provider — already carrying its stable code and user-facing
+    /// detail. Used verbatim, never text-guessed: the typed-first branch of
+    /// `_classify_error` (`tasks.py:443-451`, #1126).
+    ///
+    /// Python walks `exc.__cause__` because the agent runtime may re-raise a
+    /// provider failure wrapped in its own type. Rust has no exception chain:
+    /// the seam implementor performs that walk when converting its native
+    /// error into an [`AgentError`] at the boundary, emitting `Typed` when
+    /// any cause is an `AssistantError` (see [`ModelError`] for the same
+    /// already-classified crossing at model-resolution time).
+    Typed { code: String, detail: String },
     /// Any other provider failure → [`classify_error`] (`tasks.py:356-361`).
     Provider {
         message: String,
@@ -1011,6 +1034,10 @@ async fn stream_failed<S: TurnSeam>(
     }
     let (code, detail) = match err {
         AgentError::UsageLimit(detail) => (CODE_ITERATION_LIMIT.to_owned(), detail),
+        // Typed-first (`tasks.py:443-451`): the seam already resolved the
+        // cause chain, so the code/detail cross verbatim — text matching
+        // here would erase both into the generic bucket.
+        AgentError::Typed { code, detail } => (code, detail),
         AgentError::Provider {
             message,
             status_code,
@@ -1234,7 +1261,7 @@ mod tests {
         }
         // The 402 status wins even when the message is unrelated: the code
         // is read from the exception, never substring-matched
-        // (`tasks.py:449-453`). A bare "402" in text alone must NOT route
+        // (`tasks.py:460-464`). A bare "402" in text alone must NOT route
         // to credit.
         assert_eq!(
             classify_error("request id 402 token count 402", None).0,
@@ -1248,6 +1275,12 @@ mod tests {
         assert_eq!(
             classify_error("401 payment required", None).0,
             CODE_OUT_OF_CREDIT
+        );
+        // Untyped failures still classify by text
+        // (`test_untyped_errors_are_still_classified_by_text`).
+        assert_eq!(
+            classify_error("Connection timed out", None).0,
+            CODE_UNREACHABLE
         );
     }
 
@@ -1832,6 +1865,84 @@ mod tests {
         );
         assert!(seam.saw("finalize_row:failed:hi").len() == 1);
         assert!(seam.saw("fail_turn:provider_unreachable").len() == 1);
+    }
+
+    #[tokio::test]
+    async fn drive_typed_errors_keep_code_and_detail() {
+        // Port of `test_turn_errors.py::test_typed_errors_keep_their_code_and_detail`
+        // (bb3d99c6): the fixture pins Django's exact (code, detail) pairs,
+        // and a `Typed` failure mid-stream fails the turn with them verbatim.
+        let fx = tasks_fixture();
+        let vectors = fx["tasks"]["classify_error"]["typed_vectors"]["vectors"]
+            .as_object()
+            .expect("typed vectors map");
+        assert_eq!(vectors.len(), 2, "fixture typed vectors changed?");
+        for (name, pair) in vectors {
+            let code = pair[0].as_str().unwrap().to_owned();
+            let detail = pair[1].as_str().unwrap().to_owned();
+            let seam = FakeSeam::ok(vec![StreamItem::TextStart {
+                initial: "Hello".to_owned(),
+            }]);
+            seam.script
+                .lock()
+                .unwrap()
+                .push_back(Err(AgentError::Typed {
+                    code: code.clone(),
+                    detail: detail.clone(),
+                }));
+            let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+            assert_eq!(
+                out,
+                DriveResult::Failed {
+                    code: code.clone(),
+                    detail: detail.clone(),
+                },
+                "typed vector {name} must survive verbatim"
+            );
+            // The streamed text is closed out as failed, like any other
+            // mid-stream failure (`tasks.py:353,358`).
+            assert!(seam.saw("finalize_row:failed:Hello").len() == 1);
+            assert!(seam.saw(&format!("fail_turn:{code}:")).len() == 1);
+        }
+        // The typed arm is load-bearing, not dead: neither detail
+        // text-guesses to its own code, so without `Typed` both vectors
+        // would land in the generic bucket. ("Stream ended early." matches
+        // no marker at all — Django's own comment on the unreachable case.)
+        assert_eq!(
+            classify_error("Stream ended early.", None),
+            (CODE_INTERNAL, DETAIL_INTERNAL)
+        );
+        assert_eq!(
+            classify_error("Plan usage is unavailable. Check Settings → Usage.", None).0,
+            CODE_INTERNAL
+        );
+
+        // Port of `test_a_typed_error_wrapped_by_the_runtime_is_still_recognised`:
+        // Django walks `__cause__` past the wrapper; the Rust seam
+        // implementor performs that walk at the boundary and emits `Typed`.
+        // The wrapper's own text would text-guess to `internal`, proving the
+        // typed arm did the work. `open_stream` takes the same path with no
+        // row work (nothing streamed yet).
+        assert_eq!(
+            classify_error("model request failed", None).0,
+            CODE_INTERNAL
+        );
+        let quota = &fx["tasks"]["classify_error"]["typed_vectors"]["vectors"]["quota_direct"];
+        let mut seam = FakeSeam::ok(vec![]);
+        seam.open_err = Some(AgentError::Typed {
+            code: quota[0].as_str().unwrap().to_owned(),
+            detail: quota[1].as_str().unwrap().to_owned(),
+        });
+        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        assert_eq!(
+            out,
+            DriveResult::Failed {
+                code: "quota_exceeded".to_owned(),
+                detail: "Plan usage is unavailable. Check Settings → Usage.".to_owned(),
+            }
+        );
+        assert!(seam.saw("finalize_row:").is_empty());
+        assert!(seam.saw("fail_turn:quota_exceeded:").len() == 1);
     }
 
     #[tokio::test]
