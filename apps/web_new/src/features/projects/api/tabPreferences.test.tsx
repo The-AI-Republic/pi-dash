@@ -14,7 +14,7 @@ import {
   useTabPreferences,
   type TabPreferencesHandle,
 } from "./tabPreferences.js";
-import { useProjectProperties } from "./queries.js";
+import { useProjectProperties } from "./tabPreferences.js";
 
 vi.mock("../../../shared/shell/index.js", () => ({
   notifyError: vi.fn(),

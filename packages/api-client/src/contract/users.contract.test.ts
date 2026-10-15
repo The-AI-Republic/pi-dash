@@ -3,7 +3,8 @@
 // See the LICENSE file for details.
 // Contract: current user and workspace membership against live Django.
 import { describe, expect, it } from "vitest";
-import { getMe, getMeSettings, markOnboarded, updateMe } from "../contracts/users.js";
+import { getMe, getMeSettings } from "../contracts/users.js";
+import { markOnboarded, updateMe } from "../contracts/user-writes.js";
 import { getProfile } from "../contracts/profile.js";
 import { listWorkspaces } from "../contracts/workspaces.js";
 import { CONTRACT_EMAIL, CONTRACT_WORKSPACE, contractEnabled, sharedSignedIn } from "./setup.js";

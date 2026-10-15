@@ -32,7 +32,6 @@ import {
   usePasswordSignUp,
   useSendWorkspaceInvites,
   useSetPassword,
-  useSignOut,
   useUpdateMe,
   useUpdateProfile,
   useUploadUserAvatar,
@@ -46,7 +45,7 @@ vi.mock("../../shared/shell/index.js", async (importOriginal) => {
 import { notifyError } from "../../shared/shell/index.js";
 import { JOIN_PROJECT_FAILED_TITLE } from "./api.js";
 import { authKeys } from "./queries.js";
-import { SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE } from "./signOut.js";
+import { SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE, useSignOut } from "./signOut.js";
 
 interface SeenRequest {
   url: string;

@@ -13,8 +13,9 @@ import {
   listWorkspaceJoinRequests,
   sendWorkspaceInvitations,
 } from "../contracts/invitations.js";
-import { createWorkspace, listWorkspaces } from "../contracts/workspaces.js";
-import { signIn } from "../contracts/auth.js";
+import { listWorkspaces } from "../contracts/workspaces.js";
+import { createWorkspace } from "../contracts/workspace-management.js";
+import { signIn } from "../contracts/auth-entry.js";
 import {
   CONTRACT_PASSWORD,
   CONTRACT_SECONDARY_EMAIL,

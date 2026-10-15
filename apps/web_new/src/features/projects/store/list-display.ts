@@ -136,6 +136,17 @@ export const useListDisplayStore = create<ListDisplayState>()((set, get) => ({
     ),
 }));
 
-registerStoreReset(() => {
+/** Clear the list display state (the sign-out reset registry invokes this). */
+export function resetListDisplay(): void {
   useListDisplayStore.setState({ displays: {}, searchQuery: "", activeWorkspace: null });
-});
+}
+
+/**
+ * Join the sign-out reset list. Called once per list-view mount (not at
+ * module scope here) so this store stays side-effect-free and the
+ * initial bundle drops it (and its display math) when only lazy routes
+ * use it (NEWFRONT-523, size gate).
+ */
+export function registerListDisplayReset(): void {
+  registerStoreReset(resetListDisplay);
+}

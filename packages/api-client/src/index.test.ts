@@ -9,7 +9,7 @@ import {
   ProjectIdentifierCheck as DirectCheck,
   ProjectIdentifierMatch as DirectMatch,
   updateProject as directUpdate,
-} from "./contracts/projects.js";
+} from "./contracts/project-management.js";
 
 describe("@pidash/api-client entry", () => {
   it("imports cleanly", async () => {

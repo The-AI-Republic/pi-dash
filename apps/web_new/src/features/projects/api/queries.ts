@@ -4,16 +4,9 @@
 // Project queries. Route loaders prefetch these; components read them
 // through hooks, never through the HTTP client directly.
 
-import { queryOptions, useQuery } from "@tanstack/react-query";
-import {
-  getProjectUserProperties,
-  getWorkspaceUserProperties,
-  listProjectDetails,
-  listProjects,
-  type ApiClient,
-} from "@pidash/api-client";
+import { queryOptions } from "@tanstack/react-query";
+import { listProjectDetails, listProjects, type ApiClient } from "@pidash/api-client";
 
-import { getAppClient } from "../../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS } from "../../../core/query/client.js";
 import { projectKeys } from "./keys.js";
 
@@ -38,32 +31,4 @@ export function projectDetailsQueryOptions(client: ApiClient, workspaceSlug: str
     queryFn: () => listProjectDetails(client, workspaceSlug),
     staleTime: REFERENCE_STALE_TIME_MS,
   });
-}
-
-/** The caller's workspace display properties (SHELL-071 list mode, caps). */
-export function workspacePropertiesQueryOptions(client: ApiClient, workspaceSlug: string) {
-  return queryOptions({
-    queryKey: projectKeys.workspaceProperties(workspaceSlug),
-    queryFn: () => getWorkspaceUserProperties(client, workspaceSlug),
-    staleTime: REFERENCE_STALE_TIME_MS,
-  });
-}
-
-/** The caller's per-project display properties (SHELL-077/079 tab prefs). */
-export function projectPropertiesQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string) {
-  return queryOptions({
-    queryKey: projectKeys.projectProperties(workspaceSlug, projectId),
-    queryFn: () => getProjectUserProperties(client, workspaceSlug, projectId),
-    staleTime: REFERENCE_STALE_TIME_MS,
-  });
-}
-
-/** The caller's workspace display properties. */
-export function useWorkspaceProperties(workspaceSlug: string) {
-  return useQuery(workspacePropertiesQueryOptions(getAppClient(), workspaceSlug));
-}
-
-/** The caller's per-project display properties. */
-export function useProjectProperties(workspaceSlug: string, projectId: string) {
-  return useQuery(projectPropertiesQueryOptions(getAppClient(), workspaceSlug, projectId));
 }

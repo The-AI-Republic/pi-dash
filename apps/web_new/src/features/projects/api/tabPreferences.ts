@@ -6,15 +6,49 @@
 // endpoint; writes apply optimistically, roll back on failure, and toast.
 // Sibling preference branches ride along untouched.
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { updateProjectUserProperties, type ProjectUserProperties } from "@pidash/api-client";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  getProjectUserProperties,
+  getWorkspaceUserProperties,
+  updateProjectUserProperties,
+  type ApiClient,
+  type ProjectUserProperties,
+} from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { REFERENCE_STALE_TIME_MS } from "../../../core/query/client.js";
 import { applyOptimisticUpdate } from "../../../core/query/optimistic.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { DEFAULT_TAB_KEY, parseNavigationPrefs, type TabPreferences } from "../tabs.js";
 import { projectKeys } from "./keys.js";
-import { useProjectProperties } from "./queries.js";
+
+/** The caller's workspace display properties (SHELL-071 list mode, caps). */
+export function workspacePropertiesQueryOptions(client: ApiClient, workspaceSlug: string) {
+  return queryOptions({
+    queryKey: projectKeys.workspaceProperties(workspaceSlug),
+    queryFn: () => getWorkspaceUserProperties(client, workspaceSlug),
+    staleTime: REFERENCE_STALE_TIME_MS,
+  });
+}
+
+/** The caller's per-project display properties (SHELL-077/079 tab prefs). */
+export function projectPropertiesQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string) {
+  return queryOptions({
+    queryKey: projectKeys.projectProperties(workspaceSlug, projectId),
+    queryFn: () => getProjectUserProperties(client, workspaceSlug, projectId),
+    staleTime: REFERENCE_STALE_TIME_MS,
+  });
+}
+
+/** The caller's workspace display properties. */
+export function useWorkspaceProperties(workspaceSlug: string) {
+  return useQuery(workspacePropertiesQueryOptions(getAppClient(), workspaceSlug));
+}
+
+/** The caller's per-project display properties. */
+export function useProjectProperties(workspaceSlug: string, projectId: string) {
+  return useQuery(projectPropertiesQueryOptions(getAppClient(), workspaceSlug, projectId));
+}
 
 const DEFAULT_SAVED_TITLE = "Default tab saved";
 const DEFAULT_SAVED_BODY = "Opening this project will land there from now on.";

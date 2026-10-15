@@ -12,7 +12,8 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { useProjectRoles } from "../../auth/index.js";
 import { parseNavigationPrefs, selectDefaultTarget, selectProjectTabs, tabHref } from "../tabs.js";
-import { projectsQueryOptions, useProjectProperties } from "./../api/queries.js";
+import { projectsQueryOptions } from "./../api/queries.js";
+import { useProjectProperties } from "./../api/tabPreferences.js";
 
 export interface DefaultTabRedirectProps {
   workspaceSlug: string;

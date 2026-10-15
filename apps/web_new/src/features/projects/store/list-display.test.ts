@@ -4,7 +4,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { resetRegisteredStores } from "../../../core/session/store.js";
-import { useListDisplayStore } from "./list-display.js";
+import { registerListDisplayReset, useListDisplayStore } from "./list-display.js";
+
+// Mirror the production wiring: the list view registers this store once
+// at module scope (see ProjectsListView), so the suite does the same.
+registerListDisplayReset();
 
 beforeEach(() => {
   useListDisplayStore.setState({ displays: {}, searchQuery: "", activeWorkspace: null });

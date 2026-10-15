@@ -30,7 +30,7 @@ import {
   hasNarrowingListFilters,
   sortListRows,
 } from "../lib/list-display.js";
-import { useListDisplayStore } from "../store/list-display.js";
+import { registerListDisplayReset, useListDisplayStore } from "../store/list-display.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { DeleteProjectDialog } from "./DeleteProjectDialog.js";
 import { ProjectArchiveDialog, type ArchiveDialogMode } from "./ProjectArchiveDialog.js";
@@ -73,6 +73,15 @@ export function ProjectsListView({ workspaceSlug, archived = false }: ProjectsLi
   const navigate = useNavigate();
   const favorite = useToggleFavoriteProject();
   const [lifecycle, setLifecycle] = React.useState<LifecycleSelection | null>(null);
+
+  // The display store joins the sign-out reset list here (not at its own
+  // module scope) so the store stays side-effect-free: the initial bundle
+  // drops it when only lazy routes render this view (NEWFRONT-523). The
+  // registry dedupes repeat visits; the state is in-memory, so a sign-out
+  // before the first visit has nothing to clear.
+  React.useEffect(() => {
+    registerListDisplayReset();
+  }, []);
 
   React.useEffect(() => {
     useListDisplayStore.getState().trackWorkspace(workspaceSlug);

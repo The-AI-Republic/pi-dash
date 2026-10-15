@@ -8,7 +8,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { useProjectProperties, useWorkspaceProperties } from "./queries.js";
+import { useProjectProperties, useWorkspaceProperties } from "./tabPreferences.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const UUID2 = "223e4567-e89b-12d3-a456-426614174001";

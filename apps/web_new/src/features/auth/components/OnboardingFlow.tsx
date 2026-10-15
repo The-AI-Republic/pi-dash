@@ -29,7 +29,7 @@ import {
   visibleOnboardingSteps,
   type OnboardingStep,
 } from "../onboarding.js";
-import { useMyWorkspaceInvitations, useMyWorkspaceJoinRequests } from "../queries.js";
+import { useMyWorkspaceInvitations, useMyWorkspaceJoinRequests } from "../invitations.js";
 import { CliInstallStep } from "./CliInstallStep.js";
 import { OnboardingShell } from "./OnboardingShell.js";
 import { ProfileSetupStep } from "./ProfileSetupStep.js";

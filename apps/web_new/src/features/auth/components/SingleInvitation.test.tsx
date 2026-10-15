@@ -22,8 +22,8 @@ const { invitationHookOverride } = vi.hoisted(() => ({
   invitationHookOverride: { current: null as null | (() => unknown) },
 }));
 
-vi.mock("../queries.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../queries.js")>();
+vi.mock("../invitations.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../invitations.js")>();
   return {
     ...original,
     useWorkspaceInvitation: (slug?: string, invitationId?: string) =>

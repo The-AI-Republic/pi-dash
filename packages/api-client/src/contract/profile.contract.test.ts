@@ -3,7 +3,8 @@
 // See the LICENSE file for details.
 // Contract: profile, user timezone and the timezone list against live Django.
 import { describe, expect, it } from "vitest";
-import { getProfile, listTimezones, updateMyTimezone, updateProfile } from "../contracts/profile.js";
+import { getProfile, updateProfile } from "../contracts/profile.js";
+import { listTimezones, updateMyTimezone } from "../contracts/locale.js";
 import { getMe } from "../contracts/users.js";
 import { listWorkspaces } from "../contracts/workspaces.js";
 import { CONTRACT_EMAIL, CONTRACT_WORKSPACE, contractEnabled, sharedSignedIn } from "./setup.js";

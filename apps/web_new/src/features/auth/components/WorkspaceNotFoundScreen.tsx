@@ -13,7 +13,7 @@ import { LogOut } from "lucide-react";
 import * as React from "react";
 
 import { CrossAppLink } from "../../../shared/coexistence/index.js";
-import { useSignOut } from "../api.js";
+import { useSignOut } from "../signOut.js";
 import { runSignOutAction } from "../commands.js";
 import { useFocusOnMount } from "../focus.js";
 

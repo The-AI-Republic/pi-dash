@@ -10,28 +10,28 @@
 // placeholder TOPBAR_SEARCH_PLACEHOLDER; the open panel is role=listbox
 // named "Top bar search results" (never a dialog); rows are role=option
 // with a single aria-selected=true; the results heading pulses mid-flight.
+//
+// Size shape (NEWFRONT-523, size gate): only the field, the listbox shell
+// and the keyboard flow stay eager. The rows — command filtering, the
+// server search query and the option buttons — load lazily with
+// TopBarSearchPanel on first open and report their row count and
+// activation back through the panel API, so arrows and Enter behave
+// exactly as if the panel had always been there.
 
-import { useQuery } from "@tanstack/react-query";
-import { Spinner } from "@pidash/kit";
 import * as React from "react";
 
-import { getAppClient } from "../../core/api/index.js";
-import {
-  PALETTE_SEARCH_DEBOUNCE_MS,
-  countSearchHits,
-  filterCommands,
-  groupSearchResults,
-  listCommands,
-  paletteSearchQueryOptions,
-  useCommandPalette,
-  useDebouncedValue,
-  type PaletteSearchScope,
-  type SearchResultGroup,
-  type SearchResultHit,
-} from "../commands/index.js";
+import { useCommandPalette } from "../commands/index.js";
 import { usePaletteKeys } from "./paletteKeys.js";
-import { groupCommands, PaletteOption, type PaletteRow } from "./paletteRows.js";
 import { useTopSearchFocus } from "./topSearchFocus.js";
+import type { PaletteSearchScope, SearchResultHit } from "../commands/index.js";
+import type { TopBarSearchPanelApi } from "./TopBarSearchPanel.js";
+
+// Deferred below the initial shell chain (Quality gates budget): the rows
+// mount on first panel open; the listbox shell below renders at once so
+// the open state is never late.
+const LazySearchPanel = React.lazy(() =>
+  import("./TopBarSearchPanel.js").then((module) => ({ default: module.TopBarSearchPanel }))
+);
 
 /** The always-visible top-bar field prompt (SHELL-081). */
 export const TOPBAR_SEARCH_PLACEHOLDER = "Search commands...";
@@ -47,16 +47,27 @@ export function TopBarSearch({ scope, onSelectSearchResult }: TopBarSearchProps)
   const [term, setTerm] = React.useState("");
   const [open, setOpen] = React.useState(false);
   const modalOpen = useCommandPalette((state) => state.open);
-  const openPalette = useCommandPalette((state) => state.openPalette);
-  const openPage = useCommandPalette((state) => state.openPage);
   const containerRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
   const focusRequest = useTopSearchFocus((state) => state.request);
   const mounted = React.useRef(false);
+  // The panel reports its rows here once its chunk lands; until then the
+  // keyboard sees zero rows, so arrows and Enter safely do nothing.
+  const panelApi = React.useRef<TopBarSearchPanelApi>({ count: 0, activate: () => undefined });
+  const [panelCount, setPanelCount] = React.useState(0);
 
   const close = React.useCallback(() => {
     setOpen(false);
     setTerm("");
+  }, []);
+
+  const handlePanelApi = React.useCallback((api: TopBarSearchPanelApi) => {
+    panelApi.current = api;
+    setPanelCount(api.count);
+  }, []);
+
+  const handleActivate = React.useCallback((index: number) => {
+    panelApi.current.activate(index);
   }, []);
 
   // The palette's focus entry bumps the counter; focusing opens the panel
@@ -85,78 +96,14 @@ export function TopBarSearch({ scope, onSelectSearchResult }: TopBarSearchProps)
     };
   }, [open, close]);
 
-  const commands = React.useMemo(() => filterCommands(listCommands(), term), [term]);
-  const debounced = useDebouncedValue(term, PALETTE_SEARCH_DEBOUNCE_MS);
-  const canSearch = scope !== null && debounced.trim().length > 0;
-  // Clearing hides the section at once instead of trailing the debounce.
-  const showResults = canSearch && term.trim().length > 0;
-
-  const search = useQuery({
-    ...paletteSearchQueryOptions(getAppClient(), scope?.workspaceSlug ?? "", {
-      query: debounced,
-      projectId: scope?.projectId ?? null,
-      // The inline panel has no scope toggle: project-scoped in a project.
-      workspaceSearch: false,
-    }),
-    enabled: canSearch,
-  });
-  const groups = React.useMemo<SearchResultGroup[]>(
-    () => (showResults && search.data ? groupSearchResults(search.data) : []),
-    [showResults, search.data]
-  );
-  const fetching = showResults && search.isFetching;
-  const showNoResults = showResults && !search.isFetching && countSearchHits(groups) === 0;
-
-  const rows = React.useMemo<PaletteRow[]>(
-    () => [
-      ...commands.map((command) => ({ kind: "command" as const, command })),
-      ...(showNoResults
-        ? [{ kind: "clear-search" as const }]
-        : groups.flatMap((group) => group.hits.map((hit) => ({ kind: "hit" as const, hit })))),
-    ],
-    [commands, groups, showNoResults]
-  );
-
-  const activate = React.useCallback(
-    (index: number) => {
-      // The hook clamps into range, so the row always exists.
-      const row = rows[index]!;
-      if (row.kind === "clear-search") {
-        setTerm("");
-      } else if (row.kind === "hit") {
-        close();
-        onSelectSearchResult(row.hit);
-      } else if (row.command.page !== undefined) {
-        // Sub-pages live in the modal: hand the panel over to it.
-        close();
-        openPalette();
-        openPage(row.command.page);
-      } else {
-        close();
-        void row.command.run();
-      }
-    },
-    [rows, close, onSelectSearchResult, openPalette, openPage]
-  );
-
   const { activeIndex, setActiveIndex, onKeyDown } = usePaletteKeys({
-    count: rows.length,
+    count: panelCount,
     query: term,
-    onActivate: activate,
+    onActivate: handleActivate,
     // One press clears and closes together (SHELL-081/083).
     onClearQuery: close,
     onDismiss: close,
   });
-
-  const grouped = React.useMemo(() => groupCommands(commands), [commands]);
-  const renderGroups = React.useMemo(() => {
-    let next = commands.length;
-    return groups.map((group) => {
-      const start = next;
-      next += group.hits.length;
-      return { group, entries: group.hits.map((hit, offset) => ({ hit, index: start + offset })) };
-    });
-  }, [commands.length, groups]);
 
   return (
     <div ref={containerRef} className="relative w-full max-w-md">
@@ -177,79 +124,18 @@ export function TopBarSearch({ scope, onSelectSearchResult }: TopBarSearchProps)
           aria-label="Top bar search results"
           className="shadow-dialog absolute top-full right-0 left-0 z-50 mt-(--space-2) max-h-80 overflow-auto rounded-(--radius-dialog) border border-(--border) bg-(--bg)"
         >
-          {commands.length === 0 && !showResults ? (
-            <p className="text-body px-(--space-2) py-(--space-4) text-(--text-muted)">No matching commands.</p>
-          ) : (
-            grouped.map((group) => (
-              <div key={group.section}>
-                <p className="text-caption px-(--space-2) pt-(--space-3) pb-(--space-1) text-(--text-muted)">
-                  {group.section}
-                </p>
-                <ul>
-                  {group.entries.map(({ command, index }) => (
-                    <PaletteOption
-                      key={command.id}
-                      active={index === activeIndex}
-                      title={command.title}
-                      hint={command.hint}
-                      shortcut={command.shortcut}
-                      sequence={command.sequence}
-                      onHover={() => setActiveIndex(index)}
-                      onSelect={() => activate(index)}
-                    />
-                  ))}
-                </ul>
-              </div>
-            ))
-          )}
-          {showResults ? (
-            <section aria-busy={fetching || undefined} aria-label="Server results">
-              <p
-                className={
-                  fetching
-                    ? "text-caption animate-pulse px-(--space-2) pt-(--space-3) pb-(--space-1) text-(--text-muted)"
-                    : "text-caption px-(--space-2) pt-(--space-3) pb-(--space-1) text-(--text-muted)"
-                }
-              >
-                Search results for &ldquo;{debounced.trim()}&rdquo;
-              </p>
-              {fetching && countSearchHits(groups) === 0 ? (
-                <p className="px-(--space-2) py-(--space-4)">
-                  <Spinner label="Searching" />
-                </p>
-              ) : null}
-              {renderGroups.map(({ group, entries }) => (
-                <div key={group.entity}>
-                  <p className="text-caption px-(--space-2) pt-(--space-2) pb-(--space-1) text-(--text-muted)">
-                    {group.heading}
-                  </p>
-                  <ul>
-                    {entries.map(({ hit, index }) => (
-                      <PaletteOption
-                        key={hit.key}
-                        active={index === activeIndex}
-                        title={hit.title}
-                        hint={hit.path}
-                        onHover={() => setActiveIndex(index)}
-                        onSelect={() => activate(index)}
-                      />
-                    ))}
-                  </ul>
-                </div>
-              ))}
-              {showNoResults ? (
-                <ul>
-                  <PaletteOption
-                    active={commands.length === activeIndex}
-                    title="No results found"
-                    hint="Clear search"
-                    onHover={() => setActiveIndex(commands.length)}
-                    onSelect={() => activate(commands.length)}
-                  />
-                </ul>
-              ) : null}
-            </section>
-          ) : null}
+          <React.Suspense fallback={null}>
+            <LazySearchPanel
+              term={term}
+              scope={scope}
+              activeIndex={activeIndex}
+              onActiveIndexChange={setActiveIndex}
+              onTermChange={setTerm}
+              onClose={close}
+              onSelectSearchResult={onSelectSearchResult}
+              onPanelApi={handlePanelApi}
+            />
+          </React.Suspense>
         </div>
       ) : null}
     </div>

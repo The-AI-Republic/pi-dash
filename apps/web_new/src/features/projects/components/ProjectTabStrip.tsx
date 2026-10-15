@@ -22,7 +22,8 @@ import {
   selectProjectTabs,
   type StripWorkItem,
 } from "../tabs.js";
-import { projectsQueryOptions, useProjectProperties, useWorkspaceProperties } from "./../api/queries.js";
+import { projectsQueryOptions } from "./../api/queries.js";
+import { useProjectProperties, useWorkspaceProperties } from "./../api/tabPreferences.js";
 import { useTabPreferences } from "./../api/tabPreferences.js";
 import { ProjectTabChrome } from "./ProjectTabChrome.js";
 

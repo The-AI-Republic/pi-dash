@@ -355,19 +355,6 @@ export function useJoinProject() {
 }
 
 /**
- * Sign out everywhere (AUTH-017): end the server session, then clear every
- * client store and the query cache, then the desktop local teardown.
- * Resolves to the signed-out landing target; a failed POST toasts and
- * rejects instead, so the caller leaves the user where they are.
- */
-export function useSignOut() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: () => performSignOut({ client: getAppClient(), queryClient, teardown: platform.sessionTeardown }),
-  });
-}
-
-/**
  * Switch accounts (AUTH-018): sign out per AUTH-017, reset the theme to
  * the system default, and land on the signed-out entry for a fresh login.
  * A failed sign-out toasts and rejects; the dialog stays open.

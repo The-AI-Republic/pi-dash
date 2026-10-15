@@ -6,18 +6,17 @@
 // contract/seed-contracts.py; list responses are read raw (no list
 // contracts — those belong to their own areas) to resolve handles.
 import { describe, expect, it } from "vitest";
+import { getIssue, listIssues } from "../contracts/issues.js";
 import {
   addIssueToCycle,
   deleteIssue,
-  getIssue,
   getSubscriptionStatus,
-  listIssues,
   removeIssueFromCycle,
   setIssueModules,
   subscribeIssue,
   unsubscribeIssue,
   updateIssue,
-} from "../contracts/issues.js";
+} from "../contracts/issue-actions.js";
 import { listCycles, updateCycle } from "../contracts/cycles.js";
 import { listModules, updateModule } from "../contracts/modules.js";
 import {

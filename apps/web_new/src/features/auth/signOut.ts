@@ -10,9 +10,10 @@
 // and on desktop the daemon lifecycle rides the teardown seam the desktop
 // epic owns (DESK-010).
 
-import type { QueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { signOut as postSignOut, type ApiClient } from "@pidash/api-client";
 
+import { getAppClient } from "../../core/api/client.js";
 import { platform, type SessionTeardownApi } from "../../core/platform/index.js";
 import { signOut as clearSession } from "../../core/session/store.js";
 import { notifyError } from "../../shared/shell/index.js";
@@ -55,4 +56,17 @@ export async function performSignOut(args: {
     }
   }
   return signOutLandingTarget(platform.kind);
+}
+
+/**
+ * Sign out everywhere (AUTH-017): end the server session, then clear every
+ * client store and the query cache, then the desktop local teardown.
+ * Resolves to the signed-out landing target; a failed POST toasts and
+ * rejects instead, so the caller leaves the user where they are.
+ */
+export function useSignOut() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => performSignOut({ client: getAppClient(), queryClient, teardown: platform.sessionTeardown }),
+  });
 }
