@@ -267,3 +267,24 @@ describe("loop jobs query", () => {
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
   });
 });
+
+describe("instance configurations query", () => {
+  it("reads the key map through the client", async () => {
+    const rows = [{ key: "LLM_MODEL", value: "gpt-4o" }];
+    const getJson = vi.fn(async () => rows);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = instanceConfigurationsQueryOptions(fakeClient);
+    expect(options.queryKey).toEqual(adminKeys.configurations);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(rows);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/configurations/");
+  });
+
+  it("stays cached with no retry, refetch, or polling", () => {
+    const options = instanceConfigurationsQueryOptions({} as never);
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
+    expect("refetchInterval" in options ? options.refetchInterval : undefined).toBeUndefined();
+  });
+});

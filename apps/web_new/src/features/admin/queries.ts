@@ -119,9 +119,10 @@ export function cloudAuthProbeQueryOptions(client: ApiClient) {
 
 /**
  * The configurations key map every settings page shares (ADM-019/022,
- * ADM-024/036): one fetch per ADM-069 — never stale, never refetched
- * behind the pages' backs. Saves merge the answered rows back in (see
- * mergeConfigurationRows) instead of refetching.
+ * ADM-024/036, ADM-046): one fetch per ADM-069 — never stale, never
+ * refetched behind the pages' backs. Saves merge the answered rows
+ * back in (see mergeConfigurationRows) or refresh the key through
+ * explicit invalidation.
  */
 export function instanceConfigurationsQueryOptions(client: ApiClient) {
   return queryOptions({

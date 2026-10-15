@@ -22,6 +22,19 @@ export type { AdminCrumb, AdminSidebarEntryDef } from "./adminShell.js";
 export { formatConfigFlag, parseConfigFlag } from "./emailConfig.js";
 export type { ConfigValueMap, EmailFormValues, EmailSecurityChoice } from "./emailConfig.js";
 export {
+  AI_KEY_DOCS_URL,
+  AI_MODEL_DOCS_URL,
+  AI_SETTINGS_SAVED_MESSAGE,
+  AI_SETTINGS_SAVED_TITLE,
+  AI_VENDOR_CONTACT_URL,
+  buildAiSettingsPatch,
+  LLM_API_KEY,
+  LLM_MODEL_KEY,
+  selectAiSettings,
+  useSaveAiSettings,
+} from "./aiSettings.js";
+export type { AiSettingsValues } from "./aiSettings.js";
+export {
   AUTH_METHOD_ENABLE_KEYS,
   AUTH_METHODS,
   canDisableAuthMethod,
@@ -100,6 +113,7 @@ export {
 } from "./theme.js";
 export type { AdminThemeMode } from "./theme.js";
 export { AdminAccountMenu } from "./components/AdminAccountMenu.js";
+export { AI_SETTINGS_TITLE, AdminAiSettingsPage } from "./components/AdminAiSettingsPage.js";
 export { AdminAuthLanding, AUTH_LANDING_TITLE } from "./components/AdminAuthLanding.js";
 export { AdminAuthMethodCard } from "./components/AdminAuthMethodCard.js";
 export type { AdminAuthMethodCardProps } from "./components/AdminAuthMethodCard.js";
