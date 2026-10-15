@@ -12,6 +12,7 @@ import {
   deactivateAccount,
   generateMagicCode,
   getCsrfToken,
+  getInstanceBootstrap,
   getInstanceConfig,
   parseAuthRedirectResult,
   requestPasswordReset,
@@ -113,6 +114,20 @@ import {
   listLoopTargets,
   updateLoopJob,
 } from "./contracts/admin-loop.js";
+import {
+  adminSignIn,
+  adminSignOut,
+  adminSignUp,
+  checkEmailCredentials,
+  cloudSignInUrl,
+  disableEmailFeature,
+  getAdminSession,
+  listInstanceAdmins,
+  listInstanceConfigurations,
+  probeCloudAuthSession,
+  updateInstance,
+  updateInstanceConfigurations,
+} from "./contracts/instance.js";
 import { fakeResponse, recordingTransport } from "./client.test.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
@@ -2181,5 +2196,454 @@ describe("instance-admin loop contracts", () => {
     expect(transport.calls[2]?.url).toBe(`https://api.test/api/instances/loop/jobs/${UUID}/targets/`);
     await listLoopTargets(client, UUID, { page: 2 });
     expect(transport.calls[3]?.url).toBe(`https://api.test/api/instances/loop/jobs/${UUID}/targets/?page=2`);
+  });
+});
+
+const BOOTSTRAP_CONFIG = {
+  enable_signup: true,
+  is_workspace_creation_disabled: false,
+  is_google_enabled: false,
+  is_github_enabled: false,
+  is_gitlab_enabled: false,
+  is_gitea_enabled: false,
+  is_magic_login_enabled: true,
+  is_email_password_enabled: true,
+  is_smtp_configured: true,
+  is_self_managed: true,
+};
+
+const INSTANCE_ROW = {
+  id: UUID,
+  created_at: "2025-01-02T03:04:05.000Z",
+  updated_at: "2025-02-03T04:05:06.000Z",
+  created_by: null,
+  updated_by: UUID2,
+  deleted_at: null,
+  instance_name: "Acme",
+  whitelist_emails: null,
+  instance_id: "instance-acme",
+  current_version: "1.2.3",
+  latest_version: null,
+  edition: "PI_DASH_COMMUNITY",
+  domain: "",
+  last_checked_at: "2025-03-04T05:06:07.000Z",
+  namespace: null,
+  is_telemetry_enabled: true,
+  is_support_required: true,
+  is_setup_done: true,
+  is_signup_screen_visited: false,
+  is_verified: false,
+  is_test: false,
+  is_current_version_deprecated: false,
+};
+
+const ADMIN_ME = {
+  id: UUID,
+  avatar: "",
+  avatar_url: null,
+  cover_image: null,
+  date_joined: "2025-01-02T03:04:05.000Z",
+  display_name: "Ada Admin",
+  email: "ada@example.com",
+  first_name: "Ada",
+  last_name: "Admin",
+  is_active: true,
+  is_bot: false,
+  is_email_verified: false,
+  user_timezone: "UTC",
+  username: "ada.admin",
+  is_password_autoset: false,
+};
+
+const ADMIN_ENTRY = {
+  id: UUID,
+  created_at: "2025-01-02T03:04:05.000Z",
+  updated_at: "2025-01-02T03:04:05.000Z",
+  created_by: null,
+  updated_by: null,
+  deleted_at: null,
+  user: UUID2,
+  instance: UUID,
+  role: 20,
+  is_verified: false,
+  user_detail: {
+    id: UUID2,
+    first_name: "Ada",
+    last_name: "Admin",
+    avatar: "",
+    avatar_url: null,
+    is_bot: false,
+    display_name: "Ada Admin",
+    email: "ada@example.com",
+    last_login_medium: "email",
+  },
+};
+
+const CONFIG_ROW = {
+  id: UUID,
+  created_at: "2025-01-02T03:04:05.000Z",
+  updated_at: "2025-01-02T03:04:05.000Z",
+  created_by: null,
+  updated_by: null,
+  deleted_at: null,
+  key: "EMAIL_HOST",
+  value: "mail.test",
+  category: "SMTP",
+  is_encrypted: false,
+  source: "db",
+  is_managed: false,
+};
+
+const CLOUD_USER = {
+  id: UUID,
+  email: "ada@example.com",
+  display_name: "Ada Admin",
+  first_name: "Ada",
+  last_name: "Admin",
+  avatar: "",
+};
+
+function csrfThen(handler: (url: string) => { status: number; body: string; url?: string }) {
+  return recordingTransport((call) =>
+    call.url.endsWith("/auth/get-csrf-token/")
+      ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+      : fakeResponse(handler(call.url))
+  );
+}
+
+describe("instance bootstrap contracts", () => {
+  it("reads the full bootstrap envelope", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        config: BOOTSTRAP_CONFIG,
+        instance: { ...INSTANCE_ROW, workspaces_exist: true },
+      }),
+    });
+    const parsed = await getInstanceBootstrap(client);
+    expect(parsed.config.enable_signup).toBe(true);
+    expect(parsed.instance.instance_name).toBe("Acme");
+    expect(parsed.instance.workspaces_exist).toBe(true);
+  });
+
+  it("rejects a bootstrap without the instance half", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ config: BOOTSTRAP_CONFIG }),
+    });
+    const error = await getInstanceBootstrap(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("patches the name and telemetry flag together", async () => {
+    const transport = csrfThen((url) => {
+      expect(url.endsWith("/api/instances/")).toBe(true);
+      return { status: 200, body: JSON.stringify({ ...INSTANCE_ROW, instance_name: "New name" }) };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await updateInstance(client, { instance_name: "New name", is_telemetry_enabled: false });
+    expect(parsed.instance_name).toBe("New name");
+    const patchCall = transport.calls.find((call) => call.url.endsWith("/api/instances/"));
+    expect(patchCall?.init.method).toBe("PATCH");
+    expect(patchCall?.init.body).toBe(JSON.stringify({ instance_name: "New name", is_telemetry_enabled: false }));
+  });
+
+  it("rejects a patched row missing the instance id", async () => {
+    const transport = csrfThen(() => ({ status: 200, body: JSON.stringify({ ...INSTANCE_ROW, id: undefined }) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await updateInstance(client, { instance_name: "New name" }).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
+describe("instance admin session contracts", () => {
+  it("parses a signed-in admin", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json(ADMIN_ME) });
+    await expect(getAdminSession(client)).resolves.toEqual({ kind: "admin", admin: ADMIN_ME });
+  });
+
+  it("reads 401 as anonymous", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ status: 401, body: JSON.stringify({ detail: "Authentication credentials were not provided." }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(getAdminSession(client)).resolves.toEqual({ kind: "anonymous" });
+  });
+
+  it("reads 403 as forbidden", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ status: 403, body: JSON.stringify({ detail: "You do not have permission." }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(getAdminSession(client)).resolves.toEqual({ kind: "forbidden" });
+  });
+
+  it("rethrows a transient failure instead of classifying it", async () => {
+    const transport = recordingTransport(() => fakeResponse({ status: 500, body: "boom" }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await getAdminSession(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(500);
+  });
+
+  it("rethrows a contract violation instead of classifying it", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json({}) });
+    const error = await getAdminSession(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("lets a foreign client failure pass through unclassified", async () => {
+    const foreign = new Error("foreign boom");
+    const stub = { getJson: async () => Promise.reject(foreign) };
+    const error = await getAdminSession(stub as never).catch((e: unknown) => e);
+    expect(error).toBe(foreign);
+  });
+
+  it("lists the instance admins with their nested users", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([ADMIN_ENTRY]) });
+    const parsed = await listInstanceAdmins(client);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.user_detail.email).toBe("ada@example.com");
+  });
+
+  it("rejects an admin row without its nested user", async () => {
+    const { user_detail: _dropped, ...row } = ADMIN_ENTRY;
+    const client = createClient({ baseUrl: "https://api.test", transport: json([row]) });
+    const error = await listInstanceAdmins(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
+describe("instance admin auth contracts", () => {
+  it("posts the setup form with its defaults", async () => {
+    const transport = csrfThen((url) => {
+      expect(url.endsWith("/api/instances/admins/sign-up/")).toBe(true);
+      return { status: 200, body: "<html>", url: "https://web.test/god-mode/general/" };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await adminSignUp(client, {
+      firstName: "Ada",
+      email: "ada@example.com",
+      password: "StrongPass123!xyz",
+    });
+    expect(result).toEqual({ ok: true, location: "https://web.test/god-mode/general/" });
+    const postCall = transport.calls.find((call) => call.url.endsWith("/api/instances/admins/sign-up/"));
+    expect(postCall?.init.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    expect(postCall?.init.headers["X-CSRFTOKEN"]).toBe("csrf");
+    const body = new URLSearchParams(postCall?.init.body ?? "");
+    expect(body.get("first_name")).toBe("Ada");
+    expect(body.get("last_name")).toBe("");
+    expect(body.get("company_name")).toBe("");
+    expect(body.get("confirm_password")).toBe("StrongPass123!xyz");
+    expect(body.get("is_telemetry_enabled")).toBe("True");
+  });
+
+  it("posts an opted-out setup with explicit fields", async () => {
+    const transport = csrfThen(() => ({ status: 200, body: "<html>", url: "https://web.test/god-mode/general/" }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await adminSignUp(client, {
+      firstName: "Ada",
+      lastName: "Admin",
+      email: "ada@example.com",
+      companyName: "Acme",
+      password: "StrongPass123!xyz",
+      confirmPassword: "StrongPass123!xyz",
+      telemetryEnabled: false,
+    });
+    const postCall = transport.calls.find((call) => call.url.endsWith("/api/instances/admins/sign-up/"));
+    const body = new URLSearchParams(postCall?.init.body ?? "");
+    expect(body.get("last_name")).toBe("Admin");
+    expect(body.get("company_name")).toBe("Acme");
+    expect(body.get("is_telemetry_enabled")).toBe("False");
+  });
+
+  it("reads a rejected setup from its error code", async () => {
+    const location = "https://web.test/god-mode/?error_code=5150&error_message=ADMIN_ALREADY_EXIST";
+    const transport = csrfThen(() => ({ status: 200, body: "<html>", url: location }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await adminSignUp(client, {
+      firstName: "Ada",
+      email: "ada@example.com",
+      password: "StrongPass123!xyz",
+    });
+    expect(result).toEqual({ ok: false, location, code: "5150", message: "ADMIN_ALREADY_EXIST" });
+  });
+
+  it("posts the sign-in form and reads success from the landing URL", async () => {
+    const transport = csrfThen((url) => {
+      expect(url.endsWith("/api/instances/admins/sign-in/")).toBe(true);
+      return { status: 200, body: "<html>", url: "https://web.test/god-mode/general/" };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await adminSignIn(client, { email: "ada@example.com", password: "secret" });
+    expect(result).toEqual({ ok: true, location: "https://web.test/god-mode/general/" });
+    const postCall = transport.calls.find((call) => call.url.endsWith("/api/instances/admins/sign-in/"));
+    expect(postCall?.init.headers["X-CSRFTOKEN"]).toBe("csrf");
+    const body = new URLSearchParams(postCall?.init.body ?? "");
+    expect(body.get("email")).toBe("ada@example.com");
+    expect(body.get("password")).toBe("secret");
+  });
+
+  it("reads a failed sign-in from its error code", async () => {
+    const location = "https://web.test/god-mode/?error_code=5175&error_message=ADMIN_AUTHENTICATION_FAILED";
+    const transport = csrfThen(() => ({ status: 200, body: "<html>", url: location }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await adminSignIn(client, { email: "ada@example.com", password: "nope" });
+    expect(result).toEqual({ ok: false, location, code: "5175", message: "ADMIN_AUTHENTICATION_FAILED" });
+  });
+
+  it("posts sign-out and reports the landing URL", async () => {
+    const transport = csrfThen((url) => {
+      expect(url.endsWith("/api/instances/admins/sign-out/")).toBe(true);
+      return { status: 200, body: "<html>", url: "https://web.test/god-mode/" };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(adminSignOut(client)).resolves.toEqual({ location: "https://web.test/god-mode/" });
+  });
+});
+
+describe("instance configuration contracts", () => {
+  it("lists the key map with managed flags", async () => {
+    const managed = { ...CONFIG_ROW, id: UUID2, key: "LLM_API_KEY", value: null, source: "env", is_managed: true };
+    const client = createClient({ baseUrl: "https://api.test", transport: json([CONFIG_ROW, managed]) });
+    const parsed = await listInstanceConfigurations(client);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[1]).toMatchObject({ key: "LLM_API_KEY", value: null, source: "env", is_managed: true });
+  });
+
+  it("rejects a row with an unknown source", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json([{ ...CONFIG_ROW, source: "ssm" }]),
+    });
+    const error = await listInstanceConfigurations(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("patches a partial string map and reads back the echo", async () => {
+    const transport = csrfThen((url) => {
+      expect(url.endsWith("/api/instances/configurations/")).toBe(true);
+      return { status: 200, body: JSON.stringify([{ ...CONFIG_ROW, value: "smtp.test" }]) };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await updateInstanceConfigurations(client, { EMAIL_HOST: "smtp.test" });
+    expect(parsed).toEqual([{ ...CONFIG_ROW, value: "smtp.test" }]);
+    const patchCall = transport.calls.find((call) => call.url.endsWith("/api/instances/configurations/"));
+    expect(patchCall?.init.method).toBe("PATCH");
+    expect(patchCall?.init.body).toBe(JSON.stringify({ EMAIL_HOST: "smtp.test" }));
+  });
+
+  it("disables the email feature and reports the status", async () => {
+    const transport = csrfThen((url) => {
+      expect(url.endsWith("/api/instances/configurations/disable-email-feature/")).toBe(true);
+      return { status: 200, body: "" };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(disableEmailFeature(client)).resolves.toBe(200);
+    const deleteCall = transport.calls.find((call) =>
+      call.url.endsWith("/api/instances/configurations/disable-email-feature/")
+    );
+    expect(deleteCall?.init.method).toBe("DELETE");
+  });
+
+  it("surfaces a failed disable instead of swallowing it", async () => {
+    const transport = csrfThen(() => ({
+      status: 400,
+      body: JSON.stringify({ error: "Failed to disable email configuration" }),
+    }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await disableEmailFeature(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(400);
+  });
+
+  it("checks mail credentials with a receiver-only payload", async () => {
+    const transport = csrfThen((url) => {
+      expect(url.endsWith("/api/instances/email-credentials-check/")).toBe(true);
+      return { status: 200, body: JSON.stringify({ message: "Email successfully sent." }) };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await checkEmailCredentials(client, "probe@example.com");
+    expect(parsed).toEqual({ message: "Email successfully sent." });
+    const postCall = transport.calls.find((call) => call.url.endsWith("/api/instances/email-credentials-check/"));
+    expect(postCall?.init.body).toBe(JSON.stringify({ receiver_email: "probe@example.com" }));
+  });
+
+  it("surfaces the server mail error on a failed check", async () => {
+    const transport = csrfThen(() => ({
+      status: 400,
+      body: JSON.stringify({ error: "Invalid credentials provided" }),
+    }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await checkEmailCredentials(client, "probe@example.com").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(400);
+    expect((error as ApiError).message).toBe("Invalid credentials provided");
+  });
+});
+
+describe("cloud auth probe contracts", () => {
+  it("reads a signed-in probe with its user", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json(CLOUD_USER) });
+    await expect(probeCloudAuthSession(client)).resolves.toEqual({ kind: "authenticated", user: CLOUD_USER });
+  });
+
+  it("reads 401 and 403 as anonymous", async () => {
+    for (const status of [401, 403]) {
+      const transport = recordingTransport(() => fakeResponse({ status, body: JSON.stringify({ detail: "denied" }) }));
+      const client = createClient({ baseUrl: "https://api.test", transport });
+      await expect(probeCloudAuthSession(client)).resolves.toEqual({ kind: "anonymous" });
+    }
+  });
+
+  it("reads other statuses as inconclusive", async () => {
+    for (const status of [404, 500]) {
+      const transport = recordingTransport(() => fakeResponse({ status, body: "nope" }));
+      const client = createClient({ baseUrl: "https://api.test", transport });
+      await expect(probeCloudAuthSession(client)).resolves.toEqual({ kind: "inconclusive" });
+    }
+  });
+
+  it("reads a network failure as inconclusive", async () => {
+    const transport = recordingTransport(() => {
+      throw new Error("fetch failed");
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(probeCloudAuthSession(client)).resolves.toEqual({ kind: "inconclusive" });
+  });
+
+  it("rethrows a contract violation instead of guessing", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json({}) });
+    const error = await probeCloudAuthSession(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("rethrows a caller abort instead of guessing", async () => {
+    const transport = recordingTransport(() => {
+      throw new ApiError({ status: 0, code: "aborted", message: "Request was aborted" });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await probeCloudAuthSession(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("aborted");
+  });
+
+  it("lets a foreign client failure pass through unguessed", async () => {
+    const foreign = new Error("foreign boom");
+    const stub = { getJson: async () => Promise.reject(foreign) };
+    const error = await probeCloudAuthSession(stub as never).catch((e: unknown) => e);
+    expect(error).toBe(foreign);
+  });
+
+  it("builds the sign-in entry with an encoded deep-link return", async () => {
+    expect(cloudSignInUrl("https://api.test/", "/god-mode/loop/")).toBe(
+      "https://api.test/api/auth/sign-in/?return_to=%2Fgod-mode%2Floop%2F"
+    );
+    expect(cloudSignInUrl("https://api.test", "/god-mode/?tab=email&x=1")).toBe(
+      "https://api.test/api/auth/sign-in/?return_to=%2Fgod-mode%2F%3Ftab%3Demail%26x%3D1"
+    );
   });
 });

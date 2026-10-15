@@ -7,7 +7,7 @@
 // error_code / error_message query params is a failed sign-in.
 import * as z from "zod/mini";
 import { ApiClient, CSRF_ENDPOINT } from "../client.js";
-import { uuid } from "./fields.js";
+import { nullableDateTime, nullableUuid, uuid } from "./fields.js";
 
 export const CsrfTokenResponse = z.object({
   csrf_token: z.string(),
@@ -264,4 +264,58 @@ const InstanceResponse = z.object({
 export async function getInstanceConfig(client: ApiClient): Promise<InstanceConfig> {
   const body = await client.getJson<unknown>("/api/instances/");
   return client.parse(InstanceResponse, body, "GET /api/instances/").config;
+}
+
+/**
+ * The stored instance row: identity, setup and telemetry flags, version
+ * fields, and audit columns. PATCH answers exactly this object. (The
+ * serializer declares one phantom nested field whose source column does
+ * not exist; the backend drops it, so it is absent here too.)
+ */
+export const InstanceDetails = z.object({
+  id: uuid(),
+  created_at: z.iso.datetime(),
+  updated_at: z.iso.datetime(),
+  created_by: nullableUuid(),
+  updated_by: nullableUuid(),
+  deleted_at: nullableDateTime(),
+  instance_name: z.string(),
+  whitelist_emails: z.nullable(z.string()),
+  instance_id: z.string(),
+  current_version: z.string(),
+  latest_version: z.nullable(z.string()),
+  edition: z.string(),
+  domain: z.string(),
+  last_checked_at: z.iso.datetime(),
+  namespace: z.nullable(z.string()),
+  is_telemetry_enabled: z.boolean(),
+  is_support_required: z.boolean(),
+  is_setup_done: z.boolean(),
+  is_signup_screen_visited: z.boolean(),
+  is_verified: z.boolean(),
+  is_test: z.boolean(),
+  is_current_version_deprecated: z.boolean(),
+});
+export type InstanceDetails = z.infer<typeof InstanceDetails>;
+
+/**
+ * The `instance` half of the bootstrap read: the stored row plus the
+ * workspace-existence flag the GET view annotates (it is computed, not
+ * stored, so PATCH never returns it).
+ */
+export const InstanceInfo = z.extend(InstanceDetails, {
+  workspaces_exist: z.boolean(),
+});
+export type InstanceInfo = z.infer<typeof InstanceInfo>;
+
+/** The full bootstrap envelope: feature flags plus the instance row. */
+export const InstanceBootstrap = z.object({
+  config: InstanceConfig,
+  instance: InstanceInfo,
+});
+export type InstanceBootstrap = z.infer<typeof InstanceBootstrap>;
+
+export async function getInstanceBootstrap(client: ApiClient): Promise<InstanceBootstrap> {
+  const body = await client.getJson<unknown>("/api/instances/");
+  return client.parse(InstanceBootstrap, body, "GET /api/instances/");
 }
