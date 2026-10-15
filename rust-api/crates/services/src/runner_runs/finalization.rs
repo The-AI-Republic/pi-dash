@@ -9,6 +9,7 @@
 //! `TERMINAL_RUN_STATUSES` (same five members); the terminal
 //! orchestration/drain calls reuse the [`LifecycleEffect`]s and the
 //! failure comment / scheduler hook come from the sibling modules.
+//! `YIELD_KEYS` re-synced to `3869a226` (PDASHOSS01-248).
 //!
 //! Two transaction boundaries:
 //!
@@ -46,8 +47,8 @@ use super::{
 pub const TERMINAL_EFFECTS_TASK: &str = "runner.apply_agent_run_terminal_effects";
 
 /// Keys `pidash run yield` writes on `done_payload`
-/// (`agent_run_finalization.py:27`), in tuple order.
-pub const YIELD_KEYS: [&str; 3] = ["status", "note", "yielded_at"];
+/// (`agent_run_finalization.py:27`, `3869a226`), in tuple order.
+pub const YIELD_KEYS: [&str; 4] = ["status", "note", "yielded_at", "stop_ticking"];
 
 /// `runner` columns in Django `_meta` order (captured from
 /// `Runner._meta.concrete_fields`): the capacity re-read joins the
@@ -662,9 +663,9 @@ mod tests {
         let fx = fixture();
         assert_eq!(
             fx.get("YIELD_KEYS"),
-            Some(&json!(["status", "note", "yielded_at"]))
+            Some(&json!(["status", "note", "yielded_at", "stop_ticking"]))
         );
-        assert_eq!(YIELD_KEYS, ["status", "note", "yielded_at"]);
+        assert_eq!(YIELD_KEYS, ["status", "note", "yielded_at", "stop_ticking"]);
     }
 
     #[test]

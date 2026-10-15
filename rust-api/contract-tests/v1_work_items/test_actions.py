@@ -88,7 +88,75 @@ def test_yield_happy_path(api, world, seeder):
         "run_id": run["id"],
         "work_item_id": world["issue"]["id"],
         "outcome": "done",
+        "stop_ticking": False,
     }
+
+
+def _yield(api, world, run_id, payload):
+    return api.post(
+        f"/api/v1/workspaces/{world['workspace']['slug']}/agent-runs/{run_id}/yield/",
+        json=payload,
+    )
+
+
+def _run_with(world, seeder):
+    pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
+    return seeder.create_agent_run(
+        world["workspace"]["id"], world["owner"]["id"], pod["id"], world["issue"]["id"]
+    )
+
+
+def test_yield_stores_stop_ticking(api, world, seeder, db):
+    """Port of Django test_yield_stores_stop_ticking (PDASHOSS01-248)."""
+    run = _run_with(world, seeder)
+    response = _yield(api, world, run["id"], {"outcome": "done", "stop_ticking": True})
+    assert response.status_code == 200, response.text
+    assert response.json()["stop_ticking"] is True
+    row = db.fetchone("SELECT done_payload FROM agent_run WHERE id = %s", (run["id"],))
+    assert row["done_payload"]["status"] == "done"
+    assert row["done_payload"]["stop_ticking"] is True
+
+
+def test_yield_without_stop_ticking_stores_no_flag(api, world, seeder, db):
+    """Port of Django test_yield_without_stop_ticking_stores_no_flag."""
+    run = _run_with(world, seeder)
+    response = _yield(api, world, run["id"], {"outcome": "done"})
+    assert response.status_code == 200, response.text
+    assert response.json()["stop_ticking"] is False
+    row = db.fetchone("SELECT done_payload FROM agent_run WHERE id = %s", (run["id"],))
+    assert "stop_ticking" not in row["done_payload"]
+
+
+@pytest.mark.parametrize("flag", ["yes", 1])
+def test_yield_rejects_a_non_boolean_stop_ticking(api, world, seeder, db, flag):
+    """Port of Django test_yield_rejects_a_non_boolean_stop_ticking.
+
+    ``isinstance(flag, bool)`` is strict: ``1`` 400s exactly like ``"yes"``.
+    """
+    run = _run_with(world, seeder)
+    response = _yield(api, world, run["id"], {"outcome": "done", "stop_ticking": flag})
+    assert response.status_code == 400
+    assert response.json() == {"error": "stop_ticking must be a boolean"}
+    row = db.fetchone("SELECT done_payload FROM agent_run WHERE id = %s", (run["id"],))
+    assert not (row["done_payload"] or {})
+
+
+def test_yield_null_stop_ticking_reads_as_absent(api, world, seeder, db):
+    """An explicit JSON null is ``None`` in Django: absent, not a 400."""
+    run = _run_with(world, seeder)
+    response = _yield(api, world, run["id"], {"outcome": "done", "stop_ticking": None})
+    assert response.status_code == 200, response.text
+    assert response.json()["stop_ticking"] is False
+    row = db.fetchone("SELECT done_payload FROM agent_run WHERE id = %s", (run["id"],))
+    assert "stop_ticking" not in row["done_payload"]
+
+
+def test_yield_still_requires_an_outcome_with_stop_ticking(api, world, seeder):
+    """Port of Django test_yield_still_requires_an_outcome_with_stop_ticking."""
+    run = _run_with(world, seeder)
+    response = _yield(api, world, run["id"], {"stop_ticking": True})
+    assert response.status_code == 400
+    assert "outcome" in response.json()["error"]
 
 
 def test_yield_requires_outcome(api, world, seeder):

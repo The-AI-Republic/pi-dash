@@ -4,11 +4,13 @@
 //!
 //! * `OUTCOME_*` (`:74-78`) → [`OUTCOME_PROGRESSED`] et al.
 //! * `RUN_OUTCOMES` (`:79-87`) → [`RUN_OUTCOMES`].
-//! * `STOPPING_OUTCOMES` (`:89`) → [`STOPPING_OUTCOMES`].
-//! * `_LEGACY_OUTCOME_ALIASES` (`:94-97`) → [`LEGACY_OUTCOME_ALIASES`].
-//! * `normalize_outcome` (`:333-350`) → [`normalize_outcome`].
-//! * `outcome_for_run` (`:353-357`) → [`outcome_for_run`].
-//! * `default_outcome_for_kind` (`:360-371`) → [`default_outcome_for_kind`].
+//! * `STOPPING_OUTCOMES` was removed by PDASHOSS01-248: outcomes are
+//!   informational only and none of them stops the clock — only an
+//!   explicit `done_payload.stop_ticking` does.
+//! * `_LEGACY_OUTCOME_ALIASES` (`:92-97`) → [`LEGACY_OUTCOME_ALIASES`].
+//! * `normalize_outcome` (`:331-348`) → [`normalize_outcome`].
+//! * `outcome_for_run` (`:351-355`) → [`outcome_for_run`].
+//! * `default_outcome_for_kind` (`:358-368`) → [`default_outcome_for_kind`].
 //! * `WAIT_*` (`:742-754`) → [`WAIT_GRANTED`] et al.
 //! * `_WAIT_REARMABLE_DISARMS` (`:758-763`) → [`WAIT_REARMABLE_DISARMS`].
 //! * `TRIGGER_*` (`:863-865`) → [`TRIGGER_TICK`] et al.
@@ -66,22 +68,19 @@ pub const RUN_OUTCOMES: &[&str] = &[
     OUTCOME_BLOCKED,
 ];
 
-/// Outcomes that stop the clock for the rendered stage
-/// (`scheduling.py:89`), in source order.
-pub const STOPPING_OUTCOMES: &[&str] = &[OUTCOME_DONE, OUTCOME_BLOCKED, OUTCOME_WAITING_ON_HUMAN];
-
 /// Legacy done-payload statuses mapped onto the §7 vocabulary
-/// (`scheduling.py:94-97`), in source order.
+/// (`scheduling.py:92-97`), in source order. Outcomes are informational
+/// only (PDASHOSS01-247) — none of them stops the clock.
 pub const LEGACY_OUTCOME_ALIASES: &[(&str, &str)] = &[
     ("completed", OUTCOME_DONE),
     ("paused", OUTCOME_WAITING_ON_HUMAN),
 ];
 
 /// Map a done-payload `status` onto the §7 outcome vocabulary
-/// (`scheduling.py:333-350`).
+/// (`scheduling.py:331-348`).
 ///
 /// `None` for anything unrecognised (including non-strings); legacy
-/// `noop` follows the per-kind default.
+/// `noop` follows the per-kind default (`progressed` in every stage).
 pub fn normalize_outcome(value: &Value, phase_kind: &str) -> Option<&'static str> {
     let text = value.as_str()?;
     let lowered = super::strip_python_whitespace(text).to_lowercase();
@@ -106,7 +105,7 @@ pub struct RunOutcomeRef<'a> {
     pub phase_kind: &'a str,
 }
 
-/// The outcome a run reported, if any (`scheduling.py:353-357`).
+/// The outcome a run reported, if any (`scheduling.py:351-355`).
 ///
 /// A missing/falsy payload behaves like `{}` (no status → `None`), and a
 /// truthy non-dict payload answers `None`, as the `or {}` /
@@ -118,14 +117,11 @@ pub fn outcome_for_run(run: &RunOutcomeRef<'_>) -> Option<&'static str> {
 }
 
 /// What a run that exited without yielding is taken to mean
-/// (`scheduling.py:360-371`): `coding-task` (and the empty kind) keeps
-/// ticking, anything else is satisfied.
-pub fn default_outcome_for_kind(phase_kind: &str) -> &'static str {
-    if phase_kind.is_empty() || phase_kind == super::phases::KIND_CODING_TASK {
-        OUTCOME_PROGRESSED
-    } else {
-        OUTCOME_DONE
-    }
+/// (`scheduling.py:358-368`): `progressed` in every stage — no report
+/// means keep ticking, and the budget bounds the cost. The parameter is
+/// kept for callers (the source keeps it with `# noqa: ARG001`).
+pub fn default_outcome_for_kind(_phase_kind: &str) -> &'static str {
+    OUTCOME_PROGRESSED
 }
 
 /// Leaf literals of `AgentRunTrigger` (`runner/models.py:248-253`),
@@ -237,9 +233,10 @@ mod tests {
         let mut run = RUN_OUTCOMES.to_vec();
         run.sort_unstable();
         assert_eq!(json!(run), golden["RUN_OUTCOMES"]);
-        let mut stopping = STOPPING_OUTCOMES.to_vec();
-        stopping.sort_unstable();
-        assert_eq!(json!(stopping), golden["STOPPING_OUTCOMES"]);
+        assert!(
+            golden.get("STOPPING_OUTCOMES").is_none(),
+            "STOPPING_OUTCOMES was removed by PDASHOSS01-248"
+        );
 
         let aliases: Map<String, Value> = LEGACY_OUTCOME_ALIASES
             .iter()
@@ -425,8 +422,8 @@ mod tests {
             ("done\u{85}", "", Some("done")),
             ("\u{2003}done\u{2003}", "", Some("done")),
             ("İ", "", None),
-            ("noop", "CODING-TASK", Some("done")),
-            ("noop", " coding-task ", Some("done")),
+            ("noop", "CODING-TASK", Some("progressed")),
+            ("noop", " coding-task ", Some("progressed")),
         ];
         for (value, kind, expected) in cases {
             assert_eq!(
@@ -435,6 +432,6 @@ mod tests {
                 "{value:?} / {kind:?}"
             );
         }
-        assert_eq!(default_outcome_for_kind("Coding-Task"), "done");
+        assert_eq!(default_outcome_for_kind("Coding-Task"), "progressed");
     }
 }

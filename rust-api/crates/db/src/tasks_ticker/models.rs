@@ -103,8 +103,14 @@ pub enum TickerDisarmReason {
     CapHit,
     /// The pool was already spent when the issue moved; never auto-pauses.
     PoolSpent,
-    /// A terminal signal (`done` / `blocked` / `waiting_on_human`) disarmed it.
+    /// Legacy rows only: `reconcile` used to stop the clock on an
+    /// outcome inferred from the yield. Kept so history stays readable;
+    /// only [`TickerDisarmReason::StopSignal`] is written now.
     TerminalSignal,
+    /// The run explicitly asked to stop the clock (`pidash run yield
+    /// --stop-ticking` → `done_payload.stop_ticking`). Cleared by the
+    /// same human levers that cleared [`TickerDisarmReason::TerminalSignal`].
+    StopSignal,
     /// A human disabled the clock.
     UserDisabled,
 }
@@ -118,17 +124,19 @@ impl TickerDisarmReason {
             TickerDisarmReason::CapHit => "cap_hit",
             TickerDisarmReason::PoolSpent => "pool_spent",
             TickerDisarmReason::TerminalSignal => "terminal_signal",
+            TickerDisarmReason::StopSignal => "stop_signal",
             TickerDisarmReason::UserDisabled => "user_disabled",
         }
     }
 
-    /// All six values in declaration order (matches `enums.json`).
+    /// All seven values in declaration order (matches `enums.json`).
     pub const ALL: &[TickerDisarmReason] = &[
         TickerDisarmReason::None,
         TickerDisarmReason::LeftTickingState,
         TickerDisarmReason::CapHit,
         TickerDisarmReason::PoolSpent,
         TickerDisarmReason::TerminalSignal,
+        TickerDisarmReason::StopSignal,
         TickerDisarmReason::UserDisabled,
     ];
 }
@@ -155,6 +163,7 @@ impl FromStr for TickerDisarmReason {
             "cap_hit" => Ok(TickerDisarmReason::CapHit),
             "pool_spent" => Ok(TickerDisarmReason::PoolSpent),
             "terminal_signal" => Ok(TickerDisarmReason::TerminalSignal),
+            "stop_signal" => Ok(TickerDisarmReason::StopSignal),
             "user_disabled" => Ok(TickerDisarmReason::UserDisabled),
             other => Err(UnknownDisarmReason(other.to_string())),
         }
@@ -1040,7 +1049,7 @@ mod tests {
         let disarm: Vec<&str> = TickerDisarmReason::ALL.iter().map(|r| r.as_str()).collect();
         let expected: Vec<String> = values("ticker_disarm_reason");
         assert_eq!(disarm, expected);
-        assert_eq!(disarm.len(), 6);
+        assert_eq!(disarm.len(), 7);
         for reason in TickerDisarmReason::ALL {
             assert_eq!(TickerDisarmReason::from_str(reason.as_str()), Ok(*reason));
         }

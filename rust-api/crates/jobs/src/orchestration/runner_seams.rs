@@ -296,11 +296,12 @@ pub enum DisarmError {
     Decode(&'static str),
 }
 
-/// `maybe_disarm_on_terminal_signal(run_id)` (`scheduling.py:632-637`)
-/// with live row loading: send `RUN_ENDED` for the run; `true` iff
-/// the clock was stopped. A missing run, a run with no work item, or
-/// a missing issue answers `false` without a transaction — the
-/// planner's `(false, None)` shape.
+/// `maybe_disarm_on_terminal_signal(run_id)` (`scheduling.py:631-641`,
+/// `3869a226`) with live row loading: send `RUN_ENDED` for the run;
+/// `true` iff the clock was stopped (only an explicit
+/// `done_payload.stop_ticking` stops it). A missing run, a run with no
+/// work item, or a missing issue answers `false` without a transaction —
+/// the planner's `(false, None)` shape.
 pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bool, DisarmError> {
     let run: Option<(Option<Uuid>, String, String, Option<Value>)> = sqlx::query_as(
         r#"SELECT "work_item_id", "status", "phase_kind", "done_payload" FROM "agent_run" WHERE "id" = $1"#,

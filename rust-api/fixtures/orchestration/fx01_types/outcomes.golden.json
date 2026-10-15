@@ -11,11 +11,6 @@
     "waiting_on_external",
     "waiting_on_human"
   ],
-  "STOPPING_OUTCOMES": [
-    "blocked",
-    "done",
-    "waiting_on_human"
-  ],
   "_LEGACY_OUTCOME_ALIASES": {
     "completed": "done",
     "paused": "waiting_on_human"
@@ -31,15 +26,15 @@
     },
     {
       "phase_kind": "review",
-      "result": "done"
+      "result": "progressed"
     },
     {
       "phase_kind": "test",
-      "result": "done"
+      "result": "progressed"
     },
     {
       "phase_kind": "other-kind",
-      "result": "done"
+      "result": "progressed"
     }
   ],
   "normalize_outcome": [
@@ -101,17 +96,17 @@
     {
       "value": "noop",
       "phase_kind": "review",
-      "result": "done"
+      "result": "progressed"
     },
     {
       "value": "noop",
       "phase_kind": "test",
-      "result": "done"
+      "result": "progressed"
     },
     {
       "value": "noop",
       "phase_kind": "other-kind",
-      "result": "done"
+      "result": "progressed"
     },
     {
       "value": "NOOP",
@@ -126,17 +121,17 @@
     {
       "value": "NOOP",
       "phase_kind": "review",
-      "result": "done"
+      "result": "progressed"
     },
     {
       "value": "NOOP",
       "phase_kind": "test",
-      "result": "done"
+      "result": "progressed"
     },
     {
       "value": "NOOP",
       "phase_kind": "other-kind",
-      "result": "done"
+      "result": "progressed"
     },
     {
       "value": "completed",
@@ -243,7 +238,7 @@
         "status": "noop"
       },
       "phase_kind": "review",
-      "result": "done"
+      "result": "progressed"
     },
     {
       "done_payload": {

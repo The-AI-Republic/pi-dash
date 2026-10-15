@@ -61,14 +61,16 @@ Reading material only: `tests/unit/orchestration/`.
   (`ContinuationOutcome` defaults).
 - `fx01_types/outcomes.golden.json` —
   `orchestration/scheduling.py:74-78` (`OUTCOME_*`), `:79-87`
-  (`RUN_OUTCOMES`), `:89` (`STOPPING_OUTCOMES`), `:94-97`
-  (`_LEGACY_OUTCOME_ALIASES`), `:333-350` (`normalize_outcome` matrix:
-  verbatim + case/whitespace variants, `noop` × 5 phase kinds, legacy
-  aliases + variants, unknown/empty strings → `None`, 7 non-string
-  inputs → `None`), `:353-357` (`outcome_for_run`: statuses,
-  `noop` × kinds, missing/None/non-dict payloads), `:360-371`
-  (`default_outcome_for_kind`: `""`/`coding-task` → `progressed`, else
-  `done`).
+  (`RUN_OUTCOMES`), `:92-97` (`_LEGACY_OUTCOME_ALIASES`),
+  `:331-348` (`normalize_outcome` matrix, `3869a226`: verbatim +
+  case/whitespace variants, `noop` × 5 phase kinds →
+  `progressed` everywhere, legacy aliases + variants,
+  unknown/empty strings → `None`, 7 non-string inputs →
+  `None`), `:351-355` (`outcome_for_run`: statuses, `noop` ×
+  kinds, missing/None/non-dict payloads), `:358-368`
+  (`default_outcome_for_kind`, `3869a226`: `progressed` in
+  every stage). `STOPPING_OUTCOMES` (`:89`) was removed by
+  `3869a226`.
 - `fx01_types/dispatch_constants.golden.json` —
   `orchestration/scheduling.py:863-865` (`TRIGGER_*`, sourced from
   `AgentRunTrigger` — enum map recorded alongside), `:868`
@@ -271,29 +273,36 @@ receivers disconnected, since signals are FX-07 scope).
   (`dispatch-now` + stopped with the empty reason), agent move
   with budget (counting entry queued, no actor/trigger memory),
   agent move with pool spent (`pool-spent` park), agent move
-  while disabled (`ticking-disabled`), and resume-parent
-  capture on a cross-stage move.
+  while disabled (`ticking-disabled`), resume-parent
+  capture on a cross-stage move, and re-arm from a
+  `stop_signal` disarm (`3869a226`, cleared exactly as a
+  legacy `terminal_signal`).
 - `fx05_clock/reconcile.left_bucket.before_after.json` —
   `orchestration/scheduling.py:451-459` (`_on_left_bucket`):
   dormant with the pool kept (`used`/`granted` survive,
   `next_run_at` cleared, pending cleared,
   `LEFT_TICKING_STATE`), and the no-ticker no-op.
 - `fx05_clock/reconcile.run_ended.before_after.json` —
-  `orchestration/scheduling.py:462-518` (`_on_run_ended`):
-  stopping outcomes × 3 (`done`/`blocked`/`waiting_on_human`
-  → `TERMINAL_SIGNAL` stop, `next_run_at` kept), continuing
-  outcomes × 2 (re-armed when `next_run_at` was `None`,
-  untouched when set), the kind guard (`stage-moved-on`,
+  `orchestration/scheduling.py:458-518` (`_on_run_ended`,
+  `3869a226`): every outcome × 5 without the flag keeps
+  ticking (review) + in-test `done`, the flag stops with any
+  outcome × 5 (`STOP_SIGNAL`, `next_run_at` kept),
+  `stop_ticking: false` keeps ticking (re-armed when
+  `next_run_at` was `None`), continuing outcomes × 2
+  (re-armed when `next_run_at` was `None`, untouched when
+  set), the kind guard (`stage-moved-on`, flag included;
   queued next-stage entry survives), no-yield defaults
-  (completed coding-task → `progressed`, completed review →
-  `done`, `paused_awaiting_input` → `waiting_on_human`,
-  failed → `progressed`), pending-entry-kept, prior
-  `cap_hit` preserved (`already-stopped`), `not-in-bucket`,
-  and no-ticker. (`kind_for` is the identity on the template
-  name — `prompting/recipes.py:142-152`, out of scope.)
+  (completed → `progressed` in every stage,
+  `paused_awaiting_input` → `waiting_on_human` kept
+  ticking, failed → `progressed`), pending-entry-kept
+  (outranks the stop), prior `cap_hit` preserved
+  (`already-stopped`), `not-in-bucket`, and no-ticker.
+  (`kind_for` is the identity on the template name —
+  `prompting/recipes.py:142-152`, out of scope.)
 - `fx05_clock/reconcile.human_retick.before_after.json` —
   `orchestration/scheduling.py:521-534`
-  (`_on_human_run_requested`; free → `dispatch-now` + re-arm,
+  (`_on_human_run_requested`; free → `dispatch-now` + re-arm
+  (also from a `stop_signal` disarm, `3869a226`),
   busy → free entry with actor + explicit-trigger memory,
   `want_run=False` → `retimed`) and `:537-580` (`_on_retick`):
   grant of one fresh pool (`granted` 0 → 10) + dispatch, the
@@ -319,14 +328,14 @@ receivers disconnected, since signals are FX-07 scope).
   (`_compute_next_run_at` with the seeded jitter draw).
 - `fx05_clock/thin_senders.golden.json` —
   `orchestration/scheduling.py:598-606` (`arm_ticker`:
-  re-timed, `used` untouched), `:609-629` (`disarm_ticker`:
-  default stamps `LEFT_TICKING_STATE` and clears
-  `next_run_at`, custom reason keeps it, no ticker →
-  `None`, `TERMINAL_SIGNAL` refused with the `ValueError`
-  string verbatim), `:632-637`
-  (`maybe_disarm_on_terminal_signal`: `True` iff the
-  reason ends with `:stopped`, `False` for a run with no
-  work item), and `:640-647`
+  re-timed, `used` untouched), `:608-629` (`disarm_ticker`,
+  `3869a226`: default stamps `LEFT_TICKING_STATE` and
+  clears `next_run_at`, custom reason keeps it, no ticker →
+  `None`, `TERMINAL_SIGNAL` + `STOP_SIGNAL` refused with
+  the `ValueError` string verbatim), `:631-641`
+  (`maybe_disarm_on_terminal_signal`, `3869a226`: `True`
+  iff the yield carried the stop flag, `False` for a
+  flagless run or a run with no work item), and `:640-647`
   (`reset_ticker_after_comment_and_run`: re-timed with
   budget, `POOL_SPENT` when spent).
 
@@ -581,3 +590,10 @@ from the scheduling logger. Regeneration is byte-identical (verified).
   re-checks (`:1442-1459`) are concurrency-only — U11 passes
   them single-threaded; their `False` branches are noted in
   the fixture, not injected.
+
+## Drift 3869a226 (PIDASHCONV-1065, stage 8)
+
+- `fx01_types/outcomes.golden.json`: `STOPPING_OUTCOMES` removed; `default_outcome_for_kind` → `progressed` in every stage; `noop` rows → `progressed` everywhere — `scheduling.py:92-97,331-368`.
+- `fx05_clock/reconcile.run_ended.before_after.json`: 15 → 25 cases — `scheduling.py:458-518`. R1 × 5 keep-ticking + R1t (test stage), R1s × 5 stop with any outcome (`STOP_SIGNAL`), R1f (`false` keeps ticking), R4b/R4b2/R4c keep-ticking, R3/R5/R6/R7 runs now carry the flag.
+- `fx05_clock/reconcile.enter_move.before_after.json` gains E11 (move re-arms from `stop_signal`); `reconcile.human_retick.before_after.json` gains H1s (Run AI re-arms from `stop_signal`).
+- `fx05_clock/thin_senders.golden.json`: S2d refusal string reworded (both signal reasons refused); S3a stops on the flag with `STOP_SIGNAL` (+ idempotent second call); S3a2 flagless run keeps ticking — `scheduling.py:608-641`.

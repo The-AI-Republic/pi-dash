@@ -24,12 +24,12 @@
 //! * `reconcile` (`:374-397`) → [`reconcile`].
 //! * `_on_enter_or_move` (`:400-448`) → [`on_enter_or_move`].
 //! * `_on_left_bucket` (`:451-459`) → [`on_left_bucket`].
-//! * `_on_run_ended` (`:462-518`) → [`on_run_ended`].
+//! * `_on_run_ended` (`:458-518`, `3869a226`) → [`on_run_ended`].
 //! * `_on_human_run_requested` (`:521-534`) → [`on_human_run_requested`].
 //! * `_on_retick` (`:537-580`) → [`on_retick`].
 //! * `arm_ticker` (`:598-606`) → [`arm_ticker`].
-//! * `disarm_ticker` (`:609-629`) → [`disarm_ticker`].
-//! * `maybe_disarm_on_terminal_signal` (`:632-637`) → [`maybe_disarm_on_terminal_signal`].
+//! * `disarm_ticker` (`:608-629`, `3869a226`) → [`disarm_ticker`].
+//! * `maybe_disarm_on_terminal_signal` (`:631-641`, `3869a226`) → [`maybe_disarm_on_terminal_signal`].
 //! * `reset_ticker_after_comment_and_run` (`:640-647`) → [`reset_ticker_after_comment_and_run`].
 //!
 //! The services crate carries no `sqlx` dependency, so — per the D-27/D-30/D-36
@@ -58,16 +58,19 @@
 //! stage cadence window (fixture) plus exact math at fixed jitter (port) — never the
 //! fixture's exact stamps, which pin CPython's RNG stream (see [`compute_next_run_at`]).
 //!
-//! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
+//! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`;
+//! `_on_run_ended` / `disarm_ticker` / `maybe_disarm_on_terminal_signal`
+//! re-synced to `3869a226` (PDASHOSS01-248, unchanged on main since).
 //!
 //! Existing quirks ported as-is (translation, don't redesign):
 //!
 //! 1. `reconcile` never writes `used` — only `fire_tick`'s claim does. The
 //!    UPDATE projects exactly [`TICKER_CLOCK_FIELDS`]; the test greps it.
 //! 2. Stop reasons verbatim: `CAP_HIT` is never produced here (only the timer
-//!    tick stamps it), `POOL_SPENT` parks without auto-pausing, and
-//!    `TERMINAL_SIGNAL` is unreachable via [`disarm_ticker`] (refused with the
-//!    `:616-619` `ValueError` string byte-verbatim, em dash included).
+//!    tick stamps it), `POOL_SPENT` parks without auto-pausing, and both
+//!    `TERMINAL_SIGNAL` and `STOP_SIGNAL` are unreachable via [`disarm_ticker`]
+//!    (refused with the `:615-618` (`3869a226`) `ValueError` string
+//!    byte-verbatim, em dash included).
 //! 3. The retick reasons use underscores (`no_ticker`, `not_ticking_state`,
 //!    `budget_not_exhausted`) while the sibling handlers use hyphens
 //!    (`no-ticker`, `not-in-bucket`) — ported as written.
@@ -96,7 +99,7 @@ use pidash_db::tasks_ticker::{
 use pidash_types::orchestration::{
     cadence_fields_for, default_outcome_for_kind, is_ticking_state, outcome_for_run,
     template_name_for, RunOutcomeRef, StateRef, TickerDecision, TickerEvent, TickerEventKind,
-    OUTCOME_PROGRESSED, OUTCOME_WAITING_ON_HUMAN, STOPPING_OUTCOMES,
+    OUTCOME_WAITING_ON_HUMAN,
 };
 
 use crate::prompting::recipes::{kind_for, WORK_KIND_CODING};
@@ -540,10 +543,12 @@ pub fn on_left_bucket(ticker: Option<&mut IssueAgentTicker>) -> ClockOutcome {
     }
 }
 
-/// `_on_run_ended` (`scheduling.py:462-518`): a run on the issue reached a
-/// resting status. `run` is the re-read run row (the event carries only its
-/// id); `event.outcome` is used verbatim when present, else resolved from the
-/// run's payload, else the per-status default.
+/// `_on_run_ended` (`scheduling.py:458-518`, `3869a226`): a run on the
+/// issue reached a resting status. `run` is the re-read run row (the event
+/// carries only its id); `event.outcome` is used verbatim when present,
+/// else resolved from the run's payload, else the informational default.
+/// The clock stops only on the run's explicit
+/// `done_payload.stop_ticking` (`STOP_SIGNAL`).
 pub fn on_run_ended(
     ticker: Option<&mut IssueAgentTicker>,
     issue: &ClockIssue<'_>,
@@ -559,8 +564,9 @@ pub fn on_run_ended(
     if !is_ticking_state(issue.state.as_ref()) {
         return untouched(Some(ticker_id), "not-in-bucket");
     }
-    // The guard: a run that moved the issue on and *then* reported `done`
-    // must not stop the clock already set for the next stage.
+    // The guard: a signal from a run whose stage the issue has already
+    // left is ignored — `stop_ticking` included — so the clock already set
+    // for the next stage survives.
     let current_kind = kind_for(template_name_for(issue.state.as_ref()), WORK_KIND_CODING);
     if !run.phase_kind.is_empty() && run.phase_kind != current_kind {
         return untouched(Some(ticker_id), "stage-moved-on");
@@ -573,34 +579,37 @@ pub fn on_run_ended(
         .map(str::to_string)
     });
     let outcome = outcome.unwrap_or_else(|| {
-        // No yield. A `completed` run is read per kind; a paused one means
-        // `waiting_on_human`; a failed / cancelled / refused one said nothing
-        // about the stage — keep ticking so the next tick retries, rather
-        // than stopping the clock on a crash (which would strand a review/test
-        // issue with no Re-tick button, since the cap was never reached).
-        if run.status == AgentRunStatus::Completed {
+        // No yield. The outcome is informational either way; keep ticking
+        // so the next tick retries — whether the run completed silently,
+        // paused on a question, failed, was cancelled, or was refused.
+        if run.status == AgentRunStatus::PausedAwaitingInput {
+            OUTCOME_WAITING_ON_HUMAN.to_string()
+        } else {
             let kind = if run.phase_kind.is_empty() {
                 current_kind
             } else {
                 run.phase_kind
             };
             default_outcome_for_kind(kind).to_string()
-        } else if run.status == AgentRunStatus::PausedAwaitingInput {
-            OUTCOME_WAITING_ON_HUMAN.to_string()
-        } else {
-            OUTCOME_PROGRESSED.to_string()
         }
     });
     if ticker.pending_entry {
-        // Something already owes the next run on this clock; the finished
-        // run's opinion does not override it.
+        // Something (a human, a queued hand-off) already owes the next run
+        // on this clock; the finished run's opinion does not override it.
         return untouched(Some(ticker_id), &format!("{outcome}:pending-entry-kept"));
     }
-    if STOPPING_OUTCOMES.contains(&outcome.as_str()) {
+    // `payload.get("stop_ticking") is True`: a strict boolean-true test —
+    // a missing key, `false`, `1`, or `"yes"` all keep ticking.
+    let stop_ticking = run
+        .done_payload
+        .and_then(Value::as_object)
+        .and_then(|payload| payload.get("stop_ticking"))
+        .is_some_and(|flag| flag.as_bool() == Some(true));
+    if stop_ticking {
         if ticker.enabled {
             // Only stop an armed clock — a prior `cap_hit` must survive so
             // the deferred auto-pause still fires (design §5.2).
-            stop_clock(ticker, TickerDisarmReason::TerminalSignal.as_str());
+            stop_clock(ticker, TickerDisarmReason::StopSignal.as_str());
             return ClockOutcome {
                 decision: TickerDecision {
                     ticker: Some(ticker_id),
@@ -612,8 +621,8 @@ pub fn on_run_ended(
         }
         return untouched(Some(ticker_id), &format!("{outcome}:already-stopped"));
     }
-    // progressed / waiting_on_external: keep ticking. `fire_tick` already
-    // re-timed the clock at claim for tick-started runs; make sure a
+    // No stop signal: keep ticking, whatever the outcome said. `fire_tick`
+    // already re-timed the clock at claim for tick-started runs; make sure a
     // human-started run leaves a live clock behind too.
     if ticker.enabled
         && ticker.next_run_at.is_none()
@@ -747,10 +756,11 @@ pub enum ClockError {
     /// dereferencing it (`outcome_for_run(None)`).
     #[error("run_ended event without its run row")]
     RunEndedWithoutRun,
-    /// `disarm_ticker` refused `TERMINAL_SIGNAL` — the `ValueError` at
-    /// `:616-619`, byte-verbatim (fixture S2d).
+    /// `disarm_ticker` refused a run's stop signal (`TERMINAL_SIGNAL` /
+    /// `STOP_SIGNAL`) — the `ValueError` at `:615-618` (`3869a226`),
+    /// byte-verbatim (fixture S2d).
     #[error(
-        "disarm_ticker overwrites disarm_reason — send a RUN_ENDED event (reconcile) for TERMINAL_SIGNAL so a prior CAP_HIT survives."
+        "disarm_ticker overwrites disarm_reason — send a RUN_ENDED event (reconcile) for a run's stop signal so a prior CAP_HIT survives."
     )]
     TerminalSignalViaDisarm,
 }
@@ -902,18 +912,20 @@ pub fn arm_ticker(
     .expect("arm_ticker reconciles")
 }
 
-/// `disarm_ticker` (`scheduling.py:609-629`): stop the clock with `reason`
-/// (default `left_ticking_state`, passed by the caller — Rust has no default
-/// args). Idempotent. `TERMINAL_SIGNAL` is refused with
-/// [`ClockError::TerminalSignalViaDisarm`] so a prior `CAP_HIT` survives; the
-/// default also clears `next_run_at`, a custom reason keeps it; no ticker
-/// answers `None` (no write). Returns the row id; the handler executes
-/// [`SAVE_CLOCK_SQL`] iff `Some`.
+/// `disarm_ticker` (`scheduling.py:608-629`, `3869a226`): stop the clock
+/// with `reason` (default `left_ticking_state`, passed by the caller —
+/// Rust has no default args). Idempotent. `TERMINAL_SIGNAL` and
+/// `STOP_SIGNAL` are refused with [`ClockError::TerminalSignalViaDisarm`]
+/// so a prior `CAP_HIT` survives; the default also clears `next_run_at`,
+/// a custom reason keeps it; no ticker answers `None` (no write).
+/// Returns the row id; the handler executes [`SAVE_CLOCK_SQL`] iff `Some`.
 pub fn disarm_ticker(
     ticker: Option<&mut IssueAgentTicker>,
     reason: &str,
 ) -> Result<Option<Uuid>, ClockError> {
-    if reason == TickerDisarmReason::TerminalSignal.as_str() {
+    if reason == TickerDisarmReason::TerminalSignal.as_str()
+        || reason == TickerDisarmReason::StopSignal.as_str()
+    {
         return Err(ClockError::TerminalSignalViaDisarm);
     }
     let Some(ticker) = ticker else {
@@ -926,10 +938,13 @@ pub fn disarm_ticker(
     Ok(Some(ticker.id))
 }
 
-/// `maybe_disarm_on_terminal_signal` (`scheduling.py:632-637`): send `RUN_ENDED`
-/// for the run; `true` iff the clock was stopped (reason ends `:stopped`). A
-/// run with no work item answers `(false, None)` without sending. `run` is the
-/// re-read run row; the outcome (when sent) carries the handler's write.
+/// `maybe_disarm_on_terminal_signal` (`scheduling.py:631-641`,
+/// `3869a226`): send `RUN_ENDED` for the run; `true` iff the clock was
+/// stopped (reason ends `:stopped`). Historical name — only an explicit
+/// `done_payload.stop_ticking` stops the clock (`STOP_SIGNAL`), never the
+/// outcome itself. A run with no work item answers `(false, None)`
+/// without sending. `run` is the re-read run row; the outcome (when sent)
+/// carries the handler's write.
 pub fn maybe_disarm_on_terminal_signal(
     ticker: &mut Option<IssueAgentTicker>,
     issue: &ClockIssue<'_>,
@@ -1039,6 +1054,13 @@ mod tests {
         StateRef {
             group: "review",
             name: "In Review",
+        }
+    }
+
+    fn in_test() -> StateRef<'static> {
+        StateRef {
+            group: "test",
+            name: "In Test",
         }
     }
 
@@ -1731,7 +1753,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_move_table_replays_e1_e10() {
+    fn enter_move_table_replays_e1_e11() {
         let retimed = |interval: i64| Some(compute_next_run_at(interval, now(), JITTER));
         // E1: human enter, no ticker → dispatch-now + armed (created).
         replay_enter_move(
@@ -1835,12 +1857,24 @@ mod tests {
             ClockWrite::Insert,
             retimed(3600),
         );
+        // E11: a human move clears `stop_signal` exactly as it cleared
+        // `terminal_signal` (`3869a226`).
+        replay_enter_move(
+            "E11_human_move_rearms_stop_signal",
+            &TickerEvent::moved_stage(None, None, false, None),
+            in_review(),
+            fx5_policy(),
+            false,
+            ClockWrite::Update,
+            retimed(3600),
+        );
         // Retime cadence windows against the fixture stamps.
         let golden = fx("reconcile.enter_move.before_after.json");
         for (name, interval) in [
             ("E1_human_enter_no_ticker", 10800),
             ("E3_human_move_no_run_wanted", 10800),
             ("E10_move_remembers_resume_parent", 3600),
+            ("E11_human_move_rearms_stop_signal", 3600),
         ] {
             let after = &golden["cases"][name]["after"];
             assert_retimed(
@@ -1852,7 +1886,7 @@ mod tests {
         }
         assert_eq!(
             golden["cases"].as_object().expect("cases").len(),
-            10,
+            11,
             "all E cases replayed"
         );
     }
@@ -1959,24 +1993,92 @@ mod tests {
             phase_kind: "coding-task",
             done_payload: None,
         };
-        // R1 × 3: stopping outcomes → TERMINAL_SIGNAL stop, next_run_at kept.
+        let completed_test = RunEndedRef {
+            status: AgentRunStatus::Completed,
+            phase_kind: "test",
+            done_payload: None,
+        };
+        let stop_flag = serde_json::json!({"stop_ticking": true});
+        let stop_review = RunEndedRef {
+            status: AgentRunStatus::Completed,
+            phase_kind: "review",
+            done_payload: Some(&stop_flag),
+        };
+        let stop_coding = RunEndedRef {
+            status: AgentRunStatus::Completed,
+            phase_kind: "coding-task",
+            done_payload: Some(&stop_flag),
+        };
+        let false_flag = serde_json::json!({"stop_ticking": false});
+        let no_stop_coding = RunEndedRef {
+            status: AgentRunStatus::Completed,
+            phase_kind: "coding-task",
+            done_payload: Some(&false_flag),
+        };
+        // R1 × 5: outcomes are informational — every outcome without the
+        // flag keeps ticking (`3869a226`).
         let kept = Some(now());
         for (name, outcome) in [
-            ("R1_stopping_done", "done"),
-            ("R1_stopping_blocked", "blocked"),
-            ("R1_stopping_waiting_on_human", "waiting_on_human"),
+            ("R1_done_keeps_ticking", "done"),
+            ("R1_blocked_keeps_ticking", "blocked"),
+            (
+                "R1_waiting_on_human_keeps_ticking",
+                "waiting_on_human",
+            ),
+            ("R1_progressed_keeps_ticking", "progressed"),
+            (
+                "R1_waiting_on_external_keeps_ticking",
+                "waiting_on_external",
+            ),
         ] {
             replay_run_ended(
                 name,
                 in_review(),
                 &completed_review,
                 Some(outcome),
+                ClockWrite::None,
+                kept,
+            );
+        }
+        // R1t: same in the test stage.
+        replay_run_ended(
+            "R1t_test_stage_done_keeps_ticking",
+            in_test(),
+            &completed_test,
+            Some("done"),
+            ClockWrite::None,
+            kept,
+        );
+        // R1s × 5: the flag stops the clock with any outcome (STOP_SIGNAL,
+        // next_run_at kept).
+        for (name, outcome) in [
+            ("R1s_stop_done", "done"),
+            ("R1s_stop_blocked", "blocked"),
+            ("R1s_stop_waiting_on_human", "waiting_on_human"),
+            ("R1s_stop_progressed", "progressed"),
+            ("R1s_stop_waiting_on_external", "waiting_on_external"),
+        ] {
+            replay_run_ended(
+                name,
+                in_review(),
+                &stop_review,
+                Some(outcome),
                 ClockWrite::Update,
                 kept,
             );
         }
-        // R2 × 2: continuing outcomes re-arm a dateless clock (impl cadence).
+        // R1f: `stop_ticking: false` is not a stop (impl cadence re-arms
+        // the dateless clock, as R2 does).
         let rearmed = Some(compute_next_run_at(10800, now(), JITTER));
+        replay_run_ended(
+            "R1f_stop_false_keeps_ticking",
+            in_progress(),
+            &no_stop_coding,
+            Some("done"),
+            ClockWrite::Update,
+            rearmed,
+        );
+        // R2 × 2: continuing outcomes re-arm a dateless clock (impl cadence).
         for (name, outcome) in [
             ("R2_continuing_progressed", "progressed"),
             ("R2_continuing_waiting_on_external", "waiting_on_external"),
@@ -1999,12 +2101,13 @@ mod tests {
             ClockWrite::None,
             kept,
         );
-        // R3: the kind guard — a coding run's `done` must not stop the
-        // review clock; the queued next-stage entry survives.
+        // R3: the kind guard — a coding run's signal, `stop_ticking`
+        // included, must not stop the review clock; the queued next-stage
+        // entry survives.
         replay_run_ended(
             "R3_stage_moved_on_guard",
             in_review(),
-            &completed_coding,
+            &stop_coding,
             Some("done"),
             ClockWrite::None,
             kept,
@@ -2018,18 +2121,28 @@ mod tests {
             ClockWrite::None,
             kept,
         );
-        // R4b: completed review without yield → done (stopped).
+        // R4b: completed review without yield → progressed (kept ticking).
         replay_run_ended(
             "R4b_no_yield_completed_review",
             in_review(),
             &completed_review,
             None,
-            ClockWrite::Update,
+            ClockWrite::None,
             kept,
         );
-        // R4c: paused_awaiting_input without payload → waiting_on_human.
-        // The fixture does not pin the run kind; `""` (the model default)
-        // passes the guard via the falsy branch.
+        // R4b2: completed test without yield → progressed (kept ticking).
+        replay_run_ended(
+            "R4b2_no_yield_completed_test",
+            in_test(),
+            &completed_test,
+            None,
+            ClockWrite::None,
+            kept,
+        );
+        // R4c: paused_awaiting_input without payload → waiting_on_human,
+        // informational — kept ticking. The fixture does not pin the run
+        // kind; `""` (the model default) passes the guard via the falsy
+        // branch.
         let paused = RunEndedRef {
             status: AgentRunStatus::PausedAwaitingInput,
             phase_kind: "",
@@ -2040,7 +2153,7 @@ mod tests {
             in_progress(),
             &paused,
             None,
-            ClockWrite::Update,
+            ClockWrite::None,
             kept,
         );
         // R4d: failed without payload → progressed (a crash never stops).
@@ -2057,20 +2170,20 @@ mod tests {
             ClockWrite::None,
             kept,
         );
-        // R5: a queued entry outranks the finished run's opinion.
+        // R5: a queued entry outranks the finished run's stop signal.
         replay_run_ended(
             "R5_pending_entry_kept",
             in_review(),
-            &completed_review,
+            &stop_review,
             Some("done"),
             ClockWrite::None,
             kept,
         );
-        // R6: stopping on a disarmed clock preserves the prior cap_hit.
+        // R6: a stop on a disarmed clock preserves the prior cap_hit.
         replay_run_ended(
             "R6_prior_cap_hit_preserved",
             in_progress(),
-            &completed_coding,
+            &stop_coding,
             Some("done"),
             ClockWrite::None,
             None,
@@ -2079,7 +2192,7 @@ mod tests {
         replay_run_ended(
             "R7_not_in_bucket",
             done_state(),
-            &completed_coding,
+            &stop_coding,
             Some("done"),
             ClockWrite::None,
             None,
@@ -2096,6 +2209,7 @@ mod tests {
         // Retime cadence windows against the fixture stamps.
         let golden = fx("reconcile.run_ended.before_after.json");
         for name in [
+            "R1f_stop_false_keeps_ticking",
             "R2_continuing_progressed",
             "R2_continuing_waiting_on_external",
         ] {
@@ -2104,7 +2218,7 @@ mod tests {
         }
         assert_eq!(
             golden["cases"].as_object().expect("cases").len(),
-            15,
+            25,
             "all R cases replayed"
         );
     }
@@ -2113,7 +2227,8 @@ mod tests {
     fn run_ended_resolves_outcome_from_payload() {
         // Beyond the fixtures: `event.outcome = None` with a status-bearing
         // payload resolves through L1's `outcome_for_run` (the R-cases pin the
-        // verbatim and the no-yield paths; L1 pins the parser itself).
+        // verbatim and the no-yield paths; L1 pins the parser itself). The
+        // resolved outcome is informational — no flag, no stop.
         let payload = serde_json::json!({"status": "blocked"});
         let run = RunEndedRef {
             status: AgentRunStatus::Completed,
@@ -2137,11 +2252,90 @@ mod tests {
             None,
         )
         .expect("known kind reconciles");
-        assert_eq!(outcome.decision.reason, "blocked:stopped");
+        assert_eq!(outcome.decision.reason, "blocked:keep-ticking");
+        assert_eq!(outcome.write, ClockWrite::None);
+        let row = slot.as_ref().expect("row survives");
+        assert!(row.enabled, "no flag keeps the clock armed");
+        assert_eq!(row.disarm_reason, "");
+    }
+
+    #[test]
+    fn run_ended_crash_with_stop_signal_honors_the_yield() {
+        // Beyond the fixtures (`3869a226` `test_a_yield_survives_a_crash`):
+        // the agent yielded with a stop signal, then the process died.
+        let payload = serde_json::json!({
+            "status": "done",
+            "stop_ticking": true,
+            "yielded_at": "2026-09-13T00:00:00Z",
+        });
+        let run = RunEndedRef {
+            status: AgentRunStatus::Failed,
+            phase_kind: "review",
+            done_payload: Some(&payload),
+        };
+        let issue = clock_issue(Some(in_review()), fx5_policy());
+        let mut row = new_ticker_row(TICKER_ID, ISSUE_ID, now(), None);
+        row.enabled = true;
+        row.next_run_at = Some(now());
+        let mut slot = Some(row);
+        let event = TickerEvent::run_ended(Some(RUN_ID), None);
+        let outcome = reconcile(
+            &mut slot,
+            &issue,
+            &event,
+            Some(&run),
+            false,
+            now(),
+            JITTER,
+            None,
+        )
+        .expect("known kind reconciles");
+        assert_eq!(outcome.decision.reason, "done:stopped");
         assert_eq!(outcome.write, ClockWrite::Update);
         let row = slot.as_ref().expect("row survives");
-        assert_eq!(row.disarm_reason, "terminal_signal");
+        assert_eq!(row.disarm_reason, "stop_signal");
         assert_eq!(row.next_run_at, Some(now()), "stopping keeps next_run_at");
+    }
+
+    #[test]
+    fn run_ended_stop_ticking_must_be_boolean_true() {
+        // Beyond the fixtures: `payload.get("stop_ticking") is True` is
+        // strict — `1` and `"yes"` are truthy but not `True`.
+        for flag in [
+            serde_json::json!(1),
+            serde_json::json!("yes"),
+            serde_json::Value::Null,
+        ] {
+            let payload = serde_json::json!({"status": "done", "stop_ticking": flag});
+            let run = RunEndedRef {
+                status: AgentRunStatus::Completed,
+                phase_kind: "review",
+                done_payload: Some(&payload),
+            };
+            let issue = clock_issue(Some(in_review()), fx5_policy());
+            let mut row = new_ticker_row(TICKER_ID, ISSUE_ID, now(), None);
+            row.enabled = true;
+            row.next_run_at = Some(now());
+            let mut slot = Some(row);
+            let event = TickerEvent::run_ended(Some(RUN_ID), None);
+            let outcome = reconcile(
+                &mut slot,
+                &issue,
+                &event,
+                Some(&run),
+                false,
+                now(),
+                JITTER,
+                None,
+            )
+            .expect("known kind reconciles");
+            assert_eq!(
+                outcome.decision.reason, "done:keep-ticking",
+                "flag {flag} is not a stop"
+            );
+            assert_eq!(outcome.write, ClockWrite::None);
+            assert!(slot.as_ref().expect("row survives").enabled);
+        }
     }
 
     // -- human-requested + retick table ---------------------------------------
@@ -2193,6 +2387,17 @@ mod tests {
         // H1: free human run → dispatch-now + re-armed (used untouched).
         replay_human_retick(
             "H1_human_run_free",
+            &TickerEvent::human_run_requested(true, None, ""),
+            in_progress(),
+            fx5_policy(),
+            false,
+            ClockWrite::Update,
+            retimed,
+        );
+        // H1s: same from a stop-signal disarm (`3869a226` — cleared
+        // exactly as a legacy `terminal_signal`).
+        replay_human_retick(
+            "H1s_human_run_free_from_stop_signal",
             &TickerEvent::human_run_requested(true, None, ""),
             in_progress(),
             fx5_policy(),
@@ -2295,6 +2500,7 @@ mod tests {
         let golden = fx("reconcile.human_retick.before_after.json");
         for name in [
             "H1_human_run_free",
+            "H1s_human_run_free_from_stop_signal",
             "H3_human_run_no_run_wanted",
             "T1_retick_grant_dispatch",
         ] {
@@ -2303,7 +2509,7 @@ mod tests {
         }
         assert_eq!(
             golden["cases"].as_object().expect("cases").len(),
-            10,
+            11,
             "all H/T cases replayed"
         );
     }
@@ -2433,22 +2639,30 @@ mod tests {
         let id = disarm_ticker(None, TickerDisarmReason::LeftTickingState.as_str())
             .expect("no ticker ok");
         assert_eq!(id, None, "S2c");
-        // S2d: TERMINAL_SIGNAL refused, string verbatim (em dash included).
-        let err =
-            disarm_ticker(None, TickerDisarmReason::TerminalSignal.as_str()).expect_err("refused");
-        assert_eq!(err, ClockError::TerminalSignalViaDisarm);
-        assert_eq!(
-            err.to_string(),
-            golden["cases"]["S2d_disarm_terminal_signal"]["value_error"]
-                .as_str()
-                .expect("S2d string")
-        );
-        // S3a: stopping run → true, clock stopped (completed review, no yield → done).
+        // S2d: both signal reasons refused, string verbatim (em dash included).
+        for reason in [
+            TickerDisarmReason::TerminalSignal.as_str(),
+            TickerDisarmReason::StopSignal.as_str(),
+        ] {
+            let err = disarm_ticker(None, reason).expect_err("refused");
+            assert_eq!(err, ClockError::TerminalSignalViaDisarm);
+            assert_eq!(
+                err.to_string(),
+                golden["cases"]["S2d_disarm_terminal_signal"]["value_error"]
+                    .as_str()
+                    .expect("S2d string"),
+                "S2d: {reason}"
+            );
+        }
+        // S3a: a run whose yield carries the stop flag → true, clock
+        // stopped with STOP_SIGNAL; a second call is a no-op because the
+        // ticker is already disabled (this protects the cap-hit path).
         let case = &golden["cases"]["S3a_maybe_disarm_stopping"];
+        let stop_payload = serde_json::json!({"status": "waiting_on_human", "stop_ticking": true});
         let stopping = RunEndedRef {
             status: AgentRunStatus::Completed,
             phase_kind: "review",
-            done_payload: None,
+            done_payload: Some(&stop_payload),
         };
         let review_issue = clock_issue(Some(in_review()), fx5_policy());
         let mut slot = Some(ticker_from(&case["before"]));
@@ -2462,13 +2676,63 @@ mod tests {
         );
         assert!(stopped, "S3a: stopped");
         let outcome = outcome.expect("S3a: outcome");
-        assert_eq!(outcome.decision.reason, "done:stopped", "S3a: reason");
+        assert_eq!(
+            outcome.decision.reason, "waiting_on_human:stopped",
+            "S3a: reason"
+        );
         assert_eq!(outcome.write, ClockWrite::Update, "S3a: write");
         assert_row(
             slot.as_ref().expect("S3a row"),
             &case["after"],
             Some(kept),
             "S3a",
+        );
+        let (stopped, outcome) = maybe_disarm_on_terminal_signal(
+            &mut slot,
+            &review_issue,
+            &stopping,
+            Some(ISSUE_ID),
+            now(),
+            JITTER,
+        );
+        assert!(!stopped, "S3a: second call is a no-op");
+        let outcome = outcome.expect("S3a: second outcome");
+        assert_eq!(
+            outcome.decision.reason, "waiting_on_human:already-stopped",
+            "S3a: second reason"
+        );
+        assert_eq!(
+            slot.as_ref().expect("S3a row").disarm_reason,
+            "stop_signal",
+            "S3a: reason survives"
+        );
+        // S3a2: a `completed` (legacy alias for `done`) without the flag
+        // is informational → false, clock untouched.
+        let case = &golden["cases"]["S3a2_maybe_disarm_no_flag"];
+        let completed_payload = serde_json::json!({"status": "completed", "summary": "looks good"});
+        let no_flag = RunEndedRef {
+            status: AgentRunStatus::Completed,
+            phase_kind: "coding-task",
+            done_payload: Some(&completed_payload),
+        };
+        let mut slot = Some(ticker_from(&case["before"]));
+        let (stopped, outcome) = maybe_disarm_on_terminal_signal(
+            &mut slot,
+            &issue,
+            &no_flag,
+            Some(ISSUE_ID),
+            now(),
+            JITTER,
+        );
+        assert!(!stopped, "S3a2: kept ticking");
+        let outcome = outcome.expect("S3a2: outcome");
+        assert_eq!(outcome.decision.reason, "done:keep-ticking", "S3a2: reason");
+        assert_eq!(outcome.write, ClockWrite::None, "S3a2: write");
+        assert_row(
+            slot.as_ref().expect("S3a2 row"),
+            &case["after"],
+            Some(kept),
+            "S3a2",
         );
         // S3b: continuing run → false, clock untouched.
         let case = &golden["cases"]["S3b_maybe_disarm_continuing"];
@@ -2531,7 +2795,7 @@ mod tests {
         assert_eq!(row.next_run_at, retimed, "S4c: retimed");
         assert_eq!(
             golden["cases"].as_object().expect("cases").len(),
-            10,
+            11,
             "all S cases replayed"
         );
     }
@@ -2550,6 +2814,7 @@ mod tests {
             "left_ticking_state",
             "pool_spent",
             "terminal_signal",
+            "stop_signal",
             "user_disabled",
             "cap_hit",
         ];

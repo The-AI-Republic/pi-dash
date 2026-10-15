@@ -10,7 +10,8 @@
 //! * `IssueRunAiAPIEndpoint.post` (`:1175-1254`) — dispatch a run via
 //!   `scheduling.run_ai_for_human`; 201 with `{id, status, executor}` or 409
 //!   with `{error, reason}`, 403 from inside an agent run.
-//! * `AgentRunYieldAPIEndpoint.post` (`:1255-1313`) — record the run outcome
+//! * `AgentRunYieldAPIEndpoint.post` (`:1255-1327`, `3869a226`) — record the run outcome
+//!   plus the optional `stop_ticking` flag
 //!   (`RUN_OUTCOMES` / `normalize_outcome` + `done_payload` write).
 //!
 //! Registered by [`super::routes`] at the four
@@ -113,14 +114,17 @@ pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try
 /// (`views/issue.py:963,1042,1231`).
 pub const WORK_ITEM_NOT_FOUND_BODY: &str = r#"{"error":"Work item not found"}"#;
 /// The yield endpoint's lookup / membership / ownership miss
-/// (`views/issue.py:1291-1296`).
+/// (`views/issue.py:1298-1304`).
 pub const RUN_NOT_FOUND_BODY: &str = r#"{"error":"run not found"}"#;
-/// The yield endpoint's inactive-run refusal (`views/issue.py:1298`).
+/// The yield endpoint's inactive-run refusal (`views/issue.py:1305-1306`).
 pub const RUN_NOT_ACTIVE_BODY: &str = r#"{"error":"run is not active"}"#;
-/// The yield endpoint's missing/invalid outcome (`views/issue.py:1275-1278`);
+/// The yield endpoint's missing/invalid outcome (`views/issue.py:1275-1280`);
 /// the `allowed` list renders `sorted(RUN_OUTCOMES)`.
 pub const OUTCOME_REQUIRED_ERROR: &str = "outcome is required";
-/// The yield endpoint's header/URL mismatch (`views/issue.py:1281-1284`).
+/// The yield endpoint's non-boolean `stop_ticking` refusal
+/// (`views/issue.py:1281-1286`, `3869a226`).
+pub const STOP_TICKING_BOOL_BODY: &str = r#"{"error":"stop_ticking must be a boolean"}"#;
+/// The yield endpoint's header/URL mismatch (`views/issue.py:1287-1291`).
 pub const HEADER_MISMATCH_BODY: &str =
     r#"{"error":"X-Pi-Dash-Run-Id does not match the run in the URL"}"#;
 /// `_RUN_AI_REASON_MESSAGES` (`views/issue.py:1168-1172`), plus the `.get`
@@ -1278,10 +1282,15 @@ pub fn run_ai_created(run_id: Uuid, status: &str, executor_kind: &str) -> (Statu
     (StatusCode::CREATED, body)
 }
 
-/// The yield success (`:1308-1311`):
-/// `{"ok","run_id","work_item_id","outcome"}`. Always 200.
-pub fn yield_response(run_id: Uuid, work_item_id: Uuid, outcome: &str) -> (StatusCode, String) {
-    let mut map = serde_json::Map::with_capacity(4);
+/// The yield success (`:1318-1327`, `3869a226`):
+/// `{"ok","run_id","work_item_id","outcome","stop_ticking"}`. Always 200.
+pub fn yield_response(
+    run_id: Uuid,
+    work_item_id: Uuid,
+    outcome: &str,
+    stop_ticking: bool,
+) -> (StatusCode, String) {
+    let mut map = serde_json::Map::with_capacity(5);
     map.insert("ok".to_owned(), Value::Bool(true));
     map.insert("run_id".to_owned(), Value::String(run_id.to_string()));
     map.insert(
@@ -1289,11 +1298,12 @@ pub fn yield_response(run_id: Uuid, work_item_id: Uuid, outcome: &str) -> (Statu
         Value::String(work_item_id.to_string()),
     );
     map.insert("outcome".to_owned(), Value::String(outcome.to_owned()));
+    map.insert("stop_ticking".to_owned(), Value::Bool(stop_ticking));
     let body = serde_json::to_string(&Value::Object(map)).expect("yield body");
     (StatusCode::OK, body)
 }
 
-/// The yield outcome refusal (`:1273-1278`): 400
+/// The yield outcome refusal (`:1275-1280`): 400
 /// `{"error":"outcome is required","allowed":sorted(RUN_OUTCOMES)}`.
 pub fn outcome_required_response() -> (StatusCode, String) {
     let mut allowed: Vec<&str> = RUN_OUTCOMES.to_vec();
@@ -1316,7 +1326,7 @@ pub fn outcome_required_response() -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, body)
 }
 
-/// `note.strip()[:2000]` (`:1304-1305`): blank notes are dropped, the rest
+/// `note.strip()[:2000]` (`:1312-1313`): blank notes are dropped, the rest
 /// stripped and cut at 2000 code points (never mid-character).
 pub fn truncate_note(note: &str) -> Option<String> {
     let stripped = note.trim();
@@ -1662,7 +1672,7 @@ async fn run_ai_inner(
     Ok(json_response(status, body))
 }
 
-/// `POST .../agent-runs/<run_id>/yield/` (`views/issue.py:1255-1313`).
+/// `POST .../agent-runs/<run_id>/yield/` (`views/issue.py:1255-1327`, `3869a226`).
 pub async fn post_yield(
     State(state): State<AppState>,
     Path((slug, run_id)): Path<(String, String)>,
@@ -1712,6 +1722,19 @@ async fn yield_inner(
         let (status, body) = outcome_required_response();
         return Ok(json_response(status, body));
     };
+    // `stop_ticking is not None and not isinstance(stop_ticking, bool)`:
+    // a missing key and an explicit null both read as absent; anything
+    // present must be a JSON boolean (`1` / `"yes"` 400, as in Python).
+    let stop_ticking = match obj.get("stop_ticking") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(flag)) => Some(*flag),
+        Some(_) => {
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                STOP_TICKING_BOOL_BODY.to_owned(),
+            ));
+        }
+    };
     let header_run = headers
         .get(super::perms::RUN_ID_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -1750,6 +1773,9 @@ async fn yield_inner(
             payload.insert("note".to_owned(), Value::String(note));
         }
     }
+    if let Some(stop_ticking) = stop_ticking {
+        payload.insert("stop_ticking".to_owned(), Value::Bool(stop_ticking));
+    }
     sqlx::query(r#"UPDATE "agent_run" SET "done_payload" = $1 WHERE "id" = $2"#)
         .bind(Value::Object(payload))
         .bind(run.facts.id)
@@ -1757,7 +1783,12 @@ async fn yield_inner(
         .await
         .map_err(|error| db_error(error, "yield-write"))?;
     let work_item_id = run.facts.work_item_id.expect("checked above");
-    let (status, body) = yield_response(run.facts.id, work_item_id, outcome);
+    let (status, body) = yield_response(
+        run.facts.id,
+        work_item_id,
+        outcome,
+        stop_ticking.unwrap_or(false),
+    );
     Ok(json_response(status, body))
 }
 
@@ -1809,7 +1840,7 @@ mod tests {
         }
     }
 
-    /// The 7 action-route calls this issue replays. Fails if the fixture
+    /// The 9 action-route calls this issue replays. Fails if the fixture
     /// drops or renames one, so coverage cannot silently shrink.
     #[test]
     fn replay_count() {
@@ -1819,7 +1850,9 @@ mod tests {
             "wait",
             "run_ai",
             "yield_ok",
+            "yield_stop_true",
             "yield_bad_outcome",
+            "yield_bad_stop_ticking",
             "yield_header_mismatch",
             "yield_inactive",
         ] {
@@ -1859,8 +1892,22 @@ mod tests {
         let work_item_id: Uuid = "a9b6c9f9-2817-4967-a501-1e26caf4abea"
             .parse()
             .expect("uuid");
-        let (status, body) = yield_response(run_id, work_item_id, "progressed");
+        let (status, body) = yield_response(run_id, work_item_id, "progressed", false);
         let (fx_status, fx_body) = call_body("yield_ok");
+        assert_eq!(status.as_u16(), fx_status);
+        assert_eq!(body, fx_body);
+    }
+
+    #[test]
+    fn replay_yield_stop_true() {
+        let run_id: Uuid = "640d8cdf-08fb-4772-82d3-2c693d0e105f"
+            .parse()
+            .expect("uuid");
+        let work_item_id: Uuid = "a9b6c9f9-2817-4967-a501-1e26caf4abea"
+            .parse()
+            .expect("uuid");
+        let (status, body) = yield_response(run_id, work_item_id, "done", true);
+        let (fx_status, fx_body) = call_body("yield_stop_true");
         assert_eq!(status.as_u16(), fx_status);
         assert_eq!(body, fx_body);
     }
@@ -1871,6 +1918,13 @@ mod tests {
         let (fx_status, fx_body) = call_body("yield_bad_outcome");
         assert_eq!(status.as_u16(), fx_status);
         assert_eq!(body, fx_body);
+    }
+
+    #[test]
+    fn replay_yield_bad_stop_ticking() {
+        let (fx_status, fx_body) = call_body("yield_bad_stop_ticking");
+        assert_eq!(400, fx_status);
+        assert_eq!(STOP_TICKING_BOOL_BODY, fx_body);
     }
 
     #[test]
