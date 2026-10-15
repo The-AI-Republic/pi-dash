@@ -144,6 +144,9 @@ describe("AdminEmailPage", () => {
   });
 
   it("reads a failed load as off and skeletons the form when toggled on with no configuration", async () => {
+    // Toggling back off fires a disable that fails against the stub; the
+    // error notice is covered elsewhere, so keep the expected log quiet.
+    vi.spyOn(console, "error").mockImplementation(() => {});
     createAppClient("https://api.test", stubTransport({}));
     renderPage();
     await waitFor(() => expect(screen.getByTestId("admin-email-toggle")).toBeInTheDocument());
