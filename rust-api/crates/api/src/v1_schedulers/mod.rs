@@ -61,9 +61,9 @@ pub mod perms;
 use std::collections::HashMap;
 
 use axum::body::Bytes;
+use axum::extract::State;
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::extract::State;
 use chrono_tz::Tz;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -92,8 +92,7 @@ pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `get_object_or_404(Scheduler ...)` miss: Django raises
 /// `Http404("No Scheduler matches the given query.")` and DRF propagates
 /// the args into the body (`{"detail": ...}`, lowercase key).
-pub const SCHEDULER_NOT_FOUND_BODY: &str =
-    r#"{"detail":"No Scheduler matches the given query."}"#;
+pub const SCHEDULER_NOT_FOUND_BODY: &str = r#"{"detail":"No Scheduler matches the given query."}"#;
 /// `get_object_or_404(SchedulerBinding ...)` miss (the runs install
 /// guard): same shape, binding model name.
 pub const BINDING_NOT_FOUND_BODY: &str =
@@ -142,9 +141,7 @@ impl Denial {
             Denial::SchedulerNotFound => {
                 (StatusCode::NOT_FOUND, SCHEDULER_NOT_FOUND_BODY.to_owned())
             }
-            Denial::BindingNotFound => {
-                (StatusCode::NOT_FOUND, BINDING_NOT_FOUND_BODY.to_owned())
-            }
+            Denial::BindingNotFound => (StatusCode::NOT_FOUND, BINDING_NOT_FOUND_BODY.to_owned()),
             Denial::FeatureDisabled => (
                 StatusCode::NOT_FOUND,
                 crate::app_scheduler::gate::DISABLED_BODY.to_owned(),
@@ -263,11 +260,7 @@ pub struct Actor {
 /// the `X-Api-Key` header carries either an `api_tokens` token or an
 /// `mt_`-prefixed machine token. No header means anonymous (`authenticate`
 /// returns `None`); the permission layer then 401s before any view code.
-pub async fn actor(
-    pool: &PgPool,
-    headers: &HeaderMap,
-    secret_key: &[u8],
-) -> Result<Actor, Denial> {
+pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Result<Actor, Denial> {
     let raw = headers
         .get(pidash_auth::token::API_KEY_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -294,7 +287,10 @@ pub async fn actor(
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
-    Ok(Actor { id: user_id, timezone })
+    Ok(Actor {
+        id: user_id,
+        timezone,
+    })
 }
 
 /// The `api_tokens` columns the validator reads (`db/models/api.py:35-57`).
@@ -402,10 +398,7 @@ async fn resolve_machine_token(
 /// The request time zone (`TimezoneMixin.initial`): the user's stored zone
 /// name, loaded but NOT parsed — parsing happens after the gate in
 /// [`activate_timezone`].
-async fn load_timezone_name(
-    pool: &PgPool,
-    user_id: &uuid::Uuid,
-) -> Result<Option<String>, Denial> {
+async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
     let name: Option<Option<String>> =
         sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
             .bind(user_id)

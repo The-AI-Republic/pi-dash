@@ -240,7 +240,9 @@ fn render_datetime(dt: &DateTime<Utc>, tz: &Tz) -> Value {
 }
 
 fn opt_datetime(dt: &Option<DateTime<Utc>>, tz: &Tz) -> Value {
-    dt.as_ref().map(|d| render_datetime(d, tz)).unwrap_or(Value::Null)
+    dt.as_ref()
+        .map(|d| render_datetime(d, tz))
+        .unwrap_or(Value::Null)
 }
 
 /// `SchedulerBindingAPISerializer` in `Meta.fields` order. The nested
@@ -278,10 +280,7 @@ pub fn render_binding(row: &BindingRow, tz: &Tz) -> Value {
     // `pod_name = CharField(source="pod.name", default=None)`: null when
     // no pod (the LEFT JOIN leg).
     map.insert("pod_name".to_owned(), opt_string(&row.pod_name));
-    map.insert(
-        "next_run_at".to_owned(),
-        opt_datetime(&row.next_run_at, tz),
-    );
+    map.insert("next_run_at".to_owned(), opt_datetime(&row.next_run_at, tz));
     map.insert("last_run".to_owned(), opt_uuid(&row.last_run_id));
     // `get_last_run_*`: the `last_run` leg when `last_run_id` is set,
     // else null. `last_run_status` reads `.status` off the cached row.
@@ -301,8 +300,14 @@ pub fn render_binding(row: &BindingRow, tz: &Tz) -> Value {
         "last_error".to_owned(),
         Value::String(row.last_error.clone()),
     );
-    map.insert("created_at".to_owned(), render_datetime(&row.created_at, tz));
-    map.insert("updated_at".to_owned(), render_datetime(&row.updated_at, tz));
+    map.insert(
+        "created_at".to_owned(),
+        render_datetime(&row.created_at, tz),
+    );
+    map.insert(
+        "updated_at".to_owned(),
+        render_datetime(&row.updated_at, tz),
+    );
     Value::Object(map)
 }
 
@@ -330,8 +335,14 @@ pub fn render_scheduler(
         "bindings".to_owned(),
         Value::Array(bindings.iter().map(|b| render_binding(b, tz)).collect()),
     );
-    map.insert("created_at".to_owned(), render_datetime(&row.created_at, tz));
-    map.insert("updated_at".to_owned(), render_datetime(&row.updated_at, tz));
+    map.insert(
+        "created_at".to_owned(),
+        render_datetime(&row.created_at, tz),
+    );
+    map.insert(
+        "updated_at".to_owned(),
+        render_datetime(&row.updated_at, tz),
+    );
     map
 }
 
@@ -400,11 +411,7 @@ pub fn render_issue_touch(row: &IssueTouchRow) -> Value {
 
 /// `SchedulerRunAPISerializer` in `Meta.fields` order. Constructed without
 /// `fields`/`expand`, so no selection applies.
-pub fn render_run(
-    row: &RunRow,
-    issues: &[Value],
-    tz: &Tz,
-) -> Value {
+pub fn render_run(row: &RunRow, issues: &[Value], tz: &Tz) -> Value {
     let mut map = serde_json::Map::with_capacity(12);
     map.insert("id".to_owned(), uuid_string(&row.id));
     // `UUIDField(source="scheduler_binding.scheduler_id", default=None)`:
@@ -425,11 +432,11 @@ pub fn render_run(
         "error_code".to_owned(),
         Value::String(row.error_code.clone()),
     );
-    map.insert("created_at".to_owned(), render_datetime(&row.created_at, tz));
     map.insert(
-        "started_at".to_owned(),
-        opt_datetime(&row.started_at, tz),
+        "created_at".to_owned(),
+        render_datetime(&row.created_at, tz),
     );
+    map.insert("started_at".to_owned(), opt_datetime(&row.started_at, tz));
     map.insert("ended_at".to_owned(), opt_datetime(&row.ended_at, tz));
     map.insert("issues".to_owned(), Value::Array(issues.to_vec()));
     Value::Object(map)
@@ -509,7 +516,10 @@ async fn fetch_issues_by_run(
     let mut grouped: HashMap<uuid::Uuid, Vec<Value>> = HashMap::new();
     for row in rows {
         if let Some(run_id) = row.speaker_agent_run_id {
-            grouped.entry(run_id).or_default().push(render_issue_touch(&row));
+            grouped
+                .entry(run_id)
+                .or_default()
+                .push(render_issue_touch(&row));
         }
     }
     Ok(grouped)
@@ -601,7 +611,13 @@ async fn ws_scheduler_list_inner(
     let (page_rows, has_more) = window_page(&rows, per_page, &cursor)?;
     let scheduler_ids: Vec<uuid::Uuid> = page_rows.iter().map(|r| r.id).collect();
     let grouped = group_bindings(
-        fetch_bindings(&pre.pool, WORKSPACE_BINDINGS_SQL, &scheduler_ids, &pre.actor.id).await?,
+        fetch_bindings(
+            &pre.pool,
+            WORKSPACE_BINDINGS_SQL,
+            &scheduler_ids,
+            &pre.actor.id,
+        )
+        .await?,
     );
     let fields = fields_param(query, "fields");
     let expand = fields_param(query, "expand");
@@ -745,8 +761,7 @@ async fn project_scheduler_detail_inner(
     let Some(row) = row else {
         return Err(Denial::SchedulerNotFound);
     };
-    let bindings =
-        fetch_bindings(&pre.pool, PROJECT_BINDINGS_SQL, &[row.id], &project_id).await?;
+    let bindings = fetch_bindings(&pre.pool, PROJECT_BINDINGS_SQL, &[row.id], &project_id).await?;
     let shaped = render_scheduler(&row, &bindings, &timezone);
     Ok(super::ok_json(Value::Object(shaped)))
 }
@@ -771,15 +786,8 @@ async fn project_scheduler_runs(
         return proxy_through(state, method, uri, headers, body).await;
     };
     into_result_response(
-        project_scheduler_runs_inner(
-            &state,
-            &headers,
-            &slug,
-            &project_raw,
-            &scheduler_id,
-            &query,
-        )
-        .await,
+        project_scheduler_runs_inner(&state, &headers, &slug, &project_raw, &scheduler_id, &query)
+            .await,
     )
 }
 
@@ -1048,7 +1056,10 @@ mod tests {
     #[test]
     fn datetimes_render_drf_iso8601() {
         let map = render_scheduler(&row(), &[], &chrono_tz::UTC);
-        assert_eq!(map["created_at"], Value::String("2026-10-01T12:00:00Z".to_owned()));
+        assert_eq!(
+            map["created_at"],
+            Value::String("2026-10-01T12:00:00Z".to_owned())
+        );
         let Value::Object(bmap) = render_binding(&binding(), &chrono_tz::UTC) else {
             panic!("binding renders an object");
         };
