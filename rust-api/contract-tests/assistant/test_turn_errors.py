@@ -50,7 +50,6 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import pytest
 from psycopg.rows import dict_row
 
 from _harness import broker_probe, celery_wire, taskspec
@@ -440,6 +439,17 @@ def test_untyped_midstream_failure_keeps_text_classification(db_conn, broker_url
             else None,
             what="midstream-error turn failed",
         )
+        # `_fail_turn` commits the turn row first, then writes the error row,
+        # the `turn_failed` event and the delta prune (`tasks.py:181-201`),
+        # so the failed status alone does not mean those exist yet. Wait for
+        # the last of them before reading any (else the error-row read races).
+        def _failure_writes_complete():
+            kinds = [e["kind"] for e in _turn_events(db_conn, turn_id)]
+            if "turn_failed" in kinds and "assistant_delta" not in kinds:
+                return kinds
+            return None
+
+        kinds = wait_for(_failure_writes_complete, what="midstream-error failure writes")
         assert row["error_code"] == "model_invalid"
         assert row["error_detail"] == "The configured model name was not accepted by the provider."
         assert row["completed_at"] is not None
@@ -476,7 +486,6 @@ def test_untyped_midstream_failure_keeps_text_classification(db_conn, broker_url
             "error_code": "model_invalid",
             "detail": "The configured model name was not accepted by the provider.",
         }
-        kinds = [e["kind"] for e in _turn_events(db_conn, turn_id)]
         assert "assistant_delta" not in kinds, "deltas are pruned on failure"
     finally:
         stub.stop()
