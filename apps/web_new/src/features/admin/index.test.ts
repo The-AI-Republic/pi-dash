@@ -25,6 +25,7 @@ import {
   applyAdminThemePreference,
   applyStoredAdminTheme,
   COMPANY_NAME_MAX_LENGTH,
+  CloudAdminEntry,
   decideAdminGuard,
   FIRST_WORKSPACE_CREATE_PATH,
   FirstWorkspacePopup,
@@ -108,6 +109,7 @@ describe("admin barrel", () => {
       AdminSetupForm,
       AdminSignInForm,
       AdminSignOutForm,
+      CloudAdminEntry,
       FirstWorkspacePopup,
       InstanceFailureScreen,
     ]) {

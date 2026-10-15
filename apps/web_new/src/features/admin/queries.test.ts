@@ -7,6 +7,7 @@ import {
   adminCsrfQueryOptions,
   adminKeys,
   adminSessionQueryOptions,
+  cloudAuthProbeQueryOptions,
   instanceBootstrapQueryOptions,
 } from "./queries.js";
 
@@ -16,6 +17,7 @@ describe("admin keys", () => {
     expect(adminKeys.bootstrap).toEqual(["admin", "instance", "bootstrap"]);
     expect(adminKeys.csrf).toEqual(["admin", "csrf"]);
     expect(adminKeys.session).toEqual(["admin", "session"]);
+    expect(adminKeys.cloudProbe).toEqual(["admin", "cloud", "probe"]);
   });
 });
 
@@ -91,5 +93,33 @@ describe("admin CSRF query", () => {
     const options = adminCsrfQueryOptions({} as never);
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
     expect(options.refetchOnWindowFocus).toBe(false);
+  });
+});
+
+describe("cloud auth probe query", () => {
+  const probeUser = {
+    id: "user-1",
+    email: "user@example.com",
+    display_name: "User",
+    first_name: "User",
+    last_name: "Person",
+    avatar: "https://cdn.test/avatar.png",
+  };
+
+  it("reads the probe through the client", async () => {
+    const getJson = vi.fn(async () => probeUser);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = cloudAuthProbeQueryOptions(fakeClient);
+    expect(options.queryKey).toEqual(adminKeys.cloudProbe);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual({ kind: "authenticated", user: probeUser });
+    expect(getJson).toHaveBeenCalledWith("/api/auth/me/");
+  });
+
+  it("never retries, refetches, or goes stale (ADM-079 one shot)", () => {
+    const options = cloudAuthProbeQueryOptions({} as never);
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
   });
 });

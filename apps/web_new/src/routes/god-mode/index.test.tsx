@@ -26,6 +26,20 @@ vi.mock("../../features/admin/index.js", () => ({
   ),
 }));
 
+const harness = vi.hoisted(() => ({
+  edition: { id: "oss", flags: {} } as {
+    id: string;
+    flags: Record<string, boolean>;
+    slots?: Record<string, unknown>;
+  },
+}));
+
+vi.mock("../../core/edition/index.js", () => ({
+  get edition() {
+    return harness.edition;
+  },
+}));
+
 import { parseAdminEntrySearch, Route } from "./index.js";
 
 describe("parseAdminEntrySearch", () => {
@@ -80,6 +94,7 @@ describe("parseAdminEntrySearch", () => {
 
 describe("god-mode entry route component", () => {
   afterEach(() => {
+    harness.edition = { id: "oss", flags: {} };
     vi.restoreAllMocks();
   });
 
@@ -102,5 +117,16 @@ describe("god-mode entry route component", () => {
     expect(gate).toHaveAttribute("data-code", "5175");
     expect(gate).toHaveAttribute("data-message", "failed");
     expect(gate).toHaveAttribute("data-first", "");
+  });
+
+  it("renders the slotted cloud entry instead of the gate when an edition fills it", () => {
+    harness.edition = {
+      id: "cloud",
+      flags: {},
+      slots: { godModeCloudEntry: () => <div data-testid="cloud-entry" /> },
+    };
+    renderEntry({});
+    expect(screen.getByTestId("admin-home-guard")).toContainElement(screen.getByTestId("cloud-entry"));
+    expect(screen.queryByTestId("admin-gate")).not.toBeInTheDocument();
   });
 });
