@@ -184,6 +184,8 @@ describe("AdminSetupForm", () => {
     fireEvent.change(firstName, { target: { value: "Parity" } });
     fireEvent.change(firstName, { target: { value: "Ann1" } });
     expect(firstName).toHaveValue("Parity");
+    fireEvent.change(firstName, { target: { value: " " } });
+    expect(firstName).toHaveValue("Parity");
     fireEvent.change(firstName, { target: { value: "Jean-Paul" } });
     expect(firstName).toHaveValue("Jean-Paul");
     fireEvent.change(firstName, { target: { value: "a".repeat(60) } });

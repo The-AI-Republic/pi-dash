@@ -43,6 +43,12 @@ describe("person names", () => {
     expect(acceptPersonName("Ann1")).toBe(false);
     expect(acceptPersonName("a".repeat(60))).toBe(false);
   });
+
+  it("rejects whitespace-only names like the old required check", () => {
+    expect(isPersonNameText(" ")).toBe(false);
+    expect(isPersonNameText("   ")).toBe(false);
+    expect(acceptPersonName(" ")).toBe(false);
+  });
 });
 
 describe("company names", () => {
@@ -70,6 +76,11 @@ describe("company names", () => {
     expect(acceptCompanyName("Acme_123 Corp-x")).toBe(true);
     expect(acceptCompanyName("Acme{Corp}")).toBe(false);
     expect(acceptCompanyName("b".repeat(90))).toBe(false);
+  });
+
+  it("keeps the old optional-field behavior for whitespace-only input", () => {
+    expect(isCompanyNameText(" ")).toBe(true);
+    expect(acceptCompanyName(" ")).toBe(true);
   });
 });
 

@@ -18,7 +18,15 @@ const PERSON_NAME_PATTERN = /^[\p{L}\s'-]+$/u;
 const COMPANY_NAME_PATTERN = /^[\p{L}\p{N}\s_-]+$/u;
 
 export function isPersonNameText(value: string): boolean {
-  return value.length > 0 && value.length <= PERSON_NAME_MAX_LENGTH && PERSON_NAME_PATTERN.test(value);
+  // Blank values never validate (the old form's required check rejects
+  // them too), so a whitespace-only keystroke is swallowed; clearing
+  // still goes through acceptPersonName's explicit empty bypass.
+  return (
+    value.length > 0 &&
+    value.length <= PERSON_NAME_MAX_LENGTH &&
+    value.trim().length > 0 &&
+    PERSON_NAME_PATTERN.test(value)
+  );
 }
 
 export function isCompanyNameText(value: string): boolean {
