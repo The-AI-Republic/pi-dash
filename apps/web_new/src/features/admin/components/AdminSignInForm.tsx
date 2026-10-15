@@ -106,6 +106,7 @@ export function AdminSignInForm({ search }: { search: AdminEntrySearch }): React
             trailing={
               <button
                 type="button"
+                tabIndex={-1}
                 data-testid="admin-sign-in-toggle-password"
                 aria-label={showPassword ? "Hide password" : "Show password"}
                 onClick={() => setShowPassword((current) => !current)}
