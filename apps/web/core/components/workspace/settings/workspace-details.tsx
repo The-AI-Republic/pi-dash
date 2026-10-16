@@ -216,7 +216,9 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
               {errors.name && <p className="text-caption-sm-regular text-danger-primary">{errors.name.message}</p>}
             </div>
             <div className="flex flex-col gap-2">
-              <h4 className="text-body-sm-medium text-tertiary">{t("Company size")}</h4>
+              <h4 className="text-body-sm-medium text-tertiary">
+                {t("Company size")}
+              </h4>
               <Controller
                 name="organization_size"
                 control={control}
@@ -224,7 +226,10 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
                   <CustomSelect
                     value={value}
                     onChange={onChange}
-                    label={ORGANIZATION_SIZE.find((c) => c === value) ?? t("Select organization size")}
+                    label={
+                      ORGANIZATION_SIZE.find((c) => c === value) ??
+                      t("Select organization size")
+                    }
                     buttonClassName="border border-subtle bg-layer-2 !shadow-none !rounded-md"
                     input
                     disabled={!isAdmin}
@@ -262,7 +267,9 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
               />
             </div>
             <div className="flex flex-col gap-2">
-              <h4 className="text-body-sm-medium text-tertiary">{t("Workspace Timezone")}</h4>
+              <h4 className="text-body-sm-medium text-tertiary">
+                {t("Workspace Timezone")}
+              </h4>
               <Controller
                 name="timezone"
                 control={control}

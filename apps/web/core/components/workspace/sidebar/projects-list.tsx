@@ -197,7 +197,11 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                 type="button"
                 className="flex w-full items-center gap-1 text-left text-13 font-semibold whitespace-nowrap text-placeholder"
                 onClick={() => toggleListDisclosure(!isAllProjectsListOpen)}
-                aria-label={t(isAllProjectsListOpen ? "Close projects menu" : "Open projects menu")}
+                aria-label={t(
+                  isAllProjectsListOpen
+                    ? "Close projects menu"
+                    : "Open projects menu"
+                )}
               >
                 <span className="text-13 font-semibold">{t("Projects")}</span>
               </Disclosure.Button>
@@ -226,7 +230,11 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                   iconClassName={cn("transition-transform", {
                     "rotate-90": isAllProjectsListOpen,
                   })}
-                  aria-label={t(isAllProjectsListOpen ? "Close projects menu" : "Open projects menu")}
+                  aria-label={t(
+                    isAllProjectsListOpen
+                      ? "Close projects menu"
+                      : "Open projects menu"
+                  )}
                 />
               </div>
             </div>
@@ -286,7 +294,9 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                           className="flex flex-grow items-center gap-1.5 text-13 font-medium text-tertiary"
                           id="extended-project-sidebar-toggle"
                           aria-label={t(
-                            isExtendedProjectSidebarOpened ? "Close extended sidebar" : "Open extended sidebar"
+                            isExtendedProjectSidebarOpened
+                              ? "Close extended sidebar"
+                              : "Open extended sidebar"
                           )}
                         >
                           <Ellipsis className="size-4 flex-shrink-0" />
