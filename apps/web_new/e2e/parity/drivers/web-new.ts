@@ -4167,7 +4167,9 @@ export class WebNewDriver implements ParityDriver {
     const header = this.favoriteRowByName(folderName).getByTestId("favorite-folder-toggle");
     const to = await header.boundingBox();
     if (!to) throw new Error(`[parity] no favorite folder for ${folderName}.`);
-    await this.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    // Inner-edge grab like dragFavoriteTo: the handle juts outside its
+    // row and its center misses (off-row), so the drag never starts.
+    await this.page.mouse.move(from.x + from.width - 2, from.y + from.height / 2);
     await this.page.mouse.down();
     await this.page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 12 });
     await this.page.mouse.up();
