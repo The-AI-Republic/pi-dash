@@ -112,7 +112,7 @@ PIDASH_SKIP_DEV_PREP=1 \
 | `PIDASH_DESKTOP_EXTRA_OVERLAYS`                  | Colon-separated directories applied after the workspace and before `desktop-overlay/`.                                                                                       | unset                                                                        |
 | `PIDASH_DESKTOP_DEV_TREE`                        | Where the merged web tree is built (dev-prep.sh, test-overlay.sh).                                                                                                           | `desktop/.dev-tree`                                                          |
 | `PIDASH_DESKTOP_VERIFY_HOOK`                     | Script dev-prep.sh runs with the built client directory after its own checks.                                                                                                | unset                                                                        |
-| `PIDASH_DESKTOP_EXTERNAL_SIGNIN`                 | `=1` makes the release `build.rs` require that the bundled sign-in screen hands off to the system browser (`open_in_browser`).                                               | unset                                                                        |
+| `PIDASH_DESKTOP_EXTERNAL_SIGNIN`                 | `=1` makes the release `build.rs` require that the bundled sign-in screen hands off to the system browser (`desktop_begin_sign_in`).                                         | unset                                                                        |
 | `PIDASH_RUNNER_PROFILE` / `CODEX_BUNDLE_VERSION` | Cargo profile for the locally built runner / pinned agent-engine release staged by prepare-agent.sh.                                                                         | `release` in a release `cargo tauri build`, else `dev` / `rust-v0.153.4`     |
 
 Set both together for non-default targets. A release build with
@@ -166,9 +166,20 @@ for platform-specific third-party cookie policies.
 Signing in from the desktop requires a server that implements the desktop
 sign-in hand-off: the identity provider redirects to
 `pidash://auth/callback?code=…&state=…`, and `main.rs` navigates the webview
-to `PI_DASH_URL/api/auth/desktop-exchange/?code=…&state=…`, which must set the
-session cookies and mark the session as a desktop session (see
-`apps/api/pi_dash/ee/authentication/desktop.py`). The community server does
+to `PI_DASH_URL/api/auth/desktop-exchange/?code=…&state=…&desktop_verifier=…`,
+which must set the session cookies and mark the session as a desktop session
+(see `apps/api/pi_dash/ee/authentication/desktop.py`).
+
+Anything on the machine can open a `pidash://auth/callback` link, so a
+sign-in is bound to the app instance that started it. An edition's sign-in
+card starts the flow with the `desktop_begin_sign_in` command (not
+`open_in_browser`), which adds `desktop_challenge` — the unpadded base64url
+SHA-256 of a secret the app keeps — to the sign-in URL. The server must store
+that challenge on the flow and have `desktop-exchange` refuse a
+`desktop_verifier` that does not hash to it. The app drops any callback that
+arrives when it has no sign-in pending, and honours one callback per sign-in.
+
+The community server does
 not implement this yet, so the plain build shows a sign-in card that points
 users at the web app.
 
