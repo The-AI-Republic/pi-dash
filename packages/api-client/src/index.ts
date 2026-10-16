@@ -188,10 +188,12 @@ export {
 } from "./contracts/issues.js";
 export type { IssueListQuery } from "./contracts/issues.js";
 export {
+  IssueCreateResult,
   IssueSubscription,
   MembershipWriteResult,
   SubscriptionStatus,
   addIssueToCycle,
+  createIssue,
   deleteIssue,
   getSubscriptionStatus,
   removeIssueFromCycle,
@@ -200,7 +202,7 @@ export {
   unsubscribeIssue,
   updateIssue,
 } from "./contracts/issue-actions.js";
-export type { IssuePatch } from "./contracts/issue-actions.js";
+export type { IssueCreateInput, IssuePatch } from "./contracts/issue-actions.js";
 export {
   Favorite,
   FavoriteList,

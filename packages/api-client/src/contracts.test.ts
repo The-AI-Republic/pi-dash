@@ -73,7 +73,13 @@ import {
 } from "./contracts/home.js";
 import { listLabels, listMembers, listStates } from "./contracts/reference.js";
 import { getIssue, listIssues } from "./contracts/issues.js";
-import { getSubscriptionStatus, subscribeIssue, unsubscribeIssue, updateIssue } from "./contracts/issue-actions.js";
+import {
+  createIssue,
+  getSubscriptionStatus,
+  subscribeIssue,
+  unsubscribeIssue,
+  updateIssue,
+} from "./contracts/issue-actions.js";
 import {
   createFavorite,
   deleteFavorite,
@@ -1003,6 +1009,33 @@ describe("issue contracts", () => {
     const patchCall = transport.calls.find((call) => call.init.method === "PATCH");
     expect(patchCall?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/`);
     expect(patchCall?.init.body).toBe(JSON.stringify({ name: "Renamed" }));
+  });
+
+  it("creates a work item and parses the created row", async () => {
+    const created = { ...issue, sequence_id: 43, deleted_at: null };
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 201, body: JSON.stringify(created) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await createIssue(client, "acme", UUID2, { name: "Fresh report" });
+    expect(parsed.sequence_id).toBe(43);
+    expect(parsed.name).toBe("Fix login");
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/issues/`);
+    expect(postCall?.init.body).toBe(JSON.stringify({ name: "Fresh report" }));
+  });
+
+  it("rejects a created row without an id", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 201, body: JSON.stringify({ ...issue, id: "nope", deleted_at: null }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await createIssue(client, "acme", UUID2, { name: "Fresh report" }).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
   });
 
   it("reads and flips the subscription", async () => {

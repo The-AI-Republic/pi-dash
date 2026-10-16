@@ -11,6 +11,7 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import {
   applyNavigationPrefs,
   mergeNavigationPrefs,
+  selectProjectListCap,
   useTabPreferences,
   type TabPreferencesHandle,
 } from "./tabPreferences.js";
@@ -143,6 +144,16 @@ describe("preference payloads", () => {
       navigation: { default_tab: "cycles", hide_in_more_menu: [] },
     });
     expect(applyNavigationPrefs(undefined, { defaultTab: "cycles", hiddenTabs: [] })).toBeUndefined();
+  });
+});
+
+describe("project list cap selector", () => {
+  it("reads zero, negative and absent limits as uncapped", () => {
+    expect(selectProjectListCap(0)).toBeNull();
+    expect(selectProjectListCap(-4)).toBeNull();
+    expect(selectProjectListCap(null)).toBeNull();
+    expect(selectProjectListCap(undefined)).toBeNull();
+    expect(selectProjectListCap(3)).toBe(3);
   });
 });
 

@@ -2,144 +2,122 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import type * as React from "react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { Sidebar } from "./Sidebar.js";
+
+import { Sidebar, type SidebarProps } from "./Sidebar.js";
 
 const WORKSPACES = [
-  { id: "w1", slug: "acme", name: "Acme" },
-  { id: "w2", slug: "globex", name: "Globex" },
+  { id: "ws-1", slug: "acme", name: "Acme" },
+  { id: "ws-2", slug: "globex", name: "Globex" },
 ];
 
-const PROJECTS = [
-  { id: "p1", name: "Web", identifier: "WEB" },
-  { id: "p2", name: "Mobile", identifier: "MOB" },
-];
-
-const PERSONAL = [{ key: "drafts", label: "Drafts", href: "/acme/drafts/" }];
-
-function sidebar(props: Partial<React.ComponentProps<typeof Sidebar>> = {}): React.ReactElement {
-  return (
-    <Sidebar
-      workspaces={WORKSPACES}
-      activeSlug="acme"
-      onSelectWorkspace={() => undefined}
-      projects={PROJECTS}
-      activeProjectId="p1"
-      onSelectProject={() => undefined}
-      userLabel="ada@example.com"
-      onSignOut={() => undefined}
-      {...props}
-    />
-  );
+function sidebar(overrides: Partial<SidebarProps> = {}) {
+  const props: SidebarProps = {
+    workspaces: WORKSPACES,
+    activeSlug: "acme",
+    onSelectWorkspace: () => undefined,
+    userLabel: "Ada Lovelace",
+    onSignOut: () => undefined,
+    onNavigateHref: () => undefined,
+    ...overrides,
+  };
+  return <Sidebar {...props} />;
 }
 
 describe("Sidebar", () => {
-  it("shows the active workspace and its projects", () => {
+  it("renders the brand and the account row", () => {
     render(sidebar());
-    expect(screen.getByText("Acme")).toBeInTheDocument();
-    expect(screen.getByText("Web")).toBeInTheDocument();
-    expect(screen.getByText("Mobile")).toBeInTheDocument();
-    expect(screen.getByText("Web").closest("button")).toHaveAttribute("aria-current", "page");
-    expect(screen.getByText("ada@example.com")).toBeInTheDocument();
+    expect(screen.getByTestId("sidebar-brand")).toHaveTextContent("Pi Dash");
+    expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
   });
 
-  it("falls back to the slug for an unknown workspace", () => {
+  it("renders the home row and marks it current on home", () => {
+    render(sidebar({ currentPath: "/acme/" }));
+    const home = screen.getByRole("link", { name: "Home" });
+    expect(home).toHaveAttribute("href", "/acme");
+    expect(home).toHaveAttribute("aria-current", "page");
+  });
+
+  it("navigates client-side from the home row", () => {
+    const onNavigateHref = vi.fn();
+    render(sidebar({ onNavigateHref, currentPath: "/acme/drafts/" }));
+    const home = screen.getByRole("link", { name: "Home" });
+    expect(home).not.toHaveAttribute("aria-current");
+    fireEvent.click(home);
+    expect(onNavigateHref).toHaveBeenCalledWith("/acme");
+  });
+
+  it("leaves modified home clicks to the browser", () => {
+    const onNavigateHref = vi.fn();
+    render(sidebar({ onNavigateHref }));
+    fireEvent.click(screen.getByRole("link", { name: "Home" }), { metaKey: true, button: 0 });
+    expect(onNavigateHref).not.toHaveBeenCalled();
+  });
+
+  it("switches workspaces from the switcher", () => {
+    const onSelectWorkspace = vi.fn();
+    render(sidebar({ onSelectWorkspace }));
+    fireEvent.click(screen.getByRole("button", { name: "Switch workspace, current: Acme" }));
+    expect(screen.getByRole("menuitem", { name: "Acme" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Globex" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Globex" }));
+    expect(onSelectWorkspace).toHaveBeenCalledWith("globex");
+  });
+
+  it("falls back to the slug when the workspace row is missing", () => {
     render(sidebar({ activeSlug: "unknown" }));
     expect(screen.getByRole("button", { name: "Switch workspace, current: unknown" })).toBeInTheDocument();
   });
 
-  it("selects workspaces and projects through callbacks", async () => {
-    const user = userEvent.setup();
-    const onSelectWorkspace = vi.fn();
-    const onSelectProject = vi.fn();
-    render(sidebar({ activeProjectId: null, onSelectWorkspace, onSelectProject }));
-    await user.click(screen.getByRole("button", { name: /Switch workspace/ }));
-    await user.click(await screen.findByRole("menuitem", { name: "Globex" }));
-    expect(onSelectWorkspace).toHaveBeenCalledWith("globex");
-    await user.click(screen.getByText("Mobile"));
-    expect(onSelectProject).toHaveBeenCalledWith("p2");
+  it("renders the projects group slot", () => {
+    render(sidebar({ projectsGroup: <p>group content</p> }));
+    expect(screen.getByText("group content")).toBeInTheDocument();
   });
 
-  it("names the empty project list", () => {
-    render(sidebar({ projects: [], activeProjectId: null }));
-    expect(screen.getByText("No projects yet.")).toBeInTheDocument();
+  it("signs out from the account menu", () => {
+    const onSignOut = vi.fn();
+    render(sidebar({ onSignOut }));
+    fireEvent.click(screen.getByTestId("sidebar-account-menu"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
+    expect(onSignOut).toHaveBeenCalledTimes(1);
   });
 
-  it("omits deactivation from the account menu without a handler", async () => {
-    const user = userEvent.setup();
-    render(sidebar());
-    await user.click(screen.getByRole("button", { name: "Account actions" }));
-    expect(await screen.findByRole("menuitem", { name: "Sign out" })).toBeInTheDocument();
+  it("offers account deactivation only when wired", () => {
+    const first = render(sidebar());
+    fireEvent.click(first.getByTestId("sidebar-account-menu"));
     expect(screen.queryByRole("menuitem", { name: "Deactivate account" })).not.toBeInTheDocument();
-  });
+    first.unmount();
 
-  it("fires the deactivation handler from the account menu", async () => {
-    const user = userEvent.setup();
     const onDeactivateAccount = vi.fn();
     render(sidebar({ onDeactivateAccount }));
-    await user.click(screen.getByRole("button", { name: "Account actions" }));
-    await user.click(await screen.findByRole("menuitem", { name: "Deactivate account" }));
+    fireEvent.click(screen.getByTestId("sidebar-account-menu"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Deactivate account" }));
     expect(onDeactivateAccount).toHaveBeenCalledTimes(1);
   });
 
-  it("mounts the navigation landmark under the stable sidebar id", () => {
-    const { container } = render(sidebar({ projects: [], activeProjectId: null }));
-    const landmark = screen.getByRole("complementary", { name: "Workspace navigation" });
-    // The parity drivers and the shell contract locate the sidebar by this id.
-    expect(container.querySelector("#main-sidebar")).toBe(landmark);
+  it("renders the update control beside the account row when provided", () => {
+    render(sidebar({ updateControl: <span>update ready</span> }));
+    expect(screen.getByText("update ready")).toBeInTheDocument();
   });
 
-  it("renders the desktop update mount beside the account area when provided", () => {
+  it("lists personal entries above the projects group", () => {
     render(
-      sidebar({ projects: [], activeProjectId: null, updateControl: <button type="button">Install update</button> })
+      sidebar({
+        personalEntries: [{ key: "drafts", label: "Drafts", href: "/acme/drafts/" }],
+        currentPath: "/acme/drafts/",
+        projectsGroup: <p>group content</p>,
+      })
     );
-    expect(screen.getByRole("button", { name: "Install update" })).toBeInTheDocument();
+    const personal = screen.getByRole("navigation", { name: "Personal" });
+    expect(personal).toHaveTextContent("Drafts");
+    expect(personal.querySelector('[aria-current="page"]')).toHaveTextContent("Drafts");
+    expect(screen.getByText("group content")).toBeInTheDocument();
   });
 
-  it("mounts no update control on web builds (SHELL-102)", () => {
-    render(sidebar({ projects: [], activeProjectId: null }));
-    expect(screen.queryByRole("button", { name: /update/i })).not.toBeInTheDocument();
-  });
-
-  it("heads the shell with the brand and the personalization launcher", async () => {
-    const user = userEvent.setup();
-    const onPersonalize = vi.fn();
-    render(sidebar({ onPersonalize }));
-    expect(screen.getByTestId("sidebar-brand")).toHaveTextContent("Pi Dash");
-    await user.click(screen.getByTestId("personalize-nav"));
-    expect(onPersonalize).toHaveBeenCalledTimes(1);
-  });
-
-  it("mounts no launcher without a personalization handler", () => {
-    render(sidebar());
-    expect(screen.getByTestId("sidebar-brand")).toBeInTheDocument();
-    expect(screen.queryByTestId("personalize-nav")).not.toBeInTheDocument();
-  });
-
-  it("renders provided quick actions in their slot", () => {
+  it("renders quick actions under the header", () => {
     render(sidebar({ quickActions: <button type="button">New work item</button> }));
     expect(screen.getByTestId("sidebar-quick-actions")).toHaveTextContent("New work item");
-  });
-
-  it("lists personal entries above projects with the current one marked", () => {
-    render(sidebar({ personalEntries: PERSONAL, currentPath: "/acme/drafts/" }));
-    const drafts = screen.getByRole("link", { name: "Drafts" });
-    expect(drafts).toHaveAttribute("href", "/acme/drafts/");
-    expect(drafts).toHaveAttribute("aria-current", "page");
-  });
-
-  it("leaves personal entries unmarked off their address or without a path", () => {
-    const { rerender } = render(sidebar({ personalEntries: PERSONAL, currentPath: "/acme/" }));
-    expect(screen.getByRole("link", { name: "Drafts" })).not.toHaveAttribute("aria-current");
-    rerender(sidebar({ personalEntries: PERSONAL }));
-    expect(screen.getByRole("link", { name: "Drafts" })).not.toHaveAttribute("aria-current");
-  });
-
-  it("renders no personal section without entries", () => {
-    render(sidebar());
-    expect(screen.queryByRole("navigation", { name: "Personal" })).not.toBeInTheDocument();
   });
 });

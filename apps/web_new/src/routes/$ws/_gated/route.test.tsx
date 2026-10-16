@@ -48,6 +48,9 @@ const harness = vi.hoisted(() => ({
     personalEntries: unknown;
     currentPath: string;
     onPersonalize: () => void;
+    quickActions: unknown;
+    projectsGroup: unknown;
+    onNavigateHref: (href: string) => void;
   },
   personalizeDialog: null as null | {
     open: boolean;
@@ -158,11 +161,17 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       personalEntries: unknown;
       currentPath: string;
       onPersonalize: () => void;
+      quickActions: unknown;
+      projectsGroup: unknown;
+      onNavigateHref: (href: string) => void;
     }) => {
       harness.sidebar = {
         personalEntries: props.personalEntries,
         currentPath: props.currentPath,
         onPersonalize: props.onPersonalize,
+        quickActions: props.quickActions,
+        projectsGroup: props.projectsGroup,
+        onNavigateHref: props.onNavigateHref,
       };
       return React.createElement(
         React.Fragment,
@@ -277,7 +286,9 @@ describe("gated layout guard", () => {
 });
 
 describe("gated layout loader", () => {
-  it("prefetches workspaces, projects, the unread count and sidebar preferences", async () => {
+  it("starts the projects fetch, then prefetches workspaces, the unread count and sidebar preferences", async () => {
+    // Projects load eagerly but outside the blocking gate: the sidebar
+    // renders placeholder rows while the collection resolves (SHELL-049).
     const seen: Array<readonly unknown[]> = [];
     const args = {
       context: {
@@ -295,8 +306,8 @@ describe("gated layout loader", () => {
     if (typeof loader !== "function") throw new Error("missing loader");
     await loader(args);
     expect(seen).toEqual([
-      ["session", "workspaces"],
       ["ws", "acme", "projects", "list"],
+      ["session", "workspaces"],
       ["ws", "acme", "notifications", "unread"],
       ["ws", "acme", "sidebar-preferences"],
     ]);
@@ -343,7 +354,11 @@ describe("gated layout shell wiring", () => {
   const navigate = vi.fn();
   let mounted: { unmount: () => void } | null = null;
 
-  function stubShellQueries(unread: unknown = undefined, sidebarPrefs: unknown = { data: undefined }): void {
+  function stubShellQueries(
+    unread: unknown = undefined,
+    sidebarPrefs: unknown = { data: undefined },
+    projectsResult: unknown = null
+  ): void {
     const suspenseQuery = vi.mocked(useSuspenseQuery) as unknown as {
       mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => { data: unknown }) => void;
     };
@@ -352,18 +367,37 @@ describe("gated layout shell wiring", () => {
       if (options.queryKey[1] === "workspaces") {
         return { data: [{ id: "w1", slug: "acme", name: "Acme" }] };
       }
-      return { data: [{ id: "p1", name: "Atlas", identifier: "ATL", ...harness.projectViews }] };
+      throw new Error(`unexpected suspense query ${JSON.stringify(options.queryKey)}`);
     });
-    // Plain queries serve the unread dot (default) plus the membership and
-    // instance reads the palette entries perform through the session hooks.
-    // The entries' own suite proves the real fetch; here the mock stands in
-    // with the same shapes the fetch stub below serves, and records the
-    // membership read the guest test waits on. Sidebar preferences ride the
-    // same mock with a per-test result.
+    // Plain queries serve the projects collection (never blocking: the
+    // shell renders while it loads), the unread dot (default) plus the
+    // membership and instance reads the palette entries perform through
+    // the session hooks. The entries' own suite proves the real fetch;
+    // here the mock stands in with the same shapes the fetch stub below
+    // serves, and records the membership read the guest test waits on.
+    // Sidebar preferences ride the same mock with a per-test result.
     const plainQuery = vi.mocked(useQuery) as unknown as {
       mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => unknown) => void;
     };
     plainQuery.mockImplementation((options) => {
+      if (options.queryKey[0] === "ws" && options.queryKey[2] === "projects" && options.queryKey[3] === "list") {
+        if (projectsResult !== null) return projectsResult;
+        return {
+          data: [
+            {
+              id: "p1",
+              name: "Atlas",
+              identifier: "ATL",
+              sort_order: 10000,
+              member_role: 20,
+              intake_count: 0,
+              archived_at: null,
+              ...harness.projectViews,
+            },
+          ],
+          status: "success",
+        };
+      }
       if (options.queryKey[0] === "ws" && options.queryKey[2] === "sidebar-preferences") return sidebarPrefs;
       if (options.queryKey[0] === "session" && options.queryKey[1] === "workspaces") {
         harness.fetched.push("https://api.test/api/users/me/workspaces/");
@@ -910,6 +944,66 @@ describe("gated layout shell wiring", () => {
     });
     renderShell();
     expect(harness.sidebar?.personalEntries).toEqual([]);
+  });
+
+  it("hides member-only sidebar rows from guests (SHELL-046)", () => {
+    harness.role = 5;
+    renderShell();
+    expect(harness.sidebar?.personalEntries).toEqual([]);
+    const quickActions = harness.sidebar?.quickActions as React.ReactElement<{ canCreate: boolean }>;
+    expect(quickActions.props.canCreate).toBe(false);
+    const group = harness.sidebar?.projectsGroup as React.ReactElement<{ canCreateProject: boolean }>;
+    expect(group.props.canCreateProject).toBe(false);
+  });
+
+  it("passes the quick-create slot its picker and standing (SHELL-047)", () => {
+    renderShell();
+    const quickActions = harness.sidebar?.quickActions as React.ReactElement<{
+      workspaceSlug: string;
+      projects: Array<{ id: string; name: string }>;
+      canCreate: boolean;
+    }>;
+    expect(quickActions.props.workspaceSlug).toBe("acme");
+    expect(quickActions.props.projects).toEqual([{ id: "p1", name: "Atlas" }]);
+    expect(quickActions.props.canCreate).toBe(true);
+  });
+
+  it("passes the projects group slot its collection and handlers (SHELL-048)", () => {
+    harness.routerState = {
+      matches: [{ params: { projectId: "p1" } }],
+      location: { pathname: "/acme/projects/p1/issues" },
+    };
+    renderShell();
+    const group = harness.sidebar?.projectsGroup as React.ReactElement<{
+      workspaceSlug: string;
+      projects: unknown[];
+      projectsStatus: string;
+      currentPath: string;
+      activeProjectId: string | null;
+      canCreateProject: boolean;
+      onCreateProject: () => void;
+      onNavigate: (href: string) => void;
+    }>;
+    expect(group.props.workspaceSlug).toBe("acme");
+    expect(group.props.projects).toHaveLength(1);
+    expect(group.props.projectsStatus).toBe("success");
+    expect(group.props.currentPath).toBe("/acme/projects/p1/issues");
+    expect(group.props.activeProjectId).toBe("p1");
+    expect(group.props.canCreateProject).toBe(true);
+    expect(typeof group.props.onCreateProject).toBe("function");
+    expect(typeof group.props.onNavigate).toBe("function");
+    expect(typeof harness.sidebar?.onNavigateHref).toBe("function");
+  });
+
+  it("forwards the pending collection to the projects group (SHELL-049)", () => {
+    stubShellQueries(undefined, { data: undefined }, { data: undefined, status: "pending" });
+    renderShell();
+    const group = harness.sidebar?.projectsGroup as React.ReactElement<{
+      projects: unknown[];
+      projectsStatus: string;
+    }>;
+    expect(group.props.projectsStatus).toBe("pending");
+    expect(group.props.projects).toEqual([]);
   });
 
   it("opens personalization from the sidebar launcher with the resolved group", async () => {

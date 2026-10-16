@@ -4,7 +4,9 @@
 // Per-member tab preferences (parity/specs/shell.md §7, SHELL-079). The
 // default tab and hidden list persist on the project user-properties
 // endpoint; writes apply optimistically, roll back on failure, and toast.
-// Sibling preference branches ride along untouched.
+// Sibling preference branches ride along untouched. The listed-project
+// cap read lives here beside its workspace-properties query so the
+// sidebar layout graph does not pull the display-preference writes.
 
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -48,6 +50,21 @@ export function useWorkspaceProperties(workspaceSlug: string) {
 /** The caller's per-project display properties. */
 export function useProjectProperties(workspaceSlug: string, projectId: string) {
   return useQuery(projectPropertiesQueryOptions(getAppClient(), workspaceSlug, projectId));
+}
+
+/**
+ * Effective listed-project cap: null means uncapped. Zero, negative
+ * and absent limits all read as uncapped.
+ */
+export function selectProjectListCap(limit: number | null | undefined): number | null {
+  if (limit === null || limit === undefined || limit <= 0) return null;
+  return limit;
+}
+
+/** The effective listed-project cap for one workspace (null: uncapped). */
+export function useProjectListCap(workspaceSlug: string): number | null {
+  const properties = useWorkspaceProperties(workspaceSlug);
+  return selectProjectListCap(properties.data?.navigation_project_limit);
 }
 
 const DEFAULT_SAVED_TITLE = "Default tab saved";

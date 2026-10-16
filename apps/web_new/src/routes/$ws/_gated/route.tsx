@@ -26,11 +26,13 @@ import {
   meQueryOptions,
   ONBOARDING_PATH,
   selectWorkspace,
+  usePermissions,
   workspacesQueryOptions,
 } from "../../../core/session/index.js";
 import { runSignOutAction, signOutCommand, useSignOut } from "../../../features/auth/index.js";
+import { QuickCreateButton } from "../../../features/issues/index.js";
 import { unreadNotificationsQueryOptions } from "../../../features/notifications/index.js";
-import { projectsQueryOptions } from "../../../features/projects/index.js";
+import { projectsQueryOptions, selectSidebarProjects, SidebarProjectsGroup } from "../../../features/projects/index.js";
 import {
   selectPersonalEntries,
   selectPersonalGroup,
@@ -108,9 +110,11 @@ export const Route = createFileRoute("/$ws/_gated")({
     return {};
   },
   loader: async ({ context, params }) => {
+    // Projects start loading but never block the shell: the sidebar
+    // renders placeholder rows while the collection resolves (SHELL-049).
+    void context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws)).catch(() => undefined);
     await Promise.all([
       context.queryClient.ensureQueryData(workspacesQueryOptions(context.apiClient)),
-      context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws)),
       context.queryClient
         .ensureQueryData(unreadNotificationsQueryOptions(context.apiClient, params.ws))
         // The unread dot is optional chrome: a failing count must not fail the shell.
@@ -183,12 +187,14 @@ function WorkspaceShell({
   const context = Route.useRouteContext();
   const { data: me } = useSuspenseQuery(meQueryOptions(context.apiClient));
   const { data: workspaces } = useSuspenseQuery(workspacesQueryOptions(context.apiClient));
-  const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, workspaceSlug));
+  const projectsQuery = useQuery(projectsQueryOptions(context.apiClient, workspaceSlug));
+  const projects = projectsQuery.data ?? [];
   const [deactivateOpen, setDeactivateOpen] = React.useState(false);
   const [createProjectOpen, setCreateProjectOpen] = React.useState(false);
   const [personalizeOpen, setPersonalizeOpen] = React.useState(false);
   const { data: unread } = useQuery(unreadNotificationsQueryOptions(context.apiClient, workspaceSlug));
   const sidebarPrefs = useSidebarPreferences(workspaceSlug);
+  const { canEdit } = usePermissions(workspaceSlug);
   const sidebarCollapsed = useShellChrome((state) => state.sidebarCollapsed);
   const clearPeek = useShellChrome((state) => state.clearPeek);
   const toggleSidebarCollapsed = useShellChrome((state) => state.toggleSidebarCollapsed);
@@ -199,6 +205,10 @@ function WorkspaceShell({
   const userLabel = me.display_name || me.email;
   const personalStates = selectPersonalEntries(sidebarPrefs.data);
   const personalGroup = selectPersonalGroup(sidebarPrefs.status, sidebarPrefs.data);
+  // Member-only rows (drafts, creation) hide from guests (SHELL-046);
+  // the quick-create picker files under joined projects only (SHELL-047).
+  const personalEntries = canEdit ? selectVisiblePersonalEntries(personalStates, workspaceSlug) : [];
+  const joinedProjects = selectSidebarProjects(projects);
   const dockItems: RailDockItem[] = (edition.rail ?? []).map((entry) => ({
     id: entry.id,
     label: entry.label,
@@ -238,15 +248,32 @@ function WorkspaceShell({
           workspaces={workspaces.map((entry) => ({ id: entry.id, slug: entry.slug, name: entry.name }))}
           activeSlug={workspaceSlug}
           onSelectWorkspace={onSelectWorkspace}
-          projects={projects.map((project) => ({ id: project.id, name: project.name, identifier: project.identifier }))}
-          activeProjectId={activeProject?.id ?? null}
-          onSelectProject={onSelectProject}
           userLabel={userLabel}
           onSignOut={onSignOut}
           onDeactivateAccount={() => setDeactivateOpen(true)}
-          personalEntries={selectVisiblePersonalEntries(personalStates, workspaceSlug)}
+          personalEntries={personalEntries}
           currentPath={currentPath}
           onPersonalize={() => setPersonalizeOpen(true)}
+          quickActions={
+            <QuickCreateButton
+              workspaceSlug={workspaceSlug}
+              projects={joinedProjects.map((project) => ({ id: project.id, name: project.name }))}
+              canCreate={canEdit}
+            />
+          }
+          projectsGroup={
+            <SidebarProjectsGroup
+              workspaceSlug={workspaceSlug}
+              projects={projects}
+              projectsStatus={projectsQuery.status}
+              currentPath={currentPath}
+              activeProjectId={activeProject?.id ?? null}
+              canCreateProject={canEdit}
+              onCreateProject={() => setCreateProjectOpen(true)}
+              onNavigate={onNavigateHref}
+            />
+          }
+          onNavigateHref={onNavigateHref}
         />
       }
       rail={rail}

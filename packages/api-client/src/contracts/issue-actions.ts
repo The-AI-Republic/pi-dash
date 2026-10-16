@@ -8,8 +8,8 @@
 // bundle (NEWFRONT-523, size gate).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { uuid } from "./fields.js";
-import { ISSUE_PRIORITIES } from "./issues.js";
+import { nullableDateTime, uuid } from "./fields.js";
+import { ISSUE_PRIORITIES, IssueListItem } from "./issues.js";
 
 /**
  * Thin work-item update for the shell: the command palette's contextual
@@ -46,6 +46,40 @@ export async function updateIssue(
  */
 export async function deleteIssue(client: ApiClient, slug: string, projectId: string, issueId: string): Promise<void> {
   await client.delete(`/api/workspaces/${slug}/projects/${projectId}/issues/${issueId}/`);
+}
+
+/** Minimal work-item create: the title; the server defaults the rest. */
+export interface IssueCreateInput {
+  name: string;
+}
+
+/**
+ * The created row: the list projection plus the deletion marker. The
+ * endpoint answers 201 with the same annotated `.values()` shape the
+ * list reads.
+ */
+export const IssueCreateResult = z.object({
+  ...IssueListItem.shape,
+  deleted_at: nullableDateTime(),
+});
+export type IssueCreateResult = z.infer<typeof IssueCreateResult>;
+
+/**
+ * Thin work-item create for the shell: the sidebar quick-create entry
+ * (SHELL-047) posts the dialog's title here. Only workspace admins and
+ * members may create (guests get 403), so callers disable the entry
+ * for them instead of surfacing the denial. Full issue ownership
+ * stays in the issues area.
+ */
+export async function createIssue(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  input: IssueCreateInput
+): Promise<IssueCreateResult> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/issues/`;
+  const envelope = await client.sendJson<unknown>("POST", path, { json: input });
+  return client.parse(IssueCreateResult, envelope.data, `POST ${path}`);
 }
 
 /** 201 {message} envelope shared by the membership writes below. */

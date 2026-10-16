@@ -24,6 +24,8 @@ export {
 } from "./api/mutations.js";
 export type { CreateProjectInput, ProjectLifecycleInput, ToggleFavoriteInput } from "./api/mutations.js";
 export { projectDetailsQueryOptions, projectsQueryOptions } from "./api/queries.js";
+export { applyProjectOrder, PROJECT_ORDER_FAILED_TITLE, useUpdateProjectOrder } from "./api/projectOrder.js";
+export type { ProjectOrderInput } from "./api/projectOrder.js";
 export { JoinProjectDialog } from "./components/JoinProjectDialog.js";
 export type { JoinProjectDialogProps } from "./components/JoinProjectDialog.js";
 export { CreateProjectDialog } from "./components/CreateProjectDialog.js";
@@ -56,18 +58,15 @@ export {
   applyNavigationPrefs,
   mergeNavigationPrefs,
   projectPropertiesQueryOptions,
+  selectProjectListCap,
+  useProjectListCap,
   useProjectProperties,
   useTabPreferences,
   useWorkspaceProperties,
   workspacePropertiesQueryOptions,
 } from "./api/tabPreferences.js";
 export type { TabPreferencesHandle } from "./api/tabPreferences.js";
-export {
-  selectProjectListCap,
-  useProjectListCap,
-  useUpdateProjectLimit,
-  useUpdateProjectNavMode,
-} from "./api/displayPreferences.js";
+export { useUpdateProjectLimit, useUpdateProjectNavMode } from "./api/displayPreferences.js";
 export type { ProjectLimitHandle, ProjectNavMode, ProjectNavModeHandle } from "./api/displayPreferences.js";
 export {
   countFittingTabs,
@@ -96,12 +95,35 @@ export type {
   StripWorkItem,
   TabPreferences,
 } from "./tabs.js";
+export {
+  compareSidebarOrder,
+  isAggregateRowActive,
+  isProjectsGroupRoute,
+  isSidebarProject,
+  isSubnavEntryActive,
+  moveProjectToIndex,
+  projectOrderPatch,
+  PROJECT_ORDER_STEP,
+  resolveDropTarget,
+  resolveProjectRowHref,
+  resolveReorder,
+  revealRow,
+  selectSidebarProjects,
+  selectSubnavEntries,
+  sliceVisibleProjects,
+  sortOrderForMove,
+} from "./sidebar.js";
+export type { ScrollRevealTarget, SidebarDropRow, SidebarDropTarget, SidebarSubnavEntry } from "./sidebar.js";
 export { DefaultTabRedirect } from "./components/DefaultTabRedirect.js";
 export type { DefaultTabRedirectProps } from "./components/DefaultTabRedirect.js";
 export { LeaveProjectDialog, LEAVE_CONFIRM_PHRASE } from "./components/LeaveProjectDialog.js";
 export type { LeaveProjectDialogProps } from "./components/LeaveProjectDialog.js";
 export { ProjectQuickActions } from "./components/ProjectQuickActions.js";
 export type { ProjectQuickActionsProps } from "./components/ProjectQuickActions.js";
+export { ROW_LINK_COPIED_TITLE, SidebarProjectRow } from "./components/SidebarProjectRow.js";
+export type { SidebarProjectRowProps } from "./components/SidebarProjectRow.js";
+export { SidebarProjectsGroup } from "./components/SidebarProjectsGroup.js";
+export type { SidebarProjectsGroupProps } from "./components/SidebarProjectsGroup.js";
 export { ProjectSwitcher } from "./components/ProjectSwitcher.js";
 export type { ProjectSwitcherProps, SwitcherProject } from "./components/ProjectSwitcher.js";
 export { ProjectTabChrome } from "./components/ProjectTabChrome.js";
