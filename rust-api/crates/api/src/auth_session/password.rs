@@ -252,50 +252,13 @@ fn content_type_of(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Percent-decode plus `+`-as-space (`urlencoded` form field decoding).
-fn form_decode(field: &str) -> String {
-    let mut out = Vec::with_capacity(field.len());
-    let bytes = field.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() + 1 => {
-                let hex = &field[i + 1..(i + 3).min(field.len())];
-                match u8::from_str_radix(hex, 16) {
-                    Ok(byte) => {
-                        out.push(byte);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push(b'%');
-                        i += 1;
-                    }
-                }
-            }
-            _ => {
-                out.push(bytes[i]);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
+/// `request.POST` as last-wins pairs: `+`-as-space, `%XX` decoded,
+/// invalid escapes left literal (Django `QueryDict` parity — form
+/// parsing never raises). Shared decoder with the sibling auth modules
+/// (`email.rs`, `magic.rs`); never hand-roll this again (PIDASHCONV-1076:
+/// byte-index slicing of `&str` panicked on `%` before multibyte chars).
 fn parse_form(body: &[u8]) -> Vec<(String, String)> {
-    if body.is_empty() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(body)
-        .split('&')
-        .map(|pair| {
-            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            (form_decode(k), form_decode(v))
-        })
-        .collect()
+    serde_urlencoded::from_bytes::<Vec<(String, String)>>(body).unwrap_or_default()
 }
 
 /// Why a body could not be parsed (both answer before the view runs).
@@ -1917,6 +1880,42 @@ mod tests {
         assert_eq!(post_field(&data, "a"), Field::Text("y".to_owned()));
         assert_eq!(post_field(&data, "missing"), Field::Absent);
         assert_eq!(post_field(&data, "empty"), Field::Absent);
+    }
+
+    #[test]
+    fn form_decode_never_panics_on_percent_edge_cases() {
+        // PIDASHCONV-1076: `%` immediately followed by a multibyte char
+        // used to slice `&str` at a non-boundary (`byte index 3 is not a
+        // char boundary`). QueryDict parity: invalid escapes stay literal.
+        assert_eq!(
+            parse_form("email=%é".as_bytes()),
+            vec![("email".to_owned(), "%é".to_owned())]
+        );
+        assert_eq!(
+            parse_form("email=%☃".as_bytes()),
+            vec![("email".to_owned(), "%☃".to_owned())]
+        );
+        assert_eq!(
+            parse_form("email=%😀".as_bytes()),
+            vec![("email".to_owned(), "%😀".to_owned())]
+        );
+        assert_eq!(
+            parse_form(b"email=%"),
+            vec![("email".to_owned(), "%".to_owned())]
+        );
+        assert_eq!(
+            parse_form(b"email=%A"),
+            vec![("email".to_owned(), "%A".to_owned())]
+        );
+        assert_eq!(
+            parse_form(b"email=%zz"),
+            vec![("email".to_owned(), "%zz".to_owned())]
+        );
+        // Valid escapes still decode.
+        assert_eq!(
+            parse_form(b"email=a%40b+c"),
+            vec![("email".to_owned(), "a@b c".to_owned())]
+        );
     }
 
     #[test]
