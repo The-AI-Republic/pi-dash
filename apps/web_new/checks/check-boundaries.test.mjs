@@ -73,5 +73,7 @@ describe("entriesCatalogFailure", () => {
   it("passes non-catalog targets", () => {
     expect(entriesCatalogFailure("shared/shell/HelpMenu.tsx", "shared/shell/externalLinks.js")).toBeNull();
     expect(entriesCatalogFailure("shared/shell/HelpMenu.tsx", "shared/shell/chromeState.js")).toBeNull();
+    expect(entriesCatalogFailure("shared/shell/HelpMenu.tsx", "shared/coexistence/CrossAppLink.js")).toBeNull();
+    expect(entriesCatalogFailure("shared/shell/HelpMenu.tsx", "features/issues/panel.js")).toBeNull();
   });
 });
