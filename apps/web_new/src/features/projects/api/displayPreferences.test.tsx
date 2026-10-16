@@ -8,13 +8,8 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import {
-  selectProjectListCap,
-  useProjectListCap,
-  useUpdateProjectLimit,
-  useUpdateProjectNavMode,
-  type ProjectNavMode,
-} from "./displayPreferences.js";
+import { useUpdateProjectLimit, useUpdateProjectNavMode, type ProjectNavMode } from "./displayPreferences.js";
+import { useProjectListCap } from "./tabPreferences.js";
 
 vi.mock("../../../shared/shell/index.js", () => ({
   notifyError: vi.fn(),
@@ -92,16 +87,6 @@ function stubClient(options: StubOptions = {}) {
   }) as never);
   return { client, calls };
 }
-
-describe("project list cap selector", () => {
-  it("reads zero, negative and absent limits as uncapped", () => {
-    expect(selectProjectListCap(0)).toBeNull();
-    expect(selectProjectListCap(-4)).toBeNull();
-    expect(selectProjectListCap(null)).toBeNull();
-    expect(selectProjectListCap(undefined)).toBeNull();
-    expect(selectProjectListCap(3)).toBe(3);
-  });
-});
 
 describe("display preference hooks", () => {
   function renderHandle(options: StubOptions = {}) {

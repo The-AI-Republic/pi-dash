@@ -3,6 +3,7 @@
 // See the LICENSE file for details.
 // Contract: issue list and issue detail (read-only) against live Django.
 import { describe, expect, it } from "vitest";
+import { createIssue, deleteIssue } from "../contracts/issue-actions.js";
 import { getIssue, listIssues } from "../contracts/issues.js";
 import { listProjects } from "../contracts/projects.js";
 import { CONTRACT_PROJECT_IDENTIFIER, CONTRACT_WORKSPACE, contractEnabled, sharedSignedIn } from "./setup.js";
@@ -11,6 +12,8 @@ import type { ApiClient } from "../client.js";
 async function signedIn(): Promise<ApiClient> {
   return sharedSignedIn();
 }
+
+const CONTRACT_ISSUE_NAME = "Parity quick-create probe";
 
 async function seededProjectId(client: ApiClient): Promise<string> {
   const projects = await listProjects(client, CONTRACT_WORKSPACE);
@@ -26,6 +29,22 @@ describe.skipIf(!contractEnabled)("issues contract", () => {
     expect(page.total_count).toBeGreaterThanOrEqual(1);
     expect(page.results.length).toBeGreaterThanOrEqual(1);
     expect(page.results[0]?.project_id).toBe(await seededProjectId(client));
+  });
+
+  it("creates a work item and deletes it again", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    // A dead run may have left its row behind; clear it first so the
+    // seed stays clean no matter how often this suite runs.
+    const stale = await listIssues(client, CONTRACT_WORKSPACE, projectId);
+    for (const row of stale.results.filter((entry) => entry.name === CONTRACT_ISSUE_NAME)) {
+      await deleteIssue(client, CONTRACT_WORKSPACE, projectId, row.id);
+    }
+    const created = await createIssue(client, CONTRACT_WORKSPACE, projectId, { name: CONTRACT_ISSUE_NAME });
+    expect(created.name).toBe(CONTRACT_ISSUE_NAME);
+    expect(created.project_id).toBe(projectId);
+    expect(created.sequence_id).toBeGreaterThan(0);
+    await deleteIssue(client, CONTRACT_WORKSPACE, projectId, created.id);
   });
 
   it("reads one issue back by id", async () => {

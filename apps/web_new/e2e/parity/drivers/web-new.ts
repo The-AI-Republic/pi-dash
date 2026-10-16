@@ -2221,7 +2221,7 @@ export class WebNewDriver implements ParityDriver {
     return todo("lastToast");
   }
   async readClipboard(): Promise<string> {
-    return todo("readClipboard");
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
   async subscribeToggle(): Promise<string | null> {
     return todo("subscribeToggle");
@@ -3490,82 +3490,211 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // Sidebar + workspace navigation (NEWFRONT-125, SHELL-046..062).
-  // Throwing stubs per the shared driver contract; the sidebar area fills
-  // these in when it lands. (Restored: the base merge dropped them.)
-  async resetSession(): Promise<void> {
-    return todo("resetSession");
+  // NEWFRONT-285 implements the rows half (SHELL-046..051) plus the
+  // shared navigation reads its scenarios use; the remaining stubs
+  // (overflow, More, favorites, switcher, menus, logo) belong to
+  // NEWFRONT-286/287.
+  private async screenAside(): Promise<Locator> {
+    // Same non-waiting read as the oracle driver: measure with
+    // getBoundingClientRect, which never waits, instead of boundingBox.
+    const asides = this.page.locator("aside");
+    const boxes = await asides
+      .evaluateAll((elements) =>
+        elements.map((element) => {
+          const box = element.getBoundingClientRect();
+          return [box.x, box.width, box.height];
+        })
+      )
+      .catch((): number[][] => []);
+    for (let index = 0; index < boxes.length; index += 1) {
+      const [x, width, height] = boxes[index] ?? [];
+      if ((x ?? -1) >= 0 && (width ?? 0) > 50 && (height ?? 0) > 50) return asides.nth(index);
+    }
+    return asides.first();
   }
 
-  async openWorkspacePath(_path: string): Promise<void> {
-    return todo("openWorkspacePath");
+  /** The sidebar row carrying a project name. */
+  private async projectRow(projectName: string): Promise<Locator> {
+    const aside = await this.screenAside();
+    return aside.locator("li[data-project-row]").filter({ hasText: projectName }).first();
+  }
+
+  async resetSession(): Promise<void> {
+    await this.page.context().clearCookies();
+    await this.page.goto("/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+  }
+
+  async openWorkspacePath(path: string): Promise<void> {
+    // Absolute (a copied deep link) or base-relative; the shell must
+    // mount there either way.
+    await this.gotoShell(path);
   }
 
   async isCreateProjectVisible(): Promise<boolean> {
-    return todo("isCreateProjectVisible");
+    // The header affordance reveals on group hover; the empty-state one
+    // renders in the open.
+    try {
+      await this.page.getByTestId("projects-group-toggle").hover({ timeout: 5_000 });
+    } catch {
+      return false;
+    }
+    const header = this.page.getByTestId("sidebar-create-project");
+    if ((await header.count()) > 0 && (await header.first().isVisible())) return true;
+    const empty = this.page.getByTestId("sidebar-empty-create-project");
+    return (await empty.count()) > 0 && (await empty.first().isVisible());
   }
 
   async isSidebarOnScreen(): Promise<boolean> {
-    return todo("isSidebarOnScreen");
+    const boxes = await this.page
+      .locator("aside")
+      .evaluateAll((elements) =>
+        elements.map((element) => {
+          const box = element.getBoundingClientRect();
+          return box.width > 50 && box.height > 50;
+        })
+      )
+      .catch((): boolean[] => []);
+    return boxes.some(Boolean);
   }
 
   async sidebarLinkTexts(): Promise<string[]> {
-    return todo("sidebarLinkTexts");
+    const aside = await this.screenAside();
+    const texts = await aside.locator("a").allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
-  async sidebarRowTone(_linkText: string): Promise<{ background: string; color: string }> {
-    return todo("sidebarRowTone");
+  async sidebarRowTone(linkText: string): Promise<{ background: string; color: string }> {
+    const aside = await this.screenAside();
+    // Innermost non-transparent background from the link outward, plus
+    // the text color: the same read the oracle makes on the old app.
+    return aside
+      .locator("a", { hasText: linkText })
+      .first()
+      .evaluate((link: HTMLAnchorElement) => {
+        let background = "rgba(0, 0, 0, 0)";
+        let node: HTMLElement | null = link;
+        for (let depth = 0; depth < 3 && node !== null; depth += 1) {
+          const fill = getComputedStyle(node).backgroundColor;
+          if (fill !== "rgba(0, 0, 0, 0)" && fill !== "transparent") {
+            background = fill;
+            break;
+          }
+          node = node.parentElement;
+        }
+        const inner = link.querySelector("div");
+        const color = getComputedStyle(inner ?? link).color;
+        return { background, color };
+      });
   }
 
   async isProjectsGroupOpen(): Promise<boolean> {
-    return todo("isProjectsGroupOpen");
+    const toggle = this.page.getByTestId("projects-group-toggle");
+    try {
+      return (await toggle.getAttribute("aria-expanded", { timeout: 5_000 })) === "true";
+    } catch {
+      return false;
+    }
   }
 
-  async setProjectsGroupOpen(_open: boolean): Promise<void> {
-    return todo("setProjectsGroupOpen");
+  async setProjectsGroupOpen(open: boolean): Promise<void> {
+    if ((await this.isProjectsGroupOpen()) === open) return;
+    await this.page.getByTestId("projects-group-toggle").click();
   }
 
-  async projectRowHref(_projectName: string): Promise<string | null> {
-    return todo("projectRowHref");
+  async projectRowHref(projectName: string): Promise<string | null> {
+    const aside = await this.screenAside();
+    const link = aside.locator("a", { hasText: projectName }).first();
+    try {
+      return await link.getAttribute("href", { timeout: 5_000 });
+    } catch {
+      return null;
+    }
   }
 
-  async isProjectRowInViewport(_projectName: string): Promise<boolean> {
-    return todo("isProjectRowInViewport");
+  async isProjectRowInViewport(projectName: string): Promise<boolean> {
+    const row = await this.projectRow(projectName);
+    const box = await row.boundingBox().catch(() => null);
+    if (!box) return false;
+    const viewport = this.page.viewportSize();
+    if (!viewport) return false;
+    return box.y >= 0 && box.y + box.height <= viewport.height;
   }
 
-  async toggleProjectRow(_projectName: string): Promise<void> {
-    return todo("toggleProjectRow");
+  async toggleProjectRow(projectName: string): Promise<void> {
+    const row = await this.projectRow(projectName);
+    await row.getByTestId("project-row-toggle").click();
   }
 
-  async isProjectRowOpen(_projectName: string): Promise<boolean> {
-    return todo("isProjectRowOpen");
+  async isProjectRowOpen(projectName: string): Promise<boolean> {
+    const row = await this.projectRow(projectName);
+    const toggle = row.getByTestId("project-row-toggle");
+    if ((await toggle.count()) > 0) {
+      return (await toggle.first().getAttribute("aria-expanded")) === "true";
+    }
+    return (await row.getByTestId("project-subnav-link").count()) > 0;
   }
 
-  async setProjectRowOpen(_projectName: string, _open: boolean): Promise<void> {
-    return todo("setProjectRowOpen");
+  async setProjectRowOpen(projectName: string, open: boolean): Promise<void> {
+    // Drive the toggle until the row agrees; the row mounts its toggle
+    // asynchronously after the projects fetch, so a closed read may mean
+    // "not rendered yet" on a freshly landed project route.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if ((await this.isProjectRowOpen(projectName)) === open) return;
+      const row = await this.projectRow(projectName);
+      await row.getByTestId("project-row-toggle").click({ timeout: 10_000 });
+    }
+    await expect.poll(() => this.isProjectRowOpen(projectName), { timeout: 10_000 }).toBe(open);
   }
 
   async projectSubnavLinks(): Promise<{ text: string; href: string | null }[]> {
-    return todo("projectSubnavLinks");
+    const links = this.page.locator(
+      'a[href*="/projects/"][href$="/issues/"], a[href*="/projects/"][href$="/pages/"], a[href*="/projects/"][href$="/intake/"], a[href*="/projects/"][href$="/schedulers/"], a[href*="/projects/"][href$="/runners/"], a[href*="/projects/"][href$="/cycles/"], a[href*="/projects/"][href$="/modules/"], a[href*="/projects/"][href$="/views/"]'
+    );
+    const count = await links.count();
+    const rows: { text: string; href: string | null }[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const link = links.nth(index);
+      rows.push({
+        text: ((await link.innerText().catch(() => "")) ?? "").trim(),
+        href: await link.getAttribute("href").catch(() => null),
+      });
+    }
+    return rows;
   }
 
   async isQuickCreateEnabled(): Promise<boolean> {
-    return todo("isQuickCreateEnabled");
+    return this.page.getByRole("button", { name: "New work item" }).isEnabled();
   }
 
   async openQuickCreate(): Promise<void> {
-    return todo("openQuickCreate");
+    const entry = this.page.getByRole("button", { name: "New work item" });
+    // The button enables asynchronously after the projects fetch; a
+    // slow first paint may still show it disabled, so retry once.
+    try {
+      await entry.click({ timeout: 10_000 });
+    } catch {
+      await entry.click({ timeout: 10_000 });
+    }
   }
 
   async isQuickCreateDialogOpen(): Promise<boolean> {
-    return todo("isQuickCreateDialogOpen");
+    return this.page
+      .getByRole("dialog")
+      .filter({ hasText: "Create new work item" })
+      .isVisible()
+      .catch(() => false);
   }
 
-  async openProjectQuickMenu(_projectName: string): Promise<void> {
-    return todo("openProjectQuickMenu");
+  async openProjectQuickMenu(projectName: string): Promise<void> {
+    const row = await this.projectRow(projectName);
+    await row.hover();
+    await row.getByTestId("project-row-menu").click();
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: 10_000 });
   }
 
   async projectQuickMenuTexts(): Promise<string[]> {
-    return todo("projectQuickMenuTexts");
+    const texts = await this.page.getByRole("menuitem").allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
   async isProjectsOverflowVisible(): Promise<boolean> {
@@ -3624,8 +3753,12 @@ export class WebNewDriver implements ParityDriver {
     return todo("activateHelpEntry");
   }
 
-  async isToastVisible(_text: string): Promise<boolean> {
-    return todo("isToastVisible");
+  async isToastVisible(text: string): Promise<boolean> {
+    return this.page
+      .getByText(text, { exact: false })
+      .first()
+      .isVisible()
+      .catch(() => false);
   }
 
   async isDialogWithTextVisible(_text: string): Promise<boolean> {
@@ -3640,8 +3773,11 @@ export class WebNewDriver implements ParityDriver {
     return todo("clickMainContent");
   }
 
-  async openSidebarLink(_text: string): Promise<void> {
-    return todo("openSidebarLink");
+  async openSidebarLink(text: string): Promise<void> {
+    const aside = await this.screenAside();
+    const link = aside.locator("a", { hasText: text }).first();
+    await link.scrollIntoViewIfNeeded();
+    await link.click();
   }
 
   async switchWorkspace(_name: string): Promise<void> {
@@ -3652,8 +3788,21 @@ export class WebNewDriver implements ParityDriver {
     return todo("activateUserMenuItem");
   }
 
-  async dragSidebarProjectBefore(_sourceName: string, _targetName: string): Promise<void> {
-    return todo("dragSidebarProjectBefore");
+  async dragSidebarProjectBefore(sourceName: string, targetName: string): Promise<void> {
+    // Pointer drag through the hover handle: the pointerdown starts the
+    // reorder, the release above the target commits it.
+    const source = await this.projectRow(sourceName);
+    await source.hover();
+    const handle = source.getByTestId("project-drag-handle");
+    const from = await handle.boundingBox();
+    if (!from) throw new Error(`[parity] no drag handle for ${sourceName}.`);
+    const target = await this.projectRow(targetName);
+    const to = await target.boundingBox();
+    if (!to) throw new Error(`[parity] no sidebar row for ${targetName}.`);
+    await this.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await this.page.mouse.down();
+    await this.page.mouse.move(to.x + to.width / 2, to.y + 2, { steps: 12 });
+    await this.page.mouse.up();
   }
 
   async openFavoritesFolderDialog(): Promise<void> {
@@ -3710,8 +3859,10 @@ export class WebNewDriver implements ParityDriver {
 
   // --- NEWFRONT-125 review-fix stubs. Mirror of the interface additions.
 
-  async activateProjectQuickMenuItem(_name: string): Promise<void> {
-    return todo("activateProjectQuickMenuItem");
+  async activateProjectQuickMenuItem(name: string): Promise<void> {
+    const entry = this.page.getByRole("menuitem", { name }).first();
+    await entry.scrollIntoViewIfNeeded().catch(() => undefined);
+    await entry.click();
   }
 
   async dragFavoriteBefore(_sourceName: string, _targetName: string): Promise<void> {
@@ -3755,7 +3906,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async sidebarProjectPlaceholderCount(): Promise<number> {
-    return todo("sidebarProjectPlaceholderCount");
+    const aside = await this.screenAside();
+    const regions = aside.getByRole("status");
+    if ((await regions.count()) === 0) return 0;
+    return regions.first().locator(":scope > *").count();
   }
 
   async openDisplayOptions(): Promise<void> {

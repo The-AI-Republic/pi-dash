@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadPreference, preferenceStorage, storePreference } from "./preferenceStorage.js";
+import { loadPreference, preferenceStorage, removePreference, storePreference } from "./preferenceStorage.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -88,5 +88,25 @@ describe("storePreference", () => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;
     expect(() => storePreference("pref:unserializable", circular)).not.toThrow();
+  });
+});
+
+describe("removePreference", () => {
+  it("drops the stored payload", () => {
+    storePreference("pref:drop", { density: "icons" });
+    removePreference("pref:drop");
+    expect(globalThis.localStorage.getItem("pref:drop")).toBeNull();
+  });
+
+  it("swallows removal failures", () => {
+    // Let the writability probe pass, then fail the real removal: the
+    // first removeItem call is the probe's cleanup, the second is ours.
+    let calls = 0;
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      calls += 1;
+      if (calls > 1) throw new Error("denied");
+    });
+    expect(() => removePreference("pref:drop")).not.toThrow();
+    expect(calls).toBe(2);
   });
 });

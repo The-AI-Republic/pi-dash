@@ -75,3 +75,12 @@ export function storePreference(key: string, value: unknown): void {
     // Private modes and quota errors keep the in-memory state usable.
   }
 }
+
+/** Drop a JSON preference; storage failures are swallowed by design. */
+export function removePreference(key: string): void {
+  try {
+    preferenceStorage().removeItem(key);
+  } catch {
+    // Missing storage leaves nothing to clear.
+  }
+}
