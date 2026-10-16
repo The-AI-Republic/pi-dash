@@ -1,136 +1,201 @@
-# Area spec — Project settings, General tab (PSET-005–012)
+# Project settings — General tab: area spec (NEWFRONT-566)
 
-Source of truth for behavior: the running old app plus the old code paths
-listed under "Reference entry points". This file is prose: what the screen
-does, in which order, for whom. New code is written from this file, never
-from the old files.
+Rows PSET-005–012. Written from reading the old General form, its
+loader, and the danger-zone controls — plus the inventory Acceptance
+column and the general, artwork, execution and repository oracle
+scenarios. No old code, strings, styles or assets reused. Oracle
+scenarios are written from this spec and proven against the running
+old app.
 
-Target deltas (behavior the inventory names but unmerged main PRs still own):
-main#523 removes the cover banner, gallery search and cover upload entirely;
-main#503 changes the description placeholder. Until those merge, the oracle
-pins the current behavior and cites the PR at each affected assertion.
+Target rows (inventory describes the post-main-PR target, NEWFRONT-156
+rule): PSET-005 renders no cover banner and the description field
+carries its placeholder (targets per main#523 and main#503); PSET-007
+is emblem upload only, with no cover control and no gallery search
+(target per main#523). The current old app still shows the cover
+artwork; the new surface must not.
 
-## Reference entry points (read-only, never imported or copied)
+## General tab view (PSET-005)
 
-General form and save flow; the settings page shell with the admin gate and
-skeleton; the danger-zone rows with the archive and delete modals; the
-project card that hosts restore mode; the image picker popover behind the
-cover control; the cover-image helper that decides save-vs-warn.
+The tab renders the project emblem control, the name field, the
+description field, the repository URL row with its bind control, the
+base-branch field, the execution section (target picker, ticking
+switch, budget and cadence), the short-identifier field, the
+visibility-network picker, the timezone picker and the creation
+timestamp, followed by the save control and, for admins, the danger
+zone. No cover banner renders anywhere on the tab (target per
+main#523). The description input shows its guidance placeholder (target
+per main#503). While details are absent a skeleton stands in with
+block placeholders shaped like the emblem, name, description,
+identifier/network and save rows.
 
-## PSET-005 — view General tab
+The page has no denial view. Everyone sees the same tab; non-admins
+get the whole form dimmed with every input disabled and the danger
+zone hidden (admin-only). Outsiders who cannot access the project get
+the shell restriction screen (PSET-003), not a tab-level refusal. All
+fields render from the same detail fetch as PSET-001
+(`GET /api/workspaces/{ws}/projects/{pid}/`).
 
-Any project role opens the general address and sees one long form. From top
-to bottom: a cover banner with the project emblem overlapping its lower
-edge, the project name and short identifier beside the visibility marker;
-then labeled rows for project name, description, repository URL with its own
-bind button, base branch, the execution-target picker, the automated-run
-policy group (master switch, per-item budget with a no-cap toggle, cadence
-picker), the short identifier, the visibility network picker, the timezone
-picker, a submit button and a creation-timestamp line. While the details are
-unresolved the tab shows a skeleton with the same skeleton blocks (banner,
-emblem, name, description, identifier, network, submit). A viewer with no
-access gets the restriction screen, not the form. TARGET (main#523): the
-cover banner is gone everywhere on the tab. TARGET (main#503): the
-description box carries the AI-context placeholder.
+## Edit, save and validation (PSET-006)
 
-## PSET-006 — edit and save as admin; read-only for others
+Submit sends `PATCH /api/workspaces/{ws}/projects/{pid}/` with the
+name, network, identifier, description, emblem object, timezone,
+base branch, execution target, ticking flag, run budget and cadence
+fields (review/test cadence columns ride along only when the cadence
+picker moved). Success confirms and stays on the tab; navigation and
+headers follow the rename through the shared project record. Failure
+keeps the form open with an error notice in every case.
 
-Admins edit every field and press the submit button; a valid save confirms
-with a success notice, persists through the project update endpoint, and the
-new name and identifier show up in navigation and headers. Name and
-identifier are required: clearing the name blocks the save with a field
-error; clearing the identifier blocks it too. The identifier field strips
-everything but alphanumerics and uppercases as you type; it accepts
-non-latin letters, must be 1–10 characters, and when it changed the save
-first asks the availability endpoint — a taken identifier stops the save
-with an identifier error, while a name or identifier that collides at write
-time surfaces its own already-taken notice; any other failure keeps the form
-open with a generic error notice. Base branch caps at 128 characters and
-only letters, numbers, dot, underscore, slash and dash; the repository URL
-caps at 512. Non-admins see the same tab dimmed with every input disabled
-and no danger zone below the form.
+Name is required and capped at 255 characters; clearing the name
+blocks the save with a field error, as does clearing the identifier.
+The identifier is required, one to ten characters, stripped to
+alphanumerics and uppercased as typed while still accepting
+non-Latin letters. The base branch caps at 128 characters of
+letters, digits, dot, underscore, slash and dash. The repository URL
+caps at 512 characters but never rides the normal save (it binds
+through PSET-008 only).
 
-## PSET-007 — emblem and cover artwork
+The identifier availability precheck fires only when the identifier
+changed: `GET /api/workspaces/{ws}/project-identifiers` with the
+`name` query parameter, consulting the `exists` flag in the response.
+A hit sets a field error and blocks the save. The endpoint answers
+from the reservation table rather than live membership, so its
+all-clear does not guarantee the write succeeds: a reserved sibling
+identifier stops early with a field error, while a reservation-less
+seeded identifier passes the precheck and collides at write time,
+surfacing an already-taken notice instead. Spec and test text must
+never present the precheck as authoritative.
 
-The emblem opens a picker offering emoji and material icons; picking one
-marks the form dirty and the new emblem renders after save. The cover
-control opens a picker popover with three tabs: a static bundled gallery
-(click applies straight into the form), an upload path, and Unsplash
-search (only when the instance configures it; the seeded stack does not,
-so no search renders there). A picked gallery or Unsplash cover
-re-uploads at save time: a failed re-upload aborts the settings save with
-an error notice and no request, while on the creation path the same
-failure only warns and the project is still created (creation dialog
-belongs to NEWFRONT-390). TARGET (main#523, verified on
-chore/remove-cover-image): cover control, gallery and search are gone;
-the emoji/material emblem picker is unchanged.
+Write-time name and identifier collisions are parsed out of the error
+payload by distinct taken-codes, each producing its own field-level
+refusal; anything else gets a generic failure notice.
 
-## PSET-008 — repository bind control
+## Emblem artwork (PSET-007)
 
-The repository row is admin-only and lives outside the normal save: typing
-in it never dirties the submit, and only the bind button persists. An empty
-input is refused with an error notice. When the typed URL matches the
-stored canonical URL the button flips to a disabled bound state. A
-successful bind writes the canonical URL (as the provider reports it) back
-into the field and the store, refreshes the binding status, confirms with a
-notice that points at enabling sync, and backend failures surface verbatim.
-Seeded-stack limit (probed 2026-10-12, no re-seed): the scratch stack has
-no git provider connected, so every bind answers 401 {"error":"GitHub
-token is missing"}. That 401 trips the global session interceptor, which
-reloads the page to / and back onto the tab via next_path — no "Bind
-failed" toast ever renders (bug NEWFRONT-395; intended: the refusal
-surfaces verbatim). The oracle pins the refusal path as observed (empty
-rejection client-side; provider-missing reload with no toast and no state
-change); the bound pill and canonical writeback need a provider-backed
-stack and stay unproven there.
+The emblem picker swaps the project mark into the form — dirtying it
+without saving on its own — and the save persists it inside the
+emblem object of the project update. There is no cover control and no
+gallery or provider search anywhere in the flow (target per main#523,
+verified against the cover-removal branch): artwork is a user-asset
+upload for the emblem only, confirmed through the asset pipeline
+before the save completes. For context, the current old picker
+offers a bundled gallery (a pick applies straight into the form), an
+upload path, and a provider search only when the instance configures
+one — all removed by the target. The creation dialog's artwork path
+is covered under PSET-013 (creation-dialog oracle scope NEWFRONT-390).
 
-## PSET-009 — execution target and automated-run policy
+Failure semantics carry over from the observed flow: a failed emblem
+upload aborts the whole settings save with an error notice — the form
+stays open and neither the emblem nor any accompanying field persists.
+On the creation path the same failure only warns and continues
+(PSET-013).
 
-The target picker offers the local runner, the cloud agent and the desktop
-agent; families the project cannot use render disabled and cannot be
-picked, and switching target affects only runs created afterwards. The
-master ticking switch defaults on; switching it off leaves the budget and
-cadence controls visible but inert, and nothing validates while it is off.
-The budget takes whole numbers of at least one, enforced twice: the input
-carries a native floor of 1 that blocks the submit with no notice and no
-request, while a cleared input reaches form validation and stops the save
-with a field error. The no-cap toggle stands in for the pool sentinel,
-remembers the typed value while ticked, and restores it when unticked; a
-blank budget falls back to the default on save. The
-cadence picker offers fixed presets from half an hour up to a day and adds
-a custom marker row for values set outside the picker; picking a cadence
-writes it to every ticking stage, while any other save leaves per-stage
-rhythms set elsewhere untouched — with one wrinkle: dirty flags survive a
-save within one form session, so a cadence touched earlier in the same
-session still propagates on the next save; only a fresh load isolates an
-unrelated save.
+## Repository binding (PSET-008)
 
-## PSET-010 — archive from the danger zone
+The repository row is admin-only and lives outside the normal save:
+typing never dirties the submit payload and only the bind control
+persists. Empty input is refused client-side with an error notice and
+no request.
 
-Below the form, admins see the danger zone with archive and delete rows.
-The archive row explains the project leaves navigation but stays reachable
-and its items leave search. Its confirm modal names the project, warns the
-contents archive with it, and offers cancel plus a confirm action; confirming
-archives through the archive endpoint, confirms with a success notice, and
-lands on the project list. Afterwards the project is gone from navigation,
-still opens directly, no longer scopes search, and refuses updates.
+The form fetches binding status with
+`GET /api/workspaces/{ws}/projects/{pid}/repository/` and shows a
+disabled bound state exactly when the status says bound and the
+trimmed input equals the stored canonical repository URL (blank never
+counts); otherwise an enabled bind control shows. Binding posts
+`POST .../projects/{pid}/repository/bind/` with `repo_url`, then
+writes the returned canonical URL back into the project via the
+standard project update and the form field, revalidates status, and
+points the operator at enabling sync in repository settings. The
+service layer also carries legacy provider-specific equivalents and a
+sync-toggle/unbind pair used by the repository tab (PSET-051); the
+General tab uses only the generic binding family.
 
-## PSET-011 — restore an archived project
+Pinned bug NEWFRONT-395: on a stack with no git provider connected
+the bind refusal returns unauthorized and trips the global session
+handling, which reloads the page instead of rendering the intended
+bind-failed notice — the failure surfaces as silence with no state
+change. Slices must preserve this divergent case as the oracle pins
+it.
 
-The same confirm modal in restore mode explains restoring re-activates the
-project for its members and offers cancel plus restore; confirming restores
-through the un-archive endpoint, confirms with a success notice, and lands
-on the project list with the project usable again. (Wiring note: restore
-mode is currently opened from the project card, while the danger zone always
-opens archive mode — the scenario drives the control that actually restores
-and the inventory entry point should be corrected to match.)
+## Execution target and automated-run policy (PSET-009)
 
-## PSET-012 — delete with double typed confirmation
+The target picker offers the local runner, the cloud agent family and
+the desktop agent family, persisted as the default executor. The local
+runner is always selectable as the unconditional fallback; the other
+two disable from the per-family availability flags arriving with the
+project details. Switching persists through the normal save and
+affects new runs only — work created before the switch keeps its
+original executor.
 
-The delete row warns everything inside the project is permanently removed.
-Its modal asks for the exact project name and the exact confirmation phrase;
-the destructive submit stays disabled until both match. Confirming deletes
-through the project endpoint, confirms with a success notice, lands on the
-project list, removes all contained data with no recovery, and clears the
-caller's favorites bookkeeping for that project. Attempting the default
-project is refused server-side.
+The master ticking switch defaults on; switching it off leaves the
+budget and cadence controls visible but inert, and nothing validates
+while it is off. Human-started runs are unaffected by the switch. The
+run budget stores whole ticks with a no-cap sentinel: the number
+input carries a native floor of one that blocks submit with no notice
+and no request, while a cleared field reaches form validation and
+stops the save with a field error; the no-cap option writes the
+sentinel while remembering the last typed capped value to restore on
+untick, and a blank budget falls back to the default on save. The
+cadence picker offers presets at half an hour through a day; any
+out-of-band value renders as a custom marker. Picking a cadence
+writes it to every ticking stage, while any other save leaves
+per-stage rhythms set elsewhere untouched — with one wrinkle: dirty
+flags survive a save within one form session, so a cadence touched
+earlier in the same session still propagates on the next save, and
+only a fresh load isolates an unrelated save. New budgets and
+cadences apply from the next tick; already-paused or already-scheduled
+items are untouched.
+
+## Danger zone: archive and restore (PSET-010, PSET-011)
+
+The admin-only danger area stacks an archive control above the delete
+control. Opening the archive control shows a shared confirm dialog
+used for both directions, with a flag selecting archive versus
+restore mode. The dialog names the project in its heading, carries a
+short explanatory paragraph that differs by mode (archiving takes the
+project plus its nested planning objects, hides its items from search
+and reserves restoration to admins; restoring reactivates the project
+and makes it visible to members again), and offers dismiss plus a
+confirm control whose label tracks progress while the request runs.
+
+Archive posts `POST /api/workspaces/{ws}/projects/{pid}/archive/` and
+restore deletes the same path. On success the view confirms, closes
+the dialog and lands on the workspace project list; the record stamps
+or clears the archived timestamp and favorites bookkeeping drops or
+restores the entry. The archived project leaves navigation and the
+default card grid but stays reachable by direct settings address;
+search-side and edit-side rejection are server-enforced (its items
+leave search results and its updates are refused). The dialog itself
+is always opened in archive mode; restore is reached from archived
+cards through admin-gated entries reusing the same dialog in restore
+mode. No client-side guard blocks archiving the workspace default
+project; default protection exists only on delete (PSET-012).
+
+## Danger zone: delete (PSET-012)
+
+The delete control opens a dedicated modal bound to the current
+project: a permanence warning, then two labeled inputs — first the
+project name, then a fixed confirmation phrase. Submit stays disabled
+until both match exactly: the first against the project name
+character-for-character, the second against the fixed lowercase
+phrase (the modal states the literal as the required input and as its
+own placeholder hint), with the handler re-checking the gate and the
+workspace slug before calling.
+
+On success the record is removed, matching favorites and permission
+entries are cleared, and the view lands on the workspace project list
+when inside that project (otherwise it stays and closes the modal)
+with a success notice. A later fetch of the id fails; favorites carry
+no entry for it. Deleting the workspace default project is refused
+server-side with a bad-request error naming it as non-deletable, and
+the project stays fetchable afterwards — there is no client-side
+guard or message, the button stays enabled and the server decides.
+
+## Reuse map for the General slice (NEWFRONT-572)
+
+Exists in apps/web_new and reusable as-is: project detail reads and
+the project update, identifier check, archive, restore and delete
+mutations in the shared API client, plus the archive and delete
+dialogs. New for this slice: the General form with all fields and
+validation, the emblem upload control, the repository bind row, the
+execution section, and the danger-zone rows wiring the existing
+dialogs and mutations.

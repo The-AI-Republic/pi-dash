@@ -1,148 +1,308 @@
-# Project settings, part F — area spec (PSET-043–061)
+# Project settings — features, estimates, repository, automations, schedulers: area spec (NEWFRONT-566)
 
-Oracle scope of NEWFRONT-393: feature-flag tabs, the estimates settings
-entry, the github sync tab, the automations tab, and the scheduler
-installs area. Written in prose from reading the old app
-(`apps/web`); the Playwright scenarios in
-`apps/web_new/e2e/parity/project-settings/` are coded from this text,
-never from the old sources.
+Rows PSET-043–061. Written from reading the old feature tabs and
+combined list, the automations rows, the scheduler bindings
+components, the repository tab, and the settings estimates entry
+with its embedded shared component — plus the inventory Acceptance
+column and the features, automations, schedulers and
+estimates-github oracle scenarios. No old code, strings, styles or
+assets reused. Oracle scenarios are written from this spec and proven
+against the running old app.
 
-## Feature tabs (PSET-043–047)
+Target rows (inventory describes the post-main-PR target,
+NEWFRONT-156 rule): PSET-058 normalizes stale runner-pool selections
+back to the project default (target per main#561); PSET-059 badges a
+finished finite series as Completed once the API reports
+series_exhausted (needs main#559), and disabled or uninstalled
+bindings stop firing (target per main#561). Neither marker exists in
+the old checkout; the new surface must add them.
 
-Each feature has a dedicated tab at
-`/{workspace}/settings/projects/{project}/features/{views,cycles,intake,modules,pages}`.
-Every tab is project-admin only: a viewer without project admin rights
-gets the shared not-authorized view instead of the tab. Each tab shows a
-heading with a one-line explainer and a single boxed switch
-("Enable views", "Enable cycles", "Enable intake", "Enable modules",
-"Enable pages"). Flipping a switch PATCHes one boolean on the project
-(`issue_views_view`, `cycle_view`, `inbox_view`, `module_view`,
-`page_view`), shows a pending toast ("Updating project feature...") and
-then a success toast ("Project feature updated successfully.") or an
-error toast. The switch reads the already-loaded project, so the tabs
-render with no loaders of their own. Turning a feature off hides its
-area product-wide (saved views, planning periods, the intake area,
-sub-project grouping, free-form documents); turning it back on
-restores the area.
+## Dedicated feature tabs (PSET-043–047)
+
+Each of the five tabs — saved views (PSET-043), timeboxing periods
+(PSET-044), the triage inbox (PSET-045), sub-project grouping
+(PSET-046) and free-form documents (PSET-047) — renders
+the same reusable switch row with its own heading and short
+explainer. The switch reflects one boolean project flag read from
+the already-loaded project record, with no per-tab fetch or loader
+of its own. Toggling sends
+`PATCH /api/workspaces/{ws}/projects/{pid}/` with a single-key
+payload flipping that flag, wrapped in pending/success/failure
+notices, and the corresponding product area appears or disappears
+project-wide. Non-admin members never see the switch: the page
+wrapper returns a not-authorized view without admin standing.
 
 ## Combined feature list (PSET-048)
 
-The combined list renders five cards (Cycles, Modules, Views, Pages,
-Intake), each with an icon, a title, a one-line explainer, and a single
-switch — no per-feature child settings. Each switch PATCHes its own
-flag with the same pending/success/error feedback as the dedicated
-tabs. The same list is reused on the post-create sheet, where it always
-renders in admin mode. Non-admins see the switches disabled.
-
-Recorded absence (not a bug): the post-create feature step was
-intentionally hidden upstream (bd4f157e — MVP starts work-items-only,
-the toggle UI remains in project settings), and the combined list
-served only that step — so the PSET-048 surface does not exist in this
-checkout and creating a project only ever closes the modal with a
-success notice. The paragraph above describes the removed surface for
-context; the oracle scenario proves the absence.
+The five-entry combined card list (a marker plus title and explainer
+per feature, no per-feature child settings) exists in the tree but
+mounts only inside the post-project-create sheet, which pairs it
+with a footer offering close and open-project exits. Toggling any
+entry writes the matching single flag through the same project
+update. The settings sidebar never renders this combined list — it
+renders navigation groupings only. Creation closes the dialog with a
+success notice and no feature step ever appears in the modal flow,
+as the oracle pins; spec and test text must not place the combined
+list in Settings.
 
 ## Estimates entry (PSET-049)
 
-The estimates tab at `.../settings/projects/{project}/estimates` is
-project-admin only (non-admins get the not-authorized view) and embeds
-the shared estimates component: a loader first, then an illustrated
-empty state with a creation action when no estimation system exists, or
-the active system shown with deletion only through a confirmation
-dialog (no edit affordance in this OSS build, per the estimates area's
-EST-014 contract) with superseded systems listed read-only. The enable
-switch sets or clears the project's active-estimate reference;
-flipping it on links the current active system id with a success
-notice, flipping it off unlinks it.
+The settings estimates page is a thin shell — title, admin gate,
+header — embedding the shared estimates component with the
+workspace, project and admin standing. The page owns only the shell;
+everything below reuses the shared component.
 
-## Github tab (PSET-050–052)
+Cross-epic seam: the loading screen, the illustrated empty state
+with its creation action, the enable switch, the active-system row,
+the archived-systems list and the create/edit/delete dialogs are
+all owned by the estimates area (EST-014 contract): this area reuses
+them and builds no local copies. Observed behavior of the reused
+component: while the project-estimates fetch is pending a dedicated
+loader shows; with no active system the empty state offers creation,
+which posts `POST .../projects/{pid}/estimates/` with the estimate
+object (name, type, marked latest-used) plus its points, then
+confirms or notices; the single active system renders as an editable
+row with edit and delete callbacks; superseded systems render in a
+separate read-only section with no row buttons; the enable switch
+writes the project's active-estimate reference to the store's
+current active id (or null to disable) with enabled/disabled notices,
+reading switch state from the stored reference rather than list
+position. Row actions render only when admin standing and editability
+both hold.
 
-The github tab at `.../settings/projects/{project}/github` is visible
-to project members and admins (viewers below member get the
-not-authorized view). It fetches the repository binding and shows a
-skeleton while the binding is unresolved. A bound project shows a card
-naming the provider family (GitHub, GitLab, or a generic Git provider),
-linking out to the repository by its full name, stating the mirroring
-contract (mirrored issues are read-only on title, description, and
-synced comment bodies; workflow fields stay editable), and showing the
-four-hour sync cadence with the last successful sync time plus a plain
-"Last error:" line when a failure is recorded. The sync switch flips
-the enabled flag with failure toasts on error; the Unbind button
-(admin-only, disabled while a request is in flight) unbinds with no
-confirmation dialog and a success notice stating mirrored issues remain
-editable. With no repository linked, the tab shows a guidance card
-pointing at General settings, where linking happens via the repository
-URL field and Bind action — so the stored URL and the binding cannot
-drift. There is no branch picker and no direction selector on this tab.
+Seam caveat the oracle pins: in this build the active row exposes
+only deletion — the edit dialog is wired in the shared root but
+unreachable here, since the row-actions component renders the delete
+affordance alone. Spec and test text must not describe an
+estimate-row edit control as reachable in Settings; at gate time
+this area proves empty-state creation, active-system delete and the
+enable switch, and treats row editing as owned by the estimates
+area.
 
-## Automations tab (PSET-053–054)
+Estimate writes and point sub-paths used above belong to the
+contracts issues (estimates, repository, deploy and scheduler
+endpoints).
 
-The automations tab at `.../settings/projects/{project}/automations`
-is project-admin only and holds two built-in rows plus an empty custom
-slot that renders nothing in this checkout. The rows carry a skeleton
-for the not-yet-loaded project, but it never renders on a fresh open:
-the route wrapper blanks the content until the project retrieve
-resolves, and that retrieve fills the shared map the rows read — so
-the tab settles directly on the rows with no loader phase (old bug
-NEWFRONT-397; intended behavior is the skeleton until loaded).
-The auto-archive row has a switch that applies
-a one-month default when enabled (`archive_in` 0 to 1) and expands to a
-month picker: presets plus a "Customize time range" action opening a
-dialog whose number input carries native min/max, so out-of-range
-values never submit (no request, the dialog stays open, no app
-message), while an empty submit shows "Select a month between 1 and
-12." Valid whole months from 1 to 12 persist and close the dialog.
-The auto-close row has
-a switch that applies a one-month default plus a default cancelled
-state when enabled (`close_in` 1 with `default_state`), clearing both
-on disable; it expands to a delay picker and a state picker limited to
-cancelled-group states, where the state picker is disabled when there
-is only one choice. Failed saves toast an error. Both rows disable
-their controls for non-admins.
+## Repository tab (PSET-050, PSET-051, PSET-052)
 
-## Scheduler installs (PSET-055–060)
+The tab admits project admins and members; outsiders get the denial
+view. It fetches binding state with
+`GET /api/workspaces/{ws}/projects/{pid}/repository/` and shows a
+skeleton placeholder while unresolved.
 
-The schedulers tab at `.../settings/projects/{project}/schedulers` is
-project-admin only (members are not routed here from settings; their
-read-only view lives on the project-level schedulers page). It lists
-one row per install: scheduler identity, recurrence as a plain-language
-sentence, next and last run times, an optimistic enabled switch that
-rolls back on error, last-updated time, and edit/uninstall actions.
-Clicking a row deep-links to the install's detail page. The creation
-button opens a two-path dialog: install an already-defined workspace
-scheduler that is enabled and not yet bound here, or author a new
-workspace scheduler definition and install it in one submit (name with
-an auto-derived slug, description, prompt, color). The author path
-requires workspace admin and flags duplicate slugs inline; when nothing
-is installable and the viewer cannot author, a dead-end message
-explains why instead of offering a phantom action. Install
-configuration covers a start datetime, a timezone picked from the
-platform zone list (the runtime's Intl list, which carries no UTC
-entry in modern browsers; UTC survives only in the curated fallback
-for runtimes without Intl zone support, and empty submits default to
-it), recurrence through
-a rule builder (repeat-every, weekday chips, monthly variants,
-Never/On/After ends, raw advanced text; a blank rule fires once) with
-a live plain-language preview, project-specific context appended to the
-base prompt at run time, an enabled flag, a three-way findings-handling
-choice (file per finding; fix and open for review without merging; file
-plus delegate the fix to the coding agent into review), and a
-runner-pool override defaulting to the project default with stale
-selections normalized back. The detail page shows the full
-configuration, the latest error banner when present, a collapsible view
-of the exact composed prompt, a workspace-definition link for workspace
-admins, and a paged run history (start, end, status, duration, pool,
-result excerpt) whose rows link to run detail and which refreshes on a
-fifteen-second poll; missing installs show a not-available state with a
-back link. Editing happens through the prefilled dialog; uninstalling
-asks for confirmation and removes only the binding — the workspace
-definition survives for later reinstall.
+The bound card (PSET-050) shows a provider-family label derived from
+the provider value, the repository full name as an external link to
+its web address, a mirroring-contract line (mirrored title,
+description and synced comments read-only while workflow fields stay
+editable), a fixed four-hour cadence line with the last-success
+timestamp appended when present, and a failure line only when a
+latest error exists. The sync toggle reflects the enabled flag and is
+admin-only.
+
+The sync toggle (PSET-051) writes
+`PATCH .../projects/{pid}/repository/` with the enabled flag, then
+revalidates the binding. Unbinding deletes the same repository path
+with no confirmation dialog, then revalidates plus a success notice
+noting mirrored issues stay editable afterwards — and a previously
+mirrored issue does remain server-editable after unbind. Both
+controls disable while a request is in flight and for non-admins.
+
+The unbound guidance card (PSET-052) explains that binding happens in
+General settings next to the repository URL field — kept there
+deliberately so the stored URL and the binding cannot drift — after
+which the tab toggle works. No branch picker and no direction
+selector exist on this tab. The tab itself never calls bind; binding
+happens solely through the General row (PSET-008).
+
+## Automations tab (PSET-053, PSET-054)
+
+Each automation is a row with a marker, title, explainer and switch,
+reading its delay field from the loaded project (undefined counts as
+off, any nonzero value as on) behind the admin gate. Enabling
+auto-archive (PSET-053) writes a one-month default; disabling writes
+zero and collapses the delay picker. When on, a delay selector shows
+the current month count with singular/plural wording, offering preset
+counts of one, three, six, nine and twelve months plus a custom-range
+action opening a dialog. The dialog takes whole months one to twelve
+with required/minimum/maximum validation; empty input shows the
+range message, valid input writes the field and closes, and the
+dialog resets on close. Out-of-range typed values never reach app
+validation — the native number bounds stop them first (the dialog
+stays open with no error text and the server value unchanged), so
+spec and test text must present the range message as the empty-input
+case only.
+
+Auto-close (PSET-054) shares the structure over the close-delay plus
+default-state fields: enabling writes a one-month default plus the
+first cancelled-group state id (or null when no cancelled state
+exists); disabling clears both delay and state and collapses both
+pickers. The state picker lists only cancelled-group states with
+their markers and names, writes the chosen id, and disables itself
+when fewer than two cancelled states give no real choice. Enabling
+with zero cancelled states in the project turns the feature on with
+a null default state and shows a placeholder rather than a state
+name — no guard prevents this. Non-admin gating matches the archive
+row.
+
+Pinned divergence NEWFRONT-397: the row skeletons exist in the tree
+but are unreachable on fresh open — the tab settles on rows with no
+loader phase. Slices must preserve the observed no-loader behavior
+as pinned.
+
+## Scheduler installs table (PSET-055)
+
+The tab renders one row per scheduler install bound to the project,
+read from
+`GET .../projects/{pid}/scheduler-bindings/` for rows plus
+`GET /api/workspaces/{ws}/schedulers/` for the definition catalog.
+Each row shows the scheduler identity (color chip, definition name,
+handle), recurrence as a plain-language sentence derived from the
+stored rule anchored at the start time (raw rule kept as hover text;
+a blank rule reads as a one-time firing), next and last run times
+with a never fallback, an optimistic enabled switch with a text
+label, the last-updated time, and edit/uninstall actions. The switch
+writes `PATCH .../scheduler-bindings/{bid}/` with the enabled flag
+through an optimistic update with rollback plus success/failure
+notices, locking while its own flip is in flight. Row clicks
+deep-link to that install's detail page (PSET-059); action cells stop
+propagation. The settings tab is project-admin only — members are
+not routed here from settings; their read-only installs view lives
+on the project-level schedulers page outside Settings. The shared
+panel's read-only rendering serves that project-surface view.
+
+## Install versus author dialog (PSET-056, PSET-057)
+
+The creation dialog offers install-existing versus create-new paths;
+the author path hides unless the viewer holds the workspace-admin
+grant. The installable set is catalog entries enabled workspace-wide
+minus already-bound ids, preselecting the first eligible entry with
+a note that installed ones are excluded. Install submits
+`POST .../projects/{pid}/scheduler-bindings/` with the scheduler,
+project, start, timezone, rule, extra context, enabled flag,
+findings-handling mode and runner pool. The dead end appears only
+when nothing is installable and the viewer cannot author: a compact
+dialog names the empty state and advises asking a workspace admin,
+offering no author action. When the viewer can author, the empty
+case instead defaults to the create path.
+
+The author path (PSET-057, workspace-admin only) takes a name with
+an auto-derived handle (hand-edit latches the handle like the
+project identifier in PSET-013), description, prompt and color. One
+submit performs two sequential calls: definition creation with
+`POST /api/workspaces/{ws}/schedulers/` carrying handle, name,
+description, prompt, color and enabled, then the binding post above.
+Duplicate handles surface inline on the handle field from the
+server's field error after submit rather than as a notice. On binding
+failure after a successful definition create, the dialog reports
+the split outcome, refreshes the catalog and flips to
+install-existing with the fresh definition preselected, so retry
+cannot orphan the definition.
+
+## Install configuration (PSET-058)
+
+Shared by install and edit flows: a start datetime (local picker
+converted to UTC on submit; required, with empty submit flagging the
+field), a timezone selector over the runtime platform zone list
+(which carries no UTC entry in modern runtimes; UTC survives only in
+the curated fallback for runtimes without zone support, and empty
+submits default to it), recurrence through a rule builder —
+repeat-every count, weekday chips, monthly variants, Never/On/After
+ends, plus an Advanced raw textarea — with a live plain-language
+preview (a blank rule fires once at start), optional project-context
+notes appended to the base prompt at run time, an enabled flag noting
+disabled installs do not fire, a three-way findings-handling choice
+(file one item per finding; fix and open for review without merging;
+file plus delegate the fix to the coding agent into review), and a
+runner-pool override defaulting to the project default with late
+binding at fire time. All fields persist and round-trip; the preview
+tracks the builder. The builder serializes valid rules, and a stored
+rule the builder cannot express opens in the raw textarea and submits
+byte-identical unless edited. Install defaults are tomorrow-morning
+start, browser zone or UTC, daily recurrence, enabled on. (The old
+checkout predates the builder and shows a raw rule textarea with
+preview; the builder is the target behavior above.)
+
+Target restatement (per main#561): when the loaded pool list lacks
+the form's selected pool id, the field normalizes to the
+project-default empty value, matching the dispatcher fire-time
+fallback — a no-op save therefore cannot fail on a deleted pool.
+Stale selections reset to default; slices must build this even
+though the old checkout predates it.
+
+## Install detail page (PSET-059)
+
+The detail page loads `GET .../scheduler-bindings/{bid}/` plus paged
+run history from `GET .../scheduler-bindings/{bid}/runs/` (page
+parameter, optional page size), polling every fifteen seconds. It
+shows a back-to-list link, name/color/handle/source markers, a
+workspace-disabled badge when the definition is off workspace-wide,
+a workspace-definition link for workspace admins only, edit and
+uninstall actions for project admins, the latest-error banner when
+present, a configuration grid (schedule, starts-at, timezone with
+UTC display default, next run, findings mode, pool name or default
+label, extra/skip dates when non-empty, installer identity, enabled
+switch), an optional project-context block, and a collapsible
+composed-prompt view collapsed by default. Run-history columns are
+started (with a queued fallback), ended, status badge, human
+duration, pool name and result excerpt (failure text for failed runs,
+otherwise the done-summary string); rows link to the existing
+run-detail route, empty states distinguish disabled versus
+scheduled-but-never-run versus plain empty, and a footer paginates
+with page and total. A missing install shows a not-available state
+with a back link.
+
+Target restatements: a finished finite series badges Completed once
+the API reports series_exhausted (needs main#559) — absent from the
+old checkout, slices must add it; disabled or uninstalled bindings
+stop firing (target per main#561) — the old view asserts this in
+copy but owns no firing logic, so slices carry the badge plus the
+enabled-state plumbing and treat actual firing as the
+schedulers-area dispatcher's concern.
+
+Cross-epic seam: the scheduler definition catalog and the run-detail
+views are owned by the agents/schedulers areas; this area links to
+them and reuses their row/status presentation. At gate time this area
+proves the table, dialog, configuration round-trip, detail page and
+history polling, and treats definition authoring surfaces beyond the
+creation dialog and run-detail pages as outbound integrations owned
+elsewhere.
+
+## Edit and uninstall (PSET-060)
+
+The edit dialog opens prefilled by converting the stored UTC start
+to local input form and copying timezone (or UTC), rule, context,
+enabled flag, findings mode and pool (empty for default). Submit
+writes the binding update with trimmed text fields and null pool for
+default; field-level server errors surface as notices. Uninstall is
+a confirmation stressing the workspace definition survives for later
+reinstall, deleting `.../scheduler-bindings/{bid}/` with no other
+payload; detail-page uninstall navigates back to the list.
+Uninstalling removes the binding only, keeping the definition
+reusable.
 
 ## Empty and loading states (PSET-061)
 
-Feature switches read the already-loaded project and show no loaders;
-automations shows a loader until the project loads; schedulers shows an
-in-table creation prompt when empty, a dead-end message when nothing is
-installable, and field-level messages for a missing start, a bad month
-range, a missing scheduler choice, and duplicate slugs. Server errors
-surface as toasts, per field where available.
+Feature switches read the already-loaded project with no loaders of
+their own. Automations settles on rows with no loader phase
+(NEWFRONT-397). Estimates shows its dedicated loader while the list
+fetch is held, then the illustrated empty state with its creation
+action. The repository tab shows its skeleton while the binding
+fetch is unresolved, then the bound or guidance card. Schedulers
+shows an in-table creation prompt when empty, the dead-end message
+when nothing is installable, and field-level messages for missing
+start, bad month range, missing scheduler or findings choice, and
+duplicate handles.
+
+## Reuse map for the feature, estimates, repository, automations and
+scheduler slices (NEWFRONT-582, NEWFRONT-602, NEWFRONT-604)
+
+Exists in apps/web_new and reusable as-is: the project update and
+create mutations, the estimate list read, and the settings-adjacent
+project-surface scheduler views. New for these slices: the five
+feature tabs plus the hidden post-create sheet wiring, the
+estimates page shell reusing the shared component, the repository
+tab with sync toggle and confirm-free unbind, the two automation
+rows with pickers and custom-month dialog, the scheduler table,
+two-path dialog, configuration forms, detail page with polled
+history, and the write contracts, which belong to the contracts
+issues (estimates, repository, deploy and scheduler endpoints).

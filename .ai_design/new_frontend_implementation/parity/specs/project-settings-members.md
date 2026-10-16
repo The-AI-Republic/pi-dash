@@ -1,132 +1,168 @@
-# Area spec — project settings, members tab (PSET-018–027)
+# Project settings — members: area spec (NEWFRONT-566)
 
-Source: NEWFRONT-391 oracle research. Behavior paraphrased from the old
-frontend's members settings page and its member list, row, invite-dialog,
-remove-confirm and defaults components, plus the member service endpoints.
-No code, selectors, copy or structure are carried over; the new frontend
-is written from this prose.
+Rows PSET-018–027. Written from reading the old member list, table
+row, column, sort, picker and dialog components — plus the inventory
+Acceptance column and the members oracle scenarios. No old code,
+strings, styles or assets reused. Oracle scenarios are written from
+this spec and proven against the running old app.
 
-## Page composition and gating
-
-The members settings page stacks three blocks: a defaults section (lead,
-default assignee, guest access), a teamspace strip, and the member list
-(search, role filters, admin add control, table). Viewing requires project
-member standing or better, with workspace admins always admitted; project
-guests and outsiders see the not-authorized view instead of the table.
-The general tab stays visible to every role, but this members tab does not.
+Observed behavior the oracle pins as bugs is described as observed
+and named with its issue (role-change display versus write outcome,
+NEWFRONT-401; failed removal closing over the page, NEWFRONT-406).
+The new surface keeps the observed behavior except where a bug issue
+says otherwise.
 
 ## Member table (PSET-018)
 
-One row per project member with five columns: full name (given plus family
-name beside an avatar that links to that member's profile, falling back to
-an initial when no portrait exists), display name, email address, account
-type (the project role rendered as a word), and joining date in the app's
-standard date shape. The header row carries a per-column sort menu.
+The tab renders one table row per member with five columns: full
+name (avatar plus first and last names), display name, email, account
+type as the role word, and joining date formatted from the
+membership creation timestamp. Rows read from
+`GET /api/workspaces/{ws}/projects/{pid}/members/`. Non-human
+memberships are filtered out of the table (a bot membership never
+renders as a row). The page stacks three blocks: the defaults
+section (PSET-026), a teamspace strip, and the member list with its
+search, filters, add control and table.
 
-## Search (PSET-019)
+Cross-epic seam: both avatar states (photo and initial fallback)
+link out to the member profile route under the workspace. This area
+builds the table cell and preserves the link target; the profile
+area owns the destination — its address stability and what it
+renders. At gate time this area proves the link target is present on
+every avatar and treats the profile page itself as an outbound
+integration owned elsewhere.
 
-The search box filters the already-loaded roster in the browser, matching
-case-insensitively against display name and full name. Typing issues no
-requests; clearing restores the full list. An empty result shows a centered
-no-match notice rather than an empty table.
+The page renders a not-authorized view unless the viewer is a
+project admin, project member or workspace admin — project guests
+and workspace outsiders both get the denial even though the sidebar
+shows guests the Members entry (PSET-004) and guest list reads
+succeed server-side. The page gate is therefore UI-only on reads.
 
-## Role filter (PSET-020)
+## Search, filter and sort (PSET-019, PSET-020, PSET-021)
 
-A Filters dropdown offers one checkbox per project role (admin, member,
-guest). Choices persist per project across visits, and the button shows an
-active indicator while any filter applies.
+Search (PSET-019) is purely client-side over the already-fetched
+memberships, matching display name and full first-plus-last name
+case-insensitively with zero member-list requests per keystroke;
+clearing restores the full roster. The role filter (PSET-020) is a
+dropdown with one checkbox per role; checked roles narrow the table
+and mark the trigger button with an active indicator, and unchecking
+restores everything and clears the indicator. Sort (PSET-021) lives
+in every column header menu with ascending, descending and (once
+sorted) clear choices, and a direction marker on the active column
+only; sorting keys are per-field (name parts and email lowercased,
+join date with missing values treated as oldest, role word).
 
-## Sorting (PSET-021)
+Persistence for filter and sort is an in-memory per-project map:
+choices survive in-app tab visits within the session and a full
+reload resets to the default order. Spec and test text must never
+claim reload survival.
 
-Each column header menu offers ascending, descending and clear choices.
-The choice persists per project as a display filter across tab visits
-within the session; a full reload resets the table to its default order
-(NEWFRONT-409). The active header shows a direction indicator (an up or
-down arrow beside the menu chevron) while its column drives the order;
-inactive headers show the chevron alone.
+## Add members (PSET-022)
 
-## Adding members (PSET-022)
+An admin-only control opens a dialog starting with one row; rows can
+be added or removed past the first, each pairing a co-worker picker
+with a role dropdown. The picker lists workspace members excluding
+anyone already holding a project membership, searchable by name
+parts and display name. Picking a co-worker defaults that row's role
+to the person's workspace role; offered roles follow the co-worker's
+workspace role (workspace guests enter at guest level only,
+workspace admins at admin level only, workspace members get every
+role). A nominal per-row cap against the inviter's own project role
+exists in the dialog logic but never binds — only project admins
+reach the dialog and admin outranks every option — so the effective
+contract is no inviter-level cap, and the create endpoint applies
+none either. Submitting a row with an empty picker fails per-row
+validation and keeps the dialog open; closing resets the dialog back
+to a single blank row shortly after.
 
-An admin-only add control opens an invite dialog with one or more rows;
-each row pairs a co-worker picker (workspace members outside the project;
-current members are excluded) with a role picker. Picking a co-worker
-defaults that row's role to the co-worker's workspace role. Offered roles
-follow the co-worker's workspace role (workspace guests may only enter at
-guest level, workspace admins only at admin level, workspace members get
-every role); no cap against the inviter's own level exists in the dialog
-or on the create endpoint (NEWFRONT-399). Rows can be added and removed;
-every row needs both a member and a role before submit. One submit
-bulk-adds all rows, confirms with a success notice, and closes; closing or
-submitting resets the rows. A failed submit is silent apart from a console
-entry (no failure notice).
+Submit bulk-adds all rows at once with
+`POST /api/workspaces/{ws}/projects/{pid}/members/` carrying the
+`members` array of member-plus-role pairs, then confirms and closes.
+A failed submit is silent apart from a console entry — no failure
+notice renders. A single-member read is
+`GET .../projects/{pid}/members/{mid}/`.
 
-## Inline role change (PSET-023)
+## Inline role changes (PSET-023)
 
-The account-type cell is an inline role editor only for the permitted
-cases: a workspace admin's effective project role is admin, so the editor
-shows on every row except another workspace admin's (NEWFRONT-401), while
-a project admin without workspace standing sees it on every row except
-their own and except a workspace admin's. All other viewers see read-only
-text. The editor offers every role except for workspace-guest targets,
-who are capped to the guest option. The server governs writes by the real
-project role, so a workspace admin's writes against others' rows fail and
-only the own-role write lands; the server additionally refuses promotions
-to a role at or above the inviter's own level. There is no last-admin
-guard (the sole admin may demote themselves). Failures surface the
-server's message in an error notice.
-Server quirk (NEWFRONT-400, do not reproduce): the role endpoint computes
-its workspace-admin bypass from the target's workspace role instead of the
-requester's, so anyone's write against a workspace-admin target currently
-succeeds; the UI correctly shows those cells read-only.
+A row's role is editable when the editor is a workspace admin
+editing themselves, or a project admin editing someone who is
+neither themselves nor a workspace admin; everyone else sees plain
+role text, and guest rows offer only the guest option even to
+admins. The change sends
+`PATCH .../projects/{pid}/members/{mid}/` with the `role` field
+(note: membership id, not user id), applied optimistically and
+rolled back on failure, with a failed change toasting the server
+message durably while the table keeps the row. The server
+additionally refuses promotions to a role at or above the editor's
+own level. There is no last-admin guard: the sole admin can demote
+themselves and restore standing through the same cell.
 
-## Removing a member (PSET-024)
+Pinned mismatch NEWFRONT-401: a workspace admin is shown the editor
+on every row except another workspace admin's, but only their own
+write lands — other rows' writes are refused with a permission-error
+notice. Slices must preserve the observed display-versus-write split
+as the oracle pins it. Server quirk NEWFRONT-400: the role endpoint
+computes its workspace-admin bypass from the target's workspace role
+instead of the requester's, so a write against a workspace-admin
+target currently succeeds regardless of who sends it — while the UI
+correctly shows those cells read-only. Slices must match the
+observed server behavior as pinned, not the stricter rule.
 
-Hovering a row reveals a contextual menu (visible to admins, and to anyone
-on their own row). Choosing the remove entry opens a confirmation naming
-the member and warning that project access is lost permanently with no
-undo. Confirming deactivates the membership softly (server-side record
-kept); failures toast.
+## Remove and leave-self (PSET-024, PSET-025)
 
-## Leaving (PSET-025)
+A hover menu on the name cell offers Remove for others (admins) and
+Leave on one's own row. Remove confirms through a dialog warning
+that access is lost permanently and naming the member; cancel keeps
+the membership, confirm sends
+`DELETE .../projects/{pid}/members/{mid}/` (membership id). Removal
+is a server-side soft deactivation: the row disappears and the
+membership no longer resolves. The dialog closes unconditionally
+after submit settles, even when the removal call failed — only the
+notice signals the failure.
 
-One's own row offers leave-worded entries instead of remove-worded ones,
-explaining that rejoining is possible by invitation or for public
-projects. Confirming calls the leave endpoint (not the remove endpoint)
-and then routes to the projects list. Failures toast and the membership
-stays.
+Leave-self reuses the same dialog with leave-specific wording;
+confirm calls
+`POST .../projects/{pid}/members/leave/` and on success routes to
+the workspace project list. Failures notice and membership stays.
+
+Pinned divergence NEWFRONT-406: submitting a removal for an
+already-deleted membership ends the page outright with no navigation
+or notice, so failure-notice coverage for removals is carried by the
+role-change case instead. Companion pin NEWFRONT-398: even the
+removal-failure notice itself vanishes with the confirm dialog — it
+is only ever a flash on the way down. Slices must preserve both
+cases as pinned.
 
 ## Project defaults (PSET-026)
 
-Two pickers choose the project lead and the default assignee from current
-non-guest project members, each with a None entry that clears the slot.
-Every change saves immediately and confirms with a success notice. A guest
-access toggle lets guests view all project work items. Non-admins see all
-three controls disabled (pickers inert, toggle off-limits); while details
-load, loaders stand in.
+The defaults section offers a lead picker and a default-assignee
+picker over current project members excluding guests, plus a toggle
+letting guests view all project work items. Either picker offers a
+none choice clearing back to null; every pick or clear saves
+immediately through the project update with the lead, assignee or
+guest-visibility fields and confirms. The guest-visibility flip takes
+effect as viewing rights for guest roles. All three controls stay
+visible but disabled for non-admins; while project details load,
+loaders stand in for the controls.
 
 ## Loading and failure states (PSET-027)
 
-While the member ids are unset, a skeleton stands in for the table. Search
-or role filters that match nobody show the centered no-match notice. A
-failed role change raises a durable error toast carrying the server
-message without losing the table. A failed removal is worse: after the
-server refuses, the page fires a burst of further failing requests and
-then dies (the page closes with no navigation or crash event; NEWFRONT-406)
-— its error toast is only ever a flash on the way down (NEWFRONT-398).
-The invite dialog resets its rows after submit or close.
+A skeleton stands in while the roster is unfetched; the General tab
+carries its own analogous skeleton (PSET-005). Search/filter
+combinations matching nobody show a centered no-match notice with no
+extra action; clearing restores the rows. A refused role change
+toasts the server message and preserves the table with the
+optimistic change reverted. The invite dialog resets to one blank
+row after close (a very fast reopen can briefly show stale rows);
+the remove/leave dialog resets its loading state on close.
 
-## Observed edge notes for scenario authors
+## Reuse map for the members slices (NEWFRONT-574 read, NEWFRONT-579 writes)
 
-- The seeded stack carries an owner-admin (workspace and project admin),
-  a second plain member and a project guest: enough distinct roles for
-  filter, search, edit-permission and not-authorized scenarios without
-  re-seeding. (A bot project membership exists but is filtered from the
-  member list, so the table shows three rows.) The seeded owner doubles as
-  the workspace-admin viewer; staging a project-admin-only or
-  workspace-admin-only viewer needs temporary role changes through the API
-  (member<->admin workspace moves leave project roles untouched), always
-  restored afterwards.
-- Adding and removing members mutates shared seed state, so those
-  scenarios must restore the seeded membership through the API afterwards.
-- The leave scenario ends its own membership and must re-add itself (or
-  run as a throwaway user) so later scenarios see a clean stack.
+Exists in apps/web_new and reusable as-is: the member, state and
+label list reads plus the workspace-member list in the shared API
+client, and the avatar-plus-name presentation components. New for
+these slices: the settings member table with search, role filter
+and sort; the multi-row invite dialog; the gated inline role
+editor; the remove/leave confirmations with post-leave routing; the
+defaults section; and the write contracts, which belong to the
+contracts issues (members, states and labels writes).
