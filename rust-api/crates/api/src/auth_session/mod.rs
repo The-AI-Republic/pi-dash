@@ -19,6 +19,7 @@ pub mod email;
 // [`routes`]; merges keep both sides.
 pub mod magic;
 pub mod middleware;
+pub mod multipart;
 pub mod password;
 pub mod render;
 
