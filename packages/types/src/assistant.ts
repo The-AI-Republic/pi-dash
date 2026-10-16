@@ -89,6 +89,10 @@ export interface IUserLLMConfigInput {
  * Mirrors {@link IUserLLMConfig}; the API never echoes the key, only `has_api_key`.
  */
 export interface IUserSTTConfig {
+  /** Instance kill switch (`VOICE_DICTATION_ENABLED`). When false the web app
+   * hides dictation (settings keep only a Remove for a saved key) and the
+   * save/test/transcribe endpoints 404; DELETE always works. */
+  enabled: boolean;
   base_url: string;
   model_name: string;
   has_api_key: boolean;
