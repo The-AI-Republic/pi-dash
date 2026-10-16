@@ -41,12 +41,3 @@ orchestration/test_ticker_tasks.py
 # (Process note on PIDASHCONV-1.)
 runner/test_offline_runner_recovery.py
 runner/test_offline_runner_sweeps.py
-# Stage-8 drift, 2026-10-15 (PIDASHCONV-1055 audit): this file asserts
-# behavior that exists only on origin/main (PDASHOSS01-220, 4ed6e16a +
-# 61a0d181). The matrix serves Django from the checkout (frozen, predates
-# the drift), so the Django leg cannot pass until PIDASHCONV-1055 merges
-# main into rust-dev. Proven locally against main-Django + Rust (see
-# PIDASHCONV-1057 PR). At the merge: delete this line.
-# NOTE: rust-api-contract-tests-app-project.yml does not honor this file,
-# so the app-project job stays red on the Django leg until the merge.
-app_project/test_project_ticking_policy.py

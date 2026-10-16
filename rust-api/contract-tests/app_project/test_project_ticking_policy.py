@@ -5,9 +5,8 @@ Port of Django's tests/unit/serializers/test_project_ticking_policy.py
 so create and PATCH reject invalid values with the same field-error
 bodies on both backends.
 
-Stage-8 drift file (PIDASHCONV-1057): asserts behavior that exists only
-on origin/main, so it is listed in TASK_ORACLE_IGNORES.txt until
-PIDASHCONV-1055 merges main into rust-dev.
+Stage-8 drift file (PIDASHCONV-1057): asserted behavior that existed only
+on origin/main until PIDASHCONV-1055 merged main into rust-dev (2d029396).
 """
 
 import pytest
