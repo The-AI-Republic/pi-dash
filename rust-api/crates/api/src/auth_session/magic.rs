@@ -227,7 +227,7 @@ fn malformed_json(error: serde_json::Error) -> Response {
 /// normalised email, or `None` when the payload cannot supply a string —
 /// every `None` case 500s in Python (`AttributeError` on `.strip()` or the
 /// uncaught `ValidationError`).
-fn parse_generate_email(body: &[u8], is_json: bool) -> Option<String> {
+fn parse_generate_email(content_type: &str, body: &[u8], is_json: bool) -> Option<String> {
     if is_json {
         if body.is_empty() {
             return None;
@@ -236,10 +236,28 @@ fn parse_generate_email(body: &[u8], is_json: bool) -> Option<String> {
         let email = value.as_object()?.get("email")?.as_str()?;
         Some(normalise_email(email))
     } else {
-        let pairs: Vec<(String, String)> = serde_urlencoded::from_bytes(body).unwrap_or_default();
+        let pairs = form_pairs(Some(content_type), body);
         let email = pairs.iter().rev().find(|(k, _)| k == "email")?;
         Some(normalise_email(&email.1))
     }
+}
+
+/// `request.POST` as ordered pairs: multipart fields when the body is
+/// framed multipart, else the urlencoded parse for form posts
+/// (PIDASHCONV-1079). Any other content type leaves `POST` empty in
+/// Django, so the pairs are empty there (PIDASHCONV-1077).
+fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> {
+    let content_type = content_type.unwrap_or("");
+    if let Some(pairs) = crate::auth_session::multipart::parse_fields(content_type, body) {
+        return pairs;
+    }
+    let mime = content_type.split(';').next().map(str::trim).unwrap_or("");
+    let is_form = mime.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        || mime.eq_ignore_ascii_case("multipart/form-data");
+    if !is_form {
+        return Vec::new();
+    }
+    serde_urlencoded::from_bytes(body).unwrap_or_default()
 }
 
 /// `request.data.get("email", "").strip().lower()`: Python `strip` trims
@@ -271,8 +289,8 @@ struct SignForm {
     next_path: Option<String>,
 }
 
-fn parse_sign_form(body: &[u8]) -> SignForm {
-    let pairs: Vec<(String, String)> = serde_urlencoded::from_bytes(body).unwrap_or_default();
+fn parse_sign_form(content_type: &str, body: &[u8]) -> SignForm {
+    let pairs = form_pairs(Some(content_type), body);
     SignForm {
         code: form_field(&pairs, "code").trim().to_owned(),
         email: normalise_email(&form_field(&pairs, "email")),
@@ -290,21 +308,6 @@ fn parse_sign_form(body: &[u8]) -> SignForm {
 // views). Private copy per module (the password sibling keeps its own
 // too); only the page render is shared.
 // ---------------------------------------------------------------------------
-
-/// `request.POST` as last-wins pairs, only for form content types
-/// (any other content type leaves `POST` empty in Django).
-fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> {
-    let is_form = content_type.is_some_and(|ct| {
-        ct.split(';').next().is_some_and(|mime| {
-            mime.trim()
-                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
-        })
-    });
-    if !is_form {
-        return Vec::new();
-    }
-    serde_urlencoded::from_bytes::<Vec<(String, String)>>(body).unwrap_or_default()
-}
 
 /// Why the CSRF gate rejected (Django `REASON_*`; the failure page
 /// never renders the reason, so these are log labels only).
@@ -1663,7 +1666,7 @@ async fn generate(
         // DRF: empty JSON body parses to `{}` → `.get("email", "")` → 500.
         return server_error();
     } else {
-        match parse_generate_email(&body, false) {
+        match parse_generate_email(content_type, &body, false) {
             Some(email) => Some(email),
             None => return server_error(),
         }
@@ -1801,6 +1804,9 @@ async fn sign(
     // runs, so a failure has no side effects (no REQUIRED redirect, no
     // login). `root_url` is the flag-less `base_host(request)`.
     let root = base_host(&hosts, false, false, false);
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
     {
         let cookie_header = headers
             .get(header::COOKIE)
@@ -1808,9 +1814,6 @@ async fn sign(
             .unwrap_or("");
         let csrf_cookie = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME);
         let header_token = headers.get("x-csrftoken").and_then(|v| v.to_str().ok());
-        let content_type = headers
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok());
         if csrf_gate(
             csrf_cookie.as_deref(),
             header_token,
@@ -1821,7 +1824,7 @@ async fn sign(
             return csrf_failure_response(&root);
         }
     }
-    let form = parse_sign_form(&body);
+    let form = parse_sign_form(content_type.unwrap_or(""), &body);
     let required_slug = match flow {
         Flow::SignIn => "MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED",
         Flow::SignUp => "MAGIC_SIGN_UP_EMAIL_CODE_REQUIRED",
@@ -2340,12 +2343,14 @@ mod tests {
     fn form_parsing_matches_django_post() {
         // `request.POST.get(...)`: last value wins, missing → `""`,
         // email stripped + lowered, code stripped, `next_path` raw.
-        let form =
-            parse_sign_form(b"email=U%40X.com&code=+123456+&next_path=%2Fworkspaces&code=999");
+        let form = parse_sign_form(
+            "application/x-www-form-urlencoded",
+            b"email=U%40X.com&code=+123456+&next_path=%2Fworkspaces&code=999",
+        );
         assert_eq!(form.email, "u@x.com");
         assert_eq!(form.code, "999");
         assert_eq!(form.next_path.as_deref(), Some("/workspaces"));
-        let empty = parse_sign_form(b"");
+        let empty = parse_sign_form("application/x-www-form-urlencoded", b"");
         assert_eq!(
             empty,
             SignForm {
@@ -2354,6 +2359,14 @@ mod tests {
                 next_path: None
             }
         );
+        // Multipart posts read the same triple (PIDASHCONV-1079).
+        let multipart = parse_sign_form(
+            "multipart/form-data; boundary=b",
+            b"--b\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nU@x.com\r\n--b\r\nContent-Disposition: form-data; name=\"code\"\r\n\r\n42\r\n--b--\r\n",
+        );
+        assert_eq!(multipart.email, "u@x.com");
+        assert_eq!(multipart.code, "42");
+        assert_eq!(multipart.next_path, None);
     }
 
     #[test]
@@ -2361,18 +2374,37 @@ mod tests {
         // JSON object with a string email; anything else supplies no email
         // (→ 500 downstream, QUIRK-generate-500).
         assert_eq!(
-            parse_generate_email(br#"{"email": " H@x.com "}"#, true),
+            parse_generate_email("", br#"{"email": " H@x.com "}"#, true),
             Some("h@x.com".to_owned())
         );
-        assert_eq!(parse_generate_email(br#"{"email": null}"#, true), None);
-        assert_eq!(parse_generate_email(br#"{"email": 123}"#, true), None);
-        assert_eq!(parse_generate_email(br#"{}"#, true), None);
-        assert_eq!(parse_generate_email(b"not json", true), None);
+        assert_eq!(parse_generate_email("", br#"{"email": null}"#, true), None);
+        assert_eq!(parse_generate_email("", br#"{"email": 123}"#, true), None);
+        assert_eq!(parse_generate_email("", br#"{}"#, true), None);
+        assert_eq!(parse_generate_email("", b"not json", true), None);
         assert_eq!(
-            parse_generate_email(b"email=f%40x.com", false),
+            parse_generate_email(
+                "application/x-www-form-urlencoded",
+                b"email=f%40x.com",
+                false
+            ),
             Some("f@x.com".to_owned())
         );
-        assert_eq!(parse_generate_email(b"", false), None);
+        assert_eq!(
+            parse_generate_email("application/x-www-form-urlencoded", b"", false),
+            None
+        );
+        // Multipart posts read the same field (PIDASHCONV-1079).
+        let multipart =
+            b"--b\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nF@x.com\r\n--b--\r\n";
+        assert_eq!(
+            parse_generate_email("multipart/form-data; boundary=b", multipart, false),
+            Some("f@x.com".to_owned())
+        );
+        // Truncated multipart falls back to the urlencoded parse.
+        assert_eq!(
+            parse_generate_email("multipart/form-data; boundary=b", b"email=f%40x.com", false),
+            Some("f@x.com".to_owned())
+        );
     }
 
     #[test]
