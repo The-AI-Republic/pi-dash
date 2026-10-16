@@ -225,6 +225,11 @@ describe("PersonalizeDialog projects group", () => {
     await waitFor(() => expect(propsPatches(h.calls)).toHaveLength(1));
     expect(JSON.parse(propsPatches(h.calls)[0]!.body)).toEqual({ navigation_control_preference: "TABBED" });
     await waitFor(() => expect(screen.getByTestId("project-nav-tabbed")).toBeChecked());
+    // Flipping back exercises the accordion radio's own write path.
+    await user.click(screen.getByTestId("project-nav-accordion"));
+    await waitFor(() => expect(propsPatches(h.calls)).toHaveLength(2));
+    expect(JSON.parse(propsPatches(h.calls)[1]!.body)).toEqual({ navigation_control_preference: "ACCORDION" });
+    await waitFor(() => expect(screen.getByTestId("project-nav-accordion")).toBeChecked());
   });
 
   it("enables the cap with a default count of one", async () => {
