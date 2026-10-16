@@ -11,7 +11,7 @@ import { ApiClient } from "../client.js";
 import { isApiError } from "../errors.js";
 import { SignOutResult } from "./auth.js";
 import { InstanceDetails, SignInResult, parseAuthRedirectResult } from "./auth-entry.js";
-import { nullableDateTime, nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 
 export interface InstancePatch {
   instance_name?: string;
@@ -34,7 +34,7 @@ export const AdminMe = z.object({
   avatar: z.string(),
   avatar_url: z.nullable(z.string()),
   cover_image: z.nullable(z.string()),
-  date_joined: z.iso.datetime(),
+  date_joined: dateTime(),
   display_name: z.string(),
   email: z.email(),
   first_name: z.string(),
@@ -87,8 +87,8 @@ export type InstanceAdminUser = z.infer<typeof InstanceAdminUser>;
 /** One row of the admins list, with its nested user projection. */
 export const InstanceAdminEntry = z.object({
   id: uuid(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
   deleted_at: nullableDateTime(),
@@ -192,8 +192,8 @@ export async function adminSignOut(client: ApiClient): Promise<SignOutResult> {
  */
 export const InstanceConfiguration = z.object({
   id: uuid(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
   deleted_at: nullableDateTime(),

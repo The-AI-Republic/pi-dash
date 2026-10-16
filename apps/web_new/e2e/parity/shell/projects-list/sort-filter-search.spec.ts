@@ -139,8 +139,15 @@ test(
       // matches nothing while "riv" does. Intended: case-insensitive match.
       await driver.openFilterMenu();
       await driver.typeFilterSearch("Priv");
-      await expect.poll(() => driver.filterMenuHasOption("Private")).toBe(false);
-      await expect.poll(() => driver.filterMenuHasOption("No matches found")).toBe(true);
+      if (driver.target === "web_new") {
+        // Web_new folds case on both sides: the capitalized query matches
+        // (the option is shown, not selected, so the badge step below is
+        // unaffected).
+        await expect.poll(() => driver.filterMenuHasOption("Private")).toBe(true);
+      } else {
+        await expect.poll(() => driver.filterMenuHasOption("Private")).toBe(false);
+        await expect.poll(() => driver.filterMenuHasOption("No matches found")).toBe(true);
+      }
       await driver.closeMenu();
     });
 

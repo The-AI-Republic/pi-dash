@@ -50,7 +50,7 @@ export function TopBarSearch({ scope, onSelectSearchResult }: TopBarSearchProps)
   const containerRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
   const focusRequest = useTopSearchFocus((state) => state.request);
-  const mounted = React.useRef(false);
+  const lastRequest = React.useRef(focusRequest);
   // The panel reports its rows here once its chunk lands; until then the
   // keyboard sees zero rows, so arrows and Enter safely do nothing.
   const panelApi = React.useRef<TopBarSearchPanelApi>({ count: 0, activate: () => undefined });
@@ -71,12 +71,12 @@ export function TopBarSearch({ scope, onSelectSearchResult }: TopBarSearchProps)
   }, []);
 
   // The palette's focus entry bumps the counter; focusing opens the panel
-  // through the input's own onFocus (SHELL-089). Skipped on mount.
+  // through the input's own onFocus (SHELL-089). Compares against the
+  // last seen counter (not a mount flag): StrictMode replays this effect
+  // on mount, and a flag would focus the box on every page load.
   React.useEffect(() => {
-    if (!mounted.current) {
-      mounted.current = true;
-      return;
-    }
+    if (lastRequest.current === focusRequest) return;
+    lastRequest.current = focusRequest;
     inputRef.current?.focus();
   }, [focusRequest]);
 
@@ -115,6 +115,9 @@ export function TopBarSearch({ scope, onSelectSearchResult }: TopBarSearchProps)
         value={term}
         onChange={(event) => setTerm(event.target.value)}
         onFocus={() => setOpen(true)}
+        // Re-clicking the focused box reopens: focus alone never refires
+        // while the input already holds it (after Escape, say).
+        onClick={() => setOpen(true)}
         onKeyDown={onKeyDown}
         className="text-body h-(--control-height) w-full rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) text-(--text) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
       />

@@ -35,6 +35,12 @@ test.describe("repository star action", () => {
     { tag: specTags(["SHELL-103"]) },
     async ({ driver }) => {
       test.setTimeout(300_000);
+      // Web_new renders a currentColor vector icon instead of swapping
+      // png assets; the oracle leg below keeps pinning the old asset.
+      if (driver.target === "web_new") {
+        expect(await driver.repoStarIconThemed()).toBe(true);
+        return;
+      }
       const src = await driver.repoStarIconSrc();
       expect(src).not.toBeNull();
       // The production build fingerprints assets (github-white-<hash>.png)

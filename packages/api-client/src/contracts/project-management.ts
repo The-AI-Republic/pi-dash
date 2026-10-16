@@ -9,7 +9,7 @@
 // gate). Response shapes shared with the reads live in projects.ts.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableDateTime, nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 import { ProjectDetails, ProjectUserProperties, WorkspaceUserProperties } from "./projects.js";
 
 export interface ProjectCreateInput {
@@ -173,8 +173,8 @@ export const ProjectInvitation = z.object({
   role: z.number(),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
 });
 export type ProjectInvitation = z.infer<typeof ProjectInvitation>;
 

@@ -6,7 +6,7 @@
 // body carries no owner field.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableUuid, uuid } from "./fields.js";
 
 /** Nested owner projection on admin workspace rows. */
 export const AdminWorkspaceOwner = z.object({
@@ -38,8 +38,8 @@ export const AdminWorkspace = z.object({
   total_members: z.optional(z.nullable(z.number())),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
 });
 export type AdminWorkspace = z.infer<typeof AdminWorkspace>;
 

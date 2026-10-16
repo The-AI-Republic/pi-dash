@@ -3012,7 +3012,32 @@ export async function serverDeleteQuickLink(
 export interface HomeRecentVisit {
   id: string;
   entity_name?: string;
+  entity_identifier?: string;
   entity_data?: { name?: string; id?: string } | null;
+}
+
+/** Record an issue visit the way opening its detail page does.
+ *
+ * The server logs the visit on issue-detail GET (and a project visit
+ * on the project GET) through a celery task, so this polls the recents
+ * feed until the visit lands instead of sleeping. App-agnostic: the
+ * feed reads server visits no matter which client recorded them.
+ */
+export async function serverVisitIssue(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  await serverIssueDetail(workspaceSlug, projectId, issueId, sessionCookie, apiBase);
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    const rows = await serverRecents(workspaceSlug, sessionCookie, "issue", apiBase);
+    if (rows.some((row) => row.entity_identifier === issueId)) return;
+    if (Date.now() > deadline) throw new Error(`[parity] visit for issue ${issueId} never landed in recents.`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
 }
 
 /** Recent-visit rows for the workspace, optionally narrowed by entity. */
@@ -3075,6 +3100,10 @@ export async function serverSetWidget(
   data: Record<string, unknown>,
   apiBase: string = apiBaseFromEnv()
 ): Promise<void> {
+  // The endpoint lazy-creates the default rows on GET and answers 400 on a
+  // PATCH to a missing row, so initialize before patching. Convergent: the
+  // PATCH below applies the same delta whether the rows pre-existed or not.
+  await serverWidgets(workspaceSlug, sessionCookie, apiBase);
   await homeWrite(
     "PATCH",
     `/api/workspaces/${workspaceSlug}/home-preferences/${widgetKey}/`,

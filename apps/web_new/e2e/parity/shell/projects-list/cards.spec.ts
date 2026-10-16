@@ -6,6 +6,10 @@
 // contents + favorite star, star only for admin/member), SHELL-033 (card
 // routing: member into issues, outsider intercepted to join, archived never
 // navigates), SHELL-034 (quick actions / context menu stay contextual).
+// Target alignment (NEWFRONT-295 gate, main#523): cards carry no cover
+// slot, so the contents step asserts its absence and the actions steps
+// prove the entries on the header-row menu instead of the old cover
+// hover actions. No oracle: the old app still renders covers.
 import { test, expect } from "../../fixtures";
 import {
   NETWORK,
@@ -63,28 +67,28 @@ test(
       await expect.poll(() => driver.isFavoritesOpen()).toBe(true);
     });
 
-    await test.step("a created card shows its cover, logo and member stack with count", async () => {
+    await test.step("a created card shows no cover, its logo and member stack with count", async () => {
       await driver.clickHeaderCreateButton();
       await expect.poll(() => driver.isCreateProjectDialogVisible()).toBe(true);
-      await driver.fillCreateProjectName("Cover Card");
+      await driver.fillCreateProjectName("Plain Card");
       await driver.submitCreateProject();
-      await driver.awaitProjectCard("Cover Card");
-      expect(await driver.cardHasCoverImage("Cover Card")).toBe(true);
-      expect(await driver.cardHasLogo("Cover Card")).toBe(true);
-      await expect.poll(() => driver.cardAvatarStack("Cover Card")).toHaveLength(1);
+      await driver.awaitProjectCard("Plain Card");
+      expect(await driver.cardHasCoverImage("Plain Card")).toBe(false);
+      expect(await driver.cardHasLogo("Plain Card")).toBe(true);
+      await expect.poll(() => driver.cardAvatarStack("Plain Card")).toHaveLength(1);
 
       const mateOne = await seatFreshMember(owner, ws.slug, ROLE.MEMBER, "parity-card-m1");
       const mateTwo = await seatFreshMember(owner, ws.slug, ROLE.MEMBER, "parity-card-m2");
       const mateThree = await seatFreshMember(owner, ws.slug, ROLE.MEMBER, "parity-card-m3");
-      const cover = await projectByName(owner, ws.slug, "Cover Card");
-      await addProjectMembersViaApi(owner, ws.slug, cover!.id, [
+      const plain = await projectByName(owner, ws.slug, "Plain Card");
+      await addProjectMembersViaApi(owner, ws.slug, plain!.id, [
         { member_id: mateOne.userId, role: ROLE.MEMBER },
         { member_id: mateTwo.userId, role: ROLE.MEMBER },
         { member_id: mateThree.userId, role: ROLE.MEMBER },
       ]);
       await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(owner));
-      await driver.awaitProjectCard("Cover Card");
-      await expect.poll(() => driver.cardAvatarStack("Cover Card")).toEqual(expect.arrayContaining(["+2"]));
+      await driver.awaitProjectCard("Plain Card");
+      await expect.poll(() => driver.cardAvatarStack("Plain Card")).toEqual(expect.arrayContaining(["+2"]));
     });
 
     await test.step("a guest sees no favorite star", async () => {
@@ -251,6 +255,18 @@ test(
       await driver.openCardContextMenu("Doomed Action");
       await driver.clickCardContextMenuItem("Delete");
       await expect.poll(() => driver.isDeleteSubmitDisabled()).toBe(true);
+    });
+
+    await test.step("quick actions mount on the header row, never on a cover", async () => {
+      // Target per main#523: no cover slot exists to mount on, and the
+      // header-row menu carries the same contextual entries the steps
+      // above proved entry by entry.
+      await driver.openAuthenticated(`/${ws.slug}/projects`, browserSessionCookies(owner));
+      await driver.awaitProjectCard("Owned Action");
+      expect(await driver.cardHasCoverImage("Owned Action")).toBe(false);
+      await driver.openCardContextMenu("Owned Action");
+      expect(await driver.contextMenuItemLabels()).toEqual(expect.arrayContaining(["Settings", "Copy link"]));
+      await driver.closeMenu();
     });
   }
 );

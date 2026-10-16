@@ -329,14 +329,11 @@ export class WebNewDriver implements ParityDriver {
       await this.cardSection().waitFor({ timeout: 10_000 });
       return;
     } catch {
-      // A signed-in context bounces pre-paint (the old entry renders the
-      // card transiently instead, so same-context user switches submit
-      // through it). Clear the stale session and open the card for the
-      // next sign-in; a slow first paint just falls through to the retry.
-      if (new URL(this.page.url()).pathname !== "/") {
-        await this.dropSession();
-        await this.page.goto("/");
-      }
+      // A signed-in context bounces to the remembered workspace instead
+      // of painting the card; that bounce is the entry working, not a
+      // stale session, so it returns as-is (user switches reset first).
+      // A slow first paint just falls through to the retry.
+      if (new URL(this.page.url()).pathname !== "/") return;
       await this.waitForCard();
     }
   }
@@ -388,12 +385,34 @@ export class WebNewDriver implements ParityDriver {
     await passwordField.waitFor({ timeout: WebNewDriver.WAIT_MS });
     await passwordField.fill(password);
     const passwordForm = page.locator("form", { has: passwordField });
-    // Success navigates away (location.assign to the landing); wait for
-    // the card to go rather than any URL, since landings differ per user.
+    // Success navigates away (location.assign to the landing); the card
+    // leaving is only half the story — on a slow API the mutation can
+    // resolve after the test has already navigated on, and the belated
+    // assign then clobbers the test's page. So mark this realm, submit,
+    // wait for the card to go, then wait for the assign's load (marker
+    // gone) and the entry bounce (URL leaves /): only then is sign-in
+    // really complete. Landings differ per user, so the bounce target
+    // itself is never asserted here.
+    await page.evaluate(() => {
+      (globalThis as { __paritySignInMark?: boolean }).__paritySignInMark = true;
+    });
     await Promise.all([
       this.cardSection().waitFor({ state: "detached", timeout: 90_000 }),
       this.cardSubmit(passwordForm).click(),
     ]);
+    const assigned = Date.now() + 90_000;
+    for (;;) {
+      if (new URL(page.url()).pathname !== "/") return;
+      const marked = await page
+        .evaluate(() => (globalThis as { __paritySignInMark?: boolean }).__paritySignInMark === true)
+        .catch(() => false);
+      if (!marked) break;
+      if (Date.now() > assigned) throw new Error("[parity] sign-in submit never navigated.");
+      await page.waitForTimeout(1_000);
+    }
+    await page.waitForFunction(() => new URL(globalThis.location.href).pathname !== "/", null, {
+      timeout: 60_000,
+    });
   }
 
   async openProjectIssues(workspaceSlug: string, projectId: string): Promise<void> {
@@ -1097,11 +1116,19 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async railPresent(): Promise<boolean> {
-    return todo("railPresent");
+    // App rail (NEWFRONT-289, rows SHELL-063/099): the edition-gated
+    // strip; suppressed builds never mount it.
+    return (await this.page.locator('[data-testid="workspace-rail"]').count()) > 0;
   }
 
   async contentPaddingLeft(): Promise<number | null> {
-    return todo("contentPaddingLeft");
+    // Suppressed-rail pages reclaim the rail's padding on the content
+    // landmark (SHELL-099); railed builds render the landmark flush.
+    const main = this.page.locator('main[aria-label="Content"]');
+    if ((await main.count()) === 0) return null;
+    const raw = await main.first().evaluate((el) => getComputedStyle(el).paddingLeft);
+    const parsed = Number.parseFloat(raw);
+    return Number.isNaN(parsed) ? null : parsed;
   }
 
   private tabStrip() {
@@ -1131,15 +1158,24 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async editionBadgePresent(): Promise<boolean> {
-    return todo("editionBadgePresent");
+    // Negative row (SHELL-100): no edition badge mounts in any build.
+    // Any future badge must carry this testid so the probe keeps
+    // detecting it.
+    return (await this.page.locator('[data-testid="edition-badge"]').count()) > 0;
   }
 
   async desktopUpdatePresent(): Promise<boolean> {
-    return todo("desktopUpdatePresent");
+    // Desktop update control (SHELL-102): the Desktop area renders its
+    // waiting-update button into the sidebar slot; the web sidebar
+    // carries no update affordance.
+    const sidebar = this.page.locator("#main-sidebar");
+    return (await sidebar.getByRole("button", { name: /update/i }).count()) > 0;
   }
 
   async upgradePillCount(): Promise<number> {
-    return todo("upgradePillCount");
+    // Upgrade pill (SHELL-101): the kit pill renders the exact plan
+    // marker as plain text, never a control.
+    return await this.page.getByText("Pro", { exact: true }).count();
   }
 
   async topBarControls(): Promise<{
@@ -1189,9 +1225,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private personalItemRow(name: string): Locator {
+    // The inner locator roots at the page: filter() re-roots it at
+    // each candidate, so a dialog-rooted inner could never match a row.
     return this.personalizeDialog()
       .locator('[data-testid="personal-row"]')
-      .filter({ has: this.personalizeDialog().getByText(name, { exact: true }) });
+      .filter({ has: this.page.getByText(name, { exact: true }) });
   }
 
   async personalItemChecked(name: string): Promise<boolean | null> {
@@ -1231,10 +1269,14 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async setProjectNavMode(mode: "ACCORDION" | "TABBED"): Promise<void> {
+    // Plain click, not check(): the radio is server-driven (the checked
+    // state flips only after the mutation round-trips), and check()
+    // fails when the state does not change synchronously. Callers poll
+    // the server write after.
     const radio = this.personalizeDialog().locator(
       `[data-testid="project-nav-${mode === "TABBED" ? "tabbed" : "accordion"}"]`
     );
-    await radio.check({ force: true });
+    await radio.click();
   }
 
   async projectCapInput(): Promise<string | null> {
@@ -1365,13 +1407,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async restoreOverflowTab(name: string): Promise<void> {
+    // The row's Show control carries the tab name ("Show Pages"), so no
+    // row filter is needed (a filter whose inner locator roots at an
+    // ancestor of its candidates never matches).
     const menu = this.page.locator('[data-testid="tab-overflow-menu"]');
-    const row = menu
-      .locator("> div")
-      .filter({ has: menu.getByRole("link", { name, exact: true }) })
-      .first();
-    await row.hover();
-    await row.getByTitle("Show").click();
+    const show = menu.getByRole("button", { name: `Show ${name}`, exact: true }).first();
+    await show.hover();
+    await show.click();
   }
 
   async setViewportSize(width: number, height: number): Promise<void> {
@@ -1533,7 +1575,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async confirmArchive(): Promise<void> {
-    return todo("confirmArchive");
+    // Scoped to the dialog: the still-open card menu behind it
+    // carries its own same-named entry.
+    await this.projectDialog().getByRole("button", { name: "Archive", exact: true }).first().click();
   }
 
   async confirmDeleteIssue(): Promise<void> {
@@ -1616,8 +1660,11 @@ export class WebNewDriver implements ParityDriver {
     return todo("signInWithPasswordRetry");
   }
 
-  async openProjectIssuesSettled(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("openProjectIssuesSettled");
+  async openProjectIssuesSettled(workspaceSlug: string, projectId: string): Promise<void> {
+    // Land on a settled project page so the palette has full context;
+    // openProjectIssues already navigates and waits for the settled
+    // list, gate denial or signed-out entry.
+    await this.openProjectIssues(workspaceSlug, projectId);
   }
 
   async copyDraftByName(_name: string): Promise<void> {
@@ -1716,7 +1763,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async homeTourVisible(): Promise<boolean> {
-    return (await this.homeTourOverlay().first().count()) > 0;
+    // Count plus visibility: a hidden remnant must not keep the
+    // walk loop alive after the tour unmounts.
+    const overlay = this.homeTourOverlay().first();
+    return (await overlay.count()) > 0 && (await overlay.isVisible());
   }
 
   async homeTourAdvance(): Promise<void> {
@@ -1731,10 +1781,18 @@ export class WebNewDriver implements ParityDriver {
       await next.click();
       return;
     }
-    await overlay
-      .getByRole("button", { name: /start your first project/i })
-      .first()
-      .click();
+    // Only the last stop reaches here, and its click unmounts the tour:
+    // a fast walk loop can re-enter while the stop is still painted, so
+    // a mid-click unmount reads as completion instead of hanging.
+    try {
+      await overlay
+        .getByRole("button", { name: /start your first project/i })
+        .first()
+        .click({ timeout: 15_000 });
+    } catch (error) {
+      if (!(await this.homeTourVisible())) return;
+      throw error;
+    }
   }
 
   async homeTourDismiss(): Promise<void> {
@@ -2066,6 +2124,21 @@ export class WebNewDriver implements ParityDriver {
     if ((await this.homeRecentsSection().count()) === 0) return [];
     const rows = await this.homeRecentsSection().getByRole("link").allTextContents();
     return [...new Set(rows.map((t) => t.trim()).filter((t) => t.length > 0))];
+  }
+
+  async homeRecentPriorityTooltips(): Promise<string[]> {
+    // Priority markers carry the display label as a native tooltip
+    // (SHELL-017 target per main#894); rows without a priority render
+    // no marker, so only marked rows contribute.
+    if ((await this.homeRecentsSection().count()) === 0) return [];
+    const marks = this.homeRecentsSection().locator('[data-testid="recent-row"] span[title]');
+    const count = await marks.count();
+    const tooltips: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const title = await marks.nth(i).getAttribute("title");
+      if (title !== null && title.trim() !== "") tooltips.push(title.trim());
+    }
+    return tooltips;
   }
 
   async homeOpenRecentRow(text: string): Promise<void> {
@@ -2614,15 +2687,24 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async railSettingsEntryPresent(): Promise<boolean> {
-    return todo("railSettingsEntryPresent");
+    // Pinned rail settings entry (SHELL-063): lives inside the rail
+    // strip, so suppressed builds never show it.
+    return (await this.page.locator('[data-testid="workspace-rail"] a[aria-label="Settings"]').count()) > 0;
   }
 
   async railContextMenuText(): Promise<string> {
-    return todo("railContextMenuText");
+    // The rail owns the far-left edge context menu (density/dock
+    // controls); suppressed builds offer nothing there.
+    await this.page.mouse.click(8, 400, { button: "right" });
+    await this.page.waitForTimeout(1000);
+    return (await this.page.locator("#context-menu-portal").textContent()) ?? "";
   }
 
   async inboxDotPresent(): Promise<boolean> {
-    return todo("inboxDotPresent");
+    // The unread dot mounts inside the inbox link's icon wrapper only
+    // with unread notifications (SHELL-065); an empty inbox carries no
+    // marker element.
+    return (await this.page.locator('a[aria-label="Inbox"] div span').count()) > 0;
   }
 
   async hoverProjectHeader(): Promise<void> {
@@ -2643,7 +2725,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async activeCyclesHeaderVisible(): Promise<boolean> {
-    return todo("activeCyclesHeaderVisible");
+    // Paywalled Cycles page header (SHELL-101): the header the upgrade
+    // pill mounts beside. Lives in the Cycles area; shell builds
+    // without it read absent.
+    const header = this.page.getByText("Active cycles", { exact: false }).first();
+    return (await header.count()) > 0 && (await header.isVisible());
   }
 
   async errorNoticeVisible(): Promise<boolean> {
@@ -3845,10 +3931,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async clickMainContent(): Promise<void> {
-    await this.page
-      .getByRole("main")
-      .first()
-      .click({ position: { x: 20, y: 20 } });
+    // Center of the main region: a fixed slide-over can overlap
+    // main's left edge, so a corner click lands on the slide-over.
+    const main = this.page.getByRole("main").first();
+    const box = await main.boundingBox();
+    if (box === null) throw new Error("main region has no bounding box");
+    await main.click({ position: { x: Math.round(box.width / 2), y: Math.round(box.height / 2) } });
   }
 
   async openSidebarLink(text: string): Promise<void> {
@@ -3882,7 +3970,9 @@ export class WebNewDriver implements ParityDriver {
 
   async dragSidebarProjectBefore(sourceName: string, targetName: string): Promise<void> {
     // Pointer drag through the hover handle: the pointerdown starts the
-    // reorder, the release above the target commits it.
+    // reorder, the release above the target commits it. The handle juts
+    // outside its row and hides with row hover, so the grab lands on its
+    // inner edge (still inside the row); the center misses the row.
     const source = await this.projectRow(sourceName);
     await source.hover();
     const handle = source.getByTestId("project-drag-handle");
@@ -3891,7 +3981,7 @@ export class WebNewDriver implements ParityDriver {
     const target = await this.projectRow(targetName);
     const to = await target.boundingBox();
     if (!to) throw new Error(`[parity] no sidebar row for ${targetName}.`);
-    await this.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await this.page.mouse.move(from.x + from.width - 2, from.y + from.height / 2);
     await this.page.mouse.down();
     await this.page.mouse.move(to.x + to.width / 2, to.y + 2, { steps: 12 });
     await this.page.mouse.up();
@@ -3973,13 +4063,24 @@ export class WebNewDriver implements ParityDriver {
 
   async openUserMenu(): Promise<void> {
     // Sidebar chrome menus (NEWFRONT-287): the sidebar account card.
+    // Settles after clicking: the menu mounts a tick after the click,
+    // and callers activate entries immediately.
     await this.page.locator('[data-testid="sidebar-user-menu"]').first().click({ timeout: 30_000 });
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await this.userMenuTexts()).length > 0) return;
+      if (Date.now() > deadline) throw new Error("[parity] user menu never opened.");
+      await this.page.waitForTimeout(200);
+    }
   }
 
   async userMenuTexts(): Promise<string[]> {
     // Sidebar chrome menus (NEWFRONT-287): the identity block is not a
     // button, so read the whole menu text plus the actionable items.
+    // No menu reads empty at once: waiting out the text timeout here
+    // would starve the callers' own polls.
     const menu = this.page.getByRole("menu").first();
+    if ((await menu.count()) === 0) return [];
     const full = ((await menu.textContent({ timeout: 30_000 }).catch(() => null)) ?? "").trim().replace(/\s+/g, " ");
     const items = await menu.locator("button, a, [role='menuitem']").allTextContents();
     const cleaned = items.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text.length > 0);
@@ -3988,7 +4089,18 @@ export class WebNewDriver implements ParityDriver {
 
   async openHelpMenu(): Promise<void> {
     // Sidebar chrome menus (NEWFRONT-287): the top-bar help trigger.
+    // Idempotent: the trigger toggles, and the menu can survive a
+    // dialog opened from it, so a blind click would close it again.
+    // Settles after clicking: the menu mounts a tick after the click,
+    // and callers activate entries immediately.
+    if ((await this.helpMenuTexts()).length > 0) return;
     await this.page.locator('[data-testid="topbar-help-menu"]').first().click({ timeout: 30_000 });
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await this.helpMenuTexts()).length > 0) return;
+      if (Date.now() > deadline) throw new Error("[parity] help menu never opened.");
+      await this.page.waitForTimeout(200);
+    }
   }
 
   async helpMenuTexts(): Promise<string[]> {
@@ -4037,7 +4149,9 @@ export class WebNewDriver implements ParityDriver {
 
   async dragFavoriteBefore(sourceName: string, targetName: string): Promise<void> {
     // Pointer drag through the hover handle: the pointerdown starts the
-    // reorder, the release above the target commits it.
+    // reorder, the release above the target commits it. The handle juts
+    // outside its row and hides with row hover, so the grab lands on its
+    // inner edge (still inside the row); the center misses the row.
     const source = this.favoriteRowByName(sourceName);
     await source.hover();
     const handle = source.getByTestId("favorite-drag-handle");
@@ -4046,7 +4160,7 @@ export class WebNewDriver implements ParityDriver {
     const target = this.favoriteRowByName(targetName);
     const to = await target.boundingBox();
     if (!to) throw new Error(`[parity] no favorite row for ${targetName}.`);
-    await this.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await this.page.mouse.move(from.x + from.width - 2, from.y + from.height / 2);
     await this.page.mouse.down();
     await this.page.mouse.move(to.x + to.width / 2, to.y + 2, { steps: 12 });
     await this.page.mouse.up();
@@ -4276,96 +4390,235 @@ export class WebNewDriver implements ParityDriver {
     await this.page.goto(path, { waitUntil: "domcontentloaded", timeout: 120_000 });
   }
 
+  // Palette locators (SHELL-080-085, NEWFRONT-292/293/294). DOM contract
+  // from CommandPalette.tsx: role=dialog; the filter input keeps its
+  // label on root and sub-pages; rows are role=option with a single
+  // aria-selected=true; group headings are plain text.
+  private paletteModal(): Locator {
+    // Scoped by the filter input (both root and sub-page views render
+    // it), so sibling dialogs never masquerade as the palette.
+    return this.page
+      .locator('[role="dialog"]')
+      .filter({ has: this.page.getByLabel(/Filter (commands|options)/) })
+      .first();
+  }
+
+  private paletteInput(): Locator {
+    return this.paletteModal().locator("input").first();
+  }
+
+  private paletteItems(): Locator {
+    return this.paletteModal().locator('[role="option"]');
+  }
+
+  private async resetPaletteToClosed(): Promise<void> {
+    // Two Escapes cover a leftover query (first clears, second
+    // closes); blur then grounds focus stranded on the detached input
+    // so the next chord reaches the document listener.
+    for (let i = 0; i < 2 && (await this.isCommandPaletteOpen()); i++) {
+      await this.pressInCommandPalette("Escape");
+    }
+    await this.page
+      .waitForFunction(
+        () =>
+          [...document.querySelectorAll('[role="dialog"]')].every((dialog) => dialog.querySelector("input") === null),
+        { timeout: 10_000 }
+      )
+      .catch(() => undefined);
+    await this.page.evaluate(() => {
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    });
+    await this.page.keyboard.press("Escape");
+  }
+
+  private async paletteSettledAtRoot(): Promise<boolean> {
+    // Commands stream in as their data resolves, so require the root
+    // prompt plus a stable non-empty option count across half a second.
+    if ((await this.commandPalettePlaceholder()) !== "Type a command or search") return false;
+    const first = await this.paletteItems().count();
+    if (first === 0) return false;
+    await this.page.waitForTimeout(500);
+    if ((await this.commandPalettePlaceholder()) !== "Type a command or search") return false;
+    const second = await this.paletteItems().count();
+    return second === first && second > 0;
+  }
+
   async pressPaletteOpenChord(): Promise<void> {
-    return todo("pressPaletteOpenChord");
+    // The shell catches mod+k on document before its typing guard, so
+    // the chord opens the palette from anywhere including inputs
+    // (SHELL-080). Retry until open, populated and back at root; the
+    // store resets to fresh state on every open.
+    for (let attempt = 0; attempt < 12; attempt++) {
+      if (attempt > 0) await this.resetPaletteToClosed();
+      if (!(await this.isCommandPaletteOpen())) {
+        await this.page.keyboard.press("ControlOrMeta+k");
+      }
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        if (await this.paletteSettledAtRoot()) return;
+        await this.page.waitForTimeout(250);
+      }
+    }
+    throw new Error("[parity] command palette never settled at root.");
   }
 
   async isCommandPaletteOpen(): Promise<boolean> {
-    return todo("isCommandPaletteOpen");
+    return this.isShown(this.paletteInput());
   }
 
   async commandPalettePlaceholder(): Promise<string | null> {
-    return todo("commandPalettePlaceholder");
+    const input = this.paletteInput();
+    if ((await input.count()) === 0) return null;
+    return input.first().getAttribute("placeholder");
   }
 
-  async focusAndTypeTopBarSearch(_text: string): Promise<void> {
-    return todo("focusAndTypeTopBarSearch");
+  async focusAndTypeTopBarSearch(text: string): Promise<void> {
+    // Focus the top-bar search field and type, proving the open chord
+    // still fires while a text field holds focus (SHELL-080).
+    const search = this.topBarSearchInput();
+    await search.click();
+    await search.pressSequentially(text);
   }
 
   async closeCommandPaletteViaBackdrop(): Promise<void> {
-    return todo("closeCommandPaletteViaBackdrop");
+    // The dialog backdrop is a full-screen layer behind the centered
+    // panel; a top-left click lands on it.
+    await this.page.mouse.click(5, 5);
   }
 
-  async typeInCommandPalette(_text: string): Promise<void> {
-    return todo("typeInCommandPalette");
+  async typeInCommandPalette(text: string): Promise<void> {
+    await this.paletteInput().pressSequentially(text);
   }
 
   async commandPaletteQueryValue(): Promise<string> {
-    return todo("commandPaletteQueryValue");
+    const input = this.paletteInput();
+    if ((await input.count()) === 0) return "";
+    return (await input.first().inputValue()) ?? "";
   }
 
-  async pressInCommandPalette(_key: string): Promise<void> {
-    return todo("pressInCommandPalette");
+  async pressInCommandPalette(key: string): Promise<void> {
+    await this.paletteInput().press(key);
   }
 
   async paletteGroupHeadings(): Promise<string[]> {
-    return todo("paletteGroupHeadings");
+    // Root listbox groups render a heading paragraph above each item
+    // list; the server-results section is scoped out.
+    const texts = await this.paletteModal().locator('div[role="listbox"] > div > p').allTextContents();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
   }
 
   async paletteCommandTitles(): Promise<string[]> {
-    return todo("paletteCommandTitles");
+    // Each option renders its title plus hint/shortcut badges; callers
+    // match by substring rather than exact equality.
+    const texts = await this.paletteItems().allTextContents();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
   }
 
-  async paletteHasCommand(_title: string): Promise<boolean> {
-    return todo("paletteHasCommand");
+  async paletteHasCommand(title: string): Promise<boolean> {
+    return this.isShown(this.paletteItems().filter({ hasText: title }));
   }
 
-  async activatePaletteCommand(_title: string): Promise<void> {
-    return todo("activatePaletteCommand");
+  async activatePaletteCommand(title: string): Promise<void> {
+    // Bounded click with one re-settle retry: the palette can detach
+    // between the caller's settle and this click, and an unbounded
+    // click then hangs until the test timeout.
+    try {
+      await this.paletteItems().filter({ hasText: title }).first().click({ timeout: 15_000 });
+    } catch {
+      await this.pressPaletteOpenChord();
+      await this.paletteItems().filter({ hasText: title }).first().click({ timeout: 15_000 });
+    }
   }
 
   async paletteSelectedItemText(): Promise<string | null> {
-    return todo("paletteSelectedItemText");
+    const selected = this.paletteModal().locator('[role="option"][aria-selected="true"]').first();
+    if ((await selected.count()) === 0) return null;
+    const text = ((await selected.textContent()) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? null : text;
+  }
+
+  private searchResultsHeading(): Locator {
+    return this.paletteModal().locator('section[aria-label="Server results"] > p').first();
   }
 
   async paletteSearchResultsHeading(): Promise<string | null> {
-    return todo("paletteSearchResultsHeading");
+    const heading = this.searchResultsHeading();
+    if ((await heading.count()) === 0) return null;
+    const text = ((await heading.textContent()) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? null : text;
   }
 
   async isPaletteSearchHeadingPulsing(): Promise<boolean> {
     return todo("isPaletteSearchHeadingPulsing");
   }
 
+  private workspaceLevelToggle(): Locator {
+    // Footer scope control labelled "Workspace level".
+    return this.paletteModal()
+      .getByRole("switch", { name: /Workspace level/i })
+      .first();
+  }
+
   async paletteHasWorkspaceLevelToggle(): Promise<boolean> {
-    return todo("paletteHasWorkspaceLevelToggle");
+    return this.isShown(this.workspaceLevelToggle());
   }
 
   async isWorkspaceLevelToggleEnabled(): Promise<boolean> {
-    return todo("isWorkspaceLevelToggleEnabled");
+    const toggle = this.workspaceLevelToggle();
+    if ((await toggle.count()) === 0) return false;
+    return toggle.isEnabled();
   }
 
   async toggleWorkspaceLevel(): Promise<void> {
-    return todo("toggleWorkspaceLevel");
+    await this.workspaceLevelToggle().click();
   }
 
-  async countSearchRequests(_action: () => Promise<void>): Promise<number> {
-    return todo("countSearchRequests");
+  private searchRequests: URL[] = [];
+  private searchTrackingOn = false;
+
+  private ensureSearchTracking(): void {
+    if (this.searchTrackingOn) return;
+    this.searchTrackingOn = true;
+    this.page.on("request", (req) => {
+      const url = req.url();
+      if (/\/api\/workspaces\/[^/]+\/search\/?(\?|$)/.test(url)) {
+        this.searchRequests.push(new URL(url));
+      }
+    });
+  }
+
+  async countSearchRequests(action: () => Promise<void>): Promise<number> {
+    this.ensureSearchTracking();
+    const before = this.searchRequests.length;
+    await action();
+    return this.searchRequests.length - before;
   }
 
   async lastSearchRequestParams(): Promise<Record<string, string> | null> {
-    return todo("lastSearchRequestParams");
+    const last = this.searchRequests.at(-1);
+    if (!last) return null;
+    return Object.fromEntries(last.searchParams.entries());
+  }
+
+  private shortcutsDialog(): Locator {
+    // DOM contract from ShortcutsDialog.tsx: role=dialog titled
+    // "Keyboard shortcuts" with a "Search for shortcuts" filter.
+    return this.page
+      .locator('[role="dialog"]')
+      .filter({ has: this.page.getByPlaceholder("Search for shortcuts") })
+      .first();
   }
 
   async isShortcutsDialogOpen(): Promise<boolean> {
-    return todo("isShortcutsDialogOpen");
+    return this.isShown(this.shortcutsDialog());
   }
 
   async pressShortcutsDialogChord(): Promise<void> {
-    return todo("pressShortcutsDialogChord");
+    await this.page.keyboard.press("ControlOrMeta+/");
   }
 
-  async typeShortcutsFilter(_text: string): Promise<void> {
-    return todo("typeShortcutsFilter");
+  async typeShortcutsFilter(text: string): Promise<void> {
+    await this.page.getByPlaceholder("Search for shortcuts").fill(text);
   }
 
   async shortcutsDialogCommandTitles(): Promise<string[]> {
@@ -4394,6 +4647,21 @@ export class WebNewDriver implements ParityDriver {
     return img.getAttribute("src");
   }
 
+  async repoStarIconThemed(): Promise<boolean> {
+    // Web_new renders a Lucide vector icon, not a swapped png: its
+    // currentColor stroke inherits the theme's muted text color, which is
+    // the redesign's equivalent of the theme-adaptive asset (SHELL-103).
+    const icon = this.page
+      .getByRole("link", { name: /Star us on GitHub/i })
+      .first()
+      .locator("svg")
+      .first();
+    if ((await icon.count()) === 0) return false;
+    const stroke = await icon.getAttribute("stroke");
+    const fill = await icon.getAttribute("fill");
+    return stroke === "currentColor" || fill === "currentColor";
+  }
+
   // Preferences (NEWFRONT-294, SHELL-095/096). The applied theme is the
   // <html> data-theme attribute; the interface language is the root lang.
   async documentTheme(): Promise<string> {
@@ -4404,8 +4672,8 @@ export class WebNewDriver implements ParityDriver {
     return (await this.page.locator("html").getAttribute("lang")) ?? "";
   }
 
-  async paletteHasText(_text: string): Promise<boolean> {
-    return todo("paletteHasText");
+  async paletteHasText(text: string): Promise<boolean> {
+    return this.isShown(this.paletteModal().getByText(text, { exact: false }));
   }
 
   // Browse route (NEWFRONT-288, row SHELL-106): the key address renders
@@ -4441,36 +4709,55 @@ export class WebNewDriver implements ParityDriver {
 
   // Top-bar search box (NEWFRONT-127, SHELL-081). Throwing stubs per the
   // shared driver contract.
+  // Top-bar search box (SHELL-081). DOM contract from
+  // TopBarSearch.tsx: the labeled field plus an inline role=listbox
+  // panel named "Top bar search results" (never a dialog).
+  private topBarSearchInput(): Locator {
+    return this.page.getByLabel("Search commands").first();
+  }
+
+  private topBarResultsPanel(): Locator {
+    return this.page.getByRole("listbox", { name: "Top bar search results" }).first();
+  }
+
   async topBarSearchPlaceholder(): Promise<string | null> {
-    return todo("topBarSearchPlaceholder");
+    const input = this.topBarSearchInput();
+    if ((await input.count()) === 0) return null;
+    return input.getAttribute("placeholder");
   }
 
   async focusTopBarSearch(): Promise<void> {
-    return todo("focusTopBarSearch");
+    await this.topBarSearchInput().click();
   }
 
   async isTopBarResultsOpen(): Promise<boolean> {
-    return todo("isTopBarResultsOpen");
+    if (await this.isCommandPaletteOpen()) return false;
+    return this.isShown(this.topBarResultsPanel());
   }
 
-  async typeInTopBarSearch(_text: string): Promise<void> {
-    return todo("typeInTopBarSearch");
+  async typeInTopBarSearch(text: string): Promise<void> {
+    await this.topBarSearchInput().pressSequentially(text);
   }
 
   async topBarSearchValue(): Promise<string> {
-    return todo("topBarSearchValue");
+    const input = this.topBarSearchInput();
+    if ((await input.count()) === 0) return "";
+    return (await input.inputValue()) ?? "";
   }
 
   async topBarResultsCommandTitles(): Promise<string[]> {
-    return todo("topBarResultsCommandTitles");
+    const texts = await this.topBarResultsPanel().locator('[role="option"]').allTextContents();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
   }
 
-  async pressInTopBarSearch(_key: string): Promise<void> {
-    return todo("pressInTopBarSearch");
+  async pressInTopBarSearch(key: string): Promise<void> {
+    await this.topBarSearchInput().press(key);
   }
 
   async closeTopBarViaOutsideClick(): Promise<void> {
-    return todo("closeTopBarViaOutsideClick");
+    // The inline panel closes on outside mousedown; a top-left click
+    // lands far from the centered top-bar field.
+    await this.page.mouse.click(5, 5);
   }
 
   // Shared empty-state kit tiers (NEWFRONT-294, SHELL-104). The reader
@@ -4550,252 +4837,532 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(this.coverProjectCards().locator(".animate-pulse").first());
   }
 
-  // --- Projects list + lifecycle (NEWFRONT-124, SHELL-024..045) stubs. ---
-  async openArchivedProjects(_workspaceSlug: string): Promise<void> {
-    return todo("openArchivedProjects");
+  // --- Projects list + lifecycle (NEWFRONT-124, SHELL-024..045). ---
+  // Implemented by the shell area gate (NEWFRONT-295) against the
+  // ProjectsListScreen/View/Header/Card components.
+  private projectCardByName(name: string): Locator {
+    return this.page
+      .locator('[data-testid="project-card"]')
+      .filter({ has: this.page.getByRole("heading", { name, exact: true }) });
   }
+
+  private headerCreateButton(): Locator {
+    // Header create button: label "Add Project" (>=sm) or "Project" (below sm).
+    return this.page.getByRole("button", { name: /^(Add Project|Project)$/ });
+  }
+
+  private emptyStateCreateButton(): Locator {
+    return this.page.getByRole("button", { name: "Start your first project", exact: true });
+  }
+
+  async openArchivedProjects(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/archives`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.locator("#main-sidebar").waitFor({ state: "attached", timeout: 45_000 });
+  }
+
   async visibleProjectCardNames(): Promise<string[]> {
-    return todo("visibleProjectCardNames");
+    const headings = this.page.locator('[data-testid="project-card"]').getByRole("heading");
+    const texts = await headings.allTextContents();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
   }
-  async awaitProjectCard(_name: string): Promise<void> {
-    return todo("awaitProjectCard");
+
+  async awaitProjectCard(name: string): Promise<void> {
+    await this.projectCardByName(name).first().waitFor({ timeout: 60_000 });
   }
+
   async gridColumnCount(): Promise<number> {
-    return todo("gridColumnCount");
+    // The card grid sets grid-template-columns; count the resolved tracks.
+    const grid = this.page.locator('[data-testid="projects-grid"]');
+    const cols = await grid.first().evaluate((el) => {
+      const tpl = getComputedStyle(el).gridTemplateColumns;
+      return tpl.split(" ").filter((t) => t.trim().length > 0).length;
+    });
+    return cols;
   }
-  async setViewportWidth(_width: number): Promise<void> {
-    return todo("setViewportWidth");
+
+  async setViewportWidth(width: number): Promise<void> {
+    const current = this.page.viewportSize();
+    await this.page.setViewportSize({ width, height: current?.height ?? 900 });
   }
+
   async isProjectsSkeletonVisible(): Promise<boolean> {
-    return todo("isProjectsSkeletonVisible");
+    return this.isShown(this.page.locator('[data-testid="projects-skeleton"]'));
   }
+
   async emptyStateHeading(): Promise<string | null> {
-    return todo("emptyStateHeading");
+    for (const text of ["No active projects", "No matching results.", "No projects archived"]) {
+      const loc = this.page.getByRole("heading", { name: text, exact: false });
+      if (await this.isShown(loc)) return (await loc.first().textContent())?.trim() ?? text;
+    }
+    return null;
   }
+
   async isEmptyStateCreateVisible(): Promise<boolean> {
-    return todo("isEmptyStateCreateVisible");
+    return this.isShown(this.emptyStateCreateButton());
   }
+
   async isEmptyStateCreateEnabled(): Promise<boolean> {
-    return todo("isEmptyStateCreateEnabled");
+    return this.emptyStateCreateButton().isEnabled();
   }
+
   async clickEmptyStateCreate(): Promise<void> {
-    return todo("clickEmptyStateCreate");
+    await this.emptyStateCreateButton().click();
   }
+
   async emptyStateArtworkSignature(): Promise<string | null> {
-    return todo("emptyStateArtworkSignature");
+    // The empty-state artwork sits next to its heading inside the same
+    // block; signature the biggest illustration (icons are an order of
+    // magnitude smaller than the art).
+    const heading = this.page.getByRole("heading", {
+      name: /No active projects|No matching results\.|No projects archived/,
+    });
+    if (!(await this.isShown(heading))) return null;
+    return heading.first().evaluate((node) => {
+      const area = (el: SVGSVGElement): number => {
+        const rect = el.getBoundingClientRect();
+        return rect.width * rect.height;
+      };
+      let scope: HTMLElement | null = node as HTMLElement;
+      for (let depth = 0; depth < 6 && scope; depth += 1) {
+        const svgs = [...scope.querySelectorAll("svg")];
+        if (svgs.length > 0) {
+          const biggest = svgs.reduce((a, b) => (area(a) >= area(b) ? a : b));
+          const html = biggest.outerHTML;
+          return `${html.length}:${html.slice(0, 160)}`;
+        }
+        scope = scope.parentElement;
+      }
+      return null;
+    });
   }
+
   async isHeaderCreateButtonVisible(): Promise<boolean> {
-    return todo("isHeaderCreateButtonVisible");
+    return this.isShown(this.headerCreateButton());
   }
+
   async headerCreateButtonLabel(): Promise<string | null> {
-    return todo("headerCreateButtonLabel");
+    // The button dual-mounts its label (full + short) with one hidden
+    // per breakpoint; textContent would concatenate both, so read the
+    // visible span only.
+    const button = this.headerCreateButton();
+    if (!(await this.isShown(button))) return null;
+    const label = button.first().locator("span").filter({ visible: true }).first();
+    if ((await label.count()) === 0) return null;
+    const text = ((await label.textContent()) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? null : text;
   }
+
   async clickHeaderCreateButton(): Promise<void> {
-    return todo("clickHeaderCreateButton");
+    await this.headerCreateButton().first().click();
   }
+
   async breadcrumbLabels(): Promise<string[]> {
-    return todo("breadcrumbLabels");
+    const crumbs = this.page.locator('nav[aria-label="Breadcrumb"] li');
+    const texts = await crumbs.allTextContents();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
   }
+
   async isMobileListHeaderVisible(): Promise<boolean> {
-    return todo("isMobileListHeaderVisible");
+    return this.isShown(this.page.locator('[data-testid="projects-mobile-bar"]'));
   }
+
   async isDesktopFilterRowVisible(): Promise<boolean> {
-    return todo("isDesktopFilterRowVisible");
+    return this.isShown(this.page.locator('[data-testid="projects-desktop-filters"]'));
   }
+
   async breadcrumbTerminalIsLink(): Promise<boolean> {
-    return todo("breadcrumbTerminalIsLink");
+    const crumbs = this.page.locator('nav[aria-label="Breadcrumb"] li');
+    const count = await crumbs.count();
+    if (count === 0) return false;
+    return (
+      (await crumbs
+        .nth(count - 1)
+        .locator("a")
+        .count()) > 0
+    );
   }
+  private sortTrigger(): Locator {
+    // The header dual-mounts sort/filter (desktop row + mobile bar) with
+    // one hidden per breakpoint; always act on the visible instance.
+    return this.page.locator('[data-testid="projects-sort-trigger"]').filter({ visible: true }).first();
+  }
+
+  private filterTrigger(): Locator {
+    return this.page.locator('[data-testid="projects-filter-trigger"]').filter({ visible: true }).first();
+  }
+
+  private filterPanel(): Locator {
+    return this.page.locator('[data-testid="projects-filter-panel"]').filter({ visible: true }).first();
+  }
+
+  private appliedFilterStrip(): Locator {
+    return this.page.locator('[data-testid="projects-applied-filters"]').first();
+  }
+
+  private listSearchScope(): Locator {
+    return this.page.locator('[data-testid="projects-list-search"]').first();
+  }
+
+  private listSearchInput(): Locator {
+    return this.listSearchScope().locator('input[aria-label="Search projects"]');
+  }
+
   async openSortMenu(): Promise<void> {
-    return todo("openSortMenu");
+    await this.sortTrigger().click();
   }
-  async selectSortOption(_label: string): Promise<void> {
-    return todo("selectSortOption");
+
+  async selectSortOption(label: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name: label, exact: true }).first().click();
   }
+
   async currentSortLabel(): Promise<string> {
-    return todo("currentSortLabel");
+    return ((await this.sortTrigger().textContent()) ?? "").trim();
   }
+
   async isSortDirectionDisabled(): Promise<boolean> {
-    return todo("isSortDirectionDisabled");
+    const asc = this.page.getByRole("menuitem", { name: "Ascending", exact: true }).first();
+    return asc.isDisabled().catch(() => true);
   }
+
   async closeMenu(): Promise<void> {
-    return todo("closeMenu");
+    await this.page.keyboard.press("Escape");
   }
+
   async openFilterMenu(): Promise<void> {
-    return todo("openFilterMenu");
+    await this.filterTrigger().click();
   }
-  async typeFilterSearch(_text: string): Promise<void> {
-    return todo("typeFilterSearch");
+
+  async typeFilterSearch(text: string): Promise<void> {
+    await this.filterPanel().getByLabel("Search filters").fill(text);
   }
-  async filterMenuHasOption(_text: string): Promise<boolean> {
-    return todo("filterMenuHasOption");
+
+  async filterMenuHasOption(text: string): Promise<boolean> {
+    return this.isShown(this.filterPanel().getByText(text, { exact: true }));
   }
-  async selectFilterOption(_label: string): Promise<void> {
-    return todo("selectFilterOption");
+
+  async selectFilterOption(label: string): Promise<void> {
+    // Every filter value is a labeled checkbox. Person rows carry a
+    // decorative avatar beside their text, so text matching would miss
+    // "You" (the label reads "<initials>You"); role matching is exact.
+    await this.filterPanel().getByRole("checkbox", { name: label, exact: true }).first().click();
   }
+
   async isFilterBadgeVisible(): Promise<boolean> {
-    return todo("isFilterBadgeVisible");
+    // The active-filter badge is aria-hidden decoration on the trigger,
+    // so presence (not visibility) is the signal.
+    return (await this.page.locator('[data-testid="projects-filter-badge"]').count()) > 0;
   }
+
   async appliedFilterChipTexts(): Promise<string[]> {
-    return todo("appliedFilterChipTexts");
+    const strip = this.appliedFilterStrip();
+    if (!(await this.isShown(strip))) return [];
+    const texts = await strip.locator("span, div").allTextContents();
+    return texts.map((t) => t.trim()).filter((t) => t.length > 0);
   }
-  async removeAppliedFilterChip(_text: string): Promise<void> {
-    return todo("removeAppliedFilterChip");
+
+  async removeAppliedFilterChip(text: string): Promise<void> {
+    await this.appliedFilterStrip()
+      .getByRole("button", { name: `Remove ${text}`, exact: true })
+      .click();
   }
+
   async clickClearAllFilters(): Promise<void> {
-    return todo("clickClearAllFilters");
+    await this.appliedFilterStrip().getByText("Clear all", { exact: true }).first().click();
   }
+
   async filterMatchCountText(): Promise<string | null> {
-    return todo("filterMatchCountText");
+    const count = this.page.locator('[data-testid="projects-filter-count"]').first();
+    if (!(await this.isShown(count))) return null;
+    return (await count.textContent())?.trim() ?? null;
   }
+
   async openListSearch(): Promise<void> {
-    return todo("openListSearch");
+    if (await this.isShown(this.listSearchInput())) return;
+    // Collapsed until the search button expands it; settle on the open
+    // field so a second opener sees it instead of double-toggling.
+    await this.listSearchScope().getByRole("button", { name: "Search projects" }).click();
+    await this.listSearchInput().waitFor({ state: "visible", timeout: 10_000 });
   }
-  async typeListSearch(_text: string): Promise<void> {
-    return todo("typeListSearch");
+
+  async typeListSearch(text: string): Promise<void> {
+    await this.openListSearch();
+    await this.listSearchInput().pressSequentially(text, { delay: 60 });
   }
+
   async listSearchValue(): Promise<string> {
-    return todo("listSearchValue");
+    // The clear button unmounts the field as it resets the text, so a
+    // missing field reads as blank: every collapse path (clear, second
+    // escape, outside click on empty) leaves the query empty.
+    const input = this.listSearchInput();
+    if ((await input.count()) === 0 || !(await this.isShown(input))) return "";
+    return input.inputValue();
   }
+
   async isListSearchExpanded(): Promise<boolean> {
-    return todo("isListSearchExpanded");
+    return this.isShown(this.listSearchInput());
   }
+
   async pressEscapeInListSearch(): Promise<void> {
-    return todo("pressEscapeInListSearch");
+    await this.listSearchInput().press("Escape");
   }
+
   async clickListSearchClear(): Promise<void> {
-    return todo("clickListSearchClear");
+    await this.listSearchScope().getByRole("button", { name: "Clear search" }).click();
   }
+
   async clickOutsideListSearch(): Promise<void> {
-    return todo("clickOutsideListSearch");
+    // The leading breadcrumb is plain text with no handlers: a click
+    // there is purely "outside" the search field without navigating.
+    await this.page.locator('nav[aria-label="Breadcrumb"] li').first().click();
   }
-  async cardShortCode(_name: string): Promise<string | null> {
-    return todo("cardShortCode");
+  private projectDialog(): Locator {
+    // Card-lifecycle dialogs (create/join/leave/delete/archive/restore)
+    // render through the kit dialog; the first open one scopes reads
+    // and clicks away from same-named menu entries behind them.
+    return this.page.locator('[role="dialog"]').first();
   }
-  async cardHasPrivateMark(_name: string): Promise<boolean> {
-    return todo("cardHasPrivateMark");
+
+  async cardShortCode(name: string): Promise<string | null> {
+    const card = this.projectCardByName(name).first();
+    if (!(await this.isShown(card))) return null;
+    const code = card.locator("h2 + span > span").first();
+    if ((await code.count()) === 0) return null;
+    return (await code.textContent())?.trim() ?? null;
   }
-  async cardSubText(_name: string): Promise<string | null> {
-    return todo("cardSubText");
+
+  async cardHasPrivateMark(name: string): Promise<boolean> {
+    // The lock icon is aria-hidden beside a screen-reader-only "Private
+    // project" marker; presence (not visibility) is the signal.
+    const card = this.projectCardByName(name).first();
+    return (await card.getByText("Private project", { exact: true }).count()) > 0;
   }
-  async cardHasFavoriteStar(_name: string): Promise<boolean> {
-    return todo("cardHasFavoriteStar");
+
+  async cardSubText(name: string): Promise<string | null> {
+    const card = this.projectCardByName(name).first();
+    const sub = card.locator('[data-testid="project-card-subtext"]').first();
+    if (!(await this.isShown(sub))) return null;
+    return (await sub.textContent())?.trim() ?? null;
   }
-  async clickFavoriteStar(_name: string): Promise<void> {
-    return todo("clickFavoriteStar");
+
+  async cardHasFavoriteStar(name: string): Promise<boolean> {
+    return this.isShown(this.projectCardByName(name).first().locator('[data-testid="project-card-star"]'));
   }
-  async cardHasCoverImage(_name: string): Promise<boolean> {
-    return todo("cardHasCoverImage");
+
+  async clickFavoriteStar(name: string): Promise<void> {
+    await this.projectCardByName(name).first().locator('[data-testid="project-card-star"]').click();
   }
-  async cardHasLogo(_name: string): Promise<boolean> {
-    return todo("cardHasLogo");
+
+  async cardHasCoverImage(name: string): Promise<boolean> {
+    // Cards carry no cover slot (target per main#523): a cover would
+    // render as the project-named image, so its absence reads false.
+    const card = this.projectCardByName(name).first();
+    return this.isShown(card.getByRole("img", { name, exact: true }));
   }
-  async cardAvatarStack(_name: string): Promise<string[]> {
-    return todo("cardAvatarStack");
+
+  async cardHasLogo(name: string): Promise<boolean> {
+    // The logo box is aria-hidden decoration holding the emoji glyph
+    // or the short-code initial; presence plus content is the signal.
+    const card = this.projectCardByName(name).first();
+    const logo = card.locator('[data-testid="project-logo"]').first();
+    if ((await logo.count()) === 0) return false;
+    return (((await logo.textContent()) ?? "").trim().length ?? 0) > 0;
   }
-  async clickProjectCard(_name: string): Promise<void> {
-    return todo("clickProjectCard");
+
+  async cardAvatarStack(name: string): Promise<string[]> {
+    // Member avatars expose their names with an overflow "+N" bubble
+    // past the display cap; an empty team renders guidance instead.
+    const card = this.projectCardByName(name).first();
+    const stack = card.locator('[data-testid="project-member-stack"]').first();
+    if ((await stack.count()) === 0) return [];
+    const names: string[] = [];
+    const avatars = stack.locator('[role="img"]');
+    for (let i = 0, n = await avatars.count(); i < n; i += 1) {
+      const label = await avatars.nth(i).getAttribute("aria-label");
+      if (label !== null && label.trim() !== "") names.push(label.trim());
+    }
+    const overflow = stack.locator('[data-testid="project-member-stack-overflow"]').first();
+    if ((await overflow.count()) > 0) {
+      const text = ((await overflow.textContent()) ?? "").trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
   }
-  async openCardContextMenu(_name: string): Promise<void> {
-    return todo("openCardContextMenu");
+
+  async clickProjectCard(name: string): Promise<void> {
+    await this.projectCardByName(name).first().click();
   }
+
+  async openCardContextMenu(name: string): Promise<void> {
+    await this.projectCardByName(name).first().click({ button: "right" });
+  }
+
   async contextMenuItemLabels(): Promise<string[]> {
-    return todo("contextMenuItemLabels");
+    const texts = await this.page.getByRole("menuitem").allTextContents();
+    return texts.map((t) => t.replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
   }
-  async clickCardContextMenuItem(_label: string): Promise<void> {
-    return todo("clickCardContextMenuItem");
+
+  async clickCardContextMenuItem(label: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name: label, exact: true }).first().click();
   }
   async cardFooterLabels(_name: string): Promise<string[]> {
     return todo("cardFooterLabels");
   }
-  async clickCardJoin(_name: string): Promise<void> {
-    return todo("clickCardJoin");
+  async clickCardJoin(name: string): Promise<void> {
+    await this.projectCardByName(name).first().getByRole("button", { name: "Join", exact: true }).click();
   }
+
   async isJoinDialogVisible(): Promise<boolean> {
-    return todo("isJoinDialogVisible");
+    return this.isShown(this.page.getByRole("heading", { name: "Join Project?", exact: true }));
   }
+
   async joinDialogHeading(): Promise<string | null> {
-    return todo("joinDialogHeading");
+    const h = this.page.getByRole("heading", { name: "Join Project?", exact: true });
+    if (!(await this.isShown(h))) return null;
+    return (await h.first().textContent())?.trim() ?? null;
   }
+
   async confirmJoin(): Promise<void> {
-    return todo("confirmJoin");
+    await this.projectDialog().getByRole("button", { name: "Join Project", exact: true }).click();
   }
-  async openLeaveProjectDialog(_projectName: string): Promise<void> {
-    return todo("openLeaveProjectDialog");
+
+  async openLeaveProjectDialog(projectName: string): Promise<void> {
+    // Leave is offered from the sidebar project quick menu for members
+    // without an admin/member project role.
+    await this.openProjectQuickMenu(projectName);
+    await this.page.getByRole("menuitem", { name: "Leave project", exact: true }).click();
   }
-  async fillLeaveProjectName(_text: string): Promise<void> {
-    return todo("fillLeaveProjectName");
+
+  async fillLeaveProjectName(text: string): Promise<void> {
+    await this.projectDialog().getByPlaceholder("Enter the project name").fill(text);
   }
-  async fillLeaveConfirmPhrase(_text: string): Promise<void> {
-    return todo("fillLeaveConfirmPhrase");
+
+  async fillLeaveConfirmPhrase(text: string): Promise<void> {
+    await this.projectDialog().getByPlaceholder("Enter 'leave project'").fill(text);
   }
+
   async submitLeave(): Promise<void> {
-    return todo("submitLeave");
+    // Scoped to the dialog: the still-open quick menu behind it
+    // carries its own same-named entry.
+    await this.projectDialog().getByRole("button", { name: "Leave project", exact: true }).click();
   }
+
   async leaveErrorText(): Promise<string | null> {
-    return todo("leaveErrorText");
+    const alert = this.projectDialog().locator('[role="alert"]').first();
+    if (!(await this.isShown(alert))) return null;
+    return (await alert.textContent())?.trim() ?? null;
   }
+
   async isLeaveDialogVisible(): Promise<boolean> {
-    return todo("isLeaveDialogVisible");
+    return this.isShown(this.page.getByRole("heading", { name: "Leave project", exact: true }));
   }
-  async openArchiveProjectDialog(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("openArchiveProjectDialog");
+
+  async openArchiveProjectDialog(_workspaceSlug: string, projectId: string): Promise<void> {
+    // Archive is offered from the card menu for project admins; find
+    // the card by its work-items address since only the id is known.
+    const card = this.page.locator(`[data-testid="project-card"][href*="/projects/${projectId}/"]`).first();
+    await card.locator('[data-testid="project-card-actions"]').click();
+    await this.page.getByRole("menuitem", { name: "Archive", exact: true }).click();
   }
+
   async archiveDialogBodyText(): Promise<string | null> {
-    return todo("archiveDialogBodyText");
+    const dialog = this.projectDialog();
+    if (!(await this.isShown(dialog))) return null;
+    const text = ((await dialog.textContent()) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? null : text;
   }
-  async clickCardRestore(_name: string): Promise<void> {
-    return todo("clickCardRestore");
+
+  async clickCardRestore(name: string): Promise<void> {
+    await this.projectCardByName(name).first().getByRole("button", { name: "Restore", exact: true }).click();
   }
+
   async confirmRestore(): Promise<void> {
-    return todo("confirmRestore");
+    // Scoped to the dialog: the archived card behind it carries its
+    // own restore control.
+    await this.projectDialog().getByRole("button", { name: "Restore", exact: true }).first().click();
   }
-  async archivedCardHasAdminActions(_name: string): Promise<boolean> {
-    return todo("archivedCardHasAdminActions");
+
+  async archivedCardHasAdminActions(name: string): Promise<boolean> {
+    const card = this.projectCardByName(name).first();
+    return this.isShown(card.getByText("Restore", { exact: true }));
   }
-  async cardShowsArchivedMarker(_name: string): Promise<boolean> {
-    return todo("cardShowsArchivedMarker");
+
+  async cardShowsArchivedMarker(name: string): Promise<boolean> {
+    return this.isShown(this.projectCardByName(name).first().getByText("Archived", { exact: false }));
   }
+
   async isRestoreDialogVisible(): Promise<boolean> {
-    return todo("isRestoreDialogVisible");
+    return this.isShown(this.projectDialog().getByRole("heading", { name: /^Restore / }));
   }
-  async openDeleteProjectDialog(_name: string): Promise<void> {
-    return todo("openDeleteProjectDialog");
+
+  async openDeleteProjectDialog(name: string): Promise<void> {
+    await this.openCardContextMenu(name);
+    await this.clickCardContextMenuItem("Delete");
   }
-  async fillDeleteProjectName(_text: string): Promise<void> {
-    return todo("fillDeleteProjectName");
+
+  async fillDeleteProjectName(text: string): Promise<void> {
+    await this.projectDialog().getByPlaceholder("Project name").fill(text);
   }
-  async fillDeleteConfirmPhrase(_text: string): Promise<void> {
-    return todo("fillDeleteConfirmPhrase");
+
+  async fillDeleteConfirmPhrase(text: string): Promise<void> {
+    await this.projectDialog().getByPlaceholder("Enter 'delete my project'").fill(text);
   }
+
   async isDeleteSubmitDisabled(): Promise<boolean> {
-    return todo("isDeleteSubmitDisabled");
+    return this.projectDialog().getByRole("button", { name: "Delete project", exact: true }).isDisabled();
   }
+
   async submitDelete(): Promise<void> {
-    return todo("submitDelete");
+    await this.projectDialog().getByRole("button", { name: "Delete project", exact: true }).click();
   }
+
   async isCreateProjectDialogVisible(): Promise<boolean> {
-    return todo("isCreateProjectDialogVisible");
+    return this.isShown(this.page.getByPlaceholder("Project name"));
   }
-  async fillCreateProjectName(_text: string): Promise<void> {
-    return todo("fillCreateProjectName");
+
+  async fillCreateProjectName(text: string): Promise<void> {
+    await this.projectDialog().getByPlaceholder("Project name").fill(text);
   }
+
   async createProjectShortCodeValue(): Promise<string> {
-    return todo("createProjectShortCodeValue");
+    return this.projectDialog().getByPlaceholder("Project ID").inputValue();
   }
-  async fillCreateProjectShortCode(_text: string): Promise<void> {
-    return todo("fillCreateProjectShortCode");
+
+  async fillCreateProjectShortCode(text: string): Promise<void> {
+    await this.projectDialog().getByPlaceholder("Project ID").fill(text);
   }
+
   async submitCreateProject(): Promise<void> {
-    return todo("submitCreateProject");
+    // A sticky app-level toast can sit over the submit button and
+    // intercept pointer clicks; the button itself is verified present,
+    // so dispatch the click when the pointer cannot land.
+    const btn = this.projectDialog().getByRole("button", { name: "Create project", exact: true });
+    try {
+      await btn.click({ timeout: 10_000 });
+    } catch {
+      await btn.dispatchEvent("click");
+    }
   }
+
   async createProjectErrorText(): Promise<string | null> {
-    return todo("createProjectErrorText");
+    const alert = this.projectDialog().locator('[role="alert"]').first();
+    if (!(await this.isShown(alert))) return null;
+    return (await alert.textContent())?.trim() ?? null;
   }
+
   async createFormCoverVisible(): Promise<boolean> {
-    return todo("createFormCoverVisible");
+    // No cover step exists on the creation path (target per
+    // main#523): neither a cover image nor an upload control mounts.
+    const dialog = this.projectDialog();
+    const img = dialog.getByRole("img", { name: /cover/i });
+    const upload = dialog.locator('input[type="file"]');
+    return (await img.count()) > 0 || (await upload.count()) > 0;
   }
+
   async createFormIconVisible(): Promise<boolean> {
-    return todo("createFormIconVisible");
+    // The prefilled icon button (the picker group behind it opens from
+    // a popover only on demand).
+    return this.isShown(this.projectDialog().getByRole("button", { name: "Project icon" }));
   }
 
   // --- Invitation inbox + onboarding start (NEWFRONT-110, AUTH-026/033).

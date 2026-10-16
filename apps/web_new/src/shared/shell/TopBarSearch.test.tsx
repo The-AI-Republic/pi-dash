@@ -93,6 +93,25 @@ describe("TopBarSearch (SHELL-081)", () => {
     expect(screen.getByRole("listbox", { name: "Top bar search results" })).not.toBeNull();
   });
 
+  it("never steals focus on mount, even under StrictMode replays (SHELL-089)", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <React.StrictMode>
+        <QueryClientProvider client={queryClient}>
+          <TopBarSearch scope={null} onSelectSearchResult={() => undefined} />
+        </QueryClientProvider>
+      </React.StrictMode>
+    );
+    const field = screen.getByLabelText("Search commands");
+    expect(document.activeElement).not.toBe(field);
+    expect(screen.queryByRole("listbox", { name: "Top bar search results" })).toBeNull();
+    act(() => {
+      useTopSearchFocus.getState().requestTopSearchFocus();
+    });
+    expect(document.activeElement).toBe(field);
+    expect(screen.getByRole("listbox", { name: "Top bar search results" })).not.toBeNull();
+  });
+
   it("starts closed and opens an inline panel on focus", async () => {
     const user = userEvent.setup();
     registerCommands([
@@ -134,6 +153,21 @@ describe("TopBarSearch (SHELL-081)", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     expect(input.value).toBe("");
+  });
+
+  it("reopens when the focused box is clicked again (SHELL-081)", async () => {
+    const user = userEvent.setup();
+    registerCommands([{ id: "theme", title: "Change interface theme", run: () => undefined }]);
+    renderBox({ scope: null });
+    const input = screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER);
+    await user.click(input);
+    expect(screen.getByRole("listbox", { name: "Top bar search results" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(input);
+    // Focus never left, so only the click reopens.
+    await user.click(input);
+    expect(screen.getByRole("listbox", { name: "Top bar search results" })).toBeInTheDocument();
   });
 
   it("closes on Escape with an empty term", async () => {

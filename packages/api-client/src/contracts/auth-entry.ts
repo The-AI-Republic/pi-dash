@@ -9,7 +9,7 @@
 // stays out of the initial bundle (NEWFRONT-523, size gate).
 import * as z from "zod/mini";
 import { ApiClient, CSRF_ENDPOINT } from "../client.js";
-import { nullableDateTime, nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 import { InstanceConfig } from "./auth.js";
 
 export const CsrfTokenResponse = z.object({
@@ -230,8 +230,8 @@ export async function approveDeviceCode(client: ApiClient, userCode: string): Pr
  */
 export const InstanceDetails = z.object({
   id: uuid(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
   deleted_at: nullableDateTime(),
@@ -242,7 +242,7 @@ export const InstanceDetails = z.object({
   latest_version: z.nullable(z.string()),
   edition: z.string(),
   domain: z.string(),
-  last_checked_at: z.iso.datetime(),
+  last_checked_at: dateTime(),
   namespace: z.nullable(z.string()),
   is_telemetry_enabled: z.boolean(),
   is_support_required: z.boolean(),

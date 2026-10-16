@@ -6,14 +6,17 @@
 // in a fixed order, keeps the active tab highlighted through nested routes
 // and work-item detail pages, and persists per-tab default and hide choices
 // per member, with hidden tabs retrievable behind the overflow menu. Bare
-// project addresses do not redirect (bug NEWFRONT-141), so that scenario
-// proves the degenerate behavior only and must not become a parity target.
-// Narrow widths pool trailing tabs behind the overflow menu on the
-// production oracle (dev-only NEWFRONT-142 clipped without pooling); the
-// pooling scenario is a parity target. The
+// project addresses rewrite to the stored default tab (subsuming the old
+// not-found bug NEWFRONT-141, which the oracle scenario proved only as
+// degenerate behavior). Narrow widths pool trailing tabs behind the
+// overflow menu on the production oracle (dev-only NEWFRONT-142 clipped
+// without pooling); the pooling scenario is a parity target. The
 // strip only mounts in tabbed mode, so each width-sensitive scenario
 // enables it and every feature flag through the server first and restores
 // both after. Rows: SHELL-075, SHELL-076, SHELL-077, SHELL-078, SHELL-079.
+// Target alignment (NEWFRONT-295 gate): the SHELL-077 scenario asserts
+// the intended rewrite, which web_new implements; the old app still
+// renders not-found there, so that row has no oracle.
 import { test, expect } from "../../fixtures";
 import {
   getProject,
@@ -172,10 +175,8 @@ test(
   }
 );
 
-const BUG_077 = "NEWFRONT-141";
-
 test(
-  specTitle(ROWS_077, `bug: bare project URL never redirects to the stored default (${BUG_077})`),
+  specTitle(ROWS_077, "bare project URL rewrites to the stored default tab"),
   { tag: specTags(ROWS_077) },
   async ({ driver, seed }) => {
     await test.step("sign in through the UI", async () => {
@@ -184,27 +185,56 @@ test(
     const session = await signInSession(seed.email, seed.password);
     // The first-run tour overlay covers the dashboard for fresh users, so clear it.
     await serverSetTourCompleted(session, true);
+    const bare = `/${seed.workspaceSlug}/projects/${seed.projectId}`;
+    const modeBefore = (await getWorkspaceUserProperties(seed.workspaceSlug, session))[
+      "navigation_control_preference"
+    ] as string | undefined;
+    const cycleBefore = (await getProject(seed.workspaceSlug, seed.projectId, session))["cycle_view"];
 
-    await test.step("the bare address stays bare with nothing active", async () => {
-      // No index route or redirect handles the bare project address: the
-      // address never rewrites, whichever default the member stored, the
-      // router renders its not-found page, and no tab ever matches it. All
-      // three hold in either project-list mode, so the scenario never
-      // depends on the shared mode surviving.
+    await test.step("the bare address rewrites to the stored default tab", async () => {
+      // Intended behavior, subsuming NEWFRONT-141: the stored default
+      // wins when it names an available tab, and the landed tab
+      // highlights. The strip only mounts in tabbed mode and cycles is
+      // feature-gated, so enable both explicitly: the seed default
+      // leaves them off and the redirect would otherwise (correctly)
+      // fall back to tracking with no active tab.
+      await patchWorkspaceUserProperties(seed.workspaceSlug, session, { navigation_control_preference: "TABBED" });
+      await patchProject(seed.workspaceSlug, seed.projectId, session, { cycle_view: true });
       await patchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
         preferences: { navigation: { default_tab: "cycles", hide_in_more_menu: [] } },
       });
       try {
-        await driver.page.goto(`/${seed.workspaceSlug}/projects/${seed.projectId}`);
-        await driver.page.waitForLoadState("domcontentloaded");
-        await driver.page.waitForTimeout(3_000);
-        expect(driver.page.url().endsWith(`/projects/${seed.projectId}`)).toBe(true);
-        expect(await driver.activeTabName()).toBeNull();
-        await expect.poll(() => driver.errorNoticeVisible(), { timeout: 10_000 }).toBe(true);
+        await driver.page.goto(bare);
+        await expect
+          .poll(() => Promise.resolve(new URL(driver.page.url()).pathname), { timeout: 30_000 })
+          .toBe(`${bare}/cycles`);
+        await expect.poll(() => driver.activeTabName(), { timeout: 30_000 }).toBe("Cycles");
+        expect(await driver.errorNoticeVisible()).toBe(false);
       } finally {
         await patchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
           preferences: { navigation: { default_tab: "work_items", hide_in_more_menu: [] } },
         });
+      }
+    });
+
+    await test.step("unknown stored keys fall back to the tracking tab", async () => {
+      await patchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
+        preferences: { navigation: { default_tab: "nope", hide_in_more_menu: [] } },
+      });
+      try {
+        await driver.page.goto(bare);
+        await expect
+          .poll(() => Promise.resolve(new URL(driver.page.url()).pathname), { timeout: 30_000 })
+          .toBe(`${bare}/issues`);
+        await expect.poll(() => driver.activeTabName(), { timeout: 30_000 }).toBe("Work Items");
+      } finally {
+        await patchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
+          preferences: { navigation: { default_tab: "work_items", hide_in_more_menu: [] } },
+        });
+        await patchWorkspaceUserProperties(seed.workspaceSlug, session, {
+          navigation_control_preference: modeBefore ?? "ACCORDION",
+        });
+        await patchProject(seed.workspaceSlug, seed.projectId, session, { cycle_view: cycleBefore });
       }
     });
   }

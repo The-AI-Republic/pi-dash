@@ -1,6 +1,11 @@
 /* Copyright (c) Pi Dash contributors */
 /* SPDX-License-Identifier: AGPL-3.0-only */
 /* See the LICENSE file for details. */
+/* Import order matters: kit.css ships precompiled base utilities (it is
+   built with standalone tailwindcss), so it must come BEFORE the app's
+   own utilities — otherwise kit's duplicate base rules land after the
+   app's responsive variants and win by source order, breaking every
+   `hidden sm:/md:/lg:` pattern app-wide (NEWFRONT-295 gate). */
+@import "@pidash/kit/kit.css";
 @import "tailwindcss";
 @import "@pidash/kit/tokens.css";
-@import "@pidash/kit/kit.css";

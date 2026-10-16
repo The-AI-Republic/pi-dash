@@ -34,6 +34,8 @@ test.describe("top-bar search box", () => {
         await driver.focusTopBarSearch();
         await expect.poll(() => driver.isTopBarResultsOpen()).toBe(true);
         expect(await driver.isCommandPaletteOpen()).toBe(false);
+        // Polled: web_new's rows load lazily behind the panel shell.
+        await expect.poll(() => driver.topBarResultsCommandTitles()).not.toEqual([]);
         const titles = await driver.topBarResultsCommandTitles();
         expect(titles.length).toBeGreaterThan(0);
       });

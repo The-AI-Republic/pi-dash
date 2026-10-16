@@ -212,9 +212,6 @@ export function SidebarProjectRow({
             highlighted ? `${ROW_LINK_TONE} bg-(--subtle) text-(--text)` : `${ROW_LINK_TONE} text-(--text-muted)`
           }
         >
-          <span className="text-caption shrink-0 rounded-(--radius-control) border border-(--border) px-(--space-2) py-px font-[family-name:var(--font-mono)]">
-            {project.identifier}
-          </span>
           <span className="truncate">{project.name}</span>
         </a>
         <Menu

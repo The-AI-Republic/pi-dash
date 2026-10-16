@@ -8,7 +8,7 @@
 // (NEWFRONT-523, size gate).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableDateTime, nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 
 /** Small project projection embedded in members and activity. */
 export const ProjectLite = z.object({
@@ -43,8 +43,8 @@ export const Project = z.object({
   guest_view_all_features: z.boolean(),
   project_lead: nullableUuid(),
   network: z.number(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
 });
@@ -86,8 +86,8 @@ export async function getProject(client: ApiClient, slug: string, projectId: str
  */
 export const ProjectDetails = z.object({
   id: uuid(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
   deleted_at: nullableDateTime(),
@@ -164,8 +164,8 @@ export const WorkspaceUserProperties = z.object({
   navigation_control_preference: z.string(),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
 });
 export type WorkspaceUserProperties = z.infer<typeof WorkspaceUserProperties>;
 
@@ -195,8 +195,8 @@ export const ProjectUserProperties = z.object({
   sort_order: z.number(),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
 });
 export type ProjectUserProperties = z.infer<typeof ProjectUserProperties>;
 

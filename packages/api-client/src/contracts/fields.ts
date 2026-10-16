@@ -4,14 +4,29 @@
 // Shared zod-mini field helpers for contracts.
 import * as z from "zod/mini";
 
+/**
+ * ISO-8601 datetime as the API serializes it. Django renders datetimes
+ * in the caller's timezone, so non-UTC users get numeric offsets
+ * (2026-10-16T15:32:05.479661+09:00); the bare Z-only pattern rejects
+ * those and must never be used for API datetimes directly.
+ */
+export function dateTime() {
+  return z.iso.datetime({ offset: true });
+}
+
+/** ISO-8601 calendar date as the API serializes it; null when unset. */
+export function nullableDate() {
+  return z.nullable(z.iso.date());
+}
+
 /** ISO-8601 datetime as the API serializes it; null when unset. */
 export function nullableDateTime() {
-  return z.nullable(z.iso.datetime());
+  return z.nullable(dateTime());
 }
 
 /** ISO-8601 datetime that may also be absent from the payload. */
 export function optionalDateTime() {
-  return z.optional(z.nullable(z.iso.datetime()));
+  return z.optional(z.nullable(dateTime()));
 }
 
 /** UUID primary key. */

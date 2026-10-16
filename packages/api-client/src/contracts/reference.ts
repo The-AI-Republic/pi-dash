@@ -4,7 +4,7 @@
 // Project reference-data contracts: states, labels, members.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableUuid, uuid } from "./fields.js";
 
 export const STATE_GROUPS = [
   "backlog",
@@ -68,7 +68,7 @@ export const ProjectMember = z.object({
   member: uuid(),
   project: uuid(),
   original_role: z.number(),
-  created_at: z.iso.datetime(),
+  created_at: dateTime(),
 });
 export type ProjectMember = z.infer<typeof ProjectMember>;
 

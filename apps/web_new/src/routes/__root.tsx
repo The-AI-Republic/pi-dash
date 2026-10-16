@@ -25,7 +25,7 @@ export const Route = createRootRouteWithContext<RouterContext>()({
   notFoundComponent: NotFoundPage,
   component: function RootComponent() {
     const context = Route.useRouteContext();
-    useDocumentHead({ title: "Pi Dash", robots: "index, nofollow" });
+    useDocumentHead({ title: "Pi Dash", robots: "index, nofollow", fallback: true });
     React.useEffect(() => {
       markInitialColorScheme();
     }, []);

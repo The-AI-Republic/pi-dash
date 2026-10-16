@@ -32,42 +32,105 @@ export interface DocumentHead {
   title: string;
   /** Crawler directives while the route shows. */
   robots: string;
+  /**
+   * Fallback owners (the app root's product default) lose to every
+   * route-level owner no matter the effect order. Parent effects run
+   * after child effects, so without this the root default always
+   * clobbers route titles whenever their data is already cached.
+   */
+  fallback?: boolean;
+}
+
+interface HeadClaim {
+  id: number;
+  fallback: boolean;
+  title: string;
+  robots: string;
+}
+
+let nextClaimId = 0;
+let claims: HeadClaim[] = [];
+let bootTitle = "";
+let bootRobotsPresent = false;
+let bootRobotsContent: string | null = null;
+
+function captureBootHead(): void {
+  bootTitle = document.title;
+  const tag = document.querySelector<HTMLMetaElement>('meta[name="robots"]');
+  bootRobotsPresent = tag !== null;
+  bootRobotsContent = tag?.getAttribute("content") ?? null;
+}
+
+function topClaim(): HeadClaim | undefined {
+  // Route owners beat fallbacks; among equals the most recently
+  // mounted wins, so a freshly mounted route replaces the previous
+  // one even if the old tree lingers for a commit.
+  let top: HeadClaim | undefined;
+  for (const claim of claims) {
+    if (top === undefined || (top.fallback && !claim.fallback)) {
+      top = claim;
+    } else if (top.fallback === claim.fallback && claim.id > top.id) {
+      top = claim;
+    }
+  }
+  return top;
+}
+
+function applyHeadClaim(claim: HeadClaim | undefined): void {
+  stripServedMarketingTags();
+  if (claim === undefined) {
+    document.title = bootTitle;
+    const tag = document.querySelector<HTMLMetaElement>('meta[name="robots"]');
+    if (!bootRobotsPresent) {
+      tag?.remove();
+    } else if (tag !== null) {
+      if (bootRobotsContent === null) {
+        tag.removeAttribute("content");
+      } else {
+        tag.setAttribute("content", bootRobotsContent);
+      }
+    }
+    return;
+  }
+  document.title = claim.title;
+  let tag = document.querySelector<HTMLMetaElement>('meta[name="robots"]');
+  if (tag === null) {
+    tag = document.createElement("meta");
+    tag.setAttribute("name", "robots");
+    document.head.appendChild(tag);
+  }
+  tag.setAttribute("content", claim.robots);
 }
 
 /**
- * Own the tab title and crawler directives while mounted, restoring the
- * previous pair on unmount. The first mount also swaps the served product
- * metadata out so hydrated routes never double-report it.
+ * Own the tab title and crawler directives while mounted. Nested owners
+ * stack: a route title beats the root fallback, and unmounting restores
+ * the surviving owner (or the served head when none remains). Each
+ * application also swaps the served product metadata out so hydrated
+ * routes never double-report it.
  */
-export function useDocumentHead({ title, robots }: DocumentHead): void {
+export function useDocumentHead({ title, robots, fallback = false }: DocumentHead): void {
+  const claimRef = React.useRef<HeadClaim | null>(null);
+  if (claimRef.current === null) {
+    nextClaimId += 1;
+    claimRef.current = { id: nextClaimId, fallback, title, robots };
+  }
   React.useEffect(() => {
-    const previousTitle = document.title;
-    document.title = title;
-
-    let robotsTag = document.querySelector<HTMLMetaElement>('meta[name="robots"]');
-    const created = robotsTag === null;
-    const previousRobots = robotsTag?.getAttribute("content") ?? null;
-    if (robotsTag === null) {
-      robotsTag = document.createElement("meta");
-      robotsTag.setAttribute("name", "robots");
-      document.head.appendChild(robotsTag);
-    }
-    robotsTag.setAttribute("content", robots);
-
-    stripServedMarketingTags();
-
-    const current = robotsTag;
+    const claim = claimRef.current;
+    if (claim === null) return;
+    // A fresh generation (nothing mounted) recaptures the served head,
+    // so test renders and full remounts restore what they found.
+    if (claims.length === 0) captureBootHead();
+    claim.title = title;
+    claim.robots = robots;
+    claim.fallback = fallback;
+    if (!claims.includes(claim)) claims.push(claim);
+    applyHeadClaim(topClaim());
     return () => {
-      document.title = previousTitle;
-      if (created) {
-        current.remove();
-      } else if (previousRobots === null) {
-        current.removeAttribute("content");
-      } else {
-        current.setAttribute("content", previousRobots);
-      }
+      claims = claims.filter((entry) => entry !== claim);
+      applyHeadClaim(topClaim());
     };
-  }, [title, robots]);
+  }, [title, robots, fallback]);
 }
 
 /**
