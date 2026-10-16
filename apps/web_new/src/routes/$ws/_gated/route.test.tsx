@@ -44,7 +44,16 @@ const harness = vi.hoisted(() => ({
     unreadTotal: number;
     unreadMentions: number;
   },
-  sidebarCollapsed: false,
+  sidebar: null as null | {
+    personalEntries: unknown;
+    currentPath: string;
+    onPersonalize: () => void;
+  },
+  personalizeDialog: null as null | {
+    open: boolean;
+    workspaceSlug: string;
+    personal: unknown;
+  },
   rail: undefined as unknown,
   routerState: {
     matches: [{ params: {} }],
@@ -104,6 +113,19 @@ vi.mock("../../../features/auth/api.js", async (importOriginal) => {
   };
 });
 
+// Personalization stand-in: capture the dialog props; the dialog's own
+// suite owns its behavior.
+vi.mock("../../../features/sidebar/components/PersonalizeDialog.js", async () => {
+  const React = await import("react");
+  return {
+    PersonalizeDialog: (props: { open: boolean; workspaceSlug: string; personal: unknown }) => {
+      harness.personalizeDialog = { ...props };
+      if (!props.open) return null;
+      return React.createElement("div", { "data-testid": "personalize-dialog-standin" });
+    },
+  };
+});
+
 // Shell-chrome stand-ins: capture the registered commands, the palette
 // search wiring, the top-bar wiring and the rail node, and expose the
 // sidebar sign-out entry as a button; the chrome components own their own
@@ -118,6 +140,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       topBar?: React.ReactNode;
       sidebar?: React.ReactNode;
       rail?: React.ReactNode;
+      dialogs?: React.ReactNode;
       children?: React.ReactNode;
       searchScope: { workspaceSlug: string; projectId: string | null };
       onSelectSearchResult: (hit: SearchResultHit) => void;
@@ -126,15 +149,21 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       harness.searchScope = props.searchScope;
       harness.onSelectSearchResult = props.onSelectSearchResult;
       harness.rail = props.rail;
-      return React.createElement("div", null, props.topBar, props.sidebar, props.children);
+      return React.createElement("div", null, props.topBar, props.sidebar, props.dialogs, props.children);
     },
     Sidebar: (props: {
       userLabel: string;
       onSignOut: () => void;
       onDeactivateAccount: () => void;
-      collapsed?: boolean;
+      personalEntries: unknown;
+      currentPath: string;
+      onPersonalize: () => void;
     }) => {
-      harness.sidebarCollapsed = props.collapsed ?? false;
+      harness.sidebar = {
+        personalEntries: props.personalEntries,
+        currentPath: props.currentPath,
+        onPersonalize: props.onPersonalize,
+      };
       return React.createElement(
         React.Fragment,
         null,
@@ -143,7 +172,8 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
           { type: "button", "aria-label": `Sign out ${props.userLabel}`, onClick: props.onSignOut },
           "Sign out"
         ),
-        React.createElement("button", { type: "button", onClick: props.onDeactivateAccount }, "Deactivate account")
+        React.createElement("button", { type: "button", onClick: props.onDeactivateAccount }, "Deactivate account"),
+        React.createElement("button", { type: "button", onClick: props.onPersonalize }, "Personalize")
       );
     },
     TopBarSearch: (props: { scope: { workspaceSlug: string; projectId: string | null } | null }) => {
@@ -247,7 +277,7 @@ describe("gated layout guard", () => {
 });
 
 describe("gated layout loader", () => {
-  it("prefetches workspaces, projects and the unread count", async () => {
+  it("prefetches workspaces, projects, the unread count and sidebar preferences", async () => {
     const seen: Array<readonly unknown[]> = [];
     const args = {
       context: {
@@ -268,6 +298,7 @@ describe("gated layout loader", () => {
       ["session", "workspaces"],
       ["ws", "acme", "projects", "list"],
       ["ws", "acme", "notifications", "unread"],
+      ["ws", "acme", "sidebar-preferences"],
     ]);
   });
 
@@ -288,13 +319,31 @@ describe("gated layout loader", () => {
     if (typeof loader !== "function") throw new Error("missing loader");
     await expect(loader(args)).resolves.toBeUndefined();
   });
+
+  it("still resolves when the sidebar-preferences prefetch fails", async () => {
+    const args = {
+      context: {
+        apiClient: {},
+        queryClient: {
+          ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
+            if (options.queryKey[2] === "sidebar-preferences") throw new Error("prefs down");
+            return [];
+          },
+        },
+      },
+      params: { ws: "acme" },
+    } as never;
+    const loader = Route.options.loader;
+    if (typeof loader !== "function") throw new Error("missing loader");
+    await expect(loader(args)).resolves.toBeUndefined();
+  });
 });
 
 describe("gated layout shell wiring", () => {
   const navigate = vi.fn();
   let mounted: { unmount: () => void } | null = null;
 
-  function stubShellQueries(unread: unknown = undefined): void {
+  function stubShellQueries(unread: unknown = undefined, sidebarPrefs: unknown = { data: undefined }): void {
     const suspenseQuery = vi.mocked(useSuspenseQuery) as unknown as {
       mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => { data: unknown }) => void;
     };
@@ -309,11 +358,13 @@ describe("gated layout shell wiring", () => {
     // instance reads the palette entries perform through the session hooks.
     // The entries' own suite proves the real fetch; here the mock stands in
     // with the same shapes the fetch stub below serves, and records the
-    // membership read the guest test waits on.
+    // membership read the guest test waits on. Sidebar preferences ride the
+    // same mock with a per-test result.
     const plainQuery = vi.mocked(useQuery) as unknown as {
-      mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => { data: unknown }) => void;
+      mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => unknown) => void;
     };
     plainQuery.mockImplementation((options) => {
+      if (options.queryKey[0] === "ws" && options.queryKey[2] === "sidebar-preferences") return sidebarPrefs;
       if (options.queryKey[0] === "session" && options.queryKey[1] === "workspaces") {
         harness.fetched.push("https://api.test/api/users/me/workspaces/");
         return { data: [{ id: "w1", slug: "acme", name: "Acme", role: harness.role }] };
@@ -396,14 +447,15 @@ describe("gated layout shell wiring", () => {
   }
 
   function resetChrome(): void {
-    useShellChrome.setState({ sidebarCollapsed: false, peekOpen: false });
+    useShellChrome.setState({ sidebarCollapsed: false, peekOpen: false, sidebarWidth: 256 });
     useRailState.setState({ density: "labeled", undockedByWorkspace: {} });
     globalThis.localStorage.clear();
     delete edition.flags["app-rail"];
     delete edition.flags["sidebar-toggle"];
     delete edition.rail;
     harness.topBar = null;
-    harness.sidebarCollapsed = false;
+    harness.sidebar = null;
+    harness.personalizeDialog = null;
     harness.rail = undefined;
     harness.routerState = { matches: [{ params: {} }], location: { pathname: "/acme/projects/p1/issues" } };
   }
@@ -763,7 +815,6 @@ describe("gated layout shell wiring", () => {
       unreadTotal: 0,
       unreadMentions: 0,
     });
-    expect(harness.sidebarCollapsed).toBe(false);
   });
 
   it("names the active project section from the route match", () => {
@@ -843,5 +894,50 @@ describe("gated layout shell wiring", () => {
     } finally {
       strip.unmount();
     }
+  });
+
+  it("passes personal entries, the current path and the personalization opener to the sidebar", () => {
+    renderShell();
+    expect(harness.sidebar?.personalEntries).toEqual([{ key: "drafts", label: "Drafts", href: "/acme/drafts/" }]);
+    expect(harness.sidebar?.currentPath).toBe("/acme/projects/p1/issues");
+    expect(typeof harness.sidebar?.onPersonalize).toBe("function");
+  });
+
+  it("filters unpinned entries from the sidebar list", () => {
+    stubShellQueries(undefined, {
+      status: "success",
+      data: { drafts: { is_pinned: false, sort_order: 0 } },
+    });
+    renderShell();
+    expect(harness.sidebar?.personalEntries).toEqual([]);
+  });
+
+  it("opens personalization from the sidebar launcher with the resolved group", async () => {
+    const user = userEvent.setup();
+    stubShellQueries(undefined, {
+      status: "success",
+      data: { drafts: { is_pinned: true, sort_order: 2 } },
+    });
+    renderShell();
+    expect(screen.queryByTestId("personalize-dialog-standin")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Personalize" }));
+    expect(await screen.findByTestId("personalize-dialog-standin")).not.toBeNull();
+    expect(harness.personalizeDialog).toMatchObject({ open: true, workspaceSlug: "acme" });
+    expect(harness.personalizeDialog?.personal).toEqual({
+      status: "ready",
+      entries: [{ key: "drafts", label: "Drafts", path: "drafts", enabled: true, sortOrder: 2 }],
+    });
+  });
+
+  it.each([
+    ["pending", { status: "pending", data: undefined }],
+    ["error", { status: "error", data: undefined }],
+  ])("resolves the %s personal group for the dialog", async (_label, prefs) => {
+    const user = userEvent.setup();
+    stubShellQueries(undefined, prefs);
+    renderShell();
+    await user.click(screen.getByRole("button", { name: "Personalize" }));
+    expect(await screen.findByTestId("personalize-dialog-standin")).not.toBeNull();
+    expect(harness.personalizeDialog?.personal).toEqual({ status: _label, entries: [] });
   });
 });

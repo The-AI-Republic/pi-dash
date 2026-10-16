@@ -21,7 +21,10 @@ export { PeekPanel } from "./PeekPanel.js";
 export type { PeekPanelProps } from "./PeekPanel.js";
 export { REPOSITORY_URL, RepoStar, starIconSrc } from "./RepoStar.js";
 export { Sidebar } from "./Sidebar.js";
-export type { SidebarProject, SidebarProps, SidebarWorkspace } from "./Sidebar.js";
+export type { SidebarPersonalEntry, SidebarProject, SidebarProps, SidebarWorkspace } from "./Sidebar.js";
+export { SIDEBAR_PEEK_DISMISS_MS, SidebarShell } from "./SidebarShell.js";
+export type { SidebarShellProps } from "./SidebarShell.js";
+export { NARROW_VIEWPORT_BREAKPOINT_PX, useNarrowViewport } from "./narrowViewport.js";
 export { TitleBar } from "./TitleBar.js";
 export type { TitleBarProps } from "./TitleBar.js";
 export { TopBar } from "./TopBar.js";
@@ -29,7 +32,19 @@ export type { TopBarProps } from "./TopBar.js";
 export { TopBarSearch, TOPBAR_SEARCH_PLACEHOLDER } from "./TopBarSearch.js";
 export type { TopBarSearchProps } from "./TopBarSearch.js";
 export { useWindowTitle } from "./windowTitle.js";
-export { useShellChrome } from "./chromeState.js";
+export {
+  MAIN_SIDEBAR_PANEL,
+  SIDEBAR_DEFAULT_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+  clampSidebarWidth,
+  createSidebarPanelStore,
+  loadSidebarPanel,
+  sidebarPanelStorageKey,
+  sidebarPanelStore,
+  useShellChrome,
+} from "./chromeState.js";
+export type { SidebarPanelSnapshot, SidebarPanelState } from "./chromeState.js";
 export { isRailUndocked, useRailState } from "./railState.js";
 export type { RailDensity } from "./railState.js";
 export { isDockItemActive, isSettingsEntryActive, WorkspaceRail } from "./WorkspaceRail.js";
@@ -71,5 +86,4 @@ export type { PreferenceChoice, TimezoneMutationHandlers } from "./preferences.j
 export { groupBoundCommands, ShortcutsDialog } from "./ShortcutsDialog.js";
 export type { ShortcutGroup } from "./ShortcutsDialog.js";
 export { useShortcutsDialog } from "./shortcutsDialogStore.js";
-export { useSidebarCollapsed } from "./sidebarCollapsed.js";
 export { useTopSearchFocus } from "./topSearchFocus.js";

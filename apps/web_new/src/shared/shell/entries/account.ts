@@ -8,9 +8,9 @@
 // descriptor beside this catalog. Open to every signed-in user.
 
 import type { PidashCommand } from "../../commands/index.js";
+import { useShellChrome } from "../chromeState.js";
 import { copyCurrentPageUrl } from "../clipboard.js";
 import { useShortcutsDialog } from "../shortcutsDialogStore.js";
-import { useSidebarCollapsed } from "../sidebarCollapsed.js";
 import { useTopSearchFocus } from "../topSearchFocus.js";
 
 /** External help destinations (SHELL-089); all leave the app. */
@@ -39,7 +39,11 @@ export function buildAccountCommands(context: AccountEntryContext): PidashComman
       title: "Toggle app sidebar",
       section: "Miscellaneous",
       shortcut: "mod+b",
-      run: () => useSidebarCollapsed.getState().toggleCollapsed(),
+      run: () => {
+        // Same flip as the top-bar toggle (SHELL-066): peek never survives it.
+        useShellChrome.getState().clearPeek();
+        useShellChrome.getState().toggleSidebarCollapsed();
+      },
     },
     {
       id: "shell.copy-page-url",

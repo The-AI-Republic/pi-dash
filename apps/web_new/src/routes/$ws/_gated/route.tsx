@@ -31,6 +31,13 @@ import {
 import { runSignOutAction, signOutCommand, useSignOut } from "../../../features/auth/index.js";
 import { unreadNotificationsQueryOptions } from "../../../features/notifications/index.js";
 import { projectsQueryOptions } from "../../../features/projects/index.js";
+import {
+  selectPersonalEntries,
+  selectPersonalGroup,
+  selectVisiblePersonalEntries,
+  sidebarPreferencesQueryOptions,
+  useSidebarPreferences,
+} from "../../../features/sidebar/index.js";
 import type { SearchResultHit } from "../../../shared/commands/index.js";
 import {
   AppShell,
@@ -70,6 +77,14 @@ const LazyDeactivateAccountDialog = React.lazy(() =>
 const WorkspaceRail = React.lazy(() =>
   import("../../../shared/shell/WorkspaceRail.js").then((module) => ({ default: module.WorkspaceRail }))
 );
+// The personalization dialog splits off the initial bundle (size gate):
+// it only renders (and loads) once opened from the sidebar header
+// (shell spec §6, SHELL-070/071).
+const PersonalizeDialog = React.lazy(() =>
+  import("../../../features/sidebar/components/PersonalizeDialog.js").then((module) => ({
+    default: module.PersonalizeDialog,
+  }))
+);
 
 export const Route = createFileRoute("/$ws/_gated")({
   beforeLoad: async ({ context, location }) => {
@@ -99,6 +114,11 @@ export const Route = createFileRoute("/$ws/_gated")({
       context.queryClient
         .ensureQueryData(unreadNotificationsQueryOptions(context.apiClient, params.ws))
         // The unread dot is optional chrome: a failing count must not fail the shell.
+        .catch(() => undefined),
+      context.queryClient
+        .ensureQueryData(sidebarPreferencesQueryOptions(context.apiClient, params.ws))
+        // Personal entries are optional chrome too: the sidebar falls
+        // back to visible defaults while they load or when they fail.
         .catch(() => undefined),
     ]);
   },
@@ -166,7 +186,9 @@ function WorkspaceShell({
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, workspaceSlug));
   const [deactivateOpen, setDeactivateOpen] = React.useState(false);
   const [createProjectOpen, setCreateProjectOpen] = React.useState(false);
+  const [personalizeOpen, setPersonalizeOpen] = React.useState(false);
   const { data: unread } = useQuery(unreadNotificationsQueryOptions(context.apiClient, workspaceSlug));
+  const sidebarPrefs = useSidebarPreferences(workspaceSlug);
   const sidebarCollapsed = useShellChrome((state) => state.sidebarCollapsed);
   const clearPeek = useShellChrome((state) => state.clearPeek);
   const toggleSidebarCollapsed = useShellChrome((state) => state.toggleSidebarCollapsed);
@@ -175,6 +197,8 @@ function WorkspaceShell({
   const workspace = selectWorkspace(workspaces, workspaceSlug);
   const activeProject = projects.find((project) => project.id === childProjectId) ?? null;
   const userLabel = me.display_name || me.email;
+  const personalStates = selectPersonalEntries(sidebarPrefs.data);
+  const personalGroup = selectPersonalGroup(sidebarPrefs.status, sidebarPrefs.data);
   const dockItems: RailDockItem[] = (edition.rail ?? []).map((entry) => ({
     id: entry.id,
     label: entry.label,
@@ -220,18 +244,28 @@ function WorkspaceShell({
           userLabel={userLabel}
           onSignOut={onSignOut}
           onDeactivateAccount={() => setDeactivateOpen(true)}
-          collapsed={sidebarCollapsed}
+          personalEntries={selectVisiblePersonalEntries(personalStates, workspaceSlug)}
+          currentPath={currentPath}
+          onPersonalize={() => setPersonalizeOpen(true)}
         />
       }
       rail={rail}
+      dialogs={
+        personalizeOpen ? (
+          <React.Suspense fallback={null}>
+            <PersonalizeDialog
+              open={personalizeOpen}
+              onOpenChange={setPersonalizeOpen}
+              workspaceSlug={workspaceSlug}
+              personal={personalGroup}
+            />
+          </React.Suspense>
+        ) : null
+      }
     >
       {deactivateOpen ? (
         <React.Suspense fallback={null}>
-          <LazyDeactivateAccountDialog
-            open={deactivateOpen}
-            onOpenChange={setDeactivateOpen}
-            email={me.email}
-          />
+          <LazyDeactivateAccountDialog open={deactivateOpen} onOpenChange={setDeactivateOpen} email={me.email} />
         </React.Suspense>
       ) : null}
       <React.Suspense fallback={null}>

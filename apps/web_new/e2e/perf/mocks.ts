@@ -4,7 +4,7 @@
 // Self-contained API mocks for the perf specs (NEWFRONT-21). The payloads
 // follow the @pidash/api-client contracts; the app parses every one with
 // zod at runtime, so a malformed mock fails the spec loudly instead of
-// silently rendering nothing. Anything outside the nine endpoints the
+// silently rendering nothing. Anything outside the ten endpoints the
 // issue-list slice calls is aborted, keeping the specs hermetic: a new
 // endpoint shows up as a failure that updates these mocks.
 import type { Page } from "@playwright/test";
@@ -18,6 +18,7 @@ import type {
   Project,
   ProjectDetail,
   ProjectRoleMap,
+  SidebarPreferences,
   UnreadNotifications,
   Workspace,
 } from "@pidash/api-client";
@@ -173,6 +174,11 @@ export function mockUnreadNotifications(): UnreadNotifications {
   return { total_unread_notifications_count: 0, mention_unread_notifications_count: 0 };
 }
 
+/** Default pins: the sidebar's personal group renders while rows measure. */
+export function mockSidebarPreferences(): SidebarPreferences {
+  return { drafts: { is_pinned: true, sort_order: 0 } };
+}
+
 const PRIORITIES: IssueListItem["priority"][] = ["urgent", "high", "medium", "low", "none"];
 
 export function mockIssue(index: number): IssueListItem {
@@ -258,6 +264,7 @@ export async function installApiMocks(
   const membershipPath = `/api/workspaces/${PERF_WORKSPACE_SLUG}/workspace-members/me/`;
   const rolesPath = `/api/users/me/workspaces/${PERF_WORKSPACE_SLUG}/project-roles/`;
   const unreadPath = `/api/workspaces/${PERF_WORKSPACE_SLUG}/users/notifications/unread/`;
+  const sidebarPrefsPath = `/api/workspaces/${PERF_WORKSPACE_SLUG}/sidebar-preferences/`;
   await page.route(
     (url) => url.pathname === projectDetailPath,
     (route) => route.fulfill(jsonFulfill(mockProjectDetail()))
@@ -274,6 +281,10 @@ export async function installApiMocks(
     (url) => url.pathname === unreadPath,
     (route) => route.fulfill(jsonFulfill(mockUnreadNotifications()))
   );
+  await page.route(
+    (url) => url.pathname === sidebarPrefsPath,
+    (route) => route.fulfill(jsonFulfill(mockSidebarPreferences()))
+  );
   const known = new Set([
     "/api/users/me/",
     "/api/users/me/profile/",
@@ -284,6 +295,7 @@ export async function installApiMocks(
     membershipPath,
     rolesPath,
     unreadPath,
+    sidebarPrefsPath,
   ]);
   await page.route(
     (url) =>

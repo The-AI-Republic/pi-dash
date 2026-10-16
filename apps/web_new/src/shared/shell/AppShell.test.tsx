@@ -22,7 +22,6 @@ import { useCommandPalette } from "../commands/index.js";
 import { useSessionStore } from "../../core/session/store.js";
 import { AppShell } from "./AppShell.js";
 import { useShortcutsDialog } from "./shortcutsDialogStore.js";
-import { useSidebarCollapsed } from "./sidebarCollapsed.js";
 
 function shell(slots: Partial<React.ComponentProps<typeof AppShell>> = {}): React.ReactElement {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -54,7 +53,6 @@ afterEach(() => {
   navigate.mockClear();
   useSessionStore.setState({ status: "unknown", returnUrl: null });
   useCommandPalette.getState().closePalette();
-  useSidebarCollapsed.setState({ collapsed: false });
   useShortcutsDialog.getState().closeShortcuts();
 });
 
@@ -142,13 +140,11 @@ describe("AppShell", () => {
     expect(screen.queryByRole("listbox", { name: "Commands" })).toBeNull();
   });
 
-  it("hides the sidebar while collapsed (SHELL-089)", () => {
+  it("keeps the sidebar slot mounted: the sidebar renders its own collapsed strip (SHELL-067)", () => {
     render(shell());
+    // Collapse lives in the shell chrome store (SHELL-066/098) and the
+    // Sidebar answers it with a zero-width strip; the slot never unmounts.
     expect(screen.getByRole("complementary", { name: "Workspace navigation" })).not.toBeNull();
-    act(() => {
-      useSidebarCollapsed.getState().setCollapsed(true);
-    });
-    expect(screen.queryByRole("complementary", { name: "Workspace navigation" })).toBeNull();
   });
 
   it("mounts the shortcuts dialog closed (SHELL-094)", async () => {

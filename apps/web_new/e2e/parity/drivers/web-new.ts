@@ -1167,51 +1167,99 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async toggleSidebar(): Promise<void> {
-    return todo("toggleSidebar");
+    // Sidebar shell (NEWFRONT-290): the top-bar toggle flips collapse.
+    await this.page.locator('[data-testid="sidebar-toggle"]').first().click();
+  }
+
+  /** The open personalization dialog. */
+  private personalizeDialog(): Locator {
+    return this.page.locator('[role="dialog"]');
   }
 
   async openPersonalizeDialog(): Promise<void> {
-    return todo("openPersonalizeDialog");
+    // Sidebar shell (NEWFRONT-290): the header launcher opens the dialog.
+    await this.page.locator('[data-testid="personalize-nav"]').click();
+    await this.page.getByRole("heading", { name: "Personalize sidebar" }).waitFor({ timeout: 15_000 });
   }
 
   async personalizeDialogOpen(): Promise<boolean> {
-    return todo("personalizeDialogOpen");
+    return (await this.page.getByRole("heading", { name: "Personalize sidebar" }).count()) > 0;
   }
 
-  async personalItemChecked(): Promise<boolean | null> {
-    return todo("personalItemChecked");
+  private personalItemRow(name: string): Locator {
+    return this.personalizeDialog()
+      .locator('[data-testid="personal-row"]')
+      .filter({ has: this.personalizeDialog().getByText(name, { exact: true }) });
   }
 
-  async setPersonalItemEnabled(): Promise<void> {
-    return todo("setPersonalItemEnabled");
+  async personalItemChecked(name: string): Promise<boolean | null> {
+    const box = this.personalItemRow(name).locator('input[type="checkbox"]');
+    if ((await box.count()) === 0) return null;
+    return await box.first().isChecked();
   }
 
-  async movePersonalItem(): Promise<void> {
-    return todo("movePersonalItem");
+  async setPersonalItemEnabled(name: string, enabled: boolean): Promise<void> {
+    const box = this.personalItemRow(name).locator('input[type="checkbox"]').first();
+    await box.scrollIntoViewIfNeeded();
+    const checked = await box.isChecked();
+    if (checked !== enabled) await box.click({ force: true });
+  }
+
+  async movePersonalItem(dragged: string, target: string): Promise<void> {
+    const source = this.personalItemRow(dragged);
+    const dest = this.personalItemRow(target);
+    const box = await dest.boundingBox();
+    // Land near the target's bottom edge so the drop resolves past the
+    // target's slot instead of back into the dragged row's own.
+    const targetPosition = box === null ? undefined : { x: box.width / 2, y: box.height - 4 };
+    await source.dragTo(dest, { targetPosition });
   }
 
   async personalItemNames(): Promise<string[]> {
-    return todo("personalItemNames");
+    const labels = this.personalizeDialog().locator('[data-testid="personal-row-label"]');
+    const texts = await labels.allTextContents();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
   async projectNavMode(): Promise<"ACCORDION" | "TABBED" | null> {
-    return todo("projectNavMode");
+    const dialog = this.personalizeDialog();
+    if ((await dialog.locator('[data-testid="project-nav-accordion"]').count()) === 0) return null;
+    const tabbed = dialog.locator('[data-testid="project-nav-tabbed"]');
+    return (await tabbed.isChecked()) ? "TABBED" : "ACCORDION";
   }
 
-  async setProjectNavMode(): Promise<void> {
-    return todo("setProjectNavMode");
+  async setProjectNavMode(mode: "ACCORDION" | "TABBED"): Promise<void> {
+    const radio = this.personalizeDialog().locator(
+      `[data-testid="project-nav-${mode === "TABBED" ? "tabbed" : "accordion"}"]`
+    );
+    await radio.check({ force: true });
   }
 
   async projectCapInput(): Promise<string | null> {
-    return todo("projectCapInput");
+    const dialog = this.personalizeDialog();
+    const toggle = dialog.locator('[data-testid="project-cap-toggle"]');
+    if ((await toggle.count()) === 0) return null;
+    if (!(await toggle.isChecked())) return null;
+    const input = dialog.locator('[data-testid="project-cap-input"]');
+    if ((await input.count()) === 0) return null;
+    return await input.first().inputValue();
   }
 
   async projectCapEnabled(): Promise<boolean | null> {
-    return todo("projectCapEnabled");
+    const toggle = this.personalizeDialog().locator('[data-testid="project-cap-toggle"]');
+    if ((await toggle.count()) === 0) return null;
+    return await toggle.isChecked();
   }
 
-  async setProjectCap(): Promise<void> {
-    return todo("setProjectCap");
+  async setProjectCap(enabled: boolean, count?: number): Promise<void> {
+    const dialog = this.personalizeDialog();
+    const toggle = dialog.locator('[data-testid="project-cap-toggle"]');
+    const checked = await toggle.isChecked();
+    if (checked !== enabled) await toggle.click({ force: true });
+    if (enabled && count !== undefined) {
+      const input = dialog.locator('[data-testid="project-cap-input"]').first();
+      await input.fill(String(count));
+    }
   }
 
   async projectHeaderText(): Promise<string | null> {
@@ -2481,47 +2529,80 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async sidebarBrandVisible(): Promise<boolean> {
-    return todo("sidebarBrandVisible");
+    // Sidebar shell (NEWFRONT-290): the header wordmark.
+    const brand = this.page.locator('#main-sidebar [data-testid="sidebar-brand"]').first();
+    return (await brand.count()) > 0 && (await brand.isVisible());
   }
 
   async sidebarQuickActionNames(): Promise<string[]> {
-    return todo("sidebarQuickActionNames");
+    const texts = await this.page.locator("#main-sidebar").getByRole("button").allTextContents();
+    return texts.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text.length > 0);
   }
 
   async sidebarAccountButtonCount(): Promise<number> {
-    return todo("sidebarAccountButtonCount");
+    return await this.page.locator('#main-sidebar [data-testid="sidebar-account-menu"]').count();
   }
 
-  async dragSidebarGripBy(): Promise<void> {
-    return todo("dragSidebarGripBy");
+  /** The resize grip on the sidebar's right edge. */
+  private sidebarGrip(): Locator {
+    return this.page.locator("#main-sidebar").getByRole("separator", { name: "Resize sidebar" }).first();
+  }
+
+  async dragSidebarGripBy(dx: number): Promise<void> {
+    const grip = this.sidebarGrip();
+    const box = await grip.boundingBox();
+    if (box === null) throw new Error("[parity] sidebar resize grip has no layout box.");
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await this.page.mouse.move(x, y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(x + dx, y, { steps: 10 });
+    await this.page.mouse.up();
   }
 
   async doubleClickSidebarGrip(): Promise<void> {
-    return todo("doubleClickSidebarGrip");
+    const grip = this.sidebarGrip();
+    const box = await grip.boundingBox();
+    if (box === null) throw new Error("[parity] sidebar resize grip has no layout box.");
+    // Offset down the edge: the grip's own center can sit under the
+    // header row, while the edge below it takes the collapse gesture.
+    await this.page.mouse.dblclick(box.x + box.width / 2, box.y + 100);
   }
 
   async hoverCollapsedEdge(): Promise<void> {
-    return todo("hoverCollapsedEdge");
+    await this.page.mouse.move(4, 400);
   }
 
   async clickOutsideSidebar(): Promise<void> {
-    return todo("clickOutsideSidebar");
+    // Raw mouse event: the floating shell animates under the cursor, which
+    // defeats actionability checks, while the outside detector only needs
+    // the press itself.
+    await this.page.mouse.click(450, 400);
   }
 
-  async sidebarEntryVisible(): Promise<boolean> {
-    return todo("sidebarEntryVisible");
+  async sidebarEntryVisible(name: string): Promise<boolean> {
+    return (await this.page.locator("#main-sidebar").innerText()).includes(name);
   }
 
-  async projectCapTypeText(): Promise<void> {
-    return todo("projectCapTypeText");
+  /** The listed-projects count input inside the open dialog. */
+  private projectCapField(): Locator {
+    return this.personalizeDialog().locator('[data-testid="project-cap-input"]').first();
   }
 
-  async projectCapFill(): Promise<void> {
-    return todo("projectCapFill");
+  async projectCapTypeText(text: string): Promise<void> {
+    const input = this.projectCapField();
+    await input.click();
+    await input.press("End");
+    for (const char of text) await input.press(char);
+  }
+
+  async projectCapFill(value: string): Promise<void> {
+    await this.projectCapField().fill(value);
   }
 
   async projectCapMinErrorVisible(): Promise<boolean> {
-    return todo("projectCapMinErrorVisible");
+    const error = this.personalizeDialog().getByText("Use at least 1.");
+    return (await error.count()) > 0 && (await error.first().isVisible());
   }
 
   async railSettingsEntryPresent(): Promise<boolean> {
