@@ -147,9 +147,11 @@ export function applyFavoriteParent(
  */
 export function sequenceForInsert(ordered: readonly Pick<Favorite, "id" | "sequence">[], index: number): number {
   const slot = Math.max(0, Math.min(index, ordered.length));
-  if (slot === 0) return (ordered[0]?.sequence ?? 0) + FAVORITE_ORDER_STEP;
-  if (slot >= ordered.length) return (ordered[ordered.length - 1]?.sequence ?? 0) - FAVORITE_ORDER_STEP;
-  return ((ordered[slot - 1]?.sequence ?? 0) + (ordered[slot]?.sequence ?? 0)) / 2;
+  const prev = ordered[slot - 1]?.sequence;
+  const next = ordered[slot]?.sequence;
+  if (prev === undefined) return (next ?? 0) + FAVORITE_ORDER_STEP;
+  if (next === undefined) return prev - FAVORITE_ORDER_STEP;
+  return (prev + next) / 2;
 }
 
 /** One measured favorites row for drop resolution (SHELL-109). */
@@ -185,8 +187,14 @@ export function resolveIntoFolder(
     const bottom = span.headerBottom;
     const width = right - left;
     const height = bottom - top;
-    if (width <= 0 || height <= 0) continue;
-    if (x >= left + width / 4 && x <= right - width / 4 && y >= top + height / 4 && y <= bottom - height / 4) {
+    if (
+      width > 0 &&
+      height > 0 &&
+      x >= left + width / 4 &&
+      x <= right - width / 4 &&
+      y >= top + height / 4 &&
+      y <= bottom - height / 4
+    ) {
       return span.id;
     }
   }
@@ -304,15 +312,15 @@ export function useMoveFavorite(workspaceSlug: string) {
       if (sequence === undefined && parent === undefined) return;
       const key =
         groupId === null ? sidebarKeys.favorites(workspaceSlug) : sidebarKeys.favoriteGroup(workspaceSlug, groupId);
-      const rollback = applyOptimisticUpdate<FavoriteList>(queryClient, key, (previous) => {
-        const sequenced = sequence === undefined ? previous : applyFavoriteSequence(previous, favoriteId, sequence);
-        return parent === undefined ? sequenced : applyFavoriteParent(sequenced, favoriteId, parent);
-      });
+      const patch = {
+        ...(sequence !== undefined && { sequence }),
+        ...(parent !== undefined && { parent }),
+      };
+      const rollback = applyOptimisticUpdate<FavoriteList>(queryClient, key, (previous) =>
+        previous?.map((row) => (row.id === favoriteId ? { ...row, ...patch } : row))
+      );
       try {
-        await updateFavorite(getAppClient(), workspaceSlug, favoriteId, {
-          ...(sequence === undefined ? {} : { sequence }),
-          ...(parent === undefined ? {} : { parent }),
-        });
+        await updateFavorite(getAppClient(), workspaceSlug, favoriteId, patch);
       } catch (error) {
         rollback();
         notifyError(FAVORITE_FAILED_TITLE, FAVORITE_FAILED_BODY);
