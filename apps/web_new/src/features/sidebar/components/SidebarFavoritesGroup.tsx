@@ -29,6 +29,7 @@ import {
 import * as React from "react";
 
 import { resolveDropTarget, type SidebarDropRow, type SidebarDropTarget } from "../../projects/index.js";
+import { CrossAppLink } from "../../../shared/coexistence/index.js";
 import { isFavoritesSectionOpen, notifyError, setFavoritesSectionOpen } from "../../../shared/shell/index.js";
 import {
   FOLDER_DUPLICATE_TITLE,
@@ -343,10 +344,10 @@ function FavoriteRow({
             <span className="truncate">{name}</span>
           </button>
         ) : (
-          <a href={resolveFavoriteHref(workspaceSlug, row)} className={ROW_LINK_TONE}>
+          <CrossAppLink to={resolveFavoriteHref(workspaceSlug, row)} className={ROW_LINK_TONE}>
             <Icon size={16} strokeWidth={1.5} aria-hidden="true" />
             <span className="truncate">{name}</span>
-          </a>
+          </CrossAppLink>
         )}
         <Menu
           trigger={

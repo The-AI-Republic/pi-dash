@@ -93,11 +93,9 @@ export function isMoreRoute(pathname: string, workspaceSlug: string): boolean {
 export const MORE_SECTION_OPEN_KEY = "web_new.more.open";
 
 function storage(): Storage | null {
-  try {
-    return globalThis.localStorage ?? null;
-  } catch {
-    return null;
-  }
+  // Both callers run this inside their own try/catch, so a denied
+  // store reads closed without throwing here.
+  return globalThis.localStorage ?? null;
 }
 
 /** Persisted open flag; missing or unreadable storage reads closed. */

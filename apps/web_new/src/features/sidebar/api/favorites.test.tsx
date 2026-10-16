@@ -152,6 +152,7 @@ describe("favoriteOrderPatch", () => {
   it("stays silent when the drop changes nothing", () => {
     expect(favoriteOrderPatch(ordered, ["a", "b"], "b")).toBeNull();
     expect(favoriteOrderPatch(ordered, ["a"], "a")).toBeNull();
+    expect(favoriteOrderPatch(ordered, ["b", "a"], "zzz")).toBeNull();
   });
 });
 
