@@ -3,17 +3,29 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // What this suite owns is the mount: the GitHub address renders the
-// shared provider page over the GitHub definition (shell, form, and
-// notices belong to the admin area).
+// shared provider page over the GitHub definition with the GitHub
+// credential set (shell, form, and notices belong to the admin area).
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
+const seen = vi.hoisted(() => ({ props: null as null | Record<string, unknown> }));
+
 vi.mock("../../../../features/admin/index.js", () => ({
-  AdminAuthProviderPage: ({ provider }: { provider: { slug: string } }) => (
-    <div data-testid={`admin-auth-provider-page-${provider.slug}`} />
-  ),
+  AdminAuthProviderPage: (props: Record<string, unknown>) => {
+    seen.props = props;
+    const provider = props.provider as { slug: string };
+    return <div data-testid={`admin-auth-provider-page-${provider.slug}`} />;
+  },
   AUTH_PROVIDER_BY_SLUG: { github: { slug: "github" } },
+  PROVIDER_CREDENTIALS: {
+    github: {
+      fields: "github-fields",
+      prefill: "github-prefill",
+      copyDescriptions: "github-descriptions",
+      copyHelp: "github-help",
+    },
+  },
 }));
 
 import { Route } from "./github.js";
@@ -24,5 +36,12 @@ describe("github authentication route", () => {
     if (!Component) throw new Error("github authentication route has no component");
     render(<Component />);
     expect(screen.getByTestId("admin-auth-provider-page-github")).toBeInTheDocument();
+    expect(seen.props).toMatchObject({
+      provider: { slug: "github" },
+      fields: "github-fields",
+      prefill: "github-prefill",
+      copyDescriptions: "github-descriptions",
+      copyHelp: "github-help",
+    });
   });
 });

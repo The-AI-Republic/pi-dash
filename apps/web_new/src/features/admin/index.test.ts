@@ -136,6 +136,7 @@ import {
   selectAiSettings,
   PROVIDER_BACK_LABEL,
   PROVIDER_COPY_DONE_TITLE,
+  PROVIDER_CREDENTIALS,
   PROVIDER_DISCARD_BODY,
   PROVIDER_DISCARD_KEEP_LABEL,
   PROVIDER_DISCARD_TITLE,
@@ -341,6 +342,7 @@ describe("admin barrel", () => {
     expect(AUTH_METHOD_ENABLE_KEYS.length).toBe(6);
     expect(LOOP_MIN_ROLE_LABELS).toEqual({ 20: "Admin", 15: "Member", 5: "Guest" });
     expect(AUTH_PROVIDERS.length).toBe(4);
+    expect(Object.keys(PROVIDER_CREDENTIALS).sort()).toEqual(["gitea", "github", "gitlab", "google"]);
     expect(AUTH_PROVIDER_BY_SLUG).toBeDefined();
     expect(AUTH_PROVIDER_SKELETON_BARS).toBeGreaterThan(0);
     expect(ADMIN_NARROW_VIEWPORT_PX).toBeGreaterThan(0);
