@@ -1,12 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Sidebar project row (parity/specs/shell.md §4, SHELL-050/051). Links
-// the member's default tab, expands inline sub-navigation in
+// Sidebar project row (parity/specs/shell.md §4, SHELL-050/051/055).
+// Links the member's default tab, expands inline sub-navigation in
 // accordion mode, scrolls the active project into view, offers the
 // standing-gated quick menu, and drags from a hover handle. The row
 // reads the default tab from the member store without fetching it:
-// a cold store links tracking until a project route warms it.
+// a cold store links tracking until a project route warms it. The
+// sub-navigation entries (SHELL-055: tabs plus the workers panel,
+// flag- and role-gated with the nonzero intake badge) render from
+// the shared selector so the shell proves hrefs plus gating only;
+// link targets belong to their own areas.
 
 import { useQuery } from "@tanstack/react-query";
 import type { Project } from "@pidash/api-client";
@@ -32,9 +36,9 @@ import { PublishProjectDialog } from "./PublishProjectDialog.js";
 
 /** Copy confirmation the parity driver reads (SHELL-050). */
 export const ROW_LINK_COPIED_TITLE = "Link copied";
-const ROW_LINK_COPIED_BODY = "Paste it anywhere to share this project.";
-const ROW_COPY_FAILED_TITLE = "Couldn't copy the address";
-const ROW_COPY_FAILED_BODY = "The clipboard refused the write — try again.";
+export const ROW_LINK_COPIED_BODY = "Paste it anywhere to share this project.";
+export const ROW_COPY_FAILED_TITLE = "Couldn't copy the address";
+export const ROW_COPY_FAILED_BODY = "The clipboard refused the write — try again.";
 
 const ROW_LINK_TONE =
   "text-body flex min-w-0 flex-1 items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-2) text-left hover:bg-(--subtle)";

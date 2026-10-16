@@ -89,6 +89,21 @@ describe("Sidebar", () => {
     expect(screen.getByText("group content")).toBeInTheDocument();
   });
 
+  it("renders the more and favorites slots after the projects group", () => {
+    render(
+      sidebar({
+        projectsGroup: <p>group content</p>,
+        moreGroup: <p>more content</p>,
+        favoritesGroup: <p>favorites content</p>,
+      })
+    );
+    const group = screen.getByText("group content");
+    const more = screen.getByText("more content");
+    const favorites = screen.getByText("favorites content");
+    expect(group.compareDocumentPosition(more) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(more.compareDocumentPosition(favorites) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("signs out from the account menu", () => {
     const onSignOut = vi.fn();
     render(sidebar({ onSignOut }));

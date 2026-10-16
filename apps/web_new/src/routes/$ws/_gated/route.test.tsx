@@ -54,6 +54,8 @@ const harness = vi.hoisted(() => ({
     onPersonalize: () => void;
     quickActions: unknown;
     projectsGroup: unknown;
+    moreGroup: unknown;
+    favoritesGroup: unknown;
     onNavigateHref: (href: string) => void;
     workspaces: unknown;
     creationDisabled: unknown;
@@ -208,6 +210,8 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       onPersonalize: () => void;
       quickActions: unknown;
       projectsGroup: unknown;
+      moreGroup: unknown;
+      favoritesGroup: unknown;
       onNavigateHref: (href: string) => void;
       workspaces: unknown;
       creationDisabled: unknown;
@@ -226,6 +230,8 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
         onPersonalize: props.onPersonalize,
         quickActions: props.quickActions,
         projectsGroup: props.projectsGroup,
+        moreGroup: props.moreGroup,
+        favoritesGroup: props.favoritesGroup,
         onNavigateHref: props.onNavigateHref,
         workspaces: props.workspaces,
         creationDisabled: props.creationDisabled,
@@ -351,7 +357,7 @@ describe("gated layout guard", () => {
 });
 
 describe("gated layout loader", () => {
-  it("starts the projects fetch, then prefetches workspaces, the unread count and sidebar preferences", async () => {
+  it("starts the projects fetch, then prefetches workspaces, the unread count, sidebar preferences and favorites", async () => {
     // Projects load eagerly but outside the blocking gate: the sidebar
     // renders placeholder rows while the collection resolves (SHELL-049).
     const seen: Array<readonly unknown[]> = [];
@@ -375,6 +381,7 @@ describe("gated layout loader", () => {
       ["session", "workspaces"],
       ["ws", "acme", "notifications", "unread"],
       ["ws", "acme", "sidebar-preferences"],
+      ["ws", "acme", "favorites"],
     ]);
   });
 
@@ -1054,6 +1061,27 @@ describe("gated layout shell wiring", () => {
     expect(quickActions.props.canCreate).toBe(false);
     const group = harness.sidebar?.projectsGroup as React.ReactElement<{ canCreateProject: boolean }>;
     expect(group.props.canCreateProject).toBe(false);
+  });
+
+  it("passes the more and favorites slots with guest gating (SHELL-053/056)", () => {
+    renderShell();
+    const more = harness.sidebar?.moreGroup as React.ReactElement<{
+      workspaceSlug: string;
+      role: number | null;
+      currentPath: string;
+    }>;
+    expect(more.props.workspaceSlug).toBe("acme");
+    expect(more.props.role).toBe(15);
+    expect(typeof more.props.currentPath).toBe("string");
+    expect(harness.sidebar?.favoritesGroup).toBeDefined();
+  });
+
+  it("keeps the more disclosure but drops favorites for guests (SHELL-053/056)", () => {
+    harness.role = 5;
+    renderShell();
+    const more = harness.sidebar?.moreGroup as React.ReactElement<{ role: number | null }>;
+    expect(more.props.role).toBe(5);
+    expect(harness.sidebar?.favoritesGroup).toBeUndefined();
   });
 
   it("passes the quick-create slot its picker and standing (SHELL-047)", () => {

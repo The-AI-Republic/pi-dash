@@ -37,9 +37,14 @@ import { Route as GodModeDashboardAuthenticationRouteRouteImport } from './route
 import { Route as GodModeDashboardEmailRouteImport } from './routes/god-mode/_dashboard/email'
 import { Route as GodModeDashboardGeneralRouteImport } from './routes/god-mode/_dashboard/general'
 import { Route as GodModeDashboardWorkspaceRouteRouteImport } from './routes/god-mode/_dashboard/workspace/route'
+import { Route as WsGatedAiDevMachinesIndexRouteImport } from './routes/$ws/_gated/ai-dev-machines/index'
+import { Route as WsGatedAnalyticsIndexRouteImport } from './routes/$ws/_gated/analytics/index'
 import { Route as WsGatedBrowseIssueKeyRouteImport } from './routes/$ws/_gated/browse/$issueKey'
 import { Route as WsGatedProjectsIndexRouteImport } from './routes/$ws/_gated/projects/index'
 import { Route as WsGatedProjectsProjectIdRouteRouteImport } from './routes/$ws/_gated/projects/$projectId/route'
+import { Route as WsGatedPromptsIndexRouteImport } from './routes/$ws/_gated/prompts/index'
+import { Route as WsGatedRunnersIndexRouteImport } from './routes/$ws/_gated/runners/index'
+import { Route as WsGatedSchedulersIndexRouteImport } from './routes/$ws/_gated/schedulers/index'
 import { Route as GodModeDashboardAuthenticationIndexRouteImport } from './routes/god-mode/_dashboard/authentication/index'
 import { Route as GodModeDashboardAuthenticationGiteaRouteImport } from './routes/god-mode/_dashboard/authentication/gitea'
 import { Route as GodModeDashboardAuthenticationGithubRouteImport } from './routes/god-mode/_dashboard/authentication/github'
@@ -199,6 +204,17 @@ const GodModeDashboardWorkspaceRouteRoute =
     path: '/workspace',
     getParentRoute: () => GodModeDashboardRouteRoute,
   } as any)
+const WsGatedAiDevMachinesIndexRoute =
+  WsGatedAiDevMachinesIndexRouteImport.update({
+    id: '/ai-dev-machines/',
+    path: '/ai-dev-machines/',
+    getParentRoute: () => WsGatedRouteRoute,
+  } as any)
+const WsGatedAnalyticsIndexRoute = WsGatedAnalyticsIndexRouteImport.update({
+  id: '/analytics/',
+  path: '/analytics/',
+  getParentRoute: () => WsGatedRouteRoute,
+} as any)
 const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
   id: '/browse/$issueKey',
   path: '/browse/$issueKey',
@@ -215,6 +231,21 @@ const WsGatedProjectsProjectIdRouteRoute =
     path: '/projects/$projectId',
     getParentRoute: () => WsGatedRouteRoute,
   } as any)
+const WsGatedPromptsIndexRoute = WsGatedPromptsIndexRouteImport.update({
+  id: '/prompts/',
+  path: '/prompts/',
+  getParentRoute: () => WsGatedRouteRoute,
+} as any)
+const WsGatedRunnersIndexRoute = WsGatedRunnersIndexRouteImport.update({
+  id: '/runners/',
+  path: '/runners/',
+  getParentRoute: () => WsGatedRouteRoute,
+} as any)
+const WsGatedSchedulersIndexRoute = WsGatedSchedulersIndexRouteImport.update({
+  id: '/schedulers/',
+  path: '/schedulers/',
+  getParentRoute: () => WsGatedRouteRoute,
+} as any)
 const GodModeDashboardAuthenticationIndexRoute =
   GodModeDashboardAuthenticationIndexRouteImport.update({
     id: '/',
@@ -359,7 +390,12 @@ export interface FileRoutesByFullPath {
   '/god-mode/authentication/google': typeof GodModeDashboardAuthenticationGoogleRoute
   '/god-mode/loop/$jobId': typeof GodModeDashboardLoopJobIdRoute
   '/god-mode/workspace/create': typeof GodModeDashboardWorkspaceCreateRoute
+  '/$ws/ai-dev-machines/': typeof WsGatedAiDevMachinesIndexRoute
+  '/$ws/analytics/': typeof WsGatedAnalyticsIndexRoute
   '/$ws/projects/': typeof WsGatedProjectsIndexRoute
+  '/$ws/prompts/': typeof WsGatedPromptsIndexRoute
+  '/$ws/runners/': typeof WsGatedRunnersIndexRoute
+  '/$ws/schedulers/': typeof WsGatedSchedulersIndexRoute
   '/god-mode/authentication/': typeof GodModeDashboardAuthenticationIndexRoute
   '/god-mode/loop/': typeof GodModeDashboardLoopIndexRoute
   '/god-mode/workspace/': typeof GodModeDashboardWorkspaceIndexRoute
@@ -403,7 +439,12 @@ export interface FileRoutesByTo {
   '/god-mode/authentication/google': typeof GodModeDashboardAuthenticationGoogleRoute
   '/god-mode/loop/$jobId': typeof GodModeDashboardLoopJobIdRoute
   '/god-mode/workspace/create': typeof GodModeDashboardWorkspaceCreateRoute
+  '/$ws/ai-dev-machines': typeof WsGatedAiDevMachinesIndexRoute
+  '/$ws/analytics': typeof WsGatedAnalyticsIndexRoute
   '/$ws/projects': typeof WsGatedProjectsIndexRoute
+  '/$ws/prompts': typeof WsGatedPromptsIndexRoute
+  '/$ws/runners': typeof WsGatedRunnersIndexRoute
+  '/$ws/schedulers': typeof WsGatedSchedulersIndexRoute
   '/god-mode/authentication': typeof GodModeDashboardAuthenticationIndexRoute
   '/god-mode/loop': typeof GodModeDashboardLoopIndexRoute
   '/god-mode/workspace': typeof GodModeDashboardWorkspaceIndexRoute
@@ -455,7 +496,12 @@ export interface FileRoutesById {
   '/god-mode/_dashboard/authentication/google': typeof GodModeDashboardAuthenticationGoogleRoute
   '/god-mode/_dashboard/loop/$jobId': typeof GodModeDashboardLoopJobIdRoute
   '/god-mode/_dashboard/workspace/create': typeof GodModeDashboardWorkspaceCreateRoute
+  '/$ws/_gated/ai-dev-machines/': typeof WsGatedAiDevMachinesIndexRoute
+  '/$ws/_gated/analytics/': typeof WsGatedAnalyticsIndexRoute
   '/$ws/_gated/projects/': typeof WsGatedProjectsIndexRoute
+  '/$ws/_gated/prompts/': typeof WsGatedPromptsIndexRoute
+  '/$ws/_gated/runners/': typeof WsGatedRunnersIndexRoute
+  '/$ws/_gated/schedulers/': typeof WsGatedSchedulersIndexRoute
   '/god-mode/_dashboard/authentication/': typeof GodModeDashboardAuthenticationIndexRoute
   '/god-mode/_dashboard/loop/': typeof GodModeDashboardLoopIndexRoute
   '/god-mode/_dashboard/workspace/': typeof GodModeDashboardWorkspaceIndexRoute
@@ -506,7 +552,12 @@ export interface FileRouteTypes {
     | '/god-mode/authentication/google'
     | '/god-mode/loop/$jobId'
     | '/god-mode/workspace/create'
+    | '/$ws/ai-dev-machines/'
+    | '/$ws/analytics/'
     | '/$ws/projects/'
+    | '/$ws/prompts/'
+    | '/$ws/runners/'
+    | '/$ws/schedulers/'
     | '/god-mode/authentication/'
     | '/god-mode/loop/'
     | '/god-mode/workspace/'
@@ -550,7 +601,12 @@ export interface FileRouteTypes {
     | '/god-mode/authentication/google'
     | '/god-mode/loop/$jobId'
     | '/god-mode/workspace/create'
+    | '/$ws/ai-dev-machines'
+    | '/$ws/analytics'
     | '/$ws/projects'
+    | '/$ws/prompts'
+    | '/$ws/runners'
+    | '/$ws/schedulers'
     | '/god-mode/authentication'
     | '/god-mode/loop'
     | '/god-mode/workspace'
@@ -601,7 +657,12 @@ export interface FileRouteTypes {
     | '/god-mode/_dashboard/authentication/google'
     | '/god-mode/_dashboard/loop/$jobId'
     | '/god-mode/_dashboard/workspace/create'
+    | '/$ws/_gated/ai-dev-machines/'
+    | '/$ws/_gated/analytics/'
     | '/$ws/_gated/projects/'
+    | '/$ws/_gated/prompts/'
+    | '/$ws/_gated/runners/'
+    | '/$ws/_gated/schedulers/'
     | '/god-mode/_dashboard/authentication/'
     | '/god-mode/_dashboard/loop/'
     | '/god-mode/_dashboard/workspace/'
@@ -834,6 +895,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GodModeDashboardWorkspaceRouteRouteImport
       parentRoute: typeof GodModeDashboardRouteRoute
     }
+    '/$ws/_gated/ai-dev-machines/': {
+      id: '/$ws/_gated/ai-dev-machines/'
+      path: '/ai-dev-machines'
+      fullPath: '/$ws/ai-dev-machines/'
+      preLoaderRoute: typeof WsGatedAiDevMachinesIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/analytics/': {
+      id: '/$ws/_gated/analytics/'
+      path: '/analytics'
+      fullPath: '/$ws/analytics/'
+      preLoaderRoute: typeof WsGatedAnalyticsIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
     '/$ws/_gated/browse/$issueKey': {
       id: '/$ws/_gated/browse/$issueKey'
       path: '/browse/$issueKey'
@@ -853,6 +928,27 @@ declare module '@tanstack/react-router' {
       path: '/projects/$projectId'
       fullPath: '/$ws/projects/$projectId'
       preLoaderRoute: typeof WsGatedProjectsProjectIdRouteRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/prompts/': {
+      id: '/$ws/_gated/prompts/'
+      path: '/prompts'
+      fullPath: '/$ws/prompts/'
+      preLoaderRoute: typeof WsGatedPromptsIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/runners/': {
+      id: '/$ws/_gated/runners/'
+      path: '/runners'
+      fullPath: '/$ws/runners/'
+      preLoaderRoute: typeof WsGatedRunnersIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/schedulers/': {
+      id: '/$ws/_gated/schedulers/'
+      path: '/schedulers'
+      fullPath: '/$ws/schedulers/'
+      preLoaderRoute: typeof WsGatedSchedulersIndexRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
     '/god-mode/_dashboard/authentication/': {
@@ -1023,7 +1119,12 @@ interface WsGatedRouteRouteChildren {
   WsGatedIndexRoute: typeof WsGatedIndexRoute
   WsGatedProjectsProjectIdRouteRoute: typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute
+  WsGatedAiDevMachinesIndexRoute: typeof WsGatedAiDevMachinesIndexRoute
+  WsGatedAnalyticsIndexRoute: typeof WsGatedAnalyticsIndexRoute
   WsGatedProjectsIndexRoute: typeof WsGatedProjectsIndexRoute
+  WsGatedPromptsIndexRoute: typeof WsGatedPromptsIndexRoute
+  WsGatedRunnersIndexRoute: typeof WsGatedRunnersIndexRoute
+  WsGatedSchedulersIndexRoute: typeof WsGatedSchedulersIndexRoute
   WsGatedProjectsArchivesIndexRoute: typeof WsGatedProjectsArchivesIndexRoute
 }
 
@@ -1032,7 +1133,12 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedProjectsProjectIdRouteRoute:
     WsGatedProjectsProjectIdRouteRouteWithChildren,
   WsGatedBrowseIssueKeyRoute: WsGatedBrowseIssueKeyRoute,
+  WsGatedAiDevMachinesIndexRoute: WsGatedAiDevMachinesIndexRoute,
+  WsGatedAnalyticsIndexRoute: WsGatedAnalyticsIndexRoute,
   WsGatedProjectsIndexRoute: WsGatedProjectsIndexRoute,
+  WsGatedPromptsIndexRoute: WsGatedPromptsIndexRoute,
+  WsGatedRunnersIndexRoute: WsGatedRunnersIndexRoute,
+  WsGatedSchedulersIndexRoute: WsGatedSchedulersIndexRoute,
   WsGatedProjectsArchivesIndexRoute: WsGatedProjectsArchivesIndexRoute,
 }
 

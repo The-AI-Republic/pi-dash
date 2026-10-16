@@ -29,6 +29,7 @@ import {
   notifySuccess,
   setFavoritesSectionOpen,
 } from "../../../shared/shell/index.js";
+import { sidebarKeys } from "../../sidebar/index.js";
 import { projectKeys } from "./keys.js";
 
 export const FAVORITE_ADDED_TITLE = "Added to favorites";
@@ -97,6 +98,10 @@ export function useToggleFavoriteProject() {
     },
     onSettled: (_data, _error, input) => {
       void queryClient.invalidateQueries({ queryKey: projectKeys.details(input.workspaceSlug) });
+      // The sidebar section reads its own list: starring re-reads it
+      // so the first add surfaces (and opens the section) without a
+      // reload (SHELL-032 seam; the section is NEWFRONT-286's).
+      void queryClient.invalidateQueries({ queryKey: sidebarKeys.favorites(input.workspaceSlug) });
     },
   });
   return {
