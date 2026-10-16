@@ -4038,6 +4038,34 @@ export class WebNewDriver implements ParityDriver {
   async dragFavoriteBefore(sourceName: string, targetName: string): Promise<void> {
     // Pointer drag through the hover handle: the pointerdown starts the
     // reorder, the release above the target commits it.
+    await this.dragFavoriteTo(sourceName, targetName, "edge");
+  }
+
+  async dragFavoriteIntoFolder(sourceName: string, folderName: string): Promise<void> {
+    // Same handle drag, landing on the folder header's center so the
+    // drop reads as nesting instead of a sibling reorder. The header —
+    // not the row, which spans open children — is the drop zone.
+    const source = this.favoriteRowByName(sourceName);
+    await source.hover();
+    const handle = source.getByTestId("favorite-drag-handle");
+    const from = await handle.boundingBox();
+    if (!from) throw new Error(`[parity] no drag handle for ${sourceName}.`);
+    const header = this.favoriteRowByName(folderName).getByTestId("favorite-folder-toggle");
+    const to = await header.boundingBox();
+    if (!to) throw new Error(`[parity] no favorite folder for ${folderName}.`);
+    await this.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await this.page.mouse.down();
+    await this.page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 12 });
+    await this.page.mouse.up();
+  }
+
+  async dragFavoriteOutOfFolder(sourceName: string, targetName: string): Promise<void> {
+    // Unnesting is the sibling gesture: a nested row dropped above a
+    // top-level row leaves its folder while landing in the top list.
+    await this.dragFavoriteTo(sourceName, targetName, "edge");
+  }
+
+  private async dragFavoriteTo(sourceName: string, targetName: string, landing: "edge" | "center"): Promise<void> {
     const source = this.favoriteRowByName(sourceName);
     await source.hover();
     const handle = source.getByTestId("favorite-drag-handle");
@@ -4048,7 +4076,8 @@ export class WebNewDriver implements ParityDriver {
     if (!to) throw new Error(`[parity] no favorite row for ${targetName}.`);
     await this.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
     await this.page.mouse.down();
-    await this.page.mouse.move(to.x + to.width / 2, to.y + 2, { steps: 12 });
+    const landY = landing === "center" ? to.y + to.height / 2 : to.y + 2;
+    await this.page.mouse.move(to.x + to.width / 2, landY, { steps: 12 });
     await this.page.mouse.up();
   }
 

@@ -22090,3 +22090,28 @@ export async function serverIntakeShellInboxIssues(
     total,
   };
 }
+
+// --- NEWFRONT-525: one folder's nested favorites, as the folder's own
+// --- grouped read serves them. Appended; existing helpers above are
+// --- untouched per the shared parity contract.
+
+/** Children nested under one favorites folder. */
+export async function listFavoriteGroup(
+  workspaceSlug: string,
+  sessionCookie: string,
+  folderId: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityFavorite[]> {
+  const res = await apiJson(
+    "GET",
+    `/api/workspaces/${workspaceSlug}/user-favorites/${folderId}/group/`,
+    sessionCookie,
+    undefined,
+    apiBase
+  );
+  if (res.status !== 200) throw new Error(`[parity] favorite group read failed with HTTP ${res.status}.`);
+  const rows: unknown[] = Array.isArray(res.payload)
+    ? res.payload
+    : ((res.payload as { results?: unknown[] }).results ?? []);
+  return rows as ParityFavorite[];
+}

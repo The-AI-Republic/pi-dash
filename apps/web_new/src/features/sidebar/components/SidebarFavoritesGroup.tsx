@@ -1,15 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Sidebar favorites section (parity/specs/shell.md §4, SHELL-056/057).
+// Sidebar favorites section (parity/specs/shell.md §4, SHELL-056/057/109).
 // The collapsing Favorites group: folders with an inline validated
 // create/rename form, entries deep-linking to their targets by entity
 // type with a workspace-root fallback, hover-revealed drag handles
-// reordering each list with server persistence, and quick menus for
-// removal and folder rename. The section hides entirely while the
-// top-level list is empty; the first add opens a closed section live
-// through the SHELL-032 open flag. The route mounts this for admins
-// and members only.
+// reordering each list with server persistence, drops onto a folder
+// nesting with a parent write and nested rows dragged out un-nesting,
+// and quick menus for removal and folder rename. The section hides
+// entirely while the top-level list is empty; the first add opens a
+// closed section live through the SHELL-032 open flag. The route mounts
+// this for admins and members only.
 
 import type { Favorite } from "@pidash/api-client";
 import { IconButton, Menu } from "@pidash/kit";
@@ -28,7 +29,7 @@ import {
 } from "lucide-react";
 import * as React from "react";
 
-import { resolveDropTarget, type SidebarDropRow, type SidebarDropTarget } from "../../projects/index.js";
+import { resolveDropTarget, type SidebarDropTarget } from "../../projects/index.js";
 import { CrossAppLink } from "../../../shared/coexistence/index.js";
 import { isFavoritesSectionOpen, notifyError, setFavoritesSectionOpen } from "../../../shared/shell/index.js";
 import {
@@ -36,8 +37,10 @@ import {
   FOLDER_EMPTY_TITLE,
   favoriteOrderPatch,
   moveFavoriteToIndex,
+  resolveIntoFolder,
   selectOrderedFavorites,
   selectTopLevelFavorites,
+  sequenceForInsert,
   useCreateFavoriteFolder,
   useDeleteFavorite,
   useFavoriteGroup,
@@ -45,6 +48,7 @@ import {
   useMoveFavorite,
   useRenameFavoriteFolder,
   validateFolderName,
+  type FavoriteDropSpan,
   type FavoriteMoveInput,
 } from "../api/favorites.js";
 import { resolveFavoriteHref, resolveFavoriteIconKind, type FavoriteIconKind } from "../favoriteLinks.js";
@@ -81,50 +85,152 @@ export function favoriteDisplayName(row: Pick<Favorite, "entity_data" | "name">)
 type FolderFormState = { mode: "create" } | { mode: "rename"; favoriteId: string; current: string };
 
 /**
- * Pointer-drag reorder for one favorites list (SHELL-056): the
- * top-level list and every open folder's list each run their own.
- * Drops commit through the caller's move; releases elsewhere or
- * no-op drops stay silent.
+ * Drop preview shared by every favorites list: the sibling slot in the
+ * dragged list, a folder absorbing the row, or a slot in the top-level
+ * list for rows dragged out of a folder. Only the dragging list ever
+ * reports a non-empty preview.
+ */
+interface FavoriteDropPreview {
+  slot: SidebarDropTarget | null;
+  /** Folder absorbing the row, when the pointer holds its header band. */
+  into: string | null;
+  outer: SidebarDropTarget | null;
+}
+
+const EMPTY_DROP: FavoriteDropPreview = { slot: null, into: null, outer: null };
+
+function inside(list: Element, x: number, y: number): boolean {
+  const rect = list.getBoundingClientRect();
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+}
+
+/** Per-row drop marker: a sibling slot, a folder absorbing the row, or nothing. */
+type FavoriteDropMarker = "above" | "below" | "into" | null;
+
+function dropMarkerFor(preview: FavoriteDropPreview, rowId: string): FavoriteDropMarker {
+  if (preview.into === rowId) return "into";
+  const slot = preview.slot ?? preview.outer;
+  return slot?.id === rowId ? (slot.after ? "below" : "above") : null;
+}
+
+/** Drag state shared by every favorites list, threaded as one prop. */
+interface FavoriteDragState {
+  preview: FavoriteDropPreview;
+  report: (preview: FavoriteDropPreview) => void;
+  topRows: readonly Pick<Favorite, "id" | "sequence">[];
+  topListRef: React.RefObject<HTMLUListElement | null>;
+}
+
+/**
+ * Pointer-drag organization for one favorites list (SHELL-056,
+ * SHELL-109): the top-level list and every open folder's list each run
+ * their own. Sibling drops reorder with a sequence write; drops onto a
+ * folder header's middle band nest with a parent write; nested rows
+ * released over the top-level list un-nest with a parent-clearing
+ * write. Drops commit through the caller's move; releases elsewhere,
+ * drops onto the row's own folder and no-op drops stay silent. Folder
+ * sources never nest: over a folder band they reorder instead.
  */
 function useFavoriteReorder(args: {
-  rows: readonly Pick<Favorite, "id" | "sequence">[];
+  rows: readonly Pick<Favorite, "id" | "sequence" | "parent" | "is_folder">[];
   groupId: string | null;
   commit: (input: FavoriteMoveInput) => void;
+  report: (preview: FavoriteDropPreview) => void;
+  /** Top-level rows for nested lists (drag-out target); null on the top list itself. */
+  outer: {
+    rows: readonly Pick<Favorite, "id" | "sequence">[];
+    listRef: React.RefObject<HTMLUListElement | null>;
+  } | null;
 }): {
   listRef: React.RefObject<HTMLUListElement | null>;
   sourceId: string | null;
-  target: SidebarDropTarget | null;
   onDragStart: (favoriteId: string) => void;
 } {
   const [sourceId, setSourceId] = React.useState<string | null>(null);
-  const [target, setTarget] = React.useState<SidebarDropTarget | null>(null);
-  const targetRef = React.useRef<SidebarDropTarget | null>(null);
+  const dropRef = React.useRef<FavoriteDropPreview>(EMPTY_DROP);
   const listRef = React.useRef<HTMLUListElement>(null);
 
   React.useEffect(() => {
     if (sourceId === null) return;
-    const spans = (): SidebarDropRow[] => {
-      const nodes = listRef.current?.querySelectorAll("[data-favorite-row]") ?? [];
-      return Array.from(nodes).map((node) => {
-        const rect = node.getBoundingClientRect();
-        return { id: (node as HTMLElement).dataset["favoriteRow"] ?? "", top: rect.top, bottom: rect.bottom };
+    const outerConfig = args.outer;
+    const spans = (list: HTMLUListElement | null): FavoriteDropSpan[] =>
+      Array.from(list?.children ?? [], (node) => {
+        const element = node as HTMLElement;
+        const rect = element.getBoundingClientRect();
+        // A row is a folder iff it renders the folder toggle, so one
+        // lookup answers both questions; plain entries reuse the row.
+        const toggle = element.querySelector('[data-testid="favorite-folder-toggle"]');
+        const header = toggle?.getBoundingClientRect() ?? rect;
+        return {
+          id: element.dataset.favoriteRow ?? "",
+          top: rect.top,
+          bottom: rect.bottom,
+          isFolder: !!toggle,
+          headerTop: header.top,
+          headerBottom: header.bottom,
+          headerLeft: header.left,
+          headerRight: header.right,
+        };
       });
+    const preview = (next: FavoriteDropPreview): void => {
+      dropRef.current = next;
+      args.report(next);
     };
     const move = (event: PointerEvent): void => {
-      const next = resolveDropTarget(spans(), event.clientY, sourceId);
-      targetRef.current = next;
-      setTarget(next);
+      const x = event.clientX;
+      const y = event.clientY;
+      const own = spans(listRef.current);
+      const outer = outerConfig === null ? [] : spans(outerConfig.listRef.current);
+      const into = resolveIntoFolder([...own, ...outer], x, y, sourceId);
+      const source = args.rows.find((row) => row.id === sourceId);
+      if (into !== null) {
+        if (into === source?.parent) {
+          preview(EMPTY_DROP);
+          return;
+        }
+        if (!source?.is_folder) {
+          preview({ ...EMPTY_DROP, into });
+          return;
+        }
+      }
+      if (outerConfig !== null) {
+        // Effects run after mount, so both lists are always present here.
+        const topList = outerConfig.listRef.current as HTMLUListElement;
+        const ownList = listRef.current as HTMLUListElement;
+        if (inside(topList, x, y) && !inside(ownList, x, y)) {
+          preview({ ...EMPTY_DROP, outer: resolveDropTarget(outer, y, sourceId) });
+          return;
+        }
+      }
+      preview({ ...EMPTY_DROP, slot: resolveDropTarget(own, y, sourceId) });
     };
     const finish = (commitDrop: boolean): void => {
-      const drop = targetRef.current;
-      targetRef.current = null;
-      setTarget(null);
+      const drop = dropRef.current;
+      dropRef.current = EMPTY_DROP;
+      args.report(EMPTY_DROP);
       setSourceId(null);
-      if (!commitDrop || drop === null) return;
+      if (!commitDrop) return;
+      if (drop.into !== null) {
+        args.commit({ favoriteId: sourceId, groupId: args.groupId, parent: drop.into });
+        return;
+      }
+      if (drop.outer !== null) {
+        const outerRows = outerConfig?.rows ?? [];
+        const target = drop.outer;
+        const slot = outerRows.findIndex((row) => row.id === target.id);
+        args.commit({
+          favoriteId: sourceId,
+          groupId: args.groupId,
+          parent: null,
+          sequence: sequenceForInsert(outerRows, target.after ? slot + 1 : slot),
+        });
+        return;
+      }
+      if (drop.slot === null) return;
       const ids = args.rows.map((row) => row.id);
       const rest = ids.filter((id) => id !== sourceId);
-      const slot = rest.indexOf(drop.id);
-      const order = moveFavoriteToIndex(ids, sourceId, drop.after ? slot + 1 : slot);
+      const slot = rest.indexOf(drop.slot.id);
+      const order = moveFavoriteToIndex(ids, sourceId, drop.slot.after ? slot + 1 : slot);
       const patch = favoriteOrderPatch(args.rows, order, sourceId);
       if (patch !== null) args.commit({ ...patch, groupId: args.groupId });
     };
@@ -140,9 +246,9 @@ function useFavoriteReorder(args: {
       window.removeEventListener("pointercancel", cancel);
       window.removeEventListener("blur", cancel);
     };
-  }, [sourceId, args.rows, args.groupId, args.commit]);
+  }, [sourceId, args.rows, args.groupId, args.commit, args.report, args.outer]);
 
-  return { listRef, sourceId, target, onDragStart: setSourceId };
+  return { listRef, sourceId, onDragStart: setSourceId };
 }
 
 export interface SidebarFavoritesGroupProps {
@@ -160,7 +266,18 @@ export function SidebarFavoritesGroup({ workspaceSlug }: SidebarFavoritesGroupPr
   const remove = useDeleteFavorite(workspaceSlug);
   const mover = useMoveFavorite(workspaceSlug);
   const commit = React.useCallback((input: FavoriteMoveInput) => mover.mutate(input), [mover]);
-  const reorder = useFavoriteReorder({ rows: top, groupId: null, commit });
+  const [preview, setPreview] = React.useState<FavoriteDropPreview>(EMPTY_DROP);
+  const reorder = useFavoriteReorder({
+    rows: top,
+    groupId: null,
+    commit,
+    report: setPreview,
+    outer: null,
+  });
+  const drag = React.useMemo<FavoriteDragState>(
+    () => ({ preview, report: setPreview, topRows: top, topListRef: reorder.listRef }),
+    [preview, top, reorder.listRef]
+  );
 
   // The first add opens the section live (SHELL-032 seam): starring
   // writes the flag and re-reads the list without remounting the
@@ -256,15 +373,10 @@ export function SidebarFavoritesGroup({ workspaceSlug }: SidebarFavoritesGroupPr
                 onToggleFolder={toggleFolder}
                 onRename={(favoriteId, current) => setForm({ mode: "rename", favoriteId, current })}
                 onRemove={(favoriteId) => remove.mutate({ favoriteId })}
-                dropIndicator={
-                  reorder.target !== null && reorder.target.id === row.id
-                    ? reorder.target.after
-                      ? "below"
-                      : "above"
-                    : null
-                }
+                drop={dropMarkerFor(preview, row.id)}
                 isDragging={reorder.sourceId === row.id}
                 onDragStart={reorder.onDragStart}
+                drag={drag}
               />
             ))}
           </ul>
@@ -281,9 +393,10 @@ interface FavoriteRowProps {
   onToggleFolder: (favoriteId: string) => void;
   onRename: (favoriteId: string, current: string) => void;
   onRemove: (favoriteId: string) => void;
-  dropIndicator: "above" | "below" | null;
+  drop: FavoriteDropMarker;
   isDragging: boolean;
   onDragStart: (favoriteId: string) => void;
+  drag: FavoriteDragState;
 }
 
 function FavoriteRow({
@@ -293,9 +406,10 @@ function FavoriteRow({
   onToggleFolder,
   onRename,
   onRemove,
-  dropIndicator,
+  drop,
   isDragging,
   onDragStart,
+  drag,
 }: FavoriteRowProps): React.ReactElement {
   const name = favoriteDisplayName(row);
   const Icon = ROW_ICONS[resolveFavoriteIconKind(row)];
@@ -309,7 +423,7 @@ function FavoriteRow({
 
   return (
     <li data-favorite-row={row.id} data-testid="favorite-entry" data-entry-name={name} className="relative">
-      {dropIndicator === "above" ? (
+      {drop === "above" ? (
         <span data-testid="favorite-drop-indicator" className="absolute inset-x-2 top-0 h-0.5 bg-(--accent)" />
       ) : null}
       <div
@@ -337,8 +451,9 @@ function FavoriteRow({
             type="button"
             aria-expanded={folderOpen}
             data-testid="favorite-folder-toggle"
+            data-drop-into={drop === "into" ? "true" : undefined}
             onClick={() => onToggleFolder(row.id)}
-            className={ROW_LINK_TONE}
+            className={drop === "into" ? `${ROW_LINK_TONE} ring-2 ring-(--accent)` : ROW_LINK_TONE}
           >
             <Icon size={16} strokeWidth={1.5} aria-hidden="true" />
             <span className="truncate">{name}</span>
@@ -370,9 +485,10 @@ function FavoriteRow({
           onToggleFolder={onToggleFolder}
           onRename={onRename}
           onRemove={onRemove}
+          drag={drag}
         />
       ) : null}
-      {dropIndicator === "below" ? (
+      {drop === "below" ? (
         <span data-testid="favorite-drop-indicator" className="absolute inset-x-2 bottom-0 h-0.5 bg-(--accent)" />
       ) : null}
     </li>
@@ -386,6 +502,7 @@ interface FavoriteFolderChildrenProps {
   onToggleFolder: (favoriteId: string) => void;
   onRename: (favoriteId: string, current: string) => void;
   onRemove: (favoriteId: string) => void;
+  drag: FavoriteDragState;
 }
 
 function FavoriteFolderChildren({
@@ -395,12 +512,23 @@ function FavoriteFolderChildren({
   onToggleFolder,
   onRename,
   onRemove,
+  drag,
 }: FavoriteFolderChildrenProps): React.ReactElement {
   const group = useFavoriteGroup(workspaceSlug, folderId);
   const rows = React.useMemo(() => selectOrderedFavorites(group.data ?? []), [group.data]);
   const mover = useMoveFavorite(workspaceSlug);
   const commit = React.useCallback((input: FavoriteMoveInput) => mover.mutate(input), [mover]);
-  const reorder = useFavoriteReorder({ rows, groupId: folderId, commit });
+  const outer = React.useMemo(
+    () => ({ rows: drag.topRows, listRef: drag.topListRef }),
+    [drag.topRows, drag.topListRef]
+  );
+  const reorder = useFavoriteReorder({
+    rows,
+    groupId: folderId,
+    commit,
+    report: drag.report,
+    outer,
+  });
 
   return (
     <ul data-testid="favorite-folder-children" ref={reorder.listRef} className="flex flex-col gap-px pl-6">
@@ -413,11 +541,10 @@ function FavoriteFolderChildren({
           onToggleFolder={onToggleFolder}
           onRename={onRename}
           onRemove={onRemove}
-          dropIndicator={
-            reorder.target !== null && reorder.target.id === row.id ? (reorder.target.after ? "below" : "above") : null
-          }
+          drop={dropMarkerFor(drag.preview, row.id)}
           isDragging={reorder.sourceId === row.id}
           onDragStart={reorder.onDragStart}
+          drag={drag}
         />
       ))}
     </ul>

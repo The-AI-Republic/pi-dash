@@ -148,29 +148,48 @@ function openMenu(name: string): void {
   fireEvent.click(within(rowByName(name)).getByTestId("favorite-row-menu"));
 }
 
-function stubRowRects(spans: Record<string, { top: number; bottom: number }>): void {
+interface StubRect {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
+function toDomRect(found: Partial<StubRect> | undefined): DOMRect {
+  const top = found?.top ?? 0;
+  const bottom = found?.bottom ?? 0;
+  const left = found?.left ?? 0;
+  const right = found?.right ?? 0;
+  return {
+    top,
+    bottom,
+    left,
+    right,
+    width: right - left,
+    height: bottom - top,
+    x: left,
+    y: top,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+function stubRowRects(
+  spans: Record<string, { top: number; bottom: number }>,
+  extras: { headers?: Record<string, StubRect>; lists?: Record<string, StubRect> } = {}
+): void {
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-    const id = this.dataset["favoriteRow"];
-    const span = id === undefined ? undefined : spans[id];
-    const top = span?.top ?? 0;
-    const bottom = span?.bottom ?? 0;
-    return {
-      top,
-      bottom,
-      left: 0,
-      right: 0,
-      width: 0,
-      height: bottom - top,
-      x: 0,
-      y: top,
-      toJSON: () => ({}),
-    } as DOMRect;
+    if (this.tagName === "UL") return toDomRect(extras.lists?.[this.dataset["testid"] ?? ""]);
+    if (this.dataset["testid"] === "favorite-folder-toggle") {
+      const owner = this.closest("[data-favorite-row]")?.getAttribute("data-favorite-row") ?? "";
+      return toDomRect(extras.headers?.[owner]);
+    }
+    return toDomRect(spans[this.dataset["favoriteRow"] ?? ""]);
   });
 }
 
-function pointerMove(clientY: number): void {
+function pointerMove(clientY: number, clientX = 0): void {
   act(() => {
-    window.dispatchEvent(new window.MouseEvent("pointermove", { clientY, bubbles: true }));
+    window.dispatchEvent(new window.MouseEvent("pointermove", { clientX, clientY, bubbles: true }));
   });
 }
 
@@ -435,6 +454,184 @@ describe("SidebarFavoritesGroup", () => {
     await waitFor(() =>
       expect(h.calls.some((call) => call.method === "PATCH" && call.url.includes(second.id))).toBe(true)
     );
+  });
+
+  it("nests a top-level row dropped onto a folder", async () => {
+    window.localStorage.setItem(FAVORITES_SECTION_OPEN_KEY, "1");
+    const h = setup();
+    await waitFor(() => expect(entryNames()).toEqual(["Pinned", "Atlas"]));
+    stubRowRects(
+      { [FOLDER_ID]: { top: 0, bottom: 60 }, [ENTRY_ID]: { top: 60, bottom: 100 } },
+      { headers: { [FOLDER_ID]: { top: 4, bottom: 36, left: 8, right: 192 } } }
+    );
+    fireEvent.pointerDown(within(rowByName("Atlas")).getByTestId("favorite-drag-handle"));
+    pointerMove(20, 100);
+    const toggle = within(rowByName("Pinned")).getByTestId("favorite-folder-toggle");
+    await waitFor(() => expect(toggle.getAttribute("data-drop-into")).toBe("true"));
+    pointerUp();
+    await waitFor(() =>
+      expect(h.calls.some((call) => call.method === "PATCH" && call.url.includes(ENTRY_ID))).toBe(true)
+    );
+    const patch = h.calls.find((call) => call.method === "PATCH" && call.url.includes(ENTRY_ID));
+    expect(JSON.parse(patch?.body ?? "{}")).toEqual({ parent: FOLDER_ID });
+  });
+
+  it("reorders instead of nesting when a folder is dragged over a folder", async () => {
+    window.localStorage.setItem(FAVORITES_SECTION_OPEN_KEY, "1");
+    const sorted = row({
+      id: "b23e4567-e89b-12d3-a456-42661417400a",
+      entity_type: "folder",
+      entity_identifier: null,
+      name: "Sorted",
+      is_folder: true,
+      sequence: 25000,
+      project_id: null,
+    });
+    const h = setup({ list: [FOLDER, sorted, ENTRY] });
+    await waitFor(() => expect(entryNames()).toEqual(["Pinned", "Sorted", "Atlas"]));
+    stubRowRects(
+      {
+        [FOLDER_ID]: { top: 0, bottom: 40 },
+        [sorted.id]: { top: 40, bottom: 80 },
+        [ENTRY_ID]: { top: 80, bottom: 120 },
+      },
+      { headers: { [sorted.id]: { top: 44, bottom: 76, left: 8, right: 192 } } }
+    );
+    fireEvent.pointerDown(within(rowByName("Pinned")).getByTestId("favorite-drag-handle"));
+    pointerMove(60, 100);
+    expect(within(rowByName("Sorted")).getByTestId("favorite-folder-toggle").getAttribute("data-drop-into")).toBeNull();
+    pointerUp();
+    await waitFor(() =>
+      expect(h.calls.some((call) => call.method === "PATCH" && call.url.includes(FOLDER_ID))).toBe(true)
+    );
+    const patch = h.calls.find((call) => call.method === "PATCH" && call.url.includes(FOLDER_ID));
+    expect(JSON.parse(patch?.body ?? "{}")).toEqual({ sequence: 22500 });
+  });
+
+  it("stays silent dropping a nested row onto its own folder", async () => {
+    window.localStorage.setItem(FAVORITES_SECTION_OPEN_KEY, "1");
+    const h = setup();
+    await waitFor(() => expect(entryNames()).toEqual(["Pinned", "Atlas"]));
+    fireEvent.click(within(rowByName("Pinned")).getByTestId("favorite-folder-toggle"));
+    await waitFor(() => expect(entryNames()).toEqual(["Pinned", "Nested", "Atlas"]));
+    stubRowRects(
+      {
+        [FOLDER_ID]: { top: 0, bottom: 100 },
+        [ENTRY_ID]: { top: 100, bottom: 140 },
+        [CHILD_ID]: { top: 40, bottom: 60 },
+      },
+      { headers: { [FOLDER_ID]: { top: 4, bottom: 36, left: 8, right: 192 } } }
+    );
+    fireEvent.pointerDown(within(rowByName("Nested")).getByTestId("favorite-drag-handle"));
+    pointerMove(20, 100);
+    pointerUp();
+    expect(h.calls.some((call) => call.method === "PATCH")).toBe(false);
+    expect(screen.queryAllByTestId("favorite-drop-indicator")).toHaveLength(0);
+    expect(within(rowByName("Pinned")).getByTestId("favorite-folder-toggle").getAttribute("data-drop-into")).toBeNull();
+  });
+
+  it("un-nests a nested row dragged onto the top list", async () => {
+    window.localStorage.setItem(FAVORITES_SECTION_OPEN_KEY, "1");
+    const h = setup();
+    await waitFor(() => expect(entryNames()).toEqual(["Pinned", "Atlas"]));
+    fireEvent.click(within(rowByName("Pinned")).getByTestId("favorite-folder-toggle"));
+    await waitFor(() => expect(entryNames()).toEqual(["Pinned", "Nested", "Atlas"]));
+    stubRowRects(
+      {
+        [FOLDER_ID]: { top: 0, bottom: 100 },
+        [ENTRY_ID]: { top: 100, bottom: 140 },
+        [CHILD_ID]: { top: 40, bottom: 60 },
+      },
+      {
+        headers: { [FOLDER_ID]: { top: 4, bottom: 36, left: 8, right: 192 } },
+        lists: {
+          "favorites-entry-list": { top: 0, bottom: 140, left: 0, right: 200 },
+          "favorite-folder-children": { top: 40, bottom: 80, left: 24, right: 200 },
+        },
+      }
+    );
+    fireEvent.pointerDown(within(rowByName("Nested")).getByTestId("favorite-drag-handle"));
+    pointerMove(102, 100);
+    await waitFor(() => expect(within(rowByName("Atlas")).getByTestId("favorite-drop-indicator")).not.toBeNull());
+    pointerUp();
+    await waitFor(() =>
+      expect(h.calls.some((call) => call.method === "PATCH" && call.url.includes(CHILD_ID))).toBe(true)
+    );
+    const patch = h.calls.find((call) => call.method === "PATCH" && call.url.includes(CHILD_ID));
+    expect(JSON.parse(patch?.body ?? "{}")).toEqual({ sequence: 25000, parent: null });
+  });
+
+  it("nests a nested row dropped onto another folder", async () => {
+    window.localStorage.setItem(FAVORITES_SECTION_OPEN_KEY, "1");
+    const sorted = row({
+      id: "b23e4567-e89b-12d3-a456-42661417400a",
+      entity_type: "folder",
+      entity_identifier: null,
+      name: "Sorted",
+      is_folder: true,
+      sequence: 25000,
+      project_id: null,
+    });
+    const h = setup({ list: [FOLDER, sorted, ENTRY] });
+    await waitFor(() => expect(entryNames()).toEqual(["Pinned", "Sorted", "Atlas"]));
+    fireEvent.click(within(rowByName("Pinned")).getByTestId("favorite-folder-toggle"));
+    await waitFor(() => expect(entryNames()).toContain("Nested"));
+    stubRowRects(
+      {
+        [FOLDER_ID]: { top: 0, bottom: 100 },
+        [sorted.id]: { top: 100, bottom: 140 },
+        [ENTRY_ID]: { top: 140, bottom: 180 },
+        [CHILD_ID]: { top: 40, bottom: 60 },
+      },
+      { headers: { [sorted.id]: { top: 104, bottom: 136, left: 8, right: 192 } } }
+    );
+    fireEvent.pointerDown(within(rowByName("Nested")).getByTestId("favorite-drag-handle"));
+    pointerMove(120, 100);
+    const toggle = within(rowByName("Sorted")).getByTestId("favorite-folder-toggle");
+    await waitFor(() => expect(toggle.getAttribute("data-drop-into")).toBe("true"));
+    pointerUp();
+    await waitFor(() =>
+      expect(h.calls.some((call) => call.method === "PATCH" && call.url.includes(CHILD_ID))).toBe(true)
+    );
+    const patch = h.calls.find((call) => call.method === "PATCH" && call.url.includes(CHILD_ID));
+    expect(JSON.parse(patch?.body ?? "{}")).toEqual({ parent: sorted.id });
+  });
+
+  it("reorders within the folder when released inside it", async () => {
+    window.localStorage.setItem(FAVORITES_SECTION_OPEN_KEY, "1");
+    const second = row({
+      id: "923e4567-e89b-12d3-a456-426614174008",
+      name: "Second",
+      sequence: 5000,
+      parent: FOLDER_ID,
+    });
+    const h = setup({ groups: { [FOLDER_ID]: [CHILD, second] } });
+    await waitFor(() => expect(entryNames()).toEqual(["Pinned", "Atlas"]));
+    fireEvent.click(within(rowByName("Pinned")).getByTestId("favorite-folder-toggle"));
+    await waitFor(() => expect(entryNames()).toEqual(["Pinned", "Nested", "Second", "Atlas"]));
+    stubRowRects(
+      {
+        [FOLDER_ID]: { top: 0, bottom: 140 },
+        [ENTRY_ID]: { top: 140, bottom: 180 },
+        [CHILD_ID]: { top: 40, bottom: 60 },
+        [second.id]: { top: 60, bottom: 80 },
+      },
+      {
+        headers: { [FOLDER_ID]: { top: 4, bottom: 36, left: 8, right: 192 } },
+        lists: {
+          "favorites-entry-list": { top: 0, bottom: 180, left: 0, right: 200 },
+          "favorite-folder-children": { top: 40, bottom: 80, left: 24, right: 200 },
+        },
+      }
+    );
+    fireEvent.pointerDown(within(rowByName("Second")).getByTestId("favorite-drag-handle"));
+    pointerMove(45, 100);
+    pointerUp();
+    await waitFor(() =>
+      expect(h.calls.some((call) => call.method === "PATCH" && call.url.includes(second.id))).toBe(true)
+    );
+    const patch = h.calls.find((call) => call.method === "PATCH" && call.url.includes(second.id));
+    expect(JSON.parse(patch?.body ?? "{}")).toEqual({ sequence: 20000 });
   });
 
   it("removes nested rows through their quick menu", async () => {

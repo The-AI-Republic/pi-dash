@@ -2,7 +2,7 @@
 
 Parent epic NEWFRONT-70. Inventory
 `.ai_design/new_frontend_implementation/parity/inventory/shell.md` (rows
-SHELL-001–108). Oracle scenarios `apps/web_new/e2e/parity/shell/`.
+SHELL-001–109). Oracle scenarios `apps/web_new/e2e/parity/shell/`.
 
 Method: the old frontend was read as a behavior reference only. Nothing is
 imported, copied or translated from it; this spec restates what was learned in
@@ -389,6 +389,19 @@ correctly, and an unrecognized type lands on the workspace root without
 crashing. Known bug (NEWFRONT-144): unknown types currently crash the
 sidebar; the scenario records the intended fallback and the fix lands
 separately. Oracle: `sidebar-nav/shell-057-favorite-links.spec.ts`.
+
+SHELL-109 — Favorite entries nest into folders on folder-target drops and
+leave them on drag-out, with both moves persisting (found by the
+NEWFRONT-286 review; SHELL-056 proves sibling reorder only). Admin and
+member only; guests excluded. Dropping a loose entry onto a closed
+folder nests it: the move writes the folder as the entry's parent and
+the grouped read gains the entry through reloads. Dragging a nested
+entry above a top-level row returns it to the top list: the move clears
+the parent and the top list gains the entry through reloads. Folders
+themselves never nest. Writes go through the favorite update endpoint
+(`parent` PATCH on `.../user-favorites/`); reads split between the flat
+top-level list and the per-folder grouped read. Oracle:
+`sidebar-nav/shell-109-favorite-folder-drops.spec.ts`.
 
 SHELL-058 — The workspace switcher lists workspaces with role and member
 counts, marks the active one, and offers settings, invite, creation, invites
