@@ -710,16 +710,17 @@ async fn insert_notification_prefs(
 }
 
 /// `save_user_data` (`base.py:220-234`): the login stamps plus the
-/// activation branch. Returns whether the activation mail must be
-/// published (`not user.is_active` before the write).
+/// `is_active` flip in one `UPDATE`. The activation mail is published by
+/// the caller BEFORE this write (`base.py:230` precedes `:232-233`), so a
+/// broker failure 500s with the user still inactive and the mail is
+/// re-sent on the next login (QUIRK-activation-order).
 async fn save_user_data(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
     user_agent: Option<String>,
     ip: Option<String>,
     now: chrono::DateTime<chrono::Utc>,
-    was_active: bool,
-) -> Result<bool, sqlx::Error> {
+) -> Result<(), sqlx::Error> {
     let token = format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
@@ -738,7 +739,7 @@ async fn save_user_data(
     .bind(token)
     .execute(pool)
     .await?;
-    Ok(!was_active)
+    Ok(())
 }
 
 /// The `user_logged_in` signal (`update_last_login`): `last_login =
@@ -867,16 +868,21 @@ async fn redirection_path(
 // `post_user_auth_workflow` (`workspace_project_join.py`)
 // ---------------------------------------------------------------------------
 
-/// One accepted workspace invite: `(workspace_id, role)`.
+/// Accepted workspace invites newest-first (`WorkspaceMemberInvite.Meta`
+/// `ordering = ("-created_at",)`): `(workspace_id, role, slug)`.
 async fn accepted_workspace_invites(
     pool: &sqlx::PgPool,
     email: &str,
-) -> Result<Vec<(uuid::Uuid, i32, String)>, sqlx::Error> {
-    let rows: Vec<(uuid::Uuid, i32, String)> = sqlx::query_as(
+) -> Result<Vec<(uuid::Uuid, i16, String)>, sqlx::Error> {
+    // `role` is `smallint`: decoding into `i32` fails sqlx's strict
+    // type check, so the invite path 500s with zero rows (found while
+    // replaying the bulk join).
+    let rows: Vec<(uuid::Uuid, i16, String)> = sqlx::query_as(
         r#"SELECT i."workspace_id", i."role", w."slug"
            FROM "workspace_member_invites" i
            JOIN "workspaces" w ON w."id" = i."workspace_id"
-           WHERE i."email" = $1 AND i."accepted" = true"#,
+           WHERE i."email" = $1 AND i."accepted" = true
+           ORDER BY i."created_at" DESC"#,
     )
     .bind(email)
     .fetch_all(pool)
@@ -884,14 +890,17 @@ async fn accepted_workspace_invites(
     Ok(rows)
 }
 
-/// One accepted project invite: `(workspace_id, role, created_by)`.
+/// Accepted project invites newest-first (`ProjectMemberInvite.Meta`
+/// `ordering = ("-created_at",)`): `(workspace_id, role, created_by)`.
 async fn accepted_project_invites(
     pool: &sqlx::PgPool,
     email: &str,
-) -> Result<Vec<(uuid::Uuid, i32, Option<uuid::Uuid>)>, sqlx::Error> {
-    let rows: Vec<(uuid::Uuid, i32, Option<uuid::Uuid>)> = sqlx::query_as(
+) -> Result<Vec<(uuid::Uuid, i16, Option<uuid::Uuid>)>, sqlx::Error> {
+    // `role` is `smallint` (see above): `i16`, not `i32`.
+    let rows: Vec<(uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
         r#"SELECT "workspace_id", "role", "created_by_id"
-           FROM "project_member_invites" WHERE "email" = $1 AND "accepted" = true"#,
+           FROM "project_member_invites" WHERE "email" = $1 AND "accepted" = true
+           ORDER BY "created_at" DESC"#,
     )
     .bind(email)
     .fetch_all(pool)
@@ -900,8 +909,8 @@ async fn accepted_project_invites(
 }
 
 /// Map a project-invite role onto a member role (`... in [5, 15]`
-/// else 15).
-fn invite_member_role(role: i32) -> i32 {
+/// else 15). Same mapping as the OAuth twin (`map_invite_role`).
+fn invite_member_role(role: i16) -> i16 {
     if role == 5 || role == 15 {
         role
     } else {
@@ -937,14 +946,14 @@ fn track_event_message(
     user_id: &str,
     workspace_id: &str,
     slug: &str,
-    role: i32,
+    role: i16,
     joined_at: &str,
 ) -> pidash_jobs::CeleryTaskMessage {
     let call = queries_kernel::workspace_join_track_event_call(
         user_id,
         workspace_id,
         slug,
-        role,
+        i32::from(role),
         joined_at,
     );
     pidash_jobs::CeleryTaskMessage::new(
@@ -967,16 +976,129 @@ async fn publish_message(message: &pidash_jobs::CeleryTaskMessage) -> Result<(),
     result.map_err(|_| ())
 }
 
+/// `WorkspaceMember.objects.bulk_create(..., ignore_conflicts=True)`
+/// over ALL accepted project invites (`workspace_project_join.py:62-73`):
+/// one multi-row `INSERT` with `ON CONFLICT DO NOTHING`, committed before
+/// the project arm's ported `IntegrityError` below. Same
+/// `QueryBuilder.push_values` shape as the OAuth twin
+/// (`auth_oauth/oauth_google.rs:insert_workspace_members`); empty input
+/// emits no statement (Django's `bulk_create([])` is a no-op).
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
+async fn insert_project_arm_workspace_members(
+    pool: &sqlx::PgPool,
+    rows: &[(uuid::Uuid, i16, Option<uuid::Uuid>)],
+    user_id: uuid::Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), Response> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let default_props = default_props_json();
+    let issue_props = issue_props_json();
+    let empty = serde_json::json!({});
+    let mut builder = sqlx::QueryBuilder::new(
+        "INSERT INTO \"workspace_members\" (\"created_at\", \"updated_at\", \"created_by_id\", \
+         \"updated_by_id\", \"deleted_at\", \"id\", \"workspace_id\", \"member_id\", \"role\", \
+         \"company_role\", \"view_props\", \"default_props\", \"issue_props\", \"is_active\", \
+         \"getting_started_checklist\", \"tips\", \"explored_features\") ",
+    );
+    builder.push_values(rows, |mut bind, row| {
+        let (workspace_id, role, created_by) = row;
+        bind.push_bind(now)
+            .push_bind(now)
+            .push_bind(*created_by)
+            .push_bind(None::<uuid::Uuid>)
+            .push_bind(None::<chrono::DateTime<chrono::Utc>>)
+            .push_bind(uuid::Uuid::new_v4())
+            .push_bind(*workspace_id)
+            .push_bind(user_id)
+            .push_bind(invite_member_role(*role))
+            .push_bind(None::<String>)
+            .push_bind(sqlx::types::Json(default_props.clone()))
+            .push_bind(sqlx::types::Json(default_props.clone()))
+            .push_bind(sqlx::types::Json(issue_props.clone()))
+            .push_bind(true)
+            .push_bind(empty.clone())
+            .push_bind(empty.clone())
+            .push_bind(empty.clone());
+    });
+    builder.push(" ON CONFLICT DO NOTHING");
+    builder
+        .build()
+        .execute(pool)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(())
+}
+
+/// `ProjectMember.objects.bulk_create(..., ignore_conflicts=True)` as
+/// written (`workspace_project_join.py:76-87`): the `ProjectMember`
+/// constructor never sets `project`, so `project_id` is missing although
+/// the column is NOT NULL and any accepted project invite raises
+/// `IntegrityError` even with `ON CONFLICT DO NOTHING` — the ported 500,
+/// with the workspace rows above already committed. Same
+/// `QueryBuilder.push_values` shape as the OAuth twin
+/// (`auth_oauth/oauth_google.rs:insert_project_members`).
+// `Response` is axum's handle type, so boxing it buys no runtime win;
+// the crate-wide `Result<_, Response>` helper shape stays as-is.
+#[allow(clippy::result_large_err)]
+async fn insert_project_arm_project_members(
+    pool: &sqlx::PgPool,
+    rows: &[(uuid::Uuid, i16, Option<uuid::Uuid>)],
+    user_id: uuid::Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), Response> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let default_props = default_props_json();
+    let preferences = default_preferences_json();
+    let mut builder = sqlx::QueryBuilder::new(
+        "INSERT INTO \"project_members\" (\"created_at\", \"updated_at\", \"created_by_id\", \
+         \"updated_by_id\", \"deleted_at\", \"id\", \"workspace_id\", \"member_id\", \"comment\", \
+         \"role\", \"view_props\", \"default_props\", \"preferences\", \"sort_order\", \
+         \"is_active\") ",
+    );
+    builder.push_values(rows, |mut bind, row| {
+        let (workspace_id, role, created_by) = row;
+        bind.push_bind(now)
+            .push_bind(now)
+            .push_bind(*created_by)
+            .push_bind(None::<uuid::Uuid>)
+            .push_bind(None::<chrono::DateTime<chrono::Utc>>)
+            .push_bind(uuid::Uuid::new_v4())
+            .push_bind(*workspace_id)
+            .push_bind(user_id)
+            .push_bind(None::<String>)
+            .push_bind(invite_member_role(*role))
+            .push_bind(sqlx::types::Json(default_props.clone()))
+            .push_bind(sqlx::types::Json(default_props.clone()))
+            .push_bind(sqlx::types::Json(preferences.clone()))
+            .push_bind(65535.0f64)
+            .push_bind(true);
+    });
+    builder.push(" ON CONFLICT DO NOTHING");
+    builder
+        .build()
+        .execute(pool)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(())
+}
+
 /// `process_workspace_project_invitations`
-/// (`workspace_project_join.py:22-91`): member bulk-writes with
-/// `ignore_conflicts` (every concrete column, like `bulk_create`;
-/// `bulk_create` skips `save()`, so `created_by` stays null and the
-/// project arm keeps `project_id` null — the ported IntegrityError),
-/// one `track_event.delay` per workspace invite, then the invite
-/// deletes. Cache invalidation is a documented no-op (see the module
-/// docs). Each statement is its own autocommit write — no
-/// `transaction.atomic` anywhere — so a later failure keeps the
-/// earlier rows, exactly like Django.
+/// (`workspace_project_join.py:22-91`): the workspace arm bulk-writes
+/// members (per-row `INSERT ... ON CONFLICT DO NOTHING`, same committed
+/// rows as the bulk) and publishes one `track_event.delay` per invite;
+/// the project arm replays Django's two bulk statements (all
+/// `workspace_members` rows first, then the `project_members` bulk that
+/// raises the ported `IntegrityError`); then the invite deletes. Cache
+/// invalidation is a documented no-op (see the module docs). Each
+/// statement is its own autocommit write — no `transaction.atomic`
+/// anywhere — so a later failure keeps the earlier rows, exactly like
+/// Django.
 // `Response` is axum's handle type, so boxing it buys no runtime win;
 // the crate-wide `Result<_, Response>` helper shape stays as-is.
 #[allow(clippy::result_large_err)]
@@ -1029,54 +1151,11 @@ async fn post_user_auth_workflow(
     let project_invites = accepted_project_invites(pool, user_email)
         .await
         .map_err(|_| server_error())?;
-    let preferences = default_preferences_json();
-    for (workspace_id, role, created_by) in &project_invites {
-        let member_role = invite_member_role(*role);
-        sqlx::query(
-            r#"INSERT INTO "workspace_members"
-               ("created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-                "id", "workspace_id", "member_id", "role", "company_role",
-                "view_props", "default_props", "issue_props", "is_active",
-                "getting_started_checklist", "tips", "explored_features")
-               VALUES ($1,$1,$2,NULL,NULL, $3,$4,$5,$6,NULL, $7,$7,$8,true, '{}','{}','{}')
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(now)
-        .bind(created_by)
-        .bind(uuid::Uuid::new_v4())
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(member_role)
-        .bind(sqlx::types::Json(default_props.clone()))
-        .bind(sqlx::types::Json(issue_props.clone()))
-        .execute(pool)
-        .await
-        .map_err(|_| server_error())?;
-        // Ported bug (`workspace_project_join.py:76-87`): the
-        // `ProjectMember` constructor never sets `project`, so the
-        // row carries `project_id` null and Postgres raises
-        // `IntegrityError` despite `ignore_conflicts` — the endpoint
-        // 500s with the workspace rows already committed.
-        sqlx::query(
-            r#"INSERT INTO "project_members"
-               ("created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-                "id", "project_id", "workspace_id", "member_id", "comment", "role",
-                "view_props", "default_props", "preferences", "sort_order", "is_active")
-               VALUES ($1,$1,$2,NULL,NULL, $3,NULL,$4,$5,NULL,$6, $7,$7,$8,65535,true)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(now)
-        .bind(created_by)
-        .bind(uuid::Uuid::new_v4())
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(member_role)
-        .bind(sqlx::types::Json(default_props.clone()))
-        .bind(sqlx::types::Json(preferences.clone()))
-        .execute(pool)
-        .await
-        .map_err(|_| server_error())?;
-    }
+    // Two bulk statements, not one loop: Django commits every project-arm
+    // `workspace_members` row before the `project_members` bulk below
+    // raises the ported `IntegrityError`.
+    insert_project_arm_workspace_members(pool, &project_invites, user_id, now).await?;
+    insert_project_arm_project_members(pool, &project_invites, user_id, now).await?;
     sqlx::query(
         r#"DELETE FROM "workspace_member_invites" WHERE "email" = $1 AND "accepted" = true"#,
     )
@@ -1493,12 +1572,13 @@ async fn evaluate_attempt(
     Ok((decision, user_row, normalized, raw_password.to_owned()))
 }
 
-/// Run the authenticated tail shared by sign-in and sign-up:
-/// `save_user_data` (+ activation branch), `last_login` stamp,
-/// `post_user_auth_workflow`, `user_login` session issuance, and the
-/// success redirect. `current_site` is the surface base for
-/// `device_info.domain` (`user_login` passes its own flags);
-/// `activation_site` is the flag-less `base_host(request)` the
+/// Run the authenticated tail shared by sign-in and sign-up, in Django
+/// order: the activation publish precedes the `save_user_data` write
+/// (`base.py:230` before `:232-233`), the invitation callback runs inside
+/// `authenticate()` before the view's `user_login()`, and the `last_login`
+/// stamp plus session issuance come last (`login.py:15`). `current_site`
+/// is the surface base for `device_info.domain` (`user_login` passes its
+/// own flags); `activation_site` is the flag-less `base_host(request)` the
 /// activation mail builds its profile link from (`base.py:230`).
 #[allow(clippy::too_many_arguments)]
 // `Response` is axum's handle type, so boxing it buys no runtime win;
@@ -1519,22 +1599,15 @@ async fn run_authenticated(
     // `META.get("HTTP_USER_AGENT")`: `None` when absent (NULL), the
     // raw value — even empty — when present.
     let user_agent = req.prov.user_agent.clone();
-    let need_activation = save_user_data(
-        pool,
-        user_id,
-        user_agent,
-        req.prov.ip.clone(),
-        now,
-        was_active,
-    )
-    .await
-    .map_err(|_| server_error())?;
-    stamp_last_login(pool, user_id, now)
-        .await
-        .map_err(|_| server_error())?;
-    if need_activation {
+    // The activation mail precedes the `is_active` save (`base.py:230`
+    // before `:232-233`): a broker failure 500s with the user still
+    // inactive, and the mail is re-sent on the next login.
+    if !was_active {
         publish_activation(activation_site, user_id).await?;
     }
+    save_user_data(pool, user_id, user_agent, req.prov.ip.clone(), now)
+        .await
+        .map_err(|_| server_error())?;
     // Only the app endpoints pass `callback=post_user_auth_workflow`
     // (`app/email.py:86,208`); the space twins construct the provider
     // without a callback (`space/email.py:80,156`) so the workflow
@@ -1542,6 +1615,13 @@ async fn run_authenticated(
     if !req.space {
         post_user_auth_workflow(pool, user_id, user_email, now).await?;
     }
+    // The `user_logged_in` signal fires inside `login()`, which runs in
+    // `user_login` AFTER `provider.authenticate()` returns
+    // (`app/email.py:109-111`) — so the stamp lands after the invitation
+    // workflow, never on its 500 path.
+    stamp_last_login(pool, user_id, now)
+        .await
+        .map_err(|_| server_error())?;
     let device_info = serde_json::json!({
         "user_agent": req.prov.user_agent.as_deref().unwrap_or(""),
         "ip_address": req.prov.ip.clone().map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
