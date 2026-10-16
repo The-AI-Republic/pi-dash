@@ -18,6 +18,7 @@ import {
   getOpenAILoginStatus,
   listAssistantConnections,
   resolveCredentialLane,
+  resolveOpenhubAvailable,
   selectAssistantConnection,
   startOpenAILogin,
   testLlmConfig,
@@ -39,6 +40,7 @@ describe.skipIf(!cloudContractEnabled)("assistant cloud contract", () => {
     expect(typeof list.openai_login_available).toBe("boolean");
     expect(Array.isArray(list.openhub_model_options)).toBe(true);
     expect(typeof list.openhub_wallet_url).toBe("string");
+    expect(typeof resolveOpenhubAvailable(list)).toBe("boolean");
     const kinds = list.connections.map((row) => row.kind);
     expect(kinds).toContain("codex");
   });

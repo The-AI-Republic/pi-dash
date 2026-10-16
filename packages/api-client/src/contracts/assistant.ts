@@ -136,8 +136,8 @@ export type AssistantConnectionListItem = z.infer<typeof AssistantConnectionList
 /**
  * The connections list: rows plus the managed-model options, the
  * provider sign-in availability, and the hosted-lane availability flag.
- * The lane flag defaults to available when absent so older backends
- * never banner every row.
+ * Older backends predate the lane flag; resolveOpenhubAvailable reads
+ * a missing flag as available so they never banner every row.
  */
 export const AssistantConnectionList = z.object({
   connections: z.array(AssistantConnectionListItem),
@@ -150,6 +150,15 @@ export const AssistantConnectionList = z.object({
   openhub_wallet_url: z.string(),
 });
 export type AssistantConnectionList = z.infer<typeof AssistantConnectionList>;
+
+/**
+ * Whether the hosted lane is available on this backend. Older backends
+ * predate the lane flag entirely, so a missing flag reads as available
+ * rather than banner-every-row.
+ */
+export function resolveOpenhubAvailable(list: AssistantConnectionList): boolean {
+  return list.openhub_available ?? true;
+}
 
 export async function listAssistantConnections(client: ApiClient): Promise<AssistantConnectionList> {
   const body = await client.getJson<unknown>("/api/users/me/ai-assistant/connections/");

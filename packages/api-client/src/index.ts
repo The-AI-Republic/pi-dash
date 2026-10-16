@@ -359,6 +359,7 @@ export {
   listAssistantConnections,
   listAssistantThreads,
   resolveCredentialLane,
+  resolveOpenhubAvailable,
   selectAssistantConnection,
   startOpenAILogin,
   testLlmConfig,

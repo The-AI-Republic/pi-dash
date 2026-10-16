@@ -116,6 +116,7 @@ import {
   listAssistantConnections,
   listAssistantThreads,
   resolveCredentialLane,
+  resolveOpenhubAvailable,
   selectAssistantConnection,
   startOpenAILogin,
   testLlmConfig,
@@ -5032,6 +5033,7 @@ describe("assistant connection contracts", () => {
     expect(list.connections[0]?.connected).toBe(true);
     expect(list.openai_login_available).toBe(true);
     expect(list.openhub_available).toBe(false);
+    expect(resolveOpenhubAvailable(list)).toBe(false);
   });
 
   it("parses a list from before the lane flag existed", async () => {
@@ -5050,6 +5052,24 @@ describe("assistant connection contracts", () => {
     const list = await listAssistantConnections(client);
     expect(list.connections).toEqual([]);
     expect(list.openhub_available).toBeUndefined();
+    expect(resolveOpenhubAvailable(list)).toBe(true);
+  });
+
+  it("keeps an explicit hosted-lane flag as-is", () => {
+    for (const flag of [true, false]) {
+      expect(
+        resolveOpenhubAvailable({
+          connections: [],
+          codex_model_options: [],
+          codex_model_labels: {},
+          has_codex_credential: false,
+          openai_login_available: false,
+          openhub_model_options: [],
+          openhub_available: flag,
+          openhub_wallet_url: "",
+        })
+      ).toBe(flag);
+    }
   });
 
   it("rejects a list row of an unknown kind", async () => {
