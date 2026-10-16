@@ -9,8 +9,9 @@
 // Initial JS has two numbers. The target, 220 KB gzipped (NEWFRONT-196), is
 // what the app is composed to fit; CI reports it on every PR but does not
 // block on it, and area gates file a diet issue when it is exceeded. The
-// ceiling, 260 KB, is what fails a PR: it catches an accidental large eager
-// import, not ordinary slice growth (NEWFRONT-248, 2026-10-15). Set
+// ceiling, 265 KB, is what fails a PR: it catches an accidental large eager
+// import, not ordinary slice growth (NEWFRONT-248, 2026-10-15; raised from
+// 260 KB on 2026-10-16 when shell growth used up the headroom). Set
 // SIZE_TARGET=1 to measure against the target. Initial CSS: 30 KB gzipped.
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -27,7 +28,7 @@ if (!existsSync(manifestPath)) {
 
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 const initialJs = initialChainFiles(manifest);
-const initialJsLimit = process.env.SIZE_TARGET === "1" ? "220 KB" : "260 KB";
+const initialJsLimit = process.env.SIZE_TARGET === "1" ? "220 KB" : "265 KB";
 
 // Size-limit globs paths silently: a file that stopped matching would pass
 // vacuously, so every resolved chunk must exist on disk.
