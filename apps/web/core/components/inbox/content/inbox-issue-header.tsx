@@ -26,7 +26,7 @@ import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { TNameDescriptionLoader } from "@pi-dash/types";
 import { EInboxIssueStatus } from "@pi-dash/types";
 import { ControlLink, CustomMenu, Row } from "@pi-dash/ui";
-import { copyUrlToClipboard, findHowManyDaysLeft, generateWorkItemLink } from "@pi-dash/utils";
+import { findHowManyDaysLeft, generateWorkItemLink } from "@pi-dash/utils";
 // components
 import { CreateUpdateIssueModal } from "@/components/issues/issue-modal/modal";
 import { NameDescriptionUpdateStatus } from "@/components/issues/issue-update-status";
@@ -37,6 +37,7 @@ import { useUser, useUserPermissions } from "@/hooks/store/user";
 import { useAppRouter } from "@/hooks/use-app-router";
 // store
 import type { IInboxIssueStore } from "@/store/inbox/inbox-issue.store";
+import { copyShareUrl } from "@/utils/share-url";
 // local imports
 import { InboxIssueStatus } from "../inbox-issue-status";
 import { DeclineIssueModal } from "../modals/decline-issue-modal";
@@ -175,7 +176,7 @@ export const InboxIssueActionsHeader = observer(function InboxIssueActionsHeader
   };
 
   const handleCopyIssueLink = (path: string) =>
-    copyUrlToClipboard(path).then(() =>
+    copyShareUrl(path).then(() =>
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: t("Link copied!"),
