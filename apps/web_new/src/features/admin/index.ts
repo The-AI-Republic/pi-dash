@@ -88,6 +88,7 @@ export { PROVIDER_CREDENTIALS } from "./providerCredentials.js";
 export type { ProviderConfigCopyHelp, ProviderCredentialConfig } from "./providerCredentials.js";
 export {
   CONFIG_SAVE_FAILED_LOG,
+  createInstanceWorkspaceMutationOptions,
   createLoopJobMutationOptions,
   deleteLoopJobMutationOptions,
   toggleLoopJobMutationOptions,
@@ -95,6 +96,7 @@ export {
   updateLoopJobMutationOptions,
   useAdminCsrfToken,
   useAdminSession,
+  useCreateInstanceWorkspace,
   useCreateLoopJob,
   useDeleteLoopJob,
   useInstanceAdmins,
@@ -158,8 +160,10 @@ export {
   resetAdminStores,
   useAdminSidebarStore,
   useFirstWorkspaceStore,
+  useWorkspaceCreateDraftStore,
+  WORKSPACE_CREATE_BLANK_DRAFT,
 } from "./stores.js";
-export type { AdminStoreReset } from "./stores.js";
+export type { AdminStoreReset, WorkspaceCreateDraft } from "./stores.js";
 export {
   ADMIN_THEME_KEY,
   applyAdminThemePreference,
@@ -178,6 +182,31 @@ export {
   isWorkspaceCreationRestricted,
   selectConfigurationValue,
 } from "./workspace.js";
+export {
+  buildWorkspaceCreateInput,
+  deriveWorkspaceSlug,
+  formatWorkspaceSlugPrefix,
+  isRestrictedWorkspaceSlug,
+  isWorkspaceCreateSubmittable,
+  ORGANIZATION_SIZE_BANDS,
+  shouldShowInvalidSlugHint,
+  validateWorkspaceCreateName,
+  validateWorkspaceCreateSlug,
+  WORKSPACE_CREATE_BUSY_LABEL,
+  WORKSPACE_CREATE_FAILURE_TITLE,
+  WORKSPACE_CREATE_INVALID_SLUG_HINT,
+  WORKSPACE_CREATE_PROBE_FAILURE_MESSAGE,
+  WORKSPACE_CREATE_SAVE_FAILURE_MESSAGE,
+  WORKSPACE_CREATE_SIZE_REQUIRED_MESSAGE,
+  WORKSPACE_CREATE_SUBMIT_LABEL,
+  WORKSPACE_CREATE_SUCCESS_MESSAGE,
+  WORKSPACE_CREATE_SUCCESS_TITLE,
+  WORKSPACE_CREATE_TAKEN_MESSAGE,
+  WORKSPACE_NAME_MAX_LENGTH,
+  WORKSPACE_SLUG_MAX_LENGTH,
+  WorkspaceSlugProbeError,
+  WorkspaceSlugTakenError,
+} from "./workspaceCreate.js";
 export type { AdminThemeMode } from "./theme.js";
 export { AdminAccountMenu } from "./components/AdminAccountMenu.js";
 export { AI_SETTINGS_TITLE, AdminAiSettingsPage } from "./components/AdminAiSettingsPage.js";
@@ -219,6 +248,17 @@ export { AdminGeneralSettingsPage, GENERAL_SETTINGS_TITLE } from "./components/A
 export { AdminSetupForm, resolveSetupPrefill, SETUP_POST_PATH, SETUP_TITLE } from "./components/AdminSetupForm.js";
 export type { SetupPrefill } from "./components/AdminSetupForm.js";
 export { AdminWorkspacePage } from "./components/AdminWorkspacePage.js";
+export {
+  AdminWorkspaceCreatePage,
+  WORKSPACE_CREATE_BACK_PATH,
+  WORKSPACE_CREATE_HEADING,
+  WORKSPACE_CREATE_PAGE_TITLE,
+} from "./components/AdminWorkspaceCreatePage.js";
+export {
+  WORKSPACE_CREATE_SIZE_PLACEHOLDER,
+  WORKSPACE_CREATE_SUCCESS_PATH,
+  WorkspaceCreateForm,
+} from "./components/WorkspaceCreateForm.js";
 export { WorkspaceCreationToggle } from "./components/WorkspaceCreationToggle.js";
 export {
   WORKSPACE_CREATE_PATH,

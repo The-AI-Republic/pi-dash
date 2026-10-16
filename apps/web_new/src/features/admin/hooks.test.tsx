@@ -45,6 +45,7 @@ import {
 } from "./generalSettings.js";
 import {
   CONFIG_SAVE_FAILED_LOG,
+  createInstanceWorkspaceMutationOptions,
   createLoopJobMutationOptions,
   deleteLoopJobMutationOptions,
   toggleLoopJobMutationOptions,
@@ -64,6 +65,7 @@ import {
   useCloudAuthProbe,
   useCloudEntryRetry,
   useCloudSignInUrl,
+  useCreateInstanceWorkspace,
   useDeleteLoopJob,
   useDisableEmailFeature,
   useInstanceAdmins,
@@ -82,6 +84,15 @@ import { LOOP_TOGGLE_FAILURE_MESSAGE, LOOP_TOGGLE_FAILURE_TITLE } from "./loopJo
 import { LOOP_JOB_DELETE_FAILED_MESSAGE, LOOP_JOB_DELETE_FAILED_TITLE } from "./loopJobDetail.js";
 import { LOOP_JOB_SAVE_FAILED_TITLE } from "./loopJobModal.js";
 import { adminKeys } from "./queries.js";
+import {
+  WORKSPACE_CREATE_FAILURE_TITLE,
+  WORKSPACE_CREATE_PROBE_FAILURE_MESSAGE,
+  WORKSPACE_CREATE_SAVE_FAILURE_MESSAGE,
+  WORKSPACE_CREATE_SUCCESS_MESSAGE,
+  WORKSPACE_CREATE_SUCCESS_TITLE,
+  WorkspaceSlugProbeError,
+  WorkspaceSlugTakenError,
+} from "./workspaceCreate.js";
 
 function stubTransport(routes: Record<string, { status: number; body: unknown }>): Transport {
   return (url) => {
@@ -1424,7 +1435,6 @@ describe("useRestrictWorkspaceCreation", () => {
   });
 });
 
-
 function LoopJobDetailProbe({ jobId }: { jobId: string }): React.ReactElement {
   const query = useLoopJobDetail(jobId);
   if (query.isPending) return <div data-testid="probe">loading</div>;
@@ -1537,5 +1547,146 @@ describe("deleteLoopJobMutationOptions", () => {
     createAppClient("https://api.test", stubTransport({}));
     renderProbe(DeleteLoopJobProbe);
     expect(screen.getByTestId("probe")).toHaveTextContent("ready");
+  });
+});
+
+describe("createInstanceWorkspaceMutationOptions", () => {
+  function stubWorkspaceClient(probe: { status: boolean } | Error, created: unknown = { id: "created-1" }) {
+    const getJson = vi.fn(async () => {
+      if (probe instanceof Error) throw probe;
+      return probe;
+    });
+    const sendJson = vi.fn(async () => ({ data: created, status: 201, url: "https://api.test/" }));
+    const client = { getJson, sendJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    return { client, getJson, sendJson };
+  }
+
+  function createInput() {
+    return { name: "Good Name", slug: "good-slug-1", organization_size: "2-10" };
+  }
+
+  it("probes the slug first, then posts the create with no owner", async () => {
+    const { client, getJson, sendJson } = stubWorkspaceClient({ status: true });
+    const options = createInstanceWorkspaceMutationOptions(client, new QueryClient());
+    await options.mutationFn?.(createInput(), {} as never);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/workspace-slug-check/", { query: { slug: "good-slug-1" } });
+    expect(sendJson).toHaveBeenCalledWith("POST", "/api/instances/workspaces/", { json: createInput() });
+    expect(getJson.mock.invocationCallOrder[0]).toBeLessThan(
+      sendJson.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER
+    );
+  });
+
+  it("raises taken with no create when the probe reports unavailable", async () => {
+    const { client, sendJson } = stubWorkspaceClient({ status: false });
+    const options = createInstanceWorkspaceMutationOptions(client, new QueryClient());
+    await expect(options.mutationFn?.(createInput(), {} as never)).rejects.toBeInstanceOf(WorkspaceSlugTakenError);
+    expect(sendJson).not.toHaveBeenCalled();
+  });
+
+  it("raises taken for a restricted slug even when the probe reports free", async () => {
+    const { client, sendJson } = stubWorkspaceClient({ status: true });
+    const options = createInstanceWorkspaceMutationOptions(client, new QueryClient());
+    const input = { ...createInput(), slug: "god-mode" };
+    await expect(options.mutationFn?.(input, {} as never)).rejects.toBeInstanceOf(WorkspaceSlugTakenError);
+    expect(sendJson).not.toHaveBeenCalled();
+  });
+
+  it("raises the probe error with no create when the probe request fails", async () => {
+    const { client, sendJson } = stubWorkspaceClient(new Error("parity-probe-down"));
+    const options = createInstanceWorkspaceMutationOptions(client, new QueryClient());
+    await expect(options.mutationFn?.(createInput(), {} as never)).rejects.toBeInstanceOf(WorkspaceSlugProbeError);
+    expect(sendJson).not.toHaveBeenCalled();
+  });
+
+  it("stays silent on taken: the form renders the inline error", () => {
+    const options = createInstanceWorkspaceMutationOptions(
+      stubWorkspaceClient({ status: true }).client,
+      new QueryClient()
+    );
+    options.onError?.(new WorkspaceSlugTakenError("taken-slug"), createInput(), undefined, {} as never);
+    expect(notifyErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("toasts the probe failure", () => {
+    const options = createInstanceWorkspaceMutationOptions(
+      stubWorkspaceClient({ status: true }).client,
+      new QueryClient()
+    );
+    options.onError?.(new WorkspaceSlugProbeError("probe-slug"), createInput(), undefined, {} as never);
+    expect(notifyErrorMock).toHaveBeenCalledWith(
+      WORKSPACE_CREATE_FAILURE_TITLE,
+      WORKSPACE_CREATE_PROBE_FAILURE_MESSAGE
+    );
+  });
+
+  it("toasts any other failure as a failed create", () => {
+    const options = createInstanceWorkspaceMutationOptions(
+      stubWorkspaceClient({ status: true }).client,
+      new QueryClient()
+    );
+    options.onError?.(new Error("parity-create-down"), createInput(), undefined, {} as never);
+    expect(notifyErrorMock).toHaveBeenCalledWith(WORKSPACE_CREATE_FAILURE_TITLE, WORKSPACE_CREATE_SAVE_FAILURE_MESSAGE);
+  });
+
+  it("revalidates the list and toasts success on create", () => {
+    const queryClient = new QueryClient();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const options = createInstanceWorkspaceMutationOptions(stubWorkspaceClient({ status: true }).client, queryClient);
+    options.onSuccess?.({ id: "created-1" } as never, createInput(), undefined, {} as never);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: adminKeys.workspaces });
+    expect(notifySuccess).toHaveBeenCalledWith(WORKSPACE_CREATE_SUCCESS_TITLE, WORKSPACE_CREATE_SUCCESS_MESSAGE);
+  });
+});
+
+describe("useCreateInstanceWorkspace", () => {
+  const createdWorkspace = {
+    id: "33333333-3333-4333-8333-333333333333",
+    name: "Good Name",
+    slug: "good-slug-1",
+    logo: null,
+    logo_asset: null,
+    logo_url: null,
+    owner: {
+      id: "22222222-2222-4222-8222-222222222222",
+      email: "admin@example.com",
+      first_name: "Admin",
+      last_name: "User",
+    },
+    organization_size: "2-10",
+    timezone: "UTC",
+    background_color: "#ffffff",
+    created_by: null,
+    updated_by: null,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  };
+
+  function CreateProbe(): React.ReactElement {
+    const creating = useCreateInstanceWorkspace();
+    if (creating.isSuccess) return <div data-testid="probe">created</div>;
+    if (creating.isError) return <div data-testid="probe">failed</div>;
+    return (
+      <button
+        type="button"
+        data-testid="fire"
+        onClick={() => creating.mutate({ name: "Good Name", slug: "good-slug-1", organization_size: "2-10" })}
+      >
+        fire
+      </button>
+    );
+  }
+
+  it("creates through the app client after a clear probe", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport({
+        "/api/instances/workspace-slug-check/": { status: 200, body: { status: true } },
+        "/api/instances/workspaces/": { status: 201, body: createdWorkspace },
+      })
+    );
+    renderProbe(CreateProbe);
+    fireEvent.click(screen.getByTestId("fire"));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("created"));
+    expect(notifySuccess).toHaveBeenCalledWith(WORKSPACE_CREATE_SUCCESS_TITLE, WORKSPACE_CREATE_SUCCESS_MESSAGE);
   });
 });

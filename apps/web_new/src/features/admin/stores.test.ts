@@ -13,6 +13,8 @@ import {
   resetAdminStores,
   useAdminSidebarStore,
   useFirstWorkspaceStore,
+  useWorkspaceCreateDraftStore,
+  WORKSPACE_CREATE_BLANK_DRAFT,
 } from "./stores.js";
 
 beforeEach(() => {
@@ -86,6 +88,34 @@ describe("sidebar collapsed flag", () => {
     resetAdminStores();
     expect(useAdminSidebarStore.getState().collapsed).toBe(true);
     expect(window.localStorage.getItem(ADMIN_SIDEBAR_COLLAPSED_KEY)).toBe("true");
+  });
+});
+
+describe("create-workspace draft", () => {
+  it("starts blank", () => {
+    expect(WORKSPACE_CREATE_BLANK_DRAFT).toEqual({ name: "", slug: "", organizationSize: "" });
+    expect(useWorkspaceCreateDraftStore.getState().name).toBe("");
+    expect(useWorkspaceCreateDraftStore.getState().slug).toBe("");
+    expect(useWorkspaceCreateDraftStore.getState().organizationSize).toBe("");
+  });
+
+  it("merges typed values and clears back to blank", () => {
+    useWorkspaceCreateDraftStore.getState().setDraft({ name: "Good Name" });
+    useWorkspaceCreateDraftStore.getState().setDraft({ slug: "good-slug", organizationSize: "2-10" });
+    expect(useWorkspaceCreateDraftStore.getState().name).toBe("Good Name");
+    expect(useWorkspaceCreateDraftStore.getState().slug).toBe("good-slug");
+    expect(useWorkspaceCreateDraftStore.getState().organizationSize).toBe("2-10");
+    useWorkspaceCreateDraftStore.getState().resetDraft();
+    expect(useWorkspaceCreateDraftStore.getState().name).toBe("");
+    expect(useWorkspaceCreateDraftStore.getState().slug).toBe("");
+    expect(useWorkspaceCreateDraftStore.getState().organizationSize).toBe("");
+  });
+
+  it("clears with the sign-out reset", () => {
+    useWorkspaceCreateDraftStore.getState().setDraft({ name: "Good Name", slug: "good-slug" });
+    resetAdminStores();
+    expect(useWorkspaceCreateDraftStore.getState().name).toBe("");
+    expect(useWorkspaceCreateDraftStore.getState().slug).toBe("");
   });
 });
 

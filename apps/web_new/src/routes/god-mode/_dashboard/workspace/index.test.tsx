@@ -17,11 +17,11 @@ import {
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../features/admin/index.js", () => ({
+vi.mock("../../../../features/admin/index.js", () => ({
   AdminWorkspacePage: () => <div data-testid="workspace-page">workspace settings</div>,
 }));
 
-import { Route } from "./workspace.js";
+import { Route } from "./index.js";
 
 describe("workspace settings route", () => {
   it("mounts the workspace page at the dashboard workspace path", async () => {

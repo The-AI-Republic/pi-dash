@@ -88,3 +88,38 @@ export const useAdminSidebarStore = create<AdminSidebarState>()((set) => ({
 registerAdminStoreReset(() => {
   useAdminSidebarStore.setState({ collapsed: readStoredSidebarCollapsed() });
 });
+
+// --- Create-workspace draft (ADM-043/045) ------------------------------------
+
+export interface WorkspaceCreateDraft {
+  name: string;
+  slug: string;
+  organizationSize: string;
+}
+
+/** Blank draft: every field empty, no size band picked. */
+export const WORKSPACE_CREATE_BLANK_DRAFT: WorkspaceCreateDraft = {
+  name: "",
+  slug: "",
+  organizationSize: "",
+};
+
+interface WorkspaceCreateDraftState extends WorkspaceCreateDraft {
+  /**
+   * Merge typed values into the draft. The store outlives the form, so
+   * navigating away and back keeps what was typed.
+   */
+  setDraft: (patch: Partial<WorkspaceCreateDraft>) => void;
+  /** Clear back to blank; the form calls this after a successful create. */
+  resetDraft: () => void;
+}
+
+export const useWorkspaceCreateDraftStore = create<WorkspaceCreateDraftState>()((set) => ({
+  ...WORKSPACE_CREATE_BLANK_DRAFT,
+  setDraft: (patch) => set(patch),
+  resetDraft: () => set({ ...WORKSPACE_CREATE_BLANK_DRAFT }),
+}));
+
+registerAdminStoreReset(() => {
+  useWorkspaceCreateDraftStore.getState().resetDraft();
+});
