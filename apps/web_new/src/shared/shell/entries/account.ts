@@ -13,7 +13,13 @@ import { copyCurrentPageUrl } from "../clipboard.js";
 import { useShortcutsDialog } from "../shortcutsDialogStore.js";
 import { useTopSearchFocus } from "../topSearchFocus.js";
 
-/** External help destinations (SHELL-089); all leave the app. */
+/**
+ * External help destinations (SHELL-089); all leave the app. Lazy-only
+ * mirror of shared/shell/externalLinks.ts (same values; account.test.ts
+ * pins them together): eager components must use the leaf, because a
+ * module imported from both a route's eager closure and its lazy
+ * chunks collapses that route's TanStack component split (NEWFRONT-287).
+ */
 export const DOCS_URL = "https://github.com/The-AI-Republic/pi-dash#readme";
 export const FORUM_URL = "https://github.com/The-AI-Republic/pi-dash/discussions";
 export const REPORT_BUG_URL = "https://github.com/The-AI-Republic/pi-dash/issues/new/choose";

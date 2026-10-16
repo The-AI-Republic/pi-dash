@@ -10,6 +10,9 @@
 import { Badge, Button, Dialog, Spinner } from "@pidash/kit";
 import * as React from "react";
 
+// Lazy-only catalog import: this dialog loads through React.lazy, so the
+// catalog never joins a route's eager closure (which would collapse its
+// TanStack component split). Keep this file lazily loaded (NEWFRONT-287).
 import { DOCS_URL } from "./entries/account.js";
 
 /** The public changelog the fallback and footer link to. */

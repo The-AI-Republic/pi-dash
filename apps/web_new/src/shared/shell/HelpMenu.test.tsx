@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { DOCS_URL, FORUM_URL } from "./entries/account.js";
+import { DOCS_URL, FORUM_URL } from "./externalLinks.js";
 import { HelpMenu, SALES_EMAIL_URL } from "./HelpMenu.js";
 
 function setup() {

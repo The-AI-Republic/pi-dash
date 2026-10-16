@@ -9,7 +9,7 @@ import { IconButton, Menu } from "@pidash/kit";
 import { BookOpen, CircleHelp, Keyboard, Mail, MessagesSquare, Newspaper } from "lucide-react";
 import * as React from "react";
 
-import { DOCS_URL, FORUM_URL } from "./entries/account.js";
+import { DOCS_URL, FORUM_URL } from "./externalLinks.js";
 
 /** The sales contact behind the menu's contact entry. */
 export const SALES_EMAIL_URL = "mailto:sales@example.com";
