@@ -96,7 +96,9 @@ export {
   useInstanceAdmins,
   useInstanceBootstrap,
   useInstanceConfigurations,
+  useInstanceWorkspaces,
   useLoopJobs,
+  useRestrictWorkspaceCreation,
   useToggleLoopJob,
   useUpdateGeneralSettings,
   useUpdateInstanceConfigurations,
@@ -125,8 +127,10 @@ export {
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
+  instanceWorkspacesQueryOptions,
   loopJobsQueryOptions,
   mergeConfigurationRows,
+  selectNextWorkspaceCursor,
 } from "./queries.js";
 export {
   acceptCompanyName,
@@ -155,6 +159,17 @@ export {
   readStoredAdminTheme,
   useAdminThemeStore,
 } from "./theme.js";
+export {
+  CONFIG_SAVE_FAILURE_MESSAGE,
+  CONFIG_SAVE_FAILURE_TITLE,
+  CONFIG_SAVE_PROGRESS_TITLE,
+  CONFIG_SAVE_SUCCESS_MESSAGE,
+  CONFIG_SAVE_SUCCESS_TITLE,
+  DISABLE_WORKSPACE_CREATION_KEY,
+  encodeWorkspaceCreationRestricted,
+  isWorkspaceCreationRestricted,
+  selectConfigurationValue,
+} from "./workspace.js";
 export type { AdminThemeMode } from "./theme.js";
 export { AdminAccountMenu } from "./components/AdminAccountMenu.js";
 export { AI_SETTINGS_TITLE, AdminAiSettingsPage } from "./components/AdminAiSettingsPage.js";
@@ -194,5 +209,13 @@ export {
 export { AdminGeneralSettingsPage, GENERAL_SETTINGS_TITLE } from "./components/AdminGeneralSettingsPage.js";
 export { AdminSetupForm, resolveSetupPrefill, SETUP_POST_PATH, SETUP_TITLE } from "./components/AdminSetupForm.js";
 export type { SetupPrefill } from "./components/AdminSetupForm.js";
+export { AdminWorkspacePage } from "./components/AdminWorkspacePage.js";
+export { WorkspaceCreationToggle } from "./components/WorkspaceCreationToggle.js";
+export {
+  WORKSPACE_CREATE_PATH,
+  WORKSPACE_LIST_SKELETON_ROWS,
+  WORKSPACE_SLUG_TOOLTIP,
+  WorkspaceList,
+} from "./components/WorkspaceList.js";
 export { AdminSignInForm, SIGN_IN_POST_PATH, SIGN_IN_TITLE } from "./components/AdminSignInForm.js";
 export { CloudAdminEntry } from "./components/CloudAdminEntry.js";
