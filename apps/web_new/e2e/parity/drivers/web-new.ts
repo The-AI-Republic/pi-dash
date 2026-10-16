@@ -3499,9 +3499,10 @@ export class WebNewDriver implements ParityDriver {
 
   // Sidebar + workspace navigation (NEWFRONT-125, SHELL-046..062).
   // NEWFRONT-285 implements the rows half (SHELL-046..051) plus the
-  // shared navigation reads its scenarios use; the remaining stubs
-  // (overflow, More, favorites, switcher, menus, logo) belong to
-  // NEWFRONT-286/287.
+  // shared navigation reads its scenarios use; NEWFRONT-286 the
+  // overflow, More and favorites probes (SHELL-052..057) plus the
+  // shared outside-click and section reads; the remaining stubs
+  // (switcher, menus, logo) belong to NEWFRONT-287.
   private async screenAside(): Promise<Locator> {
     // Same non-waiting read as the oracle driver: measure with
     // getBoundingClientRect, which never waits, instead of boundingBox.
@@ -3715,55 +3716,86 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async isProjectsOverflowVisible(): Promise<boolean> {
-    return todo("isProjectsOverflowVisible");
+    const toggle = this.page.getByTestId("projects-overflow-toggle");
+    return (await toggle.count()) > 0 && (await toggle.first().isVisible());
   }
 
   async isProjectsOverflowOpen(): Promise<boolean> {
-    return todo("isProjectsOverflowOpen");
+    return (await this.page.getByTestId("projects-overflow-panel").count()) > 0;
   }
 
-  async setProjectsOverflowOpen(_open: boolean): Promise<void> {
-    return todo("setProjectsOverflowOpen");
+  async setProjectsOverflowOpen(open: boolean): Promise<void> {
+    if ((await this.isProjectsOverflowOpen()) === open) return;
+    await this.page.getByTestId("projects-overflow-toggle").click();
   }
 
-  async searchOverflowProjects(_query: string): Promise<void> {
-    return todo("searchOverflowProjects");
+  async searchOverflowProjects(query: string): Promise<void> {
+    await this.page.getByTestId("projects-overflow-search").fill(query);
   }
 
   async overflowProjectNames(): Promise<string[]> {
-    return todo("overflowProjectNames");
+    const panel = this.page.getByTestId("projects-overflow-panel");
+    const texts = await panel.locator("a").allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
   async isOverflowEmptyStateVisible(): Promise<boolean> {
-    return todo("isOverflowEmptyStateVisible");
+    const empty = this.page.getByTestId("projects-overflow-empty");
+    return (await empty.count()) > 0 && (await empty.first().isVisible());
   }
 
   async isMoreSectionOpen(): Promise<boolean> {
-    return todo("isMoreSectionOpen");
+    const toggle = this.page.getByTestId("more-section-toggle");
+    try {
+      return (await toggle.getAttribute("aria-expanded", { timeout: 5_000 })) === "true";
+    } catch {
+      return false;
+    }
   }
 
-  async setMoreSectionOpen(_open: boolean): Promise<void> {
-    return todo("setMoreSectionOpen");
+  async setMoreSectionOpen(open: boolean): Promise<void> {
+    if ((await this.isMoreSectionOpen()) === open) return;
+    await this.page.getByTestId("more-section-toggle").click();
   }
 
   async moreSectionLinks(): Promise<{ text: string; href: string | null }[]> {
-    return todo("moreSectionLinks");
+    const links = this.page.getByTestId("more-section-panel").locator("a");
+    const count = await links.count();
+    const rows: { text: string; href: string | null }[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const link = links.nth(index);
+      rows.push({
+        text: ((await link.innerText().catch(() => "")) ?? "").trim(),
+        href: await link.getAttribute("href").catch(() => null),
+      });
+    }
+    return rows;
   }
 
   async sidebarSectionNames(): Promise<string[]> {
-    return todo("sidebarSectionNames");
+    const found: string[] = [];
+    if ((await this.page.getByTestId("sidebar-projects-group").count()) > 0) found.push("Projects");
+    if ((await this.page.getByTestId("sidebar-more-group").count()) > 0) found.push("More");
+    if ((await this.page.getByTestId("sidebar-favorites-group").count()) > 0) found.push("Favorites");
+    return found;
   }
 
   async isFavoritesOpen(): Promise<boolean> {
-    return todo("isFavoritesOpen");
+    // Absent while the section hides (empty favorites): that reads
+    // closed, matching the oracle's pre-star assertion.
+    const toggle = this.page.getByTestId("favorites-section-toggle");
+    if ((await toggle.count()) === 0) return false;
+    return (await toggle.first().getAttribute("aria-expanded")) === "true";
   }
 
-  async setFavoritesOpen(_open: boolean): Promise<void> {
-    return todo("setFavoritesOpen");
+  async setFavoritesOpen(open: boolean): Promise<void> {
+    if ((await this.isFavoritesOpen()) === open) return;
+    await this.page.getByTestId("favorites-section-toggle").click();
   }
 
   async isOverflowCreateVisible(): Promise<boolean> {
-    return todo("isOverflowCreateVisible");
+    const create = this.page.getByTestId("projects-overflow-create");
+    return (await create.count()) > 0 && (await create.first().isVisible());
   }
 
   async activateHelpEntry(name: string): Promise<string | null> {
@@ -3813,7 +3845,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async clickMainContent(): Promise<void> {
-    return todo("clickMainContent");
+    await this.page
+      .getByRole("main")
+      .first()
+      .click({ position: { x: 20, y: 20 } });
   }
 
   async openSidebarLink(text: string): Promise<void> {
@@ -3862,28 +3897,45 @@ export class WebNewDriver implements ParityDriver {
     await this.page.mouse.up();
   }
 
-  async openFavoritesFolderDialog(): Promise<void> {
-    return todo("openFavoritesFolderDialog");
+  /** The favorites row carrying an exact display name. */
+  private favoriteRowByName(name: string): Locator {
+    const escaped = name.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return this.page
+      .getByTestId("sidebar-favorites-group")
+      .locator(`[data-testid="favorite-entry"][data-entry-name="${escaped}"]`)
+      .first();
   }
 
-  async submitFavoritesFolderName(_name: string): Promise<void> {
-    return todo("submitFavoritesFolderName");
+  async openFavoritesFolderDialog(): Promise<void> {
+    await this.page.getByTestId("favorites-folder-create").click();
+  }
+
+  async submitFavoritesFolderName(name: string): Promise<void> {
+    await this.page.getByTestId("favorites-folder-input").fill(name);
+    await this.page.keyboard.press("Enter");
   }
 
   async isFavoritesFolderDialogOpen(): Promise<boolean> {
-    return todo("isFavoritesFolderDialogOpen");
+    const form = this.page.getByTestId("favorites-folder-form");
+    return (await form.count()) > 0 && (await form.first().isVisible());
   }
 
   async favoriteEntryNames(): Promise<string[]> {
-    return todo("favoriteEntryNames");
+    const rows = this.page.getByTestId("sidebar-favorites-group").locator('[data-testid="favorite-entry"]');
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      names.push((await rows.nth(index).getAttribute("data-entry-name")) ?? "");
+    }
+    return names;
   }
 
-  async openFavoriteEntry(_name: string): Promise<void> {
-    return todo("openFavoriteEntry");
+  async openFavoriteEntry(name: string): Promise<void> {
+    await this.favoriteRowByName(name).locator("a").first().click();
   }
 
-  async openFavoritesFolder(_name: string): Promise<void> {
-    return todo("openFavoritesFolder");
+  async openFavoritesFolder(name: string): Promise<void> {
+    await this.favoriteRowByName(name).getByTestId("favorite-folder-toggle").click();
   }
 
   async openWorkspaceSwitcher(): Promise<void> {
@@ -3983,20 +4035,39 @@ export class WebNewDriver implements ParityDriver {
     await entry.click();
   }
 
-  async dragFavoriteBefore(_sourceName: string, _targetName: string): Promise<void> {
-    return todo("dragFavoriteBefore");
+  async dragFavoriteBefore(sourceName: string, targetName: string): Promise<void> {
+    // Pointer drag through the hover handle: the pointerdown starts the
+    // reorder, the release above the target commits it.
+    const source = this.favoriteRowByName(sourceName);
+    await source.hover();
+    const handle = source.getByTestId("favorite-drag-handle");
+    const from = await handle.boundingBox();
+    if (!from) throw new Error(`[parity] no drag handle for ${sourceName}.`);
+    const target = this.favoriteRowByName(targetName);
+    const to = await target.boundingBox();
+    if (!to) throw new Error(`[parity] no favorite row for ${targetName}.`);
+    await this.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+    await this.page.mouse.down();
+    await this.page.mouse.move(to.x + to.width / 2, to.y + 2, { steps: 12 });
+    await this.page.mouse.up();
   }
 
-  async openFavoriteQuickMenu(_name: string): Promise<void> {
-    return todo("openFavoriteQuickMenu");
+  async openFavoriteQuickMenu(name: string): Promise<void> {
+    const row = this.favoriteRowByName(name);
+    await row.hover();
+    await row.getByTestId("favorite-row-menu").click();
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: 10_000 });
   }
 
   async favoriteQuickMenuTexts(): Promise<string[]> {
-    return todo("favoriteQuickMenuTexts");
+    const texts = await this.page.getByRole("menuitem").allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
-  async activateFavoriteQuickMenuItem(_name: string): Promise<void> {
-    return todo("activateFavoriteQuickMenuItem");
+  async activateFavoriteQuickMenuItem(name: string): Promise<void> {
+    const entry = this.page.getByRole("menuitem", { name }).first();
+    await entry.scrollIntoViewIfNeeded().catch(() => undefined);
+    await entry.click();
   }
 
   async setSidebarCollapsed(collapsed: boolean): Promise<void> {

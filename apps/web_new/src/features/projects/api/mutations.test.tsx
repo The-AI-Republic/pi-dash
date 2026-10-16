@@ -16,6 +16,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { FAVORITES_SECTION_OPEN_KEY } from "../../../shared/shell/favorites.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { useFavorites } from "../../sidebar/index.js";
 import { projectKeys } from "./keys.js";
 import {
   ARCHIVE_FAILED_TITLE,
@@ -122,6 +123,14 @@ function stubClient(
         text: async () => (favoriteStatus === 204 ? "" : JSON.stringify({ detail: " starring is unavailable " })),
       };
     }
+    if (url.endsWith("/user-favorites/")) {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => "[]",
+      };
+    }
     if (url.endsWith("/projects/details/")) {
       return {
         status: 200,
@@ -204,6 +213,31 @@ describe("useToggleFavoriteProject", () => {
     fireEvent.click(screen.getByRole("button", { name: "toggle star" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(FAVORITE_ADDED_TITLE, expect.any(String)));
     expect(globalThis.localStorage.getItem(FAVORITES_SECTION_OPEN_KEY)).toBe("1");
+  });
+
+  it("re-reads the sidebar favorites list so the first add surfaces (SHELL-032 seam)", async () => {
+    const calls: string[] = [];
+    stubClient({ calls });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const row = project();
+    queryClient.setQueryData(projectKeys.details("acme"), [row]);
+    function SectionProbe(): React.ReactElement {
+      const list = useFavorites("acme");
+      return <p data-testid="fav-count">{(list.data ?? []).length}</p>;
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Probe row={row} />
+        <SectionProbe />
+      </QueryClientProvider>
+    );
+    const reads = (): number =>
+      calls.filter((call) => call.startsWith("GET") && call.includes("/user-favorites/")).length;
+    await waitFor(() => expect(screen.getByTestId("fav-count")).toHaveTextContent("0"));
+    expect(reads()).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "toggle star" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(FAVORITE_ADDED_TITLE, expect.any(String)));
+    await waitFor(() => expect(reads()).toBe(2));
   });
 
   it("unstars a favorited project", async () => {

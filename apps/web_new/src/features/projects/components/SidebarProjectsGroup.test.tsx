@@ -419,3 +419,37 @@ describe("SidebarProjectsGroup drag reorder", () => {
     expect(h.calls.some((call) => call.method === "PATCH")).toBe(false);
   });
 });
+
+describe("SidebarProjectsGroup overflow toggle (SHELL-052)", () => {
+  it("shows the toggle once the cap leaves rows out", async () => {
+    setup({}, { limit: 1 });
+    await waitFor(() => expect(rowNames()).toEqual(["ATLAtlas"]));
+    expect(screen.getByTestId("projects-overflow-toggle")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("hides the toggle while everything fits or loads", async () => {
+    const fitted = setup({}, { limit: 10 });
+    await waitFor(() => expect(rowNames()).toEqual(["ATLAtlas", "BEABeacon"]));
+    expect(screen.queryByTestId("projects-overflow-toggle")).not.toBeInTheDocument();
+    fitted.view.unmount();
+    setup({ projectsStatus: "pending" }, { limit: 1 });
+    expect(screen.queryByTestId("projects-overflow-toggle")).not.toBeInTheDocument();
+  });
+
+  it("hides the toggle with the collapsed group", async () => {
+    setup({}, { limit: 1 });
+    await waitFor(() => expect(rowNames()).toEqual(["ATLAtlas"]));
+    fireEvent.click(screen.getByTestId("projects-group-toggle"));
+    expect(screen.queryByTestId("projects-overflow-toggle")).not.toBeInTheDocument();
+  });
+
+  it("opens and closes the overflow panel", async () => {
+    setup({}, { limit: 1 });
+    await waitFor(() => expect(rowNames()).toEqual(["ATLAtlas"]));
+    fireEvent.click(screen.getByTestId("projects-overflow-toggle"));
+    expect(screen.getByTestId("projects-overflow-toggle")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("projects-overflow-panel")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("projects-overflow-toggle"));
+    expect(screen.queryByTestId("projects-overflow-panel")).not.toBeInTheDocument();
+  });
+});

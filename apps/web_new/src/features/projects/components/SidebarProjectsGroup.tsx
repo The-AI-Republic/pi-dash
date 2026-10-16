@@ -1,23 +1,25 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Sidebar projects group (parity/specs/shell.md §4, SHELL-048/049/051).
+// Sidebar projects group (parity/specs/shell.md §4, SHELL-048/049/051/052).
 // The collapsing disclosure bundling the workspace aggregate row with
 // the joined projects: placeholder rows while the collection loads, a
 // direct create action for empty workspaces, collapse memory across
 // client-side navigation with a fresh open on every load, auto-open on
-// project, drafts and views routes, and pointer-drag reordering with
-// server persistence. Drafts ride the personal entries above; the
-// overflow toggle arrives with SHELL-052.
+// project, drafts and views routes, pointer-drag reordering with
+// server persistence, and the overflow toggle opening the searchable
+// slide-over once the cap leaves rows out. Drafts ride the personal
+// entries above.
 
 import { Skeleton } from "@pidash/kit";
 import type { Project } from "@pidash/api-client";
-import { ChevronRight, List, Plus } from "lucide-react";
+import { ChevronRight, Ellipsis, List, Plus } from "lucide-react";
 import * as React from "react";
 
 import { CrossAppLink } from "../../../shared/coexistence/index.js";
 import { useUpdateProjectOrder } from "../api/projectOrder.js";
 import { useProjectListCap, useWorkspaceProperties } from "../api/tabPreferences.js";
+import { hasOverflow } from "../overflow.js";
 import { isTabbedMode } from "../tabs.js";
 import {
   isAggregateRowActive,
@@ -29,6 +31,7 @@ import {
   type SidebarDropRow,
   type SidebarDropTarget,
 } from "../sidebar.js";
+import { SidebarOverflowPanel } from "./SidebarOverflowPanel.js";
 import { SidebarProjectRow } from "./SidebarProjectRow.js";
 
 export interface SidebarProjectsGroupProps {
@@ -66,6 +69,7 @@ export function SidebarProjectsGroup({
   const joined = React.useMemo(() => selectSidebarProjects(projects), [projects]);
   const visible = sliceVisibleProjects(joined, cap);
   const [closed, setClosed] = React.useState(false);
+  const [overflowOpen, setOverflowOpen] = React.useState(false);
   const [sourceId, setSourceId] = React.useState<string | null>(null);
   const [target, setTarget] = React.useState<SidebarDropTarget | null>(null);
   const targetRef = React.useRef<SidebarDropTarget | null>(null);
@@ -176,6 +180,29 @@ export function SidebarProjectsGroup({
           ))}
         </ul>
       )}
+      {closed || projectsStatus !== "success" || !hasOverflow(joined.length, cap) ? null : (
+        <button
+          type="button"
+          aria-expanded={overflowOpen}
+          aria-label={overflowOpen ? "Close extra projects" : "Open extra projects"}
+          data-testid="projects-overflow-toggle"
+          onClick={() => setOverflowOpen(!overflowOpen)}
+          className="text-body flex w-full cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-2) text-left text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
+        >
+          <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
+          <span className="truncate">{overflowOpen ? "Hide" : "More"}</span>
+        </button>
+      )}
+      {overflowOpen ? (
+        <SidebarOverflowPanel
+          workspaceSlug={workspaceSlug}
+          projects={joined}
+          canCreateProject={canCreateProject}
+          onCreateProject={onCreateProject}
+          onNavigate={onNavigate}
+          onClose={() => setOverflowOpen(false)}
+        />
+      ) : null}
       {closed || projectsStatus !== "pending" ? null : (
         <div role="status" aria-label="Loading projects" data-testid="sidebar-project-placeholders">
           {Array.from({ length: PLACEHOLDER_ROWS }, (_, index) => (

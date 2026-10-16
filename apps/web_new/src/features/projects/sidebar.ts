@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Sidebar project model (parity/specs/shell.md §4, SHELL-046–051). Pure:
+// Sidebar project model (parity/specs/shell.md §4, SHELL-046–055). Pure:
 // joined ordering, the listed cap, drop math, subnav entries, row links
 // and route guards. Components and the route build on these; nothing
 // here touches React, the router, or the network.
@@ -154,10 +154,15 @@ export interface SidebarSubnavEntry {
 }
 
 /**
- * Inline sub-navigation entries for one project row (SHELL-050): the
- * project tabs plus the workers panel, in fixed order, each already
- * flag- and role-gated. Addresses carry a trailing slash so the
- * parity driver tells entries apart from the bare row link.
+ * Inline sub-navigation entries for one project row (SHELL-050/055):
+ * work tracking, cycles, modules, views, pages, intake with its
+ * pending-count badge, schedulers and the workers panel, in fixed
+ * order, each already flag- and role-gated (SHELL-055: guests keep
+ * tracking, views, pages, intake and schedulers; cycles, modules and
+ * workers are admin and member only). Addresses carry a trailing
+ * slash so the parity driver tells entries apart from the bare row
+ * link. Link targets belong to their own areas; the shell proves
+ * hrefs plus gating only.
  */
 export function selectSubnavEntries(args: {
   workspaceSlug: string;

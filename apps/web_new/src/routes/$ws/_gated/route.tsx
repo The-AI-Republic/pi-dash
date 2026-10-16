@@ -38,6 +38,9 @@ import { QuickCreateButton } from "../../../features/issues/index.js";
 import { unreadNotificationsQueryOptions } from "../../../features/notifications/index.js";
 import { projectsQueryOptions, selectSidebarProjects, SidebarProjectsGroup } from "../../../features/projects/index.js";
 import {
+  SidebarFavoritesGroup,
+  SidebarMoreGroup,
+  favoritesQueryOptions,
   selectPersonalEntries,
   selectPersonalGroup,
   selectVisiblePersonalEntries,
@@ -132,6 +135,12 @@ export const Route = createFileRoute("/$ws/_gated")({
     // Projects start loading but never block the shell: the sidebar
     // renders placeholder rows while the collection resolves (SHELL-049).
     void context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws)).catch(() => undefined);
+    // Favorites likewise never block: the section hides while they load
+    // or when they fail (SHELL-056), and waiting here would stall a
+    // cached desktop start behind the query's retries.
+    void context.queryClient
+      .ensureQueryData(favoritesQueryOptions(context.apiClient, params.ws))
+      .catch(() => undefined);
     await Promise.all([
       context.queryClient.ensureQueryData(workspacesQueryOptions(context.apiClient)),
       context.queryClient
@@ -216,7 +225,7 @@ function WorkspaceShell({
   const { data: unread } = useQuery(unreadNotificationsQueryOptions(context.apiClient, workspaceSlug));
   const { data: instanceConfig } = useQuery(instanceConfigQueryOptions(context.apiClient));
   const sidebarPrefs = useSidebarPreferences(workspaceSlug);
-  const { canEdit } = usePermissions(workspaceSlug);
+  const { canEdit, role } = usePermissions(workspaceSlug);
   const sidebarCollapsed = useShellChrome((state) => state.sidebarCollapsed);
   const clearPeek = useShellChrome((state) => state.clearPeek);
   const setSidebarCollapsed = useShellChrome((state) => state.setSidebarCollapsed);
@@ -402,6 +411,12 @@ function WorkspaceShell({
                 onCreateProject={() => setCreateProjectOpen(true)}
                 onNavigate={handleNavigateHref}
               />
+            }
+            moreGroup={<SidebarMoreGroup workspaceSlug={workspaceSlug} role={role} currentPath={currentPath} />}
+            favoritesGroup={
+              // Favorites are admin and member only; guests never see
+              // the section (SHELL-056).
+              canEdit ? <SidebarFavoritesGroup workspaceSlug={workspaceSlug} /> : undefined
             }
             onNavigateHref={handleNavigateHref}
             {...switcherShortcuts}

@@ -7,8 +7,8 @@
 // The shell owns collapse, resize, peek and float; this component owns
 // the content: brand, home, switcher, personal entries, the projects
 // group slot and the account row. Sidebar-content slices
-// (NEWFRONT-285/287) extend this content without touching the shell
-// contract.
+// (NEWFRONT-285/286/287) extend this content without touching the
+// shell contract.
 
 import { Kbd } from "@pidash/kit";
 import { FileText, House } from "lucide-react";
@@ -91,6 +91,10 @@ export interface SidebarProps {
   quickActions?: React.ReactNode;
   /** Projects group content (SHELL-048 fills this). */
   projectsGroup?: React.ReactNode;
+  /** Secondary-destinations disclosure (SHELL-053 fills this). */
+  moreGroup?: React.ReactNode;
+  /** Favorites section content (SHELL-056 fills this). */
+  favoritesGroup?: React.ReactNode;
   /** Client-side navigation for the home row's plain left clicks. */
   onNavigateHref: (href: string) => void;
 }
@@ -118,6 +122,8 @@ export function Sidebar({
   onPersonalize,
   quickActions,
   projectsGroup,
+  moreGroup,
+  favoritesGroup,
   onNavigateHref,
 }: SidebarProps): React.ReactElement {
   const homeHref = `/${activeSlug}`;
@@ -210,6 +216,8 @@ export function Sidebar({
         </nav>
       )}
       {projectsGroup}
+      {moreGroup}
+      {favoritesGroup}
       <p className="text-caption flex items-center gap-(--space-2) px-(--space-2) text-(--text-muted)">
         Commands <Kbd keys={["mod", "K"]} />
       </p>

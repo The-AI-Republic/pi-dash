@@ -309,6 +309,17 @@ describe("selectSubnavEntries", () => {
     });
     expect(outsider.some((entry) => entry.key === "runners")).toBe(false);
   });
+
+  it("pins the SHELL-055 oracle matrix: guest sets and the nonzero badge", () => {
+    const base = { workspaceSlug: "acme", projectId: "p1", flags: FLAGS };
+    const guest = selectSubnavEntries({ ...base, role: 5, intakeCount: 1 });
+    expect(guest.map((entry) => entry.name)).toEqual(["Work Items", "Views", "Pages", "Intake", "Schedulers"]);
+    expect(guest.find((entry) => entry.key === "schedulers")?.href).toBe("/acme/projects/p1/schedulers/");
+    expect(guest.find((entry) => entry.key === "intake")).toMatchObject({ badge: 1 });
+    const member = selectSubnavEntries({ ...base, role: 15, intakeCount: 0 });
+    expect(member.map((entry) => entry.key)).toContain("runners");
+    expect(member.find((entry) => entry.key === "intake")?.badge).toBeNull();
+  });
 });
 
 describe("resolveProjectRowHref", () => {
