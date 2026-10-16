@@ -116,6 +116,98 @@ def test_empty_context_render_agreement(env):
     assert clean == EMPTY_CONTEXT_CLEAN
 
 
+def budget_block(body: str) -> str:
+    """Lines from ``### Budget`` to end: self-contained (balanced if/endif)."""
+    lines = body.split("\n")
+    return "\n".join(lines[lines.index("### Budget") :])
+
+
+def tick_case(waited, allowance=None):
+    """A ``_tick_context``-shaped context with the waited/allowance arms set."""
+    return {
+        "tick": {
+            "count": 3,
+            "cap": 20,
+            "remaining": 17,
+            "waited": waited,
+            "wait_allowance": allowance,
+            "spent": False,
+            "clock_live": True,
+            "interval_seconds": 3600,
+            "interval_human": "1 hour",
+        },
+        "issue": {"identifier": "TP-12"},
+    }
+
+
+def test_tick_sentence_waited_counts(env):
+    """Jinja2 half of the PIDASHCONV-1073 golden: the "Runs used" sentence.
+
+    The minijinja half asserting the same literals is
+    ``prompting::renderer::tests::tick_sentence_matches_jinja2_for_waited_counts``;
+    update both sides together when the section body changes. With
+    ``spent=False`` the pinned lines are identical across Django trees (the
+    only tree difference sits inside the unrendered spent arm), so this
+    passes with or without ``PIDASH_DJANGO_PROMPTING_DIR``.
+    """
+    block = budget_block(section_body(SECTIONS_DIR / "task-lifecycle.md"))
+    template = env.from_string(block)
+    stem = (
+        "Runs used on this issue: **3 of 20** (17 remaining). This is one pool "
+        "for the life of the issue, spent in any stage by runs the ticking system "
+        "starts (timer ticks, and the run that follows a state move you make). "
+        "Runs a human starts are free."
+    )
+    tail = (
+        "each of those raised the cap by one, so they are counted above "
+        "and cost no net budget."
+    )
+    cases = {
+        0: stem,
+        1: f"{stem} You have ended 1 run by waiting on a blocker; {tail}",
+        2: f"{stem} You have ended 2 runs by waiting on a blocker; {tail}",
+    }
+    for waited, want in cases.items():
+        out = template.render(**tick_case(waited))
+        assert out.split("\n")[2] == want
+
+
+def test_tick_sentence_wait_allowance(env):
+    """Jinja2 half of the allowance arm (``== 0`` must hold for a present 0).
+
+    minijinja half:
+    ``prompting::renderer::tests::wait_allowance_arm_matches_jinja2``.
+    """
+    block = budget_block(section_body(SECTIONS_DIR / "task-lifecycle.md"))
+    template = env.from_string(block)
+    stem = (
+        "When this issue has open blockers, they are information, not a gate \u2014 "
+        "read them and decide for yourself whether the work can proceed "
+        '(see "Work item relationships"). If it can, proceed and record the '
+        "assumption. If it cannot, write down which blocker and why, call "
+        "`pidash issue wait TP-12`, and yield `waiting_on_external`: the wait buys "
+        "back this run's tick, so it costs no budget, and the next tick asks you "
+        "again. Nothing watches the blocker for you \u2014 a blocker closing starts no "
+        "run, and no one reads your workpad \u2014 so each tick you re-read and re-decide."
+    )
+    tail = (
+        " While the issue stays in its current state, Pi Dash re-invokes the agent "
+        "about every 1 hour."
+    )
+    spent_clause = (
+        " **Your wait allowance is spent**: further waiting comes out of the pool "
+        "above, so if you are still blocked, tell the human in a comment instead "
+        "of waiting again."
+    )
+    cases = {
+        0: f"{stem}{spent_clause}{tail}",
+        2: f"{stem}{tail}",
+    }
+    for allowance, want in cases.items():
+        out = template.render(**tick_case(0, allowance=allowance))
+        assert out.split("\n")[4] == want
+
+
 def test_render_goldens_reproduce_live(env):
     """FIX-render success outputs and error classes reproduce in Jinja2."""
     fixture = json.loads((FIXTURES_DIR / "FIX-render.json").read_text())
