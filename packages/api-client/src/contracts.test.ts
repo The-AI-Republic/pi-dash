@@ -1500,6 +1500,9 @@ describe("notification contracts", () => {
     await markAllNotificationsRead(client, "acme");
     const bare = transport.calls.filter((call) => call.init.method === "POST").at(-1);
     expect(bare?.init.body).toBe(JSON.stringify({}));
+    await markAllNotificationsRead(client, "acme", { type: "assigned,created" });
+    const typed = transport.calls.filter((call) => call.init.method === "POST").at(-1);
+    expect(typed?.init.body).toBe(JSON.stringify({ type: "assigned,created" }));
   });
 
   it("reads and flips one delivery toggle at a time", async () => {
