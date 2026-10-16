@@ -9,12 +9,13 @@ import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { EFileAssetType } from "@pi-dash/types";
 import type { TCommentsOperations } from "@pi-dash/types";
-import { copyUrlToClipboard, formatTextList, generateWorkItemLink } from "@pi-dash/utils";
+import { formatTextList, generateWorkItemLink } from "@pi-dash/utils";
 import { useEditorAsset } from "@/hooks/store/use-editor-asset";
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useMember } from "@/hooks/store/use-member";
 import { useProject } from "@/hooks/store/use-project";
 import { useUser } from "@/hooks/store/user";
+import { copyShareUrl } from "@/utils/share-url";
 
 export const useWorkItemCommentOperations = (
   workspaceSlug: string | undefined,
@@ -55,7 +56,7 @@ export const useWorkItemCommentOperations = (
             sequenceId: issueDetails.sequence_id,
           });
           const commentLink = `${workItemLink}#comment-${id}`;
-          copyUrlToClipboard(commentLink).then(() => {
+          copyShareUrl(commentLink).then(() => {
             setToast({
               title: t("Success!"),
               type: TOAST_TYPE.SUCCESS,

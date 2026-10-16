@@ -352,6 +352,96 @@ impl AgentKind {
             AgentKind::MuseCode => "https://developer.meta.com/ai/products/muse-code/",
         }
     }
+
+    /// The agent's *official* install command(s), or `None` when the vendor
+    /// ships no scriptable installer we've verified (in which case
+    /// `pidash runner add` falls back to opening [`install_page_url`]).
+    ///
+    /// This is the single data table the issue (PDASHOSS01-155) calls for:
+    /// each agent that has an installer contributes exactly one [`AgentInstaller`]
+    /// row here, so adding a new agent kind means adding a row — not editing
+    /// several match arms across the codebase. **Key principle:** we never
+    /// vendor, mirror, pin, or ship an agent binary; we only invoke the vendor's
+    /// own script at runtime, so pidash always tracks the vendor's latest
+    /// supported build. Only official vendor domains are allowed here.
+    ///
+    /// Every command below was verified against the vendor's current docs
+    /// (linked per row). Re-verify before changing any command.
+    pub fn official_installer(self) -> Option<AgentInstaller> {
+        match self {
+            // Anthropic Claude Code — https://code.claude.com/docs/en/setup
+            AgentKind::ClaudeCode => Some(AgentInstaller {
+                unix: Some("curl -fsSL https://claude.ai/install.sh | bash"),
+                windows: Some("irm https://claude.ai/install.ps1 | iex"),
+                doc_url: "https://code.claude.com/docs/en/setup",
+            }),
+            // OpenAI Codex — https://learn.chatgpt.com/docs/codex/cli
+            // The standalone installer is macOS/Linux only; on Windows the
+            // official method is the npm package (requires Node.js).
+            AgentKind::Codex => Some(AgentInstaller {
+                unix: Some("curl -fsSL https://chatgpt.com/codex/install.sh | sh"),
+                windows: Some("npm install -g @openai/codex"),
+                doc_url: "https://learn.chatgpt.com/docs/codex/cli",
+            }),
+            // Cursor CLI — https://cursor.com/docs/cli/installation
+            AgentKind::CursorAgent => Some(AgentInstaller {
+                unix: Some("curl https://cursor.com/install -fsS | bash"),
+                windows: Some("irm 'https://cursor.com/install?win32=true' | iex"),
+                doc_url: "https://cursor.com/docs/cli/installation",
+            }),
+            // OpenClaw (acpx), Grok, and Muse Code do not (yet) publish a
+            // verified official one-line installer, so we keep the
+            // open-install-page fallback for these agents rather than guess a
+            // command. Add a row here once a vendor script is confirmed.
+            AgentKind::OpenClaw | AgentKind::Grok | AgentKind::MuseCode => None,
+        }
+    }
+
+    /// The one login step still required after a successful install, phrased as
+    /// a command the operator can run. Installers place the binary but never
+    /// authenticate it, so `pidash runner add` prints this so the runner can
+    /// actually pick up work. `None` means auth is via an env var / no explicit
+    /// login command, in which case the doctor's per-agent auth hint covers it.
+    pub fn post_install_login_hint(self) -> Option<&'static str> {
+        match self {
+            AgentKind::ClaudeCode => Some("claude  (then follow the /login prompts)"),
+            AgentKind::Codex => Some("codex login"),
+            AgentKind::CursorAgent => Some("cursor-agent login  (or set CURSOR_API_KEY)"),
+            AgentKind::OpenClaw => None,
+            AgentKind::Grok => Some("set XAI_API_KEY  (or run `grok` and log in)"),
+            AgentKind::MuseCode => Some("set META_API_KEY"),
+        }
+    }
+}
+
+/// One agent's official installer command(s), returned by
+/// [`AgentKind::official_installer`]. The command strings are shown to the
+/// operator verbatim *and* executed, so they must be exactly the vendor's
+/// documented one-liner. `unix` covers macOS/Linux/WSL; `windows` is run in
+/// PowerShell. A `None` for a platform means "no verified installer on this
+/// platform" and the caller falls back to opening the install page there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentInstaller {
+    /// Command run in a login shell on macOS/Linux/WSL, or `None` if the vendor
+    /// has no scriptable macOS/Linux installer.
+    pub unix: Option<&'static str>,
+    /// Command run in PowerShell on Windows, or `None` if the vendor has no
+    /// scriptable Windows installer.
+    pub windows: Option<&'static str>,
+    /// Vendor documentation URL the command was verified against.
+    pub doc_url: &'static str,
+}
+
+impl AgentInstaller {
+    /// The install command for the host platform this binary is running on:
+    /// [`windows`](Self::windows) on Windows, [`unix`](Self::unix) elsewhere.
+    pub fn command_for_host(&self) -> Option<&'static str> {
+        if cfg!(target_os = "windows") {
+            self.windows
+        } else {
+            self.unix
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -996,6 +1086,99 @@ mod tests {
             let url = kind.install_page_url();
             assert!(url.starts_with("https://"), "{kind:?} url not https: {url}");
             assert!(!kind.display_name().is_empty());
+        }
+    }
+
+    #[test]
+    fn official_installers_only_use_https_and_official_domains() {
+        // The install commands are printed verbatim and executed, so a typo'd
+        // scheme or a non-vendor host is a serious defect. Assert every
+        // command begins with the vendor's https one-liner and cites an https
+        // doc URL, and that no command references a non-official domain.
+        let ok_hosts = [
+            "claude.ai",
+            "code.claude.com",
+            "chatgpt.com",
+            "learn.chatgpt.com",
+            "cursor.com",
+            "@openai/codex", // npm package name, not a URL host
+        ];
+        for kind in [
+            AgentKind::Codex,
+            AgentKind::ClaudeCode,
+            AgentKind::CursorAgent,
+            AgentKind::OpenClaw,
+            AgentKind::Grok,
+            AgentKind::MuseCode,
+        ] {
+            let Some(installer) = kind.official_installer() else {
+                continue;
+            };
+            assert!(
+                installer.doc_url.starts_with("https://"),
+                "{kind:?} doc_url not https: {}",
+                installer.doc_url
+            );
+            for cmd in [installer.unix, installer.windows].into_iter().flatten() {
+                // Any http:// (non-TLS) reference is forbidden.
+                assert!(
+                    !cmd.contains("http://"),
+                    "{kind:?} command uses plaintext http: {cmd}"
+                );
+                // Any URL in the command must point at an official host.
+                for tok in cmd.split_whitespace() {
+                    if tok.contains("https://") {
+                        assert!(
+                            ok_hosts.iter().any(|h| tok.contains(h)),
+                            "{kind:?} command references non-official host: {tok}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn agents_with_verified_installers_have_them_others_fall_back() {
+        // The three agents whose vendor scripts we verified must expose an
+        // installer; the rest deliberately return None so `runner add` keeps
+        // the open-install-page fallback.
+        assert!(AgentKind::ClaudeCode.official_installer().is_some());
+        assert!(AgentKind::Codex.official_installer().is_some());
+        assert!(AgentKind::CursorAgent.official_installer().is_some());
+        assert!(AgentKind::OpenClaw.official_installer().is_none());
+        assert!(AgentKind::Grok.official_installer().is_none());
+        assert!(AgentKind::MuseCode.official_installer().is_none());
+    }
+
+    #[test]
+    fn command_for_host_picks_the_running_platform() {
+        // Platform selection must match the host: Windows → PowerShell command,
+        // everything else → the unix curl|sh command.
+        let claude = AgentKind::ClaudeCode.official_installer().unwrap();
+        let picked = claude.command_for_host().unwrap();
+        if cfg!(target_os = "windows") {
+            assert_eq!(picked, claude.windows.unwrap());
+            assert!(picked.contains("install.ps1"), "win cmd should be ps1");
+        } else {
+            assert_eq!(picked, claude.unix.unwrap());
+            assert!(picked.contains("install.sh"), "unix cmd should be sh");
+        }
+    }
+
+    #[test]
+    fn installer_agents_carry_a_login_hint() {
+        // Every agent with an installer must tell the operator how to log in,
+        // since installers never authenticate the agent.
+        for kind in [
+            AgentKind::ClaudeCode,
+            AgentKind::Codex,
+            AgentKind::CursorAgent,
+        ] {
+            assert!(
+                kind.post_install_login_hint().is_some(),
+                "{kind:?} should carry a post-install login hint"
+            );
         }
     }
 

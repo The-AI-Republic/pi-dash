@@ -3,7 +3,12 @@ FROM node:22-alpine AS base
 
 # Setup pnpm package manager with corepack and configure global bin directory for caching
 ENV PNPM_HOME="/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
+# pnpm >= 11 (corepack fetches 12.x today) installs global binaries into $PNPM_HOME/bin and refuses
+# (`ERR_PNPM_GLOBAL_BIN_DIR_NOT_IN_PATH`) unless it is on PATH. The builder
+# stage runs `pnpm add -g turbo` before the repo (and its `packageManager`
+# pin) is copied, so corepack fetches the latest pnpm. Same line as
+# apps/web/Dockerfile.web.
+ENV PATH="$PNPM_HOME:$PNPM_HOME/bin:$PATH"
 RUN corepack enable
 
 # *****************************************************************************

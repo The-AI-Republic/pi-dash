@@ -18,11 +18,13 @@ export default function ProjectSchedulersLayout() {
   const { t } = useTranslation();
 
   const basePath = `/${workspaceSlug}/projects/${projectId}/schedulers`;
-  // /schedulers is a redirect to /schedulers/calendar; anything else is
-  // an explicit tab. Highlight Calendar when the URL ends with /calendar
-  // and when the user is on the bare /schedulers route (redirect in flight).
+  // /schedulers is a redirect to /schedulers/calendar; /list and /calendar
+  // are explicit tabs. Highlight Calendar on the bare /schedulers route
+  // (redirect in flight). Any other trailing segment is a binding detail
+  // page (/schedulers/<bindingId>) — keep the tabs visible for navigation
+  // but highlight neither.
   const isListActive = pathname.endsWith("/list");
-  const isCalendarActive = !isListActive;
+  const isCalendarActive = pathname.endsWith("/calendar") || pathname.endsWith("/schedulers");
 
   return (
     <>

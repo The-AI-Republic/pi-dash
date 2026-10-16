@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 from django.utils import timezone
 
+from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.db.models.project import Project
 from pi_dash.db.models.scheduler import OutcomeMode, Scheduler, SchedulerBinding
 from pi_dash.prompting.composer import build_scheduler_turn
@@ -75,6 +76,49 @@ def test_scheduler_turn_renders_and_injects_task_body(binding, fake_run):
         "scheduler-task",
         "pidash-cli",
     }
+
+
+@pytest.fixture
+def cloud_run(db, workspace, create_user):
+    return AgentRun.objects.create(
+        workspace=workspace,
+        prompt="",
+        created_by=create_user,
+        executor_kind=AgentExecutorKind.CLOUD_AGENT,
+    )
+
+
+@pytest.mark.unit
+def test_cloud_scheduler_turn_renders_project_and_scheduler_identity(binding, cloud_run):
+    """The Cloud recipe must render the same scheduler/project identity block
+    the local scheduler-intro renders — the agent cannot weigh findings or
+    de-duplicate sensibly without knowing which project it is running in."""
+    project = binding.project
+    project.description = "Internal admin tool for billing operators."
+    project.save(update_fields=["description"])
+
+    prompt = build_scheduler_turn(binding, cloud_run)
+    assert "{%" not in prompt and "{{" not in prompt
+    assert project.identifier in prompt
+    assert project.name in prompt
+    assert "Internal admin tool for billing operators." in prompt
+    assert "Nightly Audit" in prompt
+    assert "`nightly-audit`" in prompt
+    assert "Scan the repo for issues." in prompt
+    assert str(cloud_run.id) in prompt
+    # manifest carries the new locked section
+    assert cloud_run.prompt_manifest["executor_kind"] == "cloud_agent"
+    assert "cloud-project-context" in {e["section_key"] for e in cloud_run.prompt_manifest["sections"]}
+
+
+@pytest.mark.unit
+def test_cloud_scheduler_turn_omits_empty_project_description(binding, cloud_run):
+    project = binding.project
+    project.description = ""
+    project.save(update_fields=["description"])
+    prompt = build_scheduler_turn(binding, cloud_run)
+    assert "Project description:" not in prompt
+    assert f"Project: {project.name} ({project.identifier})" in prompt
 
 
 @pytest.mark.unit

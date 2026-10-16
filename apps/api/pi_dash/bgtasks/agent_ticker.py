@@ -79,8 +79,9 @@ def fire_tick(ticker_id: str) -> bool:
     """Per-ticker worker. Atomically claims and dispatches.
 
     Returns ``True`` if a continuation run was dispatched, ``False`` if the
-    fire was skipped (race lost, ticker changed, no active In Progress
-    state, run already in flight, etc.).
+    fire was skipped (race lost, ticker changed, ticking switched off for
+    the project or the issue, no active In Progress state, run already in
+    flight, etc.).
 
     The clock is never paused on the agent's behalf: an agent that wants to
     wait for a blocker says so explicitly with ``pidash issue wait``
@@ -117,6 +118,42 @@ def fire_tick(ticker_id: str) -> bool:
         # cannot exist (reconcile parks the issue instead), so the cap
         # check below only ever stops timer ticks.
         free_claim = ticker.pending_entry and ticker.pending_entry_free
+
+        # The switches stop the clock *before* the claim, not one tick
+        # later: rows armed while the project switch was on must not fire
+        # once it is turned off. ``_stop_for_switch`` disarms on state
+        # transitions, but nothing walks the already-armed rows when the
+        # project flag flips, so this is where they stop. A queued human
+        # entry still fires — the person asked for that run — and the
+        # post-claim branch below disarms the clock after it dispatches.
+        if not free_claim and (
+            ticker.user_disabled or not getattr(ticker.issue.project, "agent_ticking_enabled", True)
+        ):
+            ticker.enabled = False
+            ticker.disarm_reason = (
+                TickerDisarmReason.USER_DISABLED if ticker.user_disabled else TickerDisarmReason.NONE
+            )
+            ticker.pending_entry = False
+            ticker.pending_entry_free = False
+            ticker.pending_entry_actor = None
+            ticker.pending_entry_trigger = ""
+            ticker.save(
+                update_fields=[
+                    "enabled",
+                    "disarm_reason",
+                    "pending_entry",
+                    "pending_entry_free",
+                    "pending_entry_actor",
+                    "pending_entry_trigger",
+                    "updated_at",
+                ]
+            )
+            logger.info(
+                "agent_ticker.fire_tick: skip issue=%s reason=ticking-switched-off",
+                ticker.issue_id,
+            )
+            return False
+
         cap = ticker.effective_max_ticks()
         if not free_claim and cap != INFINITE_MAX_TICKS and ticker.used >= cap:
             # Already at cap — disarm and bail. A queued (counting) entry
@@ -219,8 +256,10 @@ def fire_tick(ticker_id: str) -> bool:
             ticker.enabled = False
             ticker.disarm_reason = TickerDisarmReason.CAP_HIT
         elif ticker.user_disabled or not getattr(issue.project, "agent_ticking_enabled", True):
-            # A queued human entry fires even on a switched-off clock (the
-            # human asked for this run), but no timer tick may follow it.
+            # Free claims only — a timer tick on a switched-off clock never
+            # reaches the claim (see the pre-claim switch check above). A
+            # queued human entry fires because the human asked for this
+            # run, but no timer tick may follow it.
             ticker.enabled = False
             ticker.disarm_reason = (
                 TickerDisarmReason.USER_DISABLED if ticker.user_disabled else TickerDisarmReason.NONE

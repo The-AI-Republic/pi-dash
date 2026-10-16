@@ -1256,10 +1256,12 @@ class AgentRunYieldAPIEndpoint(BaseAPIView):
     """``POST /workspaces/<slug>/agent-runs/<run_id>/yield/`` — the run's outcome.
 
     The last thing a run does: ``pidash run yield --outcome <…>``. Writes
-    ``done_payload.status`` on the run so the ticker (``reconcile``, event
-    ``RUN_ENDED``) knows whether to tick again, wait for a human, or stop.
-    The run must be active and belong to this workspace; the caller must be
-    a workspace member (the agent's CLI token resolves to the runner owner).
+    ``done_payload.status`` on the run. The outcome is informational; the
+    ticker (``reconcile``, event ``RUN_ENDED``) stops the clock only on the
+    optional boolean ``stop_ticking`` — an explicit "no further agent run
+    can do anything useful here" from the agent (PDASHOSS01-247). The run
+    must be active and belong to this workspace; the caller must be a
+    workspace member (the agent's CLI token resolves to the runner owner).
     See ``.ai_design/ticking_relevance/design.md`` §7.
     """
 
@@ -1274,6 +1276,12 @@ class AgentRunYieldAPIEndpoint(BaseAPIView):
         if outcome is None:
             return Response(
                 {"error": "outcome is required", "allowed": sorted(RUN_OUTCOMES)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        stop_ticking = request.data.get("stop_ticking")
+        if stop_ticking is not None and not isinstance(stop_ticking, bool):
+            return Response(
+                {"error": "stop_ticking must be a boolean"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         header_run = (request.headers.get(RUN_ID_HEADER) or "").strip()
@@ -1303,10 +1311,18 @@ class AgentRunYieldAPIEndpoint(BaseAPIView):
         payload["yielded_at"] = timezone.now().isoformat()
         if isinstance(note, str) and note.strip():
             payload["note"] = note.strip()[:2000]
+        if stop_ticking is not None:
+            payload["stop_ticking"] = stop_ticking
         run.done_payload = payload
         run.save(update_fields=["done_payload"])
         return Response(
-            {"ok": True, "run_id": str(run.id), "work_item_id": str(run.work_item_id), "outcome": outcome},
+            {
+                "ok": True,
+                "run_id": str(run.id),
+                "work_item_id": str(run.work_item_id),
+                "outcome": outcome,
+                "stop_ticking": bool(stop_ticking),
+            },
             status=status.HTTP_200_OK,
         )
 

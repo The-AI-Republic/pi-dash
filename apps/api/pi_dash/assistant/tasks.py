@@ -440,6 +440,17 @@ def _extract_usage(result) -> dict:
 
 
 def _classify_error(exc: Exception) -> tuple[str, str]:
+    # A typed error raised inside the run — by a model adapter or an ee
+    # provider — already carries its stable code and user-facing detail.
+    # Guessing from the message text instead would erase both and land it in
+    # the generic "unexpected error" bucket. The cause chain is walked because
+    # the agent runtime may re-raise a provider failure wrapped in its own type.
+    cause: BaseException | None = exc
+    while cause is not None:
+        if isinstance(cause, AssistantError):
+            return cause.code, cause.detail
+        cause = cause.__cause__
+
     text = str(exc).lower()
     # Credit exhaustion is a distinct, user-actionable condition — routed
     # providers (OpenRouter, and any metered gateway) answer 402 rather than

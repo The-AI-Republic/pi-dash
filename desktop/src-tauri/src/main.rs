@@ -4,9 +4,15 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
+mod account_settings;
 mod chat;
 mod chat_history;
 mod desktop_http;
+// build.rs owns this module; it is compiled here only so its tests run.
+#[cfg(test)]
+#[path = "../dist_guard.rs"]
+mod dist_guard;
 mod ipc;
 mod managed_runner;
 mod pidash_cli;
@@ -16,6 +22,7 @@ use std::sync::Mutex;
 
 use tauri::{
     Manager, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    webview::NewWindowResponse,
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
 };
@@ -36,6 +43,9 @@ struct AppConfig {
     /// hot-reload mode, where the webview *is* the server host and there is
     /// no bundle to bounce back to.
     bundle_root: Option<Url>,
+    /// Public origin of the hosted web app — what an in-app path becomes
+    /// when it has to leave the window (see `browser_url_for_new_window`).
+    web_base: Url,
 }
 
 /// Where Tauri serves `WebviewUrl::App` from. Windows is plain `http`
@@ -46,6 +56,46 @@ struct AppConfig {
 const BUNDLE_ORIGIN: &str = "http://tauri.localhost";
 #[cfg(not(windows))]
 const BUNDLE_ORIGIN: &str = "tauri://localhost";
+
+/// API base `dev-prep.sh` bakes into the SPA when `VITE_API_BASE_URL` is
+/// unset. Must stay equal to the script's `API_BASE` default.
+const DEV_API_BASE: &str = "http://localhost:8000";
+
+/// API origin the native transport allowlists and advertises to the SPA as
+/// `__PIDASH_NATIVE_HTTP__`. It has to be the origin the SPA was built
+/// against: a request to any other origin leaves the native transport for
+/// the webview's own, which sends no API cookies.
+///
+/// `vite_api_base` is the build-time `VITE_API_BASE_URL`. Unset, a
+/// bundled-dev build follows `dev-prep.sh` and assumes a local API whatever
+/// `PI_DASH_URL` (the sign-in target) says; hot-reload has no baked SPA and
+/// keeps following the target. Release builds always have it set (build.rs
+/// refuses otherwise).
+fn api_base_for<'a>(vite_api_base: Option<&'a str>, target: &'a str, bundled_dev: bool) -> &'a str {
+    match vite_api_base {
+        Some(v) if !v.is_empty() => v,
+        _ if bundled_dev => DEV_API_BASE,
+        _ => target,
+    }
+}
+
+/// The API base recorded in `dist/bake-info.txt`, when the binary resolved a
+/// different origin than the bundled SPA was built against.
+fn baked_api_base_mismatch<'a>(baked: Option<&'a str>, api_url: &Url) -> Option<&'a str> {
+    let baked = baked?;
+    let baked_url = Url::parse(baked).ok()?;
+    (baked_url.origin() != api_url.origin()).then_some(baked)
+}
+
+/// Origin the bundled SPA is actually served from. `cargo tauri dev` has no
+/// `tauri://` bundle: the CLI serves `dist/` from its own dev server and
+/// bakes that address in as `build.devUrl`, which Tauri then resolves
+/// `WebviewUrl::App` against. Everywhere else it is `BUNDLE_ORIGIN`.
+fn bundle_root_for(dev_url: Option<&Url>) -> Url {
+    dev_url
+        .cloned()
+        .unwrap_or_else(|| Url::parse(BUNDLE_ORIGIN).expect("BUNDLE_ORIGIN is a valid URL"))
+}
 
 /// Bundle URL for an in-app path: same path and query, bundle origin.
 /// Tauri's asset resolver falls back to `index.html` for any path that
@@ -79,8 +129,38 @@ fn bundle_redirect_for(url: &Url, server: &Url, bundle_root: &Url) -> Option<Url
     Some(bundle_url(bundle_root, &path_and_query))
 }
 
+/// Where a new-window request (`window.open(…, "_blank")`, a
+/// `target="_blank"` link) goes in the user's default browser.
+///
+/// The desktop app is a single window: the webview has no tab or popup
+/// surface, and without a handler wry drops these requests on every
+/// platform, so "Open in new tab" silently did nothing. An in-app path
+/// resolves against the bundle origin, which nothing outside the app can
+/// load — map it to the same path on the hosted web app, as
+/// `desktop-overlay`'s `desktopWebUrl` does for copied links. Any other
+/// http(s) URL opens unchanged. `None` means refuse: the same http/https
+/// restriction as `open_in_browser`.
+fn browser_url_for_new_window(url: &Url, bundle_root: Option<&Url>, web_base: &Url) -> Option<Url> {
+    // Checked first: on Windows the bundle origin is itself an http URL.
+    let on_bundle = bundle_root.is_some_and(|root| {
+        url.scheme() == root.scheme()
+            && url.host_str() == root.host_str()
+            && url.port_or_known_default() == root.port_or_known_default()
+    });
+    let target = if on_bundle {
+        let mut target = web_base.join(url.path()).ok()?;
+        target.set_query(url.query());
+        target.set_fragment(url.fragment());
+        target
+    } else {
+        url.clone()
+    };
+    matches!(target.scheme(), "http" | "https").then_some(target)
+}
+
 /// Whether this executable runs from an installed MSIX package; Windows
 /// installs package files under `...\WindowsApps\<package>\`.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 fn is_msix_install(exe: &std::path::Path) -> bool {
     exe.components()
         .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
@@ -279,18 +359,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = if hot_reload { "hot-reload" } else { "bundled" };
     eprintln!("Pi Dash: mode={mode} server target {target_url_str} (oss-sha {oss_sha})");
     let target_url = Url::parse(target_url_str)?;
-    let api_url = Url::parse(option_env!("VITE_API_BASE_URL").unwrap_or(target_url_str))?;
+    let api_url = Url::parse(api_base_for(
+        option_env!("VITE_API_BASE_URL"),
+        target_url_str,
+        cfg!(debug_assertions) && !hot_reload,
+    ))?;
+    // PIDASH_BAKED_API_BASE is emitted by build.rs from dist/bake-info.txt.
+    // A mismatch (a reused dist/, or VITE_API_BASE_URL changed after the SPA
+    // was built) otherwise shows up only as unexplained 401s.
+    if !hot_reload
+        && let Some(baked) = baked_api_base_mismatch(option_env!("PIDASH_BAKED_API_BASE"), &api_url)
+    {
+        eprintln!(
+            "Pi Dash: WARNING the bundled SPA was built against API base {baked} but this \
+             binary's native transport serves {} — API requests will bypass it and go out \
+             without session cookies (401s). Rebuild both with the same VITE_API_BASE_URL \
+             (PI_DASH_URL only sets the sign-in target).",
+            api_url.origin().ascii_serialization()
+        );
+    }
     let desktop_http = desktop_http::DesktopHttp::new(api_url)?;
     let initial_webview = if hot_reload {
         WebviewUrl::External(target_url.clone())
     } else {
         WebviewUrl::App("index.html".into())
     };
-    let bundle_root: Option<Url> = if hot_reload {
-        None
-    } else {
-        Some(Url::parse(BUNDLE_ORIGIN)?)
-    };
+    // Same fallback as `dev-prep.sh` and build.rs's `validate_baked_web_base`:
+    // the web app lives on the sign-in origin unless the build says otherwise.
+    let web_base = option_env!("VITE_WEB_BASE_URL")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|v| Url::parse(v).ok())
+        .unwrap_or_else(|| target_url.clone());
 
     // Loud-warning safety net for the cargo-not-tauri-cli debug path. A
     // dev who runs `cargo build` / `cargo run` / IDE Run-binary on a fresh
@@ -309,6 +409,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let context = tauri::generate_context!();
+    let bundle_root: Option<Url> = if hot_reload {
+        None
+    } else {
+        // Same condition Tauri uses to pick the dev server over `tauri://`.
+        let dev_url = context.config().build.dev_url.as_ref().filter(|_| tauri::is_dev());
+        Some(bundle_root_for(dev_url))
+    };
     // Auto-update is opt-in per build: a distributor that publishes signed
     // updates supplies `plugins.updater` (pubkey + endpoints) through a
     // `--config` overlay. Without that section the plugin cannot initialise
@@ -345,10 +452,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .manage(ZoomState(Mutex::new(1.0)))
         .manage(desktop_http)
-        .manage(AppConfig { target_url, bundle_root })
+        .manage(AppConfig { target_url, bundle_root, web_base })
         .manage(managed_runner::DaemonState::default())
         .manage(chat::ChatState::default())
-        .manage(updates::UpdateState::default())
+        .manage(<updates::UpdateState>::default())
         .invoke_handler(tauri::generate_handler![
             open_in_browser,
             desktop_http::desktop_api_request,
@@ -380,6 +487,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             desktop_clear_web_data,
             updates::desktop_pending_update,
             updates::desktop_install_update,
+            about::desktop_about,
             managed_runner::managed_doctor,
             // Direct local chat history: stored on this machine only, per
             // account, never relayed to or stored by the Pi Dash server.
@@ -393,6 +501,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chat_history::chat_delete_session,
             chat_history::chat_clear_history,
             chat_history::chat_working_dir,
+            // Per-account settings kept outside the webview's storage, which
+            // sign-out wipes.
+            account_settings::chat_approval_modes_save,
+            account_settings::chat_approval_modes_load,
         ])
         // Fallback for the navigation policy below: if a server-host page
         // does get through (e.g. a redirect the policy hook didn't see),
@@ -422,6 +534,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .inner_size(1400.0, 900.0)
                 .min_inner_size(800.0, 600.0)
                 .resizable(true);
+            let open_app = app.handle().clone();
+            window = window.on_new_window(move |url, _features| {
+                let config = open_app.state::<AppConfig>();
+                match browser_url_for_new_window(&url, config.bundle_root.as_ref(), &config.web_base) {
+                    Some(target) => {
+                        if let Err(e) = open_app.opener().open_url(target.as_str(), None::<&str>) {
+                            eprintln!("new-window: opening {target} in the browser failed: {e}");
+                        }
+                    }
+                    None => eprintln!("new-window: refused {url}"),
+                }
+                // Never a second in-app window: the request is either handed
+                // to the browser or dropped.
+                NewWindowResponse::Deny
+            });
             if !hot_reload {
                 let bounce_app = app.handle().clone();
                 window = window.on_navigation(move |url| {
@@ -435,10 +562,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Deferred: navigating from inside the policy callback
                     // would re-enter the webview mid-decision.
                     tauri::async_runtime::spawn(async move {
-                        if let Some(w) = app.get_webview_window("main") {
-                            if let Err(e) = w.navigate(target) {
-                                eprintln!("nav: bounce failed: {e}");
-                            }
+                        if let Some(w) = app.get_webview_window("main")
+                            && let Err(e) = w.navigate(target)
+                        {
+                            eprintln!("nav: bounce failed: {e}");
                         }
                     });
                     false
@@ -604,11 +731,100 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn bundled_dev_api_base_matches_the_origin_dev_prep_bakes() {
+        // dev-prep.sh bakes this default into the SPA when VITE_API_BASE_URL
+        // is unset, whatever PI_DASH_URL says; the two must not drift apart.
+        assert!(
+            include_str!("../../scripts/dev-prep.sh")
+                .contains(&format!("API_BASE=\"${{VITE_API_BASE_URL:-{DEV_API_BASE}}}\"")),
+            "dev-prep.sh no longer defaults API_BASE to {DEV_API_BASE}"
+        );
+        let target = "https://pidash.example.com";
+        assert_eq!(api_base_for(None, target, true), DEV_API_BASE);
+        assert_eq!(api_base_for(Some(""), target, true), DEV_API_BASE);
+        assert_eq!(api_base_for(Some("https://api.example.com"), target, true), "https://api.example.com");
+        // Hot-reload and release keep following the server target.
+        assert_eq!(api_base_for(None, target, false), target);
+    }
+
+    #[test]
+    fn baked_api_base_mismatch_compares_origins() {
+        let api = Url::parse("http://localhost:8000").unwrap();
+        assert_eq!(baked_api_base_mismatch(None, &api), None);
+        assert_eq!(baked_api_base_mismatch(Some("http://localhost:8000/"), &api), None);
+        assert_eq!(
+            baked_api_base_mismatch(Some("https://pidash.example.com"), &api),
+            Some("https://pidash.example.com")
+        );
+    }
+
     fn server() -> Url {
         Url::parse("https://pidash.example.com").unwrap()
     }
     fn root() -> Url {
         Url::parse("tauri://localhost").unwrap()
+    }
+
+    fn web() -> Url {
+        Url::parse("https://pidash.airepublic.com").unwrap()
+    }
+    fn new_window(url: &str, bundle_root: &str) -> Option<String> {
+        let root = Url::parse(bundle_root).unwrap();
+        browser_url_for_new_window(&Url::parse(url).unwrap(), Some(&root), &web()).map(String::from)
+    }
+
+    #[test]
+    fn open_in_new_tab_on_an_in_app_path_goes_to_the_hosted_web_app() {
+        // `window.open("/acme/browse/PROJ-12/", "_blank")` as the webview
+        // resolves it on macOS/Linux and on Windows.
+        for (url, bundle_root) in [
+            ("tauri://localhost/acme/browse/PROJ-12/", "tauri://localhost"),
+            ("http://tauri.localhost/acme/browse/PROJ-12/", "http://tauri.localhost"),
+        ] {
+            assert_eq!(
+                new_window(url, bundle_root).as_deref(),
+                Some("https://pidash.airepublic.com/acme/browse/PROJ-12/"),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_window_in_app_path_keeps_query_and_fragment() {
+        assert_eq!(
+            new_window("tauri://localhost/acme/projects/p1/cycles/c1?peek=1#comment", "tauri://localhost").as_deref(),
+            Some("https://pidash.airepublic.com/acme/projects/p1/cycles/c1?peek=1#comment")
+        );
+    }
+
+    #[test]
+    fn new_window_external_links_open_unchanged() {
+        for u in ["https://example.com/docs?a=1#b", "http://intranet.example/wiki"] {
+            assert_eq!(new_window(u, "tauri://localhost").as_deref(), Some(u), "{u}");
+            assert_eq!(new_window(u, "http://tauri.localhost").as_deref(), Some(u), "{u}");
+        }
+    }
+
+    #[test]
+    fn new_window_refuses_non_web_schemes() {
+        for u in ["file:///etc/passwd", "javascript:alert(1)", "mailto:sales@example.com", "tauri://elsewhere/x"] {
+            assert_eq!(new_window(u, "tauri://localhost"), None, "{u}");
+        }
+    }
+
+    #[test]
+    fn new_window_in_hot_reload_mode_opens_the_server_url_as_is() {
+        // No bundle: the webview is already on the server host.
+        let url = Url::parse("http://localhost:3000/acme/browse/PROJ-12/").unwrap();
+        assert_eq!(browser_url_for_new_window(&url, None, &web()), Some(url));
+    }
+
+    #[test]
+    fn new_window_in_app_path_is_refused_when_the_web_base_is_not_http() {
+        let root = Url::parse("tauri://localhost").unwrap();
+        let url = Url::parse("tauri://localhost/acme/").unwrap();
+        assert_eq!(browser_url_for_new_window(&url, Some(&root), &root), None);
     }
 
     #[test]
@@ -617,12 +833,29 @@ mod tests {
         assert_eq!(bundle_redirect_for(&url, &server(), &root()), None);
     }
 
+    // The session sign-out view lives outside `/api/`, so a form POST to it
+    // is bounced like any other server-host page and never reaches the
+    // server. The web layer signs out over the native API transport instead.
+    #[test]
+    fn sign_out_form_navigation_bounces_to_bundle() {
+        let url = Url::parse("https://pidash.example.com/auth/sign-out/").unwrap();
+        let target = bundle_redirect_for(&url, &server(), &root()).unwrap();
+        assert_eq!(target.as_str(), "tauri://localhost/auth/sign-out/");
+    }
+
     #[test]
     fn bundle_and_foreign_origins_pass_through() {
         for u in ["tauri://localhost/", "https://login.example.com/x", "http://pidash.example.com/"] {
             let url = Url::parse(u).unwrap();
             assert_eq!(bundle_redirect_for(&url, &server(), &root()), None, "{u}");
         }
+    }
+
+    #[test]
+    fn bundle_root_is_the_dev_server_only_when_tauri_serves_from_one() {
+        let dev_url = Url::parse("http://127.0.0.1:1430/").unwrap();
+        assert_eq!(bundle_root_for(Some(&dev_url)), dev_url);
+        assert_eq!(bundle_root_for(None).as_str().trim_end_matches('/'), BUNDLE_ORIGIN);
     }
 
     #[test]
