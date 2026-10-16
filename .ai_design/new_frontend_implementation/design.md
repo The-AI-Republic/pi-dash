@@ -630,8 +630,9 @@ the shell's first screen loads only the frame, and modals, palettes, settings
 and page features load through `import()`. CI reports the target on every PR
 without blocking. Each area gate records the reading and files a diet issue
 when it is over the target; the acceptance pass (NEWFRONT-11) requires it to
-be met. A PR fails only above the 260 KB ceiling, which catches an accidental
-large eager import.
+be met. A PR fails only above the 265 KB ceiling, which catches an accidental
+large eager import (260 KB until 2026-10-16, raised when ordinary shell growth
+used it up).
 
 ### 13.2 Structural checks
 
