@@ -456,24 +456,63 @@ fn csrf_failure_response(root_url: &str) -> Response {
 /// `SUBSCRIBE`, so this module holds its own short-lived multiplexed
 /// client off the same `REDIS_URL` — `None` when the URL is unset, in
 /// which case every magic flow 500s exactly like a dead `redis_instance()`.
+///
+/// Every connection carries Django's `redis_instance()` bounds
+/// (`pi_dash/settings/redis.py:70-71`): `REDIS_SOCKET_CONNECT_TIMEOUT`
+/// (2s) on establishment — which includes the `CLIENT SETINFO` setup
+/// round-trip, so a stalled server fails here rather than hanging — and
+/// `REDIS_SOCKET_TIMEOUT` (5s) per command. Relying on the `redis` crate
+/// defaults instead (1s / 500ms) 500s slow-but-healthy stalls Django
+/// rides through (PIDASHCONV-1080).
 #[derive(Debug, Clone)]
 struct Cache {
     client: redis::Client,
+    connect_timeout: std::time::Duration,
+    response_timeout: std::time::Duration,
+}
+
+/// Django's `REDIS_SOCKET_CONNECT_TIMEOUT` default
+/// (`pi_dash/settings/common.py:238`), used when the resolved setting is
+/// not a positive finite float (the `Duration` conversion would panic).
+const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Django's `REDIS_SOCKET_TIMEOUT` default
+/// (`pi_dash/settings/common.py:239`), same fallback.
+const DEFAULT_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn timeout_duration(setting_secs: f64, fallback: std::time::Duration) -> std::time::Duration {
+    if setting_secs.is_finite() && setting_secs > 0.0 {
+        std::time::Duration::from_secs_f64(setting_secs)
+    } else {
+        fallback
+    }
 }
 
 impl Cache {
     fn from_state(state: &AppState) -> Option<Self> {
-        let url = state
-            .settings()
-            .redis
-            .url
-            .as_deref()
-            .filter(|u| !u.is_empty())?;
-        redis::Client::open(url).ok().map(|client| Self { client })
+        let redis = &state.settings().redis;
+        let url = redis.url.as_deref().filter(|u| !u.is_empty())?;
+        redis::Client::open(url).ok().map(|client| Self {
+            client,
+            connect_timeout: timeout_duration(
+                redis.socket_connect_timeout_secs,
+                DEFAULT_CONNECT_TIMEOUT,
+            ),
+            response_timeout: timeout_duration(redis.socket_timeout_secs, DEFAULT_RESPONSE_TIMEOUT),
+        })
+    }
+
+    fn connection_config(&self) -> redis::AsyncConnectionConfig {
+        redis::AsyncConnectionConfig::new()
+            .set_connection_timeout(Some(self.connect_timeout))
+            .set_response_timeout(Some(self.response_timeout))
     }
 
     async fn get(&self, key: &str) -> Result<Option<String>, redis::RedisError> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection_with_config(&self.connection_config())
+            .await?;
         redis::AsyncCommands::get(&mut conn, key).await
     }
 
@@ -483,12 +522,18 @@ impl Cache {
         value: &str,
         expiry_secs: u64,
     ) -> Result<(), redis::RedisError> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection_with_config(&self.connection_config())
+            .await?;
         redis::AsyncCommands::set_ex::<_, _, ()>(&mut conn, key, value, expiry_secs).await
     }
 
     async fn del(&self, key: &str) -> Result<(), redis::RedisError> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection_with_config(&self.connection_config())
+            .await?;
         redis::AsyncCommands::del::<_, ()>(&mut conn, key).await
     }
 
@@ -496,7 +541,10 @@ impl Cache {
     /// Redis `KEYS` command (django-redis), so the pattern match is one
     /// `KEYS` here too — never a scan-then-filter subset.
     async fn del_pattern(&self, pattern: &str) -> Result<(), redis::RedisError> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection_with_config(&self.connection_config())
+            .await?;
         let keys: Vec<String> = redis::AsyncCommands::keys(&mut conn, pattern).await?;
         if !keys.is_empty() {
             redis::AsyncCommands::del::<_, ()>(&mut conn, keys).await?;
@@ -2109,6 +2157,31 @@ mod tests {
             "http://localhost:8000/spaces/".to_owned(),
             vec!["localhost:3000".to_owned(), "localhost:8000".to_owned()],
         )
+    }
+
+    #[test]
+    fn timeout_fallbacks_match_django_defaults() {
+        // `redis.py:70-71` / `common.py:238-239`: 2s connect, 5s socket.
+        // Non-positive/non-finite settings fall back instead of panicking
+        // the `Duration` conversion.
+        assert_eq!(
+            timeout_duration(2.0, DEFAULT_CONNECT_TIMEOUT),
+            std::time::Duration::from_secs(2)
+        );
+        assert_eq!(
+            timeout_duration(0.25, DEFAULT_RESPONSE_TIMEOUT),
+            std::time::Duration::from_millis(250)
+        );
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                timeout_duration(bad, DEFAULT_CONNECT_TIMEOUT),
+                DEFAULT_CONNECT_TIMEOUT
+            );
+            assert_eq!(
+                timeout_duration(bad, DEFAULT_RESPONSE_TIMEOUT),
+                DEFAULT_RESPONSE_TIMEOUT
+            );
+        }
     }
 
     #[test]

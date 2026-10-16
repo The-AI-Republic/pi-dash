@@ -47,6 +47,18 @@ def clear_magic(rdb, email: str) -> None:
     rdb.delete(magic_key(email))
 
 
+def pause_processing(rdb, pause_ms: int) -> None:
+    """Stall the backend's Redis for ``pause_ms`` (``CLIENT PAUSE``).
+
+    Fault injection for timeout pins (PIDASHCONV-1080): while paused the
+    server accepts connections but answers no command, so every in-flight
+    backend op waits it out or hits its socket timeout. The pause always
+    runs its full length — ``CLIENT UNPAUSE`` is itself queued behind it —
+    so keep windows short and let them expire naturally.
+    """
+    rdb.execute_command("CLIENT", "PAUSE", str(int(pause_ms)))
+
+
 def clear_throttle_counters(rdb) -> None:
     """Delete DRF throttle counters (django-redis ``*throttle*`` keys).
 
