@@ -246,7 +246,7 @@ describe("AdminLoopJobsPage", () => {
     expect(rows).toHaveLength(4);
     const first = within(rows[1] as HTMLElement);
     expect(first.getByRole("link", { name: "Probe one" }).getAttribute("href")).toBe(
-      "/god-mode/loop/11111111-1111-4111-8111-111111111111/"
+      "/god-mode/loop/11111111-1111-4111-8111-111111111111"
     );
     expect(first.getByText("probe-one")).toBeInTheDocument();
     expect(first.getByText("FREQ=DAILY;BYHOUR=3;BYMINUTE=0")).toBeInTheDocument();
@@ -255,7 +255,7 @@ describe("AdminLoopJobsPage", () => {
     expect(first.getByRole("switch", { name: "Probe one enabled" }).getAttribute("aria-checked")).toBe("true");
     const second = within(rows[2] as HTMLElement);
     expect(second.getByRole("link", { name: "Probe two" }).getAttribute("href")).toBe(
-      "/god-mode/loop/22222222-2222-4222-8222-222222222222/"
+      "/god-mode/loop/22222222-2222-4222-8222-222222222222"
     );
     expect(second.getByText("Guest")).toBeInTheDocument();
     expect(second.getByText(LOOP_BUILTIN_NO)).toBeInTheDocument();

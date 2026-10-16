@@ -87,17 +87,21 @@ export type {
 export {
   CONFIG_SAVE_FAILED_LOG,
   createLoopJobMutationOptions,
+  deleteLoopJobMutationOptions,
   toggleLoopJobMutationOptions,
   configValueMap,
   updateLoopJobMutationOptions,
   useAdminCsrfToken,
   useAdminSession,
   useCreateLoopJob,
+  useDeleteLoopJob,
   useInstanceAdmins,
   useInstanceBootstrap,
   useInstanceConfigurations,
   useInstanceWorkspaces,
+  useLoopJobDetail,
   useLoopJobs,
+  useLoopJobTargets,
   useRestrictWorkspaceCreation,
   useToggleLoopJob,
   useUpdateGeneralSettings,
@@ -128,7 +132,9 @@ export {
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
   instanceWorkspacesQueryOptions,
+  loopJobDetailQueryOptions,
   loopJobsQueryOptions,
+  loopJobTargetsQueryOptions,
   mergeConfigurationRows,
   selectNextWorkspaceCursor,
 } from "./queries.js";
@@ -190,6 +196,7 @@ export { AdminBrandLoader } from "./components/AdminBrandLoader.js";
 export { AdminDashboardLayout } from "./components/AdminDashboardLayout.js";
 export { AdminEmailPage, EMAIL_PAGE_TITLE } from "./components/AdminEmailPage.js";
 export { AdminEntryGate } from "./components/AdminEntryGate.js";
+export { AdminLoopJobDetailPage } from "./components/AdminLoopJobDetailPage.js";
 export { AdminLoopJobModal } from "./components/AdminLoopJobModal.js";
 export { AdminLoopJobsPage } from "./components/AdminLoopJobsPage.js";
 export type { AdminEntrySearch } from "./components/AdminEntryGate.js";

@@ -8,11 +8,11 @@ import { render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../features/admin/index.js", () => ({
+vi.mock("../../../../features/admin/index.js", () => ({
   AdminLoopJobsPage: () => <div data-testid="loop-jobs-page" />,
 }));
 
-import { Route } from "./loop.js";
+import { Route } from "./index.js";
 
 describe("loop jobs route", () => {
   it("mounts the jobs page", () => {

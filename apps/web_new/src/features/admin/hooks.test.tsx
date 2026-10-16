@@ -46,6 +46,7 @@ import {
 import {
   CONFIG_SAVE_FAILED_LOG,
   createLoopJobMutationOptions,
+  deleteLoopJobMutationOptions,
   toggleLoopJobMutationOptions,
   configValueMap,
   EMAIL_DISABLE_ERROR_LOG,
@@ -63,18 +64,22 @@ import {
   useCloudAuthProbe,
   useCloudEntryRetry,
   useCloudSignInUrl,
+  useDeleteLoopJob,
   useDisableEmailFeature,
   useInstanceAdmins,
   useInstanceBootstrap,
   useInstanceConfigurations,
   useInstanceWorkspaces,
+  useLoopJobDetail,
   useLoopJobs,
+  useLoopJobTargets,
   useRestrictWorkspaceCreation,
   useSaveSmtpConfig,
   useUpdateGeneralSettings,
   useUpdateInstanceConfigurations,
 } from "./hooks.js";
 import { LOOP_TOGGLE_FAILURE_MESSAGE, LOOP_TOGGLE_FAILURE_TITLE } from "./loopJobs.js";
+import { LOOP_JOB_DELETE_FAILED_MESSAGE, LOOP_JOB_DELETE_FAILED_TITLE } from "./loopJobDetail.js";
 import { LOOP_JOB_SAVE_FAILED_TITLE } from "./loopJobModal.js";
 import { adminKeys } from "./queries.js";
 
@@ -1416,5 +1421,121 @@ describe("useRestrictWorkspaceCreation", () => {
     expect(notifyError).toHaveBeenCalledWith("Error", "Failed to save configuration");
     expect(notifySuccess).not.toHaveBeenCalled();
     expect(queryClient.getQueryData(adminKeys.configurations)).toEqual([configRow("DISABLE_WORKSPACE_CREATION", "0")]);
+  });
+});
+
+
+function LoopJobDetailProbe({ jobId }: { jobId: string }): React.ReactElement {
+  const query = useLoopJobDetail(jobId);
+  if (query.isPending) return <div data-testid="probe">loading</div>;
+  if (query.isError) return <div data-testid="probe">failed</div>;
+  return <div data-testid="probe">{`${query.data.slug}:${query.data.stats.target_count}`}</div>;
+}
+
+function LoopJobTargetsProbe({ jobId, skipReason }: { jobId: string; skipReason: string }): React.ReactElement {
+  const query = useLoopJobTargets(jobId, skipReason);
+  if (query.isPending) return <div data-testid="probe">loading</div>;
+  if (query.isError) return <div data-testid="probe">failed</div>;
+  return <div data-testid="probe">{query.data.results.map((target) => target.user_email).join(",")}</div>;
+}
+
+function DeleteLoopJobProbe(): React.ReactElement {
+  const deletion = useDeleteLoopJob();
+  return <div data-testid="probe">{deletion.isPending ? "deleting" : "ready"}</div>;
+}
+
+describe("useLoopJobDetail", () => {
+  it("reads the job with its stats through the app client", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport({
+        "/api/instances/loop/jobs/33333333-3333-4333-8333-333333333333/": {
+          status: 200,
+          body: { ...loopJob(), stats: { target_count: 2, completed: 0, failed: 0, skipped: 1 } },
+        },
+      })
+    );
+    renderProbe(() => LoopJobDetailProbe({ jobId: "33333333-3333-4333-8333-333333333333" }));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("probe-job:2"));
+  });
+
+  it("surfaces fetch failures instead of retrying", async () => {
+    createAppClient("https://api.test", stubTransport({}));
+    renderProbe(() => LoopJobDetailProbe({ jobId: "33333333-3333-4333-8333-333333333333" }));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
+  });
+});
+
+describe("useLoopJobTargets", () => {
+  const target = {
+    id: "44444444-4444-4434-8434-444444444444",
+    workspace_slug: "probe-workspace",
+    user_email: "member@example.test",
+    next_run_at: "2026-02-03T04:05:06Z",
+    last_skipped_at: null,
+    last_skip_reason: "",
+    last_run: null,
+  };
+
+  it("reads the targets through the app client", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport({
+        "/api/instances/loop/jobs/33333333-3333-4333-8333-333333333333/targets/": {
+          status: 200,
+          body: { page: 1, results: [target] },
+        },
+      })
+    );
+    renderProbe(() => LoopJobTargetsProbe({ jobId: "33333333-3333-4333-8333-333333333333", skipReason: "" }));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("member@example.test"));
+  });
+
+  it("surfaces fetch failures instead of retrying", async () => {
+    createAppClient("https://api.test", stubTransport({}));
+    renderProbe(() => LoopJobTargetsProbe({ jobId: "33333333-3333-4333-8333-333333333333", skipReason: "min_role" }));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
+  });
+});
+
+describe("deleteLoopJobMutationOptions", () => {
+  function stubClient() {
+    const remove = vi.fn(async () => ({ status: 204 }));
+    const client = { delete: remove } as never;
+    return { client, remove };
+  }
+
+  it("deletes the job through the contract", async () => {
+    const { client, remove } = stubClient();
+    const options = deleteLoopJobMutationOptions(client, new QueryClient());
+    await expect(options.mutationFn?.("job-1", {} as never)).resolves.toBe(204);
+    expect(remove).toHaveBeenCalledWith("/api/instances/loop/jobs/job-1/");
+  });
+
+  it("toasts the fixed notice on failure", () => {
+    const options = deleteLoopJobMutationOptions(stubClient().client, new QueryClient());
+    options.onError?.(new Error("denied"), "job-1", undefined, {} as never);
+    expect(notifyErrorMock).toHaveBeenCalledWith(LOOP_JOB_DELETE_FAILED_TITLE, LOOP_JOB_DELETE_FAILED_MESSAGE);
+  });
+
+  it("stays silent on success", () => {
+    const options = deleteLoopJobMutationOptions(stubClient().client, new QueryClient());
+    expect(options.onSuccess).toBeUndefined();
+  });
+
+  it("revalidates the list and the deleted job once settled", () => {
+    const queryClient = new QueryClient();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const options = deleteLoopJobMutationOptions(stubClient().client, queryClient);
+    options.onSettled?.(204, null, "job-1", undefined, {} as never);
+    expect(invalidate).toHaveBeenCalledTimes(2);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: adminKeys.loopJobs });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: adminKeys.loopJobDetail("job-1") });
+  });
+
+  it("wires the mutation through the hook", () => {
+    createAppClient("https://api.test", stubTransport({}));
+    renderProbe(DeleteLoopJobProbe);
+    expect(screen.getByTestId("probe")).toHaveTextContent("ready");
   });
 });

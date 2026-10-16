@@ -10,6 +10,7 @@ import {
   checkEmailCredentials,
   cloudSignInUrl,
   createLoopJob,
+  deleteLoopJob,
   disableEmailFeature,
   updateInstance,
   updateInstanceConfigurations,
@@ -31,6 +32,7 @@ import { getToastManager, notifyError, notifySuccess } from "../../shared/shell/
 import type { CloudEntrySessionState } from "./cloudEntry.js";
 import { BLANKED_MAIL_KEYS, SMTP_ENABLED_KEY, type ConfigValueMap } from "./emailConfig.js";
 import { LOOP_TOGGLE_FAILURE_MESSAGE, LOOP_TOGGLE_FAILURE_TITLE } from "./loopJobs.js";
+import { LOOP_JOB_DELETE_FAILED_MESSAGE, LOOP_JOB_DELETE_FAILED_TITLE } from "./loopJobDetail.js";
 import { LOOP_JOB_SAVE_FAILED_TITLE, resolveLoopJobSaveError } from "./loopJobModal.js";
 import {
   GENERAL_SAVE_FAILURE_LOG,
@@ -47,7 +49,9 @@ import {
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
   instanceWorkspacesQueryOptions,
+  loopJobDetailQueryOptions,
   loopJobsQueryOptions,
+  loopJobTargetsQueryOptions,
   mergeConfigurationRows,
 } from "./queries.js";
 import {
@@ -403,4 +407,41 @@ export function updateLoopJobMutationOptions(client: ApiClient, queryClient: Que
  */
 export function useUpdateLoopJob() {
   return useMutation(updateLoopJobMutationOptions(getAppClient(), useQueryClient()));
+}
+
+/** One loop job with its stats rollup for the detail page (ADM-058). */
+export function useLoopJobDetail(jobId: string) {
+  return useQuery(loopJobDetailQueryOptions(getAppClient(), jobId));
+}
+
+/**
+ * One job's targets for the detail table (ADM-058/059). Each skip
+ * filter value reads its own cached entry; resetting to all reuses
+ * the cache with no refetch.
+ */
+export function useLoopJobTargets(jobId: string, skipReason: string) {
+  return useQuery(loopJobTargetsQueryOptions(getAppClient(), jobId, skipReason));
+}
+
+export function deleteLoopJobMutationOptions(client: ApiClient, queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: (jobId: string) => deleteLoopJob(client, jobId),
+    onError: () => {
+      notifyError(LOOP_JOB_DELETE_FAILED_TITLE, LOOP_JOB_DELETE_FAILED_MESSAGE);
+    },
+    onSettled: (_data: unknown, _error: unknown, jobId: string) => {
+      void queryClient.invalidateQueries({ queryKey: adminKeys.loopJobs });
+      void queryClient.invalidateQueries({ queryKey: adminKeys.loopJobDetail(jobId) });
+    },
+  });
+}
+
+/**
+ * Deletes the job immediately with no confirmation (ADM-060/073).
+ * Silent on success — the page toasts and returns to the list; a
+ * failed delete raises the fixed error notice and stays. The list
+ * and the deleted job revalidate on settle either way.
+ */
+export function useDeleteLoopJob() {
+  return useMutation(deleteLoopJobMutationOptions(getAppClient(), useQueryClient()));
 }
