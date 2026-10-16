@@ -331,6 +331,24 @@ describe("gated layout loader", () => {
     await expect(loader(args)).resolves.toBeUndefined();
   });
 
+  it("still resolves when the projects prefetch fails", async () => {
+    const args = {
+      context: {
+        apiClient: {},
+        queryClient: {
+          ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
+            if (options.queryKey[2] === "projects") throw new Error("projects down");
+            return [];
+          },
+        },
+      },
+      params: { ws: "acme" },
+    } as never;
+    const loader = Route.options.loader;
+    if (typeof loader !== "function") throw new Error("missing loader");
+    await expect(loader(args)).resolves.toBeUndefined();
+  });
+
   it("still resolves when the sidebar-preferences prefetch fails", async () => {
     const args = {
       context: {

@@ -19,6 +19,8 @@ describe("work item draft", () => {
     expect(loadWorkItemDraft("acme")).toBeNull();
     storeWorkItemDraft("acme", { title: "Half typed", projectId: "p1" });
     expect(loadWorkItemDraft("acme")).toEqual({ title: "Half typed", projectId: "p1" });
+    storeWorkItemDraft("acme", { title: "No home", projectId: null });
+    expect(loadWorkItemDraft("acme")).toEqual({ title: "No home", projectId: null });
     expect(loadWorkItemDraft("globex")).toBeNull();
     clearWorkItemDraft("acme");
     expect(loadWorkItemDraft("acme")).toBeNull();

@@ -250,6 +250,12 @@ describe("SidebarProjectRow expansion", () => {
     expect(screen.getByTestId("project-subnav")).toBeInTheDocument();
   });
 
+  it("marks no subnav entry without a reported path", () => {
+    setup({ currentPath: null, activeProjectId: PROJECT_ID });
+    const subnav = screen.getByTestId("project-subnav");
+    expect(subnav.querySelector('[aria-current="page"]')).toBeNull();
+  });
+
   it("scrolls the route project into view on mount", () => {
     const scrollIntoView = vi.fn();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { value: scrollIntoView, configurable: true });

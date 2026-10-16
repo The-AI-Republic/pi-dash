@@ -331,6 +331,8 @@ describe("SidebarProjectsGroup loading and empty states", () => {
     expect(screen.getByRole("link", { name: "Work Items" })).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("sidebar-empty-create-project"));
     expect(h.onCreateProject).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Collapse projects group" }));
+    expect(screen.queryByTestId("sidebar-empty-create-project")).not.toBeInTheDocument();
   });
 
   it("offers creation from the header for members", () => {

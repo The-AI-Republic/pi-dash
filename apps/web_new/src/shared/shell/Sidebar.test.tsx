@@ -120,4 +120,22 @@ describe("Sidebar", () => {
     render(sidebar({ quickActions: <button type="button">New work item</button> }));
     expect(screen.getByTestId("sidebar-quick-actions")).toHaveTextContent("New work item");
   });
+
+  it("leaves personal entries unmarked off their address or without a path", () => {
+    const personalEntries = [{ key: "drafts", label: "Drafts", href: "/acme/drafts/" }];
+    const { rerender } = render(sidebar({ personalEntries, currentPath: "/acme/" }));
+    expect(screen.getByRole("link", { name: "Drafts" })).not.toHaveAttribute("aria-current");
+    rerender(sidebar({ personalEntries }));
+    expect(screen.getByRole("link", { name: "Drafts" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("renders no personal section without entries", () => {
+    render(sidebar());
+    expect(screen.queryByRole("navigation", { name: "Personal" })).not.toBeInTheDocument();
+  });
+
+  it("mounts no update control on web builds (SHELL-102)", () => {
+    render(sidebar());
+    expect(screen.queryByRole("button", { name: /update/i })).not.toBeInTheDocument();
+  });
 });

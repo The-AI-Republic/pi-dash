@@ -189,6 +189,21 @@ describe("WorkItemCreateDialog", () => {
     expect(h.onOpenChange).not.toHaveBeenCalled();
   });
 
+  it("drops the submit when no target project is held", async () => {
+    const user = userEvent.setup();
+    const h = setup(201, []);
+    h.view.rerender(
+      <QueryClientProvider client={h.queryClient}>
+        <WorkItemCreateDialog open workspaceSlug="acme" projects={PROJECTS} onOpenChange={h.onOpenChange} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("button", { name: "Target project" })).toHaveTextContent("Pick a project");
+    await user.type(screen.getByLabelText("Title"), "No home");
+    await user.click(screen.getByRole("button", { name: "Create work item" }));
+    expect(h.calls.some((call) => call.method === "POST")).toBe(false);
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+  });
+
   it("prompts for a project when the list no longer holds the pick", () => {
     const { view, queryClient } = setup(201);
     expect(screen.getByRole("button", { name: "Target project" })).toHaveTextContent("Atlas");

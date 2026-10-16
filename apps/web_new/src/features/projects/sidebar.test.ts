@@ -262,6 +262,7 @@ describe("projectOrderPatch", () => {
   it("stays silent when the drop changes nothing", () => {
     expect(projectOrderPatch(ordered, ["a", "b"], "b")).toBeNull();
     expect(projectOrderPatch(ordered, ["a"], "a")).toBeNull();
+    expect(projectOrderPatch(ordered, ["b", "a"], "missing")).toBeNull();
   });
 });
 
@@ -299,6 +300,14 @@ describe("selectSubnavEntries", () => {
     });
     expect(entries.map((entry) => entry.name)).toEqual(["Work Items", "Pages", "Intake", "Schedulers"]);
     expect(entries.find((entry) => entry.key === "intake")?.badge).toBeNull();
+    const outsider = selectSubnavEntries({
+      workspaceSlug: "acme",
+      projectId: "p1",
+      flags: FLAGS,
+      role: null,
+      intakeCount: 0,
+    });
+    expect(outsider.some((entry) => entry.key === "runners")).toBe(false);
   });
 });
 
