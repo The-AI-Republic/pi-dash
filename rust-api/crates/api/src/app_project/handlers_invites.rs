@@ -2013,8 +2013,10 @@ fn role_matches_workspace(workspace_role: i16, requested: Option<&Value>) -> boo
 /// member__email=email, is_active=True).values_list("role",
 /// flat=True).first()` — `None` for non-members. Forward-FK joins carry
 /// no related-manager filter (no `workspaces.deleted_at` guard — same
-/// SQL semantics as Django, per [`membership`]); the unordered
-/// `.first()` orders by pk.
+/// SQL semantics as Django, per [`membership`]). Django's `.first()`
+/// applies the model's `-created_at` ordering, but at most one live row
+/// ever matches (`users.email` is unique and `(workspace, member)` is
+/// live-unique), so the `ORDER BY wm.id` tiebreak below never decides.
 async fn fetch_invitee_workspace_role(
     pool: &sqlx::PgPool,
     slug: &str,
