@@ -179,15 +179,35 @@ export {
 } from "./contracts/reference.js";
 export {
   ISSUE_PRIORITIES,
+  DescriptionVersion,
+  DescriptionVersionList,
+  DescriptionVersionRow,
+  GlobalIssueListResponse,
+  GlobalIssueRow,
+  GroupedIssueListResponse,
+  GroupedIssueRow,
   Issue,
+  IssueGroupBucket,
   IssueListItem,
   IssueListResponse,
   IssueRelationsSummary,
+  IssueSearchResponse,
+  IssueSearchRow,
+  LiteIssue,
+  SubGroupedIssueBucket,
+  SubGroupedIssueListResponse,
+  getDescriptionVersion,
   getIssue,
   listArchivedIssues,
+  listDescriptionVersions,
+  listGlobalIssues,
+  listGroupedIssues,
   listIssues,
+  listSubGroupedIssues,
+  resolveIssueByKey,
+  searchIssues,
 } from "./contracts/issues.js";
-export type { IssueListQuery } from "./contracts/issues.js";
+export type { IssueListQuery, IssueSearchQuery } from "./contracts/issues.js";
 export {
   IssueCreateResult,
   IssueSubscription,
@@ -204,6 +224,44 @@ export {
   updateIssue,
 } from "./contracts/issue-actions.js";
 export type { IssueCreateInput, IssuePatch } from "./contracts/issue-actions.js";
+export {
+  IssueArchiveResult,
+  MovedIssue,
+  archiveIssue,
+  moveIssueToProject,
+  restoreIssue,
+} from "./contracts/issue-lifecycle.js";
+export {
+  BulkArchiveResult,
+  BulkDeleteResult,
+  bulkArchiveIssues,
+  bulkDeleteIssues,
+  bulkSubscribeIssues,
+  bulkUpdateIssues,
+} from "./contracts/issue-bulk.js";
+export type { BulkIssueProperties, BulkOperationInput } from "./contracts/issue-bulk.js";
+export {
+  CycleUserProperties,
+  EpicUserProperties,
+  ModuleUserProperties,
+  getCycleUserProperties,
+  getEpicUserProperties,
+  getModuleUserProperties,
+  updateCycleUserProperties,
+  updateEpicUserProperties,
+  updateModuleUserProperties,
+} from "./contracts/issue-prefs.js";
+export type { PrefsPatch } from "./contracts/issue-prefs.js";
+export {
+  SavedView,
+  createProjectView,
+  createWorkspaceView,
+  deleteProjectView,
+  deleteWorkspaceView,
+  updateProjectView,
+  updateWorkspaceView,
+} from "./contracts/issue-views.js";
+export type { SavedViewCreate, SavedViewPatch } from "./contracts/issue-views.js";
 export {
   Favorite,
   FavoriteList,
@@ -257,7 +315,15 @@ export type {
   NotificationPageQuery,
   NotificationPreferencePatch,
 } from "./contracts/notifications.js";
-export { CycleList, CycleListItem, CycleUpdate, listCycles, updateCycle } from "./contracts/cycles.js";
+export {
+  CycleList,
+  CycleListItem,
+  CycleTransferResult,
+  CycleUpdate,
+  listCycles,
+  transferCycleIssues,
+  updateCycle,
+} from "./contracts/cycles.js";
 export type { CyclePatch } from "./contracts/cycles.js";
 export {
   MODULE_STATUSES,

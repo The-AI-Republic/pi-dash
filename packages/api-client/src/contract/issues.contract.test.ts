@@ -51,7 +51,9 @@ describe.skipIf(!contractEnabled)("issues contract", () => {
     const client = await signedIn();
     const projectId = await seededProjectId(client);
     const page = await listIssues(client, CONTRACT_WORKSPACE, projectId);
-    const first = page.results[0];
+    // Seeded by name: results[0] is newest-first, so under parallel runs
+    // it is often a transient probe another file deletes mid-test.
+    const first = page.results.find((row) => row.name === "Contract issue one");
     expect(first).toBeDefined();
     if (!first) return;
     const detail = await getIssue(client, CONTRACT_WORKSPACE, projectId, first.id);

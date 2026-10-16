@@ -1,21 +1,24 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Single-issue actions: the thin update and delete plus cycle and module
-// membership and subscriptions. The list and detail reads stay in
-// issues.ts; everything here runs from lazy surfaces (the palette's
-// contextual edits, the detail page), so it stays out of the initial
-// bundle (NEWFRONT-523, size gate).
+// Single-issue actions: the full update and create plus the thin delete,
+// cycle and module membership, and subscriptions. The list and detail
+// reads stay in issues.ts; everything here runs from lazy surfaces (the
+// palette's contextual edits, the detail page, the layouts), so it stays
+// out of the initial bundle (NEWFRONT-523, size gate).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { nullableDateTime, uuid } from "./fields.js";
 import { ISSUE_PRIORITIES, IssueListItem } from "./issues.js";
 
 /**
- * Thin work-item update for the shell: the command palette's contextual
- * edits (rename, state, priority, assignees, labels, estimate,
- * description). The endpoint answers 204 with no body, so callers re-read
- * through getIssue above. Full issue ownership stays in the issues area.
+ * Full work-item update (issues area): every field the layouts, modal and
+ * detail write through PATCH .../issues/<id>/. Cycle and module
+ * membership are NOT here — they go through the bridge calls below.
+ * `git_work_branch` is write-only: no read returns it (backend pin
+ * NEWFRONT-140), so callers treat the 204 as the only confirmation.
+ * The endpoint answers 204 with no body, so callers re-read through
+ * getIssue to prove the write.
  */
 export interface IssuePatch {
   name?: string;
@@ -25,8 +28,17 @@ export interface IssuePatch {
   assignee_ids?: string[];
   label_ids?: string[];
   estimate_point?: string | null;
+  start_date?: string | null;
+  target_date?: string | null;
+  parent_id?: string | null;
+  sort_order?: number;
+  git_work_branch?: string;
 }
 
+/**
+ * Work-item update: the palette's contextual edits plus every issues-area
+ * inline edit PATCH here. Answers 204 with no body.
+ */
 export async function updateIssue(
   client: ApiClient,
   slug: string,
@@ -48,9 +60,25 @@ export async function deleteIssue(client: ApiClient, slug: string, projectId: st
   await client.delete(`/api/workspaces/${slug}/projects/${projectId}/issues/${issueId}/`);
 }
 
-/** Minimal work-item create: the title; the server defaults the rest. */
+/**
+ * Full work-item create (issues area): the create modal, quick-add and
+ * calendar add post here. Sub-issue create shares this endpoint with
+ * `parent_id` set (NEWFRONT-612 consumes it). Cycle and module attach
+ * are separate bridge calls after the create; `sort_order` is
+ * server-assigned (largest + step) and any sent value is advisory.
+ */
 export interface IssueCreateInput {
   name: string;
+  description_html?: string;
+  state_id?: string | null;
+  priority?: (typeof ISSUE_PRIORITIES)[number];
+  assignee_ids?: string[];
+  label_ids?: string[];
+  estimate_point?: string | null;
+  start_date?: string | null;
+  target_date?: string | null;
+  parent_id?: string | null;
+  git_work_branch?: string;
 }
 
 /**
@@ -65,11 +93,10 @@ export const IssueCreateResult = z.object({
 export type IssueCreateResult = z.infer<typeof IssueCreateResult>;
 
 /**
- * Thin work-item create for the shell: the sidebar quick-create entry
- * (SHELL-047) posts the dialog's title here. Only workspace admins and
- * members may create (guests get 403), so callers disable the entry
- * for them instead of surfacing the denial. Full issue ownership
- * stays in the issues area.
+ * Work-item create: the sidebar quick-create entry (SHELL-047) and every
+ * issues-area creation surface post here. Only workspace admins and
+ * members may create (guests get 403), so callers disable the entries
+ * for them instead of surfacing the denial.
  */
 export async function createIssue(
   client: ApiClient,
