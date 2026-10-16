@@ -97,9 +97,12 @@ use pidash_services::auth_session::tasks::{
     MAGIC_REDIS_EXPIRY_SECS,
 };
 
+use crate::auth_session::render::render_csrf_failure;
 use crate::license::handlers_auth_forms::{email_is_valid, LOGIN_BACKEND};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_auth::csrf as csrf_kernel;
+use pidash_auth::session as session_kernel;
 
 /// `POST /auth/magic-generate/`.
 pub const APP_GENERATE_PATH: &str = "/auth/magic-generate/";
@@ -279,6 +282,168 @@ fn parse_sign_form(body: &[u8]) -> SignForm {
             .find(|(k, _)| k == "next_path")
             .map(|(_, v)| v.clone()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// CSRF gate (mirrors `email.rs`: `CsrfViewMiddleware` for the plain form
+// sign Views, `SessionAuthentication.enforce_csrf` for the DRF generate
+// views). Private copy per module (the password sibling keeps its own
+// too); only the page render is shared.
+// ---------------------------------------------------------------------------
+
+/// `request.POST` as last-wins pairs, only for form content types
+/// (any other content type leaves `POST` empty in Django).
+fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> {
+    let is_form = content_type.is_some_and(|ct| {
+        ct.split(';').next().is_some_and(|mime| {
+            mime.trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        })
+    });
+    if !is_form {
+        return Vec::new();
+    }
+    serde_urlencoded::from_bytes::<Vec<(String, String)>>(body).unwrap_or_default()
+}
+
+/// Why the CSRF gate rejected (Django `REASON_*`; the failure page
+/// never renders the reason, so these are log labels only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CsrfDenial {
+    NoCookie,
+    BadToken,
+}
+
+/// Where the request token came from (`CsrfViewMiddleware._check_token`:
+/// the `csrfmiddlewaretoken` POST field wins when non-empty, else the
+/// `X-CSRFToken` header).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenSource {
+    Post,
+    Header,
+}
+
+impl TokenSource {
+    /// `_bad_token_message` source rendering (`csrf.py:347-352`;
+    /// `CSRF_HEADER_NAME` is the default, parsed as `X-Csrftoken`).
+    fn describe(self) -> &'static str {
+        match self {
+            TokenSource::Post => "POST",
+            TokenSource::Header => "the 'X-Csrftoken' HTTP header",
+        }
+    }
+}
+
+/// Resolve the request token in Django's order: the last
+/// `csrfmiddlewaretoken` form value when non-empty, else the header
+/// when present (even empty — an empty header fails format, it does
+/// not fall through to "missing").
+fn csrf_token_source(
+    pairs: &[(String, String)],
+    header_token: Option<&str>,
+) -> Option<(String, TokenSource)> {
+    if let Some(value) = pairs
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "csrfmiddlewaretoken")
+        .map(|(_, v)| v.as_str())
+        .filter(|v| !v.is_empty())
+    {
+        return Some((value.to_owned(), TokenSource::Post));
+    }
+    header_token.map(|token| (token.to_owned(), TokenSource::Header))
+}
+
+/// `_check_token` + `_does_token_match` over one token: the format
+/// gate first (`has incorrect length` / `has invalid characters`),
+/// then the unmask-and-compare, rendered exactly like
+/// `_bad_token_message`.
+fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<(), String> {
+    if let Err(error) = csrf_kernel::check_token_format(token) {
+        return Err(format!(
+            "CSRF token from {} {}.",
+            source.describe(),
+            error.reason()
+        ));
+    }
+    if csrf_kernel::tokens_match(token, secret) {
+        Ok(())
+    } else {
+        Err(format!("CSRF token from {} incorrect.", source.describe()))
+    }
+}
+
+/// Django's `_get_secret` (`csrf.py:230-256`) over the cookie value:
+/// the cookie must pass the format gate, and a 64-char cookie is
+/// unmasked first ("Django versions before 4.0 masked the secret before
+/// storing" — and this module's own `login_user` rotation still mints
+/// masked cookies, QUIRK-csrf-rotate, so without this step a client
+/// sending its rotated cookie back as the header would never verify).
+fn csrf_cookie_secret(cookie: &str) -> Result<String, String> {
+    if let Err(error) = csrf_kernel::check_token_format(cookie) {
+        return Err(format!("CSRF cookie {}.", error.reason()));
+    }
+    if cookie.len() == csrf_kernel::CSRF_TOKEN_LENGTH {
+        csrf_kernel::unmask_token(cookie)
+            .map_err(|error| format!("CSRF cookie {}.", error.reason()))
+    } else {
+        Ok(cookie.to_owned())
+    }
+}
+
+/// Mirror `CsrfViewMiddleware.process_view` for the sign endpoints: the
+/// `csrftoken` cookie must be present and the request token must
+/// check out. The failure page never renders the reason either way.
+fn csrf_gate(
+    csrf_cookie: Option<&str>,
+    header_token: Option<&str>,
+    pairs: &[(String, String)],
+) -> Result<(), CsrfDenial> {
+    let Some(cookie) = csrf_cookie else {
+        return Err(CsrfDenial::NoCookie);
+    };
+    let secret = csrf_cookie_secret(cookie).map_err(|_| CsrfDenial::BadToken)?;
+    let Some((token, source)) = csrf_token_source(pairs, header_token) else {
+        return Err(CsrfDenial::BadToken);
+    };
+    csrf_check_token(&secret, &token, source).map_err(|_| CsrfDenial::BadToken)
+}
+
+/// DRF `SessionAuthentication.enforce_csrf` denial
+/// (`authentication.py:148`): 403 with the middleware's reason after
+/// `CSRF Failed: `. Only reachable for authenticated callers —
+/// anonymous requests return `None` before the check. Lowercase
+/// `detail`: DRF 3.15.2's `exception_handler` (`views.py:96`) renders
+/// `{'detail': exc.detail}`, and the project's
+/// `auth_exception_handler` only rewrites `Throttled`/`NotAuthenticated`
+/// (live Django bytes: `{"detail":"CSRF Failed: CSRF cookie not set."}`).
+fn csrf_failure_json(reason: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::VARY, "Cookie"),
+        ],
+        format!(
+            "{{\"detail\":\"CSRF Failed: {}\"}}",
+            reason.replace('\\', "\\\\").replace('"', "\\\"")
+        ),
+    )
+        .into_response()
+}
+
+/// The `csrf_failure` page: 200 + `text/html`, `root_url` =
+/// `base_host(request)` with no surface flags.
+fn csrf_failure_response(root_url: &str) -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::VARY, "Cookie"),
+        ],
+        render_csrf_failure(root_url),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1389,7 +1554,38 @@ async fn generate(
         return server_error();
     };
     let cache = Cache::from_state(&state);
-    if !generate_session_user_active(&pool, &extension).await
+    let authenticated = generate_session_user_active(&pool, &extension).await;
+    // `SessionAuthentication.authenticate` (`authentication.py:124-148`):
+    // anonymous callers return `None` before the CSRF check; callers with
+    // an active session user without a valid token get the 403. Runs
+    // before the throttle (DRF `initial()` order: auth → throttle), so a
+    // CSRF failure leaves the throttle history untouched.
+    if authenticated {
+        let cookie_header = headers
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let csrf_cookie = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME);
+        let header_token = headers.get("x-csrftoken").and_then(|v| v.to_str().ok());
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+        let pairs = form_pairs(content_type, &body);
+        let Some(cookie) = csrf_cookie.as_deref() else {
+            return csrf_failure_json("CSRF cookie not set.");
+        };
+        let secret = match csrf_cookie_secret(cookie) {
+            Ok(secret) => secret,
+            Err(reason) => return csrf_failure_json(&reason),
+        };
+        let Some((token, source)) = csrf_token_source(&pairs, header_token) else {
+            return csrf_failure_json("CSRF token missing.");
+        };
+        if let Err(reason) = csrf_check_token(&secret, &token, source) {
+            return csrf_failure_json(&reason);
+        }
+    }
+    if !authenticated
         && !check_generate_throttle(cache.as_ref(), &headers, Some(peer.0.ip().to_string()), app)
             .await
     {
@@ -1551,6 +1747,30 @@ async fn sign(
         hosts.admin_base_url,
         hosts.space_base_url,
     );
+    // `CsrfViewMiddleware` first: the middleware rejects before the view
+    // runs, so a failure has no side effects (no REQUIRED redirect, no
+    // login). `root_url` is the flag-less `base_host(request)`.
+    let root = base_host(&hosts, false, false, false);
+    {
+        let cookie_header = headers
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let csrf_cookie = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME);
+        let header_token = headers.get("x-csrftoken").and_then(|v| v.to_str().ok());
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+        if csrf_gate(
+            csrf_cookie.as_deref(),
+            header_token,
+            &form_pairs(content_type, &body),
+        )
+        .is_err()
+        {
+            return csrf_failure_response(&root);
+        }
+    }
     let form = parse_sign_form(&body);
     let required_slug = match flow {
         Flow::SignIn => "MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED",
