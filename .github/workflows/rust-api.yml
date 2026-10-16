@@ -24,6 +24,18 @@ jobs:
           fetch-depth: 0
       - name: Fail when the PR touches anything outside rust-api/ and the allowlist
         run: |
+          SHA="${{ github.sha }}"
+          # Maintainer main->rust-dev sync merges touch the whole tree by design
+          # (PIDASHCONV-1088). A sync merge is a merge commit whose second parent
+          # is on origin/main: pass it without diffing. actions/checkout fetches
+          # only the triggering ref, so fetch main first; if the fetch fails the
+          # reachability check below fails closed into the strict diff.
+          git fetch --quiet --no-tags origin main:refs/remotes/origin/main || true
+          set -- $(git rev-list --parents -1 "$SHA")
+          if [ "$#" -eq 3 ] && git merge-base --is-ancestor "$3" origin/main 2>/dev/null; then
+            echo "Sync merge ($1 merges $3 from origin/main); quarantine passes."
+            exit 0
+          fi
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
           else
