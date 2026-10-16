@@ -8,7 +8,9 @@ import { mutationOptions, useInfiniteQuery, useMutation, useQuery, useQueryClien
 import type { QueryClient } from "@tanstack/react-query";
 import {
   checkEmailCredentials,
+  checkInstanceWorkspaceSlug,
   cloudSignInUrl,
+  createInstanceWorkspace,
   createLoopJob,
   deleteLoopJob,
   disableEmailFeature,
@@ -19,6 +21,7 @@ import {
   type InstanceBootstrap,
   type InstanceConfigurationList,
   type InstancePatch,
+  type InstanceWorkspaceCreateInput,
   type LoopJobCreateInput,
   type LoopJobList,
   type LoopJobPatchInput,
@@ -63,6 +66,16 @@ import {
   DISABLE_WORKSPACE_CREATION_KEY,
   encodeWorkspaceCreationRestricted,
 } from "./workspace.js";
+import {
+  isRestrictedWorkspaceSlug,
+  WORKSPACE_CREATE_FAILURE_TITLE,
+  WORKSPACE_CREATE_PROBE_FAILURE_MESSAGE,
+  WORKSPACE_CREATE_SAVE_FAILURE_MESSAGE,
+  WORKSPACE_CREATE_SUCCESS_MESSAGE,
+  WORKSPACE_CREATE_SUCCESS_TITLE,
+  WorkspaceSlugProbeError,
+  WorkspaceSlugTakenError,
+} from "./workspaceCreate.js";
 
 /**
  * The single instance-info read the entry gate branches on. Pending
@@ -444,4 +457,45 @@ export function deleteLoopJobMutationOptions(client: ApiClient, queryClient: Que
  */
 export function useDeleteLoopJob() {
   return useMutation(deleteLoopJobMutationOptions(getAppClient(), useQueryClient()));
+}
+
+export function createInstanceWorkspaceMutationOptions(client: ApiClient, queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: async (input: InstanceWorkspaceCreateInput) => {
+      let available: boolean;
+      try {
+        available = (await checkInstanceWorkspaceSlug(client, input.slug)).status;
+      } catch {
+        throw new WorkspaceSlugProbeError(input.slug);
+      }
+      if (!available || isRestrictedWorkspaceSlug(input.slug)) {
+        throw new WorkspaceSlugTakenError(input.slug);
+      }
+      return createInstanceWorkspace(client, input);
+    },
+    onError: (error: unknown) => {
+      if (error instanceof WorkspaceSlugTakenError) return;
+      if (error instanceof WorkspaceSlugProbeError) {
+        notifyError(WORKSPACE_CREATE_FAILURE_TITLE, WORKSPACE_CREATE_PROBE_FAILURE_MESSAGE);
+      } else {
+        notifyError(WORKSPACE_CREATE_FAILURE_TITLE, WORKSPACE_CREATE_SAVE_FAILURE_MESSAGE);
+      }
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: adminKeys.workspaces });
+      notifySuccess(WORKSPACE_CREATE_SUCCESS_TITLE, WORKSPACE_CREATE_SUCCESS_MESSAGE);
+    },
+  });
+}
+
+/**
+ * Creates the workspace behind the create form (ADM-044/045): the slug
+ * probe runs first and a taken or restricted slug raises the taken
+ * signal the form renders inline, with no create POST. A failed probe
+ * and a failed create both toast the error and stay. Success toasts
+ * and revalidates the list; the form navigates home on its own
+ * success handler.
+ */
+export function useCreateInstanceWorkspace() {
+  return useMutation(createInstanceWorkspaceMutationOptions(getAppClient(), useQueryClient()));
 }
