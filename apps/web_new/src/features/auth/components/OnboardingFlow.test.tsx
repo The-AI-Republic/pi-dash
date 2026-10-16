@@ -114,6 +114,7 @@ function configFixture(selfManaged: boolean, creationDisabled = false) {
     is_email_password_enabled: true,
     is_smtp_configured: true,
     is_self_managed: selfManaged,
+    instance_changelog_url: "",
   };
 }
 

@@ -25,6 +25,7 @@ function bootstrapBody(): Record<string, unknown> {
       is_email_password_enabled: true,
       is_smtp_configured: false,
       is_self_managed: true,
+      instance_changelog_url: "",
     },
     instance: {
       id: "55555555-5555-4555-8555-555555555555",

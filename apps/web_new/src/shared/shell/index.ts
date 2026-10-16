@@ -91,3 +91,27 @@ export { groupBoundCommands, ShortcutsDialog } from "./ShortcutsDialog.js";
 export type { ShortcutGroup } from "./ShortcutsDialog.js";
 export { useShortcutsDialog } from "./shortcutsDialogStore.js";
 export { useTopSearchFocus } from "./topSearchFocus.js";
+export { HelpMenu, SALES_EMAIL_URL } from "./HelpMenu.js";
+export type { HelpMenuProps } from "./HelpMenu.js";
+export { resolveFileUrl } from "./fileUrls.js";
+export { APP_VERSION } from "./version.js";
+export { WorkspaceLogo } from "./WorkspaceLogo.js";
+export type { WorkspaceLogoProps } from "./WorkspaceLogo.js";
+export { NOTIFICATIONS_PATH_SEGMENT, isNotificationsPath } from "./sidebarAutohide.js";
+export {
+  formatMemberCount,
+  orderSwitcherWorkspaces,
+  switcherRoleLabel,
+  WorkspaceSwitcher,
+} from "./WorkspaceSwitcher.js";
+export type { SwitcherWorkspace, WorkspaceSwitcherProps } from "./WorkspaceSwitcher.js";
+export { UserMenu } from "./UserMenu.js";
+export type { UserMenuProps } from "./UserMenu.js";
+export {
+  CHANGELOG_LOAD_TIMEOUT_MS,
+  CHANGELOG_URL,
+  SUPPORT_EMAIL_URL,
+  UpdatesDialog,
+  changelogCategoryUrl,
+} from "./UpdatesDialog.js";
+export type { UpdatesDialogProps } from "./UpdatesDialog.js";

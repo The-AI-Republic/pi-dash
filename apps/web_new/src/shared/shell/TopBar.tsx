@@ -18,6 +18,7 @@ import * as React from "react";
 
 import { platform } from "../../core/platform/index.js";
 import { REPOSITORY_URL } from "./RepoStar.js";
+import { isNotificationsPath } from "./sidebarAutohide.js";
 import { useWindowTitle } from "./windowTitle.js";
 
 export interface TopBarProps {
@@ -66,7 +67,7 @@ export function TopBar({
   const showToggle = sidebarMounted && sidebarToggleEnabled;
   const toggleHint = sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar";
   const hasUnread = unreadTotal > 0 || unreadMentions > 0;
-  const inboxActive = currentPath.includes("/notifications/");
+  const inboxActive = isNotificationsPath(currentPath);
   const showAccountFallback = !sidebarMounted || sidebarCollapsed;
 
   return (

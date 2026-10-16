@@ -13,6 +13,11 @@ import { SIDEBAR_DEFAULT_WIDTH, useShellChrome } from "../chromeState.js";
 import { useShortcutsDialog } from "../shortcutsDialogStore.js";
 import { useTopSearchFocus } from "../topSearchFocus.js";
 import { DOCS_URL, FORUM_URL, REPORT_BUG_URL, buildAccountCommands } from "./account.js";
+import {
+  DOCS_URL as LEAF_DOCS_URL,
+  FORUM_URL as LEAF_FORUM_URL,
+  REPORT_BUG_URL as LEAF_REPORT_BUG_URL,
+} from "../externalLinks.js";
 
 afterEach(() => {
   useShellChrome.setState({ sidebarCollapsed: false, peekOpen: false, sidebarWidth: SIDEBAR_DEFAULT_WIDTH });
@@ -64,5 +69,9 @@ describe("account entries", () => {
     entries.get("shell.forum")!.run();
     entries.get("shell.report-bug")!.run();
     expect(onOpenExternal.mock.calls.map((call) => call[0])).toEqual([DOCS_URL, FORUM_URL, REPORT_BUG_URL]);
+  });
+
+  it("mirrors the eager-only leaf destinations exactly", () => {
+    expect([DOCS_URL, FORUM_URL, REPORT_BUG_URL]).toEqual([LEAF_DOCS_URL, LEAF_FORUM_URL, LEAF_REPORT_BUG_URL]);
   });
 });

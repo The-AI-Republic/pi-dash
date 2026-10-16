@@ -17,6 +17,7 @@ function configWith(flags: Partial<InstanceConfig>): InstanceConfig {
     is_email_password_enabled: true,
     is_smtp_configured: true,
     is_self_managed: false,
+    instance_changelog_url: "",
     ...flags,
   };
 }

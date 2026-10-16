@@ -11,7 +11,7 @@
 // and the edition-gated rail compose here; the palette search box and
 // the menu mounts arrive with their owning slices.
 
-import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Outlet, redirect, useRouterState } from "@tanstack/react-router";
 import { LayoutGrid } from "lucide-react";
 import * as React from "react";
@@ -21,15 +21,19 @@ import { platform } from "../../../core/platform/index.js";
 import {
   CREATE_WORKSPACE_PATH,
   decidePageGate,
+  instanceConfigQueryOptions,
   isOnboardedProfile,
   loadGateInputs,
   meQueryOptions,
   ONBOARDING_PATH,
+  ROLE_GUEST,
   selectWorkspace,
+  selectWorkspaceRole,
+  sessionKeys,
   usePermissions,
   workspacesQueryOptions,
 } from "../../../core/session/index.js";
-import { runSignOutAction, signOutCommand, useSignOut } from "../../../features/auth/index.js";
+import { runSignOutAction, signOutCommand, useSignOut, useUpdateProfile } from "../../../features/auth/index.js";
 import { QuickCreateButton } from "../../../features/issues/index.js";
 import { unreadNotificationsQueryOptions } from "../../../features/notifications/index.js";
 import { projectsQueryOptions, selectSidebarProjects, SidebarProjectsGroup } from "../../../features/projects/index.js";
@@ -42,14 +46,23 @@ import {
 } from "../../../features/sidebar/index.js";
 import type { SearchResultHit } from "../../../shared/commands/index.js";
 import {
+  APP_VERSION,
   AppShell,
+  HelpMenu,
+  isNotificationsPath,
   isRailUndocked,
+  resolveFileUrl,
   Sidebar,
   TopBar,
   TopBarSearch,
+  UserMenu,
+  useNarrowViewport,
   useRailState,
   useShellChrome,
+  useShortcutsDialog,
+  WorkspaceSwitcher,
   type RailDockItem,
+  type SwitcherWorkspace,
 } from "../../../shared/shell/index.js";
 import { resolveSearchTarget } from "./searchTarget.js";
 
@@ -86,6 +99,12 @@ const PersonalizeDialog = React.lazy(() =>
   import("../../../features/sidebar/components/PersonalizeDialog.js").then((module) => ({
     default: module.PersonalizeDialog,
   }))
+);
+// The product-updates dialog splits off the same way (shell spec §4,
+// SHELL-060): it only renders (and loads) once opened from the help
+// menu.
+const LazyUpdatesDialog = React.lazy(() =>
+  import("../../../shared/shell/UpdatesDialog.js").then((module) => ({ default: module.UpdatesDialog }))
 );
 
 export const Route = createFileRoute("/$ws/_gated")({
@@ -185,6 +204,7 @@ function WorkspaceShell({
   onSignOut: () => void;
 }): React.ReactElement {
   const context = Route.useRouteContext();
+  const queryClient = useQueryClient();
   const { data: me } = useSuspenseQuery(meQueryOptions(context.apiClient));
   const { data: workspaces } = useSuspenseQuery(workspacesQueryOptions(context.apiClient));
   const projectsQuery = useQuery(projectsQueryOptions(context.apiClient, workspaceSlug));
@@ -192,17 +212,80 @@ function WorkspaceShell({
   const [deactivateOpen, setDeactivateOpen] = React.useState(false);
   const [createProjectOpen, setCreateProjectOpen] = React.useState(false);
   const [personalizeOpen, setPersonalizeOpen] = React.useState(false);
+  const [updatesOpen, setUpdatesOpen] = React.useState(false);
   const { data: unread } = useQuery(unreadNotificationsQueryOptions(context.apiClient, workspaceSlug));
+  const { data: instanceConfig } = useQuery(instanceConfigQueryOptions(context.apiClient));
   const sidebarPrefs = useSidebarPreferences(workspaceSlug);
   const { canEdit } = usePermissions(workspaceSlug);
   const sidebarCollapsed = useShellChrome((state) => state.sidebarCollapsed);
   const clearPeek = useShellChrome((state) => state.clearPeek);
+  const setSidebarCollapsed = useShellChrome((state) => state.setSidebarCollapsed);
   const toggleSidebarCollapsed = useShellChrome((state) => state.toggleSidebarCollapsed);
   const undocked = useRailState((state) => isRailUndocked(state, workspaceSlug));
+  const narrow = useNarrowViewport();
+  const stampLastWorkspace = useUpdateProfile();
 
   const workspace = selectWorkspace(workspaces, workspaceSlug);
   const activeProject = projects.find((project) => project.id === childProjectId) ?? null;
   const userLabel = me.display_name || me.email;
+  const userRole = selectWorkspaceRole(workspaces, workspaceSlug) ?? ROLE_GUEST;
+  const sidebarHidden = isNotificationsPath(currentPath);
+  const apiBaseUrl = context.apiClient.baseUrl;
+  const switcherWorkspaces: SwitcherWorkspace[] = workspaces.map((entry) => ({
+    id: entry.id,
+    slug: entry.slug,
+    name: entry.name,
+    role: entry.role,
+    totalMembers: entry.total_members,
+    logoSrc: resolveFileUrl(entry.logo_url, apiBaseUrl),
+  }));
+
+  // Narrow autohide (SHELL-062): every shell navigation collapses the
+  // floating sidebar. Same-address taps inside the sidebar collapse
+  // through the shell's own tap capture instead.
+  const collapseIfNarrow = (): void => {
+    if (narrow) {
+      clearPeek();
+      setSidebarCollapsed(true);
+    }
+  };
+
+  // Workspace switching (SHELL-058): collapse the floating sidebar,
+  // remember the workspace on the profile so the next entry lands
+  // there, refresh the landing reads, then navigate. A failed stamp
+  // never blocks the navigation.
+  const handleSelectWorkspace = (slug: string): void => {
+    collapseIfNarrow();
+    const target = selectWorkspace(workspaces, slug);
+    if (target === undefined) {
+      onSelectWorkspace(slug);
+      return;
+    }
+    void stampLastWorkspace.mutateAsync({ last_workspace_id: target.id }).then(
+      () => {
+        void queryClient.invalidateQueries({ queryKey: sessionKeys.settings });
+        onSelectWorkspace(slug);
+      },
+      () => {
+        onSelectWorkspace(slug);
+      }
+    );
+  };
+
+  const handleSelectProject = (projectId: string): void => {
+    collapseIfNarrow();
+    onSelectProject(projectId);
+  };
+
+  const handleSelectSearchResult = (hit: SearchResultHit): void => {
+    collapseIfNarrow();
+    onSelectSearchResult(hit);
+  };
+
+  const handleNavigateHref = (href: string): void => {
+    collapseIfNarrow();
+    onNavigateHref(href);
+  };
   const personalStates = selectPersonalEntries(sidebarPrefs.data);
   const personalGroup = selectPersonalGroup(sidebarPrefs.status, sidebarPrefs.data);
   // Member-only rows (drafts, creation) hide from guests (SHELL-046);
@@ -222,16 +305,32 @@ function WorkspaceShell({
 
   const searchScope = { workspaceSlug, projectId: childProjectId };
 
+  const switcherShortcuts = {
+    creationDisabled: instanceConfig?.is_workspace_creation_disabled ?? false,
+    onSelectWorkspace: handleSelectWorkspace,
+    onOpenSettings: (slug: string) => handleNavigateHref(`/${slug}/settings`),
+    onInviteMembers: (slug: string) => handleNavigateHref(`/${slug}/settings/members`),
+    onCreateWorkspace: () => handleNavigateHref(CREATE_WORKSPACE_PATH),
+    onWorkspaceInvites: () => handleNavigateHref("/invitations"),
+    onSignOut,
+  };
+  const accountShortcuts = {
+    onYourWork: () => handleNavigateHref(`/${workspaceSlug}/profile/${me.id}`),
+    onSettings: () => handleNavigateHref("/settings/profile/general"),
+    onSignOut,
+  };
+
   return (
     <AppShell
       commands={[signOutCommand({ userLabel, onSignOut })]}
       searchScope={searchScope}
-      onSelectSearchResult={onSelectSearchResult}
+      onSelectSearchResult={handleSelectSearchResult}
       topBar={
         <TopBar
           workspaceSlug={workspaceSlug}
           section={activeProject?.name ?? ""}
           currentPath={currentPath}
+          sidebarMounted={!sidebarHidden}
           sidebarCollapsed={sidebarCollapsed}
           sidebarToggleEnabled={isSidebarToggleEnabled(edition)}
           onToggleSidebar={() => {
@@ -240,54 +339,101 @@ function WorkspaceShell({
           }}
           unreadTotal={unread?.total_unread_notifications_count ?? 0}
           unreadMentions={unread?.mention_unread_notifications_count ?? 0}
-          searchBox={<TopBarSearch scope={searchScope} onSelectSearchResult={onSelectSearchResult} />}
+          searchBox={<TopBarSearch scope={searchScope} onSelectSearchResult={handleSelectSearchResult} />}
+          workspaceMenu={
+            <WorkspaceSwitcher
+              workspaces={switcherWorkspaces}
+              activeSlug={workspaceSlug}
+              mount="topbar"
+              {...switcherShortcuts}
+            />
+          }
+          helpMenu={
+            <HelpMenu
+              version={APP_VERSION}
+              onOpenShortcuts={() => useShortcutsDialog.getState().openShortcuts()}
+              onOpenUpdates={() => setUpdatesOpen(true)}
+              onOpenExternal={(url: string) => void platform.openExternal(url)}
+            />
+          }
+          accountMenu={
+            <UserMenu
+              displayName={userLabel}
+              email={me.email}
+              avatarSrc={resolveFileUrl(me.avatar_url, apiBaseUrl)}
+              role={userRole}
+              variant="compact"
+              onDeactivateAccount={() => setDeactivateOpen(true)}
+              {...accountShortcuts}
+            />
+          }
         />
       }
       sidebar={
-        <Sidebar
-          workspaces={workspaces.map((entry) => ({ id: entry.id, slug: entry.slug, name: entry.name }))}
-          activeSlug={workspaceSlug}
-          onSelectWorkspace={onSelectWorkspace}
-          userLabel={userLabel}
-          onSignOut={onSignOut}
-          onDeactivateAccount={() => setDeactivateOpen(true)}
-          personalEntries={personalEntries}
-          currentPath={currentPath}
-          onPersonalize={() => setPersonalizeOpen(true)}
-          quickActions={
-            <QuickCreateButton
-              workspaceSlug={workspaceSlug}
-              projects={joinedProjects.map((project) => ({ id: project.id, name: project.name }))}
-              canCreate={canEdit}
-            />
-          }
-          projectsGroup={
-            <SidebarProjectsGroup
-              workspaceSlug={workspaceSlug}
-              projects={projects}
-              projectsStatus={projectsQuery.status}
-              currentPath={currentPath}
-              activeProjectId={activeProject?.id ?? null}
-              canCreateProject={canEdit}
-              onCreateProject={() => setCreateProjectOpen(true)}
-              onNavigate={onNavigateHref}
-            />
-          }
-          onNavigateHref={onNavigateHref}
-        />
+        sidebarHidden ? null : (
+          <Sidebar
+            workspaces={switcherWorkspaces}
+            activeSlug={workspaceSlug}
+            userLabel={userLabel}
+            userEmail={me.email}
+            userAvatarSrc={resolveFileUrl(me.avatar_url, apiBaseUrl)}
+            userRole={userRole}
+            onYourWork={accountShortcuts.onYourWork}
+            onUserSettings={accountShortcuts.onSettings}
+            onDeactivateAccount={() => setDeactivateOpen(true)}
+            personalEntries={personalEntries}
+            currentPath={currentPath}
+            onPersonalize={() => setPersonalizeOpen(true)}
+            quickActions={
+              <QuickCreateButton
+                workspaceSlug={workspaceSlug}
+                projects={joinedProjects.map((project) => ({ id: project.id, name: project.name }))}
+                canCreate={canEdit}
+              />
+            }
+            projectsGroup={
+              <SidebarProjectsGroup
+                workspaceSlug={workspaceSlug}
+                projects={projects}
+                projectsStatus={projectsQuery.status}
+                currentPath={currentPath}
+                activeProjectId={activeProject?.id ?? null}
+                canCreateProject={canEdit}
+                onCreateProject={() => setCreateProjectOpen(true)}
+                onNavigate={handleNavigateHref}
+              />
+            }
+            onNavigateHref={handleNavigateHref}
+            {...switcherShortcuts}
+          />
+        )
       }
       rail={rail}
       dialogs={
-        personalizeOpen ? (
-          <React.Suspense fallback={null}>
-            <PersonalizeDialog
-              open={personalizeOpen}
-              onOpenChange={setPersonalizeOpen}
-              workspaceSlug={workspaceSlug}
-              personal={personalGroup}
-            />
-          </React.Suspense>
-        ) : null
+        <>
+          {personalizeOpen ? (
+            <React.Suspense fallback={null}>
+              <PersonalizeDialog
+                open={personalizeOpen}
+                onOpenChange={setPersonalizeOpen}
+                workspaceSlug={workspaceSlug}
+                personal={personalGroup}
+              />
+            </React.Suspense>
+          ) : null}
+          {updatesOpen ? (
+            <React.Suspense fallback={null}>
+              <LazyUpdatesDialog
+                open={updatesOpen}
+                onOpenChange={setUpdatesOpen}
+                version={APP_VERSION}
+                changelogUrl={instanceConfig?.instance_changelog_url ?? null}
+                selfManaged={instanceConfig?.is_self_managed ?? false}
+                onOpenExternal={(url: string) => void platform.openExternal(url)}
+              />
+            </React.Suspense>
+          ) : null}
+        </>
       }
     >
       {deactivateOpen ? (
@@ -321,12 +467,12 @@ function WorkspaceShell({
           }))}
           workspaces={workspaces.map((entry) => ({ id: entry.id, name: entry.name, slug: entry.slug }))}
           onOpenCreateProject={() => setCreateProjectOpen(true)}
-          onCreateWorkspace={() => onNavigateHref(CREATE_WORKSPACE_PATH)}
-          onNavigate={onNavigateHref}
-          onWorkspaceInvites={() => onNavigateHref("/invitations")}
+          onCreateWorkspace={() => handleNavigateHref(CREATE_WORKSPACE_PATH)}
+          onNavigate={handleNavigateHref}
+          onWorkspaceInvites={() => handleNavigateHref("/invitations")}
           onOpenExternal={(url: string) => void platform.openExternal(url)}
-          onSelectWorkspace={onSelectWorkspace}
-          onSelectProject={onSelectProject}
+          onSelectWorkspace={handleSelectWorkspace}
+          onSelectProject={handleSelectProject}
         />
         {createProjectOpen ? (
           <ProjectCreateEntry

@@ -476,6 +476,7 @@ describe("auth contracts", () => {
           is_email_password_enabled: true,
           is_smtp_configured: true,
           is_self_managed: true,
+          instance_changelog_url: "",
           github_app_name: "",
           file_size_limit: 5242880,
         },
@@ -494,6 +495,7 @@ describe("auth contracts", () => {
       is_email_password_enabled: true,
       is_smtp_configured: true,
       is_self_managed: true,
+      instance_changelog_url: "",
     });
   });
 
@@ -2332,6 +2334,7 @@ const BOOTSTRAP_CONFIG = {
   is_email_password_enabled: true,
   is_smtp_configured: true,
   is_self_managed: true,
+  instance_changelog_url: "",
 };
 
 const INSTANCE_ROW = {

@@ -14,6 +14,13 @@ export interface MenuAction {
   icon?: React.ReactNode;
   /** React key when sibling labels repeat (project names can collide). */
   itemKey?: string;
+  /**
+   * Rich row body replacing the plain label (the workspace switcher
+   * renders logo, role and member counts here). The item keeps its
+   * menuitem role and arrow-key behavior; the accessible name derives
+   * from the rendered content.
+   */
+  content?: React.ReactNode;
 }
 
 export interface MenuSeparator {
@@ -89,7 +96,7 @@ export function Menu({ trigger, items, open, onOpenChange }: MenuProps): React.R
                       {entry.icon}
                     </span>
                   )}
-                  {entry.label}
+                  {entry.content ?? entry.label}
                 </BaseMenu.Item>
               )
             )}

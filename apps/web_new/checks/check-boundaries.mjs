@@ -116,6 +116,26 @@ function crossFeatureFailure(fromSrcRel, toSrcRel) {
   return `cross-feature import must go through features/${toFeature}/index.ts`;
 }
 
+// The palette catalogs under shared/shell/entries/ load with the lazy
+// chunks; a module imported from both a route's eager closure and its
+// lazy chunks collapses that route's TanStack component split and
+// trips the size gate (NEWFRONT-287). Only the catalogs themselves,
+// the shell barrel, and the lazily loaded updates dialog may reference
+// them; eager components take shared constants from the eager-only
+// leaf (see shared/shell/externalLinks.ts). Pure: takes src-relative
+// posix paths, returns the failure message or null when the import is
+// allowed.
+function entriesCatalogFailure(fromSrcRel, toSrcRel) {
+  const toParts = toSrcRel.split("/");
+  if (toParts[0] !== "shared" || toParts[1] !== "shell" || toParts[2] !== "entries") return null;
+  if (fromSrcRel.startsWith("shared/shell/entries/")) return null;
+  if (fromSrcRel === "shared/shell/index.ts" || fromSrcRel === "shared/shell/index.js") return null;
+  // UpdatesDialog rides React.lazy from the gated route, so its catalog
+  // import never joins an eager closure; keep it lazily loaded.
+  if (fromSrcRel === "shared/shell/UpdatesDialog.tsx") return null;
+  return "shared/shell/entries/* must not be statically imported outside entries/, the shell barrel and UpdatesDialog";
+}
+
 function checkFile(full) {
   const text = readFileSync(full, "utf8");
   const rel = relative(root, full).split(sep).join(posix.sep);
@@ -162,6 +182,13 @@ function checkFile(full) {
       const fromSrcRel = relative(appSrc, full).split(sep).join(posix.sep);
       const failure = crossFeatureFailure(fromSrcRel, importerRel);
       if (failure !== null) failures.push(`${rel}: ${failure} ("${spec}")`);
+    }
+    // Palette catalogs stay out of eager closures (see
+    // entriesCatalogFailure).
+    {
+      const fromSrcRel = relative(appSrc, full).split(sep).join(posix.sep);
+      const entriesFailure = entriesCatalogFailure(fromSrcRel, importerRel);
+      if (entriesFailure !== null) failures.push(`${rel}: ${entriesFailure} ("${spec}")`);
     }
   }
 
@@ -213,4 +240,4 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   main();
 }
 
-export { crossFeatureFailure };
+export { crossFeatureFailure, entriesCatalogFailure };

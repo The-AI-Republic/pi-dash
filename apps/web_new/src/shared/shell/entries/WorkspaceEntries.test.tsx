@@ -79,6 +79,7 @@ beforeEach(() => {
               is_email_password_enabled: true,
               is_smtp_configured: false,
               is_self_managed: true,
+              instance_changelog_url: "",
             },
           }),
       };

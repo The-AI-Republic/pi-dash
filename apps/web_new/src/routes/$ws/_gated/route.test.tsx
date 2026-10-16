@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { isRedirect } from "@tanstack/react-router";
@@ -38,11 +38,15 @@ const harness = vi.hoisted(() => ({
     workspaceSlug: string;
     section: string;
     currentPath: string;
+    sidebarMounted: boolean;
     sidebarCollapsed: boolean;
     sidebarToggleEnabled: boolean;
     onToggleSidebar: () => void;
     unreadTotal: number;
     unreadMentions: number;
+    workspaceMenu: unknown;
+    helpMenu: unknown;
+    accountMenu: unknown;
   },
   sidebar: null as null | {
     personalEntries: unknown;
@@ -51,12 +55,32 @@ const harness = vi.hoisted(() => ({
     quickActions: unknown;
     projectsGroup: unknown;
     onNavigateHref: (href: string) => void;
+    workspaces: unknown;
+    creationDisabled: unknown;
+    userRole: unknown;
+    onSelectWorkspace: (slug: string) => void;
+    onOpenSettings: (slug: string) => void;
+    onInviteMembers: (slug: string) => void;
+    onCreateWorkspace: () => void;
+    onWorkspaceInvites: () => void;
+    onYourWork: () => void;
+    onUserSettings: () => void;
   },
   personalizeDialog: null as null | {
     open: boolean;
     workspaceSlug: string;
     personal: unknown;
   },
+  updatesDialog: null as null | {
+    open: boolean;
+    changelogUrl: unknown;
+    selfManaged: unknown;
+  },
+  stampError: null as Error | null,
+  stamped: [] as Array<unknown>,
+  changelogUrl: "",
+  selfManaged: false,
+  instanceDown: false,
   rail: undefined as unknown,
   routerState: {
     matches: [{ params: {} }],
@@ -87,7 +111,8 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 });
 
 // The sign-out mutation resolves to a controllable landing (or throws);
-// the action and command descriptors under test stay real.
+// the action and command descriptors under test stay real. The profile
+// stamp resolves too (or throws), recording its input.
 vi.mock("../../../features/auth/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../features/auth/index.js")>();
   return {
@@ -100,6 +125,13 @@ vi.mock("../../../features/auth/index.js", async (importOriginal) => {
         } finally {
           harness.settled = true;
         }
+      },
+    }),
+    useUpdateProfile: () => ({
+      mutateAsync: async (input: unknown) => {
+        harness.stamped.push(input);
+        if (harness.stampError !== null) throw harness.stampError;
+        return {};
       },
     }),
   };
@@ -125,6 +157,19 @@ vi.mock("../../../features/sidebar/components/PersonalizeDialog.js", async () =>
       harness.personalizeDialog = { ...props };
       if (!props.open) return null;
       return React.createElement("div", { "data-testid": "personalize-dialog-standin" });
+    },
+  };
+});
+
+// Updates stand-in: capture the dialog props; the dialog's own suite
+// owns its behavior.
+vi.mock("../../../shared/shell/UpdatesDialog.js", async () => {
+  const React = await import("react");
+  return {
+    UpdatesDialog: (props: { open: boolean; changelogUrl: unknown; selfManaged: unknown }) => {
+      harness.updatesDialog = { ...props };
+      if (!props.open) return null;
+      return React.createElement("div", { "data-testid": "updates-dialog-standin" });
     },
   };
 });
@@ -164,6 +209,16 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       quickActions: unknown;
       projectsGroup: unknown;
       onNavigateHref: (href: string) => void;
+      workspaces: unknown;
+      creationDisabled: unknown;
+      userRole: unknown;
+      onSelectWorkspace: (slug: string) => void;
+      onOpenSettings: (slug: string) => void;
+      onInviteMembers: (slug: string) => void;
+      onCreateWorkspace: () => void;
+      onWorkspaceInvites: () => void;
+      onYourWork: () => void;
+      onUserSettings: () => void;
     }) => {
       harness.sidebar = {
         personalEntries: props.personalEntries,
@@ -172,6 +227,16 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
         quickActions: props.quickActions,
         projectsGroup: props.projectsGroup,
         onNavigateHref: props.onNavigateHref,
+        workspaces: props.workspaces,
+        creationDisabled: props.creationDisabled,
+        userRole: props.userRole,
+        onSelectWorkspace: props.onSelectWorkspace,
+        onOpenSettings: props.onOpenSettings,
+        onInviteMembers: props.onInviteMembers,
+        onCreateWorkspace: props.onCreateWorkspace,
+        onWorkspaceInvites: props.onWorkspaceInvites,
+        onYourWork: props.onYourWork,
+        onUserSettings: props.onUserSettings,
       };
       return React.createElement(
         React.Fragment,
@@ -199,7 +264,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 import { createAppClient } from "../../../core/api/index.js";
 import { edition } from "../../../core/edition/index.js";
 import { platform } from "../../../core/platform/index.js";
-import { useRailState, useShellChrome } from "../../../shared/shell/index.js";
+import { DOCS_URL, useRailState, useShellChrome, useShortcutsDialog } from "../../../shared/shell/index.js";
 import { Route } from "./route.js";
 
 function PageProbe({ page, query }: { page: PalettePage; query: string }) {
@@ -381,9 +446,13 @@ describe("gated layout shell wiring", () => {
       mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => { data: unknown }) => void;
     };
     suspenseQuery.mockImplementation((options) => {
-      if (options.queryKey[1] === "me") return { data: { display_name: "Ada", email: "ada@example.com" } };
+      if (options.queryKey[1] === "me") {
+        return { data: { id: "u1", display_name: "Ada", email: "ada@example.com", avatar_url: null } };
+      }
       if (options.queryKey[1] === "workspaces") {
-        return { data: [{ id: "w1", slug: "acme", name: "Acme" }] };
+        return {
+          data: [{ id: "w1", slug: "acme", name: "Acme", role: harness.role, total_members: 3, logo_url: null }],
+        };
       }
       throw new Error(`unexpected suspense query ${JSON.stringify(options.queryKey)}`);
     });
@@ -422,7 +491,14 @@ describe("gated layout shell wiring", () => {
         return { data: [{ id: "w1", slug: "acme", name: "Acme", role: harness.role }] };
       }
       if (options.queryKey[0] === "instance") {
-        return { data: { is_workspace_creation_disabled: harness.creationDisabled } };
+        if (harness.instanceDown) return { data: undefined };
+        return {
+          data: {
+            is_workspace_creation_disabled: harness.creationDisabled,
+            instance_changelog_url: harness.changelogUrl,
+            is_self_managed: harness.selfManaged,
+          },
+        };
       }
       return { data: unread };
     });
@@ -508,6 +584,7 @@ describe("gated layout shell wiring", () => {
     harness.topBar = null;
     harness.sidebar = null;
     harness.personalizeDialog = null;
+    harness.updatesDialog = null;
     harness.rail = undefined;
     harness.routerState = { matches: [{ params: {} }], location: { pathname: "/acme/projects/p1/issues" } };
   }
@@ -523,6 +600,11 @@ describe("gated layout shell wiring", () => {
     harness.onSelectSearchResult = null;
     harness.role = 15;
     harness.creationDisabled = false;
+    harness.changelogUrl = "";
+    harness.selfManaged = false;
+    harness.instanceDown = false;
+    harness.stampError = null;
+    harness.stamped = [];
     harness.projectViews = {
       cycle_view: true,
       module_view: true,
@@ -535,7 +617,7 @@ describe("gated layout shell wiring", () => {
     resetChrome();
     vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme" });
     vi.spyOn(Route, "useNavigate").mockReturnValue(navigate as never);
-    vi.spyOn(Route, "useRouteContext").mockReturnValue({ apiClient: {} } as never);
+    vi.spyOn(Route, "useRouteContext").mockReturnValue({ apiClient: { baseUrl: "https://api.test" } } as never);
     stubShellQueries();
     stubClientQueries();
   });
@@ -1051,5 +1133,242 @@ describe("gated layout shell wiring", () => {
     await user.click(screen.getByRole("button", { name: "Personalize" }));
     expect(await screen.findByTestId("personalize-dialog-standin")).not.toBeNull();
     expect(harness.personalizeDialog?.personal).toEqual({ status: _label, entries: [] });
+  });
+
+  describe("chrome menus (SHELL-058-062)", () => {
+    function stubNarrowViewport(narrow: boolean): void {
+      vi.stubGlobal("matchMedia", () => ({
+        matches: narrow,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+      }));
+    }
+
+    function renderNode(node: unknown): { unmount: () => void } {
+      return render(<Suspense fallback={null}>{node as React.ReactElement}</Suspense>);
+    }
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      useShortcutsDialog.getState().closeShortcuts();
+    });
+
+    it("passes switcher rows, the creation flag and the role to the sidebar", () => {
+      renderShell();
+      expect(harness.sidebar?.workspaces).toEqual([
+        { id: "w1", slug: "acme", name: "Acme", role: 15, totalMembers: 3, logoSrc: null },
+      ]);
+      expect(harness.sidebar?.creationDisabled).toBe(false);
+      expect(harness.sidebar?.userRole).toBe(15);
+      expect(harness.topBar?.sidebarMounted).toBe(true);
+    });
+
+    it("hides creation while the instance disables it", () => {
+      harness.creationDisabled = true;
+      renderShell();
+      expect(harness.sidebar?.creationDisabled).toBe(true);
+    });
+
+    it("stamps the last workspace, then navigates", async () => {
+      renderShell();
+      const menu = renderNode(harness.topBar?.workspaceMenu);
+      try {
+        fireEvent.click(screen.getByTestId("topbar-workspace-switcher"));
+        fireEvent.click(screen.getByRole("menuitem", { name: /Acme/ }));
+        await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/$ws", params: { ws: "acme" } }));
+        expect(harness.stamped).toEqual([{ last_workspace_id: "w1" }]);
+      } finally {
+        menu.unmount();
+      }
+    });
+
+    it("still navigates when the stamp fails", async () => {
+      harness.stampError = new Error("profile down");
+      renderShell();
+      const menu = renderNode(harness.topBar?.workspaceMenu);
+      try {
+        fireEvent.click(screen.getByTestId("topbar-workspace-switcher"));
+        fireEvent.click(screen.getByRole("menuitem", { name: /Acme/ }));
+        await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/$ws", params: { ws: "acme" } }));
+        expect(harness.stamped).toEqual([{ last_workspace_id: "w1" }]);
+      } finally {
+        menu.unmount();
+      }
+    });
+
+    it("navigates directly for unknown slugs without stamping", () => {
+      renderShell();
+      harness.sidebar?.onSelectWorkspace("ghost");
+      expect(navigate).toHaveBeenCalledWith({ to: "/$ws", params: { ws: "ghost" } });
+      expect(harness.stamped).toEqual([]);
+    });
+
+    it("routes the switcher shortcuts to their addresses", () => {
+      renderShell();
+      harness.sidebar?.onOpenSettings("acme");
+      expect(navigate).toHaveBeenLastCalledWith({ href: "/acme/settings" });
+      harness.sidebar?.onInviteMembers("acme");
+      expect(navigate).toHaveBeenLastCalledWith({ href: "/acme/settings/members" });
+      harness.sidebar?.onCreateWorkspace();
+      expect(navigate).toHaveBeenLastCalledWith({ href: "/create-workspace" });
+      harness.sidebar?.onWorkspaceInvites();
+      expect(navigate).toHaveBeenLastCalledWith({ href: "/invitations" });
+    });
+
+    it("routes the account shortcuts to the profile and the settings page", () => {
+      renderShell();
+      harness.sidebar?.onYourWork();
+      expect(navigate).toHaveBeenLastCalledWith({ href: "/acme/profile/u1" });
+      harness.sidebar?.onUserSettings();
+      expect(navigate).toHaveBeenLastCalledWith({ href: "/settings/profile/general" });
+    });
+
+    it("falls back to guest without an active membership", () => {
+      const suspenseQuery = vi.mocked(useSuspenseQuery) as unknown as {
+        mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => { data: unknown }) => void;
+      };
+      suspenseQuery.mockImplementation((options) => {
+        if (options.queryKey[1] === "me") {
+          return { data: { id: "u1", display_name: "Ada", email: "ada@example.com", avatar_url: null } };
+        }
+        if (options.queryKey[1] === "workspaces") return { data: [] };
+        return { data: [] };
+      });
+      renderShell();
+      expect(harness.sidebar?.userRole).toBe(5);
+      const menu = renderNode(harness.topBar?.accountMenu);
+      try {
+        fireEvent.click(screen.getByTestId("topbar-user-menu"));
+        expect(screen.queryByRole("menuitem", { name: "Your work" })).not.toBeInTheDocument();
+      } finally {
+        menu.unmount();
+      }
+    });
+
+    it("unmounts the sidebar on the notifications route with the compact fallback", () => {
+      harness.routerState.location.pathname = "/acme/notifications/";
+      renderShell();
+      expect(harness.sidebar).toBeNull();
+      expect(harness.topBar?.sidebarMounted).toBe(false);
+      const menu = renderNode(harness.topBar?.accountMenu);
+      try {
+        expect(screen.getByTestId("topbar-user-menu")).toBeInTheDocument();
+      } finally {
+        menu.unmount();
+      }
+    });
+
+    it("opens the shortcut list from the help menu", () => {
+      renderShell();
+      const menu = renderNode(harness.topBar?.helpMenu);
+      try {
+        fireEvent.click(screen.getByTestId("topbar-help-menu"));
+        fireEvent.click(screen.getByRole("menuitem", { name: "Keyboard shortcuts" }));
+        expect(useShortcutsDialog.getState().open).toBe(true);
+      } finally {
+        menu.unmount();
+      }
+    });
+
+    it("opens the updates dialog with the instance changelog", async () => {
+      harness.changelogUrl = "https://changelog.example/feed";
+      harness.selfManaged = true;
+      renderShell();
+      expect(screen.queryByTestId("updates-dialog-standin")).toBeNull();
+      const menu = renderNode(harness.topBar?.helpMenu);
+      try {
+        fireEvent.click(screen.getByTestId("topbar-help-menu"));
+        fireEvent.click(screen.getByRole("menuitem", { name: "What's new?" }));
+        expect(await screen.findByTestId("updates-dialog-standin")).not.toBeNull();
+        expect(harness.updatesDialog).toMatchObject({
+          open: true,
+          changelogUrl: "https://changelog.example/feed",
+          selfManaged: true,
+        });
+      } finally {
+        menu.unmount();
+      }
+    });
+
+    it("falls back to safe chrome defaults without instance config", async () => {
+      harness.instanceDown = true;
+      renderShell();
+      expect(harness.sidebar?.creationDisabled).toBe(false);
+      const menu = renderNode(harness.topBar?.helpMenu);
+      try {
+        fireEvent.click(screen.getByTestId("topbar-help-menu"));
+        fireEvent.click(screen.getByRole("menuitem", { name: "What's new?" }));
+        expect(await screen.findByTestId("updates-dialog-standin")).not.toBeNull();
+        expect(harness.updatesDialog).toMatchObject({ open: true, changelogUrl: null, selfManaged: false });
+      } finally {
+        menu.unmount();
+      }
+    });
+
+    it("opens help links outside the app", () => {
+      const openExternal = vi.spyOn(platform, "openExternal").mockResolvedValue(undefined);
+      renderShell();
+      const menu = renderNode(harness.topBar?.helpMenu);
+      try {
+        fireEvent.click(screen.getByTestId("topbar-help-menu"));
+        fireEvent.click(screen.getByRole("menuitem", { name: "Documentation" }));
+        expect(openExternal).toHaveBeenCalledWith(DOCS_URL);
+      } finally {
+        menu.unmount();
+      }
+    });
+
+    it("collapses the floating sidebar on shell navigation while narrow", async () => {
+      stubNarrowViewport(true);
+      renderShell();
+      expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
+      // Project picks travel through the palette into handleSelectProject.
+      await waitFor(() => expect(findPalettePage("shell.project-picker")).toBeDefined());
+      const projectPage = findPalettePage("shell.project-picker");
+      if (!projectPage) throw new Error("expected the project picker page");
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const { unmount } = render(
+        <QueryClientProvider client={queryClient}>
+          <PageProbe page={projectPage} query="" />
+        </QueryClientProvider>
+      );
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: "Atlas" }));
+      expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/$ws/projects/$projectId/issues",
+        params: { ws: "acme", projectId: "p1" },
+        search: {},
+      });
+      unmount();
+      useShellChrome.getState().setSidebarCollapsed(false);
+      harness.sidebar?.onYourWork();
+      expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
+      useShellChrome.getState().setSidebarCollapsed(false);
+      harness.onSelectSearchResult?.({
+        key: "issue:x",
+        entity: "issue",
+        title: "Hit",
+        path: "",
+        raw: {
+          id: "22222222-2222-4222-8222-222222222222",
+          sequence_id: 12,
+          project__identifier: "ATL",
+          project_id: "11111111-1111-4111-8111-111111111111",
+        },
+      });
+      expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/$ws/browse/$issueKey",
+        params: { ws: "acme", issueKey: "ATL-12" },
+      });
+    });
+
+    it("leaves the sidebar open navigating while wide", () => {
+      stubNarrowViewport(false);
+      renderShell();
+      harness.sidebar?.onYourWork();
+      expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
+    });
   });
 });
