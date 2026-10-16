@@ -144,15 +144,15 @@ function useFavoriteReorder(args: {
       Array.from(list?.children ?? [], (node) => {
         const element = node as HTMLElement;
         const rect = element.getBoundingClientRect();
-        const isFolder = element.dataset["favoriteFolder"] === "true";
-        const header = isFolder
-          ? (element.querySelector('[data-testid="favorite-folder-toggle"]')?.getBoundingClientRect() ?? rect)
-          : rect;
+        // A row is a folder iff it renders the folder toggle, so one
+        // lookup answers both questions; plain entries reuse the row.
+        const toggle = element.querySelector('[data-testid="favorite-folder-toggle"]');
+        const header = toggle?.getBoundingClientRect() ?? rect;
         return {
           id: element.dataset["favoriteRow"] ?? "",
           top: rect.top,
           bottom: rect.bottom,
-          isFolder,
+          isFolder: toggle !== null,
           headerTop: header.top,
           headerBottom: header.bottom,
           headerLeft: header.left,
@@ -414,13 +414,7 @@ function FavoriteRow({
     : [{ label: FAVORITE_REMOVE_LABEL, itemKey: "remove", onSelect: () => onRemove(row.id) }];
 
   return (
-    <li
-      data-favorite-row={row.id}
-      data-favorite-folder={String(row.is_folder)}
-      data-testid="favorite-entry"
-      data-entry-name={name}
-      className="relative"
-    >
+    <li data-favorite-row={row.id} data-testid="favorite-entry" data-entry-name={name} className="relative">
       {dropIndicator === "above" ? (
         <span data-testid="favorite-drop-indicator" className="absolute inset-x-2 top-0 h-0.5 bg-(--accent)" />
       ) : null}
