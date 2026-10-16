@@ -1151,7 +1151,16 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
             error: None,
         });
     }
-    let turn = match render_scheduler_turn(seam, &binding, &project, &workspace, &run).await? {
+    let turn = match render_scheduler_turn(
+        seam,
+        &binding,
+        &project,
+        &workspace,
+        &run,
+        &execution.tool_plan,
+    )
+    .await?
+    {
         Ok(turn) => turn,
         Err(message) => {
             let failed = seam
@@ -1190,10 +1199,15 @@ async fn render_scheduler_turn<S: EntriesSeam>(
     project: &ProjectView,
     workspace: &WorkspaceView,
     run: &RunView,
+    tool_plan: &Value,
 ) -> Result<Result<RenderedTurn, String>, EntriesError> {
     let scheduler = seam.scheduler_row(binding.scheduler_id).await?;
     let override_rows = seam.scheduler_override_rows(binding.workspace_id).await?;
-    let tool_plan = &run.tool_plan;
+    // The in-memory plan, not the round-tripped row: Postgres normalizes
+    // jsonb key order on write, while Django composes from the in-memory
+    // attribute (`run.prompt = build_scheduler_turn(binding, run)` before
+    // any `refresh_from_db`; `service.py:977`). The `Limits:` line must
+    // print `policy.py` dict order (PIDASHCONV-1072).
     let extra_enabled = tool_plan
         .get("extra_toolsets")
         .and_then(Value::as_bool)
@@ -1660,6 +1674,10 @@ mod tests {
         queued: HashMap<Uuid, Uuid>,
         prior_states: HashMap<Uuid, Option<Uuid>>,
         prior_state_calls: Vec<Uuid>,
+        /// Simulate the `INSERT ... RETURNING` jsonb round-trip: stored
+        /// plans come back key-normalized while the caller's value keeps
+        /// insertion order (PIDASHCONV-1072).
+        normalize_tool_plan: bool,
     }
 
     impl FakeEntriesSeam {
@@ -2071,6 +2089,11 @@ mod tests {
             row: &NewSchedulerRun,
         ) -> Result<RunView, CreationError> {
             self.scheduler_runs.push(row.clone());
+            let tool_plan = if self.normalize_tool_plan {
+                jsonb_normalize(&row.tool_plan)
+            } else {
+                row.tool_plan.clone()
+            };
             let run = RunView {
                 id: row.id,
                 workspace_id: row.workspace_id,
@@ -2085,7 +2108,7 @@ mod tests {
                 executor_kind: row.executor_kind,
                 phase_kind: String::new(),
                 run_config: json!({}),
-                tool_plan: row.tool_plan.clone(),
+                tool_plan,
                 error_code: row.error_code.clone(),
                 error: String::new(),
                 prompt: String::new(),
@@ -2970,6 +2993,24 @@ mod tests {
         seam
     }
 
+    /// Postgres jsonb output ordering, recursed: object keys sort by
+    /// length then lexicographically while arrays keep order — what an
+    /// `INSERT ... RETURNING` round-trip does to a tool plan.
+    fn jsonb_normalize(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut pairs: Vec<(String, Value)> = map
+                    .iter()
+                    .map(|(key, item)| (key.clone(), jsonb_normalize(item)))
+                    .collect();
+                pairs.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then(a.0.cmp(&b.0)));
+                Value::Object(pairs.into_iter().collect())
+            }
+            Value::Array(items) => Value::Array(items.iter().map(jsonb_normalize).collect()),
+            scalar => scalar.clone(),
+        }
+    }
+
     fn cloud_project(seam: &mut FakeEntriesSeam) {
         seam.projects
             .get_mut(&uid(0x20))
@@ -3368,6 +3409,88 @@ mod tests {
         );
         assert!(seam.scheduler_runs.is_empty());
         assert!(seam.dispatched.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scheduler_renders_limits_from_in_memory_plan() {
+        // PIDASHCONV-1072: Django composes from the in-memory plan
+        // (`run.prompt = build_scheduler_turn(binding, run)` before any
+        // `refresh_from_db`; `service.py:977`), so the `Limits:` line
+        // prints `policy.py` dict order even though the stored row
+        // carries jsonb order. The seam round-trips the plan to prove
+        // the render does not read the row back.
+        let now = frozen_now();
+        let mut seam = scheduler_seam();
+        cloud_project(&mut seam);
+        role_pass(&mut seam, uid(0x40));
+        seam.llm.insert(uid(0x40), true);
+        seam.normalize_tool_plan = true;
+        seam.execution = Some(Ok(ExecutionFields {
+            executor_kind: AgentExecutorKind::CloudAgent,
+            tool_plan: json!({
+                "v": 1,
+                "catalog_version": 1,
+                "tools": [],
+                "required_tools": [],
+                "limits": {
+                    "model_requests": 25,
+                    "tool_calls": 20,
+                    "writes": 3,
+                    "input_tokens": 144_000,
+                    "output_tokens": 16_000,
+                    "total_tokens": 160_000,
+                    "wall_seconds": 285,
+                },
+                "unavailable_capabilities": ["filesystem", "shell", "worktree"],
+                "extra_toolsets": false,
+            }),
+            pinned_runner_entry: Some(None),
+            error_code: None,
+            cloud_admission_error: None,
+        }));
+        let outcome = dispatch_scheduler_run(
+            &mut seam,
+            &SchedulerRequest {
+                binding_id: uid(0x80),
+                now,
+            },
+        )
+        .await
+        .expect("scheduler runs");
+        assert!(outcome.error.is_none());
+        let run_id = outcome.run.expect("run returned");
+        // The stored row carries jsonb order (the seam round-tripped it).
+        let stored: Vec<String> = seam.runs[&run_id].tool_plan["limits"]
+            .as_object()
+            .expect("limits object")
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            stored,
+            vec![
+                "writes",
+                "tool_calls",
+                "input_tokens",
+                "total_tokens",
+                "wall_seconds",
+                "output_tokens",
+                "model_requests",
+            ]
+        );
+        // The composed prompt prints policy.py dict order.
+        let run = seam.runs.get(&run_id).expect("run stored");
+        let line = run
+            .prompt
+            .lines()
+            .find(|line| line.starts_with("Limits:"))
+            .expect("Limits line");
+        assert_eq!(
+            line,
+            "Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, \
+             'input_tokens': 144000, 'output_tokens': 16000, \
+             'total_tokens': 160000, 'wall_seconds': 285}."
+        );
     }
 
     #[tokio::test]

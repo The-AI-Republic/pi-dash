@@ -29,8 +29,11 @@ uuid = { version = "1", features = ["serde", "v4"] }
 scraper = { version = "0.24" }
 # D-04 prompting renderer: sandboxed Jinja via minijinja with strict
 # undefined (Porting guide); same locked minijinja 2.x as pidash-jobs
-# (no lock churn).
-minijinja = { version = "2" }
+# (no lock churn). preserve_order: template maps iterate in insertion
+# order (IndexMap) instead of key-sorted (BTreeMap), matching Jinja2 —
+# `{{ limits }}` must print policy.py dict order, not alphabetical
+# (PIDASHCONV-1072; indexmap already locked via serde_json).
+minijinja = { version = "2", features = ["preserve_order"] }
 # D-19 collab serializers: Django EmailValidator port needs its user/domain/
 # literal patterns (same locked regex 1.x as pidash-jobs, no lock churn);
 # the IDN fallback needs UTS-46 ascii mapping (locked idna 1.x via url,
