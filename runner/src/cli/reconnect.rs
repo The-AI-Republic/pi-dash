@@ -33,12 +33,11 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
             }
             Ok(())
         }
-        Response::Error(err) => anyhow::bail!(
-            "daemon rejected reconnect: {} (code {}). An older daemon may not support it; \
-             `pidash restart` also retries every runner immediately.",
-            err.message,
-            err.code
+        Response::Error(err) if err.code == 400 => anyhow::bail!(
+            "the running daemon is too old for `pidash reconnect`; `pidash restart` also \
+             retries every runner immediately."
         ),
+        Response::Error(err) => anyhow::bail!("daemon rejected reconnect: {}", err.message),
         other => anyhow::bail!("unexpected daemon response: {other:?}"),
     }
 }
