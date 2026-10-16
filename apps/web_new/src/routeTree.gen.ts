@@ -33,13 +33,18 @@ import { Route as GodModeSplatRouteImport } from './routes/god-mode/$'
 import { Route as GodModeDashboardRouteRouteImport } from './routes/god-mode/_dashboard/route'
 import { Route as WsGatedIndexRouteImport } from './routes/$ws/_gated/index'
 import { Route as GodModeDashboardAiRouteImport } from './routes/god-mode/_dashboard/ai'
-import { Route as GodModeDashboardAuthenticationRouteImport } from './routes/god-mode/_dashboard/authentication'
+import { Route as GodModeDashboardAuthenticationRouteRouteImport } from './routes/god-mode/_dashboard/authentication/route'
 import { Route as GodModeDashboardEmailRouteImport } from './routes/god-mode/_dashboard/email'
 import { Route as GodModeDashboardGeneralRouteImport } from './routes/god-mode/_dashboard/general'
 import { Route as GodModeDashboardLoopRouteImport } from './routes/god-mode/_dashboard/loop'
 import { Route as WsGatedBrowseIssueKeyRouteImport } from './routes/$ws/_gated/browse/$issueKey'
 import { Route as WsGatedProjectsIndexRouteImport } from './routes/$ws/_gated/projects/index'
 import { Route as WsGatedProjectsProjectIdRouteRouteImport } from './routes/$ws/_gated/projects/$projectId/route'
+import { Route as GodModeDashboardAuthenticationIndexRouteImport } from './routes/god-mode/_dashboard/authentication/index'
+import { Route as GodModeDashboardAuthenticationGiteaRouteImport } from './routes/god-mode/_dashboard/authentication/gitea'
+import { Route as GodModeDashboardAuthenticationGithubRouteImport } from './routes/god-mode/_dashboard/authentication/github'
+import { Route as GodModeDashboardAuthenticationGitlabRouteImport } from './routes/god-mode/_dashboard/authentication/gitlab'
+import { Route as GodModeDashboardAuthenticationGoogleRouteImport } from './routes/god-mode/_dashboard/authentication/google'
 import { Route as WsGatedProjectsProjectIdIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/index'
 import { Route as WsGatedProjectsArchivesIndexRouteImport } from './routes/$ws/_gated/projects/archives/index'
 import { Route as WsGatedProjectsProjectIdCyclesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/cycles/index'
@@ -168,8 +173,8 @@ const GodModeDashboardAiRoute = GodModeDashboardAiRouteImport.update({
   path: '/ai',
   getParentRoute: () => GodModeDashboardRouteRoute,
 } as any)
-const GodModeDashboardAuthenticationRoute =
-  GodModeDashboardAuthenticationRouteImport.update({
+const GodModeDashboardAuthenticationRouteRoute =
+  GodModeDashboardAuthenticationRouteRouteImport.update({
     id: '/authentication',
     path: '/authentication',
     getParentRoute: () => GodModeDashboardRouteRoute,
@@ -204,6 +209,36 @@ const WsGatedProjectsProjectIdRouteRoute =
     id: '/projects/$projectId',
     path: '/projects/$projectId',
     getParentRoute: () => WsGatedRouteRoute,
+  } as any)
+const GodModeDashboardAuthenticationIndexRoute =
+  GodModeDashboardAuthenticationIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => GodModeDashboardAuthenticationRouteRoute,
+  } as any)
+const GodModeDashboardAuthenticationGiteaRoute =
+  GodModeDashboardAuthenticationGiteaRouteImport.update({
+    id: '/gitea',
+    path: '/gitea',
+    getParentRoute: () => GodModeDashboardAuthenticationRouteRoute,
+  } as any)
+const GodModeDashboardAuthenticationGithubRoute =
+  GodModeDashboardAuthenticationGithubRouteImport.update({
+    id: '/github',
+    path: '/github',
+    getParentRoute: () => GodModeDashboardAuthenticationRouteRoute,
+  } as any)
+const GodModeDashboardAuthenticationGitlabRoute =
+  GodModeDashboardAuthenticationGitlabRouteImport.update({
+    id: '/gitlab',
+    path: '/gitlab',
+    getParentRoute: () => GodModeDashboardAuthenticationRouteRoute,
+  } as any)
+const GodModeDashboardAuthenticationGoogleRoute =
+  GodModeDashboardAuthenticationGoogleRouteImport.update({
+    id: '/google',
+    path: '/google',
+    getParentRoute: () => GodModeDashboardAuthenticationRouteRoute,
   } as any)
 const WsGatedProjectsProjectIdIndexRoute =
   WsGatedProjectsProjectIdIndexRouteImport.update({
@@ -281,15 +316,20 @@ export interface FileRoutesByFullPath {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
+  '/god-mode/authentication': typeof GodModeDashboardAuthenticationRouteRouteWithChildren
   '/god-mode/ai': typeof GodModeDashboardAiRoute
-  '/god-mode/authentication': typeof GodModeDashboardAuthenticationRoute
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
   '/god-mode/loop': typeof GodModeDashboardLoopRoute
   '/$ws/': typeof WsGatedIndexRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
+  '/god-mode/authentication/gitea': typeof GodModeDashboardAuthenticationGiteaRoute
+  '/god-mode/authentication/github': typeof GodModeDashboardAuthenticationGithubRoute
+  '/god-mode/authentication/gitlab': typeof GodModeDashboardAuthenticationGitlabRoute
+  '/god-mode/authentication/google': typeof GodModeDashboardAuthenticationGoogleRoute
   '/$ws/projects/': typeof WsGatedProjectsIndexRoute
+  '/god-mode/authentication/': typeof GodModeDashboardAuthenticationIndexRoute
   '/$ws/projects/$projectId/': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/projects/archives/': typeof WsGatedProjectsArchivesIndexRoute
   '/$ws/projects/$projectId/cycles/': typeof WsGatedProjectsProjectIdCyclesIndexRoute
@@ -321,12 +361,16 @@ export interface FileRoutesByTo {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/god-mode/ai': typeof GodModeDashboardAiRoute
-  '/god-mode/authentication': typeof GodModeDashboardAuthenticationRoute
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
   '/god-mode/loop': typeof GodModeDashboardLoopRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
+  '/god-mode/authentication/gitea': typeof GodModeDashboardAuthenticationGiteaRoute
+  '/god-mode/authentication/github': typeof GodModeDashboardAuthenticationGithubRoute
+  '/god-mode/authentication/gitlab': typeof GodModeDashboardAuthenticationGitlabRoute
+  '/god-mode/authentication/google': typeof GodModeDashboardAuthenticationGoogleRoute
   '/$ws/projects': typeof WsGatedProjectsIndexRoute
+  '/god-mode/authentication': typeof GodModeDashboardAuthenticationIndexRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/projects/archives': typeof WsGatedProjectsArchivesIndexRoute
   '/$ws/projects/$projectId/cycles': typeof WsGatedProjectsProjectIdCyclesIndexRoute
@@ -361,15 +405,20 @@ export interface FileRoutesById {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
+  '/god-mode/_dashboard/authentication': typeof GodModeDashboardAuthenticationRouteRouteWithChildren
   '/god-mode/_dashboard/ai': typeof GodModeDashboardAiRoute
-  '/god-mode/_dashboard/authentication': typeof GodModeDashboardAuthenticationRoute
   '/god-mode/_dashboard/email': typeof GodModeDashboardEmailRoute
   '/god-mode/_dashboard/general': typeof GodModeDashboardGeneralRoute
   '/god-mode/_dashboard/loop': typeof GodModeDashboardLoopRoute
   '/$ws/_gated/': typeof WsGatedIndexRoute
   '/$ws/_gated/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   '/$ws/_gated/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
+  '/god-mode/_dashboard/authentication/gitea': typeof GodModeDashboardAuthenticationGiteaRoute
+  '/god-mode/_dashboard/authentication/github': typeof GodModeDashboardAuthenticationGithubRoute
+  '/god-mode/_dashboard/authentication/gitlab': typeof GodModeDashboardAuthenticationGitlabRoute
+  '/god-mode/_dashboard/authentication/google': typeof GodModeDashboardAuthenticationGoogleRoute
   '/$ws/_gated/projects/': typeof WsGatedProjectsIndexRoute
+  '/god-mode/_dashboard/authentication/': typeof GodModeDashboardAuthenticationIndexRoute
   '/$ws/_gated/projects/$projectId/': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/_gated/projects/archives/': typeof WsGatedProjectsArchivesIndexRoute
   '/$ws/_gated/projects/$projectId/cycles/': typeof WsGatedProjectsProjectIdCyclesIndexRoute
@@ -403,15 +452,20 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/god-mode/'
-    | '/god-mode/ai'
     | '/god-mode/authentication'
+    | '/god-mode/ai'
     | '/god-mode/email'
     | '/god-mode/general'
     | '/god-mode/loop'
     | '/$ws/'
     | '/$ws/projects/$projectId'
     | '/$ws/browse/$issueKey'
+    | '/god-mode/authentication/gitea'
+    | '/god-mode/authentication/github'
+    | '/god-mode/authentication/gitlab'
+    | '/god-mode/authentication/google'
     | '/$ws/projects/'
+    | '/god-mode/authentication/'
     | '/$ws/projects/$projectId/'
     | '/$ws/projects/archives/'
     | '/$ws/projects/$projectId/cycles/'
@@ -443,12 +497,16 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/god-mode/ai'
-    | '/god-mode/authentication'
     | '/god-mode/email'
     | '/god-mode/general'
     | '/god-mode/loop'
     | '/$ws/browse/$issueKey'
+    | '/god-mode/authentication/gitea'
+    | '/god-mode/authentication/github'
+    | '/god-mode/authentication/gitlab'
+    | '/god-mode/authentication/google'
     | '/$ws/projects'
+    | '/god-mode/authentication'
     | '/$ws/projects/$projectId'
     | '/$ws/projects/archives'
     | '/$ws/projects/$projectId/cycles'
@@ -482,15 +540,20 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/god-mode/'
-    | '/god-mode/_dashboard/ai'
     | '/god-mode/_dashboard/authentication'
+    | '/god-mode/_dashboard/ai'
     | '/god-mode/_dashboard/email'
     | '/god-mode/_dashboard/general'
     | '/god-mode/_dashboard/loop'
     | '/$ws/_gated/'
     | '/$ws/_gated/projects/$projectId'
     | '/$ws/_gated/browse/$issueKey'
+    | '/god-mode/_dashboard/authentication/gitea'
+    | '/god-mode/_dashboard/authentication/github'
+    | '/god-mode/_dashboard/authentication/gitlab'
+    | '/god-mode/_dashboard/authentication/google'
     | '/$ws/_gated/projects/'
+    | '/god-mode/_dashboard/authentication/'
     | '/$ws/_gated/projects/$projectId/'
     | '/$ws/_gated/projects/archives/'
     | '/$ws/_gated/projects/$projectId/cycles/'
@@ -696,7 +759,7 @@ declare module '@tanstack/react-router' {
       id: '/god-mode/_dashboard/authentication'
       path: '/authentication'
       fullPath: '/god-mode/authentication'
-      preLoaderRoute: typeof GodModeDashboardAuthenticationRouteImport
+      preLoaderRoute: typeof GodModeDashboardAuthenticationRouteRouteImport
       parentRoute: typeof GodModeDashboardRouteRoute
     }
     '/god-mode/_dashboard/email': {
@@ -740,6 +803,41 @@ declare module '@tanstack/react-router' {
       fullPath: '/$ws/projects/$projectId'
       preLoaderRoute: typeof WsGatedProjectsProjectIdRouteRouteImport
       parentRoute: typeof WsGatedRouteRoute
+    }
+    '/god-mode/_dashboard/authentication/': {
+      id: '/god-mode/_dashboard/authentication/'
+      path: '/'
+      fullPath: '/god-mode/authentication/'
+      preLoaderRoute: typeof GodModeDashboardAuthenticationIndexRouteImport
+      parentRoute: typeof GodModeDashboardAuthenticationRouteRoute
+    }
+    '/god-mode/_dashboard/authentication/gitea': {
+      id: '/god-mode/_dashboard/authentication/gitea'
+      path: '/gitea'
+      fullPath: '/god-mode/authentication/gitea'
+      preLoaderRoute: typeof GodModeDashboardAuthenticationGiteaRouteImport
+      parentRoute: typeof GodModeDashboardAuthenticationRouteRoute
+    }
+    '/god-mode/_dashboard/authentication/github': {
+      id: '/god-mode/_dashboard/authentication/github'
+      path: '/github'
+      fullPath: '/god-mode/authentication/github'
+      preLoaderRoute: typeof GodModeDashboardAuthenticationGithubRouteImport
+      parentRoute: typeof GodModeDashboardAuthenticationRouteRoute
+    }
+    '/god-mode/_dashboard/authentication/gitlab': {
+      id: '/god-mode/_dashboard/authentication/gitlab'
+      path: '/gitlab'
+      fullPath: '/god-mode/authentication/gitlab'
+      preLoaderRoute: typeof GodModeDashboardAuthenticationGitlabRouteImport
+      parentRoute: typeof GodModeDashboardAuthenticationRouteRoute
+    }
+    '/god-mode/_dashboard/authentication/google': {
+      id: '/god-mode/_dashboard/authentication/google'
+      path: '/google'
+      fullPath: '/god-mode/authentication/google'
+      preLoaderRoute: typeof GodModeDashboardAuthenticationGoogleRouteImport
+      parentRoute: typeof GodModeDashboardAuthenticationRouteRoute
     }
     '/$ws/_gated/projects/$projectId/': {
       id: '/$ws/_gated/projects/$projectId/'
@@ -876,17 +974,45 @@ const WsRouteRouteChildren: WsRouteRouteChildren = {
 const WsRouteRouteWithChildren =
   WsRouteRoute._addFileChildren(WsRouteRouteChildren)
 
+interface GodModeDashboardAuthenticationRouteRouteChildren {
+  GodModeDashboardAuthenticationGiteaRoute: typeof GodModeDashboardAuthenticationGiteaRoute
+  GodModeDashboardAuthenticationGithubRoute: typeof GodModeDashboardAuthenticationGithubRoute
+  GodModeDashboardAuthenticationGitlabRoute: typeof GodModeDashboardAuthenticationGitlabRoute
+  GodModeDashboardAuthenticationGoogleRoute: typeof GodModeDashboardAuthenticationGoogleRoute
+  GodModeDashboardAuthenticationIndexRoute: typeof GodModeDashboardAuthenticationIndexRoute
+}
+
+const GodModeDashboardAuthenticationRouteRouteChildren: GodModeDashboardAuthenticationRouteRouteChildren =
+  {
+    GodModeDashboardAuthenticationGiteaRoute:
+      GodModeDashboardAuthenticationGiteaRoute,
+    GodModeDashboardAuthenticationGithubRoute:
+      GodModeDashboardAuthenticationGithubRoute,
+    GodModeDashboardAuthenticationGitlabRoute:
+      GodModeDashboardAuthenticationGitlabRoute,
+    GodModeDashboardAuthenticationGoogleRoute:
+      GodModeDashboardAuthenticationGoogleRoute,
+    GodModeDashboardAuthenticationIndexRoute:
+      GodModeDashboardAuthenticationIndexRoute,
+  }
+
+const GodModeDashboardAuthenticationRouteRouteWithChildren =
+  GodModeDashboardAuthenticationRouteRoute._addFileChildren(
+    GodModeDashboardAuthenticationRouteRouteChildren,
+  )
+
 interface GodModeDashboardRouteRouteChildren {
+  GodModeDashboardAuthenticationRouteRoute: typeof GodModeDashboardAuthenticationRouteRouteWithChildren
   GodModeDashboardAiRoute: typeof GodModeDashboardAiRoute
-  GodModeDashboardAuthenticationRoute: typeof GodModeDashboardAuthenticationRoute
   GodModeDashboardEmailRoute: typeof GodModeDashboardEmailRoute
   GodModeDashboardGeneralRoute: typeof GodModeDashboardGeneralRoute
   GodModeDashboardLoopRoute: typeof GodModeDashboardLoopRoute
 }
 
 const GodModeDashboardRouteRouteChildren: GodModeDashboardRouteRouteChildren = {
+  GodModeDashboardAuthenticationRouteRoute:
+    GodModeDashboardAuthenticationRouteRouteWithChildren,
   GodModeDashboardAiRoute: GodModeDashboardAiRoute,
-  GodModeDashboardAuthenticationRoute: GodModeDashboardAuthenticationRoute,
   GodModeDashboardEmailRoute: GodModeDashboardEmailRoute,
   GodModeDashboardGeneralRoute: GodModeDashboardGeneralRoute,
   GodModeDashboardLoopRoute: GodModeDashboardLoopRoute,

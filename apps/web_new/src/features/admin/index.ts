@@ -45,6 +45,46 @@ export {
 } from "./authMethods.js";
 export type { AuthMethodDef, AuthMethodKey, ConfigMap } from "./authMethods.js";
 export {
+  AUTH_PROVIDER_BY_SLUG,
+  AUTH_PROVIDER_LANDING_HREF,
+  AUTH_PROVIDER_SKELETON_BARS,
+  AUTH_PROVIDERS,
+  buildAuthCallbackUrl,
+  buildProviderCopyFields,
+  buildProviderFormDefaults,
+  buildProviderSavePayload,
+  decodeSyncFlag,
+  draftValue,
+  encodeSyncFlag,
+  isProviderFormDirty,
+  isProviderFormSubmittable,
+  PROVIDER_BACK_LABEL,
+  PROVIDER_COPY_DONE_TITLE,
+  PROVIDER_DISCARD_BODY,
+  PROVIDER_DISCARD_KEEP_LABEL,
+  PROVIDER_DISCARD_TITLE,
+  PROVIDER_MASTER_FAILED_MESSAGE,
+  PROVIDER_MASTER_FAILED_TITLE,
+  PROVIDER_MASTER_SAVED_TITLE,
+  PROVIDER_SAVE_BUSY_LABEL,
+  PROVIDER_SAVE_DONE_TITLE,
+  PROVIDER_SAVE_IDLE_LABEL,
+  providerCopyDoneMessage,
+  providerMasterSavedMessage,
+  providerSaveDoneMessage,
+  readProviderSavedValues,
+  resolveAuthOrigin,
+  resolveCopyHelpHref,
+} from "./providerAuth.js";
+export type {
+  AuthProviderDef,
+  AuthProviderSlug,
+  CopyHelpHref,
+  ProviderCopyField,
+  ProviderCredentialField,
+  ProviderFormValues,
+} from "./providerAuth.js";
+export {
   CONFIG_SAVE_FAILED_LOG,
   createLoopJobMutationOptions,
   toggleLoopJobMutationOptions,
@@ -118,9 +158,19 @@ export {
 export type { AdminThemeMode } from "./theme.js";
 export { AdminAccountMenu } from "./components/AdminAccountMenu.js";
 export { AI_SETTINGS_TITLE, AdminAiSettingsPage } from "./components/AdminAiSettingsPage.js";
+export { AdminAuthCopyField } from "./components/AdminAuthCopyField.js";
+export type { AdminAuthCopyFieldProps } from "./components/AdminAuthCopyField.js";
+export { AdminAuthDiscardModal } from "./components/AdminAuthDiscardModal.js";
+export type { AdminAuthDiscardModalProps } from "./components/AdminAuthDiscardModal.js";
 export { AdminAuthLanding, AUTH_LANDING_TITLE } from "./components/AdminAuthLanding.js";
 export { AdminAuthMethodCard } from "./components/AdminAuthMethodCard.js";
 export type { AdminAuthMethodCardProps } from "./components/AdminAuthMethodCard.js";
+export { AdminAuthProviderForm } from "./components/AdminAuthProviderForm.js";
+export type { AdminAuthProviderFormProps, ProviderCopyHelp } from "./components/AdminAuthProviderForm.js";
+export { AdminAuthProviderPage } from "./components/AdminAuthProviderPage.js";
+export type { AdminAuthProviderPageProps } from "./components/AdminAuthProviderPage.js";
+export { AdminAuthProviderShell } from "./components/AdminAuthProviderShell.js";
+export type { AdminAuthProviderShellProps } from "./components/AdminAuthProviderShell.js";
 export { AdminBrandLoader } from "./components/AdminBrandLoader.js";
 export { AdminDashboardLayout } from "./components/AdminDashboardLayout.js";
 export { AdminEmailPage, EMAIL_PAGE_TITLE } from "./components/AdminEmailPage.js";
