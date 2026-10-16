@@ -232,7 +232,31 @@ export {
   getLlmConfig,
   listAssistantThreads,
 } from "./contracts/assistant.js";
-export { UnreadNotifications, getUnreadNotifications } from "./contracts/notifications.js";
+export {
+  MarkAllReadResponse,
+  NotificationItem,
+  NotificationList,
+  NotificationListResponse,
+  NotificationPreferences,
+  UnreadNotifications,
+  archiveNotification,
+  getNotificationPreferences,
+  getUnreadNotifications,
+  listNotifications,
+  listNotificationsPage,
+  markAllNotificationsRead,
+  markNotificationRead,
+  markNotificationUnread,
+  snoozeNotification,
+  unarchiveNotification,
+  updateNotificationPreferences,
+} from "./contracts/notifications.js";
+export type {
+  MarkAllReadScope,
+  NotificationListQuery,
+  NotificationPageQuery,
+  NotificationPreferencePatch,
+} from "./contracts/notifications.js";
 export { CycleList, CycleListItem, CycleUpdate, listCycles, updateCycle } from "./contracts/cycles.js";
 export type { CyclePatch } from "./contracts/cycles.js";
 export {

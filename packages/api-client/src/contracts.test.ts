@@ -93,7 +93,19 @@ import { searchWorkspace } from "./contracts/search.js";
 import { getProfile, updateProfile } from "./contracts/profile.js";
 import { listTimezones, updateMyTimezone } from "./contracts/locale.js";
 import { createAssistantThread, getLlmConfig, listAssistantThreads } from "./contracts/assistant.js";
-import { getUnreadNotifications } from "./contracts/notifications.js";
+import {
+  archiveNotification,
+  getNotificationPreferences,
+  getUnreadNotifications,
+  listNotifications,
+  listNotificationsPage,
+  markAllNotificationsRead,
+  markNotificationRead,
+  markNotificationUnread,
+  snoozeNotification,
+  unarchiveNotification,
+  updateNotificationPreferences,
+} from "./contracts/notifications.js";
 import { uploadUserAvatar } from "./contracts/assets.js";
 import { listCycles, updateCycle } from "./contracts/cycles.js";
 import { listModules, updateModule } from "./contracts/modules.js";
@@ -1328,7 +1340,243 @@ describe("notification contracts", () => {
     expect(parsed.total_unread_notifications_count).toBe(3);
     expect(parsed.mention_unread_notifications_count).toBe(1);
   });
+
+  it("encodes the default stream flags and omits mentioned when false", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify([NOTIFICATION_ROW]) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const rows = await listNotifications(client, "acme", { snoozed: false, archived: false, mentioned: false });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe(UUID);
+    const call = transport.calls.find((entry) => entry.init.method === "GET");
+    expect(call?.url).toContain("snoozed=false");
+    expect(call?.url).toContain("archived=false");
+    expect(call?.url).not.toContain("mentioned");
+    expect(call?.url).not.toContain("read=");
+    expect(call?.url).not.toContain("type=");
+  });
+
+  it("encodes the mentions tab, unread-only mode and origin filter", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify([NOTIFICATION_ROW]) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await listNotifications(client, "acme", {
+      type: "assigned,created",
+      snoozed: true,
+      archived: true,
+      read: false,
+      mentioned: true,
+    });
+    const call = transport.calls.find((entry) => entry.init.method === "GET");
+    expect(call?.url).toContain(`type=${encodeURIComponent("assigned,created")}`);
+    expect(call?.url).toContain("snoozed=true");
+    expect(call?.url).toContain("archived=true");
+    expect(call?.url).toContain("read=false");
+    expect(call?.url).toContain("mentioned=true");
+    await listNotifications(client, "acme", { read: true });
+    const readCall = transport.calls.filter((entry) => entry.init.method === "GET").at(-1);
+    expect(readCall?.url).toContain("read=true");
+    expect(readCall?.url).not.toContain("snoozed");
+  });
+
+  it("pages the list with per_page and cursor", async () => {
+    const envelope = {
+      grouped_by: null,
+      sub_grouped_by: null,
+      total_count: 1,
+      next_cursor: "300:1:0",
+      prev_cursor: "300:0:0",
+      next_page_results: false,
+      prev_page_results: false,
+      count: 1,
+      total_results: 1,
+      results: [NOTIFICATION_ROW],
+    };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(envelope) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const page = await listNotificationsPage(client, "acme", {
+      snoozed: false,
+      archived: false,
+      perPage: 300,
+      cursor: "300:0:0",
+    });
+    expect(page.total_count).toBe(1);
+    expect(page.results[0]?.sender).toBe("in_app:issue_activities:subscribed");
+    const call = transport.calls.find((entry) => entry.init.method === "GET");
+    expect(call?.url).toContain("per_page=300");
+    expect(call?.url).toContain(`cursor=${encodeURIComponent("300:0:0")}`);
+  });
+
+  it("parses a mutation echo without stream flags", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      // Explicit undefined legs vanish in JSON, matching the live echo
+      // shape where DRF drops the unresolvable annotation flags.
+      transport: json({
+        ...NOTIFICATION_ROW,
+        read_at: "2026-10-16T12:30:00.000Z",
+        is_inbox_issue: undefined,
+        is_intake_issue: undefined,
+        is_mentioned_notification: undefined,
+      }),
+    });
+    const parsed = await markNotificationRead(client, "acme", UUID);
+    expect(parsed.read_at).toBe("2026-10-16T12:30:00.000Z");
+    expect(parsed.is_mentioned_notification).toBeUndefined();
+  });
+
+  it("rejects a notification row missing its key", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json([{ ...NOTIFICATION_ROW, id: undefined }]),
+    });
+    const error = await listNotifications(client, "acme").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("marks one card read and unread again", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      const read = call.init.method === "POST" ? "2026-10-16T12:30:00.000Z" : null;
+      return fakeResponse({ body: JSON.stringify({ ...NOTIFICATION_ROW, read_at: read }) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const read = await markNotificationRead(client, "acme", UUID);
+    expect(read.read_at).toBe("2026-10-16T12:30:00.000Z");
+    const unread = await markNotificationUnread(client, "acme", UUID);
+    expect(unread.read_at).toBeNull();
+    const urls = transport.calls.map((call) => `${call.init.method} ${call.url}`);
+    expect(urls).toContain(`POST https://api.test/api/workspaces/acme/users/notifications/${UUID}/read/`);
+    expect(urls).toContain(`DELETE https://api.test/api/workspaces/acme/users/notifications/${UUID}/read/`);
+  });
+
+  it("archives one card and returns it to the stream", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      const archived = call.init.method === "POST" ? "2026-10-16T12:30:00.000Z" : null;
+      return fakeResponse({ body: JSON.stringify({ ...NOTIFICATION_ROW, archived_at: archived }) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const archived = await archiveNotification(client, "acme", UUID);
+    expect(archived.archived_at).toBe("2026-10-16T12:30:00.000Z");
+    const restored = await unarchiveNotification(client, "acme", UUID);
+    expect(restored.archived_at).toBeNull();
+  });
+
+  it("snoozes to a resume moment and clears it again", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      const resume = call.init.body === undefined ? null : JSON.parse(call.init.body).snoozed_till;
+      return fakeResponse({ body: JSON.stringify({ ...NOTIFICATION_ROW, snoozed_till: resume }) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const snoozed = await snoozeNotification(client, "acme", UUID, "2026-10-23T09:00:00.000Z");
+    expect(snoozed.snoozed_till).toBe("2026-10-23T09:00:00.000Z");
+    const cleared = await snoozeNotification(client, "acme", UUID, null);
+    expect(cleared.snoozed_till).toBeNull();
+    const patchCalls = transport.calls.filter((call) => call.init.method === "PATCH");
+    expect(patchCalls).toHaveLength(2);
+    expect(patchCalls[0]?.init.body).toBe(JSON.stringify({ snoozed_till: "2026-10-23T09:00:00.000Z" }));
+    expect(patchCalls[1]?.init.body).toBe(JSON.stringify({ snoozed_till: null }));
+  });
+
+  it("marks all in scope read with the scope body", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({ body: JSON.stringify({ message: "Successful" }) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await markAllNotificationsRead(client, "acme", { snoozed: false, archived: false });
+    expect(result).toEqual({ message: "Successful" });
+    const scoped = transport.calls.find((call) => call.init.method === "POST");
+    expect(scoped?.url).toBe("https://api.test/api/workspaces/acme/users/notifications/mark-all-read/");
+    expect(scoped?.init.body).toBe(JSON.stringify({ snoozed: false, archived: false }));
+    await markAllNotificationsRead(client, "acme");
+    const bare = transport.calls.filter((call) => call.init.method === "POST").at(-1);
+    expect(bare?.init.body).toBe(JSON.stringify({}));
+  });
+
+  it("reads and flips one delivery toggle at a time", async () => {
+    let mention = true;
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "PATCH") {
+        const patch = JSON.parse(call.init.body ?? "{}") as { mention?: boolean };
+        if (patch.mention !== undefined) mention = patch.mention;
+      }
+      return fakeResponse({ body: JSON.stringify({ ...NOTIFICATION_PREFS, mention }) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const loaded = await getNotificationPreferences(client);
+    expect(loaded.mention).toBe(true);
+    expect(loaded.issue_completed).toBe(true);
+    const updated = await updateNotificationPreferences(client, { mention: false });
+    expect(updated.mention).toBe(false);
+    expect(updated.property_change).toBe(true);
+    const patchCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patchCall?.url).toBe("https://api.test/api/users/me/notification-preferences/");
+    expect(patchCall?.init.body).toBe(JSON.stringify({ mention: false }));
+  });
 });
+
+const NOTIFICATION_ROW = {
+  id: UUID,
+  workspace: UUID2,
+  project: UUID2,
+  data: { issue: { id: UUID2 } },
+  entity_identifier: UUID2,
+  entity_name: "issue",
+  title: "State changed",
+  message: { text: "moved" },
+  message_html: "<p>moved</p>",
+  message_stripped: "moved",
+  sender: "in_app:issue_activities:subscribed",
+  triggered_by: UUID2,
+  triggered_by_details: {
+    id: UUID2,
+    first_name: "Contract",
+    last_name: "Probe",
+    avatar: "",
+    avatar_url: null,
+    display_name: "Contract Probe",
+    is_bot: false,
+  },
+  receiver: UUID,
+  read_at: null,
+  snoozed_till: null,
+  archived_at: null,
+  is_inbox_issue: false,
+  is_intake_issue: false,
+  is_mentioned_notification: false,
+  created_at: "2026-10-16T12:00:00.000Z",
+  updated_at: "2026-10-16T12:00:00.000Z",
+  created_by: null,
+  updated_by: null,
+};
+
+const NOTIFICATION_PREFS = {
+  id: UUID,
+  user: UUID2,
+  workspace: null,
+  project: null,
+  property_change: true,
+  state_change: true,
+  comment: true,
+  mention: true,
+  issue_completed: true,
+  created_at: "2026-10-16T12:00:00.000Z",
+  updated_at: "2026-10-16T12:00:00.000Z",
+  created_by: null,
+  updated_by: null,
+};
 
 describe("thin entity update contracts", () => {
   it("parses cycle, module and page update echoes", async () => {

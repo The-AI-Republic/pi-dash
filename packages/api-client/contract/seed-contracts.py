@@ -260,6 +260,81 @@ def seed():
         issues.append(issue)
         note("issue", issue.name, issue_created)
 
+    from pi_dash.db.models import Notification, UserNotificationPreference  # noqa: E402
+
+    # Notifications area (NEWFRONT-556): the inbox contract suite walks
+    # one probe row through read/unread, archive/unarchive and
+    # snooze/unsnooze, and flips one preference toggle and back. The
+    # preference row is auto-created by the User post_save signal, so this
+    # only repairs the five-flag baseline; the probe notification is
+    # repaired (not just created) so a dead run self-heals on re-seed.
+    UserNotificationPreference.objects.update_or_create(
+        user=user,
+        defaults={
+            "property_change": True,
+            "state_change": True,
+            "comment": True,
+            "mention": True,
+            "issue_completed": True,
+        },
+    )
+    note("notification-preference", user.email, False)
+
+    probe_notification = (
+        Notification.objects.filter(
+            workspace=workspace,
+            receiver=user,
+            title="Contract notification probe",
+        )
+        .order_by("created_at")
+        .first()
+    )
+    if probe_notification is None:
+        probe_notification = Notification.objects.create(
+            workspace=workspace,
+            project=project,
+            receiver=user,
+            triggered_by=probe,
+            entity_identifier=issues[0].pk,
+            entity_name="issue",
+            sender="in_app:issue_activities:subscribed",
+            title="Contract notification probe",
+            data={
+                "issue": {
+                    "id": str(issues[0].pk),
+                    "name": issues[0].name,
+                    "identifier": project.identifier,
+                    "sequence_id": issues[0].sequence_id,
+                    "state_name": first_state.name,
+                    "state_group": first_state.group,
+                },
+                "issue_activity": {
+                    "verb": "updated",
+                    "field": "state",
+                    "actor": str(probe.pk),
+                    "new_value": first_state.name,
+                    "old_value": "",
+                    "issue_comment": "",
+                    "old_identifier": None,
+                    "new_identifier": None,
+                },
+            },
+            message={"text": "Contract notification probe"},
+        )
+        note("notification", probe_notification.title, True)
+    else:
+        note("notification", probe_notification.title, False)
+    if (
+        probe_notification.read_at is not None
+        or probe_notification.archived_at is not None
+        or probe_notification.snoozed_till is not None
+    ):
+        probe_notification.read_at = None
+        probe_notification.archived_at = None
+        probe_notification.snoozed_till = None
+        probe_notification.save(update_fields=["read_at", "archived_at", "snoozed_till"])
+        note("notification-repaired", probe_notification.title, False)
+
     first_issue = issues[0]
     if label.pk and first_issue.pk:
         from pi_dash.db.models import IssueLabel  # noqa: E402
