@@ -251,6 +251,25 @@ The Pi Dash backend reads two optional environment variables and folds them into
 
 Stable runner releases set `LATEST_RUNNER_VERSION` in Cloud SSM automatically (`RELEASING.md` walks through tagging). Set `MIN_RUNNER_VERSION` manually only when you need to force a floor. Leave both unset to skip the announcement in non-Cloud environments.
 
+## Reconnecting and deleted runners
+
+When a runner can't reach Pi Dash (connection refused, DNS failure, timeout, any 5xx, a proxy error page, or 429), the daemon retries with exponential backoff: 30 s, 1 m, 2 m, … up to a 6-hour cap, with ±20% jitter on every wait so runners don't all reconnect at once. A server outage never removes a runner. `pidash status` shows why a runner is offline and when it will try again:
+
+```
+  laptop — DISCONNECTED project=WEB (server unreachable; next retry in 1h 52m; last connected 3h ago; 9 failed attempts)
+```
+
+These retry immediately and start the backoff over:
+
+- waking the machine from sleep
+- a network change (an interface comes up, a new IP)
+- `pidash reconnect [<runner>]` (all runners when no name is given)
+- `pidash restart`
+
+If a runner was deleted in Pi Dash while the daemon was offline, the server answers `runner_gone`. The daemon removes the runner locally once it gets 10 of those answers in a row over at least 5 minutes: it stops the runner, deletes the runner's data directory and removes its `[[runner]]` block from `config.toml`. The runner's working directory (your checkout) is never touched. While it is confirming, `pidash status` shows `laptop — DELETED in cloud (removing: 4/10)`. Any other answer, including any error, resets the count.
+
+`pidash runner remove` (with or without `--local-only`) stops all of that runner's network activity at once; no restart is needed.
+
 ## Design docs
 
 See `.ai_design/implement_runner/`:

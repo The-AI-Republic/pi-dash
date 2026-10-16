@@ -105,8 +105,17 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runner: Option<String>,
     },
-    /// Force a WS reconnect.
+    /// Legacy reconnect verb: kicks every runner's reconnect, like
+    /// [`Request::Reconnect`] with no selector.
     RunnerReconnect,
+    /// Retry the cloud connection now (`pidash reconnect [<runner>]`):
+    /// cuts the current backoff wait short and starts the backoff schedule
+    /// over. ``runner`` limits it to one runner; omitted = every runner.
+    /// An older daemon rejects this verb as unknown.
+    Reconnect {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runner: Option<String>,
+    },
     /// Deregister + stop.
     RunnerDisconnect,
     /// Local-only runner removal (cloud is **not** contacted).
@@ -376,6 +385,18 @@ pub struct RunnerStatusSnapshot {
     /// means the runner is actively failing to reach the cloud right now.
     #[serde(default)]
     pub consecutive_bootstrap_failures: u32,
+    /// While disconnected: when the daemon will next try to open a session.
+    /// `None` while connected, or from a daemon that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<DateTime<Utc>>,
+    /// While disconnected: short reason the last session-open failed
+    /// (e.g. "server unreachable").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disconnect_reason: Option<String>,
+    /// Consecutive `runner_gone` answers counted toward removing this
+    /// runner locally (it was deleted in the cloud). 0 when not confirming.
+    #[serde(default)]
+    pub cloud_deleted_confirmations: u32,
     /// Per-active-run telemetry. `None` when the daemon isn't running
     /// with `agent_observability_v1` enabled, or when the runner has
     /// never seen a run.
@@ -498,28 +519,7 @@ pub fn version_lt(a: &str, b: &str) -> bool {
 
 impl RunnerStatusSnapshot {
     pub fn print_compact(&self) {
-        let project = self.project_slug.as_deref().unwrap_or("(no project)");
-        if self.connected {
-            println!("  {} — {:?} project={}", self.name, self.status, project);
-        } else {
-            // A configured runner with no live session is the silent-outage
-            // case: the daemon is up and the runner reads `Idle` internally,
-            // but it can't reach the cloud. Print DISCONNECTED loudly with the
-            // failure count and last-connected time so operators see it.
-            let last = match self.last_session_open {
-                Some(ts) => format!("last connected {}", humanize_ago(ts)),
-                None => "never connected".to_string(),
-            };
-            let fails = if self.consecutive_bootstrap_failures > 0 {
-                format!("; {} failed attempts", self.consecutive_bootstrap_failures)
-            } else {
-                String::new()
-            };
-            println!(
-                "  {} — DISCONNECTED project={} ({last}{fails})",
-                self.name, project
-            );
-        }
+        println!("{}", self.compact_line(Utc::now()));
         if let Some(run) = &self.current_run {
             println!(
                 "    current run: {} ({}); events={}",
@@ -531,6 +531,68 @@ impl RunnerStatusSnapshot {
         if self.approvals_pending > 0 {
             println!("    approvals pending: {}", self.approvals_pending);
         }
+    }
+
+    /// The runner's headline line in `pidash status`.
+    pub fn compact_line(&self, now: DateTime<Utc>) -> String {
+        let project = self.project_slug.as_deref().unwrap_or("(no project)");
+        if self.connected {
+            return format!("  {} — {:?} project={}", self.name, self.status, project);
+        }
+        if self.cloud_deleted_confirmations > 0 {
+            // The cloud keeps answering `runner_gone`; the daemon removes
+            // the runner locally once enough answers confirm it.
+            return format!(
+                "  {} — DELETED in cloud (removing: {}/{})",
+                self.name, self.cloud_deleted_confirmations, CLOUD_DELETED_CONFIRMATIONS
+            );
+        }
+        // A configured runner with no live session is the silent-outage
+        // case: the daemon is up and the runner reads `Idle` internally,
+        // but it can't reach the cloud. Print DISCONNECTED loudly with why,
+        // when the next retry is due, the failure count and last-connected
+        // time so operators see it.
+        let mut parts = Vec::new();
+        if let Some(reason) = &self.disconnect_reason {
+            parts.push(reason.clone());
+        }
+        if let Some(at) = self.next_retry_at {
+            parts.push(format!("next retry in {}", humanize_until(at, now)));
+        }
+        parts.push(match self.last_session_open {
+            Some(ts) => format!("last connected {}", humanize_ago(ts)),
+            None => "never connected".to_string(),
+        });
+        if self.consecutive_bootstrap_failures > 0 {
+            parts.push(format!(
+                "{} failed attempts",
+                self.consecutive_bootstrap_failures
+            ));
+        }
+        format!(
+            "  {} — DISCONNECTED project={} ({})",
+            self.name,
+            project,
+            parts.join("; ")
+        )
+    }
+}
+
+/// Confirmations the daemon needs before removing a cloud-deleted runner
+/// locally. Mirrors `runner::cloud::reconnect::GONE_CONFIRMATIONS`.
+pub const CLOUD_DELETED_CONFIRMATIONS: u32 = 10;
+
+/// "1h 52m" / "4m 10s" / "now" until `at`. Display-only.
+fn humanize_until(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (at - now).num_seconds();
+    if secs <= 0 {
+        "now".to_string()
+    } else if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 
@@ -624,6 +686,9 @@ mod tests {
                 last_heartbeat: Some(Utc::now()),
                 last_session_open: Some(Utc::now()),
                 consecutive_bootstrap_failures: 0,
+                next_retry_at: None,
+                disconnect_reason: None,
+                cloud_deleted_confirmations: 0,
                 observability: None,
             }],
         };
@@ -659,6 +724,86 @@ mod tests {
         assert_eq!(snap.consecutive_bootstrap_failures, 0);
     }
 
+    fn disconnected(name: &str) -> RunnerStatusSnapshot {
+        RunnerStatusSnapshot {
+            runner_id: Uuid::new_v4(),
+            name: name.into(),
+            project_slug: Some("WEB".into()),
+            pod_id: None,
+            status: RunnerStatus::Idle,
+            connected: false,
+            current_run: None,
+            approvals_pending: 0,
+            last_heartbeat: None,
+            last_session_open: None,
+            consecutive_bootstrap_failures: 0,
+            next_retry_at: None,
+            disconnect_reason: None,
+            cloud_deleted_confirmations: 0,
+            observability: None,
+        }
+    }
+
+    #[test]
+    fn status_line_shows_reason_and_next_retry_for_disconnected_runner() {
+        let now = Utc::now();
+        let mut snap = disconnected("laptop");
+        snap.disconnect_reason = Some("server unreachable".into());
+        snap.next_retry_at = Some(now + chrono::Duration::seconds(6720 + 5));
+        snap.consecutive_bootstrap_failures = 9;
+        assert_eq!(
+            snap.compact_line(now),
+            "  laptop — DISCONNECTED project=WEB (server unreachable; next retry in 1h 52m; \
+             never connected; 9 failed attempts)"
+        );
+    }
+
+    #[test]
+    fn status_line_shows_deleted_in_cloud_while_confirming() {
+        let mut snap = disconnected("gone");
+        snap.cloud_deleted_confirmations = 3;
+        snap.disconnect_reason = Some("deleted in cloud; confirming 3/10".into());
+        assert_eq!(
+            snap.compact_line(Utc::now()),
+            "  gone — DELETED in cloud (removing: 3/10)"
+        );
+    }
+
+    #[test]
+    fn status_line_for_legacy_snapshot_is_unchanged() {
+        let snap = disconnected("legacy");
+        assert_eq!(
+            snap.compact_line(Utc::now()),
+            "  legacy — DISCONNECTED project=WEB (never connected)"
+        );
+    }
+
+    #[test]
+    fn humanize_until_formats() {
+        let now = Utc::now();
+        let at = |s: i64| now + chrono::Duration::seconds(s);
+        assert_eq!(humanize_until(at(-5), now), "now");
+        assert_eq!(humanize_until(at(42), now), "42s");
+        assert_eq!(humanize_until(at(250), now), "4m 10s");
+        assert_eq!(humanize_until(at(21_600), now), "6h 0m");
+    }
+
+    #[test]
+    fn reconnect_request_wire_shape() {
+        let all = serde_json::to_value(Request::Reconnect { runner: None }).unwrap();
+        assert_eq!(all, serde_json::json!({"method": "reconnect", "params": {}}));
+        let one = serde_json::to_value(Request::Reconnect {
+            runner: Some("r1".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            one,
+            serde_json::json!({"method": "reconnect", "params": {"runner": "r1"}})
+        );
+        let back: Request = serde_json::from_value(one).unwrap();
+        assert!(matches!(back, Request::Reconnect { runner: Some(r) } if r == "r1"));
+    }
+
     #[test]
     fn observability_field_roundtrips() {
         use crate::dto::{ObservabilitySnapshot, TokenUsage};
@@ -681,6 +826,9 @@ mod tests {
                 last_heartbeat: None,
                 last_session_open: Some(Utc::now()),
                 consecutive_bootstrap_failures: 0,
+                next_retry_at: None,
+                disconnect_reason: None,
+                cloud_deleted_confirmations: 0,
                 observability: Some(ObservabilitySnapshot {
                     last_event_at: Some(Utc::now()),
                     last_event_kind: Some("raw".into()),
@@ -764,6 +912,9 @@ mod tests {
                     last_heartbeat: None,
                     last_session_open: None,
                     consecutive_bootstrap_failures: 0,
+                    next_retry_at: None,
+                    disconnect_reason: None,
+                    cloud_deleted_confirmations: 0,
                     observability: None,
                 },
                 RunnerStatusSnapshot {
@@ -778,6 +929,9 @@ mod tests {
                     last_heartbeat: None,
                     last_session_open: None,
                     consecutive_bootstrap_failures: 0,
+                    next_retry_at: None,
+                    disconnect_reason: None,
+                    cloud_deleted_confirmations: 0,
                     observability: None,
                 },
             ],

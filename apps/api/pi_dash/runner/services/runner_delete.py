@@ -54,7 +54,9 @@ def delete_runner(runner: Runner, *, purge_local: bool) -> None:
     ``RunnerSession`` row, after which ``enqueue_for_runner`` would see
     no active session and divert the frame into the offline buffer —
     but the row is then hard-deleted, so future auth attempts return
-    ``runner_not_found`` and the offline buffer never drains. Enqueue
+    ``runner_gone`` and the offline buffer never drains. (A daemon that
+    misses the frame anyway purges the runner locally after enough
+    ``runner_gone`` answers — PDASHOSS01-306.) Enqueue
     while the session is still alive so the daemon's in-flight
     long-poll can drain the frame; revoke + close + delete then run as
     the cleanup tail.

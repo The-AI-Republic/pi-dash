@@ -1,6 +1,7 @@
 pub mod drain_journal;
 pub mod machine_control;
 pub mod observability;
+pub mod reconnect_triggers;
 mod run_event_mirror;
 pub mod runner_instance;
 pub mod runner_out;
