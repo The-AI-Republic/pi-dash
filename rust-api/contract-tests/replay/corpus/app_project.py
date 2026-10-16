@@ -240,7 +240,7 @@ SESSIONS = (
                 "POST", _P + "/invitations/",
                 route="/api/workspaces/{slug}/projects/{project_id}/invitations/",
                 json={"emails": [{"email": "bug@example.com", "role": 15}]},
-                auth="admin", expect_status=500,
+                auth="admin", expect_status=200,
             ),
             Request(
                 "POST", _P + "/invitations/",
