@@ -1037,6 +1037,10 @@ export interface ParityDriver {
   activateProjectQuickMenuItem(name: string): Promise<void>;
   /** Drag one sidebar Favorites entry above another. */
   dragFavoriteBefore(sourceName: string, targetName: string): Promise<void>;
+  /** Drop one sidebar Favorites entry onto a folder to nest it inside. */
+  dragFavoriteIntoFolder(sourceName: string, folderName: string): Promise<void>;
+  /** Drag a nested Favorites entry out onto a top-level row to unnest it. */
+  dragFavoriteOutOfFolder(sourceName: string, targetName: string): Promise<void>;
   /** Open the quick-actions menu of the named Favorites entry or folder. */
   openFavoriteQuickMenu(name: string): Promise<void>;
   /** Item labels of the currently open Favorites quick-actions menu. */

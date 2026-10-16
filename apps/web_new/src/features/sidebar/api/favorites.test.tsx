@@ -3,13 +3,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import type { Favorite, FavoriteList } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import {
+  applyFavoriteParent,
   applyFavoriteSequence,
   compareFavoriteSequence,
   FAVORITE_REMOVED_TITLE,
@@ -17,8 +18,10 @@ import {
   FOLDER_DUPLICATE_TITLE,
   FOLDER_EMPTY_TITLE,
   moveFavoriteToIndex,
+  resolveIntoFolder,
   selectOrderedFavorites,
   selectTopLevelFavorites,
+  sequenceForInsert,
   sequenceForMove,
   useCreateFavoriteFolder,
   useDeleteFavorite,
@@ -27,6 +30,7 @@ import {
   useMoveFavorite,
   useRenameFavoriteFolder,
   validateFolderName,
+  type FavoriteDropSpan,
   type FavoriteMoveInput,
 } from "./favorites.js";
 
@@ -163,6 +167,92 @@ describe("applyFavoriteSequence", () => {
 
   it("passes an empty cache through", () => {
     expect(applyFavoriteSequence(undefined, ENTRY_ID, 999)).toBeUndefined();
+  });
+});
+
+describe("applyFavoriteParent", () => {
+  it("applies the parent to the dragged row only", () => {
+    expect(applyFavoriteParent([FOLDER, ENTRY], ENTRY_ID, FOLDER_ID)).toEqual([
+      FOLDER,
+      { ...ENTRY, parent: FOLDER_ID },
+    ]);
+    expect(applyFavoriteParent([CHILD], CHILD_ID, null)).toEqual([{ ...CHILD, parent: null }]);
+  });
+
+  it("passes an empty cache through", () => {
+    expect(applyFavoriteParent(undefined, ENTRY_ID, FOLDER_ID)).toBeUndefined();
+  });
+});
+
+describe("sequenceForInsert", () => {
+  const ordered = [
+    { id: "a", sequence: 30000 },
+    { id: "b", sequence: 20000 },
+    { id: "c", sequence: 10000 },
+  ];
+
+  it("jumps past the edge neighbor at either end", () => {
+    expect(sequenceForInsert(ordered, 0)).toBe(40000);
+    expect(sequenceForInsert(ordered, 3)).toBe(0);
+  });
+
+  it("lands midway between the new neighbors in the middle", () => {
+    expect(sequenceForInsert(ordered, 1)).toBe(25000);
+    expect(sequenceForInsert(ordered, 2)).toBe(15000);
+  });
+
+  it("clamps slots and starts an empty list a step above zero", () => {
+    expect(sequenceForInsert(ordered, 99)).toBe(0);
+    expect(sequenceForInsert(ordered, -4)).toBe(40000);
+    expect(sequenceForInsert([], 0)).toBe(10000);
+  });
+});
+
+describe("resolveIntoFolder", () => {
+  const folder: FavoriteDropSpan = {
+    id: FOLDER_ID,
+    top: 0,
+    bottom: 100,
+    left: 0,
+    right: 200,
+    isFolder: true,
+    headerTop: 0,
+    headerBottom: 40,
+    headerLeft: 0,
+    headerRight: 200,
+  };
+  const entry: FavoriteDropSpan = {
+    id: ENTRY_ID,
+    top: 100,
+    bottom: 140,
+    left: 0,
+    right: 200,
+    isFolder: false,
+    headerTop: 100,
+    headerBottom: 140,
+    headerLeft: 0,
+    headerRight: 200,
+  };
+
+  it("matches the folder header's middle band", () => {
+    expect(resolveIntoFolder([folder, entry], 100, 20, ENTRY_ID)).toBe(FOLDER_ID);
+  });
+
+  it("ignores plain entries, the dragged row and header edges", () => {
+    expect(resolveIntoFolder([entry], 100, 120, FOLDER_ID)).toBeNull();
+    expect(resolveIntoFolder([folder], 100, 20, FOLDER_ID)).toBeNull();
+    expect(resolveIntoFolder([folder, entry], 100, 2, ENTRY_ID)).toBeNull();
+    expect(resolveIntoFolder([folder, entry], 100, 38, ENTRY_ID)).toBeNull();
+    expect(resolveIntoFolder([folder, entry], 5, 20, ENTRY_ID)).toBeNull();
+    expect(resolveIntoFolder([folder, entry], 195, 20, ENTRY_ID)).toBeNull();
+  });
+
+  it("ignores degenerate headers", () => {
+    const flat = { ...folder, headerTop: 20, headerBottom: 20 };
+    expect(resolveIntoFolder([flat], 100, 20, ENTRY_ID)).toBeNull();
+    const narrow = { ...folder, headerLeft: 100, headerRight: 100 };
+    expect(resolveIntoFolder([narrow], 100, 20, ENTRY_ID)).toBeNull();
+    expect(resolveIntoFolder([], 100, 20, ENTRY_ID)).toBeNull();
   });
 });
 
@@ -351,6 +441,37 @@ describe("favorite hooks", () => {
     await waitFor(() =>
       expect(h.calls.some((call) => call.method === "PATCH" && call.url.includes(CHILD_ID))).toBe(true)
     );
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("nests a row with a parent-only patch", async () => {
+    const h = renderHandle({ list: [FOLDER, ENTRY] });
+    await waitFor(() => expect(h.text()).toBe("success|Pinned:30000,Atlas:20000|success|"));
+    h.move({ favoriteId: ENTRY_ID, groupId: null, parent: FOLDER_ID });
+    await waitFor(() => expect(h.calls.some((call) => call.method === "PATCH")).toBe(true));
+    const patch = h.calls.find((call) => call.method === "PATCH");
+    expect(JSON.parse(patch?.body ?? "{}")).toEqual({ parent: FOLDER_ID });
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("un-nests a row with a parent-plus-sequence patch", async () => {
+    const h = renderHandle({ list: [FOLDER], group: [CHILD] });
+    await waitFor(() => expect(h.text()).toBe("success|Pinned:30000|success|Nested"));
+    h.move({ favoriteId: CHILD_ID, groupId: FOLDER_ID, sequence: 40000, parent: null });
+    await waitFor(() => expect(h.calls.some((call) => call.method === "PATCH")).toBe(true));
+    const patch = h.calls.find((call) => call.method === "PATCH");
+    expect(JSON.parse(patch?.body ?? "{}")).toEqual({ sequence: 40000, parent: null });
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("sends no patch when a move carries neither field", async () => {
+    const h = renderHandle({ list: [FOLDER, ENTRY] });
+    await waitFor(() => expect(h.text()).toBe("success|Pinned:30000,Atlas:20000|success|"));
+    h.move({ favoriteId: ENTRY_ID, groupId: null });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(h.calls.some((call) => call.method === "PATCH")).toBe(false);
     expect(notifyError).not.toHaveBeenCalled();
   });
 
