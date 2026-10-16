@@ -164,6 +164,23 @@ import { cancelRun, commentAndRun, createRun, getRun, listRuns, reTickIssue, run
 import { decideApproval, listApprovals } from "./contracts/approvals.js";
 import { bulkSubscribeIssues, bulkUpdateIssues } from "./contracts/issue-bulk.js";
 import { EpicUserProperties, getEpicUserProperties, updateEpicUserProperties } from "./contracts/issue-prefs.js";
+import {
+  createIssueComment,
+  deleteIssueComment,
+  listIssueComments,
+  updateIssueComment,
+} from "./contracts/issue-comments.js";
+import { listIssueActivities } from "./contracts/issue-activity.js";
+import {
+  createCommentReaction,
+  createIssueReaction,
+  deleteCommentReaction,
+  deleteIssueReaction,
+  listCommentReactions,
+  listIssueReactions,
+} from "./contracts/issue-reactions.js";
+import { getIssueByIdentifier, getIssueMeta } from "./contracts/issue-identity.js";
+import { createLabel, deleteLabel, getIntakeState, updateLabel } from "./contracts/reference.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const UUID2 = "223e4567-e89b-12d3-a456-426614174001";
@@ -1658,7 +1675,9 @@ describe("thin contextual palette contracts", () => {
   });
 
   it("lists cycles, modules and estimates for the pickers", async () => {
-    const cycles = [{ id: UUID, project_id: UUID2, name: "Sprint 1", is_favorite: false, total_issues: 3 }];
+    const cycles = [
+      { id: UUID, project_id: UUID2, name: "Sprint 1", is_favorite: false, status: "ACTIVE", total_issues: 3 },
+    ];
     const modules = [
       { id: UUID, project_id: UUID2, name: "Auth", status: "backlog", is_favorite: true, total_issues: 1 },
     ];
@@ -1680,7 +1699,9 @@ describe("thin contextual palette contracts", () => {
       ),
     }));
     const listedCycles = await listCycles(client, "acme", UUID2);
-    expect(listedCycles).toEqual([{ id: UUID, project_id: UUID2, name: "Sprint 1", is_favorite: false }]);
+    expect(listedCycles).toEqual([
+      { id: UUID, project_id: UUID2, name: "Sprint 1", is_favorite: false, status: "ACTIVE" },
+    ]);
     const listedModules = await listModules(client, "acme", UUID2);
     expect(listedModules).toEqual([
       { id: UUID, project_id: UUID2, name: "Auth", status: "backlog", is_favorite: true },
@@ -3694,5 +3715,359 @@ describe("cloud-only issues contracts", () => {
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).code).toBe("contract");
     expect(EpicUserProperties).toBeDefined();
+  });
+});
+
+describe("issue comment contracts", () => {
+  const actor = {
+    id: UUID,
+    first_name: "Contract",
+    last_name: "Tester",
+    avatar: "",
+    avatar_url: null,
+    display_name: "contract.tester",
+    is_bot: false,
+  };
+  const comment = {
+    id: UUID,
+    issue: UUID2,
+    project: UUID2,
+    workspace: UUID2,
+    actor: UUID,
+    actor_detail: actor,
+    comment_html: "<p>Hello</p>",
+    comment_stripped: "Hello",
+    comment_json: {},
+    attachments: [],
+    labels: [],
+    access: "INTERNAL",
+    edited_at: null,
+    comment_reactions: [],
+    speaker_type: "human",
+    speaker_label: "",
+    speaker_agent_run_id: null,
+    parent: null,
+    external_source: null,
+    external_id: null,
+    is_synced: false,
+    description: UUID2,
+    created_at: "2026-10-16T22:00:00Z",
+    updated_at: "2026-10-16T22:00:00Z",
+    created_by: UUID,
+    updated_by: UUID,
+    deleted_at: null,
+  };
+
+  it("lists comments through the history endpoint", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify([comment]) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const listed = await listIssueComments(client, "acme", UUID2, UUID, { createdAfter: "2026-01-01T00:00:00Z" });
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.comment_stripped).toBe("Hello");
+    const url = transport.calls[0]?.url ?? "";
+    expect(url).toContain(`/issues/${UUID}/history/`);
+    expect(url).toContain("activity_type=issue-comment");
+    expect(url).toContain("created_at__gt=2026-01-01T00%3A00%3A00Z");
+  });
+
+  it("creates a comment and parses the created row", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 201, body: JSON.stringify(comment) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await createIssueComment(client, "acme", UUID2, UUID, {
+      comment_html: "<p>Hello</p>",
+      access: "INTERNAL",
+    });
+    expect(parsed.id).toBe(UUID);
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/comments/`);
+    expect(postCall?.init.body).toBe(JSON.stringify({ comment_html: "<p>Hello</p>", access: "INTERNAL" }));
+  });
+
+  it("patches the body, access and fold labels", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({
+            body: JSON.stringify({ ...comment, access: "EXTERNAL", labels: ["fold"], edited_at: null }),
+          })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await updateIssueComment(client, "acme", UUID2, UUID, UUID, {
+      access: "EXTERNAL",
+      labels: ["fold"],
+    });
+    expect(parsed.access).toBe("EXTERNAL");
+    expect(parsed.labels).toEqual(["fold"]);
+    const patchCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patchCall?.url).toBe(
+      `https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/comments/${UUID}/`
+    );
+  });
+
+  it("deletes a comment (204)", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 204, body: "" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteIssueComment(client, "acme", UUID2, UUID, UUID)).resolves.toBeUndefined();
+    const deleteCall = transport.calls.find((call) => call.init.method === "DELETE");
+    expect(deleteCall?.url).toBe(
+      `https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/comments/${UUID}/`
+    );
+  });
+
+  it("rejects a comment without an id", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...comment, id: "nope" }]) });
+    const error = await listIssueComments(client, "acme", UUID2, UUID).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
+describe("issue activity contract", () => {
+  const activity = {
+    id: UUID,
+    issue: UUID2,
+    project: UUID2,
+    workspace: UUID2,
+    actor: UUID,
+    actor_detail: {
+      id: UUID,
+      first_name: "Contract",
+      last_name: "Tester",
+      avatar: "",
+      avatar_url: null,
+      display_name: "contract.tester",
+      is_bot: false,
+    },
+    verb: "updated",
+    field: "state",
+    old_value: "Triage",
+    new_value: "In Progress",
+    comment: "",
+    attachments: [],
+    issue_comment: null,
+    old_identifier: null,
+    new_identifier: null,
+    epoch: 1729000000.5,
+    source_data: null,
+    created_at: "2026-10-16T22:00:00Z",
+    updated_at: "2026-10-16T22:00:00Z",
+    created_by: null,
+    updated_by: null,
+    deleted_at: null,
+  };
+
+  it("lists activities with the issue-property type", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify([activity]) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const listed = await listIssueActivities(client, "acme", UUID2, UUID);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.new_value).toBe("In Progress");
+    expect(transport.calls[0]?.url).toContain("activity_type=issue-property");
+  });
+});
+
+describe("issue reaction contracts", () => {
+  const issueReaction = {
+    id: UUID,
+    actor: UUID2,
+    actor_detail: {
+      id: UUID2,
+      first_name: "Contract",
+      last_name: "Probe",
+      avatar: "",
+      avatar_url: null,
+      display_name: "contract.probe",
+      is_bot: false,
+    },
+    issue: UUID,
+    reaction: "thumbsup",
+    project: UUID2,
+    workspace: UUID2,
+    created_at: "2026-10-16T22:00:00Z",
+    updated_at: "2026-10-16T22:00:00Z",
+    created_by: UUID2,
+    updated_by: null,
+    deleted_at: null,
+  };
+  const commentReaction = {
+    id: UUID,
+    actor: UUID2,
+    comment: UUID,
+    reaction: "heart",
+    display_name: "contract.probe",
+    project: UUID2,
+    workspace: UUID2,
+    created_at: "2026-10-16T22:00:00Z",
+    updated_at: "2026-10-16T22:00:00Z",
+    created_by: UUID2,
+    updated_by: null,
+    deleted_at: null,
+  };
+  function writesTransport(body: unknown, status = 201) {
+    return recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status, body: status === 204 ? "" : JSON.stringify(body) })
+    );
+  }
+
+  it("lists, creates and deletes issue reactions", async () => {
+    const listClient = createClient({ baseUrl: "https://api.test", transport: json([issueReaction]) });
+    const listed = await listIssueReactions(listClient, "acme", UUID2, UUID);
+    expect(listed[0]?.reaction).toBe("thumbsup");
+
+    const transport = writesTransport(issueReaction);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const created = await createIssueReaction(client, "acme", UUID2, UUID, "thumbsup");
+    expect(created.id).toBe(UUID);
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/reactions/`);
+    expect(postCall?.init.body).toBe(JSON.stringify({ reaction: "thumbsup" }));
+
+    const deleteTransport = writesTransport(null, 204);
+    const deleteClient = createClient({ baseUrl: "https://api.test", transport: deleteTransport });
+    await expect(deleteIssueReaction(deleteClient, "acme", UUID2, UUID, "thumbsup")).resolves.toBeUndefined();
+    const deleteCall = deleteTransport.calls.find((call) => call.init.method === "DELETE");
+    expect(deleteCall?.url).toBe(
+      `https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/reactions/thumbsup/`
+    );
+  });
+
+  it("lists, creates and deletes comment reactions", async () => {
+    const listClient = createClient({ baseUrl: "https://api.test", transport: json([commentReaction]) });
+    const listed = await listCommentReactions(listClient, "acme", UUID2, UUID);
+    expect(listed[0]?.display_name).toBe("contract.probe");
+
+    const transport = writesTransport(commentReaction);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const created = await createCommentReaction(client, "acme", UUID2, UUID, "heart");
+    expect(created.id).toBe(UUID);
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/comments/${UUID}/reactions/`);
+
+    const deleteTransport = writesTransport(null, 204);
+    const deleteClient = createClient({ baseUrl: "https://api.test", transport: deleteTransport });
+    await expect(deleteCommentReaction(deleteClient, "acme", UUID2, UUID, "heart")).resolves.toBeUndefined();
+    const deleteCall = deleteTransport.calls.find((call) => call.init.method === "DELETE");
+    expect(deleteCall?.url).toBe(
+      `https://api.test/api/workspaces/acme/projects/${UUID2}/comments/${UUID}/reactions/heart/`
+    );
+  });
+});
+
+describe("issue label contracts", () => {
+  const label = {
+    parent: null,
+    name: "Bug",
+    color: "#e11d48",
+    id: UUID,
+    project_id: UUID2,
+    workspace_id: UUID2,
+    sort_order: 75535.0,
+  };
+  function writesTransport(body: unknown, status = 201) {
+    return recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status, body: status === 204 ? "" : JSON.stringify(body) })
+    );
+  }
+
+  it("creates, patches and deletes a label", async () => {
+    const createTransport = writesTransport(label);
+    const creatingClient = createClient({ baseUrl: "https://api.test", transport: createTransport });
+    const created = await createLabel(creatingClient, "acme", UUID2, { name: "Bug", color: "#e11d48" });
+    expect(created.id).toBe(UUID);
+    const postCall = createTransport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/issue-labels/`);
+    expect(postCall?.init.body).toBe(JSON.stringify({ name: "Bug", color: "#e11d48" }));
+
+    const patchTransport = writesTransport({ ...label, color: "#0000ff", sort_order: 12.5 }, 200);
+    const patchClient = createClient({ baseUrl: "https://api.test", transport: patchTransport });
+    const patched = await updateLabel(patchClient, "acme", UUID2, UUID, { color: "#0000ff", sort_order: 12.5 });
+    expect(patched.sort_order).toBe(12.5);
+    const patchCall = patchTransport.calls.find((call) => call.init.method === "PATCH");
+    expect(patchCall?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/issue-labels/${UUID}/`);
+
+    const deleteTransport = writesTransport(null, 204);
+    const deleteClient = createClient({ baseUrl: "https://api.test", transport: deleteTransport });
+    await expect(deleteLabel(deleteClient, "acme", UUID2, UUID)).resolves.toBeUndefined();
+  });
+});
+
+describe("issue identity and dropdown-read contracts", () => {
+  it("reads the intake state, meta, lite row and pods", async () => {
+    const state = {
+      id: UUID,
+      project_id: UUID2,
+      workspace_id: UUID2,
+      name: "Triage",
+      color: "#4E5355",
+      group: "triage",
+      default: false,
+      description: "",
+      sequence: 120000.0,
+    };
+    const stateClient = createClient({ baseUrl: "https://api.test", transport: json(state) });
+    const parsed = await getIntakeState(stateClient, "acme", UUID2);
+    expect(parsed.group).toBe("triage");
+
+    const metaClient = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ sequence_id: 7, project_identifier: "CT" }),
+    });
+    const meta = await getIssueMeta(metaClient, "acme", UUID2, UUID);
+    expect(meta.sequence_id).toBe(7);
+
+    const lite = {
+      id: UUID,
+      sequence_id: 7,
+      name: "One",
+      description_html: "<p></p>",
+      sort_order: 10000.0,
+      project_id: UUID2,
+      created_at: "2026-10-16T22:00:00Z",
+      updated_at: "2026-10-16T22:00:00Z",
+      created_by: null,
+      updated_by: null,
+      is_draft: false,
+      is_epic: false,
+      is_intake: false,
+      is_synced: false,
+      archived_at: null,
+    };
+    const liteTransport = recordingTransport(() => fakeResponse({ body: JSON.stringify(lite) }));
+    const liteClient = createClient({ baseUrl: "https://api.test", transport: liteTransport });
+    const liteRow = await getIssueByIdentifier(liteClient, "acme", "CT", 7);
+    expect(liteRow.id).toBe(UUID);
+    expect(liteTransport.calls[0]?.url).toBe("https://api.test/api/workspaces/acme/work-items/CT-7/?lite=true");
+
+    const pods = [
+      {
+        id: UUID,
+        name: "CT_pod_1",
+        description: "Auto-created default pod.",
+        is_default: true,
+        workspace: UUID2,
+        project: UUID2,
+        project_identifier: "CT",
+        created_by: null,
+        runner_count: 0,
+        created_at: "2026-10-16T22:00:00Z",
+        updated_at: "2026-10-16T22:00:00Z",
+      },
+    ];
+    const podTransport = recordingTransport(() => fakeResponse({ body: JSON.stringify(pods) }));
+    const podClient = createClient({ baseUrl: "https://api.test", transport: podTransport });
+    const listed = await listPods(podClient, { projectId: UUID2 });
+    expect(listed[0]?.is_default).toBe(true);
+    expect(podTransport.calls[0]?.url).toBe(`https://api.test/api/runners/pods/?project=${UUID2}`);
   });
 });

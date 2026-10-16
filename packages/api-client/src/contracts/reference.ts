@@ -58,6 +58,69 @@ export async function listLabels(client: ApiClient, slug: string, projectId: str
   return client.parse(LabelList, body, "GET issue-labels");
 }
 
+export interface LabelCreate {
+  name: string;
+  color: string;
+  parent?: string | null;
+}
+
+/**
+ * Label create for the issues area: the settings form and the picker's
+ * inline admin create. Admin-only; duplicate names answer 400. Fresh
+ * labels take large incremental sort orders from the server.
+ */
+export async function createLabel(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  input: LabelCreate
+): Promise<Label> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/issue-labels/`;
+  const envelope = await client.sendJson<unknown>("POST", path, { json: input });
+  return client.parse(Label, envelope.data, `POST ${path}`);
+}
+
+export interface LabelPatch {
+  name?: string;
+  color?: string;
+  parent?: string | null;
+  sort_order?: number;
+}
+
+/**
+ * Label update: rename/recolor from the settings form, parent plus
+ * fractional sort-order writes from drag group/reorder. Passing parent
+ * null ungroups back to top level.
+ */
+export async function updateLabel(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  labelId: string,
+  input: LabelPatch
+): Promise<Label> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/issue-labels/${labelId}/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: input });
+  return client.parse(Label, envelope.data, `PATCH ${path}`);
+}
+
+/**
+ * Label delete: cascades the label off every work item carrying it.
+ * Admin-only like the other label writes.
+ */
+export async function deleteLabel(client: ApiClient, slug: string, projectId: string, labelId: string): Promise<void> {
+  await client.delete(`/api/workspaces/${slug}/projects/${projectId}/issue-labels/${labelId}/`);
+}
+
+/**
+ * The project's single intake (triage) state for the intake-state
+ * picker. Answers 404 when the project has no triage state.
+ */
+export async function getIntakeState(client: ApiClient, slug: string, projectId: string): Promise<State> {
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/intake-state/`);
+  return client.parse(State, body, `GET intake-state ${projectId}`);
+}
+
 /**
  * Project member list row. The endpoint answers the role projection — the
  * member and project ride along as bare ids, not nested objects.
