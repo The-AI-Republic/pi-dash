@@ -599,6 +599,7 @@ describe("auth contracts", () => {
       is_smtp_configured: true,
       is_self_managed: true,
       instance_changelog_url: "",
+      file_size_limit: 5242880,
     });
   });
 
@@ -2690,6 +2691,7 @@ const BOOTSTRAP_CONFIG = {
   is_smtp_configured: true,
   is_self_managed: true,
   instance_changelog_url: "",
+  file_size_limit: 5242880,
 };
 
 const INSTANCE_ROW = {

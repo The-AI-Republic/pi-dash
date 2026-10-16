@@ -745,6 +745,128 @@ def seed():
     else:
         note("approval", str(approval.pk), False)
 
+    # Issues detail widgets (NEWFRONT-612): a sub-issue tree for the
+    # children list/rollup contracts, an agent probe for the
+    # agent-status read contract, and a description version for the
+    # version-history contracts. Relations, links, attachments, drafts
+    # and code reviews round-trip through the API in the suites, so
+    # they need no rows here. Run-level writes (dispatch, cancel,
+    # re-tick) seed in the runners area block above.
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker  # noqa: E402
+    from pi_dash.db.models.issue import IssueDescriptionVersion  # noqa: E402
+    from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod  # noqa: E402
+
+    parent_issue, parent_created = Issue.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract sub-issue parent",
+        defaults={
+            "state": first_state,
+            "priority": "medium",
+            "created_by": user,
+            "updated_by": user,
+        },
+    )
+    note("issue", parent_issue.name, parent_created)
+
+    # A second state group keeps the state_distribution rollup honest.
+    child_states = [first_state, states[1] if len(states) > 1 else first_state]
+    child_issues = []
+    for child_name, child_state in (
+        ("Contract sub-issue child A", child_states[0]),
+        ("Contract sub-issue child B", child_states[1]),
+    ):
+        child, child_created = Issue.objects.get_or_create(
+            workspace=workspace,
+            project=project,
+            name=child_name,
+            defaults={
+                "state": child_state,
+                "priority": "medium",
+                "created_by": user,
+                "updated_by": user,
+            },
+        )
+        if child.parent_id != parent_issue.pk or child.state_id != child_state.pk:
+            child.parent = parent_issue
+            child.state = child_state
+            child.save(update_fields=["parent", "state"])
+        child_issues.append(child)
+        note("issue", child.name, child_created)
+
+    grandchild, grandchild_created = Issue.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract sub-issue grandchild",
+        defaults={
+            "state": first_state,
+            "priority": "low",
+            "created_by": user,
+            "updated_by": user,
+        },
+    )
+    if grandchild.parent_id != child_issues[0].pk:
+        grandchild.parent = child_issues[0]
+        grandchild.save(update_fields=["parent"])
+    note("issue", grandchild.name, grandchild_created)
+
+    # Agent-status probe: a ticker plus one finished run carrying token
+    # usage. The ticker pool is fresh (used 0 of 10).
+    agent_issue, agent_created = Issue.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract agent probe",
+        defaults={
+            "state": first_state,
+            "priority": "medium",
+            "created_by": user,
+            "updated_by": user,
+        },
+    )
+    note("issue", agent_issue.name, agent_created)
+
+    ticker, ticker_created = IssueAgentTicker.objects.get_or_create(issue=agent_issue)
+    note("agent-ticker", agent_issue.name, ticker_created)
+
+    pod = Pod.objects.filter(project=project, is_default=True, deleted_at__isnull=True).first()
+    if pod is None:
+        pod = Pod.objects.create(
+            workspace=workspace, project=project, name="Contract default pod", is_default=True
+        )
+        note("pod", pod.name, True)
+    else:
+        note("pod", pod.name, False)
+
+    finished_run = AgentRun.objects.filter(work_item=agent_issue).order_by("created_at").first()
+    if finished_run is None:
+        finished_run = AgentRun.objects.create(
+            workspace=workspace,
+            created_by=user,
+            pod=pod,
+            work_item=agent_issue,
+            status=AgentRunStatus.COMPLETED,
+            usage={"input": 1200, "output": 340, "total": 1540},
+            llm_model="contract-model",
+        )
+        note("agent-run", f"{agent_issue.name}/completed", True)
+    else:
+        note("agent-run", f"{agent_issue.name}/completed", False)
+
+    version, version_created = IssueDescriptionVersion.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        issue=first_issue,
+        owned_by=user,
+        description_html="<p>Contract version probe</p>",
+        defaults={
+            "description_stripped": "Contract version probe",
+            "description_json": {},
+            "created_by": user,
+            "updated_by": user,
+        },
+    )
+    note("description-version", f"{first_issue.name}", version_created)
+
     return {
         "email": user.email,
         "workspace_slug": workspace.slug,

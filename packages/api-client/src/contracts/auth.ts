@@ -30,8 +30,10 @@ export async function deactivateAccount(client: ApiClient): Promise<number> {
  * Instance flags the auth cards read: sign-up and workspace-creation
  * gates, enabled providers, the email login methods, the mail posture,
  * and the self-managed marker — plus the configured changelog page the
- * help menu's updates dialog embeds (empty when unconfigured). The
- * payload carries more; the areas read these.
+ * help menu's updates dialog embeds (empty when unconfigured), and the
+ * file-size ceiling in bytes the attachment dropzones enforce (the
+ * server default is five megabytes; readers fall back to it when the
+ * key is absent). The payload carries more; the areas read these.
  */
 export const InstanceConfig = z.object({
   enable_signup: z.boolean(),
@@ -45,6 +47,7 @@ export const InstanceConfig = z.object({
   is_smtp_configured: z.boolean(),
   is_self_managed: z.boolean(),
   instance_changelog_url: z.string(),
+  file_size_limit: z.optional(z.number()),
 });
 export type InstanceConfig = z.infer<typeof InstanceConfig>;
 

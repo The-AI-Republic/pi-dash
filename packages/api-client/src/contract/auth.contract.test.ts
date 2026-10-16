@@ -207,11 +207,13 @@ describe.skipIf(!contractEnabled)("deactivation contract", () => {
 describe.skipIf(!contractEnabled)("instance config contract", () => {
   it("reads the auth flags", async () => {
     const config = await getInstanceConfig(contractClient());
-    expect(Object.keys(config)).toHaveLength(11);
+    expect(Object.keys(config)).toHaveLength(12);
     for (const [key, value] of Object.entries(config)) {
-      expect(typeof value, key).toBe(key === "instance_changelog_url" ? "string" : "boolean");
+      const expected = key === "instance_changelog_url" ? "string" : key === "file_size_limit" ? "number" : "boolean";
+      expect(typeof value, key).toBe(expected);
     }
     expect(config.is_smtp_configured).toBe(true);
     expect(config.is_email_password_enabled).toBe(true);
+    expect(config.file_size_limit).toBeGreaterThan(0);
   });
 });
