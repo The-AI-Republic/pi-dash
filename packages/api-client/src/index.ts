@@ -334,16 +334,35 @@ export {
 export type { FavoriteCreate, FavoritePatch, SidebarPreferencePatch } from "./contracts/sidebar.js";
 export { SEARCH_ENTITIES, SearchResults, searchWorkspace } from "./contracts/search.js";
 export type { SearchEntity, WorkspaceSearchQuery } from "./contracts/search.js";
-export { Profile, getProfile, updateProfile } from "./contracts/profile.js";
+export { OpenhubAppSettings, Profile, agentToolsEnabled, getProfile, updateProfile } from "./contracts/profile.js";
 export type { ProfilePatch } from "./contracts/profile.js";
 export { MeTimezone, TimezoneEntry, TimezoneList, listTimezones, updateMyTimezone } from "./contracts/locale.js";
 export {
+  ASSISTANT_CONNECTION_KINDS,
+  CREDENTIAL_LANES,
+  OPENAI_LOGIN_STATUSES,
+  AssistantConnection,
+  AssistantConnectionList,
+  AssistantConnectionListItem,
   AssistantThread,
   AssistantThreadList,
   LlmConfig,
+  LlmConfigTestResult,
+  OpenAILoginStart,
+  OpenAILoginStatus,
+  createAssistantConnection,
   createAssistantThread,
+  deleteAssistantConnection,
+  disconnectAssistantConnection,
   getLlmConfig,
+  getOpenAILoginStatus,
+  listAssistantConnections,
   listAssistantThreads,
+  resolveCredentialLane,
+  selectAssistantConnection,
+  startOpenAILogin,
+  testLlmConfig,
+  updateConnectionModel,
 } from "./contracts/assistant.js";
 export {
   MarkAllReadResponse,
@@ -379,6 +398,38 @@ export {
   transferCycleIssues,
   updateCycle,
 } from "./contracts/cycles.js";
+export type {
+  AssistantConnectionKind,
+  AssistantConnectionCreateInput,
+  CredentialLane,
+  OpenAILoginStatusValue,
+} from "./contracts/assistant.js";
+export {
+  OpenhubActivationResult,
+  OpenhubApiKeyResult,
+  OpenhubApp,
+  OpenhubAppManifest,
+  OpenhubAuthStatus,
+  OpenhubCredentialField,
+  OpenhubInstallResult,
+  OpenhubManualSetup,
+  OpenhubMarketplacePage,
+  OpenhubOAuthStart,
+  OpenhubStatus,
+  appIconUrl,
+  appOAuthBeginUrl,
+  getAppAuthStatus,
+  getAppManifest,
+  getOpenhubStatus,
+  installApp,
+  listInstalledApps,
+  listMarketplaceApps,
+  setAppActivation,
+  startAppOAuth,
+  submitAppApiKey,
+  uninstallApp,
+} from "./contracts/openhub.js";
+export type { AppApiKeyInput, MarketplaceQuery } from "./contracts/openhub.js";
 export type { CyclePatch } from "./contracts/cycles.js";
 export {
   MODULE_STATUSES,

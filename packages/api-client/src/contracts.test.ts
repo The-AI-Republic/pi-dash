@@ -104,9 +104,37 @@ import {
   updateSidebarPreferences,
 } from "./contracts/sidebar.js";
 import { searchWorkspace } from "./contracts/search.js";
-import { getProfile, updateProfile } from "./contracts/profile.js";
+import { agentToolsEnabled, getProfile, OpenhubAppSettings, updateProfile } from "./contracts/profile.js";
 import { listTimezones, updateMyTimezone } from "./contracts/locale.js";
-import { createAssistantThread, getLlmConfig, listAssistantThreads } from "./contracts/assistant.js";
+import {
+  createAssistantConnection,
+  createAssistantThread,
+  deleteAssistantConnection,
+  disconnectAssistantConnection,
+  getLlmConfig,
+  getOpenAILoginStatus,
+  listAssistantConnections,
+  listAssistantThreads,
+  resolveCredentialLane,
+  selectAssistantConnection,
+  startOpenAILogin,
+  testLlmConfig,
+  updateConnectionModel,
+} from "./contracts/assistant.js";
+import {
+  appIconUrl,
+  appOAuthBeginUrl,
+  getAppAuthStatus,
+  getAppManifest,
+  getOpenhubStatus,
+  installApp,
+  listInstalledApps,
+  listMarketplaceApps,
+  setAppActivation,
+  startAppOAuth,
+  submitAppApiKey,
+  uninstallApp,
+} from "./contracts/openhub.js";
 import {
   archiveNotification,
   getNotificationPreferences,
@@ -4724,5 +4752,572 @@ describe("cloud billing plan contracts", () => {
     });
     const error = await getCloudBillingPlan(client).catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("contract");
+  });
+});
+
+describe("openhub contracts", () => {
+  const app = {
+    appId: "app-notes",
+    slug: "notes",
+    name: "Notes Pro",
+    description: "Notes Pro description",
+    authType: "none",
+    isInstalled: false,
+    suggestedAction: "install",
+  };
+
+  function unsafeStub(answer: unknown) {
+    return recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ body: JSON.stringify(answer) })
+    );
+  }
+
+  it("parses the connected catalog status", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        connected: true,
+        has_gateway_scopes: true,
+        hub_url: "https://hub.example.com",
+        wallet_url: "https://hub.example.com/account/credits",
+        scopes: ["chat", "apps"],
+        credential_type: "oidc",
+      }),
+    });
+    const status = await getOpenhubStatus(client);
+    expect(status.connected).toBe(true);
+    expect(status.hub_url).toBe("https://hub.example.com");
+    expect(status.scopes).toEqual(["chat", "apps"]);
+  });
+
+  it("parses the disconnected status with its server detail", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        connected: false,
+        has_gateway_scopes: false,
+        hub_url: "https://hub.example.com",
+        error: "openhub_reauth_required",
+        detail: "Sign out and back in.",
+      }),
+    });
+    const status = await getOpenhubStatus(client);
+    expect(status.connected).toBe(false);
+    expect(status.has_gateway_scopes).toBe(false);
+    expect(status.detail).toBe("Sign out and back in.");
+    expect(status.scopes).toBeUndefined();
+  });
+
+  it("rejects a status answer without the gate fields", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json({ connected: true }) });
+    const error = await getOpenhubStatus(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("reads the marketplace with no params by default", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ body: JSON.stringify({ items: [app], nextCursor: null, totalCount: 1 }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const page = await listMarketplaceApps(client);
+    expect(page.items).toHaveLength(1);
+    expect(page.nextCursor).toBeNull();
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe("https://api.test/api/openhub/apps/marketplace/");
+    expect(url.search).toBe("");
+  });
+
+  it("passes the search query, cursor, limit and kind through", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ body: JSON.stringify({ items: [], nextCursor: "cursor-2" }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const page = await listMarketplaceApps(client, { q: "notes", cursor: "cursor-1", limit: 24, resourceKind: "app" });
+    expect(page.nextCursor).toBe("cursor-2");
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.searchParams.get("q")).toBe("notes");
+    expect(url.searchParams.get("cursor")).toBe("cursor-1");
+    expect(url.searchParams.get("limit")).toBe("24");
+    expect(url.searchParams.get("resourceKind")).toBe("app");
+  });
+
+  it("rejects a catalog page with a shapeless row", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ items: [{ slug: "nameless" }], nextCursor: null }),
+    });
+    const error = await listMarketplaceApps(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("reads the caller's own installations", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ body: JSON.stringify({ items: [{ ...app, isInstalled: true }], nextCursor: null }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const page = await listInstalledApps(client);
+    expect(page.items[0]?.isInstalled).toBe(true);
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/openhub/apps/installations/");
+  });
+
+  it("reads an app manifest and encodes the app id", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ body: JSON.stringify({ version: "3", tools: ["search"] }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const manifest = await getAppManifest(client, "com.linear/linear");
+    expect(manifest).toEqual({ version: "3", tools: ["search"] });
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/openhub/apps/com.linear%2Flinear/manifest/");
+  });
+
+  it("rejects a manifest that is not an object", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json(["nope"]) });
+    const error = await getAppManifest(client, "app-notes").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("installs with an empty body and uninstalls via DELETE", async () => {
+    const transport = unsafeStub({ installed: true });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const installed = await installApp(client, "app-notes");
+    expect(installed.installed).toBe(true);
+    const removed = await uninstallApp(client, "app-notes");
+    expect(removed.installed).toBe(true);
+    const post = transport.calls.find((call) => call.init.method === "POST");
+    expect(post?.url).toBe("https://api.test/api/openhub/apps/app-notes/install/");
+    expect(post?.init.body).toBe("{}");
+    const deleted = transport.calls.find((call) => call.init.method === "DELETE");
+    expect(deleted?.url).toBe("https://api.test/api/openhub/apps/app-notes/install/");
+  });
+
+  it("toggles activation with the flag in the body", async () => {
+    const transport = unsafeStub({ active: true });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await setAppActivation(client, "app-notes", true);
+    await setAppActivation(client, "app-notes", false);
+    const posts = transport.calls.filter((call) => call.init.method === "POST");
+    expect(posts).toHaveLength(2);
+    expect(posts[0]?.url).toBe("https://api.test/api/openhub/apps/app-notes/activation/");
+    expect(posts[0]?.init.body).toBe(JSON.stringify({ activate: true }));
+    expect(posts[1]?.init.body).toBe(JSON.stringify({ activate: false }));
+  });
+
+  it("parses auth status with its key-setup manifest", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        type: "api_key",
+        status: "needs_auth",
+        manualSetup: {
+          setupUrl: "https://crm.example.com/keys",
+          instructions_md: "Paste your key.",
+          fields: [{ key: "api_key", label: "API key", type: "secret", placeholder: "sk-..." }],
+        },
+      }),
+    });
+    const status = await getAppAuthStatus(client, "app-manual");
+    expect(status.type).toBe("api_key");
+    expect(status.manualSetup?.fields).toHaveLength(1);
+  });
+
+  it("parses auth status without a manifest", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ type: "none", status: "active" }),
+    });
+    const status = await getAppAuthStatus(client, "app-plain");
+    expect(status.manualSetup).toBeUndefined();
+  });
+
+  it("rejects auth status without its state fields", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json({ type: "none" }) });
+    const error = await getAppAuthStatus(client, "app-plain").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("starts OAuth with the return path in the body", async () => {
+    const transport = unsafeStub({ authorizationUrl: "https://provider.example.com/authorize" });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const started = await startAppOAuth(client, "app-oauth", "/acme/apps");
+    expect(started.authorizationUrl).toBe("https://provider.example.com/authorize");
+    const post = transport.calls.find((call) => call.init.method === "POST");
+    expect(post?.url).toBe("https://api.test/api/openhub/apps/app-oauth/auth/oauth/start/");
+    expect(post?.init.body).toBe(JSON.stringify({ return_path: "/acme/apps" }));
+  });
+
+  it("starts OAuth without a return path when none is given", async () => {
+    const transport = unsafeStub({ authorizationUrl: "https://provider.example.com/authorize" });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await startAppOAuth(client, "app-oauth");
+    const post = transport.calls.find((call) => call.init.method === "POST");
+    expect(post?.init.body).toBe("{}");
+  });
+
+  it("rejects an OAuth start without the authorize URL", async () => {
+    const transport = unsafeStub({ launchUrl: "https://hub.example.com/launch" });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await startAppOAuth(client, "app-oauth", "/acme/apps").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("builds the consent-handoff address", () => {
+    expect(appOAuthBeginUrl("https://api.test/", "app-oauth", "/acme/apps")).toBe(
+      "https://api.test/api/openhub/apps/app-oauth/auth/oauth/begin/?return_path=%2Facme%2Fapps"
+    );
+  });
+
+  it("submits trimmed credential fields with an optional account hint", async () => {
+    const transport = unsafeStub({ connected: true });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const connected = await submitAppApiKey(client, "app-manual", {
+      fields: { api_key: "sk-abcd", region: "us" },
+      accountHint: "work",
+    });
+    expect(connected.connected).toBe(true);
+    await submitAppApiKey(client, "app-manual", { fields: { api_key: "sk-abcd" } });
+    const posts = transport.calls.filter((call) => call.init.method === "POST");
+    expect(posts[0]?.url).toBe("https://api.test/api/openhub/apps/app-manual/auth/api-key/");
+    expect(posts[0]?.init.body).toBe(
+      JSON.stringify({ fields: { api_key: "sk-abcd", region: "us" }, account_hint: "work" })
+    );
+    expect(posts[1]?.init.body).toBe(JSON.stringify({ fields: { api_key: "sk-abcd" } }));
+  });
+
+  it("builds the icon-proxy address", () => {
+    expect(appIconUrl("https://api.test/", "https://cdn.example.com/icon.png?size=64")).toBe(
+      "https://api.test/api/openhub/apps/icon/?url=https%3A%2F%2Fcdn.example.com%2Ficon.png%3Fsize%3D64"
+    );
+  });
+});
+
+describe("assistant connection contracts", () => {
+  const row = {
+    id: UUID,
+    kind: "byok",
+    provider_kind: "openai_compatible",
+    base_url: "https://openrouter.ai/api/v1",
+    model_name: "meta-llama/llama-3.3-70b-instruct",
+    has_api_key: true,
+    is_selected: true,
+    last_verified_at: null,
+    created_at: "2024-02-03T04:05:06Z",
+  };
+
+  function unsafeStub(answer: unknown, status = 200) {
+    return recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status, body: JSON.stringify(answer) })
+    );
+  }
+
+  it("parses the connections list with its lane flags", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        connections: [{ ...row, connected: true, uses_chatgpt_plan: false }],
+        codex_model_options: ["gpt-5.6-sol"],
+        codex_model_labels: {},
+        has_codex_credential: false,
+        openai_login_available: true,
+        openhub_model_options: [],
+        openhub_available: false,
+        openhub_wallet_url: "",
+      }),
+    });
+    const list = await listAssistantConnections(client);
+    expect(list.connections).toHaveLength(1);
+    expect(list.connections[0]?.connected).toBe(true);
+    expect(list.openai_login_available).toBe(true);
+    expect(list.openhub_available).toBe(false);
+  });
+
+  it("parses a list from before the lane flag existed", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        connections: [],
+        codex_model_options: [],
+        codex_model_labels: {},
+        has_codex_credential: false,
+        openai_login_available: false,
+        openhub_model_options: [],
+        openhub_wallet_url: "",
+      }),
+    });
+    const list = await listAssistantConnections(client);
+    expect(list.connections).toEqual([]);
+    expect(list.openhub_available).toBeUndefined();
+  });
+
+  it("rejects a list row of an unknown kind", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        connections: [{ ...row, kind: "smoke-signals", connected: true, uses_chatgpt_plan: false }],
+        codex_model_options: [],
+        codex_model_labels: {},
+        has_codex_credential: false,
+        openai_login_available: false,
+        openhub_model_options: [],
+        openhub_wallet_url: "",
+      }),
+    });
+    const error = await listAssistantConnections(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("creates a connection and sends the snake-case body", async () => {
+    const transport = unsafeStub({ ...row, is_selected: true });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const created = await createAssistantConnection(client, {
+      providerKind: "openai_compatible",
+      baseUrl: "https://openrouter.ai/api/v1",
+      modelName: "meta-llama/llama-3.3-70b-instruct",
+      apiKey: "secret",
+    });
+    expect(created.id).toBe(UUID);
+    const post = transport.calls.find((call) => call.init.method === "POST");
+    expect(post?.url).toBe("https://api.test/api/users/me/ai-assistant/connections/");
+    expect(post?.init.body).toBe(
+      JSON.stringify({
+        provider_kind: "openai_compatible",
+        base_url: "https://openrouter.ai/api/v1",
+        model_name: "meta-llama/llama-3.3-70b-instruct",
+        api_key: "secret",
+      })
+    );
+  });
+
+  it("updates a connection model through its detail URL", async () => {
+    const transport = unsafeStub({ ...row, model_name: "llama-edited" });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateConnectionModel(client, UUID, "llama-edited");
+    expect(updated.model_name).toBe("llama-edited");
+    const patch = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patch?.url).toBe(`https://api.test/api/users/me/ai-assistant/connections/${UUID}/`);
+    expect(patch?.init.body).toBe(JSON.stringify({ model_name: "llama-edited" }));
+  });
+
+  it("deletes a connection with a bodyless DELETE", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 204, body: "" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await deleteAssistantConnection(client, UUID);
+    const deleted = transport.calls.find((call) => call.init.method === "DELETE");
+    expect(deleted?.url).toBe(`https://api.test/api/users/me/ai-assistant/connections/${UUID}/`);
+  });
+
+  it("selects a connection and reads the flipped row", async () => {
+    const transport = unsafeStub({ ...row, is_selected: true });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const selected = await selectAssistantConnection(client, UUID);
+    expect(selected.is_selected).toBe(true);
+    const post = transport.calls.find((call) => call.init.method === "POST");
+    expect(post?.url).toBe(`https://api.test/api/users/me/ai-assistant/connections/${UUID}/select/`);
+    expect(post?.init.body).toBe("{}");
+  });
+
+  it("disconnects the provider account with a 204 POST", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 204, body: "" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await disconnectAssistantConnection(client, UUID);
+    const post = transport.calls.find((call) => call.init.method === "POST");
+    expect(post?.url).toBe(`https://api.test/api/users/me/ai-assistant/connections/${UUID}/disconnect/`);
+    expect(post?.init.body).toBe("{}");
+  });
+
+  it("starts provider login and reads the authorize address", async () => {
+    const transport = unsafeStub({ authorize_url: "https://openai.com/authorize", state: "state-1" });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const started = await startOpenAILogin(client);
+    expect(started).toEqual({ authorize_url: "https://openai.com/authorize", state: "state-1" });
+    const post = transport.calls.find((call) => call.init.method === "POST");
+    expect(post?.url).toBe("https://api.test/api/users/me/ai-assistant/openai-login/");
+  });
+
+  it("polls provider-login status with the start state", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify({ status: "pending" }) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const status = await getOpenAILoginStatus(client, "state-1");
+    expect(status).toEqual({ status: "pending" });
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe("https://api.test/api/users/me/ai-assistant/openai-login/status/");
+    expect(url.searchParams.get("state")).toBe("state-1");
+  });
+
+  it("parses a failed login poll with its detail", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ status: "error", detail: "denied by provider" }),
+    });
+    const status = await getOpenAILoginStatus(client, "state-1");
+    expect(status.detail).toBe("denied by provider");
+  });
+
+  it("rejects a login poll outside the known states", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ status: "orbiting" }),
+    });
+    const error = await getOpenAILoginStatus(client, "state-1").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("parses the cloud provider config with its lane fields", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        provider_kind: "openai_compatible",
+        base_url: "",
+        model_name: "",
+        has_api_key: false,
+        last_verified_at: null,
+        credential_mode: "codex",
+        has_byok_api_key: false,
+        has_codex_token: true,
+        has_openhub_access: false,
+        has_openai_api_key: false,
+        codex_model_name: "gpt-5.6-sol",
+        codex_model_options: ["gpt-5.6-sol"],
+        codex_last_verified_at: null,
+      }),
+    });
+    const config = await getLlmConfig(client);
+    expect(config.credential_mode).toBe("codex");
+    expect(config.has_codex_token).toBe(true);
+    expect(resolveCredentialLane(config)).toBe("codex");
+  });
+
+  it("defaults the lane to self-supplied on older backends", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        provider_kind: "openai_compatible",
+        base_url: "",
+        model_name: "",
+        has_api_key: false,
+        last_verified_at: null,
+      }),
+    });
+    const config = await getLlmConfig(client);
+    expect(config.credential_mode).toBeUndefined();
+    expect(resolveCredentialLane(config)).toBe("byok");
+  });
+
+  it("resolves every reported lane as-is", () => {
+    for (const lane of ["byok", "codex", "openhub"] as const) {
+      expect(
+        resolveCredentialLane({
+          provider_kind: "openai_compatible",
+          base_url: "",
+          model_name: "",
+          has_api_key: false,
+          last_verified_at: null,
+          credential_mode: lane,
+        })
+      ).toBe(lane);
+    }
+  });
+
+  it("tests the active config and reads success plus failure", async () => {
+    let testCalls = 0;
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      testCalls += 1;
+      return fakeResponse({
+        body: JSON.stringify(
+          testCalls > 1
+            ? { ok: false, error_code: "provider_unreachable", detail: "Could not reach the endpoint." }
+            : { ok: true }
+        ),
+      });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const passed = await testLlmConfig(client);
+    expect(passed).toEqual({ ok: true });
+    const failed = await testLlmConfig(client);
+    expect(failed.ok).toBe(false);
+    expect(failed.error_code).toBe("provider_unreachable");
+    const posts = transport.calls.filter((call) => call.init.method === "POST");
+    expect(posts[0]?.url).toBe("https://api.test/api/users/me/ai-assistant/config/test/");
+    expect(posts[0]?.init.body).toBe("{}");
+  });
+
+  it("rejects a config-test answer without the verdict", async () => {
+    const transport = unsafeStub({ error_code: "provider_unreachable" });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await testLlmConfig(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
+describe("profile app-settings contracts", () => {
+  it("patches the namespaced agent-tools flag", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({
+            body: JSON.stringify({
+              id: UUID,
+              user: UUID2,
+              theme: {},
+              is_app_rail_docked: true,
+              is_tour_completed: false,
+              onboarding_step: {},
+              use_case: null,
+              role: null,
+              is_onboarded: true,
+              last_workspace_id: null,
+              billing_address_country: "INDIA",
+              billing_address: null,
+              has_billing_address: false,
+              company_name: "",
+              notification_view_mode: "full",
+              is_smooth_cursor_enabled: false,
+              is_mobile_onboarded: false,
+              mobile_onboarding_step: {},
+              mobile_timezone_auto_set: false,
+              language: "en",
+              start_of_the_week: 0,
+              goals: {},
+              background_color: "#fff",
+              is_navigation_tour_completed: false,
+              has_marketing_email_consent: false,
+              is_subscribed_to_changelog: false,
+              product_tour: {},
+              settings: { openhub: { apps_enabled: true } },
+              created_at: "2024-01-02T03:04:05Z",
+              updated_at: "2024-02-03T04:05:06Z",
+            }),
+          })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const patched = await updateProfile(client, { settings: { openhub: { apps_enabled: true } } });
+    expect(agentToolsEnabled(patched.settings)).toBe(true);
+    expect(OpenhubAppSettings.parse(patched.settings["openhub"])).toEqual({ apps_enabled: true });
+    const patch = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patch?.init.body).toBe(JSON.stringify({ settings: { openhub: { apps_enabled: true } } }));
+  });
+
+  it("reads anything but an explicit true as off", () => {
+    expect(agentToolsEnabled({})).toBe(false);
+    expect(agentToolsEnabled({ openhub: null })).toBe(false);
+    expect(agentToolsEnabled({ openhub: "yes" })).toBe(false);
+    expect(agentToolsEnabled({ openhub: {} })).toBe(false);
+    expect(agentToolsEnabled({ openhub: { apps_enabled: false } })).toBe(false);
+    expect(agentToolsEnabled({ openhub: { apps_enabled: "yes" } })).toBe(false);
+    expect(agentToolsEnabled({ openhub: { apps_enabled: true } })).toBe(true);
   });
 });

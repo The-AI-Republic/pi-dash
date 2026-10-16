@@ -52,6 +52,28 @@ export async function getProfile(client: ApiClient): Promise<Profile> {
   return client.parse(Profile, body, "GET /api/users/me/profile/");
 }
 
+/**
+ * The catalog's namespaced app settings: whether agent runs this user
+ * starts may call the tools of their installed apps. Unset reads as
+ * off — enabling is a deliberate act, never inherited. The server
+ * merges settings per namespace, so patching this namespace cannot
+ * drop another surface's values.
+ */
+export const OpenhubAppSettings = z.object({
+  apps_enabled: z.boolean(),
+});
+export type OpenhubAppSettings = z.infer<typeof OpenhubAppSettings>;
+
+/**
+ * Read the agent-tools flag out of a profile settings bag. Anything but
+ * an explicit true in the catalog namespace reads as off.
+ */
+export function agentToolsEnabled(settings: Profile["settings"]): boolean {
+  const openhub = settings["openhub"];
+  if (typeof openhub !== "object" || openhub === null) return false;
+  return (openhub as Record<string, unknown>)["apps_enabled"] === true;
+}
+
 export interface ProfilePatch {
   theme?: Record<string, unknown>;
   language?: string;
@@ -66,6 +88,7 @@ export interface ProfilePatch {
   has_marketing_email_consent?: boolean;
   onboarding_step?: Record<string, unknown>;
   last_workspace_id?: string | null;
+  settings?: { openhub?: { apps_enabled?: boolean } };
 }
 
 export async function updateProfile(client: ApiClient, input: ProfilePatch): Promise<Profile> {
