@@ -135,6 +135,12 @@ export const Route = createFileRoute("/$ws/_gated")({
     // Projects start loading but never block the shell: the sidebar
     // renders placeholder rows while the collection resolves (SHELL-049).
     void context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws)).catch(() => undefined);
+    // Favorites likewise never block: the section hides while they load
+    // or when they fail (SHELL-056), and waiting here would stall a
+    // cached desktop start behind the query's retries.
+    void context.queryClient
+      .ensureQueryData(favoritesQueryOptions(context.apiClient, params.ws))
+      .catch(() => undefined);
     await Promise.all([
       context.queryClient.ensureQueryData(workspacesQueryOptions(context.apiClient)),
       context.queryClient
@@ -145,11 +151,6 @@ export const Route = createFileRoute("/$ws/_gated")({
         .ensureQueryData(sidebarPreferencesQueryOptions(context.apiClient, params.ws))
         // Personal entries are optional chrome too: the sidebar falls
         // back to visible defaults while they load or when they fail.
-        .catch(() => undefined),
-      context.queryClient
-        .ensureQueryData(favoritesQueryOptions(context.apiClient, params.ws))
-        // Favorites are optional chrome as well: the section hides
-        // while they load or when they fail (SHELL-056).
         .catch(() => undefined),
     ]);
   },

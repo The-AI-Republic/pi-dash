@@ -357,9 +357,10 @@ describe("gated layout guard", () => {
 });
 
 describe("gated layout loader", () => {
-  it("starts the projects fetch, then prefetches workspaces, the unread count, sidebar preferences and favorites", async () => {
-    // Projects load eagerly but outside the blocking gate: the sidebar
-    // renders placeholder rows while the collection resolves (SHELL-049).
+  it("starts the projects and favorites fetches, then prefetches workspaces, the unread count and sidebar preferences", async () => {
+    // Projects and favorites load eagerly but outside the blocking gate:
+    // the sidebar renders placeholder rows while the collection resolves
+    // (SHELL-049) and hides favorites until they arrive (SHELL-056).
     const seen: Array<readonly unknown[]> = [];
     const args = {
       context: {
@@ -378,11 +379,45 @@ describe("gated layout loader", () => {
     await loader(args);
     expect(seen).toEqual([
       ["ws", "acme", "projects", "list"],
+      ["ws", "acme", "favorites"],
       ["session", "workspaces"],
       ["ws", "acme", "notifications", "unread"],
       ["ws", "acme", "sidebar-preferences"],
-      ["ws", "acme", "favorites"],
     ]);
+  });
+
+  it("does not wait for favorites before the shell renders", async () => {
+    const args = {
+      context: {
+        apiClient: {},
+        queryClient: {
+          ensureQueryData: (options: { queryKey: readonly unknown[] }) =>
+            options.queryKey[2] === "favorites" ? new Promise(() => undefined) : Promise.resolve([]),
+        },
+      },
+      params: { ws: "acme" },
+    } as never;
+    const loader = Route.options.loader;
+    if (typeof loader !== "function") throw new Error("missing loader");
+    await expect(loader(args)).resolves.toBeUndefined();
+  });
+
+  it("still resolves when the favorites prefetch fails", async () => {
+    const args = {
+      context: {
+        apiClient: {},
+        queryClient: {
+          ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
+            if (options.queryKey[2] === "favorites") throw new Error("favorites down");
+            return [];
+          },
+        },
+      },
+      params: { ws: "acme" },
+    } as never;
+    const loader = Route.options.loader;
+    if (typeof loader !== "function") throw new Error("missing loader");
+    await expect(loader(args)).resolves.toBeUndefined();
   });
 
   it("still resolves when the unread-count prefetch fails", async () => {
