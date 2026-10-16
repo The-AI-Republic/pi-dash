@@ -205,8 +205,66 @@ static ENV: LazyLock<minijinja::Environment<'static>> = LazyLock::new(environmen
 /// (`renderer.py:42-52`). Any engine error becomes a [`PromptRenderError`]
 /// so call sites can fail cleanly instead of bubbling a 500.
 pub fn render(body: &str, context: &serde_json::Value) -> Result<String, PromptRenderError> {
-    ENV.render_str(body, context)
+    // Convert by hand (see `mini_value`): rendering the JSON value
+    // directly would serialize numbers through serde.
+    let converted = mini_value(context);
+    ENV.render_str(body, &converted)
         .map_err(|err| PromptRenderError::new(err.to_string()))
+}
+
+/// Convert one JSON context value into a minijinja value by hand, never
+/// through serde.
+///
+/// Rendering `&serde_json::Value` serializes the context via serde — and
+/// the workspace unifies `serde_json/arbitrary_precision` (from
+/// `pidash-api`), under which `Number::serialize` emits the internal
+/// token struct instead of a u64/i64/f64. minijinja then sees every JSON
+/// number as a one-entry `$serde_json::private::Number` map: `{{ n }}`
+/// prints the map, a `0` is truthy, and `n != 1` never holds
+/// (PIDASHCONV-1073; the `tasks_mail` precedent is PIDASHCONV-865 D1).
+/// Walking the value here keeps numbers numeric however the crate graph
+/// unifies; rendering takes the converted value, whose own `Serialize`
+/// round-trips through minijinja's value-handle fast path.
+fn mini_value(value: &serde_json::Value) -> minijinja::value::Value {
+    use minijinja::value::Value as MiniValue;
+    use serde_json::Value as Json;
+    match value {
+        Json::Null => MiniValue::from(()),
+        Json::Bool(flag) => MiniValue::from(*flag),
+        Json::Number(number) => mini_number(number),
+        Json::String(text) => MiniValue::from(text.clone()),
+        Json::Array(items) => items.iter().map(mini_value).collect::<MiniValue>(),
+        Json::Object(map) => map
+            .iter()
+            .map(|(key, item)| (key.clone(), mini_value(item)))
+            .collect::<MiniValue>(),
+    }
+}
+
+/// A JSON number as the narrowest minijinja number. `as_u64`/`as_i64`
+/// parse the stored token, so they stay exact under
+/// `arbitrary_precision`; only an out-of-range integer falls through to
+/// the 128-bit parse and then to its decimal spelling (unreachable in
+/// prompt contexts — counts and small ids — but must not panic; as a
+/// display string it still renders the same digits).
+fn mini_number(number: &serde_json::Number) -> minijinja::value::Value {
+    use minijinja::value::Value as MiniValue;
+    if let Some(int) = number.as_u64() {
+        MiniValue::from(int)
+    } else if let Some(int) = number.as_i64() {
+        MiniValue::from(int)
+    } else if number.is_f64() {
+        // Checked above, so the parse cannot fail; `is_f64` (not
+        // `as_f64().is_some()`) keeps out-of-range integers on the exact
+        // 128-bit path instead of a lossy float.
+        MiniValue::from(number.as_f64().expect("is_f64 checked"))
+    } else if let Ok(int) = number.to_string().parse::<u128>() {
+        MiniValue::from(int)
+    } else if let Ok(int) = number.to_string().parse::<i128>() {
+        MiniValue::from(int)
+    } else {
+        MiniValue::from(number.to_string())
+    }
 }
 
 /// Raise [`PromptSyntaxError`] iff `body` is not a valid Jinja template
@@ -408,6 +466,97 @@ mod tests {
             }
         }
         assert_eq!(clean, EMPTY_CONTEXT_CLEAN);
+    }
+
+    /// Budget-block source: lines from `### Budget` to the end of the
+    /// embedded task-lifecycle body (self-contained: the `{% if tick %}`
+    /// opened on the runs line closes on the last line).
+    fn budget_block() -> String {
+        let section = crate::prompting::registry::all_sections()
+            .into_iter()
+            .find(|s| s.key == "task-lifecycle")
+            .expect("task-lifecycle section exists");
+        let lines: Vec<&str> = section.default_body.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| *line == "### Budget")
+            .expect("Budget head exists");
+        lines[start..].join("\n")
+    }
+
+    /// A `tick_context`-shaped context with the waited/allowance arms set.
+    fn tick_case(waited: i64, allowance: Value) -> Value {
+        json!({
+            "tick": {
+                "count": 3,
+                "cap": 20,
+                "remaining": 17,
+                "waited": waited,
+                "wait_allowance": allowance,
+                "spent": false,
+                "clock_live": true,
+                "interval_seconds": 3600,
+                "interval_human": "1 hour",
+            },
+            "issue": {"identifier": "TP-12"},
+        })
+    }
+
+    /// The "Runs used on this issue" sentence renders byte-identical to
+    /// Jinja2 for waited = 0/1/2 (PIDASHCONV-1073): JSON numbers must
+    /// reach minijinja as numbers, so `{% if tick.waited | default(0) %}`
+    /// treats 0 as falsy and `tick.waited | default(0) != 1` compares
+    /// numerically. The Jinja2 half asserting the same literals lives in
+    /// `rust-api/contract-tests/prompting/test_data_plane_dual_engine.py`
+    /// (`test_tick_sentence_waited_counts`); update both sides together
+    /// when the section body changes.
+    #[test]
+    fn tick_sentence_matches_jinja2_for_waited_counts() {
+        let block = budget_block();
+        let stem = "Runs used on this issue: **3 of 20** (17 remaining). This is one pool for the life of the issue, spent in any stage by runs the ticking system starts (timer ticks, and the run that follows a state move you make). Runs a human starts are free.";
+        let tail = "each of those raised the cap by one, so they are counted above and cost no net budget.";
+        let cases: &[(i64, String)] = &[
+            (0, stem.to_owned()),
+            (
+                1,
+                format!("{stem} You have ended 1 run by waiting on a blocker; {tail}"),
+            ),
+            (
+                2,
+                format!("{stem} You have ended 2 runs by waiting on a blocker; {tail}"),
+            ),
+        ];
+        for (waited, want) in cases {
+            let out = render(&block, &tick_case(*waited, Value::Null)).expect("renders");
+            let line = out.lines().nth(2).expect("runs sentence is line 3");
+            assert_eq!(
+                line, want,
+                "byte-identical tick sentence for waited={waited}"
+            );
+        }
+    }
+
+    /// Same defect class on the allowance arm: `tick.wait_allowance == 0`
+    /// must hold for a present 0 (PIDASHCONV-1073). Jinja2 half is
+    /// `test_tick_sentence_wait_allowance` in the dual-engine suite.
+    #[test]
+    fn wait_allowance_arm_matches_jinja2() {
+        let block = budget_block();
+        let stem = "When this issue has open blockers, they are information, not a gate — read them and decide for yourself whether the work can proceed (see \"Work item relationships\"). If it can, proceed and record the assumption. If it cannot, write down which blocker and why, call `pidash issue wait TP-12`, and yield `waiting_on_external`: the wait buys back this run's tick, so it costs no budget, and the next tick asks you again. Nothing watches the blocker for you — a blocker closing starts no run, and no one reads your workpad — so each tick you re-read and re-decide.";
+        let tail = " While the issue stays in its current state, Pi Dash re-invokes the agent about every 1 hour.";
+        let spent_clause = " **Your wait allowance is spent**: further waiting comes out of the pool above, so if you are still blocked, tell the human in a comment instead of waiting again.";
+        let cases: &[(i64, String)] = &[
+            (0, format!("{stem}{spent_clause}{tail}")),
+            (2, format!("{stem}{tail}")),
+        ];
+        for (allowance, want) in cases {
+            let out = render(&block, &tick_case(0, json!(*allowance))).expect("renders");
+            let line = out.lines().nth(4).expect("blockers paragraph is line 5");
+            assert_eq!(
+                line, want,
+                "byte-identical allowance arm for wait_allowance={allowance}"
+            );
+        }
     }
 
     #[test]
