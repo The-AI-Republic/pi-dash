@@ -157,7 +157,7 @@ jobs:
       - run: pnpm --filter @pidash/kit build
       - run: pnpm --filter @pidash/api-client build
       - run: pnpm --filter web_new build
-      # Fails only above the 260 KB initial-JS ceiling (and the CSS budget).
+      # Fails only above the 265 KB initial-JS ceiling (and the CSS budget).
       - run: pnpm --filter web_new size
       # The 220 KB target is reported, never blocking; area gates act on it (NEWFRONT-248).
       - name: initial JS against the 220 KB target (report only, never blocks)
