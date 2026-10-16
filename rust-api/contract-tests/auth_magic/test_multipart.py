@@ -109,6 +109,36 @@ class TestMultipartGenerate:
         assert redis_helper.read_magic(rdb, second) is not None
         assert redis_helper.read_magic(rdb, first) is None
 
+    def test_generate_multipart_empty_filename_is_a_field(self, path, rdb):
+        # Browsers send filename="" for empty file inputs; Django files
+        # such parts under POST (not FILES), so the email still reads.
+        # httpx omits falsy filenames, so the framing is raw here.
+        client = csrf_client()
+        email = fresh_email("mp-emptyfn")
+        redis_helper.clear_magic(rdb, email)
+        boundary = "mpemptyfnboundary"
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="email"; filename=""\r\n'
+            "Content-Type: application/octet-stream\r\n"
+            "\r\n"
+            f"{email}\r\n"
+            f"--{boundary}--\r\n"
+        ).encode()
+        resp = client.post(
+            path,
+            content=body,
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "X-CSRFToken": client.cookies["csrftoken"],
+            },
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"key": "magic_" + email}
+        assert redis_helper.read_magic(rdb, email) is not None
+
 
 @pytest.mark.contract
 @pytest.mark.parametrize("sign_path,generate_path,code,slug,is_app", SIGN_FLOWS)

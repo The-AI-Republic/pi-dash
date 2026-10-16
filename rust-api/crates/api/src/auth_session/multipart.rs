@@ -9,8 +9,16 @@
 //!
 //! Python: `django/http/multipartparser.py` (`MultiPartParser._parse`:
 //! fields appendlist with `errors="replace"`, base64 transfer-decoding
-//! with a raw fallback, parts without a name or with a filename
-//! skipped).
+//! with a raw fallback, parts without a name skipped, `filename=""`
+//! parts filed under POST).
+//!
+//! Known approximations (all verified against Django 6.0.5; none is
+//! reachable with the field names and values these routes read):
+//! all-padding base64 quads (`====`) decode to empty in CPython but
+//! fail strict decoding (raw kept); quoted `;` inside a field name is
+//! mis-split; backslash escapes beyond `\\`/`\"` collapse; boundary
+//! bytes inside a value split anywhere in Django but only at line
+//! starts here (RFC 2046).
 
 use base64::Engine as _;
 
@@ -118,7 +126,7 @@ fn first_delimiter(body: &[u8], delimiter: &[u8]) -> Option<usize> {
 /// Offset of the next line-start delimiter at or after `from`, plus
 /// whether it is the closing (`--`-suffixed) one. A `--boundary`
 /// occurrence is only a delimiter when it starts a line and is
-/// followed by `--`, a line break, or the end of the body.
+/// followed by `--`, CRLF, or the end of the body.
 fn next_delimiter(body: &[u8], delimiter: &[u8], from: usize) -> Option<(usize, bool)> {
     let mut search = from;
     while let Some(relative) = find_subslice(&body[search..], delimiter) {
@@ -136,12 +144,13 @@ fn next_delimiter(body: &[u8], delimiter: &[u8], from: usize) -> Option<(usize, 
     None
 }
 
-/// Length of the `\r\n` (or bare `\n`) line break at the slice start.
+/// Length of the `\r\n` line break at the slice start. Django splits
+/// framing only on CRLF (`multipartparser.py`: `\r\n\r\n` header end,
+/// `\r\n` header lines), so a bare LF never opens, continues, or
+/// closes a part — such bodies fall back to the urlencoded parse.
 fn line_break_len(slice: &[u8]) -> Option<usize> {
     if slice.starts_with(b"\r\n") {
         Some(2)
-    } else if slice.starts_with(b"\n") {
-        Some(1)
     } else {
         None
     }
@@ -153,10 +162,11 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// One part → `(name, value)`, or `None` for file parts (any
-/// `filename`, even empty — Django files them, never POSTs them) and
-/// parts without a `name`. Names and values decode lossy
-/// (`force_str(…, errors="replace")`).
+/// One part → `(name, value)`, or `None` for file parts (a
+/// non-empty `filename`/`filename*` — Django checks
+/// `params.get("filename")` truthiness, so `filename=""` lands in
+/// POST: `multipartparser.py:737`) and parts without a `name`. Names
+/// and values decode lossy (`force_str(…, errors="replace")`).
 fn parse_part(part: &[u8]) -> Option<(String, String)> {
     let (raw_headers, value) = split_headers(part)?;
     let mut name: Option<String> = None;
@@ -164,6 +174,11 @@ fn parse_part(part: &[u8]) -> Option<(String, String)> {
     let mut base64 = false;
     for line in raw_headers.split(|b| *b == b'\n') {
         let line = strip_cr(line);
+        // Django `line.decode()`s every header line strictly: a
+        // non-UTF-8 line is skipped, never lossy-read.
+        if std::str::from_utf8(line).is_err() {
+            continue;
+        }
         if line.len() > "content-disposition:".len()
             && line[..="content-disposition".len()].eq_ignore_ascii_case(b"content-disposition:")
         {
@@ -199,19 +214,14 @@ fn parse_part(part: &[u8]) -> Option<(String, String)> {
     Some((name, String::from_utf8_lossy(value).into_owned()))
 }
 
-/// Split part bytes into headers and content at the first blank line.
-/// The content keeps its bytes minus the line break that precedes the
-/// next delimiter (that break belongs to the framing, not the value).
+/// Split part bytes into headers and content at the first blank line
+/// (`\r\n\r\n` only, like Django — a bare-LF part has no headers and
+/// is skipped). The content keeps its bytes minus the line break that
+/// precedes the next delimiter (that break belongs to the framing,
+/// not the value).
 fn split_headers(part: &[u8]) -> Option<(&[u8], &[u8])> {
-    if let Some(index) = find_subslice(part, b"\r\n\r\n") {
-        let content_end = part.len();
-        return Some((&part[..index], &part[index + 4..content_end]));
-    }
-    if let Some(index) = find_subslice(part, b"\n\n") {
-        let content_end = part.len();
-        return Some((&part[..index], &part[index + 2..content_end]));
-    }
-    None
+    let index = find_subslice(part, b"\r\n\r\n")?;
+    Some((&part[..index], &part[index + 4..]))
 }
 
 fn strip_cr(slice: &[u8]) -> &[u8] {
@@ -219,7 +229,8 @@ fn strip_cr(slice: &[u8]) -> &[u8] {
 }
 
 /// `Content-Disposition` params: the field `name` (if any) and whether
-/// a `filename`/`filename*` param marks a file part.
+/// a non-empty `filename`/`filename*` value marks a file part
+/// (`filename=""` is a field — Django `params.get` truthiness).
 fn disposition_params(value: &[u8]) -> (Option<String>, bool) {
     let mut name = None;
     let mut is_file = false;
@@ -231,8 +242,8 @@ fn disposition_params(value: &[u8]) -> (Option<String>, bool) {
             .collect::<Vec<u8>>();
         if let Some(raw) = strip_param(&param, b"name=") {
             name = Some(String::from_utf8_lossy(&param_value(raw)).into_owned());
-        } else if strip_param(&param, b"filename=").is_some()
-            || strip_param(&param, b"filename*=").is_some()
+        } else if strip_param(&param, b"filename=").is_some_and(|raw| !param_value(raw).is_empty())
+            || strip_param(&param, b"filename*=").is_some_and(|raw| !param_value(raw).is_empty())
         {
             is_file = true;
         }
@@ -327,11 +338,53 @@ mod tests {
     #[test]
     fn file_parts_are_ignored() {
         let file = b"--abc123\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"a.bin\"\r\nContent-Type: application/octet-stream\r\n\r\nxxx\r\n".to_vec();
-        let empty_name = b"--abc123\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"\"\r\nContent-Type: application/octet-stream\r\n\r\n\r\n".to_vec();
-        let framed = frame(&[part("email", "a@x.com"), file, empty_name]);
+        let rfc5987 =
+            b"--abc123\r\nContent-Disposition: form-data; name=\"doc\"; filename*=utf-8''a.bin\r\n\r\nzzz\r\n"
+                .to_vec();
+        let framed = frame(&[part("email", "a@x.com"), file, rfc5987]);
         assert_eq!(
             parse_fields(CT, &framed),
             Some(vec![("email".to_owned(), "a@x.com".to_owned())])
+        );
+    }
+
+    #[test]
+    fn empty_filename_is_a_field() {
+        // `filename=""` (the browser empty-file-input shape): Django
+        // checks `params.get("filename")` truthiness, so the part
+        // lands in POST — the email still reads.
+        let empty =
+            b"--abc123\r\nContent-Disposition: form-data; name=\"email\"; filename=\"\"\r\nContent-Type: application/octet-stream\r\n\r\na@x.com\r\n"
+                .to_vec();
+        let framed = frame(&[empty]);
+        assert_eq!(
+            parse_fields(CT, &framed),
+            Some(vec![("email".to_owned(), "a@x.com".to_owned())])
+        );
+    }
+
+    #[test]
+    fn bare_lf_framing_yields_no_fields() {
+        // Django splits framing only on CRLF: a bare-LF body has no
+        // headers per part, so POST stays empty.
+        let body =
+            b"--abc123\nContent-Disposition: form-data; name=\"email\"\n\nU@x.com\n--abc123--\n"
+                .to_vec();
+        assert_eq!(parse_fields(CT, &body), Some(vec![]));
+    }
+
+    #[test]
+    fn non_utf8_header_lines_are_skipped() {
+        // Django `line.decode()`s strictly: a non-UTF-8 disposition
+        // line drops the part, a non-UTF-8 encoding line drops the
+        // transfer decoding (value stays raw).
+        let bad_disposition =
+            b"--abc123\r\nContent-Disposition: form-data; name=\"caf\xe9\"\r\n\r\nv\r\n".to_vec();
+        assert_eq!(parse_fields(CT, &frame(&[bad_disposition])), Some(vec![]));
+        let bad_encoding = b"--abc123\r\nContent-Disposition: form-data; name=\"code\"\r\nContent-Transfer-Encoding: base64\xe9\r\n\r\nMTIzNDU2\r\n".to_vec();
+        assert_eq!(
+            parse_fields(CT, &frame(&[bad_encoding])),
+            Some(vec![("code".to_owned(), "MTIzNDU2".to_owned())])
         );
     }
 

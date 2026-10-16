@@ -2367,6 +2367,12 @@ mod tests {
         assert_eq!(multipart.email, "u@x.com");
         assert_eq!(multipart.code, "42");
         assert_eq!(multipart.next_path, None);
+        // A `filename=""` part is a field in Django, not a file.
+        let empty_filename = parse_sign_form(
+            "multipart/form-data; boundary=b",
+            b"--b\r\nContent-Disposition: form-data; name=\"email\"; filename=\"\"\r\n\r\na@x.com\r\n--b--\r\n",
+        );
+        assert_eq!(empty_filename.email, "a@x.com");
     }
 
     #[test]
