@@ -32,7 +32,7 @@ export type SignInResult =
   | { ok: true; location: string }
   | { ok: false; location: string; code: string; message: string };
 
-function firstQueryParam(url: string, name: string): string | null {
+export function firstQueryParam(url: string, name: string): string | null {
   const hash = url.indexOf("?");
   if (hash < 0) return null;
   const params = new URLSearchParams(url.slice(hash + 1));

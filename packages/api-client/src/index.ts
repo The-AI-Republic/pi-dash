@@ -547,3 +547,22 @@ export {
   listApprovals,
 } from "./contracts/approvals.js";
 export type { ApprovalDecision, ApprovalKind, ApprovalStatus } from "./contracts/approvals.js";
+export {
+  CLOUD_CSRF_ENDPOINT,
+  CloudSignOutResponse,
+  QuotaExceededPayload,
+  cloudSignInHandoffUrl,
+  cloudSignOut,
+  exchangeDesktopCode,
+  getCloudCsrfToken,
+  isCloudSessionRejected,
+  parseDesktopExchangeResult,
+  quotaRefusalFrom,
+  refreshCloudSession,
+} from "./contracts/cloud-session.js";
+export type {
+  CloudSignInHandoffInput,
+  DesktopExchangeInput,
+  DesktopExchangeResult,
+} from "./contracts/cloud-session.js";
+export { CloudBillingPlan, getCloudBillingPlan } from "./contracts/cloud-billing.js";

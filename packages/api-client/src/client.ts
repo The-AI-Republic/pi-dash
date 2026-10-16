@@ -304,6 +304,7 @@ export class ApiClient {
           status: response.status,
           code: String(errorCode),
           message: typeof record["error_message"] === "string" ? record["error_message"] : "Request failed",
+          body,
         });
       }
       if (typeof record["detail"] === "string") {
@@ -312,6 +313,7 @@ export class ApiClient {
           status: response.status,
           code: typeof code === "string" ? code : "http",
           message: record["detail"],
+          body,
         });
       }
       if (
@@ -322,6 +324,7 @@ export class ApiClient {
           status: response.status,
           code: (record as { code: string }).code,
           message: (record as { message: string }).message,
+          body,
         });
       }
       if (typeof record["error"] === "string" && record["error"].length > 0) {
@@ -329,6 +332,7 @@ export class ApiClient {
           status: response.status,
           code: "http",
           message: record["error"],
+          body,
         });
       }
       const fields: Record<string, string[]> = {};
@@ -345,13 +349,14 @@ export class ApiClient {
           message = `${field}: ${messages.join(", ")}`;
           break;
         }
-        return new ApiError({ status: response.status, code: "http", message, fields });
+        return new ApiError({ status: response.status, code: "http", message, fields, body });
       }
     }
     return new ApiError({
       status: response.status,
       code: "http",
       message: text && text.length < 300 ? text : `Request failed with status ${response.status}`,
+      body,
     });
   }
 

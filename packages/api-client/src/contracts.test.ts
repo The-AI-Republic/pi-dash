@@ -167,6 +167,18 @@ import {
   updateInstance,
   updateInstanceConfigurations,
 } from "./contracts/instance.js";
+import {
+  CLOUD_CSRF_ENDPOINT,
+  cloudSignInHandoffUrl,
+  cloudSignOut,
+  exchangeDesktopCode,
+  getCloudCsrfToken,
+  isCloudSessionRejected,
+  parseDesktopExchangeResult,
+  quotaRefusalFrom,
+  refreshCloudSession,
+} from "./contracts/cloud-session.js";
+import { getCloudBillingPlan } from "./contracts/cloud-billing.js";
 import { fakeResponse, recordingTransport } from "./client.test.js";
 import type { RecordedCall } from "./client.test.js";
 import { createPod, deletePod, getPod, listPods, updatePod } from "./contracts/pods.js";
@@ -4366,5 +4378,351 @@ describe("workspace logo asset contracts", () => {
     expect(transport.calls.some((call) => call.url.endsWith(`/api/workspaces/file-assets/${UUID}/logo-key/`))).toBe(
       true
     );
+  });
+});
+
+describe("cloud sign-in handoff contracts", () => {
+  it("builds the handoff with an encoded return target", () => {
+    expect(cloudSignInHandoffUrl("https://api.test/", { returnTo: "/" })).toBe(
+      "https://api.test/api/auth/sign-in/?return_to=%2F"
+    );
+    expect(cloudSignInHandoffUrl("https://api.test", { returnTo: "/sign-up?next_path=%2Fdocs" })).toBe(
+      "https://api.test/api/auth/sign-in/?return_to=%2Fsign-up%3Fnext_path%3D%252Fdocs"
+    );
+  });
+
+  it("omits the origin on same-origin setups", () => {
+    expect(cloudSignInHandoffUrl("https://api.test/", { returnTo: "/docs", returnOrigin: "https://api.test" })).toBe(
+      "https://api.test/api/auth/sign-in/?return_to=%2Fdocs"
+    );
+    expect(
+      cloudSignInHandoffUrl("https://api.test", { returnTo: "/docs", returnOrigin: "https://api.test/other" })
+    ).toBe("https://api.test/api/auth/sign-in/?return_to=%2Fdocs");
+  });
+
+  it("sends the origin on split setups", () => {
+    expect(cloudSignInHandoffUrl("https://api.test", { returnTo: "/docs", returnOrigin: "https://app.test" })).toBe(
+      "https://api.test/api/auth/sign-in/?return_to=%2Fdocs&return_origin=https%3A%2F%2Fapp.test"
+    );
+    // A different port is a different origin.
+    expect(
+      cloudSignInHandoffUrl("https://api.test", { returnTo: "/", returnOrigin: "https://api.test:8443" })
+    ).toContain("return_origin=");
+  });
+
+  it("omits an absent or empty origin", () => {
+    expect(cloudSignInHandoffUrl("https://api.test", { returnTo: "/" })).not.toContain("return_origin");
+    expect(cloudSignInHandoffUrl("https://api.test", { returnTo: "/", returnOrigin: "" })).not.toContain(
+      "return_origin"
+    );
+  });
+
+  it("sends an uncomparable origin as-is for the server to judge", () => {
+    expect(cloudSignInHandoffUrl("https://api.test", { returnTo: "/", returnOrigin: "%%%" })).toBe(
+      "https://api.test/api/auth/sign-in/?return_to=%2F&return_origin=%25%25%25"
+    );
+    expect(cloudSignInHandoffUrl("", { returnTo: "/", returnOrigin: "https://app.test" })).toBe(
+      "/api/auth/sign-in/?return_to=%2F&return_origin=https%3A%2F%2Fapp.test"
+    );
+  });
+
+  it("marks the desktop shell branch", () => {
+    expect(cloudSignInHandoffUrl("https://api.test", { returnTo: "/", desktop: true })).toBe(
+      "https://api.test/api/auth/sign-in/?return_to=%2F&desktop=1"
+    );
+    expect(cloudSignInHandoffUrl("https://api.test", { returnTo: "/" })).not.toContain("desktop=");
+    expect(cloudSignInHandoffUrl("https://api.test", { returnTo: "/", desktop: false })).not.toContain("desktop=");
+  });
+});
+
+describe("cloud session refresh contracts", () => {
+  it("rotates without a body or CSRF fetch and answers the status", async () => {
+    const transport = recordingTransport((call) => {
+      expect(call.url.endsWith("/auth/get-csrf-token/")).toBe(false);
+      return fakeResponse({ status: 200, body: "" });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(refreshCloudSession(client)).resolves.toBe(200);
+    expect(transport.calls).toHaveLength(1);
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/auth/refresh/");
+    expect(transport.calls[0]?.init.method).toBe("POST");
+    expect(transport.calls[0]?.init.body).toBeUndefined();
+    expect(transport.calls[0]?.init.headers["X-CSRFTOKEN"]).toBeUndefined();
+  });
+
+  it("propagates a rejected rotation", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ status: 401, body: JSON.stringify({ detail: "refresh expired" }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await refreshCloudSession(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(401);
+  });
+
+  it("treats only 401/403 responses as a dead session", () => {
+    expect(isCloudSessionRejected(new ApiError({ status: 401, code: "http", message: "x" }))).toBe(true);
+    expect(isCloudSessionRejected(new ApiError({ status: 403, code: "http", message: "x" }))).toBe(true);
+    for (const status of [400, 404, 429, 500]) {
+      expect(isCloudSessionRejected(new ApiError({ status, code: "http", message: "x" }))).toBe(false);
+    }
+    for (const code of ["network", "timeout", "aborted", "parse", "contract"] as const) {
+      expect(isCloudSessionRejected(new ApiError({ status: 0, code, message: "x" }))).toBe(false);
+    }
+    expect(isCloudSessionRejected(new Error("plain"))).toBe(false);
+    expect(isCloudSessionRejected(null)).toBe(false);
+    expect(isCloudSessionRejected(undefined)).toBe(false);
+  });
+});
+
+describe("cloud sign-out contracts", () => {
+  const CLOUD_TOKEN = { csrf_token: "cloud-csrf" };
+  const SIGN_OUT_ANSWER = { airepublic_logout_url: "https://accounts.test/auth/logout" };
+
+  function cloudAuthTransport() {
+    return recordingTransport((call) => {
+      if (call.url.endsWith("/api/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify(CLOUD_TOKEN) });
+      }
+      if (call.url.endsWith("/api/auth/sign-out/")) {
+        return fakeResponse({ body: JSON.stringify(SIGN_OUT_ANSWER) });
+      }
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({ body: JSON.stringify({}) });
+    });
+  }
+
+  it("reads the cloud CSRF token from the cloud path", async () => {
+    expect(CLOUD_CSRF_ENDPOINT).toBe("/api/auth/get-csrf-token/");
+    const transport = cloudAuthTransport();
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(getCloudCsrfToken(client)).resolves.toEqual(CLOUD_TOKEN);
+    expect(transport.calls).toHaveLength(1);
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/auth/get-csrf-token/");
+  });
+
+  it("rejects a cloud CSRF answer without a token", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json({}) });
+    const error = await getCloudCsrfToken(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("posts the empty logout with the cloud token and reports the answer", async () => {
+    const transport = cloudAuthTransport();
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(cloudSignOut(client)).resolves.toEqual(SIGN_OUT_ANSWER);
+    const postCall = transport.calls.find((call) => call.url.endsWith("/api/auth/sign-out/"));
+    expect(postCall?.init.method).toBe("POST");
+    expect(postCall?.init.body).toBe("{}");
+    expect(postCall?.init.headers["Content-Type"]).toBe("application/json");
+    expect(postCall?.init.headers["X-CSRFTOKEN"]).toBe("cloud-csrf");
+    // The explicit header keeps the default OSS CSRF fetch out of the flow
+    // (matched exactly — the cloud path shares the OSS suffix).
+    expect(transport.calls.some((call) => call.url === "https://api.test/auth/get-csrf-token/")).toBe(false);
+  });
+
+  it("aborts the sign-out when the token read fails, posting nothing", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/api/auth/get-csrf-token/")) {
+        return fakeResponse({ status: 401, body: JSON.stringify({ detail: "no session" }) });
+      }
+      return fakeResponse({ body: JSON.stringify(SIGN_OUT_ANSWER) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await cloudSignOut(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(401);
+    expect(transport.calls.some((call) => call.url.endsWith("/api/auth/sign-out/"))).toBe(false);
+  });
+
+  it("aborts the sign-out when the token shape is wrong, posting nothing", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/api/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({}) });
+      }
+      return fakeResponse({ body: JSON.stringify(SIGN_OUT_ANSWER) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await cloudSignOut(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+    expect(transport.calls.some((call) => call.url.endsWith("/api/auth/sign-out/"))).toBe(false);
+  });
+
+  it("rejects a logout answer without the provider URL", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/api/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify(CLOUD_TOKEN) });
+      }
+      return fakeResponse({ body: JSON.stringify({}) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await cloudSignOut(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("drops the cached CSRF token once the session is gone", async () => {
+    const transport = cloudAuthTransport();
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await client.post("/api/warm/", { json: {} });
+    await cloudSignOut(client);
+    await client.post("/api/after/", { json: {} });
+    // Matched exactly — the cloud token read shares the OSS suffix.
+    const csrfCalls = transport.calls.filter((call) => call.url === "https://api.test/auth/get-csrf-token/");
+    expect(csrfCalls).toHaveLength(2);
+  });
+});
+
+describe("cloud desktop exchange contracts", () => {
+  it("reads success from a landing without an error", () => {
+    expect(parseDesktopExchangeResult("https://app.test/acme")).toEqual({
+      ok: true,
+      location: "https://app.test/acme",
+    });
+    expect(parseDesktopExchangeResult("https://app.test/acme?welcome=1")).toEqual({
+      ok: true,
+      location: "https://app.test/acme?welcome=1",
+    });
+    expect(parseDesktopExchangeResult("")).toEqual({ ok: true, location: "" });
+  });
+
+  it("reads refusal from the error param", () => {
+    expect(parseDesktopExchangeResult("https://app.test/sign-in?error=missing_params")).toEqual({
+      ok: false,
+      location: "https://app.test/sign-in?error=missing_params",
+      error: "missing_params",
+    });
+    expect(parseDesktopExchangeResult("/sign-in?error=invalid_state")).toEqual({
+      ok: false,
+      location: "/sign-in?error=invalid_state",
+      error: "invalid_state",
+    });
+  });
+
+  it("exchanges the deep-link pair through the query", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ status: 200, body: "<html>", url: "https://app.test/acme" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await exchangeDesktopCode(client, { code: "co de", state: "st&ate" });
+    expect(result).toEqual({ ok: true, location: "https://app.test/acme" });
+    expect(transport.calls).toHaveLength(1);
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe("https://api.test/api/auth/desktop-exchange/");
+    expect(url.searchParams.get("code")).toBe("co de");
+    expect(url.searchParams.get("state")).toBe("st&ate");
+  });
+
+  it("sends a partial pair and reads the refusal landing", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ status: 200, body: "<html>", url: "https://app.test/sign-in?error=missing_params" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await exchangeDesktopCode(client, { code: "orphan" });
+    expect(result).toEqual({
+      ok: false,
+      location: "https://app.test/sign-in?error=missing_params",
+      error: "missing_params",
+    });
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.searchParams.get("code")).toBe("orphan");
+    expect(url.searchParams.has("state")).toBe(false);
+  });
+});
+
+describe("cloud quota refusal contracts", () => {
+  const REFUSAL = {
+    error: "quota_exceeded",
+    code: "free_issue_creation_limit_exceeded",
+    limit: 500,
+    used: 500,
+    upgrade_url: "https://app.test/pricing",
+  };
+
+  async function refusedCreation(payload: unknown): Promise<unknown> {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 402, body: JSON.stringify(payload) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    return client
+      .post("/api/workspaces/acme/projects/p/issues/", { json: { name: "capped" } })
+      .catch((e: unknown) => e);
+  }
+
+  it("reads the exact 402 shape off a refused creation", async () => {
+    const error = await refusedCreation(REFUSAL);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(402);
+    expect(quotaRefusalFrom(error)).toEqual(REFUSAL);
+  });
+
+  it("reads a refusal without an upgrade address", async () => {
+    const { upgrade_url: _dropped, ...bare } = REFUSAL;
+    expect(quotaRefusalFrom(await refusedCreation(bare))).toEqual({ ...bare, upgrade_url: undefined });
+  });
+
+  it("ignores anything but the exact shape", async () => {
+    expect(quotaRefusalFrom(await refusedCreation({ ...REFUSAL, error: "other" }))).toBeNull();
+    expect(quotaRefusalFrom(await refusedCreation({ ...REFUSAL, code: "other" }))).toBeNull();
+    expect(quotaRefusalFrom(await refusedCreation({ ...REFUSAL, limit: "500" }))).toBeNull();
+    const { used: _dropped, ...missing } = REFUSAL;
+    expect(quotaRefusalFrom(await refusedCreation(missing))).toBeNull();
+    expect(quotaRefusalFrom(await refusedCreation({ detail: "nope" }))).toBeNull();
+  });
+
+  it("ignores non-402 failures and foreign throws", async () => {
+    expect(quotaRefusalFrom(new ApiError({ status: 400, code: "http", message: "x" }))).toBeNull();
+    expect(quotaRefusalFrom(new ApiError({ status: 402, code: "http", message: "x", body: REFUSAL }))).toEqual(REFUSAL);
+    expect(quotaRefusalFrom(new Error("plain"))).toBeNull();
+    expect(quotaRefusalFrom(null)).toBeNull();
+  });
+});
+
+describe("cloud billing plan contracts", () => {
+  const PLAN = {
+    is_paid: false,
+    migration_required: false,
+    user_center_url: "https://accounts.test/center",
+    plan_name: "Free",
+    legacy_flag: true,
+  };
+
+  it("reads the plan snapshot and strips the rest", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json(PLAN) });
+    await expect(getCloudBillingPlan(client)).resolves.toEqual({
+      is_paid: false,
+      migration_required: false,
+      user_center_url: "https://accounts.test/center",
+      plan_name: "Free",
+    });
+  });
+
+  it("reads a snapshot without the paid label", async () => {
+    const { plan_name: _dropped, legacy_flag: _alsoDropped, ...free } = PLAN;
+    const client = createClient({ baseUrl: "https://api.test", transport: json(free) });
+    await expect(getCloudBillingPlan(client)).resolves.toEqual({ ...free, plan_name: undefined });
+  });
+
+  it("rejects a snapshot without the pinned fields", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ is_paid: false, migration_required: false }),
+    });
+    const error = await getCloudBillingPlan(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("rejects a paid flag of the wrong type", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ ...PLAN, is_paid: "no" }),
+    });
+    const error = await getCloudBillingPlan(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
   });
 });
