@@ -81,7 +81,122 @@ fn environment() -> minijinja::Environment<'static> {
     env.set_trim_blocks(false);
     env.set_lstrip_blocks(false);
     env.set_undefined_behavior(minijinja::UndefinedBehavior::Strict);
+    // Jinja2 prints interpolated values with Python `str()`; minijinja's
+    // default prints maps/sequences with Rust `Debug`. The custom
+    // formatter closes that gap (`{{ limits }}` renders the dict repr).
+    env.set_formatter(python_formatter);
     env
+}
+
+/// Field name serde_json uses when a `Number` is serialized with the
+/// `arbitrary_precision` feature (`serialize_struct(TOKEN, 1)` carrying
+/// the exact decimal text). minijinja takes structs as maps, so without
+/// intervention every JSON number arrives as a one-entry map under this
+/// key. The token is serde_json-private (`pub(crate)`), hence the
+/// literal; no prompt context builds it by hand.
+const SERDE_JSON_NUMBER_TOKEN: &str = "$serde_json::private::Number";
+
+/// `{{ value }}` with Python `str()` semantics (PIDASHCONV-1072).
+///
+/// Scalars delegate to the default formatter (minijinja already prints
+/// `True`/`False`/`None`/ints like CPython); maps and sequences render
+/// as Python `repr` — `{'k': v}` / `[v]` with single-quoted strings —
+/// so `{{ limits }}` matches Jinja2 byte for byte.
+fn python_formatter(
+    out: &mut minijinja::Output,
+    state: &minijinja::State,
+    value: &minijinja::value::Value,
+) -> Result<(), minijinja::Error> {
+    write_python_value(out, state, value, false)
+}
+
+/// Shared `str()`/`repr()` writer: a top-level string stays bare
+/// (`repr_strings = false`) while strings nested in a map or sequence
+/// quote (`repr_strings = true`), exactly like CPython. Single-entry
+/// [`SERDE_JSON_NUMBER_TOKEN`] maps unwrap to their digits at any
+/// level, restoring numbers the `arbitrary_precision` build turns into
+/// maps during context conversion.
+fn write_python_value(
+    out: &mut minijinja::Output,
+    state: &minijinja::State,
+    value: &minijinja::value::Value,
+    repr_strings: bool,
+) -> Result<(), minijinja::Error> {
+    use minijinja::value::ValueKind;
+    use std::fmt::Write as _;
+    if let Some(digits) = serde_number_text(value) {
+        return out.write_str(&digits).map_err(minijinja::Error::from);
+    }
+    match value.kind() {
+        ValueKind::Map => {
+            out.write_char('{').map_err(minijinja::Error::from)?;
+            let mut first = true;
+            for key in value.try_iter()? {
+                if !first {
+                    out.write_str(", ").map_err(minijinja::Error::from)?;
+                }
+                first = false;
+                write_python_value(out, state, &key, true)?;
+                out.write_str(": ").map_err(minijinja::Error::from)?;
+                write_python_value(out, state, &value.get_item(&key)?, true)?;
+            }
+            out.write_char('}').map_err(minijinja::Error::from)
+        }
+        ValueKind::Seq => {
+            out.write_char('[').map_err(minijinja::Error::from)?;
+            let mut first = true;
+            for item in value.try_iter()? {
+                if !first {
+                    out.write_str(", ").map_err(minijinja::Error::from)?;
+                }
+                first = false;
+                write_python_value(out, state, &item, true)?;
+            }
+            out.write_char(']').map_err(minijinja::Error::from)
+        }
+        ValueKind::String if repr_strings => {
+            let text = value.as_str().unwrap_or_default();
+            out.write_str(&py_quote(text))
+                .map_err(minijinja::Error::from)
+        }
+        _ => minijinja::escape_formatter(out, state, value),
+    }
+}
+
+/// The digits of a serde_json number that crossed into a one-entry map
+/// (`arbitrary_precision`), else `None`. Only the exact single-key,
+/// string-valued shape unwraps; anything else formats as a map.
+fn serde_number_text(value: &minijinja::value::Value) -> Option<String> {
+    use minijinja::value::{Value, ValueKind};
+    if value.kind() != ValueKind::Map || value.len() != Some(1) {
+        return None;
+    }
+    let key = Value::from(SERDE_JSON_NUMBER_TOKEN);
+    let digits = value.get_item(&key).ok()?;
+    digits.as_str().map(str::to_owned)
+}
+
+/// Python `repr` of a string: single-quoted with backslash escapes.
+/// Mirrors `jobs::celery::py_str`, which services cannot import (the
+/// crate edge runs the other way).
+fn py_quote(s: &str) -> String {
+    let mut quoted = String::with_capacity(s.len() + 2);
+    quoted.push('\'');
+    for c in s.chars() {
+        match c {
+            '\\' => quoted.push_str("\\\\"),
+            '\'' => quoted.push_str("\\'"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                quoted.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 static ENV: LazyLock<minijinja::Environment<'static>> = LazyLock::new(environment);
@@ -317,5 +432,121 @@ mod tests {
         // PromptRenderError like the Python subclass.
         let render_err: PromptRenderError = validate_syntax("{% if %}").expect_err("raises").into();
         assert!(!render_err.message().is_empty());
+    }
+
+    /// Django-default limits in `policy.py:140-148` insertion order.
+    fn django_default_limits() -> Value {
+        json!({
+            "model_requests": 25,
+            "tool_calls": 20,
+            "writes": 3,
+            "input_tokens": 144_000,
+            "output_tokens": 16_000,
+            "total_tokens": 160_000,
+            "wall_seconds": 285,
+        })
+    }
+
+    /// `Limits: {{ limits }}.` renders the Python dict repr — exact key
+    /// order, single quotes, plain ints (PIDASHCONV-1072). The Jinja2
+    /// half of this agreement lives in
+    /// `rust-api/contract-tests/prompting/test_data_plane_dual_engine.py`;
+    /// both pin the same bytes.
+    #[test]
+    fn limits_line_renders_as_python_dict_repr() {
+        let text = render(
+            "Limits: {{ limits }}.",
+            &json!({ "limits": django_default_limits() }),
+        )
+        .expect("renders");
+        assert_eq!(
+            text,
+            "Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, \
+             'input_tokens': 144000, 'output_tokens': 16000, \
+             'total_tokens': 160000, 'wall_seconds': 285}."
+        );
+    }
+
+    /// The whole cloud-capabilities section renders byte-identical to
+    /// Jinja2 with a realistic context (PIDASHCONV-1072). Same expected
+    /// text as the dual-engine contract test pins on the Python side.
+    #[test]
+    fn cloud_capabilities_section_renders_like_jinja2() {
+        let section =
+            crate::prompting::registry::get_section("cloud-capabilities").expect("section exists");
+        let text = render(
+            &section.default_body,
+            &json!({
+                "available_tools": ["pidash_get_current_issue"],
+                "unavailable_capabilities": ["filesystem", "shell", "worktree"],
+                "extra_toolsets": false,
+                "limits": django_default_limits(),
+            }),
+        )
+        .expect("renders");
+        assert_eq!(
+            text,
+            "## Capabilities\n\
+             \n\
+             Available tools:\n\
+             - `pidash_get_current_issue`\n\
+             \n\
+             Unavailable capabilities: filesystem, shell, worktree.\n\
+             Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, \
+             'input_tokens': 144000, 'output_tokens': 16000, \
+             'total_tokens': 160000, 'wall_seconds': 285}.\n\
+             \n\
+             You do not have a local filesystem, shell, worktree, repository \
+             checkout, or Pi Dash CLI. Do not invent or simulate them.\n"
+        );
+    }
+
+    /// Numbers from a JSON context render as digits, not as the
+    /// one-entry `$serde_json::private::Number` map the
+    /// `arbitrary_precision` build converts them into (PIDASHCONV-1072).
+    /// Covers the `{{ limits.writes | default(0) }}` interpolation in
+    /// `cloud-write-policy.md` and the scalar legs (`tick.count`, …).
+    #[test]
+    fn scalar_numbers_render_as_digits() {
+        let ctx = json!({ "limits": django_default_limits(), "x": 5 });
+        assert_eq!(
+            render("{{ limits.writes | default(0) }}", &ctx).expect("renders"),
+            "3"
+        );
+        assert_eq!(render("{{ x }}", &ctx).expect("renders"), "5");
+        assert_eq!(
+            render("{{ missing | default(0) }}", &ctx).expect("renders"),
+            "0"
+        );
+        assert_eq!(
+            render("{{ limits.missing | default(0) }}", &ctx).expect("renders"),
+            "0"
+        );
+    }
+
+    /// Maps and sequences otherwise render as Python `repr`: empty
+    /// containers stay bare, nested strings quote, `None`/`True` spell
+    /// CPython's way, and quotes/backslashes escape (PIDASHCONV-1072).
+    #[test]
+    fn collections_render_as_python_repr() {
+        let ctx = json!({
+            "empty_map": {},
+            "empty_list": [],
+            "nested": {"a": [1, "x", null, true]},
+            "quote": {"q": "a'b\\c"},
+        });
+        assert_eq!(render("{{ empty_map }}", &ctx).expect("renders"), "{}");
+        assert_eq!(render("{{ empty_list }}", &ctx).expect("renders"), "[]");
+        assert_eq!(
+            render("{{ nested }}", &ctx).expect("renders"),
+            "{'a': [1, 'x', None, True]}"
+        );
+        assert_eq!(
+            render("{{ quote }}", &ctx).expect("renders"),
+            "{'q': 'a\\'b\\\\c'}"
+        );
+        // A top-level string stays bare while the same string nested in a
+        // container quotes, exactly like `str()` vs `repr()`.
+        assert_eq!(render("{{ nested.a[1] }}!", &ctx).expect("renders"), "x!");
     }
 }

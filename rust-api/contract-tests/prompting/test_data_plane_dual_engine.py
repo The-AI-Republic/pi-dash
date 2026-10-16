@@ -190,3 +190,60 @@ def test_recipe_goldens_match_sources():
         "cloud_recipes"
     ]
     assert list(tables["RECIPES"]) == list(data["all_kinds"])
+
+
+DJANGO_DEFAULT_LIMITS = {
+    "model_requests": 25,
+    "tool_calls": 20,
+    "writes": 3,
+    "input_tokens": 144000,
+    "output_tokens": 16000,
+    "total_tokens": 160000,
+    "wall_seconds": 285,
+}
+
+
+def test_limits_line_dict_repr(env):
+    """PIDASHCONV-1072: the Limits line renders the Python dict repr.
+
+    Jinja2 half of the dual-engine agreement (the minijinja half lives in
+    ``prompting::renderer::tests``); both pin the same bytes, and the
+    full-section case below pins the created prompt text end to end.
+    """
+    assert (
+        env.from_string("Limits: {{ limits }}.").render(limits=DJANGO_DEFAULT_LIMITS)
+        == "Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, "
+        "'input_tokens': 144000, 'output_tokens': 16000, "
+        "'total_tokens': 160000, 'wall_seconds': 285}."
+    )
+    assert (
+        env.from_string("{{ limits.writes | default(0) }}").render(
+            limits=DJANGO_DEFAULT_LIMITS
+        )
+        == "3"
+    )
+
+
+def test_cloud_capabilities_section_golden(env):
+    """PIDASHCONV-1072: the created cloud-capabilities text, pinned."""
+    body = section_body(SECTIONS_DIR / "cloud-capabilities.md")
+    assert (
+        env.from_string(body).render(
+            available_tools=["pidash_get_current_issue"],
+            unavailable_capabilities=["filesystem", "shell", "worktree"],
+            extra_toolsets=False,
+            limits=DJANGO_DEFAULT_LIMITS,
+        )
+        == "## Capabilities\n"
+        "\n"
+        "Available tools:\n"
+        "- `pidash_get_current_issue`\n"
+        "\n"
+        "Unavailable capabilities: filesystem, shell, worktree.\n"
+        "Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, "
+        "'input_tokens': 144000, 'output_tokens': 16000, "
+        "'total_tokens': 160000, 'wall_seconds': 285}.\n"
+        "\n"
+        "You do not have a local filesystem, shell, worktree, repository "
+        "checkout, or Pi Dash CLI. Do not invent or simulate them.\n"
+    )

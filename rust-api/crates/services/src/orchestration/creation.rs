@@ -1515,7 +1515,12 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             parent_run_id: run.parent_run_id,
             trigger: run.trigger.clone(),
             executor_kind: run.executor_kind,
-            tool_plan: run.tool_plan.clone(),
+            // The in-memory plan: Postgres normalizes jsonb key order on
+            // write, while Django composes from the in-memory attribute
+            // (`run.prompt = build_first_turn(issue, run)` before any
+            // `refresh_from_db`; `service.py:811`). The `Limits:` line
+            // must print `policy.py` dict order (PIDASHCONV-1072).
+            tool_plan: execution.tool_plan.clone(),
             created_by_id: run.created_by_id,
         },
     )
@@ -1642,7 +1647,9 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
             parent_run_id: run.parent_run_id,
             trigger: run.trigger.clone(),
             executor_kind: run.executor_kind,
-            tool_plan: run.tool_plan.clone(),
+            // The in-memory plan, not the round-tripped row (see the
+            // dispatch site; `service.py:507` composes pre-refresh).
+            tool_plan: execution.tool_plan.clone(),
             created_by_id: run.created_by_id,
         },
     )
@@ -1757,7 +1764,9 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
             parent_run_id: run.parent_run_id,
             trigger: run.trigger.clone(),
             executor_kind: run.executor_kind,
-            tool_plan: run.tool_plan.clone(),
+            // The in-memory plan, not the round-tripped row (see the
+            // dispatch site; `service.py:626` composes pre-refresh).
+            tool_plan: execution.tool_plan.clone(),
             created_by_id: run.created_by_id,
         },
     )
@@ -2030,6 +2039,24 @@ mod tests {
             .with_timezone(&Utc)
     }
 
+    /// Postgres jsonb output ordering, recursed: object keys sort by
+    /// length then lexicographically while arrays keep order — what an
+    /// `INSERT ... RETURNING` round-trip does to a tool plan.
+    fn jsonb_normalize(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut pairs: Vec<(String, Value)> = map
+                    .iter()
+                    .map(|(key, item)| (key.clone(), jsonb_normalize(item)))
+                    .collect();
+                pairs.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then(a.0.cmp(&b.0)));
+                Value::Object(pairs.into_iter().collect())
+            }
+            Value::Array(items) => Value::Array(items.iter().map(jsonb_normalize).collect()),
+            scalar => scalar.clone(),
+        }
+    }
+
     fn issue_view() -> IssueView {
         IssueView {
             id: uid(0x01),
@@ -2182,6 +2209,10 @@ mod tests {
         saved_configs: std::cell::RefCell<HashMap<Uuid, Value>>,
         finalized: Vec<(Uuid, String, String)>,
         lock_order: std::cell::RefCell<Vec<&'static str>>,
+        /// Simulate the `INSERT ... RETURNING` jsonb round-trip: stored
+        /// plans come back key-normalized while the caller's value keeps
+        /// insertion order (PIDASHCONV-1072).
+        normalize_tool_plan: bool,
     }
 
     impl Default for FakeSeam {
@@ -2206,6 +2237,7 @@ mod tests {
                 saved_configs: std::cell::RefCell::new(HashMap::new()),
                 finalized: Vec::new(),
                 lock_order: std::cell::RefCell::new(Vec::new()),
+                normalize_tool_plan: false,
             }
         }
     }
@@ -2383,6 +2415,11 @@ mod tests {
 
         async fn insert_run(&mut self, row: &NewAgentRun) -> Result<RunView, CreationError> {
             self.inserted.borrow_mut().push(row.clone());
+            let tool_plan = if self.normalize_tool_plan {
+                jsonb_normalize(&row.tool_plan)
+            } else {
+                row.tool_plan.clone()
+            };
             let run = RunView {
                 id: row.id,
                 workspace_id: row.workspace_id,
@@ -2397,7 +2434,7 @@ mod tests {
                 executor_kind: row.executor_kind,
                 phase_kind: row.phase_kind.clone(),
                 run_config: row.run_config.clone(),
-                tool_plan: row.tool_plan.clone(),
+                tool_plan,
                 error_code: row.error_code.clone(),
                 error: String::new(),
                 prompt: String::new(),
@@ -3167,6 +3204,78 @@ mod tests {
         assert_eq!(inserted[0].parent_run_id, Some(uid(0x70)));
         assert_eq!(inserted[0].pinned_runner_id, Some(uid(0x60)));
         assert_eq!(inserted[0].trigger, AgentRunTrigger::CommentAndRun.value());
+    }
+
+    #[tokio::test]
+    async fn continuation_renders_limits_from_in_memory_plan() {
+        // PIDASHCONV-1072: Django composes from the in-memory plan
+        // (`run.prompt = build_first_turn(issue, run)` before any
+        // `refresh_from_db`; `service.py:507`), so the `Limits:` line
+        // prints `policy.py` dict order even though the stored row
+        // carries jsonb order. The seam round-trips the plan to prove
+        // the render does not read the row back.
+        let mut seam = FakeSeam::minimal().with_bundle();
+        seam.normalize_tool_plan = true;
+        seam.execution = Some(Ok(ExecutionFields {
+            executor_kind: AgentExecutorKind::CloudAgent,
+            tool_plan: json!({
+                "v": 1,
+                "catalog_version": 1,
+                "tools": [],
+                "required_tools": [],
+                "limits": {
+                    "model_requests": 25,
+                    "tool_calls": 20,
+                    "writes": 3,
+                    "input_tokens": 144_000,
+                    "output_tokens": 16_000,
+                    "total_tokens": 160_000,
+                    "wall_seconds": 285,
+                },
+                "unavailable_capabilities": ["filesystem", "shell", "worktree"],
+                "extra_toolsets": false,
+            }),
+            pinned_runner_entry: Some(None),
+            error_code: None,
+            cloud_admission_error: None,
+        }));
+        let outcome = create_continuation_run(&mut seam, &continuation_req(run_view(uid(0x70))))
+            .await
+            .expect("creates");
+        assert_eq!(outcome.reason, REASON_CREATED);
+        let created = outcome.created_run.expect("created");
+        // The stored row carries jsonb order (the seam round-tripped it).
+        let stored: Vec<String> = seam.runs.borrow()[&created].tool_plan["limits"]
+            .as_object()
+            .expect("limits object")
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            stored,
+            vec![
+                "writes",
+                "tool_calls",
+                "input_tokens",
+                "total_tokens",
+                "wall_seconds",
+                "output_tokens",
+                "model_requests",
+            ]
+        );
+        // The composed prompt prints policy.py dict order.
+        let prompts = seam.saved_prompts.borrow();
+        let (prompt, _) = &prompts[&created];
+        let line = prompt
+            .lines()
+            .find(|line| line.starts_with("Limits:"))
+            .expect("Limits line");
+        assert_eq!(
+            line,
+            "Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, \
+             'input_tokens': 144000, 'output_tokens': 16000, \
+             'total_tokens': 160000, 'wall_seconds': 285}."
+        );
     }
 
     #[tokio::test]
