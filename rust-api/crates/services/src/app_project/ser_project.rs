@@ -12,6 +12,12 @@
 //!   with self-exclusion on update. The duplicate verdict arrives as a
 //!   caller-supplied boolean; the `exclude(id)` + soft-delete-scoped
 //!   `exists()` SQL belongs to the queries layer (PIDASHCONV-568).
+//! * `validate_agent_default_max_ticks` / the three
+//!   `validate_agent_*_interval_seconds` (PDASHOSS01-220, on main at
+//!   `:30-41,:99-119` — `-1`/infinite-or-`>= 1` pool, `>= 60`s cadence).
+//!   `ProjectSerializer`-only, like the name checks: the handler runs
+//!   them on create/PATCH and skips them on PUT (`ProjectListSerializer`
+//!   has no such methods).
 //! * `validate` (`:85-108`) — the `default_agent_executor == "cloud_agent"`
 //!   gate (D-11, consumed — never reimplemented — from
 //!   `crate::dispatch`), the is-default-unset guard, and the
@@ -407,6 +413,71 @@ pub fn check_identifier_value(
     }
     if identifier_taken {
         return Err(IdentifierError::Taken);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_agent_default_max_ticks / validate_agent_*_interval_seconds
+// (PDASHOSS01-220; `serializers/project.py:30-41,:99-119` on main)
+// ---------------------------------------------------------------------------
+
+/// `MIN_CADENCE_SECONDS` (`serializers/project.py:34` on main): the
+/// ticker scans once a minute, so a sub-minute cadence cannot be served.
+pub const MIN_CADENCE_SECONDS: i64 = 60;
+
+/// `validate_agent_default_max_ticks` detail (`:108` on main).
+pub const MAX_TICKS_DETAIL: &str = "AGENT_MAX_TICKS_MUST_BE_POSITIVE_OR_INFINITE";
+/// `_validate_cadence_seconds` detail (`:39` on main), shared by the
+/// three interval validators.
+pub const CADENCE_TOO_SHORT_DETAIL: &str = "AGENT_CADENCE_TOO_SHORT";
+
+/// Failure of `validate_agent_default_max_ticks` (`:99-110` on main).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaxTicksError;
+
+impl MaxTicksError {
+    /// The wire detail (`{"agent_default_max_ticks": ["..."]}` via
+    /// [`field_error_body`]).
+    pub fn detail(self) -> &'static str {
+        MAX_TICKS_DETAIL
+    }
+}
+
+/// Ports `validate_agent_default_max_ticks`: `-1` — the infinite-pool
+/// sentinel, consumed from the ticker models so the two can never drift,
+/// like Django's import — passes, and anything else must be `>= 1`
+/// (`0` would arm a clock that can never fire; other negatives read as
+/// infinite on some paths and exhausted on others). Runs after DRF
+/// `IntegerField` parsing, so `max_ticks` is already an `i64`.
+pub fn check_agent_default_max_ticks(max_ticks: i64) -> Result<(), MaxTicksError> {
+    if max_ticks != i64::from(pidash_db::tasks_ticker::INFINITE_MAX_TICKS) && max_ticks < 1 {
+        return Err(MaxTicksError);
+    }
+    Ok(())
+}
+
+/// Failure of `validate_agent_default_interval_seconds`,
+/// `validate_agent_review_default_interval_seconds` and
+/// `validate_agent_test_default_interval_seconds` (`:112-119` on main),
+/// all three delegating to `_validate_cadence_seconds` (`:37-41`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CadenceTooShortError;
+
+impl CadenceTooShortError {
+    /// The wire detail (`{"<field>": ["..."]}` via [`field_error_body`]).
+    pub fn detail(self) -> &'static str {
+        CADENCE_TOO_SHORT_DETAIL
+    }
+}
+
+/// Ports `_validate_cadence_seconds`: below [`MIN_CADENCE_SECONDS`]
+/// fails. One kernel serves all three interval fields, like Django's
+/// shared helper. Runs after DRF `IntegerField` parsing, so `interval`
+/// is already an `i64`.
+pub fn check_agent_cadence_seconds(interval: i64) -> Result<(), CadenceTooShortError> {
+    if interval < MIN_CADENCE_SECONDS {
+        return Err(CadenceTooShortError);
     }
     Ok(())
 }
@@ -2115,6 +2186,55 @@ mod tests {
             IdentifierError::Taken.detail(),
             "PROJECT_IDENTIFIER_ALREADY_EXIST"
         );
+    }
+
+    #[test]
+    fn max_ticks_allows_infinite_or_positive_only() {
+        // Mirrors Django's test_valid_max_ticks_pass_through /
+        // test_zero_and_other_negatives_are_rejected
+        // (tests/unit/serializers/test_project_ticking_policy.py on main).
+        for ticks in [-1, 1, 10, 500] {
+            assert_eq!(
+                check_agent_default_max_ticks(ticks),
+                Ok(()),
+                "ticks {ticks}"
+            );
+        }
+        for ticks in [0, -2, -10] {
+            let err = check_agent_default_max_ticks(ticks).expect_err("fails");
+            assert_eq!(err.detail(), "AGENT_MAX_TICKS_MUST_BE_POSITIVE_OR_INFINITE");
+            assert_eq!(
+                field_error_body("agent_default_max_ticks", err.detail()),
+                "{\"agent_default_max_ticks\":[\"AGENT_MAX_TICKS_MUST_BE_POSITIVE_OR_INFINITE\"]}",
+            );
+        }
+        // The sentinel is the ticker model's, not a local copy.
+        assert_eq!(i64::from(pidash_db::tasks_ticker::INFINITE_MAX_TICKS), -1);
+        assert_eq!(MaxTicksError.detail(), MAX_TICKS_DETAIL);
+    }
+
+    #[test]
+    fn cadence_below_the_scan_floor_is_rejected() {
+        // Mirrors Django's test_cadence_at_or_above_the_scan_floor_passes /
+        // test_cadence_below_the_scan_floor_is_rejected: one kernel serves
+        // all three interval fields, like `_validate_cadence_seconds`.
+        assert_eq!(MIN_CADENCE_SECONDS, 60);
+        for interval in [60, 1800, 10800, 86400] {
+            assert_eq!(
+                check_agent_cadence_seconds(interval),
+                Ok(()),
+                "interval {interval}"
+            );
+        }
+        for interval in [59, 0, -1] {
+            let err = check_agent_cadence_seconds(interval).expect_err("fails");
+            assert_eq!(err.detail(), "AGENT_CADENCE_TOO_SHORT");
+            assert_eq!(
+                field_error_body("agent_default_interval_seconds", err.detail()),
+                "{\"agent_default_interval_seconds\":[\"AGENT_CADENCE_TOO_SHORT\"]}",
+            );
+        }
+        assert_eq!(CadenceTooShortError.detail(), CADENCE_TOO_SHORT_DETAIL);
     }
 
     #[test]
