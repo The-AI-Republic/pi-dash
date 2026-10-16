@@ -1154,6 +1154,8 @@ export class WebNewDriver implements ParityDriver {
     // Route shells (NEWFRONT-288): read what the chrome actually mounts.
     // The switcher, toggle, search, inbox, help, star and account controls
     // arrive with the top-bar slices, which extend these reads in place.
+    // Sidebar chrome menus (NEWFRONT-287): the compact account control
+    // mounts only where the sidebar is collapsed or unmounted.
     const page = this.page;
     return {
       workspaceMenu: (await page.getByRole("button", { name: "Open workspace switcher" }).count()) > 0,
@@ -1162,7 +1164,7 @@ export class WebNewDriver implements ParityDriver {
       inbox: (await page.locator('a[href*="/notifications"]').count()) > 0,
       help: (await page.locator("button:has(svg.lucide-circle-help)").count()) > 0,
       starLink: (await page.getByRole("link", { name: "Star us on GitHub" }).count()) > 0,
-      accountFallback: false,
+      accountFallback: (await page.locator('[data-testid="topbar-user-menu"]').count()) > 0,
     };
   }
 
@@ -1376,8 +1378,12 @@ export class WebNewDriver implements ParityDriver {
     await this.page.setViewportSize({ width, height });
   }
 
-  async openNotifications(): Promise<void> {
-    return todo("openNotifications");
+  async openNotifications(workspaceSlug: string): Promise<void> {
+    // Sidebar chrome menus (NEWFRONT-287): the notifications address
+    // renders without the app sidebar (SHELL-062), so this waits for
+    // the document, not the sidebar mount.
+    await this.page.goto(`/${workspaceSlug}/notifications/`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded", { timeout: 60_000 });
   }
 
   // --- Issues bulk-ops / modal / drafts stubs (NEWFRONT-120).
@@ -2540,7 +2546,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async sidebarAccountButtonCount(): Promise<number> {
-    return await this.page.locator('#main-sidebar [data-testid="sidebar-account-menu"]').count();
+    // Sidebar chrome menus (NEWFRONT-287): the account row is the user
+    // menu card now, so the trigger carries the user-menu test id.
+    return await this.page.locator('#main-sidebar [data-testid="sidebar-user-menu"]').count();
   }
 
   /** The resize grip on the sidebar's right edge. */
@@ -3526,7 +3534,14 @@ export class WebNewDriver implements ParityDriver {
 
   async openWorkspacePath(path: string): Promise<void> {
     // Absolute (a copied deep link) or base-relative; the shell must
-    // mount there either way.
+    // mount there either way — except the notifications address, which
+    // renders shell-less by design (SHELL-062), where the sidebar wait
+    // is skipped.
+    if (path.includes("/notifications/")) {
+      await this.page.goto(path, { timeout: 60_000 });
+      await this.page.waitForLoadState("domcontentloaded", { timeout: 60_000 });
+      return;
+    }
     await this.gotoShell(path);
   }
 
@@ -3545,22 +3560,24 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async isSidebarOnScreen(): Promise<boolean> {
+    // Any substantially-sized aside on screen counts, mirroring the
+    // oracle read; off-screen asides never do.
     const boxes = await this.page
       .locator("aside")
       .evaluateAll((elements) =>
         elements.map((element) => {
           const box = element.getBoundingClientRect();
-          return box.width > 50 && box.height > 50;
+          return [box.x, box.width, box.height];
         })
       )
-      .catch((): boolean[] => []);
-    return boxes.some(Boolean);
+      .catch((): number[][] => []);
+    return boxes.some(([x, width, height]) => (x ?? -1) >= 0 && (width ?? 0) > 50 && (height ?? 0) > 50);
   }
 
   async sidebarLinkTexts(): Promise<string[]> {
-    const aside = await this.screenAside();
-    const texts = await aside.locator("a").allInnerTexts();
-    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
+    // The main sidebar's anchor texts, rendered and whitespace-folded.
+    const texts = await this.page.locator("#main-sidebar").locator("a").allInnerTexts();
+    return texts.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text.length > 0);
   }
 
   async sidebarRowTone(linkText: string): Promise<{ background: string; color: string }> {
@@ -3749,11 +3766,33 @@ export class WebNewDriver implements ParityDriver {
     return todo("isOverflowCreateVisible");
   }
 
-  async activateHelpEntry(_name: string): Promise<string | null> {
-    return todo("activateHelpEntry");
+  async activateHelpEntry(name: string): Promise<string | null> {
+    // Sidebar chrome menus (NEWFRONT-287): the help menu is the one
+    // holding Documentation; external entries resolve to their popup.
+    const menus = this.page.getByRole("menu");
+    for (let index = 0; index < (await menus.count()); index += 1) {
+      const content = (
+        (await menus
+          .nth(index)
+          .textContent({ timeout: 15_000 })
+          .catch(() => null)) ?? ""
+      ).replace(/\s+/g, " ");
+      if (!content.includes("Documentation")) continue;
+      const item = menus.nth(index).locator("button, a, [role='menuitem']").filter({ hasText: name }).last();
+      const [popup] = await Promise.all([
+        this.page.waitForEvent("popup", { timeout: 10_000 }).catch(() => null),
+        item.click({ timeout: 30_000 }),
+      ]);
+      await this.page.waitForTimeout(1000);
+      if (popup === null) return null;
+      await popup.waitForFunction(() => window.location.href !== "about:blank", { timeout: 10_000 }).catch(() => {});
+      return popup.url();
+    }
+    throw new Error(`[parity] help menu holding ${name} is not open.`);
   }
 
   async isToastVisible(text: string): Promise<boolean> {
+    // A visible toast carrying the text.
     return this.page
       .getByText(text, { exact: false })
       .first()
@@ -3761,12 +3800,16 @@ export class WebNewDriver implements ParityDriver {
       .catch(() => false);
   }
 
-  async isDialogWithTextVisible(_text: string): Promise<boolean> {
-    return todo("isDialogWithTextVisible");
+  async isDialogWithTextVisible(text: string): Promise<boolean> {
+    // Sidebar chrome menus (NEWFRONT-287): an open dialog holding the text.
+    const dialog = this.page.getByRole("dialog").filter({ hasText: text });
+    if ((await dialog.count()) === 0) return false;
+    return await dialog.first().isVisible();
   }
 
   async dismissTopmost(): Promise<void> {
-    return todo("dismissTopmost");
+    // Sidebar chrome menus (NEWFRONT-287): Escape dismisses the topmost layer.
+    await this.page.keyboard.press("Escape");
   }
 
   async clickMainContent(): Promise<void> {
@@ -3774,18 +3817,32 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async openSidebarLink(text: string): Promise<void> {
+    // The sidebar anchor naming the entry, scrolled into view first.
     const aside = await this.screenAside();
     const link = aside.locator("a", { hasText: text }).first();
     await link.scrollIntoViewIfNeeded();
-    await link.click();
+    await link.click({ timeout: 30_000 });
   }
 
-  async switchWorkspace(_name: string): Promise<void> {
-    return todo("switchWorkspace");
+  async switchWorkspace(name: string): Promise<void> {
+    // Sidebar chrome menus (NEWFRONT-287): the outermost match in the
+    // open switcher menu carries the selection handler.
+    const menu = this.page.getByRole("menu").first();
+    await menu.locator("button, a, [role='menuitem']").filter({ hasText: name }).first().click({ timeout: 30_000 });
   }
 
-  async activateUserMenuItem(_name: string): Promise<void> {
-    return todo("activateUserMenuItem");
+  async activateUserMenuItem(name: string): Promise<void> {
+    // Sidebar chrome menus (NEWFRONT-287): the menu holding the entry
+    // receives the activation; another open menu never does.
+    const menus = this.page.getByRole("menu");
+    const count = await menus.count();
+    for (let index = 0; index < count; index += 1) {
+      const item = menus.nth(index).locator("button, a, [role='menuitem']").filter({ hasText: name }).first();
+      if ((await item.count()) === 0) continue;
+      await item.click({ timeout: 30_000 });
+      return;
+    }
+    throw new Error(`[parity] user menu entry ${name} is not open.`);
   }
 
   async dragSidebarProjectBefore(sourceName: string, targetName: string): Promise<void> {
@@ -3830,31 +3887,92 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async openWorkspaceSwitcher(): Promise<void> {
-    return todo("openWorkspaceSwitcher");
+    // Sidebar chrome menus (NEWFRONT-287): the sidebar trigger when the
+    // sidebar is open, else the top-bar trigger.
+    const sidebar = this.page.locator('[data-testid="sidebar-workspace-switcher"]');
+    if ((await sidebar.count()) > 0 && (await sidebar.first().isVisible())) {
+      await sidebar.first().click({ timeout: 30_000 });
+      return;
+    }
+    await this.page.locator('[data-testid="topbar-workspace-switcher"]').first().click({ timeout: 30_000 });
   }
 
   async workspaceSwitcherTexts(): Promise<string[]> {
-    return todo("workspaceSwitcherTexts");
+    // Sidebar chrome menus (NEWFRONT-287): every open menu and dialog
+    // text, mirroring the oracle read.
+    const texts: string[] = [];
+    for (const role of ["menu", "dialog"] as const) {
+      const els = this.page.getByRole(role);
+      for (let index = 0; index < (await els.count()); index += 1) {
+        texts.push(
+          (
+            (await els
+              .nth(index)
+              .textContent({ timeout: 15_000 })
+              .catch(() => null)) ?? ""
+          )
+            .trim()
+            .replace(/\s+/g, " ")
+        );
+      }
+    }
+    return texts.filter((text) => text.length > 0);
   }
 
   async openUserMenu(): Promise<void> {
-    return todo("openUserMenu");
+    // Sidebar chrome menus (NEWFRONT-287): the sidebar account card.
+    await this.page.locator('[data-testid="sidebar-user-menu"]').first().click({ timeout: 30_000 });
   }
 
   async userMenuTexts(): Promise<string[]> {
-    return todo("userMenuTexts");
+    // Sidebar chrome menus (NEWFRONT-287): the identity block is not a
+    // button, so read the whole menu text plus the actionable items.
+    const menu = this.page.getByRole("menu").first();
+    const full = ((await menu.textContent({ timeout: 30_000 }).catch(() => null)) ?? "").trim().replace(/\s+/g, " ");
+    const items = await menu.locator("button, a, [role='menuitem']").allTextContents();
+    const cleaned = items.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text.length > 0);
+    return [...(full.length > 0 ? [full] : []), ...cleaned];
   }
 
   async openHelpMenu(): Promise<void> {
-    return todo("openHelpMenu");
+    // Sidebar chrome menus (NEWFRONT-287): the top-bar help trigger.
+    await this.page.locator('[data-testid="topbar-help-menu"]').first().click({ timeout: 30_000 });
   }
 
   async helpMenuTexts(): Promise<string[]> {
-    return todo("helpMenuTexts");
+    // Sidebar chrome menus (NEWFRONT-287): the menu holding
+    // Documentation, with the version footer alongside the items.
+    const menus = this.page.getByRole("menu");
+    for (let index = 0; index < (await menus.count()); index += 1) {
+      const content = (
+        (await menus
+          .nth(index)
+          .textContent({ timeout: 15_000 })
+          .catch(() => null)) ?? ""
+      ).replace(/\s+/g, " ");
+      if (content.includes("Documentation")) {
+        const full = content.length > 0 ? [content] : [];
+        const items = await menus.nth(index).locator("button, a, [role='menuitem']").allTextContents();
+        const cleaned = items.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text.length > 0);
+        return [...full, ...cleaned];
+      }
+    }
+    return [];
   }
 
   async workspaceLogoState(): Promise<{ hasImage: boolean; label: string | null; initial: string | null }> {
-    return todo("workspaceLogoState");
+    // Sidebar chrome menus (NEWFRONT-287): the first visible logo mark.
+    const marks = this.page.locator('[data-testid="workspace-logo"]');
+    const count = await marks.count();
+    for (let index = 0; index < count; index += 1) {
+      const mark = marks.nth(index);
+      if (!(await mark.isVisible())) continue;
+      const hasImage = (await mark.locator("img").count()) > 0;
+      const label = await mark.getAttribute("aria-label");
+      const initial = hasImage ? null : ((await mark.textContent()) ?? "").trim() || null;
+      return { hasImage, label, initial };
+    }
+    return { hasImage: false, label: null, initial: null };
   }
 
   // --- NEWFRONT-125 review-fix stubs. Mirror of the interface additions.
@@ -3881,16 +3999,49 @@ export class WebNewDriver implements ParityDriver {
     return todo("activateFavoriteQuickMenuItem");
   }
 
-  async setSidebarCollapsed(_collapsed: boolean): Promise<void> {
-    return todo("setSidebarCollapsed");
+  async setSidebarCollapsed(collapsed: boolean): Promise<void> {
+    // Sidebar chrome menus (NEWFRONT-287): the collapse flag persists
+    // per panel in browser-local storage and the shell reads it on
+    // mount, so writing it plus a reload applies the state.
+    await this.page.evaluate((value) => {
+      const key = "pidash:sidebar-panel:main";
+      let snapshot: { sidebarCollapsed: boolean; peekOpen: boolean; sidebarWidth: number } | null = null;
+      try {
+        snapshot = JSON.parse(localStorage.getItem(key) ?? "null") as typeof snapshot;
+      } catch {
+        snapshot = null;
+      }
+      const next = {
+        sidebarCollapsed: value,
+        peekOpen: false,
+        sidebarWidth:
+          snapshot !== null && Number.isFinite(snapshot.sidebarWidth) && snapshot.sidebarWidth >= 236
+            ? snapshot.sidebarWidth
+            : 256,
+      };
+      localStorage.setItem(key, JSON.stringify(next));
+    }, collapsed);
+    await this.page.reload({ timeout: 60_000 }).catch(() => {});
+    await this.page
+      .locator("#main-sidebar")
+      .waitFor({ state: "attached", timeout: 45_000 })
+      .catch(() => {});
   }
 
   async isSidebarCollapsed(): Promise<boolean> {
-    return todo("isSidebarCollapsed");
+    // Sidebar chrome menus (NEWFRONT-287): collapsed keeps a 1px
+    // border, so the live width reads 1, not 0.
+    const bar = this.page.locator("#main-sidebar").first();
+    if ((await bar.count()) === 0) return false;
+    const box = await bar.boundingBox({ timeout: 15_000 }).catch(() => null);
+    if (box === null) return true;
+    return box.width <= 1;
   }
 
   async openCompactUserMenu(): Promise<void> {
-    return todo("openCompactUserMenu");
+    // Sidebar chrome menus (NEWFRONT-287): the top-bar avatar trigger,
+    // mounted only while the sidebar is collapsed or unmounted.
+    await this.page.locator('[data-testid="topbar-user-menu"]').first().click({ timeout: 30_000 });
   }
 
   async profileSettingsActiveTab(): Promise<string | null> {
@@ -3898,11 +4049,16 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async isSidebarPeekVisible(): Promise<boolean> {
-    return todo("isSidebarPeekVisible");
+    // Sidebar chrome menus (NEWFRONT-287): the preview overlay mounts
+    // only while open, so presence plus visibility reads shown.
+    const peek = this.page.locator('[data-testid="sidebar-peek"]');
+    return (await peek.count()) > 0 && (await peek.first().isVisible());
   }
 
   async dismissDialogByOverlayClick(): Promise<void> {
-    return todo("dismissDialogByOverlayClick");
+    // Sidebar chrome menus (NEWFRONT-287): some dialogs (product
+    // updates) ignore Escape, so click the overlay outside the panel.
+    await this.page.mouse.click(5, 200);
   }
 
   async sidebarProjectPlaceholderCount(): Promise<number> {

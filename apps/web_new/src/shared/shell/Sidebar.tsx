@@ -10,18 +10,24 @@
 // (NEWFRONT-285/287) extend this content without touching the shell
 // contract.
 
-import { Avatar, Button, Kbd, Menu } from "@pidash/kit";
-import { ChevronsUpDown, FileText, House, LogOut } from "lucide-react";
+import { Kbd } from "@pidash/kit";
+import { FileText, House } from "lucide-react";
 import * as React from "react";
 
 import { CrossAppLink } from "../coexistence/CrossAppLink.js";
 import { SidebarShell } from "./SidebarShell.js";
 import { isClientSideClick, isHomeRowActive } from "./sidebarLink.js";
+import { UserMenu } from "./UserMenu.js";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher.js";
 
 export interface SidebarWorkspace {
   id: string;
   slug: string;
   name: string;
+  role: number;
+  totalMembers: number;
+  /** Resolved logo URL; null renders the workspace initial. */
+  logoSrc: string | null;
 }
 
 /**
@@ -39,11 +45,31 @@ export interface SidebarProps {
   activeSlug: string;
   onSelectWorkspace: (slug: string) => void;
   userLabel: string;
+  /** Signed-in identity details for the user menu. */
+  userEmail: string;
+  /** Resolved avatar URL; null renders initials. */
+  userAvatarSrc: string | null;
+  /** The caller's role in the active workspace; gates Your work. */
+  userRole: number;
+  /** Opens the current user's profile (Your work). */
+  onYourWork: () => void;
+  /** Opens the settings page. */
+  onUserSettings: () => void;
+  /** True while the instance disables workspace creation: hides its row. */
+  creationDisabled: boolean;
+  /** Opens one workspace's settings page. */
+  onOpenSettings: (slug: string) => void;
+  /** Opens one workspace's member invites. */
+  onInviteMembers: (slug: string) => void;
+  /** Opens workspace creation. */
+  onCreateWorkspace: () => void;
+  /** Opens the workspace invites inbox. */
+  onWorkspaceInvites: () => void;
   onSignOut: () => void;
   /**
    * Opens the deactivate-account dialog. Interim placement (AUTH-019): the
    * settings page (NEWFRONT-90) relocates this trigger when it lands.
-   * Absent, the menu offers sign-out only.
+   * Absent, the menu offers sign-out only after settings.
    */
   onDeactivateAccount?: () => void;
   /**
@@ -74,6 +100,16 @@ export function Sidebar({
   activeSlug,
   onSelectWorkspace,
   userLabel,
+  userEmail,
+  userAvatarSrc,
+  userRole,
+  onYourWork,
+  onUserSettings,
+  creationDisabled,
+  onOpenSettings,
+  onInviteMembers,
+  onCreateWorkspace,
+  onWorkspaceInvites,
   onSignOut,
   onDeactivateAccount,
   updateControl,
@@ -84,7 +120,6 @@ export function Sidebar({
   projectsGroup,
   onNavigateHref,
 }: SidebarProps): React.ReactElement {
-  const active = workspaces.find((workspace) => workspace.slug === activeSlug) ?? null;
   const homeHref = `/${activeSlug}`;
   const homeCurrent = currentPath !== null && isHomeRowActive(currentPath, activeSlug);
 
@@ -105,22 +140,20 @@ export function Sidebar({
       quickActions={quickActions}
       account={
         <>
-          <Avatar name={userLabel} size="small" />
-          <span className="text-body min-w-0 flex-1 truncate text-(--text-muted)">{userLabel}</span>
+          <div className="min-w-0 flex-1">
+            <UserMenu
+              displayName={userLabel}
+              email={userEmail}
+              avatarSrc={userAvatarSrc}
+              role={userRole}
+              variant="sidebar"
+              onYourWork={onYourWork}
+              onSettings={onUserSettings}
+              onDeactivateAccount={onDeactivateAccount}
+              onSignOut={onSignOut}
+            />
+          </div>
           {updateControl}
-          <Menu
-            trigger={
-              <Button variant="ghost" size="small" aria-label="Account actions" data-testid="sidebar-account-menu">
-                <LogOut size={16} strokeWidth={1.5} aria-hidden="true" />
-              </Button>
-            }
-            items={[
-              { label: "Sign out", onSelect: onSignOut },
-              ...(onDeactivateAccount === undefined
-                ? []
-                : [{ label: "Deactivate account", onSelect: onDeactivateAccount }]),
-            ]}
-          />
         </>
       }
     >
@@ -139,20 +172,17 @@ export function Sidebar({
           <span className="truncate">Home</span>
         </a>
       </nav>
-      <Menu
-        trigger={
-          <Button variant="ghost" aria-label={`Switch workspace, current: ${active?.name ?? activeSlug}`}>
-            <span className="flex min-w-0 flex-1 items-center gap-(--space-2)">
-              <Avatar name={active?.name ?? activeSlug} size="small" />
-              <span className="text-emphasis truncate text-(--text)">{active?.name ?? activeSlug}</span>
-            </span>
-            <ChevronsUpDown size={16} strokeWidth={1.5} aria-hidden="true" />
-          </Button>
-        }
-        items={workspaces.map((workspace) => ({
-          label: workspace.name,
-          onSelect: () => onSelectWorkspace(workspace.slug),
-        }))}
+      <WorkspaceSwitcher
+        workspaces={workspaces}
+        activeSlug={activeSlug}
+        creationDisabled={creationDisabled}
+        onSelectWorkspace={onSelectWorkspace}
+        onOpenSettings={onOpenSettings}
+        onInviteMembers={onInviteMembers}
+        onCreateWorkspace={onCreateWorkspace}
+        onWorkspaceInvites={onWorkspaceInvites}
+        onSignOut={onSignOut}
+        mount="sidebar"
       />
       {personalEntries.length === 0 ? null : (
         <nav aria-label="Personal" className="flex flex-col gap-(--space-1)">

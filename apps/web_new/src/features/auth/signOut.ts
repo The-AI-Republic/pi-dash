@@ -19,7 +19,10 @@ import { signOut as clearSession } from "../../core/session/store.js";
 import { notifyError } from "../../shared/shell/index.js";
 
 export const SIGN_OUT_FAILED_TITLE = "Could not sign out";
-export const SIGN_OUT_FAILED_MESSAGE = "Check your connection and try again.";
+// The failure message is pinned by the shell oracle (SHELL-058): the
+// workspace-switcher scenario asserts this exact text, so the wording
+// stays aligned with the old app.
+export const SIGN_OUT_FAILED_MESSAGE = "Failed to sign out. Please try again.";
 
 /** The signed-out entry: the sign-in card at home, the login route on desktop. */
 export function signOutLandingTarget(kind: "web" | "desktop"): string {

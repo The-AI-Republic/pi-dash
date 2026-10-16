@@ -25,6 +25,7 @@ function envelope(setupDone: boolean): InstanceBootstrap {
       is_email_password_enabled: true,
       is_smtp_configured: false,
       is_self_managed: true,
+      instance_changelog_url: "",
     },
     instance: {
       id: "11111111-1111-4111-8111-111111111111",

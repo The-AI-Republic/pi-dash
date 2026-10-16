@@ -207,9 +207,9 @@ describe.skipIf(!contractEnabled)("deactivation contract", () => {
 describe.skipIf(!contractEnabled)("instance config contract", () => {
   it("reads the auth flags", async () => {
     const config = await getInstanceConfig(contractClient());
-    expect(Object.keys(config)).toHaveLength(10);
+    expect(Object.keys(config)).toHaveLength(11);
     for (const [key, value] of Object.entries(config)) {
-      expect(typeof value, key).toBe("boolean");
+      expect(typeof value, key).toBe(key === "instance_changelog_url" ? "string" : "boolean");
     }
     expect(config.is_smtp_configured).toBe(true);
     expect(config.is_email_password_enabled).toBe(true);

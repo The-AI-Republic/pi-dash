@@ -118,6 +118,40 @@ describe("Menu", () => {
     expect(onSelect).toHaveBeenCalledTimes(1);
   });
 
+  it("renders rich action content in place of the label with menuitem behavior", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(
+      <Menu
+        trigger={<Button>Workspaces</Button>}
+        items={[
+          {
+            label: "Acme",
+            onSelect,
+            content: (
+              <span data-testid="rich-row">
+                <strong>Acme</strong> admin
+              </span>
+            ),
+          },
+          { label: "Second", onSelect },
+        ]}
+      />
+    );
+    screen.getByRole("button", { name: "Workspaces" }).focus();
+    await user.keyboard("{ArrowDown}");
+    const row = screen.getByTestId("rich-row");
+    expect(row).toBeInTheDocument();
+    // The rich row is the menuitem itself: arrow-key focus lands on it
+    // and Enter activates it.
+    const item = screen.getByRole("menuitem", { name: "Acme admin" });
+    expect(item).toContainElement(row);
+    expect(item).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
   it("classifies entries by shape", () => {
     expect(isMenuCustom({ custom: true, entryKey: "x", node: null })).toBe(true);
     expect(isMenuCustom({ label: "Edit", onSelect: () => {} })).toBe(false);

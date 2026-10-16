@@ -3,14 +3,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { Sidebar, type SidebarProps } from "./Sidebar.js";
 
 const WORKSPACES = [
-  { id: "ws-1", slug: "acme", name: "Acme" },
-  { id: "ws-2", slug: "globex", name: "Globex" },
+  { id: "ws-1", slug: "acme", name: "Acme", role: 20, totalMembers: 3, logoSrc: null },
+  { id: "ws-2", slug: "globex", name: "Globex", role: 15, totalMembers: 1, logoSrc: null },
 ];
 
 function sidebar(overrides: Partial<SidebarProps> = {}) {
@@ -19,6 +20,16 @@ function sidebar(overrides: Partial<SidebarProps> = {}) {
     activeSlug: "acme",
     onSelectWorkspace: () => undefined,
     userLabel: "Ada Lovelace",
+    userEmail: "ada@example.com",
+    userAvatarSrc: null,
+    userRole: 20,
+    onYourWork: () => undefined,
+    onUserSettings: () => undefined,
+    creationDisabled: false,
+    onOpenSettings: () => undefined,
+    onInviteMembers: () => undefined,
+    onCreateWorkspace: () => undefined,
+    onWorkspaceInvites: () => undefined,
     onSignOut: () => undefined,
     onNavigateHref: () => undefined,
     ...overrides,
@@ -30,7 +41,9 @@ describe("Sidebar", () => {
   it("renders the brand and the account row", () => {
     render(sidebar());
     expect(screen.getByTestId("sidebar-brand")).toHaveTextContent("Pi Dash");
+    expect(screen.getByText("Acme")).toBeInTheDocument();
     expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
+    expect(screen.getByText("ada@example.com")).toBeInTheDocument();
   });
 
   it("renders the home row and marks it current on home", () => {
@@ -59,16 +72,16 @@ describe("Sidebar", () => {
   it("switches workspaces from the switcher", () => {
     const onSelectWorkspace = vi.fn();
     render(sidebar({ onSelectWorkspace }));
-    fireEvent.click(screen.getByRole("button", { name: "Switch workspace, current: Acme" }));
-    expect(screen.getByRole("menuitem", { name: "Acme" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Globex" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("menuitem", { name: "Globex" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open workspace switcher" }));
+    expect(screen.getByRole("menuitem", { name: /Acme/ })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /Globex/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("menuitem", { name: /Globex/ }));
     expect(onSelectWorkspace).toHaveBeenCalledWith("globex");
   });
 
   it("falls back to the slug when the workspace row is missing", () => {
     render(sidebar({ activeSlug: "unknown" }));
-    expect(screen.getByRole("button", { name: "Switch workspace, current: unknown" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open workspace switcher" })).toHaveTextContent("unknown");
   });
 
   it("renders the projects group slot", () => {
@@ -79,27 +92,65 @@ describe("Sidebar", () => {
   it("signs out from the account menu", () => {
     const onSignOut = vi.fn();
     render(sidebar({ onSignOut }));
-    fireEvent.click(screen.getByTestId("sidebar-account-menu"));
+    fireEvent.click(screen.getByTestId("sidebar-user-menu"));
     fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
     expect(onSignOut).toHaveBeenCalledTimes(1);
   });
 
-  it("offers account deactivation only when wired", () => {
-    const first = render(sidebar());
-    fireEvent.click(first.getByTestId("sidebar-account-menu"));
+  it("omits deactivation from the user menu without a handler", async () => {
+    const user = userEvent.setup();
+    render(sidebar());
+    await user.click(screen.getByTestId("sidebar-user-menu"));
+    expect(await screen.findByRole("menuitem", { name: "Sign out" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Settings" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Deactivate account" })).not.toBeInTheDocument();
-    first.unmount();
+  });
 
+  it("fires the deactivation handler from the user menu", async () => {
+    const user = userEvent.setup();
     const onDeactivateAccount = vi.fn();
     render(sidebar({ onDeactivateAccount }));
-    fireEvent.click(screen.getByTestId("sidebar-account-menu"));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Deactivate account" }));
+    await user.click(screen.getByTestId("sidebar-user-menu"));
+    await user.click(await screen.findByRole("menuitem", { name: "Deactivate account" }));
     expect(onDeactivateAccount).toHaveBeenCalledTimes(1);
   });
 
   it("renders the update control beside the account row when provided", () => {
     render(sidebar({ updateControl: <span>update ready</span> }));
     expect(screen.getByText("update ready")).toBeInTheDocument();
+  });
+
+  it("routes the switcher and user-menu callbacks through", async () => {
+    const user = userEvent.setup();
+    const handlers = {
+      onYourWork: vi.fn(),
+      onUserSettings: vi.fn(),
+      onOpenSettings: vi.fn(),
+      onInviteMembers: vi.fn(),
+      onCreateWorkspace: vi.fn(),
+      onWorkspaceInvites: vi.fn(),
+    };
+    render(sidebar(handlers));
+    await user.click(screen.getByRole("button", { name: "Open workspace switcher" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Create workspace" }));
+    expect(handlers.onCreateWorkspace).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Open workspace switcher" }));
+    await user.click(await screen.findByRole("button", { name: /Invite members/ }));
+    expect(handlers.onInviteMembers).toHaveBeenCalledWith("acme");
+    await user.click(screen.getByTestId("sidebar-user-menu"));
+    await user.click(await screen.findByRole("menuitem", { name: "Your work" }));
+    expect(handlers.onYourWork).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByTestId("sidebar-user-menu"));
+    await user.click(await screen.findByRole("menuitem", { name: "Settings" }));
+    expect(handlers.onUserSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("mounts the navigation landmark under the stable sidebar id", () => {
+    const { container } = render(sidebar());
+    const landmark = screen.getByRole("complementary", { name: "Workspace navigation" });
+    // The parity drivers and the shell contract locate the sidebar by this id.
+    expect(container.querySelector("#main-sidebar")).toBe(landmark);
+
   });
 
   it("lists personal entries above the projects group", () => {

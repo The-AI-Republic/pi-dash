@@ -266,38 +266,87 @@ describe("SidebarShell", () => {
     expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
   });
 
-  it("starts collapsed mounting narrow, and reopening while narrow sticks", () => {
+  it("starts open and floating mounting narrow, and toggling while narrow sticks", () => {
+    // Narrow loads show the sidebar (SHELL-062's autohide scenario taps
+    // a link to dismiss it); only crossing below the breakpoint
+    // collapses. This supersedes the earlier mount-collapsed reading.
     narrowMatches = true;
     render(shell());
-    expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
-    act(() => {
-      useShellChrome.getState().toggleSidebarCollapsed();
-    });
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
     const aside = screen.getByRole("complementary", { name: "Workspace navigation" });
     expect(aside.getAttribute("style")).toContain(`width: ${SIDEBAR_DEFAULT_WIDTH}px`);
     expect(screen.getByRole("button", { name: "Account" })).not.toBeNull();
-    // The reopened sidebar floats above content; no peek trigger mounts.
+    // The open sidebar floats above content; no peek trigger mounts.
     expect(aside.className).toContain("absolute");
     expect(aside.className).toContain("z-40");
     expect(aside.className).toContain("shadow-popover");
     expect(screen.queryByTestId("sidebar-peek-trigger")).toBeNull();
+    act(() => {
+      useShellChrome.getState().toggleSidebarCollapsed();
+    });
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
+    act(() => {
+      useShellChrome.getState().toggleSidebarCollapsed();
+    });
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
   });
 
   it("collapses the floating sidebar on outside presses only", () => {
     narrowMatches = true;
     render(shell());
-    // Presses while narrow and collapsed fall through: no listener rides.
-    fireEvent.pointerDown(screen.getByText("Page body"));
-    expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
-    act(() => {
-      useShellChrome.getState().toggleSidebarCollapsed();
-    });
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
     fireEvent.pointerDown(screen.getByText("Scroll content"));
     expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
     fireEvent.pointerDown(screen.getByText("Page body"));
     expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
+    // Presses while narrow and collapsed fall through: no listener rides.
+    fireEvent.pointerDown(screen.getByText("Page body"));
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
     // Widening never reopens: the toggle does.
     setNarrow(false);
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
+  });
+
+  it("collapses the floating sidebar on content taps (SHELL-062)", () => {
+    narrowMatches = true;
+    render(
+      <SidebarShell brand={<span>Pi Dash</span>}>
+        <a href="/acme/">Home</a>
+        <button type="button">Project</button>
+        <button type="button" data-keep-open="true">
+          Switcher
+        </button>
+      </SidebarShell>
+    );
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
+    // Same-address taps collapse too: the tap, not the navigation, hides.
+    fireEvent.click(screen.getByRole("link", { name: "Home" }));
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
+    act(() => {
+      useShellChrome.getState().toggleSidebarCollapsed();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Project" }));
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
+    act(() => {
+      useShellChrome.getState().toggleSidebarCollapsed();
+    });
+    // Menu and dialog triggers opt out: opening them never collapses.
+    fireEvent.click(screen.getByRole("button", { name: "Switcher" }));
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
+  });
+
+  it("ignores content taps while docked or collapsed", () => {
+    render(
+      <SidebarShell brand={<span>Pi Dash</span>}>
+        <a href="/acme/">Home</a>
+      </SidebarShell>
+    );
+    fireEvent.click(screen.getByRole("link", { name: "Home" }));
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
+    act(() => {
+      useShellChrome.getState().setSidebarCollapsed(true);
+    });
+    fireEvent.click(screen.getByText("Home"));
     expect(useShellChrome.getState().sidebarCollapsed).toBe(true);
   });
 
@@ -326,11 +375,10 @@ describe("SidebarShell", () => {
         {shell()}
       </>
     );
-    act(() => {
-      useShellChrome.getState().toggleSidebarCollapsed();
-    });
-    // The pointerdown lands first, outside the aside: it must fall
-    // through, or the click would flip the sidebar back open.
+    // Narrow mounts open (SHELL-062); the pointerdown lands first,
+    // outside the aside: it must fall through, or the click would flip
+    // the sidebar back open.
+    expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
     fireEvent.pointerDown(screen.getByTestId("sidebar-toggle-icon"));
     expect(useShellChrome.getState().sidebarCollapsed).toBe(false);
     fireEvent.pointerDown(screen.getByTestId("sidebar-toggle"));

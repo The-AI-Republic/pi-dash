@@ -16,7 +16,13 @@ export interface DialogProps {
   /** Footer actions (usually Buttons); rendered right-aligned. */
   actions?: React.ReactNode | undefined;
   open?: boolean | undefined;
-  onOpenChange?: ((open: boolean) => void) | undefined;
+  onOpenChange?: ((open: boolean, details: { reason: string }) => void) | undefined;
+  /**
+   * When true, Escape no longer dismisses while the backdrop and the
+   * close button still do (the product-updates dialog). Only meaningful
+   * with a controlled open: an uncontrolled dialog closes on its own.
+   */
+  ignoreEscapeKey?: boolean | undefined;
   /** When true, Escape and the backdrop no longer dismiss. */
   nonDismissable?: boolean | undefined;
   className?: string | undefined;
@@ -30,12 +36,17 @@ export function Dialog({
   actions,
   open,
   onOpenChange,
+  ignoreEscapeKey = false,
   nonDismissable = false,
   className,
   children,
 }: DialogProps): React.ReactElement {
+  const handleOpenChange = (next: boolean, details: { reason: string }): void => {
+    if (!next && ignoreEscapeKey && details.reason === "escape-key") return;
+    onOpenChange?.(next, details);
+  };
   return (
-    <BaseDialog.Root {...pickDefined({ open, onOpenChange })}>
+    <BaseDialog.Root {...pickDefined({ open })} onOpenChange={handleOpenChange}>
       {trigger ? <BaseDialog.Trigger render={trigger} /> : null}
       <BaseDialog.Portal>
         <BaseDialog.Backdrop className="fixed inset-0 bg-black/40 transition-opacity duration-(--motion-duration)" />

@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Button } from "./Button";
 import { Dialog } from "./Dialog";
 
@@ -48,6 +48,47 @@ describe("Dialog", () => {
     setup();
     await user.click(screen.getByRole("button", { name: "Edit title" }));
     await user.click(screen.getByRole("button", { name: "Close dialog" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("ignores Escape but still closes from the close button when controlled", async () => {
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+    let open = true;
+    const { rerender } = render(
+      <Dialog
+        title="Updates"
+        open={open}
+        onOpenChange={(next, details) => {
+          onOpenChange(next, details);
+          open = next;
+        }}
+        ignoreEscapeKey
+      >
+        <p>Dialog body</p>
+      </Dialog>
+    );
+    const sync = () =>
+      rerender(
+        <Dialog
+          title="Updates"
+          open={open}
+          onOpenChange={(next, details) => {
+            onOpenChange(next, details);
+            open = next;
+          }}
+          ignoreEscapeKey
+        >
+          <p>Dialog body</p>
+        </Dialog>
+      );
+    expect(screen.getByRole("dialog", { name: "Updates" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Updates" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close dialog" }));
+    expect(onOpenChange).toHaveBeenCalledWith(false, expect.anything());
+    sync();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

@@ -9,8 +9,9 @@
 // exists. The right-edge grip drag-resizes within the store clamps and
 // double-click toggles; a hovered collapsed edge previews the navigation
 // in a temporary overlay; below the breakpoint the open sidebar floats
-// above content and collapses on outside presses. Collapse, peek and
-// width persist per panel through the chrome store.
+// above content and collapses on outside presses and on content taps
+// (SHELL-062). Collapse, peek and width persist per panel through the
+// chrome store.
 import { IconButton } from "@pidash/kit";
 import { SlidersHorizontal } from "lucide-react";
 import * as React from "react";
@@ -47,8 +48,18 @@ function ShellHeader({ brand, launcher }: { brand: React.ReactNode; launcher?: R
   );
 }
 
-function ShellScroll({ children }: { children: React.ReactNode }): React.ReactElement {
-  return <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto">{children}</div>;
+function ShellScroll({
+  children,
+  onContentTap,
+}: {
+  children: React.ReactNode;
+  onContentTap?: ((event: React.MouseEvent) => void) | undefined;
+}): React.ReactElement {
+  return (
+    <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto" onClickCapture={onContentTap}>
+      {children}
+    </div>
+  );
 }
 
 export function SidebarShell({
@@ -95,13 +106,17 @@ export function SidebarShell({
   );
 
   // Crossing below the breakpoint collapses the open sidebar; widening
-  // never reopens it — the toggle does. Reads the store directly so a
-  // toggle while narrow does not retrigger the effect.
+  // never reopens it — the toggle does. Mounting narrow starts open
+  // (SHELL-062): narrow loads show the floating sidebar until a tap
+  // dismisses it. Reads the store directly so a toggle while narrow
+  // does not retrigger the effect.
+  const wasNarrow = React.useRef(narrow);
   React.useEffect(() => {
-    if (narrow && !store.getState().sidebarCollapsed) {
+    if (narrow && !wasNarrow.current && !store.getState().sidebarCollapsed) {
       store.getState().clearPeek();
       store.getState().setSidebarCollapsed(true);
     }
+    wasNarrow.current = narrow;
   }, [narrow, store]);
 
   // The floating sidebar dismisses on outside presses; the docked one
@@ -152,6 +167,18 @@ export function SidebarShell({
     store.getState().toggleSidebarCollapsed();
   };
 
+  // Narrow autohide (SHELL-062): tapping sidebar content on a narrow
+  // viewport collapses the floating sidebar, including taps that stay
+  // on the same address. Menu and dialog triggers opt out with
+  // data-keep-open so opening them never collapses.
+  const collapseOnContentTap = (event: React.MouseEvent): void => {
+    if (!narrow || collapsed) return;
+    const target = event.target as Element;
+    if (target.closest("[data-keep-open]") !== null) return;
+    store.getState().clearPeek();
+    store.getState().setSidebarCollapsed(true);
+  };
+
   const open = !collapsed;
   const floating = narrow && open;
   const showPeek = collapsed && peekOpen;
@@ -178,7 +205,7 @@ export function SidebarShell({
       >
         <ShellHeader brand={brand} launcher={launcher} />
         {quickActions === undefined ? null : <div data-testid="sidebar-quick-actions">{quickActions}</div>}
-        <ShellScroll>{children}</ShellScroll>
+        <ShellScroll onContentTap={collapseOnContentTap}>{children}</ShellScroll>
         {open && account !== undefined ? (
           <div className="flex items-center gap-(--space-2) border-t border-(--border) pt-(--space-4)">{account}</div>
         ) : null}
