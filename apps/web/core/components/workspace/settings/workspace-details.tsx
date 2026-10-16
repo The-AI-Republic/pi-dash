@@ -15,7 +15,7 @@ import { EditIcon } from "@pi-dash/propel/icons";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { IWorkspace } from "@pi-dash/types";
 import { CustomSelect, Input } from "@pi-dash/ui";
-import { cn, copyUrlToClipboard, getFileURL, validateWorkspaceName } from "@pi-dash/utils";
+import { cn, getFileURL, validateWorkspaceName } from "@pi-dash/utils";
 // components
 import { WorkspaceImageUploadModal } from "@/components/core/modals/workspace-image-upload-modal";
 import { TimezoneSelect } from "@/components/global/timezone-select";
@@ -24,6 +24,7 @@ import { useWorkspace } from "@/hooks/store/use-workspace";
 import { useUserPermissions } from "@/hooks/store/user";
 // pi dash web components
 import { DeleteWorkspaceSection } from "@/pi-dash-web/components/workspace/delete-workspace-section";
+import { copyShareUrl } from "@/utils/share-url";
 
 const defaultValues: Partial<IWorkspace> = {
   name: "",
@@ -106,7 +107,7 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
   const handleCopyUrl = () => {
     if (!currentWorkspace) return;
 
-    void copyUrlToClipboard(`${currentWorkspace.slug}`)
+    void copyShareUrl(`${currentWorkspace.slug}`)
       .then(() => {
         setToast({
           type: TOAST_TYPE.SUCCESS,
@@ -215,9 +216,7 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
               {errors.name && <p className="text-caption-sm-regular text-danger-primary">{errors.name.message}</p>}
             </div>
             <div className="flex flex-col gap-2">
-              <h4 className="text-body-sm-medium text-tertiary">
-                {t("Company size")}
-              </h4>
+              <h4 className="text-body-sm-medium text-tertiary">{t("Company size")}</h4>
               <Controller
                 name="organization_size"
                 control={control}
@@ -225,10 +224,7 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
                   <CustomSelect
                     value={value}
                     onChange={onChange}
-                    label={
-                      ORGANIZATION_SIZE.find((c) => c === value) ??
-                      t("Select organization size")
-                    }
+                    label={ORGANIZATION_SIZE.find((c) => c === value) ?? t("Select organization size")}
                     buttonClassName="border border-subtle bg-layer-2 !shadow-none !rounded-md"
                     input
                     disabled={!isAdmin}
@@ -266,9 +262,7 @@ export const WorkspaceDetails = observer(function WorkspaceDetails() {
               />
             </div>
             <div className="flex flex-col gap-2">
-              <h4 className="text-body-sm-medium text-tertiary">
-                {t("Workspace Timezone")}
-              </h4>
+              <h4 className="text-body-sm-medium text-tertiary">{t("Workspace Timezone")}</h4>
               <Controller
                 name="timezone"
                 control={control}

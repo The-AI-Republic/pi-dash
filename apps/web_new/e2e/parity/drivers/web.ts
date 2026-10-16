@@ -6287,6 +6287,22 @@ export class WebDriver implements ParityDriver {
     // Favorite rows share the project rows' hover-revealed grab handle
     // inside a row container, so the drag mirrors the project drag: hover
     // the source row, drag from its revealed handle above the target row.
+    await this.dragFavoriteTo(sourceName, targetName, "edge");
+  }
+
+  async dragFavoriteIntoFolder(sourceName: string, folderName: string): Promise<void> {
+    // Same handle drag, landing on the folder row's center so the drop
+    // reads as nesting instead of a sibling reorder.
+    await this.dragFavoriteTo(sourceName, folderName, "center");
+  }
+
+  async dragFavoriteOutOfFolder(sourceName: string, targetName: string): Promise<void> {
+    // Unnesting is the sibling gesture: a nested row dropped above a
+    // top-level row leaves its folder while landing in the top list.
+    await this.dragFavoriteTo(sourceName, targetName, "edge");
+  }
+
+  private async dragFavoriteTo(sourceName: string, targetName: string, landing: "edge" | "center"): Promise<void> {
     // One retry on a fresh lookup: a remount between resolve and hover
     // leaves a detached handle that burns the whole hover timeout.
     let from = { x: 0, y: 0, width: 0, height: 0 };
@@ -6319,7 +6335,8 @@ export class WebDriver implements ParityDriver {
     };
     await this.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
     await this.page.mouse.down();
-    await this.page.mouse.move(to.x + to.width / 2, to.y + 2, { steps: 25 });
+    const landY = landing === "center" ? to.y + to.height / 2 : to.y + 2;
+    await this.page.mouse.move(to.x + to.width / 2, landY, { steps: 25 });
     await this.page.mouse.up();
   }
 

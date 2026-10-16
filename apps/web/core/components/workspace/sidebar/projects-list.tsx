@@ -25,7 +25,7 @@ import { IconButton } from "@pi-dash/propel/icon-button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { Tooltip } from "@pi-dash/propel/tooltip";
 import { Loader } from "@pi-dash/ui";
-import { copyUrlToClipboard, cn, orderJoinedProjects } from "@pi-dash/utils";
+import { cn, orderJoinedProjects } from "@pi-dash/utils";
 // components
 import { CreateProjectModal } from "@/components/project/create-project-modal";
 import { SidebarNavItem } from "@/components/sidebar/sidebar-navigation";
@@ -38,6 +38,7 @@ import { usePersonalNavigationPreferences, useProjectNavigationPreferences } fro
 // pi dash web imports
 import { SidebarItem } from "@/pi-dash-web/components/workspace/sidebar/sidebar-item";
 import type { TProject } from "@/pi-dash-web/types";
+import { copyShareUrl } from "@/utils/share-url";
 // local imports
 import { SidebarProjectsListItem } from "./projects-list-item";
 
@@ -79,7 +80,7 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
 
   const handleCopyText = async (projectId: string) => {
     try {
-      await copyUrlToClipboard(`${workspaceSlug}/projects/${projectId}/issues`);
+      await copyShareUrl(`${workspaceSlug}/projects/${projectId}/issues`);
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: t("Link copied"),
@@ -196,11 +197,7 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                 type="button"
                 className="flex w-full items-center gap-1 text-left text-13 font-semibold whitespace-nowrap text-placeholder"
                 onClick={() => toggleListDisclosure(!isAllProjectsListOpen)}
-                aria-label={t(
-                  isAllProjectsListOpen
-                    ? "Close projects menu"
-                    : "Open projects menu"
-                )}
+                aria-label={t(isAllProjectsListOpen ? "Close projects menu" : "Open projects menu")}
               >
                 <span className="text-13 font-semibold">{t("Projects")}</span>
               </Disclosure.Button>
@@ -229,11 +226,7 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                   iconClassName={cn("transition-transform", {
                     "rotate-90": isAllProjectsListOpen,
                   })}
-                  aria-label={t(
-                    isAllProjectsListOpen
-                      ? "Close projects menu"
-                      : "Open projects menu"
-                  )}
+                  aria-label={t(isAllProjectsListOpen ? "Close projects menu" : "Open projects menu")}
                 />
               </div>
             </div>
@@ -293,9 +286,7 @@ export const SidebarProjectsList = observer(function SidebarProjectsList() {
                           className="flex flex-grow items-center gap-1.5 text-13 font-medium text-tertiary"
                           id="extended-project-sidebar-toggle"
                           aria-label={t(
-                            isExtendedProjectSidebarOpened
-                              ? "Close extended sidebar"
-                              : "Open extended sidebar"
+                            isExtendedProjectSidebarOpened ? "Close extended sidebar" : "Open extended sidebar"
                           )}
                         >
                           <Ellipsis className="size-4 flex-shrink-0" />
