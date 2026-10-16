@@ -84,6 +84,8 @@ export type {
   ProviderCredentialField,
   ProviderFormValues,
 } from "./providerAuth.js";
+export { PROVIDER_CREDENTIALS } from "./providerCredentials.js";
+export type { ProviderConfigCopyHelp, ProviderCredentialConfig } from "./providerCredentials.js";
 export {
   CONFIG_SAVE_FAILED_LOG,
   createLoopJobMutationOptions,
