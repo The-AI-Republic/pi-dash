@@ -1594,17 +1594,21 @@ async fn sign(
         Ok(config) => config,
         Err(_) => return server_error(),
     };
+    // The sign views construct the provider with the prefixed key
+    // (`key=f"magic_{email}"`), and the `__init__` gates raise with
+    // `payload={"email": str(key)}` (`magic_code.py:36-48`) — so the
+    // gate redirects carry `magic_<email>`, not the bare address.
+    let key = magic_redis_key(&form.email);
     if let Some((slug, code)) = gate_error(init_gate(email_host.as_deref(), &magic_enabled)) {
         return redirect_error(
             &base,
             form.next_path.as_deref(),
             code,
             slug,
-            Some(&form.email),
+            Some(&key),
             &allowed,
         );
     }
-    let key = magic_redis_key(&form.email);
     let stored = match cache.get(&key).await {
         Ok(None) => None,
         Ok(Some(raw)) => match parse_stored(&raw) {
