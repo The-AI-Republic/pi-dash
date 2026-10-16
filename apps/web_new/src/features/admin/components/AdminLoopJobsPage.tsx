@@ -38,15 +38,6 @@ export const LOOP_LIST_SKELETON_BAR_HEIGHT = "48px";
 export const LOOP_BUILTIN_YES = "Yes";
 export const LOOP_BUILTIN_NO = "No";
 
-type RouterLinkProps = Parameters<typeof Link>[0];
-
-// The detail route lands with NEWFRONT-517; the cast carries the
-// literal through the same way the sidebar reaches its out-of-tree
-// entries.
-function detailLinkProps(jobId: string): RouterLinkProps {
-  return { to: `/god-mode/loop/${jobId}/` } as RouterLinkProps;
-}
-
 function LoopJobRow({
   job,
   onToggle,
@@ -57,7 +48,11 @@ function LoopJobRow({
   return (
     <tr>
       <td className="text-body border-b border-(--border) px-(--space-4) py-(--space-3) font-medium text-(--text)">
-        <Link {...detailLinkProps(job.id)} className="text-(--accent) hover:text-(--accent-hover) hover:underline">
+        <Link
+          to="/god-mode/loop/$jobId"
+          params={{ jobId: job.id }}
+          className="text-(--accent) hover:text-(--accent-hover) hover:underline"
+        >
           {job.name}
         </Link>
       </td>

@@ -13,7 +13,9 @@ import {
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
   instanceWorkspacesQueryOptions,
+  loopJobDetailQueryOptions,
   loopJobsQueryOptions,
+  loopJobTargetsQueryOptions,
   mergeConfigurationRows,
   selectNextWorkspaceCursor,
 } from "./queries.js";
@@ -44,6 +46,8 @@ describe("admin keys", () => {
     expect(adminKeys.configurations).toEqual(["admin", "configurations"]);
     expect(adminKeys.loopJobs).toEqual(["admin", "loop", "jobs"]);
     expect(adminKeys.loopJobDetail("job-1")).toEqual(["admin", "loop", "job", "job-1"]);
+    expect(adminKeys.loopJobTargets("job-1", "")).toEqual(["admin", "loop", "targets", "job-1", ""]);
+    expect(adminKeys.loopJobTargets("job-1", "min_role")).toEqual(["admin", "loop", "targets", "job-1", "min_role"]);
     expect(adminKeys.workspaces).toEqual(["admin", "workspaces"]);
   });
 });
@@ -268,6 +272,61 @@ describe("loop jobs query", () => {
     expect(options.retry).toBe(false);
     expect(options.refetchOnWindowFocus).toBe(false);
     expect(options.refetchOnReconnect).toBe(false);
+    expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("loop job detail query", () => {
+  it("reads the job through the client", async () => {
+    const job = { slug: "probe-job", stats: { target_count: 0 } };
+    const getJson = vi.fn(async () => job);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = loopJobDetailQueryOptions(fakeClient, "job-1");
+    expect(options.queryKey).toEqual(adminKeys.loopJobDetail("job-1"));
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(job);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/loop/jobs/job-1/");
+  });
+
+  it("never retries, refetches, polls, or goes stale", () => {
+    const options = loopJobDetailQueryOptions({} as never, "job-1");
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.refetchInterval).toBe(false);
+    expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("loop job targets query", () => {
+  it("reads the targets through the client with the skip filter", async () => {
+    const page = { page: 1, results: [] };
+    const getJson = vi.fn(async () => page);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = loopJobTargetsQueryOptions(fakeClient, "job-1", "user_disabled");
+    expect(options.queryKey).toEqual(adminKeys.loopJobTargets("job-1", "user_disabled"));
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(page);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/loop/jobs/job-1/targets/", {
+      query: { page: undefined, skip_reason: "user_disabled" },
+    });
+  });
+
+  it("drops the empty skip filter from the request", async () => {
+    const getJson = vi.fn(async () => ({ page: 1, results: [] }));
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = loopJobTargetsQueryOptions(fakeClient, "job-1", "");
+    expect(options.queryKey).toEqual(adminKeys.loopJobTargets("job-1", ""));
+    await options.queryFn?.({} as never);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/loop/jobs/job-1/targets/", {
+      query: { page: undefined, skip_reason: undefined },
+    });
+  });
+
+  it("never retries, refetches, polls, or goes stale", () => {
+    const options = loopJobTargetsQueryOptions({} as never, "job-1", "");
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.refetchInterval).toBe(false);
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
   });
 });

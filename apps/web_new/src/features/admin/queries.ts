@@ -13,10 +13,12 @@ import {
   getAdminSession,
   getCsrfToken,
   getInstanceBootstrap,
+  getLoopJob,
   listInstanceAdmins,
   listInstanceConfigurations,
   listInstanceWorkspaces,
   listLoopJobs,
+  listLoopTargets,
   probeCloudAuthSession,
   type AdminWorkspaceListResponse,
   type ApiClient,
@@ -45,6 +47,14 @@ export const adminKeys = {
    * (NEWFRONT-517) hangs its query off this key.
    */
   loopJobDetail: (jobId: string) => ["admin", "loop", "job", jobId],
+  /**
+   * One job's targets read (ADM-058/059). The key carries the skip
+   * filter ("" for all), so each filter value keeps its own cached
+   * entry and resetting to all reuses the cache instead of
+   * refetching. A sibling of the detail key rather than a child, so
+   * editing the job revalidates the job without re-reading targets.
+   */
+  loopJobTargets: (jobId: string, skipReason: string) => ["admin", "loop", "targets", jobId, skipReason],
   /** The cursor-paginated instance workspace list. */
   workspaces: ["admin", "workspaces"],
 } as const;
@@ -170,6 +180,36 @@ export function loopJobsQueryOptions(client: ApiClient) {
     retry: false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
+  });
+}
+
+/**
+ * One loop job read with its stats rollup (ADM-058): the shared
+ * never-stale shape, refreshed only by explicit revalidation after
+ * an edit (spec §0.6).
+ */
+export function loopJobDetailQueryOptions(client: ApiClient, jobId: string) {
+  return queryOptions({
+    queryKey: adminKeys.loopJobDetail(jobId),
+    queryFn: () => getLoopJob(client, jobId),
+    ...adminQueryDefaults,
+    retry: false,
+  });
+}
+
+/**
+ * One job's targets read (ADM-058/059): the shared never-stale shape
+ * per filter value, so picking a reason fetches its entry once and
+ * resetting to all serves the cached unfiltered entry with no
+ * refetch. The blank filter passes through; the contract drops the
+ * empty skip_reason from the URL.
+ */
+export function loopJobTargetsQueryOptions(client: ApiClient, jobId: string, skipReason: string) {
+  return queryOptions({
+    queryKey: adminKeys.loopJobTargets(jobId, skipReason),
+    queryFn: () => listLoopTargets(client, jobId, { skipReason }),
+    ...adminQueryDefaults,
+    retry: false,
   });
 }
 
