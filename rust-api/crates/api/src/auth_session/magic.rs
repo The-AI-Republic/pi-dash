@@ -482,7 +482,9 @@ const DEFAULT_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_
 
 fn timeout_duration(setting_secs: f64, fallback: std::time::Duration) -> std::time::Duration {
     if setting_secs.is_finite() && setting_secs > 0.0 {
-        std::time::Duration::from_secs_f64(setting_secs)
+        // `try_from` (not `from_secs_f64`): a huge finite setting would
+        // otherwise panic on `u64` overflow instead of falling back.
+        std::time::Duration::try_from_secs_f64(setting_secs).unwrap_or(fallback)
     } else {
         fallback
     }
@@ -2162,8 +2164,8 @@ mod tests {
     #[test]
     fn timeout_fallbacks_match_django_defaults() {
         // `redis.py:70-71` / `common.py:238-239`: 2s connect, 5s socket.
-        // Non-positive/non-finite settings fall back instead of panicking
-        // the `Duration` conversion.
+        // Non-positive/non-finite/overflowing settings fall back instead
+        // of panicking the `Duration` conversion.
         assert_eq!(
             timeout_duration(2.0, DEFAULT_CONNECT_TIMEOUT),
             std::time::Duration::from_secs(2)
@@ -2172,7 +2174,7 @@ mod tests {
             timeout_duration(0.25, DEFAULT_RESPONSE_TIMEOUT),
             std::time::Duration::from_millis(250)
         );
-        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e300] {
             assert_eq!(
                 timeout_duration(bad, DEFAULT_CONNECT_TIMEOUT),
                 DEFAULT_CONNECT_TIMEOUT
