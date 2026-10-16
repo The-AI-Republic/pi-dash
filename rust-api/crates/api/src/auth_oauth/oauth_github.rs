@@ -739,6 +739,21 @@ fn random_letters(n: usize) -> String {
         .collect()
 }
 
+/// `User.save()` display-name backfill (`db/models/user.py:177-182`): a
+/// blank name becomes `email.split("@")[0]`. `len(split)` is never 0, so
+/// the random-letters arm is dead here — unlike
+/// [`display_name_for_email`], which keeps its `== 2` shape for the sync
+/// path (`User.get_display_name`, `user.py:190-197`).
+fn backfill_display_name(email: &str) -> String {
+    email.split('@').next().unwrap_or_default().to_owned()
+}
+
+/// `User.save()` token rotation (`user.py:173-175`):
+/// `uuid4().hex + uuid4().hex` — 64 lowercase hex chars.
+fn rotated_token() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
 // ---------------------------------------------------------------------------
 // Callback success path: user resolution (`complete_login_or_signup`)
 // ---------------------------------------------------------------------------
@@ -908,16 +923,26 @@ async fn complete_login_or_signup(
     // `user = User.objects.filter(email=email).first()`;
     // `is_signup = bool(user)` — True when the user EXISTS
     // (QUIRK-is-signup-inverted, ported as-is).
-    let existing: Option<(Uuid, bool, String)> =
-        sqlx::query_as("SELECT id, is_active, password FROM users WHERE email = $1")
-            .bind(email)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| CallbackFailure::Server)?;
+    let existing: Option<(Uuid, bool, String, String, bool, bool)> = sqlx::query_as(
+        "SELECT id, is_active, password, display_name, is_superuser, is_staff \
+         FROM users WHERE email = $1",
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| CallbackFailure::Server)?;
     let is_signup = existing.is_some();
 
-    let (user_id, password_field) = if let Some((id, _, password)) = existing {
-        (id, password)
+    let (user_id, password_field, mut display_name, is_superuser, is_staff) = if let Some((
+        id,
+        _,
+        password,
+        display_name,
+        is_superuser,
+        is_staff,
+    )) = existing
+    {
+        (id, password, display_name, is_superuser, is_staff)
     } else {
         // `__check_signup`: `ENABLE_SIGNUP == "0"` with no invite → 5030.
         let enable_signup = config_value(
@@ -964,8 +989,10 @@ async fn complete_login_or_signup(
             .map(str::to_owned)
             .unwrap_or_default();
         let avatar = user_obj.avatar.as_str().unwrap_or("").to_owned();
-        // `display_name` stays the model default (`""`): the create branch
-        // never sets it — only the sync path does below.
+        // `User.save()` (`user.py:177-182`) backfills the blank
+        // `display_name` from the email local part on the create save
+        // (`base.py:328`); the row is inserted already backfilled.
+        let display_name = backfill_display_name(email);
         sqlx::query(
             r#"INSERT INTO "users" ("id", "password", "last_login", "username", "mobile_number", "email",
                 "display_name", "first_name", "last_name", "avatar", "avatar_asset_id",
@@ -975,7 +1002,7 @@ async fn complete_login_or_signup(
                 "token", "last_active", "last_login_time", "last_logout_time", "last_login_ip", "last_logout_ip",
                 "last_login_medium", "last_login_uagent", "token_updated_at", "is_bot", "bot_type",
                 "user_timezone", "is_email_valid", "masked_at")
-               VALUES ($1, $2, NULL, $3, NULL, $4, '', $5, $6, $7, NULL, NULL, NULL, $8, $8, $8,
+               VALUES ($1, $2, NULL, $3, NULL, $4, $9, $5, $6, $7, NULL, NULL, NULL, $8, $8, $8,
                 '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, TRUE, FALSE,
                 '', $8, NULL, NULL, '', '', 'email', '', NULL, FALSE, NULL, 'UTC', FALSE, NULL)"#,
         )
@@ -987,6 +1014,7 @@ async fn complete_login_or_signup(
         .bind(&last_name)
         .bind(&avatar)
         .bind(now)
+        .bind(&display_name)
         .execute(pool)
         .await
         .map_err(|_| CallbackFailure::Server)?;
@@ -1022,7 +1050,7 @@ async fn complete_login_or_signup(
         .execute(pool)
         .await
         .map_err(|_| CallbackFailure::Server)?;
-        (id, password)
+        (id, password, display_name, false, false)
     };
 
     // IDP sync (`base.py:sync_user_data`): `check_sync_enabled() and not
@@ -1047,7 +1075,10 @@ async fn complete_login_or_signup(
             .map(str::to_owned)
             .unwrap_or_default();
         let avatar = user_obj.avatar.as_str().unwrap_or("").to_owned();
-        let display_name = display_name_for_email(email);
+        // The sync save (`base.py:286`) overwrites the name via
+        // `get_display_name`; its `is_staff` arm no-ops (only new,
+        // never-superuser rows reach this branch).
+        display_name = display_name_for_email(email);
         sqlx::query(
             r#"UPDATE "users" SET "first_name" = $1, "last_name" = $2, "display_name" = $3,
                "avatar" = $4, "updated_at" = $5 WHERE "id" = $6"#,
@@ -1063,21 +1094,36 @@ async fn complete_login_or_signup(
         .map_err(|_| CallbackFailure::Server)?;
     }
 
-    // `save_user_data` (`base.py`): login stamps; inactive users are
-    // flipped active (the activation-email publish is a cross-domain
+    // `save_user_data` (`base.py:220-233`): login stamps; inactive users
+    // are flipped active (the activation-email publish is a cross-domain
     // boundary — see module docs). `None` binds NULL into the NOT NULL
-    // stamp columns, raising into the same 500 Python hits.
+    // stamp columns, raising into the same 500 Python hits. The save
+    // (`base.py:233`) then runs `User.save()` (`user.py:169-187`):
+    // `token_updated_at` is set, so the token rotates; a blank
+    // `display_name` backfills from the email local part; `is_staff`
+    // syncs from `is_superuser`.
     let ip = client_ip(headers, remote_addr);
     let uagent = user_agent(headers);
+    let token = rotated_token();
+    let display_name = if display_name.is_empty() {
+        backfill_display_name(email)
+    } else {
+        display_name
+    };
+    let is_staff = is_staff || is_superuser;
     sqlx::query(
         r#"UPDATE "users" SET "last_login_medium" = 'github', "last_active" = $1, "last_login_time" = $1,
-           "last_login_ip" = $2, "last_login_uagent" = $3, "token_updated_at" = $1,
+           "last_login_ip" = $2, "last_login_uagent" = $3, "token_updated_at" = $1, "token" = $5,
+           "display_name" = $6, "is_staff" = $7,
            "is_active" = TRUE, "updated_at" = $1 WHERE "id" = $4"#,
     )
     .bind(now)
     .bind(ip.as_deref())
     .bind(uagent.as_deref())
     .bind(user_id)
+    .bind(token)
+    .bind(display_name)
+    .bind(is_staff)
     .execute(pool)
     .await
     .map_err(|_| CallbackFailure::Server)?;
@@ -1703,6 +1749,30 @@ mod tests {
     fn display_name_goldens() {
         assert_eq!(display_name_for_email("octo@example.com"), "octo");
         assert_eq!(display_name_for_email("a@b@c").len(), 6);
+    }
+
+    // `User.save()` backfill goldens (`user.py:177-182`): the local part
+    // wins for any `@` count — including the shapes where the sync-path
+    // `get_display_name` falls back to random letters.
+    #[test]
+    fn save_backfill_goldens() {
+        assert_eq!(backfill_display_name("octo@example.com"), "octo");
+        assert_eq!(backfill_display_name("a@b@c"), "a");
+        assert_eq!(backfill_display_name("no-at-sign"), "no-at-sign");
+        assert_eq!(backfill_display_name(""), "");
+    }
+
+    // `User.save()` rotation shape (`user.py:173-175`): 64 hex chars.
+    #[test]
+    fn rotated_token_shape() {
+        for _ in 0..8 {
+            let token = rotated_token();
+            assert_eq!(token.len(), 64, "two uuid4 hexes");
+            assert!(
+                token.bytes().all(|b| b.is_ascii_hexdigit()),
+                "lowercase hex only: {token}"
+            );
+        }
     }
 
     // Numeric provider ids (github userinfo `id`) str-coerce like Django's
