@@ -8,7 +8,7 @@
 // issue-actions.ts, out of the initial bundle (NEWFRONT-523, size gate).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableDateTime, nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableDate, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 
 export const ISSUE_PRIORITIES = ["urgent", "high", "medium", "low", "none"] as const;
 
@@ -32,15 +32,16 @@ const issueCoreFields = {
   sub_issues_count: z.nullable(z.number()),
   attachment_count: z.nullable(z.number()),
   link_count: z.nullable(z.number()),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
   created_by: z.nullable(z.string()),
   updated_by: z.nullable(z.string()),
   is_draft: z.boolean(),
   // Epic marker for the project tab highlight (SHELL-076): only some
   // serializers send it, so readers treat absence as a plain work item.
   is_epic: z.optional(z.boolean()),
-  archived_at: nullableDateTime(),
+  // The model stamps a calendar date (DateField), not a datetime.
+  archived_at: nullableDate(),
 };
 
 /**
@@ -113,4 +114,19 @@ export async function listIssues(
 export async function getIssue(client: ApiClient, slug: string, projectId: string, issueId: string): Promise<Issue> {
   const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/issues/${issueId}/`);
   return client.parse(Issue, body, "GET issue detail");
+}
+
+/**
+ * Archived issues of one project. Workspace search only indexes live
+ * issues, so key resolution falls back to this list for archived keys.
+ * Rows share the flat list shape; the envelope carries the same cursor
+ * fields as the live list plus grouping extras the schema ignores.
+ */
+export async function listArchivedIssues(
+  client: ApiClient,
+  slug: string,
+  projectId: string
+): Promise<IssueListResponse> {
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/archived-issues/`);
+  return client.parse(IssueListResponse, body, "GET archived issues");
 }

@@ -114,7 +114,11 @@ function PersonSection({
                 className="text-body flex cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) hover:bg-(--subtle)"
               >
                 <input type="checkbox" checked={option.applied} onChange={() => onTogglePerson(dimension, option.id)} />
-                <Avatar name={option.displayName} src={option.avatarUrl} size="small" />
+                {/* Decorative here: the label text already names the option,
+                    so the avatar's img role must not leak into the name. */}
+                <span aria-hidden="true">
+                  <Avatar name={option.displayName} src={option.avatarUrl} size="small" />
+                </span>
                 {option.self ? "You" : option.displayName}
               </label>
             ))

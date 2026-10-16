@@ -124,7 +124,9 @@ test(
       const other = await context.newPage();
       await other.goto("about:blank");
       await driver.page.bringToFront();
-      await driver.page.waitForTimeout(3_000);
+      // Refocus refetches the widgets; settle on repopulated rows instead
+      // of a fixed sleep so a slow refetch never reads mid-reload.
+      await expect.poll(() => driver.homeRecentRowTexts(), { timeout: 30_000 }).not.toEqual([]);
       await other.close();
       expect(await driver.homeWidgetTitles()).toEqual(widgetsBefore);
       expect(await driver.homeQuickLinkNames()).toEqual(linksBefore);

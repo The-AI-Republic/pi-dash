@@ -153,6 +153,19 @@ describe("ProjectsFilterPanel", () => {
     expect(handlers.onTogglePerson).toHaveBeenCalledWith("members", "u3");
   });
 
+  it("names person checkboxes by label text alone, without the avatar", async () => {
+    await setup();
+
+    // The avatar is decorative inside the label: its img name must not
+    // leak into the checkbox name (self reads exactly "You", not
+    // "Ada Lovelace You").
+    const lead = screen.getByRole("region", { name: "Lead" });
+    expect(within(lead).getByRole("checkbox", { name: "You" })).not.toBeNull();
+    expect(within(lead).queryByRole("checkbox", { name: "Ada Lovelace You" })).toBeNull();
+    const members = screen.getByRole("region", { name: "Members" });
+    expect(within(members).getByRole("checkbox", { name: "Alan Turing" })).not.toBeNull();
+  });
+
   it("counts picks on collapsible headers", async () => {
     const { user } = await setup({
       filters: {

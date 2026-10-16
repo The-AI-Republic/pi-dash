@@ -13,6 +13,7 @@ import {
   serverHomeIssues,
   serverSeedProject,
   serverSetTourCompleted,
+  serverVisitIssue,
   signInSessionRetry,
   serverEnsureWidgets,
 } from "../../helpers/api";
@@ -38,8 +39,9 @@ test(
     await test.step("seed a recent visit then return home", async () => {
       await driver.openEntry();
       await driver.signInWithPassword(seed.email, seed.password);
-      await driver.homeOpenIssueDetail(seed.workspaceSlug, project.id, target.id);
-      await driver.page.waitForTimeout(2_000);
+      // API-seeded visit: the server records it on detail GET (polling
+      // until it lands); the UI visit is setup, not the assertion.
+      await serverVisitIssue(seed.workspaceSlug, project.id, target.id, session);
       await driver.homeOpen(seed.workspaceSlug);
       await driver.homeWaitForWidgets();
       await expect.poll(() => driver.homeRecentRowTexts(), { timeout: 60_000 }).not.toEqual([]);

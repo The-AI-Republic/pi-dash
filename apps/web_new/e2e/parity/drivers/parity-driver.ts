@@ -659,6 +659,12 @@ export interface ParityDriver {
   homeSetRecentsFilter(name: "all" | "issue" | "page" | "project"): Promise<void>;
   /** Full text of every recent-activity row currently rendered. */
   homeRecentRowTexts(): Promise<string[]>;
+  /**
+   * Native tooltip of every priority marker on work-item recent rows.
+   * Target-only (SHELL-017, main#894): the old app tooltips the raw
+   * enum, so the oracle driver leaves this unimplemented.
+   */
+  homeRecentPriorityTooltips(): Promise<string[]>;
   /** Click a recent row identified by contained text. */
   homeOpenRecentRow(text: string): Promise<void>;
   /** Whether a work-item preview overlay is shown (in-place side panel). */
@@ -1905,6 +1911,12 @@ export interface ParityDriver {
   repoStarLinkAttributes(): Promise<{ href: string; target: string; rel: string } | null>;
   /** The src of the repo-star icon image (theme-adaptive asset), or null. */
   repoStarIconSrc(): Promise<string | null>;
+  /**
+   * True when the repo-star affordance renders a theme-driven vector icon
+   * (currentColor SVG) instead of a swapped image asset. Only the web_new
+   * driver implements this; the oracle leg asserts the png asset instead.
+   */
+  repoStarIconThemed(): Promise<boolean>;
 
   // --- preferences: theme, language, timezone, first day of week
   //     (SHELL-088, 095, 096, 097). The four "Change …" preference commands

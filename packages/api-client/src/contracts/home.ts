@@ -5,7 +5,7 @@
 // recent visits and the new-user tour flag.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableDateTime, nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 
 /**
  * Live home-dashboard endpoint.
@@ -138,8 +138,8 @@ export const QuickLink = z.object({
   metadata: z.record(z.string(), z.unknown()),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
 });
 export type QuickLink = z.infer<typeof QuickLink>;
 
@@ -196,7 +196,7 @@ export const RecentVisit = z.object({
   entity_name: z.string(),
   entity_identifier: z.string(),
   entity_data: z.nullable(z.record(z.string(), z.unknown())),
-  visited_at: z.iso.datetime(),
+  visited_at: dateTime(),
 });
 export type RecentVisit = z.infer<typeof RecentVisit>;
 

@@ -47,6 +47,23 @@ function expectedVariant(hour: number): RegExp {
   return /evening/i;
 }
 
+/**
+ * Both apps greet in the user's timezone, not the runner's: resolve the
+ * expected variant against the account zone (an invalid zone falls back
+ * to the runner hour, mirroring the apps' Intl fallback).
+ */
+function expectedVariantForZone(userTimezone: string | undefined): RegExp {
+  try {
+    const zone = userTimezone === undefined || userTimezone.trim() === "" ? "UTC" : userTimezone;
+    const parts = new Intl.DateTimeFormat("en-US", { hour: "numeric", hour12: false, timeZone: zone }).formatToParts(
+      new Date()
+    );
+    return expectedVariant(Number(parts.find((part) => part.type === "hour")?.value ?? 0) % 24);
+  } catch {
+    return expectedVariant(new Date().getHours());
+  }
+}
+
 test(specTitle(ROWS, "home dashboard greets the signed-in user"), { tag: specTags(ROWS) }, async ({ driver, seed }) => {
   const session = await signInSessionRetry(seed.email, seed.password);
   const me = await serverHomeMe(session);
@@ -64,7 +81,7 @@ test(specTitle(ROWS, "home dashboard greets the signed-in user"), { tag: specTag
   await test.step("greeting names the user with the time-of-day variant", async () => {
     const heading = await driver.homeGreetingHeading();
     expect(heading ?? "").toContain(me.first_name);
-    expect(heading ?? "").toMatch(expectedVariant(new Date().getHours()));
+    expect(heading ?? "").toMatch(expectedVariantForZone(me.user_timezone));
   });
 
   await test.step("date line keeps a fixed weekday-date-clock shape", async () => {
@@ -111,7 +128,7 @@ test(
         await driver.homeReload();
         const heading = await reloadUntilHeading(driver);
         expect(heading ?? "").toContain(me.first_name);
-        expect(heading ?? "").toMatch(expectedVariant(new Date().getHours()));
+        expect(heading ?? "").toMatch(expectedVariantForZone(me.user_timezone));
         expect((await driver.homeDateLine()) ?? "").toMatch(DATE_SHAPE);
       });
 

@@ -7,7 +7,7 @@
 // (NEWFRONT-523, size gate).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableDateTime, uuid } from "./fields.js";
+import { dateTime, nullableDateTime, uuid } from "./fields.js";
 
 export const Me = z.object({
   id: uuid(),
@@ -20,7 +20,7 @@ export const Me = z.object({
   avatar_url: z.nullable(z.string()),
   cover_image: z.nullable(z.string()),
   cover_image_url: z.nullable(z.string()),
-  date_joined: z.iso.datetime(),
+  date_joined: dateTime(),
   user_timezone: z.string(),
   is_active: z.boolean(),
   is_bot: z.boolean(),

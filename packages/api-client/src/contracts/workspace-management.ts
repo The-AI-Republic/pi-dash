@@ -8,7 +8,7 @@
 // it stays out of the initial bundle (NEWFRONT-523, size gate).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableUuid, uuid } from "./fields.js";
 import { UserLite } from "./users.js";
 
 export const WorkspaceSlugStatus = z.object({
@@ -51,8 +51,8 @@ export const CreatedWorkspace = z.object({
   role: z.number(),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
 });
 export type CreatedWorkspace = z.infer<typeof CreatedWorkspace>;
 

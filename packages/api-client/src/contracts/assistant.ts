@@ -6,15 +6,15 @@
 // run (unconfigured when no model name or key is set).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableDateTime, uuid } from "./fields.js";
+import { dateTime, nullableDateTime, uuid } from "./fields.js";
 
 export const AssistantThread = z.object({
   id: uuid(),
   title: z.string(),
   is_archived: z.boolean(),
   has_active_turn: z.boolean(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
 });
 export type AssistantThread = z.infer<typeof AssistantThread>;
 

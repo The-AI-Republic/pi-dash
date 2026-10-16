@@ -6,7 +6,7 @@
 // flow for users who arrive with no workspace.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableDateTime, nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 import { WorkspaceLite } from "./workspaces.js";
 
 /**
@@ -26,8 +26,8 @@ export const WorkspaceInvitation = z.object({
   invite_link: z.string(),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
 });
 export type WorkspaceInvitation = z.infer<typeof WorkspaceInvitation>;
 
@@ -142,8 +142,8 @@ export const WorkspaceJoinRequest = z.object({
   message: z.nullable(z.string()),
   status: z.enum(["PENDING", "APPROVED", "DENIED"]),
   responded_at: nullableDateTime(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
 });
 export type WorkspaceJoinRequest = z.infer<typeof WorkspaceJoinRequest>;
 

@@ -8,7 +8,7 @@
 // (NEWFRONT-523, size gate).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableUuid, uuid } from "./fields.js";
 
 export const WorkspaceLite = z.object({
   id: uuid(),
@@ -58,8 +58,8 @@ export const OwnWorkspaceMembership = z.object({
   draft_issue_count: z.number(),
   created_by: nullableUuid(),
   updated_by: nullableUuid(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+  created_at: dateTime(),
+  updated_at: dateTime(),
 });
 export type OwnWorkspaceMembership = z.infer<typeof OwnWorkspaceMembership>;
 

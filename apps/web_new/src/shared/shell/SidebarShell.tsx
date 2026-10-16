@@ -71,10 +71,13 @@ export function SidebarShell({
   children,
   account,
 }: SidebarShellProps): React.ReactElement {
-  const store = sidebarPanelStore(panel);
-  const collapsed = store((state) => state.sidebarCollapsed);
-  const peekOpen = store((state) => state.peekOpen);
-  const width = store((state) => state.sidebarWidth);
+  // Called through a `use*` binding: the React Compiler only treats
+  // `use*` (and `React.use*`) callees as hooks, and memoizing across
+  // these selector subscriptions breaks hook order (gate-found crash).
+  const usePanelStore = sidebarPanelStore(panel);
+  const collapsed = usePanelStore((state) => state.sidebarCollapsed);
+  const peekOpen = usePanelStore((state) => state.peekOpen);
+  const width = usePanelStore((state) => state.sidebarWidth);
   const narrow = useNarrowViewport();
   const [resizing, setResizing] = React.useState(false);
   const asideRef = React.useRef<HTMLElement | null>(null);
@@ -93,7 +96,7 @@ export function SidebarShell({
     cancelPeekDismiss();
     peekTimer.current = setTimeout(() => {
       peekTimer.current = null;
-      store.getState().clearPeek();
+      usePanelStore.getState().clearPeek();
     }, SIDEBAR_PEEK_DISMISS_MS);
   };
 
@@ -112,12 +115,12 @@ export function SidebarShell({
   // does not retrigger the effect.
   const wasNarrow = React.useRef(narrow);
   React.useEffect(() => {
-    if (narrow && !wasNarrow.current && !store.getState().sidebarCollapsed) {
-      store.getState().clearPeek();
-      store.getState().setSidebarCollapsed(true);
+    if (narrow && !wasNarrow.current && !usePanelStore.getState().sidebarCollapsed) {
+      usePanelStore.getState().clearPeek();
+      usePanelStore.getState().setSidebarCollapsed(true);
     }
     wasNarrow.current = narrow;
-  }, [narrow, store]);
+  }, [narrow, usePanelStore]);
 
   // The floating sidebar dismisses on outside presses; the docked one
   // ignores them. Presses on the top-bar toggle fall through: the toggle
@@ -129,22 +132,22 @@ export function SidebarShell({
       const target = event.target as Element;
       if (target.closest('[data-testid="sidebar-toggle"]') !== null) return;
       if (!asideRef.current!.contains(target)) {
-        store.getState().clearPeek();
-        store.getState().setSidebarCollapsed(true);
+        usePanelStore.getState().clearPeek();
+        usePanelStore.getState().setSidebarCollapsed(true);
       }
     };
     document.addEventListener("pointerdown", onPointerDown);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
     };
-  }, [narrow, collapsed, store]);
+  }, [narrow, collapsed, usePanelStore]);
 
   // Grip drag: track the pointer on the document so fast drags past the
   // edge keep resizing; the store clamps into the draggable range.
   React.useEffect(() => {
     if (!resizing) return;
     const onMove = (event: MouseEvent): void => {
-      store.getState().setSidebarWidth(dragStart.current.width + (event.clientX - dragStart.current.x));
+      usePanelStore.getState().setSidebarWidth(dragStart.current.width + (event.clientX - dragStart.current.x));
     };
     const onUp = (): void => {
       setResizing(false);
@@ -159,12 +162,12 @@ export function SidebarShell({
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
-  }, [resizing, store]);
+  }, [resizing, usePanelStore]);
 
   const flip = (): void => {
     cancelPeekDismiss();
-    store.getState().clearPeek();
-    store.getState().toggleSidebarCollapsed();
+    usePanelStore.getState().clearPeek();
+    usePanelStore.getState().toggleSidebarCollapsed();
   };
 
   // Narrow autohide (SHELL-062): tapping sidebar content on a narrow
@@ -175,8 +178,8 @@ export function SidebarShell({
     if (!narrow || collapsed) return;
     const target = event.target as Element;
     if (target.closest("[data-keep-open]") !== null) return;
-    store.getState().clearPeek();
-    store.getState().setSidebarCollapsed(true);
+    usePanelStore.getState().clearPeek();
+    usePanelStore.getState().setSidebarCollapsed(true);
   };
 
   const open = !collapsed;
@@ -197,8 +200,10 @@ export function SidebarShell({
         aria-label="Workspace navigation"
         inert={collapsed}
         style={{ width: collapsed ? 0 : width }}
-        className={`relative flex shrink-0 flex-col gap-(--space-4) border-r border-(--border) bg-(--surface) p-(--space-4)${
-          collapsed ? " w-0 overflow-hidden" : ""
+        // Collapsed width must measure zero: padding and the edge border
+        // leak through w-0, so they only apply while open.
+        className={`relative flex shrink-0 flex-col gap-(--space-4) border-(--border) bg-(--surface)${
+          collapsed ? " w-0 overflow-hidden border-r-0 p-0" : " border-r p-(--space-4)"
         }${floating ? " shadow-popover absolute inset-y-0 left-0 z-40" : ""}${
           resizing ? "" : " transition-[width] duration-(--motion-duration) ease-in-out motion-reduce:transition-none"
         }`}
@@ -214,7 +219,7 @@ export function SidebarShell({
           aria-label="Resize sidebar"
           aria-orientation="vertical"
           onMouseDown={(event) => {
-            dragStart.current = { x: event.clientX, width: store.getState().sidebarWidth };
+            dragStart.current = { x: event.clientX, width: usePanelStore.getState().sidebarWidth };
             setResizing(true);
           }}
           onDoubleClick={flip}
@@ -228,14 +233,14 @@ export function SidebarShell({
           type="button"
           aria-label="Preview sidebar"
           data-testid="sidebar-peek-trigger"
-          onPointerEnter={() => store.getState().setPeekOpen(true)}
-          onClick={() => store.getState().setPeekOpen(true)}
-          onFocus={() => store.getState().setPeekOpen(true)}
+          onPointerEnter={() => usePanelStore.getState().setPeekOpen(true)}
+          onClick={() => usePanelStore.getState().setPeekOpen(true)}
+          onFocus={() => usePanelStore.getState().setPeekOpen(true)}
           onBlur={(event) => {
             // Focus moving into the overlay keeps it up; focus anywhere
             // else (or a blur with the overlay already gone) closes it.
             if (overlayRef.current === null || !overlayRef.current.contains(event.relatedTarget as Node | null)) {
-              store.getState().clearPeek();
+              usePanelStore.getState().clearPeek();
             }
           }}
           className="absolute inset-y-0 left-0 z-30 w-2 cursor-pointer hover:bg-(--subtle) focus-visible:bg-(--subtle)"
@@ -251,7 +256,7 @@ export function SidebarShell({
           onPointerEnter={cancelPeekDismiss}
           onPointerLeave={schedulePeekDismiss}
           onKeyDown={(event) => {
-            if (event.key === "Escape") store.getState().clearPeek();
+            if (event.key === "Escape") usePanelStore.getState().clearPeek();
           }}
           className="shadow-popover absolute inset-y-0 left-0 z-40 flex flex-col gap-(--space-4) overflow-hidden border-r border-(--border) bg-(--surface) p-(--space-4)"
         >

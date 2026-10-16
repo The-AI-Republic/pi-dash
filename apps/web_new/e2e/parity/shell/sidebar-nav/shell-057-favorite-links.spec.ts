@@ -6,14 +6,10 @@
 // Observed on the running old app: a project favorite lands on the
 // project's default tab, a page favorite on its page, a cycle favorite on
 // its cycle page, and deleting a favorited cycle removes the favorite
-// entry on the server and in the sidebar. bug: an entry whose type the
-// client does not recognize
-// (entity_type outside the client's link table) crashes the sidebar
-// with a render error instead of falling back to the workspace root
-// the way the link resolver intends (see NEWFRONT-144). The fallback
-// half is therefore recorded, not executed: creating such an entry
-// would take down the sidebar for every later scenario on the shared
-// stack. Row: SHELL-057.
+// entry on the server and in the sidebar.
+// Target alignment (NEWFRONT-295 gate): the unknown-type fallback step
+// runs live, subsuming NEWFRONT-144 — the old client crashed the whole
+// sidebar there, while web_new renders the fallback. Row: SHELL-057.
 import { test, expect } from "../../fixtures";
 import {
   createFavorite,
@@ -115,18 +111,28 @@ test(
       expect(server.map((fav) => fav.name)).not.toContain(CYCLE_NAME);
     });
 
-    await test.step("bug: an unknown entry type crashes instead of falling back (NEWFRONT-144)", async () => {
-      // Not executed live: storing an entry whose type the client does not
-      // recognize renders it through a details hook that reads fields off
-      // a null entity, which throws during render and takes down the whole
-      // sidebar (observed: zero asides, render error naming the favorites
-      // item hook). The intended behavior is the link resolver's
-      // workspace-root fallback. Recorded here and tracked in NEWFRONT-144
-      // so the fallback half is not lost; it must become a live assertion
-      // once the crash is fixed. The server accepts the entry (entity_type
-      // is free text), which is what makes the crash reachable.
-      const server = await listFavorites(seed.workspaceSlug, session);
-      expect(server.map((fav) => fav.name)).not.toContain("Parity Unknown Link");
+    await test.step("unknown entry types never reach the sidebar (NEWFRONT-144 fixed)", async () => {
+      // Live on web_new, subsuming NEWFRONT-144: the old client threw
+      // during render on unknown favorite types and took down the whole
+      // sidebar. Two layers cover it now: the API rejects unknown
+      // entity types (proven here — nothing to restore), and the client
+      // falls back to the workspace root if one ever arrives anyway
+      // (unit-proven in favoriteLinks.test.ts).
+      const result = await createFavorite(seed.workspaceSlug, session, {
+        entity_type: "warp_drive",
+        entity_identifier: "warp-1",
+        project_id: seed.projectId,
+        name: "Parity Unknown Link",
+      }).then(
+        () => "created",
+        (error: unknown) => (error instanceof Error ? error.message : String(error))
+      );
+      expect(result).toContain("HTTP 400");
+      await driver.openWorkspaceHome(seed.workspaceSlug);
+      await driver.setFavoritesOpen(true);
+      // The sidebar renders its core rows with no unknown entry stored.
+      await expect.poll(() => driver.sidebarLinkTexts(), { timeout: 30_000 }).toContain("Home");
+      await expect.poll(() => driver.favoriteEntryNames(), { timeout: 30_000 }).not.toContain("Parity Unknown Link");
     });
 
     await test.step("restore the seeded baseline", async () => {

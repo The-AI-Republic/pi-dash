@@ -9,13 +9,18 @@
 // Behavior learned from the old dashboard in prose: rows render in visit
 // order, the filter refetches per activity type, and each row shows an
 // age plus status, priority, assignee or owner and project identifiers.
+// Target alignment (NEWFRONT-295 gate, main#894): the priority marker
+// tooltips the display label ("Urgent"), never the raw enum. No oracle
+// for that step: the old app still tooltips the raw value.
 import { test, expect } from "../../fixtures";
 import type { ParityDriver } from "../../drivers/parity-driver";
 import {
+  patchIssue,
   serverHomeIssues,
   serverRecents,
   serverSeedProject,
   serverSetTourCompleted,
+  serverVisitIssue,
   signInSessionRetry,
   serverEnsureWidgets,
 } from "../../helpers/api";
@@ -52,10 +57,13 @@ test(
     await test.step("visit two work items to seed the feed", async () => {
       await driver.openEntry();
       await driver.signInWithPassword(seed.email, seed.password);
-      await driver.homeOpenIssueDetail(seed.workspaceSlug, project.id, first.id);
-      await driver.page.waitForTimeout(2_000);
-      await driver.homeOpenIssueDetail(seed.workspaceSlug, project.id, second.id);
-      await driver.page.waitForTimeout(2_000);
+      // Pin the later visit's priority so the tooltip step always has a
+      // marked row; the feed reads issue data at render time.
+      await patchIssue(seed.workspaceSlug, project.id, second.id, session, { priority: "urgent" });
+      // API-seeded visits: the server records a visit on detail GET, and
+      // each call polls until its visit lands, so the order is exact.
+      await serverVisitIssue(seed.workspaceSlug, project.id, first.id, session);
+      await serverVisitIssue(seed.workspaceSlug, project.id, second.id, session);
     });
 
     await test.step("rows appear most-recent-first with age and identifiers", async () => {
@@ -75,6 +83,16 @@ test(
       // Every rendered row is non-empty: entries with missing payloads are
       // skipped instead of breaking the feed.
       for (const row of rows) expect(row.trim().length).toBeGreaterThan(0);
+    });
+
+    await test.step("priority markers tooltip the display label, never the raw enum", async () => {
+      // Target per main#894: "Urgent", not "urgent".
+      await expect.poll(() => driver.homeRecentPriorityTooltips(), { timeout: 60_000 }).not.toEqual([]);
+      const tooltips = await driver.homeRecentPriorityTooltips();
+      expect(tooltips).toContain("Urgent");
+      for (const tooltip of tooltips) {
+        expect(["Urgent", "High", "Medium", "Low", "None"]).toContain(tooltip);
+      }
     });
   }
 );

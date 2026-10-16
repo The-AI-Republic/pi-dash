@@ -3129,6 +3129,13 @@ export class WebDriver implements ParityDriver {
     return [...new Set(rows.map((t) => t.trim()).filter((t) => t.length > 0))];
   }
 
+  async homeRecentPriorityTooltips(): Promise<string[]> {
+    // Target-only (SHELL-017, main#894): the old app tooltips the raw
+    // lowercase enum, so this probe is intentionally unimplemented on
+    // the oracle driver; the gate proves it on web_new alone.
+    throw new Error("[parity] homeRecentPriorityTooltips has no oracle: target-only probe.");
+  }
+
   async homeOpenRecentRow(text: string): Promise<void> {
     const section = this.homeRecentsSection();
     // The feed clips its overflow behind a fading gradient that swallows
@@ -9290,6 +9297,13 @@ export class WebDriver implements ParityDriver {
       .first();
     if ((await img.count()) === 0) return null;
     return img.getAttribute("src");
+  }
+
+  async repoStarIconThemed(): Promise<boolean> {
+    // Web_new-only (SHELL-103): the old app swaps png assets, so the
+    // oracle leg asserts the asset name while the gate proves the
+    // currentColor vector equivalent on web_new alone.
+    throw new Error("[parity] repoStarIconThemed has no oracle: web_new-only probe.");
   }
 
   // --- preferences: theme, language, timezone, first day of week

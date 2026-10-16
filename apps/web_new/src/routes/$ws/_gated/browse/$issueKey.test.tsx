@@ -239,14 +239,16 @@ function renderBrowse(
     } else if (url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 200;
       const row = isEpic === undefined ? issueRow() : { ...issueRow(), is_epic: isEpic };
-      body = JSON.stringify(extras.archivedIssue === true ? { ...row, archived_at: "2024-03-04T05:06:07Z" } : row);
+      body = JSON.stringify(extras.archivedIssue === true ? { ...row, archived_at: "2024-03-04" } : row);
     } else if (url.endsWith("/projects/details/")) {
+      status = 200;
       if (extras.details !== undefined) {
-        status = 200;
         const overrides: Record<string, unknown> =
           extras.details === "archived" ? { archived_at: "2024-03-04T05:06:07Z" } : {};
         if (extras.estimate !== undefined) overrides["estimate"] = extras.estimate;
         body = JSON.stringify([detailsRow(overrides)]);
+      } else {
+        body = "[]";
       }
     } else if (url.endsWith("/api/users/me/")) {
       if (extras.me === true) {

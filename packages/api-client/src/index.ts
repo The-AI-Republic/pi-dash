@@ -184,6 +184,7 @@ export {
   IssueListResponse,
   IssueRelationsSummary,
   getIssue,
+  listArchivedIssues,
   listIssues,
 } from "./contracts/issues.js";
 export type { IssueListQuery } from "./contracts/issues.js";

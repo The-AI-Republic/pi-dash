@@ -11,6 +11,9 @@
 // guests see the shared rows but no member-only rows (drafts, analytics,
 // archives), no Favorites section and no project-creation affordance.
 // Row: SHELL-046.
+// Target alignment (NEWFRONT-295 gate, main#672): no "Your work"
+// sidebar row exists — it lives in the user menu popup (SHELL-059).
+// No oracle: the old app still renders the row.
 import { test, expect } from "../../fixtures";
 import {
   WORKSPACE_ROLE_GUEST,
@@ -18,6 +21,7 @@ import {
   ensureWorkspace,
   ensureWorkspaceMember,
   getSidebarPreferences,
+  getWorkspaceUserProperties,
   patchSidebarPreferences,
   ownerSession,
   patchUserProperties,
@@ -51,6 +55,13 @@ test(
         .toEqual(expect.arrayContaining(["Home", "Drafts", "Work Items", seed.projectName]));
     });
 
+    await test.step("no Your-work row exists in the sidebar", async () => {
+      // Target per main#672: "Your work" lives in the user menu popup
+      // (SHELL-059), never as a sidebar row.
+      const links = await driver.sidebarLinkTexts();
+      expect(links).not.toContain("Your work");
+    });
+
     await test.step("the current-URL row reads active", async () => {
       const home = await driver.sidebarRowTone("Home");
       const drafts = await driver.sidebarRowTone("Drafts");
@@ -58,6 +69,32 @@ test(
     });
 
     await test.step("the highlight follows navigation", async () => {
+      // Gate note (NEWFRONT-295): drafts has no web_new route yet
+      // (another area owns it), so the web_new leg runs between home
+      // and the seed project's work list. Project rows highlight on
+      // their URL in tabbed mode (accordion expands instead), so that
+      // leg enables it and restores the previous mode after.
+      if (driver.target === "web_new") {
+        const modeBefore = (await getWorkspaceUserProperties(seed.workspaceSlug, session))[
+          "navigation_control_preference"
+        ] as string | undefined;
+        await patchUserProperties(seed.workspaceSlug, session, { navigation_control_preference: "TABBED" });
+        try {
+          await driver.openWorkspacePath(`/${seed.workspaceSlug}/projects/${seed.projectId}/issues`);
+          await expect.poll(() => driver.sidebarLinkTexts(), { timeout: 60_000 }).toContain(seed.projectName);
+          const home = await driver.sidebarRowTone("Home");
+          const project = await driver.sidebarRowTone(seed.projectName);
+          expect(home.background !== project.background || home.color !== project.color).toBe(true);
+          const homeActive = home.background !== "rgba(0, 0, 0, 0)";
+          const projectActive = project.background !== "rgba(0, 0, 0, 0)";
+          expect(projectActive && !homeActive).toBe(true);
+        } finally {
+          await patchUserProperties(seed.workspaceSlug, session, {
+            navigation_control_preference: modeBefore ?? "ACCORDION",
+          });
+        }
+        return;
+      }
       await driver.openWorkspacePath(`/${seed.workspaceSlug}/drafts/`);
       await expect.poll(() => driver.sidebarLinkTexts(), { timeout: 60_000 }).toContain("Drafts");
       const home = await driver.sidebarRowTone("Home");

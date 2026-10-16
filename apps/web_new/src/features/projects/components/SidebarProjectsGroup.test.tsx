@@ -219,15 +219,15 @@ describe("SidebarProjectsGroup rows", () => {
       "href",
       "/acme/workspace-views/all-issues/"
     );
-    expect(rowNames()).toEqual(["ATLAtlas", "BEABeacon"]);
+    expect(rowNames()).toEqual(["Atlas", "Beacon"]);
   });
 
   it("caps the listed rows while zero means uncapped", async () => {
     const capped = setup({}, { limit: 1 });
-    await waitFor(() => expect(rowNames()).toEqual(["ATLAtlas"]));
+    await waitFor(() => expect(rowNames()).toEqual(["Atlas"]));
     capped.view.unmount();
     const uncapped = setup({}, { limit: 0 });
-    await waitFor(() => expect(rowNames()).toEqual(["ATLAtlas", "BEABeacon"]));
+    await waitFor(() => expect(rowNames()).toEqual(["Atlas", "Beacon"]));
     uncapped.view.unmount();
   });
 
@@ -423,13 +423,13 @@ describe("SidebarProjectsGroup drag reorder", () => {
 describe("SidebarProjectsGroup overflow toggle (SHELL-052)", () => {
   it("shows the toggle once the cap leaves rows out", async () => {
     setup({}, { limit: 1 });
-    await waitFor(() => expect(rowNames()).toEqual(["ATLAtlas"]));
+    await waitFor(() => expect(rowNames()).toEqual(["Atlas"]));
     expect(screen.getByTestId("projects-overflow-toggle")).toHaveAttribute("aria-expanded", "false");
   });
 
   it("hides the toggle while everything fits or loads", async () => {
     const fitted = setup({}, { limit: 10 });
-    await waitFor(() => expect(rowNames()).toEqual(["ATLAtlas", "BEABeacon"]));
+    await waitFor(() => expect(rowNames()).toEqual(["Atlas", "Beacon"]));
     expect(screen.queryByTestId("projects-overflow-toggle")).not.toBeInTheDocument();
     fitted.view.unmount();
     setup({ projectsStatus: "pending" }, { limit: 1 });
@@ -438,14 +438,14 @@ describe("SidebarProjectsGroup overflow toggle (SHELL-052)", () => {
 
   it("hides the toggle with the collapsed group", async () => {
     setup({}, { limit: 1 });
-    await waitFor(() => expect(rowNames()).toEqual(["ATLAtlas"]));
+    await waitFor(() => expect(rowNames()).toEqual(["Atlas"]));
     fireEvent.click(screen.getByTestId("projects-group-toggle"));
     expect(screen.queryByTestId("projects-overflow-toggle")).not.toBeInTheDocument();
   });
 
   it("opens and closes the overflow panel", async () => {
     setup({}, { limit: 1 });
-    await waitFor(() => expect(rowNames()).toEqual(["ATLAtlas"]));
+    await waitFor(() => expect(rowNames()).toEqual(["Atlas"]));
     fireEvent.click(screen.getByTestId("projects-overflow-toggle"));
     expect(screen.getByTestId("projects-overflow-toggle")).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByTestId("projects-overflow-panel")).toBeInTheDocument();

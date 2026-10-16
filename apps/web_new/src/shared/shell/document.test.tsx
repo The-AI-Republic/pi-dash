@@ -33,9 +33,19 @@ function mockColorScheme(dark: boolean): void {
   });
 }
 
-function HeadProbe({ title, robots }: { title: string; robots: string }): React.ReactElement {
-  useDocumentHead({ title, robots });
-  return <span>probe</span>;
+function HeadProbe({
+  title,
+  robots,
+  fallback = false,
+  children,
+}: {
+  title: string;
+  robots: string;
+  fallback?: boolean;
+  children?: React.ReactNode;
+}): React.ReactElement {
+  useDocumentHead({ title, robots, fallback });
+  return <span>probe{children}</span>;
 }
 
 describe("useDocumentHead", () => {
@@ -81,6 +91,78 @@ describe("useDocumentHead", () => {
 
     unmount();
     expect(document.querySelector('meta[name="robots"]')?.getAttribute("content")).toBe("index, nofollow");
+  });
+
+  it("prefers a nested route title over the root fallback despite effect order", () => {
+    // Parent effects run after child effects, so the fallback writes
+    // last — the route must still win (gate-found home title clobber).
+    document.title = "served title";
+    render(
+      <HeadProbe title="Pi Dash" robots="index, nofollow" fallback>
+        <HeadProbe title="Parity Workspace · Home" robots="noindex, nofollow" />
+      </HeadProbe>
+    );
+
+    expect(document.title).toBe("Parity Workspace · Home");
+    expect(document.querySelector('meta[name="robots"]')?.getAttribute("content")).toBe("noindex, nofollow");
+  });
+
+  it("restores the surviving fallback when the route unmounts", () => {
+    document.title = "served title";
+    const { rerender } = render(
+      <HeadProbe title="Pi Dash" robots="index, nofollow" fallback>
+        <HeadProbe title="Parity Workspace · Home" robots="noindex, nofollow" />
+      </HeadProbe>
+    );
+    expect(document.title).toBe("Parity Workspace · Home");
+
+    rerender(
+      <HeadProbe title="Pi Dash" robots="index, nofollow" fallback>
+        <span>route gone</span>
+      </HeadProbe>
+    );
+    expect(document.title).toBe("Pi Dash");
+    expect(document.querySelector('meta[name="robots"]')?.getAttribute("content")).toBe("index, nofollow");
+  });
+
+  it("prefers the newest route when two routes overlap, then reveals the older", () => {
+    document.title = "served title";
+    const { rerender } = render(
+      <HeadProbe title="Pi Dash" robots="index, nofollow" fallback>
+        <HeadProbe title="First route" robots="noindex, nofollow" />
+      </HeadProbe>
+    );
+    rerender(
+      <HeadProbe title="Pi Dash" robots="index, nofollow" fallback>
+        <HeadProbe title="First route" robots="noindex, nofollow" />
+        <HeadProbe title="Second route" robots="noindex, nofollow" />
+      </HeadProbe>
+    );
+    expect(document.title).toBe("Second route");
+
+    rerender(
+      <HeadProbe title="Pi Dash" robots="index, nofollow" fallback>
+        <HeadProbe title="First route" robots="noindex, nofollow" />
+      </HeadProbe>
+    );
+    expect(document.title).toBe("First route");
+  });
+
+  it("reapplies a route title when it changes", () => {
+    document.title = "served title";
+    const { rerender } = render(
+      <HeadProbe title="Pi Dash" robots="index, nofollow" fallback>
+        <HeadProbe title="workspace-slug · Home" robots="noindex, nofollow" />
+      </HeadProbe>
+    );
+    expect(document.title).toBe("workspace-slug · Home");
+
+    rerender(
+      <HeadProbe title="Pi Dash" robots="index, nofollow" fallback>
+        <HeadProbe title="Workspace Name · Home" robots="noindex, nofollow" />
+      </HeadProbe>
+    );
+    expect(document.title).toBe("Workspace Name · Home");
   });
 });
 

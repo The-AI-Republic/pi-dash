@@ -50,6 +50,19 @@ test(specTitle(ROWS, "top bar composition and sidebar toggle"), { tag: specTags(
   });
 
   await test.step("the compact account control appears where the sidebar is unmounted", async () => {
+    if (driver.target === "web_new") {
+      // Web_new renders the same fallback whenever the sidebar is
+      // collapsed; the notifications page is unlanded, so the collapsed
+      // project page carries the leg (the prior step leaves it open).
+      await driver.toggleSidebar();
+      await expect.poll(() => driver.sidebarWidth(), { timeout: 15_000 }).toBe(0);
+      const controls = await driver.topBarControls();
+      expect(controls.accountFallback).toBe(true);
+      expect(controls.inbox).toBe(true);
+      await driver.toggleSidebar();
+      await expect.poll(() => driver.sidebarWidth(), { timeout: 15_000 }).toBeGreaterThan(200);
+      return;
+    }
     await driver.openNotifications(seed.workspaceSlug);
     await expect.poll(() => driver.sidebarPresent(), { timeout: 30_000 }).toBe(false);
     // Generous budget: under shared-stack contention the notifications

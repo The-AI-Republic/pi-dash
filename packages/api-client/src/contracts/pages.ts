@@ -7,7 +7,7 @@
 // to prove the rows.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableDateTime, uuid } from "./fields.js";
+import { nullableDate, uuid } from "./fields.js";
 
 export const PageUpdate = z.object({
   id: uuid(),
@@ -15,7 +15,7 @@ export const PageUpdate = z.object({
   access: z.optional(z.number()),
   color: z.optional(z.string()),
   is_locked: z.optional(z.boolean()),
-  archived_at: z.optional(nullableDateTime()),
+  archived_at: z.optional(nullableDate()),
   project_ids: z.optional(z.array(uuid())),
 });
 export type PageUpdate = z.infer<typeof PageUpdate>;
