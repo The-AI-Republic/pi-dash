@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import * as React from "react";
 
-import { resolveDropTarget, type SidebarDropRow, type SidebarDropTarget } from "../../projects/index.js";
+import { resolveDropTarget, type SidebarDropTarget } from "../../projects/index.js";
 import { CrossAppLink } from "../../../shared/coexistence/index.js";
 import { isFavoritesSectionOpen, notifyError, setFavoritesSectionOpen } from "../../../shared/shell/index.js";
 import {
@@ -92,15 +92,12 @@ type FolderFormState = { mode: "create" } | { mode: "rename"; favoriteId: string
  */
 interface FavoriteDropPreview {
   slot: SidebarDropTarget | null;
-  intoFolderId: string | null;
+  /** Folder absorbing the row, when the pointer holds its header band. */
+  into: string | null;
   outer: SidebarDropTarget | null;
 }
 
-const EMPTY_DROP: FavoriteDropPreview = { slot: null, intoFolderId: null, outer: null };
-
-function toSlotRow(span: FavoriteDropSpan): SidebarDropRow {
-  return { id: span.id, top: span.top, bottom: span.bottom };
-}
+const EMPTY_DROP: FavoriteDropPreview = { slot: null, into: null, outer: null };
 
 function inside(rect: { left: number; top: number; right: number; bottom: number }, x: number, y: number): boolean {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
@@ -108,8 +105,7 @@ function inside(rect: { left: number; top: number; right: number; bottom: number
 
 function slotIndicatorFor(preview: FavoriteDropPreview, rowId: string): "above" | "below" | null {
   const slot = preview.slot ?? preview.outer;
-  if (slot === null || slot.id !== rowId) return null;
-  return slot.after ? "below" : "above";
+  return slot?.id === rowId ? (slot.after ? "below" : "above") : null;
 }
 
 /**
@@ -145,7 +141,7 @@ function useFavoriteReorder(args: {
     if (sourceId === null) return;
     const outerConfig = args.outer;
     const spans = (list: HTMLUListElement | null): FavoriteDropSpan[] =>
-      Array.from(list?.children ?? []).map((node) => {
+      Array.from(list?.children ?? [], (node) => {
         const element = node as HTMLElement;
         const rect = element.getBoundingClientRect();
         const isFolder = element.dataset["favoriteFolder"] === "true";
@@ -156,8 +152,6 @@ function useFavoriteReorder(args: {
           id: element.dataset["favoriteRow"] ?? "",
           top: rect.top,
           bottom: rect.bottom,
-          left: rect.left,
-          right: rect.right,
           isFolder,
           headerTop: header.top,
           headerBottom: header.bottom,
@@ -181,22 +175,22 @@ function useFavoriteReorder(args: {
           preview(EMPTY_DROP);
           return;
         }
-        if (source?.is_folder !== true) {
-          preview({ slot: null, intoFolderId: into, outer: null });
+        if (!source?.is_folder) {
+          preview({ slot: null, into, outer: null });
           return;
         }
       }
-      const slot = resolveDropTarget(own.map(toSlotRow), y, sourceId);
+      const slot = resolveDropTarget(own, y, sourceId);
       if (outerConfig !== null) {
         // Effects run after mount, so both lists are always present here.
         const topList = outerConfig.listRef.current as HTMLUListElement;
         const ownList = listRef.current as HTMLUListElement;
         if (inside(topList.getBoundingClientRect(), x, y) && !inside(ownList.getBoundingClientRect(), x, y)) {
-          preview({ slot: null, intoFolderId: null, outer: resolveDropTarget(outer.map(toSlotRow), y, sourceId) });
+          preview({ slot: null, into: null, outer: resolveDropTarget(outer, y, sourceId) });
           return;
         }
       }
-      preview({ slot, intoFolderId: null, outer: null });
+      preview({ slot, into: null, outer: null });
     };
     const finish = (commitDrop: boolean): void => {
       const drop = dropRef.current;
@@ -204,15 +198,15 @@ function useFavoriteReorder(args: {
       args.report(EMPTY_DROP);
       setSourceId(null);
       if (!commitDrop) return;
-      if (drop.intoFolderId !== null) {
-        args.commit({ favoriteId: sourceId, groupId: args.groupId, parent: drop.intoFolderId });
+      if (drop.into !== null) {
+        args.commit({ favoriteId: sourceId, groupId: args.groupId, parent: drop.into });
         return;
       }
       if (drop.outer !== null) {
         const outerRows = outerConfig?.rows ?? [];
-        const ids = outerRows.map((row) => row.id);
-        const slot = ids.indexOf(drop.outer.id);
-        const sequence = sequenceForInsert(outerRows, drop.outer.after ? slot + 1 : slot);
+        const target = drop.outer;
+        const slot = outerRows.findIndex((row) => row.id === target.id);
+        const sequence = sequenceForInsert(outerRows, target.after ? slot + 1 : slot);
         args.commit({ favoriteId: sourceId, groupId: args.groupId, parent: null, sequence });
         return;
       }
@@ -257,12 +251,11 @@ export function SidebarFavoritesGroup({ workspaceSlug }: SidebarFavoritesGroupPr
   const mover = useMoveFavorite(workspaceSlug);
   const commit = React.useCallback((input: FavoriteMoveInput) => mover.mutate(input), [mover]);
   const [preview, setPreview] = React.useState<FavoriteDropPreview>(EMPTY_DROP);
-  const report = React.useCallback((next: FavoriteDropPreview) => setPreview(next), []);
   const reorder = useFavoriteReorder({
     rows: top,
     groupId: null,
     commit,
-    report,
+    report: setPreview,
     outer: null,
   });
 
@@ -361,11 +354,11 @@ export function SidebarFavoritesGroup({ workspaceSlug }: SidebarFavoritesGroupPr
                 onRename={(favoriteId, current) => setForm({ mode: "rename", favoriteId, current })}
                 onRemove={(favoriteId) => remove.mutate({ favoriteId })}
                 dropIndicator={slotIndicatorFor(preview, row.id)}
-                dropInto={preview.intoFolderId === row.id}
+                dropInto={preview.into === row.id}
                 isDragging={reorder.sourceId === row.id}
                 onDragStart={reorder.onDragStart}
                 preview={preview}
-                report={report}
+                report={setPreview}
                 topRows={top}
                 topListRef={reorder.listRef}
               />
@@ -423,7 +416,7 @@ function FavoriteRow({
   return (
     <li
       data-favorite-row={row.id}
-      data-favorite-folder={row.is_folder ? "true" : "false"}
+      data-favorite-folder={String(row.is_folder)}
       data-testid="favorite-entry"
       data-entry-name={name}
       className="relative"
@@ -553,7 +546,7 @@ function FavoriteFolderChildren({
           onRename={onRename}
           onRemove={onRemove}
           dropIndicator={slotIndicatorFor(preview, row.id)}
-          dropInto={preview.intoFolderId === row.id}
+          dropInto={preview.into === row.id}
           isDragging={reorder.sourceId === row.id}
           onDragStart={reorder.onDragStart}
           preview={preview}

@@ -147,10 +147,8 @@ export function applyFavoriteParent(
  */
 export function sequenceForInsert(ordered: readonly Pick<Favorite, "id" | "sequence">[], index: number): number {
   const slot = Math.max(0, Math.min(index, ordered.length));
-  const first = ordered[0];
-  const last = ordered[ordered.length - 1];
-  if (slot === 0) return (first?.sequence ?? 0) + FAVORITE_ORDER_STEP;
-  if (slot >= ordered.length) return (last?.sequence ?? 0) - FAVORITE_ORDER_STEP;
+  if (slot === 0) return (ordered[0]?.sequence ?? 0) + FAVORITE_ORDER_STEP;
+  if (slot >= ordered.length) return (ordered[ordered.length - 1]?.sequence ?? 0) - FAVORITE_ORDER_STEP;
   return ((ordered[slot - 1]?.sequence ?? 0) + (ordered[slot]?.sequence ?? 0)) / 2;
 }
 
@@ -159,8 +157,6 @@ export interface FavoriteDropSpan {
   id: string;
   top: number;
   bottom: number;
-  left: number;
-  right: number;
   isFolder: boolean;
   /** Folder header bounds; the row bounds for plain entries. */
   headerTop: number;
@@ -183,15 +179,14 @@ export function resolveIntoFolder(
 ): string | null {
   for (const span of spans) {
     if (!span.isFolder || span.id === sourceId) continue;
-    const insetX = (span.headerRight - span.headerLeft) / 4;
-    const insetY = (span.headerBottom - span.headerTop) / 4;
-    if (insetX <= 0 || insetY <= 0) continue;
-    if (
-      x >= span.headerLeft + insetX &&
-      x <= span.headerRight - insetX &&
-      y >= span.headerTop + insetY &&
-      y <= span.headerBottom - insetY
-    ) {
+    const left = span.headerLeft;
+    const right = span.headerRight;
+    const top = span.headerTop;
+    const bottom = span.headerBottom;
+    const width = right - left;
+    const height = bottom - top;
+    if (width <= 0 || height <= 0) continue;
+    if (x >= left + width / 4 && x <= right - width / 4 && y >= top + height / 4 && y <= bottom - height / 4) {
       return span.id;
     }
   }
@@ -305,20 +300,18 @@ export function useMoveFavorite(workspaceSlug: string) {
   const queryClient = useQueryClient();
   return useMutation<void, Error, FavoriteMoveInput>({
     mutationFn: async (input) => {
-      if (input.sequence === undefined && input.parent === undefined) return;
+      const { favoriteId, groupId, sequence, parent } = input;
+      if (sequence === undefined && parent === undefined) return;
       const key =
-        input.groupId === null
-          ? sidebarKeys.favorites(workspaceSlug)
-          : sidebarKeys.favoriteGroup(workspaceSlug, input.groupId);
+        groupId === null ? sidebarKeys.favorites(workspaceSlug) : sidebarKeys.favoriteGroup(workspaceSlug, groupId);
       const rollback = applyOptimisticUpdate<FavoriteList>(queryClient, key, (previous) => {
-        const sequenced =
-          input.sequence === undefined ? previous : applyFavoriteSequence(previous, input.favoriteId, input.sequence);
-        return input.parent === undefined ? sequenced : applyFavoriteParent(sequenced, input.favoriteId, input.parent);
+        const sequenced = sequence === undefined ? previous : applyFavoriteSequence(previous, favoriteId, sequence);
+        return parent === undefined ? sequenced : applyFavoriteParent(sequenced, favoriteId, parent);
       });
       try {
-        await updateFavorite(getAppClient(), workspaceSlug, input.favoriteId, {
-          ...(input.sequence === undefined ? {} : { sequence: input.sequence }),
-          ...(input.parent === undefined ? {} : { parent: input.parent }),
+        await updateFavorite(getAppClient(), workspaceSlug, favoriteId, {
+          ...(sequence === undefined ? {} : { sequence }),
+          ...(parent === undefined ? {} : { parent }),
         });
       } catch (error) {
         rollback();
