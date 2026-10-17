@@ -18,13 +18,15 @@
 //! * Messages are `{kind: request|response, parts: [...]}`; parts carry
 //!   a `part_kind` discriminator (`system-prompt`, `user-prompt`,
 //!   `text`, `tool-call`, `tool-return`, `retry-prompt`, ...).
-//! * `ToolCallPart.args` is `str | dict`: streamed turns store the raw
-//!   arguments **string** on both lanes (the Anthropic `input_json`
-//!   deltas accumulate as a string); the object form appears on the
-//!   non-streaming path (`anthropic.py:944`). The dump keeps each
-//!   form verbatim.
+//! * `ToolCallPart.args` is `str | dict | None`: streamed turns store
+//!   the raw arguments **string** on both lanes (the Anthropic
+//!   `input_json` deltas accumulate as a string); the object form
+//!   appears on the non-streaming path (`anthropic.py:944`); null
+//!   survives when a streamed `tool_use` block yields zero input
+//!   deltas (`anthropic.py:2222`). The dump keeps each form verbatim.
 //! * `tool_call_id` defaults via `generate_tool_call_id`
-//!   (`_utils.py:431-436`, `pyd_ai_{uuid4hex}`) when absent.
+//!   (`_utils.py:431-436`, `pyd_ai_{uuid4hex}`) when the key is absent;
+//!   an explicit null fails validation, like the `str` field.
 //! * Stored blobs read back from the turn table are in Postgres jsonb
 //!   key order (length, then bytewise) — the captures pin that order,
 //!   and the round-trip test compares at the JSON-value level. The
@@ -56,7 +58,7 @@
 //! fields the model cannot carry — accepting them would silently drop
 //! fields on re-dump). A loud skip beats a silent corruption.
 
-use pidash_jobs::oss_worker::model_runtime::provider::{generate_tool_call_id, ToolArgs, ToolCall};
+use pidash_jobs::oss_worker::model_runtime::provider::{generate_tool_call_id, ToolArgs};
 use pidash_jobs::oss_worker::model_runtime::usage::{RequestUsage, UsageNumber};
 use serde_json::{Map, Value};
 
@@ -86,11 +88,14 @@ pub struct RetryErrorDetail {
     pub input: Value,
 }
 
-/// A location segment: object field or list index.
+/// A location segment: object field or list index (`int`, signed
+/// like the `loc` tuple — real validation errors only carry
+/// non-negative indices, but the codec stays no stricter than
+/// `validate_python`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetryLocSeg {
     Field(String),
-    Index(u64),
+    Index(i64),
 }
 
 /// Retry feedback content (`RetryPromptPart.content`).
@@ -137,8 +142,8 @@ pub enum TurnRequestPart {
     },
 }
 
-/// A response-side part (`ToolCall` has no `PartialEq`, so neither does
-/// this enum; tests match structurally instead).
+/// A response-side part (tests match structurally instead of
+/// deriving `PartialEq`).
 #[derive(Debug, Clone)]
 pub enum TurnResponsePart {
     Text {
@@ -148,7 +153,15 @@ pub enum TurnResponsePart {
         provider_details: Option<Map<String, Value>>,
     },
     ToolCall {
-        call: ToolCall,
+        name: String,
+        /// `None` is a stored null: `args` defaults to `None`
+        /// (`messages.py:1776`), and the Anthropic lane stores null when
+        /// a `tool_use` block yields zero `input_json` deltas
+        /// (`anthropic.py:2222`, `... or None`, with no block-stop
+        /// normalization for the regular path). The loop reads `None`
+        /// as `{}` (`args_as_dict`); the dump reproduces the null.
+        args: Option<ToolArgs>,
+        call_id: String,
         id: Option<String>,
         provider_name: Option<String>,
         provider_details: Option<Map<String, Value>>,
@@ -438,13 +451,14 @@ fn opt_metadata(object: &Map<String, Value>) -> Result<Value, CodecError> {
     }
 }
 
-/// `tool_call_id` (`_utils.py:431-436`): absent or null backfills with
-/// a generated id, exactly the `default_factory`.
+/// `tool_call_id` (`_utils.py:431-436`): a missing key backfills with
+/// a generated id, exactly the `default_factory` (which only fires on
+/// absence — the field is `str`, so an explicit null fails validation).
 fn call_id_or_generated(part: &Map<String, Value>) -> Result<String, CodecError> {
     match part.get("tool_call_id") {
-        None | Some(Value::Null) => Ok(generate_tool_call_id()),
+        None => Ok(generate_tool_call_id()),
         Some(Value::String(id)) => Ok(id.clone()),
-        Some(_) => Err(err("tool_call_id must be a string or null")),
+        Some(_) => Err(err("tool_call_id must be a string")),
     }
 }
 
@@ -526,19 +540,20 @@ fn parse_response_part(part: &Value) -> Result<TurnResponsePart, CodecError> {
         "tool-call" => {
             check_null_tool_kind(object)?;
             let args = match object.get("args") {
-                Some(Value::String(raw)) => ToolArgs::Raw(raw.clone()),
-                Some(Value::Object(map)) => ToolArgs::Dict(map.clone()),
+                // `args` defaults to `None`: a missing key and an
+                // explicit null both read `None` and re-dump as null.
+                None | Some(Value::Null) => None,
+                Some(Value::String(raw)) => Some(ToolArgs::Raw(raw.clone())),
+                Some(Value::Object(map)) => Some(ToolArgs::Dict(map.clone())),
                 // The streamed lanes store the raw arguments string;
                 // the non-streaming path stores the input object;
-                // anything else fails the `str | dict` union.
-                _ => return Err(err("tool-call args must be a string or object")),
+                // anything else fails the `str | dict | None` union.
+                _ => return Err(err("tool-call args must be a string, object, or null")),
             };
             Ok(TurnResponsePart::ToolCall {
-                call: ToolCall {
-                    name: required_str(object, "tool_name")?,
-                    args,
-                    call_id: call_id_or_generated(object)?,
-                },
+                name: required_str(object, "tool_name")?,
+                args,
+                call_id: call_id_or_generated(object)?,
                 id: opt_str(object, "id")?,
                 provider_name: opt_str(object, "provider_name")?,
                 provider_details: opt_details(object, "provider_details", "vendor_details")?,
@@ -565,9 +580,9 @@ fn parse_retry_detail(detail: &Value) -> Result<RetryErrorDetail, CodecError> {
         .map(|seg| match seg {
             Value::String(field) => Ok(RetryLocSeg::Field(field.clone())),
             Value::Number(index) => index
-                .as_u64()
+                .as_i64()
                 .map(RetryLocSeg::Index)
-                .ok_or_else(|| err("retry error loc index must be a non-negative int")),
+                .ok_or_else(|| err("retry error loc index must be an int")),
             _ => Err(err("retry error loc segments must be strings or ints")),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -597,9 +612,11 @@ fn parse_retry_detail(detail: &Value) -> Result<RetryErrorDetail, CodecError> {
 /// 0/1 exactly pydantic's lax ints.
 fn parse_usage(object: &Map<String, Value>) -> Result<RequestUsage, CodecError> {
     let usage = match object.get("usage") {
-        None | Some(Value::Null) => return Ok(RequestUsage::zeros()),
+        // `usage` is non-optional with a zeros default: a missing key
+        // reads zeros, but an explicit null fails validation.
+        None => return Ok(RequestUsage::zeros()),
         Some(Value::Object(map)) => map,
-        Some(_) => return Err(err("usage must be an object or null")),
+        Some(_) => return Err(err("usage must be an object")),
     };
     let counter = |key: &str| -> Result<UsageNumber, CodecError> {
         match usage.get(key) {
@@ -644,6 +661,11 @@ fn parse_usage(object: &Map<String, Value>) -> Result<RequestUsage, CodecError> 
 /// render as `{n} validation error(s):\n```json\n{errors}\n``` ` with
 /// the `input`/`ctx` exclusions, always suffixed with
 /// `\n\nFix the errors and try again.`
+///
+/// The JSON body is `error_details_ta.dump_json(..., indent=2)`
+/// verbatim: 2-space pretty, raw UTF-8 (no `ensure_ascii` — the
+/// serializer is serde-based, so `to_string_pretty` matches byte for
+/// byte, including lowercase `\u00xx` control escapes).
 pub fn retry_message(content: &TurnRetryContent, tool_name: Option<&str>) -> String {
     let description = match content {
         TurnRetryContent::Text(text) => {
@@ -658,9 +680,8 @@ pub fn retry_message(content: &TurnRetryContent, tool_name: Option<&str>) -> Str
                 .iter()
                 .map(|detail| render_retry_error(detail, tool_name.is_none()))
                 .collect();
-            let pretty =
+            let body =
                 serde_json::to_string_pretty(&Value::Array(errors)).unwrap_or("[]".to_owned());
-            let body = ensure_ascii(&pretty);
             let plural = details.len() != 1;
             format!(
                 "{} validation error{}:\n```json\n{body}\n```",
@@ -698,54 +719,6 @@ fn render_retry_error(detail: &RetryErrorDetail, no_tool: bool) -> Value {
         error.insert("input".to_owned(), detail.input.clone());
     }
     Value::Object(error)
-}
-
-/// `json.dumps(..., ensure_ascii=True)`: every `c >= 0x7F` inside a
-/// string becomes `\uXXXX` (lowercase hex; surrogate pairs for astral
-/// planes). String boundaries are tracked with escape awareness;
-/// structural characters are never touched.
-fn ensure_ascii(pretty: &str) -> String {
-    let mut out = String::with_capacity(pretty.len());
-    let mut chars = pretty.chars().peekable();
-    let mut in_string = false;
-    let mut escaped = false;
-    for c in chars.by_ref() {
-        if !in_string {
-            out.push(c);
-            if c == '"' {
-                in_string = true;
-            }
-            continue;
-        }
-        if escaped {
-            out.push(c);
-            escaped = false;
-            continue;
-        }
-        match c {
-            '\\' => {
-                out.push(c);
-                escaped = true;
-            }
-            '"' => {
-                out.push(c);
-                in_string = false;
-            }
-            c if (c as u32) < 0x7f => out.push(c),
-            c => {
-                let code = c as u32;
-                if code <= 0xffff {
-                    out.push_str(&format!("\\u{code:04x}"));
-                } else {
-                    let shifted = code - 0x1_0000;
-                    let high = 0xd800 + (shifted >> 10);
-                    let low = 0xdc00 + (shifted & 0x3ff);
-                    out.push_str(&format!("\\u{high:04x}\\u{low:04x}"));
-                }
-            }
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -983,25 +956,25 @@ fn dump_response_part(part: &TurnResponsePart) -> Value {
             ("part_kind".to_owned(), Value::String("text".to_owned())),
         ])),
         TurnResponsePart::ToolCall {
-            call,
+            name,
+            args,
+            call_id,
             id,
             provider_name,
             provider_details,
         } => {
             // Each lane's stored form: the streamed raw arguments
             // string verbatim (provider spacing intact), the
-            // non-streaming input object as-is.
-            let args = match &call.args {
-                ToolArgs::Raw(raw) => Value::String(raw.clone()),
-                ToolArgs::Dict(map) => Value::Object(map.clone()),
+            // non-streaming input object as-is, or the stored null.
+            let args = match args {
+                None => Value::Null,
+                Some(ToolArgs::Raw(raw)) => Value::String(raw.clone()),
+                Some(ToolArgs::Dict(map)) => Value::Object(map.clone()),
             };
             Value::Object(Map::from_iter([
-                ("tool_name".to_owned(), Value::String(call.name.clone())),
+                ("tool_name".to_owned(), Value::String(name.clone())),
                 ("args".to_owned(), args),
-                (
-                    "tool_call_id".to_owned(),
-                    Value::String(call.call_id.clone()),
-                ),
+                ("tool_call_id".to_owned(), Value::String(call_id.clone())),
                 ("tool_kind".to_owned(), Value::Null),
                 ("id".to_owned(), opt_string(id)),
                 ("provider_name".to_owned(), opt_string(provider_name)),
@@ -1188,10 +1161,10 @@ mod tests {
                 assert_eq!(*finish, Some(TurnFinish::ToolCall));
                 assert!(matches!(
                     parts.as_slice(),
-                    [TurnResponsePart::ToolCall { call, .. }]
-                    if call.name == "list_projects"
-                        && matches!(&call.args, ToolArgs::Raw(raw) if raw == "{}")
-                        && call.call_id == "call_1"
+                    [TurnResponsePart::ToolCall { name, args, call_id, .. }]
+                    if name == "list_projects"
+                        && matches!(args, Some(ToolArgs::Raw(raw)) if raw == "{}")
+                        && call_id == "call_1"
                 ));
             }
             _ => panic!("second message must be the tool-call response"),
@@ -1279,10 +1252,10 @@ mod tests {
                 );
                 assert!(matches!(
                     parts.as_slice(),
-                    [TurnResponsePart::ToolCall { call, .. }]
-                    if call.name == "list_projects"
-                        && matches!(&call.args, ToolArgs::Raw(raw) if raw == "{}")
-                        && call.call_id == "toolu_1"
+                    [TurnResponsePart::ToolCall { name, args, call_id, .. }]
+                    if name == "list_projects"
+                        && matches!(args, Some(ToolArgs::Raw(raw)) if raw == "{}")
+                        && call_id == "toolu_1"
                 ));
             }
             _ => panic!("second message must be the tool-call response"),
@@ -1308,8 +1281,8 @@ mod tests {
             messages.as_slice(),
             [TurnMessage::Response { parts, .. }]
             if matches!(parts.as_slice(),
-                [TurnResponsePart::ToolCall { call, .. }]
-                if matches!(&call.args, ToolArgs::Dict(map) if map.is_empty()))
+                [TurnResponsePart::ToolCall { args, .. }]
+                if matches!(args, Some(ToolArgs::Dict(map)) if map.is_empty()))
         ));
         assert_eq!(dump_blob(&messages)[0]["parts"][0]["args"], json!({}));
     }
@@ -1516,9 +1489,69 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [TurnMessage::Response { parts, .. }]
-            if matches!(parts.as_slice(), [TurnResponsePart::ToolCall { call, .. }]
-                if call.call_id.starts_with("pyd_ai_"))
+            if matches!(parts.as_slice(), [TurnResponsePart::ToolCall { call_id, .. }]
+                if call_id.starts_with("pyd_ai_"))
         ));
+        // ...but an explicit null fails validation (the field is `str`).
+        assert!(parse_blob(&json!([{
+            "kind": "response",
+            "timestamp": "ts",
+            "parts": [{
+                "part_kind": "tool-call",
+                "tool_name": "t",
+                "args": "{}",
+                "tool_call_id": Value::Null,
+            }],
+        }]))
+        .is_err());
+        // An explicit null usage fails validation too (missing reads zeros).
+        assert!(parse_blob(&json!([{
+            "kind": "response",
+            "timestamp": "ts",
+            "parts": [],
+            "usage": Value::Null,
+        }]))
+        .is_err());
+    }
+
+    #[test]
+    fn null_args_parse_and_dump_as_null() {
+        // A streamed `tool_use` block with zero input deltas stores
+        // null (`anthropic.py:2222`); `validate_python` accepts it and
+        // `dump_python` reproduces it.
+        for blob in [
+            json!([{
+                "kind": "response",
+                "timestamp": "ts",
+                "parts": [{
+                    "part_kind": "tool-call",
+                    "tool_name": "t",
+                    "args": Value::Null,
+                    "tool_call_id": "c",
+                }],
+            }]),
+            json!([{
+                "kind": "response",
+                "timestamp": "ts",
+                "parts": [{
+                    "part_kind": "tool-call",
+                    "tool_name": "t",
+                    "tool_call_id": "c",
+                }],
+            }]),
+        ] {
+            let messages = parse_blob(&blob).expect("null args parse");
+            assert!(matches!(
+                messages.as_slice(),
+                [TurnMessage::Response { parts, .. }]
+                if matches!(parts.as_slice(),
+                    [TurnResponsePart::ToolCall { args: None, .. }])
+            ));
+            let dumped = dump_blob(&messages);
+            assert_eq!(dumped[0]["parts"][0]["args"], Value::Null);
+            let back = parse_blob(&dumped).expect("dump re-parses");
+            assert_eq!(dump_blob(&back), dumped);
+        }
     }
 
     #[test]
@@ -1547,6 +1580,23 @@ mod tests {
         );
         let text = retry_message(&TurnRetryContent::Text("nope".to_owned()), Some("t"));
         assert_eq!(text, "nope\n\nFix the errors and try again.");
+    }
+
+    #[test]
+    fn retry_errors_keep_raw_utf8_like_dump_json() {
+        // Byte pin against `RetryPromptPart(...).model_response()`
+        // (pydantic-ai 1.107 venv probe): `dump_json` emits raw UTF-8,
+        // never `\uXXXX` escapes.
+        let content = TurnRetryContent::Errors(vec![RetryErrorDetail {
+            error_type: "missing".to_owned(),
+            loc: vec![RetryLocSeg::Field("x".to_owned())],
+            msg: "café 中".to_owned(),
+            input: json!({}),
+        }]);
+        assert_eq!(
+            retry_message(&content, Some("t")),
+            "1 validation error:\n```json\n[\n  {\n    \"type\": \"missing\",\n    \"loc\": [\n      \"x\"\n    ],\n    \"msg\": \"café 中\",\n    \"input\": {}\n  }\n]\n```\n\nFix the errors and try again."
+        );
     }
 
     #[test]
