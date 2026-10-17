@@ -53,6 +53,7 @@
 pub mod activity_dispatch;
 pub mod automation;
 pub mod link_crawl;
+pub mod model_data;
 pub mod sinks;
 pub mod visit_page;
 pub mod webhook_fanout;
