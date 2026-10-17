@@ -17,7 +17,18 @@ export const CONTRACT_SECONDARY_EMAIL = process.env["PIDASH_CONTRACT_SECONDARY_E
 export const CONTRACT_AUTOSET_EMAIL = process.env["PIDASH_CONTRACT_AUTOSET_EMAIL"] ?? "contract.autoset@example.com";
 export const CONTRACT_ADMIN_EMAIL = process.env["PIDASH_CONTRACT_ADMIN_EMAIL"] ?? "contract.admin@example.com";
 
+/**
+ * Cloud-edition contract backend. The cloud endpoints (openhub catalog,
+ * assistant connections, provider login) exist only in the cloud Django,
+ * so their suites gate on this base URL instead of the OSS one: a
+ * scratch DEBUG cloud backend without a gateway, the same shape the
+ * parity cloud stack serves. Shared by the NEWFRONT-638/641 suites.
+ */
+export const CONTRACT_CLOUD_BASE_URL = process.env["PIDASH_CONTRACT_CLOUD_BASE_URL"] ?? "";
+
 export const contractEnabled = CONTRACT_BASE_URL.length > 0;
+
+export const cloudContractEnabled = CONTRACT_CLOUD_BASE_URL.length > 0;
 
 /**
  * Transport with a minimal cookie jar. Node's fetch does not persist
@@ -133,4 +144,35 @@ export async function sharedAdminSignedIn(): Promise<ApiClient> {
     sharedAdminClient = client;
   }
   return sharedAdminClient;
+}
+
+let sharedCloudClient: ApiClient | null = null;
+
+/**
+ * One cloud-signed-in session per process, via the DEBUG-only dev-login
+ * (the OSS form sign-in does not exist on the cloud URL conf). A fresh
+ * address per process keeps suites from inheriting each other's rows.
+ * The cloud REST APIs are CSRF-exempt; the client still attempts the
+ * token read and proceeds without one when it 404s.
+ */
+export async function sharedCloudSignedIn(): Promise<ApiClient> {
+  if (!sharedCloudClient) {
+    if (!cloudContractEnabled) throw new Error("PIDASH_CONTRACT_CLOUD_BASE_URL is not set");
+    const client = createClient({
+      baseUrl: CONTRACT_CLOUD_BASE_URL,
+      transport: contractTransport(),
+      validate: true,
+    });
+    const email = `contract-cloud-${Date.now()}@example.com`;
+    const envelope = await client.sendJson<{ user?: { id?: unknown } }>("POST", "/api/auth/dev-login/", {
+      json: { email },
+      csrf: false,
+    });
+    const userId = envelope.data.user?.id;
+    if (typeof userId !== "string" || userId === "") {
+      throw new Error("contract cloud dev-login carried no user id");
+    }
+    sharedCloudClient = client;
+  }
+  return sharedCloudClient;
 }
