@@ -62,3 +62,27 @@ export async function updateCycle(
   );
   return client.parse(CycleUpdate, envelope.data, `PATCH cycle ${cycleId}`);
 }
+
+/** POST .../cycles/<id>/transfer-issues/ answers 200 {message}. */
+export const CycleTransferResult = z.object({
+  message: z.string(),
+});
+export type CycleTransferResult = z.infer<typeof CycleTransferResult>;
+
+/**
+ * Move a cycle's remaining issues into another cycle (ISS-224). The
+ * transfer freezes the source progress snapshot, so the source keeps
+ * its counts by design. Issues-area call: the transfer prompt lives on
+ * the issues surfaces; the cycles area owns the cycle pages.
+ */
+export async function transferCycleIssues(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  cycleId: string,
+  newCycleId: string
+): Promise<CycleTransferResult> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/cycles/${cycleId}/transfer-issues/`;
+  const envelope = await client.sendJson<unknown>("POST", path, { json: { new_cycle_id: newCycleId } });
+  return client.parse(CycleTransferResult, envelope.data, `POST ${path}`);
+}

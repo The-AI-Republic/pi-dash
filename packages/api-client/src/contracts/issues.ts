@@ -1,11 +1,13 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Issue contracts, read-only: ungrouped list and single-issue detail.
-// The list answers a slim projection per row; only the detail carries the
-// scoring, sync and description fields. Single-issue actions (update,
-// delete, cycle/module membership, subscriptions) live in
-// issue-actions.ts, out of the initial bundle (NEWFRONT-523, size gate).
+// Issue contracts, read-only: flat, grouped and global lists, archived
+// list and single-issue detail. Picker search and description versions
+// live with NEWFRONT-612, key resolve with NEWFRONT-613. The lists
+// answer a slim projection per row; only the detail carries the scoring,
+// sync and description fields. Single-issue actions (update, delete,
+// cycle/module membership, subscriptions) live in issue-actions.ts, out
+// of the initial bundle (NEWFRONT-523, size gate).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDate, nullableDateTime, nullableUuid, uuid } from "./fields.js";
@@ -93,6 +95,24 @@ export interface IssueListQuery {
   perPage?: number;
   cursor?: string;
   orderBy?: string;
+  groupBy?: string;
+  subGroupBy?: string;
+  /** Legacy filter params (state, priority, assignees, ...) passed through verbatim. */
+  filters?: Record<string, string | string[]>;
+}
+
+function listQueryParams(query: IssueListQuery): Record<string, string | number | boolean | undefined | null> {
+  const params: Record<string, string | number | boolean | undefined | null> = {
+    per_page: query.perPage,
+    cursor: query.cursor,
+    order_by: query.orderBy,
+    group_by: query.groupBy,
+    sub_group_by: query.subGroupBy,
+  };
+  for (const [key, value] of Object.entries(query.filters ?? {})) {
+    params[key] = Array.isArray(value) ? value.join(",") : value;
+  }
+  return params;
 }
 
 export async function listIssues(
@@ -102,13 +122,133 @@ export async function listIssues(
   query: IssueListQuery = {}
 ): Promise<IssueListResponse> {
   const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/issues/`, {
-    query: {
-      per_page: query.perPage,
-      cursor: query.cursor,
-      order_by: query.orderBy,
-    },
+    query: listQueryParams(query),
   });
   return client.parse(IssueListResponse, body, "GET issues");
+}
+
+/**
+ * One row of a grouped issue list. Grouped reads add the `state__group`
+ * annotation, and grouping by a to-many dimension swaps the aggregated
+ * array for the raw join key (`labels__id`, `assignees__id`,
+ * `issue_module__module_id`), so the arrays are optional here.
+ */
+export const GroupedIssueRow = z.object({
+  ...issueCoreFields,
+  module_ids: z.optional(z.array(uuid())),
+  label_ids: z.optional(z.array(uuid())),
+  assignee_ids: z.optional(z.array(uuid())),
+  state__group: z.optional(z.nullable(z.string())),
+  labels__id: z.optional(z.nullable(uuid())),
+  assignees__id: z.optional(z.nullable(uuid())),
+  issue_module__module_id: z.optional(z.nullable(uuid())),
+});
+export type GroupedIssueRow = z.infer<typeof GroupedIssueRow>;
+
+/** One group bucket: the page's rows plus the group's total. */
+export const IssueGroupBucket = z.object({
+  results: z.array(GroupedIssueRow),
+  total_results: z.number(),
+});
+export type IssueGroupBucket = z.infer<typeof IssueGroupBucket>;
+
+/** Grouped list envelope: `results` maps group value to its bucket. */
+export const GroupedIssueListResponse = z.object({
+  grouped_by: z.nullable(z.string()),
+  sub_grouped_by: z.nullable(z.string()),
+  total_count: z.number(),
+  next_cursor: z.string(),
+  prev_cursor: z.string(),
+  next_page_results: z.boolean(),
+  prev_page_results: z.boolean(),
+  count: z.number(),
+  total_results: z.number(),
+  results: z.record(z.string(), IssueGroupBucket),
+});
+export type GroupedIssueListResponse = z.infer<typeof GroupedIssueListResponse>;
+
+/** Sub-grouped envelope: each group bucket holds sub-group buckets. */
+export const SubGroupedIssueBucket = z.object({
+  results: z.record(z.string(), IssueGroupBucket),
+  total_results: z.number(),
+});
+export type SubGroupedIssueBucket = z.infer<typeof SubGroupedIssueBucket>;
+
+export const SubGroupedIssueListResponse = z.object({
+  grouped_by: z.nullable(z.string()),
+  sub_grouped_by: z.nullable(z.string()),
+  total_count: z.number(),
+  next_cursor: z.string(),
+  prev_cursor: z.string(),
+  next_page_results: z.boolean(),
+  prev_page_results: z.boolean(),
+  count: z.number(),
+  total_results: z.number(),
+  results: z.record(z.string(), SubGroupedIssueBucket),
+});
+export type SubGroupedIssueListResponse = z.infer<typeof SubGroupedIssueListResponse>;
+
+/** GET .../issues/ with group_by: one bucket per group value. */
+export async function listGroupedIssues(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  query: IssueListQuery & { groupBy: string }
+): Promise<GroupedIssueListResponse> {
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/issues/`, {
+    query: listQueryParams(query),
+  });
+  return client.parse(GroupedIssueListResponse, body, "GET grouped issues");
+}
+
+/** GET .../issues/ with group_by + sub_group_by: buckets within buckets. */
+export async function listSubGroupedIssues(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  query: IssueListQuery & { groupBy: string; subGroupBy: string }
+): Promise<SubGroupedIssueListResponse> {
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/issues/`, {
+    query: listQueryParams(query),
+  });
+  return client.parse(SubGroupedIssueListResponse, body, "GET sub-grouped issues");
+}
+
+/**
+ * One row of the workspace all-issues list: the flat list shape plus
+ * the `state__group` annotation the global serializer always sends.
+ */
+export const GlobalIssueRow = z.object({
+  ...issueCoreFields,
+  state__group: z.nullable(z.string()),
+});
+export type GlobalIssueRow = z.infer<typeof GlobalIssueRow>;
+
+/** Cursor-paginated envelope for the workspace all-issues list. */
+export const GlobalIssueListResponse = z.object({
+  grouped_by: z.nullable(z.string()),
+  sub_grouped_by: z.nullable(z.string()),
+  total_count: z.number(),
+  next_cursor: z.string(),
+  prev_cursor: z.string(),
+  next_page_results: z.boolean(),
+  prev_page_results: z.boolean(),
+  count: z.number(),
+  total_results: z.number(),
+  results: z.array(GlobalIssueRow),
+});
+export type GlobalIssueListResponse = z.infer<typeof GlobalIssueListResponse>;
+
+/** GET /api/workspaces/<slug>/issues/ — every visible issue, all projects. */
+export async function listGlobalIssues(
+  client: ApiClient,
+  slug: string,
+  query: IssueListQuery = {}
+): Promise<GlobalIssueListResponse> {
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/issues/`, {
+    query: listQueryParams(query),
+  });
+  return client.parse(GlobalIssueListResponse, body, "GET global issues");
 }
 
 export async function getIssue(client: ApiClient, slug: string, projectId: string, issueId: string): Promise<Issue> {

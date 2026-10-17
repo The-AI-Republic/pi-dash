@@ -152,6 +152,45 @@ def seed():
     )
     note("project-member", f"{project.identifier}/{user.email}", project_membership_created)
 
+    # Second project (NEWFRONT-611): the move-to-project contract moves a
+    # probe issue here and back, so it needs membership plus a default
+    # state for the landing. Found by identifier, never by position, so
+    # suites that assume a single project keep passing.
+    project_two, project_two_created = Project.objects.get_or_create(
+        workspace=workspace,
+        identifier="CU",
+        defaults={
+            "name": "Contract Two",
+            "description": "Move target for api-client contract tests.",
+            "created_by": user,
+            "updated_by": user,
+        },
+    )
+    note("project", project_two.identifier, project_two_created)
+
+    _, project_two_membership_created = ProjectMember.objects.get_or_create(
+        workspace=workspace,
+        project=project_two,
+        member=user,
+        defaults={"role": 20, "is_active": True},
+    )
+    note("project-member", f"{project_two.identifier}/{user.email}", project_two_membership_created)
+
+    for index, spec in enumerate(DEFAULT_STATES):
+        state_two, state_two_created = State.all_state_objects.get_or_create(
+            workspace=workspace,
+            project=project_two,
+            name=spec["name"],
+            defaults={
+                "group": spec["group"],
+                "color": spec["color"],
+                "description": spec.get("description", ""),
+                "sequence": spec.get("sequence", index),
+                "default": spec.get("default", False),
+            },
+        )
+        note("state", f"{project_two.identifier}/{state_two.name}", state_two_created)
+
     # Second user: the leave/rejoin contract test signs in as this user, so
     # the membership rows are repaired (not just created) to stay green
     # across runs even after a leave deactivates them.
@@ -355,6 +394,25 @@ def seed():
         defaults={"owned_by": user},
     )
     note("cycle", cycle.name, cycle_created)
+
+    # Transfer pair (NEWFRONT-611): the transfer-issues contract moves a
+    # probe from source to target and back. Dedicated cycles — transfer
+    # moves every open issue in the source, so sharing the seeded cycle
+    # would race the updates suite's membership test.
+    cycle_transfer_source, cycle_transfer_source_created = Cycle.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract transfer source",
+        defaults={"owned_by": user},
+    )
+    note("cycle", cycle_transfer_source.name, cycle_transfer_source_created)
+    cycle_target, cycle_target_created = Cycle.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract cycle target",
+        defaults={"owned_by": user},
+    )
+    note("cycle", cycle_target.name, cycle_target_created)
 
     module, module_created = Module.objects.get_or_create(
         workspace=workspace,

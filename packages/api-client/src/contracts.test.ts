@@ -162,6 +162,8 @@ import {
 import { deleteRunner, getRunner, listRunners, revokeRunner } from "./contracts/runners.js";
 import { cancelRun, commentAndRun, createRun, getRun, listRuns, reTickIssue, runAi } from "./contracts/runs.js";
 import { decideApproval, listApprovals } from "./contracts/approvals.js";
+import { bulkSubscribeIssues, bulkUpdateIssues } from "./contracts/issue-bulk.js";
+import { EpicUserProperties, getEpicUserProperties, updateEpicUserProperties } from "./contracts/issue-prefs.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const UUID2 = "223e4567-e89b-12d3-a456-426614174001";
@@ -3608,5 +3610,89 @@ describe("approvals contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...approval, kind: "telepathy" }]) });
     const error = await listApprovals(client).catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("contract");
+  });
+});
+
+describe("cloud-only issues contracts", () => {
+  // Bulk update, bulk subscribe and epics user-properties have no OSS
+  // route, so no live contract test can reach them. These stub tests
+  // prove the request shapes and response parsing instead.
+
+  it("posts the bulk update payload to bulk-operation-issues", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ status: 200, body: JSON.stringify({ message: "ok" }), url: "https://api.test/" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await bulkUpdateIssues(client, "acme", UUID2, {
+      issue_ids: [UUID],
+      properties: { state_id: UUID, priority: "high", label_ids: [UUID], estimate_point: null },
+    });
+    const call = transport.calls.find((entry) => entry.url.endsWith("/bulk-operation-issues/"));
+    expect(call?.init.method).toBe("POST");
+    expect(call?.init.body).toBe(
+      JSON.stringify({
+        issue_ids: [UUID],
+        properties: { state_id: UUID, priority: "high", label_ids: [UUID], estimate_point: null },
+      })
+    );
+  });
+
+  it("posts the bulk subscribe payload to bulk-subscribe-issues", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ status: 200, body: JSON.stringify({ message: "ok" }), url: "https://api.test/" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await bulkSubscribeIssues(client, "acme", UUID2, [UUID]);
+    const call = transport.calls.find((entry) => entry.url.endsWith("/bulk-subscribe-issues/"));
+    expect(call?.init.method).toBe("POST");
+    expect(call?.init.body).toBe(JSON.stringify({ issue_ids: [UUID] }));
+  });
+
+  const epicPrefs = {
+    id: UUID,
+    workspace: UUID,
+    project: UUID2,
+    user: UUID,
+    filters: { priority: ["high"] },
+    display_filters: { layout: "kanban" },
+    display_properties: { state: true },
+    rich_filters: {},
+    created_by: null,
+    updated_by: null,
+    created_at: "2026-10-01T00:00:00.000Z",
+    updated_at: "2026-10-02T00:00:00.000Z",
+  };
+
+  it("parses the epics user-properties record", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ body: JSON.stringify(epicPrefs), url: "https://api.test/" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await getEpicUserProperties(client, "acme", UUID2);
+    expect(parsed.project).toBe(UUID2);
+    expect(parsed.display_filters).toEqual({ layout: "kanban" });
+    expect(transport.calls[0]?.url).toContain("/epics-user-properties/");
+  });
+
+  it("patches the epics user-properties record", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ status: 201, body: JSON.stringify(epicPrefs), url: "https://api.test/" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await updateEpicUserProperties(client, "acme", UUID2, {
+      display_filters: { layout: "kanban" },
+    });
+    expect(parsed.filters).toEqual({ priority: ["high"] });
+    const call = transport.calls.find((entry) => entry.url.endsWith("/epics-user-properties/"));
+    expect(call?.init.method).toBe("PATCH");
+    expect(call?.init.body).toBe(JSON.stringify({ display_filters: { layout: "kanban" } }));
+  });
+
+  it("rejects an epics record without the filter keys", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json({ id: UUID }) });
+    const error = await getEpicUserProperties(client, "acme", UUID2).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+    expect(EpicUserProperties).toBeDefined();
   });
 });

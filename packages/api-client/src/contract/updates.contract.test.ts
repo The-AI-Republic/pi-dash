@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { getIssue, listIssues } from "../contracts/issues.js";
 import {
   addIssueToCycle,
+  createIssue,
   deleteIssue,
   getSubscriptionStatus,
   removeIssueFromCycle,
@@ -56,22 +57,38 @@ async function seededRowId(client: ApiClient, path: string, name: string): Promi
   return String(row?.id ?? "");
 }
 
+/**
+ * The seeded issue, by name. results[0] is newest-first, so under
+ * parallel runs it is often a transient probe another file deletes,
+ * moves or archives mid-test (NEWFRONT-611).
+ */
+async function seededIssueId(client: ApiClient, projectId: string): Promise<string> {
+  const page = await listIssues(client, CONTRACT_WORKSPACE, projectId);
+  const seeded = page.results.find((row) => row.name === "Contract issue one");
+  expect(seeded).toBeDefined();
+  return seeded?.id ?? "";
+}
+
 describe.skipIf(!contractEnabled)("thin issue update contract", () => {
-  it("renames the seeded issue and restores it", async () => {
+  it("renames a probe issue and restores it", async () => {
     const client = await signedIn();
     const projectId = await seededProjectId(client);
-    const page = await listIssues(client, CONTRACT_WORKSPACE, projectId);
-    const first = page.results[0];
-    expect(first).toBeDefined();
-    if (!first) return;
+    // Own probe: renaming the seeded row would break parallel suites
+    // that resolve it by name (NEWFRONT-611).
+    const stale = await listIssues(client, CONTRACT_WORKSPACE, projectId);
+    for (const row of stale.results.filter((entry) => entry.name === "Contract rename probe")) {
+      await deleteIssue(client, CONTRACT_WORKSPACE, projectId, row.id);
+    }
+    const created = await createIssue(client, CONTRACT_WORKSPACE, projectId, { name: "Contract rename probe" });
     // The update endpoint answers 204 with no body; the rename is proven
     // by re-reading the detail.
-    await updateIssue(client, CONTRACT_WORKSPACE, projectId, first.id, { name: "Contract issue renamed" });
-    const renamed = await getIssue(client, CONTRACT_WORKSPACE, projectId, first.id);
-    expect(renamed.name).toBe("Contract issue renamed");
-    await updateIssue(client, CONTRACT_WORKSPACE, projectId, first.id, { name: first.name });
-    const restored = await getIssue(client, CONTRACT_WORKSPACE, projectId, first.id);
-    expect(restored.name).toBe(first.name);
+    await updateIssue(client, CONTRACT_WORKSPACE, projectId, created.id, { name: "Contract rename probe renamed" });
+    const renamed = await getIssue(client, CONTRACT_WORKSPACE, projectId, created.id);
+    expect(renamed.name).toBe("Contract rename probe renamed");
+    await updateIssue(client, CONTRACT_WORKSPACE, projectId, created.id, { name: created.name });
+    const restored = await getIssue(client, CONTRACT_WORKSPACE, projectId, created.id);
+    expect(restored.name).toBe(created.name);
+    await deleteIssue(client, CONTRACT_WORKSPACE, projectId, created.id);
   });
 });
 
@@ -79,21 +96,18 @@ describe.skipIf(!contractEnabled)("issue subscription contract", () => {
   it("subscribes, reports status and unsubscribes", async () => {
     const client = await signedIn();
     const projectId = await seededProjectId(client);
-    const page = await listIssues(client, CONTRACT_WORKSPACE, projectId);
-    const first = page.results[0];
-    expect(first).toBeDefined();
-    if (!first) return;
+    const issueId = await seededIssueId(client, projectId);
     try {
-      const before = await getSubscriptionStatus(client, CONTRACT_WORKSPACE, projectId, first.id);
+      const before = await getSubscriptionStatus(client, CONTRACT_WORKSPACE, projectId, issueId);
       expect(before.subscribed).toBe(false);
-      const subscription = await subscribeIssue(client, CONTRACT_WORKSPACE, projectId, first.id);
+      const subscription = await subscribeIssue(client, CONTRACT_WORKSPACE, projectId, issueId);
       expect(typeof subscription.id).toBe("string");
-      const during = await getSubscriptionStatus(client, CONTRACT_WORKSPACE, projectId, first.id);
+      const during = await getSubscriptionStatus(client, CONTRACT_WORKSPACE, projectId, issueId);
       expect(during.subscribed).toBe(true);
     } finally {
-      await unsubscribeIssue(client, CONTRACT_WORKSPACE, projectId, first.id);
+      await unsubscribeIssue(client, CONTRACT_WORKSPACE, projectId, issueId);
     }
-    const after = await getSubscriptionStatus(client, CONTRACT_WORKSPACE, projectId, first.id);
+    const after = await getSubscriptionStatus(client, CONTRACT_WORKSPACE, projectId, issueId);
     expect(after.subscribed).toBe(false);
   });
 });
@@ -157,38 +171,35 @@ describe.skipIf(!contractEnabled)("thin contextual field contracts", () => {
   it("patches priority, assignees, labels and estimate, then restores", async () => {
     const client = await signedIn();
     const projectId = await seededProjectId(client);
-    const page = await listIssues(client, CONTRACT_WORKSPACE, projectId);
-    const first = page.results[0];
-    expect(first).toBeDefined();
-    if (!first) return;
+    const issueId = await seededIssueId(client, projectId);
     const me = await getMe(client);
     const labels = await listLabels(client, CONTRACT_WORKSPACE, projectId);
     const estimates = await listProjectEstimates(client, CONTRACT_WORKSPACE, projectId);
     const point = estimates.find((estimate) => estimate.name === "Contract estimate")?.points[0];
     expect(labels.length).toBeGreaterThan(0);
     expect(point).toBeDefined();
-    const before = await getIssue(client, CONTRACT_WORKSPACE, projectId, first.id);
+    const before = await getIssue(client, CONTRACT_WORKSPACE, projectId, issueId);
     try {
-      await updateIssue(client, CONTRACT_WORKSPACE, projectId, first.id, {
+      await updateIssue(client, CONTRACT_WORKSPACE, projectId, issueId, {
         priority: "high",
         assignee_ids: [me.id],
         label_ids: labels.map((label) => label.id),
         estimate_point: point?.id ?? null,
       });
-      const patched = await getIssue(client, CONTRACT_WORKSPACE, projectId, first.id);
+      const patched = await getIssue(client, CONTRACT_WORKSPACE, projectId, issueId);
       expect(patched.priority).toBe("high");
       expect(patched.assignee_ids).toContain(me.id);
       expect(patched.label_ids).toEqual(labels.map((label) => label.id));
       expect(patched.estimate_point).toBe(point?.id ?? null);
     } finally {
-      await updateIssue(client, CONTRACT_WORKSPACE, projectId, first.id, {
+      await updateIssue(client, CONTRACT_WORKSPACE, projectId, issueId, {
         priority: before.priority,
         assignee_ids: before.assignee_ids,
         label_ids: before.label_ids,
         estimate_point: typeof before.estimate_point === "string" ? before.estimate_point : null,
       });
     }
-    const restored = await getIssue(client, CONTRACT_WORKSPACE, projectId, first.id);
+    const restored = await getIssue(client, CONTRACT_WORKSPACE, projectId, issueId);
     expect(restored.priority).toBe(before.priority);
     expect(restored.assignee_ids).toEqual(before.assignee_ids);
   });
@@ -196,10 +207,7 @@ describe.skipIf(!contractEnabled)("thin contextual field contracts", () => {
   it("moves the seeded issue through the seeded cycle and module", async () => {
     const client = await signedIn();
     const projectId = await seededProjectId(client);
-    const page = await listIssues(client, CONTRACT_WORKSPACE, projectId);
-    const first = page.results[0];
-    expect(first).toBeDefined();
-    if (!first) return;
+    const issueId = await seededIssueId(client, projectId);
     const cycles = await listCycles(client, CONTRACT_WORKSPACE, projectId);
     const modules = await listModules(client, CONTRACT_WORKSPACE, projectId);
     const cycle = cycles.find((row) => row.name === "Contract cycle");
@@ -207,40 +215,33 @@ describe.skipIf(!contractEnabled)("thin contextual field contracts", () => {
     expect(cycle).toBeDefined();
     expect(module).toBeDefined();
     if (!cycle || !module) return;
-    const before = await getIssue(client, CONTRACT_WORKSPACE, projectId, first.id);
+    const before = await getIssue(client, CONTRACT_WORKSPACE, projectId, issueId);
     try {
-      await addIssueToCycle(client, CONTRACT_WORKSPACE, projectId, cycle.id, first.id);
-      await setIssueModules(client, CONTRACT_WORKSPACE, projectId, first.id, { modules: [module.id] });
-      const moved = await getIssue(client, CONTRACT_WORKSPACE, projectId, first.id);
+      await addIssueToCycle(client, CONTRACT_WORKSPACE, projectId, cycle.id, issueId);
+      await setIssueModules(client, CONTRACT_WORKSPACE, projectId, issueId, { modules: [module.id] });
+      const moved = await getIssue(client, CONTRACT_WORKSPACE, projectId, issueId);
       expect(moved.cycle_id).toBe(cycle.id);
       expect(moved.module_ids).toContain(module.id);
     } finally {
-      await removeIssueFromCycle(client, CONTRACT_WORKSPACE, projectId, cycle.id, first.id);
-      await setIssueModules(client, CONTRACT_WORKSPACE, projectId, first.id, {
+      await removeIssueFromCycle(client, CONTRACT_WORKSPACE, projectId, cycle.id, issueId);
+      await setIssueModules(client, CONTRACT_WORKSPACE, projectId, issueId, {
         modules: [],
         removed_modules: [module.id],
       });
     }
-    const restored = await getIssue(client, CONTRACT_WORKSPACE, projectId, first.id);
+    const restored = await getIssue(client, CONTRACT_WORKSPACE, projectId, issueId);
     expect(restored.cycle_id).toBe(before.cycle_id);
     expect(restored.module_ids).not.toContain(module.id);
   });
 
-  it("deletes a probe issue created raw (no create contract in the shell)", async () => {
+  it("deletes a probe issue created by contract", async () => {
     const client = await signedIn();
     const projectId = await seededProjectId(client);
-    // Issue creation belongs to the issues area; the probe is created raw
-    // (same precedent as the raw list reads above) and removed by contract.
-    const created = await client.sendJson<unknown>(
-      "POST",
-      `/api/workspaces/${CONTRACT_WORKSPACE}/projects/${projectId}/issues/`,
-      { json: { name: "Contract delete probe" } }
-    );
-    const probeId = (created.data as { id?: unknown }).id;
-    expect(typeof probeId).toBe("string");
-    if (typeof probeId !== "string") return;
-    await deleteIssue(client, CONTRACT_WORKSPACE, projectId, probeId);
-    await expect(getIssue(client, CONTRACT_WORKSPACE, projectId, probeId)).rejects.toMatchObject({ status: 404 });
+    const created = await createIssue(client, CONTRACT_WORKSPACE, projectId, { name: "Contract delete probe" });
+    await deleteIssue(client, CONTRACT_WORKSPACE, projectId, created.id);
+    await expect(getIssue(client, CONTRACT_WORKSPACE, projectId, created.id)).rejects.toMatchObject({
+      status: 404,
+    });
   });
 
   it("patches module members and status, then restores", async () => {

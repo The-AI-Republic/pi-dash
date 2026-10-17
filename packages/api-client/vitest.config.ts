@@ -7,5 +7,9 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    // Contract suites drive a live Django over HTTP (each write round-trips
+    // the broker for activity tasks), so the 5s default flakes under
+    // parallel load. Unit tests stay milliseconds-fast either way.
+    testTimeout: 30_000,
   },
 });
