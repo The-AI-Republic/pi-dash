@@ -144,9 +144,9 @@ impl GoneConfirmation {
         if self.count >= self.timing.confirmations
             && now.saturating_duration_since(first) >= self.timing.min_span
         {
-            GoneVerdict::Purge(self.count)
+            GoneVerdict::Purge(self.count())
         } else {
-            GoneVerdict::Confirming(self.count)
+            GoneVerdict::Confirming(self.count())
         }
     }
 
@@ -156,8 +156,11 @@ impl GoneConfirmation {
         self.first_at = None;
     }
 
+    /// Answers counted so far, capped at the target: past it the daemon is
+    /// only waiting out the minimum span, so status shows `10/10`, not
+    /// `12/10`.
     pub fn count(&self) -> u32 {
-        self.count
+        self.count.min(self.timing.confirmations)
     }
 }
 
@@ -392,7 +395,7 @@ mod tests {
         }
         assert_eq!(
             p.on_failure_with(&TransportError::RunnerGone, t0 + mins(5), no_jitter),
-            RetryDecision::Purge { confirmations: 11 }
+            RetryDecision::Purge { confirmations: 10 }
         );
     }
 
@@ -402,9 +405,11 @@ mod tests {
         let t0 = Instant::now();
         for i in 0..100u64 {
             let verdict = g.record(t0 + Duration::from_secs(i));
-            assert!(matches!(verdict, GoneVerdict::Confirming(_)), "{verdict:?}");
+            let shown = (i as u32 + 1).min(GONE_CONFIRMATIONS);
+            assert_eq!(verdict, GoneVerdict::Confirming(shown));
         }
-        assert_eq!(g.record(t0 + mins(5)), GoneVerdict::Purge(101));
+        assert_eq!(g.count(), GONE_CONFIRMATIONS, "count is capped for display");
+        assert_eq!(g.record(t0 + mins(5)), GoneVerdict::Purge(GONE_CONFIRMATIONS));
     }
 
     #[test]

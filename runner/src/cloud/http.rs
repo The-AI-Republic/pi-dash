@@ -31,7 +31,7 @@ use uuid::Uuid;
 use crate::cloud::protocol::{
     ClientMsg, Envelope, RunnerStatus as WireStatus, ServerMsg, WIRE_VERSION,
 };
-use crate::cloud::reconnect::{Backoff, ReconnectPolicy, RetryDecision, jittered};
+use crate::cloud::reconnect::{Backoff, ReconnectPolicy, RetryDecision, failure_reason, jittered};
 use crate::config::schema::AgentKind;
 
 // ---------------------------------------------------------------------------
@@ -1783,6 +1783,9 @@ impl HttpLoop {
 
         let mut poll_backoff = Backoff::poll();
         let mut consecutive_evictions = 0u32;
+        // Consecutive transient poll failures on the established session;
+        // non-zero means status currently shows the runner DISCONNECTED.
+        let mut consecutive_poll_failures = 0u32;
         loop {
             let shutdown = self.shutdown.clone();
             let teardown = self.teardown_rx.clone();
@@ -1796,6 +1799,17 @@ impl HttpLoop {
                 Ok(()) => {
                     poll_backoff.reset();
                     consecutive_evictions = 0;
+                    if consecutive_poll_failures > 0 {
+                        tracing::info!(
+                            runner = %self.client.runner_id(),
+                            failures = consecutive_poll_failures,
+                            "cloud reachable again; poll recovered",
+                        );
+                        consecutive_poll_failures = 0;
+                        if let Some(state) = &self.state {
+                            state.note_poll_recovered().await;
+                        }
+                    }
                     continue;
                 }
                 Err(err) if err.is_fatal_for_runner() => {
@@ -1839,13 +1853,23 @@ impl HttpLoop {
                         runner = %self.client.runner_id(),
                         "cloud says this runner is gone; confirming before removing it locally",
                     );
+                    // Not connected while confirming, so status shows
+                    // `DELETED in cloud (removing: n/10)`.
+                    consecutive_poll_failures = 0;
+                    if let Some(state) = &self.state {
+                        state.set_connected(false).await;
+                    }
                     match self.wait_after_failure(&TransportError::RunnerGone, 0).await {
                         Ok(()) => {}
                         Err(err) if is_bootstrap_shutdown(&err) => break,
                         Err(err) => return Err(err),
                     }
                     match self.bootstrap_with_retry().await {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            if let Some(state) = &self.state {
+                                state.set_connected(true).await;
+                            }
+                        }
                         Err(err) if is_bootstrap_shutdown(&err) => break,
                         Err(err) => return Err(err),
                     }
@@ -1865,7 +1889,22 @@ impl HttpLoop {
                         } => (*after).max(jittered(poll_backoff.next_base())),
                         _ => jittered(poll_backoff.next_base()),
                     };
-                    if err.is_recoverable() {
+                    consecutive_poll_failures = consecutive_poll_failures.saturating_add(1);
+                    if let Some(state) = &self.state {
+                        let next_retry_at = Utc::now()
+                            + chrono::Duration::from_std(delay)
+                                .unwrap_or_else(|_| chrono::Duration::zero());
+                        state
+                            .note_poll_failure(next_retry_at, failure_reason(&err))
+                            .await;
+                    }
+                    if consecutive_poll_failures == 1 {
+                        tracing::warn!(
+                            runner = %self.client.runner_id(),
+                            backoff_secs = delay.as_secs(),
+                            "poll failed; runner disconnected until the cloud answers: {err}",
+                        );
+                    } else if err.is_recoverable() {
                         tracing::debug!(
                             runner = %self.client.runner_id(),
                             backoff_secs = delay.as_secs(),
@@ -3263,6 +3302,54 @@ mod reconnect_loop_tests {
             "{err}"
         );
         assert!(hits.load(Ordering::SeqCst) >= 11);
+    }
+
+    #[tokio::test]
+    async fn outage_on_established_session_shows_disconnected_then_recovers() {
+        // Session opens, the next poll hits a proxy 503, then polls succeed.
+        let session = serde_json::json!({
+            "session_id": Uuid::new_v4(),
+            "welcome": {"long_poll_interval_secs": 1},
+        })
+        .to_string();
+        let (url, hits) = stub_server(Arc::new(move |n, _| match n {
+            0 => Some((201, "application/json", session.clone())),
+            1 => Some((503, "text/html", "<html>503 Service Unavailable</html>".into())),
+            _ => Some((200, "application/json", "{\"messages\":[]}".into())),
+        }))
+        .await;
+        let h = harness(url, Duration::from_secs(5), fast_policy());
+        h.state.set_connected(true).await;
+        let state = h.state.clone();
+        let task = tokio::spawn(h.http_loop.run());
+        wait_until("failed poll", || hits.load(Ordering::SeqCst) == 2).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let snap = loop {
+            let snap = state.runner_snapshot().await;
+            if !snap.connected || std::time::Instant::now() > deadline {
+                break snap;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert!(!snap.connected, "a failed poll must mark the runner disconnected");
+        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable: HTTP 503"));
+        assert!(snap.next_retry_at.is_some(), "next retry recorded");
+        assert_eq!(snap.cloud_deleted_confirmations, 0);
+
+        wait_until("recovered poll", || hits.load(Ordering::SeqCst) >= 3).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let snap = loop {
+            let snap = state.runner_snapshot().await;
+            if snap.connected || std::time::Instant::now() > deadline {
+                break snap;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert!(snap.connected, "a successful poll reconnects the runner");
+        assert_eq!(snap.disconnect_reason, None);
+        assert_eq!(snap.next_retry_at, None);
+        h.remove_tx.send(true).unwrap();
+        let _ = task.await;
     }
 
     #[tokio::test]

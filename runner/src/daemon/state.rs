@@ -248,6 +248,27 @@ impl StateHandle {
         self.tick();
     }
 
+    /// A long-poll on an established session failed transiently (cloud
+    /// outage, proxy error page, timeout). The session may still be valid,
+    /// but until a poll gets through the runner is not reachable, so show
+    /// it DISCONNECTED with when the next poll is due.
+    pub async fn note_poll_failure(&self, next_retry_at: DateTime<Utc>, reason: String) {
+        *self.inner.connected.lock().await = false;
+        *self.inner.retry.lock().await = RetryStatus {
+            next_retry_at: Some(next_retry_at),
+            reason: Some(reason),
+            cloud_deleted_confirmations: 0,
+        };
+        self.tick();
+    }
+
+    /// A long-poll got through again after [`Self::note_poll_failure`].
+    pub async fn note_poll_recovered(&self) {
+        *self.inner.connected.lock().await = true;
+        *self.inner.retry.lock().await = RetryStatus::default();
+        self.tick();
+    }
+
     /// Record one failed bootstrap attempt and return the new running count
     /// of consecutive failures (for the caller's log line).
     pub async fn note_bootstrap_failure(&self) -> u32 {
