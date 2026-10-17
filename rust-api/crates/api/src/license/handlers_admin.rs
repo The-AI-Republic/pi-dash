@@ -80,6 +80,10 @@ use pidash_types::license::serializers_core::{
     InstanceAdminRow, LiteUserRow,
 };
 
+use super::form_body::{
+    parse_form_body, parse_multipart_body, select_body_kind, BodyFail, BodyField, BodyKind,
+    ParsedBody,
+};
 use super::handlers_auth_forms as forms;
 use super::{file_asset_url, AssetUrl};
 use crate::auth_session::render::render_csrf_failure;
@@ -617,56 +621,68 @@ fn render_admin(
     Ok(body)
 }
 
-/// Parse a POST body the way DRF `_parse` + `JSONParser` do: empty body
-/// is `{}` without parsing; a non-JSON content-type with a body is 415;
-/// otherwise the body must be UTF-8 (a decode error is not a `ValueError`,
-/// so it escapes the parser into the generic 500); unparsable JSON is
-/// `ParseError` 400 with the
-/// `{"detail"}` shape. The message is input-dependent, but the all-blank
-/// case is deterministic CPython output, reproduced exactly.
-fn parse_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
+/// Parse a POST body the way DRF `_parse` does: empty body is `{}`
+/// without parsing; otherwise the content-type selects the parser in
+/// `select_parser` order (JSON, form, multipart —
+/// `form_body::select_body_kind`); unmatched types are 415. On the JSON
+/// branch the body must be UTF-8 (a decode error is not a `ValueError`,
+/// so it escapes the parser into the generic 500) and an object
+/// (`None.get("email")` / `[1].get("email")` raise `AttributeError` out
+/// of the view → generic 500); unparsable JSON is `ParseError` 400 with
+/// the `{"detail"}` shape. The message is input-dependent, but the
+/// all-blank case is deterministic CPython output, reproduced exactly.
+fn parse_json_body(
+    headers: &HeaderMap,
+    body: &[u8],
+    memory_limit: i64,
+) -> Result<ParsedBody, Denial> {
     if body.is_empty() {
-        return Ok(Value::Object(serde_json::Map::new()));
+        return Ok(ParsedBody::json(Value::Object(serde_json::Map::new())));
     }
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let media_type = content_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    if media_type != "application/json"
-        && media_type != "*/*"
-        && media_type != "application/*"
-        && media_type != "*/json"
-    {
-        return Err(Denial::UnsupportedMediaType(format!(
-            "Unsupported media type \"{content_type}\" in request."
-        )));
-    }
-    let text = std::str::from_utf8(body).map_err(|_| Denial::ServerError)?;
-    match serde_json::from_str::<Value>(text) {
-        Ok(data) => {
-            if data.is_object() {
-                Ok(data)
-            } else {
-                // `None.get("email")` / `[1].get("email")` raise
-                // `AttributeError` out of the view → generic 500.
-                Err(Denial::ServerError)
+    match select_body_kind(content_type) {
+        Some(BodyKind::Json) => {
+            let text = std::str::from_utf8(body).map_err(|_| Denial::ServerError)?;
+            match serde_json::from_str::<Value>(text) {
+                Ok(data) => {
+                    if data.is_object() {
+                        Ok(ParsedBody::json(data))
+                    } else {
+                        // `None.get("email")` / `[1].get("email")` raise
+                        // `AttributeError` out of the view → generic 500.
+                        Err(Denial::ServerError)
+                    }
+                }
+                Err(_) if text.trim().is_empty() => {
+                    let len = text.len();
+                    Err(Denial::BadDetail(format!(
+                        "JSON parse error - Expecting value: line 1 column {} (char {})",
+                        len + 1,
+                        len
+                    )))
+                }
+                Err(_) => Err(Denial::BadDetail("JSON parse error.".to_owned())),
             }
         }
-        Err(_) if text.trim().is_empty() => {
-            let len = text.len();
-            Err(Denial::BadDetail(format!(
-                "JSON parse error - Expecting value: line 1 column {} (char {})",
-                len + 1,
-                len
-            )))
-        }
-        Err(_) => Err(Denial::BadDetail("JSON parse error.".to_owned())),
+        Some(BodyKind::Form) => match parse_form_body(body) {
+            Ok(pairs) => Ok(ParsedBody::form(pairs)),
+            // Cap errors escape the view into the base
+            // `handle_exception` (generic 500) — the POST-only 400 page
+            // seen locally is the Debug Toolbar re-parsing the body in
+            // middleware (DEBUG-only; prod has no toolbar).
+            Err(_) => Err(Denial::ServerError),
+        },
+        Some(BodyKind::Multipart) => match parse_multipart_body(content_type, body, memory_limit) {
+            Ok(pairs) => Ok(ParsedBody::form(pairs)),
+            Err(BodyFail::Parse(message)) => Err(Denial::BadDetail(message)),
+            Err(BodyFail::Fatal) | Err(BodyFail::TooMany) => Err(Denial::ServerError),
+        },
+        None => Err(Denial::UnsupportedMediaType(format!(
+            "Unsupported media type \"{content_type}\" in request."
+        ))),
     }
 }
 
@@ -677,21 +693,132 @@ fn parse_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
 /// ints (`True` → 1, `False` → 0 — `bool` subclasses `int`); integers that
 /// fit pass through; EVERY float truncates toward zero BEFORE the range
 /// check (`int(20.5)` → 20, so no `fract() == 0.0` gate, and
-/// `int(2147483647.5)` → `2147483647` fits); numeric strings parse with `int()`
-/// semantics (surrounding whitespace tolerated, `"20.5"`/`"abc"` →
-/// `ValueError` → generic 500); anything else errors → generic 500.
-/// A parsed negative still 400s, but at the INSERT: the
-/// `PositiveIntegerField` CHECK (`role >= 0`) raises `IntegrityError`.
-fn role_from_value(value: Option<&Value>) -> Result<i32, Denial> {
+/// `int(2147483647.5)` → `2147483647` fits); numeric strings parse with
+/// `int()`
+/// semantics (ASCII-whitespace tolerated, underscores between digits,
+/// Unicode decimal digits, `"20.5"`/`"abc"` → `ValueError` → generic
+/// 500); anything else errors → generic 500. Past-`i32` values 500 at
+/// the INSERT (`DataError`, uncaught). A parsed negative still 400s,
+/// but at the INSERT: the `PositiveIntegerField` CHECK (`role >= 0`)
+/// raises `IntegrityError`. An uploaded file always 500s: `int(file)`
+/// is a `TypeError` regardless of the filename (probed) — unlike
+/// numeric strings.
+///
+/// Returns the INSERT int plus the 201 echo: the model field carries
+/// `choices=((20, "Admin"),)`, so the serializer renders a
+/// `ChoiceField.to_representation` over the RAW input —
+/// `choice_strings_to_values.get(str(value), value)` — echoing the
+/// input verbatim unless `str(value) == "20"` (probed: `" 20 "`,
+/// `"1_0"`, `"٢٠"`, `true`, `20.5` all echo).
+fn role_from_value(found: BodyField<'_>) -> Result<(i32, Value), Denial> {
+    let value = match found {
+        BodyField::File(_) => return Err(Denial::ServerError),
+        BodyField::Json(value) => Some(value),
+        BodyField::Missing => None,
+    };
     match value {
-        None => Ok(20),
+        None => Ok((20, Value::Number(20.into()))),
         Some(Value::Null) => Err(Denial::InvalidPayload),
-        Some(Value::Bool(true)) => Ok(1),
-        Some(Value::Bool(false)) => Ok(0),
-        Some(Value::Number(n)) => role_from_number(n),
-        Some(Value::String(s)) => s.trim().parse::<i32>().map_err(|_| Denial::ServerError),
+        Some(Value::Bool(b)) => Ok((i32::from(*b), Value::Bool(*b))),
+        Some(Value::Number(n)) => {
+            let parsed = role_from_number(n)?;
+            // `str(value) == "20"` is exactly the int token `20`
+            // (`as_i64` is `None` for floats and out-of-range ints).
+            let echo = if n.as_i64() == Some(20) {
+                Value::Number(20.into())
+            } else {
+                Value::Number(n.clone())
+            };
+            Ok((parsed, echo))
+        }
+        Some(Value::String(s)) => {
+            let parsed = py_int_i32(s).map_err(|_| Denial::ServerError)?;
+            let echo = if s == "20" {
+                Value::Number(20.into())
+            } else {
+                Value::String(s.clone())
+            };
+            Ok((parsed, echo))
+        }
         Some(_) => Err(Denial::ServerError),
     }
+}
+
+/// CPython `int(s)` for a base-10 string, then an `i32` range check:
+/// ASCII-whitespace stripped, one optional sign, digits `0-9` plus
+/// Unicode decimal (`Nd`) digits, single underscores allowed only
+/// between digits. Anything else (empty, `"20.5"`, `"0x10"`, `"1__2"`,
+/// lone sign) is a `ValueError`.
+fn py_int_i32(text: &str) -> Result<i32, ()> {
+    // `int()` strips Unicode whitespace (`\u{a0}`, `\u{2003}`, `\u{85}`
+    // all strip; `\u{1c}` does not — probed).
+    let text = text.trim_matches(|c: char| c.is_whitespace());
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    if digits.is_empty() {
+        return Err(());
+    }
+    let mut value: i64 = 0;
+    let mut count = 0u32;
+    let mut prev_underscore = false;
+    let mut any_digit = false;
+    for c in digits.chars() {
+        if c == '_' {
+            if !any_digit || prev_underscore {
+                return Err(());
+            }
+            prev_underscore = true;
+            continue;
+        }
+        let Some(digit) = py_decimal_value(c) else {
+            return Err(());
+        };
+        prev_underscore = false;
+        any_digit = true;
+        // Only significant digits count toward the 10-digit `i32` bound:
+        // leading zeros don't change the value (`int("00000000001")`
+        // is 1 — probed). Past 4300 digits `int()` itself refuses, but
+        // that is a 500 either way, so over-long input just fails below.
+        if digit != 0 || count > 0 {
+            count += 1;
+            if count <= 10 {
+                value = value * 10 + digit as i64;
+            }
+        }
+    }
+    if prev_underscore || count > 10 {
+        return Err(());
+    }
+    let value = if negative { -value } else { value };
+    i32::try_from(value).map_err(|_| ())
+}
+
+/// The decimal value of an ASCII or Unicode decimal (`Nd`) digit, via
+/// each script's zero point (`int()` accepts every `Nd` char — probed).
+/// Zeros generated from CPython 3.12's `unicodedata` (Unicode 15.0).
+fn py_decimal_value(c: char) -> Option<u32> {
+    if c.is_ascii_digit() {
+        return Some(c as u32 - '0' as u32);
+    }
+    const ZEROS: [u32; 67] = [
+        0x0660, 0x06F0, 0x07C0, 0x0966, 0x09E6, 0x0A66, 0x0AE6, 0x0B66, 0x0BE6, 0x0C66, 0x0CE6,
+        0x0D66, 0x0DE6, 0x0E50, 0x0ED0, 0x0F20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0,
+        0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0,
+        0xAA50, 0xABF0, 0xFF10, 0x104A0, 0x10D30, 0x11066, 0x110F0, 0x11136, 0x111D0, 0x112F0,
+        0x11450, 0x114D0, 0x11650, 0x116C0, 0x11730, 0x118E0, 0x11950, 0x11C50, 0x11D50, 0x11DA0,
+        0x11F50, 0x16A60, 0x16AC0, 0x16B50, 0x1D7CE, 0x1D7D8, 0x1D7E2, 0x1D7EC, 0x1D7F6, 0x1E140,
+        0x1E2F0, 0x1E4F0, 0x1E950, 0x1FBF0,
+    ];
+    let code = c as u32;
+    ZEROS.iter().find_map(|zero| {
+        if (0..10).contains(&(code.wrapping_sub(*zero))) {
+            Some(code - zero)
+        } else {
+            None
+        }
+    })
 }
 
 /// Adapt a JSON number to the integer `role` column: integers that fit,
@@ -724,8 +851,17 @@ fn role_from_number(n: &serde_json::Number) -> Result<i32, Denial> {
 /// `CharField.get_prep_value` stringifies it (`True` → `"True"`,
 /// `[1]` → `"[1]"`) and an unknown address 404s. Container spellings
 /// differ textually from CPython `str()` (`["a"]` vs `['a']`), but either
-/// spelling only decides which unknown address 404s.
-fn lookup_email(value: Option<&Value>) -> Result<String, Denial> {
+/// spelling only decides which unknown address 404s. An uploaded file is
+/// truthy (`bool(name)`) and stringifies to its name in the lookup, so a
+/// file 404s unless a user is literally named for it (probed).
+fn lookup_email(found: BodyField<'_>) -> Result<String, Denial> {
+    if let BodyField::File(file) = found {
+        return Ok(file.filename.clone());
+    }
+    let value = match found {
+        BodyField::Json(value) => Some(value),
+        _ => None,
+    };
     match value {
         Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
         Some(Value::Bool(true)) => Ok("True".to_owned()),
@@ -766,8 +902,8 @@ async fn create_admin(
     let instance_id = require_instance_admin(pool, &actor).await?;
     let tz = actor_timezone(pool, &actor).await?;
 
-    let data = parse_json_body(&headers, &body)?;
-    let email = lookup_email(data.get("email"))?;
+    let data = parse_json_body(&headers, &body, state.settings().file_size_limit)?;
+    let email = lookup_email(data.field("email"))?;
     if instance_first(pool).await?.is_none() {
         // Near-dead: the permission gate above already denied the
         // instance-less case with the default 403. Kept for order parity.
@@ -788,7 +924,7 @@ async fn create_admin(
     // The role is parsed here, after the user lookup, because Django only
     // touches it inside `.create()`: an unknown email 404s no matter how
     // unparsable the role is (PIDASHCONV-1120).
-    let role = role_from_value(data.get("role"))?;
+    let (role, role_echo) = role_from_value(data.field("role"))?;
 
     // `InstanceAdmin.objects.create(...)`: `BaseModel.save` stamps
     // `created_by` from the request user and leaves `updated_by` null.
@@ -824,7 +960,7 @@ async fn create_admin(
     let user = fetch_user(pool, &user_id)
         .await?
         .ok_or(Denial::ServerError)?;
-    let body = render_admin(
+    let mut body = render_admin(
         &admin_id,
         &now,
         &now,
@@ -838,6 +974,11 @@ async fn create_admin(
         Some(&user),
         &tz,
     )?;
+    // The 201 renders the in-memory `create()` instance, whose `role`
+    // is still the RAW input: the `choices` `ChoiceField` echoes it
+    // unless `str(value) == "20"`. The shared row struct only carries
+    // the INSERT int (foundation-owned), so the echo overwrites here.
+    body["role"] = role_echo;
     Ok(json_response(StatusCode::CREATED, body))
 }
 
@@ -2471,18 +2612,19 @@ mod tests {
             headers
         };
         // Valid objects pass through.
-        assert!(parse_json_body(&json_headers(), br#"{"email":"a@b.c"}"#).is_ok());
+        assert!(parse_json_body(&json_headers(), br#"{"email":"a@b.c"}"#, 5_242_880).is_ok());
         // Empty body is `{}` without parsing (DRF `_parse`: stream None).
-        let empty = parse_json_body(&json_headers(), b"").expect("empty is {}");
-        assert_eq!(empty, serde_json::json!({}));
+        let empty = parse_json_body(&json_headers(), b"", 5_242_880).expect("empty is {}");
+        assert_eq!(empty.value(), &serde_json::json!({}));
         // Blank bodies are DRF `ParseError` with the CPython message.
-        let err = parse_json_body(&json_headers(), b"   ").expect_err("blank body 400s");
+        let err = parse_json_body(&json_headers(), b"   ", 5_242_880).expect_err("blank body 400s");
         let (_, body) = err.status_and_body();
         assert!(body.contains("column 4 (char 3)"), "{body}");
         // Non-JSON content-type with a body is 415.
         let mut plain = HeaderMap::new();
         plain.insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
-        let err = parse_json_body(&plain, br#"{"email":"a@b.c"}"#).expect_err("text/plain 415s");
+        let err = parse_json_body(&plain, br#"{"email":"a@b.c"}"#, 5_242_880)
+            .expect_err("text/plain 415s");
         let (status, body) = err.status_and_body();
         assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(
@@ -2490,78 +2632,238 @@ mod tests {
             r#"{"detail":"Unsupported media type \"text/plain\" in request."}"#
         );
         // Missing content-type with a body is 415 (Rust echoes "").
-        let err =
-            parse_json_body(&HeaderMap::new(), br#"{"email":"a@b.c"}"#).expect_err("missing 415s");
+        let err = parse_json_body(&HeaderMap::new(), br#"{"email":"a@b.c"}"#, 5_242_880)
+            .expect_err("missing 415s");
         let (status, _) = err.status_and_body();
         assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
         // Case-variant JSON serves (Django lowercases the base).
         let mut mixed = HeaderMap::new();
         mixed.insert(header::CONTENT_TYPE, "Application/JSON".parse().unwrap());
-        assert!(parse_json_body(&mixed, br#"{"email":"a@b.c"}"#).is_ok());
+        assert!(parse_json_body(&mixed, br#"{"email":"a@b.c"}"#, 5_242_880).is_ok());
         // Wildcards serve (DRF `_MediaType.match` honors `*` either side).
         for ct in ["*/*", "application/*", "*/json"] {
             let mut wild = HeaderMap::new();
             wild.insert(header::CONTENT_TYPE, ct.parse().unwrap());
             assert!(
-                parse_json_body(&wild, br#"{"email":"a@b.c"}"#).is_ok(),
+                parse_json_body(&wild, br#"{"email":"a@b.c"}"#, 5_242_880).is_ok(),
                 "{ct}"
             );
         }
         // Non-object JSON has no `.get`: Django raises out of the view.
         assert!(matches!(
-            parse_json_body(&json_headers(), br"[1]"),
+            parse_json_body(&json_headers(), br"[1]", 5_242_880),
             Err(Denial::ServerError)
         ));
         assert!(matches!(
-            parse_json_body(&json_headers(), br"null"),
+            parse_json_body(&json_headers(), br"null", 5_242_880),
             Err(Denial::ServerError)
         ));
         // Non-UTF-8 escapes the parser the same way.
         assert!(matches!(
-            parse_json_body(&json_headers(), &[0xff]),
+            parse_json_body(&json_headers(), &[0xff], 5_242_880),
             Err(Denial::ServerError)
         ));
+    }
+
+    #[test]
+    fn parse_json_body_serves_forms_like_drf() {
+        use axum::http::header;
+        let headers_for = |content_type: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+            headers
+        };
+        // Form bodies decode to last-wins text (probed end to end).
+        let body = parse_json_body(
+            &headers_for("application/x-www-form-urlencoded"),
+            b"email=a@b.c&role=20",
+            5_242_880,
+        )
+        .expect("form parses");
+        assert!(body.is_form());
+        assert_eq!(lookup_email(body.field("email")).expect("email"), "a@b.c");
+        assert_eq!(
+            role_from_value(body.field("role")).expect("role"),
+            (20, serde_json::json!(20))
+        );
+        // Multipart bodies decode fields; framing failures are 400s.
+        let multipart =
+            b"--B\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\na@b.c\r\n--B--\r\n";
+        let body = parse_json_body(
+            &headers_for("multipart/form-data; boundary=B"),
+            multipart,
+            5_242_880,
+        )
+        .expect("multipart parses");
+        assert!(body.is_form());
+        assert_eq!(lookup_email(body.field("email")).expect("email"), "a@b.c");
+        let err = parse_json_body(&headers_for("multipart/form-data"), multipart, 5_242_880)
+            .expect_err("missing boundary 400s");
+        assert!(matches!(err, Denial::BadDetail(_)));
+        // Upload caps escape the view into the base `handle_exception`
+        // (generic 500) on every endpoint — including POST ones. The 400
+        // page seen locally on POST is the Debug Toolbar re-parsing the
+        // body in middleware (DEBUG-only; prod has no toolbar — probed
+        // with DEBUG=False: 500 JSON on all five endpoints).
+        let over = (0..1001)
+            .map(|i| format!("u{i}=v"))
+            .collect::<Vec<_>>()
+            .join("&");
+        assert!(matches!(
+            parse_json_body(
+                &headers_for("application/x-www-form-urlencoded"),
+                over.as_bytes(),
+                5_242_880
+            ),
+            Err(Denial::ServerError)
+        ));
+    }
+
+    #[test]
+    fn admin_files_email_looks_up_but_role_500s() {
+        use super::super::form_body::{FormFile, FormValue};
+        // A file email stringifies to its name in the lookup (probed:
+        // truthy, then 404-or-hit downstream).
+        let body = ParsedBody::form(vec![(
+            "email".to_owned(),
+            FormValue::File(FormFile {
+                filename: "e.txt".to_owned(),
+                size: 18,
+            }),
+        )]);
+        assert_eq!(
+            lookup_email(body.field("email")).expect("file email"),
+            "e.txt"
+        );
+        // A file role is `int(file)` → `TypeError` → 500 however the
+        // filename spells (probed with both numeric and junk names).
+        for filename in ["20", "abc"] {
+            let body = ParsedBody::form(vec![(
+                "role".to_owned(),
+                FormValue::File(FormFile {
+                    filename: filename.to_owned(),
+                    size: 1,
+                }),
+            )]);
+            assert!(
+                matches!(
+                    role_from_value(body.field("role")),
+                    Err(Denial::ServerError)
+                ),
+                "{filename}"
+            );
+        }
     }
 
     #[test]
     fn role_values_follow_the_orm_column() {
         let role = |raw: &str| {
             let data: Value = serde_json::from_str(raw).expect("json");
-            role_from_value(data.get("role"))
+            role_from_value(ParsedBody::json(data).field("role"))
         };
-        // Absent -> default 20; plain ints pass through.
-        assert_eq!(role("{}").expect("default"), 20);
-        assert_eq!(role(r#"{"role":20}"#).expect("int"), 20);
-        assert_eq!(role(r#"{"role":5}"#).expect("low role"), 5);
-        // `bool` subclasses `int`: True -> 1, False -> 0.
-        assert_eq!(role(r#"{"role":true}"#).expect("bool"), 1);
-        assert_eq!(role(r#"{"role":false}"#).expect("bool"), 0);
+        // Absent -> default 20; plain ints pass through. Each case
+        // asserts `(insert int, 201 echo)`: the `choices` `ChoiceField`
+        // echoes the raw input unless `str(value) == "20"` (probed).
+        assert_eq!(role("{}").expect("default"), (20, serde_json::json!(20)));
+        assert_eq!(
+            role(r#"{"role":20}"#).expect("int"),
+            (20, serde_json::json!(20))
+        );
+        assert_eq!(
+            role(r#"{"role":5}"#).expect("low role"),
+            (5, serde_json::json!(5))
+        );
+        // `bool` subclasses `int`: True -> 1, False -> 0; the echo keeps
+        // the bools (`str(True)` is not `"20"`).
+        assert_eq!(
+            role(r#"{"role":true}"#).expect("bool"),
+            (1, serde_json::json!(true))
+        );
+        assert_eq!(
+            role(r#"{"role":false}"#).expect("bool"),
+            (0, serde_json::json!(false))
+        );
         // `int(value)` truncates every float toward zero, including
         // negatives (-0.5 -> 0); a parsed negative still 400s, but at the
-        // INSERT CHECK, so the adapter returns it.
-        assert_eq!(role(r#"{"role":20.0}"#).expect("integral float"), 20);
-        assert_eq!(role(r#"{"role":20.9}"#).expect("truncation"), 20);
-        assert_eq!(role(r#"{"role":-0.5}"#).expect("negative truncation"), 0);
-        assert_eq!(role(r#"{"role":-1}"#).expect("negative parses"), -1);
+        // INSERT CHECK, so the adapter returns it. Floats echo raw.
+        assert_eq!(
+            role(r#"{"role":20.0}"#).expect("integral float"),
+            (20, serde_json::json!(20.0))
+        );
+        assert_eq!(
+            role(r#"{"role":20.9}"#).expect("truncation"),
+            (20, serde_json::json!(20.9))
+        );
+        assert_eq!(
+            role(r#"{"role":-0.5}"#).expect("negative truncation"),
+            (0, serde_json::json!(-0.5))
+        );
+        assert_eq!(
+            role(r#"{"role":-1}"#).expect("negative parses"),
+            (-1, serde_json::json!(-1))
+        );
         // Truncation runs BEFORE the range check (PIDASHCONV-1120): the
         // boundary floats fit after `int()`, while floats that are still
-        // out of range after truncation error like a DB overflow.
+        // out of range after truncation error like a DB overflow. The
+        // echo stays raw.
         assert_eq!(
             role(r#"{"role":2147483647.5}"#).expect("max boundary float"),
-            2147483647
+            (2147483647, serde_json::json!(2147483647.5))
         );
         assert_eq!(
             role(r#"{"role":-2147483648.5}"#).expect("min boundary float"),
-            -2147483648
+            (-2147483648, serde_json::json!(-2147483648.5))
         );
         assert!(role(r#"{"role":2147483648.0}"#).is_err());
         assert!(role(r#"{"role":-2147483649.0}"#).is_err());
         // Numeric strings parse with `int()` semantics (surrounding
         // whitespace tolerated); `"20.5"`/`"abc"` are `ValueError` -> 500.
-        assert_eq!(role(r#"{"role":"20"}"#).expect("string"), 20);
-        assert_eq!(role(r#"{"role":" 20 "}"#).expect("padded"), 20);
+        // Only the exact `"20"` echoes as an int; the rest echo raw.
+        assert_eq!(
+            role(r#"{"role":"20"}"#).expect("string"),
+            (20, serde_json::json!(20))
+        );
+        assert_eq!(
+            role(r#"{"role":" 20 "}"#).expect("padded"),
+            (20, serde_json::json!(" 20 "))
+        );
+        assert_eq!(
+            role(r#"{"role":"1_0"}"#).expect("underscores"),
+            (10, serde_json::json!("1_0"))
+        );
+        assert_eq!(
+            role(r#"{"role":"\u0662\u0660"}"#).expect("unicode digits"),
+            (20, serde_json::json!("٢٠"))
+        );
+        assert_eq!(
+            role(r#"{"role":"+20"}"#).expect("sign"),
+            (20, serde_json::json!("+20"))
+        );
         assert!(role(r#"{"role":"20.5"}"#).is_err());
         assert!(role(r#"{"role":"abc"}"#).is_err());
+        assert!(role(r#"{"role":"1__2"}"#).is_err());
+        assert!(role(r#"{"role":""}"#).is_err());
+        assert!(role(r#"{"role":"0x10"}"#).is_err());
+        // Leading zeros don't count toward the `i32` bound: `int()`
+        // takes the value, not the width (`int("00000000001") == 1`
+        // — probed). Only the exact `"20"` echoes as an int.
+        assert_eq!(
+            role(r#"{"role":"00000000001"}"#).expect("leading zeros"),
+            (1, serde_json::json!("00000000001"))
+        );
+        assert_eq!(
+            role(r#"{"role":"-00000000001"}"#).expect("negative zeros"),
+            (-1, serde_json::json!("-00000000001"))
+        );
+        assert_eq!(
+            role(r#"{"role":"00000000000000000000000000000000000000000000001"}"#)
+                .expect("many zeros"),
+            (
+                1,
+                serde_json::json!("00000000000000000000000000000000000000000000001")
+            )
+        );
+        assert!(role(r#"{"role":"99999999999"}"#).is_err());
         // Explicit null is the NOT NULL column -> invalid-payload 400;
         // out-of-range ints and containers are generic 500s.
         assert!(matches!(
@@ -2576,7 +2878,7 @@ mod tests {
     fn lookup_email_matches_request_data_truthiness() {
         let email = |raw: &str| {
             let data: Value = serde_json::from_str(raw).expect("json");
-            lookup_email(data.get("email"))
+            lookup_email(ParsedBody::json(data).field("email"))
         };
         // `if not email`: missing, null, empty string, false, zero, and
         // EMPTY containers all 400.

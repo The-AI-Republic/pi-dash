@@ -78,6 +78,10 @@ use pidash_db::license::queries::{
 };
 use pidash_types::license::serializers_core::{instance_to_representation, InstanceRow};
 
+use super::form_body::{
+    parse_form_body, parse_multipart_body, select_body_kind, BodyFail, BodyField, BodyKind,
+    ParsedBody,
+};
 use super::handlers_base::{json_response, resolve_request_tz, HandlerError, CACHE_CONTROL_VALUE};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -617,7 +621,9 @@ fn invalid_uuid_message(display: &str) -> String {
 }
 
 /// DRF `BooleanField` input: the strict true/false sets plus `1` / `0`
-/// (`1.0 == 1` in Python, so float ones count too).
+/// (`1.0 == 1` in Python, so float ones count too). The case fold is
+/// Unicode (`str.lower`, not ASCII); unobservable on these sets (only
+/// Kelvin K folds to an ASCII letter, and `k` matches nothing).
 fn as_bool(value: &serde_json::Value) -> Result<bool, &'static str> {
     match value {
         serde_json::Value::Bool(b) => Ok(*b),
@@ -630,11 +636,14 @@ fn as_bool(value: &serde_json::Value) -> Result<bool, &'static str> {
                 Err("Must be a valid boolean.")
             }
         }
-        serde_json::Value::String(s) => match s.to_ascii_lowercase().as_str() {
-            "1" | "true" | "t" | "y" | "yes" | "on" => Ok(true),
-            "0" | "false" | "f" | "n" | "no" | "off" => Ok(false),
-            _ => Err("Must be a valid boolean."),
-        },
+        serde_json::Value::String(s) => {
+            let lowered: String = s.chars().flat_map(char::to_lowercase).collect();
+            match lowered.as_str() {
+                "1" | "true" | "t" | "y" | "yes" | "on" => Ok(true),
+                "0" | "false" | "f" | "n" | "no" | "off" => Ok(false),
+                _ => Err("Must be a valid boolean."),
+            }
+        }
         _ => Err("Must be a valid boolean."),
     }
 }
@@ -642,13 +651,21 @@ fn as_bool(value: &serde_json::Value) -> Result<bool, &'static str> {
 /// Validate one writable text field (`blank` / `max_length` in that order,
 /// after the partial null-skip resolved by the caller). `max_length` is
 /// `Some` for `CharField`s, `None` for `TextField`s (no length validator).
+/// An uploaded file is never a string (`CharField` takes `str`/`int`/
+/// `float` only — probed).
 fn check_text(
     field: &'static str,
-    value: &serde_json::Value,
+    found: BodyField<'_>,
     allow_blank: bool,
     max_length: Option<usize>,
     errors: &mut Vec<(String, Vec<String>)>,
 ) -> Option<String> {
+    let BodyField::Json(value) = found else {
+        if matches!(found, BodyField::File(_)) {
+            errors.push((field.to_owned(), vec!["Not a valid string.".to_owned()]));
+        }
+        return None;
+    };
     match as_text(value) {
         Err(message) => {
             errors.push((field.to_owned(), vec![message.to_owned()]));
@@ -690,21 +707,40 @@ fn check_text(
 /// one field with DRF-correct null handling — an explicit `null` clears
 /// (`allow_null`) while a missing key is skipped — unlike the blanket
 /// null-skip below (a known port divergence for the other fields).
-fn validate_partial(
-    object: &serde_json::Map<String, serde_json::Value>,
-    timezone: Tz,
-) -> Result<Vec<Assignment>, PatchRejection> {
+///
+/// On form bodies the HTML-form `get_value` rules apply (`fields.py`):
+/// an empty string on an `allow_null` field arrives as `None`
+/// (`deleted_at` and the nullable FKs clear), on a `not required`
+/// field without `allow_blank` it skips (bools, `edition`), and on the
+/// rest it validates like JSON `""` (all probed).
+fn validate_partial(body: &ParsedBody, timezone: Tz) -> Result<Vec<Assignment>, PatchRejection> {
     let mut sets = Vec::new();
     let mut errors: Vec<(String, Vec<String>)> = Vec::new();
-    if let Some(value) = object.get("deleted_at") {
-        match super::parse_deleted_at(value, timezone) {
+    match body.field("deleted_at") {
+        BodyField::Missing => {}
+        BodyField::Json(serde_json::Value::String(text)) if body.is_form() && text.is_empty() => {
+            sets.push(Assignment::NullableDateTime("deleted_at", None));
+        }
+        BodyField::Json(value) => match super::parse_deleted_at(value, timezone) {
             Ok(stamp) => sets.push(Assignment::NullableDateTime("deleted_at", stamp)),
             Err(message) => errors.push(("deleted_at".to_owned(), vec![message.to_owned()])),
-        }
+        },
+        BodyField::File(_) => errors.push((
+            "deleted_at".to_owned(),
+            vec![crate::app_project::handlers_project::INVALID_DATETIME_MESSAGE.to_owned()],
+        )),
     }
-    let get = |field: &str| match object.get(field) {
-        None | Some(serde_json::Value::Null) => None,
-        Some(value) => Some(value),
+    let get = |field: &str| -> Option<BodyField<'_>> {
+        match body.field(field) {
+            BodyField::Missing => None,
+            BodyField::Json(serde_json::Value::Null) => None,
+            BodyField::Json(serde_json::Value::String(text))
+                if body.is_form() && text.is_empty() && skips_blank_form_value(field) =>
+            {
+                None
+            }
+            other => Some(other),
+        }
     };
 
     // `CharField(max_length=255)` vs `TextField` (no length validator).
@@ -757,8 +793,14 @@ fn validate_partial(
         "is_test",
         "is_current_version_deprecated",
     ] {
-        if let Some(value) = get(field) {
-            match as_bool(value) {
+        if let Some(found) = get(field) {
+            let parsed = match found {
+                // An uploaded file is never a boolean (probed).
+                BodyField::File(_) => Err("Must be a valid boolean."),
+                BodyField::Json(value) => as_bool(value),
+                BodyField::Missing => continue,
+            };
+            match parsed {
                 Ok(flag) => sets.push(Assignment::Flag(field, flag)),
                 Err(message) => errors.push((field.to_owned(), vec![message.to_owned()])),
             }
@@ -776,23 +818,34 @@ fn validate_partial(
     // accepts it. Only the exact `""`: `" "` still fails below as an
     // invalid UUID.
     for field in ["created_by", "updated_by"] {
-        if let Some(value) = get(field) {
-            match value {
-                serde_json::Value::Bool(_) => errors.push((
+        if let Some(found) = get(field) {
+            match found {
+                // The lookup stringifies the file, so its name lands in
+                // the message (`get_prep_value` — probed).
+                BodyField::File(file) => {
+                    errors.push((field.to_owned(), vec![invalid_uuid_message(&file.filename)]))
+                }
+                // `RelatedField.run_validation` forces the exact `""`
+                // to `None` on every path, JSON included
+                // (`relations.py:151-155`); `allow_null` clears. HTML-form
+                // `get_value` on the nullable FK also sends `''` as
+                // `None` (probed). Only the exact `""`: `" "` still fails
+                // below as an invalid UUID.
+                BodyField::Json(serde_json::Value::String(raw)) if raw.is_empty() => {
+                    sets.push(Assignment::NullableUuid(field, None));
+                }
+                BodyField::Json(value @ serde_json::Value::Bool(_)) => errors.push((
                     field.to_owned(),
                     vec![format!(
                         "Incorrect type. Expected pk value, received {}.",
                         datatype_name(value)
                     )],
                 )),
-                serde_json::Value::String(raw) if raw.is_empty() => {
-                    sets.push(Assignment::NullableUuid(field, None));
-                }
-                serde_json::Value::String(raw) => match raw.parse::<Uuid>() {
+                BodyField::Json(serde_json::Value::String(raw)) => match raw.parse::<Uuid>() {
                     Ok(id) => sets.push(Assignment::NullableUuid(field, Some((id, raw.clone())))),
                     Err(_) => errors.push((field.to_owned(), vec![invalid_uuid_message(raw)])),
                 },
-                serde_json::Value::Number(n) => {
+                BodyField::Json(serde_json::Value::Number(n)) => {
                     let token = n.to_string();
                     if token.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
                         errors.push((
@@ -810,10 +863,11 @@ fn validate_partial(
                         }
                     }
                 }
-                other => errors.push((
+                BodyField::Json(other) => errors.push((
                     field.to_owned(),
                     vec![invalid_uuid_message(&py_str_value(other))],
                 )),
+                BodyField::Missing => {}
             }
         }
     }
@@ -823,6 +877,23 @@ fn validate_partial(
     } else {
         Err(PatchRejection::FieldErrors(errors))
     }
+}
+
+/// Fields whose HTML-form empty string skips validation: `get_value`
+/// returns `empty` for `not required` fields without `allow_blank` — the
+/// six defaulted booleans and defaulted `edition` (all probed). Every
+/// other `''` validates like JSON `""`.
+fn skips_blank_form_value(field: &str) -> bool {
+    matches!(
+        field,
+        "edition"
+            | "is_telemetry_enabled"
+            | "is_support_required"
+            | "is_signup_screen_visited"
+            | "is_verified"
+            | "is_test"
+            | "is_current_version_deprecated"
+    )
 }
 
 /// Render `serializer.errors`: `{"field": ["message", ...]}` in wire
@@ -883,12 +954,11 @@ async fn patch_instance(
     if !admin_allowed(pool, &actor.id).await? {
         return Err(HandlerError::Forbidden);
     }
-    let value = patch_body(&headers, &body)?;
-    let object = match &value {
-        serde_json::Value::Object(object) => object.clone(),
-        other => return Err(non_object_error(other)),
-    };
-    let mut sets = validate_partial(&object, actor.timezone).map_err(|rejection| {
+    let body = patch_body(&headers, &body, state.settings().file_size_limit)?;
+    if body.object().is_none() {
+        return Err(non_object_error(body.value()));
+    }
+    let mut sets = validate_partial(&body, actor.timezone).map_err(|rejection| {
         let PatchRejection::FieldErrors(errors) = rejection;
         HandlerError::FieldErrors(render_field_errors(&errors))
     })?;
@@ -955,41 +1025,49 @@ async fn fetch_instance_by_id(
 }
 
 /// Decode the PATCH body like DRF `_parse`: empty → `{}`; otherwise the
-/// content-type base (before `;`, trimmed, lowercased like Django's
-/// `parse_header_parameters`) must match the JSON parser — `*/*`,
-/// `application/*`, and `*/json` match too — else 415; parse errors →
-/// 400 `detail`.
-fn patch_body(headers: &HeaderMap, body: &[u8]) -> Result<serde_json::Value, HandlerError> {
+/// content-type selects the parser in `select_parser` order (JSON, form,
+/// multipart — `form_body::select_body_kind`). JSON and multipart framing
+/// errors → 400 `detail`; unmatched types → 415.
+fn patch_body(
+    headers: &HeaderMap,
+    body: &[u8],
+    memory_limit: i64,
+) -> Result<ParsedBody, HandlerError> {
     if body.is_empty() {
-        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+        return Ok(ParsedBody::json(serde_json::Value::Object(
+            serde_json::Map::new(),
+        )));
     }
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let media_type = content_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    if media_type != "application/json"
-        && media_type != "*/*"
-        && media_type != "application/*"
-        && media_type != "*/json"
-    {
-        return Err(HandlerError::UnsupportedMediaType(
+    match select_body_kind(content_type) {
+        Some(BodyKind::Json) => serde_json::from_slice(body)
+            .map(ParsedBody::json)
+            .map_err(|e| {
+                HandlerError::BadDetail(
+                    serde_json::json!({"detail": format!("JSON parse error - {e}")}).to_string(),
+                )
+            }),
+        Some(BodyKind::Form) => match parse_form_body(body) {
+            Ok(pairs) => Ok(ParsedBody::form(pairs)),
+            Err(_) => Err(HandlerError::ServerError),
+        },
+        Some(BodyKind::Multipart) => match parse_multipart_body(content_type, body, memory_limit) {
+            Ok(pairs) => Ok(ParsedBody::form(pairs)),
+            Err(BodyFail::Parse(message)) => Err(HandlerError::BadDetail(
+                serde_json::json!({"detail": message}).to_string(),
+            )),
+            Err(BodyFail::Fatal) | Err(BodyFail::TooMany) => Err(HandlerError::ServerError),
+        },
+        None => Err(HandlerError::UnsupportedMediaType({
             serde_json::json!({
                 "detail": format!("Unsupported media type \"{content_type}\" in request.")
             })
-            .to_string(),
-        ));
+            .to_string()
+        })),
     }
-    serde_json::from_slice(body).map_err(|e| {
-        HandlerError::BadDetail(
-            serde_json::json!({"detail": format!("JSON parse error - {e}")}).to_string(),
-        )
-    })
 }
 
 /// `InstanceAdminPermission.has_permission` (`permissions/instance.py`):
@@ -1364,11 +1442,30 @@ fn with_cache_control(response: axum::response::Response) -> axum::response::Res
 
 #[cfg(test)]
 mod tests {
+    use super::super::form_body::FormValue;
     use super::*;
     use pidash_db::license::queries::INSTANCE_FIRST_SQL;
 
-    fn obj(json: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
-        json.as_object().cloned().expect("object")
+    fn obj(json: serde_json::Value) -> ParsedBody {
+        ParsedBody::json(json)
+    }
+
+    fn form_obj(pairs: Vec<(String, FormValue)>) -> ParsedBody {
+        ParsedBody::form(pairs)
+    }
+
+    fn text_field(name: &str, value: &str) -> (String, FormValue) {
+        (name.to_owned(), FormValue::Text(value.to_owned()))
+    }
+
+    fn file_field(name: &str, filename: &str, size: usize) -> (String, FormValue) {
+        (
+            name.to_owned(),
+            FormValue::File(super::super::form_body::FormFile {
+                filename: filename.to_owned(),
+                size,
+            }),
+        )
     }
 
     #[test]
@@ -1539,8 +1636,9 @@ mod tests {
         // Malformed string: UUID message with the raw value (curly quotes
         // U+201C/U+201D, raw UTF-8 on the wire like Django's
         // `ensure_ascii=False` renderer).
-        let body: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(r#"{"created_by": "not-a-uuid"}"#).expect("json");
+        let body = ParsedBody::json(
+            serde_json::from_str(r#"{"created_by": "not-a-uuid"}"#).expect("json"),
+        );
         let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
             panic!("expected field errors");
         };
@@ -1563,8 +1661,9 @@ mod tests {
                 "340282366920938463463374607431768211455",
             ),
         ] {
-            let body: serde_json::Map<String, serde_json::Value> =
-                serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json");
+            let body = ParsedBody::json(
+                serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json"),
+            );
             let sets = validate_partial(&body, Tz::UTC).expect("int pk validates");
             assert_eq!(
                 sets,
@@ -1580,8 +1679,9 @@ mod tests {
         }
         // Out-of-range ints fail with the decimal display.
         for raw in ["340282366920938463463374607431768211456", "-5"] {
-            let body: serde_json::Map<String, serde_json::Value> =
-                serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json");
+            let body = ParsedBody::json(
+                serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json"),
+            );
             let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
                 panic!("expected field errors for {raw}");
             };
@@ -1593,8 +1693,9 @@ mod tests {
         }
         // Floats fail with the Python `str()` of the value.
         for (raw, display) in [("1.5", "1.5"), ("1.0", "1.0"), ("1e3", "1000.0")] {
-            let body: serde_json::Map<String, serde_json::Value> =
-                serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json");
+            let body = ParsedBody::json(
+                serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json"),
+            );
             let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
                 panic!("expected field errors for {raw}");
             };
@@ -1606,8 +1707,9 @@ mod tests {
         }
         // Lists and dicts fail with the Python `str()` (single quotes).
         for (raw, display) in [(r#"["a"]"#, "['a']"), (r#"{"a": 1}"#, "{'a': 1}")] {
-            let body: serde_json::Map<String, serde_json::Value> =
-                serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json");
+            let body = ParsedBody::json(
+                serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json"),
+            );
             let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
                 panic!("expected field errors for {raw}");
             };
@@ -1911,5 +2013,170 @@ mod tests {
             render_field_errors(&errors),
             r#"{"deleted_at":["Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z]."],"instance_name":["Ensure this field has no more than 255 characters."]}"#
         );
+    }
+
+    #[test]
+    fn form_blank_bools_and_edition_skip_but_json_blanks_fail() {
+        // HTML-form `get_value`: `''` on the defaulted bools and `edition`
+        // skips validation (probed); JSON `""` still fails.
+        for field in [
+            "is_verified",
+            "is_test",
+            "is_telemetry_enabled",
+            "is_support_required",
+            "is_signup_screen_visited",
+            "is_current_version_deprecated",
+            "edition",
+        ] {
+            let body = form_obj(vec![text_field(field, "")]);
+            assert_eq!(
+                validate_partial(&body, Tz::UTC).expect("form blank skips"),
+                Vec::new(),
+                "field {field}"
+            );
+        }
+        let body = obj(serde_json::json!({"is_verified": ""}));
+        assert!(validate_partial(&body, Tz::UTC).is_err());
+        let body = obj(serde_json::json!({"edition": ""}));
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            render_field_errors(&errors),
+            r#"{"edition":["This field may not be blank."]}"#
+        );
+        // Form strings otherwise validate like JSON strings.
+        let body = form_obj(vec![text_field("is_verified", "true")]);
+        assert_eq!(
+            validate_partial(&body, Tz::UTC).expect("bool parses"),
+            vec![Assignment::Flag("is_verified", true)]
+        );
+        let body = form_obj(vec![text_field("is_verified", "bogus")]);
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            render_field_errors(&errors),
+            r#"{"is_verified":["Must be a valid boolean."]}"#
+        );
+        let body = form_obj(vec![text_field("instance_name", "")]);
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            render_field_errors(&errors),
+            r#"{"instance_name":["This field may not be blank."]}"#
+        );
+    }
+
+    #[test]
+    fn form_blank_deleted_at_and_fks_clear() {
+        // HTML-form `get_value` on `allow_null` fields: `''` arrives as
+        // `None` (probed) — unlike JSON `""`, which fails parsing.
+        let body = form_obj(vec![text_field("deleted_at", "")]);
+        assert_eq!(
+            validate_partial(&body, Tz::UTC).expect("form blank clears"),
+            vec![Assignment::NullableDateTime("deleted_at", None)]
+        );
+        let body = obj(serde_json::json!({"deleted_at": ""}));
+        assert!(validate_partial(&body, Tz::UTC).is_err());
+        for field in ["created_by", "updated_by"] {
+            let body = form_obj(vec![text_field(field, "")]);
+            assert_eq!(
+                validate_partial(&body, Tz::UTC).expect("form blank clears"),
+                vec![Assignment::NullableUuid(field, None)],
+                "field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn form_files_fail_text_bool_datetime_and_pk_fields() {
+        // Uploaded files are never strings, booleans or datetimes; the
+        // pk lookup stringifies the file into the message (all probed).
+        let body = form_obj(vec![file_field("instance_name", "x.txt", 8)]);
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            render_field_errors(&errors),
+            r#"{"instance_name":["Not a valid string."]}"#
+        );
+        let body = form_obj(vec![file_field("is_verified", "v.txt", 4)]);
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            render_field_errors(&errors),
+            r#"{"is_verified":["Must be a valid boolean."]}"#
+        );
+        let body = form_obj(vec![file_field("deleted_at", "d.txt", 20)]);
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            render_field_errors(&errors),
+            r#"{"deleted_at":["Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z]."]}"#
+        );
+        let body = form_obj(vec![file_field("created_by", "c.txt", 1)]);
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            render_field_errors(&errors),
+            format!(
+                "{{\"created_by\":[{}]}}",
+                serde_json::to_string(&invalid_uuid_message("c.txt")).expect("json")
+            )
+        );
+    }
+
+    #[test]
+    fn patch_body_routes_form_and_multipart_like_drf() {
+        let headers_for = |content_type: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                content_type.parse().expect("content type"),
+            );
+            headers
+        };
+        // Form bodies decode to last-wins text and flag the HTML rules.
+        let body = patch_body(
+            &headers_for("application/x-www-form-urlencoded"),
+            b"a=First&a=Second&is_verified=",
+            5_242_880,
+        )
+        .expect("form parses");
+        assert!(body.is_form());
+        assert_eq!(
+            body.value(),
+            &serde_json::json!({"a": "Second", "is_verified": ""})
+        );
+        // Multipart bodies decode fields and flag the HTML rules.
+        let multipart =
+            b"--B\r\nContent-Disposition: form-data; name=\"instance_name\"\r\n\r\nMP\r\n--B--\r\n";
+        let body = patch_body(
+            &headers_for("multipart/form-data; boundary=B"),
+            multipart,
+            5_242_880,
+        )
+        .expect("multipart parses");
+        assert!(body.is_form());
+        assert_eq!(body.value(), &serde_json::json!({"instance_name": "MP"}));
+        // Multipart framing failures are 400 `detail` bodies (probed).
+        let err =
+            patch_body(&headers_for("multipart/form-data"), multipart, 5_242_880).expect_err("400");
+        assert!(matches!(err, HandlerError::BadDetail(_)));
+        // JSON and 415 behavior is unchanged.
+        let body = patch_body(
+            &headers_for("application/json"),
+            br#"{"instance_name":"J"}"#,
+            5_242_880,
+        )
+        .expect("json parses");
+        assert!(!body.is_form());
+        let err = patch_body(&headers_for("text/plain"), b"x=1", 5_242_880).expect_err("415");
+        assert!(matches!(err, HandlerError::UnsupportedMediaType(_)));
     }
 }

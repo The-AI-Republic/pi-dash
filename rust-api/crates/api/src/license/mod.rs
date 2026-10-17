@@ -512,6 +512,7 @@ pub(crate) fn parse_deleted_at(
     }
 }
 
+pub mod form_body;
 pub mod handlers_admin;
 pub mod handlers_auth_forms;
 pub mod handlers_base;
