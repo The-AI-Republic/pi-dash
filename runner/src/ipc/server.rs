@@ -16,6 +16,10 @@ use super::protocol::{Request, Response, RpcError, StatusSnapshot};
 use crate::approval::router::DecisionSource;
 use crate::daemon::runner_instance::RunnerInstance;
 
+/// How often the server checks that its socket file still exists.
+#[cfg(unix)]
+const SOCKET_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// IPC server. Owns the multi-runner instance map and dispatches
 /// per-runner requests to the right `RunnerInstance`'s state /
 /// approvals / paths.
@@ -39,6 +43,42 @@ pub struct IpcServer {
 impl IpcServer {
     #[cfg(unix)]
     pub async fn run(self) -> Result<()> {
+        let mut listener = self.bind().await?;
+        let mut socket_check = tokio::time::interval(SOCKET_CHECK_INTERVAL);
+
+        let me = Arc::new(self);
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted?;
+                    let server = me.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = server.handle_conn(stream).await {
+                            tracing::warn!("ipc conn error: {e:#}");
+                        }
+                    });
+                }
+                _ = socket_check.tick() => {
+                    // A socket a host app placed in a temp directory can be
+                    // swept by the OS's temp cleaner while the daemon is
+                    // still up (macOS removes files left untouched for a few
+                    // days). The listener keeps working for nobody: clients
+                    // connect by path. Bind it again.
+                    if !me.path.exists() {
+                        tracing::warn!("ipc socket {:?} disappeared; binding it again", me.path);
+                        match me.bind().await {
+                            Ok(rebound) => listener = rebound,
+                            Err(e) => tracing::error!("rebinding ipc socket: {e:#}"),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    async fn bind(&self) -> Result<UnixListener> {
+        pidash_ipc::check_socket_path(&self.path)?;
         // Clean up stale socket.
         let _ = tokio::fs::remove_file(&self.path).await;
         if let Some(parent) = self.path.parent() {
@@ -47,9 +87,14 @@ impl IpcServer {
                 .with_context(|| format!("creating {parent:?}"))?;
             // Best-effort: tighten the runtime dir to 0700 so even if the
             // socket bind racewindow is exploited, no peer can reach it.
-            let mut p = std::fs::metadata(parent)?.permissions();
-            p.set_mode(0o700);
-            let _ = std::fs::set_permissions(parent, p);
+            // Only the daemon's own runtime dir: an assigned socket can sit
+            // in a directory the host app chose (a per-user runtime or temp
+            // dir), which is not ours to chmod.
+            if parent == self.paths.runtime_dir {
+                let mut p = std::fs::metadata(parent)?.permissions();
+                p.set_mode(0o700);
+                let _ = std::fs::set_permissions(parent, p);
+            }
         }
         // Restrict the file mode of files (including the socket) we create
         // until after bind, then restore. Closes the TOCTOU window where the
@@ -63,17 +108,7 @@ impl IpcServer {
         let mut perm = std::fs::metadata(&self.path)?.permissions();
         perm.set_mode(0o600);
         std::fs::set_permissions(&self.path, perm)?;
-
-        let me = Arc::new(self);
-        loop {
-            let (stream, _) = listener.accept().await?;
-            let server = me.clone();
-            tokio::spawn(async move {
-                if let Err(e) = server.handle_conn(stream).await {
-                    tracing::warn!("ipc conn error: {e:#}");
-                }
-            });
-        }
+        Ok(listener)
     }
 
     #[cfg(windows)]

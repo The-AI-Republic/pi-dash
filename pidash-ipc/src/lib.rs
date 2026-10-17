@@ -17,12 +17,14 @@
 pub mod client;
 pub mod dto;
 pub mod protocol;
+pub mod socket;
 
 // Convenience flat re-exports so downstream clients can `use pidash_ipc::{...}`
 // without threading through the submodule layout.
 pub use client::Client;
 pub use dto::*;
 pub use protocol::*;
+pub use socket::*;
 
 /// Windows named-pipe name derived deterministically from the socket path.
 ///

@@ -8,15 +8,15 @@
 //! (`managed_runner`), but until now it had no live connection to it. This
 //! module is that connection: a thin wrapper over the shared
 //! [`pidash_ipc::Client`] that talks to the managed daemon over its control
-//! socket (`<runtime_dir>/pidash.sock` — a Unix socket on macOS/Linux, a
-//! named pipe on Windows, both handled by `pidash_ipc::Client`).
+//! socket (a Unix socket on macOS/Linux, a named pipe on Windows, both handled
+//! by `pidash_ipc::Client`).
 //!
-//! The socket path matches the daemon's own `RunnerPaths::ipc_socket_path`
-//! (`<runtime_dir>/pidash.sock`). Which runtime dir matters: the daemon runs
-//! **per workspace** with `PIDASH_DATA_DIR` set to the re-rooted `data_dir`,
-//! so it binds under `<data_dir>/runtime`, not the shared `managed/runtime/`
-//! that holds the model token. Use [`ManagedPaths::daemon_runtime_dir`] (via
-//! `ManagedPaths::for_workspace`) rather than `paths.runtime_dir`.
+//! The daemon runs **per workspace**, so there is one socket per workspace
+//! data dir. This side chooses where it lives ([`daemon_socket_path`]) and
+//! hands that path to every `pidash` it spawns in `PIDASH_IPC_SOCKET`; the
+//! daemon binds exactly there. Resolve it with [`ManagedPaths::daemon_socket`]
+//! (via `ManagedPaths::for_workspace`) — never from `paths.runtime_dir`, the
+//! shared `managed/runtime/` that only holds the model token.
 //!
 //! Scope note (PDASHOSS01-158): this lands the *capability* — the desktop
 //! crate depends on `pidash-ipc` (not the runner) and can round-trip
@@ -31,12 +31,56 @@ use pidash_ipc::protocol::{Request, Response, StatusSnapshot};
 
 use crate::managed_runner::ManagedPaths;
 
-/// The managed daemon's control socket, derived from the managed runtime dir.
-///
-/// Kept byte-identical to the daemon's `RunnerPaths::ipc_socket_path` so both
-/// ends agree without a shared constant crossing the crate boundary.
+/// The control socket of a daemon whose runtime dir is `runtime_dir`, when no
+/// shorter place is available: `<runtime_dir>/pidash.sock`, the path the
+/// daemon defaults to.
 pub fn socket_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("pidash.sock")
+}
+
+/// The control socket for the daemon whose data lives in `data_dir`.
+///
+/// Not under `data_dir`: that tree is
+/// `<app data>/managed/pidash/<workspace>/data`, and on macOS its prefix alone
+/// is about as long as a Unix socket path may be (104 bytes), so a socket
+/// bound there fails for nearly every user name. It goes in a short per-user
+/// directory instead, named by a hash of `data_dir` so each workspace, install
+/// and edition still has its own.
+pub fn daemon_socket_path(data_dir: &Path) -> PathBuf {
+    socket_in(short_socket_dir().as_deref(), data_dir)
+}
+
+fn socket_in(short_dir: Option<&Path>, data_dir: &Path) -> PathBuf {
+    match short_dir {
+        Some(dir) => pidash_ipc::short_socket_path(dir, data_dir),
+        None => socket_path(&data_dir.join("runtime")),
+    }
+}
+
+/// A short directory only this user can reach, or `None` to keep the socket
+/// under the data dir.
+///
+/// macOS: the per-user temp dir (`/var/folders/…/T/`, inside the container for
+/// a sandboxed build), whose length does not depend on the user name.
+#[cfg(target_os = "macos")]
+fn short_socket_dir() -> Option<PathBuf> {
+    Some(std::env::temp_dir())
+}
+
+/// Linux: the per-user runtime dir (`/run/user/<uid>`). Without one there is
+/// no short location that is already private to the user — `/tmp` is shared —
+/// so the socket stays under the data dir.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn short_socket_dir() -> Option<PathBuf> {
+    let dir = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
+    (dir.is_absolute() && dir.is_dir()).then_some(dir)
+}
+
+/// Windows: the path is only hashed into a named-pipe name, so its length
+/// does not matter.
+#[cfg(not(unix))]
+fn short_socket_dir() -> Option<PathBuf> {
+    None
 }
 
 /// Fetch a one-shot status snapshot from the managed daemon.
@@ -45,7 +89,7 @@ pub fn socket_path(runtime_dir: &Path) -> PathBuf {
 /// answers with anything other than a `Status` frame — the caller decides
 /// whether "no daemon" is an error or just "not signed in yet".
 pub async fn managed_status(paths: &ManagedPaths) -> Result<StatusSnapshot, String> {
-    status_over(&socket_path(&paths.daemon_runtime_dir())).await
+    status_over(&paths.daemon_socket()).await
 }
 
 /// Connect to a daemon at `socket` and complete a single `StatusGet`
@@ -83,6 +127,86 @@ mod tests {
             },
             runners: vec![],
         }
+    }
+
+    /// The managed data dir for `user` in `workspace` on macOS, where the app
+    /// data dir is `~/Library/Application Support/<bundle id>`.
+    fn macos_data_dir(root: &Path, user: &str, workspace: &str) -> PathBuf {
+        root.join("Users")
+            .join(user)
+            .join("Library/Application Support/com.airepublic.pidash.oss/managed/pidash")
+            .join(workspace)
+            .join("data")
+    }
+
+    /// The longest names the path can be asked to carry: a 32-character login
+    /// and a 48-character workspace slug.
+    fn longest_data_dir(root: &Path) -> PathBuf {
+        macos_data_dir(root, &"u".repeat(32), &"w".repeat(48))
+    }
+
+    #[test]
+    fn socket_under_the_data_dir_overflows_for_an_ordinary_mac_user() {
+        let socket = socket_in(None, &macos_data_dir(Path::new("/"), "alice", "acme"));
+        // 104 bytes of `sun_path` on macOS, one of them the terminating NUL.
+        assert!(socket.as_os_str().len() > 103, "{socket:?}");
+    }
+
+    #[test]
+    fn short_socket_fits_macos_limit_for_the_longest_names() {
+        let data_dir = longest_data_dir(Path::new("/"));
+        for temp_dir in [
+            // Direct download.
+            "/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/",
+            // Mac App Store: the sandbox appends the bundle id.
+            "/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/com.airepublic.pidash.oss/",
+            "/private/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/com.airepublic.pidash.oss/",
+        ] {
+            let socket = socket_in(Some(Path::new(temp_dir)), &data_dir);
+            let len = socket.as_os_str().len();
+            assert!(len <= 103, "{socket:?} is {len} bytes");
+        }
+    }
+
+    #[test]
+    fn short_socket_fits_linux_limit_for_the_longest_names() {
+        let socket = socket_in(
+            Some(Path::new("/run/user/4294967295")),
+            &longest_data_dir(Path::new("/")),
+        );
+        let len = socket.as_os_str().len();
+        assert!(len <= 107, "{socket:?} is {len} bytes");
+    }
+
+    #[test]
+    fn each_workspace_gets_its_own_socket() {
+        let dir = Path::new("/run/user/1000");
+        let acme = socket_in(Some(dir), &macos_data_dir(Path::new("/"), "alice", "acme"));
+        let other = socket_in(Some(dir), &macos_data_dir(Path::new("/"), "alice", "other"));
+        assert_ne!(acme, other);
+        assert_eq!(
+            acme,
+            socket_in(Some(dir), &macos_data_dir(Path::new("/"), "alice", "acme"))
+        );
+    }
+
+    /// The real thing, on whatever OS runs the tests: under a data dir as deep
+    /// as the desktop's, the socket the daemon would default to cannot be bound
+    /// at all, and the short one can.
+    #[test]
+    fn os_binds_the_short_socket_where_the_data_dir_one_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let short_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let data_dir = longest_data_dir(root.path());
+        std::fs::create_dir_all(data_dir.join("runtime")).unwrap();
+
+        let under_data_dir = socket_in(None, &data_dir);
+        pidash_ipc::check_socket_path(&under_data_dir).expect_err("too long to bind");
+        std::os::unix::net::UnixListener::bind(&under_data_dir).expect_err("the OS agrees");
+
+        let short = socket_in(Some(short_dir.path()), &data_dir);
+        pidash_ipc::check_socket_path(&short).expect("short enough to bind");
+        std::os::unix::net::UnixListener::bind(&short).expect("the OS agrees");
     }
 
     /// The desktop crate, depending only on `pidash-ipc`, can connect to a
