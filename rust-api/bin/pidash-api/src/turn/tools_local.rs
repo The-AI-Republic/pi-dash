@@ -1064,6 +1064,10 @@ pub async fn execute_create_issue<S: ToolStore>(
         validate_priority,
     };
     let project = executor_get_project(store, deps, &args.project_id).await?;
+    // `require_project_write` hits `user_for` before the role check
+    // (`_scoping.py:104-107`): a missing user fails internal even when
+    // validation or the role gate would also fail.
+    let actor = executor_actor(store, deps).await?;
     executor_require_project_write(store, deps, &project.id).await?;
     let name = validate_create_name(&args.name)?;
     let priority = validate_priority(args.priority.as_deref())?;
@@ -1074,7 +1078,6 @@ pub async fn execute_create_issue<S: ToolStore>(
         }
         _ => None,
     };
-    let actor = executor_actor(store, deps).await?;
     let row = store
         .create_issue_row(
             &NewIssueInput {
@@ -1137,6 +1140,10 @@ pub async fn execute_update_issue<S: ToolStore>(
         create_description_html, py_strip, tool_identifier, updated_summary,
         validate_update_priority,
     };
+    // `_scoping.get_issue` → `scoped_issues` → `user_for` runs before
+    // the malformed-id translation (`_scoping.py:67-85`): a missing user
+    // fails internal even for a malformed id.
+    let actor = executor_actor(store, deps).await?;
     let issue = executor_get_issue(store, deps, &args.issue_id).await?;
     executor_require_project_write(store, deps, &issue.project_id).await?;
     let priority = validate_update_priority(args.priority.as_deref())?;
@@ -1165,7 +1172,6 @@ pub async fn execute_update_issue<S: ToolStore>(
             "Nothing to update \u{2014} provide at least one field to change.",
         ));
     }
-    let actor = executor_actor(store, deps).await?;
     // Effective writes (`issues.py:337-361`): a whitespace-only name is
     // silently ignored (no change recorded, no error).
     let mut changed: Vec<&str> = Vec::new();
@@ -1280,6 +1286,12 @@ async fn relation_write_prefix<S: ToolStore>(
     related_issues: &[String],
 ) -> Result<(IssueRow, Vec<IssueRow>), ToolFailure> {
     use pidash_services::assistant::tools_issues::EMPTY_RELATED_MESSAGE;
+    // `_resolve_issue_refs` → `scoped_issues` → `user_for` runs before
+    // source resolution (`issues.py:394-398`): a missing user fails
+    // internal even when the source ref is unresolvable. (The actor is
+    // re-fetched by the caller afterwards, as Python's explicit
+    // `user_for` does.)
+    executor_actor(store, deps).await?;
     let source = executor_resolve_ref(store, deps, issue).await?;
     executor_require_project_write(store, deps, &source.project_id).await?;
     if related_issues.is_empty() {
@@ -1717,6 +1729,10 @@ pub async fn execute_create_comment<S: ToolStore>(
     use pidash_services::assistant::tools_comments::{
         comment_result, comment_summary, guest_denial, guest_may_comment, validate_body,
     };
+    // `_scoping.get_issue` → `scoped_issues` → `user_for` is the first
+    // statement (`comments.py:37`, `_scoping.py:67-85`): a missing user
+    // fails internal before the guest gate and the body check.
+    let actor = executor_actor(store, deps).await?;
     let issue = executor_get_issue(store, deps, &args.issue_id).await?;
     // The guest gate reads the issue's project row (`comments.py:39`).
     // The issue is scoped, so its project is a member project; a TOCTOU
@@ -1738,7 +1754,6 @@ pub async fn execute_create_comment<S: ToolStore>(
         return Err(guest_denial().into());
     }
     let body = validate_body(Some(args.body_md.as_str()))?;
-    let actor = executor_actor(store, deps).await?;
     let comment_id = store
         .create_comment_row(
             &NewCommentInput {
@@ -1778,6 +1793,10 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
         already_in_state_result, dispatch_success_result, dispatch_summary, invalid_state_error,
         is_ticking_state, no_delegation_state_result, non_ticking_state_error, PHASES,
     };
+    // `_scoping.get_issue` → `scoped_issues` → `user_for` is the first
+    // statement (`runs.py:41`, `_scoping.py:67-85`): a missing user fails
+    // internal before target resolution.
+    let actor = executor_actor(store, deps).await?;
     let issue = executor_get_issue(store, deps, &args.issue_id).await?;
     executor_require_project_write(store, deps, &issue.project_id).await?;
     let states = store.project_states(deps, &issue.project_id).await?;
@@ -1815,7 +1834,6 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
     if issue.state_id.is_some_and(|id| id == target.id) {
         return Ok(already_in_state_result(&target.name));
     }
-    let actor = executor_actor(store, deps).await?;
     let from_view = issue
         .state_id
         .map(|id| pidash_services::orchestration::creation::StateView {
@@ -4841,6 +4859,56 @@ mod tests {
             retry_message(&result),
             "Unknown state name(s): Nope. Valid states: Backlog, Done, In Progress, In Review."
         );
+    }
+
+    #[tokio::test]
+    async fn missing_user_fails_write_paths_internal() {
+        // The write paths reach `user_for` before their first retry-class
+        // failure (`_scoping.py:67-85,104-107`): a missing user fails
+        // internal even when validation, the role gate, or source
+        // resolution would also fail.
+        let mut store = FixtureStore::standard();
+        store.missing_user = true;
+        for (name, params) in [
+            // `require_project_write` hits the user before validation.
+            (
+                "create_issue",
+                json!({"project_id": uid(101).to_string(), "name": "x", "priority": "bogus"}),
+            ),
+            // ... and before the role gate.
+            (
+                "create_issue",
+                json!({"project_id": uid(103).to_string(), "name": "x"}),
+            ),
+            // `get_issue` hits the user before the malformed-id translation.
+            ("update_issue", json!({"issue_id": "bogus", "name": "x"})),
+            // ... before the guest gate and the body check.
+            (
+                "create_comment",
+                json!({"issue_id": uid(301).to_string(), "body_md": "   "}),
+            ),
+            ("dispatch_coding_run", json!({"issue_id": "bogus"})),
+            // `_resolve_issue_refs` hits the user before source resolution.
+            (
+                "relate_issues",
+                json!({
+                    "issue": "PROJ-999",
+                    "relation_type": "blocked_by",
+                    "related_issues": ["PROJ-1"],
+                }),
+            ),
+            (
+                "unrelate_issues",
+                json!({"issue": "bogus", "relation_type": "blocked_by", "related_issues": []}),
+            ),
+        ] {
+            let result = call(&store, name, params).await;
+            assert_eq!(
+                internal_message(&result),
+                "User matching query does not exist.",
+                "{name} must fail internal on a missing user"
+            );
+        }
     }
 
     #[tokio::test]
