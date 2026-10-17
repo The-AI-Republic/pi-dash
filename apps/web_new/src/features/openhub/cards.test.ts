@@ -84,6 +84,7 @@ describe("firstIconStage / nextIconStage", () => {
     expect(nextIconStage(both, "graphic")).toBe("proxy");
     expect(nextIconStage(both, "proxy")).toBe("tile");
     expect(nextIconStage(card({ iconSvgFallback: svg }), "graphic")).toBe("tile");
+    expect(nextIconStage(card({ iconSvgFallback: svg, iconUrl: "" }), "graphic")).toBe("tile");
     expect(nextIconStage(card(), "tile")).toBe("tile");
   });
 });

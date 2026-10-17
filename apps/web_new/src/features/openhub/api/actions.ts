@@ -131,16 +131,18 @@ export function useAppCardActions(workspaceSlug: string): AppCardActions {
     // The commit refreshes before connecting, so a later failure reads
     // as not-connected rather than not-installed (CLOUD-024).
     await refreshMarketplace(queryClient, workspaceSlug);
-    if (mechanism === "none") {
-      notifySuccess(installedTitle(app.name));
-      return;
-    }
+    // Every install reads auth status, mechanism-less apps included:
+    // the oracle pins commit-then-refresh-then-status (CLOUD-024).
     let auth: OpenhubAuthStatus;
     try {
       auth = await getAppAuthStatus(getAppClient(), app.appId);
     } catch (error) {
       tab?.close();
       notifyError(INSTALLED_UNCONNECTED_TITLE, writeFailureMessage(error));
+      return;
+    }
+    if (mechanism === "none") {
+      notifySuccess(installedTitle(app.name));
       return;
     }
     if (mechanism === "key") {

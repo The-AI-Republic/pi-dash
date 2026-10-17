@@ -145,6 +145,7 @@ describe("hubAppUrl", () => {
     expect(hubAppUrl("", "linear", "com.linear.linear")).toBeNull();
     expect(hubAppUrl("not-a-url", "linear", "com.linear.linear")).toBeNull();
     expect(hubAppUrl("https://user:pass@hub.example.com", "linear", "com.linear.linear")).toBeNull();
+    expect(hubAppUrl("https://:pass@hub.example.com", "linear", "com.linear.linear")).toBeNull();
     expect(hubAppUrl("http://hub.example.com", "plain-http", "app-plain-http")).toBeNull();
     expect(hubAppUrl("ftp://hub.example.com", "linear", "com.linear.linear")).toBeNull();
   });
@@ -155,6 +156,7 @@ describe("isSafeSetupUrl", () => {
     expect(isSafeSetupUrl("https://crm.example.com/keys")).toBe(true);
     expect(isSafeSetupUrl("http://crm.example.com/keys")).toBe(false);
     expect(isSafeSetupUrl("https://user:pass@crm.example.com/keys")).toBe(false);
+    expect(isSafeSetupUrl("https://:pass@crm.example.com/keys")).toBe(false);
     expect(isSafeSetupUrl("/relative/keys")).toBe(false);
     expect(isSafeSetupUrl(undefined)).toBe(false);
     expect(isSafeSetupUrl("")).toBe(false);

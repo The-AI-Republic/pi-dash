@@ -187,7 +187,11 @@ describe("install", () => {
     expect(notifySuccess).toHaveBeenCalledWith(installedTitle("Plain App"));
     expect(installedTitle("Plain App")).toContain("Installed");
     const paths = apiCalls(calls).map((call) => `${call.method} ${call.path.split("?")[0]}`);
-    expect(paths).toEqual(["POST /api/openhub/apps/app-plain/install/", "GET /api/openhub/apps/marketplace/"]);
+    expect(paths).toEqual([
+      "POST /api/openhub/apps/app-plain/install/",
+      "GET /api/openhub/apps/marketplace/",
+      "GET /api/openhub/apps/app-plain/auth/status/",
+    ]);
     expect(actions.result.current.dialog).toBeNull();
   });
 
