@@ -305,10 +305,16 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // `inventory::tests::mirror_registry_matches_tasks_table`). The four
     // T6 handlers exist and the project invitation port lands in the same
     // module, so the Rust worker owns all five — otherwise the tasks are
-    // lost at switchover (parity gap W-mail). The auth mail ports stay
-    // Python-owned until PIDASHCONV-1103 — never register them here.
+    // lost at switchover (parity gap W-mail).
     crate::tasks_mail::register_membership_mail_tasks(registry, ctx.pools.primary().clone());
     crate::tasks_mail::register_project_invitation_task(registry, ctx.pools.primary().clone());
+    // D-07 auth mail (PIDASHCONV-1103; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). The
+    // four T5 handlers exist over the live send pipeline
+    // (`tasks_mail::mail_send`), so the Rust worker owns all four —
+    // otherwise the jobs never run on a Rust-only deployment (no
+    // RabbitMQ on the Redis Celery broker; standalone-Rust rule).
+    crate::tasks_mail::register_auth_mail_tasks(registry, ctx.pools.primary().clone());
     // Runner tasks (PIDASHCONV-859; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The
     // beat entries fire the sweeps and the L6 handlers exist with
@@ -434,7 +440,7 @@ mod tests {
 
     /// PIDASHCONV-918: the helper owns exactly the OSS task set — the
     /// same const union the binary's `mirror_registry_matches_tasks_table`
-    /// pins (65 names), while the Python-owned sentinels stay
+    /// pins (69 names), while the Python-owned sentinels stay
     /// unregistered. `Pools::primary_only` over a lazy pool keeps the
     /// test hermetic: registration constructs handlers without I/O, and
     /// none of them runs here.
@@ -506,12 +512,19 @@ mod tests {
         // the project invitation task.
         expected.extend(crate::tasks_mail::membership_mail::MEMBERSHIP_MAIL_TASKS);
         expected.insert(crate::tasks_mail::membership_mail::PROJECT_INVITATION_TASK);
+        // D-07 auth mail (PIDASHCONV-1103): the four T5 names.
+        expected.extend(crate::tasks_mail::AUTH_MAIL_TASKS);
         assert_eq!(
             crate::tasks_mail::membership_mail::MEMBERSHIP_MAIL_TASKS.len(),
             4,
             "membership group drifted"
         );
-        assert_eq!(expected.len(), 65, "worker-owned count drifted");
+        assert_eq!(
+            crate::tasks_mail::AUTH_MAIL_TASKS.len(),
+            4,
+            "auth mail group drifted"
+        );
+        assert_eq!(expected.len(), 69, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");

@@ -5,12 +5,14 @@ with mail Celery traffic. This suite proves the Rust worker's side of the
 hybrid-worker contract for the same tasks:
 
 - ``notifications`` (PIDASHCONV-834), ``stack_email_notification`` and
-  ``send_email_notification`` (PIDASHCONV-865) execute LOCALLY: the jobs
-  settle in ``rust_job_queue``, no message for the task lands on the AMQP
-  broker, the stack marks ``processed_at`` and fans its sends out into
-  the Rust queue, and the sends deliver into the SMTP sink and mark
-  ``sent_at``. The five membership mail tasks (PIDASHCONV-1104) execute
-  locally too; their pins live in ``test_rust_replay_user_project.py``.
+  ``send_email_notification`` (PIDASHCONV-865), and the four auth mail
+  tasks (PIDASHCONV-1103) execute LOCALLY: the jobs settle in
+  ``rust_job_queue``, no message for the task lands on the AMQP broker,
+  the stack marks ``processed_at`` and fans its sends out into the Rust
+  queue, and the sends (and the auth mails) deliver into the SMTP sink
+  (the sends mark ``sent_at``). The five membership mail tasks
+  (PIDASHCONV-1104) execute locally too; their pins live in
+  ``test_rust_replay_user_project.py``.
 - Every other mail task name still publishes but has no local handler, so
   the worker forwards it to the Python plane: the job settles (the forward
   is the terminal effect) and exactly one message for the task lands on
@@ -115,7 +117,7 @@ def _publish_and_observe_forward(task, kwargs):
     return celery_id
 
 
-def _publish_and_observe_local(task, kwargs):
+def _publish_and_observe_local(task, kwargs, args=None):
     """Publish one Rust-queue job and prove it executes locally.
 
     Returns the job's celery id once the row settles; the caller asserts
@@ -124,7 +126,7 @@ def _publish_and_observe_local(task, kwargs):
     plane (a per-task pin, not global flatness — see the module
     docstring).
     """
-    celery_id = rust_queue.publish(task, [], kwargs)
+    celery_id = rust_queue.publish(task, list(args or []), kwargs)
     rust_queue.wait_for_settled(
         celery_id, what=f"locally executed mail task settled ({task})"
     )
@@ -321,10 +323,90 @@ def test_rust_stack_ignores_soft_deleted_logs(smtp_sink, db_conn):
         )
 
 
+# The four auth mail tasks (PIDASHCONV-1103): case-for-case mirror of the
+# Django oracle's AUTH_MAIL_CASES (test_mail_tasks.py) — same args, same
+# subjects, same body markers — plus the local-execution pins (settle,
+# no broker message, no row writes). The two suites together are the
+# Django-vs-Rust equivalence proof. No Redis pin: neither plane touches
+# Redis on these paths (see the oracle-side note), so "same Redis keys"
+# holds vacuously.
+AUTH_MAIL_CASES = [
+    (
+        "pi_dash.bgtasks.magic_link_code_task.magic_link",
+        ["contract@example.com", "key-1103", "842103"],
+        "Your unique Pi Dash login code is 842103",
+        [
+            "842103",
+            "contract@example.com",
+            "Your login code for Pi Dash",
+            'src="/static/logos/Logo.png"',
+        ],
+    ),
+    (
+        "pi_dash.bgtasks.forgot_password_task.forgot_password",
+        ["Contract", "contract@example.com", "uidb64-1103", "tok-1103", "example.com"],
+        "A new password to your Pi Dash account has been requested",
+        [
+            "Reset your Pi Dash password",
+            # Django autoescape: the raw-interpolated `&` renders as `&amp;`
+            # (same bytes the Rust pre-escape produces).
+            "example.com/accounts/reset-password/?uidb64=uidb64-1103&amp;token=tok-1103&amp;email=contract@example.com",
+            "contract@example.com",
+        ],
+    ),
+    (
+        "pi_dash.bgtasks.user_email_update_task.send_email_update_magic_code",
+        ["contract@example.com", "654321"],
+        "Verify your new email address",
+        [
+            "654321",
+            "contract@example.com",
+            "Your login code for Pi Dash",
+            'src="/static/logos/Logo.png"',
+        ],
+    ),
+    (
+        "pi_dash.bgtasks.user_email_update_task.send_email_update_confirmation",
+        ["contract@example.com"],
+        "Pi Dash email address successfully updated",
+        [
+            "contract@example.com",
+            "successfully updated",
+        ],
+    ),
+]
+
+
+@pytest.mark.parametrize("task_name,args,subject,markers", AUTH_MAIL_CASES)
+def test_rust_auth_mail_executes_locally(smtp_sink, db_conn, task_name, args, subject, markers):
+    """Auth mail tasks execute locally and deliver the oracle-identical mail.
+
+    Settles in `rust_job_queue` with no message for the task on the
+    broker, delivers into the SMTP sink with the oracle's subject and
+    body markers, and writes no rows (mirrors the Django oracle's
+    `test_auth_mail_full_capture` case-for-case).
+    """
+    smtp_sink.clear()
+    before = snapshot(db_conn, ["users", "email_notification_logs"])
+    _publish_and_observe_local(task_name, {}, args=args)
+    delivered = smtp_sink.wait_for_count(1, what=f"{task_name} mail")
+    matches = [m for m in delivered if "contract@example.com" in m["rcpt_tos"]]
+    assert matches, f"{task_name} delivered nothing to contract@example.com"
+    mail = matches[0]
+    assert mail["subject"] == subject, f"{task_name} subject: {mail['subject']!r}"
+    raw = mail["raw"]
+    assert "multipart/alternative" in raw, f"{task_name} is not multipart/alternative"
+    assert "text/plain" in raw and "text/html" in raw, f"{task_name} misses a MIME part"
+    for marker in markers:
+        assert marker in raw, f"{task_name} body misses {marker!r}"
+    assert _diff(before, snapshot(db_conn, ["users", "email_notification_logs"])) == {}
+
+
 # Every mail task name that is still Python-owned: published, forwarded,
 # settled, exactly one broker message for the task, no local rows.
-# `notifications` (PIDASHCONV-834) and `send`/`stack_email_notification`
-# (PIDASHCONV-865) execute locally and are pinned above instead.
+# `notifications` (PIDASHCONV-834), `send`/`stack_email_notification`
+# (PIDASHCONV-865) and the four auth mail tasks (PIDASHCONV-1103)
+# execute locally and are pinned above instead.
 MAIL_TASKS = [
     "pi_dash.bgtasks.auth_task.send_email_verification",
     "pi_dash.bgtasks.auth_task.send_forgot_password",

@@ -6,8 +6,9 @@ name: rust-api-contract-tests-tasks-mail-rust
 # (`pidash-api worker`) serves rust_job_queue instead. The replay suites
 # (tasks_mail/test_rust_replay*.py) seed rust_job_queue rows with the
 # exact Celery v2 payloads: `notifications` (PIDASHCONV-834),
-# `stack`/`send_email_notification` (PIDASHCONV-865) and the five
-# membership mail tasks (PIDASHCONV-1104) execute locally (settle + flat
+# `stack`/`send_email_notification` (PIDASHCONV-865), the five
+# membership mail tasks (PIDASHCONV-1104) and the four auth
+# mail tasks (PIDASHCONV-1103) execute locally (settle + flat
 # broker + SMTP sink receipts), while the remaining Python-owned D-07
 # task names assert observable AMQP forwarding.
 

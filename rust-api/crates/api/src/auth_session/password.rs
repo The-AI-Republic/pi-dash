@@ -1315,34 +1315,34 @@ async fn smtp_configured(pool: &sqlx::PgPool, secret_key: &str) -> Result<bool, 
     })
 }
 
-/// Publish `forgot_password.delay(first_name, email, uidb64, token,
-/// current_site)` in Celery v2 wire format. A refused publish is the
-/// `.delay()` raising, i.e. HTTP 500.
+/// Enqueue `forgot_password.delay(first_name, email, uidb64, token,
+/// current_site)` into the Postgres queue (PIDASHCONV-1103: the Rust
+/// worker owns the task, so the job runs locally instead of forwarding
+/// to Python over AMQP). A refused enqueue is the `.delay()` raising,
+/// i.e. HTTP 500.
 async fn publish_forgot_password(
+    pool: &sqlx::PgPool,
     first_name: &str,
     email: &str,
     uidb64: &str,
     token: &str,
     current_site: &str,
 ) -> Result<(), ()> {
-    let message = pidash_jobs::CeleryTaskMessage::new(
+    let job = pidash_jobs::queue::NewJob::new(
         t::FORGOT_PASSWORD_TASK,
-        vec![
+        Value::Array(vec![
             Value::String(first_name.to_owned()),
             Value::String(email.to_owned()),
             Value::String(uidb64.to_owned()),
             Value::String(token.to_owned()),
             Value::String(current_site.to_owned()),
-        ],
-        serde_json::Map::new(),
+        ]),
+        Value::Object(serde_json::Map::new()),
     );
-    let config = pidash_jobs::AmqpConfig::from_env().map_err(|_| ())?;
-    let publisher = pidash_jobs::Publisher::connect(&config)
+    pidash_jobs::queue::enqueue(pool, &job)
         .await
-        .map_err(|_| ())?;
-    let result = publisher.publish(&message).await;
-    let _ = publisher.close().await;
-    result.map_err(|_| ())
+        .map(|_| ())
+        .map_err(|_| ())
 }
 
 /// Shared forgot-password flow; `is_space` selects the view twin (the
@@ -1443,6 +1443,7 @@ async fn forgot_password(
         now,
     );
     if publish_forgot_password(
+        &pool,
         &user.first_name,
         &user.email,
         &uidb64,

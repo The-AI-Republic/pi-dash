@@ -223,6 +223,82 @@ def test_pure_mail_tasks_deliver(db_conn, broker_url, smtp_sink, task_name, args
     assert any("contract@example.com" in m["rcpt_tos"] for m in delivered)
 
 
+# The four auth mail tasks (PIDASHCONV-1103), pinned to the full captured
+# mail: recipient, exact subject, template markers in the raw MIME, and an
+# empty DB diff (the bodies write no rows — config is read, mail is sent).
+# The Rust replay suite mirrors these pins case-for-case
+# (test_rust_replay.py::test_rust_auth_mail_executes_locally); the two
+# suites together are the Django-vs-Rust equivalence proof. No Redis pin:
+# neither plane touches Redis on these paths (no cache/redis use in the
+# three task modules, utils/email.py, or the instance-value resolver;
+# the Rust send_mail path is pool + SMTP only), so "same Redis keys"
+# holds vacuously.
+AUTH_MAIL_CASES = [
+    (
+        f"{M}.magic_link_code_task.magic_link",
+        ["contract@example.com", "key-1103", "842103"],
+        "Your unique Pi Dash login code is 842103",
+        [
+            "842103",
+            "contract@example.com",
+            "Your login code for Pi Dash",
+            'src="/static/logos/Logo.png"',
+        ],
+    ),
+    (
+        f"{M}.forgot_password_task.forgot_password",
+        ["Contract", "contract@example.com", "uidb64-1103", "tok-1103", "example.com"],
+        "A new password to your Pi Dash account has been requested",
+        [
+            "Reset your Pi Dash password",
+            # Django autoescape: the raw-interpolated `&` renders as `&amp;`
+            # (same bytes the Rust pre-escape produces).
+            "example.com/accounts/reset-password/?uidb64=uidb64-1103&amp;token=tok-1103&amp;email=contract@example.com",
+            "contract@example.com",
+        ],
+    ),
+    (
+        f"{M}.user_email_update_task.send_email_update_magic_code",
+        ["contract@example.com", "654321"],
+        "Verify your new email address",
+        [
+            "654321",
+            "contract@example.com",
+            "Your login code for Pi Dash",
+            'src="/static/logos/Logo.png"',
+        ],
+    ),
+    (
+        f"{M}.user_email_update_task.send_email_update_confirmation",
+        ["contract@example.com"],
+        "Pi Dash email address successfully updated",
+        [
+            "contract@example.com",
+            "successfully updated",
+        ],
+    ),
+]
+
+
+@pytest.mark.parametrize("task_name,args,subject,markers", AUTH_MAIL_CASES)
+def test_auth_mail_full_capture(db_conn, broker_url, smtp_sink, task_name, args, subject, markers):
+    """Auth mail tasks: full captured mail (to/subject/body/template) + no row writes."""
+    smtp_sink.clear()
+    before = snapshot(db_conn, ["users", "email_notification_logs"])
+    celery_wire.publish(task_name, args=args)
+    delivered = smtp_sink.wait_for_count(1, what=f"{task_name} mail")
+    matches = [m for m in delivered if "contract@example.com" in m["rcpt_tos"]]
+    assert matches, f"{task_name} delivered nothing to contract@example.com"
+    mail = matches[0]
+    assert mail["subject"] == subject, f"{task_name} subject: {mail['subject']!r}"
+    raw = mail["raw"]
+    assert "multipart/alternative" in raw, f"{task_name} is not multipart/alternative"
+    assert "text/plain" in raw and "text/html" in raw, f"{task_name} misses a MIME part"
+    for marker in markers:
+        assert marker in raw, f"{task_name} body misses {marker!r}"
+    assert diff(before, snapshot(db_conn, ["users", "email_notification_logs"])) == {}
+
+
 def _processed(conn, log_ids) -> bool:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(

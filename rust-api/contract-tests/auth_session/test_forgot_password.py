@@ -6,8 +6,9 @@
 
 AllowAny + throttle; needs EMAIL_HOST (DB-backed ``instance_configurations``
 overrides the server env default) or the View answers SMTP_NOT_CONFIGURED.
-A known user gets 200 + message (the reset email is enqueued to the
-broker; no worker consumes it in the oracle), an unknown user 400.
+A known user gets 200 + message (the reset email is enqueued for the
+worker — Django's broker, the Rust Postgres queue since PIDASHCONV-1103;
+no worker consumes it in the oracle), an unknown user 400.
 """
 
 import uuid
