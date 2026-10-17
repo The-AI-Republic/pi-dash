@@ -1,26 +1,26 @@
 {
   "_trace": "live GET /api/schema/ (+ ?format=json) against Django with ENABLE_DRF_SPECTACULAR=1 (routes pi_dash/urls.py:31-44); securityScheme rendered from utils/openapi/auth.py:15-34 (APIKeyAuthenticationExtension.get_security_definition)",
-  "_method": "httpx GETs to http://127.0.0.1:8525 (scratch DB pidash_525_test, ENABLE_DRF_SPECTACULAR=1); YAML parsed with yaml.safe_load, JSON with r.json(); equality asserted on parsed docs",
+  "_method": "httpx GETs to http://127.0.0.1:18890 (scratch DB pidash_1090_dj, ENABLE_DRF_SPECTACULAR=1); YAML parsed with yaml.safe_load, JSON with r.json(); equality asserted on the parsed docs",
   "openapi_version": "3.0.3",
   "default_rendering": {
     "url": "/api/schema/",
     "status": 200,
     "content_type": "application/vnd.oai.openapi; charset=utf-8",
-    "body_bytes": 821546,
-    "body_sha256": "c07b56308f3a9b8da698b7b4c1160dc7bb9d63d052fb2d9a9c107eb1be620f4d",
+    "body_bytes": 830731,
+    "body_sha256": "574b92976f8f6a7ad19fbee064ab14792781bb166d00ad5c9fa42c7347b7cabf",
     "note": "YAML by default; content-type has NO +json suffix"
   },
   "json_rendering": {
     "url": "/api/schema/?format=json",
     "status": 200,
     "content_type": "application/vnd.oai.openapi+json",
-    "body_bytes": 1381432,
-    "body_sha256": "0964b5f26eb0f59ce6c3c5cbfaa8110a422d6f2fa9950344d7aa3c75915ed8bc"
+    "body_bytes": 1397521,
+    "body_sha256": "9760cb0b3c7c0885b37f020ebc848b7e69b87f1fb02bdd1db0c9578131b669f7"
   },
   "doc_equality_proof": {
     "parsed_equal": true,
-    "yaml_paths": 121,
-    "json_paths": 121
+    "yaml_paths": 125,
+    "json_paths": 125
   },
   "route_map_matches_golden": true,
   "security_schemes": {
@@ -10699,6 +10699,174 @@
         }
       }
     },
+    "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/": {
+      "get": {
+        "operationId": "workspaces_projects_schedulers_retrieve",
+        "tags": [
+          "workspaces"
+        ],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+            "examples": {
+              "uuid": {
+                "value": "00000000-0000-0000-0000-000000000000",
+                "summary": "UUID form"
+              },
+              "slug": {
+                "value": "ENG",
+                "summary": "Workspace-scoped identifier"
+              }
+            }
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchedulerAPI"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/": {
+      "get": {
+        "operationId": "workspaces_projects_schedulers_retrieve_2",
+        "tags": [
+          "workspaces"
+        ],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+            "examples": {
+              "uuid": {
+                "value": "00000000-0000-0000-0000-000000000000",
+                "summary": "UUID form"
+              },
+              "slug": {
+                "value": "ENG",
+                "summary": "Workspace-scoped identifier"
+              }
+            }
+          },
+          {
+            "in": "path",
+            "name": "scheduler_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchedulerAPI"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/runs/": {
+      "get": {
+        "operationId": "workspaces_projects_schedulers_runs_retrieve",
+        "tags": [
+          "workspaces"
+        ],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+            "examples": {
+              "uuid": {
+                "value": "00000000-0000-0000-0000-000000000000",
+                "summary": "UUID form"
+              },
+              "slug": {
+                "value": "ENG",
+                "summary": "Workspace-scoped identifier"
+              }
+            }
+          },
+          {
+            "in": "path",
+            "name": "scheduler_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchedulerRunAPI"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{slug}/projects/{project_id}/states/": {
       "get": {
         "operationId": "list_states",
@@ -15683,6 +15851,37 @@
           },
           "404": {
             "description": "Work item not found"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{slug}/schedulers/": {
+      "get": {
+        "operationId": "workspaces_schedulers_retrieve",
+        "tags": [
+          "workspaces"
+        ],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchedulerAPI"
+                }
+              }
+            },
+            "description": ""
           }
         }
       }

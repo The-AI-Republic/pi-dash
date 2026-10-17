@@ -196,7 +196,7 @@ fn push_indent(indent: usize, out: &mut String) {
 }
 
 /// Per-operation essentials: `{path: {method: {operationId, tags, summary,
-/// parameters, responses}}}` for all 189 golden operations, pretty JSON
+/// parameters, responses}}}` for all 193 golden operations, pretty JSON
 /// extracted from the `operations` key of
 /// `rust-api/fixtures/v1_openapi/FX-OPENAPI-04.doc_essentials.json`.
 ///
@@ -10875,6 +10875,174 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   },
+  "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/": {
+    "get": {
+      "operationId": "workspaces_projects_schedulers_retrieve",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
+    }
+  },
+  "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/": {
+    "get": {
+      "operationId": "workspaces_projects_schedulers_retrieve_2",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "scheduler_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
+    }
+  },
+  "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/runs/": {
+    "get": {
+      "operationId": "workspaces_projects_schedulers_runs_retrieve",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "schema": {
+            "type": "string"
+          },
+          "required": true,
+          "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+          "examples": {
+            "uuid": {
+              "value": "00000000-0000-0000-0000-000000000000",
+              "summary": "UUID form"
+            },
+            "slug": {
+              "value": "ENG",
+              "summary": "Workspace-scoped identifier"
+            }
+          }
+        },
+        {
+          "in": "path",
+          "name": "scheduler_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        },
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerRunAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
+    }
+  },
   "/api/v1/workspaces/{slug}/projects/{project_id}/states/": {
     "get": {
       "operationId": "list_states",
@@ -15863,6 +16031,37 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   },
+  "/api/v1/workspaces/{slug}/schedulers/": {
+    "get": {
+      "operationId": "workspaces_schedulers_retrieve",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SchedulerAPI"
+              }
+            }
+          },
+          "description": ""
+        }
+      }
+    }
+  },
   "/api/v1/workspaces/{slug}/stickies/": {
     "get": {
       "operationId": "list_stickies",
@@ -16516,7 +16715,7 @@ mod tests {
                 ops += 1;
             }
         }
-        assert_eq!(ops, 189);
+        assert_eq!(ops, 193);
     }
 
     #[test]
@@ -16679,7 +16878,7 @@ mod tests {
             }
         }
         assert_eq!(omitted_parameters, 16);
-        assert_eq!(omitted_summaries, 95);
+        assert_eq!(omitted_summaries, 99);
     }
 
     #[test]
