@@ -17,7 +17,7 @@ import type { TBillingFrequency } from "@pi-dash/types";
 import { EProductSubscriptionEnum } from "@pi-dash/types";
 import { getSubscriptionName } from "@pi-dash/utils";
 // components
-import { DiscountInfo } from "@/components/license/modal/card/discount-info";
+import { DiscountInfo } from "./discount-info";
 import type { TPlanDetail } from "@/constants/plans";
 // local imports
 import { PlanFrequencyToggle } from "./frequency-toggle";
