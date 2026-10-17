@@ -38,9 +38,9 @@
 //!   delegates to DRF first, so the response is the raw detail dict — the
 //!   trailing per-field-list return is dead code); `save(owner=request.user)`
 //!   plus a
-//!   `WorkspaceMember(role=20)` row; `IntegrityError` containing
-//!   `"already exists"` is 409, anything else falls off the `except` block
-//!   (500, BUG-3).
+//!   `WorkspaceMember(role=20)` row; a unique violation (whose DETAIL line
+//!   carries `"already exists"`, so Django's substring branch fires) is
+//!   409, anything else falls off the `except` block (500, BUG-3).
 //!
 //! Layering (all foundation use is read-only): row SQL + pure transforms in
 //! `pidash_db::license::queries`; shapes in `pidash_types::license`;
@@ -56,11 +56,12 @@
 //!   `try`, so garbage raises `ValueError` into the base 500, not the
 //!   fallthrough 400. `None` (a `NULL` row with no env fallback) raises
 //!   `TypeError` the same way.
-//! - BUG-3 (`workspace.py:105-110`): an `IntegrityError` whose message
-//!   lacks `"already exists"` (every real Postgres unique violation reads
-//!   `duplicate key value ...`) falls off the `except` block, so the view
-//!   returns `None` and Django answers 500. The 409 branch is dead in
-//!   practice and ported as written.
+//! - BUG-3 (`workspace.py:105-110`): an `IntegrityError` whose string
+//!   lacks `"already exists"` (any non-unique violation: every 23505
+//!   carries a `Key (...) already exists.` DETAIL line through the
+//!   driver's `str`) falls off the `except` block, so the view returns
+//!   `None` and Django answers 500. Unique violations take the 409
+//!   branch, ported as written (PIDASHCONV-1100).
 //! - The trailing `return Response([...serializer.errors...], 400)`
 //!   (`workspace.py:100-103`) is dead code: `is_valid(raise_exception=True)`
 //!   raises a DRF `ValidationError` on any field error, which the base
@@ -2078,10 +2079,10 @@ async fn create_workspace(
         Ok(_) => {}
         Err(err) => {
             // `except IntegrityError: if "already exists" in str(e)` —
-            // real Postgres violations never contain it (BUG-3), so this
-            // is 409 only in the specified case, 500 otherwise.
-            let message = database_error_message(&err);
-            if message.contains("already exists") {
+            // the driver's string carries the `Key (...) already exists.`
+            // DETAIL on every unique violation, so 23505 is the 409
+            // branch and anything else falls through to 500 (BUG-3).
+            if is_unique_violation(&err) {
                 return Denial::Conflict(
                     "slug".to_owned(),
                     "The workspace with the slug already exists".to_owned(),
@@ -2137,10 +2138,10 @@ async fn create_workspace(
     .execute(&pool)
     .await;
     if let Err(err) = member_result {
-        // Same `except IntegrityError` as the workspace row: the
-        // 409 needs `"already exists"` in the message, anything else
+        // Same `except IntegrityError` as the workspace row: a unique
+        // violation answers the slug 409 as written, anything else
         // falls off the block into the base 500.
-        if database_error_message(&err).contains("already exists") {
+        if is_unique_violation(&err) {
             return Denial::Conflict(
                 "slug".to_owned(),
                 "The workspace with the slug already exists".to_owned(),
@@ -2199,11 +2200,16 @@ fn json_len(value: Option<&Value>) -> Option<usize> {
     }
 }
 
-fn database_error_message(err: &sqlx::Error) -> String {
-    match err {
-        sqlx::Error::Database(db) => db.message().to_owned(),
-        other => other.to_string(),
-    }
+/// True when `err` takes Django's `"already exists" in str(e)` branch:
+/// every Postgres unique violation renders a `Key (...) already exists.`
+/// DETAIL line (which is what psycopg's `str` matches on), and `sqlx`
+/// exposes no `DETAIL` accessor — hence the kind check instead of a
+/// string match (the `app_integrations` `is_duplicate_url` precedent).
+fn is_unique_violation(err: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(db_error) = err else {
+        return false;
+    };
+    db_error.is_unique_violation()
 }
 
 /// `request.data.get("company_role", "")`: missing keys store `""`,
