@@ -29,6 +29,11 @@
 //!   is `partial` (`validate_empty_values` raises `SkipField`), so an
 //!   explicit `null` on PATCH is silently ignored for every field —
 //!   including non-nullable ones. Reproduced in [`validate_partial`].
+//!   Exception: `deleted_at` (PIDASHCONV-1099) is the one field with
+//!   DRF-correct null handling — an explicit `null` clears it
+//!   (`allow_null`, from `null=True`), a missing key is skipped. The
+//!   blanket skip for the other fields is a known port divergence
+//!   (DRF would 400 on non-nullable `null`s), left untouched.
 //! * `read_only_fields` (`instance.py:17`) lists `email`, a model field
 //!   that does not exist: unknown input keys are ignored, so `email` (and
 //!   any other unknown key) never validates and never writes.
@@ -448,6 +453,7 @@ enum Assignment {
     NullableText(&'static str, Option<String>),
     Flag(&'static str, bool),
     NullableUuid(&'static str, Option<(Uuid, String)>),
+    NullableDateTime(&'static str, Option<chrono::DateTime<chrono::Utc>>),
 }
 
 /// PATCH validation outcome: assignments or per-field errors
@@ -656,11 +662,25 @@ fn check_text(
 /// (`instance.py:179-180`): unknown and read-only keys ignored, explicit
 /// `null`s skipped (partial `SkipField`), the rest validated in wire
 /// order with every error collected.
+///
+/// `deleted_at` goes first: DRF validates writable fields in model
+/// order and the audit column precedes the instance fields
+/// (`db/mixins.py:85`, `serializers/instance.py:11-17`). It is also the
+/// one field with DRF-correct null handling — an explicit `null` clears
+/// (`allow_null`) while a missing key is skipped — unlike the blanket
+/// null-skip below (a known port divergence for the other fields).
 fn validate_partial(
     object: &serde_json::Map<String, serde_json::Value>,
+    timezone: Tz,
 ) -> Result<Vec<Assignment>, PatchRejection> {
     let mut sets = Vec::new();
     let mut errors: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(value) = object.get("deleted_at") {
+        match super::parse_deleted_at(value, timezone) {
+            Ok(stamp) => sets.push(Assignment::NullableDateTime("deleted_at", stamp)),
+            Err(message) => errors.push(("deleted_at".to_owned(), vec![message.to_owned()])),
+        }
+    }
     let get = |field: &str| match object.get(field) {
         None | Some(serde_json::Value::Null) => None,
         Some(value) => Some(value),
@@ -839,7 +859,7 @@ async fn patch_instance(
         serde_json::Value::Object(object) => object.clone(),
         other => return Err(non_object_error(other)),
     };
-    let sets = validate_partial(&object).map_err(|rejection| {
+    let sets = validate_partial(&object, actor.timezone).map_err(|rejection| {
         let PatchRejection::FieldErrors(errors) = rejection;
         HandlerError::FieldErrors(render_field_errors(&errors))
     })?;
@@ -856,18 +876,21 @@ async fn patch_instance(
     }
     // `created_by` / `updated_by` existence (DRF `does_not_exist`).
     check_user_assignments(pool, &sets).await?;
-    match row {
+    let updated_id = match row {
         Some(current) => {
             apply_patch(pool, &current.id, &sets, &actor.id).await?;
+            current.id
         }
         // No row: `ModelSerializer.save()` with `instance=None` creates.
         // Partial mode still skips missing fields, so Django column
         // defaults fill the gaps and the database enforces the rest.
-        None => {
-            insert_instance(pool, &sets, &actor.id).await?;
-        }
-    }
-    let updated = fetch_instance_first(pool)
+        None => insert_instance(pool, &sets, &actor.id).await?,
+    };
+    // `serializer.data` after `save()`: Django re-serializes the saved
+    // in-memory row, so a PATCH that set `deleted_at` still renders it —
+    // the re-fetch is by id WITHOUT the soft-delete filter (the old
+    // live-only re-fetch would 500 exactly when the write lands).
+    let updated = fetch_instance_by_id(pool, &updated_id)
         .await
         .map_err(|_| HandlerError::ServerError)?
         .ok_or(HandlerError::ServerError)?;
@@ -875,6 +898,24 @@ async fn patch_instance(
         StatusCode::OK,
         render_instance(&updated, actor.timezone, None).to_string(),
     ))
+}
+
+/// One `instances` row by id, live or soft-deleted (the PATCH response
+/// re-fetch). Same column list Django emits for a by-id fetch; rows map
+/// through the queries-layer mapper, so the SQL is handler-local and the
+/// foundation stays untouched.
+async fn fetch_instance_by_id(
+    pool: &sqlx::PgPool,
+    id: &Uuid,
+) -> Result<Option<pidash_db::license::models::instance::Instance>, sqlx::Error> {
+    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
+        "SELECT \"instances\".\"created_at\", \"instances\".\"updated_at\", \"instances\".\"created_by_id\", \"instances\".\"updated_by_id\", \"instances\".\"deleted_at\", \"instances\".\"id\", \"instances\".\"instance_name\", \"instances\".\"whitelist_emails\", \"instances\".\"instance_id\", \"instances\".\"current_version\", \"instances\".\"latest_version\", \"instances\".\"edition\", \"instances\".\"domain\", \"instances\".\"last_checked_at\", \"instances\".\"namespace\", \"instances\".\"is_telemetry_enabled\", \"instances\".\"is_support_required\", \"instances\".\"is_setup_done\", \"instances\".\"is_signup_screen_visited\", \"instances\".\"is_verified\", \"instances\".\"is_test\", \"instances\".\"is_current_version_deprecated\" FROM \"instances\" WHERE \"instances\".\"id\" = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|r| pidash_db::license::queries::map_instance_row(&r))
+        .transpose()
 }
 
 /// Decode the PATCH body like DRF: empty → `{}`; otherwise JSON by
@@ -1075,6 +1116,13 @@ fn push_assignment(builder: &mut QueryBuilder<Postgres>, set: &Assignment) {
         Assignment::NullableUuid(column, None) => {
             builder.push(format!("{column}_id = NULL"));
         }
+        Assignment::NullableDateTime(column, Some(stamp)) => {
+            builder.push(format!("{column} = "));
+            builder.push_bind(*stamp);
+        }
+        Assignment::NullableDateTime(column, None) => {
+            builder.push(format!("{column} = NULL"));
+        }
     }
 }
 
@@ -1083,7 +1131,8 @@ fn assignment_column(set: &Assignment) -> &'static str {
         Assignment::Text(column, _)
         | Assignment::NullableText(column, _)
         | Assignment::Flag(column, _)
-        | Assignment::NullableUuid(column, _) => column,
+        | Assignment::NullableUuid(column, _)
+        | Assignment::NullableDateTime(column, _) => column,
     }
 }
 
@@ -1093,11 +1142,13 @@ fn assignment_column(set: &Assignment) -> &'static str {
 /// `IntegrityError` Python maps to 400 through `handle_exception`
 /// (`base.py:67-71`), unreachable via HTTP only because the permission
 /// gate denies when no instance row exists.
+/// Returns the new row's id so the response re-fetch finds it even when
+/// the PATCH set `deleted_at` (a live-only re-fetch would 500).
 async fn insert_instance(
     pool: &sqlx::PgPool,
     sets: &[Assignment],
     user_id: &Uuid,
-) -> Result<(), HandlerError> {
+) -> Result<Uuid, HandlerError> {
     let now = chrono::Utc::now();
     let mut columns: Vec<&'static str> = Vec::new();
     for set in sets {
@@ -1173,6 +1224,12 @@ async fn insert_instance(
             Some(Assignment::NullableUuid(_, None)) => {
                 builder.push("NULL");
             }
+            Some(Assignment::NullableDateTime(_, Some(stamp))) => {
+                builder.push_bind(*stamp);
+            }
+            Some(Assignment::NullableDateTime(_, None)) => {
+                builder.push("NULL");
+            }
             None if *column == "edition" => {
                 builder.push_bind("PI_DASH_COMMUNITY".to_owned());
             }
@@ -1189,13 +1246,13 @@ async fn insert_instance(
             }
         }
     }
-    builder.push(")");
-    builder
-        .build()
-        .execute(pool)
+    builder.push(") RETURNING id");
+    let (id,): (Uuid,) = builder
+        .build_query_as()
+        .fetch_one(pool)
         .await
         .map_err(map_write_error)?;
-    Ok(())
+    Ok(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,7 +1331,7 @@ mod tests {
     #[test]
     fn patch_rejects_overlong_name_like_drf() {
         let body = obj(serde_json::json!({"instance_name": "n".repeat(300)}));
-        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
             panic!("expected field errors");
         };
         assert_eq!(
@@ -1295,7 +1352,7 @@ mod tests {
             "last_checked_at": "2026-01-01T00:00:00Z",
             "primary_owner_details": {},
         }));
-        let sets = validate_partial(&body).expect("valid");
+        let sets = validate_partial(&body, Tz::UTC).expect("valid");
         assert_eq!(
             sets,
             vec![Assignment::Text("instance_name", "Kept".to_owned())]
@@ -1310,13 +1367,16 @@ mod tests {
             "is_verified": null,
             "created_by": null,
         }));
-        assert_eq!(validate_partial(&body).expect("nulls skipped"), vec![]);
+        assert_eq!(
+            validate_partial(&body, Tz::UTC).expect("nulls skipped"),
+            vec![]
+        );
     }
 
     #[test]
     fn patch_blank_and_boolean_edges_match_drf() {
         let body = obj(serde_json::json!({"instance_name": ""}));
-        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
             panic!("expected field errors");
         };
         assert_eq!(
@@ -1325,7 +1385,7 @@ mod tests {
         );
 
         let body = obj(serde_json::json!({"domain": ""}));
-        assert!(validate_partial(&body)
+        assert!(validate_partial(&body, Tz::UTC)
             .expect("blank ok")
             .contains(&Assignment::Text("domain", String::new())));
 
@@ -1340,13 +1400,13 @@ mod tests {
         ] {
             let body = obj(serde_json::json!({"is_test": raw}));
             assert_eq!(
-                validate_partial(&body).expect("bool"),
+                validate_partial(&body, Tz::UTC).expect("bool"),
                 vec![Assignment::Flag("is_test", want)],
                 "input {raw}"
             );
         }
         let body = obj(serde_json::json!({"is_test": "maybe"}));
-        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
             panic!("expected field errors");
         };
         assert_eq!(
@@ -1354,7 +1414,7 @@ mod tests {
             r#"{"is_test":["Must be a valid boolean."]}"#
         );
         let body = obj(serde_json::json!({"instance_name": true}));
-        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
             panic!("expected field errors");
         };
         assert_eq!(
@@ -1369,7 +1429,7 @@ mod tests {
         // validator, so 300 chars validate where `instance_name` 400s.
         let body = obj(serde_json::json!({"domain": "x".repeat(300)}));
         assert_eq!(
-            validate_partial(&body).expect("text field uncapped"),
+            validate_partial(&body, Tz::UTC).expect("text field uncapped"),
             vec![Assignment::Text("domain", "x".repeat(300))]
         );
     }
@@ -1378,7 +1438,7 @@ mod tests {
     fn patch_numbers_coerce_to_text_like_drf() {
         let body = obj(serde_json::json!({"instance_name": 123}));
         assert_eq!(
-            validate_partial(&body).expect("number coerces"),
+            validate_partial(&body, Tz::UTC).expect("number coerces"),
             vec![Assignment::Text("instance_name", "123".to_owned())]
         );
     }
@@ -1387,9 +1447,9 @@ mod tests {
     fn patch_max_length_counts_characters() {
         // 255 CJK code points (765 UTF-8 bytes) are within the limit.
         let body = obj(serde_json::json!({"instance_name": "あ".repeat(255)}));
-        assert!(validate_partial(&body).is_ok());
+        assert!(validate_partial(&body, Tz::UTC).is_ok());
         let body = obj(serde_json::json!({"instance_name": "あ".repeat(256)}));
-        assert!(validate_partial(&body).is_err());
+        assert!(validate_partial(&body, Tz::UTC).is_err());
     }
 
     #[test]
@@ -1411,7 +1471,7 @@ mod tests {
         // `ensure_ascii=False` renderer).
         let body: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"created_by": "not-a-uuid"}"#).expect("json");
-        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
             panic!("expected field errors");
         };
         let rendered = render_field_errors(&errors);
@@ -1435,7 +1495,7 @@ mod tests {
         ] {
             let body: serde_json::Map<String, serde_json::Value> =
                 serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json");
-            let sets = validate_partial(&body).expect("int pk validates");
+            let sets = validate_partial(&body, Tz::UTC).expect("int pk validates");
             assert_eq!(
                 sets,
                 vec![Assignment::NullableUuid(
@@ -1452,7 +1512,7 @@ mod tests {
         for raw in ["340282366920938463463374607431768211456", "-5"] {
             let body: serde_json::Map<String, serde_json::Value> =
                 serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json");
-            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
                 panic!("expected field errors for {raw}");
             };
             assert_eq!(
@@ -1465,7 +1525,7 @@ mod tests {
         for (raw, display) in [("1.5", "1.5"), ("1.0", "1.0"), ("1e3", "1000.0")] {
             let body: serde_json::Map<String, serde_json::Value> =
                 serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json");
-            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
                 panic!("expected field errors for {raw}");
             };
             assert_eq!(
@@ -1478,7 +1538,7 @@ mod tests {
         for (raw, display) in [(r#"["a"]"#, "['a']"), (r#"{"a": 1}"#, "{'a': 1}")] {
             let body: serde_json::Map<String, serde_json::Value> =
                 serde_json::from_str(&format!(r#"{{"created_by": {raw}}}"#)).expect("json");
-            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
                 panic!("expected field errors for {raw}");
             };
             assert_eq!(
@@ -1489,7 +1549,7 @@ mod tests {
         }
         // Bools stay `incorrect_type`; `updated_by` mirrors `created_by`.
         let body = obj(serde_json::json!({"created_by": true}));
-        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
             panic!("expected field errors");
         };
         assert_eq!(
@@ -1497,7 +1557,7 @@ mod tests {
             r#"{"created_by":["Incorrect type. Expected pk value, received bool."]}"#
         );
         let body = obj(serde_json::json!({"updated_by": "not-a-uuid"}));
-        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
             panic!("expected field errors");
         };
         assert_eq!(
@@ -1512,7 +1572,7 @@ mod tests {
         // the `TextField`s (`whitelist_emails`, `domain`) stay uncapped.
         for field in ["namespace", "latest_version"] {
             let body = obj(serde_json::json!({field: "x".repeat(300)}));
-            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
                 panic!("expected field errors for {field}");
             };
             assert_eq!(
@@ -1521,7 +1581,7 @@ mod tests {
                 "field {field}"
             );
             let body = obj(serde_json::json!({field: "x".repeat(255)}));
-            assert!(validate_partial(&body).is_ok(), "field {field}");
+            assert!(validate_partial(&body, Tz::UTC).is_ok(), "field {field}");
         }
     }
 
@@ -1530,7 +1590,7 @@ mod tests {
         // DRF `trim_whitespace`: whitespace-only fails blank-guarded
         // fields, surrounding runs are stripped before store.
         let body = obj(serde_json::json!({"instance_name": "   "}));
-        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body) else {
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
             panic!("expected field errors");
         };
         assert_eq!(
@@ -1539,12 +1599,12 @@ mod tests {
         );
         let body = obj(serde_json::json!({"instance_name": "  x  "}));
         assert_eq!(
-            validate_partial(&body).expect("trimmed"),
+            validate_partial(&body, Tz::UTC).expect("trimmed"),
             vec![Assignment::Text("instance_name", "x".to_owned())]
         );
         let body = obj(serde_json::json!({"domain": "   "}));
         assert_eq!(
-            validate_partial(&body).expect("blank ok"),
+            validate_partial(&body, Tz::UTC).expect("blank ok"),
             vec![Assignment::Text("domain", String::new())]
         );
     }
@@ -1693,5 +1753,93 @@ mod tests {
         // layer fixture (queries/instance_first.sql).
         assert!(INSTANCE_FIRST_SQL.contains("FROM \"instances\""));
         assert!(INSTANCE_FIRST_SQL.contains("ORDER BY \"instances\".\"created_at\" DESC LIMIT 1"));
+    }
+
+    #[test]
+    fn patch_deleted_at_sets_clears_and_rejects_like_drf() {
+        use chrono::{DateTime, Utc};
+        // Set: the stored UTC instant of the wall time.
+        let body = obj(serde_json::json!({"deleted_at": "2026-01-01T00:00:00Z"}));
+        assert_eq!(
+            validate_partial(&body, Tz::UTC).expect("valid"),
+            vec![Assignment::NullableDateTime(
+                "deleted_at",
+                Some(
+                    "2026-01-01T00:00:00Z"
+                        .parse::<DateTime<Utc>>()
+                        .expect("instant")
+                )
+            )]
+        );
+        // Offsets and naive wall times resolve through the request zone.
+        let body = obj(serde_json::json!({"deleted_at": "2026-06-01T12:00:00+05:30"}));
+        assert_eq!(
+            validate_partial(&body, Tz::UTC).expect("valid"),
+            vec![Assignment::NullableDateTime(
+                "deleted_at",
+                Some(
+                    "2026-06-01T06:30:00Z"
+                        .parse::<DateTime<Utc>>()
+                        .expect("instant")
+                )
+            )]
+        );
+        let eastern: Tz = "America/New_York".parse().expect("zone");
+        let body = obj(serde_json::json!({"deleted_at": "2026-06-01T12:00:00"}));
+        assert_eq!(
+            validate_partial(&body, eastern).expect("valid"),
+            vec![Assignment::NullableDateTime(
+                "deleted_at",
+                Some(
+                    "2026-06-01T16:00:00Z"
+                        .parse::<DateTime<Utc>>()
+                        .expect("instant")
+                )
+            )]
+        );
+        // Explicit `null` clears — the one field exempt from the blanket
+        // partial null-skip (DRF `allow_null`).
+        let body = obj(serde_json::json!({"deleted_at": null}));
+        assert_eq!(
+            validate_partial(&body, Tz::UTC).expect("null clears"),
+            vec![Assignment::NullableDateTime("deleted_at", None)]
+        );
+        // Missing key writes nothing.
+        let body = obj(serde_json::json!({"instance_name": "Kept"}));
+        assert_eq!(
+            validate_partial(&body, Tz::UTC).expect("valid"),
+            vec![Assignment::Text("instance_name", "Kept".to_owned())]
+        );
+        // Unparseable and non-string inputs answer the exact message.
+        for raw in [
+            serde_json::json!("not-a-date"),
+            serde_json::json!(123),
+            serde_json::json!(true),
+        ] {
+            let body = obj(serde_json::json!({"deleted_at": raw}));
+            let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
+                panic!("expected field errors for {raw}");
+            };
+            assert_eq!(
+                render_field_errors(&errors),
+                r#"{"deleted_at":["Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z]."]}"#,
+                "input {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn patch_deleted_at_error_comes_first_like_drf() {
+        // DRF validates writable fields in model order; the audit column
+        // `deleted_at` precedes the instance fields.
+        let body =
+            obj(serde_json::json!({"deleted_at": "bogus", "instance_name": "n".repeat(300)}));
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            render_field_errors(&errors),
+            r#"{"deleted_at":["Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z]."],"instance_name":["Ensure this field has no more than 255 characters."]}"#
+        );
     }
 }

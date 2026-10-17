@@ -90,6 +90,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
+use chrono_tz::Tz;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -1960,6 +1961,7 @@ struct ValidatedWorkspace {
     organization_size: Option<String>,
     timezone: String,
     background_color: String,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One serializer error dict: `(field, messages)` in field order.
@@ -2037,7 +2039,7 @@ async fn create_workspace(
     }
     // Serializer validation (`is_valid(raise_exception=True)`): a DRF
     // `ValidationError` answers the raw detail dict.
-    let validated = match validate_workspace_input(&pool, map).await {
+    let validated = match validate_workspace_input(&pool, map, actor.timezone).await {
         Ok(validated) => validated,
         Err(ValidationFailure::Detail(errors)) => return detail_response(&errors),
         Err(ValidationFailure::Store) => return Denial::ServerError.into_response(),
@@ -2060,7 +2062,7 @@ async fn create_workspace(
     .bind(updated_at)
     .bind(actor.id)
     .bind(None::<uuid::Uuid>)
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
+    .bind(validated.deleted_at)
     .bind(workspace_id)
     .bind(&validated.name)
     .bind(&validated.logo)
@@ -2163,7 +2165,10 @@ async fn create_workspace(
         total_members: None,
         created_at: crate::serializer::render_datetime_in(&created_at, &actor.timezone),
         updated_at: crate::serializer::render_datetime_in(&updated_at, &actor.timezone),
-        deleted_at: None,
+        deleted_at: validated
+            .deleted_at
+            .as_ref()
+            .map(|stamp| crate::serializer::render_datetime_in(stamp, &actor.timezone)),
         name: validated.name,
         logo: validated.logo,
         slug: validated.slug,
@@ -2744,10 +2749,11 @@ pub const WORKSPACE_TIMEZONES: &[&str] = &[
 /// app-base `ValidationError` body (the trailing per-field return is dead
 /// code). Store failures (the `iexact` probe) are the base 500.
 /// Field validation for `POST workspaces/`, in serializer field order
-/// (`name`, `logo`, `logo_asset`, `slug`, `organization_size`, `timezone`,
-/// `background_color`). Read-only and unknown input keys are ignored.
-/// Failures accumulate per field in validator order and answer the raw
-/// detail dict; a store failure escapes to the base 500.
+/// (`deleted_at`, `name`, `logo`, `logo_asset`, `slug`,
+/// `organization_size`, `timezone`, `background_color`). Read-only and
+/// unknown input keys are ignored. Failures accumulate per field in
+/// validator order and answer the raw detail dict; a store failure
+/// escapes to the base 500.
 /// Validation failure: field detail (400) or a store failure (500).
 enum ValidationFailure {
     Detail(FieldErrors),
@@ -2763,8 +2769,24 @@ impl From<Denial> for ValidationFailure {
 async fn validate_workspace_input(
     pool: &sqlx::PgPool,
     map: &serde_json::Map<String, Value>,
+    request_tz: Tz,
 ) -> Result<ValidatedWorkspace, ValidationFailure> {
     let mut errors: FieldErrors = Vec::new();
+    // `deleted_at` first: DRF validates writable fields in model order
+    // and the audit column precedes the workspace fields
+    // (`db/mixins.py:85`, `serializers/workspace.py:15-41`). Missing and
+    // explicit-`null` both store `NULL` (`required=False` from
+    // `null=True`; `allow_null`).
+    let deleted_at = match map.get("deleted_at") {
+        None | Some(Value::Null) => None,
+        Some(value) => match super::parse_deleted_at(value, request_tz) {
+            Ok(stamp) => stamp,
+            Err(message) => {
+                field_error(&mut errors, "deleted_at", message);
+                None
+            }
+        },
+    };
     // `name`: length pre-checked by the view; the field rejects
     // non-strings (`CharField.invalid`) and blanks/controls.
     let name = match map.get("name") {
@@ -2981,6 +3003,7 @@ async fn validate_workspace_input(
         organization_size,
         timezone: timezone.expect("valid"),
         background_color: background_color.expect("valid"),
+        deleted_at,
     })
 }
 

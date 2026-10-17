@@ -385,6 +385,48 @@ pub fn json_response<T: serde::Serialize>(value: &T) -> Response {
         .expect("json response")
 }
 
+/// DRF `DateTimeField(allow_null=True)` over one JSON value: the shared
+/// `deleted_at` input shape for the instance PATCH and workspace POST
+/// validators (PIDASHCONV-1099). Neither serializer marks `deleted_at`
+/// read-only, so DRF maps it to a writable datetime that admins can set
+/// (ISO-8601) or clear (`null`).
+///
+/// * `null` clears (`allow_null`, from `null=True` on the model field).
+/// * Only strings parse: `parse_datetime` needs `str`, so every other
+///   JSON scalar answers the `invalid` message (`to_internal_value`
+///   suppresses the `TypeError` and falls through).
+/// * Strings parse through the shared [`parse_drf_datetime`](crate::app_project::handlers_project::parse_drf_datetime)
+///   (`parse_datetime` + `enforce_timezone` in the request zone): Django's
+///   `dateparse` and DRF's `DateTimeField` are behaviorally identical
+///   across the versions in play (4.2/6, 3.15/3.18 — diffed), so there is
+///   one oracle and one implementation.
+///
+/// The `timezone` is the request zone (`TimezoneMixin` activates the
+/// actor's `user_timezone`): naive wall times attach there
+/// (`make_aware`, `fold=0`, always accepted with `ZoneInfo` — gap and
+/// ambiguous times alike, probed), aware values convert there
+/// (`astimezone`, `OverflowError` → the `overflow` message when either
+/// conversion leaves `0001..=9999`).
+pub(crate) fn parse_deleted_at(
+    value: &serde_json::Value,
+    timezone: Tz,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, &'static str> {
+    use crate::app_project::handlers_project::{
+        DttmParse, INVALID_DATETIME_MESSAGE, OVERFLOW_DATETIME_MESSAGE,
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let serde_json::Value::String(text) = value else {
+        return Err(INVALID_DATETIME_MESSAGE);
+    };
+    match crate::app_project::handlers_project::parse_drf_datetime(text, timezone) {
+        DttmParse::Ok(when) => Ok(Some(when)),
+        DttmParse::Invalid => Err(INVALID_DATETIME_MESSAGE),
+        DttmParse::Overflow => Err(OVERFLOW_DATETIME_MESSAGE),
+    }
+}
+
 pub mod handlers_admin;
 pub mod handlers_auth_forms;
 pub mod handlers_base;
@@ -399,4 +441,292 @@ pub fn routes() -> Router<AppState> {
     handlers_instance::routes()
         .merge(config_workspace_routes())
         .merge(handlers_admin::routes())
+}
+
+#[cfg(test)]
+mod deleted_at_tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+
+    /// One oracle row: the UTC instant DRF stores, or the 400 it answers.
+    /// Expected values transcribed from the `.probe1099_oracle_312.txt`
+    /// battery (real `DateTimeField().to_internal_value`, `USE_TZ`, Python
+    /// 3.12 + Django 4.2.30 + DRF 3.15.2 — the CI/production stack).
+    enum Expect {
+        /// Stored UTC instant, RFC 3339 (`Z`).
+        Instant(&'static str),
+        Invalid,
+        Overflow,
+    }
+
+    fn check(text: &str, zone: &str, expect: Expect) {
+        use crate::app_project::handlers_project::{
+            INVALID_DATETIME_MESSAGE, OVERFLOW_DATETIME_MESSAGE,
+        };
+        let timezone: Tz = zone.parse().expect("zone");
+        let value = serde_json::Value::String(text.to_owned());
+        match expect {
+            Expect::Instant(want) => {
+                let want: DateTime<Utc> = want.parse().expect("want parses");
+                assert_eq!(
+                    parse_deleted_at(&value, timezone),
+                    Ok(Some(want)),
+                    "input {text:?} in {zone}"
+                );
+            }
+            Expect::Invalid => assert_eq!(
+                parse_deleted_at(&value, timezone),
+                Err(INVALID_DATETIME_MESSAGE),
+                "input {text:?} in {zone}"
+            ),
+            Expect::Overflow => assert_eq!(
+                parse_deleted_at(&value, timezone),
+                Err(OVERFLOW_DATETIME_MESSAGE),
+                "input {text:?} in {zone}"
+            ),
+        }
+    }
+
+    #[test]
+    fn deleted_at_matches_oracle_in_utc() {
+        use Expect::{Instant as At, Invalid, Overflow};
+        for (text, expect) in [
+            ("2026-01-01T00:00:00Z", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00:00:00+00:00", At("2026-01-01T00:00:00Z")),
+            (
+                "2026-01-01T00:00:00.123456Z",
+                At("2026-01-01T00:00:00.123456Z"),
+            ),
+            // Fractions truncate (never round) to micros.
+            (
+                "2026-01-01T00:00:00.123456789Z",
+                At("2026-01-01T00:00:00.123456Z"),
+            ),
+            (
+                "2026-01-01T00:00:00.123456789012",
+                At("2026-01-01T00:00:00.123456Z"),
+            ),
+            (
+                "2026-01-01T00:00:00.1234567",
+                At("2026-01-01T00:00:00.123456Z"),
+            ),
+            ("2026-01-01T00:00:00.5", At("2026-01-01T00:00:00.500000Z")),
+            // Comma fractions; fractions after minutes.
+            (
+                "2026-01-01T00:00:00,123456Z",
+                At("2026-01-01T00:00:00.123456Z"),
+            ),
+            ("2026-01-01T00:00,5", At("2026-01-01T00:00:00.500000Z")),
+            // Short times, date-only, unpadded (regex fallback).
+            ("2026-01-01T00:00Z", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00:00", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01 00:00:00", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00:00:00", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01", At("2026-01-01T00:00:00Z")),
+            ("2026-1-1T0:0", At("2026-01-01T00:00:00Z")),
+            // Basic + week dates (3.12 `fromisoformat`; 3.10 rejects).
+            ("20260101T000000Z", At("2026-01-01T00:00:00Z")),
+            ("20260101T000000", At("2026-01-01T00:00:00Z")),
+            ("20260101", At("2026-01-01T00:00:00Z")),
+            ("2026-W01-1", At("2025-12-29T00:00:00Z")),
+            ("2026-W01-1T00:00:00", At("2025-12-29T00:00:00Z")),
+            ("2026-001", Invalid),
+            // Any single char separates date and time.
+            ("2026-01-01X00:00:00", At("2026-01-01T00:00:00Z")),
+            // Offsets: colon, basic, hour-only, seconds, unnormalized.
+            ("2026-01-01T00:00:00+05:30", At("2025-12-31T18:30:00Z")),
+            ("2026-01-01T00:00:00+0530", At("2025-12-31T18:30:00Z")),
+            ("2026-01-01T00:00:00+05", At("2025-12-31T19:00:00Z")),
+            ("2026-01-01T00:00:00+05:30:15", At("2025-12-31T18:29:45Z")),
+            (
+                "2026-01-01T00:00:00+05:30:15.5",
+                At("2025-12-31T18:29:44.500000Z"),
+            ),
+            ("2026-01-01T00:00:00 +05:00", At("2025-12-31T19:00:00Z")),
+            (
+                "2026-01-01 00:00:00.123 +05:00",
+                At("2025-12-31T19:00:00.123000Z"),
+            ),
+            ("2026-01-01T00:00:00+00:60", At("2025-12-31T23:00:00Z")),
+            ("2026-01-01T00:00:00+14:00", At("2025-12-31T10:00:00Z")),
+            ("2026-01-01T00:00:00+15:00", At("2025-12-31T09:00:00Z")),
+            ("2026-01-01T00:00:00+23:59", At("2025-12-31T00:01:00Z")),
+            ("2026-01-01T00:00:00+24:00", Invalid),
+            ("2026-01-01T00:00:00+99:99", Invalid),
+            ("2026-01-01T00:00:00+05:3", Invalid),
+            ("2026-01-01T00:00:00+5:30", Invalid),
+            // Trailing whitespace only without a tz designator.
+            ("2026-01-01T00:00:00 ", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00:00:00\n", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00:00:00\t", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00:00:00+00:00 ", Invalid),
+            ("2026-01-01T00:00:00Z ", Invalid),
+            (" 2026-01-01T00:00:00", Invalid),
+            ("\t2026-01-01T00:00:00", Invalid),
+            ("2026-01-01T00:00:00+00:00\x00", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00:00:00\x00", At("2026-01-01T00:00:00Z")),
+            // Lowercase `z` is not a designator.
+            ("2026-01-01t00:00:00z", Invalid),
+            // Out-of-range components.
+            ("2026-01-01T24:00:00", Invalid),
+            ("2026-01-01T25:00:00", Invalid),
+            ("2026-01-01T00:00:61", Invalid),
+            ("2026-13-01T00:00:00", Invalid),
+            ("2026-01-32T00:00:00", Invalid),
+            ("2026-02-30T00:00:00", Invalid),
+            // Malformed.
+            ("2026-01-01T", Invalid),
+            ("T00:00:00", Invalid),
+            ("00:00:00", Invalid),
+            ("2026-01-01T00:00:00ZZ", Invalid),
+            ("not-a-date", Invalid),
+            ("", Invalid),
+            // Year bounds.
+            ("9999-12-31T23:59:59Z", At("9999-12-31T23:59:59Z")),
+            ("0001-01-01T00:00:00Z", At("0001-01-01T00:00:00Z")),
+            (
+                "2026-01-01T00:00:00.000000+00:00",
+                At("2026-01-01T00:00:00Z"),
+            ),
+            // DRF's `strptime(value, 'iso-8601')` fallthrough: the literal
+            // matches case-insensitively and yields naive 1900-01-01.
+            ("iso-8601", At("1900-01-01T00:00:00Z")),
+            ("ISO-8601", At("1900-01-01T00:00:00Z")),
+            ("Iso-8601", At("1900-01-01T00:00:00Z")),
+            (" iso-8601", Invalid),
+            ("iso-8601 ", Invalid),
+            // `astimezone` overflow (either conversion out of range).
+            ("9999-12-31T10:00:00-14:00", Overflow),
+            ("9999-12-31T23:59:59-23:59", Overflow),
+            ("0001-01-01T00:00:00+23:59", Overflow),
+            ("0001-01-01T00:00:00-23:59", At("0001-01-01T23:59:00Z")),
+        ] {
+            check(text, "UTC", expect);
+        }
+    }
+
+    #[test]
+    fn deleted_at_matches_oracle_in_new_york() {
+        use Expect::{Instant as At, Overflow};
+        for (text, expect) in [
+            // Naive wall times attach in the request zone.
+            ("2026-06-01T12:00:00", At("2026-06-01T16:00:00Z")),
+            ("2026-01-01", At("2026-01-01T05:00:00Z")),
+            ("20260101T000000Z", At("2026-01-01T00:00:00Z")),
+            // Gap and ambiguous times are accepted (`fold=0` /
+            // pre-transition offset — the `make_aware` 400 is dead with
+            // `ZoneInfo`).
+            ("2026-03-08T02:30:00", At("2026-03-08T07:30:00Z")),
+            ("2025-11-02T01:30:00", At("2025-11-02T05:30:00Z")),
+            // Aware values convert through the request zone.
+            ("2026-01-01T00:00:00+05:30", At("2025-12-31T18:30:00Z")),
+            (
+                "2026-01-01T00:00:00+05:30:15.5",
+                At("2025-12-31T18:29:44.500000Z"),
+            ),
+            ("iso-8601", At("1900-01-01T05:00:00Z")),
+            ("9999-12-31T10:00:00-14:00", Overflow),
+            ("9999-12-31T23:59:59-23:59", Overflow),
+            ("0001-01-01T00:00:00+23:59", Overflow),
+        ] {
+            check(text, "America/New_York", expect);
+        }
+    }
+
+    #[test]
+    fn deleted_at_matches_oracle_round_two() {
+        use Expect::{Instant as At, Invalid};
+        // Separator + offset splits (`.probe1099_oracle2_312.txt`).
+        for (text, expect) in [
+            ("2026-01-01t00:00:00Z", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00:00:00z", Invalid),
+            ("2026-01-01_00:00:00Z", At("2026-01-01T00:00:00Z")),
+            // A digit separates fine; the short hour fails, not the sep.
+            ("2026-01-0100:00:00Z", Invalid),
+            // The sign doubles as the separator: naive 05:30.
+            ("2026-01-01+05:30", At("2026-01-01T05:30:00Z")),
+            ("2026-01-01Z", Invalid),
+            ("2026-01-01T00:00:00+00", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00:00:00-05", At("2026-01-01T05:00:00Z")),
+            ("2026-01-01T00:00:00+0000", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00:00:00+00:00:00", At("2026-01-01T00:00:00Z")),
+            // Offset sub-second fractions truncate to the minute.
+            ("2026-01-01T00:00:00+00:00:00.5", At("2026-01-01T00:00:00Z")),
+            (
+                "2026-01-01T00:00:00.123456+05:30",
+                At("2025-12-31T18:30:00.123456Z"),
+            ),
+            // `$` matches before a trailing newline, even after a designator.
+            ("2026-01-01T00:00:00Z\n", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00:00:00+00:00\n", At("2026-01-01T00:00:00Z")),
+            ("2026-01-01T00:00:00.", Invalid),
+            ("+002026-01-01T00:00:00", Invalid),
+            ("0000-01-01T00:00:00Z", Invalid),
+            ("10000-01-01T00:00:00Z", Invalid),
+            ("2026-01-01T00:00:00+23:60", Invalid),
+            ("2026-01-01T00:00:00+99", Invalid),
+            // Week-date corners: digit-sep ban, Monday backtrack, Sunday
+            // fallback, cross-year resolution, past-9999 rejection.
+            ("2024-W01-1200:00", Invalid),
+            ("2024W011200", At("2024-01-01T00:00:00Z")),
+            ("2024-W01-7x00:00", At("2024-01-07T00:00:00Z")),
+            ("2024W013000000", At("2024-01-01T00:00:00Z")),
+            ("2020-W53-7", At("2021-01-03T00:00:00Z")),
+            ("9999-W52-7", Invalid),
+            ("20260101T000000+0530", At("2025-12-31T18:30:00Z")),
+            ("2026-W01-1T00:00:00+05:30", At("2025-12-28T18:30:00Z")),
+        ] {
+            check(text, "UTC", expect);
+        }
+        // Dateline-skip and half-hour-DST zones: gap walls resolve with
+        // the pre-transition offset, never the `make_aware` 400.
+        for (zone, text, expect) in [
+            (
+                "Pacific/Apia",
+                "2011-12-30T00:00:00",
+                At("2011-12-30T10:00:00Z"),
+            ),
+            (
+                "Pacific/Apia",
+                "2011-12-29T12:00:00",
+                At("2011-12-29T22:00:00Z"),
+            ),
+            (
+                "Australia/Lord_Howe",
+                "2025-10-05T02:15:00",
+                At("2025-10-04T15:45:00Z"),
+            ),
+            (
+                "Australia/Lord_Howe",
+                "2025-04-06T02:00:00",
+                At("2025-04-05T15:30:00Z"),
+            ),
+        ] {
+            check(text, zone, expect);
+        }
+    }
+
+    #[test]
+    fn deleted_at_json_shapes_match_drf() {
+        use crate::app_project::handlers_project::INVALID_DATETIME_MESSAGE;
+        use serde_json::json;
+        let utc: Tz = "UTC".parse().expect("utc");
+        // `null` clears.
+        assert_eq!(parse_deleted_at(&json!(null), utc), Ok(None));
+        // Non-strings never parse (`parse_datetime` needs `str`).
+        for raw in [
+            json!(123),
+            json!(12.5),
+            json!(true),
+            json!(["x"]),
+            json!({"a": 1}),
+        ] {
+            assert_eq!(
+                parse_deleted_at(&raw, utc),
+                Err(INVALID_DATETIME_MESSAGE),
+                "input {raw}"
+            );
+        }
+    }
 }
