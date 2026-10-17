@@ -43,7 +43,14 @@ redis = { version = "1", default-features = false, features = ["tokio-rustls-com
 # Model runtime (PIDASHCONV-866): genai-prices provider URL patterns.
 # Same locked regex 1.x as pidash-jobs/pidash-services (no lock churn).
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+# Assistant turn MCP client (PIDASHCONV-1112): output-schema validation
+# for tools/call results (the mcp SDK's _validate_tool_result). No default
+# features: no resolve-http/resolve-file (remote $refs fail closed like
+# Python's empty referencing registry) and no aws-lc-rs (ring only).
+jsonschema = { version = "0.59", default-features = false }
+# (PIDASHCONV-1112 adds "stream": incremental SSE reads for MCP responses;
+# same feature pidash-api already enables, so no lock churn.)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream"] }
 # Model runtime (PIDASHCONV-866): JWT claims struct.
 # Same locked serde 1.x as the workspace (no lock churn).
 serde = "1"

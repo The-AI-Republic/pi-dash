@@ -27,9 +27,10 @@ mod inventory;
 mod model_runtime;
 #[cfg(test)]
 mod runner_seams;
-/// Live assistant turn runtime (PIDASHCONV-1110): the provider-backed
-/// half of `assistant.run_turn` behind the `TurnSeam` boundary.
-/// Unwired by design: PIDASHCONV-863 wires this module into `worker()`.
+/// Live assistant turn runtime (stage 8 split: PIDASHCONV-1110…1113 land
+/// library modules here; PIDASHCONV-863 wires them into `worker()`).
+/// Unwired by design until the wiring lands — that is the split working
+/// as designed, not dead code.
 #[allow(dead_code)]
 mod turn;
 
