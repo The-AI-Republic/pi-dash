@@ -144,6 +144,11 @@ describe("NewSchedulerModal", () => {
       expect(screen.getByRole("button", { name: "Create & install" })).toBeInTheDocument();
     });
 
+    it("labels the template description as optional", () => {
+      renderModal({ availableSchedulers: [] });
+      expect(screen.getByLabelText("Description (optional)")).toBeInTheDocument();
+    });
+
     it("treats already-bound and disabled schedulers as not installable", () => {
       renderModal({
         availableSchedulers: SCHEDULERS,

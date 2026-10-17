@@ -62,6 +62,10 @@ export function SchedulerDefinitionFields<T extends FieldValues>({
   const slugErr = (errors as any)[slugName as string];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const promptErr = (errors as any)[promptName as string];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const descriptionErr = (errors as any)[descriptionName as string];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const colorErr = (errors as any)[colorName as string];
 
   return (
     <>
@@ -131,7 +135,7 @@ export function SchedulerDefinitionFields<T extends FieldValues>({
 
       <div className="flex flex-col gap-1">
         <label htmlFor="scheduler-description" className="text-13 font-medium text-primary">
-          {t("Description")}
+          {t("Description (optional)")}
         </label>
         <Controller
           control={control}
@@ -143,11 +147,13 @@ export function SchedulerDefinitionFields<T extends FieldValues>({
               value={value}
               onChange={onChange}
               ref={ref}
+              hasError={Boolean(descriptionErr)}
               placeholder={t("Short summary shown in the install picker.")}
               className="min-h-[60px] w-full"
             />
           )}
         />
+        {descriptionErr?.message && <p className="text-12 text-danger-primary">{String(descriptionErr.message)}</p>}
       </div>
 
       <div className="flex flex-col gap-1">
@@ -206,6 +212,7 @@ export function SchedulerDefinitionFields<T extends FieldValues>({
           )}
         />
         <p className="text-12 text-secondary">{t("Used to color this scheduler's blocks on the project calendar.")}</p>
+        {colorErr?.message && <p className="text-12 text-danger-primary">{String(colorErr.message)}</p>}
       </div>
     </>
   );

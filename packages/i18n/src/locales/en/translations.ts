@@ -371,6 +371,7 @@ export default {
   "Could not load dev machines.": "Could not load dev machines.",
   "Could not load pods.": "Could not load pods.",
   "Could not load projects.": "Could not load projects.",
+  "Could not load the scheduler template.": "Could not load the scheduler template.",
   "Could not revert the prompt.": "Could not revert the prompt.",
   "Could not delete the dev machine.": "Could not delete the dev machine.",
   "Could not revoke the dev machine.": "Could not revoke the dev machine.",
@@ -515,6 +516,8 @@ export default {
   "Disabled schedulers cannot be installed on new projects, and existing bindings will not fire.":
     "Disabled schedulers cannot be installed on new projects, and existing bindings will not fire.",
   Discard: "Discard",
+  "Discard changes": "Discard changes",
+  "Discard your unsaved scheduler template changes?": "Discard your unsaved scheduler template changes?",
   Display: "Display",
   "Display name": "Display name",
   "Display Properties": "Display Properties",
@@ -555,6 +558,7 @@ export default {
   "Edit logo": "Edit logo",
   "Edit scheduler": "Edit scheduler",
   "Edit scheduler install": "Edit scheduler install",
+  "Edit scheduler template": "Edit scheduler template",
   "Edit work item": "Edit work item",
   "Edited by": "Edited by",
   "Editor is not ready to discard changes": "Editor is not ready to discard changes",
@@ -801,9 +805,13 @@ export default {
   Info: "Info",
   Install: "Install",
   "Install a scheduler from the List tab to see it here.": "Install a scheduler from the List tab to see it here.",
+  "Install and scheduler template updated": "Install and scheduler template updated",
   "Install a scheduler from the List tab to see its occurrences on the calendar.":
     "Install a scheduler from the List tab to see its occurrences on the calendar.",
   "Install existing": "Install existing",
+  "Install settings not saved": "Install settings not saved",
+  "Install settings: {installDetail} Scheduler template: {templateDetail}":
+    "Install settings: {installDetail} Scheduler template: {templateDetail}",
   "Install the pidash CLI": "Install the pidash CLI",
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Install the pidash CLI and register dev machines as AI agent runners",
@@ -848,6 +856,7 @@ export default {
   "Jot down an idea, capture an aha, or record a brainwave. Add a sticky to get started.":
     "Jot down an idea, capture an aha, or record a brainwave. Add a sticky to get started.",
   JSON: "JSON",
+  "Keep editing": "Keep editing",
   "Keep important references, resources, or docs handy for your work":
     "Keep important references, resources, or docs handy for your work",
   "Key created": "Key created",
@@ -1070,6 +1079,7 @@ export default {
   "No. of {entity}": "No. of {entity}",
   None: "None",
   "None selected": "None selected",
+  "Nothing was saved": "Nothing was saved",
   "Not right now": "Not right now",
   "Notes specific to this project…": "Notes specific to this project…",
   "Notification marked as archived": "Notification marked as archived",
@@ -1373,6 +1383,7 @@ export default {
   "Scheduler installed": "Scheduler installed",
   "Scheduler uninstalled": "Scheduler uninstalled",
   "Scheduler updated": "Scheduler updated",
+  "Scheduler template not saved": "Scheduler template not saved",
   Schedulers: "Schedulers",
   "Schedulers installed on this project. Each install fires its prompt against the project on the configured cron.":
     "Schedulers installed on this project. Each install fires its prompt against the project on the configured cron.",
@@ -1566,6 +1577,10 @@ export default {
     "The runner will stop this run as soon as it gets the signal.",
   "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.":
     "The runner's credentials are invalidated and any in-flight runs are cancelled, but the row stays in the list. To attach it again, delete it and add a new runner from the target machine.",
+  "The install settings were saved. The scheduler template was not saved: {detail}":
+    "The install settings were saved. The scheduler template was not saved: {detail}",
+  "The scheduler template was saved. The install settings were not saved: {detail}":
+    "The scheduler template was saved. The install settings were not saved: {detail}",
   "The scheduler stops firing on this project. The workspace definition is unaffected and can be re-installed later.":
     "The scheduler stops firing on this project. The workspace definition is unaffected and can be re-installed later.",
   "The sticky could not be created": "The sticky could not be created",
@@ -1601,6 +1616,8 @@ export default {
     "This run is not available. It may have been deleted or belong to a different workspace.",
   "This soft-deletes the scheduler. Any active project bindings will stop firing. The slug becomes available for re-creation.":
     "This soft-deletes the scheduler. Any active project bindings will stop firing. The slug becomes available for re-creation.",
+  "This template is shared. Changes apply to every project this scheduler is installed on ({count, plural, one {# active install} other {# active installs}}).":
+    "This template is shared. Changes apply to every project this scheduler is installed on ({count, plural, one {# active install} other {# active installs}}).",
   "This workspace is back on the shared default template.": "This workspace is back on the shared default template.",
   "{count} of {max} runs used": "{count} of {max} runs used",
   "{count} runs used, no cap": "{count} runs used, no cap",

@@ -21,3 +21,28 @@ export function deriveSchedulerSlug(name: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 }
+
+/** The scheduler template fields an edit form can change. */
+export type SchedulerTemplateValues = {
+  name: string;
+  description: string;
+  prompt: string;
+  color: string;
+};
+
+/**
+ * Fields of `current` that differ from the `saved` template, as a PATCH
+ * payload. Empty when nothing changed, so callers can skip the request.
+ * Colors compare case-insensitively (the API lowercases them).
+ */
+export function diffSchedulerTemplate(
+  current: SchedulerTemplateValues,
+  saved: SchedulerTemplateValues
+): Partial<SchedulerTemplateValues> {
+  const changes: Partial<SchedulerTemplateValues> = {};
+  if (current.name !== saved.name) changes.name = current.name;
+  if (current.description !== (saved.description ?? "")) changes.description = current.description;
+  if (current.prompt !== saved.prompt) changes.prompt = current.prompt;
+  if (current.color.toLowerCase() !== (saved.color ?? "").toLowerCase()) changes.color = current.color;
+  return changes;
+}
