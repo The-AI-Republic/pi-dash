@@ -50,7 +50,7 @@ pub const CACHE_FAILED: &str = "Failed to clear cache";
 /// Leaf `(app_label, migration_name)` nodes of the Django migration graph —
 /// `MigrationExecutor(connection).loader.graph.leaf_nodes()`, computed with
 /// the real Django 4.2 loader over `INSTALLED_APPS`
-/// (`settings/common.py:44-68`) at the ported commit (260 graph nodes):
+/// (`settings/common.py:44-68`) at the ported commit (261 graph nodes):
 /// no `run_before`, `replaces`, `__first__` or `__latest__` markers exist in
 /// any `pi_dash` migration, so the five first-party leaves are also exactly
 /// what an `ast` parse of the `dependencies` lists in `apps/api` yields
@@ -59,7 +59,7 @@ pub const LEAF_MIGRATIONS: &[(&str, &str)] = &[
     ("assistant", "0004_usersttconfig"),
     ("auth", "0012_alter_user_first_name_max_length"),
     ("contenttypes", "0002_remove_content_type_name"),
-    ("db", "0167_wait_budget"),
+    ("db", "0168_ticker_stop_signal_disarm_reason"),
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
@@ -302,7 +302,7 @@ mod tests {
                 ("assistant", "0004_usersttconfig"),
                 ("auth", "0012_alter_user_first_name_max_length"),
                 ("contenttypes", "0002_remove_content_type_name"),
-                ("db", "0167_wait_budget"),
+                ("db", "0168_ticker_stop_signal_disarm_reason"),
                 ("django_celery_beat", "0018_improve_crontab_helptext"),
                 ("license", "0006_instance_is_current_version_deprecated"),
                 ("prompting", "0007_reseed_directional_relations"),

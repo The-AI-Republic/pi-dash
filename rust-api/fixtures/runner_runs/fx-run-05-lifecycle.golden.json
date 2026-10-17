@@ -3,7 +3,8 @@
  "YIELD_KEYS": [
   "status",
   "note",
-  "yielded_at"
+  "yielded_at",
+  "stop_ticking"
  ],
  "LAST_ERROR_MAX_LEN": 1000,
  "merge_done_payload": [
@@ -34,7 +35,8 @@
    "existing": {
     "status": "waiting_on_human",
     "note": "asked",
-    "yielded_at": "2026-09-13T00:00:00Z"
+    "yielded_at": "2026-09-13T00:00:00Z",
+    "stop_ticking": true
    },
    "incoming": {
     "conclusion": "success",
@@ -45,7 +47,8 @@
     "result": "final message",
     "status": "waiting_on_human",
     "note": "asked",
-    "yielded_at": "2026-09-13T00:00:00Z"
+    "yielded_at": "2026-09-13T00:00:00Z",
+    "stop_ticking": true
    }
   },
   {
@@ -154,7 +157,7 @@
    }
   }
  ],
- "merge_rule": "no yielded_at in existing -> incoming wins wholesale; yielded + incoming without status -> yield keys (status/note/yielded_at) survive onto incoming (dict or {} for non-dict); incoming status (even None) suppresses the merge (finalization.py:38-45)",
+ "merge_rule": "no yielded_at in existing -> incoming wins wholesale; yielded + incoming without status -> yield keys (status/note/yielded_at/stop_ticking) survive onto incoming (dict or {} for non-dict); incoming status (even None) suppresses the merge (finalization.py:38-45, YIELD_KEYS 3869a226)",
  "finalize_agent_run": {
   "basic": {
    "returned": true,

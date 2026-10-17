@@ -23,6 +23,10 @@
       "label": "Terminal Signal"
     },
     {
+      "value": "stop_signal",
+      "label": "Stop Signal"
+    },
+    {
       "value": "user_disabled",
       "label": "User Disabled"
     }

@@ -1511,7 +1511,36 @@
         "ok": true,
         "run_id": "640d8cdf-08fb-4772-82d3-2c693d0e105f",
         "work_item_id": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
-        "outcome": "progressed"
+        "outcome": "progressed",
+        "stop_ticking": false
+      }
+    },
+    "yield_stop_true": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/yield/",
+      "request": {
+        "outcome": "done",
+        "stop_ticking": true
+      },
+      "status": 200,
+      "body": {
+        "ok": true,
+        "run_id": "640d8cdf-08fb-4772-82d3-2c693d0e105f",
+        "work_item_id": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
+        "outcome": "done",
+        "stop_ticking": true
+      }
+    },
+    "yield_bad_stop_ticking": {
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/yield/",
+      "request": {
+        "outcome": "done",
+        "stop_ticking": "yes"
+      },
+      "status": 400,
+      "body": {
+        "error": "stop_ticking must be a boolean"
       }
     },
     "yield_bad_outcome": {

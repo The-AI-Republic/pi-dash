@@ -43,6 +43,45 @@
       },
       "issue": "FX5-27"
     },
+    "H1s_human_run_free_from_stop_signal": {
+      "before": {
+        "used": 4,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "stop_signal",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "decision": {
+        "dispatch_now": true,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "dispatch-now"
+      },
+      "after": {
+        "used": 4,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T15:01:45.493780+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
+    },
     "H2_human_run_busy": {
       "before": {
         "used": 4,

@@ -157,6 +157,10 @@
           "Terminal Signal"
         ],
         [
+          "stop_signal",
+          "Stop Signal"
+        ],
+        [
           "user_disabled",
           "User Disabled"
         ]

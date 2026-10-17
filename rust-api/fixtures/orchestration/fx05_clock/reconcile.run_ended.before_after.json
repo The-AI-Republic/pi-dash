@@ -1,8 +1,8 @@
 {
-  "_trace": "orchestration/scheduling.py:462-518 (_on_run_ended: kind guard 476-482, no-yield defaults 484-496, pending kept 498-501, stopping 503-510, keep-ticking 512-518); kind_for is identity on template_name (prompting/recipes.py:142-152, out of scope)",
-  "_method": "live reconcile on pidash_524_scratch; clock frozen 2026-06-01T12:00Z, random.seed(52405) per event, states set via queryset update (orchestration Issue signals disconnected)",
+  "_trace": "orchestration/scheduling.py:458-518 (_on_run_ended, 3869a226: kind guard 481-484, no-yield defaults 486-494, pending kept 496-499, stopping 501-509, keep-ticking 511-517); kind_for is identity on template_name (prompting/recipes.py:142-152, out of scope)",
+  "_method": "live reconcile on pidash_524_scratch; clock frozen 2026-06-01T12:00Z, random.seed(52405) per event, states set via queryset update (orchestration Issue signals disconnected); R1/R1s/R1f/R4b/R4b2/R4c re-synced to 3869a226 by live reconcile oracle (probe1065-reconcile.py on a scratch DB, same frozen clock)",
   "cases": {
-    "R1_stopping_done": {
+    "R1_done_keeps_ticking": {
       "before": {
         "used": 0,
         "granted": 0,
@@ -18,7 +18,240 @@
         "pending_entry_trigger": "",
         "resume_parent_run": null
       },
-      "event": "run_ended(review run, status=done)",
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "done:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
+    },
+    "R1_blocked_keeps_ticking": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "blocked:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
+    },
+    "R1_waiting_on_human_keeps_ticking": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "waiting_on_human:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
+    },
+    "R1_progressed_keeps_ticking": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "progressed:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
+    },
+    "R1_waiting_on_external_keeps_ticking": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "waiting_on_external:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
+    },
+    "R1t_test_stage_done_keeps_ticking": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "done:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
+    },
+    "R1s_stop_done": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
       "decision": {
         "dispatch_now": false,
         "queued": false,
@@ -32,7 +265,7 @@
         "waited": 0,
         "user_disabled": false,
         "enabled": false,
-        "disarm_reason": "terminal_signal",
+        "disarm_reason": "stop_signal",
         "next_run_at": "2026-06-01T12:00:00+00:00",
         "last_tick_at": null,
         "pending_entry": false,
@@ -40,10 +273,9 @@
         "pending_entry_actor": null,
         "pending_entry_trigger": "",
         "resume_parent_run": null
-      },
-      "issue": "FX5-12"
+      }
     },
-    "R1_stopping_blocked": {
+    "R1s_stop_blocked": {
       "before": {
         "used": 0,
         "granted": 0,
@@ -59,7 +291,6 @@
         "pending_entry_trigger": "",
         "resume_parent_run": null
       },
-      "event": "run_ended(review run, status=blocked)",
       "decision": {
         "dispatch_now": false,
         "queued": false,
@@ -73,7 +304,7 @@
         "waited": 0,
         "user_disabled": false,
         "enabled": false,
-        "disarm_reason": "terminal_signal",
+        "disarm_reason": "stop_signal",
         "next_run_at": "2026-06-01T12:00:00+00:00",
         "last_tick_at": null,
         "pending_entry": false,
@@ -81,10 +312,9 @@
         "pending_entry_actor": null,
         "pending_entry_trigger": "",
         "resume_parent_run": null
-      },
-      "issue": "FX5-13"
+      }
     },
-    "R1_stopping_waiting_on_human": {
+    "R1s_stop_waiting_on_human": {
       "before": {
         "used": 0,
         "granted": 0,
@@ -100,7 +330,6 @@
         "pending_entry_trigger": "",
         "resume_parent_run": null
       },
-      "event": "run_ended(review run, status=waiting_on_human)",
       "decision": {
         "dispatch_now": false,
         "queued": false,
@@ -114,7 +343,24 @@
         "waited": 0,
         "user_disabled": false,
         "enabled": false,
-        "disarm_reason": "terminal_signal",
+        "disarm_reason": "stop_signal",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
+    },
+    "R1s_stop_progressed": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
         "next_run_at": "2026-06-01T12:00:00+00:00",
         "last_tick_at": null,
         "pending_entry": false,
@@ -123,7 +369,106 @@
         "pending_entry_trigger": "",
         "resume_parent_run": null
       },
-      "issue": "FX5-14"
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "progressed:stopped"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "stop_signal",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
+    },
+    "R1s_stop_waiting_on_external": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "waiting_on_external:stopped"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": false,
+        "disarm_reason": "stop_signal",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
+    },
+    "R1f_stop_false_keeps_ticking": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": null,
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      },
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "done:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T15:01:45.493780+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
     },
     "R2_continuing_progressed": {
       "before": {
@@ -346,21 +691,37 @@
         "pending_entry_trigger": "",
         "resume_parent_run": null
       },
-      "event": "run_ended(completed review, no status)",
       "decision": {
         "dispatch_now": false,
         "queued": false,
         "parked": false,
         "granted": false,
-        "reason": "done:stopped"
+        "reason": "progressed:keep-ticking"
       },
       "after": {
         "used": 0,
         "granted": 0,
         "waited": 0,
         "user_disabled": false,
-        "enabled": false,
-        "disarm_reason": "terminal_signal",
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
+    },
+    "R4b2_no_yield_completed_test": {
+      "before": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
         "next_run_at": "2026-06-01T12:00:00+00:00",
         "last_tick_at": null,
         "pending_entry": false,
@@ -369,7 +730,28 @@
         "pending_entry_trigger": "",
         "resume_parent_run": null
       },
-      "issue": "FX5-20"
+      "decision": {
+        "dispatch_now": false,
+        "queued": false,
+        "parked": false,
+        "granted": false,
+        "reason": "progressed:keep-ticking"
+      },
+      "after": {
+        "used": 0,
+        "granted": 0,
+        "waited": 0,
+        "user_disabled": false,
+        "enabled": true,
+        "disarm_reason": "",
+        "next_run_at": "2026-06-01T12:00:00+00:00",
+        "last_tick_at": null,
+        "pending_entry": false,
+        "pending_entry_free": false,
+        "pending_entry_actor": null,
+        "pending_entry_trigger": "",
+        "resume_parent_run": null
+      }
     },
     "R4c_no_yield_paused_awaiting": {
       "before": {
@@ -387,21 +769,20 @@
         "pending_entry_trigger": "",
         "resume_parent_run": null
       },
-      "event": "run_ended(paused_awaiting_input, no payload)",
       "decision": {
         "dispatch_now": false,
         "queued": false,
         "parked": false,
         "granted": false,
-        "reason": "waiting_on_human:stopped"
+        "reason": "waiting_on_human:keep-ticking"
       },
       "after": {
         "used": 0,
         "granted": 0,
         "waited": 0,
         "user_disabled": false,
-        "enabled": false,
-        "disarm_reason": "terminal_signal",
+        "enabled": true,
+        "disarm_reason": "",
         "next_run_at": "2026-06-01T12:00:00+00:00",
         "last_tick_at": null,
         "pending_entry": false,
@@ -409,8 +790,7 @@
         "pending_entry_actor": null,
         "pending_entry_trigger": "",
         "resume_parent_run": null
-      },
-      "issue": "FX5-21"
+      }
     },
     "R4d_no_yield_failed": {
       "before": {

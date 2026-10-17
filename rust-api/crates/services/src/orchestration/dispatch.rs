@@ -2918,14 +2918,19 @@ mod tests {
                 paused_state_id: paused,
             }
         }
-        // U5: pool_spent never auto-pauses.
+        // U5: pool_spent never auto-pauses — nor does a stop-signal
+        // disarm or a legacy terminal-signal row (`3869a226` ports the
+        // Django parametrization over both signal reasons).
         let mut ticker = ticker_view();
         ticker.enabled = false;
-        ticker.disarm_reason = "pool_spent".to_owned();
-        assert_eq!(
-            pause_guard_verdict(&mk(&ticker, ticking, None, Some(uid(0x31)))),
-            Some(PauseStop::NotCapHit)
-        );
+        for reason in ["pool_spent", "stop_signal", "terminal_signal"] {
+            ticker.disarm_reason = reason.to_owned();
+            assert_eq!(
+                pause_guard_verdict(&mk(&ticker, ticking, None, Some(uid(0x31)))),
+                Some(PauseStop::NotCapHit),
+                "{reason} skips the deferred pause"
+            );
+        }
         // U4: a queued entry run keeps the issue alive.
         ticker.disarm_reason = "cap_hit".to_owned();
         ticker.pending_entry = true;
