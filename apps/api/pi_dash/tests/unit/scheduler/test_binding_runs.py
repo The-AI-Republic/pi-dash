@@ -312,6 +312,54 @@ def test_binding_detail_exposes_resolved_prompt_and_run_count(
     assert res.data["scheduler_is_enabled"] is True
 
 
+def _patch_binding(workspace, project, binding, user, data):
+    factory = APIRequestFactory()
+    request = factory.patch(
+        f"/api/workspaces/{workspace.slug}/projects/{project.id}"
+        f"/scheduler-bindings/{binding.id}/",
+        data,
+        format="json",
+    )
+    force_authenticate(request, user=user)
+    return ProjectSchedulerBindingDetailEndpoint.as_view()(
+        request,
+        slug=workspace.slug,
+        project_id=str(project.id),
+        binding_id=str(binding.id),
+    )
+
+
+@pytest.mark.unit
+def test_binding_patch_edits_and_recomputes_next_run_at_on_cadence_change(
+    db, workspace, project, scheduler, binding, create_user
+):
+    # No cadence field touched: next_run_at is left alone.
+    res = _patch_binding(
+        workspace, project, binding, create_user, {"extra_context": "Focus on the API."}
+    )
+    assert res.status_code == 200
+    assert res.data["extra_context"] == "Focus on the API."
+    assert "Focus on the API." in res.data["resolved_prompt"]
+    binding.refresh_from_db()
+    assert binding.next_run_at is None
+
+    # A cadence edit recomputes it from the new rule.
+    res = _patch_binding(
+        workspace, project, binding, create_user, {"rrule": "FREQ=HOURLY"}
+    )
+    assert res.status_code == 200
+    binding.refresh_from_db()
+    assert binding.rrule == "FREQ=HOURLY"
+    assert timezone.now() < binding.next_run_at <= timezone.now() + timedelta(hours=1)
+
+    res = _patch_binding(
+        workspace, project, binding, create_user, {"rrule": "FREQ=NEVER"}
+    )
+    assert res.status_code == 400
+    binding.refresh_from_db()
+    assert binding.rrule == "FREQ=HOURLY"
+
+
 # ---------------------------------------------------------------------------
 # Run detail view: project-member grant for scheduler runs
 # ---------------------------------------------------------------------------
