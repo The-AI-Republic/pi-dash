@@ -17,13 +17,11 @@
 //! [`pidash_services::tasks_cleanup::exports`] and the shared wire
 //! constants in `pidash-types` — all reused here, never re-implemented.
 //!
-//! Ownership: this task stays Python-owned. No local handler is
-//! registered here — registering one would steal live traffic from the
-//! Python workers while the S3 upload, the presigned-URL minting and the
-//! ORM prefetch cascade still live there. [`is_export_task`] is the
-//! routing predicate the worker consults; the domain gate flips
-//! ownership after the oracle replay passes on both backends (the
-//! `tasks_webhooks` precedent).
+//! Ownership: worker-owned since PIDASHCONV-1106 (stage 8). The two
+//! registry handlers live in [`issue`] and [`analytic`]; the wire
+//! surface and the pure decisions stay here. [`is_export_task`] is the
+//! legacy D-35 routing predicate, kept for its fixture test — the live
+//! task resolves through the registry, not through it.
 //!
 //! Ack parity: the bare `@shared_task` carries no autoretry and every
 //! Python control path ends in `return` (success, `ValueError` failure or
@@ -101,7 +99,9 @@ pub struct ExportTaskCall {
     pub slug: String,
 }
 
-/// Routing predicate: true while this task name is Python-owned.
+/// Legacy D-35 routing predicate for the issue-export task name. The
+/// task is worker-owned since PIDASHCONV-1106; the registry handler
+/// serves it, not this predicate.
 pub fn is_export_task(name: &str) -> bool {
     name == ISSUE_EXPORT_TASK
 }
