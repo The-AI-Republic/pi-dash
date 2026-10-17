@@ -867,6 +867,65 @@ def seed():
     )
     note("description-version", f"{first_issue.name}", version_created)
 
+    # Schedulers area (NEWFRONT-568): one definition installed on the
+    # seeded project with a single completed run behind it, so the
+    # binding-runs contract proves a full AgentRun row (not just an empty
+    # page) and the occurrences contract proves a past row. The binding's
+    # last_run pointer is pinned so the joined last-run fields parse
+    # non-null; next_run_at stays null to prove the nullable half.
+    from pi_dash.db.models import Scheduler, SchedulerBinding  # noqa: E402
+
+    runs_scheduler, runs_scheduler_created = Scheduler.objects.get_or_create(
+        workspace=workspace,
+        slug="contract-runs",
+        defaults={
+            "name": "Contract Runs",
+            "description": "Seeded for the scheduler contract tests.",
+            "prompt": "Contract seeded scheduler definition.",
+            "color": "#3b82f6",
+            "is_enabled": True,
+        },
+    )
+    note("scheduler", runs_scheduler.slug, runs_scheduler_created)
+
+    from datetime import timedelta  # noqa: E402
+
+    runs_binding, runs_binding_created = SchedulerBinding.objects.get_or_create(
+        scheduler=runs_scheduler,
+        project=project,
+        defaults={
+            "workspace": workspace,
+            "dtstart": timezone.now() - timedelta(days=1),
+            "tzid": "UTC",
+            "rrule": "FREQ=DAILY",
+            "actor": user,
+        },
+    )
+    note("scheduler-binding", str(runs_binding.pk), runs_binding_created)
+
+    # default_pod is provided by the runners block above (NEWFRONT-530),
+    # which guarantees the seeded project has exactly one default pod.
+
+    seeded_run = AgentRun.objects.filter(scheduler_binding=runs_binding).order_by("created_at").first()
+    if seeded_run is None:
+        seeded_run = AgentRun.objects.create(
+            workspace=workspace,
+            created_by=user,
+            pod=default_pod,
+            scheduler_binding=runs_binding,
+            status="completed",
+            prompt="Contract seeded scheduler run.",
+            started_at=timezone.now() - timedelta(hours=1),
+            ended_at=timezone.now() - timedelta(minutes=50),
+        )
+        note("agent-run", str(seeded_run.pk), True)
+    else:
+        note("agent-run", str(seeded_run.pk), False)
+    if runs_binding.last_run_id != seeded_run.pk:
+        runs_binding.last_run = seeded_run
+        runs_binding.save(update_fields=["last_run", "updated_at"])
+        note("scheduler-binding-last-run", str(seeded_run.pk), False)
+
     return {
         "email": user.email,
         "workspace_slug": workspace.slug,

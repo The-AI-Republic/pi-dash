@@ -511,6 +511,51 @@ export {
 } from "./contracts/assistant-editor.js";
 export type { EditorTaskInput, RephraseGrammarInput } from "./contracts/assistant-editor.js";
 export {
+  OCCURRENCE_KINDS,
+  OUTCOME_MODES,
+  SCHEDULER_SOURCES,
+  Scheduler,
+  SchedulerBinding,
+  SchedulerBindingDetail,
+  SchedulerBindingList,
+  SchedulerList,
+  SchedulerOccurrence,
+  SchedulerOccurrenceWindow,
+  createScheduler,
+  createSchedulerBinding,
+  deleteScheduler,
+  deleteSchedulerBinding,
+  getScheduler,
+  getSchedulerBinding,
+  listBindingRuns,
+  listSchedulerBindings,
+  listSchedulerOccurrences,
+  listSchedulers,
+  updateScheduler,
+  updateSchedulerBinding,
+} from "./contracts/schedulers.js";
+export type {
+  SchedulerBindingCreateInput,
+  SchedulerBindingUpdateInput,
+  SchedulerCreateInput,
+  SchedulerUpdateInput,
+} from "./contracts/schedulers.js";
+export {
+  CompiledPrompt,
+  PROMPT_SCOPES,
+  PROMPT_TIERS,
+  PromptPreview,
+  PromptSectionListResponse,
+  PromptSectionOverride,
+  ResolvedPromptSection,
+  getCompiledPrompt,
+  listPromptSections,
+  previewPrompt,
+  revertPromptSection,
+  upsertPromptSection,
+} from "./contracts/prompts.js";
+export type { PromptPreviewInput } from "./contracts/prompts.js";
+export {
   MarkAllReadResponse,
   NotificationItem,
   NotificationList,

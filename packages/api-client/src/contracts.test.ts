@@ -208,6 +208,27 @@ import {
   refreshCloudSession,
 } from "./contracts/cloud-session.js";
 import { getCloudBillingPlan } from "./contracts/cloud-billing.js";
+import {
+  createScheduler,
+  createSchedulerBinding,
+  deleteScheduler,
+  deleteSchedulerBinding,
+  getScheduler,
+  getSchedulerBinding,
+  listBindingRuns,
+  listSchedulerBindings,
+  listSchedulerOccurrences,
+  listSchedulers,
+  updateScheduler,
+  updateSchedulerBinding,
+} from "./contracts/schedulers.js";
+import {
+  getCompiledPrompt,
+  listPromptSections,
+  previewPrompt,
+  revertPromptSection,
+  upsertPromptSection,
+} from "./contracts/prompts.js";
 import { fakeResponse, recordingTransport } from "./client.test.js";
 import type { RecordedCall } from "./client.test.js";
 import { createPod, deletePod, getPod, listPods, updatePod } from "./contracts/pods.js";
@@ -2065,6 +2086,24 @@ describe("project lifecycle contracts", () => {
     const patchCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
     expect(patchCall?.init.method).toBe("PATCH");
     expect(patchCall?.init.body).toBe(JSON.stringify({ description: "Updated" }));
+  });
+
+  it("patches the automations fields the settings page owns", async () => {
+    const transport = stubbedApi(() => ({
+      status: 200,
+      body: { ...details, archive_in: 1, close_in: 2, default_state: UUID },
+    }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateProject(client, "acme", UUID2, {
+      archive_in: 1,
+      close_in: 2,
+      default_state: UUID,
+    });
+    expect(updated.archive_in).toBe(1);
+    expect(updated.close_in).toBe(2);
+    expect(updated.default_state).toBe(UUID);
+    const patchCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(patchCall?.init.body).toBe(JSON.stringify({ archive_in: 1, close_in: 2, default_state: UUID }));
   });
 
   it("checks identifier availability and parses matches", async () => {
@@ -5365,5 +5404,344 @@ describe("profile app-settings contracts", () => {
     expect(agentToolsEnabled({ openhub: { apps_enabled: false } })).toBe(false);
     expect(agentToolsEnabled({ openhub: { apps_enabled: "yes" } })).toBe(false);
     expect(agentToolsEnabled({ openhub: { apps_enabled: true } })).toBe(true);
+  });
+});
+
+describe("scheduler contracts", () => {
+  const definition = {
+    id: UUID,
+    workspace: UUID2,
+    slug: "contract-sched",
+    name: "Contract",
+    description: "",
+    prompt: "Contract base prompt.",
+    color: "#3b82f6",
+    source: "builtin",
+    is_enabled: true,
+    active_binding_count: 1,
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
+  };
+  const binding = {
+    id: UUID2,
+    scheduler: UUID,
+    scheduler_slug: "contract-sched",
+    scheduler_name: "Contract",
+    scheduler_color: "#3b82f6",
+    project: UUID,
+    workspace: UUID2,
+    dtstart: "2026-10-01T00:00:00Z",
+    tzid: "UTC",
+    rrule: "FREQ=DAILY",
+    rdates: [],
+    exdates: [],
+    extra_context: "",
+    enabled: true,
+    outcome_mode: "create_issue",
+    pod: null,
+    pod_name: null,
+    next_run_at: "2026-10-02T00:00:00Z",
+    last_run: null,
+    last_run_status: null,
+    last_run_ended_at: null,
+    last_error: "",
+    actor: UUID,
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
+  };
+  const detail = {
+    ...binding,
+    resolved_prompt: "Resolved prompt.",
+    run_count: 0,
+    scheduler_source: "builtin",
+    scheduler_is_enabled: true,
+  };
+
+  function stubbedApi(handler: (call: RecordedCall) => { status: number; body: unknown }) {
+    return recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      const { status, body } = handler(call);
+      return fakeResponse({ status, body: JSON.stringify(body) });
+    });
+  }
+
+  it("lists, reads, creates and updates definitions", async () => {
+    const transport = stubbedApi((call) => {
+      if (call.init.method === "POST") return { status: 201, body: definition };
+      if (call.init.method === "PATCH") return { status: 200, body: { ...definition, name: "Renamed" } };
+      if (call.url.endsWith("/schedulers/")) return { status: 200, body: [definition] };
+      return { status: 200, body: definition };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const listed = await listSchedulers(client, "acme");
+    expect(listed[0]?.slug).toBe("contract-sched");
+    const read = await getScheduler(client, "acme", UUID);
+    expect(read.active_binding_count).toBe(1);
+    const created = await createScheduler(client, "acme", {
+      name: "Contract",
+      slug: "contract-sched",
+      prompt: "Contract base prompt.",
+    });
+    expect(created.id).toBe(UUID);
+    const updated = await updateScheduler(client, "acme", UUID, { name: "Renamed" });
+    expect(updated.name).toBe("Renamed");
+    const updateCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(updateCall?.init.body).toBe(JSON.stringify({ name: "Renamed" }));
+  });
+
+  it("resolves the definition delete status", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({ status: 204, body: "" });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const status = await deleteScheduler(client, "acme", UUID);
+    expect(status).toBe(204);
+  });
+
+  it("installs with the project key in the payload", async () => {
+    const transport = stubbedApi((call) => {
+      if (call.init.method === "POST") return { status: 201, body: binding };
+      return { status: 200, body: [binding] };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const installed = await createSchedulerBinding(client, "acme", UUID, {
+      scheduler: UUID2,
+      dtstart: "2026-10-01T00:00:00Z",
+      rrule: "FREQ=DAILY",
+    });
+    expect(installed.scheduler_slug).toBe("contract-sched");
+    const createCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(createCall?.init.body).toContain(`"project":"${UUID}"`);
+    const listed = await listSchedulerBindings(client, "acme", UUID);
+    expect(listed).toHaveLength(1);
+  });
+
+  it("reads the detail shape and patches it, enabled-only included", async () => {
+    const transport = stubbedApi((call) => {
+      if (call.init.method === "PATCH") {
+        const payload = JSON.parse(String(call.init.body ?? "{}")) as { enabled?: boolean };
+        return { status: 200, body: { ...detail, enabled: payload.enabled ?? true } };
+      }
+      if (call.init.method === "DELETE") return { status: 204, body: "" };
+      return { status: 200, body: detail };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const read = await getSchedulerBinding(client, "acme", UUID, UUID2);
+    expect(read.run_count).toBe(0);
+    expect(read.resolved_prompt).toBe("Resolved prompt.");
+    const toggled = await updateSchedulerBinding(client, "acme", UUID, UUID2, { enabled: false });
+    expect(toggled.enabled).toBe(false);
+    expect(toggled.scheduler_source).toBe("builtin");
+    const toggleCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(toggleCall?.init.body).toBe(JSON.stringify({ enabled: false }));
+    const status = await deleteSchedulerBinding(client, "acme", UUID, UUID2);
+    expect(status).toBe(204);
+  });
+
+  it("pages binding runs with full run rows", async () => {
+    const run = {
+      id: UUID,
+      status: "completed",
+      executor_kind: "local_runner",
+      dispatch_attempts: 1,
+      cancel_requested_at: null,
+      cancel_reason: "",
+      prompt: "Run prompt.",
+      thread_id: "",
+      agent_metadata: {},
+      runner: null,
+      work_item: null,
+      scheduler_binding: UUID2,
+      scheduler_binding_detail: {
+        id: UUID2,
+        scheduler_name: "Contract",
+        scheduler_slug: "contract-sched",
+        project: UUID,
+      },
+      pod: UUID,
+      pod_detail: { id: UUID, name: "CT_pod_1", is_default: true, project: UUID, project_identifier: "CT" },
+      created_by: UUID,
+      owner: null,
+      created_at: "2026-10-01T00:00:00Z",
+      assigned_at: "2026-10-01T00:00:01Z",
+      queue_position: null,
+      started_at: "2026-10-01T00:00:02Z",
+      ended_at: "2026-10-01T00:01:00Z",
+      done_payload: null,
+      error: "",
+      error_code: "",
+      error_diagnostic: null,
+      refusal_category: "",
+      llm_model: "",
+      input_tokens: 10,
+      output_tokens: 20,
+      total_tokens: 30,
+      usage: { input: 10, output: 20, total: 30 },
+      tool_plan: {},
+      tool_calls: [],
+    };
+    const transport = stubbedApi(() => ({
+      status: 200,
+      body: { results: [run], count: 1, total_count: 1, total_pages: 1, page: 1, per_page: 10 },
+    }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const page = await listBindingRuns(client, "acme", UUID, UUID2, { page: 1, per_page: 10 });
+    expect(page.total_count).toBe(1);
+    expect(page.results[0]?.pod_detail.project_identifier).toBe("CT");
+    const call = transport.calls.find((entry) => entry.url.includes("/runs/"));
+    expect(call?.url).toContain("page=1");
+    expect(call?.url).toContain("per_page=10");
+    const defaulted = await listBindingRuns(client, "acme", UUID, UUID2);
+    expect(defaulted.total_count).toBe(1);
+    const bareCall = transport.calls.filter((entry) => entry.url.includes("/runs/")).pop();
+    expect(bareCall?.url.endsWith("/runs/")).toBe(true);
+  });
+
+  it("reads the occurrences window with its truncation fields", async () => {
+    const window = {
+      occurrences: [
+        {
+          binding_id: UUID2,
+          scheduler_id: UUID,
+          scheduler_name: "Contract",
+          scheduler_color: "#3b82f6",
+          dtstart: "2026-10-02T00:00:00Z",
+          tzid: "UTC",
+          kind: "scheduled",
+          agent_run_id: null,
+          status: null,
+        },
+      ],
+      has_more: false,
+      next_window_start: null,
+    };
+    const transport = stubbedApi(() => ({ status: 200, body: window }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const from = "2026-10-01T00:00:00Z";
+    const to = "2026-10-08T00:00:00Z";
+    const parsed = await listSchedulerOccurrences(client, "acme", UUID, { from, to });
+    expect(parsed.occurrences[0]?.kind).toBe("scheduled");
+    const call = transport.calls.find((entry) => entry.url.includes("/occurrences/"));
+    expect(call?.url).toContain(`from=${encodeURIComponent(from)}`);
+    expect(call?.url).toContain(`to=${encodeURIComponent(to)}`);
+    const defaulted = await listSchedulerOccurrences(client, "acme", UUID);
+    expect(defaulted.occurrences).toHaveLength(1);
+    const bareCall = transport.calls.filter((entry) => entry.url.includes("/occurrences/")).pop();
+    expect(bareCall?.url.endsWith("/occurrences/")).toBe(true);
+  });
+});
+
+describe("prompt contracts", () => {
+  const section = {
+    key: "autonomy",
+    title: "Autonomy",
+    customizable: "overridable",
+    body: "Body.",
+    default_body: "Default.",
+    source: "default",
+    version: 1,
+    needs_attention: false,
+    editable_at_workspace: true,
+    editable_at_personal: true,
+  };
+  const override = {
+    id: UUID,
+    workspace: UUID2,
+    user: null,
+    section_key: "autonomy",
+    body: "Override.",
+    is_active: true,
+    version: 2,
+    needs_attention: false,
+    is_workspace_level: true,
+    updated_by: UUID,
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
+  };
+
+  function stubbedApi(handler: (call: RecordedCall) => { status: number; body: unknown }) {
+    return recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      const { status, body } = handler(call);
+      return fakeResponse({ status, body: JSON.stringify(body) });
+    });
+  }
+
+  it("lists sections with kind and scope echoes", async () => {
+    const transport = stubbedApi(() => ({
+      status: 200,
+      body: { kind: "coding-task", scope: "user", sections: [section] },
+    }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listPromptSections(client, "acme", { kind: "coding-task", scope: "user" });
+    expect(parsed.sections[0]?.key).toBe("autonomy");
+    const call = transport.calls.find((entry) => entry.url.includes("/prompt-sections"));
+    expect(call?.url).toContain("kind=coding-task");
+    expect(call?.url).toContain("scope=user");
+    const defaulted = await listPromptSections(client, "acme");
+    expect(defaulted.sections).toHaveLength(1);
+    const bareCall = transport.calls.filter((entry) => entry.url.includes("/prompt-sections")).pop();
+    expect(bareCall?.url.endsWith("/prompt-sections")).toBe(true);
+  });
+
+  it("upserts with scope plus body and reverts by scope", async () => {
+    const transport = stubbedApi((call) => {
+      if (call.init.method === "PUT") return { status: 200, body: override };
+      return { status: 204, body: "" };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const stored = await upsertPromptSection(client, "acme", "autonomy", {
+      scope: "workspace",
+      body: "Override.",
+    });
+    expect(stored.version).toBe(2);
+    const putCall = transport.calls.find((call) => call.init.method === "PUT");
+    expect(putCall?.url.endsWith("/prompt-sections/autonomy")).toBe(true);
+    expect(putCall?.init.body).toBe(JSON.stringify({ scope: "workspace", body: "Override." }));
+    const status = await revertPromptSection(client, "acme", "autonomy", "workspace");
+    expect(status).toBe(204);
+    const deleteCall = transport.calls.find((call) => call.init.method === "DELETE");
+    expect(deleteCall?.url).toContain("scope=workspace");
+  });
+
+  it("reads the compiled receipt with and without the automatic variant", async () => {
+    const transport = stubbedApi((call) => {
+      if (call.url.includes("scope=workspace")) {
+        return { status: 200, body: { kind: "coding-task", scope: "workspace", template_body: "T" } };
+      }
+      return {
+        status: 200,
+        body: { kind: "coding-task", scope: "user", template_body: "T", automatic_template_body: "A" },
+      };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const plain = await getCompiledPrompt(client, "acme", "coding-task", { scope: "workspace" });
+    expect(plain.automatic_template_body).toBeUndefined();
+    const dual = await getCompiledPrompt(client, "acme", "coding-task");
+    expect(dual.automatic_template_body).toBe("A");
+  });
+
+  it("previews saved prompts and unsaved drafts", async () => {
+    const transport = stubbedApi(() => ({ status: 200, body: { kind: "coding-task", prompt: "Rendered." } }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const saved = await previewPrompt(client, "acme", "coding-task", { scope: "workspace", issue_id: UUID });
+    expect(saved.prompt).toBe("Rendered.");
+    const draft = await previewPrompt(client, "acme", "scheduler", {
+      binding_id: UUID2,
+      section_key: "autonomy",
+      body: "Draft.",
+    });
+    expect(draft.prompt).toBe("Rendered.");
+    const posts = transport.calls.filter((call) => call.init.method === "POST");
+    expect(posts).toHaveLength(2);
+    expect(posts[0]?.url.endsWith("/prompts/coding-task/preview")).toBe(true);
+    expect(posts[1]?.init.body).toContain(UUID2);
   });
 });

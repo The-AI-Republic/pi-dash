@@ -57,13 +57,19 @@ export interface ProjectUpdateInput {
   emoji?: string | null;
   repo_url?: string;
   base_branch?: string;
+  /** Idle-archive delay in months (0 disables); the automations page. */
+  archive_in?: number;
+  /** Idle-close delay in months (0 disables); the automations page. */
+  close_in?: number;
+  /** Cancelled-state target for idle closes; a state of this project. */
+  default_state?: string | null;
 }
 
 /**
  * PATCH /api/workspaces/<slug>/projects/<id>/ answers 200 with the updated
  * row in the list-serializer shape (the same shape create returns).
  * Workspace and project admins only (403 otherwise); archived projects
- * refuse with 400.
+ * refuse with 400. `default_state` must be a state of this project.
  */
 export async function updateProject(
   client: ApiClient,
