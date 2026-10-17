@@ -11,6 +11,7 @@ import { render } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it } from "vitest";
 import * as buttonStories from "./components/Button.stories";
+import * as comboboxStories from "./components/Combobox.stories";
 import * as fieldsStories from "./components/fields.stories";
 import * as iconButtonStories from "./components/IconButton.stories";
 import * as menuStories from "./components/Menu.stories";
@@ -24,6 +25,7 @@ import * as virtualListStories from "./components/VirtualList.stories";
 
 const modules: Record<string, Record<string, unknown>> = {
   "Button.stories": buttonStories,
+  "Combobox.stories": comboboxStories,
   "fields.stories": fieldsStories,
   "IconButton.stories": iconButtonStories,
   "Menu.stories": menuStories,
