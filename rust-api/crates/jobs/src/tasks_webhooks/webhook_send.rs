@@ -685,12 +685,12 @@ pub(crate) fn bind_call(
     args: &Value,
     kwargs: &Value,
 ) -> Result<Vec<Value>, CallTypeError> {
-    let args = args.as_array().ok_or_else(|| {
-        CallTypeError(format!("{task}() args must be a list"))
-    })?;
-    let kwargs = kwargs.as_object().ok_or_else(|| {
-        CallTypeError(format!("{task}() kwargs must be a dict"))
-    })?;
+    let args = args
+        .as_array()
+        .ok_or_else(|| CallTypeError(format!("{task}() args must be a list")))?;
+    let kwargs = kwargs
+        .as_object()
+        .ok_or_else(|| CallTypeError(format!("{task}() kwargs must be a dict")))?;
     if args.len() > params.len() {
         return Err(CallTypeError(format!(
             "{task}() takes {want} positional arguments but {got} were given",
@@ -754,7 +754,10 @@ async fn fetch_webhook(
         id: row.get("id"),
         workspace_id: row.get("workspace_id"),
         url: row.get("url"),
-        secret_key: row.get("secret_key"),
+        secret_key: row
+            .try_get("secret_key")
+            .unwrap_or(None)
+            .unwrap_or_default(),
         created_by_id: row.try_get("created_by_id").unwrap_or(None),
     }))
 }
@@ -784,16 +787,29 @@ async fn save_log_doc(
             }
         }
     }
-    let get = |key: &str| doc.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
+    let get = |key: &str| {
+        doc.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
     let retry_count = doc.get("retry_count").and_then(Value::as_u64).unwrap_or(0) as i32;
-    // `WebhookLog.objects.create(**log_data)`: the model's own columns;
-    // audit columns default (`created_at`/`updated_at` now, the rest null).
+    // `WebhookLog.objects.create(**log_data)`: the model's own columns.
+    // `webhook` is a bare `UUIDField` (0091 altered the FK away; the
+    // column renamed with it), `id`/`created_at`/`updated_at` are
+    // Python-side (`uuid4`/`auto_now_add`/`auto_now`), and the audit
+    // columns stay null (no crum user in a worker).
+    let id = uuid::Uuid::new_v4();
+    let now = chrono::Utc::now();
     let stored = sqlx::query(
         "INSERT INTO webhook_logs \
-         (workspace_id, webhook_id, event_type, request_method, request_headers, \
-         request_body, response_status, response_headers, response_body, retry_count) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+         (id, created_at, updated_at, workspace_id, webhook, event_type, request_method, \
+         request_headers, request_body, response_status, response_headers, response_body, \
+         retry_count) \
+         VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
+    .bind(id)
+    .bind(now)
     .bind(get("workspace_id").parse::<uuid::Uuid>().ok())
     .bind(get("webhook").parse::<uuid::Uuid>().ok())
     .bind(get("event_type"))
@@ -807,8 +823,12 @@ async fn save_log_doc(
     .execute(pool)
     .await;
     match stored {
-        Ok(_) => tracing::info!(target: "pi_dash.worker", "Webhook log saved successfully to database"),
-        Err(error) => tracing::error!(target: "pi_dash.exception", "Failed to save webhook log: {error}"),
+        Ok(_) => {
+            tracing::info!(target: "pi_dash.worker", "Webhook log saved successfully to database")
+        }
+        Err(error) => {
+            tracing::error!(target: "pi_dash.exception", "Failed to save webhook log: {error}")
+        }
     }
 }
 
@@ -827,7 +847,11 @@ pub fn celery_backoff_delay_secs(retries: u32) -> u64 {
 /// first (custom `User-Agent` overriding in place), the task's headers
 /// next, `Content-Length` appended by the transport, the signature (when
 /// computed) in task order after `X-Pi Dash-Event`.
-pub fn wire_headers(event: &str, delivery_id: &str, signature: Option<&str>) -> Vec<(String, String)> {
+pub fn wire_headers(
+    event: &str,
+    delivery_id: &str,
+    signature: Option<&str>,
+) -> Vec<(String, String)> {
     let mut headers = vec![
         ("User-Agent".to_owned(), USER_AGENT.to_owned()),
         ("Accept-Encoding".to_owned(), "gzip, deflate".to_owned()),
@@ -856,7 +880,9 @@ pub enum SendOutcome {
 ///
 /// * Bind `TypeError` → [`SendOutcome::Fail`] (no autoretry for it).
 /// * First-`try` failures (bad id/slug shapes, missing row, store
-///   errors, non-dict `event_data`) → logged, acked, no log row.
+///   errors, unhashable `action`) → logged, acked, no log row.
+///   `event_data`/`activity` ride through untouched (any JSON type —
+///   the wire already normalized them).
 /// * Transport errors → failure log row, then
 ///   [`after_failure`]`(attempts)`: [`SendOutcome::Retry`] with the
 ///   Celery backoff, or deactivate + enqueue the deactivation email and
@@ -868,11 +894,14 @@ pub async fn run_webhook_send(
     job: &crate::queue::JobRow,
     call: &WebhookSendCall,
 ) -> SendOutcome {
-    use crate::tasks_mail::notifications::py_truthy;
     // `Webhook.objects.get(id=webhook_id, workspace__slug=slug)`: a
     // garbage id is `ValidationError`, a non-string slug breaks the
     // lookup — both land in the first `try`'s swallow.
-    let webhook_id = match call.webhook_id.as_str().and_then(|raw| raw.parse::<uuid::Uuid>().ok()) {
+    let webhook_id = match call
+        .webhook_id
+        .as_str()
+        .and_then(|raw| raw.parse::<uuid::Uuid>().ok())
+    {
         Some(id) => id,
         None => {
             tracing::error!(
@@ -895,17 +924,21 @@ pub async fn run_webhook_send(
             return SendOutcome::Ack;
         }
     };
-    let event_data = match call.event_data.as_object() {
-        Some(data) => data,
-        None => {
+    // `{"POST": ...}.get(action, action)` (`:297-302`): strings map,
+    // hashable scalars pass through, unhashable containers raise
+    // `TypeError` into the swallow.
+    let action_value = match &call.action {
+        Value::Array(_) | Value::Object(_) => {
             tracing::error!(
                 target: "pi_dash.exception",
                 task = WEBHOOK_SEND_TASK_NAME,
-                "event_data has no .get"
+                "unhashable action"
             );
             return SendOutcome::Ack;
         }
+        other => envelope_action(other),
     };
+    let action_str = py_json_str(&action_value);
     let webhook = match fetch_webhook(pool, webhook_id, slug).await {
         Ok(row) => row,
         Err(error) => {
@@ -922,27 +955,24 @@ pub async fn run_webhook_send(
         return SendOutcome::Ack;
     };
 
-    // `"action" if event_data.get("id") else map_action(action)` (`:292`).
-    let id_value = event_data.get("id").unwrap_or(&Value::Null);
-    let action_value = if py_truthy(id_value) {
-        Value::String("action".to_owned())
-    } else {
-        envelope_action(&call.action)
-    };
-    // `json.dumps(json.loads(...))` round-trips are identity over JSON
-    // values at this layer (no tuples/datetimes survive the wire).
+    // The `:293`/`:295` `DjangoJSONEncoder` round-trips are identity
+    // over JSON values at this layer (no tuples/datetimes survive the
+    // wire).
     let event_str = py_json_str(&call.event);
     let delivery_id = uuid::Uuid::new_v4().to_string();
     let mut envelope = build_envelope(
         &event_str,
-        "",
+        &action_str,
         &webhook_id.to_string(),
         &webhook.workspace_id.to_string(),
-        Some(Value::Object(event_data.clone())),
+        Some(call.event_data.clone()),
         Some(call.activity.clone()),
     );
+    // The envelope carries the raw mapped value (`None` stays null);
+    // only the logged `request_method` is `str()`-wrapped.
     envelope.insert("action".to_owned(), action_value);
-    let payload_json = render_signature_input(&Value::Object(envelope));
+    let payload_value = Value::Object(envelope);
+    let payload_json = render_signature_input(&payload_value);
     let signature = if webhook.secret_key.is_empty() {
         None
     } else {
@@ -959,15 +989,24 @@ pub async fn run_webhook_send(
         );
     }
     let attempts = u32::try_from(job.attempts).unwrap_or(0);
-    match super::webhook_http::post(&webhook.url, &wire, payload_json.as_bytes(), WEBHOOK_POST_TIMEOUT_SECS).await {
+    match super::webhook_http::post(
+        &webhook.url,
+        &wire,
+        payload_json.as_bytes(),
+        WEBHOOK_POST_TIMEOUT_SECS,
+    )
+    .await
+    {
         Ok(response) => {
+            // `request_method=action` (`:334`), `request_body=payload`
+            // (`:336`): the mapped action and the full envelope.
             let doc = build_log_doc(
                 &webhook.workspace_id.to_string(),
                 &webhook_id.to_string(),
                 &event_str,
-                "POST",
+                &action_str,
                 &Value::Object(logged),
-                &call.event_data,
+                &payload_value,
                 response.status,
                 &super::webhook_http::headers_repr(&response.headers),
                 &super::webhook_http::response_text(&response.headers, &response.body),
@@ -985,9 +1024,9 @@ pub async fn run_webhook_send(
                 &webhook.workspace_id.to_string(),
                 &webhook_id.to_string(),
                 &event_str,
-                "POST",
+                &action_str,
                 &Value::Object(logged),
-                &call.event_data,
+                &payload_value,
                 500u16,
                 "",
                 &error,
@@ -1000,32 +1039,45 @@ pub async fn run_webhook_send(
                 },
                 AfterFailure::Deactivate => {
                     // BUG-4: filtered update, `updated_at` untouched.
-                    if let Err(error) = sqlx::query("UPDATE webhooks SET is_active = false WHERE id = $1")
-                        .bind(webhook.id)
-                        .execute(pool)
-                        .await
+                    if let Err(error) =
+                        sqlx::query("UPDATE webhooks SET is_active = false WHERE id = $1")
+                            .bind(webhook.id)
+                            .execute(pool)
+                            .await
                     {
-                        return SendOutcome::Fail { error: error.to_string() };
+                        return SendOutcome::Fail {
+                            error: error.to_string(),
+                        };
                     }
-                    if webhook.created_by_id.is_some() {
-                        // kwargs ride through with their JSON types intact
-                        // (`current_site=None` stays null, like `.delay`).
-                        let mut kwargs = Map::with_capacity(4);
-                        kwargs.insert("webhook_id".to_owned(), Value::String(webhook_id.to_string()));
-                        kwargs.insert(
-                            "receiver_id".to_owned(),
-                            Value::String(webhook.created_by_id.map(|id| id.to_string()).unwrap_or_default()),
-                        );
-                        kwargs.insert("reason".to_owned(), Value::String(error));
-                        kwargs.insert("current_site".to_owned(), call.current_site.clone());
-                        let email = crate::queue::NewJob::new(
-                            DEACTIVATION_EMAIL_TASK_NAME.to_owned(),
-                            Value::Array(Vec::new()),
-                            Value::Object(kwargs),
-                        );
-                        if let Err(error) = crate::queue::enqueue(pool, &email).await {
-                            return SendOutcome::Fail { error: error.to_string() };
-                        }
+                    // `if webhook:` (`:361`) is always true (a model
+                    // instance), so the email is always enqueued — even
+                    // with a null `receiver_id`, which the email task
+                    // then swallows through its broad `except`.
+                    // kwargs ride through with their JSON types intact
+                    // (`current_site=None` stays null, like `.delay`).
+                    let mut kwargs = Map::with_capacity(4);
+                    kwargs.insert(
+                        "webhook_id".to_owned(),
+                        Value::String(webhook_id.to_string()),
+                    );
+                    kwargs.insert(
+                        "receiver_id".to_owned(),
+                        webhook
+                            .created_by_id
+                            .map(|id| Value::String(id.to_string()))
+                            .unwrap_or(Value::Null),
+                    );
+                    kwargs.insert("reason".to_owned(), Value::String(error));
+                    kwargs.insert("current_site".to_owned(), call.current_site.clone());
+                    let email = crate::queue::NewJob::new(
+                        DEACTIVATION_EMAIL_TASK_NAME.to_owned(),
+                        Value::Array(Vec::new()),
+                        Value::Object(kwargs),
+                    );
+                    if let Err(error) = crate::queue::enqueue(pool, &email).await {
+                        return SendOutcome::Fail {
+                            error: error.to_string(),
+                        };
                     }
                     SendOutcome::Ack
                 }
@@ -1043,8 +1095,14 @@ pub const DEACTIVATION_HTML_SOURCE: &str =
 /// `except`), then the shared mail send (which swallows internally).
 /// Always acks — bind `TypeError` parks via the handler, like Python.
 pub async fn run_deactivation_email(pool: &sqlx::PgPool, call: &DeactivationEmailCall) {
-    let webhook_id = call.webhook_id.as_str().and_then(|raw| raw.parse::<uuid::Uuid>().ok());
-    let receiver_id = call.receiver_id.as_str().and_then(|raw| raw.parse::<uuid::Uuid>().ok());
+    let webhook_id = call
+        .webhook_id
+        .as_str()
+        .and_then(|raw| raw.parse::<uuid::Uuid>().ok());
+    let receiver_id = call
+        .receiver_id
+        .as_str()
+        .and_then(|raw| raw.parse::<uuid::Uuid>().ok());
     let (Some(webhook_id), Some(receiver_id)) = (webhook_id, receiver_id) else {
         tracing::error!(target: "pi_dash.exception", task = DEACTIVATION_EMAIL_TASK_NAME, "invalid ids");
         return;
@@ -1055,9 +1113,8 @@ pub async fn run_deactivation_email(pool: &sqlx::PgPool, call: &DeactivationEmai
             .fetch_optional(pool)
             .await
             .unwrap_or(None);
-    let receiver_email: Option<String> = receiver.and_then(|row| {
-        row.try_get("email").unwrap_or(None)
-    });
+    let receiver_email: Option<String> =
+        receiver.and_then(|row| row.try_get("email").unwrap_or(None));
     let webhook: Option<sqlx::postgres::PgRow> =
         sqlx::query("SELECT id, url, workspace_id FROM webhooks WHERE id = $1")
             .bind(webhook_id)
@@ -1072,20 +1129,14 @@ pub async fn run_deactivation_email(pool: &sqlx::PgPool, call: &DeactivationEmai
         );
         return;
     };
-    let url: String = {
-        webhook.get("url")
-    };
-    let workspace_id: uuid::Uuid = {
-        webhook.get("workspace_id")
-    };
+    let url: String = { webhook.get("url") };
+    let workspace_id: uuid::Uuid = { webhook.get("workspace_id") };
     let slug: Option<String> = sqlx::query("SELECT slug FROM workspaces WHERE id = $1")
         .bind(workspace_id)
         .fetch_optional(pool)
         .await
         .unwrap_or(None)
-        .and_then(|row| {
-                row.try_get("slug").unwrap_or(None)
-        });
+        .and_then(|row| row.try_get("slug").unwrap_or(None));
     let Some(slug) = slug else {
         tracing::error!(target: "pi_dash.exception", task = DEACTIVATION_EMAIL_TASK_NAME, "workspace missing");
         return;
@@ -1100,13 +1151,14 @@ pub async fn run_deactivation_email(pool: &sqlx::PgPool, call: &DeactivationEmai
             deactivation_webhook_url(&current_site, &slug, &webhook_id.to_string()),
         ),
     ]);
+    // Success log (`:247`): `logger.info("Email sent successfully.")`.
     crate::tasks_mail::mail_send::send_mail(
         pool,
         DEACTIVATION_HTML_SOURCE,
         DEACTIVATION_SUBJECT,
         &context,
         &receiver_email,
-        "Deactivation email sent successfully",
+        "Email sent successfully.",
     )
     .await;
 }
@@ -1124,19 +1176,18 @@ pub fn register_webhook_send_task(
         Box::pin(async move {
             let outcome = match parse_webhook_send_call(&job.args, &job.kwargs) {
                 Err(error) => {
-                    return Ok(crate::worker::Verdict::Fail { error: format!("TypeError: {}", error.0) });
+                    return Ok(crate::worker::Verdict::Fail {
+                        error: format!("TypeError: {}", error.0),
+                    });
                 }
-                Ok(call) => {
-                    run_webhook_send(pools.primary(), mongo.as_ref(), &job, &call).await
-                }
+                Ok(call) => run_webhook_send(pools.primary(), mongo.as_ref(), &job, &call).await,
             };
             Ok(match outcome {
                 SendOutcome::Ack => crate::worker::Verdict::Ack,
                 SendOutcome::Retry { delay_secs } => crate::worker::Verdict::Retry { delay_secs },
                 SendOutcome::Fail { error } => crate::worker::Verdict::Fail { error },
             })
-        })
-            as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
     });
     registry.register(WEBHOOK_SEND_TASK_NAME, handler);
 }
@@ -1158,8 +1209,7 @@ pub fn register_deactivation_email_task(
                     Ok(crate::worker::Verdict::Ack)
                 }
             }
-        })
-            as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
     });
     registry.register(DEACTIVATION_EMAIL_TASK_NAME, handler);
 }

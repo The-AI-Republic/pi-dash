@@ -26,13 +26,11 @@ What maps where (``celery_wire`` -> ``rust_queue``):
 - ``celery_wire.publish(task, args, kwargs)`` ->
   ``rust_queue.publish(...)`` (same task name, same args/kwargs).
 - ``broker_probe.wait_for_queue_drain`` -> ``rust_queue.wait_for_settled``
-  per job (the Postgres row is acked/deleted once the worker forwards
-  it) plus a ``broker_probe.queue_depth`` delta proving the message
-  arrived on the broker ``celery`` queue for the Python plane.
+  per job (the Postgres row is deleted once the worker finishes it).
 - ``test_worker_registration`` (Celery inspect) ->
-  ``test_rust_worker_liveness`` below: a no-op track_event job must be
-  consumed from ``rust_job_queue``, proving a Rust worker (not Django)
-  is serving this database.
+  ``test_rust_worker_liveness`` below: a webhook-send job must settle
+  from ``rust_job_queue`` and POST to the harness sink, proving a Rust
+  worker (not Django) is serving this database.
 
 What is NOT duplicated here: the static parity tests (wire payload,
 retry options, beat entries, fan-out call sites) are
@@ -40,34 +38,19 @@ backend-independent — they assert on Django source text and the
 in-process wire builder, so they already pass with no worker at all.
 Only the live worker tests have a replay form.
 
-Ownership split (mirrors the worker registry on rust-dev): 7 of the
-11 D-08 task names are Rust-owned — ``process_logs`` (PIDASHCONV-260),
+Ownership split (mirrors the worker registry on rust-dev): all 11
+D-08 task names are Rust-owned — ``process_logs`` (PIDASHCONV-260),
 ``archive_and_close_old_issues`` (PIDASHCONV-837),
-``issue_activity`` (PIDASHCONV-836), plus ``track_event``,
+``issue_activity`` (PIDASHCONV-836), ``track_event``,
 ``page_transaction``, ``recent_visited_task`` and
-``crawl_work_item_link_title`` (PIDASHCONV-1107 wires
-``register_sink_tasks``, ``register_visit_page_handlers`` and
-``register_link_crawl_handler`` in ``register_oss_handlers``).
-``crates/jobs/src/tasks_webhooks/mod.rs``
-keeps the webhook send/fan-out path Python-owned deliberately
-(registering a local send handler would steal live traffic while the
-webhook-row fetch, HTTP send and SMTP send still live on Python;
-PIDASHCONV-1105 ports those four names).
-Every test below except the owned-cases (seven tasks, nine tests:
-``test_rust_process_logs_executes_locally``,
-``test_rust_archive_and_close_executes_locally``,
-``test_rust_issue_activity_executes_locally``,
-``test_rust_track_event_executes_locally``,
-``test_rust_track_event_assigns_workspace_role``,
-``test_rust_recent_visited_executes_locally``,
-``test_rust_page_transaction_executes_locally``,
-``test_rust_page_transaction_url_src_inserts_nothing`` and
-``test_rust_crawl_link_executes_locally``)
-therefore asserts observable AMQP forwarding — the
-``rust_job_queue`` row is acked AND the broker ``celery`` queue grows
-while the Django worker is stopped — instead of local DB effects, plus
-a no-local-row pin proving the Rust worker never executes these jobs
-itself. No skipped or weakened assertions.
+``crawl_work_item_link_title`` (PIDASHCONV-1107), plus the four
+``webhook_task`` names (PIDASHCONV-1105 wires
+``register_webhook_send_task``, ``register_deactivation_email_task``,
+``register_webhook_activity_task`` and ``register_model_activity_task``
+in ``register_oss_handlers``). Every test below asserts local
+execution — the same DB effects and sink captures the Django oracle
+pins — with the Django worker stopped, so a forward could never
+produce them. No skipped or weakened assertions.
 
 process_logs note (PIDASHCONV-242, decided EXECUTE; PIDASHCONV-260
 registers it): canonical Django (settings.local, the CI worker-plane
@@ -86,8 +69,16 @@ standalone note (PIDASHCONV-1107 registers track_event, page_transaction,
 recent_visited_task and crawl_work_item_link_title): the forward pins
 for those four are gone; the ``*_executes_locally`` tests below assert
 the same DB effects and sink captures the Django oracle pins. The
-liveness probe moved to ``WEBHOOK_SEND`` (still Python-owned); the
 PostHog sink assertions need the replay job's ``POSTHOG_*`` env.
+
+standalone note 2 (PIDASHCONV-1105 registers the four ``webhook_task``
+names): the last forward pins are gone too. The liveness probe stays
+on ``WEBHOOK_SEND`` but now asserts local execution (settle + sink
+POST); the ``test_rust_webhook_*`` / ``test_rust_activity_*`` /
+``test_rust_deactivation_*`` tests mirror the oracle's send, failure,
+redelivery, chain, midpoint, signature, exhaustion and mail cases.
+The ``webhook_sink`` / ``smtp_sink`` fixtures serve both suites from
+their session defaults — no replay-job env needed.
 
 Beat note: D-08 owns no beat entries (``test_no_beat_entries_owned`` —
 cleanup owns the webhook-log delete; the daily
@@ -97,15 +88,18 @@ static test does not count as owned). Beat pins are source-text, so
 there is no replay form.
 """
 
+import ast
+import hashlib
+import hmac
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from _harness import broker_probe, rust_queue
+from _harness import config, rust_queue
 from _harness import seed as seed_helpers
-from _harness.db import diff as _diff
 from _harness.db import insert_row
 from _harness.db import snapshot, wait_for_condition as wait_for
+from psycopg.types.json import Json
 
 M = "pi_dash.bgtasks"
 
@@ -122,52 +116,30 @@ PROCESS_LOGS = f"{M}.logger_task.process_logs"
 TRACK_EVENT = f"{M}.event_tracking_task.track_event"
 
 
-def _publish_and_observe_forward(task_name, args=None, kwargs=None):
-    """Publish one job; assert the Rust worker forwarded it to Python.
-
-    Returns the celery id. The ``rust_job_queue`` row must be settled
-    (acked on AMQP publish) and the broker ``celery`` queue must grow —
-    it grows because the Django worker is stopped. Growth is a lower
-    bound, not an exact delta: the worker's scheduler loop also
-    forwards its own unregistered entries over the same broker, so
-    concurrent scheduler traffic can only add messages. Settlement of
-    our row is the precise per-job proof; a requeued (unforwarded) job
-    would never settle.
-    """
-    baseline = broker_probe.queue_depth()
-    celery_id = rust_queue.publish(task_name, args=args, kwargs=kwargs)
-    rust_queue.wait_for_settled(celery_id, what=f"{task_name} forwarded")
-    arrived = broker_probe.queue_depth()
-    assert arrived >= baseline + 1, (
-        f"{task_name} was consumed from rust_job_queue but no message "
-        f"arrived on the broker (depth {baseline} -> {arrived})"
-    )
-    return celery_id
-
-
-def test_rust_worker_liveness(db_conn, broker_url):
-    """Rust inspect-equivalent: a still-forwarded job is consumed.
+def test_rust_worker_liveness(db_conn, broker_url, webhook_sink):
+    """Rust inspect-equivalent: an owned send job settles and POSTs.
 
     Replaces ``test_worker_registration`` (Celery broadcast inspect,
     which only a Django worker answers). Settlement of the
-    ``rust_job_queue`` row proves the Rust worker owns the queue; a
-    Django worker never reads that table. The probe is a webhook-send
-    job (still Python-owned since PIDASHCONV-1107 owns track_event).
+    ``rust_job_queue`` row proves a Rust worker owns the queue (a
+    Django worker never reads that table); the sink POST proves it
+    executed the job locally instead of forwarding it.
     """
-    hook = _seed_hook(db_conn)
-    _publish_and_observe_forward(
+    hook = _seed_sink_hook(db_conn)
+    webhook_sink.clear()
+    celery_id = rust_queue.publish(
         WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-liveness")
     )
+    rust_queue.wait_for_settled(celery_id, what="liveness send settled")
+    webhook_sink.wait_for_count(1, what="liveness webhook POST")
 
 
-def _seed_hook(db_conn):
-    # No webhook_sink fixture here: nothing POSTs while the Django
-    # worker is stopped, so the URL is never fetched — it only has to
-    # be a well-formed row.
+def _seed_sink_hook(db_conn, **flags):
+    """Workspace + active hook pointing at the harness sink (PIDASHCONV-1105)."""
     owner = seed_helpers.user(db_conn, "rust-replay-hook-owner")
     workspace = seed_helpers.workspace(db_conn, "rustreplayhook", owner["id"])
-    url = f"https://example.com/hook/{uuid.uuid4().hex}"
-    hook = seed_helpers.webhook(db_conn, workspace["id"], url, issue=True)
+    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    hook = seed_helpers.webhook(db_conn, workspace["id"], url, issue=True, **flags)
     hook = dict(hook)
     hook["workspace_slug"] = workspace["slug"]
     hook["owner_id"] = owner["id"]
@@ -186,80 +158,116 @@ def _send_kwargs(hook, probe_id):
     }
 
 
-def test_rust_webhook_send_forwards_to_python(db_conn, broker_url):
-    """Send path, Rust side: forward, never execute locally.
+def test_rust_webhook_send_executes_locally(db_conn, broker_url, webhook_sink):
+    """Send path, Rust side: EXECUTE locally (PIDASHCONV-1105).
 
     Mirrors ``test_webhook_send_success`` (same payload incl. the
-    header-spaces bug surface): the sink POST and the ``webhook_logs``
-    row are Python-plane effects, so the replay pins forwarding plus a
-    no-local-row pin — the Rust worker must not write the log row
-    itself.
+    header-spaces bug surface): the Rust worker POSTs through the raw
+    requests-faithful client and writes the ``webhook_logs`` row
+    itself. Settlement plus the sink receipt plus the row diff is the
+    proof: with the Django worker stopped, a forward could never
+    produce a local POST or a local row.
     """
-    hook = _seed_hook(db_conn)
+    hook = _seed_sink_hook(db_conn)
+    webhook_sink.clear()
     before = snapshot(db_conn, ["webhook_logs"])
-    _publish_and_observe_forward(
+    celery_id = rust_queue.publish(
         WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-probe")
     )
-    assert _diff(before, snapshot(db_conn, ["webhook_logs"])) == {}
+    rust_queue.wait_for_settled(celery_id, what=f"{WEBHOOK_SEND} executed")
+    (delivery,) = webhook_sink.wait_for_count(1, what="webhook POST")
+    assert delivery["headers"].get("Content-Type") == "application/json"
+    assert delivery["headers"].get("User-Agent") == "Autopilot"
+    assert "X-Pi Dash-Event" not in delivery["headers"]
+    assert "X-Pi Dash-Delivery" not in delivery["headers"]
+    assert "X-Pi Dash-Signature" not in delivery["headers"]
+    assert delivery["body"] == ""
+
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="webhook_logs row",
+    )
+    assert str(row["response_status"]) == "200"
+    assert row["retry_count"] == 0
+    assert row["request_method"] == "create"
+    assert "X-Pi Dash-Event" in row["request_headers"]
+    assert "rust-replay-probe" in row["request_body"]
+    assert "create" in row["request_body"]
 
 
-def test_rust_webhook_failure_forwards_without_local_log_row(db_conn, broker_url):
-    """First-attempt failure, Rust side: same forward, no local row.
+def test_rust_webhook_failure_executes_locally(db_conn, broker_url, webhook_sink):
+    """First-attempt failure, Rust side: same 500 row, no retry (PIDASHCONV-1105).
 
-    Mirrors ``test_webhook_send_failure_logs_retry_count``: with no
-    sink in the loop there is no 500 to observe — the payload is
-    byte-identical to the success path apart from the probe id — so the
-    replay pins that the job still forwards exactly once and writes no
-    local ``webhook_logs`` row. Retry timing stays pinned statically
+    Mirrors ``test_webhook_send_failure_logs_retry_count``: a 500
+    *response* is the success path (only transport errors retry), so
+    the Rust worker logs the failure row with ``retry_count`` 0 and
+    acks. Retry timing stays pinned statically
     (``test_retry_options_parity``).
     """
-    hook = _seed_hook(db_conn)
+    hook = _seed_sink_hook(db_conn)
+    webhook_sink.clear()
+    webhook_sink.fail_next(100)
     before = snapshot(db_conn, ["webhook_logs"])
-    _publish_and_observe_forward(
+    celery_id = rust_queue.publish(
         WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-fail")
     )
-    assert _diff(before, snapshot(db_conn, ["webhook_logs"])) == {}
+    rust_queue.wait_for_settled(celery_id, what=f"{WEBHOOK_SEND} executed")
+    webhook_sink.wait_for_count(1, what="failed webhook POST")
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="failure webhook_logs row",
+    )
+    assert row["retry_count"] == 0
+    assert str(row["response_status"]) == "500"
 
 
-def test_rust_webhook_redelivery_forwards_twice(db_conn, broker_url):
-    """Redelivery: two publishes → two broker messages, nothing local.
+def test_rust_webhook_redelivery_executes_locally(db_conn, broker_url, webhook_sink):
+    """Redelivery: two publishes → two POSTs, two rows (PIDASHCONV-1105).
 
     Mirrors ``test_webhook_redelivery_posts_twice_with_identical_bodies``:
     Django intends distinct per-execution delivery ids, but the
     ``X-Pi Dash-Delivery`` header never reaches the wire, so parity is
-    two identical forwards. Both ``rust_job_queue`` rows settle and the
-    broker grows by at least two (lower bound — scheduler traffic can
-    only add); no local ``webhook_logs`` rows appear.
+    two POSTs with identical (empty) bodies plus two ``webhook_logs``
+    rows. Both ``rust_job_queue`` rows settle.
     """
-    hook = _seed_hook(db_conn)
+    hook = _seed_sink_hook(db_conn)
+    webhook_sink.clear()
     kwargs = _send_kwargs(hook, "rust-replay-redelivery")
     before = snapshot(db_conn, ["webhook_logs"])
-    baseline = broker_probe.queue_depth()
     celery_ids = [
         rust_queue.publish(WEBHOOK_SEND, kwargs=dict(kwargs)) for _ in range(2)
     ]
     for celery_id in celery_ids:
-        rust_queue.wait_for_settled(celery_id, what="redelivered webhook forwarded")
-    assert broker_probe.queue_depth() >= baseline + 2
-    assert _diff(before, snapshot(db_conn, ["webhook_logs"])) == {}
+        rust_queue.wait_for_settled(celery_id, what="redelivered webhook executed")
+    deliveries = webhook_sink.wait_for_count(2, what="redelivered webhook POSTs")
+    assert all("X-Pi Dash-Delivery" not in d["headers"] for d in deliveries)
+    assert [d["body"] for d in deliveries] == [""] * 2
+    logged = wait_for(
+        lambda: _logs_with_count(db_conn, before, 2),
+        what="two redelivered webhook_logs rows",
+    )
+    assert all(str(r["response_status"]) == "200" for r in logged)
 
 
-def test_rust_activity_chain_entry_forwards_to_python(db_conn, broker_url):
-    """Chain entry, Rust side: model_activity forwards; chain runs on Python.
+def test_rust_activity_chain_executes_locally(db_conn, broker_url, webhook_sink):
+    """Chain entry, Rust side: the whole fan-out runs locally (PIDASHCONV-1105).
 
     Mirrors ``test_activity_chain_fans_out_to_sink`` (same seed, same
-    positional payload): the fan-out (model → webhook_activity → send →
-    sink POST) executes on the Python plane, so the replay pins the
-    entry-point forward plus no local ``webhook_logs`` row.
+    positional payload): ``model_activity`` enqueues
+    ``webhook_activity`` into ``rust_job_queue``, which renders
+    ``get_model_data`` live and enqueues the sends — the sink POST and
+    the ``webhook_logs`` row prove every link ran with the Django
+    worker stopped.
     """
-    # model_id must be a real issue, mirroring the oracle: the payload
-    # must be executable when the Python plane eventually runs it.
+    # model_id must be a real issue: webhook_activity serializes it via
+    # get_model_data, and a miss swallows the fan-out (no POST).
     chain = seed_helpers.issue_chain(db_conn, "rustreplaychain")
     owner, workspace, issue = chain["owner"], chain["workspace"], chain["issue"]
-    url = f"https://example.com/hook/{uuid.uuid4().hex}"
+    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
     seed_helpers.webhook(db_conn, workspace["id"], url, issue=True)
+    webhook_sink.clear()
     before = snapshot(db_conn, ["webhook_logs"])
-    _publish_and_observe_forward(
+    celery_id = rust_queue.publish(
         MODEL_ACTIVITY,
         args=[
             "issue",
@@ -271,14 +279,31 @@ def test_rust_activity_chain_entry_forwards_to_python(db_conn, broker_url):
             "example.com",
         ],
     )
-    assert _diff(before, snapshot(db_conn, ["webhook_logs"])) == {}
+    rust_queue.wait_for_settled(celery_id, what=f"{MODEL_ACTIVITY} executed")
+    (delivery,) = webhook_sink.wait_for_count(1, what="chained webhook POST")
+    assert delivery["body"] == ""
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="chained webhook_logs row",
+    )
+    assert row["event_type"] == "issue"
 
 
-def test_rust_webhook_activity_forwards_to_python(db_conn, broker_url):
-    """Fan-out midpoint, Rust side: forwards with the oracle arg shape."""
+def test_rust_webhook_activity_executes_locally(db_conn, broker_url, webhook_sink):
+    """Fan-out midpoint, Rust side: EXECUTE locally (PIDASHCONV-1105).
+
+    Publishes ``webhook_activity`` directly in the oracle arg shape (the
+    kwargs ``model_activity`` passes on the created path,
+    ``webhook_task.py:467-480``): the Rust worker renders the issue via
+    ``get_model_data`` and the send POSTs to the sink.
+    """
     chain = seed_helpers.issue_chain(db_conn, "rustreplayfanout")
     owner, workspace, issue = chain["owner"], chain["workspace"], chain["issue"]
-    _publish_and_observe_forward(
+    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    seed_helpers.webhook(db_conn, workspace["id"], url, issue=True)
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    celery_id = rust_queue.publish(
         WEBHOOK_ACTIVITY,
         kwargs={
             "event": "issue",
@@ -289,22 +314,27 @@ def test_rust_webhook_activity_forwards_to_python(db_conn, broker_url):
             "actor_id": str(owner["id"]),
             "slug": workspace["slug"],
             "current_site": "example.com",
-            # Required by the Python signature (webhook_task.py:378-390);
-            # same values model_activity passes on the created path, so the
-            # forwarded payload stays executable on the Python plane.
             "event_id": str(issue["id"]),
             "old_identifier": None,
             "new_identifier": None,
         },
     )
+    rust_queue.wait_for_settled(celery_id, what=f"{WEBHOOK_ACTIVITY} executed")
+    webhook_sink.wait_for_count(1, what="fan-out webhook POST")
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="fan-out webhook_logs row",
+    )
+    assert row["event_type"] == "issue"
+    assert str(row["response_status"]) == "200"
 
 
-def test_rust_deactivation_email_forwards_to_python(db_conn, broker_url):
-    """Deactivation mail, Rust side: forward; SMTP sends on Python.
+def test_rust_deactivation_email_executes_locally(db_conn, broker_url, smtp_sink):
+    """Deactivation mail, Rust side: EXECUTE locally (PIDASHCONV-1105).
 
     Mirrors ``test_deactivation_email_delivers`` (same positional
-    payload): the SMTP receipt is a Python-plane effect, so the replay
-    pins the forward.
+    payload): the Rust worker renders the shared template and SMTPs it
+    through the live mail send seam.
     """
     owner = seed_helpers.user(db_conn, "rust-replay-deact-owner")
     receiver = seed_helpers.user(db_conn, "rust-replay-deact-receiver")
@@ -313,10 +343,148 @@ def test_rust_deactivation_email_forwards_to_python(db_conn, broker_url):
         db_conn, workspace["id"], "https://example.com/hook",
         created_by_id=str(owner["id"]),
     )
-    _publish_and_observe_forward(
+    smtp_sink.clear()
+    celery_id = rust_queue.publish(
         DEACTIVATION_EMAIL,
         args=[str(hook["id"]), str(receiver["id"]), "example.com", "contract reason"],
     )
+    rust_queue.wait_for_settled(celery_id, what=f"{DEACTIVATION_EMAIL} executed")
+    delivered = smtp_sink.wait_for_count(1, what="deactivation mail")
+    assert any(receiver["email"] in m["rcpt_tos"] for m in delivered)
+    assert any(m["subject"] == "Webhook Deactivated" for m in delivered)
+
+
+def _expected_payload(hook, probe_id):
+    """The delivery envelope the send task signs and POSTs (PIDASHCONV-1105)."""
+    return {
+        "event": "issue",
+        "action": "create",
+        "webhook_id": str(hook["id"]),
+        "workspace_id": str(hook["workspace_id"]),
+        "data": {"id": probe_id},
+        "activity": None,
+    }
+
+
+def _expected_signature(secret, payload):
+    return hmac.new(
+        secret.encode("utf-8"),
+        json.dumps(payload).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def test_rust_webhook_send_signature_logged(db_conn, broker_url, webhook_sink):
+    """Fixed secret, Rust side: identical HMAC over the envelope (PIDASHCONV-1105).
+
+    Mirrors ``test_webhook_send_signature_logged``: the logged
+    ``X-Pi Dash-Signature`` must equal the same recomputation, and the
+    logged headers/body must parse (``ast.literal_eval``) to the same
+    ordered dicts — pinning the signature input bytes, the HMAC, and
+    the ``str()`` log rendering on both backends.
+    """
+    hook = _seed_sink_hook(db_conn, secret_key="contract-secret-1105")
+    probe_id = "rust-replay-signature"
+    payload = _expected_payload(hook, probe_id)
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    celery_id = rust_queue.publish(
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, probe_id)
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{WEBHOOK_SEND} executed")
+    webhook_sink.wait_for_count(1, what="signed webhook POST")
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="signed webhook_logs row",
+    )
+    logged_headers = ast.literal_eval(row["request_headers"])
+    assert list(logged_headers) == [
+        "Content-Type",
+        "User-Agent",
+        "X-Pi Dash-Delivery",
+        "X-Pi Dash-Event",
+        "X-Pi Dash-Signature",
+    ]
+    assert logged_headers["X-Pi Dash-Signature"] == _expected_signature(
+        "contract-secret-1105", payload
+    )
+    logged_body = ast.literal_eval(row["request_body"])
+    assert list(logged_body) == [
+        "event",
+        "action",
+        "webhook_id",
+        "workspace_id",
+        "data",
+        "activity",
+    ]
+    assert logged_body == payload
+
+
+def test_rust_webhook_send_exhaustion_deactivates(db_conn, broker_url, smtp_sink):
+    """Retries exhausted, Rust side: same row, disable, mail (PIDASHCONV-1105).
+
+    Mirrors ``test_webhook_send_exhaustion_deactivates``: the row lands
+    with ``attempts=5`` preset (a redelivered sixth attempt) against a
+    refused URL, so the transport error takes the
+    ``attempts >= max_retries`` arm directly — failure row, webhook
+    flipped ``is_active`` with ``updated_at`` untouched, deactivation
+    mail to the creator. No retry is scheduled.
+    """
+    owner = seed_helpers.user(db_conn, "rust-replay-exhaust-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplayexhaust", owner["id"])
+    hook = seed_helpers.webhook(
+        db_conn,
+        workspace["id"],
+        f"http://127.0.0.1:9/{uuid.uuid4().hex}",
+        issue=True,
+        created_by_id=str(owner["id"]),
+    )
+    hook = dict(hook)
+    hook["workspace_slug"] = workspace["slug"]
+    before_hooks = snapshot(db_conn, ["webhooks"])["webhooks"][str(hook["id"])]
+    before = snapshot(db_conn, ["webhook_logs"])
+    smtp_sink.clear()
+    celery_id = str(uuid.uuid4())
+    kwargs = _send_kwargs(hook, "rust-replay-exhaustion")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO rust_job_queue "
+            "(celery_id, task, args, kwargs, queue, visible_at, attempts, max_retries) "
+            "VALUES (%s, %s, %s, %s, 'celery', now(), 5, 5)",
+            (celery_id, WEBHOOK_SEND, Json([]), Json(kwargs)),
+        )
+    db_conn.commit()
+    rust_queue.wait_for_settled(celery_id, what="exhausted send settled")
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="exhaustion webhook_logs row",
+    )
+    assert row["retry_count"] == 5
+    assert str(row["response_status"]) == "500"
+    assert row["response_headers"] == ""
+    assert "refused" in row["response_body"].lower()
+
+    def _deactivated():
+        current = snapshot(db_conn, ["webhooks"])["webhooks"][str(hook["id"])]
+        return current if current["is_active"] is False else None
+
+    deactivated = wait_for(_deactivated, what="webhook deactivation")
+    assert deactivated["updated_at"] == before_hooks["updated_at"]
+
+    delivered = smtp_sink.wait_for_count(1, what="exhaustion deactivation mail")
+    assert any(owner["email"] in m["rcpt_tos"] for m in delivered)
+    assert any(m["subject"] == "Webhook Deactivated" for m in delivered)
+
+
+def _log_diff_rows(conn, before):
+    after = snapshot(conn, ["webhook_logs"])["webhook_logs"]
+    new_keys = set(after) - set(before["webhook_logs"])
+    return [after[k] for k in new_keys]
+
+
+def _logs_with_count(conn, before, n):
+    rows = _log_diff_rows(conn, before)
+    return rows if len(rows) == n else None
 
 
 def _added_rows(conn, table, before):
