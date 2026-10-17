@@ -1204,43 +1204,23 @@ pub async fn execute_update_issue<S: ToolStore>(
         patch.parent_touched = true;
         patch.parent_id = new_parent.as_ref().map(|parent| parent.id);
     }
-    let (row, from_state) = store
-        .update_issue_row(&patch, &issue.id, &actor, &env.now)
+    // The resolved target view travels into the fused save: the store
+    // locks, saves, and — when the target differs from the locked
+    // row's pre-save state — drives the transition on the same
+    // transaction (`issues.py:334-381`, one atomic).
+    let to_view =
+        to_state.as_ref().map(
+            |state| pidash_services::orchestration::creation::StateView {
+                id: state.id,
+                name: state.name.clone(),
+                group: state.group.clone(),
+            },
+        );
+    let (row, drive_outcome) = store
+        .update_issue_row(&patch, &issue.id, to_view, &actor, &env.now)
         .await?;
-    // `to_state is not None and from_state != to_state` (`:373`): the
-    // ORM instances compare by pk, and a stateless issue always counts
-    // as changed.
-    let from_state_id = from_state.as_ref().map(|state| state.id);
-    let state_changed =
-        to_state.is_some() && from_state_id != to_state.as_ref().map(|state| state.id);
     let mut run_id: Option<String> = None;
-    if state_given && state_changed {
-        let to = to_state.as_ref().expect("changed implies a target");
-        // Name/group come from the locked row (`from_state =
-        // locked.state`, `issues.py:339`), not the pre-lock read —
-        // a concurrent edit may have moved the issue meanwhile.
-        let from_view =
-            from_state.map(
-                |state| pidash_services::orchestration::creation::StateView {
-                    id: state.id,
-                    name: state.name,
-                    group: state.group,
-                },
-            );
-        let outcome = store
-            .drive_transition(
-                &issue.id,
-                from_view,
-                pidash_services::orchestration::creation::StateView {
-                    id: to.id,
-                    name: to.name.clone(),
-                    group: to.group.clone(),
-                },
-                &actor,
-                Some(actor),
-                &env.now,
-            )
-            .await?;
+    if let Some(outcome) = drive_outcome {
         run_id = outcome.created_run_id.map(|id| id.to_string());
     }
     let identifier = tool_identifier(&row.project_identifier, row.sequence_id);
@@ -2053,8 +2033,9 @@ mod tests {
         transition_outcome: TransitionOutcome,
         created_comments: Mutex<Vec<NewCommentInput>>,
         record_writes: Mutex<Vec<(String, Vec<Value>)>>,
-        /// `from_state` views received by `drive_transition`, in call
-        /// order (pins the locked-row `from_view`).
+        /// `from_state` views received by the fused update drive and
+        /// `drive_transition`, in call order (pins the locked-row
+        /// `from_view`).
         transition_from: Mutex<Vec<Option<(Uuid, String, String)>>>,
         binding_configs: HashMap<(String, String, String), Value>,
         sync_creds: HashMap<(String, String), Value>,
@@ -2798,9 +2779,10 @@ mod tests {
             &self,
             patch: &IssuePatch,
             issue_id: &Uuid,
+            to_state: Option<pidash_services::orchestration::creation::StateView>,
             _actor_id: &Uuid,
             now: &DateTime<chrono::Utc>,
-        ) -> Result<(IssueRow, Option<LockedState>), StoreError> {
+        ) -> Result<(IssueRow, Option<TransitionOutcome>), StoreError> {
             self.updated_issues
                 .lock()
                 .unwrap()
@@ -2815,10 +2797,15 @@ mod tests {
                 // panic.
                 return Err(StoreError::Missing { model: "Issue" });
             };
-            let from_state = issue.state_id.map(|id| LockedState {
-                id,
-                name: issue.state_name.clone().unwrap_or_default(),
-                group: issue.state_group.clone().unwrap_or_default(),
+            // The "locked" read: the map row, not the pre-lock read
+            // (which `stale_pre_lock_state` may have staled).
+            let from_id = issue.state_id;
+            let from_view = issue.state_id.map(|id| {
+                (
+                    id,
+                    issue.state_name.clone().unwrap_or_default(),
+                    issue.state_group.clone().unwrap_or_default(),
+                )
             });
             let mut row = issue;
             if let Some(name) = &patch.name {
@@ -2847,7 +2834,18 @@ mod tests {
                 row.parent_id = patch.parent_id;
             }
             row.updated_at = *now;
-            Ok((row, from_state))
+            // The fused drive (`to_state is not None and from_state !=
+            // to_state`, `issues.py:373`): recorded exactly as the live
+            // store drives, so the transition assertions keep pinning
+            // the executor's target view.
+            let changed = to_state.as_ref().is_some_and(|to| from_id != Some(to.id));
+            if changed {
+                self.transitions.lock().unwrap().push(*issue_id);
+                self.transition_from.lock().unwrap().push(from_view);
+                Ok((row, Some(self.transition_outcome.clone())))
+            } else {
+                Ok((row, None))
+            }
         }
 
         async fn drive_transition(
@@ -4998,7 +4996,13 @@ mod tests {
         // `DoesNotExist` → internal, never a panic.
         let store = FixtureStore::standard();
         let error = store
-            .update_issue_row(&IssuePatch::default(), &uid(999), &uid(1), &store.env().now)
+            .update_issue_row(
+                &IssuePatch::default(),
+                &uid(999),
+                None,
+                &uid(1),
+                &store.env().now,
+            )
             .await
             .expect_err("unknown issue must miss");
         assert_eq!(error.message(), "Issue matching query does not exist.");
