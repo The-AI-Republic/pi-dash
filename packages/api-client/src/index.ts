@@ -808,3 +808,66 @@ export type {
   DesktopExchangeResult,
 } from "./contracts/cloud-session.js";
 export { CloudBillingPlan, getCloudBillingPlan } from "./contracts/cloud-billing.js";
+export {
+  CHAT_EVENT_STREAM_NAME,
+  CancelChatResult,
+  ChatApprovalDecision,
+  ChatApprovalKind,
+  ChatApprovalList,
+  ChatApprovalRequest,
+  ChatApprovalStatus,
+  ChatEvent,
+  ChatMessage,
+  ChatMessageList,
+  ChatMessageRole,
+  ChatMessageStatus,
+  ChatSession,
+  ChatSessionList,
+  ChatSessionRunner,
+  ChatSessionStatus,
+  WarmChatResult,
+  cancelChat,
+  chatEventsUrl,
+  closeChat,
+  createChatSession,
+  decideChatApproval,
+  getChatSession,
+  listChatApprovals,
+  listChatMessages,
+  listChatSessions,
+  sendChatMessage,
+  warmChatSession,
+} from "./contracts/runner-chat.js";
+export type { ChatSessionCreate, ChatSessionQuery } from "./contracts/runner-chat.js";
+export {
+  AGENT_AVAILABILITY_UNKNOWN,
+  DesktopEnrollResult,
+  checkAgentAvailability,
+  createDesktopEnroll,
+  deleteDesktopEnroll,
+} from "./contracts/desktop-runtime.js";
+export type { AgentAvailability, DesktopEnrollInput } from "./contracts/desktop-runtime.js";
+export {
+  DEFAULT_LOCAL_APPROVAL_MODE,
+  LocalApprovalMode,
+  LocalChatAppendEvent,
+  LocalChatDecision,
+  LocalChatErrorEvent,
+  LocalChatEventRecord,
+  LocalChatFrame,
+  LocalChatFrameApproval,
+  LocalChatFrameClosed,
+  LocalChatFrameCompleted,
+  LocalChatFrameEvent,
+  LocalChatFrameFailed,
+  LocalChatFrameMessageStarted,
+  LocalChatFrameStarted,
+  LocalChatNewSession,
+  LocalChatSessionRecord,
+} from "./contracts/local-chat.js";
+export type {
+  LocalChatErrorHandler,
+  LocalChatEventHandler,
+  LocalChatTransport,
+  LocalChatUnsubscribe,
+} from "./contracts/local-chat.js";

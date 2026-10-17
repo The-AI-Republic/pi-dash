@@ -572,6 +572,8 @@ def seed():
         note("instance-config", key, row_created)
 
     from pi_dash.runner.models import (  # noqa: E402
+        AgentChatApprovalRequest,
+        AgentChatSession,
         AgentRun,
         AgentRunEvent,
         AgentRunStatus,
@@ -925,6 +927,76 @@ def seed():
         runs_binding.last_run = seeded_run
         runs_binding.save(update_fields=["last_run", "updated_at"])
         note("scheduler-binding-last-run", str(seeded_run.pk), False)
+
+    # Runner chat (NEWFRONT-536): an online runner on the default pod plus
+    # a probe session carrying pending chat approvals. The chat suites
+    # create their own sessions through the API — accumulation is fine
+    # because a create never reuses a session that already has messages —
+    # but approvals have no creation endpoint, so the decide suite walks
+    # the seeded pool (one accept per run; the 400 probe is never
+    # consumed). The pool is repaired (not just created) so re-seeding
+    # restores it after runs decide rows.
+    pod = Pod.objects.filter(project=project, is_default=True, deleted_at__isnull=True).first()
+    if pod is None:
+        pod = Pod.objects.create(
+            workspace=workspace,
+            project=project,
+            name=f"{project.identifier} Default",
+            created_by=user,
+            is_default=True,
+        )
+        note("pod", pod.name, True)
+    else:
+        note("pod", pod.name, False)
+
+    runner, runner_created = Runner.objects.get_or_create(
+        pod=pod,
+        name="contract-chat-runner",
+        defaults={"owner": user, "workspace": workspace, "status": RunnerStatus.ONLINE},
+    )
+    if not runner_created and (runner.status != RunnerStatus.ONLINE or runner.owner_id != user.pk):
+        runner.status = RunnerStatus.ONLINE
+        runner.owner = user
+        runner.save(update_fields=["status", "owner", "updated_at"])
+        note("runner-repaired", runner.name, False)
+    else:
+        note("runner", runner.name, runner_created)
+
+    # The seed session stays the oldest on this runner: suites only add
+    # newer ones, so first() is stable across runs without a marker.
+    probe_session = (
+        AgentChatSession.objects.filter(workspace=workspace, runner=runner, created_by=user)
+        .order_by("created_at")
+        .first()
+    )
+    if probe_session is None:
+        probe_session = AgentChatSession.objects.create(
+            workspace=workspace, runner=runner, created_by=user, pod=pod
+        )
+        note("chat-session", str(probe_session.pk), True)
+    else:
+        note("chat-session", str(probe_session.pk), False)
+
+    for index in range(1, 6):
+        local_id = f"contract-approval-{index}"
+        approval, approval_created = AgentChatApprovalRequest.objects.get_or_create(
+            session=probe_session,
+            local_approval_id=local_id,
+            defaults={
+                "kind": ApprovalKind.COMMAND_EXECUTION,
+                "payload": {"command": "contract-probe"},
+                "reason": "Seeded probe.",
+            },
+        )
+        if not approval_created and approval.status != ApprovalStatus.PENDING:
+            approval.status = ApprovalStatus.PENDING
+            approval.decision_source = ""
+            approval.decided_by = None
+            approval.decided_at = None
+            approval.save(update_fields=["status", "decision_source", "decided_by", "decided_at"])
+            note("chat-approval-repaired", local_id, False)
+        else:
+            note("chat-approval", local_id, approval_created)
 
     return {
         "email": user.email,

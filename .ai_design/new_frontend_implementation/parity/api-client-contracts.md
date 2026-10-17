@@ -136,6 +136,14 @@ contract suites (`src/contract/*.contract.test.ts`) skip unless
 | Compiled prompt            | `getCompiledPrompt`                                                                                                                | `prompts.contract.test.ts` — workspace template assembles; personal override adds the automatic-runs variant, revert drops it (NEWFRONT-568)                                                                                                                                                    |
 | Prompt preview             | `previewPrompt`                                                                                                                    | `prompts.contract.test.ts` — saved render against an issue, draft render carries the draft text, scheduler render against an install; missing target 400s (NEWFRONT-568)                                                                                                                        |
 | Project automations        | `updateProject` (`archive_in`, `close_in`, `default_state`)                                                                        | `schedulers.contract.test.ts` — delay + cancelled-state PATCH round trip on a throwaway project; foreign state 400s (NEWFRONT-568)                                                                                                                                                              |
+| Chat sessions              | `listChatSessions`, `createChatSession`, `getChatSession`                                                                          | `runner-chat.contract.test.ts` — create then list-contains + get round trip (NEWFRONT-536)                                                                                                                                                                                                      |
+| Chat send/transcript       | `sendChatMessage`, `listChatMessages`                                                                                              | `runner-chat.contract.test.ts` — send answers 201 then list-contains; the turn reads back failed once dispatch fails offline (NEWFRONT-536)                                                                                                                                                     |
+| Chat warm/cancel/close     | `warmChatSession`, `cancelChat`, `closeChat`                                                                                       | `runner-chat.contract.test.ts` — warm ok on a turn-free session; cancel noop once dispatch fails offline; close red live on backend bug PDASHOSS01-307 (unguarded offline dispatch 500s; the close persists) (NEWFRONT-536)                                                                     |
+| Chat event stream          | `chatEventsUrl`, `ChatEvent`                                                                                                       | `runner-chat.contract.test.ts` — stored frame streams first with its sequence; `after=<seq>` opens a live stream (NEWFRONT-536)                                                                                                                                                                 |
+| Chat approvals             | `listChatApprovals`, `decideChatApproval`                                                                                          | `runner-chat.contract.test.ts` — seeded pool lists scoped + unscoped; `accept_for_session` 400s without deciding; accept-decide red live on backend bug PDASHOSS01-307 (same unguarded offline dispatch; the decision persists) (NEWFRONT-536)                                                  |
+| Agent availability         | `checkAgentAvailability`                                                                                                           | `desktop-runtime.contract.test.ts` — refusal reads as unavailable with the client marker, never throws (NEWFRONT-536)                                                                                                                                                                           |
+| Desktop enroll             | `createDesktopEnroll`, `deleteDesktopEnroll`                                                                                       | `desktop-runtime.contract.test.ts` — browser session refused 403; success shapes in stub tests (NEWFRONT-536)                                                                                                                                                                                   |
+| Local chat shapes          | `LocalChatSessionRecord`, `LocalChatEventRecord`, `LocalChatFrame`, `LocalChatTransport`                                           | stub tests only (`contracts.test.ts`) — no HTTP endpoint; the desktop slice implements the transport (NEWFRONT-536)                                                                                                                                                                             |
 
 ## From a clean checkout
 
@@ -163,14 +171,17 @@ python ../../packages/api-client/contract/seed-contracts.py
 python ../../packages/api-client/contract/seed-contracts.py --apply
 
 # 3. Serve it on a port of your own (do not reuse another run's port).
-python manage.py runserver 127.0.0.1:8123 --noreload
+#    uvicorn, not runserver: the chat event stream is an async view and
+#    runserver consumes its infinite iterator synchronously (the stream
+#    test hangs there). Serve the ASGI app instead.
+python -m uvicorn pi_dash.asgi:application --host 127.0.0.1 --port 8123
 
 # 4. Run the contract suites against it (from the repo root).
 export PIDASH_CONTRACT_BASE_URL="http://127.0.0.1:8123"
 pnpm --filter @pidash/api-client test
 ```
 
-Expected: unit tests pass and all contract tests run (not skip) and pass — except the favorite-list GET, which stays red until backend bug NEWFRONT-384 is fixed (the table above is the count).
+Expected: unit tests pass and all contract tests run (not skip) and pass — except the favorite-list GET (red until backend bug NEWFRONT-384 is fixed) and the chat close + chat accept-decide (red until backend bug PDASHOSS01-307 is fixed; the table above is the count).
 Unset `PIDASH_CONTRACT_BASE_URL` returns the package to unit-only mode.
 
 ## Notes

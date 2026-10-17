@@ -229,6 +229,38 @@ import {
   revertPromptSection,
   upsertPromptSection,
 } from "./contracts/prompts.js";
+import {
+  CHAT_EVENT_STREAM_NAME,
+  ChatEvent,
+  cancelChat,
+  chatEventsUrl,
+  closeChat,
+  createChatSession,
+  decideChatApproval,
+  getChatSession,
+  listChatApprovals,
+  listChatMessages,
+  listChatSessions,
+  sendChatMessage,
+  warmChatSession,
+} from "./contracts/runner-chat.js";
+import {
+  AGENT_AVAILABILITY_UNKNOWN,
+  checkAgentAvailability,
+  createDesktopEnroll,
+  deleteDesktopEnroll,
+} from "./contracts/desktop-runtime.js";
+import {
+  DEFAULT_LOCAL_APPROVAL_MODE,
+  LocalApprovalMode,
+  LocalChatAppendEvent,
+  LocalChatDecision,
+  LocalChatErrorEvent,
+  LocalChatEventRecord,
+  LocalChatFrame,
+  LocalChatNewSession,
+  LocalChatSessionRecord,
+} from "./contracts/local-chat.js";
 import { fakeResponse, recordingTransport } from "./client.test.js";
 import type { RecordedCall } from "./client.test.js";
 import { createPod, deletePod, getPod, listPods, updatePod } from "./contracts/pods.js";
@@ -5743,5 +5775,417 @@ describe("prompt contracts", () => {
     expect(posts).toHaveLength(2);
     expect(posts[0]?.url.endsWith("/prompts/coding-task/preview")).toBe(true);
     expect(posts[1]?.init.body).toContain(UUID2);
+  });
+});
+
+const CHAT_RUNNER_ECHO = {
+  id: UUID,
+  name: "Runner One",
+  status: "online",
+  // The echo carries the full runner row; the chat subset keeps three keys.
+  pod: UUID2,
+  os: "linux",
+  capabilities: ["chat"],
+};
+
+const CHAT_SESSION_ROW = {
+  id: UUID,
+  workspace: UUID2,
+  runner: UUID,
+  runner_detail: CHAT_RUNNER_ECHO,
+  created_by: UUID2,
+  pod: UUID,
+  status: "open",
+  agent_kind: "",
+  local_thread_id: "",
+  local_session_id: "",
+  cwd: "",
+  model: "",
+  active_turn_id: "",
+  active_message_id: null,
+  close_requested: false,
+  last_message_at: null,
+  closed_at: null,
+  error: "",
+  created_at: "2026-10-17T04:00:00.000Z",
+  updated_at: "2026-10-17T04:00:00.000Z",
+};
+
+const CHAT_MESSAGE_ROW = {
+  id: UUID2,
+  session: UUID,
+  role: "user",
+  content: "hello runner",
+  content_parts: [],
+  status: "queued",
+  local_item_id: "",
+  local_turn_id: "",
+  seq: 1,
+  created_at: "2026-10-17T04:01:00.000Z",
+  completed_at: null,
+};
+
+const CHAT_APPROVAL_ROW = {
+  id: UUID,
+  session: UUID2,
+  local_approval_id: "approval-1",
+  kind: "command_execution",
+  payload: { command: "ls" },
+  reason: "list the directory",
+  status: "pending",
+  decision_source: "",
+  decided_by: null,
+  requested_at: "2026-10-17T04:02:00.000Z",
+  expires_at: "2026-10-17T04:07:00.000Z",
+  decided_at: null,
+};
+
+describe("runner chat contracts", () => {
+  it("lists sessions with workspace, runner and project filters", async () => {
+    const transport = json([CHAT_SESSION_ROW]);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listChatSessions(client, { workspace: UUID2, runner: UUID, project: UUID });
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.status).toBe("open");
+    // The runner echo strips to the declared subset.
+    expect(parsed[0]?.runner_detail).toEqual({ id: UUID, name: "Runner One", status: "online" });
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.pathname).toBe("/api/runners/chat/sessions/");
+    expect(url.searchParams.get("workspace")).toBe(UUID2);
+    expect(url.searchParams.get("runner")).toBe(UUID);
+    expect(url.searchParams.get("project")).toBe(UUID);
+  });
+
+  it("lists sessions unfiltered without query params", async () => {
+    const transport = json([]);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(listChatSessions(client, {})).resolves.toEqual([]);
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.search).toBe("");
+  });
+
+  it("creates a session against a runner", async () => {
+    const transport = csrfThen(() => ({ status: 201, body: JSON.stringify(CHAT_SESSION_ROW) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await createChatSession(client, { workspace: UUID2, runner: UUID, model: "fast" });
+    expect(parsed.id).toBe(UUID);
+    const call = transport.calls.find((c) => c.url.endsWith("/api/runners/chat/sessions/"));
+    expect(call?.init.method).toBe("POST");
+    expect(call?.init.body).toBe(JSON.stringify({ workspace: UUID2, runner: UUID, model: "fast" }));
+  });
+
+  it("reads one session back by id", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json(CHAT_SESSION_ROW) });
+    const parsed = await getChatSession(client, UUID);
+    expect(parsed.runner).toBe(UUID);
+    expect(parsed.last_message_at).toBeNull();
+  });
+
+  it("lists the transcript in sequence order", async () => {
+    const reply = { ...CHAT_MESSAGE_ROW, id: UUID, role: "assistant", status: "completed", seq: 2 };
+    const client = createClient({ baseUrl: "https://api.test", transport: json([CHAT_MESSAGE_ROW, reply]) });
+    const parsed = await listChatMessages(client, UUID);
+    expect(parsed.map((row) => row.seq)).toEqual([1, 2]);
+    expect(parsed[1]?.completed_at).toBeNull();
+  });
+
+  it("sends a turn with empty parts", async () => {
+    const transport = csrfThen(() => ({ status: 201, body: JSON.stringify(CHAT_MESSAGE_ROW) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await sendChatMessage(client, UUID, "hello runner");
+    expect(parsed.content).toBe("hello runner");
+    const call = transport.calls.find((c) => c.url.endsWith(`/api/runners/chat/sessions/${UUID}/messages/`));
+    expect(call?.init.body).toBe(JSON.stringify({ content: "hello runner", content_parts: [] }));
+  });
+
+  it("warms a session and reports a skipped warm", async () => {
+    const warm = createClient({
+      baseUrl: "https://api.test",
+      transport: csrfThen(() => ({ status: 202, body: JSON.stringify({ ok: true }) })),
+    });
+    await expect(warmChatSession(warm, UUID)).resolves.toEqual({ ok: true });
+    const skipped = createClient({
+      baseUrl: "https://api.test",
+      transport: csrfThen(() => ({ status: 200, body: JSON.stringify({ ok: true, skipped: "chat_turn_active" }) })),
+    });
+    await expect(warmChatSession(skipped, UUID)).resolves.toEqual({ ok: true, skipped: "chat_turn_active" });
+  });
+
+  it("cancels with the default user-cancelled reason", async () => {
+    const transport = csrfThen(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(cancelChat(client, UUID)).resolves.toEqual({ ok: true });
+    const call = transport.calls.find((c) => c.url.endsWith(`/api/runners/chat/sessions/${UUID}/cancel/`));
+    expect(call?.init.body).toBe(JSON.stringify({ reason: "user_cancelled" }));
+  });
+
+  it("cancels with an explicit reason and reads the noop echo", async () => {
+    const transport = csrfThen(() => ({ status: 200, body: JSON.stringify({ ok: true, noop: true }) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(cancelChat(client, UUID, "close_requested")).resolves.toEqual({ ok: true, noop: true });
+    const call = transport.calls.find((c) => c.url.endsWith(`/api/runners/chat/sessions/${UUID}/cancel/`));
+    expect(call?.init.body).toBe(JSON.stringify({ reason: "close_requested" }));
+  });
+
+  it("closes a session and reads the closed row", async () => {
+    const closed = { ...CHAT_SESSION_ROW, status: "closed", closed_at: "2026-10-17T04:05:00.000Z" };
+    const transport = csrfThen(() => ({ status: 200, body: JSON.stringify(closed) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await closeChat(client, UUID);
+    expect(parsed.status).toBe("closed");
+    expect(parsed.closed_at).not.toBeNull();
+    const call = transport.calls.find((c) => c.url.endsWith(`/api/runners/chat/sessions/${UUID}/close/`));
+    expect(call?.init.body).toBe(JSON.stringify({}));
+  });
+
+  it("builds the event stream URL with and without resume", () => {
+    const client = createClient({ baseUrl: "https://api.test/", transport: json({}) });
+    expect(chatEventsUrl(client, UUID)).toBe(`https://api.test/api/runners/chat/sessions/${UUID}/events/`);
+    expect(chatEventsUrl(client, UUID, 0)).toBe(`https://api.test/api/runners/chat/sessions/${UUID}/events/`);
+    expect(chatEventsUrl(client, UUID, 41)).toBe(`https://api.test/api/runners/chat/sessions/${UUID}/events/?after=41`);
+    expect(CHAT_EVENT_STREAM_NAME).toBe("chat.event");
+  });
+
+  it("parses a streamed event frame", () => {
+    const parsed = ChatEvent.parse({
+      id: 7,
+      session: UUID,
+      message: UUID2,
+      seq: 7,
+      kind: "assistant_delta",
+      payload: { params: { delta: "hello" } },
+      created_at: "2026-10-17T13:02:05.479661+09:00",
+    });
+    expect(parsed.seq).toBe(7);
+    expect(parsed.message).toBe(UUID2);
+  });
+
+  it("lists pending chat approvals with and without a workspace", async () => {
+    const scoped = json([CHAT_APPROVAL_ROW]);
+    const scopedClient = createClient({ baseUrl: "https://api.test", transport: scoped });
+    const rows = await listChatApprovals(scopedClient, UUID2);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe("command_execution");
+    expect(new URL(scoped.calls[0]?.url ?? "").searchParams.get("workspace")).toBe(UUID2);
+
+    const unscoped = json([]);
+    const unscopedClient = createClient({ baseUrl: "https://api.test", transport: unscoped });
+    await expect(listChatApprovals(unscopedClient)).resolves.toEqual([]);
+    expect(new URL(unscoped.calls[0]?.url ?? "").search).toBe("");
+  });
+
+  it("decides a chat approval and reads the decided row", async () => {
+    const decided = { ...CHAT_APPROVAL_ROW, status: "accepted", decision_source: "web", decided_by: UUID2 };
+    const transport = csrfThen(() => ({ status: 200, body: JSON.stringify(decided) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await decideChatApproval(client, UUID, "accept");
+    expect(parsed.status).toBe("accepted");
+    expect(parsed.decided_by).toBe(UUID2);
+    const call = transport.calls.find((c) => c.url.endsWith(`/api/runners/chat/approvals/${UUID}/decide/`));
+    expect(call?.init.body).toBe(JSON.stringify({ decision: "accept" }));
+  });
+
+  it("rejects a session with an unknown status", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ ...CHAT_SESSION_ROW, status: "archived" }),
+    });
+    const error = await getChatSession(client, UUID).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
+const AGENT_PROFILE_ROW = {
+  managed_runner_enabled: true,
+  lane: "openhub",
+  base_url: "https://gateway.test/v1",
+  model: "contract-model",
+  available: true,
+  reason_code: "",
+  graceful_stop_seconds: 5,
+};
+
+describe("desktop runtime contracts", () => {
+  // The profile read and token mint live in assistant-desktop.js
+  // (NEWFRONT-577, merged first) with their own stub tests; this
+  // suite covers only the availability answer and enrollment.
+  it("reports an available engine without a reason code", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json(AGENT_PROFILE_ROW) });
+    await expect(checkAgentAvailability(client)).resolves.toEqual({ available: true, reasonCode: "" });
+  });
+
+  it("reports a disabled engine with the server reason code", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ ...AGENT_PROFILE_ROW, available: false, reason_code: "managed_runner_disabled" }),
+    });
+    await expect(checkAgentAvailability(client)).resolves.toEqual({
+      available: false,
+      reasonCode: "managed_runner_disabled",
+    });
+  });
+
+  it("reports an unreachable profile as unavailable with the marker", async () => {
+    const transport = recordingTransport(() => {
+      throw new Error("fetch failed");
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(checkAgentAvailability(client)).resolves.toEqual({
+      available: false,
+      reasonCode: AGENT_AVAILABILITY_UNKNOWN,
+    });
+  });
+
+  it("enrolls a desktop without an app version", async () => {
+    const enrolled = {
+      dev_machine_id: UUID,
+      machine_token: "machine-token",
+      workspace_slug: "acme",
+      managed_runner_enabled: true,
+      graceful_stop_seconds: 5,
+    };
+    const transport = csrfThen(() => ({ status: 201, body: JSON.stringify(enrolled) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await createDesktopEnroll(client, { workspaceSlug: "acme", hostLabel: "ada-mac" });
+    expect(parsed).toEqual(enrolled);
+    const call = transport.calls.find((c) => c.url.endsWith("/api/v1/runner/dev-machines/desktop-enroll/"));
+    expect(call?.init.body).toBe(JSON.stringify({ workspace_slug: "acme", host_label: "ada-mac" }));
+  });
+
+  it("enrolls a desktop with an app version", async () => {
+    const enrolled = {
+      dev_machine_id: UUID,
+      machine_token: "machine-token",
+      workspace_slug: "acme",
+      managed_runner_enabled: true,
+      graceful_stop_seconds: 5,
+    };
+    const transport = csrfThen(() => ({ status: 201, body: JSON.stringify(enrolled) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await createDesktopEnroll(client, { workspaceSlug: "acme", hostLabel: "ada-mac", appVersion: "1.2.3" });
+    const call = transport.calls.find((c) => c.url.endsWith("/api/v1/runner/dev-machines/desktop-enroll/"));
+    expect(call?.init.body).toBe(
+      JSON.stringify({ workspace_slug: "acme", host_label: "ada-mac", app_version: "1.2.3" })
+    );
+  });
+
+  it("deletes an enrollment by host label", async () => {
+    const transport = csrfThen(() => ({ status: 204, body: "" }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteDesktopEnroll(client, "ada-mac")).resolves.toBeUndefined();
+    const call = transport.calls.find((c) => c.url.includes("/api/v1/runner/dev-machines/desktop-enroll/"));
+    expect(call?.init.method).toBe("DELETE");
+    expect(new URL(call?.url ?? "").searchParams.get("host_label")).toBe("ada-mac");
+  });
+
+  it("deletes every enrollment without a host label", async () => {
+    const transport = csrfThen(() => ({ status: 204, body: "" }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteDesktopEnroll(client)).resolves.toBeUndefined();
+    const call = transport.calls.find((c) => c.url.includes("/api/v1/runner/dev-machines/desktop-enroll/"));
+    expect(new URL(call?.url ?? "").search).toBe("");
+  });
+});
+
+describe("local chat shapes", () => {
+  it("parses a stored session and a stored transcript row", () => {
+    const session = LocalChatSessionRecord.parse({
+      id: UUID,
+      title: "",
+      workspace: UUID2,
+      project: "pidash-builtin",
+      working_dir: "/home/ada/work",
+      engine_version: "1.0",
+      engine_thread_id: "thread-1",
+      created_at: 1760664000000,
+      updated_at: 1760664060000,
+    });
+    expect(session.engine_thread_id).toBe("thread-1");
+    const row = LocalChatEventRecord.parse({
+      id: UUID2,
+      session_id: UUID,
+      seq: 1,
+      role: "user",
+      content: "hello local",
+      tool_calls: null,
+      approval_decision: null,
+      created_at: 1760664000000,
+    });
+    expect(row.seq).toBe(1);
+  });
+
+  it("parses the session-create and event-append payloads", () => {
+    expect(LocalChatNewSession.parse({ title: "", workspace: "acme", project: "r1", engine_version: "" })).toEqual({
+      title: "",
+      workspace: "acme",
+      project: "r1",
+      engine_version: "",
+    });
+    expect(LocalChatAppendEvent.parse({ role: "assistant", content: "hi" })).toEqual({
+      role: "assistant",
+      content: "hi",
+    });
+    expect(LocalChatErrorEvent.parse({ chat_session_id: UUID, message: "boom" }).message).toBe("boom");
+  });
+
+  it("routes every daemon frame through the tagged union", () => {
+    const frames = [
+      {
+        result: "chat_started",
+        data: { chat_session_id: UUID, local_thread_id: "t1", started_at: "2026-10-17T04:00:00.000Z" },
+      },
+      {
+        result: "chat_message_started",
+        data: { chat_session_id: UUID, message_id: UUID2, started_at: "2026-10-17T04:00:01.000Z" },
+      },
+      {
+        result: "chat_event",
+        data: { chat_session_id: UUID, bridge_seq: 3, kind: "assistant_delta", payload: { params: {} } },
+      },
+      {
+        result: "chat_approval_request",
+        data: { chat_session_id: UUID, local_approval_id: "a1", kind: "command_execution", payload: {} },
+      },
+      {
+        result: "chat_message_completed",
+        data: {
+          chat_session_id: UUID,
+          message_id: UUID2,
+          status: "completed",
+          completed_at: "2026-10-17T04:00:09.000Z",
+        },
+      },
+      {
+        result: "chat_failed",
+        data: { chat_session_id: UUID, code: "engine_crashed", failed_at: "2026-10-17T04:00:09.000Z" },
+      },
+      { result: "chat_closed", data: { chat_session_id: UUID, closed_at: "2026-10-17T04:01:00.000Z" } },
+    ];
+    const tags = frames.map((frame) => LocalChatFrame.parse(frame).result);
+    expect(tags).toEqual([
+      "chat_started",
+      "chat_message_started",
+      "chat_event",
+      "chat_approval_request",
+      "chat_message_completed",
+      "chat_failed",
+      "chat_closed",
+    ]);
+  });
+
+  it("rejects a frame with an unknown tag", () => {
+    expect(() => LocalChatFrame.parse({ result: "chat_unknown", data: {} })).toThrow();
+  });
+
+  it("defaults the approval mode to full access", () => {
+    expect(DEFAULT_LOCAL_APPROVAL_MODE).toBe("full_access");
+    expect(LocalApprovalMode.parse("ask")).toBe("ask");
+    expect(LocalApprovalMode.parse("workspace")).toBe("workspace");
+    expect(() => LocalApprovalMode.parse("sometimes")).toThrow();
+  });
+
+  it("keeps the three-way local decision", () => {
+    expect(LocalChatDecision.parse("accept_for_session")).toBe("accept_for_session");
   });
 });
