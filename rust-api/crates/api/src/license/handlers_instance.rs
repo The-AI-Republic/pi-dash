@@ -940,8 +940,9 @@ async fn fetch_instance_by_id(
 
 /// Decode the PATCH body like DRF `_parse`: empty → `{}`; otherwise the
 /// content-type base (before `;`, trimmed, lowercased like Django's
-/// `parse_header_parameters`) must match the JSON parser — `*/*` and
-/// `application/*` match too — else 415; parse errors → 400 `detail`.
+/// `parse_header_parameters`) must match the JSON parser — `*/*`,
+/// `application/*`, and `*/json` match too — else 415; parse errors →
+/// 400 `detail`.
 fn patch_body(headers: &HeaderMap, body: &[u8]) -> Result<serde_json::Value, HandlerError> {
     if body.is_empty() {
         return Ok(serde_json::Value::Object(serde_json::Map::new()));
@@ -956,7 +957,11 @@ fn patch_body(headers: &HeaderMap, body: &[u8]) -> Result<serde_json::Value, Han
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    if media_type != "application/json" && media_type != "*/*" && media_type != "application/*" {
+    if media_type != "application/json"
+        && media_type != "*/*"
+        && media_type != "application/*"
+        && media_type != "*/json"
+    {
         return Err(HandlerError::UnsupportedMediaType(
             serde_json::json!({
                 "detail": format!("Unsupported media type \"{content_type}\" in request.")

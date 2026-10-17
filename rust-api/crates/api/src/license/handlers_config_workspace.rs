@@ -423,8 +423,8 @@ fn py_repr_str(s: &str) -> String {
 /// `{}` without parsing; a non-JSON content-type with a body is 415 with
 /// the verbatim header in the detail; otherwise JSON-parse, 400 on failure.
 /// The base match lowercases like Django's `parse_header_parameters`, so
-/// `Application/JSON`, charset params, and the `*/*` / `application/*`
-/// wildcards all serve.
+/// `Application/JSON`, charset params, and the `*/*`, `application/*`,
+/// and `*/json` wildcards all serve.
 fn decode_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
     if body.is_empty() {
         return Ok(Value::Object(serde_json::Map::new()));
@@ -439,7 +439,11 @@ fn decode_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    if media_type != "application/json" && media_type != "*/*" && media_type != "application/*" {
+    if media_type != "application/json"
+        && media_type != "*/*"
+        && media_type != "application/*"
+        && media_type != "*/json"
+    {
         return Err(Denial::UnsupportedMediaType(format!(
             "Unsupported media type \"{content_type}\" in request."
         )));

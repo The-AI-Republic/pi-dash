@@ -10,7 +10,8 @@ echoes ``text/plain`` while prod Django and Rust echo ``""``, so the
 test asserts status plus the message prefix/suffix); (iii) an empty body
 is ``{}`` without parsing, so validation runs. Case-variant
 ``Application/JSON`` serves: Django lowercases the base in
-``parse_header_parameters``.
+``parse_header_parameters``. The ``*/json`` wildcard serves too: DRF
+``_MediaType.match`` honors ``*`` on either side.
 """
 
 import pytest
@@ -153,6 +154,56 @@ def test_case_variant_json_workspace_post_serves(admin_api):
         "/api/instances/workspaces/",
         content=b'{"name":"N","slug":"probe-space"}',
         headers={"Content-Type": "Application/JSON"},
+    )
+    assert res.status_code == 201
+    assert res.json()["slug"] == "probe-space"
+
+
+def test_wildcard_subtype_json_instance_patch_serves(admin_api):
+    res = admin_api.patch(
+        "/api/instances/",
+        content=b'{"instance_name":"Probe"}',
+        headers={"Content-Type": "*/json"},
+    )
+    assert res.status_code == 200
+    assert res.json()["instance_name"] == "Probe"
+
+
+def test_wildcard_subtype_json_admins_post_serves(admin_api):
+    res = admin_api.post(
+        "/api/instances/admins/",
+        content=b'{"email":"ghost@example.com"}',
+        headers={"Content-Type": "*/json"},
+    )
+    assert res.status_code == 404
+    assert res.json() == {"error": "The required object does not exist."}
+
+
+def test_wildcard_subtype_json_configurations_patch_serves(admin_api):
+    res = admin_api.patch(
+        "/api/instances/configurations/",
+        content=b'{"NO_SUCH_KEY":"x"}',
+        headers={"Content-Type": "*/json"},
+    )
+    assert res.status_code == 200
+    assert res.json() == []
+
+
+def test_wildcard_subtype_json_email_check_serves(admin_api):
+    res = admin_api.post(
+        "/api/instances/email-credentials-check/",
+        content=b'{"receiver_email":""}',
+        headers={"Content-Type": "*/json"},
+    )
+    assert res.status_code == 400
+    assert res.json() == {"error": "Receiver email is required"}
+
+
+def test_wildcard_subtype_json_workspace_post_serves(admin_api):
+    res = admin_api.post(
+        "/api/instances/workspaces/",
+        content=b'{"name":"N","slug":"probe-space"}',
+        headers={"Content-Type": "*/json"},
     )
     assert res.status_code == 201
     assert res.json()["slug"] == "probe-space"

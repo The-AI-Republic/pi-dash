@@ -579,7 +579,11 @@ fn parse_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    if media_type != "application/json" && media_type != "*/*" && media_type != "application/*" {
+    if media_type != "application/json"
+        && media_type != "*/*"
+        && media_type != "application/*"
+        && media_type != "*/json"
+    {
         return Err(Denial::UnsupportedMediaType(format!(
             "Unsupported media type \"{content_type}\" in request."
         )));
@@ -2328,6 +2332,15 @@ mod tests {
         let mut mixed = HeaderMap::new();
         mixed.insert(header::CONTENT_TYPE, "Application/JSON".parse().unwrap());
         assert!(parse_json_body(&mixed, br#"{"email":"a@b.c"}"#).is_ok());
+        // Wildcards serve (DRF `_MediaType.match` honors `*` either side).
+        for ct in ["*/*", "application/*", "*/json"] {
+            let mut wild = HeaderMap::new();
+            wild.insert(header::CONTENT_TYPE, ct.parse().unwrap());
+            assert!(
+                parse_json_body(&wild, br#"{"email":"a@b.c"}"#).is_ok(),
+                "{ct}"
+            );
+        }
         // Non-object JSON has no `.get`: Django raises out of the view.
         assert!(matches!(
             parse_json_body(&json_headers(), br"[1]"),
