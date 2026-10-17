@@ -307,6 +307,16 @@ describe("PodPicker", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
+  it("reports controlled closes without managing state", async () => {
+    const { queryClient } = harness();
+    const onOpenChange = vi.fn();
+    const user = userEvent.setup();
+    renderPicker({ open: true, onOpenChange }, queryClient);
+    await screen.findByRole("option", { name: "ACME-Tier" });
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
   it("does not fetch or open while disabled", () => {
     const { queryClient, calls } = harness();
     renderPicker({ disabled: true }, queryClient);

@@ -169,6 +169,16 @@ describe("IntakeStatePicker", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
+  it("reports controlled closes without managing state", async () => {
+    const { queryClient } = harness(TRIAGE);
+    const onOpenChange = vi.fn();
+    const user = userEvent.setup();
+    renderPicker({ open: true, onOpenChange }, queryClient);
+    await screen.findByRole("option", { name: "Triage" });
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
   it("does not fetch or open while disabled", () => {
     const { queryClient, calls } = harness(TRIAGE);
     renderPicker({ disabled: true }, queryClient);

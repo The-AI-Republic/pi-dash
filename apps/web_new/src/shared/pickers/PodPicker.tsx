@@ -49,10 +49,6 @@ function AgentGlyph({ executor }: { executor: AgentRowKind }): React.ReactElemen
   return <Icon size={16} strokeWidth={1.5} className="text-(--text-muted)" aria-hidden="true" />;
 }
 
-function TargetGlyph({ target }: { target: ExecutionTarget }): React.ReactElement {
-  return target.kind === "pod" ? <PodGlyph /> : <AgentGlyph executor={target.executor} />;
-}
-
 function DefaultPill(): React.ReactElement {
   return (
     <span className="text-caption rounded-(--radius-full) bg-(--subtle) px-(--space-2) py-px text-(--text-muted)">
@@ -110,7 +106,7 @@ function selectionGlyph(selection: ExecutionSelection | null, targets: Execution
     return isAgentRowKind(selection.executor) ? <AgentGlyph executor={selection.executor} /> : null;
   }
   const pod = targets.find((target) => target.kind === "pod" && target.podId === selection.podId);
-  return pod === undefined ? null : <TargetGlyph target={pod} />;
+  return pod === undefined ? null : <PodGlyph />;
 }
 
 export function PodPicker({

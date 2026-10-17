@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { LAYOUT_ORDER } from "../layouts/kinds.js";
 import { LayoutPicker } from "./LayoutPicker.js";
@@ -71,6 +72,15 @@ describe("LayoutPicker", () => {
     render(<LayoutPicker value="list" onChange={() => {}} open onOpenChange={onOpenChange} />);
     expect(screen.getByRole("option", { name: "Board" })).toBeInTheDocument();
     expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("reports controlled closes without managing state", async () => {
+    const onOpenChange = vi.fn();
+    const user = userEvent.setup();
+    render(<LayoutPicker value="list" onChange={() => {}} open onOpenChange={onOpenChange} />);
+    expect(screen.getByRole("option", { name: "Board" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("does not open while disabled", () => {
