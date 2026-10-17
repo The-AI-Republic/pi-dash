@@ -306,4 +306,34 @@ describe("ApiClient", () => {
     expect(new ApiError({ code: "network", message: "x" }).body).toBeNull();
     expect(new ApiError({ code: "http", message: "x", body: { a: 1 } }).body).toEqual({ a: 1 });
   });
+
+  it("passes multipart uploads through without a content type", async () => {
+    const transport = recordingTransport(() => jsonResponse({ text: "hi" }));
+    const client = createClient({ baseUrl: "https://api.test", transport, csrfToken: async () => "tok" });
+    const form = new FormData();
+    form.append("file", new Blob(["audio"]), "dictation.webm");
+    await client.post("/api/upload/", { multipart: form });
+    const call = transport.calls[0];
+    expect(call?.init.formData).toBe(form);
+    expect(call?.init.body).toBeUndefined();
+    expect(call?.init.headers["Content-Type"]).toBeUndefined();
+    expect(call?.init.headers["X-CSRFTOKEN"]).toBe("tok");
+  });
+
+  it("carries the parsed JSON error body on failures, null otherwise", async () => {
+    const coded = recordingTransport(() =>
+      fakeResponse({ status: 404, body: '{"error":"dictation_disabled","detail":"off"}' })
+    );
+    const codedError = await createClient({ baseUrl: "https://api.test", transport: coded })
+      .getJson("/x/")
+      .catch((e: unknown) => e);
+    expect(isApiError(codedError)).toBe(true);
+    expect((codedError as ApiError).body).toEqual({ error: "dictation_disabled", detail: "off" });
+
+    const plain = recordingTransport(() => fakeResponse({ status: 500, body: "boom" }));
+    const plainError = await createClient({ baseUrl: "https://api.test", transport: plain })
+      .getJson("/x/")
+      .catch((e: unknown) => e);
+    expect((plainError as ApiError).body).toBeNull();
+  });
 });

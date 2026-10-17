@@ -16,6 +16,12 @@ export interface TransportInit {
   method: HttpMethod;
   headers: Record<string, string>;
   body?: string | undefined;
+  /**
+   * Multipart body; preferred over `body` when set. The client sets
+   * exactly one of the two — transports forward this untouched so
+   * fetch sets the boundary Content-Type itself.
+   */
+  formData?: FormData | undefined;
   signal?: AbortSignal | undefined;
   credentials?: "include" | "same-origin" | "omit";
 }
@@ -30,7 +36,8 @@ export interface TransportResponse {
 /**
  * A fetch-compatible function satisfies Transport directly: RequestInit
  * accepts this init shape, and Response carries status, url, headers and
- * text(). Pass `fetch` (or a stub with the same surface) as-is.
+ * text(). Pass `fetch` (or a stub with the same surface) as-is — map
+ * `formData` onto the request body first when it is set.
  */
 
 export interface MiddlewareContext {
@@ -38,6 +45,7 @@ export interface MiddlewareContext {
   url: string;
   headers: Record<string, string>;
   body?: string | undefined;
+  formData?: FormData | undefined;
 }
 
 export type Middleware = (
@@ -63,6 +71,11 @@ export interface RequestOptions {
   query?: Record<string, string | number | boolean | undefined | null>;
   json?: unknown;
   form?: Record<string, string | undefined | null>;
+  /**
+   * Multipart upload. Passed to the transport untouched so fetch sets the
+   * boundary Content-Type itself — never set Content-Type alongside it.
+   */
+  multipart?: FormData;
   headers?: Record<string, string>;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -124,9 +137,12 @@ export class ApiClient {
   async request(method: HttpMethod, path: string, options: RequestOptions = {}): Promise<TransportResponse> {
     const headers: Record<string, string> = { ...(options.headers ?? {}) };
     let body: string | undefined;
+    let formData: FormData | undefined;
     if (options.json !== undefined) {
       headers["Content-Type"] = headers["Content-Type"] ?? "application/json";
       body = JSON.stringify(options.json);
+    } else if (options.multipart !== undefined) {
+      formData = options.multipart;
     } else if (options.form !== undefined) {
       headers["Content-Type"] = headers["Content-Type"] ?? "application/x-www-form-urlencoded";
       const params = new URLSearchParams();
@@ -146,13 +162,14 @@ export class ApiClient {
     const timeoutMs = options.timeoutMs ?? this.timeoutMs;
     const { signal, cancelTimeout } = this.raceTimeout(timeoutMs, options.signal);
 
-    const initial: MiddlewareContext = { method, url, headers, body };
+    const initial: MiddlewareContext = { method, url, headers, body, formData };
     const dispatch = (request: MiddlewareContext, index: number): Promise<TransportResponse> => {
       if (index >= this.middleware.length) {
         return this.transport(request.url, {
           method: request.method,
           headers: request.headers,
           body: request.body,
+          formData: request.formData,
           signal: signal ?? undefined,
           credentials: "include",
         });

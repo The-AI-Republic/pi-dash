@@ -24,7 +24,8 @@ export interface ApiErrorInit {
  * one of the client codes above, or the server's own code (`error_code`,
  * DRF `code`) passed through untouched, in decimal for numeric codes.
  * `body` carries the parsed JSON error body when the server sent one
- * (shape readers like the quota-refusal parser validate it further);
+ * (shape readers like the quota-refusal parser validate it further, and
+ * endpoints whose callers branch on a machine code read it from there);
  * null when the failure has no body to read.
  */
 export class ApiError extends Error {

@@ -55,16 +55,18 @@ export function contractTransport(jar = new Map<string, string>()): Transport {
     let currentUrl = url;
     let method = init.method;
     let body = init.body;
+    let formData = init.formData;
     let hops = 0;
     for (;;) {
       const headers: Record<string, string> = { ...init.headers };
       if (jar.size > 0) {
         headers["Cookie"] = [...jar.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
       }
+      const outgoing = formData ?? body;
       const response = await globalThis.fetch(currentUrl, {
         method,
         headers,
-        ...(body === undefined ? {} : { body }),
+        ...(outgoing === undefined ? {} : { body: outgoing }),
         ...(init.signal === undefined ? {} : { signal: init.signal }),
         credentials: "include",
         redirect: "manual",
@@ -77,6 +79,7 @@ export function contractTransport(jar = new Map<string, string>()): Transport {
       if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === "POST")) {
         method = "GET";
         body = undefined;
+        formData = undefined;
       }
     }
   };
