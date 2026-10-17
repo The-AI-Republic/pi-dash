@@ -1622,13 +1622,20 @@ async fn executor_user(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Exec
 /// `has_usable_llm_config` EE seam only on configured instances; the local
 /// leg is the runners EXISTS; the managed leg is L4's
 /// `managed_runner_availability` with the EE profile seam.
+///
+/// `viewer` is `None` for renders without request context (the PATCH
+/// `current_instance` dump: `ProjectSerializer(project)` at `base.py:342`
+/// carries no context, so Django passes `user=None`): the cloud leg
+/// reports only the instance switch and the managed leg short-circuits at
+/// the viewer gate — no seam call, no enrolled/online probes, exactly as
+/// the Python short-circuits (`agent_execution.py:96`,
+/// `managed_runner/policy.py:85`).
 async fn executor_options(
     pool: &sqlx::PgPool,
     state: &AppState,
     project_id: &uuid::Uuid,
     workspace_id: &uuid::Uuid,
-    user_id: &uuid::Uuid,
-    user: &ExecutorUser,
+    viewer: Option<(&uuid::Uuid, &ExecutorUser)>,
 ) -> Result<[pidash_services::dispatch::policy::ExecutorOption; 3], Denial> {
     use pidash_services::dispatch::admission::{
         managed_runner_availability, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL, HEARTBEAT_GRACE_SECS,
@@ -1642,26 +1649,47 @@ async fn executor_options(
         .await
         .map_err(db_denial)?;
     let settings = state.settings();
-    let llm_has_key = user.llm_has_key;
     // The seam is async but the services closures below are sync `FnOnce`,
     // so both verdicts resolve eagerly here and move into the closures.
     // The values are what the lazy calls would have returned for the same
     // inputs (the CE branch is pure; the overlay branch reads but never
-    // writes), so eagerness changes no verdict.
-    let llm_usable = state
-        .assistant_seam()
-        .has_usable_llm_config(*user_id, llm_has_key)
-        .await;
-    let seam_profile = state
-        .assistant_seam()
-        .agent_model_profile(*user_id, llm_has_key)
-        .await;
-    let llm_profile = pidash_services::dispatch::admission::LlmProfile {
-        available: seam_profile.available,
-        reason_code: seam_profile.reason_code,
+    // writes), so eagerness changes no verdict. Without a viewer neither
+    // verdict is consulted (the policy short-circuits first), so the seam
+    // is never called — mirroring `agent_execution.py:96`.
+    let (flags, llm_usable, llm_profile) = match viewer {
+        Some((user_id, user)) => {
+            let llm_usable = state
+                .assistant_seam()
+                .has_usable_llm_config(*user_id, user.llm_has_key)
+                .await;
+            let seam_profile = state
+                .assistant_seam()
+                .agent_model_profile(*user_id, user.llm_has_key)
+                .await;
+            (
+                Some(&user.flags),
+                llm_usable,
+                pidash_services::dispatch::admission::LlmProfile {
+                    available: seam_profile.available,
+                    reason_code: seam_profile.reason_code,
+                },
+            )
+        }
+        None => (
+            None,
+            false,
+            pidash_services::dispatch::admission::LlmProfile {
+                available: false,
+                reason_code: String::new(),
+            },
+        ),
     };
-    let managed =
-        if pidash_services::dispatch::policy::managed_runner_is_enabled(&settings.managed_runner) {
+    let managed = match viewer {
+        Some((user_id, _))
+            if pidash_services::dispatch::policy::managed_runner_is_enabled(
+                &settings.managed_runner,
+            ) =>
+        {
             let enrolled: Option<(i32,)> = sqlx::query_as(ENROLLED_MANAGED_RUNNERS_EXISTS_SQL)
                 .bind(user_id)
                 .bind(project_id)
@@ -1682,25 +1710,25 @@ async fn executor_options(
                 .map_err(db_denial)?;
             managed_runner_availability(
                 &settings.managed_runner,
-                Some(&user.flags),
+                flags,
                 || llm_profile,
                 enrolled.is_some(),
                 online.is_some(),
             )
-        } else {
-            managed_runner_availability(
-                &settings.managed_runner,
-                Some(&user.flags),
-                || llm_profile,
-                false,
-                false,
-            )
-        };
+        }
+        _ => managed_runner_availability(
+            &settings.managed_runner,
+            flags,
+            || llm_profile,
+            false,
+            false,
+        ),
+    };
     Ok(
         pidash_services::app_project::ser_project::project_executor_options(
             &settings.cloud_agent,
-            Some(user.flags),
-            true,
+            flags.copied(),
+            flags.is_some(),
             || llm_usable,
             local.is_some(),
             managed,
@@ -1729,8 +1757,14 @@ async fn render_list_row(
     let members = fetch_members(pool, &row.id, slug).await?;
     let rendered_members = render_members(&members)?;
     let sequence = next_sequence(pool, &row.id).await?;
-    let options =
-        executor_options(pool, state, &row.id, &row.workspace_id, &actor.id, user).await?;
+    let options = executor_options(
+        pool,
+        state,
+        &row.id,
+        &row.workspace_id,
+        Some((&actor.id, user)),
+    )
+    .await?;
     let cover_url =
         cover_image_url(pool, row.cover_image_asset_id, row.cover_image.as_deref()).await?;
     let timezone = actor.timezone;
@@ -1828,13 +1862,15 @@ async fn workspace_detail(pool: &sqlx::PgPool, workspace_id: &uuid::Uuid) -> Res
 /// `current_instance` (`base.py:340-341`): `json.dumps` (CPython defaults)
 /// of the pre-save `ProjectSerializer` read shape. The project is fetched
 /// bare (`Project.objects.get`, no annotations); `workspace_detail` nests
-/// the D-24 lite shape; datetimes render in the caller's zone.
+/// the D-24 lite shape; datetimes render in the caller's zone. The
+/// serializer carries no request context, so the executor options render
+/// with no viewer (`user=None` in Python): the cloud leg reports only the
+/// instance switch, never the actor's LLM config.
 async fn render_current_instance(
     pool: &sqlx::PgPool,
     state: &AppState,
     project_id: &uuid::Uuid,
     actor: &Actor,
-    user: &ExecutorUser,
     slug: &str,
 ) -> Result<String, Denial> {
     use pidash_services::app_project::ser_project::ProjectRead;
@@ -1842,8 +1878,7 @@ async fn render_current_instance(
         .await?
         .ok_or(Denial::ServerError)?;
     let detail = workspace_detail(pool, &row.workspace_id).await?;
-    let options =
-        executor_options(pool, state, &row.id, &row.workspace_id, &actor.id, user).await?;
+    let options = executor_options(pool, state, &row.id, &row.workspace_id, None).await?;
     let timezone = actor.timezone;
     let read = ProjectRead {
         id: row.id.to_string(),
@@ -5609,9 +5644,8 @@ async fn project_patch(
     // (`:343`): archived + malformed JSON answers the `ParseError` 400,
     // archived + non-dict JSON answers the `.get` 500.
     let data = parse_get_body(&body)?;
-    let user = executor_user(&pool, &actor.id).await?;
     let current_instance =
-        render_current_instance(&pool, &state, &project_id, &actor, &user, &slug).await?;
+        render_current_instance(&pool, &state, &project_id, &actor, &slug).await?;
     if instance.archived_at.is_some() {
         return Err(Denial::Raw(
             StatusCode::BAD_REQUEST,
@@ -5684,6 +5718,9 @@ async fn project_patch(
         ),
     )
     .await;
+    // The actor's executor inputs resolve only for the response render
+    // (`base.py:378`): the `current_instance` dump above carries no viewer.
+    let user = executor_user(&pool, &actor.id).await?;
     let body = render_list_row(&pool, &state, &updated, &slug, &actor, &user).await?;
     Ok(json_ok(body))
 }
@@ -6991,13 +7028,13 @@ mod live_tests {
         let user = keyless_user();
         // Fresh ids: no runners exist for this project, so the local leg
         // is down and the managed leg stops at runner enrollment.
+        let viewer_id = uuid::Uuid::new_v4();
         let options = executor_options(
             &pool,
             &state,
             &uuid::Uuid::new_v4(),
             &uuid::Uuid::new_v4(),
-            &uuid::Uuid::new_v4(),
-            &user,
+            Some((&viewer_id, &user)),
         )
         .await
         .expect("options");
@@ -7019,13 +7056,13 @@ mod live_tests {
         // viewer out of both legs exactly like the ported free functions.
         let state = live_state(None);
         let user = keyless_user();
+        let viewer_id = uuid::Uuid::new_v4();
         let options = executor_options(
             &pool,
             &state,
             &uuid::Uuid::new_v4(),
             &uuid::Uuid::new_v4(),
-            &uuid::Uuid::new_v4(),
-            &user,
+            Some((&viewer_id, &user)),
         )
         .await
         .expect("options");
@@ -7033,5 +7070,32 @@ mod live_tests {
         assert_eq!(options[0].reason_code, "llm_config_missing");
         assert!(!options[2].available);
         assert_eq!(options[2].reason_code, "llm_config_missing");
+    }
+
+    #[tokio::test]
+    async fn executor_options_without_viewer_reports_switches_only() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        // The PATCH `current_instance` dump has no request context, so no
+        // viewer (`base.py:342`): the cloud leg reports only the instance
+        // switch (on here) and the managed leg stops at the viewer gate —
+        // never the actor's LLM config (PIDASHCONV-1093).
+        let state = live_state(None);
+        let options = executor_options(
+            &pool,
+            &state,
+            &uuid::Uuid::new_v4(),
+            &uuid::Uuid::new_v4(),
+            None,
+        )
+        .await
+        .expect("options");
+        assert!(options[0].available);
+        assert!(options[0].reason_code.is_empty());
+        assert!(!options[1].available);
+        assert_eq!(options[1].reason_code, "no_local_runner");
+        assert!(!options[2].available);
+        assert_eq!(options[2].reason_code, "desktop_not_connected");
     }
 }
