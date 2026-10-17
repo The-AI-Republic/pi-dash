@@ -124,7 +124,29 @@ pub enum Denial {
     Conflict(String, String),
     /// 500, generic branch.
     ServerError,
+    /// 400, uncaught upload-cap error (`TooManyFieldsSent` /
+    /// `TooManyFilesSent` / `RequestDataTooBig` escaping a view without
+    /// a catch-all — email-check POST, workspaces POST). Django answers
+    /// `ERROR_PAGE_TEMPLATE` (`views/defaults.py`) with
+    /// `text/html; charset=utf-8`. Under local `DEBUG` the page is the
+    /// traceback variant instead (settings-dependent, untranslatable),
+    /// so contract tests pin the status only there.
+    BadRequestPage,
 }
+
+/// Django's `ERROR_PAGE_TEMPLATE % {"title": "Bad Request (400)",
+/// "details": ""}` (`views/defaults.py:16-26`), byte-exact.
+pub(crate) const BAD_REQUEST_PAGE: &str = "
+<!doctype html>
+<html lang=\"en\">
+<head>
+  <title>Bad Request (400)</title>
+</head>
+<body>
+  <h1>Bad Request (400)</h1><p></p>
+</body>
+</html>
+";
 
 impl Denial {
     fn status_and_body(&self) -> (StatusCode, String) {
@@ -155,6 +177,7 @@ impl Denial {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
             ),
+            Denial::BadRequestPage => (StatusCode::BAD_REQUEST, BAD_REQUEST_PAGE.to_owned()),
         }
     }
 }
@@ -162,9 +185,14 @@ impl Denial {
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
         let (status, body) = self.status_and_body();
+        let content_type = if matches!(self, Denial::BadRequestPage) {
+            "text/html; charset=utf-8"
+        } else {
+            "application/json"
+        };
         Response::builder()
             .status(status)
-            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_TYPE, content_type)
             .body(axum::body::Body::from(body))
             .expect("static denial response")
     }
@@ -512,6 +540,7 @@ pub(crate) fn parse_deleted_at(
     }
 }
 
+pub mod form_body;
 pub mod handlers_admin;
 pub mod handlers_auth_forms;
 pub mod handlers_base;

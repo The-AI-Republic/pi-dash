@@ -95,6 +95,10 @@ use chrono_tz::Tz;
 use serde_json::Value;
 use std::collections::HashMap;
 
+use super::form_body::{
+    parse_form_body, parse_multipart_body, select_body_kind, BodyFail, BodyField, BodyKind,
+    ParsedBody,
+};
 use super::{
     file_asset_url, json_response, owned, query_last, require_admin, Actor, AssetUrl, Denial,
     QueryMap,
@@ -277,19 +281,21 @@ async fn patch_configurations(
         Err(denial) => return denial.into_response(),
     };
     // `request.data.keys()`: a non-object body has no `.keys()`
-    // (`AttributeError` -> base 500).
-    let data: Value = match decode_json_body(&headers, &body) {
+    // (`AttributeError` -> base 500). File parts merge into the keys.
+    let data = match decode_json_body(&headers, &body, state.settings().file_size_limit) {
         Ok(data) => data,
+        // This view wraps parsing in `except Exception` (generic 500),
+        // unlike the email-check/workspace views sharing the decoder.
+        Err(Denial::BadRequestPage) => return Denial::ServerError.into_response(),
         Err(denial) => return denial.into_response(),
     };
-    let map = match data.as_object() {
-        Some(map) => map,
-        None => return Denial::ServerError.into_response(),
-    };
+    if data.object().is_none() {
+        return Denial::ServerError.into_response();
+    }
     // `filter(key__in=request.data.keys())`: unknown keys are never
     // fetched and never created. An empty key set short-circuits to `[]`
     // (Django raises `EmptyResultSet` and skips the database).
-    let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+    let keys: Vec<&str> = data.keys();
     let rows = match pidash_db::license::queries::fetch_config_by_keys(&pool, &keys).await {
         Ok(rows) => rows,
         Err(_) => return Denial::ServerError.into_response(),
@@ -301,7 +307,7 @@ async fn patch_configurations(
     // `encrypt_data(value)`.
     let mut pairs: Vec<(uuid::Uuid, String)> = Vec::with_capacity(rows.len());
     for row in &rows {
-        let raw = map.get(&row.key);
+        let raw = data.field(&row.key);
         let normalized = py_str_value(raw);
         let stored = if row.is_encrypted {
             pidash_services::license::encryption::encrypt_data(&keyring, Some(&normalized))
@@ -352,12 +358,18 @@ async fn patch_configurations(
     json_response(&out)
 }
 
-/// Python `str()` over a JSON body value, then `.strip()`
-/// (`configuration.py:49`): `None` becomes `""` (handled by the `None`
+/// Python `str()` over a body value, then `.strip()`
+/// (`configuration.py:49`): `None` becomes `""` (handled by the missing
 /// arm — a missing key and an explicit `null` are identical here);
 /// strings pass through; `True`/`False`/`None` render capitalized;
-/// numbers render plainly; arrays/objects render as Python `repr`.
-pub fn py_str_value(raw: Option<&Value>) -> String {
+/// numbers render plainly; arrays/objects render as Python `repr`;
+/// an uploaded file renders as its name (probed).
+fn py_str_value(found: BodyField<'_>) -> String {
+    let raw = match found {
+        BodyField::File(file) => return file.filename.trim().to_owned(),
+        BodyField::Json(value) => Some(value),
+        BodyField::Missing => None,
+    };
     match raw {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(s)) => s.trim().to_owned(),
@@ -445,31 +457,39 @@ fn py_repr_str(s: &str) -> String {
 /// The base match lowercases like Django's `parse_header_parameters`, so
 /// `Application/JSON`, charset params, and the `*/*`, `application/*`,
 /// and `*/json` wildcards all serve.
-fn decode_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
+fn decode_json_body(
+    headers: &HeaderMap,
+    body: &[u8],
+    memory_limit: i64,
+) -> Result<ParsedBody, Denial> {
     if body.is_empty() {
-        return Ok(Value::Object(serde_json::Map::new()));
+        return Ok(ParsedBody::json(Value::Object(serde_json::Map::new())));
     }
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let media_type = content_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    if media_type != "application/json"
-        && media_type != "*/*"
-        && media_type != "application/*"
-        && media_type != "*/json"
-    {
-        return Err(Denial::UnsupportedMediaType(format!(
+    match select_body_kind(content_type) {
+        Some(BodyKind::Json) => serde_json::from_slice(body)
+            .map(ParsedBody::json)
+            .map_err(|err| Denial::BadDetail(format!("JSON parse error - {err}"))),
+        Some(BodyKind::Form) => match parse_form_body(body) {
+            Ok(pairs) => Ok(ParsedBody::form(pairs)),
+            // The email-check and workspace views have no catch-all, so
+            // cap errors escape to Django's 400 page; the configurations
+            // call site remaps to the 500 its `except Exception` answers.
+            Err(_) => Err(Denial::BadRequestPage),
+        },
+        Some(BodyKind::Multipart) => match parse_multipart_body(content_type, body, memory_limit) {
+            Ok(pairs) => Ok(ParsedBody::form(pairs)),
+            Err(BodyFail::Parse(message)) => Err(Denial::BadDetail(message)),
+            Err(BodyFail::Fatal) => Err(Denial::ServerError),
+            Err(BodyFail::TooMany) => Err(Denial::BadRequestPage),
+        },
+        None => Err(Denial::UnsupportedMediaType(format!(
             "Unsupported media type \"{content_type}\" in request."
-        )));
+        ))),
     }
-    serde_json::from_slice(body)
-        .map_err(|err| Denial::BadDetail(format!("JSON parse error - {err}")))
 }
 
 /// `DELETE configurations/disable-email-feature/`
@@ -522,17 +542,16 @@ async fn email_credential_check(
     };
     // `request.data.get(...)`: a non-object body has no `.get`
     // (`AttributeError` -> base 500).
-    let data: Value = match decode_json_body(&headers, &body) {
+    let data = match decode_json_body(&headers, &body, state.settings().file_size_limit) {
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };
-    let map = match data.as_object() {
-        Some(map) => map,
-        None => return Denial::ServerError.into_response(),
-    };
+    if data.object().is_none() {
+        return Denial::ServerError.into_response();
+    }
     // `receiver_email = request.data.get("receiver_email", False)`:
     // anything falsy answers 400 (`configuration.py:91-96`).
-    let receiver = map.get("receiver_email");
+    let receiver = data.field("receiver_email");
     if !json_truthy(receiver) {
         return Denial::BadError("Receiver email is required".to_owned()).into_response();
     }
@@ -590,7 +609,14 @@ async fn email_credential_check(
 }
 
 /// Python truthiness over a JSON body value (`not receiver_email`).
-fn json_truthy(value: Option<&Value>) -> bool {
+/// Python truthiness over a body value. An uploaded file is always
+/// truthy (`bool(name)` — file parts always have names).
+fn json_truthy(found: BodyField<'_>) -> bool {
+    let value = match found {
+        BodyField::File(_) => return true,
+        BodyField::Json(value) => Some(value),
+        BodyField::Missing => None,
+    };
     match value {
         None | Some(Value::Null) => false,
         Some(Value::Bool(b)) => *b,
@@ -611,8 +637,14 @@ fn json_truthy(value: Option<&Value>) -> bool {
 
 /// `msg = ...; to=[receiver_email]`: a bare string is one recipient, a
 /// list is many (`sendmail` wraps a bare string). Non-string entries are
-/// stringified the way the envelope path would carry them.
-fn json_string_list(value: Option<&Value>) -> Vec<String> {
+/// stringified the way the envelope path would carry them; a file
+/// recipient is its name (probed).
+fn json_string_list(found: BodyField<'_>) -> Vec<String> {
+    let value = match found {
+        BodyField::File(file) => return vec![file.filename.clone()],
+        BodyField::Json(value) => Some(value),
+        BodyField::Missing => None,
+    };
     match value {
         Some(Value::Array(items)) => items.iter().map(json_scalar_string).collect(),
         Some(other) => vec![json_scalar_string(other)],
@@ -2052,17 +2084,16 @@ async fn create_workspace(
     };
     // `request.data.get(...)`: a non-object body has no `.get`
     // (`AttributeError` -> base 500).
-    let data: Value = match decode_json_body(&headers, &body) {
+    let data = match decode_json_body(&headers, &body, state.settings().file_size_limit) {
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };
-    let map = match data.as_object() {
-        Some(map) => map,
-        None => return Denial::ServerError.into_response(),
-    };
+    if data.object().is_none() {
+        return Denial::ServerError.into_response();
+    }
     // `if not name or not slug` (`workspace.py:78-82`).
-    let name_raw = map.get("name");
-    let slug_raw = map.get("slug");
+    let name_raw = data.field("name");
+    let slug_raw = data.field("slug");
     if !json_truthy(name_raw) || !json_truthy(slug_raw) {
         return Denial::BadError("Both name and slug are required".to_owned()).into_response();
     }
@@ -2083,7 +2114,7 @@ async fn create_workspace(
     }
     // Serializer validation (`is_valid(raise_exception=True)`): a DRF
     // `ValidationError` answers the raw detail dict.
-    let validated = match validate_workspace_input(&pool, map, actor.timezone).await {
+    let validated = match validate_workspace_input(&pool, &data, actor.timezone).await {
         Ok(validated) => validated,
         Err(ValidationFailure::Detail(errors)) => return detail_response(&errors),
         Err(ValidationFailure::Store) => return Denial::ServerError.into_response(),
@@ -2147,7 +2178,7 @@ async fn create_workspace(
     .await;
     // `WorkspaceMember.objects.create(workspace_id, member=user, role=20,
     // company_role=...)`: model `JSONField` defaults apply Python-side.
-    let company_role = company_role_value(map.get("company_role"));
+    let company_role = company_role_value(data.field("company_role"));
     let member_now = chrono::Utc::now();
     let member_result = sqlx::query(
         r#"INSERT INTO workspace_members
@@ -2251,7 +2282,16 @@ async fn create_workspace(
 /// Python `len()` over a JSON body value (`workspace.py:84`): strings
 /// count code points, arrays/objects count items, everything else raises
 /// `TypeError`.
-fn json_len(value: Option<&Value>) -> Option<usize> {
+/// `len()` over a body value: strings count chars, containers count
+/// members, anything else (`int`, `bool`, `float`, missing) raises
+/// `TypeError` (`None`). An uploaded file takes `len()` normally — its
+/// size in bytes (probed).
+fn json_len(found: BodyField<'_>) -> Option<usize> {
+    let value = match found {
+        BodyField::File(file) => return Some(file.size),
+        BodyField::Json(value) => Some(value),
+        BodyField::Missing => None,
+    };
     match value {
         Some(Value::String(s)) => Some(s.chars().count()),
         Some(Value::Array(items)) => Some(items.len()),
@@ -2278,7 +2318,13 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
 /// `CharField.to_python`, which is `str(value)` (`fields/__init__.py`):
 /// `True` -> `"True"`, numbers plainly, composites as Python `repr`
 /// (`str([1]) == "[1]"`) — never a 500.
-fn company_role_value(raw: Option<&Value>) -> Option<String> {
+fn company_role_value(found: BodyField<'_>) -> Option<String> {
+    let raw = match found {
+        // The ORM stringifies the file for the `text` column (probed).
+        BodyField::File(file) => return Some(file.filename.clone()),
+        BodyField::Json(value) => Some(value),
+        BodyField::Missing => None,
+    };
     match raw {
         None => Some(String::new()),
         Some(Value::Null) => None,
@@ -2835,7 +2881,7 @@ impl From<Denial> for ValidationFailure {
 
 async fn validate_workspace_input(
     pool: &sqlx::PgPool,
-    map: &serde_json::Map<String, Value>,
+    body: &ParsedBody,
     request_tz: Tz,
 ) -> Result<ValidatedWorkspace, ValidationFailure> {
     let mut errors: FieldErrors = Vec::new();
@@ -2844,20 +2890,32 @@ async fn validate_workspace_input(
     // (`db/mixins.py:85`, `serializers/workspace.py:15-41`). Missing and
     // explicit-`null` both store `NULL` (`required=False` from
     // `null=True`; `allow_null`).
-    let deleted_at = match map.get("deleted_at") {
-        None | Some(Value::Null) => None,
-        Some(value) => match super::parse_deleted_at(value, request_tz) {
+    let deleted_at = match body.field("deleted_at") {
+        BodyField::Missing | BodyField::Json(Value::Null) => None,
+        // HTML-form `get_value` on `allow_null`: `''` arrives as `None`
+        // (probed) — unlike JSON `""`, which fails datetime parsing.
+        BodyField::Json(Value::String(text)) if body.is_form() && text.is_empty() => None,
+        BodyField::Json(value) => match super::parse_deleted_at(value, request_tz) {
             Ok(stamp) => stamp,
             Err(message) => {
                 field_error(&mut errors, "deleted_at", message);
                 None
             }
         },
+        // Files are never datetimes (probed).
+        BodyField::File(_) => {
+            field_error(
+                &mut errors,
+                "deleted_at",
+                crate::app_project::handlers_project::INVALID_DATETIME_MESSAGE,
+            );
+            None
+        }
     };
     // `name`: length pre-checked by the view; the field rejects
     // non-strings (`CharField.invalid`) and blanks/controls.
-    let name = match map.get("name") {
-        Some(Value::String(name)) => {
+    let name = match body.field("name") {
+        BodyField::Json(Value::String(name)) => {
             let trimmed = name.trim();
             if trimmed.is_empty() {
                 field_error(&mut errors, "name", "This field may not be blank.");
@@ -2875,24 +2933,29 @@ async fn validate_workspace_input(
         }
     };
     // `logo`: blankable/nullable text; numerics coerce via `str()`.
-    let logo = match map.get("logo") {
-        None | Some(Value::Null) => None,
-        Some(Value::Bool(_)) | Some(Value::Array(_)) | Some(Value::Object(_)) => {
+    let logo = match body.field("logo") {
+        BodyField::Missing | BodyField::Json(Value::Null) => None,
+        BodyField::File(_)
+        | BodyField::Json(Value::Bool(_))
+        | BodyField::Json(Value::Array(_))
+        | BodyField::Json(Value::Object(_)) => {
             field_error(&mut errors, "logo", "Not a valid string.");
             None
         }
-        Some(Value::Number(n)) => coerced_text(n, "logo", &mut errors),
-        Some(Value::String(s)) => trimmed_text(s, "logo", &mut errors, true),
+        BodyField::Json(Value::Number(n)) => coerced_text(n, "logo", &mut errors),
+        BodyField::Json(Value::String(s)) => trimmed_text(s, "logo", &mut errors, true),
     };
     // `logo_asset`: writable `PrimaryKeyRelatedField` over live rows.
     // The exact empty string clears: `RelatedField.run_validation`
     // forces `""` to `None` on every path, JSON included
     // (`relations.py:151-155`), and `allow_null` (from `null=True`)
     // stores NULL. Only the exact `""`: `" "` still fails below as an
-    // invalid UUID.
-    let logo_asset = match map.get("logo_asset") {
-        None | Some(Value::Null) => None,
-        Some(Value::Bool(_)) => {
+    // invalid UUID. HTML-form `''` on the nullable FK arrives as `None`
+    // too (probed, same branch as instance `created_by`).
+    let logo_asset = match body.field("logo_asset") {
+        BodyField::Missing | BodyField::Json(Value::Null) => None,
+        BodyField::Json(Value::String(text)) if text.is_empty() => None,
+        BodyField::Json(Value::Bool(_)) => {
             field_error(
                 &mut errors,
                 "logo_asset",
@@ -2900,11 +2963,12 @@ async fn validate_workspace_input(
             );
             None
         }
-        Some(Value::Number(n)) => asset_by_number(pool, n, &mut errors).await?,
-        Some(Value::String(raw)) if raw.is_empty() => None,
-        Some(Value::String(raw)) => asset_by_pk(pool, raw, &mut errors).await?,
-        Some(Value::Array(_) | Value::Object(_)) => {
-            let raw = py_repr(map.get("logo_asset").expect("matched"));
+        BodyField::Json(Value::Number(n)) => asset_by_number(pool, n, &mut errors).await?,
+        BodyField::Json(Value::String(raw)) => asset_by_pk(pool, raw, &mut errors).await?,
+        // The lookup stringifies the file into the message (probed).
+        BodyField::File(file) => asset_by_pk(pool, &file.filename, &mut errors).await?,
+        BodyField::Json(value @ (Value::Array(_) | Value::Object(_))) => {
+            let raw = py_repr(value);
             asset_by_pk(pool, &raw, &mut errors).await?
         }
     };
@@ -2912,8 +2976,8 @@ async fn validate_workspace_input(
     // `UniqueValidator` carrying the model's message), then DRF's
     // (`MaxLength` preempted by the view, null characters, regex), then
     // the serializer `validate_slug` (`iexact`).
-    let slug = match map.get("slug") {
-        Some(Value::String(slug)) => {
+    let slug = match body.field("slug") {
+        BodyField::Json(Value::String(slug)) => {
             if slug.trim().is_empty() {
                 field_error(&mut errors, "slug", "This field may not be blank.");
                 None
@@ -2970,14 +3034,17 @@ async fn validate_workspace_input(
         }
     };
     // `organization_size`: blankable/nullable, 20 chars.
-    let organization_size = match map.get("organization_size") {
-        None | Some(Value::Null) => None,
-        Some(Value::Bool(_)) | Some(Value::Array(_)) | Some(Value::Object(_)) => {
+    let organization_size = match body.field("organization_size") {
+        BodyField::Missing | BodyField::Json(Value::Null) => None,
+        BodyField::File(_)
+        | BodyField::Json(Value::Bool(_))
+        | BodyField::Json(Value::Array(_))
+        | BodyField::Json(Value::Object(_)) => {
             field_error(&mut errors, "organization_size", "Not a valid string.");
             None
         }
-        Some(Value::Number(n)) => coerced_text(n, "organization_size", &mut errors),
-        Some(Value::String(s)) => {
+        BodyField::Json(Value::Number(n)) => coerced_text(n, "organization_size", &mut errors),
+        BodyField::Json(Value::String(s)) => {
             let trimmed = s.trim();
             if trimmed.contains('\0') {
                 field_error(
@@ -3001,30 +3068,31 @@ async fn validate_workspace_input(
     // `timezone`: a `ChoiceField` — no trimming, no blank gate, no
     // null-character check; anything outside `TIMEZONE_CHOICES` (compared
     // as `str(value)`) fails, `None` fails null.
-    let timezone = match map.get("timezone") {
-        None => Some("UTC".to_owned()),
-        Some(Value::Null) => {
+    let timezone = match body.field("timezone") {
+        BodyField::Missing => Some("UTC".to_owned()),
+        // HTML-form `get_value`: `''` on the defaulted field skips to
+        // the default (probed) — unlike JSON `""`, which is an invalid
+        // choice.
+        BodyField::Json(Value::String(text)) if body.is_form() && text.is_empty() => {
+            Some("UTC".to_owned())
+        }
+        BodyField::Json(Value::Null) => {
             field_error(&mut errors, "timezone", "This field may not be null.");
             None
         }
-        Some(value) => {
-            let text = json_scalar_string(value);
-            if !WORKSPACE_TIMEZONES.contains(&text.as_str()) {
-                field_error(
-                    &mut errors,
-                    "timezone",
-                    &format!("\"{text}\" is not a valid choice."),
-                );
-                None
-            } else {
-                Some(text)
-            }
-        }
+        BodyField::Json(value) => check_timezone_value(&json_scalar_string(value), &mut errors),
+        // The choice check stringifies the file (probed).
+        BodyField::File(file) => check_timezone_value(&file.filename, &mut errors),
     };
     // `background_color`: default `get_random_color()` when absent.
-    let background_color = match map.get("background_color") {
-        None => Some(random_background_color()),
-        Some(Value::Null) => {
+    let background_color = match body.field("background_color") {
+        BodyField::Missing => Some(random_background_color()),
+        // HTML-form `get_value`: `''` on the defaulted field skips to
+        // the default (probed) — unlike JSON `""`, which fails blank.
+        BodyField::Json(Value::String(text)) if body.is_form() && text.is_empty() => {
+            Some(random_background_color())
+        }
+        BodyField::Json(Value::Null) => {
             field_error(
                 &mut errors,
                 "background_color",
@@ -3032,12 +3100,15 @@ async fn validate_workspace_input(
             );
             None
         }
-        Some(Value::Bool(_)) | Some(Value::Array(_)) | Some(Value::Object(_)) => {
+        BodyField::File(_)
+        | BodyField::Json(Value::Bool(_))
+        | BodyField::Json(Value::Array(_))
+        | BodyField::Json(Value::Object(_)) => {
             field_error(&mut errors, "background_color", "Not a valid string.");
             None
         }
-        Some(Value::Number(n)) => coerced_text(n, "background_color", &mut errors),
-        Some(Value::String(s)) => {
+        BodyField::Json(Value::Number(n)) => coerced_text(n, "background_color", &mut errors),
+        BodyField::Json(Value::String(s)) => {
             let trimmed = s.trim();
             if trimmed.is_empty() {
                 field_error(
@@ -3084,6 +3155,21 @@ async fn validate_workspace_input(
 /// controls rejected after.
 fn coerced_text(n: &serde_json::Number, field: &str, errors: &mut FieldErrors) -> Option<String> {
     trimmed_text(&py_number_str(n), field, errors, false)
+}
+
+/// `ChoiceField` membership over the stringified input: anything
+/// outside `TIMEZONE_CHOICES` fails (compared as `str(value)`).
+fn check_timezone_value(text: &str, errors: &mut FieldErrors) -> Option<String> {
+    if !WORKSPACE_TIMEZONES.contains(&text) {
+        field_error(
+            errors,
+            "timezone",
+            &format!("\"{text}\" is not a valid choice."),
+        );
+        None
+    } else {
+        Some(text.to_owned())
+    }
 }
 
 /// Trimmed text with the null-character gate. `allow_blank` decides
@@ -3220,19 +3306,22 @@ mod handler_tests {
 
     #[test]
     fn py_str_coercion_matches_python() {
-        assert_eq!(py_str_value(None), "");
-        assert_eq!(py_str_value(Some(&json!(null))), "");
-        assert_eq!(py_str_value(Some(&json!("  padded  "))), "padded");
-        assert_eq!(py_str_value(Some(&json!(true))), "True");
-        assert_eq!(py_str_value(Some(&json!(false))), "False");
-        assert_eq!(py_str_value(Some(&json!(587))), "587");
-        assert_eq!(py_str_value(Some(&json!(-4))), "-4");
-        assert_eq!(py_str_value(Some(&json!(1.5))), "1.5");
+        assert_eq!(py_str_value(BodyField::Missing), "");
+        assert_eq!(py_str_value(BodyField::Json(&json!(null))), "");
         assert_eq!(
-            py_str_value(Some(&json!([1, true, null]))),
+            py_str_value(BodyField::Json(&json!("  padded  "))),
+            "padded"
+        );
+        assert_eq!(py_str_value(BodyField::Json(&json!(true))), "True");
+        assert_eq!(py_str_value(BodyField::Json(&json!(false))), "False");
+        assert_eq!(py_str_value(BodyField::Json(&json!(587))), "587");
+        assert_eq!(py_str_value(BodyField::Json(&json!(-4))), "-4");
+        assert_eq!(py_str_value(BodyField::Json(&json!(1.5))), "1.5");
+        assert_eq!(
+            py_str_value(BodyField::Json(&json!([1, true, null]))),
             "[1, True, None]"
         );
-        assert_eq!(py_str_value(Some(&json!({"a": 1}))), "{'a': 1}");
+        assert_eq!(py_str_value(BodyField::Json(&json!({"a": 1}))), "{'a': 1}");
     }
 
     #[test]
@@ -3285,16 +3374,16 @@ mod handler_tests {
 
     #[test]
     fn truthiness_matches_python() {
-        assert!(!json_truthy(None));
-        assert!(!json_truthy(Some(&json!(null))));
-        assert!(!json_truthy(Some(&json!(false))));
-        assert!(!json_truthy(Some(&json!(0))));
-        assert!(!json_truthy(Some(&json!(""))));
-        assert!(!json_truthy(Some(&json!([]))));
-        assert!(!json_truthy(Some(&json!({}))));
-        assert!(json_truthy(Some(&json!("x"))));
-        assert!(json_truthy(Some(&json!(1))));
-        assert!(json_truthy(Some(&json!([0]))));
+        assert!(!json_truthy(BodyField::Missing));
+        assert!(!json_truthy(BodyField::Json(&json!(null))));
+        assert!(!json_truthy(BodyField::Json(&json!(false))));
+        assert!(!json_truthy(BodyField::Json(&json!(0))));
+        assert!(!json_truthy(BodyField::Json(&json!(""))));
+        assert!(!json_truthy(BodyField::Json(&json!([]))));
+        assert!(!json_truthy(BodyField::Json(&json!({}))));
+        assert!(json_truthy(BodyField::Json(&json!("x"))));
+        assert!(json_truthy(BodyField::Json(&json!(1))));
+        assert!(json_truthy(BodyField::Json(&json!([0]))));
     }
 
     #[test]
@@ -3319,39 +3408,50 @@ mod handler_tests {
 
     #[test]
     fn json_len_matches_python_len() {
-        assert_eq!(json_len(Some(&json!("abc"))), Some(3));
-        assert_eq!(json_len(Some(&json!("é"))), Some(1));
-        assert_eq!(json_len(Some(&json!([1, 2]))), Some(2));
-        assert_eq!(json_len(Some(&json!({"a": 1}))), Some(1));
-        assert_eq!(json_len(Some(&json!(5))), None);
-        assert_eq!(json_len(Some(&json!(true))), None);
-        assert_eq!(json_len(None), None);
+        assert_eq!(json_len(BodyField::Json(&json!("abc"))), Some(3));
+        assert_eq!(json_len(BodyField::Json(&json!("é"))), Some(1));
+        assert_eq!(json_len(BodyField::Json(&json!([1, 2]))), Some(2));
+        assert_eq!(json_len(BodyField::Json(&json!({"a": 1}))), Some(1));
+        assert_eq!(json_len(BodyField::Json(&json!(5))), None);
+        assert_eq!(json_len(BodyField::Json(&json!(true))), None);
+        assert_eq!(json_len(BodyField::Missing), None);
     }
 
     #[test]
     fn company_role_coercion_matches_str() {
-        assert_eq!(company_role_value(None), Some(String::new()));
-        assert_eq!(company_role_value(Some(&json!(null))), None);
+        assert_eq!(company_role_value(BodyField::Missing), Some(String::new()));
+        assert_eq!(company_role_value(BodyField::Json(&json!(null))), None);
         assert_eq!(
-            company_role_value(Some(&json!("Ops"))),
+            company_role_value(BodyField::Json(&json!("Ops"))),
             Some("Ops".to_owned())
         );
         assert_eq!(
-            company_role_value(Some(&json!(true))),
+            company_role_value(BodyField::Json(&json!(true))),
             Some("True".to_owned())
         );
         assert_eq!(
-            company_role_value(Some(&json!(false))),
+            company_role_value(BodyField::Json(&json!(false))),
             Some("False".to_owned())
         );
-        assert_eq!(company_role_value(Some(&json!(5))), Some("5".to_owned()));
         assert_eq!(
-            company_role_value(Some(&json!([1]))),
+            company_role_value(BodyField::Json(&json!(5))),
+            Some("5".to_owned())
+        );
+        assert_eq!(
+            company_role_value(BodyField::Json(&json!([1]))),
             Some("[1]".to_owned())
         );
         assert_eq!(
-            company_role_value(Some(&json!({"a": 1}))),
+            company_role_value(BodyField::Json(&json!({"a": 1}))),
             Some("{'a': 1}".to_owned())
+        );
+        let file = super::super::form_body::FormFile {
+            filename: "resume.pdf".to_owned(),
+            size: 12,
+        };
+        assert_eq!(
+            company_role_value(BodyField::File(&file)),
+            Some("resume.pdf".to_owned())
         );
     }
 
