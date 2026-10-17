@@ -645,6 +645,22 @@ pub fn project_invitation_handler(pool: PgPool) -> Handler {
                         let Some((project_name, workspace_id)) = project_row else {
                             return Ok(None);
                         };
+                        // `ProjectMemberInvite.objects.get(token, email)`
+                        // (`:28`): silent miss. Read BEFORE the workspace
+                        // hop below — Python only touches
+                        // `project.workspace.slug` while building the link
+                        // (`:30`), after the invite lookup.
+                        let invite_row: Option<(Uuid,)> = sqlx::query_as(
+                            "SELECT id FROM project_member_invites WHERE token = $1 AND email = $2 AND deleted_at IS NULL",
+                        )
+                        .bind(&token)
+                        .bind(&email)
+                        .fetch_optional(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        let Some((invite_id,)) = invite_row else {
+                            return Ok(None);
+                        };
                         // Lazy `project.workspace.slug` hop (`:30`): the FK
                         // descriptor reads through `_base_manager`
                         // (unfiltered — no `base_manager_name` is set), and
@@ -658,19 +674,6 @@ pub fn project_invitation_handler(pool: PgPool) -> Handler {
                                 .map_err(|e| e.to_string())?;
                         let (workspace_slug,) = workspace_row
                             .ok_or_else(|| "Workspace.DoesNotExist".to_owned())?;
-                        // `ProjectMemberInvite.objects.get(token, email)`:
-                        // silent miss.
-                        let invite_row: Option<(Uuid,)> = sqlx::query_as(
-                            "SELECT id FROM project_member_invites WHERE token = $1 AND email = $2 AND deleted_at IS NULL",
-                        )
-                        .bind(&token)
-                        .bind(&email)
-                        .fetch_optional(&pool)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        let Some((invite_id,)) = invite_row else {
-                            return Ok(None);
-                        };
                         let email_str = user.email.as_deref().map_or_else(
                             || py_str(&serde_json::Value::Null),
                             str::to_owned,

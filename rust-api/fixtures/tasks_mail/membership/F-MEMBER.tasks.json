@@ -84,7 +84,7 @@
         "current_site": "current_site"
       },
       "template": "emails/invitations/project_invitation.html",
-      "write": "project_member_invite.message = text_content; .save() BEFORE the send (full-field save; also NULLs created_by/updated_by in the worker \u2014 see PB-2008)",
+      "write": "project_member_invite.message = text_content; .save() BEFORE the send (full-field save; also NULLs created_by/updated_by in the worker \u2014 see PB-2009)",
       "exceptions": "except (Project.DoesNotExist, ProjectMemberInvite.DoesNotExist): silent return (NOTE: User.DoesNotExist NOT caught -> falls to log_exception path)"
     }
   }

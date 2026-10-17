@@ -344,8 +344,11 @@ pub struct OutgoingMail {
 /// the SMTP line limit that flips Django to quoted-printable (probed
 /// from `EmailMultiAlternatives`, PIDASHCONV-1104: ASCII 998 → `7bit`,
 /// 999 → QP; `q`*997+é, 999 bytes → QP, `q`*990+é, 992 bytes → `8bit`).
+/// A trailing `\r` is not measured: Django splits with `splitlines()`
+/// (`SafeMIMEText.set_payload`), which strips the `\r` of `\r\n`.
 fn body_needs_qp(body: &str) -> bool {
-    body.split('\n').any(|line| line.len() > 998)
+    body.split('\n')
+        .any(|line| line.strip_suffix('\r').unwrap_or(line).len() > 998)
 }
 
 /// `quopri.body_encode` (CPython `email/quoprimime.py`, `maxlinelen=76`):
@@ -356,6 +359,10 @@ fn body_needs_qp(body: &str) -> bool {
 /// break when the line is full). Byte-oriented over the UTF-8 bytes,
 /// exactly like the latin1 round-trip in `Charset.body_encode`. Joined
 /// with `\n`; the caller's CRLF normalization runs after assembly.
+/// NOTE the `room == 2` shape: CPython appends `line[-1] + soft_break`
+/// (the break's own eol lives INSIDE the chunk), so the join newline
+/// survives as a real line break — the break line is followed by an
+/// empty line, never glue to the next chunk.
 fn quoted_printable_encode(body: &str) -> String {
     let mut translated = String::with_capacity(body.len());
     for &byte in body.as_bytes() {
@@ -401,7 +408,11 @@ fn quoted_printable_encode(body: &str) -> String {
                 if room >= 3 {
                     encoded_lines.push(format!("{}{quoted}", &rest[..rest.len() - 1]));
                 } else if room == 2 {
+                    // `line[-1] + soft_break`, then the real break:
+                    // CPython's chunk ends with the break's own eol, so
+                    // the join newline survives (`...X=\n\n<next>`).
                     encoded_lines.push(format!("{}{}=", &rest[..rest.len() - 1], *last as char));
+                    encoded_lines.push(String::new());
                 } else {
                     encoded_lines.push(format!("{}=", &rest[..rest.len() - 1]));
                     encoded_lines.push(quoted);
@@ -1469,6 +1480,21 @@ mod tests {
         assert_eq!(
             quoted_printable_encode("café ’ =\t\nline2 "),
             "caf=C3=A9 =E2=80=99 =3D=09\nline2=20"
+        );
+        // `room == 2` (75-char line, trailing whitespace): the soft
+        // break keeps its own eol, so the real line break survives
+        // (review fuzz vs `quoprimime.body_encode`: `...X=\n\n<next>`).
+        assert_eq!(
+            quoted_printable_encode(&format!("{} ", "q".repeat(74))),
+            format!("{} =\n", "q".repeat(74))
+        );
+        assert_eq!(
+            quoted_printable_encode(&format!("{} \nx", "q".repeat(74))),
+            format!("{} =\n\nx", "q".repeat(74))
+        );
+        assert_eq!(
+            quoted_printable_encode(&format!("{}\t", "q".repeat(74))),
+            format!("{}\t=\n", "q".repeat(74))
         );
     }
 }
