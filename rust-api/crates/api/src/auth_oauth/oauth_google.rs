@@ -2001,7 +2001,7 @@ pub fn workspace_members_cache_pattern(workspace_slug: &str) -> String {
 /// per-invite cache invalidation + `track_event`; invalidation runs
 /// before the event publish, `join.py:39-45` order),
 /// project-invite workspace joins (mapped role), the buggy project joins,
-/// then both invite deletes.
+/// then both invite soft-deletes.
 pub async fn process_invitations(
     pool: &sqlx::PgPool,
     redis: Option<&RedisHandle>,
@@ -2063,16 +2063,22 @@ pub async fn process_invitations(
         .collect();
     insert_workspace_members(pool, &project_rows, now).await?;
     insert_project_members(pool, &project_rows, now).await?;
+    // Both invite sets soft-delete (queryset `.delete()` → `UPDATE
+    // deleted_at`, `mixins.py:SoftDeletionQuerySet`).
     sqlx::query(
-        "DELETE FROM \"workspace_member_invites\" WHERE \"email\" = $1 AND \"accepted\" = TRUE",
+        r#"UPDATE "workspace_member_invites" SET "deleted_at" = $1
+           WHERE "email" = $2 AND "accepted" = TRUE AND "deleted_at" IS NULL"#,
     )
+    .bind(now)
     .bind(email)
     .execute(pool)
     .await
     .map_err(|_| CallbackError::Internal)?;
     sqlx::query(
-        "DELETE FROM \"project_member_invites\" WHERE \"email\" = $1 AND \"accepted\" = TRUE",
+        r#"UPDATE "project_member_invites" SET "deleted_at" = $1
+           WHERE "email" = $2 AND "accepted" = TRUE AND "deleted_at" IS NULL"#,
     )
+    .bind(now)
     .bind(email)
     .execute(pool)
     .await
@@ -2762,5 +2768,225 @@ mod tests {
         // `FILE_SIZE_LIMIT` / `DATA_UPLOAD_MAX_MEMORY_SIZE`
         // (`settings/common.py:428,594`): `int(get_config(..., 5242880))`.
         assert_eq!(AVATAR_MAX_BYTES, 5_242_880);
+    }
+
+    // -- live kernel tests (env-gated, PIDASHCONV-1089) ------------------
+    // Same convention as the github kernel harness (PIDASHCONV-1083):
+    // unset DATABASE_URL (plain `cargo test`) skips these. REDIS_URL
+    // defaults to the shared local server's db 6 scratch lane. The HTTP
+    // success path is sealed in tests (the exchange posts to hardcoded
+    // https://oauth2.googleapis.com URLs on both backends), so these
+    // drive `process_invitations` directly — the kernel-level harness.
+
+    /// Serializes the queue DDL: parallel tests racing
+    /// `CREATE TABLE IF NOT EXISTS` can collide on the sequence.
+    static SCHEMA_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn kernel_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => {
+                let pool = sqlx::PgPool::connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL");
+                let _guard = SCHEMA_LOCK.lock().await;
+                pidash_jobs::queue::ensure_schema(&pool)
+                    .await
+                    .expect("queue schema");
+                Some(pool)
+            }
+            Err(_) => {
+                eprintln!("skipping live-kernel test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    fn kernel_redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/6".to_owned())
+    }
+
+    /// Seed an active user + workspace + accepted invite for the email,
+    /// plus an unaccepted decoy in a second workspace (live invites are
+    /// unique per (email, workspace); column lists mirror
+    /// `_harness.db.Database.make_user/make_workspace/make_invite`).
+    async fn seed_invited_user(
+        pool: &sqlx::PgPool,
+        email: &str,
+        slug: &str,
+    ) -> (uuid::Uuid, uuid::Uuid, uuid::Uuid) {
+        let user_id = uuid::Uuid::new_v4();
+        let workspace_id = uuid::Uuid::new_v4();
+        let decoy_workspace_id = uuid::Uuid::new_v4();
+        let decoy_slug = format!("{slug}-u");
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{}", &user_id.simple().to_string()[..8]))
+        .bind(email)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug",
+                "owner_id", "timezone", "background_color")
+               VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#ffffff')"#,
+        )
+        .bind(now)
+        .bind(workspace_id)
+        .bind(format!("kernel ws {slug}"))
+        .bind(slug)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug",
+                "owner_id", "timezone", "background_color")
+               VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#ffffff')"#,
+        )
+        .bind(now)
+        .bind(decoy_workspace_id)
+        .bind(format!("kernel ws {decoy_slug}"))
+        .bind(&decoy_slug)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed decoy workspace");
+        for (accepted, target, suffix) in
+            [(true, workspace_id, ""), (false, decoy_workspace_id, "-u")]
+        {
+            sqlx::query(
+                r#"INSERT INTO "workspace_member_invites" ("created_at", "updated_at", "id", "email",
+                    "accepted", "token", "role", "workspace_id", "created_by_id", "responded_at")
+                   VALUES ($1, $1, $2, $3, $4, $5, 15, $6, NULL, NULL)"#,
+            )
+            .bind(now)
+            .bind(uuid::Uuid::new_v4())
+            .bind(email)
+            .bind(accepted)
+            .bind(format!("tok-1089-{slug}{suffix}"))
+            .bind(target)
+            .execute(pool)
+            .await
+            .expect("seed invite");
+        }
+        (user_id, workspace_id, decoy_workspace_id)
+    }
+
+    async fn cleanup_kernel_world(pool: &sqlx::PgPool, email: &str, workspace_ids: &[uuid::Uuid]) {
+        let user_ids: Vec<uuid::Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "email" = $1"#)
+                .bind(email)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+        for user_id in &user_ids {
+            sqlx::query(r#"DELETE FROM "workspace_members" WHERE "member_id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+        sqlx::query(r#"DELETE FROM "workspace_member_invites" WHERE "email" = $1"#)
+            .bind(email)
+            .execute(pool)
+            .await
+            .ok();
+        for workspace_id in workspace_ids {
+            sqlx::query(r#"DELETE FROM "workspaces" WHERE "id" = $1"#)
+                .bind(workspace_id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+        for user_id in &user_ids {
+            sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
+            // Best-effort queue sweep for this run's track_event emits
+            // (the user id rides in kwargs).
+            sqlx::query(
+                r#"DELETE FROM "rust_job_queue"
+                   WHERE "args"::text LIKE $1 OR "kwargs"::text LIKE $1"#,
+            )
+            .bind(format!("%{user_id}%"))
+            .execute(pool)
+            .await
+            .ok();
+        }
+    }
+
+    /// Consumed workspace invites soft-delete: the accepted row survives
+    /// with `deleted_at` set (Django `.delete()` semantics), the
+    /// membership lands, and the unaccepted decoy stays live.
+    #[tokio::test]
+    async fn google_kernel_consumed_invites_soft_delete() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let redis =
+            pidash_db::redis::RedisHandle::from_url(&kernel_redis_url()).expect("redis url parses");
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("go1089-{tag}@example.test");
+        let slug = format!("go1089-{tag}");
+        let (user_id, workspace_id, decoy_workspace_id) =
+            seed_invited_user(&pool, &email, &slug).await;
+
+        let outcome =
+            process_invitations(&pool, Some(&redis), user_id, &email, chrono::Utc::now()).await;
+
+        // Observe everything before cleanup so a failure still sweeps.
+        let members: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM "workspace_members"
+               WHERE "workspace_id" = $1 AND "member_id" = $2"#,
+        )
+        .bind(workspace_id)
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count members");
+        let invite_rows: Vec<(bool, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            r#"SELECT "accepted", "deleted_at" FROM "workspace_member_invites"
+               WHERE "email" = $1"#,
+        )
+        .bind(&email)
+        .fetch_all(&pool)
+        .await
+        .expect("read invites");
+        let project_rows: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM "project_member_invites" WHERE "email" = $1"#,
+        )
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .expect("count project invites");
+        cleanup_kernel_world(&pool, &email, &[workspace_id, decoy_workspace_id]).await;
+
+        assert!(outcome.is_ok(), "process_invitations succeeds");
+        assert_eq!(members, 1, "membership row lands");
+        assert_eq!(invite_rows.len(), 2, "both invite rows survive");
+        for (accepted, deleted_at) in &invite_rows {
+            if *accepted {
+                assert!(deleted_at.is_some(), "consumed invite soft-deletes");
+            } else {
+                assert!(deleted_at.is_none(), "unaccepted invite stays live");
+            }
+        }
+        assert_eq!(project_rows, 0, "no project invites seeded");
     }
 }

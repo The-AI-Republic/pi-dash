@@ -6,6 +6,7 @@ import json
 import threading
 from email import message_from_bytes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -129,6 +130,85 @@ class FixedResponseStub:
         return f"http://{host}:{port}"
 
     def __enter__(self) -> "FixedResponseStub":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._server.shutdown()
+        self._thread.join(timeout=5)
+        self._server.server_close()
+
+
+class RoutingStub:
+    """HTTP stub dispatching fixed responses by (method, path).
+
+    First use: PIDASHCONV-1089, stubbing the Gitea OAuth endpoints
+    (``GITEA_HOST`` points at :attr:`url`). ``routes`` maps
+    ``(METHOD, path)`` (path without query string) to
+    ``(status, body)``; ``body`` may be bytes, str, or a JSON-serializable
+    value (dict/list, served as ``application/json``). Unmapped paths
+    answer 404. Every hit records ``{method, path, headers, body}`` in
+    :attr:`requests` (full path, query string included).
+    """
+
+    def __init__(self, routes: dict[tuple[str, str], tuple[int, object]]) -> None:
+        outer = self
+        self.requests: list[dict] = []
+        normalized: dict[tuple[str, str], tuple[int, bytes, str]] = {}
+        for (method, path), (status, body) in routes.items():
+            if isinstance(body, (dict, list)):
+                payload, content_type = json.dumps(body).encode(), "application/json"
+            elif isinstance(body, str):
+                payload, content_type = body.encode(), "application/json"
+            else:
+                payload, content_type = bytes(body), "application/json"
+            normalized[(method, path)] = (status, payload, content_type)
+
+        class Handler(BaseHTTPRequestHandler):
+            def _answer(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                outer.requests.append(
+                    {
+                        "method": self.command,
+                        "path": self.path,
+                        "headers": dict(self.headers),
+                        "body": raw,
+                    }
+                )
+                route = normalized.get((self.command, urlsplit(self.path).path))
+                if route is None:
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", "9")
+                    self.end_headers()
+                    self.wfile.write(b"not found")
+                    return
+                status, payload, content_type = route
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = _answer
+            do_POST = _answer
+            do_PUT = _answer
+            do_PATCH = _answer
+            do_DELETE = _answer
+
+            def log_message(self, *args: object) -> None:  # keep test output clean
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address
+        return f"http://{host}:{port}"
+
+    def __enter__(self) -> "RoutingStub":
         self._thread.start()
         return self
 
