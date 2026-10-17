@@ -50,7 +50,7 @@ pub const CACHE_FAILED: &str = "Failed to clear cache";
 /// Leaf `(app_label, migration_name)` nodes of the Django migration graph —
 /// `MigrationExecutor(connection).loader.graph.leaf_nodes()`, computed with
 /// the real Django 4.2 loader over `INSTALLED_APPS`
-/// (`settings/common.py:44-68`) at the ported commit (260 graph nodes):
+/// (`settings/common.py:44-68`) at the ported commit (261 graph nodes):
 /// no `run_before`, `replaces`, `__first__` or `__latest__` markers exist in
 /// any `pi_dash` migration, so the five first-party leaves are also exactly
 /// what an `ast` parse of the `dependencies` lists in `apps/api` yields
