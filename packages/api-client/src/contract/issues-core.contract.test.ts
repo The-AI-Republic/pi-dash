@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Contract: full issue create/update, archive/restore, move, grouped and
-// global lists, picker search, key resolve and description versions
-// against live Django (NEWFRONT-611).
+// global lists against live Django (NEWFRONT-611).
 import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../client.js";
 import { listCycles, transferCycleIssues } from "../contracts/cycles.js";
@@ -19,16 +18,12 @@ import {
 } from "../contracts/issue-actions.js";
 import { archiveIssue, moveIssueToProject, restoreIssue } from "../contracts/issue-lifecycle.js";
 import {
-  getDescriptionVersion,
   getIssue,
   listArchivedIssues,
-  listDescriptionVersions,
   listGlobalIssues,
   listGroupedIssues,
   listIssues,
   listSubGroupedIssues,
-  resolveIssueByKey,
-  searchIssues,
 } from "../contracts/issues.js";
 import { listProjects } from "../contracts/projects.js";
 import { CONTRACT_PROJECT_IDENTIFIER, CONTRACT_WORKSPACE, contractEnabled, sharedSignedIn } from "./setup.js";
@@ -354,57 +349,5 @@ describe.skipIf(!contractEnabled)("grouped and filtered issue list contract", ()
     const one = await listGlobalIssues(client, CONTRACT_WORKSPACE, { perPage: 1 });
     expect(one.results).toHaveLength(1);
     expect(one.next_page_results).toBe(true);
-  });
-});
-
-describe.skipIf(!contractEnabled)("issue search, key resolve and versions contract", () => {
-  it("searches issues for the pickers", async () => {
-    const client = await signedIn();
-    const projectId = await seededProjectId(client);
-    const rows = await searchIssues(client, CONTRACT_WORKSPACE, projectId, { search: "Contract issue" });
-    const names = rows.map((row) => row.name);
-    expect(names).toContain("Contract issue one");
-    const first = rows.find((row) => row.name === "Contract issue one");
-    expect(first?.project__identifier).toBe(CONTRACT_PROJECT_IDENTIFIER);
-    expect(first?.workspace__slug).toBe(CONTRACT_WORKSPACE);
-    expect(first?.state__group).toBe("backlog");
-  });
-
-  it("excludes the issue itself from parent search", async () => {
-    const client = await signedIn();
-    const projectId = await seededProjectId(client);
-    const selfId = await seededIssueId(client, projectId, "Contract issue one");
-    const rows = await searchIssues(client, CONTRACT_WORKSPACE, projectId, { parent: true, issueId: selfId });
-    expect(rows.map((row) => row.id)).not.toContain(selfId);
-  });
-
-  it("resolves an issue by its workspace key", async () => {
-    const client = await signedIn();
-    const projectId = await seededProjectId(client);
-    const page = await listIssues(client, CONTRACT_WORKSPACE, projectId);
-    const first = page.results.find((row) => row.name === "Contract issue one");
-    expect(first).toBeDefined();
-    if (!first) return;
-    const lite = await resolveIssueByKey(client, CONTRACT_WORKSPACE, CONTRACT_PROJECT_IDENTIFIER, first.sequence_id);
-    expect(lite.id).toBe(first.id);
-    expect(lite.project_id).toBe(projectId);
-    expect(lite.name).toBe("Contract issue one");
-    expect(lite.is_epic).toBe(false);
-  });
-
-  it("reads the seeded description version history", async () => {
-    const client = await signedIn();
-    const projectId = await seededProjectId(client);
-    const issueId = await seededIssueId(client, projectId, "Contract issue one");
-    const history = await listDescriptionVersions(client, CONTRACT_WORKSPACE, projectId, issueId);
-    expect(history.total_results).toBeGreaterThanOrEqual(1);
-    expect(history.results.length).toBeGreaterThanOrEqual(1);
-    expect(history.results[0]?.issue).toBe(issueId);
-    const versionId = history.results[0]?.id;
-    expect(versionId).toBeDefined();
-    if (!versionId) return;
-    const version = await getDescriptionVersion(client, CONTRACT_WORKSPACE, projectId, issueId, versionId);
-    expect(version.id).toBe(versionId);
-    expect(version.description_html).toContain("Seeded description version");
   });
 });

@@ -1,12 +1,13 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Contract: bulk issue delete and archive against live Django
-// (NEWFRONT-611). Bulk update and bulk subscribe are cloud-only (no OSS
-// route) and are proven by stub unit tests in contracts.test.ts instead.
+// Contract: bulk issue delete, archive and batch dates against live
+// Django (NEWFRONT-611). Bulk update and bulk subscribe are cloud-only
+// (no OSS route) and are proven by stub unit tests in contracts.test.ts
+// instead.
 import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../client.js";
-import { bulkArchiveIssues, bulkDeleteIssues } from "../contracts/issue-bulk.js";
+import { bulkArchiveIssues, bulkDeleteIssues, bulkUpdateIssueDates } from "../contracts/issue-bulk.js";
 import { createIssue, deleteIssue, updateIssue } from "../contracts/issue-actions.js";
 import { restoreIssue } from "../contracts/issue-lifecycle.js";
 import { getIssue, listArchivedIssues, listIssues } from "../contracts/issues.js";
@@ -110,5 +111,58 @@ describe.skipIf(!contractEnabled)("bulk issue archive contract", () => {
     expect(archived.results.map((row) => row.id)).not.toContain(done.id);
     await deleteIssue(client, CONTRACT_WORKSPACE, projectId, open.id);
     await deleteIssue(client, CONTRACT_WORKSPACE, projectId, done.id);
+  });
+});
+
+const BULK_DATES_PROBES = ["Contract bulk dates one", "Contract bulk dates two"];
+
+describe.skipIf(!contractEnabled)("bulk issue dates contract", () => {
+  it("updates every probe's dates in one request", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    await clearProbes(client, projectId, BULK_DATES_PROBES);
+    const first = await createIssue(client, CONTRACT_WORKSPACE, projectId, {
+      name: BULK_DATES_PROBES[0] ?? "",
+      start_date: "2026-01-05",
+      target_date: "2026-01-20",
+    });
+    const second = await createIssue(client, CONTRACT_WORKSPACE, projectId, {
+      name: BULK_DATES_PROBES[1] ?? "",
+      start_date: "2026-01-05",
+      target_date: "2026-01-20",
+    });
+    const result = await bulkUpdateIssueDates(client, CONTRACT_WORKSPACE, projectId, [
+      { id: first.id, start_date: "2026-02-01", target_date: "2026-02-10" },
+      // A partial row keeps the stored start date.
+      { id: second.id, target_date: "2026-03-15" },
+    ]);
+    expect(result.message).toContain("successfully");
+    const firstDetail = await getIssue(client, CONTRACT_WORKSPACE, projectId, first.id);
+    expect(firstDetail.start_date).toBe("2026-02-01");
+    expect(firstDetail.target_date).toBe("2026-02-10");
+    const secondDetail = await getIssue(client, CONTRACT_WORKSPACE, projectId, second.id);
+    expect(secondDetail.start_date).toBe("2026-01-05");
+    expect(secondDetail.target_date).toBe("2026-03-15");
+    await deleteIssue(client, CONTRACT_WORKSPACE, projectId, first.id);
+    await deleteIssue(client, CONTRACT_WORKSPACE, projectId, second.id);
+  });
+
+  it("refuses a batch whose start passes its target", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    await clearProbes(client, projectId, BULK_DATES_PROBES);
+    const probe = await createIssue(client, CONTRACT_WORKSPACE, projectId, {
+      name: BULK_DATES_PROBES[0] ?? "",
+      start_date: "2026-03-01",
+      target_date: "2026-03-10",
+    });
+    await expect(
+      bulkUpdateIssueDates(client, CONTRACT_WORKSPACE, projectId, [{ id: probe.id, start_date: "2026-04-01" }])
+    ).rejects.toMatchObject({ status: 400 });
+    // The batch is all-or-nothing: the stored dates are untouched.
+    const detail = await getIssue(client, CONTRACT_WORKSPACE, projectId, probe.id);
+    expect(detail.start_date).toBe("2026-03-01");
+    expect(detail.target_date).toBe("2026-03-10");
+    await deleteIssue(client, CONTRACT_WORKSPACE, projectId, probe.id);
   });
 });

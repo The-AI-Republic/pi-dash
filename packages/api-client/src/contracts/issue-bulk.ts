@@ -1,11 +1,11 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Bulk issue operations: one request across a selection. Bulk delete and
-// bulk archive run against the OSS backend; bulk update and bulk
-// subscribe are cloud-only endpoints (no OSS route), so their contracts
-// below carry request/response schemas for the cloud backend and are
-// proven by stub unit tests rather than live contract tests.
+// Bulk issue operations: one request across a selection. Bulk delete,
+// bulk archive and batch dates run against the OSS backend; bulk update
+// and bulk subscribe are cloud-only endpoints (no OSS route), so their
+// contracts below carry request/response schemas for the cloud backend
+// and are proven by stub unit tests rather than live contract tests.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { ISSUE_PRIORITIES } from "./issues.js";
@@ -83,6 +83,39 @@ export async function bulkArchiveIssues(
   const path = `/api/workspaces/${slug}/projects/${projectId}/bulk-archive-issues/`;
   const envelope = await client.sendJson<unknown>("POST", path, { json: { issue_ids: issueIds } });
   return client.parse(BulkArchiveResult, envelope.data, `POST ${path}`);
+}
+
+/**
+ * One row of a batch date update: the gantt's reschedule and resize
+ * persist here. Dates are calendar strings; an omitted date keeps the
+ * stored value. Ids outside the project are silently skipped.
+ */
+export interface BulkIssueDateUpdate {
+  id: string;
+  start_date?: string;
+  target_date?: string;
+}
+
+/** POST .../issue-dates/ answers 200 {message} on success. */
+export const BulkIssueDatesResult = z.object({
+  message: z.string(),
+});
+export type BulkIssueDatesResult = z.infer<typeof BulkIssueDatesResult>;
+
+/**
+ * Batch issue dates: one request carries the gantt's moved bars. A row
+ * whose merged start passes its target fails the whole batch with 400
+ * and nothing is written.
+ */
+export async function bulkUpdateIssueDates(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  updates: BulkIssueDateUpdate[]
+): Promise<BulkIssueDatesResult> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/issue-dates/`;
+  const envelope = await client.sendJson<unknown>("POST", path, { json: { updates } });
+  return client.parse(BulkIssueDatesResult, envelope.data, `POST ${path}`);
 }
 
 /**

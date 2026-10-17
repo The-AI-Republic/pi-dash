@@ -179,9 +179,6 @@ export {
 } from "./contracts/reference.js";
 export {
   ISSUE_PRIORITIES,
-  DescriptionVersion,
-  DescriptionVersionList,
-  DescriptionVersionRow,
   GlobalIssueListResponse,
   GlobalIssueRow,
   GroupedIssueListResponse,
@@ -191,23 +188,16 @@ export {
   IssueListItem,
   IssueListResponse,
   IssueRelationsSummary,
-  IssueSearchResponse,
-  IssueSearchRow,
-  LiteIssue,
   SubGroupedIssueBucket,
   SubGroupedIssueListResponse,
-  getDescriptionVersion,
   getIssue,
   listArchivedIssues,
-  listDescriptionVersions,
   listGlobalIssues,
   listGroupedIssues,
   listIssues,
   listSubGroupedIssues,
-  resolveIssueByKey,
-  searchIssues,
 } from "./contracts/issues.js";
-export type { IssueListQuery, IssueSearchQuery } from "./contracts/issues.js";
+export type { IssueListQuery } from "./contracts/issues.js";
 export {
   IssueCreateResult,
   IssueSubscription,
@@ -234,12 +224,14 @@ export {
 export {
   BulkArchiveResult,
   BulkDeleteResult,
+  BulkIssueDatesResult,
   bulkArchiveIssues,
   bulkDeleteIssues,
   bulkSubscribeIssues,
+  bulkUpdateIssueDates,
   bulkUpdateIssues,
 } from "./contracts/issue-bulk.js";
-export type { BulkIssueProperties, BulkOperationInput } from "./contracts/issue-bulk.js";
+export type { BulkIssueDateUpdate, BulkIssueProperties, BulkOperationInput } from "./contracts/issue-bulk.js";
 export {
   CycleUserProperties,
   EpicUserProperties,

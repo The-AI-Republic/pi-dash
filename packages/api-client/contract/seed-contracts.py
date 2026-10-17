@@ -385,26 +385,6 @@ def seed():
         )
         note("issue-label", f"{first_issue.name}/{label.name}", link_created)
 
-    # Description history (NEWFRONT-611): versions are written by a celery
-    # task and no worker runs in contract tests, so the read contracts
-    # prove against this seeded row. Tests only read it; re-seed is stable.
-    from pi_dash.db.models.issue import IssueDescriptionVersion  # noqa: E402
-
-    _, version_created = IssueDescriptionVersion.objects.get_or_create(
-        issue=first_issue,
-        owned_by=user,
-        defaults={
-            "workspace": workspace,
-            "project": project,
-            "created_by": user,
-            "updated_by": user,
-            "description_html": "<p>Seeded description version.</p>",
-            "description_stripped": "Seeded description version.",
-            "description_json": {},
-        },
-    )
-    note("description-version", first_issue.name, version_created)
-
     from pi_dash.db.models import Cycle, Module, Page, ProjectPage  # noqa: E402
 
     cycle, cycle_created = Cycle.objects.get_or_create(

@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Issue contracts, read-only: flat, grouped and global lists, archived
-// list, single-issue detail, picker search, key resolve and description
-// versions. The lists answer a slim projection per row; only the detail
-// carries the scoring, sync and description fields. Single-issue actions
-// (update, delete, cycle/module membership, subscriptions) live in
-// issue-actions.ts, out of the initial bundle (NEWFRONT-523, size gate).
+// list and single-issue detail. Picker search and description versions
+// live with NEWFRONT-612, key resolve with NEWFRONT-613. The lists
+// answer a slim projection per row; only the detail carries the scoring,
+// sync and description fields. Single-issue actions (update, delete,
+// cycle/module membership, subscriptions) live in issue-actions.ts, out
+// of the initial bundle (NEWFRONT-523, size gate).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDate, nullableDateTime, nullableUuid, uuid } from "./fields.js";
@@ -248,172 +249,6 @@ export async function listGlobalIssues(
     query: listQueryParams(query),
   });
   return client.parse(GlobalIssueListResponse, body, "GET global issues");
-}
-
-export interface IssueSearchQuery {
-  search?: string;
-  workspaceSearch?: boolean;
-  parent?: boolean;
-  issueRelation?: boolean;
-  cycle?: boolean;
-  module?: string;
-  subIssue?: boolean;
-  /** `none` keeps only issues with no target date. */
-  targetDate?: string;
-  issueId?: string;
-}
-
-/**
- * One row of the project issue search: the pickers' slim projection
- * (name, key parts, state chip). Doubled keys (`project__name`) are the
- * ORM values() spelling, kept verbatim.
- */
-export const IssueSearchRow = z.object({
-  name: z.string(),
-  id: uuid(),
-  start_date: z.nullable(z.iso.date()),
-  sequence_id: z.number(),
-  project__name: z.string(),
-  project__identifier: z.string(),
-  project_id: uuid(),
-  workspace__slug: z.string(),
-  state__name: z.nullable(z.string()),
-  state__group: z.nullable(z.string()),
-  state__color: z.nullable(z.string()),
-});
-export type IssueSearchRow = z.infer<typeof IssueSearchRow>;
-
-export const IssueSearchResponse = z.array(IssueSearchRow);
-export type IssueSearchResponse = z.infer<typeof IssueSearchResponse>;
-
-/**
- * GET .../search-issues/ — the parent/relation/sub-issue pickers'
- * typeahead. Boolean flags travel as the "true"/"false" strings the
- * view compares against.
- */
-export async function searchIssues(
-  client: ApiClient,
-  slug: string,
-  projectId: string,
-  query: IssueSearchQuery = {}
-): Promise<IssueSearchResponse> {
-  const flag = (value: boolean | undefined): string | undefined =>
-    value === undefined ? undefined : value ? "true" : "false";
-  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/search-issues/`, {
-    query: {
-      search: query.search,
-      workspace_search: flag(query.workspaceSearch),
-      parent: flag(query.parent),
-      issue_relation: flag(query.issueRelation),
-      cycle: flag(query.cycle),
-      module: query.module,
-      sub_issue: flag(query.subIssue),
-      target_date: query.targetDate,
-      issue_id: query.issueId,
-    },
-  });
-  return client.parse(IssueSearchResponse, body, "GET search issues");
-}
-
-/**
- * Lite issue by workspace key (`IDENT-seq`): the browse route's first
- * phase, resolving id and project before the full hydrate. Audit ids
- * are bare user keys here, not the detail's shaped values.
- */
-export const LiteIssue = z.object({
-  id: uuid(),
-  sequence_id: z.number(),
-  name: z.string(),
-  description_html: z.string(),
-  sort_order: z.number(),
-  project_id: uuid(),
-  created_at: dateTime(),
-  updated_at: dateTime(),
-  created_by: nullableUuid(),
-  updated_by: nullableUuid(),
-  is_draft: z.boolean(),
-  is_epic: z.boolean(),
-  is_intake: z.boolean(),
-  is_synced: z.boolean(),
-  archived_at: nullableDate(),
-});
-export type LiteIssue = z.infer<typeof LiteIssue>;
-
-/** GET /api/workspaces/<slug>/work-items/<IDENT>-<seq>/?lite=1. */
-export async function resolveIssueByKey(
-  client: ApiClient,
-  slug: string,
-  projectIdentifier: string,
-  sequenceId: number
-): Promise<LiteIssue> {
-  const path = `/api/workspaces/${slug}/work-items/${projectIdentifier}-${sequenceId}/`;
-  const body = await client.getJson<unknown>(path, { query: { lite: "1" } });
-  return client.parse(LiteIssue, body, `GET ${path}`);
-}
-
-/** One description version row (list view: metadata, no content). */
-export const DescriptionVersionRow = z.object({
-  id: uuid(),
-  workspace: uuid(),
-  project: uuid(),
-  issue: uuid(),
-  last_saved_at: dateTime(),
-  owned_by: uuid(),
-  created_at: dateTime(),
-  updated_at: dateTime(),
-  created_by: nullableUuid(),
-  updated_by: nullableUuid(),
-});
-export type DescriptionVersionRow = z.infer<typeof DescriptionVersionRow>;
-
-/** Cursor envelope for the description-version history. */
-export const DescriptionVersionList = z.object({
-  prev_cursor: z.string(),
-  cursor: z.string(),
-  next_cursor: z.nullable(z.string()),
-  prev_page_results: z.boolean(),
-  next_page_results: z.boolean(),
-  page_count: z.number(),
-  total_results: z.number(),
-  total_pages: z.number(),
-  results: z.array(DescriptionVersionRow),
-});
-export type DescriptionVersionList = z.infer<typeof DescriptionVersionList>;
-
-/** GET .../work-items/<id>/description-versions/ — version history. */
-export async function listDescriptionVersions(
-  client: ApiClient,
-  slug: string,
-  projectId: string,
-  issueId: string,
-  query: { cursor?: string } = {}
-): Promise<DescriptionVersionList> {
-  const path = `/api/workspaces/${slug}/projects/${projectId}/work-items/${issueId}/description-versions/`;
-  const body = await client.getJson<unknown>(path, { query: { cursor: query.cursor } });
-  return client.parse(DescriptionVersionList, body, `GET ${path}`);
-}
-
-/** One version with its content: restore reads through this shape. */
-export const DescriptionVersion = z.object({
-  ...DescriptionVersionRow.shape,
-  description_binary: z.nullable(z.string()),
-  description_html: z.string(),
-  description_stripped: z.nullable(z.string()),
-  description_json: z.unknown(),
-});
-export type DescriptionVersion = z.infer<typeof DescriptionVersion>;
-
-/** GET .../description-versions/<version_id>/ — one version's content. */
-export async function getDescriptionVersion(
-  client: ApiClient,
-  slug: string,
-  projectId: string,
-  issueId: string,
-  versionId: string
-): Promise<DescriptionVersion> {
-  const path = `/api/workspaces/${slug}/projects/${projectId}/work-items/${issueId}/description-versions/${versionId}/`;
-  const body = await client.getJson<unknown>(path);
-  return client.parse(DescriptionVersion, body, `GET ${path}`);
 }
 
 export async function getIssue(client: ApiClient, slug: string, projectId: string, issueId: string): Promise<Issue> {
