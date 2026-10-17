@@ -252,30 +252,71 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-/// `request.user` from the Django session (`_auth_user_id`). No session,
-/// no key, or a non-UUID id means anonymous (pilot `actor_user_id`
-/// pattern; Django PKs are UUIDs).
-fn actor_user_id(extension: &Option<Extension<SessionHandle>>) -> Option<Uuid> {
-    let handle = extension.as_ref().map(|ext| ext.0.clone())?;
+/// `request.user` from the Django session. Mirrors
+/// `django.contrib.auth.get_user` plus DRF `SessionAuthentication`: the
+/// session must carry a UUID `_auth_user_id` for the `ModelBackend` with
+/// a matching `_auth_user_hash`, and the user row must exist and be
+/// active — the same three facts [`super::resolve_actor`] verifies
+/// (PIDASHCONV-1097). Anything else authenticates as nobody. Inactive
+/// counts as nobody even on the plain-View sign-out:
+/// `ModelBackend.get_user` rejects `is_active=False` before the hash
+/// check, so `get_user` yields anonymous there too.
+async fn verified_actor(
+    pool: &PgPool,
+    secret_key: &[u8],
+    extension: &Option<Extension<SessionHandle>>,
+) -> Result<Option<Uuid>, Denial> {
+    let Some(handle) = extension.as_ref().map(|ext| ext.0.clone()) else {
+        return Ok(None);
+    };
     let mut session = handle.snapshot();
-    session.get("_auth_user_id")?.as_str()?.parse::<Uuid>().ok()
+    let backend = session
+        .get("_auth_user_backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if backend != super::MODEL_BACKEND {
+        return Ok(None);
+    }
+    let Some(id) = session
+        .get("_auth_user_id")
+        .and_then(|v| v.as_str())
+        .and_then(|raw| raw.parse::<Uuid>().ok())
+    else {
+        return Ok(None);
+    };
+    let session_hash = session
+        .get("_auth_user_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let row: Option<(String, bool)> =
+        sqlx::query_as("SELECT password, is_active FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    let Some((password, true)) = row else {
+        return Ok(None);
+    };
+    if session_hash.is_empty() || !super::verify_session_hash(&session_hash, &password, secret_key)
+    {
+        return Ok(None);
+    }
+    Ok(Some(id))
 }
 
-/// Authenticated actor or 401. Django's `SessionAuthentication.get_user`
-/// returns `None` for a session whose user row is gone, which the
-/// permission layer turns into `NotAuthenticated` — so a dangling session
-/// is 401 here, not 403.
+/// Authenticated actor or 401. A dangling session (user row gone), a
+/// stale hash, a wrong backend, or an inactive user all authenticate as
+/// nobody, which the permission layer turns into `NotAuthenticated` — so
+/// every one of them is 401 here, not 403.
 async fn authed_user(
     pool: &PgPool,
+    secret_key: &[u8],
     extension: &Option<Extension<SessionHandle>>,
 ) -> Result<Uuid, Denial> {
-    let actor = actor_user_id(extension).ok_or(Denial::Unauthorized)?;
-    let row: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE id = $1")
-        .bind(actor)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::Unauthorized)
+    verified_actor(pool, secret_key, extension)
+        .await?
+        .ok_or(Denial::Unauthorized)
 }
 
 /// `Instance.objects.first()`: `Meta.ordering = ("-created_at",)` over the
@@ -624,7 +665,7 @@ async fn create_admin(
     body: axum::body::Bytes,
 ) -> Result<Response, Denial> {
     let pool = pools(&state)?;
-    let actor = authed_user(pool, &extension).await?;
+    let actor = authed_user(pool, state.settings().secret_key.as_bytes(), &extension).await?;
     let instance_id = require_instance_admin(pool, &actor).await?;
     let tz = actor_timezone(pool, &actor).await?;
 
@@ -707,7 +748,7 @@ async fn list_admins(
     extension: Option<Extension<SessionHandle>>,
 ) -> Result<Response, Denial> {
     let pool = pools(&state)?;
-    let actor = authed_user(pool, &extension).await?;
+    let actor = authed_user(pool, state.settings().secret_key.as_bytes(), &extension).await?;
     let instance_id = require_instance_admin(pool, &actor).await?;
     let tz = actor_timezone(pool, &actor).await?;
     if instance_first(pool).await?.is_none() {
@@ -813,7 +854,7 @@ async fn delete_admin(
         return Ok(edge::proxy(State(state), req).await);
     };
     let pool = pools(&state)?;
-    let actor = authed_user(pool, &extension).await?;
+    let actor = authed_user(pool, state.settings().secret_key.as_bytes(), &extension).await?;
     let instance_id = require_instance_admin(pool, &actor).await?;
 
     // The manager's `deleted_at IS NULL` rides the filter. Queryset
@@ -845,7 +886,7 @@ async fn me(
     extension: Option<Extension<SessionHandle>>,
 ) -> Result<Response, Denial> {
     let pool = pools(&state)?;
-    let actor = authed_user(pool, &extension).await?;
+    let actor = authed_user(pool, state.settings().secret_key.as_bytes(), &extension).await?;
     require_instance_admin(pool, &actor).await?;
     let tz = actor_timezone(pool, &actor).await?;
     // `authed_user` already proved the row exists.
@@ -864,8 +905,11 @@ async fn session(
     // `TimezoneMixin.initial` runs even under `AllowAny`: an authenticated
     // session resolves its zone (bad zone → 500) before the view body, so
     // the zone resolves before the admin check, exactly like Python. A
-    // session whose user row is gone authenticates to nobody → bare flag.
-    if let Some(actor) = actor_user_id(&extension) {
+    // session whose user row is gone — or whose backend/hash fails, or
+    // whose user is inactive — authenticates to nobody → bare flag.
+    if let Some(actor) =
+        verified_actor(pool, state.settings().secret_key.as_bytes(), &extension).await?
+    {
         if let Some(user) = fetch_user(pool, &actor).await? {
             let tz: Tz = user
                 .user_timezone
@@ -960,15 +1004,13 @@ async fn sign_out(
     )?;
     let outcome: Result<(), Denial> = async {
         let pool = pools(&state)?;
-        let actor = actor_user_id(&extension).ok_or(Denial::ServerError)?;
-        let exists: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE id = $1")
-            .bind(actor)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        if exists.is_none() {
-            return Err(Denial::ServerError);
-        }
+        // `get_user` yields anonymous for a missing row, a wrong backend,
+        // a stale hash, or an inactive user (`ModelBackend.get_user`
+        // rejects those before the hash check); the view's `get(pk=None)`
+        // then raises before any stamp — the same early-out.
+        let actor = verified_actor(pool, state.settings().secret_key.as_bytes(), &extension)
+            .await?
+            .ok_or(Denial::ServerError)?;
         let now = Utc::now();
         sqlx::query(
             "UPDATE users SET last_logout_ip = $1, last_logout_time = $2, updated_at = $2 WHERE id = $3",
@@ -982,8 +1024,9 @@ async fn sign_out(
         // `logout()`: `Session.flush()` drops the presented row (this
         // route always reads the admin cookie); the middleware then
         // answers the cookie deletion because the session reads empty.
-        // Anonymous hits never reach here (the `get(pk=None)` raises
-        // first, skipping `logout()` entirely — same early-out).
+        // Anonymous hits — no session, or a session that fails the
+        // backend/hash/active check — never reach here (the `get(pk=None)`
+        // raises first, skipping `logout()` entirely — same early-out).
         let cookie_header = headers
             .get(header::COOKIE)
             .and_then(|v| v.to_str().ok())

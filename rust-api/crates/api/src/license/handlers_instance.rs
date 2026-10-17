@@ -111,10 +111,13 @@ pub fn routes() -> Router<AppState> {
 // Session actor (BaseSessionAuthentication without CSRF)
 // ---------------------------------------------------------------------------
 
-/// The request's user: `None` is anonymous. Mirrors DRF
-/// `SessionAuthentication.authenticate`: a missing session, an unknown
-/// user id, or an inactive user all authenticate as nobody (guarded routes
-/// then answer 401, `AllowAny` routes proceed).
+/// The request's user: `None` is anonymous. Mirrors Django
+/// `auth.get_user` plus DRF `SessionAuthentication.authenticate`: the
+/// session must carry a UUID `_auth_user_id` for the `ModelBackend` with
+/// a matching `_auth_user_hash`, and the user row must exist and be
+/// active. Anything else authenticates as nobody (guarded routes then
+/// answer 401, `AllowAny` routes proceed) — the same three facts
+/// [`super::resolve_actor`] verifies (PIDASHCONV-1097).
 struct Actor {
     id: Uuid,
     timezone: Tz,
@@ -122,28 +125,45 @@ struct Actor {
 
 async fn request_actor(
     pool: &sqlx::PgPool,
+    secret_key: &[u8],
     extension: Option<Extension<SessionHandle>>,
 ) -> Result<Option<Actor>, HandlerError> {
-    let raw = extension
-        .and_then(|Extension(handle)| {
-            handle
-                .snapshot()
-                .get("_auth_user_id")
-                .and_then(|v| v.as_str().map(str::to_owned))
-        })
-        .and_then(|raw| raw.parse::<Uuid>().ok());
-    let id = match raw {
-        Some(id) => id,
-        None => return Ok(None),
+    let Some(Extension(handle)) = extension else {
+        return Ok(None);
     };
-    let row: Option<(bool, Option<String>)> =
-        sqlx::query_as("SELECT is_active, user_timezone FROM users WHERE id = $1")
+    let mut session = handle.snapshot();
+    let backend = session
+        .get("_auth_user_backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if backend != super::MODEL_BACKEND {
+        return Ok(None);
+    }
+    let id: Option<Uuid> = session
+        .get("_auth_user_id")
+        .and_then(|v| v.as_str())
+        .and_then(|raw| raw.parse().ok());
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let session_hash = session
+        .get("_auth_user_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let row: Option<(String, bool, Option<String>)> =
+        sqlx::query_as("SELECT password, is_active, user_timezone FROM users WHERE id = $1")
             .bind(id)
             .fetch_optional(pool)
             .await
             .map_err(|_| HandlerError::ServerError)?;
     match row {
-        Some((true, timezone)) => {
+        Some((password, true, timezone)) => {
+            if session_hash.is_empty()
+                || !super::verify_session_hash(&session_hash, &password, secret_key)
+            {
+                return Ok(None);
+            }
             let tz = resolve_request_tz(true, timezone.as_deref())?;
             Ok(Some(Actor { id, timezone: tz }))
         }
@@ -171,7 +191,7 @@ async fn get_instance(
     extension: Option<Extension<SessionHandle>>,
 ) -> Result<axum::response::Response, HandlerError> {
     let pool = pool_of(&state)?;
-    let actor = request_actor(pool, extension).await?;
+    let actor = request_actor(pool, state.settings().secret_key.as_bytes(), extension).await?;
     let timezone = actor.map(|a| a.timezone).unwrap_or(chrono_tz::UTC);
     let row = fetch_instance_first(pool)
         .await
@@ -848,7 +868,7 @@ async fn patch_instance(
     // Authentication runs before permission (DRF `initial`), and the body
     // is only parsed inside the handler (`request.data`): no valid
     // session answers 401 even for a malformed body, never 403 or 400.
-    let actor = request_actor(pool, extension)
+    let actor = request_actor(pool, state.settings().secret_key.as_bytes(), extension)
         .await?
         .ok_or(HandlerError::Unauthorized)?;
     if !admin_allowed(pool, &actor.id).await? {
@@ -1270,7 +1290,7 @@ async fn signup_screen_visited(
     // `TimezoneMixin.initial` runs before the handler body: resolve the
     // actor first so a bad stored zone 500s before the instance check,
     // exactly like Django.
-    let actor = request_actor(pool, extension).await?;
+    let actor = request_actor(pool, state.settings().secret_key.as_bytes(), extension).await?;
     let row = fetch_instance_first(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
