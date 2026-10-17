@@ -176,9 +176,9 @@ pub fn json_string(value: &str) -> String {
 
 /// `FileAsset.asset_url` (`db/models/asset.py:80-100`) as seen through a
 /// non-required DRF field: `Present(url)` renders the key (`None` is JSON
-/// null, the unknown-entity passthrough), `Skip` omits it — the
-/// `AttributeError` raised inside the property (NULL or dangling workspace
-/// on attachment/description entities) is caught by DRF's
+/// null, the unknown-entity passthrough), `Skip` omits it — the plain
+/// `AttributeError` raised inside the property (NULL workspace on
+/// attachment/description entities: `None.slug`) is caught by DRF's
 /// `Field.get_attribute` and becomes `SkipField`
 /// (`rest_framework/fields.py:445-451`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,9 +190,10 @@ pub enum AssetUrl {
 /// Pure `asset_url` for a resolved (unscoped) asset row: `entity` is the
 /// raw `entity_type` (NULL/other yields `None`, never a fallback),
 /// `workspace_slug` the unscoped workspace slug when `workspace_id` is
-/// `Some`. A NULL `workspace_id`, or a `Some` id with no row (FK-unreachable
-/// in practice), is the `None.slug` / `RelatedObjectDoesNotExist` path, both
-/// `AttributeError`s, hence `Skip`.
+/// `Some`. A NULL `workspace_id` is the `None.slug` path (`Skip`); a `Some`
+/// id with no row (FK-unreachable in practice) raises
+/// `RelatedObjectDoesNotExist`, which DRF's `get_attribute` catches as
+/// `ObjectDoesNotExist` and renders as null.
 pub fn file_asset_url(
     id: &uuid::Uuid,
     entity: Option<&str>,
@@ -206,8 +207,11 @@ pub fn file_asset_url(
             AssetUrl::Present(Some(format!("/api/assets/v2/static/{id}/")))
         }
         Some("ISSUE_ATTACHMENT") => {
-            let (Some(_), Some(slug)) = (workspace_id, workspace_slug) else {
+            if workspace_id.is_none() {
                 return AssetUrl::Skip;
+            }
+            let Some(slug) = workspace_slug else {
+                return AssetUrl::Present(None);
             };
             AssetUrl::Present(Some(format!(
                 "/api/assets/v2/workspaces/{}/projects/{}/issues/{}/attachments/{id}/",
@@ -222,8 +226,11 @@ pub fn file_asset_url(
             | "PAGE_DESCRIPTION"
             | "DRAFT_ISSUE_DESCRIPTION",
         ) => {
-            let (Some(_), Some(slug)) = (workspace_id, workspace_slug) else {
+            if workspace_id.is_none() {
                 return AssetUrl::Skip;
+            }
+            let Some(slug) = workspace_slug else {
+                return AssetUrl::Present(None);
             };
             AssetUrl::Present(Some(format!(
                 "/api/assets/v2/workspaces/{}/projects/{}/{id}/",
@@ -547,15 +554,16 @@ mod asset_url_tests {
             file_asset_url(&id, Some("DRAFT_ISSUE_ATTACHMENT"), None, None, None, None),
             AssetUrl::Present(None)
         );
-        // Attachment/description entities need the workspace slug; a NULL
-        // workspace (or a dangling id) is the AttributeError path: Skip.
+        // Attachment/description entities need the workspace slug: a NULL
+        // workspace is the AttributeError path (Skip), a dangling id the
+        // ObjectDoesNotExist path (null).
         assert_eq!(
             file_asset_url(&id, Some("ISSUE_ATTACHMENT"), None, None, None, None),
             AssetUrl::Skip
         );
         assert_eq!(
             file_asset_url(&id, Some("ISSUE_DESCRIPTION"), Some(&ws), None, None, None),
-            AssetUrl::Skip
+            AssetUrl::Present(None)
         );
         // NULL project/issue ids render as "None", like the f-strings.
         assert_eq!(

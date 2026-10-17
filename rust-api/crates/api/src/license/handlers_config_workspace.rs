@@ -1912,7 +1912,8 @@ async fn render_workspace_row(
 /// through `_base_manager`, so a soft-deleted asset still renders — feeds
 /// [`file_asset_url`]; only a NULL FK falls back to `logo` when set, else
 /// `None`. A dangling FK (row gone; FK-unreachable in practice) raises
-/// `RelatedObjectDoesNotExist`, an `AttributeError`, hence `Skip`.
+/// `RelatedObjectDoesNotExist`, which DRF's `get_attribute` catches as
+/// `ObjectDoesNotExist` and renders as null.
 async fn workspace_logo_url(
     pool: &sqlx::PgPool,
     logo_asset_id: Option<uuid::Uuid>,
@@ -1937,7 +1938,7 @@ async fn workspace_logo_url(
             .await
             .map_err(|_| Denial::ServerError)?;
     let Some((id, entity_type, workspace_id, project_id, issue_id)) = asset else {
-        return Ok(AssetUrl::Skip);
+        return Ok(AssetUrl::Present(None));
     };
     let slug = match workspace_id {
         None => None,
@@ -1958,7 +1959,7 @@ async fn asset_workspace_slug(
     workspace_id: uuid::Uuid,
 ) -> Result<Option<String>, Denial> {
     // Unscoped, like the forward-FK descriptor; a missing row is the
-    // `RelatedObjectDoesNotExist` path (`Skip` at the caller).
+    // `RelatedObjectDoesNotExist` path (null at the caller).
     let row: Option<(String,)> = sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)
         .bind(workspace_id)
         .fetch_optional(pool)

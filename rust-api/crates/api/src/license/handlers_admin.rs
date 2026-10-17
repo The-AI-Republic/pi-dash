@@ -388,7 +388,8 @@ fn pools(state: &AppState) -> Result<&PgPool, Denial> {
 /// `_base_manager`, so a soft-deleted asset still renders — feeds
 /// [`file_asset_url`]; only a NULL FK falls back to the raw `avatar` string
 /// (non-empty) or null. A dangling FK (row gone; FK-unreachable in practice)
-/// raises `RelatedObjectDoesNotExist`, an `AttributeError`, hence `Skip`.
+/// raises `RelatedObjectDoesNotExist`, which DRF's `get_attribute` catches
+/// as `ObjectDoesNotExist` and renders as null.
 #[allow(clippy::too_many_arguments)]
 fn avatar_url(
     asset_id: Option<Uuid>,
@@ -407,7 +408,7 @@ fn avatar_url(
         return AssetUrl::Present(Some(avatar.to_owned()));
     }
     let Some(row) = asset_row else {
-        return AssetUrl::Skip;
+        return AssetUrl::Present(None);
     };
     file_asset_url(
         &row,
@@ -2350,8 +2351,9 @@ mod tests {
                     .to_owned()
             ))
         );
-        // A dangling FK skips (`RelatedObjectDoesNotExist` is an
-        // `AttributeError`); only a NULL FK falls back to the raw avatar.
+        // A dangling FK renders null (`RelatedObjectDoesNotExist` is an
+        // `ObjectDoesNotExist`, caught by DRF's `get_attribute`); only a
+        // NULL FK falls back to the raw avatar.
         assert_eq!(
             avatar_url(
                 asset,
@@ -2363,7 +2365,7 @@ mod tests {
                 None,
                 "https://cdn/x.png"
             ),
-            AssetUrl::Skip
+            AssetUrl::Present(None)
         );
         assert_eq!(
             avatar_url(None, None, None, None, None, None, None, ""),
