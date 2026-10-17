@@ -40,22 +40,29 @@ backend-independent — they assert on Django source text and the
 in-process wire builder, so they already pass with no worker at all.
 Only the live worker tests have a replay form.
 
-Ownership split (mirrors the worker registry on rust-dev): 8 of the
-11 D-08 task names are Python-owned — the ``pidash-api`` binary
-registers three ``tasks_webhooks`` handlers, ``process_logs``
-(``bin/pidash-api/src/main.rs`` wires cleanup + integrations +
-``PROCESS_LOGS_TASK``), ``archive_and_close_old_issues``
-(PIDASHCONV-837 wires ``register_automation_handlers`` in
-``worker()``) and ``issue_activity`` (PIDASHCONV-836 wires
-``register_activity_task`` in ``worker()``), and
+Ownership split (mirrors the worker registry on rust-dev): 7 of the
+11 D-08 task names are Rust-owned — ``process_logs`` (PIDASHCONV-260),
+``archive_and_close_old_issues`` (PIDASHCONV-837),
+``issue_activity`` (PIDASHCONV-836), plus ``track_event``,
+``page_transaction``, ``recent_visited_task`` and
+``crawl_work_item_link_title`` (PIDASHCONV-1107 wires
+``register_sink_tasks``, ``register_visit_page_handlers`` and
+``register_link_crawl_handler`` in ``register_oss_handlers``).
 ``crates/jobs/src/tasks_webhooks/mod.rs``
 keeps the webhook send/fan-out path Python-owned deliberately
 (registering a local send handler would steal live traffic while the
-webhook-row fetch, HTTP send and SMTP send still live on Python).
-Every test below except the three owned-cases
-(``test_rust_process_logs_executes_locally``,
-``test_rust_archive_and_close_executes_locally`` and
-``test_rust_issue_activity_executes_locally``)
+webhook-row fetch, HTTP send and SMTP send still live on Python;
+PIDASHCONV-1105 ports those four names).
+Every test below except the owned-cases (seven tasks, nine tests:
+``test_rust_process_logs_executes_locally``,
+``test_rust_archive_and_close_executes_locally``,
+``test_rust_issue_activity_executes_locally``,
+``test_rust_track_event_executes_locally``,
+``test_rust_track_event_assigns_workspace_role``,
+``test_rust_recent_visited_executes_locally``,
+``test_rust_page_transaction_executes_locally``,
+``test_rust_page_transaction_url_src_inserts_nothing`` and
+``test_rust_crawl_link_executes_locally``)
 therefore asserts observable AMQP forwarding — the
 ``rust_job_queue`` row is acked AND the broker ``celery`` queue grows
 while the Django worker is stopped — instead of local DB effects, plus
@@ -72,9 +79,15 @@ issue_activity note (PIDASHCONV-836 registers it): the Rust worker owns
 ``ISSUE_ACTIVITY_TASK`` and ``test_rust_issue_activity_executes_locally``
 asserts the local ``issue_activities`` row diff instead of forwarding.
 
-archive_and_close note (PIDASHCONV-837 registers it without a replay
-flip): ``test_rust_light_tasks_forwarded_without_crash`` still pins
-its forward; this issue leaves that test untouched.
+archive_and_close note (PIDASHCONV-837 registers it):
+``test_rust_archive_and_close_executes_locally`` pins local execution.
+
+standalone note (PIDASHCONV-1107 registers track_event, page_transaction,
+recent_visited_task and crawl_work_item_link_title): the forward pins
+for those four are gone; the ``*_executes_locally`` tests below assert
+the same DB effects and sink captures the Django oracle pins. The
+liveness probe moved to ``WEBHOOK_SEND`` (still Python-owned); the
+PostHog sink assertions need the replay job's ``POSTHOG_*`` env.
 
 Beat note: D-08 owns no beat entries (``test_no_beat_entries_owned`` —
 cleanup owns the webhook-log delete; the daily
@@ -133,16 +146,17 @@ def _publish_and_observe_forward(task_name, args=None, kwargs=None):
 
 
 def test_rust_worker_liveness(db_conn, broker_url):
-    """Rust inspect-equivalent: a no-op track_event job is consumed.
+    """Rust inspect-equivalent: a still-forwarded job is consumed.
 
     Replaces ``test_worker_registration`` (Celery broadcast inspect,
     which only a Django worker answers). Settlement of the
     ``rust_job_queue`` row proves the Rust worker owns the queue; a
-    Django worker never reads that table.
+    Django worker never reads that table. The probe is a webhook-send
+    job (still Python-owned since PIDASHCONV-1107 owns track_event).
     """
+    hook = _seed_hook(db_conn)
     _publish_and_observe_forward(
-        TRACK_EVENT,
-        args=[str(uuid.uuid4()), "contract.probe", "contract-ws", {}],
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-liveness")
     )
 
 
@@ -454,41 +468,246 @@ def test_rust_archive_and_close_executes_locally(db_conn, broker_url):
     assert moved["state_id"] == str(seeded["close_target"]["id"])
 
 
-def test_rust_track_event_forwarded_without_crash(db_conn, broker_url):
-    """No PostHog configured → early return on Python; job still forwards.
+def test_rust_track_event_executes_locally(db_conn, broker_url, posthog_sink):
+    """track_event, Rust side: EXECUTE locally (PIDASHCONV-1107).
 
-    Mirrors ``test_track_event_consumed_without_crash``: consumption is
-    the assertion, observed as settlement + one broker message.
+    Mirrors ``test_track_event_posts_capture_to_posthog`` (same probe
+    payload): the Rust worker POSTs the same /batch/ capture itself.
+    Settlement plus the sink receipt is the proof: with the Django
+    worker stopped, a forward could never produce a local POST. No
+    broker-depth assertion: the scheduler loop forwards other
+    domains' entries over the same broker, so only the sink receipt is
+    attributable to this job.
     """
-    _publish_and_observe_forward(
+    import os
+
+    owner = seed_helpers.user(db_conn, "rust-replay-evt-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplayevt", owner["id"])
+    posthog_sink.clear()
+    celery_id = rust_queue.publish(
         TRACK_EVENT,
-        args=[str(uuid.uuid4()), "rust.replay.probe", "rust-replay-ws", {}],
+        args=[str(owner["id"]), "contract.probe", workspace["slug"], {"source": "contract"}],
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{TRACK_EVENT} executed")
+    (capture,) = posthog_sink.wait_for_count(1, what="posthog /batch/ capture")
+    assert capture["path"] == "/batch/"
+    # Header names are case-insensitive on the wire (RFC 9110 §5.1):
+    # compare lowercased so the port (reqwest) and the SDK (requests)
+    # pin the same header set despite different capitalisation.
+    headers = {key.lower(): value for key, value in capture["headers"].items()}
+    assert headers.get("content-type") == "application/json"
+    assert headers.get("user-agent") == "posthog-python/3.5.0"
+    body = capture["json"]
+    assert body["api_key"] == os.environ["POSTHOG_API_KEY"]
+    assert body["sentAt"]
+    assert body["historical_migration"] is False
+    (msg,) = body["batch"]
+    assert msg["event"] == "contract.probe"
+    assert msg["distinct_id"] == str(owner["id"])
+    assert msg["context"] == {}
+    assert msg["timestamp"]
+    assert msg["properties"]["source"] == "contract"
+    assert msg["properties"]["$groups"] == {"workspace": workspace["slug"]}
+    assert msg["properties"]["$lib"] == "posthog-python"
+    assert msg["properties"]["$lib_version"] == "3.5.0"
+    assert msg["properties"]["$geoip_disable"] is True
+
+
+def test_rust_track_event_assigns_workspace_role(db_conn, broker_url, posthog_sink):
+    """Role events, Rust side: same owner/admin/unknown stamp as Django."""
+    owner = seed_helpers.user(db_conn, "rust-replay-role-owner")
+    member = seed_helpers.user(db_conn, "rust-replay-role-member")
+    workspace = seed_helpers.workspace(db_conn, "rustreplayrole", owner["id"])
+    missing_slug = f"missing-ws-{uuid.uuid4().hex[:8]}"
+    posthog_sink.clear()
+    cases = [
+        (str(owner["id"]), workspace["slug"], "owner"),
+        (str(member["id"]), workspace["slug"], "admin"),
+        (str(owner["id"]), missing_slug, "unknown"),
+    ]
+    for user_id, slug, role in cases:
+        celery_id = rust_queue.publish(
+            TRACK_EVENT,
+            args=[user_id, "user_invited_to_workspace", slug, {"case": role}],
+        )
+        rust_queue.wait_for_settled(celery_id, what=f"{TRACK_EVENT} executed")
+    captures = posthog_sink.wait_for_count(3, what="role capture batch")
+    roles = {
+        capture["json"]["batch"][0]["properties"]["case"]: capture["json"]["batch"][0][
+            "properties"
+        ]["role"]
+        for capture in captures
+    }
+    assert roles == {"owner": "owner", "admin": "admin", "unknown": "unknown"}
+
+
+def test_rust_recent_visited_executes_locally(db_conn, broker_url):
+    """recent_visited_task, Rust side: EXECUTE locally (PIDASHCONV-1107).
+
+    Mirrors ``test_recent_visited_writes_row`` (same payload): create
+    inserts the visit row with NULL audit (QUIRK-5); a repeat visit
+    touches only visited_at. Settlement plus the row diffs is the
+    proof: with the Django worker stopped, a forward could never
+    produce local rows.
+    """
+    owner = seed_helpers.user(db_conn, "rust-replay-visit-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplayvisit", owner["id"])
+    project = seed_helpers.project(db_conn, workspace["id"])
+    entity_id = str(uuid.uuid4())
+    before = snapshot(db_conn, ["user_recent_visits"])
+    celery_id = rust_queue.publish(
+        RECENT_VISITED,
+        args=["issue", entity_id, str(owner["id"]), str(project["id"]), workspace["slug"]],
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{RECENT_VISITED} executed")
+    (created,) = wait_for(
+        lambda: _added_rows(db_conn, "user_recent_visits", before) or None,
+        what="user_recent_visits row",
+    )
+    assert created["entity_name"] == "issue"
+    assert created["entity_identifier"] == entity_id
+    assert created["user_id"] == str(owner["id"])
+    assert created["project_id"] == str(project["id"])
+    assert created["workspace_id"] == str(workspace["id"])
+    assert created["visited_at"] is not None
+    assert created["created_by_id"] is None
+    assert created["updated_by_id"] is None
+
+    celery_id = rust_queue.publish(
+        RECENT_VISITED,
+        args=["issue", entity_id, str(owner["id"]), str(project["id"]), workspace["slug"]],
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{RECENT_VISITED} re-executed")
+
+    def _touched():
+        row = snapshot(db_conn, ["user_recent_visits"])["user_recent_visits"].get(
+            str(created["id"])
+        )
+        return row if row and row["visited_at"] != created["visited_at"] else None
+
+    touched = wait_for(_touched, what="visited_at touch")
+    assert touched["visited_at"] > created["visited_at"]
+    live = [
+        row
+        for row in snapshot(db_conn, ["user_recent_visits"])["user_recent_visits"].values()
+        if row["user_id"] == str(owner["id"]) and row["deleted_at"] is None
+    ]
+    assert len(live) == 1
+    assert touched["updated_at"] == created["updated_at"]
+
+
+def _seed_page(db_conn, workspace_id, owner_id):
+    return insert_row(
+        db_conn,
+        "pages",
+        {
+            "name": "Contract tx page",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "owned_by_id": str(owner_id),
+            "access": 0,
+            "workspace_id": str(workspace_id),
+            "color": "",
+            "is_locked": False,
+            "view_props": {"full_width": False},
+            "logo_props": {},
+            "is_global": False,
+            "sort_order": 65535,
+            "created_by_id": str(owner_id),
+        },
     )
 
 
-def test_rust_light_tasks_forwarded_without_crash(db_conn, broker_url):
-    """Execution parity: remaining D-08 tasks forward for the Python plane.
-
-    Mirrors ``test_light_tasks_consumed_without_crash`` (same probe
-    payloads): page_transaction, recent_visited. archive_and_close
-    moved to the owned-cases — PIDASHCONV-837 wires its handler in
-    ``worker()``, so ``test_rust_archive_and_close_executes_locally``
-    pins local execution instead of forwarding.
-    """
-    cases = [
-        (
-            PAGE_TRANSACTION,
-            ["<p>new</p>", "<p>old</p>", str(uuid.uuid4())],
-            {},
-        ),
-        (
-            RECENT_VISITED,
-            ["issue", str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4()), "ws"],
-            {},
-        ),
+def _live_page_logs(db_conn, page_id):
+    return [
+        row
+        for row in snapshot(db_conn, ["page_logs"])["page_logs"].values()
+        if row["page_id"] == str(page_id) and row["deleted_at"] is None
     ]
-    for task_name, args, kwargs in cases:
-        _publish_and_observe_forward(task_name, args=args, kwargs=kwargs)
+
+
+def test_rust_page_transaction_executes_locally(db_conn, broker_url):
+    """page_transaction, Rust side: EXECUTE locally (PIDASHCONV-1107).
+
+    Mirrors ``test_page_transaction_writes_page_logs`` (same payload):
+    new components insert PageLog rows (the mention extract drops the
+    entity_type attribute); removed ones soft-delete. Settlement plus
+    the row diffs is the proof: with the Django worker stopped, a
+    forward could never produce local rows.
+    """
+    owner = seed_helpers.user(db_conn, "rust-replay-tx-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplaytx", owner["id"])
+    page = _seed_page(db_conn, workspace["id"], owner["id"])
+    mention_id, image_id, entity_id = (str(uuid.uuid4()) for _ in range(3))
+    html = (
+        f'<mention-component id="{mention_id}" entity_identifier="{entity_id}" '
+        f'entity_name="ISS-1" entity_type="issue"></mention-component>'
+        f'<image-component id="{image_id}" src="{entity_id}"></image-component>'
+    )
+    celery_id = rust_queue.publish(
+        PAGE_TRANSACTION,
+        args=[html, "", str(page["id"])],
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{PAGE_TRANSACTION} executed")
+    rows = wait_for(
+        lambda: _live_page_logs(db_conn, page["id"]) or None,
+        what="page_logs rows",
+    )
+    assert len(rows) == 2
+    by_tx = {row["transaction"]: row for row in rows}
+    mention = by_tx[mention_id]
+    assert mention["entity_name"] == "ISS-1"
+    assert mention["entity_type"] is None
+    assert mention["entity_identifier"] == entity_id
+    assert mention["workspace_id"] == str(workspace["id"])
+    image = by_tx[image_id]
+    assert image["entity_name"] == "image"
+    assert image["entity_type"] is None
+    assert image["entity_identifier"] == entity_id
+
+    celery_id = rust_queue.publish(
+        PAGE_TRANSACTION,
+        args=["", html, str(page["id"])],
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{PAGE_TRANSACTION} re-executed")
+    wait_for(
+        lambda: True if _live_page_logs(db_conn, page["id"]) == [] else None,
+        what="page_logs soft-delete",
+    )
+    deleted = [
+        row
+        for row in snapshot(db_conn, ["page_logs"])["page_logs"].values()
+        if row["page_id"] == str(page["id"])
+    ]
+    assert len(deleted) == 2
+    assert all(row["deleted_at"] is not None for row in deleted)
+
+
+def test_rust_page_transaction_url_src_inserts_nothing(db_conn, broker_url):
+    """URL image src, Rust side: same poisoned batch, no rows (PIDASHCONV-1107).
+
+    Mirrors ``test_page_transaction_url_src_inserts_nothing``: the UUID
+    column rejects the raw src URL, the handler logs and acks, and the
+    mention row in the same batch is lost too. Settlement proves the
+    handler ran (unlike the Django oracle, no marker job is needed —
+    the queue row settles only after the handler returns).
+    """
+    owner = seed_helpers.user(db_conn, "rust-replay-txbug-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplaytxbug", owner["id"])
+    page = _seed_page(db_conn, workspace["id"], owner["id"])
+    html = (
+        f'<mention-component id="{uuid.uuid4()}" entity_identifier="{uuid.uuid4()}" '
+        f'entity_name="ISS-1" entity_type="issue"></mention-component>'
+        f'<image-component id="{uuid.uuid4()}" src="https://cdn.example/logo.png">'
+        f"</image-component>"
+    )
+    before = snapshot(db_conn, ["page_logs"])
+    celery_id = rust_queue.publish(
+        PAGE_TRANSACTION,
+        args=[html, "", str(page["id"])],
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{PAGE_TRANSACTION} poisoned run")
+    assert _added_rows(db_conn, "page_logs", before) == []
 
 
 def test_rust_issue_activity_executes_locally(db_conn, broker_url):
@@ -552,12 +771,60 @@ def test_rust_issue_activity_executes_locally(db_conn, broker_url):
     assert row["epoch"] == epoch
 
 
-def test_rust_crawl_link_forwards_to_python(db_conn, broker_url):
-    """crawl_work_item_link_title has no behavioral oracle test (wire +
-    registration pins only), so the replay pins the forward with the
-    Python ``(id, url)`` shape (``work_item_link_task.py:263``)."""
-    _publish_and_observe_forward(
-        CRAWL_LINK_TITLE,
-        args=[str(uuid.uuid4()), "https://example.com/rust-replay-probe"],
+#: ``data:image/svg+xml;base64,`` + DEFAULT_FAVICON
+#: (``work_item_link_task.py:24``), the favicon fallback.
+DEFAULT_FAVICON_DATA_URI = (
+    "data:image/svg+xml;base64,"
+    "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIg"
+    "dmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdp"
+    "ZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGNsYXNzPSJs"
+    "dWNpZGUgbHVjaWRlLWxpbmstaWNvbiBsdWNpZGUtbGluayI+PHBhdGggZD0iTTEwIDEzYTUgNSAwIDAgMCA3"
+    "LjU0LjU0bDMtM2E1IDUgMCAwIDAtNy4wNy03LjA3bC0xLjcyIDEuNzEiLz48cGF0aCBkPSJNMTQgMTFhNSA1"
+    "IDAgMCAwLTcuNTQtLjU0bC0zIDNhNSA1IDAgMCAwIDcuMDcgNy4wN2wxLjcxLTEuNzEiLz48L3N2Zz4="
+)
+
+
+def test_rust_crawl_link_executes_locally(db_conn, broker_url):
+    """crawl_work_item_link_title, Rust side: EXECUTE locally (PIDASHCONV-1107).
+
+    Mirrors ``test_crawl_link_updates_metadata`` (same payload): the
+    loopback URL trips the SSRF guard on both backends, so the metadata
+    keeps the fallback shape. Settlement plus the metadata diff is the
+    proof: with the Django worker stopped, a forward could never
+    produce a local row change.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rustreplaycrawl")
+    issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+    url = "http://127.0.0.1:9/rust-replay-probe"
+    link = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "Seed probe",
+            "url": url,
+            "issue_id": str(issue["id"]),
+            "project_id": str(project["id"]),
+            "workspace_id": str(workspace["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "updated_by_id": str(chain["owner"]["id"]),
+            "metadata": {},
+        },
     )
+    celery_id = rust_queue.publish(
+        CRAWL_LINK_TITLE,
+        args=[str(link["id"]), url],
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{CRAWL_LINK_TITLE} executed")
+
+    def _crawled():
+        row = snapshot(db_conn, ["issue_links"])["issue_links"].get(str(link["id"]))
+        return row if row and row["metadata"] != {} else None
+
+    crawled = wait_for(_crawled, what="issue_links metadata")
+    assert crawled["metadata"] == {
+        "title": None,
+        "favicon": DEFAULT_FAVICON_DATA_URI,
+        "url": url,
+        "favicon_url": None,
+    }
 

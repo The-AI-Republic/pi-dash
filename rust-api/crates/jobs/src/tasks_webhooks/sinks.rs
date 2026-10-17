@@ -16,10 +16,9 @@
 //! and `rust-api/fixtures/tasks_webhooks/fx-evt-01-track-event.json`.
 //! Trace: `rust-api/fixtures/tasks_webhooks/TRACE.md`.
 //!
-//! Ownership note: [`register_sink_tasks`] only builds the handler table.
-//! Flipping the live worker to these handlers (calling it from the
-//! binary) is the domain gate's call (PIDASHCONV-203, after the
-//! PIDASHCONV-21 proxy pass) — not this layer issue.
+//! Ownership note: [`register_sink_tasks`] builds the handler table and
+//! the OSS worker composes it (`register_oss_handlers`; `process_logs`
+//! since PIDASHCONV-260, `track_event` since PIDASHCONV-1107).
 //!
 //! Ported quirks (translate, don't redesign):
 //!
@@ -218,8 +217,11 @@ pub struct CaptureRequest {
 ///   order.
 /// * `timestamp=None` becomes now-UTC isoformat; `uuid=None` is dropped;
 ///   `context={}`; `distinct_id=str(user_id)`.
-/// * Envelope `{"batch": [msg], "sentAt": now, "api_key": key}`
-///   (`request.py:36-53`); `User-Agent: posthog-python/3.5.0`.
+/// * Envelope `{"batch": [msg], "historical_migration": false,
+///   "sentAt": now, "api_key": key}`: the consumer passes
+///   `batch` + `historical_migration` (`consumer.py:139-146`) and
+///   `post()` appends `sentAt` + `api_key` (`request.py:36-53`);
+///   `User-Agent: posthog-python/3.5.0`.
 pub fn build_capture_request(
     api_key: &str,
     host: &str,
@@ -252,6 +254,7 @@ pub fn build_capture_request(
 
     let mut body = Map::new();
     body.insert("batch".to_owned(), Value::Array(vec![Value::Object(msg)]));
+    body.insert("historical_migration".to_owned(), Value::Bool(false));
     body.insert("sentAt".to_owned(), Value::String(iso_now(now)));
     body.insert("api_key".to_owned(), Value::String(api_key.to_owned()));
 
@@ -656,8 +659,7 @@ async fn run_track_event(
     post_capture(http, &request).await
 }
 
-/// Register both D-08 sink tasks. The binary wiring (calling this from
-/// `main.rs`) is the domain gate's call — see module docs.
+/// Register both D-08 sink tasks (wired by `register_oss_handlers`).
 pub fn register_sink_tasks(
     registry: &mut Registry,
     pools: Pools,
@@ -1008,12 +1010,17 @@ mod tests {
         assert_eq!(request.user_agent, POSTHOG_USER_AGENT);
         assert_eq!(request.timeout_secs, POSTHOG_TIMEOUT_SECS);
 
-        // Envelope key order: batch, sentAt, api_key (`request.py:36-53`).
+        // Envelope key order: batch, historical_migration, sentAt,
+        // api_key (consumer kwargs order + `request.py:36-53` appends).
         let body = request.body.as_object().expect("body object");
         let keys: Vec<&str> = body.keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["batch", "sentAt", "api_key"]);
+        assert_eq!(
+            keys,
+            vec!["batch", "historical_migration", "sentAt", "api_key"]
+        );
         assert_eq!(body["api_key"], str_value("phc_test"));
         assert_eq!(body["sentAt"], str_value("2026-09-28T07:00:00+00:00"));
+        assert_eq!(body["historical_migration"], Value::Bool(false));
 
         // Message key order: properties, timestamp, context, distinct_id,
         // event (`client.py:188-195`); NO uuid key (None is popped).

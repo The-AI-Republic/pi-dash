@@ -176,19 +176,35 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         crate::integrations::github_sync::LiveTransports::from_env(),
     );
-    // D-08 process_logs (PIDASHCONV-260, FX-LOG-01; kept in sync with
-    // `tests::worker_registry_owns_process_logs_task`). EXECUTE parity
-    // per PIDASHCONV-242: canonical Django (settings.local, the CI
+    // D-08 sink tasks (PIDASHCONV-260, FX-LOG-01 for `process_logs`;
+    // PIDASHCONV-1107 for `track_event`; kept in sync with
+    // `tests::worker_registry_owns_sink_tasks`). EXECUTE parity per
+    // PIDASHCONV-242: canonical Django (settings.local, the CI
     // worker-plane env) executes `process_logs` at worker boot, so the
     // Rust worker owns it too — the existing `process_logs_handler`
     // (mongo-configured → mongo sink, else the Postgres fallback row;
-    // `logger_task.py:97-100`). `track_event` stays Python-owned: with no
-    // PostHog configured it early-returns, so local registration would
-    // only swallow the forward — never register it here.
-    registry.register(
-        crate::tasks_webhooks::PROCESS_LOGS_TASK,
-        crate::tasks_webhooks::process_logs_handler(ctx.pools.clone(), ctx.mongo.clone()),
+    // `logger_task.py:97-100`). `track_event` is owned as well: with no
+    // PostHog configured the handler early-returns exactly like Python
+    // (`event_tracking_task.py:65-67`), and with PostHog configured it
+    // POSTs the same `/batch/` capture — never a silent swallow.
+    // Standalone-Rust rule (PIDASHCONV-1, 2026-10-16): the Rust worker
+    // runs it; Django drops it in production (PDASHOSS01-292).
+    crate::tasks_webhooks::register_sink_tasks(
+        registry,
+        ctx.pools.clone(),
+        ctx.mongo.clone(),
+        reqwest::Client::new(),
     );
+    // D-08 visit/page + link-crawl tasks (PIDASHCONV-1107; kept in
+    // sync with `inventory::tests::mirror_registry_matches_tasks_table`).
+    // The `recent_visited_task` + `page_transaction` handlers
+    // (PIDASHCONV-201) and the `crawl_work_item_link_title` handler
+    // (PIDASHCONV-200) exist with fixtures and unit tests; this wires
+    // them so the Rust worker owns all three names. Standalone-Rust
+    // rule (PIDASHCONV-1, 2026-10-16): the Rust worker runs them;
+    // Django drops them in production (PDASHOSS01-292).
+    crate::tasks_webhooks::register_visit_page_handlers(registry, ctx.pools.clone());
+    crate::tasks_webhooks::register_link_crawl_handler(registry, ctx.pools.clone());
     // License instance_traces (PIDASHCONV-839; kept in sync with
     // `mirror_registry_matches_tasks_table` in inventory.rs). The
     // beat entry fires it every 6 hours and the D-01 handler exists, so
@@ -418,7 +434,7 @@ mod tests {
 
     /// PIDASHCONV-918: the helper owns exactly the OSS task set — the
     /// same const union the binary's `mirror_registry_matches_tasks_table`
-    /// pins (61 names), while the Python-owned sentinels stay
+    /// pins (65 names), while the Python-owned sentinels stay
     /// unregistered. `Pools::primary_only` over a lazy pool keeps the
     /// test hermetic: registration constructs handlers without I/O, and
     /// none of them runs here.
@@ -460,8 +476,12 @@ mod tests {
             crate::tasks_cleanup::WORKSPACE_SEED_TASK_NAME,
             crate::tasks_cleanup::dummy_data::TASK_NAME,
             crate::tasks_webhooks::PROCESS_LOGS_TASK,
+            crate::tasks_webhooks::TRACK_EVENT_TASK,
+            crate::tasks_webhooks::RECENT_VISITED_TASK_NAME,
+            crate::tasks_webhooks::PAGE_TRANSACTION_TASK_NAME,
             crate::tasks_webhooks::ISSUE_ACTIVITY_TASK,
         ]);
+        expected.extend(crate::tasks_webhooks::link_crawl::TASK_NAMES);
         expected.extend(crate::integrations::git_sync::TASK_NAMES);
         expected.extend(crate::integrations::github_sync::TASK_NAMES);
         expected.insert(crate::license::tasks::TASK_NAME);
@@ -491,7 +511,7 @@ mod tests {
             4,
             "membership group drifted"
         );
-        assert_eq!(expected.len(), 61, "worker-owned count drifted");
+        assert_eq!(expected.len(), 65, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");
@@ -502,7 +522,6 @@ mod tests {
         // helper's comments.
         for name in [
             crate::tasks_cleanup::RESTORE_TASK_NAME,
-            crate::tasks_webhooks::TRACK_EVENT_TASK,
             crate::assistant::RUN_TURN_TASK,
         ] {
             assert!(!registry.owns(name), "{name} must stay Python-owned");

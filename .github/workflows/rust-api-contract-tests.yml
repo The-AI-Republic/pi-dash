@@ -169,6 +169,11 @@ jobs:
       # database; never a real secret) — the other oracles never touch BYOK.
       ASSISTANT_CRYPTO_BACKEND: fernet
       ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # D-08 event-tracking oracle (PIDASHCONV-1107): the Django worker
+      # POSTs track_event captures to the harness PostHog sink
+      # (POSTHOG_SINK_BASE default). Test-only key, ephemeral CI database.
+      POSTHOG_API_KEY: contract-posthog-key
+      POSTHOG_HOST: http://127.0.0.1:18098
     steps:
       - uses: actions/checkout@v6
 

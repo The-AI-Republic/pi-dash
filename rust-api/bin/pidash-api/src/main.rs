@@ -657,35 +657,43 @@ mod tests {
         }
     }
 
-    /// PIDASHCONV-260 (FX-LOG-01): the worker owns `PROCESS_LOGS_TASK`
-    /// (EXECUTE parity per PIDASHCONV-242) while `TRACK_EVENT_TASK`
-    /// stays Python-owned. Mirrors the `worker()` registration block:
-    /// `process_logs_handler` needs a `Pools`, which cannot be built
+    /// PIDASHCONV-260 (FX-LOG-01) + PIDASHCONV-1107: the worker owns
+    /// both sink tasks — `PROCESS_LOGS_TASK` (EXECUTE parity per
+    /// PIDASHCONV-242) and `TRACK_EVENT_TASK` (standalone-Rust rule:
+    /// the Rust worker runs it; Django drops it in production per
+    /// PDASHOSS01-292). Mirrors the `worker()` registration block:
+    /// `register_sink_tasks` needs a `Pools`, which cannot be built
     /// without a database (same precedent as the `Pools`-taking groups
-    /// in `worker_registry_owns_all_d09_local_tasks`), so the stub below
-    /// is registered over the exact name constant the real call uses —
-    /// the live execution itself is pinned by the contract replay
-    /// (`test_rust_process_logs_executes_locally`).
+    /// in `worker_registry_owns_all_d09_local_tasks`), so the stubs
+    /// below are registered over the exact name constants the real
+    /// call uses — the live execution itself is pinned by the
+    /// contract replays (`test_rust_process_logs_executes_locally`,
+    /// `test_rust_track_event_executes_locally`).
     #[test]
-    fn worker_registry_owns_process_logs_task() {
+    fn worker_registry_owns_sink_tasks() {
         use pidash_jobs::tasks_webhooks::{PROCESS_LOGS_TASK, TRACK_EVENT_TASK};
         use pidash_jobs::worker::{route_for, Handler, Registry, Route, Verdict};
 
         let mut registry = Registry::new();
-        // Same name + same handler constructor `worker()` uses (the real
-        // `process_logs_handler` needs live pools, so a stub stands in
-        // for the handler body — never for the name).
-        let handler: Handler = std::sync::Arc::new(|_| Box::pin(async { Ok(Verdict::Ack) }));
-        registry.register(PROCESS_LOGS_TASK, handler);
+        // Same names + same handler constructors `worker()` uses (the
+        // real `register_sink_tasks` needs live pools, so stubs stand
+        // in for the handler bodies — never for the names).
+        for name in [PROCESS_LOGS_TASK, TRACK_EVENT_TASK] {
+            let handler: Handler = std::sync::Arc::new(|_| Box::pin(async { Ok(Verdict::Ack) }));
+            registry.register(name, handler);
+        }
 
         assert_eq!(
             PROCESS_LOGS_TASK,
             "pi_dash.bgtasks.logger_task.process_logs"
         );
-        assert!(registry.owns(PROCESS_LOGS_TASK));
-        assert_eq!(route_for(&registry, PROCESS_LOGS_TASK), Route::Local);
-        // Deliberately unregistered: the forward stays the contract.
-        assert!(!registry.owns(TRACK_EVENT_TASK));
-        assert_eq!(route_for(&registry, TRACK_EVENT_TASK), Route::PythonOwned);
+        assert_eq!(
+            TRACK_EVENT_TASK,
+            "pi_dash.bgtasks.event_tracking_task.track_event"
+        );
+        for name in [PROCESS_LOGS_TASK, TRACK_EVENT_TASK] {
+            assert!(registry.owns(name), "{name} must be worker-owned");
+            assert_eq!(route_for(&registry, name), Route::Local);
+        }
     }
 }

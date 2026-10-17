@@ -5,10 +5,9 @@ name: rust-api-contract-tests-tasks-webhooks-rust
 # Django worker (and beat) stay STOPPED and the Rust worker
 # (`pidash-api worker`) serves rust_job_queue instead. The replay suite
 # (tasks_webhooks/test_rust_replay.py) seeds rust_job_queue rows with the
-# exact Celery v2 payloads and asserts observable AMQP forwarding
-# for all 11 Python-owned D-08 task names (no tasks_webhooks handler
-# is registered in the binary, so every job forwards over AMQP) with
-# the Django worker stopped.
+# exact Celery v2 payloads and asserts local execution for the 7 owned
+# D-08 task names plus observable AMQP forwarding for the 4 still
+# Python-owned webhook names, with the Django worker stopped.
 
 on:
   push:
@@ -88,6 +87,11 @@ jobs:
       DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
       CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
       CONTRACT_TASK_TIMEOUT: "60"
+      # D-08 event-tracking replay (PIDASHCONV-1107): the Rust worker
+      # POSTs track_event captures to the harness PostHog sink
+      # (POSTHOG_SINK_BASE default). Test-only key, ephemeral CI database.
+      POSTHOG_API_KEY: contract-posthog-key
+      POSTHOG_HOST: http://127.0.0.1:18098
     steps:
       - uses: actions/checkout@v6
 

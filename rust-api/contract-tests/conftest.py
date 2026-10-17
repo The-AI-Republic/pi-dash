@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pytest
 from _harness import config  # noqa: E402
 from _harness.db import connect  # noqa: E402
-from _harness.sinks import smtp_sink, webhook_sink  # noqa: E402,F401
+from _harness.sinks import posthog_sink, smtp_sink, webhook_sink  # noqa: E402,F401
 
 
 @pytest.fixture(scope="session")
