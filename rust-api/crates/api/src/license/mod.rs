@@ -263,8 +263,14 @@ pub async fn resolve_actor(
 }
 
 /// `user.get_session_auth_hash()`: `salted_hmac(...get_session_auth_hash,
-/// password).hexdigest()`, compared constant-time.
-fn verify_session_hash(session_hash: &str, password_field: &str, secret_key: &[u8]) -> bool {
+/// password).hexdigest()`, compared constant-time. Shared by the sibling
+/// instance/admin preambles, which verify the same three session facts as
+/// [`resolve_actor`] (PIDASHCONV-1097).
+pub(crate) fn verify_session_hash(
+    session_hash: &str,
+    password_field: &str,
+    secret_key: &[u8],
+) -> bool {
     let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
     let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
     mac.update(password_field.as_bytes());
