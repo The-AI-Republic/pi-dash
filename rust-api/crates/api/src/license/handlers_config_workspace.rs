@@ -19,7 +19,10 @@
 //! - `POST /api/instances/email-credentials-check/` —
 //!   `EmailCredentialCheckEndpoint.post` (`configuration.py:90-172`):
 //!   `receiver_email`-required 400; `get_email_configuration`;
-//!   `int(EMAIL_PORT)`; SMTP send with the 9-branch error matrix plus the
+//!   `int(EMAIL_PORT)`; send through `settings.EMAIL_BACKEND` — SMTP is
+//!   the live conversation with the 9-branch error matrix, console/locmem
+//!   validate headers and succeed without network, dummy succeeds bare,
+//!   unknown dotted paths 500 like `import_string` failing. Plus the
 //!   generic-`Exception` fallthrough, every message string verbatim.
 //! - `GET /api/instances/workspace-slug-check/` —
 //!   `InstanceWorkSpaceAvailabilityCheckEndpoint.get`
@@ -572,6 +575,28 @@ async fn email_credential_check(
         },
         None => return Denial::ServerError.into_response(),
     };
+    // `get_connection()` resolves the send through `settings.EMAIL_BACKEND`
+    // (`configuration.py:109`): only the SMTP backend dials out.
+    // Console/locmem validate headers and succeed without touching the
+    // network; dummy succeeds without even validating; an unknown dotted
+    // path fails `import_string` outside the view's `try` and answers the
+    // base 500 (PIDASHCONV-1126).
+    let backend = state.settings().email_backend.as_str();
+    if backend != smtp::SMTP_BACKEND {
+        let stub = match backend {
+            smtp::CONSOLE_BACKEND => Some(smtp::send_console(from_email.as_deref(), &recipients)),
+            smtp::LOCMEM_BACKEND => Some(smtp::send_locmem(from_email.as_deref(), &recipients)),
+            smtp::DUMMY_BACKEND => Some(Ok(())),
+            _ => None,
+        };
+        return match stub {
+            Some(Ok(())) => {
+                json_response(&serde_json::json!({"message": "Email successfully sent."}))
+            }
+            Some(Err(err)) => Denial::BadError(err.message().to_owned()).into_response(),
+            None => Denial::ServerError.into_response(),
+        };
+    }
     match smtp::send_test_email(smtp::EmailConfig {
         host: host.as_deref().unwrap_or(""),
         port,
@@ -714,14 +739,27 @@ pub fn parse_py_int(text: &str) -> Option<i64> {
 // SMTP test-send (EmailCredentialCheckEndpoint)
 // ---------------------------------------------------------------------------
 
-/// The genuine send behind `email-credentials-check`, speaking SMTP the way
-/// `smtplib` + Django's `EmailBackend` do (`configuration.py:108-172`):
-/// connect (+implicit TLS), greeting, EHLO/HELO, STARTTLS, AUTH, `MAIL`,
-/// `RCPT`, `DATA`, `QUIT`. Every failure maps to the exact Python exception
-/// branch and its message string; nothing here fabricates a send.
+/// The send behind `email-credentials-check`, through `settings.EMAIL_BACKEND`
+/// the way `get_connection()` resolves it (`configuration.py:108-172`).
+/// The SMTP backend is the genuine conversation, speaking SMTP the way
+/// `smtplib` + Django's `EmailBackend` do: connect (+implicit TLS),
+/// greeting, EHLO/HELO, STARTTLS, AUTH, `MAIL`, `RCPT`, `DATA`, `QUIT`.
+/// Every failure maps to the exact Python exception branch and its message
+/// string; nothing here fabricates a send. Console/locmem/dummy never dial
+/// out (`send_console` / `send_locmem`); unknown dotted paths fail
+/// `import_string` outside the view's `try` and answer the base 500.
 mod smtp {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
+
+    /// `settings.EMAIL_BACKEND` builtins the handler serves. `filebased`
+    /// is deliberately absent: it needs an `EMAIL_FILE_PATH` setting Rust
+    /// does not carry, so it falls into the unknown-path 500 — which is
+    /// also what Django answers when `EMAIL_FILE_PATH` is unset.
+    pub const SMTP_BACKEND: &str = "django.core.mail.backends.smtp.EmailBackend";
+    pub const CONSOLE_BACKEND: &str = "django.core.mail.backends.console.EmailBackend";
+    pub const LOCMEM_BACKEND: &str = "django.core.mail.backends.locmem.EmailBackend";
+    pub const DUMMY_BACKEND: &str = "django.core.mail.backends.dummy.EmailBackend";
 
     /// Fixed probe content (`configuration.py:118-119`).
     const SUBJECT: &str = "Email Notification from Pi Dash";
@@ -908,6 +946,33 @@ mod smtp {
             return Err(MailError::BadHeader);
         }
         Ok(())
+    }
+
+    /// `console.EmailBackend.send_messages`: header validation runs (via
+    /// `message.message()`), then the rendered message plus the 79-dash
+    /// separator goes to stdout, flushed per message. A failed write
+    /// propagates (`fail_silently=False`) into the generic fallthrough.
+    pub fn send_console(from_email: Option<&str>, recipients: &[String]) -> Result<(), MailError> {
+        let from = from_email.unwrap_or(DEFAULT_FROM_EMAIL);
+        check_headers(from, recipients)?;
+        // The render is shared with the DATA path (same accepted
+        // approximation: exact bytes unobservable past the server), with
+        // the email policy's `\n` endings the console backend writes.
+        let text = String::from_utf8_lossy(&message_bytes(from, recipients)).replace("\r\n", "\n");
+        use std::io::Write as _;
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{text}")
+            .and_then(|()| writeln!(out, "{}", "-".repeat(79)))
+            .and_then(|()| out.flush())
+            .map_err(|_| MailError::Failed)
+    }
+
+    /// `locmem.EmailBackend.send_messages`: header validation runs, then
+    /// success — the outbox append is in-process with no HTTP-observable
+    /// effect, so there is nothing further to mirror.
+    pub fn send_locmem(from_email: Option<&str>, recipients: &[String]) -> Result<(), MailError> {
+        let from = from_email.unwrap_or(DEFAULT_FROM_EMAIL);
+        check_headers(from, recipients)
     }
 
     fn base64_encode(bytes: &[u8]) -> String {
@@ -1336,6 +1401,29 @@ mod smtp {
             assert_eq!(
                 MailError::Failed.message(),
                 "Could not send email. Please check your configuration"
+            );
+        }
+
+        /// PIDASHCONV-1126: console/locmem validate headers and succeed
+        /// with no network; dummy succeeds without even validating.
+        #[test]
+        fn stub_backends_match_django() {
+            let to = ["probe@example.com".to_owned()];
+            assert_eq!(send_console(Some("noreply@example.com"), &to), Ok(()));
+            assert_eq!(send_locmem(Some("noreply@example.com"), &to), Ok(()));
+            assert_eq!(send_locmem(None, &to), Ok(()));
+            let bad_to = ["a@b.com\nBcc: x@example.com".to_owned()];
+            assert_eq!(
+                send_console(Some("noreply@example.com"), &bad_to),
+                Err(MailError::BadHeader)
+            );
+            assert_eq!(
+                send_locmem(Some("noreply@example.com"), &bad_to),
+                Err(MailError::BadHeader)
+            );
+            assert_eq!(
+                send_locmem(Some("from@example.com\nX: y"), &to),
+                Err(MailError::BadHeader)
             );
         }
 
