@@ -301,25 +301,13 @@ DEAD_TASKS = {
 # truth: {"task", "cadence", "issue", "commit"}, where "cadence" is
 # the _format_schedule rendering of main's entry. A rust-only entry
 # in this map diffs OWNED only when the Rust task + cadence match the
-# pinned truth; any mismatch is beat drift. When PIDASHCONV-1055
-# merges main into rust-dev, Django gains the entry and the map row
-# goes stale (the check fails until the row is deleted).
-RUST_AHEAD_BEAT_ENTRIES = {
-    # PIDASHCONV-1063: 70d684af "Recover agent runs stranded on
-    # offline runners" — every-minute sweeps.
-    "runner-release-pins-on-offline-runners": {
-        "task": "runner.release_pins_on_offline_runners",
-        "cadence": "crontab(minute=*/1 hour=* day_of_month=* month_of_year=* day_of_week=*)",
-        "issue": "PIDASHCONV-1063",
-        "commit": "70d684af",
-    },
-    "runner-fail-runs-on-offline-runners": {
-        "task": "runner.fail_runs_on_offline_runners",
-        "cadence": "crontab(minute=*/1 hour=* day_of_month=* month_of_year=* day_of_week=*)",
-        "issue": "PIDASHCONV-1063",
-        "commit": "70d684af",
-    },
-}
+# pinned truth; any mismatch is beat drift. Once main merges into
+# rust-dev, Django gains the entry and the map row goes stale (the
+# check fails until the row is deleted).
+# Currently empty: PIDASHCONV-1087 deleted the last rows
+# (PIDASHCONV-1063's two offline-runner sweeps) after the
+# PIDASHCONV-1055 merge (2d029396).
+RUST_AHEAD_BEAT_ENTRIES = {}
 
 # Beat cadence the Rust entry must equal, rendered deterministically.
 def _rust_cadence_string(entry: dict) -> str:
