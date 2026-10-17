@@ -1766,9 +1766,10 @@ async fn insert_signup_admin(
 }
 
 /// `instance.save()` (`admin.py:231-234`): setup done, the company name
-/// verbatim, telemetry as coerced. `Invalid` raises on save in Python (500
-/// *after* the earlier rows committed), so the caller returns before this
-/// UPDATE runs.
+/// verbatim, telemetry as coerced, both audit columns NULLed (the save
+/// runs anonymous, before `user_login`). `Invalid` raises on save in
+/// Python (500 *after* the earlier rows committed), so the caller returns
+/// before this UPDATE runs.
 async fn apply_instance_setup(
     pool: &PgPool,
     instance_id: &Uuid,
@@ -1777,7 +1778,7 @@ async fn apply_instance_setup(
     telemetry: bool,
 ) -> Result<(), Denial> {
     sqlx::query(
-        "UPDATE instances SET is_setup_done = TRUE, instance_name = $1, is_telemetry_enabled = $2, updated_at = $3, updated_by_id = NULL WHERE id = $4",
+        "UPDATE instances SET is_setup_done = TRUE, instance_name = $1, is_telemetry_enabled = $2, updated_at = $3, created_by_id = NULL, updated_by_id = NULL WHERE id = $4",
     )
     .bind(company_name)
     .bind(telemetry)

@@ -110,6 +110,26 @@ def test_signup_screen_visited_marks_instance(admin_api, world):
     assert visited is True
 
 
+def test_signup_screen_visited_anonymous_nulls_both_audit_columns(anon_api, world):
+    # Django BaseModel.save NULLs BOTH created_by and updated_by on
+    # anonymous saves, even on updates (db/models/base.py:31-33) — the
+    # pre-existing creator is wiped, not preserved.
+    db = world["db"]
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "update instances set created_by_id = %s, updated_by_id = %s;",
+                (world["admin"]["id"], world["admin"]["id"]),
+            )
+        conn.commit()
+    res = anon_api.post("/api/instances/admins/sign-up-screen-visited/")
+    assert res.status_code == 204
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("select created_by_id, updated_by_id from instances;")
+            assert cur.fetchone() == (None, None)
+
+
 def test_signup_screen_visited_without_instance(anon_api):
     res = anon_api.post("/api/instances/admins/sign-up-screen-visited/")
     assert res.status_code == 400
