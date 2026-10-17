@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Workspace Apps catalog route (CLOUD-021/022). Thin mount: the
-// trailing-slash landing, the edition gate with its prefetch, and the
-// connected view behind it.
+// trailing-slash landing, the edition gate, and the connected view
+// behind it. Reads fetch on mount — there is deliberately no loader.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { isRedirect } from "@tanstack/react-router";
 import { render, screen } from "@testing-library/react";
@@ -108,44 +108,14 @@ describe("apps route", () => {
     ).toBeUndefined();
   });
 
-  it("prefetches the status read and the first window on cloud editions", async () => {
-    edition.routes = [{ path: "apps" }];
-    const getJson = vi.fn(async (path: string) => {
-      if (path === "/api/openhub/status/") {
-        return { connected: true, has_gateway_scopes: true, hub_url: "https://hub.test" };
-      }
-      return { items: [], nextCursor: null };
-    });
-    const apiClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const loader = Route.options.loader;
-    if (typeof loader !== "function") throw new Error("missing loader");
-    await expect(loader({ context: { queryClient, apiClient }, params: { ws: "acme" } } as never)).resolves.toBeNull();
-    expect(getJson).toHaveBeenCalledWith("/api/openhub/status/");
-    expect(getJson).toHaveBeenCalledWith("/api/openhub/apps/marketplace/", {
-      query: { q: undefined, cursor: undefined, limit: 24, resourceKind: undefined },
-    });
-  });
-
-  it("still resolves when the prefetch fails", async () => {
-    edition.routes = [{ path: "apps" }];
-    const apiClient = {
-      getJson: () => Promise.reject(new Error("offline")),
-      parse: (_schema: unknown, data: unknown) => data,
-    } as never;
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const loader = Route.options.loader;
-    if (typeof loader !== "function") throw new Error("missing loader");
-    await expect(loader({ context: { queryClient, apiClient }, params: { ws: "acme" } } as never)).resolves.toBeNull();
-  });
-
-  it("prefetches nothing without the edition route", async () => {
-    const getJson = vi.fn(async () => ({}));
-    const apiClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const loader = Route.options.loader;
-    if (typeof loader !== "function") throw new Error("missing loader");
-    await expect(loader({ context: { queryClient, apiClient }, params: { ws: "acme" } } as never)).resolves.toBeNull();
-    expect(getJson).not.toHaveBeenCalled();
+  it("carries no loader: reads fetch on mount (CLOUD-030 fail-once shape)", () => {
+    // A loader prefetch would cache the first failure, and the mount
+    // refetch would then consume the oracle's fail-once-then-live
+    // second call before the error panel renders (unreachable-status
+    // and catalog-failure scenarios); the marketplace window must also
+    // only load behind a connected status. The component suites pin
+    // both fail-once shapes at mount level — this guards the route
+    // against reintroducing the loader.
+    expect(Route.options.loader).toBeUndefined();
   });
 });
