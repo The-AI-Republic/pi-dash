@@ -50,6 +50,7 @@ const harness = vi.hoisted(() => ({
   },
   sidebar: null as null | {
     personalEntries: unknown;
+    editionEntries: unknown;
     currentPath: string;
     onPersonalize: () => void;
     quickActions: unknown;
@@ -206,6 +207,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       onSignOut: () => void;
       onDeactivateAccount: () => void;
       personalEntries: unknown;
+      editionEntries: unknown;
       currentPath: string;
       onPersonalize: () => void;
       quickActions: unknown;
@@ -226,6 +228,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
     }) => {
       harness.sidebar = {
         personalEntries: props.personalEntries,
+        editionEntries: props.editionEntries,
         currentPath: props.currentPath,
         onPersonalize: props.onPersonalize,
         quickActions: props.quickActions,
@@ -623,6 +626,7 @@ describe("gated layout shell wiring", () => {
     delete edition.flags["app-rail"];
     delete edition.flags["sidebar-toggle"];
     delete edition.rail;
+    delete edition.sidebar;
     harness.topBar = null;
     harness.sidebar = null;
     harness.personalizeDialog = null;
@@ -1077,6 +1081,24 @@ describe("gated layout shell wiring", () => {
     expect(harness.sidebar?.personalEntries).toEqual([{ key: "drafts", label: "Drafts", href: "/acme/drafts/" }]);
     expect(harness.sidebar?.currentPath).toBe("/acme/projects/p1/issues");
     expect(typeof harness.sidebar?.onPersonalize).toBe("function");
+  });
+
+  it("passes no edition entries on the OSS edition (CLOUD-021 flag-off)", () => {
+    renderShell();
+    expect(harness.sidebar?.editionEntries).toEqual([]);
+  });
+
+  it("resolves edition sidebar entries against the workspace slug (CLOUD-021)", () => {
+    edition.sidebar = [{ id: "apps", label: "Apps", to: "/apps/" }];
+    renderShell();
+    expect(harness.sidebar?.editionEntries).toEqual([{ key: "apps", label: "Apps", href: "/acme/apps/" }]);
+  });
+
+  it("keeps edition entries for guests (CLOUD-021)", () => {
+    edition.sidebar = [{ id: "apps", label: "Apps", to: "/apps/" }];
+    harness.role = 5;
+    renderShell();
+    expect(harness.sidebar?.editionEntries).toEqual([{ key: "apps", label: "Apps", href: "/acme/apps/" }]);
   });
 
   it("filters unpinned entries from the sidebar list", () => {

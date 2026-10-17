@@ -16,7 +16,12 @@ import { createFileRoute, Outlet, redirect, useRouterState } from "@tanstack/rea
 import { LayoutGrid } from "lucide-react";
 import * as React from "react";
 
-import { edition, isAppRailEnabled, isSidebarToggleEnabled } from "../../../core/edition/index.js";
+import {
+  edition,
+  isAppRailEnabled,
+  isSidebarToggleEnabled,
+  resolveEditionSidebarHref,
+} from "../../../core/edition/index.js";
 import { platform } from "../../../core/platform/index.js";
 import {
   CREATE_WORKSPACE_PATH,
@@ -301,6 +306,15 @@ function WorkspaceShell({
   // the quick-create picker files under joined projects only (SHELL-047).
   const personalEntries = canEdit ? selectVisiblePersonalEntries(personalStates, workspaceSlug) : [];
   const joinedProjects = selectSidebarProjects(projects);
+  // Edition sidebar entries (CLOUD-021): workspace-relative targets
+  // resolved against the active slug. Rendered for every role — guests
+  // included — since installations belong to the viewer. The OSS
+  // edition contributes none, so its sidebar is unchanged.
+  const editionEntries = (edition.sidebar ?? []).map((entry) => ({
+    key: entry.id,
+    label: entry.label,
+    href: resolveEditionSidebarHref(workspaceSlug, entry.to),
+  }));
   const dockItems: RailDockItem[] = (edition.rail ?? []).map((entry) => ({
     id: entry.id,
     label: entry.label,
@@ -391,6 +405,7 @@ function WorkspaceShell({
             onUserSettings={accountShortcuts.onSettings}
             onDeactivateAccount={() => setDeactivateOpen(true)}
             personalEntries={personalEntries}
+            editionEntries={editionEntries}
             currentPath={currentPath}
             onPersonalize={() => setPersonalizeOpen(true)}
             quickActions={

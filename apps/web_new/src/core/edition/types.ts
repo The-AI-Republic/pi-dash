@@ -10,7 +10,7 @@ import type { ComponentType } from "react";
 
 /** Extra route subtree contributed by an edition. */
 export interface RouteExtension {
-  /** Path prefix the subtree mounts under, e.g. "/billing". */
+  /** Route segment the edition declares, matched exactly (workspace routes use the bare segment, e.g. "apps"). */
   path: string;
 }
 

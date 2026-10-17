@@ -40,6 +40,7 @@ import { Route as GodModeDashboardWorkspaceRouteRouteImport } from './routes/god
 import { Route as SettingsProfileNotificationsRouteImport } from './routes/settings/profile/notifications'
 import { Route as WsGatedAiDevMachinesIndexRouteImport } from './routes/$ws/_gated/ai-dev-machines/index'
 import { Route as WsGatedAnalyticsIndexRouteImport } from './routes/$ws/_gated/analytics/index'
+import { Route as WsGatedAppsIndexRouteImport } from './routes/$ws/_gated/apps/index'
 import { Route as WsGatedBrowseIssueKeyRouteImport } from './routes/$ws/_gated/browse/$issueKey'
 import { Route as WsGatedNotificationsIndexRouteImport } from './routes/$ws/_gated/notifications/index'
 import { Route as WsGatedProjectsIndexRouteImport } from './routes/$ws/_gated/projects/index'
@@ -221,6 +222,11 @@ const WsGatedAiDevMachinesIndexRoute =
 const WsGatedAnalyticsIndexRoute = WsGatedAnalyticsIndexRouteImport.update({
   id: '/analytics/',
   path: '/analytics/',
+  getParentRoute: () => WsGatedRouteRoute,
+} as any)
+const WsGatedAppsIndexRoute = WsGatedAppsIndexRouteImport.update({
+  id: '/apps/',
+  path: '/apps/',
   getParentRoute: () => WsGatedRouteRoute,
 } as any)
 const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
@@ -407,6 +413,7 @@ export interface FileRoutesByFullPath {
   '/god-mode/workspace/create': typeof GodModeDashboardWorkspaceCreateRoute
   '/$ws/ai-dev-machines/': typeof WsGatedAiDevMachinesIndexRoute
   '/$ws/analytics/': typeof WsGatedAnalyticsIndexRoute
+  '/$ws/apps/': typeof WsGatedAppsIndexRoute
   '/$ws/notifications/': typeof WsGatedNotificationsIndexRoute
   '/$ws/projects/': typeof WsGatedProjectsIndexRoute
   '/$ws/prompts/': typeof WsGatedPromptsIndexRoute
@@ -458,6 +465,7 @@ export interface FileRoutesByTo {
   '/god-mode/workspace/create': typeof GodModeDashboardWorkspaceCreateRoute
   '/$ws/ai-dev-machines': typeof WsGatedAiDevMachinesIndexRoute
   '/$ws/analytics': typeof WsGatedAnalyticsIndexRoute
+  '/$ws/apps': typeof WsGatedAppsIndexRoute
   '/$ws/notifications': typeof WsGatedNotificationsIndexRoute
   '/$ws/projects': typeof WsGatedProjectsIndexRoute
   '/$ws/prompts': typeof WsGatedPromptsIndexRoute
@@ -517,6 +525,7 @@ export interface FileRoutesById {
   '/god-mode/_dashboard/workspace/create': typeof GodModeDashboardWorkspaceCreateRoute
   '/$ws/_gated/ai-dev-machines/': typeof WsGatedAiDevMachinesIndexRoute
   '/$ws/_gated/analytics/': typeof WsGatedAnalyticsIndexRoute
+  '/$ws/_gated/apps/': typeof WsGatedAppsIndexRoute
   '/$ws/_gated/notifications/': typeof WsGatedNotificationsIndexRoute
   '/$ws/_gated/projects/': typeof WsGatedProjectsIndexRoute
   '/$ws/_gated/prompts/': typeof WsGatedPromptsIndexRoute
@@ -575,6 +584,7 @@ export interface FileRouteTypes {
     | '/god-mode/workspace/create'
     | '/$ws/ai-dev-machines/'
     | '/$ws/analytics/'
+    | '/$ws/apps/'
     | '/$ws/notifications/'
     | '/$ws/projects/'
     | '/$ws/prompts/'
@@ -626,6 +636,7 @@ export interface FileRouteTypes {
     | '/god-mode/workspace/create'
     | '/$ws/ai-dev-machines'
     | '/$ws/analytics'
+    | '/$ws/apps'
     | '/$ws/notifications'
     | '/$ws/projects'
     | '/$ws/prompts'
@@ -684,6 +695,7 @@ export interface FileRouteTypes {
     | '/god-mode/_dashboard/workspace/create'
     | '/$ws/_gated/ai-dev-machines/'
     | '/$ws/_gated/analytics/'
+    | '/$ws/_gated/apps/'
     | '/$ws/_gated/notifications/'
     | '/$ws/_gated/projects/'
     | '/$ws/_gated/prompts/'
@@ -943,6 +955,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedAnalyticsIndexRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
+    '/$ws/_gated/apps/': {
+      id: '/$ws/_gated/apps/'
+      path: '/apps'
+      fullPath: '/$ws/apps/'
+      preLoaderRoute: typeof WsGatedAppsIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
     '/$ws/_gated/browse/$issueKey': {
       id: '/$ws/_gated/browse/$issueKey'
       path: '/browse/$issueKey'
@@ -1162,6 +1181,7 @@ interface WsGatedRouteRouteChildren {
   WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute
   WsGatedAiDevMachinesIndexRoute: typeof WsGatedAiDevMachinesIndexRoute
   WsGatedAnalyticsIndexRoute: typeof WsGatedAnalyticsIndexRoute
+  WsGatedAppsIndexRoute: typeof WsGatedAppsIndexRoute
   WsGatedNotificationsIndexRoute: typeof WsGatedNotificationsIndexRoute
   WsGatedProjectsIndexRoute: typeof WsGatedProjectsIndexRoute
   WsGatedPromptsIndexRoute: typeof WsGatedPromptsIndexRoute
@@ -1177,6 +1197,7 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedBrowseIssueKeyRoute: WsGatedBrowseIssueKeyRoute,
   WsGatedAiDevMachinesIndexRoute: WsGatedAiDevMachinesIndexRoute,
   WsGatedAnalyticsIndexRoute: WsGatedAnalyticsIndexRoute,
+  WsGatedAppsIndexRoute: WsGatedAppsIndexRoute,
   WsGatedNotificationsIndexRoute: WsGatedNotificationsIndexRoute,
   WsGatedProjectsIndexRoute: WsGatedProjectsIndexRoute,
   WsGatedPromptsIndexRoute: WsGatedPromptsIndexRoute,

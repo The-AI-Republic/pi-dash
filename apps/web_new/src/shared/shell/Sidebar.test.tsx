@@ -165,7 +165,6 @@ describe("Sidebar", () => {
     const landmark = screen.getByRole("complementary", { name: "Workspace navigation" });
     // The parity drivers and the shell contract locate the sidebar by this id.
     expect(container.querySelector("#main-sidebar")).toBe(landmark);
-
   });
 
   it("lists personal entries above the projects group", () => {
@@ -203,5 +202,42 @@ describe("Sidebar", () => {
   it("mounts no update control on web builds (SHELL-102)", () => {
     render(sidebar());
     expect(screen.queryByRole("button", { name: /update/i })).not.toBeInTheDocument();
+  });
+
+  it("renders nothing extra without edition entries (CLOUD-021 flag-off)", () => {
+    const { container } = render(sidebar());
+    expect(screen.getByRole("link", { name: "Home" })).toBeInTheDocument();
+    expect(container.querySelector("#main-sidebar")?.textContent).not.toContain("Apps");
+    expect(container.querySelectorAll('#main-sidebar a[href*="apps"]')).toHaveLength(0);
+  });
+
+  it("lists edition entries beside Home with their own icon (CLOUD-021)", () => {
+    render(
+      sidebar({
+        editionEntries: [{ key: "apps", label: "Apps", href: "/acme/apps/" }],
+        currentPath: "/acme/projects/p1/issues",
+      })
+    );
+    const apps = screen.getByRole("link", { name: "Apps" });
+    expect(apps).toHaveAttribute("href", "/acme/apps/");
+    expect(apps.querySelector("svg")).not.toBeNull();
+    expect(apps).not.toHaveAttribute("aria-current");
+    const workspace = screen.getByRole("navigation", { name: "Workspace" });
+    expect(workspace).toContainElement(apps);
+  });
+
+  it("marks the edition entry current on its route (CLOUD-021)", () => {
+    render(
+      sidebar({
+        editionEntries: [{ key: "apps", label: "Apps", href: "/acme/apps/" }],
+        currentPath: "/acme/apps/",
+      })
+    );
+    expect(screen.getByRole("link", { name: "Apps" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("leaves edition entries unmarked without a path (CLOUD-021)", () => {
+    render(sidebar({ editionEntries: [{ key: "apps", label: "Apps", href: "/acme/apps/" }] }));
+    expect(screen.getByRole("link", { name: "Apps" })).not.toHaveAttribute("aria-current");
   });
 });
