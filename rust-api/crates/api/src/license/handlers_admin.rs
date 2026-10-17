@@ -675,8 +675,9 @@ fn parse_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
 /// `IntegerField.get_prep_value`): absent → 20; explicit null hits the NOT
 /// NULL column → `IntegrityError` → invalid-payload 400; bools adapt as
 /// ints (`True` → 1, `False` → 0 — `bool` subclasses `int`); integers that
-/// fit pass through; EVERY float truncates toward zero (`int(20.5)` → 20,
-/// so no `fract() == 0.0` gate); numeric strings parse with `int()`
+/// fit pass through; EVERY float truncates toward zero BEFORE the range
+/// check (`int(20.5)` → 20, so no `fract() == 0.0` gate, and
+/// `int(2147483647.5)` → `2147483647` fits); numeric strings parse with `int()`
 /// semantics (surrounding whitespace tolerated, `"20.5"`/`"abc"` →
 /// `ValueError` → generic 500); anything else errors → generic 500.
 /// A parsed negative still 400s, but at the INSERT: the
@@ -694,17 +695,23 @@ fn role_from_value(value: Option<&Value>) -> Result<i32, Denial> {
 }
 
 /// Adapt a JSON number to the integer `role` column: integers that fit,
-/// plus every finite float in range truncated toward zero (Django
-/// `int(value)`); out-of-range and unparsable numbers error out →
-/// generic 500 (Postgres numeric overflow surfaces as `DataError`, which
-/// `handle_exception` does not catch, so 500 either way).
+/// plus every finite float truncated toward zero FIRST and then
+/// range-checked (Python `int(value)` semantics: `int(2147483647.5)` →
+/// `2147483647` fits, `int(-2147483648.5)` → `-2147483648` fits and the
+/// role CHECK then decides at INSERT); out-of-range-after-truncation and
+/// unparsable numbers error out → generic 500 (Postgres numeric overflow
+/// surfaces as `DataError`, which `handle_exception` does not catch, so
+/// 500 either way).
 fn role_from_number(n: &serde_json::Number) -> Result<i32, Denial> {
     if let Some(v) = n.as_i64() {
         return i32::try_from(v).map_err(|_| Denial::ServerError);
     }
     if let Some(v) = n.as_f64() {
-        if v.is_finite() && v >= f64::from(i32::MIN) && v <= f64::from(i32::MAX) {
-            return Ok(v.trunc() as i32);
+        if v.is_finite() {
+            let truncated = v.trunc();
+            if truncated >= f64::from(i32::MIN) && truncated <= f64::from(i32::MAX) {
+                return Ok(truncated as i32);
+            }
         }
     }
     Err(Denial::ServerError)
@@ -761,7 +768,6 @@ async fn create_admin(
 
     let data = parse_json_body(&headers, &body)?;
     let email = lookup_email(data.get("email"))?;
-    let role = role_from_value(data.get("role"))?;
     if instance_first(pool).await?.is_none() {
         // Near-dead: the permission gate above already denied the
         // instance-less case with the default 403. Kept for order parity.
@@ -778,6 +784,11 @@ async fn create_admin(
     let Some((user_id,)) = user_row else {
         return Err(Denial::NotFound);
     };
+
+    // The role is parsed here, after the user lookup, because Django only
+    // touches it inside `.create()`: an unknown email 404s no matter how
+    // unparsable the role is (PIDASHCONV-1120).
+    let role = role_from_value(data.get("role"))?;
 
     // `InstanceAdmin.objects.create(...)`: `BaseModel.save` stamps
     // `created_by` from the request user and leaves `updated_by` null.
@@ -2532,6 +2543,19 @@ mod tests {
         assert_eq!(role(r#"{"role":20.9}"#).expect("truncation"), 20);
         assert_eq!(role(r#"{"role":-0.5}"#).expect("negative truncation"), 0);
         assert_eq!(role(r#"{"role":-1}"#).expect("negative parses"), -1);
+        // Truncation runs BEFORE the range check (PIDASHCONV-1120): the
+        // boundary floats fit after `int()`, while floats that are still
+        // out of range after truncation error like a DB overflow.
+        assert_eq!(
+            role(r#"{"role":2147483647.5}"#).expect("max boundary float"),
+            2147483647
+        );
+        assert_eq!(
+            role(r#"{"role":-2147483648.5}"#).expect("min boundary float"),
+            -2147483648
+        );
+        assert!(role(r#"{"role":2147483648.0}"#).is_err());
+        assert!(role(r#"{"role":-2147483649.0}"#).is_err());
         // Numeric strings parse with `int()` semantics (surrounding
         // whitespace tolerated); `"20.5"`/`"abc"` are `ValueError` -> 500.
         assert_eq!(role(r#"{"role":"20"}"#).expect("string"), 20);
