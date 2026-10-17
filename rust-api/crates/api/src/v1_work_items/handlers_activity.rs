@@ -2623,14 +2623,15 @@ fn cpython_write_string(out: &mut String, text: &str) {
 
 /// Python `str(value)` for a request-data scalar, as the `f"{...}-{name}"`
 /// key factory stringifies a non-string `name` (`:2357`): bools spell
-/// `True`/`False`, numbers their JSON spelling, strings pass through.
-/// Containers spell their `repr` (single quotes, `", "`/`": "`).
+/// `True`/`False`, numbers via [`py_number_str`] (ints verbatim, floats
+/// CPython's `str`), strings pass through. Containers spell their `repr`
+/// (single quotes, `", "`/`": "`).
 fn py_str(value: &Value) -> String {
     match value {
         Value::Null => "None".to_owned(),
         Value::Bool(true) => "True".to_owned(),
         Value::Bool(false) => "False".to_owned(),
-        Value::Number(number) => number.to_string(),
+        Value::Number(number) => py_number_str(number),
         Value::String(text) => text.clone(),
         Value::Array(items) => {
             let inner: Vec<String> = items.iter().map(py_repr).collect();
@@ -2649,6 +2650,25 @@ fn py_str(value: &Value) -> String {
                 .collect();
             format!("{{{}}}", inner.join(", "))
         }
+    }
+}
+
+/// Python `str()` of a JSON number: int tokens verbatim (Python ints
+/// never lose precision, however large), `paginator::py_float_str` for
+/// true floats. Int-vs-float follows the token shape (no `.`/`e`/`E` is an
+/// int), which `arbitrary_precision` preserves; `-0` reads back `I64(0)`
+/// (`PIDASHCONV-1121`). Without the float arm a raw `1e3` echoes
+/// `serde_json`'s normalized `"1e+3"` instead of CPython's `"1000.0"`
+/// (`PIDASHCONV-1130`).
+fn py_number_str(number: &serde_json::Number) -> String {
+    let token = number.to_string();
+    if token.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
+        // `str(float)` is `repr(float)` for floats. Parse the token rather
+        // than `Number::as_f64`, which drops non-finite overflow spellings
+        // (`1e999` is `inf` on the Python side).
+        crate::paginator::py_float_str(token.parse::<f64>().unwrap_or(f64::NAN))
+    } else {
+        token
     }
 }
 
@@ -6083,6 +6103,31 @@ mod tests {
         assert_eq!(py_str(&serde_json::json!([1, "a"])), "[1, 'a']");
         assert_eq!(py_str(&serde_json::json!({"a": 1})), "{'a': 1}");
         assert_eq!(py_repr(&serde_json::json!("it's")), "\"it's\"");
+    }
+
+    #[test]
+    fn py_str_number_tokens() {
+        fn parsed(literal: &str) -> Value {
+            serde_json::from_str(literal).expect("number")
+        }
+        // Float tokens stringify through CPython's `str(float)`
+        // (PIDASHCONV-1130); `serde_json` normalizes the raw exponent
+        // spelling (`1e3` -> `1e+3`), so the token shape, not the literal,
+        // decides.
+        assert_eq!(py_str(&parsed("1e3")), "1000.0");
+        assert_eq!(py_str(&parsed("1.50")), "1.5");
+        assert_eq!(py_str(&parsed("0.5e1")), "5.0");
+        assert_eq!(py_str(&parsed("1e16")), "1e+16");
+        // Ints (however huge) stay verbatim; `-0` reads back `0`.
+        assert_eq!(py_str(&parsed("1000")), "1000");
+        assert_eq!(py_str(&parsed("-0")), "0");
+        let huge = "123456789012345678901234567890123456789012345678901234567890";
+        assert_eq!(py_str(&parsed(huge)), huge);
+        // Overflow spellings read as floats: CPython's `str(inf)`.
+        assert_eq!(py_str(&parsed("1e999")), "inf");
+        // Nested containers recurse through the same arm.
+        assert_eq!(py_str(&parsed("[1e3]")), "[1000.0]");
+        assert_eq!(py_str(&parsed("{\"a\": 1e3}")), "{'a': 1000.0}");
     }
 
     #[test]
