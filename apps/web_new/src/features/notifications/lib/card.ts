@@ -36,6 +36,9 @@ export interface NotificationCardData {
 /**
  * One human-readable summary sentence for a change. Every sentence names
  * the actor first; mention rows name the viewer as the mentioned party.
+ * Cases dispatch on which values are present, not on the verb: the fan-out
+ * reuses "updated" for every property change and carries the added name in
+ * the new value, the removed name in the old value.
  */
 export function describeNotificationChange(actorName: string, change: NotificationChange, isMention: boolean): string {
   if (isMention) {
@@ -57,17 +60,20 @@ export function describeNotificationChange(actorName: string, change: Notificati
       return `${actorName} set the state to ${change.newValue}`;
     case "assignees":
     case "assignee":
-      if (change.verb === "created") return `${actorName} assigned ${change.newValue}`;
-      if (change.verb === "deleted" || change.verb === "removed") return `${actorName} unassigned ${change.oldValue}`;
+      if (change.newValue !== "") return `${actorName} assigned ${change.newValue}`;
+      if (change.oldValue !== "") return `${actorName} unassigned ${change.oldValue}`;
       return `${actorName} changed the assignees`;
     case "start_date":
-      return `${actorName} changed the start date to ${change.newValue}`;
+      return change.newValue === ""
+        ? `${actorName} removed the start date`
+        : `${actorName} changed the start date to ${change.newValue}`;
     case "target_date":
-      return `${actorName} changed the due date to ${change.newValue}`;
+      return change.newValue === ""
+        ? `${actorName} removed the due date`
+        : `${actorName} changed the due date to ${change.newValue}`;
     case "labels":
-      if (change.verb === "created") return `${actorName} added the ${change.newValue} label`;
-      if (change.verb === "deleted" || change.verb === "removed")
-        return `${actorName} removed the ${change.oldValue} label`;
+      if (change.newValue !== "") return `${actorName} added the ${change.newValue} label`;
+      if (change.oldValue !== "") return `${actorName} removed the ${change.oldValue} label`;
       return `${actorName} changed the labels`;
     case "parent":
       return change.newValue === ""
@@ -75,8 +81,8 @@ export function describeNotificationChange(actorName: string, change: Notificati
         : `${actorName} set the parent to ${change.newValue}`;
     case "link":
     case "blocks":
-      if (change.verb === "created") return `${actorName} linked ${change.newValue}`;
-      if (change.verb === "deleted" || change.verb === "removed") return `${actorName} unlinked ${change.oldValue}`;
+      if (change.newValue !== "") return `${actorName} linked ${change.newValue}`;
+      if (change.oldValue !== "") return `${actorName} unlinked ${change.oldValue}`;
       return `${actorName} changed the relations`;
     case "attachment":
       if (change.verb === "created") return `${actorName} attached a file`;
