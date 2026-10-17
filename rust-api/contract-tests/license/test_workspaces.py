@@ -147,3 +147,18 @@ def test_create_workspace_rejects_duplicate_slug(admin_api, world):
     world["db"].make_workspace("Acme", "acme", world["admin"]["id"])
     res = admin_api.post("/api/instances/workspaces/", json={"name": "Acme 2", "slug": "ACME"})
     assert res.status_code == 400
+
+
+def test_create_workspace_slug_held_by_soft_deleted_row_returns_409(admin_api, world):
+    # PIDASHCONV-1100: a queryset-style soft delete keeps the slug, so the
+    # live-row-only validators pass and the INSERT collides on UNIQUE(slug).
+    # Django's str(IntegrityError) carries the Postgres DETAIL line
+    # ("Key (slug)=(acme) already exists."), so the view answers 409.
+    world["db"].make_workspace("Acme", "acme", world["admin"]["id"])
+    with world["db"].connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE workspaces SET deleted_at = now() WHERE slug = 'acme';")
+        conn.commit()
+    res = admin_api.post("/api/instances/workspaces/", json={"name": "x", "slug": "acme"})
+    assert res.status_code == 409
+    assert res.json() == {"slug": "The workspace with the slug already exists"}
