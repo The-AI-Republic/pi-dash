@@ -150,6 +150,18 @@ import {
 } from "./contracts/instance.js";
 import { fakeResponse, recordingTransport } from "./client.test.js";
 import type { RecordedCall } from "./client.test.js";
+import { createPod, deletePod, getPod, listPods, updatePod } from "./contracts/pods.js";
+import {
+  createRunnerOnMachine,
+  deleteDevMachine,
+  getCreateRunnerStatus,
+  listDevMachines,
+  revokeDevMachine,
+  rotateDevMachine,
+} from "./contracts/dev-machines.js";
+import { deleteRunner, getRunner, listRunners, revokeRunner } from "./contracts/runners.js";
+import { cancelRun, commentAndRun, createRun, getRun, listRuns, reTickIssue, runAi } from "./contracts/runs.js";
+import { decideApproval, listApprovals } from "./contracts/approvals.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const UUID2 = "223e4567-e89b-12d3-a456-426614174001";
@@ -3021,5 +3033,580 @@ describe("cloud auth probe contracts", () => {
     expect(cloudSignInUrl("https://api.test", "/god-mode/?tab=email&x=1")).toBe(
       "https://api.test/api/auth/sign-in/?return_to=%2Fgod-mode%2F%3Ftab%3Demail%26x%3D1"
     );
+  });
+});
+
+function mutating(value: unknown, status = 200) {
+  return recordingTransport((call) =>
+    call.url.endsWith("/auth/get-csrf-token/")
+      ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+      : fakeResponse({ status, body: JSON.stringify(value) })
+  );
+}
+
+const POD_MINI = {
+  id: UUID,
+  name: "CT_probe",
+  is_default: true,
+  project: UUID2,
+  project_identifier: "CT",
+};
+
+describe("pods contracts", () => {
+  const pod = {
+    ...POD_MINI,
+    description: "Probe pod",
+    workspace: UUID,
+    created_by: null,
+    runner_count: 3,
+    created_at: "2026-10-17T04:00:00.000Z",
+    updated_at: "2026-10-17T04:00:00.000Z",
+  };
+
+  it("lists pods with both scope filters", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify([pod]) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listPods(client, { projectId: UUID2, workspaceId: UUID });
+    expect(parsed).toEqual([pod]);
+    const params = new URL(transport.calls[0]?.url ?? "");
+    expect(params.searchParams.get("project")).toBe(UUID2);
+    expect(params.searchParams.get("workspace")).toBe(UUID);
+  });
+
+  it("lists pods with no scope", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([pod]) });
+    const parsed = await listPods(client);
+    expect(parsed).toHaveLength(1);
+  });
+
+  it("reads one pod", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json(pod) });
+    const parsed = await getPod(client, UUID);
+    expect(parsed.runner_count).toBe(3);
+    expect(parsed.project_identifier).toBe("CT");
+  });
+
+  it("creates a pod with a description", async () => {
+    const transport = mutating(pod, 201);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const created = await createPod(client, { project: UUID2, name: "probe", description: "Probe pod" });
+    expect(created.id).toBe(UUID);
+    const createCall = transport.calls.find((call) => call.url.endsWith("/api/runners/pods/"));
+    expect(createCall?.init.method).toBe("POST");
+    expect(createCall?.init.body).toBe(JSON.stringify({ project: UUID2, name: "probe", description: "Probe pod" }));
+  });
+
+  it("creates a pod without a description", async () => {
+    const transport = mutating({ ...pod, description: "" }, 201);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await createPod(client, { project: UUID2, name: "probe" });
+    const createCall = transport.calls.find((call) => call.url.endsWith("/api/runners/pods/"));
+    expect(createCall?.init.body).toBe(JSON.stringify({ project: UUID2, name: "probe" }));
+  });
+
+  it("patches a pod and parses the updated row", async () => {
+    const transport = mutating({ ...pod, is_default: true });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updatePod(client, UUID, { name: "CT_next", is_default: true });
+    expect(updated.is_default).toBe(true);
+    const patchCall = transport.calls.find((call) => call.url.endsWith(`/api/runners/pods/${UUID}/`));
+    expect(patchCall?.init.method).toBe("PATCH");
+    expect(patchCall?.init.body).toBe(JSON.stringify({ name: "CT_next", is_default: true }));
+  });
+
+  it("deletes a pod by status", async () => {
+    const transport = mutating(null, 204);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deletePod(client, UUID)).resolves.toBe(204);
+    const deleteCall = transport.calls.find((call) => call.url.endsWith(`/api/runners/pods/${UUID}/`));
+    expect(deleteCall?.init.method).toBe("DELETE");
+  });
+
+  it("rejects pod rows without an id", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...pod, id: "nope" }]) });
+    const error = await listPods(client, { projectId: UUID2 }).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
+describe("dev-machines contracts", () => {
+  const machine = {
+    id: UUID,
+    host_label: "probe-host",
+    label: "probe",
+    visibility: 0,
+    runner_count: 1,
+    online_runner_count: 0,
+    control_online: false,
+    last_seen_at: "2026-10-17T04:00:00.000Z",
+    last_heartbeat_at: null,
+    revoked_at: null,
+    created_at: "2026-10-17T04:00:00.000Z",
+    updated_at: "2026-10-17T04:00:00.000Z",
+  };
+
+  it("lists workspace machines", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify([machine]) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listDevMachines(client, UUID2);
+    expect(parsed).toEqual([machine]);
+    const params = new URL(transport.calls[0]?.url ?? "");
+    expect(params.searchParams.get("workspace")).toBe(UUID2);
+  });
+
+  it("rotates with the workspace in the body", async () => {
+    const transport = mutating(machine);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const rotated = await rotateDevMachine(client, UUID, UUID2);
+    expect(rotated.revoked_at).toBeNull();
+    const rotateCall = transport.calls.find((call) => call.url.endsWith(`/dev-machines/${UUID}/rotate/`));
+    expect(rotateCall?.init.method).toBe("POST");
+    expect(rotateCall?.init.body).toBe(JSON.stringify({ workspace: UUID2 }));
+  });
+
+  it("revokes with the workspace in the body", async () => {
+    const transport = mutating({ ...machine, revoked_at: "2026-10-17T04:00:00.000Z" });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const revoked = await revokeDevMachine(client, UUID, UUID2);
+    expect(revoked.revoked_at).not.toBeNull();
+    const revokeCall = transport.calls.find((call) => call.url.endsWith(`/dev-machines/${UUID}/revoke/`));
+    expect(revokeCall?.init.body).toBe(JSON.stringify({ workspace: UUID2 }));
+  });
+
+  it("deletes with the purge default", async () => {
+    const transport = mutating(null, 204);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteDevMachine(client, UUID, UUID2)).resolves.toBe(204);
+    const deleteCall = transport.calls.find((call) => call.url.includes(`/dev-machines/${UUID}/`));
+    const params = new URL(deleteCall?.url ?? "");
+    expect(params.searchParams.get("workspace")).toBe(UUID2);
+    expect(params.searchParams.get("purge_local")).toBe("true");
+  });
+
+  it("deletes without the local purge when asked", async () => {
+    const transport = mutating(null, 204);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteDevMachine(client, UUID, UUID2, { purgeLocal: false })).resolves.toBe(204);
+    const deleteCall = transport.calls.find((call) => call.url.includes(`/dev-machines/${UUID}/`));
+    const params = new URL(deleteCall?.url ?? "");
+    expect(params.searchParams.get("purge_local")).toBe("false");
+  });
+
+  it("requests a creation and parses the accepted id", async () => {
+    const transport = mutating({ request_id: UUID2 }, 202);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const input = {
+      workspace: UUID2,
+      project: "CT",
+      pod: "CT_probe",
+      name: "probe-runner",
+      working_dir: "/tmp/probe",
+      agent: "codex",
+      model: "probe-model",
+      reasoning_effort: "high",
+    };
+    const accepted = await createRunnerOnMachine(client, UUID, input);
+    expect(accepted.request_id).toBe(UUID2);
+    const createCall = transport.calls.find((call) => call.url.endsWith(`/dev-machines/${UUID}/create-runner/`));
+    expect(createCall?.init.body).toBe(JSON.stringify(input));
+  });
+
+  it("parses every creation status", async () => {
+    const pending = { request_id: UUID2, status: "pending" };
+    const ok = { request_id: UUID2, status: "ok", runner_id: UUID, runner_name: "probe-runner" };
+    const failed = { request_id: UUID2, status: "error", error: "machine_offline" };
+    for (const shape of [pending, ok, failed]) {
+      const client = createClient({ baseUrl: "https://api.test", transport: json(shape) });
+      const parsed = await getCreateRunnerStatus(client, UUID, UUID2, UUID);
+      expect(parsed.request_id).toBe(UUID2);
+    }
+    const errored = await getCreateRunnerStatus(
+      createClient({ baseUrl: "https://api.test", transport: json(failed) }),
+      UUID,
+      UUID2,
+      UUID
+    );
+    expect(errored.error).toBe("machine_offline");
+  });
+
+  it("rejects machine rows without an id", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...machine, id: 7 }]) });
+    const error = await listDevMachines(client, UUID2).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
+describe("runners contracts", () => {
+  const liveState = {
+    observed_run_id: UUID2,
+    last_event_at: "2026-10-17T04:00:00.000Z",
+    last_event_kind: "agent_narrative",
+    last_event_summary: "probe summary",
+    agent_pid: 4242,
+    agent_subprocess_alive: true,
+    approvals_pending: 1,
+    input_tokens: 10,
+    output_tokens: 20,
+    total_tokens: 30,
+    usage: { input: 10, output: 20 },
+    llm_model: "probe-model",
+    turn_count: 2,
+    updated_at: "2026-10-17T04:00:00.000Z",
+  };
+  const runner = {
+    id: UUID,
+    name: "probe-runner",
+    status: "busy",
+    host_label: "probe-host",
+    provisioning: "manual",
+    os: "darwin",
+    arch: "arm64",
+    runner_version: "1.2.3",
+    dev_metadata: { working_dir: "/tmp/probe" },
+    protocol_version: 4,
+    capabilities: ["shell", "fs"],
+    last_heartbeat_at: "2026-10-17T04:00:00.000Z",
+    owner: UUID2,
+    dev_machine: UUID,
+    dev_machine_detail: { id: UUID, host_label: "probe-host", label: "probe" },
+    visibility: 0,
+    pod: UUID,
+    pod_detail: POD_MINI,
+    live_state: liveState,
+    enrolled_at: "2026-10-17T04:00:00.000Z",
+    revoked_at: null,
+    revoked_reason: "",
+    created_at: "2026-10-17T04:00:00.000Z",
+    updated_at: "2026-10-17T04:00:00.000Z",
+  };
+
+  it("lists workspace runners", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ body: JSON.stringify([{ ...runner, live_state: null }]) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listRunners(client, UUID2);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.pod_detail.project_identifier).toBe("CT");
+    const params = new URL(transport.calls[0]?.url ?? "");
+    expect(params.searchParams.get("workspace")).toBe(UUID2);
+    expect(params.searchParams.has("project")).toBe(false);
+  });
+
+  it("lists runners with project, pod and bundled scope", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify([runner]) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await listRunners(client, UUID2, { projectId: UUID, podId: UUID, includeBundled: true });
+    const params = new URL(transport.calls[0]?.url ?? "");
+    expect(params.searchParams.get("project")).toBe(UUID);
+    expect(params.searchParams.get("pod")).toBe(UUID);
+    expect(params.searchParams.get("include_bundled")).toBe("true");
+  });
+
+  it("reads one runner with live state", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json(runner) });
+    const parsed = await getRunner(client, UUID);
+    expect(parsed.live_state?.agent_pid).toBe(4242);
+    expect(parsed.dev_metadata.working_dir).toBe("/tmp/probe");
+  });
+
+  it("revokes without a body and parses the updated row", async () => {
+    const transport = mutating({ ...runner, status: "revoked", revoked_at: "2026-10-17T04:00:00.000Z" });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const revoked = await revokeRunner(client, UUID);
+    expect(revoked.status).toBe("revoked");
+    const revokeCall = transport.calls.find((call) => call.url.endsWith(`/api/runners/${UUID}/revoke/`));
+    expect(revokeCall?.init.method).toBe("POST");
+    expect(revokeCall?.init.body).toBeUndefined();
+  });
+
+  it("deletes with the purge default", async () => {
+    const transport = mutating(null, 204);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteRunner(client, UUID)).resolves.toBe(204);
+    const deleteCall = transport.calls.find((call) => call.url.includes(`/api/runners/${UUID}/`));
+    const params = new URL(deleteCall?.url ?? "");
+    expect(params.searchParams.get("purge_local")).toBe("true");
+  });
+
+  it("deletes without the local purge when asked", async () => {
+    const transport = mutating(null, 204);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteRunner(client, UUID, { purgeLocal: false })).resolves.toBe(204);
+    const deleteCall = transport.calls.find((call) => call.url.includes(`/api/runners/${UUID}/`));
+    const params = new URL(deleteCall?.url ?? "");
+    expect(params.searchParams.get("purge_local")).toBe("false");
+  });
+
+  it("rejects runner rows with an unknown status", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...runner, status: "napping" }]) });
+    const error = await listRunners(client, UUID2).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
+describe("runs contracts", () => {
+  const run = {
+    id: UUID,
+    status: "running",
+    executor_kind: "local_runner",
+    dispatch_attempts: 1,
+    cancel_requested_at: null,
+    cancel_reason: "",
+    prompt: "Probe prompt",
+    thread_id: "thread-probe",
+    agent_metadata: { agent: "probe" },
+    runner: UUID2,
+    work_item: null,
+    scheduler_binding: null,
+    scheduler_binding_detail: null,
+    pod: UUID,
+    pod_detail: POD_MINI,
+    created_by: UUID2,
+    owner: UUID2,
+    created_at: "2026-10-17T04:00:00.000Z",
+    assigned_at: "2026-10-17T04:00:00.000Z",
+    queue_position: null,
+    started_at: "2026-10-17T04:00:00.000Z",
+    ended_at: null,
+    done_payload: null,
+    error: "",
+    error_code: "",
+    error_diagnostic: null,
+    refusal_category: "",
+    llm_model: "probe-model",
+    input_tokens: 10,
+    output_tokens: 20,
+    total_tokens: 30,
+    usage: { input: 10 },
+    tool_plan: { tools: ["probe-tool"], limits: { calls: 5 } },
+    tool_calls: [
+      {
+        id: UUID2,
+        tool_call_id: "call-probe",
+        source: "internal",
+        server_key: "",
+        tool_name: "probe-tool",
+        risk: "read",
+        status: "succeeded",
+        error_code: "",
+        prepared_at: "2026-10-17T04:00:00.000Z",
+        submitted_at: "2026-10-17T04:00:00.000Z",
+        completed_at: "2026-10-17T04:00:00.000Z",
+      },
+    ],
+  };
+
+  it("lists runs with no query", async () => {
+    const page = { results: [run], count: 1, total_count: 1, total_pages: 1, page: 1, per_page: 30 };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(page) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listRuns(client);
+    expect(parsed.results).toHaveLength(1);
+    expect(parsed.results[0]?.tool_calls).toHaveLength(1);
+    expect(new URL(transport.calls[0]?.url ?? "").search).toBe("");
+  });
+
+  it("lists runs with the full query", async () => {
+    const page = { results: [], count: 0, total_count: 0, total_pages: 1, page: 2, per_page: 10 };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(page) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listRuns(client, {
+      workspaceId: UUID,
+      projectId: UUID2,
+      schedulerBindingId: UUID,
+      page: 2,
+      perPage: 10,
+    });
+    expect(parsed.page).toBe(2);
+    const params = new URL(transport.calls[0]?.url ?? "");
+    expect(params.searchParams.get("workspace")).toBe(UUID);
+    expect(params.searchParams.get("project")).toBe(UUID2);
+    expect(params.searchParams.get("scheduler_binding")).toBe(UUID);
+    expect(params.searchParams.get("page")).toBe("2");
+    expect(params.searchParams.get("per_page")).toBe("10");
+  });
+
+  it("reads one run without events unless asked", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(run) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await getRun(client, UUID);
+    expect(parsed.events).toBeUndefined();
+    expect(new URL(transport.calls[0]?.url ?? "").search).toBe("");
+  });
+
+  it("reads one run with its transcript", async () => {
+    const events = [
+      { id: 1, seq: 1, kind: "run_started", payload: {}, created_at: "2026-10-17T04:00:00.000Z" },
+      { id: 2, seq: 2, kind: "agent_narrative", payload: { text: "hi" }, created_at: "2026-10-17T04:00:01.000Z" },
+    ];
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify({ ...run, events }) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await getRun(client, UUID, { includeEvents: true });
+    expect(parsed.events).toHaveLength(2);
+    const params = new URL(transport.calls[0]?.url ?? "");
+    expect(params.searchParams.get("include_events")).toBe("1");
+  });
+
+  it("creates a run and posts the input as JSON", async () => {
+    const transport = mutating({ ...run, status: "queued" }, 201);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const input = { workspace: UUID2, prompt: "Probe prompt", required_capabilities: ["shell"] };
+    const created = await createRun(client, input);
+    expect(created.status).toBe("queued");
+    const createCall = transport.calls.find((call) => call.url.endsWith("/api/runners/runs/"));
+    expect(createCall?.init.body).toBe(JSON.stringify(input));
+  });
+
+  it("dispatches Run AI and parses the fresh run", async () => {
+    const transport = mutating(run, 201);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const dispatched = await runAi(client, { workspace: UUID2, work_item: UUID });
+    expect("queued" in dispatched ? dispatched.queued : dispatched.id).toBe(UUID);
+    const dispatchCall = transport.calls.find((call) => call.url.endsWith("/api/runners/runs/"));
+    expect(dispatchCall?.init.body).toBe(JSON.stringify({ workspace: UUID2, work_item: UUID, triggered_by: "run_ai" }));
+  });
+
+  it("parses the queued dispatch shape", async () => {
+    const queued = { queued: true, reason: "active_run", detail: "A run is active." };
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: mutating(queued, 202),
+    });
+    const dispatched = await runAi(client, { workspace: UUID2, work_item: UUID });
+    expect(dispatched).toEqual(queued);
+  });
+
+  it("dispatches Comment & Run with its trigger flag", async () => {
+    const queued = { queued: true, reason: "active_run", detail: "A run is active." };
+    const transport = mutating(queued, 202);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const dispatched = await commentAndRun(client, { workspace: UUID2, work_item: UUID });
+    expect(dispatched).toEqual(queued);
+    const dispatchCall = transport.calls.find((call) => call.url.endsWith("/api/runners/runs/"));
+    expect(dispatchCall?.init.body).toBe(
+      JSON.stringify({ workspace: UUID2, work_item: UUID, triggered_by: "comment_and_run" })
+    );
+  });
+
+  it("cancels with a reason", async () => {
+    const transport = mutating({ ...run, status: "cancel_requested", cancel_reason: "probe stop" });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const cancelled = await cancelRun(client, UUID, "probe stop");
+    expect(cancelled.status).toBe("cancel_requested");
+    const cancelCall = transport.calls.find((call) => call.url.endsWith(`/api/runners/runs/${UUID}/cancel/`));
+    expect(cancelCall?.init.body).toBe(JSON.stringify({ reason: "probe stop" }));
+  });
+
+  it("cancels without a reason", async () => {
+    const transport = mutating({ ...run, status: "cancelled" });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await cancelRun(client, UUID);
+    const cancelCall = transport.calls.find((call) => call.url.endsWith(`/api/runners/runs/${UUID}/cancel/`));
+    expect(cancelCall?.init.body).toBe(JSON.stringify({ reason: "" }));
+  });
+
+  it("parses a re-tick grant with its budget", async () => {
+    const grant = {
+      granted: true,
+      reason: "pool_regranted",
+      run_id: UUID,
+      used: 3,
+      tick_count: 3,
+      max_ticks: 15,
+      enabled: true,
+      pending_entry: false,
+      next_run_at: null,
+    };
+    const transport = mutating(grant);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await reTickIssue(client, { work_item: UUID2 });
+    expect(parsed.max_ticks).toBe(15);
+    const tickCall = transport.calls.find((call) => call.url.endsWith("/api/runners/re-tick/"));
+    expect(tickCall?.init.body).toBe(JSON.stringify({ work_item: UUID2 }));
+  });
+
+  it("parses a re-tick refusal", async () => {
+    const refusal = { granted: false, reason: "pool_not_spent", run_id: null };
+    const client = createClient({ baseUrl: "https://api.test", transport: mutating(refusal) });
+    const parsed = await reTickIssue(client, { work_item: UUID2 });
+    expect(parsed.granted).toBe(false);
+    expect(parsed.used).toBeUndefined();
+  });
+
+  it("rejects runs with an unknown status", async () => {
+    const page = {
+      results: [{ ...run, status: "napping" }],
+      count: 1,
+      total_count: 1,
+      total_pages: 1,
+      page: 1,
+      per_page: 30,
+    };
+    const client = createClient({ baseUrl: "https://api.test", transport: json(page) });
+    const error = await listRuns(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
+describe("approvals contracts", () => {
+  const approval = {
+    id: UUID,
+    agent_run: UUID2,
+    kind: "command_execution",
+    payload: { command: "probe" },
+    reason: "Probe approval",
+    status: "pending",
+    decision_source: "",
+    requested_at: "2026-10-17T04:00:00.000Z",
+    decided_at: null,
+    expires_at: null,
+  };
+
+  it("lists pending approvals with no scope", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify([approval]) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listApprovals(client);
+    expect(parsed).toEqual([approval]);
+    expect(new URL(transport.calls[0]?.url ?? "").search).toBe("");
+  });
+
+  it("lists approvals scoped to one project", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify([approval]) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await listApprovals(client, UUID2);
+    const params = new URL(transport.calls[0]?.url ?? "");
+    expect(params.searchParams.get("project")).toBe(UUID2);
+  });
+
+  it("decides and parses the acted row", async () => {
+    const transport = mutating({
+      ...approval,
+      status: "accepted",
+      decision_source: "web",
+      decided_at: "2026-10-17T04:00:00.000Z",
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const decided = await decideApproval(client, UUID, "accept");
+    expect(decided.status).toBe("accepted");
+    const decideCall = transport.calls.find((call) => call.url.endsWith(`/approvals/${UUID}/decide/`));
+    expect(decideCall?.init.method).toBe("POST");
+    expect(decideCall?.init.body).toBe(JSON.stringify({ decision: "accept" }));
+  });
+
+  it("sends every decision value", async () => {
+    for (const decision of ["decline", "accept_for_session"] as const) {
+      const transport = mutating({ ...approval, status: "declined" });
+      const client = createClient({ baseUrl: "https://api.test", transport });
+      await decideApproval(client, UUID, decision);
+      const decideCall = transport.calls.find((call) => call.url.endsWith(`/approvals/${UUID}/decide/`));
+      expect(decideCall?.init.body).toBe(JSON.stringify({ decision }));
+    }
+  });
+
+  it("rejects approval rows with an unknown kind", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...approval, kind: "telepathy" }]) });
+    const error = await listApprovals(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
   });
 });
