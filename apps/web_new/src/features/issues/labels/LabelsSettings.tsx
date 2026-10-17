@@ -8,7 +8,7 @@
 // insertion line or a nesting ring.
 
 import type { Label } from "@pidash/api-client";
-import { Button, EmptyState, IconButton, Menu, Skeleton, type MenuEntry } from "@pidash/kit";
+import { Button, EmptyState, IconButton, Menu, Skeleton, cn, type MenuEntry } from "@pidash/kit";
 import { ChevronDown, ChevronRight, Ellipsis, GripVertical, Tags, Trash2 } from "lucide-react";
 import * as React from "react";
 
@@ -197,12 +197,12 @@ function LabelRowChrome({
         data-label-id={row.id}
         data-nestable={indented ? "false" : "true"}
         data-drop-into={marker === "into" ? "true" : undefined}
-        className={
-          "group/row relative flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-2)" +
-          (indented ? "ml-(--space-8)" : "") +
-          (dragging ? "opacity-60" : "") +
-          (marker === "into" ? "ring-2 ring-(--accent)" : "")
-        }
+        className={cn(
+          "group/row relative flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-2)",
+          indented && "ml-(--space-8)",
+          dragging && "opacity-60",
+          marker === "into" && "ring-2 ring-(--accent)"
+        )}
       >
         {canEdit ? (
           <button
@@ -513,11 +513,11 @@ function LabelGroupCard({
           data-label-id={label.id}
           data-nestable="true"
           data-drop-into={marker === "into" ? "true" : undefined}
-          className={
-            "group/row relative flex w-full items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--subtle) px-(--space-2) py-(--space-2)" +
-            (dragging ? "opacity-60" : "") +
-            (marker === "into" ? "ring-2 ring-(--accent)" : "")
-          }
+          className={cn(
+            "group/row relative flex w-full items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--subtle) px-(--space-2) py-(--space-2)",
+            dragging && "opacity-60",
+            marker === "into" && "ring-2 ring-(--accent)"
+          )}
         >
           {canEdit ? (
             <button

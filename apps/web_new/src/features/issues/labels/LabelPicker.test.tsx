@@ -143,8 +143,8 @@ describe("LabelPicker options", () => {
     const options = screen.getAllByTestId("label-picker-option");
     expect(options[0]).toHaveAttribute("aria-pressed", "false");
     expect(options[1]).toHaveAttribute("aria-pressed", "true");
-    expect(options[1]?.className).toContain("pl-(--space-8)");
-    expect(options[0]?.className).not.toContain("pl-(--space-8)");
+    expect(options[1]).toHaveClass("pl-(--space-8)");
+    expect(options[0]).not.toHaveClass("pl-(--space-8)");
   });
 
   it("toggles selection without closing", async () => {

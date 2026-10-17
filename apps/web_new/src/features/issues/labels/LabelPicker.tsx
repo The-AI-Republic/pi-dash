@@ -9,7 +9,7 @@
 // empty-result note. Selection is controlled: callers PATCH label_ids.
 
 import type { Label } from "@pidash/api-client";
-import { Button, Input, Popover } from "@pidash/kit";
+import { Button, Input, Popover, cn } from "@pidash/kit";
 import { Check, ChevronDown } from "lucide-react";
 import * as React from "react";
 
@@ -199,10 +199,10 @@ export function LabelPicker({
                     data-testid="label-picker-option"
                     data-label-id={option.label.id}
                     onClick={() => toggle(option.label.id)}
-                    className={
-                      "flex w-full cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-2) text-left hover:bg-(--subtle)" +
-                      (option.depth === 1 ? "pl-(--space-8)" : "")
-                    }
+                    className={cn(
+                      "flex w-full cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-2) text-left hover:bg-(--subtle)",
+                      option.depth === 1 && "pl-(--space-8)"
+                    )}
                   >
                     <span
                       aria-hidden="true"

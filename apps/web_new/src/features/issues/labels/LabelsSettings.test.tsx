@@ -278,6 +278,8 @@ describe("LabelsSettings groups", () => {
     const user = userEvent.setup();
     setup({ labels: grouped });
     await waitFor(() => expect(visibleNames()).toEqual(["Alpha", "Kid", "Beta"]));
+    expect(rowByName("Kid").querySelector("[data-label-slot]")).toHaveClass("ml-(--space-8)");
+    expect(rowByName("Beta").querySelector("[data-label-slot]")).not.toHaveClass("ml-(--space-8)");
     const toggle = screen.getByRole("button", { name: "Collapse Alpha" });
     await user.click(toggle);
     expect(visibleNames()).toEqual(["Alpha", "Beta"]);
@@ -526,6 +528,7 @@ describe("LabelsSettings drag", () => {
     fireEvent.pointerDown(gripByName("Gamma"));
     pointerMove(200, 20);
     expect(ringed("Alpha")).toBe(true);
+    expect(rowByName("Alpha").querySelector('[data-drop-into="true"]')).toHaveClass("ring-2", "ring-(--accent)");
     expect(screen.queryByTestId("label-drop-line")).not.toBeInTheDocument();
     pointerUp();
     expect(await patchBody(calls)).toEqual({ parent: AID });
