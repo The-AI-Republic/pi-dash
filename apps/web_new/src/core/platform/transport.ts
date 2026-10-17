@@ -16,8 +16,13 @@ function headerProxy(headers: Headers): { get(name: string): string | null } {
 export function toApiTransport(platform: Platform): Transport {
   return async (url, init) => {
     const request: RequestInit = { method: init.method, headers: init.headers };
-    if (init.body !== undefined) {
-      request.body = init.body;
+    // Multipart wins when set; fetch derives the boundary Content-Type
+    // itself. Note for the desktop bridge: a transport that re-encodes
+    // the body instead of handing it to fetch must also forward that
+    // derived Content-Type, or the server sees bytes it cannot parse.
+    const outgoing = init.formData ?? init.body;
+    if (outgoing !== undefined) {
+      request.body = outgoing;
     }
     if (init.signal !== undefined) {
       request.signal = init.signal;

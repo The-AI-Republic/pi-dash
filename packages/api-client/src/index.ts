@@ -365,6 +365,76 @@ export {
   testLlmConfig,
   updateConnectionModel,
 } from "./contracts/assistant.js";
+export { AssistantApiError, assistantErrorFrom } from "./contracts/assistant-errors.js";
+export type { AssistantFailure } from "./contracts/assistant-errors.js";
+export {
+  AssistantGeneratedTitle,
+  AssistantMessage,
+  AssistantMessageLink,
+  AssistantMessageList,
+  AssistantMessageRole,
+  AssistantMessageStatus,
+  AssistantSendResponse,
+  AssistantTurnStatus,
+  cancelAssistantTurn,
+  deleteAssistantThread,
+  generateAssistantTitle,
+  listAssistantMessages,
+  sendAssistantMessage,
+  updateAssistantThread,
+} from "./contracts/assistant-messages.js";
+export type { AssistantMessageQuery, AssistantThreadPatch } from "./contracts/assistant-messages.js";
+export {
+  AssistantEvent,
+  AssistantSkippedServer,
+  AssistantTurnUsage,
+  KnownAssistantEvent,
+  UnknownAssistantEvent,
+  assistantEventsUrl,
+  parseAssistantEventFrames,
+} from "./contracts/assistant-events.js";
+export { deleteLlmConfig, putLlmConfig } from "./contracts/assistant-config.js";
+export type { LlmConfigInput } from "./contracts/assistant-config.js";
+export {
+  DictationDisabledPayload,
+  SttConfig,
+  SttConfigTestResult,
+  TranscribeResponse,
+  deleteSttConfig,
+  dictationDisabledFrom,
+  getSttConfig,
+  putSttConfig,
+  testSttConfig,
+  transcribeAudio,
+} from "./contracts/assistant-voice.js";
+export type { SttConfigInput, TranscribeOptions } from "./contracts/assistant-voice.js";
+export {
+  McpServer,
+  McpServerList,
+  createMcpServer,
+  deleteMcpServer,
+  listMcpServers,
+  patchMcpServer,
+} from "./contracts/assistant-registry.js";
+export type { McpServerInput, McpServerPatch } from "./contracts/assistant-registry.js";
+export {
+  AgentProfile,
+  AgentToken,
+  desktopSessionRequiredFrom,
+  getAgentProfile,
+  postAgentToken,
+} from "./contracts/assistant-desktop.js";
+export {
+  EditorTaskProjectDetail,
+  EditorTaskResponse,
+  EditorTaskWorkspaceDetail,
+  ProjectEditorTaskResponse,
+  RephraseGrammarResponse,
+  rephraseGrammar,
+  runProjectEditorTask,
+  runWorkspaceEditorTask,
+} from "./contracts/assistant-editor.js";
+export type { EditorTaskInput, RephraseGrammarInput } from "./contracts/assistant-editor.js";
 export {
   MarkAllReadResponse,
   NotificationItem,

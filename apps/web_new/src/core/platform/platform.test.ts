@@ -129,4 +129,32 @@ describe("toApiTransport", () => {
     expect(response.headers.get("content-type")).toContain("application/json");
     expect(await response.text()).toBe(JSON.stringify({ hello: 1 }));
   });
+
+  it("maps the multipart channel onto the request body", async () => {
+    const seen: { body?: unknown }[] = [];
+    const fake: Platform = {
+      ...webPlatform,
+      fetch: (async (_input: unknown, init?: { body?: unknown }) => {
+        seen.push({ body: init?.body });
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch,
+    };
+    const transport = toApiTransport(fake);
+    const form = new FormData();
+    form.append("file", new Blob(["audio"]), "dictation.webm");
+    await transport("https://example.test/api/upload/", {
+      method: "POST",
+      headers: {},
+      formData: form,
+      credentials: "include",
+    });
+    expect(seen[0]?.body).toBe(form);
+    await transport("https://example.test/api/x/", {
+      method: "POST",
+      headers: {},
+      body: '{"a":1}',
+      credentials: "include",
+    });
+    expect(seen[1]?.body).toBe('{"a":1}');
+  });
 });
