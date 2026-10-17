@@ -20,5 +20,15 @@
 //! the turn message model lives here, pinned against the same
 //! pydantic-ai sources and the
 //! `fixtures/assistant/turn-runtime/` captures.
+//!
+//! Local tools layer (PIDASHCONV-1113): the 17 local tool schemas +
+//! executors (`assistant/tools/*.py` port). Each layer merges as its own
+//! tested module; PIDASHCONV-863 wires them into `worker()` (agent loop,
+//! live seam, parity flip, replay proof). Until then this tree is
+//! exercised by its unit tests only.
 
 pub mod history;
+pub mod tool_args;
+pub mod tool_schemas;
+pub mod tools_local;
+pub mod tools_local_store;

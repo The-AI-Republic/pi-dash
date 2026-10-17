@@ -30,6 +30,9 @@ mod runner_seams;
 /// Live assistant turn runtime (PIDASHCONV-1110): the provider-backed
 /// half of `assistant.run_turn` behind the `TurnSeam` boundary.
 /// Unwired by design: PIDASHCONV-863 wires this module into `worker()`.
+// Turn runtime layers (PIDASHCONV-1110…1113): library modules with unit
+// tests. The allow expires with the 863 wiring; until then nothing
+// outside `#[cfg(test)]` calls in.
 #[allow(dead_code)]
 mod turn;
 
