@@ -41,6 +41,7 @@ import { Route as SettingsProfileNotificationsRouteImport } from './routes/setti
 import { Route as WsGatedAiDevMachinesIndexRouteImport } from './routes/$ws/_gated/ai-dev-machines/index'
 import { Route as WsGatedAnalyticsIndexRouteImport } from './routes/$ws/_gated/analytics/index'
 import { Route as WsGatedBrowseIssueKeyRouteImport } from './routes/$ws/_gated/browse/$issueKey'
+import { Route as WsGatedNotificationsIndexRouteImport } from './routes/$ws/_gated/notifications/index'
 import { Route as WsGatedProjectsIndexRouteImport } from './routes/$ws/_gated/projects/index'
 import { Route as WsGatedProjectsProjectIdRouteRouteImport } from './routes/$ws/_gated/projects/$projectId/route'
 import { Route as WsGatedPromptsIndexRouteImport } from './routes/$ws/_gated/prompts/index'
@@ -227,6 +228,12 @@ const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
   path: '/browse/$issueKey',
   getParentRoute: () => WsGatedRouteRoute,
 } as any)
+const WsGatedNotificationsIndexRoute =
+  WsGatedNotificationsIndexRouteImport.update({
+    id: '/notifications/',
+    path: '/notifications/',
+    getParentRoute: () => WsGatedRouteRoute,
+  } as any)
 const WsGatedProjectsIndexRoute = WsGatedProjectsIndexRouteImport.update({
   id: '/projects/',
   path: '/projects/',
@@ -400,6 +407,7 @@ export interface FileRoutesByFullPath {
   '/god-mode/workspace/create': typeof GodModeDashboardWorkspaceCreateRoute
   '/$ws/ai-dev-machines/': typeof WsGatedAiDevMachinesIndexRoute
   '/$ws/analytics/': typeof WsGatedAnalyticsIndexRoute
+  '/$ws/notifications/': typeof WsGatedNotificationsIndexRoute
   '/$ws/projects/': typeof WsGatedProjectsIndexRoute
   '/$ws/prompts/': typeof WsGatedPromptsIndexRoute
   '/$ws/runners/': typeof WsGatedRunnersIndexRoute
@@ -450,6 +458,7 @@ export interface FileRoutesByTo {
   '/god-mode/workspace/create': typeof GodModeDashboardWorkspaceCreateRoute
   '/$ws/ai-dev-machines': typeof WsGatedAiDevMachinesIndexRoute
   '/$ws/analytics': typeof WsGatedAnalyticsIndexRoute
+  '/$ws/notifications': typeof WsGatedNotificationsIndexRoute
   '/$ws/projects': typeof WsGatedProjectsIndexRoute
   '/$ws/prompts': typeof WsGatedPromptsIndexRoute
   '/$ws/runners': typeof WsGatedRunnersIndexRoute
@@ -508,6 +517,7 @@ export interface FileRoutesById {
   '/god-mode/_dashboard/workspace/create': typeof GodModeDashboardWorkspaceCreateRoute
   '/$ws/_gated/ai-dev-machines/': typeof WsGatedAiDevMachinesIndexRoute
   '/$ws/_gated/analytics/': typeof WsGatedAnalyticsIndexRoute
+  '/$ws/_gated/notifications/': typeof WsGatedNotificationsIndexRoute
   '/$ws/_gated/projects/': typeof WsGatedProjectsIndexRoute
   '/$ws/_gated/prompts/': typeof WsGatedPromptsIndexRoute
   '/$ws/_gated/runners/': typeof WsGatedRunnersIndexRoute
@@ -565,6 +575,7 @@ export interface FileRouteTypes {
     | '/god-mode/workspace/create'
     | '/$ws/ai-dev-machines/'
     | '/$ws/analytics/'
+    | '/$ws/notifications/'
     | '/$ws/projects/'
     | '/$ws/prompts/'
     | '/$ws/runners/'
@@ -615,6 +626,7 @@ export interface FileRouteTypes {
     | '/god-mode/workspace/create'
     | '/$ws/ai-dev-machines'
     | '/$ws/analytics'
+    | '/$ws/notifications'
     | '/$ws/projects'
     | '/$ws/prompts'
     | '/$ws/runners'
@@ -672,6 +684,7 @@ export interface FileRouteTypes {
     | '/god-mode/_dashboard/workspace/create'
     | '/$ws/_gated/ai-dev-machines/'
     | '/$ws/_gated/analytics/'
+    | '/$ws/_gated/notifications/'
     | '/$ws/_gated/projects/'
     | '/$ws/_gated/prompts/'
     | '/$ws/_gated/runners/'
@@ -937,6 +950,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedBrowseIssueKeyRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
+    '/$ws/_gated/notifications/': {
+      id: '/$ws/_gated/notifications/'
+      path: '/notifications'
+      fullPath: '/$ws/notifications/'
+      preLoaderRoute: typeof WsGatedNotificationsIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
     '/$ws/_gated/projects/': {
       id: '/$ws/_gated/projects/'
       path: '/projects'
@@ -1142,6 +1162,7 @@ interface WsGatedRouteRouteChildren {
   WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute
   WsGatedAiDevMachinesIndexRoute: typeof WsGatedAiDevMachinesIndexRoute
   WsGatedAnalyticsIndexRoute: typeof WsGatedAnalyticsIndexRoute
+  WsGatedNotificationsIndexRoute: typeof WsGatedNotificationsIndexRoute
   WsGatedProjectsIndexRoute: typeof WsGatedProjectsIndexRoute
   WsGatedPromptsIndexRoute: typeof WsGatedPromptsIndexRoute
   WsGatedRunnersIndexRoute: typeof WsGatedRunnersIndexRoute
@@ -1156,6 +1177,7 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedBrowseIssueKeyRoute: WsGatedBrowseIssueKeyRoute,
   WsGatedAiDevMachinesIndexRoute: WsGatedAiDevMachinesIndexRoute,
   WsGatedAnalyticsIndexRoute: WsGatedAnalyticsIndexRoute,
+  WsGatedNotificationsIndexRoute: WsGatedNotificationsIndexRoute,
   WsGatedProjectsIndexRoute: WsGatedProjectsIndexRoute,
   WsGatedPromptsIndexRoute: WsGatedPromptsIndexRoute,
   WsGatedRunnersIndexRoute: WsGatedRunnersIndexRoute,
