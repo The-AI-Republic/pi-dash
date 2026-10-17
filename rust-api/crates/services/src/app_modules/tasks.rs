@@ -8,7 +8,7 @@
 //! * `ModuleViewSet.create`, `model_activity.delay(...)` (`base.py:339-347`):
 //!   `model_id=str(module id)`, `current_instance=None`.
 //! * `ModuleViewSet.retrieve`, `recent_visited_task.delay(...)`
-//!   (`base.py:641-647`): visit upsert, deferred (see NO-OP note below).
+//!   (`base.py:641-647`): visit upsert, deferred (see deferral note below).
 //! * `ModuleViewSet.partial_update`, `model_activity.delay(...)`
 //!   (`base.py:708-716`): `current_instance` is the
 //!   `json.dumps(ModuleSerializer(current_module).data)` snapshot taken
@@ -519,7 +519,7 @@ pub fn link_destroy_instance(module_name: &str) -> String {
 /// Kwargs in call order: `slug`, `entity_name`, `entity_identifier`,
 /// `user_id`, `project_id`. `entity_name` is always `"module"`;
 /// `entity_identifier` is the raw `pk` kwarg (string form on the wire).
-/// Deferred publish only (NO-OP note above): handlers keep the call site
+/// Deferred publish only (deferral note above): handlers keep the call site
 /// but perform no inline write.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecentVisitedEmit {
