@@ -39,16 +39,16 @@
 //!   map, envelope, HMAC input rendering, log-document builder,
 //!   retry/deactivation choice, email builders).
 //!
-//! Ownership (webhook path, send + fan-out): these tasks stay
-//! Python-owned. No local handler is registered here — registering one
-//! would steal live traffic from the Python workers while the
-//! webhook-row fetch, HTTP send, mongo sink and SMTP send still live
-//! there. The domain gate flips ownership after the oracle replay
-//! passes on both backends. Until then
+//! Ownership (webhook path, send + fan-out): the Rust worker owns the
+//! four `webhook_task` jobs since PIDASHCONV-1105 (stage 8). The send
+//! handler POSTs through [`webhook_http`] (raw requests-faithful bytes)
+//! and logs to mongo-else-postgres; the fan-out renders
+//! [`model_data`] live and enqueues sends into the Rust queue; the
+//! deactivation email goes through the shared mail send. Registration
+//! lives in [`oss_worker`][crate::oss_worker] (`register_oss_handlers`);
 //! [`webhook_send::is_webhook_task`] and
-//! [`webhook_fanout::is_webhook_fanout_task`] are the routing
-//! predicates the worker consults, and every name routes to
-//! `PythonOwned`.
+//! [`webhook_fanout::is_webhook_fanout_task`] remain the routing
+//! predicates the pre-registration layers consult.
 
 pub mod activity_dispatch;
 pub mod automation;
@@ -57,6 +57,7 @@ pub mod model_data;
 pub mod sinks;
 pub mod visit_page;
 pub mod webhook_fanout;
+pub mod webhook_http;
 pub mod webhook_send;
 
 pub use activity_dispatch::{
