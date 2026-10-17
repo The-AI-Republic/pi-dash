@@ -81,6 +81,7 @@ use pidash_types::license::serializers_core::{instance_to_representation, Instan
 use super::handlers_base::{json_response, resolve_request_tz, HandlerError, CACHE_CONTROL_VALUE};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
 
 /// Register the owned D-01 instance routes. Unowned methods fall through
 /// to Django through the edge fallback (never a Rust 405).
@@ -943,7 +944,8 @@ async fn fetch_instance_by_id(
 /// content-type base (before `;`, trimmed, lowercased like Django's
 /// `parse_header_parameters`) must match the JSON parser — `*/*`,
 /// `application/*`, and `*/json` match too — else 415; parse errors →
-/// 400 `detail`.
+/// 400 `detail` with CPython's exact text through the shared `json_cpython`
+/// layer (PIDASHCONV-1128); past the depth cap is Django's JSON 500.
 fn patch_body(headers: &HeaderMap, body: &[u8]) -> Result<serde_json::Value, HandlerError> {
     if body.is_empty() {
         return Ok(serde_json::Value::Object(serde_json::Map::new()));
@@ -970,11 +972,14 @@ fn patch_body(headers: &HeaderMap, body: &[u8]) -> Result<serde_json::Value, Han
             .to_string(),
         ));
     }
-    serde_json::from_slice(body).map_err(|e| {
-        HandlerError::BadDetail(
-            serde_json::json!({"detail": format!("JSON parse error - {e}")}).to_string(),
-        )
-    })
+    match json_cpython::parse_request_bytes(body) {
+        Ok(jval) => Ok(json_cpython::to_serde_publish(&jval)),
+        Err(JsonFail::Message(detail)) => Err(HandlerError::BadDetail(
+            serde_json::json!({"detail": format!("{}{detail}", json_cpython::JSON_PARSE_PREFIX)})
+                .to_string(),
+        )),
+        Err(JsonFail::Recursion) => Err(HandlerError::ServerError),
+    }
 }
 
 /// `InstanceAdminPermission.has_permission` (`permissions/instance.py`):
