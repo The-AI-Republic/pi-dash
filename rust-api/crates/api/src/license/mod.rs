@@ -116,6 +116,8 @@ pub enum Denial {
     NotFound,
     /// 400, `{"detail": ...}` (`ParseError` and friends).
     BadDetail(String),
+    /// 415, unsupported media type (DRF `UnsupportedMediaType` — PIDASHCONV-1102).
+    UnsupportedMediaType(String),
     /// 400, `{"error": ...}` (view-inline).
     BadError(String),
     /// 409, duplicate slug (`workspace.py:105-110`).
@@ -135,6 +137,10 @@ impl Denial {
             Denial::NotFound => (StatusCode::NOT_FOUND, NOT_FOUND_BODY.to_owned()),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::BadError(message) => (
