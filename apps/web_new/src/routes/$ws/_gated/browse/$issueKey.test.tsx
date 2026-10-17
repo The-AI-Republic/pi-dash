@@ -8,6 +8,7 @@ import {
   createRootRouteWithContext,
   createRoute,
   createRouter,
+  isRedirect,
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
@@ -55,6 +56,27 @@ function projectRow() {
     updated_at: "2024-02-03T04:05:06Z",
     created_by: null,
     updated_by: null,
+  };
+}
+
+function liteRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: ISSUE_ID,
+    sequence_id: 1,
+    name: "Fix login",
+    description_html: "<p></p>",
+    sort_order: 1,
+    project_id: PROJECT_ID,
+    created_at: "2024-01-02T03:04:05Z",
+    updated_at: "2024-02-03T04:05:06Z",
+    created_by: null,
+    updated_by: null,
+    is_draft: false,
+    is_epic: false,
+    is_intake: false,
+    is_synced: false,
+    archived_at: null,
+    ...overrides,
   };
 }
 
@@ -190,11 +212,16 @@ function userPropertiesPayload() {
   };
 }
 
-function renderBrowse(
-  known: boolean,
-  isEpic?: boolean,
-  extras: { details?: "member" | "archived"; me?: boolean; archivedIssue?: boolean; estimate?: string | null } = {}
-) {
+interface BrowseExtras {
+  details?: "member" | "archived";
+  me?: boolean;
+  archivedIssue?: boolean;
+  estimate?: string | null;
+  intake?: boolean;
+  liteStatus?: number;
+}
+
+function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {}) {
   const calls: string[] = [];
   const apiClient = createAppClient("https://api.test", async (url: string, init: { method: string }) => {
     calls.push(`${init.method} ${url}`);
@@ -206,24 +233,16 @@ function renderBrowse(
     } else if (init.method !== "GET" && url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 204;
       body = "";
-    } else if (url.includes("/search/")) {
-      status = 200;
-      body = JSON.stringify({
-        results: {
-          issue: known
-            ? [
-                {
-                  name: "Fix login",
-                  id: ISSUE_ID,
-                  sequence_id: 1,
-                  project__identifier: "WEB",
-                  project_id: PROJECT_ID,
-                  workspace__slug: "acme",
-                },
-              ]
-            : [],
-        },
-      });
+    } else if (url.includes("/work-items/WEB-1/")) {
+      status = extras.liteStatus ?? (known ? 200 : 404);
+      if (status === 200) {
+        const lite = liteRow({
+          ...(isEpic === undefined ? {} : { is_epic: isEpic }),
+          ...(extras.intake === true ? { is_intake: true } : {}),
+          ...(extras.archivedIssue === true ? { archived_at: "2024-03-04" } : {}),
+        });
+        body = JSON.stringify(lite);
+      }
     } else if (url.includes("/project-roles/")) {
       status = 200;
       body = JSON.stringify({ [PROJECT_ID]: 20 });
@@ -263,6 +282,22 @@ function renderBrowse(
     } else if (url.includes("/states/")) {
       status = 200;
       body = JSON.stringify([STATE_ROW]);
+    } else if (url.includes("description-versions")) {
+      status = 200;
+      body = JSON.stringify({
+        prev_cursor: "",
+        cursor: "",
+        next_cursor: null,
+        prev_page_results: false,
+        next_page_results: false,
+        page_count: 0,
+        total_results: 0,
+        total_pages: 0,
+        results: [],
+      });
+    } else if (url.endsWith("/members/")) {
+      status = 200;
+      body = JSON.stringify([]);
     }
     return { status, url, headers: { get: () => null }, text: async () => body };
   });
@@ -313,13 +348,39 @@ describe("browse route", () => {
     await screen.findByTestId("project-tab-strip");
     expect(screen.getByTestId("project-switcher-trigger")).toHaveTextContent("Web");
     expect(screen.getByRole("link", { name: "Work Items" })).toHaveAttribute("aria-current", "page");
+    // No project details resolve, so the title reads as a heading.
     expect(screen.getByRole("heading", { name: "Fix login" })).toBeInTheDocument();
+    expect(document.title).toBe("WEB-1 Fix login");
   });
 
-  it("renders unknown keys without the strip", async () => {
+  it("edits the title inline once membership resolves", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    const box = await screen.findByRole("textbox", { name: "Title" });
+    expect(box).toHaveValue("Fix login");
+  });
+
+  it("shows the history line read-only for archived issues", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, archivedIssue: true });
+    // Membership resolves (the line renders), yet the title stays a heading.
+    await screen.findByRole("button", { name: /Edited by/ });
+    expect(screen.getByRole("heading", { name: "Fix login" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+  });
+
+  it("renders unknown keys without the strip, linking home", async () => {
     renderBrowse(false);
     await screen.findByRole("heading", { name: "No work item matches this address" });
     expect(screen.queryByTestId("project-tab-strip")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Back to the workspace home" })).toHaveAttribute("href", "/acme");
+    // Missing keys claim no detail title; the shell fallback wins.
+    expect(document.title).not.toContain("WEB-1");
+  });
+
+  it("leaves intake rows for the project intake tab", async () => {
+    const { router } = renderBrowse(true, undefined, { intake: true });
+    expect(await screen.findByText("navigated away")).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe(`/acme/projects/${PROJECT_ID}/intake`);
+    expect(router.state.location.search).toMatchObject({ currentTab: "open", inboxIssueId: ISSUE_ID });
   });
 
   it("highlights nothing for an epic while no epic tab renders", async () => {
@@ -429,5 +490,92 @@ describe("browse route", () => {
     expect(router.state.location.pathname).toBe(`/acme/projects/${PROJECT_ID}/issues`);
     clearCommands();
     clearPalettePages();
+  });
+});
+
+describe("browse loader", () => {
+  function loaderClient(stub: { liteStatus?: number; intake?: boolean }) {
+    const calls: string[] = [];
+    const apiClient = createAppClient("https://api.test", async (url: string, init: { method: string }) => {
+      calls.push(`${init.method} ${url}`);
+      let status = 404;
+      let body = "{}";
+      if (url.includes("/work-items/WEB-1/")) {
+        status = stub.liteStatus ?? 200;
+        if (status === 200) {
+          body = JSON.stringify(liteRow(stub.intake === true ? { is_intake: true } : {}));
+        }
+      } else if (url.includes(`/issues/${ISSUE_ID}/`)) {
+        status = 200;
+        body = JSON.stringify(issueRow());
+      }
+      return { status, url, headers: { get: () => null }, text: async () => body };
+    });
+    return { apiClient, queryClient: new QueryClient({ defaultOptions: { queries: { retry: false } } }), calls };
+  }
+
+  type LoaderInput = { context: { queryClient: QueryClient; apiClient: unknown }; params: unknown };
+
+  function getLoader(): (input: LoaderInput) => Promise<unknown> {
+    const loader = Route.options.loader as unknown as (input: LoaderInput) => Promise<unknown>;
+    if (typeof loader !== "function") throw new Error("missing loader");
+    return loader;
+  }
+
+  async function runLoader(stub: { liteStatus?: number; intake?: boolean }): Promise<unknown> {
+    const { apiClient, queryClient } = loaderClient(stub);
+    return getLoader()({ context: { queryClient, apiClient }, params: { ws: "acme", issueKey: "WEB-1" } });
+  }
+
+  it("prefetches the detail behind a resolved key", async () => {
+    const { apiClient, queryClient, calls } = loaderClient({});
+    await getLoader()({ context: { queryClient, apiClient }, params: { ws: "acme", issueKey: "WEB-1" } });
+    expect(calls.some((call) => call.includes("/work-items/WEB-1/"))).toBe(true);
+    expect(calls.some((call) => call.includes(`/issues/${ISSUE_ID}/`))).toBe(true);
+  });
+
+  it("redirects intake rows without hydrating", async () => {
+    const thrown = await runLoader({ intake: true }).then(
+      () => null,
+      (error: unknown) => error
+    );
+    expect(thrown).not.toBeNull();
+    expect(isRedirect(thrown)).toBe(true);
+    const options = (thrown as unknown as { options?: { to?: unknown; params?: unknown; search?: unknown } }).options;
+    expect(options?.to).toBe("/$ws/projects/$projectId/intake");
+    expect(options?.params).toEqual({ ws: "acme", projectId: PROJECT_ID });
+    expect(options?.search).toEqual({ currentTab: "open", inboxIssueId: ISSUE_ID });
+  });
+
+  it("hydrates nothing for unknown keys", async () => {
+    const { apiClient, queryClient, calls } = loaderClient({ liteStatus: 404 });
+    await getLoader()({ context: { queryClient, apiClient }, params: { ws: "acme", issueKey: "WEB-1" } });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("rejects when the lite fetch fails", async () => {
+    await expect(runLoader({ liteStatus: 500 })).rejects.toThrow();
+  });
+});
+
+describe("browse chrome", () => {
+  it("shows the skeleton while pending and retries from errors", async () => {
+    const user = userEvent.setup();
+    const Pending = Route.options.pendingComponent as unknown as React.ComponentType;
+    const { unmount } = render(<Pending />);
+    expect(screen.getByRole("status", { name: "Loading work item" })).toBeInTheDocument();
+    unmount();
+    const ErrorView = Route.options.errorComponent as unknown as React.ComponentType<{
+      error: unknown;
+      reset: () => void;
+    }>;
+    let resets = 0;
+    const { rerender } = render(<ErrorView error={new Error("Downstream is down")} reset={() => (resets += 1)} />);
+    expect(screen.getByRole("heading", { name: "Could not load this work item" })).toBeInTheDocument();
+    expect(screen.getByText("Downstream is down")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(resets).toBe(1);
+    rerender(<ErrorView error="string failure" reset={() => {}} />);
+    expect(screen.getByText("Something went wrong.")).toBeInTheDocument();
   });
 });

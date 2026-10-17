@@ -73,10 +73,32 @@ export { QuickCreateButton } from "./components/QuickCreateButton.js";
 export type { QuickCreateButtonProps } from "./components/QuickCreateButton.js";
 export { WorkItemCreateDialog } from "./components/WorkItemCreateDialog.js";
 export type { WorkItemCreateDialogProps, WorkItemCreateProject } from "./components/WorkItemCreateDialog.js";
-export { browseIssueQueryOptions, loadBrowseIssue, matchBrowseRow } from "./api/browse.js";
-export type { BrowseResolution, BrowseSearchRow } from "./api/browse.js";
-export { BrowseDetail, BrowseUnknownKey } from "./components/BrowseDetail.js";
-export type { BrowseDetailProps } from "./components/BrowseDetail.js";
+export { liteIssueQueryOptions, loadLiteIssue, parseBrowseKey, resolveShortLink } from "./api/browse.js";
+export type { LiteResolution } from "./api/browse.js";
+export {
+  descriptionVersionQueryOptions,
+  descriptionVersionsQueryOptions,
+  issueDetailQueryOptions,
+} from "./api/queries.js";
+export { DESCRIPTION_SAVE_FAILED_TITLE, TITLE_SAVE_FAILED_TITLE, useUpdateIssue } from "./api/mutations.js";
+export type { UpdateIssueScope } from "./api/mutations.js";
+export { DetailMainColumn } from "./detail/DetailMainColumn.js";
+export type { DetailMainColumnProps } from "./detail/DetailMainColumn.js";
+export { DetailMissingState } from "./detail/DetailMissingState.js";
+export type { DetailMissingStateProps } from "./detail/DetailMissingState.js";
+export { DetailSkeleton } from "./detail/DetailSkeleton.js";
+export { DescriptionHistory } from "./detail/DescriptionHistory.js";
+export type { DescriptionHistoryProps, VersionAuthor } from "./detail/DescriptionHistory.js";
+export { IssueDescriptionField } from "./detail/IssueDescriptionField.js";
+export type { IssueDescriptionFieldProps, RestoredDescription } from "./detail/IssueDescriptionField.js";
+export { IssueDetailRoot } from "./detail/IssueDetailRoot.js";
+export type { IssueDetailRootProps } from "./detail/IssueDetailRoot.js";
+export { IssueTitleField, TITLE_AUTOSAVE_MS, TITLE_MAX_LENGTH } from "./detail/IssueTitleField.js";
+export type { IssueTitleFieldProps } from "./detail/IssueTitleField.js";
+export { SaveIndicator } from "./detail/SaveIndicator.js";
+export { useSavePipeline } from "./detail/savePipeline.js";
+export type { SavePipeline, SaveStatus } from "./detail/savePipeline.js";
+export { useDetailUiStore } from "./detail/store.js";
 export { IssueList } from "./components/IssueList.js";
 export type { IssueListProps } from "./components/IssueList.js";
 export { IssueLayout, IssueSearch, parseIssueSearch } from "./filters/search.js";

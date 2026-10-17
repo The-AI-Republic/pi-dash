@@ -130,13 +130,19 @@ export default defineConfig(({ mode }) => {
           // the feature barrel (NEWFRONT-523, size gate). The issues row
           // highlight and mutation loader are likewise pure context plus
           // components, lazy-only behind the layout root (NEWFRONT-614).
+          // The shared editor read surface and lazy editor are pure too
+          // (the lazy call carries a PURE annotation): without the listing
+          // the barrel pins the sanitizer plus DOMPurify into the initial
+          // bundle (NEWFRONT-639, size gate).
           // Every other module keeps the default: a blanket false reshapes
           // the TanStack route splits the size gate keys on.
           moduleSideEffects: (id) =>
             id.includes("features/projects/store/list-display.") ||
             id.includes("features/projects/lib/list-display.") ||
             id.includes("features/issues/freshness/highlight.") ||
-            id.includes("features/issues/loaders/loaderContext.")
+            id.includes("features/issues/loaders/loaderContext.") ||
+            id.includes("shared/editor/sanitize.") ||
+            id.includes("shared/editor/RichTextEditor.")
               ? false
               : true,
         },

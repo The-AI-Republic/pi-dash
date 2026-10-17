@@ -1,43 +1,22 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Browse resolution (SHELL-106, from parity/specs/shell.md §1). The
-// workspace-level browse route renders the project-scoped detail view,
-// never a workspace-wide browser: the key in the route resolves to the
-// internal id through workspace search, then detail loads through the
-// issues area's read path. Full detail ownership stays with NEWFRONT-71.
+// Browse resolution, phase one (parity/specs/issues.md §13, ISS-142).
+// The key in the route resolves through the lite identifier fetch,
+// which answers for live, archived, draft, and intake items alike and
+// tells the route which phase-two path to take: hydrate the full
+// detail, or leave for the project intake tab. Unknown keys, refused
+// keys, and malformed keys all resolve to null so the route renders
+// one generic missing state, never a workspace-wide browser.
 
 import { queryOptions } from "@tanstack/react-query";
-import {
-  getIssue,
-  listArchivedIssues,
-  listProjectDetails,
-  searchWorkspace,
-  type ApiClient,
-  type Issue,
-  type SearchResults,
-} from "@pidash/api-client";
+import { getIssueByIdentifier, getIssueMeta, isApiError, type ApiClient, type IssueLite } from "@pidash/api-client";
 
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
 import { issueKeys } from "./keys.js";
 
-export type BrowseSearchRow = NonNullable<NonNullable<SearchResults["results"]>["issue"]>[number];
-
-export interface BrowseResolution {
-  issue: Issue | null;
-  projectId: string | null;
-}
-
-/**
- * Exact key match on the identifier-plus-sequence pair (for example
- * ACME-42). Prefix orPartial matches stay out: the route names one item.
- */
-export function matchBrowseRow(rows: BrowseSearchRow[], issueKey: string): BrowseSearchRow | null {
-  if (issueKey.length === 0) return null;
-  for (const row of rows) {
-    if (`${row.project__identifier}-${row.sequence_id}` === issueKey) return row;
-  }
-  return null;
+export interface LiteResolution {
+  lite: IssueLite | null;
 }
 
 /**
@@ -53,40 +32,53 @@ export function parseBrowseKey(issueKey: string): { identifier: string; sequence
   return { identifier: issueKey.slice(0, dash), sequenceId };
 }
 
-/** Resolve a browse key to the project-scoped detail (null when unknown). */
-export async function loadBrowseIssue(
+/** True for the statuses that mean "no such key for this caller". */
+function isUnknownKey(error: unknown): boolean {
+  if (!isApiError(error)) return false;
+  return error.status === 400 || error.status === 403 || error.status === 404;
+}
+
+/**
+ * Resolve a browse key to its lite row (null when unknown). Server and
+ * transport failures rethrow so the route can offer a retry.
+ */
+export async function loadLiteIssue(
   client: ApiClient,
   workspaceSlug: string,
   issueKey: string
-): Promise<BrowseResolution> {
-  const found = await searchWorkspace(client, workspaceSlug, {
-    search: issueKey,
-    workspaceSearch: true,
-    entities: ["issue"],
-  });
-  const row = matchBrowseRow(found.results.issue ?? [], issueKey);
-  if (row !== null) {
-    const issue = await getIssue(client, workspaceSlug, row.project_id, row.id);
-    return { issue, projectId: row.project_id };
-  }
-  // Workspace search only indexes live issues: an archived key misses
-  // above, so resolve it through the owning project's archived list.
+): Promise<LiteResolution> {
   const parsed = parseBrowseKey(issueKey);
-  if (parsed === null) return { issue: null, projectId: null };
-  const projects = await listProjectDetails(client, workspaceSlug);
-  const project = projects.find((candidate) => candidate.identifier === parsed.identifier) ?? null;
-  if (project === null) return { issue: null, projectId: null };
-  const archived = await listArchivedIssues(client, workspaceSlug, project.id);
-  const archivedRow = archived.results.find((candidate) => candidate.sequence_id === parsed.sequenceId) ?? null;
-  if (archivedRow === null) return { issue: null, projectId: null };
-  const issue = await getIssue(client, workspaceSlug, project.id, archivedRow.id);
-  return { issue, projectId: project.id };
+  if (parsed === null) return { lite: null };
+  try {
+    const lite = await getIssueByIdentifier(client, workspaceSlug, parsed.identifier, parsed.sequenceId);
+    return { lite };
+  } catch (error) {
+    if (isUnknownKey(error)) return { lite: null };
+    throw error;
+  }
 }
 
-export function browseIssueQueryOptions(client: ApiClient, workspaceSlug: string, issueKey: string) {
+export function liteIssueQueryOptions(client: ApiClient, workspaceSlug: string, issueKey: string) {
   return queryOptions({
     queryKey: issueKeys.browse(workspaceSlug, issueKey),
-    queryFn: () => loadBrowseIssue(client, workspaceSlug, issueKey),
+    queryFn: () => loadLiteIssue(client, workspaceSlug, issueKey),
     staleTime: LIST_STALE_TIME_MS,
   });
+}
+
+/**
+ * Resolve a legacy short-link (project id plus issue id) to the browse
+ * key the canonical route wants (ISS-143). Unknown, deleted, archived,
+ * and refused issues all resolve to null: the route renders one generic
+ * missing state and never distinguishes them.
+ */
+export async function resolveShortLink(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string
+): Promise<{ issueKey: string } | null> {
+  const meta = await getIssueMeta(client, workspaceSlug, projectId, issueId).catch(() => null);
+  if (meta === null) return null;
+  return { issueKey: `${meta.project_identifier}-${meta.sequence_id}` };
 }

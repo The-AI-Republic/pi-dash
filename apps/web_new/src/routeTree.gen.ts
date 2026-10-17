@@ -62,6 +62,7 @@ import { Route as WsGatedProjectsArchivesIndexRouteImport } from './routes/$ws/_
 import { Route as WsGatedProjectsProjectIdCyclesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/cycles/index'
 import { Route as WsGatedProjectsProjectIdIntakeIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/intake/index'
 import { Route as WsGatedProjectsProjectIdIssuesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/issues/index'
+import { Route as WsGatedProjectsProjectIdIssuesIssueIdRouteImport } from './routes/$ws/_gated/projects/$projectId/issues/$issueId'
 import { Route as WsGatedProjectsProjectIdModulesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/modules/index'
 import { Route as WsGatedProjectsProjectIdPagesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/pages/index'
 import { Route as WsGatedProjectsProjectIdSchedulersIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/schedulers/index'
@@ -351,6 +352,12 @@ const WsGatedProjectsProjectIdIssuesIndexRoute =
     path: '/issues/',
     getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
   } as any)
+const WsGatedProjectsProjectIdIssuesIssueIdRoute =
+  WsGatedProjectsProjectIdIssuesIssueIdRouteImport.update({
+    id: '/issues/$issueId',
+    path: '/issues/$issueId',
+    getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
+  } as any)
 const WsGatedProjectsProjectIdModulesIndexRoute =
   WsGatedProjectsProjectIdModulesIndexRouteImport.update({
     id: '/modules/',
@@ -431,6 +438,7 @@ export interface FileRoutesByFullPath {
   '/god-mode/workspace/': typeof GodModeDashboardWorkspaceIndexRoute
   '/$ws/projects/$projectId/': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/projects/archives/': typeof WsGatedProjectsArchivesIndexRoute
+  '/$ws/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   '/$ws/settings/projects/$projectId/labels': typeof WsGatedSettingsProjectsProjectIdLabelsRoute
   '/$ws/projects/$projectId/cycles/': typeof WsGatedProjectsProjectIdCyclesIndexRoute
   '/$ws/projects/$projectId/intake/': typeof WsGatedProjectsProjectIdIntakeIndexRoute
@@ -484,6 +492,7 @@ export interface FileRoutesByTo {
   '/god-mode/workspace': typeof GodModeDashboardWorkspaceIndexRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/projects/archives': typeof WsGatedProjectsArchivesIndexRoute
+  '/$ws/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   '/$ws/settings/projects/$projectId/labels': typeof WsGatedSettingsProjectsProjectIdLabelsRoute
   '/$ws/projects/$projectId/cycles': typeof WsGatedProjectsProjectIdCyclesIndexRoute
   '/$ws/projects/$projectId/intake': typeof WsGatedProjectsProjectIdIntakeIndexRoute
@@ -545,6 +554,7 @@ export interface FileRoutesById {
   '/god-mode/_dashboard/workspace/': typeof GodModeDashboardWorkspaceIndexRoute
   '/$ws/_gated/projects/$projectId/': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/_gated/projects/archives/': typeof WsGatedProjectsArchivesIndexRoute
+  '/$ws/_gated/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   '/$ws/_gated/settings/projects/$projectId/labels': typeof WsGatedSettingsProjectsProjectIdLabelsRoute
   '/$ws/_gated/projects/$projectId/cycles/': typeof WsGatedProjectsProjectIdCyclesIndexRoute
   '/$ws/_gated/projects/$projectId/intake/': typeof WsGatedProjectsProjectIdIntakeIndexRoute
@@ -605,6 +615,7 @@ export interface FileRouteTypes {
     | '/god-mode/workspace/'
     | '/$ws/projects/$projectId/'
     | '/$ws/projects/archives/'
+    | '/$ws/projects/$projectId/issues/$issueId'
     | '/$ws/settings/projects/$projectId/labels'
     | '/$ws/projects/$projectId/cycles/'
     | '/$ws/projects/$projectId/intake/'
@@ -658,6 +669,7 @@ export interface FileRouteTypes {
     | '/god-mode/workspace'
     | '/$ws/projects/$projectId'
     | '/$ws/projects/archives'
+    | '/$ws/projects/$projectId/issues/$issueId'
     | '/$ws/settings/projects/$projectId/labels'
     | '/$ws/projects/$projectId/cycles'
     | '/$ws/projects/$projectId/intake'
@@ -718,6 +730,7 @@ export interface FileRouteTypes {
     | '/god-mode/_dashboard/workspace/'
     | '/$ws/_gated/projects/$projectId/'
     | '/$ws/_gated/projects/archives/'
+    | '/$ws/_gated/projects/$projectId/issues/$issueId'
     | '/$ws/_gated/settings/projects/$projectId/labels'
     | '/$ws/_gated/projects/$projectId/cycles/'
     | '/$ws/_gated/projects/$projectId/intake/'
@@ -1122,6 +1135,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedProjectsProjectIdIssuesIndexRouteImport
       parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
     }
+    '/$ws/_gated/projects/$projectId/issues/$issueId': {
+      id: '/$ws/_gated/projects/$projectId/issues/$issueId'
+      path: '/issues/$issueId'
+      fullPath: '/$ws/projects/$projectId/issues/$issueId'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdIssuesIssueIdRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
+    }
     '/$ws/_gated/projects/$projectId/modules/': {
       id: '/$ws/_gated/projects/$projectId/modules/'
       path: '/modules'
@@ -1162,6 +1182,7 @@ declare module '@tanstack/react-router' {
 
 interface WsGatedProjectsProjectIdRouteRouteChildren {
   WsGatedProjectsProjectIdIndexRoute: typeof WsGatedProjectsProjectIdIndexRoute
+  WsGatedProjectsProjectIdIssuesIssueIdRoute: typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   WsGatedProjectsProjectIdCyclesIndexRoute: typeof WsGatedProjectsProjectIdCyclesIndexRoute
   WsGatedProjectsProjectIdIntakeIndexRoute: typeof WsGatedProjectsProjectIdIntakeIndexRoute
   WsGatedProjectsProjectIdIssuesIndexRoute: typeof WsGatedProjectsProjectIdIssuesIndexRoute
@@ -1174,6 +1195,8 @@ interface WsGatedProjectsProjectIdRouteRouteChildren {
 const WsGatedProjectsProjectIdRouteRouteChildren: WsGatedProjectsProjectIdRouteRouteChildren =
   {
     WsGatedProjectsProjectIdIndexRoute: WsGatedProjectsProjectIdIndexRoute,
+    WsGatedProjectsProjectIdIssuesIssueIdRoute:
+      WsGatedProjectsProjectIdIssuesIssueIdRoute,
     WsGatedProjectsProjectIdCyclesIndexRoute:
       WsGatedProjectsProjectIdCyclesIndexRoute,
     WsGatedProjectsProjectIdIntakeIndexRoute:
