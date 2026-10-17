@@ -325,10 +325,27 @@ fn render_naive(naive: NaiveDateTime) -> Option<String> {
     ))
 }
 
-/// Python `str.isspace` coverage for URL segments (`re` `\s` under `str`
-/// patterns matches Unicode whitespace).
+/// Python `str.isspace()` set — identical to `re` `\s` under `str`
+/// patterns and to `str.strip()`'s predicate. It is Unicode
+/// `White_Space` (exactly what Rust's `char::is_whitespace` covers,
+/// including U+0085) plus the four C0 separators U+001C-U+001F that
+/// Rust's Unicode tables omit (`github_client.py:236-261`).
+fn py_isspace(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+/// Python `str.strip()`: `trim_matches` over the full `\s` set. The URL
+/// regexes run on the *stripped* string (`github_client.py:249,272`;
+/// `github.py:66`), so a trailing U+001C-U+001F must be removed before
+/// matching — the strip-first asymmetry (`'.../pull/1\x1c'` parses in
+/// Python even though an *embedded* control does not).
+fn py_strip(s: &str) -> &str {
+    s.trim_matches(py_isspace)
+}
+
+/// `[^\s]` gate for URL segments.
 fn has_whitespace(s: &str) -> bool {
-    s.chars().any(char::is_whitespace)
+    s.chars().any(py_isspace)
 }
 
 /// Shared `owner/name` core of `_HTTPS_REPO_RE` / `_SSH_REPO_RE`
@@ -372,7 +389,7 @@ fn parse_github_repo_url(url: &str) -> Option<(String, String)> {
     if url.is_empty() {
         return None;
     }
-    let candidate = url.trim();
+    let candidate = py_strip(url);
     if candidate.is_empty() {
         return None;
     }
@@ -398,7 +415,7 @@ fn parse_github_pull_request_url(url: &str) -> Option<(String, String, String)> 
     if url.is_empty() {
         return None;
     }
-    let candidate = url.trim();
+    let candidate = py_strip(url);
     let https = candidate
         .strip_prefix("https://")
         .or_else(|| candidate.strip_prefix("http://"))?;
@@ -777,7 +794,7 @@ impl<C: GithubClient> GitProviderAdapter for GitHubAdapter<C> {
             namespace: owner.clone(),
             name: name.clone(),
             full_name: format!("{owner}/{name}"),
-            clone_url: url.trim().to_owned(),
+            clone_url: py_strip(url).to_owned(),
         })
     }
 
@@ -1314,6 +1331,64 @@ mod tests {
         assert_eq!(parsed.url, "https://github.com/acme/web/pull/7");
         assert!(adapter
             .parse_code_review_url("https://github.com/acme/web/pull/")
+            .is_none());
+    }
+
+    #[test]
+    fn whitespace_gate_matches_python_re_whitespace() {
+        let adapter = test_adapter::<NullClient>();
+        // `re \s` under `str` patterns is Unicode `White_Space` plus the
+        // four C0 separators U+001C-U+001F (`github_client.py:259-261`).
+        // Rust `char::is_whitespace` misses those four; the port must not.
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            // PR URL: embedded in owner / name / number / tail => `[^\s]`.
+            for url in [
+                format!("https://github.com/{sep}/n/pull/1"),
+                format!("https://github.com/o/{sep}/pull/1"),
+                format!("https://github.com/o/n/pull/{sep}1"),
+                format!("https://github.com/o/n/pull/1/x{sep}y"),
+            ] {
+                assert!(adapter.parse_code_review_url(&url).is_none(), "{url:?}");
+            }
+            // Repo URL: embedded in owner / name => `[^\s]`.
+            for url in [
+                format!("https://github.com/{sep}/n"),
+                format!("https://github.com/o/{sep}"),
+            ] {
+                assert!(adapter.parse_repo_url(&url).is_none(), "{url:?}");
+            }
+        }
+        // U+0085 is Unicode `White_Space` (Rust covers it) — still rejected
+        // embedded, still stripped when it trails.
+        assert!(adapter
+            .parse_code_review_url("https://github.com/o\u{85}/n/pull/1")
+            .is_none());
+        assert!(adapter
+            .parse_code_review_url("https://github.com/o/n/pull/1\u{85}")
+            .is_some());
+    }
+
+    #[test]
+    fn trailing_control_is_stripped_before_matching() {
+        let adapter = test_adapter::<NullClient>();
+        // `url.strip()` (`github_client.py:249,272`) removes trailing
+        // U+001C-U+001F before the regex runs, so these parse in Python
+        // even though an *embedded* control rejects (`.../pull/1\x1c`
+        // -> ('o','n',1)).
+        let pr = adapter
+            .parse_code_review_url("https://github.com/o/n/pull/1\u{1c}")
+            .expect("trailing control stripped, PR parses");
+        assert_eq!(pr.external_iid, "1");
+        assert_eq!(pr.url, "https://github.com/o/n/pull/1");
+        let repo = adapter
+            .parse_repo_url("https://github.com/o/n\u{1c}")
+            .expect("trailing control stripped, repo parses");
+        assert_eq!(repo.full_name, "o/n");
+        // The clone URL is the stripped input, like `url.strip()`.
+        assert_eq!(repo.clone_url, "https://github.com/o/n");
+        // A control before a trailing slash is *not* trailing: reject.
+        assert!(adapter
+            .parse_repo_url("https://github.com/o/n\u{1c}/")
             .is_none());
     }
 

@@ -247,6 +247,15 @@ fn py_isdigit_char(ch: char) -> bool {
         .is_some_and(|prev| value <= PY_ISDIGIT_RANGES[prev].1)
 }
 
+/// `re` `\s` predicate for `str` patterns: Unicode `White_Space` (what
+/// Rust's `char::is_whitespace` covers, U+0085 included) plus the four
+/// C0 separators U+001C-U+001F that Rust omits. `github_client.py:259-261`
+/// uses `[^\s]` for every segment, so this set — not `char::is_whitespace`
+/// alone — is the width the URL must be checked against.
+fn py_re_isspace(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
 /// `parse_github_pull_request_url` (`utils/github_client.py:264-275`)
 /// over `_HTTPS_PR_RE` (`:259-261`):
 /// `^https?://github\.com/([^/\s]+)/([^/\s]+?)/pull/(\d+)(?:/[^\s]*)?$`.
@@ -258,7 +267,7 @@ pub fn parse_github_review_url(url: &str) -> Option<ParsedReview> {
     let rest = url
         .strip_prefix("https://github.com/")
         .or_else(|| url.strip_prefix("http://github.com/"))?;
-    if rest.chars().any(char::is_whitespace) {
+    if rest.chars().any(py_re_isspace) {
         return None;
     }
     let mut parts = rest.split('/');
@@ -669,6 +678,32 @@ mod tests {
             parse_code_review_url("  https://github.com/o/n/pull/3  ", &no_gitlab_hosts())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn github_parse_whitespace_gate_matches_python_re_whitespace() {
+        // `re \s` under `str` patterns is Unicode `White_Space` plus the
+        // four C0 separators U+001C-U+001F (`github_client.py:259-261`).
+        // `char::is_whitespace` misses those four, so an embedded control
+        // char must still reject the URL.
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            for url in [
+                format!("https://github.com/{sep}/n/pull/1"),
+                format!("https://github.com/o/{sep}/pull/1"),
+                format!("https://github.com/o/n/pull/{sep}1"),
+                format!("https://github.com/o/n/pull/1/x{sep}y"),
+            ] {
+                assert!(parse_github_review_url(&url).is_none(), "{url:?}");
+            }
+        }
+        // U+0085 is Unicode `White_Space`: rejected embedded, and the
+        // strip-first asymmetry means a *trailing* control is stripped
+        // first (`github_client.py:272` `url.strip()`), so it parses.
+        assert!(parse_github_review_url("https://github.com/o\u{85}/n/pull/1").is_none());
+        let trailing = parse_github_review_url("https://github.com/o/n/pull/1\u{1c}")
+            .expect("trailing control stripped then matched");
+        assert_eq!(trailing.external_iid, "1");
+        assert_eq!(trailing.url, "https://github.com/o/n/pull/1");
     }
 
     #[test]
