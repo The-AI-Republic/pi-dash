@@ -67,15 +67,19 @@ export async function createWorkspace(client: ApiClient, input: WorkspaceCreateI
 }
 
 /**
- * One active workspace membership with the nested member projection. The
- * backend answers the admin projection for privileged callers (extra email
- * and last-login fields); the shared UserLite subset below is what
- * readers need, so extras are ignored.
+ * One workspace membership with the nested member projection. The list
+ * also carries deactivated memberships; the member picker renders those
+ * suspended (parity/specs/issues.md §17, ISS-208). The backend answers
+ * the admin projection for privileged callers (extra email and
+ * last-login fields); the shared UserLite subset below is what readers
+ * need, so extras are ignored.
  */
 export const WorkspaceMember = z.object({
   id: uuid(),
   member: UserLite,
   role: z.number(),
+  /** False on deactivated memberships. Absent where the lens omits it. */
+  is_active: z.optional(z.boolean()),
 });
 export type WorkspaceMember = z.infer<typeof WorkspaceMember>;
 
