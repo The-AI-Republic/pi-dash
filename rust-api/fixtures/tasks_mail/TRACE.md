@@ -114,10 +114,8 @@ dead code (see `dead/`): no fixture, no test, Python stays in place.
 
 ## Dead — no fixture (SKIP, stays in place)
 
-- `dead/DEAD.project_invitation.json` — evidence record only, NOT a fixture:
-  `bgtasks/project_invitation_task.py:24` (`project_invitation`); (1) zero imports of the
-  module under `apps/api` (grep this run); (2) only apparent call site
-  `app/views/project/invite.py:104-105` calls `.delay()` on the `bulk_create` list
-  (`:98-99`), never the task (loop var `invitation` unused); (3) no `celery.py` beat
-  entry (grep `invitation`: no match); (4) worker-plane CI 2026-09-24: 74 registered
-  tasks, this one missing. Oracle `MAIL_TASKS` excludes it by design. No fixture, no test.
+Retired by PIDASHCONV-1104: the only entry (`project_invitation`) is live —
+Django d656243d fixed the `invite.py` call site (`.delay` on the task, once
+per invitation), so the task is ported (`tasks_mail::membership_mail`) and
+oracle-covered like the other membership mail tasks. The
+`dead/DEAD.project_invitation.json` evidence record is deleted.

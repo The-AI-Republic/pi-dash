@@ -3,8 +3,9 @@
 Django sources: pi_dash/bgtasks/{email_notification_task, notification_task,
 magic_link_code_task, forgot_password_task, user_activation_email_task,
 user_deactivation_email_task, user_email_update_task,
-project_add_user_email_task, workspace_invitation_task}.py
-(project_invitation_task.py is dead code — see NOTE on MAIL_TASKS.)
+project_add_user_email_task, workspace_invitation_task,
+project_invitation_task}.py (project_invitation revived by Django d656243d;
+see NOTE on MAIL_TASKS.)
 """
 
 import uuid
@@ -94,13 +95,16 @@ MAIL_TASKS = {
         ["example.com", str(uuid.uuid4()), str(uuid.uuid4())],
         {},
     ),
-    # NOTE: pi_dash/bgtasks/project_invitation_task.py::project_invitation is
-    # deliberately absent. It is dead code: nothing imports the module, no
-    # beat entry or send_task names it, and the live worker does not register
-    # it (worker-plane CI 2026-09-24: 74 registered tasks, this one missing).
-    # The apparent call site (app/views/project/invite.py:105) calls .delay()
-    # on the list returned by bulk_create, not on the task. Per the Dead
-    # Python Code page it stays unported and untested here.
+    # NOTE (PIDASHCONV-1104): project_invitation was deliberately absent
+    # (dead code: invite.py called .delay() on the bulk_create list). Django
+    # d656243d fixed the call site, so the task is live, ported, and covered
+    # here; the oracle worker boots with it in -I (oracle_worker_includes).
+    f"{M}.project_invitation_task.project_invitation": (
+        "pi_dash/bgtasks/project_invitation_task.py",
+        "project_invitation",
+        ["contract@example.com", str(uuid.uuid4()), "token", "example.com", "inviter"],
+        {},
+    ),
     f"{M}.workspace_invitation_task.workspace_invitation": (
         "pi_dash/bgtasks/workspace_invitation_task.py",
         "workspace_invitation",

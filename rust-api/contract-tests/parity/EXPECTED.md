@@ -17,11 +17,11 @@ line, sorted); the prose around them is for reviewers. Never add a
 `G0`/`W0` line: unclassified rows must be resolved by hand, given a gap
 id, and filed as a fix issue first.
 
-Counts (2026-10-15, `pi_dash.settings.test`):
+Counts (2026-10-17, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 521 OWNED, 7 MISSING (all listed below),
   9 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 85 tasks — 54 OWNED, 31 proxied by design, 0 MISSING;
+- Jobs: 87 tasks — 61 OWNED, 26 proxied by design, 0 MISSING;
   beat 28/28 OWNED (same task, same cadence on both sides).
 
 ## Routes
@@ -147,13 +147,16 @@ Python worker and Django's outcome is preserved — each row says why),
 MISSING (live registered task Rust forwards that would be lost at
 switchover — one fix issue per register fn).
 
-Note: 6 OWNED tasks are Rust-superset executions — called in Django
+Note: 11 OWNED tasks are Rust-superset executions — called in Django
 but unregistered there (dropped; PDASHOSS01-292), while the Rust
 worker runs them: `copy_s3_objects_of_description_and_assets`,
 `issue_description_version_task`, `process_logs`, `track_page_version`,
-`get_asset_object_metadata`, `workspace_seed`. Deliberate (accepted by
-their domain gates); recorded here and in the V-01 PR, for the V-05
-ported-bug register to catalog.
+`get_asset_object_metadata`, `workspace_seed` (domain gates + V-01),
+`user_activation_email`, `user_deactivation_email`,
+`project_add_user_email`, `workspace_invitation`, `project_invitation`
+(PIDASHCONV-1104). Deliberate (accepted by their domain gates);
+recorded here and in the V-01 PR, for the V-05 ported-bug register
+to catalog.
 
 ### W-assistant (0 rows; sweep wired, turn reclassified to PROXIED)
 
@@ -214,12 +217,12 @@ The row reclassified to OWNED (signature deleted).
 ```expected-jobs
 ```
 
-### Proxied by design (31 rows)
+### Proxied by design (26 rows)
 
 No fix issue: forwarding preserves Django's outcome on every row.
 
 - `celery.*` (9): Celery canvas builtins; no canvas usage in the codebase.
-- `django-drops-too` (17): called but unregistered in Django
+- `django-drops-too` (13): called but unregistered in Django
   (PDASHOSS01-292) — the Python worker drops them; forwarding drops
   them identically. `track_event` is explicitly unregistered in Rust
   because an early-return handler would swallow the forward.
@@ -248,8 +251,6 @@ No fix issue: forwarding preserves Django's outcome on every row.
   switchover track (PIDASHCONV-857); revisit PIDASHCONV-863 by
   2027-04-10, or when Rust ships a live TurnSeam, whichever comes
   first.
-- `project_invitation`: never invoked (`invite.py:105` calls `.delay`
-  on a list; PDASHOSS01-292).
 - `recent_visited_task`: documented no-op (memory broker, no worker by
   design).
 - `export_analytics_to_csv_email`: dead (defined, never referenced).
@@ -273,11 +274,7 @@ PROXIED :: pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link :: hybrid wo
 PROXIED :: pi_dash.bgtasks.forgot_password_task.forgot_password :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.magic_link_code_task.magic_link :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.page_transaction_task.page_transaction :: django-drops-too (PDASHOSS01-292)
-PROXIED :: pi_dash.bgtasks.project_add_user_email_task.project_add_user_email :: django-drops-too (PDASHOSS01-292)
-PROXIED :: pi_dash.bgtasks.project_invitation_task.project_invitation :: task never invoked (invite.py:105 calls .delay on a list; PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.recent_visited_task.recent_visited_task :: documented no-op (memory broker, no worker by design)
-PROXIED :: pi_dash.bgtasks.user_activation_email_task.user_activation_email :: django-drops-too (PDASHOSS01-292)
-PROXIED :: pi_dash.bgtasks.user_deactivation_email_task.user_deactivation_email :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.user_email_update_task.send_email_update_confirmation :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.user_email_update_task.send_email_update_magic_code :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.webhook_task.model_activity :: django-drops-too (PDASHOSS01-292)
@@ -285,7 +282,6 @@ PROXIED :: pi_dash.bgtasks.webhook_task.send_webhook_deactivation_email :: djang
 PROXIED :: pi_dash.bgtasks.webhook_task.webhook_activity :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.webhook_task.webhook_send_task :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title :: django-drops-too (PDASHOSS01-292)
-PROXIED :: pi_dash.bgtasks.workspace_invitation_task.workspace_invitation :: django-drops-too (PDASHOSS01-292)
 ```
 
 ## Beat

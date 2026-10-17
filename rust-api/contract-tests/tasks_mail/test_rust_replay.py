@@ -9,7 +9,8 @@ hybrid-worker contract for the same tasks:
   settle in ``rust_job_queue``, no message for the task lands on the AMQP
   broker, the stack marks ``processed_at`` and fans its sends out into
   the Rust queue, and the sends deliver into the SMTP sink and mark
-  ``sent_at``.
+  ``sent_at``. The five membership mail tasks (PIDASHCONV-1104) execute
+  locally too; their pins live in ``test_rust_replay_user_project.py``.
 - Every other mail task name still publishes but has no local handler, so
   the worker forwards it to the Python plane: the job settles (the forward
   is the terminal effect) and exactly one message for the task lands on

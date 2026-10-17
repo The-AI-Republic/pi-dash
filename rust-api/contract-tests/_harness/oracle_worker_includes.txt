@@ -1,0 +1,11 @@
+# Oracle worker includes (PIDASHCONV-1104): Celery task modules the stock
+# worker never imports (PDASHOSS01-292), one per line, sorted. The
+# worker-plane oracle boots `celery -A pi_dash worker -I <comma-joined
+# lines>` so the oracle can execute these tasks; this file (never
+# apps/api) is where the registration gap is closed for tests. Each
+# standalone-Rust task-port issue appends its own modules here.
+pi_dash.bgtasks.project_add_user_email_task
+pi_dash.bgtasks.project_invitation_task
+pi_dash.bgtasks.user_activation_email_task
+pi_dash.bgtasks.user_deactivation_email_task
+pi_dash.bgtasks.workspace_invitation_task

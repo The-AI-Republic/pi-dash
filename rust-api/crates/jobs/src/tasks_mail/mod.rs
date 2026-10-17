@@ -32,8 +32,8 @@
 //! builds the handler table for the two mail task names over the live
 //! seams in [`live`], and the worker binary calls it (PIDASHCONV-865),
 //! so both names are Rust-owned; [`NOTIFICATIONS_TASK`] is Rust-owned too
-//! (PIDASHCONV-834). The auth/membership ports stay unwired: no Django
-//! task of those names exists, so there is nothing to own.
+//! (PIDASHCONV-834). The membership ports are wired by the live worker
+//! (PIDASHCONV-1104); the auth ports stay unwired until PIDASHCONV-1103.
 //! [`is_mail_task`] is the routing predicate and [`TASK_NAMES`] is pinned
 //! against the `F-WIRE-MAIL` fixture below.
 
@@ -102,12 +102,15 @@ pub use auth_mail::{
     AUTH_MAIL_TASKS, UPDATE_CONFIRM_TASK, UPDATE_MAGIC_TASK,
 };
 pub use membership_mail::{
-    project_add_user_email_handler, user_activation_email_handler, user_deactivation_email_handler,
-    workspace_invitation_handler, MEMBERSHIP_MAIL_TASKS,
+    project_add_user_email_handler, project_invitation_handler, user_activation_email_handler,
+    user_deactivation_email_handler, workspace_invitation_handler, MEMBERSHIP_MAIL_TASKS,
 };
 
-/// Every live D-07 Celery task name (11 tasks; `project_invitation_task.py`
-/// is dead code — no caller in `apps/api/pi_dash` — so it has no name here).
+/// Every D-07 oracle Celery task name (11 tasks; `project_invitation` is
+/// live — Django d656243d fixed the `invite.py` call site — and owned by
+/// [`membership_mail::PROJECT_INVITATION_TASK`], but it stays out of this
+/// routing table so the `F-WIRE-MAIL` fixture keeps pinning the D-07
+/// oracle eleven).
 pub const TASK_NAMES: [&str; 11] = [
     STACK_EMAIL_NOTIFICATION_TASK,
     SEND_EMAIL_NOTIFICATION_TASK,
@@ -163,6 +166,16 @@ pub fn register_auth_mail_tasks(registry: &mut Registry, pool: sqlx::PgPool) {
         update_magic_handler(pool.clone()),
     );
     registry.register(auth_mail::UPDATE_CONFIRM_TASK, update_confirm_handler(pool));
+}
+
+/// Register the project invitation task name on `registry` (PIDASHCONV-1104;
+/// plain `@shared_task`: default ack-on-success, no `autoretry_for` — the
+/// handler always acknowledges, mirroring the swallow-everything body).
+pub fn register_project_invitation_task(registry: &mut Registry, pool: sqlx::PgPool) {
+    registry.register(
+        membership_mail::PROJECT_INVITATION_TASK,
+        project_invitation_handler(pool),
+    );
 }
 
 /// Register all four T6 task names on `registry` (F-WIRE-MAIL names, plain
@@ -488,8 +501,9 @@ mod tests {
         for name in AUTH_MAIL_TASKS {
             assert!(registry.owns(name), "{name}");
         }
-        // Neighbors stay Python-owned: T6 names and the dead invitation
-        // task are NOT registered here.
+        // Neighbors stay Python-owned: T6 names and the project
+        // invitation task (PIDASHCONV-1104, separate register fn) are NOT
+        // registered here.
         assert!(!registry.owns("pi_dash.bgtasks.user_activation_email_task.user_activation_email"));
         assert!(!registry.owns("pi_dash.bgtasks.project_invitation_task.project_invitation"));
     }
@@ -502,7 +516,8 @@ mod tests {
         for name in MEMBERSHIP_MAIL_TASKS {
             assert!(registry.owns(name), "{name}");
         }
-        // T5 names and the dead invitation task are NOT registered here.
+        // T5 names and the project invitation task (PIDASHCONV-1104,
+        // separate register fn) are NOT registered here.
         assert!(!registry.owns("pi_dash.bgtasks.magic_link_code_task.magic_link"));
         assert!(!registry.owns("pi_dash.bgtasks.project_invitation_task.project_invitation"));
     }
