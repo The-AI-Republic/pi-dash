@@ -82,6 +82,11 @@ describe("agent tools flip", () => {
     expect(flipped?.settings).toEqual({ openhub: { apps_enabled: true } });
   });
 
+  it("starts a fresh namespace over a null value", () => {
+    const flipped = applyAgentToolsFlip({ settings: { openhub: null } } as unknown as Profile, true);
+    expect(flipped?.settings).toEqual({ openhub: { apps_enabled: true } });
+  });
+
   it("merges over siblings without dropping them", () => {
     const previous = profileWith(false, { other: { keep: 1 } });
     (previous.settings["openhub"] as Record<string, unknown>)["draft"] = "keep-me";

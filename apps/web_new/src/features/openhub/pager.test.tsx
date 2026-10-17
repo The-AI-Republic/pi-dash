@@ -37,6 +37,10 @@ describe("catalog pager stack", () => {
     expect(nextCatalogPage(pager, undefined)).toBe(pager);
   });
 
+  it("reads an out-of-range window as the first", () => {
+    expect(currentPagerCursor({ query: "", cursors: [null], at: 3 })).toBeNull();
+  });
+
   it("steps back through visited windows, re-reading the first cursorless", () => {
     const second = nextCatalogPage(createCatalogPager(""), "cursor-2");
     const back = previousCatalogPage(second);
