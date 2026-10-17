@@ -147,12 +147,20 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     crate::tasks_cleanup::register_cleanup_handlers(registry, ctx.pools.clone(), ctx.mongo.clone());
     crate::tasks_cleanup::register_versions(registry, ctx.pools.primary().clone());
     // D-09 remaining groups (PIDASHCONV-224; kept in sync with
-    // `tests::worker_registry_owns_all_d09_local_tasks`). The three
-    // export tasks stay Python-owned: never register them here.
-    // `delete_old_s3_link` flipped to Rust in PIDASHCONV-858 (below):
-    // the live S3 deleter fails the task on any S3 error, so an S3
-    // outage parks instead of ack-and-clearing.
+    // `tests::worker_registry_owns_all_d09_local_tasks`). The dead
+    // `export_analytics_to_csv_email` stays Python-owned: never register it
+    // here. `delete_old_s3_link` flipped to Rust in PIDASHCONV-858 (below):
+    // the live S3 deleter fails the task on any S3 error, so an S3 outage
+    // parks instead of ack-and-clearing.
     crate::tasks_cleanup::register_deletion_tasks(registry, ctx.pools.clone());
+    // Export tasks (PIDASHCONV-1106; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). The
+    // pool-only handlers exist with live mail/S3 seams, so the Rust
+    // worker owns `issue_export_task` and `analytic_export_task` —
+    // otherwise the exports are lost at switchover (parity gap
+    // W-export). Django drops both (PDASHOSS01-292); Rust runs them.
+    crate::tasks_export::register_issue_export_task(registry, ctx.pools.primary().clone());
+    crate::tasks_export::register_analytic_task(registry, ctx.pools.primary().clone());
     // `register_assets` installs sweep + metadata + copy (assets.rs:692).
     crate::tasks_cleanup::assets::register_assets(
         registry,
@@ -535,7 +543,11 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected.len(), 70, "worker-owned count drifted");
+        expected.extend([
+            crate::tasks_export::ISSUE_EXPORT_TASK,
+            crate::tasks_export::ANALYTIC_EXPORT_TASK,
+        ]);
+        assert_eq!(expected.len(), 72, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");
@@ -555,7 +567,10 @@ mod tests {
         // `delete_old_s3_link` flipped to Rust (PIDASHCONV-858).
         assert_eq!(crate::tasks_cleanup::EXPORT_TASK_NAMES.len(), 4);
         for name in crate::tasks_cleanup::EXPORT_TASK_NAMES {
-            if name == crate::tasks_cleanup::TASK_DELETE_OLD_S3_LINK {
+            if name == crate::tasks_cleanup::TASK_DELETE_OLD_S3_LINK
+                || name == crate::tasks_export::ISSUE_EXPORT_TASK
+                || name == crate::tasks_export::ANALYTIC_EXPORT_TASK
+            {
                 assert!(registry.owns(name), "{name} must be worker-owned");
                 assert_eq!(route_for(&registry, name), Route::Local);
             } else {

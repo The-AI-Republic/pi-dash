@@ -3267,10 +3267,10 @@ async fn get_saved_analytic(
 // Export-analytics endpoint
 // ---------------------------------------------------------------------------
 
-/// Celery task enqueued by `ExportAnalyticsEndpoint.post`: the bare
-/// `@shared_task` path (`analytic_plot_export.py:349-350`, D-09 owned —
-/// the Rust worker forwards unregistered names to the broker, so the
-/// endpoint only publishes).
+/// Task enqueued by `ExportAnalyticsEndpoint.post`: the bare
+/// `@shared_task` path (`analytic_plot_export.py:349-350`). Rust owns the
+/// body (PIDASHCONV-1106), so the endpoint only publishes the row and the
+/// Rust worker runs it (no broker hand-off).
 const ANALYTIC_EXPORT_TASK: &str = "pi_dash.bgtasks.analytic_plot_export.analytic_export_task";
 
 /// Best-effort deferred publish (the space-intake / views-search
