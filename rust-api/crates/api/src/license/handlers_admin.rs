@@ -200,14 +200,6 @@ enum Denial {
     InvalidPayload,
     /// 500, generic branch.
     ServerError,
-    /// 400, uncaught upload-cap error (`TooManyFieldsSent` /
-    /// `TooManyFilesSent` / `RequestDataTooBig` escaping a view without
-    /// a catch-all — admins POST, email-check POST, workspaces POST).
-    /// Django answers `ERROR_PAGE_TEMPLATE` (`views/defaults.py`) with
-    /// `text/html; charset=utf-8`. Under local `DEBUG` the page is the
-    /// traceback variant instead (settings-dependent, untranslatable),
-    /// so contract tests pin the status only there.
-    BadRequestPage,
 }
 
 impl Denial {
@@ -252,7 +244,6 @@ impl Denial {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 crate::app_issues::SERVER_ERROR_BODY.to_owned(),
             ),
-            Denial::BadRequestPage => (StatusCode::BAD_REQUEST, super::BAD_REQUEST_PAGE.to_owned()),
         }
     }
 }
@@ -260,14 +251,9 @@ impl Denial {
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
         let (status, body) = self.status_and_body();
-        let content_type = if matches!(self, Denial::BadRequestPage) {
-            "text/html; charset=utf-8"
-        } else {
-            "application/json"
-        };
         Response::builder()
             .status(status)
-            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(body))
             .expect("static denial response")
     }
@@ -683,15 +669,16 @@ fn parse_json_body(
         }
         Some(BodyKind::Form) => match parse_form_body(body) {
             Ok(pairs) => Ok(ParsedBody::form(pairs)),
-            // The view has no catch-all: the cap error escapes to
-            // Django's 400 page (`admin.py:49-68`).
-            Err(_) => Err(Denial::BadRequestPage),
+            // Cap errors escape the view into the base
+            // `handle_exception` (generic 500) — the POST-only 400 page
+            // seen locally is the Debug Toolbar re-parsing the body in
+            // middleware (DEBUG-only; prod has no toolbar).
+            Err(_) => Err(Denial::ServerError),
         },
         Some(BodyKind::Multipart) => match parse_multipart_body(content_type, body, memory_limit) {
             Ok(pairs) => Ok(ParsedBody::form(pairs)),
             Err(BodyFail::Parse(message)) => Err(Denial::BadDetail(message)),
-            Err(BodyFail::Fatal) => Err(Denial::ServerError),
-            Err(BodyFail::TooMany) => Err(Denial::BadRequestPage),
+            Err(BodyFail::Fatal) | Err(BodyFail::TooMany) => Err(Denial::ServerError),
         },
         None => Err(Denial::UnsupportedMediaType(format!(
             "Unsupported media type \"{content_type}\" in request."
@@ -788,12 +775,15 @@ fn py_int_i32(text: &str) -> Result<i32, ()> {
         };
         prev_underscore = false;
         any_digit = true;
-        count += 1;
-        // Past 10 digits the value cannot fit `i32` (and past 4300
-        // `int()` itself refuses); keep validating the grammar, then
-        // fail the range check below.
-        if count <= 10 {
-            value = value * 10 + digit as i64;
+        // Only significant digits count toward the 10-digit `i32` bound:
+        // leading zeros don't change the value (`int("00000000001")`
+        // is 1 — probed). Past 4300 digits `int()` itself refuses, but
+        // that is a 500 either way, so over-long input just fails below.
+        if digit != 0 || count > 0 {
+            count += 1;
+            if count <= 10 {
+                value = value * 10 + digit as i64;
+            }
         }
     }
     if prev_underscore || count > 10 {
@@ -2384,19 +2374,6 @@ mod tests {
                 r#"{"error":"Something went wrong please try again later"}"#.to_owned()
             )
         );
-        // The uncaught-cap 400 is Django's fixed `ERROR_PAGE_TEMPLATE`
-        // (prod shape; local DEBUG renders the traceback variant).
-        assert_eq!(
-            denial_body(Denial::BadRequestPage),
-            (
-                StatusCode::BAD_REQUEST,
-                super::super::BAD_REQUEST_PAGE.to_owned()
-            )
-        );
-        assert_eq!(
-            super::super::BAD_REQUEST_PAGE,
-            "\n<!doctype html>\n<html lang=\"en\">\n<head>\n  <title>Bad Request (400)</title>\n</head>\n<body>\n  <h1>Bad Request (400)</h1><p></p>\n</body>\n</html>\n"
-        );
     }
 
     #[test]
@@ -2711,6 +2688,23 @@ mod tests {
         let err = parse_json_body(&headers_for("multipart/form-data"), multipart, 5_242_880)
             .expect_err("missing boundary 400s");
         assert!(matches!(err, Denial::BadDetail(_)));
+        // Upload caps escape the view into the base `handle_exception`
+        // (generic 500) on every endpoint — including POST ones. The 400
+        // page seen locally on POST is the Debug Toolbar re-parsing the
+        // body in middleware (DEBUG-only; prod has no toolbar — probed
+        // with DEBUG=False: 500 JSON on all five endpoints).
+        let over = (0..1001)
+            .map(|i| format!("u{i}=v"))
+            .collect::<Vec<_>>()
+            .join("&");
+        assert!(matches!(
+            parse_json_body(
+                &headers_for("application/x-www-form-urlencoded"),
+                over.as_bytes(),
+                5_242_880
+            ),
+            Err(Denial::ServerError)
+        ));
     }
 
     #[test]
@@ -2824,6 +2818,26 @@ mod tests {
         assert!(role(r#"{"role":"1__2"}"#).is_err());
         assert!(role(r#"{"role":""}"#).is_err());
         assert!(role(r#"{"role":"0x10"}"#).is_err());
+        // Leading zeros don't count toward the `i32` bound: `int()`
+        // takes the value, not the width (`int("00000000001") == 1`
+        // — probed). Only the exact `"20"` echoes as an int.
+        assert_eq!(
+            role(r#"{"role":"00000000001"}"#).expect("leading zeros"),
+            (1, serde_json::json!("00000000001"))
+        );
+        assert_eq!(
+            role(r#"{"role":"-00000000001"}"#).expect("negative zeros"),
+            (-1, serde_json::json!("-00000000001"))
+        );
+        assert_eq!(
+            role(r#"{"role":"00000000000000000000000000000000000000000000001"}"#)
+                .expect("many zeros"),
+            (
+                1,
+                serde_json::json!("00000000000000000000000000000000000000000000001")
+            )
+        );
+        assert!(role(r#"{"role":"99999999999"}"#).is_err());
         // Explicit null is the NOT NULL column -> invalid-payload 400;
         // out-of-range ints and containers are generic 500s.
         assert!(matches!(

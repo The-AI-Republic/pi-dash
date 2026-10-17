@@ -30,7 +30,6 @@
 //!   Rust answers the documented file-decode 400 instead. The HTML page
 //!   is settings-dependent and cannot be byte-matched.
 
-use base64::Engine as _;
 use serde_json::Value;
 
 /// Which DRF default parser a content-type selects.
@@ -353,8 +352,9 @@ pub(crate) enum BodyFail {
 ///
 /// `memory_limit` is `DATA_UPLOAD_MAX_MEMORY_SIZE` (`FILE_SIZE_LIMIT`,
 /// 5242880 by default): cumulative FIELD bytes (encoded length for
-/// base64 parts) plus `len(name) + 2` per named field past it is
-/// `RequestDataTooBig`. Past `DATA_UPLOAD_MAX_NUMBER_FIELDS + 2`
+/// base64 parts) plus `len(name) + 2` (chars, not bytes) per named
+/// field past it is `RequestDataTooBig`. Past
+/// `DATA_UPLOAD_MAX_NUMBER_FIELDS + 2`
 /// (1000 + preamble/epilogue) FIELD/RAW segments, or past
 /// `DATA_UPLOAD_MAX_NUMBER_FILES` (100) named files, is
 /// `TooManyFieldsSent` / `TooManyFilesSent`. All three answer the
@@ -383,7 +383,9 @@ pub(crate) fn parse_multipart_body(
         let Some(name) = part.name else { continue };
         match part.kind {
             SegKind::Field => {
-                memory += part.content.len() + name.len() + 2;
+                // The name counts in CHARS (`len()` of the decoded
+                // `str`), not bytes — `multipartparser.py`.
+                memory += part.content.len() + name.chars().count() + 2;
                 if memory_limit < 0 || memory as u64 > memory_limit as u64 {
                     return Err(BodyFail::TooMany);
                 }
@@ -731,9 +733,7 @@ fn decode_base64_field(content: &[u8]) -> Vec<u8> {
         .copied()
         .filter(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
         .collect();
-    base64::engine::general_purpose::STANDARD
-        .decode(&filtered)
-        .unwrap_or_else(|_| content.to_vec())
+    binascii_b64decode(&filtered).unwrap_or_else(|()| content.to_vec())
 }
 
 /// Base64 file decoding: ASCII whitespace stripped, non-alphabet bytes
@@ -753,11 +753,70 @@ fn decode_base64_file(content: &[u8]) -> Result<Vec<u8>, BodyFail> {
         .copied()
         .filter(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
         .collect();
-    base64::engine::general_purpose::STANDARD
-        .decode(&filtered)
-        .map_err(|_| {
-            BodyFail::Parse("Multipart form parse error - Could not decode base64 data.".to_owned())
-        })
+    binascii_b64decode(&filtered).map_err(|()| {
+        BodyFail::Parse("Multipart form parse error - Could not decode base64 data.".to_owned())
+    })
+}
+
+/// `binascii.a2b_base64` over alphabet-filtered input (no strict crate
+/// matches it — every rule below was probed against CPython):
+/// data chars accumulate into quads (flushed at 4); a `=` pad with 0-1
+/// data chars in the quad is skipped; with 2 it skips iff the next byte
+/// is data, terminates with one byte on a following pad, and fails at
+/// end (`"AA="` is truncated); with 3 it always terminates with two
+/// bytes. A trailing short group fails (1 data char fails, 2-3 fail);
+/// all-pad input decodes to empty.
+fn binascii_b64decode(filtered: &[u8]) -> Result<Vec<u8>, ()> {
+    fn sextet(byte: u8) -> u8 {
+        match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            _ => 63,
+        }
+    }
+    let mut out = Vec::new();
+    let mut acc: Vec<u8> = Vec::new();
+    let mut index = 0;
+    while index < filtered.len() {
+        let byte = filtered[index];
+        if byte != b'=' {
+            acc.push(sextet(byte));
+            if acc.len() == 4 {
+                out.push(acc[0] << 2 | acc[1] >> 4);
+                out.push(acc[1] << 4 | acc[2] >> 2);
+                out.push(acc[2] << 6 | acc[3]);
+                acc.clear();
+            }
+            index += 1;
+            continue;
+        }
+        if acc.len() <= 1 {
+            index += 1;
+            continue;
+        }
+        if acc.len() == 2 {
+            let followed_by_data = index + 1 < filtered.len() && filtered[index + 1] != b'=';
+            if followed_by_data {
+                index += 1;
+                continue;
+            }
+            if index + 1 == filtered.len() {
+                return Err(());
+            }
+            out.push(acc[0] << 2 | acc[1] >> 4);
+            return Ok(out);
+        }
+        out.push(acc[0] << 2 | acc[1] >> 4);
+        out.push(acc[1] << 4 | acc[2] >> 2);
+        return Ok(out);
+    }
+    if acc.is_empty() {
+        Ok(out)
+    } else {
+        Err(())
+    }
 }
 
 /// `sanitize_file_name` (`multipartparser.py:382-404`): HTML-unescape,
@@ -1458,6 +1517,14 @@ mod tests {
             parse_multipart_body(ct, body.as_bytes(), 102),
             Err(BodyFail::TooMany)
         );
+        // The name counts in CHARS (`len()` of the decoded `str`), not
+        // bytes: `é` (2 bytes, 1 char) + 7 content bytes + 2 is 10.
+        let body = "--B\r\nContent-Disposition: form-data; name=\"é\"\r\n\r\n1234567";
+        assert!(parse_multipart_body(ct, body.as_bytes(), 10).is_ok());
+        assert_eq!(
+            parse_multipart_body(ct, body.as_bytes(), 9),
+            Err(BodyFail::TooMany)
+        );
         // Form: 1000 segments OK, 1001 (empties counted) trips.
         let ok = (0..1000)
             .map(|i| format!("u{i}=v"))
@@ -1644,6 +1711,64 @@ mod tests {
                 "Multipart form parse error - Could not decode base64 data.".to_owned()
             ))
         );
+    }
+
+    #[test]
+    fn base64_padding_matches_binascii() {
+        // `binascii.a2b_base64` leniency (every case probed against
+        // CPython — the strict crate decoder disagrees on all of these):
+        // pads at 0-1 data chars skip; at 2 data chars a pad skips iff
+        // data follows immediately, terminates on a following pad, and
+        // fails at end; at 3 data chars a pad always terminates; a
+        // trailing short group fails (1 data) or fails (2-3 data).
+        let field_ok: &[(&[u8], &[u8])] = &[
+            (b"====", b""),
+            (b"=", b""),
+            (b"=======", b""),
+            (b"QUJD", b"ABC"),
+            (b"QUJD====", b"ABC"),
+            (b"====AAAA", b"\x00\x00\x00"),
+            (b"AA==AA==", b"\x00"),
+            (b"AA=A==", b"\x00\x00"),
+            (b"AAA=A", b"\x00\x00"),
+            (b"AA=AA", b"\x00\x00\x00"),
+            (b"AA=AA==", b"\x00\x00\x00"),
+            (b"AAAAAAA=", b"\x00\x00\x00\x00\x00"),
+            (b"AA==A", b"\x00"),
+            (b"A=A=A=", b"\x00\x00"),
+        ];
+        for (raw, want) in field_ok {
+            assert_eq!(&decode_base64_field(raw), want, "field {raw:?}");
+            assert_eq!(
+                decode_base64_file(raw).expect("file decodes").as_slice(),
+                *want,
+                "file {raw:?}"
+            );
+        }
+        // Failures: fields fall back to raw, files 400.
+        for raw in [
+            b"A===".as_slice(),
+            b"==AA".as_slice(),
+            b"=A==".as_slice(),
+            b"AA=A".as_slice(),
+            b"A=A=".as_slice(),
+            b"=AAA".as_slice(),
+            b"A==A".as_slice(),
+            b"AA=".as_slice(),
+            b"A=".as_slice(),
+            b"A".as_slice(),
+            b"AA".as_slice(),
+            b"AAA".as_slice(),
+            b"QUJDQUI".as_slice(),
+            b"QUJDQ".as_slice(),
+            b"AAAAAA=".as_slice(),
+            b"AAAA=AAA".as_slice(),
+            b"A=B=C".as_slice(),
+            b"AB=C".as_slice(),
+        ] {
+            assert_eq!(decode_base64_field(raw), raw, "field {raw:?}");
+            assert!(decode_base64_file(raw).is_err(), "file {raw:?} 400s");
+        }
     }
 
     #[test]

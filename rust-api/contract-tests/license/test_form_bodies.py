@@ -12,14 +12,19 @@ file handling, multipart framing, and the upload caps.
 
 Deliberate pin limits (all probed, see the issue workpad):
 
-* Over-cap POST bodies on admins/email-check/workspaces, and every POST
-  multipart framing error, assert status-only: under local ``DEBUG`` the
-  Django Debug Toolbar re-parses the body after the view and replaces
-  the response (traceback page for caps, fixed 400 page for framing).
-  Prod Django and Rust answer the fixed ``Bad Request (400)`` HTML page
-  (caps) or the JSON ``ParseError`` (framing); the shared pin is the
-  status. PATCH endpoints pin byte-exact bodies (the toolbar skips
-  non-POST bodies).
+* Upload caps (``TooManyFieldsSent`` / ``TooManyFilesSent`` /
+  ``RequestDataTooBig``) escape every license view into the base
+  ``handle_exception``: prod Django answers the generic 500 JSON on all
+  five endpoints. PATCH endpoints pin that byte-exactly. POST over-cap
+  bodies are NOT pinned here: under local ``DEBUG`` the Django Debug
+  Toolbar re-parses the body in middleware after the view and replaces
+  the 500 with a traceback-400 page, so no shared pin exists (prod,
+  verified with ``DEBUG=False``, answers 500 like Rust). The decoder
+  mapping for the POST endpoints is pinned by Rust unit tests instead.
+* Every POST multipart framing error asserts status-only: the toolbar
+  re-parse likewise replaces the JSON ``ParseError`` with the fixed
+  400 page locally, while prod Django answers the JSON ``ParseError``
+  exactly like Rust. PATCH framing errors pin byte-exact bodies.
 * Member over-cap POST bodies are not pinned at all: local Django 400s
   via the toolbar while prod and Rust 403. Member PATCH over-cap pins
   the exact 403.
@@ -53,22 +58,25 @@ def mp(*parts, boundary=B):
     return body
 
 
-def field(name, value):
+def field(name, value, cte=None):
     if isinstance(value, str):
         value = value.encode()
-    return ([f'Content-Disposition: form-data; name="{name}"'], value)
+    headers = [f'Content-Disposition: form-data; name="{name}"']
+    if cte is not None:
+        headers.append(f"Content-Transfer-Encoding: {cte}")
+    return (headers, value)
 
 
-def filepart(name, filename, payload, ctype="text/plain"):
+def filepart(name, filename, payload, ctype="text/plain", cte=None):
     if isinstance(payload, str):
         payload = payload.encode()
-    return (
-        [
-            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"',
-            f"Content-Type: {ctype}",
-        ],
-        payload,
-    )
+    headers = [
+        f'Content-Disposition: form-data; name="{name}"; filename="{filename}"',
+        f"Content-Type: {ctype}",
+    ]
+    if cte is not None:
+        headers.append(f"Content-Transfer-Encoding: {cte}")
+    return (headers, payload)
 
 
 def _send(client, method, path, body, content_type):
@@ -272,6 +280,45 @@ def test_instance_multipart_quoted_semicolon_boundary_serves(admin_api):
     assert res.json()["instance_name"] == "Semi"
 
 
+def test_instance_multipart_base64_field_decodes(admin_api):
+    res = _send(
+        admin_api, "PATCH", "/api/instances/", mp(field("instance_name", "TXA=", cte="base64")), MCT
+    )
+    assert res.status_code == 200
+    assert res.json()["instance_name"] == "Mp"
+
+
+def test_instance_multipart_base64_field_bad_falls_back(admin_api):
+    # Undecodable field base64 keeps the raw bytes (`b64decode` fallback).
+    res = _send(
+        admin_api, "PATCH", "/api/instances/", mp(field("instance_name", "abc", cte="base64")), MCT
+    )
+    assert res.status_code == 200
+    assert res.json()["instance_name"] == "abc"
+
+
+def test_instance_multipart_base64_field_all_pad_is_empty(admin_api):
+    # All-padding base64 decodes to empty (`binascii` leniency), and the
+    # empty name fails blank like a form `''`.
+    res = _send(
+        admin_api, "PATCH", "/api/instances/", mp(field("instance_name", "====", cte="base64")), MCT
+    )
+    assert res.status_code == 400
+    assert res.json() == {"instance_name": ["This field may not be blank."]}
+
+
+def test_instance_multipart_base64_file_undecodable_400(admin_api):
+    res = _send(
+        admin_api,
+        "PATCH",
+        "/api/instances/",
+        mp(filepart("instance_name", "n.txt", "abc", cte="base64")),
+        MCT,
+    )
+    assert res.status_code == 400
+    assert res.json() == {"detail": "Multipart form parse error - Could not decode base64 data."}
+
+
 def test_instance_form_1000_ok_1001_500(admin_api):
     ok = "&".join(f"u{i}=v" for i in range(1000)).encode()
     res = _send(admin_api, "PATCH", "/api/instances/", ok, FORM)
@@ -428,30 +475,23 @@ def test_admins_multipart_role_file_500(admin_api):
     assert res.json() == SERVER_ERROR
 
 
-def test_admins_form_over_cap_400(admin_api):
-    over = "&".join(f"u{i}=v" for i in range(1001)).encode()
-    res = _send(admin_api, "POST", "/api/instances/admins/", over, FORM)
-    assert res.status_code == 400
-
-
-def test_admins_multipart_over_cap_400(admin_api):
-    over = (
-        b"".join(
-            b"--" + B.encode() + b'\r\nContent-Disposition: form-data; name="u%d"\r\n\r\nv\r\n' % i
-            for i in range(1001)
-        )
-        + b"--" + B.encode() + b"--\r\n"
-    )
-    res = _send(admin_api, "POST", "/api/instances/admins/", over, MCT)
-    assert res.status_code == 400
+def test_admins_form_role_leading_zeros_201(admin_api):
+    # `int()` takes the value, not the width: 11 chars still fit `i32`.
+    # The echo is the raw input (`str(value) != "20"`).
     res = _send(
-        admin_api,
-        "POST",
-        "/api/instances/admins/",
-        mp(*[filepart(f"f{i}", f"f{i}.txt", "x") for i in range(101)]),
-        MCT,
+        admin_api, "POST", "/api/instances/admins/", b"email=member@example.com&role=00000000001", FORM
     )
-    assert res.status_code == 400
+    assert res.status_code == 201
+    assert res.json()["role"] == "00000000001"
+
+
+def test_admins_form_role_control_char_500(admin_api):
+    # `int()` never strips U+001C (unlike every other whitespace).
+    res = _send(
+        admin_api, "POST", "/api/instances/admins/", b"email=member@example.com&role=%1C20", FORM
+    )
+    assert res.status_code == 500
+    assert res.json() == SERVER_ERROR
 
 
 def test_admins_multipart_framing_400(admin_api):
@@ -578,21 +618,6 @@ def test_mailcheck_multipart_requires_receiver(admin_api):
     )
     assert res.status_code == 400
     assert res.json() == RECEIVER_REQUIRED
-
-
-def test_mailcheck_over_cap_400(admin_api):
-    over = "&".join(f"u{i}=v" for i in range(1001)).encode()
-    res = _send(admin_api, "POST", "/api/instances/email-credentials-check/", over, FORM)
-    assert res.status_code == 400
-    over_mp = (
-        b"".join(
-            b"--" + B.encode() + b'\r\nContent-Disposition: form-data; name="u%d"\r\n\r\nv\r\n' % i
-            for i in range(1001)
-        )
-        + b"--" + B.encode() + b"--\r\n"
-    )
-    res = _send(admin_api, "POST", "/api/instances/email-credentials-check/", over_mp, MCT)
-    assert res.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -726,24 +751,18 @@ def test_workspaces_multipart_name_trims_trailing_breaks(admin_api):
     assert res.json()["name"] == "N"
 
 
-def test_workspaces_over_cap_400(admin_api):
-    over = "&".join(f"u{i}=v" for i in range(1001)).encode()
-    res = _send(admin_api, "POST", "/api/instances/workspaces/", over, FORM)
-    assert res.status_code == 400
-    over_mp = (
-        b"".join(
-            b"--" + B.encode() + b'\r\nContent-Disposition: form-data; name="u%d"\r\n\r\nv\r\n' % i
-            for i in range(1001)
-        )
-        + b"--" + B.encode() + b"--\r\n"
-    )
-    res = _send(admin_api, "POST", "/api/instances/workspaces/", over_mp, MCT)
-    assert res.status_code == 400
+def test_workspaces_multipart_base64_file_sizes_decoded(admin_api):
+    # `len(file)` is the DECODED size: 108 chars of `Q` decode to 81
+    # bytes, tripping the view's 80-char name limit on both backends.
     res = _send(
         admin_api,
         "POST",
         "/api/instances/workspaces/",
-        mp(*[filepart(f"f{i}", f"f{i}.txt", "x") for i in range(101)]),
+        mp(
+            field("slug", "s13"),
+            filepart("name", "n.txt", "Q" * 108, cte="base64"),
+        ),
         MCT,
     )
     assert res.status_code == 400
+    assert res.json() == {"error": "The maximum length for name is 80 and for slug is 48"}
