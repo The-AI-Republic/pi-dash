@@ -195,14 +195,23 @@ describe("notificationsEmailPreferencesCompletedNested", () => {
         if (id === "email-prefs-completed-nest") {
           return {
             first: () => ({
-              getByRole: () => ({ count: async () => count, first: () => ({ boundingBox: failBox(completedBox) }) }),
+              getByRole: (role: string, options?: { name: string; exact: boolean }) => {
+                if (options === undefined) {
+                  expect(role).toBe("switch");
+                  return { count: async () => count };
+                }
+                expect(role).toBe("heading");
+                expect(options).toEqual({ name: "Completed items only", exact: true });
+                return { boundingBox: failBox(completedBox) };
+              },
             }),
           };
         }
         expect(id).toBe("email-prefs-form");
         return {
           first: () => ({
-            getByRole: (_role: string, options: { name: string; exact: boolean }) => {
+            getByRole: (role: string, options: { name: string; exact: boolean }) => {
+              expect(role).toBe("heading");
               expect(options).toEqual({ name: "State changes", exact: true });
               return { boundingBox: failBox(stateBox) };
             },
@@ -221,15 +230,15 @@ describe("notificationsEmailPreferencesCompletedNested", () => {
     );
   });
 
-  it("rejects a missing state box", async () => {
+  it("rejects a missing state heading box", async () => {
     await expect(nestedPage(1, gone, { x: 10 }).notificationsEmailPreferencesCompletedNested()).resolves.toBe(false);
   });
 
-  it("rejects a missing completed box", async () => {
+  it("rejects a missing completed heading box", async () => {
     await expect(nestedPage(1, { x: 0 }, gone).notificationsEmailPreferencesCompletedNested()).resolves.toBe(false);
   });
 
-  it("accepts an indented completed switch", async () => {
+  it("accepts an indented completed heading", async () => {
     await expect(
       nestedPage(
         1,
@@ -239,7 +248,7 @@ describe("notificationsEmailPreferencesCompletedNested", () => {
     ).resolves.toBe(true);
   });
 
-  it("rejects a completed switch level with the state switch", async () => {
+  it("rejects a completed heading level with the state heading", async () => {
     await expect(
       nestedPage(
         1,

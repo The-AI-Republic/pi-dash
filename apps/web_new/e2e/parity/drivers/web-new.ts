@@ -8399,14 +8399,15 @@ export class WebNewDriver implements ParityDriver {
   async notificationsEmailPreferencesCompletedNested(): Promise<boolean> {
     const nest = this.page.getByTestId("email-prefs-completed-nest").first();
     if ((await nest.getByRole("switch").count()) !== 1) return false;
+    // Both rows spread their switch to the trailing edge, so the switches
+    // sit at the same x; the nesting shows in the headings instead.
     const form = this.page.getByTestId("email-prefs-form").first();
     const stateBox = await form
-      .getByRole("switch", { name: "State changes", exact: true })
+      .getByRole("heading", { name: WebNewDriver.emailPrefNames.state_change, exact: true })
       .boundingBox()
       .catch(() => null);
     const completedBox = await nest
-      .getByRole("switch")
-      .first()
+      .getByRole("heading", { name: WebNewDriver.emailPrefNames.issue_completed, exact: true })
       .boundingBox()
       .catch(() => null);
     if (stateBox === null || completedBox === null) return false;
