@@ -30,7 +30,8 @@ export interface StatePickerProps {
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
 
-function StateGlyph({ option, size = 16 }: { option: StateOption; size?: number }): React.ReactElement {
+/** Group glyph in the state's own color; the intake picker reuses it for triage states. */
+export function StateGlyph({ option, size = 16 }: { option: StateOption; size?: number }): React.ReactElement {
   const Icon = STATE_GROUP_ICONS[option.group];
   return <Icon size={size} strokeWidth={1.5} style={{ color: option.color }} aria-hidden="true" />;
 }
