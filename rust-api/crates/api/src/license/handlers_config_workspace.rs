@@ -95,7 +95,10 @@ use chrono_tz::Tz;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use super::{json_response, owned, query_last, require_admin, Actor, Denial, QueryMap};
+use super::{
+    file_asset_url, json_response, owned, query_last, require_admin, Actor, AssetUrl, Denial,
+    QueryMap,
+};
 use crate::state::AppState;
 
 /// Register the five configuration/workspace paths. Sibling license paths
@@ -1860,7 +1863,13 @@ async fn render_workspace_row(
         // The FK is non-nullable; a missing owner row cannot render.
         return Err(Denial::ServerError);
     };
-    let logo_url = workspace_logo_url(pool, row).await?;
+    let resolved_logo_url =
+        workspace_logo_url(pool, row.logo_asset_id, row.logo.as_deref()).await?;
+    let skip_logo_url = matches!(resolved_logo_url, AssetUrl::Skip);
+    let logo_url = match resolved_logo_url {
+        AssetUrl::Present(url) => url,
+        AssetUrl::Skip => None,
+    };
     let view = pidash_types::license::serializers_workspace::Workspace {
         id: row.id.to_string(),
         owner: pidash_types::license::serializers_workspace::UserLite {
@@ -1888,22 +1897,32 @@ async fn render_workspace_row(
         updated_by: row.updated_by_id.map(|id| id.to_string()),
         logo_asset: row.logo_asset_id.map(|id| id.to_string()),
     };
-    serde_json::to_value(&view).map_err(|_| Denial::ServerError)
+    let mut body = serde_json::to_value(&view).map_err(|_| Denial::ServerError)?;
+    if skip_logo_url {
+        // DRF `SkipField`: the key is omitted, not nulled.
+        if let Some(object) = body.as_object_mut() {
+            object.remove("logo_url");
+        }
+    }
+    Ok(body)
 }
 
-/// `Workspace.logo_url` (`db/models/workspace.py:145-154`):
-/// `logo_asset.asset_url` when a live asset row exists, else `logo` when
-/// set, else `None`. `asset_url` (`db/models/asset.py:80-98`) renders by
-/// `entity_type`; `None` fills render as `"None"`, exactly like the
-/// f-strings do.
+/// `Workspace.logo_url` (`db/models/workspace.py:145-154`): the
+/// `logo_asset` row resolved *unscoped* — the forward-FK descriptor reads
+/// through `_base_manager`, so a soft-deleted asset still renders — feeds
+/// [`file_asset_url`]; only a NULL FK falls back to `logo` when set, else
+/// `None`. A dangling FK (row gone; FK-unreachable in practice) raises
+/// `RelatedObjectDoesNotExist`, an `AttributeError`, hence `Skip`.
 async fn workspace_logo_url(
     pool: &sqlx::PgPool,
-    row: &pidash_db::license::queries::WorkspaceListRow,
-) -> Result<Option<String>, Denial> {
-    let Some(asset_id) = row.logo_asset_id else {
-        return Ok(row.logo.clone().filter(|logo| !logo.is_empty()));
+    logo_asset_id: Option<uuid::Uuid>,
+    logo: Option<&str>,
+) -> Result<AssetUrl, Denial> {
+    let fallback = || AssetUrl::Present(logo.filter(|logo| !logo.is_empty()).map(str::to_owned));
+    let Some(asset_id) = logo_asset_id else {
+        return Ok(fallback());
     };
-    // `(id, entity_type, workspace_id, project_id, issue_id)`.
+    // `(id, entity_type, workspace_id, project_id, issue_id)`, unscoped.
     type AssetRow = (
         uuid::Uuid,
         Option<String>,
@@ -1911,66 +1930,41 @@ async fn workspace_logo_url(
         Option<uuid::Uuid>,
         Option<uuid::Uuid>,
     );
-    let asset: Option<AssetRow> = sqlx::query_as(
-        r#"SELECT id, entity_type, workspace_id, project_id, issue_id
-               FROM file_assets WHERE id = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let asset: Option<AssetRow> =
+        sqlx::query_as(r#"SELECT id, entity_type, workspace_id, project_id, issue_id FROM file_assets WHERE id = $1"#)
+            .bind(asset_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     let Some((id, entity_type, workspace_id, project_id, issue_id)) = asset else {
-        return Ok(row.logo.clone().filter(|logo| !logo.is_empty()));
+        return Ok(AssetUrl::Skip);
     };
-    let url = match entity_type.as_deref() {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
-            Some(format!("/api/assets/v2/static/{id}/"))
-        }
-        Some("ISSUE_ATTACHMENT") => {
-            let slug = asset_workspace_slug(pool, workspace_id).await?;
-            Some(format!(
-                "/api/assets/v2/workspaces/{}/projects/{}/issues/{}/attachments/{id}/",
-                slug,
-                none_str(&project_id.map(|id| id.to_string())),
-                none_str(&issue_id.map(|id| id.to_string())),
-            ))
-        }
-        Some(
-            "ISSUE_DESCRIPTION"
-            | "COMMENT_DESCRIPTION"
-            | "PAGE_DESCRIPTION"
-            | "DRAFT_ISSUE_DESCRIPTION",
-        ) => {
-            let slug = asset_workspace_slug(pool, workspace_id).await?;
-            Some(format!(
-                "/api/assets/v2/workspaces/{}/projects/{}/{id}/",
-                slug,
-                none_str(&project_id.map(|id| id.to_string())),
-            ))
-        }
-        _ => None,
+    let slug = match workspace_id {
+        None => None,
+        Some(workspace_id) => asset_workspace_slug(pool, workspace_id).await?,
     };
-    Ok(url.or_else(|| row.logo.clone().filter(|logo| !logo.is_empty())))
+    Ok(file_asset_url(
+        &id,
+        entity_type.as_deref(),
+        workspace_id.as_ref(),
+        project_id.as_ref(),
+        issue_id.as_ref(),
+        slug.as_deref(),
+    ))
 }
 
 async fn asset_workspace_slug(
     pool: &sqlx::PgPool,
-    workspace_id: Option<uuid::Uuid>,
-) -> Result<String, Denial> {
-    let Some(workspace_id) = workspace_id else {
-        return Ok("None".to_owned());
-    };
+    workspace_id: uuid::Uuid,
+) -> Result<Option<String>, Denial> {
+    // Unscoped, like the forward-FK descriptor; a missing row is the
+    // `RelatedObjectDoesNotExist` path (`Skip` at the caller).
     let row: Option<(String,)> = sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)
         .bind(workspace_id)
         .fetch_optional(pool)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0).unwrap_or_else(|| "None".to_owned()))
-}
-
-/// Python `str(None)` inside the asset-URL f-strings.
-fn none_str(value: &Option<String>) -> String {
-    value.clone().unwrap_or_else(|| "None".to_owned())
+    Ok(row.map(|row| row.0))
 }
 
 // ---------------------------------------------------------------------------
@@ -2183,7 +2177,18 @@ async fn create_workspace(
     }
     // `Response(serializer.data, 201)`: annotations are absent on a fresh
     // row, so `total_projects`/`total_members` are skipped, exactly like
-    // DRF's `SkipField`.
+    // DRF's `SkipField`. `logo_url` renders through the model property,
+    // resolving the just-validated `logo_asset` like the list path.
+    let resolved_logo_url =
+        match workspace_logo_url(&pool, validated.logo_asset, validated.logo.as_deref()).await {
+            Ok(resolved) => resolved,
+            Err(denial) => return denial.into_response(),
+        };
+    let skip_logo_url = matches!(resolved_logo_url, AssetUrl::Skip);
+    let logo_url = match resolved_logo_url {
+        AssetUrl::Present(url) => url,
+        AssetUrl::Skip => None,
+    };
     let view = pidash_types::license::serializers_workspace::Workspace {
         id: workspace_id.to_string(),
         owner: pidash_types::license::serializers_workspace::UserLite {
@@ -2192,7 +2197,7 @@ async fn create_workspace(
             first_name: actor.first_name.clone(),
             last_name: actor.last_name.clone(),
         },
-        logo_url: validated.logo.clone().filter(|logo| !logo.is_empty()),
+        logo_url,
         total_projects: None,
         total_members: None,
         created_at: crate::serializer::render_datetime_in(&created_at, &actor.timezone),
@@ -2211,7 +2216,16 @@ async fn create_workspace(
         updated_by: None,
         logo_asset: validated.logo_asset.map(|id| id.to_string()),
     };
-    let body = serde_json::to_string(&view).expect("workspace view serializes");
+    // `to_value` keeps declaration order (`preserve_order`), so this matches
+    // the direct serialization byte for byte when nothing is skipped.
+    let mut body_value = serde_json::to_value(&view).expect("workspace view serializes");
+    if skip_logo_url {
+        // DRF `SkipField`: the key is omitted, not nulled.
+        if let Some(object) = body_value.as_object_mut() {
+            object.remove("logo_url");
+        }
+    }
+    let body = serde_json::to_string(&body_value).expect("workspace view serializes");
     Response::builder()
         .status(StatusCode::CREATED)
         .header(axum::http::header::CONTENT_TYPE, "application/json")

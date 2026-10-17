@@ -81,6 +81,7 @@ use pidash_types::license::serializers_core::{
 };
 
 use super::handlers_auth_forms as forms;
+use super::{file_asset_url, AssetUrl};
 use crate::auth_session::render::render_csrf_failure;
 use crate::edge;
 use crate::middleware::SessionHandle;
@@ -382,30 +383,40 @@ fn pools(state: &AppState) -> Result<&PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-/// One `users` row projected for the lite/me shapes, with the avatar asset
-/// URL rule (`user.py:143-151`): the asset's `asset_url` wins, else the
-/// raw `avatar` string when non-empty, else null. Only the four static
-/// `entity_type`s render without a workspace/project context
-/// (`asset.py:80-87`); any other asset falls through to the raw avatar.
+/// `User.avatar_url` (`db/models/user.py:143-151`): the `avatar_asset`
+/// row resolved *unscoped* — the forward-FK descriptor reads through
+/// `_base_manager`, so a soft-deleted asset still renders — feeds
+/// [`file_asset_url`]; only a NULL FK falls back to the raw `avatar` string
+/// (non-empty) or null. A dangling FK (row gone; FK-unreachable in practice)
+/// raises `RelatedObjectDoesNotExist`, an `AttributeError`, hence `Skip`.
 #[allow(clippy::too_many_arguments)]
 fn avatar_url(
     asset_id: Option<Uuid>,
+    asset_row: Option<Uuid>,
     asset_entity: Option<String>,
+    asset_workspace: Option<Uuid>,
+    asset_project: Option<Uuid>,
+    asset_issue: Option<Uuid>,
+    asset_workspace_slug: Option<String>,
     avatar: &str,
-) -> Option<String> {
-    if let Some(asset) = asset_id {
-        if matches!(
-            asset_entity.as_deref(),
-            Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER")
-        ) {
-            return Some(format!("/api/assets/v2/static/{asset}/"));
+) -> AssetUrl {
+    if asset_id.is_none() {
+        if avatar.is_empty() {
+            return AssetUrl::Present(None);
         }
+        return AssetUrl::Present(Some(avatar.to_owned()));
     }
-    if avatar.is_empty() {
-        None
-    } else {
-        Some(avatar.to_owned())
-    }
+    let Some(row) = asset_row else {
+        return AssetUrl::Skip;
+    };
+    file_asset_url(
+        &row,
+        asset_entity.as_deref(),
+        asset_workspace.as_ref(),
+        asset_project.as_ref(),
+        asset_issue.as_ref(),
+        asset_workspace_slug.as_deref(),
+    )
 }
 
 /// Full `users` projection shared by `me`, `session`, and `user_detail`.
@@ -420,7 +431,12 @@ struct UserShape {
     last_name: Option<String>,
     avatar: Option<String>,
     avatar_asset_id: Option<Uuid>,
+    avatar_asset_row: Option<Uuid>,
     avatar_asset_entity: Option<String>,
+    avatar_asset_workspace: Option<Uuid>,
+    avatar_asset_project: Option<Uuid>,
+    avatar_asset_issue: Option<Uuid>,
+    avatar_asset_workspace_slug: Option<String>,
     cover_image: Option<String>,
     date_joined: Option<DateTime<Utc>>,
     display_name: Option<String>,
@@ -434,11 +450,13 @@ struct UserShape {
     last_login_medium: Option<String>,
 }
 
-const USER_SHAPE_SELECT: &str = "u.id AS id, u.first_name AS first_name, u.last_name AS last_name, u.avatar AS avatar, u.avatar_asset_id AS avatar_asset_id, fa.entity_type AS avatar_asset_entity, u.cover_image AS cover_image, u.date_joined AS date_joined, u.display_name AS display_name, u.email AS email, u.is_active AS is_active, u.is_bot AS is_bot, u.is_email_verified AS is_email_verified, u.user_timezone AS user_timezone, u.username AS username, u.is_password_autoset AS is_password_autoset, u.last_login_medium AS last_login_medium";
+const USER_SHAPE_SELECT: &str = "u.id AS id, u.first_name AS first_name, u.last_name AS last_name, u.avatar AS avatar, u.avatar_asset_id AS avatar_asset_id, fa.id AS avatar_asset_row, fa.entity_type AS avatar_asset_entity, fa.workspace_id AS avatar_asset_workspace, fa.project_id AS avatar_asset_project, fa.issue_id AS avatar_asset_issue, w.slug AS avatar_asset_workspace_slug, u.cover_image AS cover_image, u.date_joined AS date_joined, u.display_name AS display_name, u.email AS email, u.is_active AS is_active, u.is_bot AS is_bot, u.is_email_verified AS is_email_verified, u.user_timezone AS user_timezone, u.username AS username, u.is_password_autoset AS is_password_autoset, u.last_login_medium AS last_login_medium";
 
 async fn fetch_user(pool: &PgPool, user_id: &Uuid) -> Result<Option<UserShape>, Denial> {
+    // Both joins are deliberately unscoped: the forward-FK descriptor reads
+    // through `_base_manager`, so soft-deleted assets/workspaces resolve.
     let row: Option<UserShape> = sqlx::query_as(&format!(
-        "SELECT {USER_SHAPE_SELECT} FROM users u LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id AND fa.deleted_at IS NULL WHERE u.id = $1"
+        "SELECT {USER_SHAPE_SELECT} FROM users u LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id LEFT JOIN workspaces w ON w.id = fa.workspace_id WHERE u.id = $1"
     ))
     .bind(user_id)
     .fetch_optional(pool)
@@ -454,11 +472,21 @@ async fn fetch_user(pool: &PgPool, user_id: &Uuid) -> Result<Option<UserShape>, 
 /// data — Django would 500 rendering it, so this maps to `ServerError`.
 fn render_me(user: &UserShape, tz: &Tz) -> Result<Value, Denial> {
     let date_joined = user.date_joined.as_ref().ok_or(Denial::ServerError)?;
-    let owned_avatar_url = avatar_url(
+    let resolved_avatar_url = avatar_url(
         user.avatar_asset_id,
+        user.avatar_asset_row,
         user.avatar_asset_entity.clone(),
+        user.avatar_asset_workspace,
+        user.avatar_asset_project,
+        user.avatar_asset_issue,
+        user.avatar_asset_workspace_slug.clone(),
         user.avatar.as_deref().unwrap_or(""),
     );
+    let skip_avatar_url = matches!(resolved_avatar_url, AssetUrl::Skip);
+    let owned_avatar_url = match resolved_avatar_url {
+        AssetUrl::Present(url) => url,
+        AssetUrl::Skip => None,
+    };
     // Owned strings first: the row borrows them and the view borrows the
     // row, so everything must outlive `to_value` below.
     let owned_id = user.id.as_ref().ok_or(Denial::ServerError)?.to_string();
@@ -481,7 +509,14 @@ fn render_me(user: &UserShape, tz: &Tz) -> Result<Value, Denial> {
         is_password_autoset: user.is_password_autoset.unwrap_or(false),
     };
     let view = instance_admin_me_to_representation(&row);
-    serde_json::to_value(&view).map_err(|_| Denial::ServerError)
+    let mut body = serde_json::to_value(&view).map_err(|_| Denial::ServerError)?;
+    if skip_avatar_url {
+        // DRF `SkipField`: the key is omitted, not nulled.
+        if let Some(object) = body.as_object_mut() {
+            object.remove("avatar_url");
+        }
+    }
+    Ok(body)
 }
 
 /// Render one admin row through `InstanceAdminSerializer`
@@ -515,16 +550,29 @@ fn render_admin(
     struct LiteOwned {
         id: String,
         avatar_url: Option<String>,
+        skip_avatar_url: bool,
     }
     let owned_lite: Option<LiteOwned> = match user {
-        Some(shape) => Some(LiteOwned {
-            id: shape.id.as_ref().ok_or(Denial::ServerError)?.to_string(),
-            avatar_url: avatar_url(
+        Some(shape) => {
+            let resolved = avatar_url(
                 shape.avatar_asset_id,
+                shape.avatar_asset_row,
                 shape.avatar_asset_entity.clone(),
+                shape.avatar_asset_workspace,
+                shape.avatar_asset_project,
+                shape.avatar_asset_issue,
+                shape.avatar_asset_workspace_slug.clone(),
                 shape.avatar.as_deref().unwrap_or(""),
-            ),
-        }),
+            );
+            Some(LiteOwned {
+                id: shape.id.as_ref().ok_or(Denial::ServerError)?.to_string(),
+                skip_avatar_url: matches!(resolved, AssetUrl::Skip),
+                avatar_url: match resolved {
+                    AssetUrl::Present(url) => url,
+                    AssetUrl::Skip => None,
+                },
+            })
+        }
         None => None,
     };
     let lite = owned_lite
@@ -555,7 +603,17 @@ fn render_admin(
         instance_id: &owned_instance_id,
     };
     let view = instance_admin_to_representation(&row);
-    serde_json::to_value(&view).map_err(|_| Denial::ServerError)
+    let mut body = serde_json::to_value(&view).map_err(|_| Denial::ServerError)?;
+    if owned_lite
+        .as_ref()
+        .is_some_and(|owned| owned.skip_avatar_url)
+    {
+        // DRF `SkipField`: the key is omitted, not nulled.
+        if let Some(detail) = body.get_mut("user_detail").and_then(Value::as_object_mut) {
+            detail.remove("avatar_url");
+        }
+    }
+    Ok(body)
 }
 
 /// Parse a POST body the way DRF `_parse` + `JSONParser` do: empty body
@@ -806,15 +864,22 @@ async fn list_admins(
         u_last_name: Option<String>,
         u_avatar: Option<String>,
         u_avatar_asset_id: Option<Uuid>,
+        u_avatar_asset_row: Option<Uuid>,
         u_avatar_asset_entity: Option<String>,
+        u_avatar_asset_workspace: Option<Uuid>,
+        u_avatar_asset_project: Option<Uuid>,
+        u_avatar_asset_issue: Option<Uuid>,
+        u_avatar_asset_workspace_slug: Option<String>,
         u_is_bot: Option<bool>,
         u_display_name: Option<String>,
         u_email: Option<String>,
         u_last_login_medium: Option<String>,
     }
 
+    // The asset joins are deliberately unscoped (see `fetch_user`): the
+    // forward-FK descriptor reads through `_base_manager`.
     let rows: Vec<AdminListRow> = sqlx::query_as(
-        "SELECT a.id AS id, a.created_at AS created_at, a.updated_at AS updated_at, a.deleted_at AS deleted_at, a.role AS role, a.is_verified AS is_verified, a.created_by_id AS created_by_id, a.updated_by_id AS updated_by_id, a.user_id AS user_id, a.instance_id AS instance_id, u.id AS u_id, u.first_name AS u_first_name, u.last_name AS u_last_name, u.avatar AS u_avatar, u.avatar_asset_id AS u_avatar_asset_id, fa.entity_type AS u_avatar_asset_entity, u.is_bot AS u_is_bot, u.display_name AS u_display_name, u.email AS u_email, u.last_login_medium AS u_last_login_medium FROM instance_admins a LEFT JOIN users u ON u.id = a.user_id LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id AND fa.deleted_at IS NULL WHERE a.instance_id = $1 AND a.deleted_at IS NULL ORDER BY a.created_at DESC",
+        "SELECT a.id AS id, a.created_at AS created_at, a.updated_at AS updated_at, a.deleted_at AS deleted_at, a.role AS role, a.is_verified AS is_verified, a.created_by_id AS created_by_id, a.updated_by_id AS updated_by_id, a.user_id AS user_id, a.instance_id AS instance_id, u.id AS u_id, u.first_name AS u_first_name, u.last_name AS u_last_name, u.avatar AS u_avatar, u.avatar_asset_id AS u_avatar_asset_id, fa.id AS u_avatar_asset_row, fa.entity_type AS u_avatar_asset_entity, fa.workspace_id AS u_avatar_asset_workspace, fa.project_id AS u_avatar_asset_project, fa.issue_id AS u_avatar_asset_issue, w.slug AS u_avatar_asset_workspace_slug, u.is_bot AS u_is_bot, u.display_name AS u_display_name, u.email AS u_email, u.last_login_medium AS u_last_login_medium FROM instance_admins a LEFT JOIN users u ON u.id = a.user_id LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id LEFT JOIN workspaces w ON w.id = fa.workspace_id WHERE a.instance_id = $1 AND a.deleted_at IS NULL ORDER BY a.created_at DESC",
     )
     .bind(instance_id)
     .fetch_all(pool)
@@ -829,7 +894,12 @@ async fn list_admins(
             last_name: row.u_last_name.clone(),
             avatar: row.u_avatar.clone(),
             avatar_asset_id: row.u_avatar_asset_id,
+            avatar_asset_row: row.u_avatar_asset_row,
             avatar_asset_entity: row.u_avatar_asset_entity.clone(),
+            avatar_asset_workspace: row.u_avatar_asset_workspace,
+            avatar_asset_project: row.u_avatar_asset_project,
+            avatar_asset_issue: row.u_avatar_asset_issue,
+            avatar_asset_workspace_slug: row.u_avatar_asset_workspace_slug.clone(),
             cover_image: None,
             date_joined: None,
             display_name: row.u_display_name.clone(),
@@ -2217,23 +2287,100 @@ mod tests {
     #[test]
     fn avatar_url_follows_the_property_branches() {
         let asset = Some(Uuid::nil());
-        assert_eq!(
-            avatar_url(asset, Some("USER_AVATAR".to_owned()), ""),
-            Some("/api/assets/v2/static/00000000-0000-0000-0000-000000000000/".to_owned())
-        );
-        // A non-static entity type falls through to the raw avatar.
+        let ws = Some(Uuid::nil());
+        // A resolved static-entity row renders its URL (soft-deleted rows
+        // resolve too — the join is unscoped, like `_base_manager`).
         assert_eq!(
             avatar_url(
                 asset,
-                Some("ISSUE_ATTACHMENT".to_owned()),
+                asset,
+                Some("USER_AVATAR".to_owned()),
+                None,
+                None,
+                None,
+                None,
+                ""
+            ),
+            AssetUrl::Present(Some(
+                "/api/assets/v2/static/00000000-0000-0000-0000-000000000000/".to_owned()
+            ))
+        );
+        // NULL/other entities pass None through (no fallback to the raw
+        // avatar); a NULL workspace on an attachment skips the key.
+        assert_eq!(
+            avatar_url(
+                asset,
+                asset,
+                None,
+                None,
+                None,
+                None,
+                None,
                 "https://cdn/x.png"
             ),
-            Some("https://cdn/x.png".to_owned())
+            AssetUrl::Present(None)
         );
-        assert_eq!(avatar_url(None, None, ""), None);
         assert_eq!(
-            avatar_url(None, None, "https://cdn/x.png"),
-            Some("https://cdn/x.png".to_owned())
+            avatar_url(
+                asset,
+                asset,
+                Some("ISSUE_ATTACHMENT".to_owned()),
+                None,
+                None,
+                None,
+                None,
+                "https://cdn/x.png"
+            ),
+            AssetUrl::Skip
+        );
+        // A workspace-backed attachment renders its full URL.
+        assert_eq!(
+            avatar_url(
+                asset,
+                asset,
+                Some("ISSUE_ATTACHMENT".to_owned()),
+                ws,
+                None,
+                None,
+                Some("acme".to_owned()),
+                "https://cdn/x.png"
+            ),
+            AssetUrl::Present(Some(
+                "/api/assets/v2/workspaces/acme/projects/None/issues/None/attachments/00000000-0000-0000-0000-000000000000/"
+                    .to_owned()
+            ))
+        );
+        // A dangling FK skips (`RelatedObjectDoesNotExist` is an
+        // `AttributeError`); only a NULL FK falls back to the raw avatar.
+        assert_eq!(
+            avatar_url(
+                asset,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "https://cdn/x.png"
+            ),
+            AssetUrl::Skip
+        );
+        assert_eq!(
+            avatar_url(None, None, None, None, None, None, None, ""),
+            AssetUrl::Present(None)
+        );
+        assert_eq!(
+            avatar_url(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "https://cdn/x.png"
+            ),
+            AssetUrl::Present(Some("https://cdn/x.png".to_owned()))
         );
     }
 
@@ -2244,7 +2391,12 @@ mod tests {
             last_name: Some("Lovelace".to_owned()),
             avatar: Some(String::new()),
             avatar_asset_id: None,
+            avatar_asset_row: None,
             avatar_asset_entity: None,
+            avatar_asset_workspace: None,
+            avatar_asset_project: None,
+            avatar_asset_issue: None,
+            avatar_asset_workspace_slug: None,
             cover_image: None,
             date_joined: Some(
                 DateTime::parse_from_rfc3339("2026-01-15T12:30:45Z")

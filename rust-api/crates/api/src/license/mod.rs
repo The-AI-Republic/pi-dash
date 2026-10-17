@@ -174,6 +174,72 @@ pub fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
+/// `FileAsset.asset_url` (`db/models/asset.py:80-100`) as seen through a
+/// non-required DRF field: `Present(url)` renders the key (`None` is JSON
+/// null, the unknown-entity passthrough), `Skip` omits it — the
+/// `AttributeError` raised inside the property (NULL or dangling workspace
+/// on attachment/description entities) is caught by DRF's
+/// `Field.get_attribute` and becomes `SkipField`
+/// (`rest_framework/fields.py:445-451`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssetUrl {
+    Present(Option<String>),
+    Skip,
+}
+
+/// Pure `asset_url` for a resolved (unscoped) asset row: `entity` is the
+/// raw `entity_type` (NULL/other yields `None`, never a fallback),
+/// `workspace_slug` the unscoped workspace slug when `workspace_id` is
+/// `Some`. A NULL `workspace_id`, or a `Some` id with no row (FK-unreachable
+/// in practice), is the `None.slug` / `RelatedObjectDoesNotExist` path, both
+/// `AttributeError`s, hence `Skip`.
+pub fn file_asset_url(
+    id: &uuid::Uuid,
+    entity: Option<&str>,
+    workspace_id: Option<&uuid::Uuid>,
+    project_id: Option<&uuid::Uuid>,
+    issue_id: Option<&uuid::Uuid>,
+    workspace_slug: Option<&str>,
+) -> AssetUrl {
+    match entity {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+            AssetUrl::Present(Some(format!("/api/assets/v2/static/{id}/")))
+        }
+        Some("ISSUE_ATTACHMENT") => {
+            let (Some(_), Some(slug)) = (workspace_id, workspace_slug) else {
+                return AssetUrl::Skip;
+            };
+            AssetUrl::Present(Some(format!(
+                "/api/assets/v2/workspaces/{}/projects/{}/issues/{}/attachments/{id}/",
+                slug,
+                none_str(&project_id.map(uuid::Uuid::to_string)),
+                none_str(&issue_id.map(uuid::Uuid::to_string)),
+            )))
+        }
+        Some(
+            "ISSUE_DESCRIPTION"
+            | "COMMENT_DESCRIPTION"
+            | "PAGE_DESCRIPTION"
+            | "DRAFT_ISSUE_DESCRIPTION",
+        ) => {
+            let (Some(_), Some(slug)) = (workspace_id, workspace_slug) else {
+                return AssetUrl::Skip;
+            };
+            AssetUrl::Present(Some(format!(
+                "/api/assets/v2/workspaces/{}/projects/{}/{id}/",
+                slug,
+                none_str(&project_id.map(uuid::Uuid::to_string)),
+            )))
+        }
+        _ => AssetUrl::Present(None),
+    }
+}
+
+/// Python `str(None)` inside the asset-URL f-strings.
+fn none_str(value: &Option<String>) -> String {
+    value.clone().unwrap_or_else(|| "None".to_owned())
+}
+
 /// One `users` row for session resolution:
 /// `(id, email, first_name, last_name, password, is_active, user_timezone)`.
 type UserLookupRow = (
@@ -453,6 +519,72 @@ pub fn routes() -> Router<AppState> {
     handlers_instance::routes()
         .merge(config_workspace_routes())
         .merge(handlers_admin::routes())
+}
+
+#[cfg(test)]
+mod asset_url_tests {
+    use super::*;
+
+    #[test]
+    fn file_asset_url_follows_asset_py_branches() {
+        let id = uuid::Uuid::nil();
+        let ws = uuid::Uuid::nil();
+        let proj = uuid::Uuid::nil();
+        let issue = uuid::Uuid::nil();
+        // Static entities render without any context.
+        assert_eq!(
+            file_asset_url(&id, Some("USER_AVATAR"), None, None, None, None),
+            AssetUrl::Present(Some(
+                "/api/assets/v2/static/00000000-0000-0000-0000-000000000000/".to_owned()
+            ))
+        );
+        // NULL/other entities pass None through (no fallback).
+        assert_eq!(
+            file_asset_url(&id, None, None, None, None, None),
+            AssetUrl::Present(None)
+        );
+        assert_eq!(
+            file_asset_url(&id, Some("DRAFT_ISSUE_ATTACHMENT"), None, None, None, None),
+            AssetUrl::Present(None)
+        );
+        // Attachment/description entities need the workspace slug; a NULL
+        // workspace (or a dangling id) is the AttributeError path: Skip.
+        assert_eq!(
+            file_asset_url(&id, Some("ISSUE_ATTACHMENT"), None, None, None, None),
+            AssetUrl::Skip
+        );
+        assert_eq!(
+            file_asset_url(&id, Some("ISSUE_DESCRIPTION"), Some(&ws), None, None, None),
+            AssetUrl::Skip
+        );
+        // NULL project/issue ids render as "None", like the f-strings.
+        assert_eq!(
+            file_asset_url(
+                &id,
+                Some("ISSUE_ATTACHMENT"),
+                Some(&ws),
+                None,
+                None,
+                Some("acme")
+            ),
+            AssetUrl::Present(Some(format!(
+                "/api/assets/v2/workspaces/acme/projects/None/issues/None/attachments/{id}/"
+            )))
+        );
+        assert_eq!(
+            file_asset_url(
+                &id,
+                Some("PAGE_DESCRIPTION"),
+                Some(&ws),
+                Some(&proj),
+                Some(&issue),
+                Some("acme")
+            ),
+            AssetUrl::Present(Some(format!(
+                "/api/assets/v2/workspaces/acme/projects/{proj}/{id}/"
+            )))
+        );
+    }
 }
 
 #[cfg(test)]

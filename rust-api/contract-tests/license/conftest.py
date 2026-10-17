@@ -29,10 +29,16 @@ def db():
 def clean_db(db):
     # Sweep rows with FKs into users that Database.reset() does not know
     # about (the signal-created preference rows sign-up leaves behind) so
-    # the reset below never hits a foreign key.
+    # the reset below never hits a foreign key. Avatar/logo tests also
+    # seed file_assets (referenced by users.avatar_asset_id and
+    # workspaces.logo_asset_id), so those FKs are nulled and the asset
+    # rows wiped before the reset deletes users/workspaces.
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM user_notification_preferences")
+            cur.execute("UPDATE users SET avatar_asset_id = NULL")
+            cur.execute("UPDATE workspaces SET logo_asset_id = NULL")
+            cur.execute("DELETE FROM file_assets")
         conn.commit()
     db.reset()
     yield
