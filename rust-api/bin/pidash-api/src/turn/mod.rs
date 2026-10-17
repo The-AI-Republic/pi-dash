@@ -34,3 +34,4 @@ pub mod mcp_client;
 mod mcp_parity;
 #[cfg(test)]
 mod mcp_stub;
+pub mod streaming;
