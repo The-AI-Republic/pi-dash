@@ -22,7 +22,8 @@ export function NotFoundPage(): React.ReactElement {
       <img src={NOT_FOUND_ART} alt="An empty notice board with a magnifier" width={320} height={240} />
       <h1 className="text-h2 text-(--text)">That page does not exist</h1>
       <p className="text-body max-w-md text-(--text-muted)">
-        The address may be mistyped, or the page was moved or deleted. Head home and navigate from there.
+        The page was not found. The address may be mistyped, or the page was moved or deleted. Head home and navigate
+        from there.
       </p>
       <a
         href="/"

@@ -14,6 +14,9 @@ describe("NotFoundPage", () => {
     expect(screen.getByRole("heading", { name: "That page does not exist" })).not.toBeNull();
     const body = screen.getByText(/mistyped/, { exact: false });
     expect(body.textContent!.length).toBeGreaterThan(20);
+    // The cloud flag-off scenario matches unknown routes against
+    // /cannot be found|not found|something went wrong/ (CLOUD-021).
+    expect(body.textContent).toMatch(/not found/);
 
     const home = screen.getByRole("link", { name: "Back to home" });
     expect(home).toHaveAttribute("href", "/");

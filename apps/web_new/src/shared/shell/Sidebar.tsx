@@ -11,7 +11,7 @@
 // shell contract.
 
 import { Kbd } from "@pidash/kit";
-import { FileText, House } from "lucide-react";
+import { Blocks, FileText, House } from "lucide-react";
 import * as React from "react";
 
 import { CrossAppLink } from "../coexistence/CrossAppLink.js";
@@ -35,6 +35,17 @@ export interface SidebarWorkspace {
  * visible, ordered list from sidebar preferences; the dialog edits them.
  */
 export interface SidebarPersonalEntry {
+  key: string;
+  label: string;
+  href: string;
+}
+
+/**
+ * One edition-contributed navigation entry (CLOUD-021). The workspace
+ * route resolves these from `edition.sidebar`; the OSS edition
+ * contributes none, so its sidebar renders exactly as before.
+ */
+export interface SidebarEditionEntry {
   key: string;
   label: string;
   href: string;
@@ -80,6 +91,12 @@ export interface SidebarProps {
   updateControl?: React.ReactNode;
   /** Personal entries above projects, already filtered and ordered. */
   personalEntries?: SidebarPersonalEntry[];
+  /**
+   * Edition entries beside Home (CLOUD-021). Rendered for every role —
+   * installations belong to the viewer, so no role is excluded — and
+   * absent entirely when the edition contributes none.
+   */
+  editionEntries?: SidebarEditionEntry[];
   /** Current pathname; entries matching it read as current. */
   currentPath?: string | null;
   /**
@@ -118,6 +135,7 @@ export function Sidebar({
   onDeactivateAccount,
   updateControl,
   personalEntries = [],
+  editionEntries = [],
   currentPath = null,
   onPersonalize,
   quickActions,
@@ -177,6 +195,24 @@ export function Sidebar({
           <House size={16} strokeWidth={1.5} aria-hidden="true" />
           <span className="truncate">Home</span>
         </a>
+        {editionEntries.map((entry) => {
+          const current = currentPath?.startsWith(entry.href) ?? false;
+          return (
+            <CrossAppLink
+              key={entry.key}
+              to={entry.href}
+              aria-current={current ? "page" : undefined}
+              className={
+                current
+                  ? "text-body flex w-full items-center gap-(--space-2) rounded-(--radius-control) bg-(--subtle) px-(--space-2) py-(--space-2) text-left text-(--text)"
+                  : "text-body flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-2) text-left text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
+              }
+            >
+              <Blocks size={16} strokeWidth={1.5} aria-hidden="true" />
+              <span className="truncate">{entry.label}</span>
+            </CrossAppLink>
+          );
+        })}
       </nav>
       <WorkspaceSwitcher
         workspaces={workspaces}
