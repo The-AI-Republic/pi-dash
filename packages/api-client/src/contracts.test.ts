@@ -603,6 +603,30 @@ describe("auth contracts", () => {
     });
   });
 
+  it("reads the instance config without a file-size ceiling", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        config: {
+          enable_signup: false,
+          is_workspace_creation_disabled: false,
+          is_google_enabled: false,
+          is_github_enabled: false,
+          is_gitlab_enabled: false,
+          is_gitea_enabled: false,
+          is_magic_login_enabled: true,
+          is_email_password_enabled: true,
+          is_smtp_configured: true,
+          is_self_managed: true,
+          instance_changelog_url: "",
+        },
+        instance: { id: UUID, workspaces_exist: true },
+      }),
+    });
+    const parsed = await getInstanceConfig(client);
+    expect(parsed.file_size_limit).toBeUndefined();
+  });
+
   it("rejects an instance answer without the config flags", async () => {
     const client = createClient({
       baseUrl: "https://api.test",

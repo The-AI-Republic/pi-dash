@@ -5,7 +5,7 @@
 // parses a representative payload through a stub transport and sends
 // the expected method, path and body. Live-server proof lives in
 // contract/issue-*.contract.test.ts.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createClient } from "../client.js";
 import { ApiError } from "../errors.js";
 import { fakeResponse, recordingTransport } from "../client.test.js";
@@ -362,6 +362,32 @@ describe("attachment contracts", () => {
     expect(upload?.body.get("key")).toBe("k");
     expect((upload?.body.get("file") as File | undefined)?.name).toBe("note.png");
     expect(transport.calls.map((call) => call.init.method)).toEqual(["GET", "POST", "PATCH"]);
+  });
+
+  it("uploads bytes through the default signed-post fetch", async () => {
+    const seen: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
+      seen.push({ url, init });
+      return Promise.resolve({ ok: true, status: 200 });
+    });
+    try {
+      const transport = recordingTransport((call) =>
+        fakeResponse({
+          status: call.init.method === "PATCH" ? 204 : 200,
+          body: call.init.method === "PATCH" ? "" : JSON.stringify(uploadGrant),
+        })
+      );
+      const client = createClient({ baseUrl: "https://api.test", transport });
+      const file = new File(["bytes"], "note.png", { type: "image/png" });
+      const attachment = await uploadIssueAttachment(client, "acme", UUID3, UUID2, file);
+      expect(attachment.is_uploaded).toBe(true);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.url).toBe("https://objects.test/upload");
+      expect(seen[0]?.init.method).toBe("POST");
+      expect(seen[0]?.init.body).toBeInstanceOf(FormData);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("rejects when the byte leg fails", async () => {
