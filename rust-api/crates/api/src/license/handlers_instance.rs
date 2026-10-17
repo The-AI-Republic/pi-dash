@@ -488,13 +488,14 @@ enum PatchRejection {
 const MAX_NAME_LEN: usize = 255;
 
 /// DRF `CharField` input: bools, objects and arrays are `"Not a valid
-/// string."`; numbers coerce via `str()`; strings are stripped
-/// (`trim_whitespace=True`), so blank-check, length-count and storage all
-/// see the trimmed value.
+/// string."`; numbers coerce via Python `str()` ([`py_number_str`]:
+/// int tokens verbatim, float tokens shortest-round-trip — the raw
+/// token is never echoed); strings are stripped (`trim_whitespace=True`),
+/// so blank-check, length-count and storage all see the trimmed value.
 fn as_text(value: &serde_json::Value) -> Result<String, &'static str> {
     match value {
         serde_json::Value::String(s) => Ok(s.trim().to_owned()),
-        serde_json::Value::Number(n) => Ok(n.to_string()),
+        serde_json::Value::Number(n) => Ok(py_number_str(n)),
         _ => Err("Not a valid string."),
     }
 }
