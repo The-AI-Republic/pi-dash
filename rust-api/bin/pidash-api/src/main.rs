@@ -31,6 +31,9 @@ mod runner_seams;
 /// library modules here; PIDASHCONV-863 wires them into `worker()`).
 /// Unwired by design until the wiring lands — that is the split working
 /// as designed, not dead code.
+// Turn runtime layers (PIDASHCONV-1110…1113): library modules with unit
+// tests. The allow expires with the 863 wiring; until then nothing
+// outside `#[cfg(test)]` calls in.
 #[allow(dead_code)]
 mod turn;
 
