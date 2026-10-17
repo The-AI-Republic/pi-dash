@@ -39,8 +39,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from _harness import admin_client
 from _harness import signing
+from _harness.http import ContractClient
 from _harness.settings import base_url, secret_key
 
 UNAUTH = {"detail": "Authentication credentials were not provided."}
@@ -121,9 +121,25 @@ def _broken_key(world, condition):
     raise AssertionError(f"unknown condition {condition!r}")
 
 
+def _session_client(key):
+    """Session-cookie client that rides out the stock anon throttle.
+
+    Broken sessions authenticate as nobody, so every request here counts
+    against DRF's 30/min anon throttle — over a full-suite run the window
+    fills and Django answers 429. A 429 is the server asking us to wait,
+    never a contract answer, so retry it (harness ``ContractClient``)
+    instead of failing the run.
+    """
+    return ContractClient(
+        base_url=base_url(),
+        cookies={signing.ADMIN_SESSION_COOKIE: key},
+        timeout=15,
+    )
+
+
 def _primed_client_with_cookie(cookie_name, cookie_value):
     """Browser-like client: CSRF cookie jar + header, plus one session cookie."""
-    client = httpx.Client(base_url=base_url(), timeout=15, follow_redirects=False)
+    client = ContractClient(base_url=base_url(), timeout=15, follow_redirects=False)
     client.cookies.set(cookie_name, cookie_value)
     res = client.get("/auth/get-csrf-token/")
     assert res.status_code == 200, f"CSRF priming failed: {res.status_code}"
@@ -155,7 +171,7 @@ def test_broken_session_denied_on_guarded_routes(world, condition):
     key = _broken_key(world, condition)
     doomed = world["db"].make_user("doomed@example.com")
     row = world["db"].make_admin(world["instance"]["id"], doomed["id"])
-    with admin_client(key) as client:
+    with _session_client(key) as client:
         res = client.patch("/api/instances/", json={"instance_name": "Nope"})
         assert res.status_code == 401, (condition, res.status_code, res.text[:200])
         assert res.json() == UNAUTH
@@ -185,7 +201,7 @@ def test_broken_session_denied_on_guarded_routes(world, condition):
 @pytest.mark.parametrize("condition", CONDITIONS)
 def test_broken_session_reports_bare_flag(world, condition):
     key = _broken_key(world, condition)
-    with admin_client(key) as client:
+    with _session_client(key) as client:
         res = client.get("/api/instances/admins/session/")
     assert res.status_code == 200
     assert res.json() == BARE_SESSION
@@ -197,7 +213,7 @@ def test_broken_session_get_renders_utc(world, condition):
     (which every broken shape is) means UTC, whatever the row stores."""
     _set_timezone(world["db"], world["admin"]["id"], "America/New_York")
     key = _broken_key(world, condition)
-    with admin_client(key) as client:
+    with _session_client(key) as client:
         body = client.get("/api/instances/").json()
     assert body["instance"]["created_at"].endswith("Z"), body["instance"]["created_at"]
     assert body["instance"]["updated_at"].endswith("Z"), body["instance"]["updated_at"]
@@ -207,7 +223,7 @@ def test_fresh_session_get_renders_user_zone(world):
     """Control: the same GET with a valid cookie renders the stored zone,
     so the UTC assertions above are not vacuous."""
     _set_timezone(world["db"], world["admin"]["id"], "America/New_York")
-    with admin_client(world["admin_key"]) as client:
+    with _session_client(world["admin_key"]) as client:
         body = client.get("/api/instances/").json()
     assert not body["instance"]["created_at"].endswith("Z"), body["instance"]["created_at"]
 
@@ -217,7 +233,7 @@ def test_broken_session_signup_visited_stamps_null(world, condition):
     """The AllowAny signup-visited POST still 204s, but stamps no author:
     anonymous posts leave ``updated_by`` NULL."""
     key = _broken_key(world, condition)
-    with admin_client(key) as client:
+    with _session_client(key) as client:
         res = client.post("/api/instances/admins/sign-up-screen-visited/")
     assert res.status_code == 204
     with world["db"].connect() as conn:
@@ -230,7 +246,7 @@ def test_broken_session_signup_visited_stamps_null(world, condition):
 
 def test_fresh_session_signup_visited_stamps_author(world):
     """Control: a valid cookie stamps the acting admin."""
-    with admin_client(world["admin_key"]) as client:
+    with _session_client(world["admin_key"]) as client:
         res = client.post("/api/instances/admins/sign-up-screen-visited/")
     assert res.status_code == 204
     _, updated_by = _instance_row(world["db"])
