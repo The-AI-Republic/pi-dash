@@ -4,6 +4,8 @@
 
 """Instance admins: list/create/delete, me, session, signup-screen-visited."""
 
+import pytest
+
 ME_KEYS = {
     "id",
     "avatar",
@@ -54,6 +56,48 @@ def test_create_admin_missing_email(admin_api):
     res = admin_api.post("/api/instances/admins/", json={})
     assert res.status_code == 400
     assert res.json() == {"error": "Email is required"}
+
+
+@pytest.mark.parametrize("role", ["abc", {}, [], None])
+def test_create_admin_bad_role_unknown_user_is_404(admin_api, role):
+    # The role is only touched at .create(), AFTER the user lookup, so an
+    # unknown email 404s no matter how unparsable the role is (PIDASHCONV-1120a).
+    res = admin_api.post("/api/instances/admins/", json={"role": role, "email": "nobody@example.com"})
+    assert res.status_code == 404
+    assert res.json() == {"error": "The required object does not exist."}
+
+
+def test_create_admin_max_boundary_float_truncates(admin_api, world):
+    # int(2147483647.5) -> 2147483647: Python truncates toward zero BEFORE
+    # the range check, so the boundary float stores (PIDASHCONV-1120b).
+    # (The 201 body echoes the raw 2147483647.5 input attribute on Django;
+    # that response-rendering quirk is out of scope here — only the status
+    # and the stored value are asserted.)
+    newcomer = world["db"].make_user("floatmax@example.com")
+    res = admin_api.post("/api/instances/admins/", json={"role": 2147483647.5, "email": newcomer["email"]})
+    assert res.status_code == 201
+    with world["db"].connect() as conn:
+        stored = conn.execute(
+            "select role from instance_admins where user_id = %s;", (newcomer["id"],)
+        ).fetchone()[0]
+    assert stored == 2147483647
+
+
+def test_create_admin_min_boundary_float_rejected_by_check(admin_api, world):
+    # int(-2147483648.5) -> -2147483648 fits i32, but the
+    # instance_admins_role_check (role >= 0) rejects it: IntegrityError ->
+    # 400 invalid-payload (PIDASHCONV-1120b). PIDASHCONV-1120 expected 201
+    # assuming no CHECK; the migrated schema has the CHECK and live Django
+    # 400s, so 400 is the oracle behavior on both backends.
+    newcomer = world["db"].make_user("floatmin@example.com")
+    res = admin_api.post("/api/instances/admins/", json={"role": -2147483648.5, "email": newcomer["email"]})
+    assert res.status_code == 400
+    assert res.json() == {"error": "The payload is not valid"}
+    with world["db"].connect() as conn:
+        count = conn.execute(
+            "select count(*) from instance_admins where user_id = %s;", (newcomer["id"],)
+        ).fetchone()[0]
+    assert count == 0
 
 
 def test_delete_admin_soft_deletes(admin_api, world):
