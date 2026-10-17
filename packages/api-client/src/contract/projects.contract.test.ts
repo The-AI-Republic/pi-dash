@@ -334,3 +334,32 @@ describe.skipIf(!contractEnabled)("user properties contracts", () => {
     expect(restored.sort_order).toBe(before.sort_order);
   });
 });
+
+describe.skipIf(!contractEnabled)("executor fields contract", () => {
+  it("reads executor options and the default off the project retrieve", async () => {
+    const row = await getProject(client, CONTRACT_WORKSPACE, await seededProjectId(client));
+    expect(row.agent_executor_options.map((option) => option.kind).sort()).toEqual([
+      "cloud_agent",
+      "local_runner",
+      "managed_runner",
+    ]);
+    for (const option of row.agent_executor_options) {
+      expect(typeof option.available).toBe("boolean");
+      expect(typeof option.reason_code).toBe("string");
+      if (option.available) expect(option.reason_code).toBe("");
+    }
+    expect(typeof row.default_agent_executor).toBe("string");
+    expect(row.default_agent_executor.length).toBeGreaterThan(0);
+  });
+
+  it("reads executor options and the default off the rich rows", async () => {
+    const details = await listProjectDetails(client, CONTRACT_WORKSPACE);
+    const seeded = details.find((project) => project.identifier === CONTRACT_PROJECT_IDENTIFIER);
+    expect(seeded?.agent_executor_options.map((option) => option.kind).sort()).toEqual([
+      "cloud_agent",
+      "local_runner",
+      "managed_runner",
+    ]);
+    expect(typeof seeded?.default_agent_executor).toBe("string");
+  });
+});

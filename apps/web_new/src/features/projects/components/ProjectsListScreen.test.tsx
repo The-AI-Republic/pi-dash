@@ -69,7 +69,12 @@ function project(overrides: Partial<ProjectDetails> = {}): ProjectDetails {
     anchor: null,
     members: [],
     next_work_item_sequence: 1,
-    agent_executor_options: null,
+    agent_executor_options: [
+      { kind: "cloud_agent", available: false, reason_code: "cloud_agent_unavailable" },
+      { kind: "local_runner", available: true, reason_code: "" },
+      { kind: "managed_runner", available: false, reason_code: "managed_runner_disabled" },
+    ],
+    default_agent_executor: "local_runner",
     ...overrides,
   };
 }

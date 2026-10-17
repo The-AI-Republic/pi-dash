@@ -138,7 +138,18 @@ export function mockProjects(): Project[] {
 /** One project row without the list-only intake count (the retrieve view shape). */
 export function mockProjectDetail(): ProjectDetail {
   const { intake_count: _listOnly, ...detail } = mockProjects()[0] ?? {};
-  return detail as ProjectDetail;
+  // The retrieve contract requires the executor options and default (the
+  // readiness gate reads them); the app zod-parses this payload, so the
+  // fields must travel here, not just in the type.
+  return {
+    ...detail,
+    agent_executor_options: [
+      { kind: "cloud_agent", available: false, reason_code: "cloud_agent_unavailable" },
+      { kind: "local_runner", available: true, reason_code: "" },
+      { kind: "managed_runner", available: false, reason_code: "managed_runner_disabled" },
+    ],
+    default_agent_executor: "local_runner",
+  } as ProjectDetail;
 }
 
 /** The perf user belongs to the perf workspace as a member. */

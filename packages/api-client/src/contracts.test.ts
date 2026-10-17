@@ -995,11 +995,20 @@ describe("project contracts", () => {
 
   it("parses one project row without the list-only intake count", async () => {
     const { intake_count: _listOnly, ...detail } = project;
-    const client = createClient({ baseUrl: "https://api.test", transport: json(detail) });
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        ...detail,
+        agent_executor_options: [{ kind: "managed_runner", available: true, reason_code: "" }],
+        default_agent_executor: "local_runner",
+      }),
+    });
     const parsed = await getProject(client, "acme", UUID);
     expect(parsed.identifier).toBe("WEB");
     expect(parsed.member_role).toBe(20);
     expect("intake_count" in parsed).toBe(false);
+    expect(parsed.agent_executor_options).toEqual([{ kind: "managed_runner", available: true, reason_code: "" }]);
+    expect(parsed.default_agent_executor).toBe("local_runner");
   });
 
   it("hits the project detail URL", async () => {
@@ -2072,7 +2081,12 @@ describe("project lifecycle contracts", () => {
     anchor: null,
     members: [UUID],
     next_work_item_sequence: 3,
-    agent_executor_options: [],
+    agent_executor_options: [
+      { kind: "cloud_agent", available: false, reason_code: "cloud_agent_unavailable" },
+      { kind: "local_runner", available: true, reason_code: "" },
+      { kind: "managed_runner", available: false, reason_code: "managed_runner_disabled" },
+    ],
+    default_agent_executor: "local_runner",
   };
 
   function stubbedApi(
@@ -2096,6 +2110,15 @@ describe("project lifecycle contracts", () => {
 
   it("rejects details rows without an id", async () => {
     const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...details, id: "nope" }]) });
+    const error = await listProjectDetails(client, "acme").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("rejects details rows with a malformed executor option", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json([{ ...details, agent_executor_options: [{ kind: "managed_runner" }] }]),
+    });
     const error = await listProjectDetails(client, "acme").catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("contract");
   });
@@ -5776,7 +5799,7 @@ describe("prompt contracts", () => {
     expect(posts[0]?.url.endsWith("/prompts/coding-task/preview")).toBe(true);
     expect(posts[1]?.init.body).toContain(UUID2);
   });
-});
+})
 
 const CHAT_RUNNER_ECHO = {
   id: UUID,

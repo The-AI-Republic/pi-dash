@@ -58,6 +58,20 @@ export async function listProjects(client: ApiClient, slug: string): Promise<Pro
   return client.parse(ProjectList, body, `GET /api/workspaces/${slug}/projects/`);
 }
 
+/**
+ * One execution target the project offers, with live availability for the
+ * viewer. `kind` is a server executor kind (local_runner, cloud_agent,
+ * managed_runner); `reason_code` is empty exactly when `available` is
+ * true. Both stay open strings: readers compare one kind for equality and
+ * surface unknown codes as-is.
+ */
+export const AgentExecutorOption = z.object({
+  kind: z.string(),
+  available: z.boolean(),
+  reason_code: z.string(),
+});
+export type AgentExecutorOption = z.infer<typeof AgentExecutorOption>;
+
 const { intake_count: _listOnly, ...projectDetailShape } = Project.shape;
 
 /**
@@ -66,9 +80,14 @@ const { intake_count: _listOnly, ...projectDetailShape } = Project.shape;
  * list-only pending-intake count is absent). Extra serializer fields pass
  * through untouched. The denial screens read this for their fetch status:
  * unknown projects 404, private projects 403 for non-members, other
- * non-member projects 409.
+ * non-member projects 409. The agent readiness gate reads the executor
+ * options and the default executor off this same row (DESK-002).
  */
-export const ProjectDetail = z.object(projectDetailShape);
+export const ProjectDetail = z.object({
+  ...projectDetailShape,
+  agent_executor_options: z.array(AgentExecutorOption),
+  default_agent_executor: z.string(),
+});
 export type ProjectDetail = z.infer<typeof ProjectDetail>;
 
 /** GET /api/workspaces/<slug>/projects/<projectId>/ — one project row. */
@@ -82,7 +101,8 @@ export async function getProject(client: ApiClient, slug: string, projectId: str
  * Full project row answered by GET .../projects/details/ and by POST
  * .../projects/ on create: every Project model field plus the membership
  * annotations (favorite flag, sort order, role, deploy-board anchor, member
- * ids) the list serializer adds.
+ * ids) the list serializer adds. The executor options and default travel
+ * here too, for the agent readiness gate (DESK-002).
  */
 export const ProjectDetails = z.object({
   id: uuid(),
@@ -133,7 +153,8 @@ export const ProjectDetails = z.object({
   anchor: z.nullable(z.string()),
   members: z.array(uuid()),
   next_work_item_sequence: z.number(),
-  agent_executor_options: z.unknown(),
+  agent_executor_options: z.array(AgentExecutorOption),
+  default_agent_executor: z.string(),
 });
 export type ProjectDetails = z.infer<typeof ProjectDetails>;
 
