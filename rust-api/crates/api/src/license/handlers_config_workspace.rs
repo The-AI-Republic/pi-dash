@@ -368,15 +368,19 @@ pub fn py_str_value(raw: Option<&Value>) -> String {
     }
 }
 
+/// Python `str()` of a JSON number: int tokens verbatim (Python ints
+/// never lose precision, however large), `paginator::py_float_str`
+/// for true floats. Int-vs-float follows the token shape (no `.`/`e` is
+/// an int), which `arbitrary_precision` preserves; range-sniffing with
+/// `as_i64`/`as_u64` would route huge ints through lossy `f64`.
 fn py_number_str(n: &serde_json::Number) -> String {
-    if let Some(i) = n.as_i64() {
-        return i.to_string();
+    let token = n.to_string();
+    if token.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
+        // `str(float)` is `repr(float)` for floats.
+        crate::paginator::py_float_str(n.as_f64().unwrap_or(f64::NAN))
+    } else {
+        token
     }
-    if let Some(u) = n.as_u64() {
-        return u.to_string();
-    }
-    // `str(float)` is `repr(float)` for floats.
-    crate::paginator::py_float_str(n.as_f64().unwrap_or(f64::NAN))
 }
 
 /// Python `repr()` over a JSON value: single quotes, `True`/`False`/`None`,
@@ -402,23 +406,36 @@ pub fn py_repr(value: &Value) -> String {
     }
 }
 
+/// Python `repr()` of a string: double quotes when the value holds a
+/// single quote (and no double quote), single quotes otherwise; both
+/// arms escape backslashes, `\n`/`\r`/`\t`, the active quote, and the
+/// control range (`\x00`-`\x1f`, `\x7f`) as `\xNN`. (Twin of the
+/// instance handler's `py_repr_str`.)
 fn py_repr_str(s: &str) -> String {
-    if s.contains('\'') && !s.contains('"') {
-        return format!("\"{}\"", s);
-    }
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
     let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
+    out.push(quote);
     for ch in s.chars() {
         match ch {
-            '\'' => out.push_str("\\'"),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            _ => out.push(ch),
+            ch if ch == quote => {
+                out.push('\\');
+                out.push(ch);
+            }
+            ch if ch < '\u{20}' || ch == '\u{7f}' => {
+                out.push_str(&format!("\\x{:02x}", ch as u32));
+            }
+            ch => out.push(ch),
         }
     }
-    out.push('\'');
+    out.push(quote);
     out
 }
 
@@ -2130,10 +2147,7 @@ async fn create_workspace(
     .await;
     // `WorkspaceMember.objects.create(workspace_id, member=user, role=20,
     // company_role=...)`: model `JSONField` defaults apply Python-side.
-    let company_role = match company_role_value(map.get("company_role")) {
-        Some(value) => value,
-        None => return Denial::ServerError.into_response(),
-    };
+    let company_role = company_role_value(map.get("company_role"));
     let member_now = chrono::Utc::now();
     let member_result = sqlx::query(
         r#"INSERT INTO workspace_members
@@ -2258,20 +2272,21 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
     db_error.is_unique_violation()
 }
 
-/// `request.data.get("company_role", "")`: missing keys store `""`,
-/// strings store verbatim (no serializer strips a non-field), `None`
-/// stores `NULL`; numerics/bools take the Postgres assignment cast
-/// (`5` -> `"5"`, `True` -> `"true"`); composites fail to adapt
-/// (`DataError` -> base 500).
-fn company_role_value(raw: Option<&Value>) -> Option<Option<String>> {
+/// `request.data.get("company_role", "")` into `CharField`: missing
+/// keys store `""`, strings store verbatim (no serializer strips a
+/// non-field), `None` stores `NULL`; everything else goes through
+/// `CharField.to_python`, which is `str(value)` (`fields/__init__.py`):
+/// `True` -> `"True"`, numbers plainly, composites as Python `repr`
+/// (`str([1]) == "[1]"`) — never a 500.
+fn company_role_value(raw: Option<&Value>) -> Option<String> {
     match raw {
-        None => Some(Some(String::new())),
-        Some(Value::Null) => Some(None),
-        Some(Value::String(s)) => Some(Some(s.clone())),
-        Some(Value::Bool(true)) => Some(Some("true".to_owned())),
-        Some(Value::Bool(false)) => Some(Some("false".to_owned())),
-        Some(Value::Number(n)) => Some(Some(py_number_str(n))),
-        Some(Value::Array(_) | Value::Object(_)) => None,
+        None => Some(String::new()),
+        Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Bool(true)) => Some("True".to_owned()),
+        Some(Value::Bool(false)) => Some("False".to_owned()),
+        Some(Value::Number(n)) => Some(py_number_str(n)),
+        Some(value @ (Value::Array(_) | Value::Object(_))) => Some(py_repr(value)),
     }
 }
 
@@ -3103,35 +3118,37 @@ async fn unique_slug_taken(pool: &sqlx::PgPool, slug: &str) -> Result<bool, Deni
     Ok(row.is_some())
 }
 
-/// `PrimaryKeyRelatedField` over a numeric: `UUID(int=i)` is well-formed
-/// for `i >= 0` (existence probe) and fails with the invalid message
-/// otherwise; floats fail the same way carrying `str(value)`.
+/// `PrimaryKeyRelatedField` over a numeric: `uuid.UUID(int=i)` is
+/// well-formed for `i` in `[0, 2**128)` (existence probe carrying the
+/// canonical decimal) and fails with the invalid message otherwise;
+/// floats fail the same way carrying `str(value)`. Int-vs-float follows
+/// the token shape, so huge ints never detour through `f64`.
 async fn asset_by_number(
     pool: &sqlx::PgPool,
     n: &serde_json::Number,
     errors: &mut FieldErrors,
 ) -> Result<Option<uuid::Uuid>, Denial> {
-    if let Some(i) = n.as_i64() {
-        if i >= 0 {
-            return asset_by_id(
-                pool,
-                uuid::Uuid::from_u128(i as u128),
-                &i.to_string(),
-                errors,
-            )
-            .await;
+    let token = n.to_string();
+    if !token.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
+        // Int token: `i128` covers the negatives, `u128` the large
+        // positives; anything wider is out of `UUID(int=…)` range and
+        // fails carrying the token itself (already canonical decimal).
+        if let Ok(v) = token.parse::<i128>() {
+            if v >= 0 {
+                return asset_by_id(
+                    pool,
+                    uuid::Uuid::from_u128(v as u128),
+                    &v.to_string(),
+                    errors,
+                )
+                .await;
+            }
+            return asset_by_pk(pool, &v.to_string(), errors).await;
         }
-        // `UUID(int=i)` rejects negatives with the invalid message.
-        return asset_by_pk(pool, &i.to_string(), errors).await;
-    }
-    if let Some(u) = n.as_u64() {
-        return asset_by_id(
-            pool,
-            uuid::Uuid::from_u128(u128::from(u)),
-            &u.to_string(),
-            errors,
-        )
-        .await;
+        if let Ok(v) = token.parse::<u128>() {
+            return asset_by_id(pool, uuid::Uuid::from_u128(v), &v.to_string(), errors).await;
+        }
+        return asset_by_pk(pool, &token, errors).await;
     }
     // Floats fail `UUID()` with the invalid message carrying `str(value)`.
     let raw = py_number_str(n);
@@ -3306,22 +3323,30 @@ mod handler_tests {
     }
 
     #[test]
-    fn company_role_coercion_matches_casts() {
-        assert_eq!(company_role_value(None), Some(Some(String::new())));
-        assert_eq!(company_role_value(Some(&json!(null))), Some(None));
+    fn company_role_coercion_matches_str() {
+        assert_eq!(company_role_value(None), Some(String::new()));
+        assert_eq!(company_role_value(Some(&json!(null))), None);
         assert_eq!(
             company_role_value(Some(&json!("Ops"))),
-            Some(Some("Ops".to_owned()))
+            Some("Ops".to_owned())
         );
         assert_eq!(
             company_role_value(Some(&json!(true))),
-            Some(Some("true".to_owned()))
+            Some("True".to_owned())
         );
         assert_eq!(
-            company_role_value(Some(&json!(5))),
-            Some(Some("5".to_owned()))
+            company_role_value(Some(&json!(false))),
+            Some("False".to_owned())
         );
-        assert_eq!(company_role_value(Some(&json!([1]))), None);
+        assert_eq!(company_role_value(Some(&json!(5))), Some("5".to_owned()));
+        assert_eq!(
+            company_role_value(Some(&json!([1]))),
+            Some("[1]".to_owned())
+        );
+        assert_eq!(
+            company_role_value(Some(&json!({"a": 1}))),
+            Some("{'a': 1}".to_owned())
+        );
     }
 
     #[test]
