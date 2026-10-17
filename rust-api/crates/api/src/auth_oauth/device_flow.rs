@@ -61,25 +61,27 @@
 //!   500s in Django (`(123 or "").strip()` raises `AttributeError`); here
 //!   it answers the missing-field 400 instead. Only observable on input
 //!   the contract suite never sends.
-//! - The device-start throttle (`DeviceCodeStartThrottle`, 20/minute
-//!   per-IP) is specified in `super::guards` but not enforced here: the
-//!   Rust edge has no shared DRF-style counter store, matching the merged
-//!   handler precedent of documenting the gate without re-implementing
-//!   the counter.
+//!
+//! The device-start throttle (`DeviceCodeStartThrottle`, 20/minute
+//! per-IP) is enforced in `post_start` through the `super::guards` spec
+//! and the shared DRF counter kernel against the app redis cache —
+//! fail-open without a cache, answering the rewritten 429 like Django.
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Extension, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_db::auth_oauth::models::{api_token_device_flow, cli_device_code};
+use pidash_services::auth_session::guards::{allow_request, throttle_denied_json, throttle_wait};
 
 use super::guards::{
-    verification_uri, DEVICE_CODE_MIN_POLL_GAP_SECS, DEVICE_CODE_POLL_INTERVAL_SECS,
-    DEVICE_CODE_START_MAX_RETRIES, DEVICE_CODE_TTL_SECS,
+    device_start_cache_key, device_start_throttle_rate, verification_uri,
+    DEVICE_CODE_MIN_POLL_GAP_SECS, DEVICE_CODE_POLL_INTERVAL_SECS, DEVICE_CODE_START_MAX_RETRIES,
+    DEVICE_CODE_TTL_SECS,
 };
 
 // ---------------------------------------------------------------------------
@@ -344,19 +346,148 @@ fn verification_base(state: &AppState) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// device/start/ throttle (DRF `DeviceCodeStartThrottle`, 20/minute per IP)
+// ---------------------------------------------------------------------------
+
+/// Peer address from the serve-installed `ConnectInfo` extension, when
+/// present (`Option<ConnectInfo>` is not an extractor — only types
+/// implementing `OptionalFromRequestParts` wrap in `Option`).
+struct PeerAddr(Option<std::net::SocketAddr>);
+
+impl<S> axum::extract::FromRequestParts<S> for PeerAddr
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(PeerAddr(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|info| info.0),
+        ))
+    }
+}
+
+/// DRF `get_ident` (`throttling.py:23-41`, `NUM_PROXIES` unset): the
+/// `X-Forwarded-For` header with all whitespace stripped, else the peer
+/// address.
+fn throttle_ident(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> String {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if !xff.is_empty() {
+            return xff.split_whitespace().collect();
+        }
+    }
+    peer.map(|p| p.ip().to_string()).unwrap_or_default()
+}
+
+fn now_secs_f64() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// One `DeviceCodeStartThrottle` pass over the shared redis history
+/// (`device.py:132-138` + `throttling.py:109-132` via the `super::guards`
+/// spec and the guards kernel): trim entries older than the window, deny
+/// iff 20 remain, recording `now` on allow with a 60s TTL (DRF caches
+/// with `timeout=duration`). `start` is fully anonymous
+/// (`authentication_classes = []`), so every caller counts — the
+/// `authenticated=false` key unconditionally. No redis handle (or an
+/// unreadable/unwritable cache) degrades to allow, per the
+/// `auth_session` fail-open precedent — a cache blip must never deny an
+/// auth endpoint.
+async fn check_start_throttle(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+) -> Result<(), Option<f64>> {
+    let (num_requests, duration) = match device_start_throttle_rate() {
+        Some(parsed) => parsed,
+        None => return Ok(()),
+    };
+    let key = match device_start_cache_key(false, &throttle_ident(headers, peer)) {
+        Some(key) => key,
+        None => return Ok(()),
+    };
+    let redis = match state.redis() {
+        Some(redis) => redis,
+        None => return Ok(()),
+    };
+    let history: Vec<f64> = match redis.get_string(&key).await {
+        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let now = now_secs_f64();
+    let decision = allow_request(&history, num_requests, duration, now);
+    if !decision.allowed {
+        return Err(throttle_wait(
+            &decision.history,
+            num_requests,
+            duration,
+            now,
+        ));
+    }
+    let raw = serde_json::to_string(&decision.history).unwrap_or_else(|_| "[]".to_owned());
+    if let Err(error) = redis.set_ex(&key, &raw, duration).await {
+        tracing::debug!(%error, key = key.as_str(), "device-flow throttle: re-cache failed; allowance stands");
+    }
+    Ok(())
+}
+
+/// `Retry-After` rendering chain: `Throttled.__init__` ceils the wait
+/// (`exceptions.py:237`), then the exception handler emits
+/// `Retry-After: '%d' % wait` only when the ceiled value is truthy
+/// (`views.py:90-91`). `None` in (overfull history) means the header is
+/// absent.
+fn retry_after_secs(wait: Option<f64>) -> Option<i64> {
+    let secs = wait?.ceil() as i64;
+    if secs == 0 {
+        None
+    } else {
+        Some(secs)
+    }
+}
+
+/// Live 429: `auth_exception_handler` rewrites DRF's default throttled
+/// response to the 5900 error dict (`adapter/exception.py:26-31`); the
+/// `Retry-After` header from `exception_handler` survives the rewrite
+/// (`views.py:90-91`).
+fn throttled(wait: Option<f64>) -> Response {
+    let mut response = json_response(StatusCode::TOO_MANY_REQUESTS, throttle_denied_json());
+    if let Some(secs) = retry_after_secs(wait) {
+        if let Ok(value) = header::HeaderValue::from_str(&secs.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/v1/auth/device/start/
 // ---------------------------------------------------------------------------
 
 /// RFC 8628 §3.1 — issue a device/user code pair (`device.py:145-187`).
 ///
 /// Anonymous (`AllowAny`, empty `authentication_classes`), throttled per
-/// IP in Django (`DeviceCodeStartThrottle`; spec in `super::guards`, not
-/// enforced here — see module docs). The body is never read.
-async fn post_start(State(state): State<AppState>) -> Response {
+/// IP (`DeviceCodeStartThrottle`, enforced here through the
+/// `super::guards` spec and the shared DRF kernel). The body is never
+/// read.
+async fn post_start(State(state): State<AppState>, headers: HeaderMap, peer: PeerAddr) -> Response {
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
+    // DRF order: `check_throttles` runs before `post()` — a denied call
+    // writes no row.
+    if let Err(wait) = check_start_throttle(&state, &headers, peer.0).await {
+        return throttled(wait);
+    }
     // One grant window for every attempt (`device.py:159`).
     let now = chrono::Utc::now();
     let expires_at = now + chrono::Duration::seconds(DEVICE_CODE_TTL_SECS as i64);
