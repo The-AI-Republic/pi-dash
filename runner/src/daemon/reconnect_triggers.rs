@@ -8,8 +8,11 @@
 //! - **wake from sleep** — detected as wall-clock time jumping ahead of
 //!   monotonic time. Both `Instant` and tokio timers stop while the machine
 //!   sleeps (on macOS and Linux), but the wall clock keeps going.
-//! - **network change** — the set of non-loopback interface addresses
-//!   changed (interface up/down, new IP). Unix only.
+//! - **network change** — the set of non-loopback, non-link-local
+//!   interface addresses changed (interface up/down, new IP). Unix only.
+//!   Link-local addresses are ignored: every Docker container start/stop
+//!   adds or drops a veth with an `fe80::` address, and counting those
+//!   would reset the outage backoff on every container lifecycle.
 //!
 //! `pidash reconnect` (IPC) and `pidash restart` (a fresh process) are the
 //! other two triggers; they need no watcher.
@@ -72,7 +75,17 @@ pub fn addresses_changed(
     matches!((before, after), (Some(b), Some(a)) if a != b)
 }
 
-/// Sorted `interface=address` pairs for every non-loopback IP address.
+/// Loopback and link-local addresses say nothing about reaching the cloud
+/// and churn with local virtual interfaces, so they are left out of the
+/// fingerprint.
+pub fn counts_for_network_change(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => !v4.is_loopback() && !v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => !v6.is_loopback() && !v6.is_unicast_link_local(),
+    }
+}
+
+/// Sorted `interface=address` pairs for every routable IP address.
 #[cfg(unix)]
 fn interface_fingerprint() -> Option<BTreeSet<String>> {
     let addrs = nix::ifaddrs::getifaddrs().ok()?;
@@ -88,7 +101,7 @@ fn interface_fingerprint() -> Option<BTreeSet<String>> {
         } else {
             continue;
         };
-        if ip.is_loopback() {
+        if !counts_for_network_change(ip) {
             continue;
         }
         out.insert(format!("{}={ip}", ifa.interface_name));
@@ -129,13 +142,25 @@ mod tests {
         assert!(!addresses_changed(Some(&a), None));
     }
 
+    #[test]
+    fn link_local_and_loopback_addresses_are_not_network_changes() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        assert!(!counts_for_network_change(ip("127.0.0.1")));
+        assert!(!counts_for_network_change(ip("::1")));
+        assert!(!counts_for_network_change(ip("169.254.10.2")));
+        assert!(!counts_for_network_change(ip("fe80::1c2:3ff:fe44:5566")));
+        assert!(counts_for_network_change(ip("192.168.1.5")));
+        assert!(counts_for_network_change(ip("2001:db8::7")));
+    }
+
     #[cfg(unix)]
     #[test]
     fn fingerprint_reads_interfaces_without_loopback() {
         let fp = interface_fingerprint().expect("getifaddrs works on unix");
         assert!(
-            fp.iter()
-                .all(|e| !e.ends_with("=127.0.0.1") && !e.ends_with("=::1"))
+            fp.iter().all(|e| !e.ends_with("=127.0.0.1")
+                && !e.ends_with("=::1")
+                && !e.contains("=fe80:"))
         );
     }
 }
