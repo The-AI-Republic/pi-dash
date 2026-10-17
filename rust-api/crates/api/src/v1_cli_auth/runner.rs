@@ -6,7 +6,8 @@
 //! and the delete service (`runner_delete.py:47-95`, via the D-13
 //! drivers — never inlined).
 //!
-//! Handler order (preserved, not redesigned): UUID resolve → auth (401
+//! Handler order (preserved, not redesigned): UUID resolve (garbage →
+//! JSON 404, parseable-but-non-canonical → proxied to Django) → auth (401
 //! anonymous, 403 bad token) → by-pk lookup (404) → `can_view` (404) →
 //! `can_manage` (403) → flag parse (400) → `delete_runner` → 204 empty.
 //! Guards run before the flag parse, so an unviewable runner with a bad
@@ -36,11 +37,13 @@
 //! drivers call-for-call on the open transaction instead of taking
 //! `&PubsubStore`, whose `&self` shape cannot hold the `&mut` tx.
 //!
-//! Approximations: a non-UUID segment answers the view's JSON 404 —
+//! Approximations: a garbage segment answers the view's JSON 404 —
 //! Django's converter 404s with its HTML page, so only the status is
-//! exact (the `runner_enroll::manage` precedent) — unhandled failures
-//! answer the JSON 500 while Django renders HTML (status-exact, the
-//! `runner_runs` precedent).
+//! exact (the `runner_enroll::manage` precedent) — while a
+//! parseable-but-non-canonical UUID proxies to Django so the resolver
+//! 404 answers byte for byte (the `app_issues` PB-0340 precedent) —
+//! unhandled failures answer the JSON 500 while Django renders HTML
+//! (status-exact, the `runner_runs` precedent).
 //!
 //! Fixture ids: V1CLIAUTH-F1 (branches + flag mapping), V1CLIAUTH-F4
 //! (guard truth tables, handler-expected behavior over the kernel).
@@ -50,8 +53,9 @@
 #![allow(clippy::result_large_err)]
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -927,19 +931,61 @@ impl delete_svc::RunnerDeleteStore for DeleteStore<'_> {
 // Handler (`views/runner.py:44-57`)
 // ---------------------------------------------------------------------------
 
+/// Rebuild the inbound request and proxy it to Django (non-canonical
+/// UUID spellings: routing precedes auth, so Django's resolver 404
+/// answers before any 401 — the `v1_cycles_modules` precedent).
+async fn proxy_through(
+    state: AppState,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(axum::body::Body::from(body))
+        .expect("rebuild proxy request");
+    *req.headers_mut() = headers;
+    crate::edge::proxy(State(state), req).await
+}
+
+/// Whether the segment is spelled the way Django's `UUIDConverter`
+/// routes: lowercase hex, hyphenated, 36 chars
+/// (`django/urls/converters.py`; the `app_issues` PB-0340 precedent).
+fn is_canonical_uuid(raw: &str) -> bool {
+    if raw.len() != 36 {
+        return false;
+    }
+    raw.bytes().enumerate().all(|(index, byte)| {
+        if index == 8 || index == 13 || index == 18 || index == 23 {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+        }
+    })
+}
+
 /// `DELETE /api/v1/runners/<runner_id>/`: by-pk 404, view-guard 404,
 /// manage-guard 403, flag-parse 400, then the delete service and an
 /// empty 204.
 pub async fn delete_runner(
     State(state): State<AppState>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     Path(raw_id): Path<String>,
     Query(query): Query<QueryMap>,
+    body: Bytes,
 ) -> Response {
     // Resolver-level: Django's `<uuid:>` converter rejects before any
-    // authentication runs, so the segment parses before the 401 arm.
+    // authentication runs, so the segment classifies before the 401 arm:
+    // garbage keeps the view's JSON 404 (status-exact, pinned by the
+    // unit test), while a parseable-but-non-canonical spelling proxies
+    // to Django so its resolver 404 answers byte for byte.
     let runner_id: Uuid = match raw_id.parse() {
-        Ok(runner_id) => runner_id,
+        Ok(runner_id) if is_canonical_uuid(&raw_id) => runner_id,
+        Ok(_) => return proxy_through(state, method, uri, headers, body).await,
         Err(_) => return not_found(),
     };
     // Anonymous callers 401 before any pool or database access. Any
@@ -1068,4 +1114,24 @@ pub async fn delete_runner(
         }
     }
     no_content()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_canonical_uuid;
+
+    #[test]
+    fn canonical_uuid_accepts_lowercase_hyphenated_only() {
+        assert!(is_canonical_uuid("12345678-1234-1234-1234-1234567890ab"));
+        for raw in [
+            "12345678-1234-1234-1234-1234567890AB",
+            "123456781234123412341234567890ab",
+            "{12345678-1234-1234-1234-1234567890ab}",
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
+            "not-a-uuid",
+            "",
+        ] {
+            assert!(!is_canonical_uuid(raw), "{raw}");
+        }
+    }
 }

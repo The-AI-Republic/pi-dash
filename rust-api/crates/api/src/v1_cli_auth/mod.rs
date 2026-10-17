@@ -99,6 +99,25 @@ mod tests {
         );
     }
 
+    /// Parseable-but-non-canonical UUID spellings proxy to Django
+    /// (502 fail-closed with the test edge) so its resolver 404 answers
+    /// byte for byte — before auth, so anonymous callers proxy too.
+    #[tokio::test]
+    async fn noncanonical_uuid_segments_proxy_before_auth() {
+        for segment in [
+            "12345678-1234-1234-1234-1234567890ab".to_uppercase(),
+            "123456781234123412341234567890ab".to_owned(),
+            "%7B12345678-1234-1234-1234-1234567890ab%7D".to_owned(),
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab".to_owned(),
+        ] {
+            assert_eq!(
+                status("DELETE", &format!("/api/v1/runners/{segment}/"),).await,
+                StatusCode::BAD_GATEWAY,
+                "{segment}"
+            );
+        }
+    }
+
     /// Unowned methods proxy to Django (502 fail-closed with the test
     /// edge), preserving its 405-after-auth byte for byte.
     #[tokio::test]
