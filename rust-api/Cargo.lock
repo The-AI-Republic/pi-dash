@@ -2985,6 +2985,7 @@ dependencies = [
  "bson",
  "chrono",
  "crc32fast",
+ "flate2",
  "futures-util",
  "hmac 0.12.1",
  "jsonwebtoken",

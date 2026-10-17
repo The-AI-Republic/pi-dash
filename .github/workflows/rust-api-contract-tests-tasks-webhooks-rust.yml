@@ -5,9 +5,9 @@ name: rust-api-contract-tests-tasks-webhooks-rust
 # Django worker (and beat) stay STOPPED and the Rust worker
 # (`pidash-api worker`) serves rust_job_queue instead. The replay suite
 # (tasks_webhooks/test_rust_replay.py) seeds rust_job_queue rows with the
-# exact Celery v2 payloads and asserts local execution for the 7 owned
-# D-08 task names plus observable AMQP forwarding for the 4 still
-# Python-owned webhook names, with the Django worker stopped.
+# exact Celery v2 payloads and asserts local execution for all 11 owned
+# D-08 task names (PIDASHCONV-1105 owns the last four webhook names),
+# with the Django worker stopped.
 
 on:
   push:

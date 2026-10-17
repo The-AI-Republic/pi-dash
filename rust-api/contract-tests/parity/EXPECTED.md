@@ -21,7 +21,7 @@ Counts (2026-10-17, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 521 OWNED, 7 MISSING (all listed below),
   9 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 87 tasks — 70 OWNED, 17 proxied by design, 0 MISSING;
+- Jobs: 87 tasks — 74 OWNED, 13 proxied by design, 0 MISSING;
   beat 28/28 OWNED (same task, same cadence on both sides).
 
 ## Routes
@@ -147,7 +147,7 @@ Python worker and Django's outcome is preserved — each row says why),
 MISSING (live registered task Rust forwards that would be lost at
 switchover — one fix issue per register fn).
 
-Note: 19 OWNED tasks are Rust-superset executions — called in Django
+Note: 23 OWNED tasks are Rust-superset executions — called in Django
 but unregistered there (dropped; PDASHOSS01-292), while the Rust
 worker runs them: `copy_s3_objects_of_description_and_assets`,
 `issue_description_version_task`, `process_logs`, `track_page_version`,
@@ -159,7 +159,10 @@ worker runs them: `copy_s3_objects_of_description_and_assets`,
 standalone-Rust rule — the Rust worker runs them, Django drops them),
 plus the four auth mail tasks (`magic_link`, `forgot_password`,
 `send_email_update_magic_code`, `send_email_update_confirmation`;
-PIDASHCONV-1103). Deliberate (accepted by their domain gates);
+PIDASHCONV-1103), plus the four webhook tasks (`webhook_send_task`,
+`webhook_activity`, `model_activity`, `send_webhook_deactivation_email`;
+PIDASHCONV-1105; standalone-Rust rule — runs in Rust, Django drops it).
+Deliberate (accepted by their domain gates);
 recorded here and in the V-01 PR, for the V-05 ported-bug register to
 catalog.
 
@@ -225,12 +228,12 @@ The row reclassified to OWNED (signature deleted).
 ```expected-jobs
 ```
 
-### Proxied by design (17 rows)
+### Proxied by design (13 rows)
 
 No fix issue: forwarding preserves Django's outcome on every row.
 
 - `celery.*` (9): Celery canvas builtins; no canvas usage in the codebase.
-- `django-drops-too` (6): called but unregistered in Django
+- `django-drops-too` (2): called but unregistered in Django
   (PDASHOSS01-292) — the Python worker drops them; forwarding drops
   them identically.
 - `assistant.run_turn`: hybrid worker (PIDASHCONV-857). Published on
@@ -262,10 +265,6 @@ PROXIED :: celery.starmap :: celery-builtin; no canvas usage
 PROXIED :: pi_dash.bgtasks.analytic_plot_export.analytic_export_task :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email :: dead (defined, never referenced)
 PROXIED :: pi_dash.bgtasks.export_task.issue_export_task :: django-drops-too (PDASHOSS01-292)
-PROXIED :: pi_dash.bgtasks.webhook_task.model_activity :: django-drops-too (PDASHOSS01-292)
-PROXIED :: pi_dash.bgtasks.webhook_task.send_webhook_deactivation_email :: django-drops-too (PDASHOSS01-292)
-PROXIED :: pi_dash.bgtasks.webhook_task.webhook_activity :: django-drops-too (PDASHOSS01-292)
-PROXIED :: pi_dash.bgtasks.webhook_task.webhook_send_task :: django-drops-too (PDASHOSS01-292)
 ```
 
 ## Beat

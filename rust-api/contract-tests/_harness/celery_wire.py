@@ -67,6 +67,37 @@ def publish(
     return result.id
 
 
+def publish_with_retries(
+    task_name: str,
+    args=None,
+    kwargs=None,
+    *,
+    retries: int,
+    queue: str = "celery",
+    broker_url: str | None = None,
+) -> str:
+    """Publish one v2 message with a preset ``retries`` count (PIDASHCONV-1105).
+
+    A redelivered attempt lands on the wire with ``retries > 0``; the
+    worker executes it with ``request.retries`` preset, so exhaustion
+    paths (``retries >= max_retries``) run without waiting out the
+    backoff schedule. Built by the same ``as_task_v2`` + task-sender
+    path as :func:`publish` — only the header differs. Returns the task id.
+    """
+    app = make_app(broker_url or config.required(config.CELERY_BROKER_URL))
+    task_id = str(uuid.uuid4())
+    message = app.amqp.create_task_message(
+        task_id,
+        task_name,
+        args=list(args or []),
+        kwargs=dict(kwargs or {}),
+        retries=retries,
+    )
+    with app.producer_or_acquire() as producer:
+        app.amqp.send_task_message(producer, task_name, message, queue=queue)
+    return task_id
+
+
 def capture_wire_message(
     task_name: str,
     args=None,

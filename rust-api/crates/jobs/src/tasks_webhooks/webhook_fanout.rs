@@ -14,14 +14,13 @@
 //! `model_activity` with Python-`==` value comparison, and the fan-out
 //! error classifier.
 //!
-//! The impure edges — the `Webhook` queryset fetch, the per-webhook
-//! `get_model_data` reads and the `.delay()` broker writes — stay with
-//! the Python workers until the domain gate flips ownership, so (like
-//! the send path in `webhook_send`) no local handler is registered
-//! here: [`is_webhook_fanout_task`] is the routing predicate and every
-//! name routes to `PythonOwned` on an empty registry. Registering a
-//! handler would steal live fan-out traffic while the row fetch, the
-//! model-data reads and the downstream send still live in Python.
+//! The live section below (PIDASHCONV-1105, stage 8) wires those
+//! decisions to Postgres ([`model_data`][crate::tasks_webhooks::model_data]
+//! renders `get_model_data` live), enqueues send tasks into the Rust
+//! queue, and registers both handlers in
+//! [`oss_worker`][crate::oss_worker]: the Rust worker owns these tasks
+//! now. [`is_webhook_fanout_task`] stays the routing predicate for the
+//! pre-registration layers.
 //!
 //! Ported bugs and quirks (translate, don't redesign):
 //!
@@ -633,6 +632,629 @@ pub fn diff_updates(
         }
     }
     Ok(diffs)
+}
+
+use sqlx::Row as _;
+
+/// Live `webhook_activity` + `model_activity` execution (PIDASHCONV-1105).
+/// The pure binders above are `String`-strict; Python is duck-typed, so
+/// the live binders below carry every parameter as a [`Value`] and apply
+/// bind `TypeError` only to arity/unknown/missing/duplicate shapes.
+/// Value mistypes follow the bodies: the fan-out's broad `except`
+/// swallows (ack), `model_activity`'s bare body lets them fail the job
+/// (park) — QUIRK-4.
+///
+/// Bound live `webhook_activity` call: the eleven `.delay()` params in
+/// signature order, values unconverted.
+pub struct LiveWebhookActivityCall {
+    pub event: Value,
+    pub verb: Value,
+    pub field: Value,
+    pub old_value: Value,
+    pub new_value: Value,
+    pub actor_id: Value,
+    pub slug: Value,
+    pub current_site: Value,
+    pub event_id: Value,
+    pub old_identifier: Value,
+    pub new_identifier: Value,
+}
+
+/// Bind a live `webhook_activity` payload (all eleven params required).
+pub fn parse_live_webhook_activity(
+    args: &Value,
+    kwargs: &Value,
+) -> Result<LiveWebhookActivityCall, super::webhook_send::CallTypeError> {
+    super::webhook_send::bind_call(
+        WEBHOOK_ACTIVITY_TASK_NAME,
+        &WEBHOOK_ACTIVITY_PARAMS_ORDER,
+        args,
+        kwargs,
+    )
+    .map(|bound| LiveWebhookActivityCall {
+        event: bound[0].clone(),
+        verb: bound[1].clone(),
+        field: bound[2].clone(),
+        old_value: bound[3].clone(),
+        new_value: bound[4].clone(),
+        actor_id: bound[5].clone(),
+        slug: bound[6].clone(),
+        current_site: bound[7].clone(),
+        event_id: bound[8].clone(),
+        old_identifier: bound[9].clone(),
+        new_identifier: bound[10].clone(),
+    })
+}
+
+/// Bound live `model_activity` call: six required params plus `origin`
+/// (default `None`), values unconverted, in signature order
+/// (`model_name, model_id, requested_data, current_instance, actor_id,
+/// slug, origin`).
+pub struct LiveModelActivityCall {
+    pub model_name: Value,
+    pub model_id: Value,
+    pub requested_data: Value,
+    pub current_instance: Value,
+    pub actor_id: Value,
+    pub slug: Value,
+    pub origin: Value,
+}
+
+/// Bind a live `model_activity` payload. `origin` defaults to `None`
+/// when absent (the signature's only default); everything else follows
+/// the shared `TypeError` rules.
+pub fn parse_live_model_activity(
+    args: &Value,
+    kwargs: &Value,
+) -> Result<LiveModelActivityCall, super::webhook_send::CallTypeError> {
+    const REQUIRED: [&str; 6] = [
+        "model_name",
+        "model_id",
+        "requested_data",
+        "current_instance",
+        "actor_id",
+        "slug",
+    ];
+    let args_list = args.as_array().ok_or_else(|| {
+        super::webhook_send::CallTypeError(format!(
+            "{MODEL_ACTIVITY_TASK_NAME}() args must be a list"
+        ))
+    })?;
+    let kwargs_map = kwargs.as_object().ok_or_else(|| {
+        super::webhook_send::CallTypeError(format!(
+            "{MODEL_ACTIVITY_TASK_NAME}() kwargs must be a dict"
+        ))
+    })?;
+    if args_list.len() > MODEL_ACTIVITY_PARAMS_ORDER.len() {
+        return Err(super::webhook_send::CallTypeError(format!(
+            "{}() takes 7 positional arguments but {} were given",
+            MODEL_ACTIVITY_TASK_NAME,
+            args_list.len()
+        )));
+    }
+    for key in kwargs_map.keys() {
+        if !MODEL_ACTIVITY_PARAMS_ORDER.contains(&key.as_str()) {
+            return Err(super::webhook_send::CallTypeError(format!(
+                "{}() got an unexpected keyword argument '{key}'",
+                MODEL_ACTIVITY_TASK_NAME
+            )));
+        }
+    }
+    // Positional overflow into `origin` is legal (7th positional); a
+    // positional fill plus an `origin` kwarg duplicates.
+    let mut bound = super::webhook_send::bind_call(
+        MODEL_ACTIVITY_TASK_NAME,
+        &REQUIRED,
+        &Value::Array(args_list.iter().take(6).cloned().collect()),
+        &Value::Object(
+            kwargs_map
+                .iter()
+                .filter(|(k, _)| *k != "origin")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+    )?;
+    if args_list.len() == 7 {
+        if kwargs_map.contains_key("origin") {
+            return Err(super::webhook_send::CallTypeError(format!(
+                "{}() got multiple values for argument 'origin'",
+                MODEL_ACTIVITY_TASK_NAME
+            )));
+        }
+        bound.push(args_list[6].clone());
+    } else {
+        bound.push(kwargs_map.get("origin").cloned().unwrap_or(Value::Null));
+    }
+    Ok(LiveModelActivityCall {
+        model_name: bound[0].clone(),
+        model_id: bound[1].clone(),
+        requested_data: bound[2].clone(),
+        current_instance: bound[3].clone(),
+        actor_id: bound[4].clone(),
+        slug: bound[5].clone(),
+        origin: bound[6].clone(),
+    })
+}
+
+/// Driver outcome for the fan-out handlers: ack (every swallow path),
+/// or parked failure (bind `TypeError`, `model_activity` body errors).
+pub enum FanoutOutcome {
+    Ack,
+    Fail { error: String },
+}
+
+/// Live `webhook_activity` (`:389-460`).
+///
+/// * Bind `TypeError` → [`FanoutOutcome::Fail`] (plain task, no retry).
+/// * The flag filter runs first (non-string/unknown events match no
+///   branch, so every active webhook fires); model lookups happen
+///   per row — the `deleted` verb never touches `get_model_data` for
+///   `event_data`, so unknown events still fan out on deletes, exactly
+///   like the source loop.
+/// * Bad `actor_id`/`event_id` shapes, store errors, unknown models →
+///   logged ack from that row on; `NotFound` rows ack silently (the
+///   `ObjectDoesNotExist` race path). QUIRK-2 recomputes `event_data` +
+///   actor per webhook, so a mid-loop abort keeps the rows already
+///   enqueued.
+/// * Send jobs enqueue with `max_retries=5` (the send task's budget);
+///   an enqueue failure aborts the remaining rows and acks (the
+///   `.delay` sits inside the `try`).
+pub async fn run_webhook_activity(
+    pool: &sqlx::PgPool,
+    web_base: Option<&str>,
+    call: &LiveWebhookActivityCall,
+) -> FanoutOutcome {
+    let deleted = call.verb.as_str() == Some("deleted");
+    // `slug=None` filters to the empty set (`IS NULL` on a non-null
+    // column); any other non-string breaks the lookup (swallowed).
+    let slug = match &call.slug {
+        Value::String(slug) => Some(slug.clone()),
+        Value::Null => None,
+        _ => {
+            tracing::error!(
+                target: "pi_dash.exception",
+                task = WEBHOOK_ACTIVITY_TASK_NAME,
+                "invalid workspace slug"
+            );
+            return FanoutOutcome::Ack;
+        }
+    };
+    // Only string events match the `:420-433` branches; anything else
+    // leaves the queryset unfiltered, like Python's `==` chain.
+    let flag = call.event.as_str().and_then(event_flag_for);
+    let webhook_ids = match slug {
+        None => Vec::new(),
+        Some(slug) => match fetch_fanout_webhooks(pool, &slug, flag).await {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::error!(target: "pi_dash.exception", task = WEBHOOK_ACTIVITY_TASK_NAME, "{error}");
+                return FanoutOutcome::Ack;
+            }
+        },
+    };
+    for webhook_id in webhook_ids {
+        // QUIRK-2: `event_data` + actor recompute per row.
+        let event_data = if deleted {
+            let mut data = Map::with_capacity(1);
+            data.insert("id".to_owned(), call.event_id.clone());
+            Value::Object(data)
+        } else {
+            // `get_model_data` checks the model before the id
+            // (`:159-166`): a non-string event is the same `ValueError`.
+            let event = match call.event.as_str() {
+                Some(event) => event,
+                None => {
+                    tracing::error!(
+                        target: "pi_dash.exception",
+                        task = WEBHOOK_ACTIVITY_TASK_NAME,
+                        "Model not found for event: {}",
+                        super::webhook_send::py_json_str(&call.event)
+                    );
+                    return FanoutOutcome::Ack;
+                }
+            };
+            let event_id = match call.event_id.as_str() {
+                Some(id) => id,
+                None => {
+                    tracing::error!(
+                        target: "pi_dash.exception",
+                        task = WEBHOOK_ACTIVITY_TASK_NAME,
+                        "invalid event id"
+                    );
+                    return FanoutOutcome::Ack;
+                }
+            };
+            match super::model_data::get_model_data(pool, event, event_id, web_base).await {
+                Ok(data) => data,
+                Err(error) if super::model_data::is_not_found(&error) => return FanoutOutcome::Ack,
+                Err(error) => {
+                    tracing::error!(target: "pi_dash.exception", task = WEBHOOK_ACTIVITY_TASK_NAME, "{error}");
+                    return FanoutOutcome::Ack;
+                }
+            }
+        };
+        let actor_id = match call.actor_id.as_str() {
+            Some(id) => id,
+            None => {
+                tracing::error!(
+                    target: "pi_dash.exception",
+                    task = WEBHOOK_ACTIVITY_TASK_NAME,
+                    "invalid actor id"
+                );
+                return FanoutOutcome::Ack;
+            }
+        };
+        let actor = match super::model_data::get_model_data(pool, "user", actor_id, web_base).await
+        {
+            Ok(data) => data,
+            Err(error) if super::model_data::is_not_found(&error) => return FanoutOutcome::Ack,
+            Err(error) => {
+                tracing::error!(target: "pi_dash.exception", task = WEBHOOK_ACTIVITY_TASK_NAME, "{error}");
+                return FanoutOutcome::Ack;
+            }
+        };
+        let mut activity = Map::with_capacity(6);
+        for key in ACTIVITY_KEY_ORDER {
+            let value = match key {
+                "field" => call.field.clone(),
+                "old_value" => call.old_value.clone(),
+                "new_value" => call.new_value.clone(),
+                "actor" => actor.clone(),
+                "old_identifier" => call.old_identifier.clone(),
+                "new_identifier" => call.new_identifier.clone(),
+                _ => Value::Null,
+            };
+            activity.insert(key.to_owned(), value);
+        }
+        let mut kwargs = Map::with_capacity(7);
+        kwargs.insert("webhook_id".to_owned(), Value::String(webhook_id));
+        kwargs.insert("slug".to_owned(), call.slug.clone());
+        // `event` rides through raw (`:439` passes the parameter, not a
+        // stringified copy).
+        kwargs.insert("event".to_owned(), call.event.clone());
+        kwargs.insert("event_data".to_owned(), event_data);
+        kwargs.insert("action".to_owned(), call.verb.clone());
+        kwargs.insert("current_site".to_owned(), call.current_site.clone());
+        kwargs.insert("activity".to_owned(), Value::Object(activity));
+        let mut send = crate::queue::NewJob::new(
+            super::webhook_send::WEBHOOK_SEND_TASK_NAME.to_owned(),
+            Value::Array(Vec::new()),
+            Value::Object(kwargs),
+        );
+        send.max_retries = super::webhook_send::WEBHOOK_SEND_RETRY.max_retries as i32;
+        if let Err(error) = crate::queue::enqueue(pool, &send).await {
+            tracing::error!(target: "pi_dash.exception", task = WEBHOOK_ACTIVITY_TASK_NAME, "{error}");
+            return FanoutOutcome::Ack;
+        }
+    }
+    FanoutOutcome::Ack
+}
+
+/// Webhook ids for the fan-out: workspace slug + active + event flag
+/// (`None` leaves the flag off — unknown/non-string events fire every
+/// active webhook), newest first (`Meta.ordering`).
+async fn fetch_fanout_webhooks(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    flag: Option<&str>,
+) -> Result<Vec<String>, sqlx::Error> {
+    let sql = match flag {
+        Some(column) => format!(
+            "SELECT w.id FROM webhooks w JOIN workspaces ws ON ws.id = w.workspace_id \
+             WHERE ws.slug = $1 AND w.is_active = true AND w.{column} = true \
+             ORDER BY w.created_at DESC"
+        ),
+        None => "SELECT w.id FROM webhooks w JOIN workspaces ws ON ws.id = w.workspace_id \
+             WHERE ws.slug = $1 AND w.is_active = true \
+             ORDER BY w.created_at DESC"
+            .to_owned(),
+    };
+    let rows = sqlx::query(&sql).bind(slug).fetch_all(pool).await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let id: uuid::Uuid = row.get("id");
+            id.to_string()
+        })
+        .collect())
+}
+
+/// Live `model_activity` (`:463-505`).
+///
+/// * `current_instance=None` → one `created` dispatch + ack.
+/// * Anything else must be a JSON string (other types are `TypeError`)
+///   that parses (else the QUIRK-4 `JSONDecodeError`): both park the job.
+/// * `requested_data` iterates like Python (`for key in ...`): objects
+///   yield keys, arrays yield elements, strings yield chars; anything
+///   else is `TypeError` → park.
+/// * Per-key membership + `.get`/index access mirror `in`/`[]` exactly
+///   (including `TypeError`/`AttributeError`/`IndexError` → park), and
+///   diffs compare under [`py_json_eq`]. Enqueue failures park (no
+///   `try` anywhere in the body).
+pub async fn run_model_activity(
+    pool: &sqlx::PgPool,
+    call: &LiveModelActivityCall,
+) -> FanoutOutcome {
+    if call.current_instance.is_null() {
+        let kwargs = activity_kwargs(
+            &call.model_name,
+            "created",
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &call.actor_id,
+            &call.slug,
+            &call.origin,
+            &call.model_id,
+        );
+        return enqueue_activity(pool, kwargs).await;
+    }
+    let raw = match call.current_instance.as_str() {
+        Some(raw) => raw,
+        None => {
+            return FanoutOutcome::Fail {
+                error: format!(
+                    "TypeError: the JSON object must be str, bytes or bytearray, not {}",
+                    json_type_name(&call.current_instance)
+                ),
+            };
+        }
+    };
+    let instance = match parse_current_instance(raw) {
+        Ok(instance) => instance,
+        Err(error) => return FanoutOutcome::Fail { error },
+    };
+    // `for key in requested_data` in iteration order.
+    let keys: Vec<Value> = match &call.requested_data {
+        Value::Object(map) => map.keys().map(|k| Value::String(k.clone())).collect(),
+        Value::Array(items) => items.clone(),
+        Value::String(text) => text.chars().map(|c| Value::String(c.to_string())).collect(),
+        other => {
+            return FanoutOutcome::Fail {
+                error: format!(
+                    "TypeError: argument of type '{}' is not iterable",
+                    json_type_name(other)
+                ),
+            };
+        }
+    };
+    for key in keys {
+        // `if key in current_instance`.
+        let member = match member_of(&key, &instance) {
+            Ok(member) => member,
+            Err(error) => return FanoutOutcome::Fail { error },
+        };
+        if !member {
+            continue;
+        }
+        // `requested_data[key] != current_instance.get(key, None)`.
+        let new_value = match index_requested(&call.requested_data, &key) {
+            Ok(value) => value,
+            Err(error) => return FanoutOutcome::Fail { error },
+        };
+        let old_value = match instance_get(&instance, &key) {
+            Ok(value) => value,
+            Err(error) => return FanoutOutcome::Fail { error },
+        };
+        if !py_json_eq(&old_value, &new_value) {
+            let kwargs = activity_kwargs(
+                &call.model_name,
+                "updated",
+                &key,
+                &old_value,
+                &new_value,
+                &call.actor_id,
+                &call.slug,
+                &call.origin,
+                &call.model_id,
+            );
+            if let FanoutOutcome::Fail { error } = enqueue_activity(pool, kwargs).await {
+                return FanoutOutcome::Fail { error };
+            }
+        }
+    }
+    FanoutOutcome::Ack
+}
+
+/// `webhook_activity.delay(...)` kwargs for one dispatch (`field`/
+/// values/identifiers as bound; identifiers always null here).
+#[allow(clippy::too_many_arguments)]
+fn activity_kwargs(
+    event: &Value,
+    verb: &str,
+    field: &Value,
+    old_value: &Value,
+    new_value: &Value,
+    actor_id: &Value,
+    slug: &Value,
+    current_site: &Value,
+    event_id: &Value,
+) -> Map<String, Value> {
+    let mut kwargs = Map::with_capacity(11);
+    kwargs.insert("event".to_owned(), event.clone());
+    kwargs.insert("verb".to_owned(), Value::String(verb.to_owned()));
+    kwargs.insert("field".to_owned(), field.clone());
+    kwargs.insert("old_value".to_owned(), old_value.clone());
+    kwargs.insert("new_value".to_owned(), new_value.clone());
+    kwargs.insert("actor_id".to_owned(), actor_id.clone());
+    kwargs.insert("slug".to_owned(), slug.clone());
+    kwargs.insert("current_site".to_owned(), current_site.clone());
+    kwargs.insert("event_id".to_owned(), event_id.clone());
+    kwargs.insert("old_identifier".to_owned(), Value::Null);
+    kwargs.insert("new_identifier".to_owned(), Value::Null);
+    kwargs
+}
+
+async fn enqueue_activity(pool: &sqlx::PgPool, kwargs: Map<String, Value>) -> FanoutOutcome {
+    let job = crate::queue::NewJob::new(
+        WEBHOOK_ACTIVITY_TASK_NAME.to_owned(),
+        Value::Array(Vec::new()),
+        Value::Object(kwargs),
+    );
+    match crate::queue::enqueue(pool, &job).await {
+        Ok(_) => FanoutOutcome::Ack,
+        Err(error) => FanoutOutcome::Fail {
+            error: error.to_string(),
+        },
+    }
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) => {
+            if number.is_i64() || number.is_u64() {
+                "int"
+            } else {
+                "float"
+            }
+        }
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+/// `key in instance` across JSON types: dict membership (unhashable keys
+/// are `TypeError`), list membership under `==`, substring (non-string
+/// keys are `TypeError`), anything else `TypeError`.
+fn member_of(key: &Value, instance: &Value) -> Result<bool, String> {
+    match instance {
+        Value::Object(map) => match key {
+            Value::String(name) => Ok(map.contains_key(name)),
+            Value::Bool(_) | Value::Number(_) | Value::Null => Ok(false),
+            Value::Array(_) | Value::Object(_) => Err("TypeError: unhashable type".to_owned()),
+        },
+        Value::Array(items) => Ok(items.iter().any(|item| py_json_eq(item, key))),
+        Value::String(text) => match key {
+            Value::String(part) => Ok(text.contains(part.as_str())),
+            _ => Err("TypeError: 'in <string>' requires string as left operand".to_owned()),
+        },
+        other => Err(format!(
+            "TypeError: argument of type '{}' is not iterable",
+            json_type_name(other)
+        )),
+    }
+}
+
+/// `requested_data[key]`: dict lookup (keys from iteration always hit),
+/// list/str integer indexing (bools as 0/1, negatives wrap,
+/// out-of-range is `IndexError`, non-integers `TypeError`).
+fn index_requested(requested: &Value, key: &Value) -> Result<Value, String> {
+    match requested {
+        Value::Object(map) => match key {
+            Value::String(name) => map
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("KeyError: {name:?}")),
+            _ => Err("TypeError: unhashable type".to_owned()),
+        },
+        Value::Array(items) => {
+            let index = int_index(key)?;
+            let resolved = if index < 0 {
+                items.len() as i64 + index
+            } else {
+                index
+            };
+            items
+                .get(resolved as usize)
+                .cloned()
+                .ok_or_else(|| "IndexError: list index out of range".to_owned())
+        }
+        Value::String(text) => {
+            let index = int_index(key)?;
+            let chars: Vec<char> = text.chars().collect();
+            let resolved = if index < 0 {
+                chars.len() as i64 + index
+            } else {
+                index
+            };
+            chars
+                .get(resolved as usize)
+                .map(|c| Value::String(c.to_string()))
+                .ok_or_else(|| "IndexError: string index out of range".to_owned())
+        }
+        _ => Err("TypeError: unhashable type".to_owned()),
+    }
+}
+
+/// `current_instance.get(key, None)`: dicts only — every other holder
+/// is the `AttributeError` a missing `.get` raises.
+fn instance_get(instance: &Value, key: &Value) -> Result<Value, String> {
+    match instance {
+        Value::Object(map) => match key {
+            Value::String(name) => Ok(map.get(name).cloned().unwrap_or(Value::Null)),
+            _ => Err("TypeError: unhashable type".to_owned()),
+        },
+        Value::Array(_) => Err("TypeError: 'list' object has no attribute 'get'".to_owned()),
+        Value::String(_) => Err("TypeError: 'str' object has no attribute 'get'".to_owned()),
+        other => Err(format!(
+            "TypeError: '{}' object has no attribute 'get'",
+            json_type_name(other)
+        )),
+    }
+}
+
+/// Integer list/str index: bools count as 0/1, whole floats are still
+/// `TypeError` (only `__index__` holders qualify).
+fn int_index(key: &Value) -> Result<i64, String> {
+    match key {
+        Value::Bool(true) => Ok(1),
+        Value::Bool(false) => Ok(0),
+        Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| "TypeError: list indices must be integers".to_owned()),
+        _ => Err("TypeError: list indices must be integers".to_owned()),
+    }
+}
+
+/// Register the `webhook_activity` handler (always acks past binding).
+pub fn register_webhook_activity_task(
+    registry: &mut crate::worker::Registry,
+    pools: pidash_db::pool::Pools,
+    web_base: Option<String>,
+) {
+    let handler: crate::worker::Handler = std::sync::Arc::new(move |job: crate::queue::JobRow| {
+        let pools = pools.clone();
+        let web_base = web_base.clone();
+        Box::pin(async move {
+            let outcome = match parse_live_webhook_activity(&job.args, &job.kwargs) {
+                Err(error) => FanoutOutcome::Fail {
+                    error: format!("TypeError: {}", error.0),
+                },
+                Ok(call) => run_webhook_activity(pools.primary(), web_base.as_deref(), &call).await,
+            };
+            Ok(match outcome {
+                FanoutOutcome::Ack => crate::worker::Verdict::Ack,
+                FanoutOutcome::Fail { error } => crate::worker::Verdict::Fail { error },
+            })
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+    });
+    registry.register(WEBHOOK_ACTIVITY_TASK_NAME, handler);
+}
+
+/// Register the `model_activity` handler (body errors park the job).
+pub fn register_model_activity_task(
+    registry: &mut crate::worker::Registry,
+    pools: pidash_db::pool::Pools,
+) {
+    let handler: crate::worker::Handler = std::sync::Arc::new(move |job: crate::queue::JobRow| {
+        let pools = pools.clone();
+        Box::pin(async move {
+            let outcome = match parse_live_model_activity(&job.args, &job.kwargs) {
+                Err(error) => FanoutOutcome::Fail {
+                    error: format!("TypeError: {}", error.0),
+                },
+                Ok(call) => run_model_activity(pools.primary(), &call).await,
+            };
+            Ok(match outcome {
+                FanoutOutcome::Ack => crate::worker::Verdict::Ack,
+                FanoutOutcome::Fail { error } => crate::worker::Verdict::Fail { error },
+            })
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+    });
+    registry.register(MODEL_ACTIVITY_TASK_NAME, handler);
 }
 
 #[cfg(test)]

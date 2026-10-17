@@ -10,6 +10,10 @@ timing is pinned by options parity while the suite behaviorally covers the
 first-attempt failure log row, the success path, and redelivery.
 """
 
+import ast
+import hashlib
+import hmac
+import json
 import os
 import uuid
 
@@ -190,6 +194,8 @@ def test_webhook_send_success(db_conn, broker_url, webhook_sink):
     assert len(new_rows) == 1
     assert str(new_rows[0]["response_status"]) == "200"
     assert new_rows[0]["retry_count"] == 0
+    # The logged method is the mapped action (POST -> create), not the wire verb.
+    assert new_rows[0]["request_method"] == "create"
     # ...while the logged request_headers show the task did compute them
     # (dropped at transmission, not at construction).
     assert "X-Pi Dash-Event" in new_rows[0]["request_headers"]
@@ -308,6 +314,7 @@ def test_deactivation_email_delivers(db_conn, broker_url, smtp_sink):
     )
     delivered = smtp_sink.wait_for_count(1, what="deactivation mail")
     assert any(receiver["email"] in m["rcpt_tos"] for m in delivered)
+    assert any(m["subject"] == "Webhook Deactivated" for m in delivered)
 
 
 def test_process_logs_writes_postgres_row(db_conn, broker_url):
@@ -654,6 +661,140 @@ def test_crawl_link_updates_metadata(db_conn, broker_url):
         "url": url,
         "favicon_url": None,
     }
+
+
+def _expected_payload(hook, probe_id):
+    """The delivery envelope the send task signs and POSTs (PIDASHCONV-1105).
+
+    Key order is the source dict order (event, action, webhook_id,
+    workspace_id, data, activity); the HMAC input is ``json.dumps`` with
+    stdlib defaults over exactly this dict.
+    """
+    return {
+        "event": "issue",
+        "action": "create",
+        "webhook_id": str(hook["id"]),
+        "workspace_id": str(hook["workspace_id"]),
+        "data": {"id": probe_id},
+        "activity": None,
+    }
+
+
+def _expected_signature(secret, payload):
+    return hmac.new(
+        secret.encode("utf-8"),
+        json.dumps(payload).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def test_webhook_send_signature_logged(db_conn, broker_url, webhook_sink):
+    """Fixed secret: the logged signature is HMAC over the exact envelope (PIDASHCONV-1105)."""
+    owner = seed_helpers.user(db_conn, "contract-sig-owner")
+    workspace = seed_helpers.workspace(db_conn, "contractsig", owner["id"])
+    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    secret = "contract-secret-1105"
+    hook = seed_helpers.webhook(
+        db_conn, workspace["id"], url, issue=True, secret_key=secret
+    )
+    probe_id = "contract-signature"
+    payload = _expected_payload(hook, probe_id)
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+
+    celery_wire.publish(
+        f"{M}.webhook_task.webhook_send_task",
+        kwargs={
+            "webhook_id": str(hook["id"]),
+            "slug": workspace["slug"],
+            "event": "issue",
+            "event_data": {"id": probe_id},
+            "action": "POST",
+            "current_site": "example.com",
+            "activity": None,
+        },
+    )
+    webhook_sink.wait_for_count(1, what="signed webhook POST")
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="signed webhook_logs row",
+    )
+    logged_headers = ast.literal_eval(row["request_headers"])
+    assert list(logged_headers) == [
+        "Content-Type",
+        "User-Agent",
+        "X-Pi Dash-Delivery",
+        "X-Pi Dash-Event",
+        "X-Pi Dash-Signature",
+    ]
+    assert logged_headers["X-Pi Dash-Signature"] == _expected_signature(secret, payload)
+    logged_body = ast.literal_eval(row["request_body"])
+    assert list(logged_body) == [
+        "event",
+        "action",
+        "webhook_id",
+        "workspace_id",
+        "data",
+        "activity",
+    ]
+    assert logged_body == payload
+
+
+def test_webhook_send_exhaustion_deactivates(db_conn, broker_url, smtp_sink):
+    """Retries exhausted: failure row, webhook disabled, deactivation mail (PIDASHCONV-1105).
+
+    The job lands with ``retries=5`` preset (a redelivered sixth attempt)
+    against a refused URL, so the transport error takes the
+    ``retries >= max_retries`` arm directly: no retry is scheduled, the
+    webhook flips ``is_active`` (``updated_at`` untouched — a filtered
+    ``update()``, not a ``save()``), and the deactivation mail goes to
+    the webhook creator.
+    """
+    owner = seed_helpers.user(db_conn, "contract-exhaust-owner")
+    workspace = seed_helpers.workspace(db_conn, "contractexhaust", owner["id"])
+    hook = seed_helpers.webhook(
+        db_conn,
+        workspace["id"],
+        f"http://127.0.0.1:9/{uuid.uuid4().hex}",
+        issue=True,
+        created_by_id=str(owner["id"]),
+    )
+    before_hooks = snapshot(db_conn, ["webhooks"])["webhooks"][str(hook["id"])]
+    before = snapshot(db_conn, ["webhook_logs"])
+    smtp_sink.clear()
+
+    celery_wire.publish_with_retries(
+        f"{M}.webhook_task.webhook_send_task",
+        kwargs={
+            "webhook_id": str(hook["id"]),
+            "slug": workspace["slug"],
+            "event": "issue",
+            "event_data": {"id": "contract-exhaustion"},
+            "action": "POST",
+            "current_site": "example.com",
+            "activity": None,
+        },
+        retries=5,
+    )
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="exhaustion webhook_logs row",
+    )
+    assert row["retry_count"] == 5
+    assert str(row["response_status"]) == "500"
+    assert row["response_headers"] == ""
+    assert "refused" in row["response_body"].lower()
+
+    def _deactivated():
+        current = snapshot(db_conn, ["webhooks"])["webhooks"][str(hook["id"])]
+        return current if current["is_active"] is False else None
+
+    deactivated = wait_for(_deactivated, what="webhook deactivation")
+    assert deactivated["updated_at"] == before_hooks["updated_at"]
+
+    delivered = smtp_sink.wait_for_count(1, what="exhaustion deactivation mail")
+    assert any(owner["email"] in m["rcpt_tos"] for m in delivered)
+    assert any(m["subject"] == "Webhook Deactivated" for m in delivered)
 
 
 def _logs_with_count(conn, before, n):
