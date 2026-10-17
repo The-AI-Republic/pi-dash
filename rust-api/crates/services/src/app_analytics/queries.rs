@@ -412,7 +412,7 @@ pub fn base_plot_count_sql(
     let null_guard = format!(" AND {dim_expr} IS NOT NULL");
     Some(format!(
         "SELECT \"dimension\", COUNT(*) AS \"count\" FROM (SELECT {dim_expr} AS \"dimension\"{seg_select} \
-         FROM \"{ISSUE_TABLE}\"{dim_join}{seg_join}{scope}{null_guard}) GROUP BY \"dimension\"{seg_group} \
+         FROM \"{ISSUE_TABLE}\"{dim_join}{seg_join}{scope}{null_guard}) AS \"plot\" GROUP BY \"dimension\"{seg_group} \
          ORDER BY \"dimension\" ASC",
         scope = workspace_scope().replace("{filters}", filters_sql),
     ))
@@ -1889,6 +1889,18 @@ mod tests {
         assert!(fixture.contains("annotate(count=Count('*')).order_by(dimension)"));
         let sql = base_plot_count_sql("priority", None, "TRUE").expect("known axis");
         assert!(sql.contains("COUNT(*) AS \"count\""));
+        // The FROM subquery must carry an alias or Postgres rejects the
+        // whole statement (`subquery in FROM must have an alias`, PIDASHCONV-1119).
+        assert!(
+            sql.contains(") AS \"plot\" GROUP BY \"dimension\""),
+            "count plot FROM subquery lacks an alias: {sql}"
+        );
+        let segmented_sql =
+            base_plot_count_sql("priority", Some("state_id"), "TRUE").expect("segmented axis");
+        assert!(
+            segmented_sql.contains(") AS \"plot\" GROUP BY \"dimension\""),
+            "segmented count plot FROM subquery lacks an alias: {segmented_sql}"
+        );
         assert!(sql.contains("GROUP BY \"dimension\""));
         assert!(sql.contains("ORDER BY \"dimension\" ASC"));
         assert!(sql.contains("\"workspaces\".\"slug\" = $1"));
