@@ -116,6 +116,50 @@ export async function sendWorkspaceInvitations(
 }
 
 /**
+ * GET /api/workspaces/<slug>/invitations/ — the workspace's invitations
+ * through the admin lens, behind the roster's pending-invites group. Same
+ * row shape as the requester's own list. Admins and members may read
+ * (guests answer 403); the roster UI keeps the group admin-only.
+ */
+export async function listPendingWorkspaceInvites(client: ApiClient, slug: string): Promise<WorkspaceInvitationList> {
+  const path = `/api/workspaces/${slug}/invitations/`;
+  const body = await client.getJson<unknown>(path);
+  return client.parse(WorkspaceInvitationList, body, `GET ${path}`);
+}
+
+export interface WorkspaceInviteRoleInput {
+  role: number;
+}
+
+/**
+ * PATCH /api/workspaces/<slug>/invitations/<invitationId>/ — the invite
+ * role write behind the pending row's role control. Admins and members
+ * may write (guests answer 403); the roster UI keeps it admin-only.
+ * Answers the updated invitation row.
+ */
+export async function updateWorkspaceInviteRole(
+  client: ApiClient,
+  slug: string,
+  invitationId: string,
+  input: WorkspaceInviteRoleInput
+): Promise<WorkspaceInvitation> {
+  const path = `/api/workspaces/${slug}/invitations/${invitationId}/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: input });
+  return client.parse(WorkspaceInvitation, envelope.data, `PATCH ${path}`);
+}
+
+/**
+ * DELETE /api/workspaces/<slug>/invitations/<invitationId>/ — the
+ * withdrawal behind the pending row's Remove entry (204). Admins and
+ * members may withdraw (guests answer 403); the roster UI keeps it
+ * admin-only.
+ */
+export async function withdrawWorkspaceInvite(client: ApiClient, slug: string, invitationId: string): Promise<number> {
+  const response = await client.delete(`/api/workspaces/${slug}/invitations/${invitationId}/`);
+  return response.status;
+}
+
+/**
  * The join-request requester. Same shape as UserLite, including the
  * nullable avatar_url for users who never set an avatar.
  */

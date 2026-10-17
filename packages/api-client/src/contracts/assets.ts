@@ -1,9 +1,10 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// User-asset upload contract: the signed-URL flow behind the onboarding
-// avatar picker (AUTH-031). Request a grant, PUT the bytes to the signed
-// URL, confirm the asset, then store the returned URL on the user row.
+// Asset upload contracts: the signed-URL flows behind the onboarding
+// avatar picker (AUTH-031) and the workspace logo dialog (WSET-004).
+// Request a grant, POST the bytes to the signed URL, confirm the asset,
+// then store the returned URL on the owning row.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { ApiError } from "../errors.js";
@@ -76,4 +77,74 @@ export async function uploadUserAvatar(
 
   await client.patch(`/api/assets/v2/user-assets/${encodeURIComponent(grant.asset_id)}/`);
   return grant.asset_url;
+}
+
+/**
+ * Upload one workspace logo and resolve to its public URL. Three legs like
+ * the avatar flow: grant (`POST /api/assets/v2/workspaces/<slug>/` with
+ * the workspace-logo entity plus file metadata), bytes (a signed POST of
+ * the grant fields plus the file), and confirm (`PATCH .../<asset_id>/`,
+ * which also wires the asset as the workspace logo). The caller then
+ * stores the returned URL on the workspace row. Any failed leg rejects
+ * with ApiError.
+ */
+export async function uploadWorkspaceLogo(
+  client: ApiClient,
+  slug: string,
+  workspaceId: string,
+  file: File,
+  uploadBytes: ByteUpload = defaultByteUpload
+): Promise<string> {
+  const grantPath = `/api/assets/v2/workspaces/${slug}/`;
+  const envelope = await client.sendJson<unknown>("POST", grantPath, {
+    json: {
+      entity_identifier: workspaceId,
+      entity_type: "WORKSPACE_LOGO",
+      name: file.name,
+      size: file.size,
+      type: file.type,
+    },
+  });
+  const grant = client.parse(SignedUserAsset, envelope.data, `POST ${grantPath}`);
+
+  const payload = new FormData();
+  for (const [key, value] of Object.entries(grant.upload_data.fields)) {
+    payload.append(key, value);
+  }
+  payload.append("file", file);
+  const uploaded = await uploadBytes(grant.upload_data.url, payload);
+  if (!uploaded.ok) {
+    throw new ApiError({
+      status: uploaded.status,
+      code: "http",
+      message: "The logo upload was rejected.",
+    });
+  }
+
+  await client.patch(`/api/assets/v2/workspaces/${slug}/${encodeURIComponent(grant.asset_id)}/`);
+  return grant.asset_url;
+}
+
+/**
+ * DELETE /api/assets/v2/workspaces/<slug>/<asset_id>/ — drops a current
+ * logo asset (204) and unwires it from the workspace. The caller then
+ * PATCHes the workspace with an emptied logo field.
+ */
+export async function deleteWorkspaceLogoAsset(client: ApiClient, slug: string, assetId: string): Promise<number> {
+  const response = await client.delete(`/api/assets/v2/workspaces/${slug}/${assetId}/`);
+  return response.status;
+}
+
+/**
+ * DELETE /api/workspaces/file-assets/<workspace_id>/<asset_key>/ — drops a
+ * legacy full-URL logo asset (204). Removal picks this path when the stored
+ * logo is a full URL, the v2 path otherwise.
+ */
+export async function deleteLegacyWorkspaceFileAsset(
+  client: ApiClient,
+  workspaceId: string,
+  assetKey: string
+): Promise<number> {
+  const response = await client.delete(`/api/workspaces/file-assets/${workspaceId}/${assetKey}/`);
+  return response.status;
 }

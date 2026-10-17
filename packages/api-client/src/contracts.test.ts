@@ -25,15 +25,29 @@ import {
 import { getMe, getMeSettings } from "./contracts/users.js";
 import { markOnboarded, updateMe } from "./contracts/user-writes.js";
 import { getMyWorkspaceMembership, listWorkspaces } from "./contracts/workspaces.js";
-import { checkWorkspaceSlug, createWorkspace, listWorkspaceMembers } from "./contracts/workspace-management.js";
+import {
+  checkWorkspaceSlug,
+  createWorkspace,
+  deleteWorkspace,
+  getWorkspace,
+  leaveWorkspace,
+  listWorkspaceMembers,
+  listWorkspaceRoster,
+  removeWorkspaceMember,
+  updateWorkspace,
+  updateWorkspaceMemberRole,
+} from "./contracts/workspace-management.js";
 import {
   acceptWorkspaceInvitations,
   answerWorkspaceInvitation,
   createWorkspaceJoinRequest,
   getWorkspaceInvitation,
+  listPendingWorkspaceInvites,
   listWorkspaceInvitations,
   listWorkspaceJoinRequests,
   sendWorkspaceInvitations,
+  updateWorkspaceInviteRole,
+  withdrawWorkspaceInvite,
 } from "./contracts/invitations.js";
 import {
   getMyProjectRoles,
@@ -106,7 +120,12 @@ import {
   unarchiveNotification,
   updateNotificationPreferences,
 } from "./contracts/notifications.js";
-import { uploadUserAvatar } from "./contracts/assets.js";
+import {
+  deleteLegacyWorkspaceFileAsset,
+  deleteWorkspaceLogoAsset,
+  uploadUserAvatar,
+  uploadWorkspaceLogo,
+} from "./contracts/assets.js";
 import { listCycles, updateCycle } from "./contracts/cycles.js";
 import { listModules, updateModule } from "./contracts/modules.js";
 import {
@@ -4078,5 +4097,274 @@ describe("issue identity and dropdown-read contracts", () => {
     const listed = await listPods(podClient, { projectId: UUID2 });
     expect(listed[0]?.is_default).toBe(true);
     expect(podTransport.calls[0]?.url).toBe(`https://api.test/api/runners/pods/?project=${UUID2}`);
+  });
+});
+
+describe("workspace settings details contracts", () => {
+  const details = {
+    id: UUID,
+    name: "Acme",
+    slug: "acme",
+    logo: null,
+    logo_asset: null,
+    logo_url: null,
+    owner: UUID2,
+    organization_size: "2-10",
+    timezone: "Pacific/Auckland",
+    background_color: "#45d945",
+    total_members: 2,
+    created_by: null,
+    updated_by: null,
+    created_at: "2026-10-17T05:53:37.880616Z",
+    updated_at: "2026-10-17T05:53:37.880640Z",
+  };
+
+  function settingsApi(handler: (call: { url: string; init: { method?: string } }) => unknown) {
+    return recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({ body: JSON.stringify(handler(call)) });
+    });
+  }
+
+  it("reads the stored details without a role annotation", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json(details) });
+    const parsed = await getWorkspace(client, "acme");
+    expect(parsed.slug).toBe("acme");
+    expect(parsed.organization_size).toBe("2-10");
+    expect(parsed.total_members).toBe(2);
+    expect("role" in parsed).toBe(false);
+  });
+
+  it("rejects details without a slug", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json({ ...details, slug: 7 }) });
+    const error = await getWorkspace(client, "acme").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("patches details and posts the input as JSON", async () => {
+    const transport = settingsApi(() => ({ ...details, organization_size: "11-50" }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateWorkspace(client, "acme", { organization_size: "11-50" });
+    expect(updated.organization_size).toBe("11-50");
+    const patchCall = transport.calls.find((call) => call.url.endsWith("/api/workspaces/acme/"));
+    expect(patchCall?.init.method).toBe("PATCH");
+    expect(patchCall?.init.body).toBe(JSON.stringify({ organization_size: "11-50" }));
+  });
+
+  it("deletes by status", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({ status: 204, body: "" });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteWorkspace(client, "acme")).resolves.toBe(204);
+  });
+});
+
+describe("workspace roster contracts", () => {
+  const thinMember = {
+    id: UUID2,
+    first_name: "Contract",
+    last_name: "Probe",
+    avatar: "",
+    avatar_url: null,
+    display_name: "contract.probe",
+    is_bot: false,
+  };
+  const rosterRow = {
+    id: UUID,
+    member: { ...thinMember, email: "contract.probe@example.com", last_login_medium: "email" },
+    role: 20,
+    is_active: true,
+    created_at: "2026-10-17T05:53:38.187975Z",
+  };
+
+  function settingsApi(status: number, body: unknown) {
+    return recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({ status, body: JSON.stringify(body) });
+    });
+  }
+
+  it("parses the admin-lens roster rows", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([rosterRow]) });
+    const parsed = await listWorkspaceRoster(client, "acme");
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.member.email).toBe("contract.probe@example.com");
+    expect(parsed[0]?.member.last_login_medium).toBe("email");
+    expect(parsed[0]?.is_active).toBe(true);
+    expect(parsed[0]?.created_at).toContain("2026-10-17");
+  });
+
+  it("rejects thin-lens rows without an email", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json([{ ...rosterRow, member: thinMember }]),
+    });
+    const error = await listWorkspaceRoster(client, "acme").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("patches a member role and parses the updated row", async () => {
+    const transport = settingsApi(200, { id: UUID, member: thinMember, role: 5 });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateWorkspaceMemberRole(client, "acme", UUID, { role: 5 });
+    expect(updated.role).toBe(5);
+    const patchCall = transport.calls.find((call) => call.url.endsWith(`/api/workspaces/acme/members/${UUID}/`));
+    expect(patchCall?.init.method).toBe("PATCH");
+    expect(patchCall?.init.body).toBe(JSON.stringify({ role: 5 }));
+  });
+
+  it("removes and leaves by status", async () => {
+    const transport = settingsApi(204, null);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(removeWorkspaceMember(client, "acme", UUID)).resolves.toBe(204);
+    await expect(leaveWorkspace(client, "acme")).resolves.toBe(204);
+    const leaveCall = transport.calls.find((call) => call.url.endsWith("/members/leave/"));
+    expect(leaveCall?.init.method).toBe("POST");
+  });
+});
+
+describe("workspace invitation admin contracts", () => {
+  const invite = {
+    id: UUID,
+    workspace: { id: UUID2, name: "Acme", slug: "acme", logo_url: null },
+    email: "guest@example.com",
+    accepted: false,
+    token: "tok",
+    message: null,
+    responded_at: null,
+    role: 15,
+    invite_link: "/workspace-invitations/?invitation_id=1&slug=acme&token=tok",
+    created_by: null,
+    updated_by: null,
+    created_at: "2026-10-17T05:53:38.187975Z",
+    updated_at: "2026-10-17T05:53:38.188014Z",
+  };
+
+  function settingsApi(status: number, body: unknown) {
+    return recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({ status, body: JSON.stringify(body) });
+    });
+  }
+
+  it("lists the pending invites", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([invite]) });
+    const parsed = await listPendingWorkspaceInvites(client, "acme");
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.email).toBe("guest@example.com");
+    expect(parsed[0]?.role).toBe(15);
+    expect(parsed[0]?.invite_link).toContain("invitation_id=");
+  });
+
+  it("patches an invite role and parses the updated row", async () => {
+    const transport = settingsApi(200, { ...invite, role: 5 });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateWorkspaceInviteRole(client, "acme", UUID, { role: 5 });
+    expect(updated.role).toBe(5);
+    const patchCall = transport.calls.find((call) => call.url.endsWith(`/api/workspaces/acme/invitations/${UUID}/`));
+    expect(patchCall?.init.method).toBe("PATCH");
+    expect(patchCall?.init.body).toBe(JSON.stringify({ role: 5 }));
+  });
+
+  it("withdraws by status", async () => {
+    const transport = settingsApi(204, null);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(withdrawWorkspaceInvite(client, "acme", UUID)).resolves.toBe(204);
+  });
+});
+
+describe("workspace logo asset contracts", () => {
+  const grant = {
+    asset_id: "asset-1",
+    asset_url: "https://cdn.test/logos/asset-1.png",
+    upload_data: { url: "https://uploads.test/signed", fields: { key: "logos/asset-1.png", policy: "p" } },
+  };
+
+  function grantTransport() {
+    return recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "POST") {
+        return fakeResponse({ status: 200, body: JSON.stringify(grant) });
+      }
+      return fakeResponse({ body: JSON.stringify({ ok: true }) });
+    });
+  }
+
+  it("uploads a logo through grant, bytes, and confirm", async () => {
+    const transport = grantTransport();
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const file = new File(["bytes"], "logo.png", { type: "image/png" });
+    const uploads: Array<{ url: string; body: FormData }> = [];
+    const url = await uploadWorkspaceLogo(client, "acme", UUID, file, async (target, body) => {
+      uploads.push({ url: target, body });
+      return { ok: true, status: 204 };
+    });
+    expect(url).toBe("https://cdn.test/logos/asset-1.png");
+
+    const grantCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(grantCall?.url).toBe("https://api.test/api/assets/v2/workspaces/acme/");
+    expect(grantCall?.init.body).toBe(
+      JSON.stringify({
+        entity_identifier: UUID,
+        entity_type: "WORKSPACE_LOGO",
+        name: "logo.png",
+        size: file.size,
+        type: "image/png",
+      })
+    );
+
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]?.url).toBe("https://uploads.test/signed");
+    const payload = uploads[0]?.body;
+    expect(payload?.get("key")).toBe("logos/asset-1.png");
+    expect(payload?.get("policy")).toBe("p");
+    expect(payload?.get("file")).toBe(file);
+
+    const confirmCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(confirmCall?.url).toBe("https://api.test/api/assets/v2/workspaces/acme/asset-1/");
+  });
+
+  it("rejects when the signed upload refuses the bytes", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: grantTransport() });
+    const file = new File(["bytes"], "logo.png", { type: "image/png" });
+    const failure = await uploadWorkspaceLogo(client, "acme", UUID, file, async () => ({
+      ok: false,
+      status: 403,
+    })).then(
+      () => null,
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(403);
+  });
+
+  it("deletes current and legacy assets by status", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({ status: 204, body: "" });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteWorkspaceLogoAsset(client, "acme", "asset-1")).resolves.toBe(204);
+    await expect(deleteLegacyWorkspaceFileAsset(client, UUID, "logo-key")).resolves.toBe(204);
+    expect(transport.calls.some((call) => call.url.endsWith("/api/assets/v2/workspaces/acme/asset-1/"))).toBe(true);
+    expect(transport.calls.some((call) => call.url.endsWith(`/api/workspaces/file-assets/${UUID}/logo-key/`))).toBe(
+      true
+    );
   });
 });
