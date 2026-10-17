@@ -36,12 +36,12 @@
 
 pub mod history;
 pub mod mcp_client;
-pub mod tool_args;
-pub mod tool_schemas;
-pub mod tools_local;
-pub mod tools_local_store;
 #[cfg(test)]
 mod mcp_parity;
 #[cfg(test)]
 mod mcp_stub;
 pub mod streaming;
+pub mod tool_args;
+pub mod tool_schemas;
+pub mod tools_local;
+pub mod tools_local_store;
