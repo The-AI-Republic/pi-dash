@@ -173,10 +173,15 @@ export {
   STATE_GROUPS,
   State,
   StateList,
+  createLabel,
+  deleteLabel,
+  getIntakeState,
   listLabels,
   listMembers,
   listStates,
+  updateLabel,
 } from "./contracts/reference.js";
+export type { LabelCreate, LabelPatch } from "./contracts/reference.js";
 export {
   ISSUE_PRIORITIES,
   GlobalIssueListResponse,
@@ -254,6 +259,39 @@ export {
   updateWorkspaceView,
 } from "./contracts/issue-views.js";
 export type { SavedViewCreate, SavedViewPatch } from "./contracts/issue-views.js";
+export {
+  COMMENT_ACCESS,
+  COMMENT_FOLD_LABEL,
+  COMMENT_SPEAKERS,
+  IssueComment,
+  IssueCommentList,
+  createIssueComment,
+  deleteIssueComment,
+  listIssueComments,
+  updateIssueComment,
+} from "./contracts/issue-comments.js";
+export type {
+  CommentAccess,
+  CommentSpeaker,
+  IssueCommentCreate,
+  IssueCommentPatch,
+  IssueCommentQuery,
+} from "./contracts/issue-comments.js";
+export { IssueActivity, IssueActivityList, listIssueActivities } from "./contracts/issue-activity.js";
+export type { IssueActivityQuery } from "./contracts/issue-activity.js";
+export {
+  CommentReaction,
+  CommentReactionList,
+  IssueReaction,
+  IssueReactionList,
+  createCommentReaction,
+  createIssueReaction,
+  deleteCommentReaction,
+  deleteIssueReaction,
+  listCommentReactions,
+  listIssueReactions,
+} from "./contracts/issue-reactions.js";
+export { IssueLite, IssueMeta, getIssueByIdentifier, getIssueMeta } from "./contracts/issue-identity.js";
 export {
   Favorite,
   FavoriteList,

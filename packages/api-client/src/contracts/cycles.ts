@@ -21,8 +21,9 @@ export const CycleUpdate = z.object({
 export type CycleUpdate = z.infer<typeof CycleUpdate>;
 
 /**
- * Thin cycle row for the shell: the palette's Add-to-cycle picker lists
- * names. The server already excludes archived cycles. Full cycle
+ * Thin cycle row for the shell and the issues cycle picker: the palette's
+ * Add-to-cycle picker lists names while the dropdown additionally filters
+ * on status. The server already excludes archived cycles. Full cycle
  * ownership stays in the cycles area.
  */
 export const CycleListItem = z.object({
@@ -30,6 +31,11 @@ export const CycleListItem = z.object({
   project_id: uuid(),
   name: z.string(),
   is_favorite: z.boolean(),
+  // Lifecycle marker the cycle picker filters on (completed cycles are
+  // excluded). The server sends it uppercase (DRAFT, ACTIVE, ...), so
+  // readers compare case-insensitively. Optional: rows already held by
+  // existing readers omit it, and those readers must keep parsing.
+  status: z.optional(z.string()),
 });
 export type CycleListItem = z.infer<typeof CycleListItem>;
 

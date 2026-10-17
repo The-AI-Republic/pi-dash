@@ -51,6 +51,7 @@ def seed():
     from django.contrib.auth.hashers import make_password  # noqa: E402
     from pi_dash.db.models import (  # noqa: E402
         Issue,
+        IssueActivity,
         Label,
         Project,
         ProjectMember,
@@ -375,6 +376,28 @@ def seed():
         note("notification-repaired", probe_notification.title, False)
 
     first_issue = issues[0]
+
+    # Issues area (NEWFRONT-613): the activity-feed contract suite reads
+    # history/?activity_type=issue-property. Live rows are written by
+    # celery workers (none runs in contract tests), so the rows are
+    # seeded directly. Read-only for every suite, so no repair needed.
+    for verb, field, old_value, new_value in (
+        ("created", "", "", ""),
+        ("updated", "state", "Triage", "In Progress"),
+        ("updated", "priority", "low", "high"),
+    ):
+        _, activity_created = IssueActivity.objects.get_or_create(
+            workspace=workspace,
+            project=project,
+            issue=first_issue,
+            verb=verb,
+            field=field,
+            old_value=old_value,
+            new_value=new_value,
+            defaults={"actor": user, "created_by": user, "updated_by": user},
+        )
+        note("issue-activity", f"{first_issue.name}/{verb}/{field or '-'}", activity_created)
+
     if label.pk and first_issue.pk:
         from pi_dash.db.models import IssueLabel  # noqa: E402
 
