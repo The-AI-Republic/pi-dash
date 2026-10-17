@@ -84,10 +84,11 @@ use crate::worker::{Handler, Registry, Verdict};
 /// (`exporter_expired_task.py:22-23`, bare `@shared_task`, no arguments).
 pub const TASK_DELETE_OLD_S3_LINK: &str = DELETE_OLD_S3_LINK_TASK_NAME;
 
-/// `filter(id).update(url=None)` (`:53`): no `deleted_at` guard on the
-/// write (only the scan filters live rows) and no `updated_at` bump
-/// (`QuerySet.update` never touches `auto_now`).
-pub const CLEAR_EXPIRED_URL_SQL: &str = "UPDATE \"exporters\" SET \"url\" = NULL WHERE \"id\" = $1";
+/// `filter(id).update(url=None)` (`:53`): the `SoftDeletionManager`
+/// base filter rides along, so the write keeps its `deleted_at` guard;
+/// no `updated_at` bump (`QuerySet.update` never touches `auto_now`).
+pub const CLEAR_EXPIRED_URL_SQL: &str =
+    "UPDATE \"exporters\" SET \"url\" = NULL WHERE \"id\" = $1 AND \"deleted_at\" IS NULL";
 
 /// Render the expiry scan for one run: the fixture-pinned
 /// [`logic::delete_old_s3_link_sql`] over the Django-rendered cutoff
@@ -124,6 +125,14 @@ pub trait ExpiryStore: Send + Sync {
 /// fail on S3), while this task has no `try`, so an S3 failure fails
 /// the task. Sharing the trait would carry two opposing contracts.
 pub trait ObjectDeleter: Send + Sync {
+    /// The eager `boto3.client(...)` build (`:28-43`), before the scan:
+    /// a region boto3 would reject at build fails the task with zero
+    /// rows touched (probed `ValueError`/`InvalidRegionError`). The
+    /// default never fails; deleters whose client construction can
+    /// fail override it.
+    fn check_client(&self) -> Result<(), String> {
+        Ok(())
+    }
     /// Delete one object. `Err` carries the S3 failure text, which
     /// parks the task (never retries).
     fn delete_object(
@@ -177,7 +186,10 @@ impl LiveS3Deleter {
     /// the unchained values `Settings` does not retain (both are
     /// env-tier keys, and the worker resolves `Settings` from the same
     /// environment first — a garbage `USE_MINIO` already failed boot
-    /// there, like Django's import-time `int()`).
+    /// there, like Django's import-time `int()`). Construction never
+    /// fails: the eager client check runs per task run
+    /// ([`ObjectDeleter::check_client`]), like the `boto3.client(...)`
+    /// build inside the Python task.
     pub fn from_settings(settings: &Settings) -> Self {
         let aws_region = std::env::var("AWS_REGION").ok();
         let aws_default_region = std::env::var("AWS_DEFAULT_REGION").ok();
@@ -244,6 +256,30 @@ impl LiveS3Deleter {
 }
 
 impl ObjectDeleter for LiveS3Deleter {
+    fn check_client(&self) -> Result<(), String> {
+        // Pure (no I/O): botocore validates the region at client
+        // construction, before the loop. The regional arm fails on an
+        // invalid name (`InvalidRegionError`) and on `""` (`ValueError:
+        // Invalid endpoint`); the MinIO arm fails only on an invalid
+        // chained name — a missing endpoint builds fine there.
+        let region = if self.storage.use_minio {
+            &self.minio_region
+        } else {
+            &self.region_raw
+        };
+        if !pidash_db::config::is_valid_region_name(region) {
+            return Err(format!(
+                "s3 misconfigured: region {region:?} is not a valid host label"
+            ));
+        }
+        if !self.storage.use_minio && region.is_empty() {
+            return Err(
+                "s3 misconfigured: empty region with no endpoint URL to derive from".to_owned(),
+            );
+        }
+        Ok(())
+    }
+
     async fn delete_object(&self, key: &str) -> Result<(), String> {
         let now = Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -289,6 +325,9 @@ pub async fn run_expiry<S: ExpiryStore, D: ObjectDeleter>(
     deleter: &D,
     now: DateTime<Utc>,
 ) -> Result<ExpiryOutcome, String> {
+    // Eager client build first (`:28-43` runs before the loop): a bad
+    // region fails here, with zero rows touched.
+    deleter.check_client()?;
     let rows = store.expired_exporters(now).await?;
     let actions = logic::plan_expiry_deletes(
         &rows
@@ -423,7 +462,7 @@ mod tests {
     fn clear_sql_pins_write() {
         assert_eq!(
             CLEAR_EXPIRED_URL_SQL,
-            "UPDATE \"exporters\" SET \"url\" = NULL WHERE \"id\" = $1"
+            "UPDATE \"exporters\" SET \"url\" = NULL WHERE \"id\" = $1 AND \"deleted_at\" IS NULL"
         );
     }
 
@@ -587,9 +626,17 @@ mod tests {
     struct FakeDeleter {
         deleted: Mutex<Vec<String>>,
         fail_on: HashMap<String, String>,
+        fail_client: Option<String>,
     }
 
     impl ObjectDeleter for FakeDeleter {
+        fn check_client(&self) -> Result<(), String> {
+            match &self.fail_client {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+
         async fn delete_object(&self, key: &str) -> Result<(), String> {
             if let Some(error) = self.fail_on.get(key) {
                 return Err(error.clone());
@@ -612,7 +659,40 @@ mod tests {
         FakeDeleter {
             deleted: Mutex::new(Vec::new()),
             fail_on: HashMap::new(),
+            fail_client: None,
         }
+    }
+
+    #[test]
+    fn check_client_mirrors_boto3_build_rules() {
+        // Regional arm: "" fails (ValueError), garbage fails
+        // (InvalidRegionError), real regions pass.
+        assert!(deleter_with(false, None, "us-east-1", "us-east-1", "")
+            .check_client()
+            .is_err());
+        assert!(deleter_with(false, None, "us-east-1", "us-east-1", "!!!")
+            .check_client()
+            .is_err());
+        assert!(
+            deleter_with(false, None, "us-east-1", "us-east-1", "eu-west-1")
+                .check_client()
+                .is_ok()
+        );
+        // MinIO arm: garbage chained region fails, "" passes, and a
+        // missing endpoint builds fine (boto3 only fails per call).
+        assert!(
+            deleter_with(true, Some("http://localhost:4566"), "x", "!!!", "")
+                .check_client()
+                .is_err()
+        );
+        assert!(
+            deleter_with(true, Some("http://localhost:4566"), "x", "", "")
+                .check_client()
+                .is_ok()
+        );
+        assert!(deleter_with(true, None, "us-east-1", "us-east-1", "")
+            .check_client()
+            .is_ok());
     }
 
     #[tokio::test]
@@ -657,6 +737,21 @@ mod tests {
         // untouched.
         assert_eq!(*s3.deleted.lock().unwrap(), vec!["k1.zip".to_owned()]);
         assert_eq!(*store.cleared.lock().unwrap(), vec![ids[0]]);
+    }
+
+    #[tokio::test]
+    async fn bad_client_fails_before_scan_with_zero_rows_touched() {
+        // `boto3.client(...)` runs before the loop: even falsy-key rows
+        // (which need no S3 call) keep their url when the build fails.
+        let ids = [Uuid::new_v4(), Uuid::new_v4()];
+        let store = store_with(vec![(None, ids[0]), (Some(String::new()), ids[1])]);
+        let mut s3 = deleter();
+        s3.fail_client = Some("s3 misconfigured: empty region".to_owned());
+        run_expiry(&store, &s3, Utc::now())
+            .await
+            .expect_err("fails");
+        assert!(s3.deleted.lock().unwrap().is_empty());
+        assert!(store.cleared.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
