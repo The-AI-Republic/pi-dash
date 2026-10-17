@@ -189,6 +189,8 @@ enum Denial {
     BadError(String),
     /// 400, `{"detail": …}` (DRF `ParseError`, e.g. malformed JSON body).
     BadDetail(String),
+    /// 415, unsupported media type (DRF `UnsupportedMediaType` — PIDASHCONV-1102).
+    UnsupportedMediaType(String),
     /// 400, `IntegrityError` branch (duplicate admin, null role).
     InvalidPayload,
     /// 500, generic branch.
@@ -223,6 +225,10 @@ impl Denial {
             ),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::InvalidPayload => (
@@ -552,12 +558,32 @@ fn render_admin(
     serde_json::to_value(&view).map_err(|_| Denial::ServerError)
 }
 
-/// Parse a POST body the way DRF's `JSONParser` does: the body must be
-/// UTF-8 (a decode error is not a `ValueError`, so it escapes the parser
-/// into the generic 500); unparsable JSON is `ParseError` 400 with the
+/// Parse a POST body the way DRF `_parse` + `JSONParser` do: empty body
+/// is `{}` without parsing; a non-JSON content-type with a body is 415;
+/// otherwise the body must be UTF-8 (a decode error is not a `ValueError`,
+/// so it escapes the parser into the generic 500); unparsable JSON is
+/// `ParseError` 400 with the
 /// `{"detail"}` shape. The message is input-dependent, but the all-blank
 /// case is deterministic CPython output, reproduced exactly.
-fn parse_json_body(body: &[u8]) -> Result<Value, Denial> {
+fn parse_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
+    if body.is_empty() {
+        return Ok(Value::Object(serde_json::Map::new()));
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if media_type != "application/json" && media_type != "*/*" && media_type != "application/*" {
+        return Err(Denial::UnsupportedMediaType(format!(
+            "Unsupported media type \"{content_type}\" in request."
+        )));
+    }
     let text = std::str::from_utf8(body).map_err(|_| Denial::ServerError)?;
     match serde_json::from_str::<Value>(text) {
         Ok(data) => {
@@ -662,6 +688,7 @@ fn json_response(status: StatusCode, body: Value) -> Response {
 async fn create_admin(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, Denial> {
     let pool = pools(&state)?;
@@ -669,7 +696,7 @@ async fn create_admin(
     let instance_id = require_instance_admin(pool, &actor).await?;
     let tz = actor_timezone(pool, &actor).await?;
 
-    let data = parse_json_body(&body)?;
+    let data = parse_json_body(&headers, &body)?;
     let email = lookup_email(data.get("email"))?;
     let role = role_from_value(data.get("role"))?;
     if instance_first(pool).await?.is_none() {
@@ -2267,27 +2294,54 @@ mod tests {
 
     #[test]
     fn parse_json_body_matches_drf_parser_edges() {
+        use axum::http::header;
+        let json_headers = || {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+            headers
+        };
         // Valid objects pass through.
-        assert!(parse_json_body(br#"{"email":"a@b.c"}"#).is_ok());
-        // Empty/blank bodies are DRF `ParseError` with the CPython message.
-        let err = parse_json_body(b"").expect_err("empty body 400s");
-        assert!(matches!(err, Denial::BadDetail(_)));
-        let (_, body) = err.status_and_body();
-        assert_eq!(
-            body,
-            r#"{"detail":"JSON parse error - Expecting value: line 1 column 1 (char 0)"}"#
-        );
-        let err = parse_json_body(b"   ").expect_err("blank body 400s");
+        assert!(parse_json_body(&json_headers(), br#"{"email":"a@b.c"}"#).is_ok());
+        // Empty body is `{}` without parsing (DRF `_parse`: stream None).
+        let empty = parse_json_body(&json_headers(), b"").expect("empty is {}");
+        assert_eq!(empty, serde_json::json!({}));
+        // Blank bodies are DRF `ParseError` with the CPython message.
+        let err = parse_json_body(&json_headers(), b"   ").expect_err("blank body 400s");
         let (_, body) = err.status_and_body();
         assert!(body.contains("column 4 (char 3)"), "{body}");
+        // Non-JSON content-type with a body is 415.
+        let mut plain = HeaderMap::new();
+        plain.insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
+        let err = parse_json_body(&plain, br#"{"email":"a@b.c"}"#).expect_err("text/plain 415s");
+        let (status, body) = err.status_and_body();
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            body,
+            r#"{"detail":"Unsupported media type \"text/plain\" in request."}"#
+        );
+        // Missing content-type with a body is 415 (Rust echoes "").
+        let err =
+            parse_json_body(&HeaderMap::new(), br#"{"email":"a@b.c"}"#).expect_err("missing 415s");
+        let (status, _) = err.status_and_body();
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // Case-variant JSON serves (Django lowercases the base).
+        let mut mixed = HeaderMap::new();
+        mixed.insert(header::CONTENT_TYPE, "Application/JSON".parse().unwrap());
+        assert!(parse_json_body(&mixed, br#"{"email":"a@b.c"}"#).is_ok());
         // Non-object JSON has no `.get`: Django raises out of the view.
-        assert!(matches!(parse_json_body(br"[1]"), Err(Denial::ServerError)));
         assert!(matches!(
-            parse_json_body(br"null"),
+            parse_json_body(&json_headers(), br"[1]"),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(
+            parse_json_body(&json_headers(), br"null"),
             Err(Denial::ServerError)
         ));
         // Non-UTF-8 escapes the parser the same way.
-        assert!(matches!(parse_json_body(&[0xff]), Err(Denial::ServerError)));
+        assert!(matches!(
+            parse_json_body(&json_headers(), &[0xff]),
+            Err(Denial::ServerError)
+        ));
     }
 
     #[test]

@@ -132,8 +132,11 @@ pub enum HandlerError {
     FieldErrors(String),
     /// 400, view-inline `{"error": ...}` bodies.
     BadError(String),
-    /// 400, DRF `{"detail": ...}` bodies (parse errors, ...).
+    /// 400, DRF `{"Detail": ...}` bodies (parse errors, ...).
     BadDetail(String),
+    /// 415, DRF `{"Detail": ...}` (`UnsupportedMediaType`: no parser for
+    /// the request content type — PIDASHCONV-1102).
+    UnsupportedMediaType(String),
     /// 500, generic branch (logged, like `log_exception`).
     ServerError,
 }
@@ -157,6 +160,9 @@ impl HandlerError {
                 (StatusCode::BAD_REQUEST, body.clone())
             }
             HandlerError::BadDetail(body) => (StatusCode::BAD_REQUEST, body.clone()),
+            HandlerError::UnsupportedMediaType(body) => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, body.clone())
+            }
             HandlerError::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),

@@ -87,7 +87,7 @@
 //!   which matches CPython `repr` except for very large/small exponents.
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
@@ -262,6 +262,7 @@ fn rendered_config_value(
 async fn patch_configurations(
     State(state): State<AppState>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let actor = match require_admin(&state, extension).await {
@@ -274,9 +275,9 @@ async fn patch_configurations(
     };
     // `request.data.keys()`: a non-object body has no `.keys()`
     // (`AttributeError` -> base 500).
-    let data: Value = match serde_json::from_slice(&body) {
+    let data: Value = match decode_json_body(&headers, &body) {
         Ok(data) => data,
-        Err(err) => return parse_error_response(&err),
+        Err(denial) => return denial.into_response(),
     };
     let map = match data.as_object() {
         Some(map) => map,
@@ -418,9 +419,33 @@ fn py_repr_str(s: &str) -> String {
     out
 }
 
-/// DRF `JSONParser` failure: 400 `{"detail": "JSON parse error - ..."}`.
-fn parse_error_response(err: &serde_json::Error) -> Response {
-    Denial::BadDetail(format!("JSON parse error - {err}")).into_response()
+/// Decode a write body like DRF `_parse` + `JSONParser`: an empty body is
+/// `{}` without parsing; a non-JSON content-type with a body is 415 with
+/// the verbatim header in the detail; otherwise JSON-parse, 400 on failure.
+/// The base match lowercases like Django's `parse_header_parameters`, so
+/// `Application/JSON`, charset params, and the `*/*` / `application/*`
+/// wildcards all serve.
+fn decode_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
+    if body.is_empty() {
+        return Ok(Value::Object(serde_json::Map::new()));
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if media_type != "application/json" && media_type != "*/*" && media_type != "application/*" {
+        return Err(Denial::UnsupportedMediaType(format!(
+            "Unsupported media type \"{content_type}\" in request."
+        )));
+    }
+    serde_json::from_slice(body)
+        .map_err(|err| Denial::BadDetail(format!("JSON parse error - {err}")))
 }
 
 /// `DELETE configurations/disable-email-feature/`
@@ -459,6 +484,7 @@ async fn disable_email_feature(
 async fn email_credential_check(
     State(state): State<AppState>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     // The endpoint declares no `permission_classes`, so it inherits the
@@ -472,9 +498,9 @@ async fn email_credential_check(
     };
     // `request.data.get(...)`: a non-object body has no `.get`
     // (`AttributeError` -> base 500).
-    let data: Value = match serde_json::from_slice(&body) {
+    let data: Value = match decode_json_body(&headers, &body) {
         Ok(data) => data,
-        Err(err) => return parse_error_response(&err),
+        Err(denial) => return denial.into_response(),
     };
     let map = match data.as_object() {
         Some(map) => map,
@@ -1997,6 +2023,7 @@ fn detail_response(errors: &FieldErrors) -> Response {
 async fn create_workspace(
     State(state): State<AppState>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let actor = match require_admin(&state, extension).await {
@@ -2009,9 +2036,9 @@ async fn create_workspace(
     };
     // `request.data.get(...)`: a non-object body has no `.get`
     // (`AttributeError` -> base 500).
-    let data: Value = match serde_json::from_slice(&body) {
+    let data: Value = match decode_json_body(&headers, &body) {
         Ok(data) => data,
-        Err(err) => return parse_error_response(&err),
+        Err(denial) => return denial.into_response(),
     };
     let map = match data.as_object() {
         Some(map) => map,
