@@ -27,9 +27,19 @@
 //!
 //! Nothing here is wired into `worker()` yet — PIDASHCONV-863 does the
 //! wiring — so this module is a tested library until then.
+//!
+//! Local tools layer (PIDASHCONV-1113): the 17 local tool schemas +
+//! executors (`assistant/tools/*.py` port). Each layer merges as its own
+//! tested module; PIDASHCONV-863 wires them into `worker()` (agent loop,
+//! live seam, parity flip, replay proof). Until then this tree is
+//! exercised by its unit tests only.
 
 pub mod history;
 pub mod mcp_client;
+pub mod tool_args;
+pub mod tool_schemas;
+pub mod tools_local;
+pub mod tools_local_store;
 #[cfg(test)]
 mod mcp_parity;
 #[cfg(test)]
