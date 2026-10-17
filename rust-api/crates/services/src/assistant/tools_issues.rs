@@ -262,21 +262,23 @@ pub fn brief_row(row: &BriefRow<'_>) -> Value {
 /// Author rule in `get_issue` (`issues.py:161-165`): agent turns render
 /// `Pi Dash AI`; otherwise the actor's display name, falling back to
 /// email, falling back to `Unknown` when there is no actor row.
+/// `(display_name or email)` is `None` — JSON null, not `""` — when
+/// the display name is empty and the email is NULL.
 pub fn comment_author(
     speaker_type: &str,
     display_name: Option<&str>,
     email: Option<&str>,
     has_actor: bool,
-) -> String {
+) -> Option<String> {
     if speaker_type == "agent" {
-        return "Pi Dash AI".to_owned();
+        return Some("Pi Dash AI".to_owned());
     }
     if !has_actor {
-        return "Unknown".to_owned();
+        return Some("Unknown".to_owned());
     }
     match display_name.filter(|name| !name.is_empty()) {
-        Some(name) => name.to_owned(),
-        None => email.unwrap_or("").to_owned(),
+        Some(name) => Some(name.to_owned()),
+        None => email.map(str::to_owned),
     }
 }
 
@@ -1327,9 +1329,10 @@ pub fn relation_write_summary(
 /// comments (`-created_at`, `select_related("actor")`), each body wrapped
 /// and truncated at 500 code points, timestamps as `isoformat()`; the
 /// tool then reverses the list so the wire order is chronological
-/// (`recent_comments: list(reversed(comments))`, `:179`).
+/// (`recent_comments: list(reversed(comments))`, `:179`). A `None`
+/// author renders JSON null (`issues.py:164`).
 pub fn detail_comment_row(
-    author: &str,
+    author: Option<&str>,
     body: &str,
     body_truncated: bool,
     created_at_iso: &str,
@@ -1749,19 +1752,38 @@ mod tests {
     #[test]
     fn comment_author_matrix() {
         assert_eq!(
-            comment_author("agent", Some("X"), Some("x@y"), true),
-            "Pi Dash AI"
+            comment_author("agent", Some("X"), Some("x@y"), true).as_deref(),
+            Some("Pi Dash AI")
         );
         assert_eq!(
-            comment_author("user", Some("Ann"), Some("a@b"), true),
-            "Ann"
+            comment_author("user", Some("Ann"), Some("a@b"), true).as_deref(),
+            Some("Ann")
         );
-        assert_eq!(comment_author("user", None, Some("a@b"), true), "a@b");
-        assert_eq!(comment_author("user", Some(""), Some("a@b"), true), "a@b");
         assert_eq!(
-            comment_author("user", Some("Ann"), Some("a@b"), false),
-            "Unknown"
+            comment_author("user", None, Some("a@b"), true).as_deref(),
+            Some("a@b")
         );
+        assert_eq!(
+            comment_author("user", Some(""), Some("a@b"), true).as_deref(),
+            Some("a@b")
+        );
+        assert_eq!(
+            comment_author("user", Some("Ann"), Some("a@b"), false).as_deref(),
+            Some("Unknown")
+        );
+    }
+
+    #[test]
+    fn comment_author_null_when_display_empty_and_email_null() {
+        // `(display_name or email)` (`issues.py:164`): empty display +
+        // NULL email is None — JSON null, not `""`.
+        assert_eq!(comment_author("user", Some(""), None, true), None);
+        assert_eq!(comment_author("user", None, None, true), None);
+        let row = detail_comment_row(None, "hi", false, "2026-01-01T00:00:00+00:00");
+        assert_eq!(row["author"], Value::Null);
+        // A present author still renders as a string.
+        let row = detail_comment_row(Some("Ann"), "hi", false, "2026-01-01T00:00:00+00:00");
+        assert_eq!(row["author"], "Ann");
     }
 
     #[test]
