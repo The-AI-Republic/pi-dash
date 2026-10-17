@@ -28,6 +28,9 @@ export interface IssuePatch {
   assignee_ids?: string[];
   label_ids?: string[];
   estimate_point?: string | null;
+  /** Execution-target patch (ISS-218): pod pin plus executor override, each nullable. */
+  assigned_pod_id?: string | null;
+  agent_executor?: string | null;
   start_date?: string | null;
   target_date?: string | null;
   parent_id?: string | null;

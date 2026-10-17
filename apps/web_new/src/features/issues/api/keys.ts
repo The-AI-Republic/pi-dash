@@ -25,4 +25,15 @@ export const issueKeys = {
   lists: (workspaceSlug: string, ...part: string[]) => [...issueKeys.all(workspaceSlug), "list", ...part] as const,
   /** Per-entity display preferences (ISS-002). */
   prefs: (workspaceSlug: string, ...part: string[]) => [...issueKeys.all(workspaceSlug), "prefs", ...part] as const,
+  /** Project estimate systems behind the estimate picker (ISS-216). */
+  estimates: (workspaceSlug: string, projectId: string) =>
+    [...issueKeys.all(workspaceSlug), "estimates", projectId] as const,
+  /** Project intake states behind the intake-state picker (ISS-217). */
+  intakeStates: (workspaceSlug: string, projectId: string) =>
+    [...issueKeys.all(workspaceSlug), "intake-states", projectId] as const,
+  /** Project pods behind the execution-target picker (ISS-218). */
+  pods: (workspaceSlug: string, projectId: string) => [...issueKeys.all(workspaceSlug), "pods", projectId] as const,
+  /** Project row carrying the executor options (ISS-218). */
+  project: (workspaceSlug: string, projectId: string) =>
+    [...issueKeys.all(workspaceSlug), "project", projectId] as const,
 };
