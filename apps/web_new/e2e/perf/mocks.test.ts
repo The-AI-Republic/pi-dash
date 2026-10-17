@@ -15,6 +15,7 @@ import {
   ProjectDetail,
   ProjectList,
   ProjectRoleMap,
+  ProjectUserProperties,
   SidebarPreferences,
   UnreadNotifications,
   WorkspaceList,
@@ -27,6 +28,7 @@ import {
   mockProfile,
   mockProjectDetail,
   mockProjectRoles,
+  mockProjectUserProperties,
   mockProjects,
   mockSidebarPreferences,
   mockUnreadNotifications,
@@ -44,6 +46,7 @@ describe("perf mocks satisfy their contracts", () => {
     expect(() => ProjectRoleMap.parse(mockProjectRoles())).not.toThrow();
     expect(() => UnreadNotifications.parse(mockUnreadNotifications())).not.toThrow();
     expect(() => SidebarPreferences.parse(mockSidebarPreferences())).not.toThrow();
+    expect(() => ProjectUserProperties.parse(mockProjectUserProperties())).not.toThrow();
     expect(() => IssueListResponse.parse(mockIssues(3))).not.toThrow();
     expect(mockIssue(0).project_id).toBe(mockProjects()[0]?.id);
   });

@@ -4,7 +4,7 @@
 // Self-contained API mocks for the perf specs (NEWFRONT-21). The payloads
 // follow the @pidash/api-client contracts; the app parses every one with
 // zod at runtime, so a malformed mock fails the spec loudly instead of
-// silently rendering nothing. Anything outside the ten endpoints the
+// silently rendering nothing. Anything outside the eleven endpoints the
 // issue-list slice calls is aborted, keeping the specs hermetic: a new
 // endpoint shows up as a failure that updates these mocks.
 import type { Page } from "@playwright/test";
@@ -18,6 +18,7 @@ import type {
   Project,
   ProjectDetail,
   ProjectRoleMap,
+  ProjectUserProperties,
   SidebarPreferences,
   UnreadNotifications,
   Workspace,
@@ -190,6 +191,26 @@ export function mockSidebarPreferences(): SidebarPreferences {
   return { drafts: { is_pinned: true, sort_order: 0 } };
 }
 
+/** List layout with default grouping: the issues route prefetches these prefs. */
+export function mockProjectUserProperties(): ProjectUserProperties {
+  return {
+    id: "123e4567-e89b-42d3-a456-426614174004",
+    workspace: WORKSPACE_ID,
+    project: PERF_PROJECT_ID,
+    user: USER_ID,
+    filters: {},
+    display_filters: { layout: "list", group_by: null, order_by: "sort_order" },
+    display_properties: {},
+    rich_filters: {},
+    preferences: {},
+    sort_order: 0,
+    created_by: null,
+    updated_by: null,
+    created_at: NOW,
+    updated_at: NOW,
+  };
+}
+
 const PRIORITIES: IssueListItem["priority"][] = ["urgent", "high", "medium", "low", "none"];
 
 export function mockIssue(index: number): IssueListItem {
@@ -296,6 +317,13 @@ export async function installApiMocks(
     (url) => url.pathname === sidebarPrefsPath,
     (route) => route.fulfill(jsonFulfill(mockSidebarPreferences()))
   );
+  // The issues route prefetches the caller's display prefs alongside the
+  // list (ISS-002); without this the prefetch aborts and the route errors.
+  const projectPrefsPath = `/api/workspaces/${PERF_WORKSPACE_SLUG}/projects/${PERF_PROJECT_ID}/user-properties/`;
+  await page.route(
+    (url) => url.pathname === projectPrefsPath,
+    (route) => route.fulfill(jsonFulfill(mockProjectUserProperties()))
+  );
   const known = new Set([
     "/api/users/me/",
     "/api/users/me/profile/",
@@ -307,6 +335,7 @@ export async function installApiMocks(
     rolesPath,
     unreadPath,
     sidebarPrefsPath,
+    projectPrefsPath,
   ]);
   await page.route(
     (url) =>

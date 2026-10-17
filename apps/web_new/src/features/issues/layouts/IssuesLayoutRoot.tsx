@@ -84,7 +84,7 @@ function IssuesLayoutRootInner({
     updateDisplayPrefs({ layout: kind });
   };
   return (
-    <section aria-label="Issues" className="flex h-full flex-col">
+    <div className="flex h-full flex-col">
       <IssuesHeader
         title={title}
         totalCount={totalCount}
@@ -112,6 +112,6 @@ function IssuesLayoutRootInner({
           {renderLayout(active, prefs)}
         </LayoutBody>
       </div>
-    </section>
+    </div>
   );
 }
