@@ -141,8 +141,11 @@ async function defaultAttachmentByteUpload(url: string, body: FormData): Promise
 /**
  * Upload one file end to end and resolve to its attachment row. Three
  * legs: grant (metadata POST), bytes (a signed POST of the grant
- * fields plus the file), and complete (the asset PATCH). Any failed
- * leg rejects with ApiError.
+ * fields plus the file), and complete (the asset PATCH). The complete
+ * leg answers 204 with no row, so the resolved row is the grant
+ * snapshot with the upload flip applied; widgets that need
+ * server-fresh timestamps re-list. Any failed leg rejects with
+ * ApiError.
  */
 export async function uploadIssueAttachment(
   client: ApiClient,
@@ -173,5 +176,5 @@ export async function uploadIssueAttachment(
   }
 
   await completeAttachmentUpload(client, slug, projectId, issueId, grant.asset_id);
-  return grant.attachment;
+  return { ...grant.attachment, is_uploaded: true };
 }

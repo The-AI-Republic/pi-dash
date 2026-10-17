@@ -118,6 +118,13 @@ describe("sub-issue contracts", () => {
     expect(url.searchParams.get("order_by")).toBe("-created_at");
   });
 
+  it("omits unset paging params from the query", async () => {
+    const transport = json({ sub_issues: [], state_distribution: {} });
+    await listSubIssues(createClient({ baseUrl: "https://api.test", transport }), "acme", UUID3, UUID2, {});
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.search).toBe("");
+  });
+
   it("attaches existing issues and parses the attached rows", async () => {
     const transport = json({ sub_issues: [addedSubIssueRow], state_distribution: { backlog: [UUID] } });
     const client = createClient({ baseUrl: "https://api.test", transport });
@@ -348,6 +355,7 @@ describe("attachment contracts", () => {
       return Promise.resolve({ ok: true, status: 200 });
     });
     expect(attachment.id).toBe(UUID);
+    expect(attachment.is_uploaded).toBe(true);
     expect(seen).toHaveLength(1);
     const upload = seen[0];
     expect(upload?.url).toBe("https://objects.test/upload");
@@ -416,6 +424,13 @@ describe("draft contracts", () => {
 
     const reread = await getDraftIssue(clientFor(draftRow), "acme", UUID);
     expect(reread.id).toBe(UUID);
+  });
+
+  it("omits unset paging params from the query", async () => {
+    const transport = json(draftEnvelope);
+    await listDraftIssues(createClient({ baseUrl: "https://api.test", transport }), "acme", {});
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.search).toBe("");
   });
 
   it("creates, updates, deletes and promotes a draft", async () => {
@@ -568,6 +583,13 @@ describe("description-version contracts", () => {
       UUID
     );
     expect(detail.description_html).toBe("<p>v</p>");
+  });
+
+  it("omits an unset cursor from the query", async () => {
+    const transport = json(versionEnvelope);
+    await listDescriptionVersions(createClient({ baseUrl: "https://api.test", transport }), "acme", UUID3, UUID2, {});
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.search).toBe("");
   });
 });
 
