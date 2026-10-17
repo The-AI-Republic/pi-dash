@@ -3,99 +3,39 @@
 // See the LICENSE file for details.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@pidash/api-client", () => ({
-  getIssue: vi.fn(),
-  listArchivedIssues: vi.fn(),
-  listProjectDetails: vi.fn(),
-  searchWorkspace: vi.fn(),
-}));
+vi.mock("@pidash/api-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@pidash/api-client")>();
+  return { ...actual, getIssueByIdentifier: vi.fn(), getIssueMeta: vi.fn() };
+});
 
-import {
-  getIssue,
-  listArchivedIssues,
-  listProjectDetails,
-  searchWorkspace,
-  type Issue,
-  type IssueListItem,
-} from "@pidash/api-client";
+import { ApiError, getIssueByIdentifier, getIssueMeta, type IssueLite } from "@pidash/api-client";
 
-import {
-  browseIssueQueryOptions,
-  loadBrowseIssue,
-  matchBrowseRow,
-  parseBrowseKey,
-  type BrowseSearchRow,
-} from "./browse.js";
+import { liteIssueQueryOptions, loadLiteIssue, parseBrowseKey, resolveShortLink } from "./browse.js";
 import { issueKeys } from "./keys.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 const ISSUE_ID = "123e4567-e89b-12d3-a456-426614174000";
 
-function searchRow(overrides: Partial<BrowseSearchRow> = {}): BrowseSearchRow {
+function liteRow(overrides: Partial<IssueLite> = {}): IssueLite {
   return {
-    name: "Fix login",
     id: ISSUE_ID,
     sequence_id: 42,
-    project__identifier: "ACME",
-    project_id: PROJECT_ID,
-    workspace__slug: "acme",
-    ...overrides,
-  };
-}
-
-function issue(overrides: Partial<Issue> = {}): Issue {
-  return {
-    id: ISSUE_ID,
     name: "Fix login",
-    state_id: null,
+    description_html: "<p></p>",
     sort_order: 1,
-    completed_at: null,
-    estimate_point: null,
-    priority: "high",
-    sequence_id: 42,
     project_id: PROJECT_ID,
-    parent_id: null,
-    cycle_id: null,
-    module_ids: [],
-    label_ids: [],
-    assignee_ids: [],
-    sub_issues_count: null,
-    attachment_count: null,
-    link_count: null,
     created_at: "2024-01-02T03:04:05Z",
     updated_at: "2024-02-03T04:05:06Z",
     created_by: null,
     updated_by: null,
     is_draft: false,
-    archived_at: null,
-    complexity_score: 0,
-    agent_executor: null,
+    is_epic: false,
+    is_intake: false,
     is_synced: false,
-    description_html: "",
-    is_subscribed: false,
-    agent_ticker: null,
-    agent_status: null,
-    relations_summary: { blocked_by: [], blocking: [] },
-    has_open_blockers: false,
+    archived_at: null,
     ...overrides,
   };
 }
-
-describe("matchBrowseRow", () => {
-  it("matches the exact identifier-plus-sequence pair", () => {
-    const rows = [searchRow(), searchRow({ project__identifier: "OTHER", sequence_id: 7 })];
-    expect(matchBrowseRow(rows, "ACME-42")).toEqual(rows[0]);
-  });
-
-  it("rejects empty keys, prefixes and case drift", () => {
-    const rows = [searchRow()];
-    expect(matchBrowseRow(rows, "")).toBeNull();
-    expect(matchBrowseRow(rows, "ACME-4")).toBeNull();
-    expect(matchBrowseRow(rows, "acme-42")).toBeNull();
-    expect(matchBrowseRow(rows, "OTHER-9")).toBeNull();
-    expect(matchBrowseRow([], "ACME-42")).toBeNull();
-  });
-});
 
 describe("parseBrowseKey", () => {
   it("splits on the last dash", () => {
@@ -112,106 +52,85 @@ describe("parseBrowseKey", () => {
   });
 });
 
-describe("loadBrowseIssue", () => {
+describe("loadLiteIssue", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  function archivedRow(overrides: Partial<IssueListItem> = {}): IssueListItem {
-    return {
-      id: ISSUE_ID,
-      name: "Fix login",
-      state_id: null,
-      sort_order: 1,
-      completed_at: null,
-      estimate_point: null,
-      priority: "high",
-      sequence_id: 42,
-      project_id: PROJECT_ID,
-      parent_id: null,
-      cycle_id: null,
-      module_ids: [],
-      label_ids: [],
-      assignee_ids: [],
-      sub_issues_count: null,
-      attachment_count: null,
-      link_count: null,
-      created_at: "2024-01-02T03:04:05Z",
-      updated_at: "2024-02-03T04:05:06Z",
-      created_by: null,
-      updated_by: null,
-      is_draft: false,
-      archived_at: "2024-03-04",
-      ...overrides,
-    };
-  }
+  it("resolves the key through the lite identifier fetch", async () => {
+    vi.mocked(getIssueByIdentifier).mockResolvedValue(liteRow());
 
-  it("resolves the key through search, then reads the detail", async () => {
-    vi.mocked(searchWorkspace).mockResolvedValue({ results: { issue: [searchRow()] } });
-    vi.mocked(getIssue).mockResolvedValue(issue());
+    const resolution = await loadLiteIssue("client" as never, "acme", "ACME-42");
 
-    const resolution = await loadBrowseIssue("client" as never, "acme", "ACME-42");
-
-    expect(searchWorkspace).toHaveBeenCalledWith("client", "acme", {
-      search: "ACME-42",
-      workspaceSearch: true,
-      entities: ["issue"],
-    });
-    expect(getIssue).toHaveBeenCalledWith("client", "acme", PROJECT_ID, ISSUE_ID);
-    expect(resolution.issue?.name).toBe("Fix login");
-    expect(resolution.projectId).toBe(PROJECT_ID);
-    expect(listProjectDetails).not.toHaveBeenCalled();
-    expect(listArchivedIssues).not.toHaveBeenCalled();
+    expect(getIssueByIdentifier).toHaveBeenCalledWith("client", "acme", "ACME", 42);
+    expect(resolution.lite?.id).toBe(ISSUE_ID);
+    expect(resolution.lite?.project_id).toBe(PROJECT_ID);
   });
 
-  it("falls back to the archived list when search misses an archived key", async () => {
-    vi.mocked(searchWorkspace).mockResolvedValue({ results: {} });
-    vi.mocked(listProjectDetails).mockResolvedValue([{ id: PROJECT_ID, identifier: "ACME" } as never]);
-    vi.mocked(listArchivedIssues).mockResolvedValue({ results: [archivedRow()] } as never);
-    vi.mocked(getIssue).mockResolvedValue(issue({ archived_at: "2024-03-04" }));
+  it("resolves archived rows without a fallback", async () => {
+    vi.mocked(getIssueByIdentifier).mockResolvedValue(liteRow({ archived_at: "2024-03-04" }));
 
-    const resolution = await loadBrowseIssue("client" as never, "acme", "ACME-42");
+    const resolution = await loadLiteIssue("client" as never, "acme", "ACME-42");
 
-    expect(listProjectDetails).toHaveBeenCalledWith("client", "acme");
-    expect(listArchivedIssues).toHaveBeenCalledWith("client", "acme", PROJECT_ID);
-    expect(getIssue).toHaveBeenCalledWith("client", "acme", PROJECT_ID, ISSUE_ID);
-    expect(resolution.issue?.archived_at).toBe("2024-03-04");
-    expect(resolution.projectId).toBe(PROJECT_ID);
+    expect(resolution.lite?.archived_at).toBe("2024-03-04");
   });
 
-  it("returns an empty resolution when no row matches", async () => {
-    vi.mocked(searchWorkspace).mockResolvedValue({ results: {} });
-    vi.mocked(listProjectDetails).mockResolvedValue([{ id: PROJECT_ID, identifier: "ACME" } as never]);
-    vi.mocked(listArchivedIssues).mockResolvedValue({ results: [] } as never);
-
-    const resolution = await loadBrowseIssue("client" as never, "acme", "ACME-404");
-
-    expect(resolution).toEqual({ issue: null, projectId: null });
-    expect(getIssue).not.toHaveBeenCalled();
+  it("returns null for malformed keys without calling the API", async () => {
+    expect(await loadLiteIssue("client" as never, "acme", "no-key-here")).toEqual({ lite: null });
+    expect(getIssueByIdentifier).not.toHaveBeenCalled();
   });
 
-  it("skips the archived fallback for malformed keys and unknown projects", async () => {
-    vi.mocked(searchWorkspace).mockResolvedValue({ results: {} });
-    vi.mocked(listProjectDetails).mockResolvedValue([{ id: PROJECT_ID, identifier: "ACME" } as never]);
+  it.each([400, 403, 404])("maps status %s to an unknown key", async (status) => {
+    vi.mocked(getIssueByIdentifier).mockRejectedValue(new ApiError({ status, code: "http", message: "no" }));
 
-    expect(await loadBrowseIssue("client" as never, "acme", "no-key-here")).toEqual({
-      issue: null,
-      projectId: null,
-    });
-    expect(listProjectDetails).not.toHaveBeenCalled();
+    expect(await loadLiteIssue("client" as never, "acme", "ACME-42")).toEqual({ lite: null });
+  });
 
-    expect(await loadBrowseIssue("client" as never, "acme", "OTHER-9")).toEqual({
-      issue: null,
-      projectId: null,
-    });
-    expect(listArchivedIssues).not.toHaveBeenCalled();
-    expect(getIssue).not.toHaveBeenCalled();
+  it("rethrows non-API failures so the route can offer a retry", async () => {
+    const failure = new Error("boom");
+    vi.mocked(getIssueByIdentifier).mockRejectedValue(failure);
+
+    await expect(loadLiteIssue("client" as never, "acme", "ACME-42")).rejects.toBe(failure);
+  });
+
+  it("rethrows server failures so the route can offer a retry", async () => {
+    const failure = new ApiError({ status: 500, code: "http", message: "bad" });
+    vi.mocked(getIssueByIdentifier).mockRejectedValue(failure);
+
+    await expect(loadLiteIssue("client" as never, "acme", "ACME-42")).rejects.toBe(failure);
   });
 });
 
-describe("browseIssueQueryOptions", () => {
+describe("liteIssueQueryOptions", () => {
   it("keys the resolution by workspace and key", () => {
-    const options = browseIssueQueryOptions("client" as never, "acme", "ACME-42");
+    const options = liteIssueQueryOptions("client" as never, "acme", "ACME-42");
     expect(options.queryKey).toEqual(issueKeys.browse("acme", "ACME-42"));
+  });
+});
+
+describe("resolveShortLink", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("builds the browse key from the issue meta", async () => {
+    vi.mocked(getIssueMeta).mockResolvedValue({ project_identifier: "WEB", sequence_id: 7 });
+
+    const target = await resolveShortLink("client" as never, "acme", PROJECT_ID, ISSUE_ID);
+
+    expect(getIssueMeta).toHaveBeenCalledWith("client", "acme", PROJECT_ID, ISSUE_ID);
+    expect(target).toEqual({ issueKey: "WEB-7" });
+  });
+
+  it.each([400, 403, 404, 500])("maps status %s to an unresolvable link", async (status) => {
+    vi.mocked(getIssueMeta).mockRejectedValue(new ApiError({ status, code: "http", message: "no" }));
+
+    await expect(resolveShortLink("client" as never, "acme", PROJECT_ID, ISSUE_ID)).resolves.toBeNull();
+  });
+
+  it("maps transport failures to an unresolvable link", async () => {
+    vi.mocked(getIssueMeta).mockRejectedValue(new Error("boom"));
+
+    await expect(resolveShortLink("client" as never, "acme", PROJECT_ID, ISSUE_ID)).resolves.toBeNull();
   });
 });
