@@ -16,7 +16,10 @@
 //!   the `InstanceAdminSerializer` list ordered `-created_at`.
 //! - `DELETE /api/instances/admins/<uuid:pk>/` — admin permission; soft
 //!   UPDATEs `deleted_at` on `filter(instance, pk)` with no existence
-//!   check, so unknown PKs still answer 204 (ported quirk).
+//!   check, so unknown PKs still answer 204 (ported quirk). A pk spelling
+//!   the `<uuid:pk>` converter does not route (uppercase, simple, braced,
+//!   `urn:uuid:`) resolver-404s before auth, so those segments proxy to
+//!   Django (PIDASHCONV-1132).
 //! - `GET /api/instances/admins/me/` — admin permission; the
 //!   `InstanceAdminMeSerializer` rendering of the acting user.
 //! - `GET /api/instances/admins/session/` — `AllowAny`; authed admins get
@@ -1097,15 +1100,26 @@ async fn delete_admin(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, Denial> {
-    let Ok(admin_id) = pk.parse::<Uuid>() else {
-        let mut builder = Request::builder().method(method).uri(uri);
-        for (name, value) in headers.iter() {
-            builder = builder.header(name, value);
+    // Django routes this URL through the `<uuid:pk>` converter
+    // (`license/urls.py:37`), whose regex is lowercase-hyphenated only and
+    // compiled case-sensitively, so every other spelling resolver-404s
+    // before auth (and before the view). `Uuid::parse_str` accepts
+    // uppercase, simple, braced and URN spellings, so gate on the raw
+    // segment first and proxy the rest — parseable-but-non-canonical and
+    // garbage alike — to Django for its own resolver 404
+    // (PIDASHCONV-1095 / PB-0340 precedent).
+    let admin_id = match pk.parse::<Uuid>() {
+        Ok(admin_id) if is_canonical_uuid(&pk) => admin_id,
+        _ => {
+            let mut builder = Request::builder().method(method).uri(uri);
+            for (name, value) in headers.iter() {
+                builder = builder.header(name, value);
+            }
+            let req = builder
+                .body(axum::body::Body::empty())
+                .map_err(|_| Denial::ServerError)?;
+            return Ok(edge::proxy(State(state), req).await);
         }
-        let req = builder
-            .body(axum::body::Body::empty())
-            .map_err(|_| Denial::ServerError)?;
-        return Ok(edge::proxy(State(state), req).await);
     };
     let pool = pools(&state)?;
     let actor = authed_user(pool, state.settings().secret_key.as_bytes(), &extension).await?;
@@ -1131,6 +1145,23 @@ async fn delete_admin(
         .header(header::CONTENT_TYPE, "application/json")
         .body(axum::body::Body::empty())
         .expect("empty 204 response"))
+}
+
+/// Whether a path segment is spelled the way Django's `UUIDConverter`
+/// routes it: lowercase hex, hyphenated, exactly 36 characters
+/// (`django/urls/converters.py`; the `v1_cli_auth` PIDASHCONV-1095 and
+/// `app_issues` PB-0340 precedents).
+fn is_canonical_uuid(raw: &str) -> bool {
+    if raw.len() != 36 {
+        return false;
+    }
+    raw.bytes().enumerate().all(|(index, byte)| {
+        if index == 8 || index == 13 || index == 18 || index == 23 {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+        }
+    })
 }
 
 /// `GET /api/instances/admins/me/` (`admin.py:361-366`): admin
@@ -2249,6 +2280,80 @@ mod tests {
 
     fn denial_body(denial: Denial) -> (StatusCode, String) {
         denial.status_and_body()
+    }
+
+    #[test]
+    fn canonical_uuid_accepts_lowercase_hyphenated_only() {
+        assert!(is_canonical_uuid("12345678-1234-1234-1234-1234567890ab"));
+        for raw in [
+            "12345678-1234-1234-1234-1234567890AB",
+            "123456781234123412341234567890ab",
+            "{12345678-1234-1234-1234-1234567890ab}",
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
+            "not-a-uuid",
+            "",
+        ] {
+            assert!(!is_canonical_uuid(raw), "{raw}");
+        }
+    }
+
+    fn admin_app() -> axum::Router {
+        // Port 1 is never bound, so proxied (unowned/non-canonical) requests
+        // fail closed with 502 instead of reaching a dev server.
+        crate::routes::with_routes(
+            AppState::with_edge(
+                "0.1.0",
+                crate::edge::EdgeHandle::for_tests("http://127.0.0.1:1"),
+            ),
+            super::routes(),
+        )
+    }
+
+    async fn admin_status(method: &str, uri: &str) -> StatusCode {
+        use tower::ServiceExt;
+
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .expect("request");
+        admin_app().oneshot(request).await.expect("serve").status()
+    }
+
+    /// Non-canonical UUID spellings in the path proxy to Django before any
+    /// auth runs (502 fail-closed with the test edge), so Django's resolver
+    /// 404 answers byte for byte rather than Rust's 401/403/204
+    /// (PIDASHCONV-1132).
+    #[tokio::test]
+    async fn noncanonical_uuid_segments_proxy_before_auth() {
+        for segment in [
+            "12345678-1234-1234-1234-1234567890ab".to_uppercase(),
+            "123456781234123412341234567890ab".to_owned(),
+            "%7B12345678-1234-1234-1234-1234567890ab%7D".to_owned(),
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab".to_owned(),
+        ] {
+            assert_eq!(
+                admin_status("DELETE", &format!("/api/instances/admins/{segment}/")).await,
+                StatusCode::BAD_GATEWAY,
+                "{segment}"
+            );
+        }
+    }
+
+    /// A canonical spelling still serves from Rust, never a proxy 502. The
+    /// test edge has no database pool and `delete_admin` resolves it before
+    /// the auth gate, so the handler stops at its own 500 rather than
+    /// proxying.
+    #[tokio::test]
+    async fn canonical_uuid_segment_is_served_not_proxied() {
+        assert_eq!(
+            admin_status(
+                "DELETE",
+                "/api/instances/admins/12345678-1234-1234-1234-1234567890ab/"
+            )
+            .await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]
