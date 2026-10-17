@@ -12,7 +12,7 @@ import { updateIssue } from "@pidash/api-client";
 import { getAppClient } from "../../../core/api/client.js";
 import { rollbackSnapshots, snapshotQueries } from "../../../core/query/optimistic.js";
 import { notifyError } from "../../../shared/shell/index.js";
-import type { ExecutionTargetPatch } from "../dropdowns/podOptions.js";
+import type { ExecutionTargetPatch } from "../../../shared/pickers/index.js";
 import { issueKeys } from "./keys.js";
 import { withIssueFields } from "./optimisticRows.js";
 
