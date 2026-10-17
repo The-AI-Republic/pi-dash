@@ -310,7 +310,7 @@ async fn is_member(
 ) -> Result<bool, Response> {
     let exists: Option<bool> = sqlx::query_scalar(
         r#"SELECT EXISTS(SELECT 1 FROM workspace_members
-           WHERE workspace_id = $1 AND member_id = $2 AND is_active)"#,
+           WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL)"#,
     )
     .bind(workspace_id)
     .bind(user_id)
@@ -363,7 +363,7 @@ async fn get_workspaces(State(state): State<AppState>, headers: HeaderMap) -> Re
     let rows: Vec<(Option<String>, Option<String>)> = match sqlx::query_as(
         r#"SELECT w.slug, w.name FROM workspace_members m
            LEFT JOIN workspaces w ON w.id = m.workspace_id
-           WHERE m.member_id = $1 AND m.is_active
+           WHERE m.member_id = $1 AND m.is_active AND m.deleted_at IS NULL
            ORDER BY m.created_at"#,
     )
     .bind(user_id)
@@ -511,15 +511,16 @@ async fn post_machine_token(
     };
     // `Workspace.objects.filter(slug=...).first()` + membership, else
     // 404 (`device.py:446-451`).
-    let workspace: Option<(Uuid, String)> =
-        match sqlx::query_as(r#"SELECT id, slug FROM workspaces WHERE slug = $1"#)
-            .bind(&params.workspace_slug)
-            .fetch_optional(&pool)
-            .await
-        {
-            Ok(row) => row,
-            Err(_) => return Failure::server_error().into_response(),
-        };
+    let workspace: Option<(Uuid, String)> = match sqlx::query_as(
+        r#"SELECT id, slug FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#,
+    )
+    .bind(&params.workspace_slug)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return Failure::server_error().into_response(),
+    };
     let Some((workspace_id, workspace_slug)) = workspace else {
         return not_found("workspace_not_found").into_response();
     };
