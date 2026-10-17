@@ -1,11 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Project issues (parity/specs/issues.md §1, ISS-001–006). Thin: the single
-// search param validated by zod, a loader that prefetches issues plus
-// display preferences in parallel with the code split, and the per-entity
-// layout root. Layout slices extend the offered list with their renderer;
-// context empty-state copy arrives with ISS-068.
+// Project issues (parity/specs/issues.md §1 and §9, ISS-001–006 and
+// ISS-075–081/ISS-106). Thin: the single search param validated by zod,
+// a loader that prefetches issues plus display preferences in parallel
+// with the code split, and the per-entity layout root with the Display
+// control in both headers. Layout slices extend the offered list with
+// their renderer; context empty-state copy arrives with ISS-068.
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
@@ -15,12 +16,14 @@ import * as React from "react";
 import { invalidateWorkspace } from "../../../../../../core/query/optimistic.js";
 import { isProjectGateError } from "../../../../../../features/auth/index.js";
 import {
+  DisplayControl,
   IssueList,
   IssuesLayoutRoot,
   ListSkeleton,
   issuesQueryOptions,
   parseIssueSearch,
   prefsQueryOptions,
+  type LayoutKind,
 } from "../../../../../../features/issues/index.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
@@ -123,6 +126,18 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
       );
     }
 
+    // Layout slices extend the offered list with their renderer; the
+    // Display control resolves the same active layout from it.
+    const offered: readonly LayoutKind[] = ["list"];
+    const display = (
+      <DisplayControl
+        workspaceSlug={params.ws}
+        entity={{ scope: "project", projectId: params.projectId }}
+        offered={offered}
+        hideCycle={!project.cycle_view}
+        hideModule={!project.module_view}
+      />
+    );
     return (
       <IssuesLayoutRoot
         workspaceSlug={params.ws}
@@ -130,12 +145,14 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         title={project.name}
         totalCount={issues.total_count}
         resultCount={issues.results.length}
-        offered={["list"]}
+        offered={offered}
         renderLayout={() => (
           <IssueList issues={issues.results} projectIdentifier={project.identifier} layout={search.layout ?? "list"} />
         )}
         emptyState={<ProjectIssuesEmptyState />}
         noMatchState={<ProjectIssuesNoMatchState />}
+        headerActions={display}
+        displayControl={display}
       />
     );
   },
