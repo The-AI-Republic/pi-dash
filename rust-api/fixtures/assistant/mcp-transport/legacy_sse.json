@@ -1,0 +1,130 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/mcp.py + pydantic-ai-slim==1.107.0/fastmcp==3.4.4/mcp==1.30.0",
+  "ported_from": "d656243d3700dd5ff749f1bfeb2bc74c918a33ba",
+  "case": "legacy_sse",
+  "stack": {
+    "pydantic_ai_slim": "1.107.0",
+    "fastmcp": "3.4.4",
+    "mcp": "1.30.0",
+    "python": "3.12"
+  },
+  "toolset": {
+    "timeout": 10.0,
+    "read_timeout": 300.0,
+    "prefix": "mcp_probe",
+    "auth": true,
+    "server_name": "probe",
+    "url_path": "/sse"
+  },
+  "flow": [
+    "enter",
+    "list",
+    "call"
+  ],
+  "call": {
+    "tool": "mcp_probe_echo",
+    "args": {
+      "text": "hi"
+    },
+    "fabricate": false
+  },
+  "stub": {
+    "framing": "json"
+  },
+  "wire": [
+    {
+      "method": "GET",
+      "path": "/sse",
+      "headers": {
+        "authorization": "Bearer probe-token",
+        "accept": "text/event-stream"
+      },
+      "body": ""
+    },
+    {
+      "method": "POST",
+      "path": "/messages?sessionId=legacy-1",
+      "headers": {
+        "accept": "*/*",
+        "authorization": "Bearer probe-token",
+        "content-type": "application/json"
+      },
+      "body": "{\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"mcp\",\"version\":\"0.1.0\"}},\"jsonrpc\":\"2.0\",\"id\":0}"
+    },
+    {
+      "method": "POST",
+      "path": "/messages?sessionId=legacy-1",
+      "headers": {
+        "accept": "*/*",
+        "authorization": "Bearer probe-token",
+        "content-type": "application/json"
+      },
+      "body": "{\"method\":\"notifications/initialized\",\"jsonrpc\":\"2.0\"}"
+    },
+    {
+      "method": "POST",
+      "path": "/messages?sessionId=legacy-1",
+      "headers": {
+        "accept": "*/*",
+        "authorization": "Bearer probe-token",
+        "content-type": "application/json"
+      },
+      "body": "{\"method\":\"tools/list\",\"jsonrpc\":\"2.0\",\"id\":1}"
+    },
+    {
+      "method": "POST",
+      "path": "/messages?sessionId=legacy-1",
+      "headers": {
+        "accept": "*/*",
+        "authorization": "Bearer probe-token",
+        "content-type": "application/json"
+      },
+      "body": "{\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"hi\"},\"_meta\":{\"progressToken\":2}},\"jsonrpc\":\"2.0\",\"id\":2}"
+    }
+  ],
+  "expect": {
+    "tools": {
+      "mcp_probe_echo": {
+        "description": "Echo back the input text.",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      },
+      "mcp_probe_add": {
+        "description": "Add two numbers.",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "a": {
+              "type": "number"
+            },
+            "b": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    },
+    "call": {
+      "result": {
+        "kind": "text",
+        "value": "echo:hi"
+      }
+    },
+    "failures": {
+      "after_enter": null,
+      "after_list": null,
+      "after_call": null,
+      "at_exit": null
+    },
+    "delete_seen": false
+  }
+}
