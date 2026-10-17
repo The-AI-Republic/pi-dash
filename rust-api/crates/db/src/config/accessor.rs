@@ -86,7 +86,7 @@ impl PgConfigStore {
     /// The exact query text, visible for tests: keyed lookup over the
     /// `instance_configurations` table, nothing else.
     pub const QUERY: &'static str =
-        "SELECT key, value, is_encrypted FROM instance_configurations WHERE key = ANY($1)";
+        "SELECT key, value, is_encrypted FROM instance_configurations WHERE key = ANY($1) AND deleted_at IS NULL";
 }
 
 impl ConfigStore for PgConfigStore {
@@ -739,5 +739,63 @@ mod tests {
     fn pg_store_targets_instance_configurations() {
         assert!(PgConfigStore::QUERY.contains("instance_configurations"));
         assert!(PgConfigStore::QUERY.contains("is_encrypted"));
+        // Django reads through the scoped default manager
+        // (`InstanceConfiguration.objects`, i.e. `SoftDeletionManager`),
+        // so the store must exclude soft-deleted rows too (PIDASHCONV-1101).
+        assert!(
+            PgConfigStore::QUERY.contains("deleted_at IS NULL"),
+            "{}",
+            PgConfigStore::QUERY
+        );
+    }
+
+    // --- PgConfigStore live-db scope ----------------------------------------
+
+    async fn scratch_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    /// PIDASHCONV-1101: `fetch` must not serve soft-deleted rows. The
+    /// temporary table shadows the real `instance_configurations` on this
+    /// single-connection pool, so the test is hermetic.
+    #[tokio::test]
+    async fn pg_store_fetch_excludes_soft_deleted_rows() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(
+            "CREATE TEMPORARY TABLE instance_configurations (key TEXT PRIMARY KEY, value TEXT, is_encrypted BOOLEAN NOT NULL, deleted_at TIMESTAMPTZ)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create temp instance_configurations");
+        sqlx::query(
+            "INSERT INTO instance_configurations (key, value, is_encrypted, deleted_at) VALUES ('LIVE_KEY', 'live', FALSE, NULL), ('DEAD_KEY', 'stale', FALSE, now())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed temp rows");
+        let store = PgConfigStore::new(pool);
+        let rows = store.fetch(&["LIVE_KEY", "DEAD_KEY"]).await.expect("fetch");
+        assert_eq!(
+            rows.get("LIVE_KEY").and_then(|r| r.value.clone()),
+            Some("live".to_owned())
+        );
+        assert!(
+            !rows.contains_key("DEAD_KEY"),
+            "soft-deleted row leaked: {rows:?}"
+        );
     }
 }
