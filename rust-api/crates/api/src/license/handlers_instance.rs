@@ -994,6 +994,30 @@ async fn check_user_assignments(
     }
 }
 
+/// True for the `IntegrityError` subclasses this path raises
+/// deterministically: unique violations (SQLSTATE 23505 — `instance_id`
+/// colliding a soft-deleted row the live-scoped pre-check cannot see) and
+/// not-null violations (SQLSTATE 23502 — the create path with required
+/// columns missing). Django's `BaseAPIView.handle_exception` maps every
+/// `IntegrityError` to 400 (`base.py:67-71`); connection and unknown
+/// errors stay 500.
+fn is_payload_integrity_error(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|db| db.code())
+        .is_some_and(|code| code == "23505" || code == "23502")
+}
+
+/// Map a PATCH write failure: integrity violations are the client's
+/// fault (400 `InvalidPayload`), everything else is a 500.
+fn map_write_error(error: sqlx::Error) -> HandlerError {
+    if is_payload_integrity_error(&error) {
+        HandlerError::InvalidPayload
+    } else {
+        HandlerError::ServerError
+    }
+}
+
 /// `serializer.save()` on the update path: validated columns plus
 /// `updated_at = now` (`auto_now`) and `updated_by = request.user`
 /// (`BaseModel.save`, `db/models/base.py:26-40`).
@@ -1026,7 +1050,7 @@ async fn apply_patch(
         .build()
         .execute(pool)
         .await
-        .map_err(|_| HandlerError::ServerError)?;
+        .map_err(map_write_error)?;
     Ok(())
 }
 
@@ -1065,8 +1089,10 @@ fn assignment_column(set: &Assignment) -> &'static str {
 
 /// `serializer.save()` with `instance=None`: create. Missing columns fall
 /// back to the Django field defaults (`edition`, `domain`, untouched
-/// flags); required columns left out fail at the database — the same
-/// `IntegrityError` → 500 path Python takes through its dispatch.
+/// flags); required columns left out fail at the database — an
+/// `IntegrityError` Python maps to 400 through `handle_exception`
+/// (`base.py:67-71`), unreachable via HTTP only because the permission
+/// gate denies when no instance row exists.
 async fn insert_instance(
     pool: &sqlx::PgPool,
     sets: &[Assignment],
@@ -1168,7 +1194,7 @@ async fn insert_instance(
         .build()
         .execute(pool)
         .await
-        .map_err(|_| HandlerError::ServerError)?;
+        .map_err(map_write_error)?;
     Ok(())
 }
 
