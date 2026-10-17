@@ -53,15 +53,15 @@
 //! # Cross-domain transport boundaries (documented, no stubs)
 //!
 //! The success chain below performs every Python statement with real
-//! I/O. Three transports belong to other domains and degrade exactly as
-//! Python's own `except` fallbacks do: avatar S3 upload failure falls
-//! back to the provider URL (`base.py:download_and_upload_avatar`
-//! returns `None` on any exception); `user_activation_email.delay` and
-//! `track_event.delay` are Celery tasks owned by other domains, so the
-//! DB writes they guard (activation flag, membership rows) land while
-//! the queue publish is a documented no-op like the D-33 install flow's
-//! memory-broker note; cache invalidation (`invalidate_cache_directly`)
-//! has no Rust cache population to evict from and is a documented no-op.
+//! I/O. Avatar S3 upload failure falls back to the provider URL
+//! (`base.py:download_and_upload_avatar` returns `None` on any
+//! exception). The Celery publishes (`user_activation_email.delay` for
+//! inactive users, `track_event.delay` per joined workspace) enqueue
+//! into the Postgres job queue for the worker to forward, and the
+//! per-invite `invalidate_cache_directly` deletes the member-list keys
+//! through the shared Redis handle — like the google, gitlab and gitea
+//! siblings. A publish or invalidation failure 500s, as Python with its
+//! broker or cache backend down does.
 
 use std::collections::HashMap;
 
@@ -78,6 +78,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use pidash_db::auth_oauth::queries::account as account_queries;
+use pidash_db::redis::RedisHandle;
 use pidash_services::auth_oauth::{error as oauth_error, exchange, providers};
 use pidash_services::auth_session::shapes::{self, HostSettings, ParamValue};
 
@@ -904,10 +905,13 @@ fn coerce_provider_id(user_data: &mut Value) {
 ///   provider URL is stored as `avatar` with no `FileAsset` row — the
 ///   same value Python stores in `user.avatar` on every path, including
 ///   its upload-failure fallback.
-/// * `user_activation_email.delay` and `track_event.delay` are Celery
-///   tasks owned by other domains (documented no-op publishes, like the
-///   D-33 flow); the guarded DB writes land. Cache invalidation has no
-///   Rust population to evict from (documented no-op).
+/// * `user_activation_email.delay` fires before the active flip for
+///   pre-existing inactive users, and `track_event.delay` fires per
+///   joined workspace next to its cache invalidation — real Postgres
+///   queue publishes (`pidash_jobs::queue::enqueue`), like the google,
+///   gitlab and gitea siblings. A publish failure 500s, as `.delay`
+///   raising does in Python.
+#[allow(clippy::too_many_arguments)]
 async fn complete_login_or_signup(
     pool: &sqlx::PgPool,
     secret_key: &str,
@@ -915,6 +919,8 @@ async fn complete_login_or_signup(
     remote_addr: Option<&str>,
     auth: &GithubAuth,
     email: &str,
+    site: &str,
+    redis: Option<&RedisHandle>,
 ) -> Result<ResolvedUser, CallbackFailure> {
     let now = chrono::Utc::now();
     let user_data = &auth.user_data;
@@ -933,67 +939,60 @@ async fn complete_login_or_signup(
     .map_err(|_| CallbackFailure::Server)?;
     let is_signup = existing.is_some();
 
-    let (user_id, password_field, mut display_name, is_superuser, is_staff) = if let Some((
-        id,
-        _,
-        password,
-        display_name,
-        is_superuser,
-        is_staff,
-    )) = existing
-    {
-        (id, password, display_name, is_superuser, is_staff)
-    } else {
-        // `__check_signup`: `ENABLE_SIGNUP == "0"` with no invite → 5030.
-        let enable_signup = config_value(
-            pool,
-            secret_key,
-            "ENABLE_SIGNUP",
-            std::env::var("ENABLE_SIGNUP").ok(),
-        )
-        .await
-        .map_err(|_| CallbackFailure::Server)?;
-        if enable_signup.as_deref() == Some("0") {
-            let invited: Option<(i64,)> = sqlx::query_as(
+    let (user_id, password_field, was_active, mut display_name, is_superuser, is_staff) =
+        if let Some((id, active, password, display_name, is_superuser, is_staff)) = existing {
+            (id, password, active, display_name, is_superuser, is_staff)
+        } else {
+            // `__check_signup`: `ENABLE_SIGNUP == "0"` with no invite → 5030.
+            let enable_signup = config_value(
+                pool,
+                secret_key,
+                "ENABLE_SIGNUP",
+                std::env::var("ENABLE_SIGNUP").ok(),
+            )
+            .await
+            .map_err(|_| CallbackFailure::Server)?;
+            if enable_signup.as_deref() == Some("0") {
+                let invited: Option<(i64,)> = sqlx::query_as(
                 "SELECT 1 FROM workspace_member_invites WHERE email = $1 AND deleted_at IS NULL LIMIT 1",
             )
             .bind(email)
             .fetch_optional(pool)
             .await
             .map_err(|_| CallbackFailure::Server)?;
-            if invited.is_none() {
-                return Err(CallbackFailure::Auth(
-                    oauth_error::AuthenticationException::new(
-                        pidash_services::auth_session::shapes::error_code("SIGNUP_DISABLED")
-                            .unwrap_or(5035),
-                        "SIGNUP_DISABLED".to_owned(),
-                        vec![("email".to_owned(), Value::String(email.to_owned()))],
-                    ),
-                ));
+                if invited.is_none() {
+                    return Err(CallbackFailure::Auth(
+                        oauth_error::AuthenticationException::new(
+                            pidash_services::auth_session::shapes::error_code("SIGNUP_DISABLED")
+                                .unwrap_or(5035),
+                            "SIGNUP_DISABLED".to_owned(),
+                            vec![("email".to_owned(), Value::String(email.to_owned()))],
+                        ),
+                    ));
+                }
             }
-        }
 
-        // Autoset arm (`base.py:complete_login_or_signup` new-user branch):
-        // `username = uuid4().hex`, `set_password(uuid4().hex)`.
-        let id = Uuid::new_v4();
-        let username = Uuid::new_v4().simple().to_string();
-        let password = encode_password(&Uuid::new_v4().simple().to_string());
-        let first_name = user_obj
-            .first_name
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or_default();
-        let last_name = user_obj
-            .last_name
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or_default();
-        let avatar = user_obj.avatar.as_str().unwrap_or("").to_owned();
-        // `User.save()` (`user.py:177-182`) backfills the blank
-        // `display_name` from the email local part on the create save
-        // (`base.py:328`); the row is inserted already backfilled.
-        let display_name = backfill_display_name(email);
-        sqlx::query(
+            // Autoset arm (`base.py:complete_login_or_signup` new-user branch):
+            // `username = uuid4().hex`, `set_password(uuid4().hex)`.
+            let id = Uuid::new_v4();
+            let username = Uuid::new_v4().simple().to_string();
+            let password = encode_password(&Uuid::new_v4().simple().to_string());
+            let first_name = user_obj
+                .first_name
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_default();
+            let last_name = user_obj
+                .last_name
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_default();
+            let avatar = user_obj.avatar.as_str().unwrap_or("").to_owned();
+            // `User.save()` (`user.py:177-182`) backfills the blank
+            // `display_name` from the email local part on the create save
+            // (`base.py:328`); the row is inserted already backfilled.
+            let display_name = backfill_display_name(email);
+            sqlx::query(
             r#"INSERT INTO "users" ("id", "password", "last_login", "username", "mobile_number", "email",
                 "display_name", "first_name", "last_name", "avatar", "avatar_asset_id",
                 "cover_image", "cover_image_asset_id", "date_joined", "created_at", "updated_at",
@@ -1019,17 +1018,17 @@ async fn complete_login_or_signup(
         .await
         .map_err(|_| CallbackFailure::Server)?;
 
-        // `Profile.objects.create(user=user)` (`user.py:200-275` defaults).
-        let background = format!(
-            "#{}",
-            Uuid::new_v4()
-                .simple()
-                .to_string()
-                .chars()
-                .take(6)
-                .collect::<String>()
-        );
-        sqlx::query(
+            // `Profile.objects.create(user=user)` (`user.py:200-275` defaults).
+            let background = format!(
+                "#{}",
+                Uuid::new_v4()
+                    .simple()
+                    .to_string()
+                    .chars()
+                    .take(6)
+                    .collect::<String>()
+            );
+            sqlx::query(
             r#"INSERT INTO "profiles" ("id", "created_at", "updated_at", "user_id", "theme",
                 "is_app_rail_docked", "is_tour_completed", "onboarding_step", "use_case", "role",
                 "is_onboarded", "last_workspace_id", "billing_address_country", "billing_address",
@@ -1050,8 +1049,10 @@ async fn complete_login_or_signup(
         .execute(pool)
         .await
         .map_err(|_| CallbackFailure::Server)?;
-        (id, password, display_name, false, false)
-    };
+            // Created active (`is_active` defaults True, `user.py`), so the
+            // activation branch below never fires for new users — as in Python.
+            (id, password, true, display_name, false, false)
+        };
 
     // IDP sync (`base.py:sync_user_data`): `check_sync_enabled() and not
     // is_signup` — with the inverted flag this runs for NEW users.
@@ -1094,14 +1095,20 @@ async fn complete_login_or_signup(
         .map_err(|_| CallbackFailure::Server)?;
     }
 
-    // `save_user_data` (`base.py:220-233`): login stamps; inactive users
-    // are flipped active (the activation-email publish is a cross-domain
-    // boundary — see module docs). `None` binds NULL into the NOT NULL
-    // stamp columns, raising into the same 500 Python hits. The save
-    // (`base.py:233`) then runs `User.save()` (`user.py:169-187`):
-    // `token_updated_at` is set, so the token rotates; a blank
-    // `display_name` backfills from the email local part; `is_staff`
+    // `save_user_data` (`base.py:220-234`): login stamps; inactive users
+    // are flipped active. The save (`base.py:233`) then runs `User.save()`
+    // (`user.py:169-187`): `token_updated_at` is set, so the token rotates;
+    // a blank `display_name` backfills from the email local part; `is_staff`
     // syncs from `is_superuser`.
+    // The activation mail fires BEFORE the active flip while the row still
+    // shows inactive (QUIRK-activation-order). A publish failure raises in
+    // Python (`.delay` propagates), so it 500s here too.
+    if !was_active {
+        enqueue_activation_email(pool, site, user_id).await?;
+    }
+
+    // Login stamps + the active flip. `None` binds NULL into the NOT NULL
+    // stamp columns, raising into the same 500 Python hits.
     let ip = client_ip(headers, remote_addr);
     let uagent = user_agent(headers);
     let token = rotated_token();
@@ -1130,11 +1137,11 @@ async fn complete_login_or_signup(
 
     // `post_user_auth_workflow` → `process_workspace_project_invitations`
     // (`workspace_project_join.py`, full file): accepted workspace invites
-    // become members (`bulk_create(ignore_conflicts=True)`), then accepted
-    // project invites become workspace + project members (role clamped to
-    // 5/15), then both invite sets soft-delete. Per-invite cache invalidation
-    // and analytics publishes are cross-domain boundaries (see module docs).
-    process_invitations(pool, email, user_id, now)
+    // become members (`bulk_create(ignore_conflicts=True)`), then each
+    // joined workspace emits its cache invalidation + `track_event`,
+    // then accepted project invites become workspace + project members
+    // (role clamped to 5/15), then both invite sets soft-delete.
+    process_invitations(pool, redis, email, user_id, now)
         .await
         .map_err(|_| CallbackFailure::Server)?;
 
@@ -1169,23 +1176,113 @@ async fn complete_login_or_signup(
     })
 }
 
+/// `user_activation_email.delay(current_site, user.id)` (`base.py:230`):
+/// positional args, empty kwargs, enqueued through the Postgres queue
+/// for the worker to forward. A publish failure raises in Python, so
+/// it surfaces as a 500 here too.
+async fn enqueue_activation_email(
+    pool: &sqlx::PgPool,
+    site: &str,
+    user_id: Uuid,
+) -> Result<(), CallbackFailure> {
+    let emit = pidash_services::auth_session::tasks::UserActivationEmailEmit {
+        current_site: site.to_owned(),
+        user_id: user_id.to_string(),
+    };
+    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+        emit.task_name(),
+        emit.args(),
+        Default::default(),
+    );
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        serde_json::Value::Array(message.args.clone()),
+        serde_json::Value::Object(message.kwargs.clone()),
+    );
+    pidash_jobs::queue::enqueue(pool, &job)
+        .await
+        .map_err(|_| CallbackFailure::Server)?;
+    Ok(())
+}
+
+/// `invalidate_cache_directly(path, url_params=False, user=False,
+/// multiple=True)` (`utils/cache.py:54-69` +
+/// `workspace_project_join.py:39-44`): `user=False` forces
+/// `auth_header=None`, so the key is the bare
+/// `/api/workspaces/{slug}/members/` path; `multiple=True` deletes every
+/// key matching `*{key}*` (`KEYS` + `DEL`).
+fn workspace_members_cache_pattern(workspace_slug: &str) -> String {
+    format!("*/api/workspaces/{workspace_slug}/members/*")
+}
+
+/// `str(timezone.now().isoformat())` (`workspace_project_join.py:54`):
+/// six fractional digits when the instant carries microseconds, none
+/// when it lands exactly on a second — the magic-slice conditional.
+fn format_joined_at(now: chrono::DateTime<chrono::Utc>) -> String {
+    if now.timestamp_subsec_micros() == 0 {
+        now.format("%Y-%m-%dT%H:%M:%S%:z").to_string()
+    } else {
+        now.format("%Y-%m-%dT%H:%M:%S%.6f%:z").to_string()
+    }
+}
+
+/// `track_event.delay(user_id=..., event_name=...,
+/// slug=..., event_properties=...)` (`workspace_project_join.py:45-56`,
+/// keyword args) for one joined workspace, enqueued through the
+/// Postgres queue. A publish failure raises in Python, so it surfaces
+/// as a 500 here too.
+async fn enqueue_join_event(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    workspace_slug: &str,
+    role: i16,
+    joined_at: &str,
+) -> Result<(), sqlx::Error> {
+    let call = pidash_services::auth_session::queries::workspace_join_track_event_call(
+        &user_id.to_string(),
+        &workspace_id.to_string(),
+        workspace_slug,
+        i32::from(role),
+        joined_at,
+    );
+    let kwargs = call.as_object().cloned().unwrap_or_default();
+    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+        "pi_dash.bgtasks.event_tracking_task.track_event",
+        Vec::new(),
+        kwargs,
+    );
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        serde_json::Value::Array(message.args.clone()),
+        serde_json::Value::Object(message.kwargs.clone()),
+    );
+    pidash_jobs::queue::enqueue(pool, &job).await?;
+    Ok(())
+}
+
 /// `process_workspace_project_invitations`
 /// (`authentication/utils/workspace_project_join.py`, full file).
 async fn process_invitations(
     pool: &sqlx::PgPool,
+    redis: Option<&RedisHandle>,
     email: &str,
     user_id: Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
     // Accepted workspace invites → members, `ignore_conflicts=True`.
-    let workspace_invites: Vec<(Uuid, i16)> = sqlx::query_as(
-        r#"SELECT workspace_id, role FROM workspace_member_invites
-           WHERE email = $1 AND accepted AND deleted_at IS NULL"#,
+    // Newest first (`Meta.ordering = ("-created_at",)`); the slug rides
+    // along for the per-invite cache invalidation + event below.
+    let workspace_invites: Vec<(Uuid, i16, String)> = sqlx::query_as(
+        r#"SELECT i.workspace_id, i.role, w.slug FROM workspace_member_invites i
+           JOIN workspaces w ON w.id = i.workspace_id
+           WHERE i.email = $1 AND i.accepted AND i.deleted_at IS NULL
+           ORDER BY i.created_at DESC"#,
     )
     .bind(email)
     .fetch_all(pool)
     .await?;
-    for (workspace_id, role) in &workspace_invites {
+    for (workspace_id, role, _slug) in &workspace_invites {
         sqlx::query(
             r#"INSERT INTO "workspace_members" ("id", "created_at", "updated_at", "workspace_id",
                "member_id", "role", "view_props", "default_props", "issue_props",
@@ -1201,6 +1298,22 @@ async fn process_invitations(
         .bind(serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true}))
         .execute(pool)
         .await?;
+    }
+    // Per-invite cache invalidation + `track_event`, newest first (the
+    // bulk above commits first, `workspace_project_join.py:26-56` order).
+    // Any Redis or queue failure raises into the 500 Python hits (the
+    // call site maps every error to `CallbackFailure::Server`, so the
+    // `sqlx::Error` variant below is never observed).
+    for (workspace_id, role, slug) in &workspace_invites {
+        let handle = redis.ok_or(sqlx::Error::PoolTimedOut)?;
+        handle
+            .invalidate_matching(&workspace_members_cache_pattern(slug))
+            .await
+            .map_err(|_| sqlx::Error::PoolTimedOut)?;
+        // `joined_at` is stamped per invite (`:54` calls
+        // `timezone.now()` on every iteration).
+        let joined_at = format_joined_at(chrono::Utc::now());
+        enqueue_join_event(pool, user_id, *workspace_id, slug, *role, &joined_at).await?;
     }
 
     // Accepted project invites → workspace members (role clamped to 5/15)
@@ -1416,6 +1529,12 @@ async fn app_callback(
     let Some(pool) = pool_of(&state) else {
         return server_error();
     };
+    // `current_site` for the activation mail (`base_host(request)`,
+    // `base.py:230`) and the cache handle for the per-invite member-list
+    // invalidation (a missing handle 500s, like Python with its cache
+    // backend down).
+    let site = shapes::base_host(&host_settings(settings), false, false, false);
+    let redis = state.redis();
     let secret = settings.secret_key.clone();
     // `REMOTE_ADDR` (`get_client_ip` fallback; serve installs the peer via
     // `into_make_service_with_connect_info`, so this is always present live).
@@ -1449,8 +1568,17 @@ async fn app_callback(
         )
         .await?;
         let email = sanitize_email(&auth.user_data.email).map_err(CallbackFailure::Auth)?;
-        let user =
-            complete_login_or_signup(&pool, &secret, &headers, remote_addr, &auth, &email).await?;
+        let user = complete_login_or_signup(
+            &pool,
+            &secret,
+            &headers,
+            remote_addr,
+            &auth,
+            &email,
+            &site,
+            redis,
+        )
+        .await?;
         login_session(&handle, settings, &headers, remote_addr, &user, true, false);
         // `path = next_path or get_redirection_path(user)`
         // (`github.py:98-101`): the RAW session value (possibly "").
@@ -1791,5 +1919,386 @@ mod tests {
             already["user"]["provider_id"],
             Value::String("12345".to_owned())
         );
+    }
+
+    // Per-invite invalidation pattern (`cache.keys("*<path>*")`,
+    // `cache.py` + `workspace_project_join.py:39-44`).
+    #[test]
+    fn workspace_members_cache_pattern_shape() {
+        assert_eq!(
+            workspace_members_cache_pattern("acme"),
+            "*/api/workspaces/acme/members/*"
+        );
+    }
+
+    // `joined_at` renders like `str(datetime.isoformat())`: six digits
+    // when microseconds are present, none on an exact second.
+    #[test]
+    fn format_joined_at_goldens() {
+        use chrono::TimeZone;
+        let with_micros = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 16, 22, 0, 0)
+            .unwrap()
+            + chrono::Duration::microseconds(123_456);
+        assert_eq!(
+            format_joined_at(with_micros),
+            "2026-10-16T22:00:00.123456+00:00"
+        );
+        let exact_second = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 16, 22, 0, 0)
+            .unwrap();
+        assert_eq!(format_joined_at(exact_second), "2026-10-16T22:00:00+00:00");
+    }
+
+    // -- live kernel tests (env-gated, PIDASHCONV-1083) ------------------
+    // Same convention as runner_runs: unset DATABASE_URL (plain
+    // `cargo test`) skips these. REDIS_URL defaults to the shared local
+    // server's db 6 scratch lane; keys are uniquely prefixed per run
+    // and never flushed. The HTTP success path is sealed in tests (the
+    // exchange posts to hardcoded https://github.com URLs on both
+    // backends), so these drive `complete_login_or_signup` directly
+    // with a fabricated `GithubAuth` — the kernel-level harness.
+
+    /// Serializes the queue DDL: parallel tests racing
+    /// `CREATE TABLE IF NOT EXISTS` can collide on the sequence.
+    static SCHEMA_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn kernel_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => {
+                let pool = sqlx::PgPool::connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL");
+                let _guard = SCHEMA_LOCK.lock().await;
+                pidash_jobs::queue::ensure_schema(&pool)
+                    .await
+                    .expect("queue schema");
+                Some(pool)
+            }
+            Err(_) => {
+                eprintln!("skipping live-kernel test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    fn kernel_redis() -> pidash_db::redis::RedisHandle {
+        let url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/6".to_owned());
+        pidash_db::redis::RedisHandle::from_url(&url).expect("redis url parses")
+    }
+
+    fn kernel_auth(email: &str) -> GithubAuth {
+        GithubAuth {
+            tokens: providers::TokenData {
+                access_token: Value::String("kernel-access-token".to_owned()),
+                refresh_token: Value::Null,
+                access_token_expired_at: None,
+                refresh_token_expired_at: None,
+                id_token: Value::String(String::new()),
+            },
+            user_data: providers::ProviderUserData {
+                email: Value::String(email.to_owned()),
+                user: providers::ProviderUser {
+                    provider_id: Value::String("kernel-provider-1".to_owned()),
+                    email: Value::String(email.to_owned()),
+                    avatar: Value::String("https://example.test/avatar.png".to_owned()),
+                    first_name: Value::String("Kernel".to_owned()),
+                    last_name: Value::String("User".to_owned()),
+                    is_password_autoset: true,
+                },
+            },
+        }
+    }
+
+    fn kernel_headers() -> HeaderMap {
+        // Both stamp columns are NOT NULL: the uagent header and the peer
+        // addr must be present or the save UPDATE 500s like Python.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::USER_AGENT,
+            "github-kernel-test".parse().expect("ascii"),
+        );
+        headers
+    }
+
+    /// Seed an inactive user + workspace + accepted invite (column lists
+    /// mirror `_harness.db.Database.make_user/make_workspace/make_invite`).
+    async fn seed_inactive_invited_user(
+        pool: &sqlx::PgPool,
+        email: &str,
+        slug: &str,
+    ) -> (Uuid, Uuid) {
+        let user_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{}", &user_id.simple().to_string()[..8]))
+        .bind(email)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug",
+                "owner_id", "timezone", "background_color")
+               VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#ffffff')"#,
+        )
+        .bind(now)
+        .bind(workspace_id)
+        .bind(format!("kernel ws {slug}"))
+        .bind(slug)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            r#"INSERT INTO "workspace_member_invites" ("created_at", "updated_at", "id", "email",
+                "accepted", "token", "role", "workspace_id", "created_by_id", "responded_at")
+               VALUES ($1, $1, $2, $3, TRUE, $4, 15, $5, NULL, NULL)"#,
+        )
+        .bind(now)
+        .bind(Uuid::new_v4())
+        .bind(email)
+        .bind(format!("tok-{}", &Uuid::new_v4().simple().to_string()[..8]))
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("seed invite");
+        (user_id, workspace_id)
+    }
+
+    async fn cleanup_kernel_world(pool: &sqlx::PgPool, email: &str, slug: &str) {
+        let user_ids: Vec<Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "email" = $1"#)
+                .bind(email)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+        let workspace_ids: Vec<Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
+                .bind(slug)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+        for user_id in &user_ids {
+            sqlx::query(r#"DELETE FROM "accounts" WHERE "user_id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
+            sqlx::query(r#"DELETE FROM "profiles" WHERE "user_id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
+            sqlx::query(r#"DELETE FROM "workspace_members" WHERE "member_id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+        sqlx::query(r#"DELETE FROM "workspace_member_invites" WHERE "email" = $1"#)
+            .bind(email)
+            .execute(pool)
+            .await
+            .ok();
+        for workspace_id in &workspace_ids {
+            sqlx::query(r#"DELETE FROM "workspaces" WHERE "id" = $1"#)
+                .bind(workspace_id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+        for user_id in &user_ids {
+            sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
+            // Best-effort queue sweep for this run's emits (both tasks
+            // carry the user id in args/kwargs).
+            sqlx::query(
+                r#"DELETE FROM "rust_job_queue"
+                   WHERE "args"::text LIKE $1 OR "kwargs"::text LIKE $1"#,
+            )
+            .bind(format!("%{}%", user_id))
+            .execute(pool)
+            .await
+            .ok();
+        }
+    }
+
+    /// Inactive user + accepted workspace invite: the login flips the
+    /// user active, lands the membership row, soft-deletes the invite,
+    /// enqueues the activation mail + one `track_event` per joined
+    /// workspace, and evicts the member-list cache keys.
+    #[tokio::test]
+    async fn github_kernel_inactive_invited_user_emits_mail_event_and_evicts() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let redis = kernel_redis();
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1083-{tag}@example.test");
+        let slug = format!("gh1083-{tag}");
+        let (user_id, workspace_id) = seed_inactive_invited_user(&pool, &email, &slug).await;
+        let cache_key = format!("gh1083:{tag}:/api/workspaces/{slug}/members/:1");
+        redis
+            .set_ex(&cache_key, "1", 600)
+            .await
+            .expect("seed cache key");
+
+        let auth = kernel_auth(&email);
+        let headers = kernel_headers();
+        let outcome = complete_login_or_signup(
+            &pool,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            Some(&redis),
+        )
+        .await;
+
+        // Observe everything before cleanup so a failure still sweeps.
+        let user_row: Option<(bool, String)> = sqlx::query_as(
+            r#"SELECT "is_active", "last_login_medium" FROM "users" WHERE "id" = $1"#,
+        )
+        .bind(user_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("read user");
+        let members: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM "workspace_members"
+               WHERE "workspace_id" = $1 AND "member_id" = $2"#,
+        )
+        .bind(workspace_id)
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count members");
+        let invites_live: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM "workspace_member_invites"
+               WHERE "email" = $1 AND "accepted" AND "deleted_at" IS NULL"#,
+        )
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .expect("count invites");
+        let activation_rows: Vec<(Value, Value)> = sqlx::query_as(
+            r#"SELECT "args", "kwargs" FROM "rust_job_queue"
+               WHERE "task" = 'pi_dash.bgtasks.user_activation_email_task.user_activation_email'
+                 AND ("args"::text LIKE $1 OR "kwargs"::text LIKE $1)"#,
+        )
+        .bind(format!("%{}%", user_id))
+        .fetch_all(&pool)
+        .await
+        .expect("read activation rows");
+        let event_rows: Vec<(Value, Value)> = sqlx::query_as(
+            r#"SELECT "args", "kwargs" FROM "rust_job_queue"
+               WHERE "task" = 'pi_dash.bgtasks.event_tracking_task.track_event'
+                 AND ("args"::text LIKE $1 OR "kwargs"::text LIKE $1)"#,
+        )
+        .bind(format!("%{}%", user_id))
+        .fetch_all(&pool)
+        .await
+        .expect("read event rows");
+        let cached = redis.get_string(&cache_key).await.expect("read cache");
+        cleanup_kernel_world(&pool, &email, &slug).await;
+
+        assert!(outcome.is_ok(), "kernel must succeed");
+        let (is_active, medium) = user_row.expect("user row survives");
+        assert!(is_active, "inactive user flips active");
+        assert_eq!(medium, "github");
+        assert_eq!(members, 1, "membership row lands");
+        assert_eq!(invites_live, 0, "invite soft-deletes");
+        assert_eq!(activation_rows.len(), 1, "one activation mail");
+        assert_eq!(
+            activation_rows[0].0,
+            serde_json::json!(["http://kernel.test", user_id.to_string()]),
+            "activation args are positional (site, user_id)"
+        );
+        assert_eq!(event_rows.len(), 1, "one track_event per joined workspace");
+        let kwargs = event_rows[0].1.as_object().expect("kwargs object");
+        assert_eq!(
+            kwargs.get("event_name"),
+            Some(&Value::String("user_joined_workspace".to_owned()))
+        );
+        assert_eq!(kwargs.get("slug"), Some(&Value::String(slug.clone())));
+        let props = kwargs
+            .get("event_properties")
+            .and_then(Value::as_object)
+            .expect("event_properties object");
+        assert_eq!(
+            props.get("workspace_id"),
+            Some(&Value::String(workspace_id.to_string()))
+        );
+        assert!(props.get("joined_at").is_some(), "joined_at stamped");
+        assert!(cached.is_none(), "member-list cache keys evicted");
+    }
+
+    /// New user, no invites: the login succeeds and emits nothing.
+    #[tokio::test]
+    async fn github_kernel_new_user_without_invites_emits_nothing() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1083-new-{tag}@example.test");
+        let auth = kernel_auth(&email);
+        let headers = kernel_headers();
+        // No invites: no cache handle is needed and none is touched.
+        let outcome = complete_login_or_signup(
+            &pool,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            None,
+        )
+        .await;
+
+        let user_row: Option<(Uuid, bool)> =
+            sqlx::query_as(r#"SELECT "id", "is_active" FROM "users" WHERE "email" = $1"#)
+                .bind(&email)
+                .fetch_optional(&pool)
+                .await
+                .expect("read user");
+        let queue_rows: i64 = if let Some((user_id, _)) = user_row {
+            sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM "rust_job_queue"
+                   WHERE "args"::text LIKE $1 OR "kwargs"::text LIKE $1"#,
+            )
+            .bind(format!("%{}%", user_id))
+            .fetch_one(&pool)
+            .await
+            .expect("count queue")
+        } else {
+            -1
+        };
+        cleanup_kernel_world(&pool, &email, &format!("gh1083-new-{tag}")).await;
+
+        assert!(outcome.is_ok(), "kernel must succeed");
+        let (_, is_active) = user_row.expect("user row created");
+        assert!(is_active, "new user is active");
+        assert_eq!(queue_rows, 0, "no emits without invites or prior inactive");
     }
 }
