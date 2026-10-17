@@ -18,13 +18,8 @@
 //! T5 (PIDASHCONV-216) adds [`auth_mail`] (the four auth mail tasks) and
 //! [`mail_send`] (the shared send pipeline T6 reuses, never forks).
 //! T6 (PIDASHCONV-217) adds [`membership_mail`] (the four membership mail
-//! tasks) via [`register_membership_mail_tasks`].
-//! [`register_auth_mail_tasks`] only builds the handler table — flipping
-//! the live worker to these handlers is the domain gate's call
-//! (PIDASHCONV-218, after the PIDASHCONV-21 proxy pass), so every name in
-//! [`TASK_NAMES`] still routes to `PythonOwned` (see
-//! [`crate::worker::route_for`]); the domain gate flips ownership after
-//! the proxy pass, mirroring the `tasks_cleanup` export tasks.
+//! tasks) via [`register_membership_mail_tasks`] (still unwired —
+//! PIDASHCONV-1104 wires it).
 //! [`is_mail_task`] is the routing predicate and [`TASK_NAMES`]
 //! is pinned against the `F-WIRE-MAIL` fixture below.
 //!
@@ -33,7 +28,8 @@
 //! seams in [`live`], and the worker binary calls it (PIDASHCONV-865),
 //! so both names are Rust-owned; [`NOTIFICATIONS_TASK`] is Rust-owned too
 //! (PIDASHCONV-834). The membership ports are wired by the live worker
-//! (PIDASHCONV-1104); the auth ports stay unwired until PIDASHCONV-1103.
+//! (PIDASHCONV-1104), and so are the four [`AUTH_MAIL_TASKS`] names
+//! (PIDASHCONV-1103 wires [`register_auth_mail_tasks`] into the worker).
 //! [`is_mail_task`] is the routing predicate and [`TASK_NAMES`] is pinned
 //! against the `F-WIRE-MAIL` fixture below.
 
@@ -125,15 +121,15 @@ pub const TASK_NAMES: [&str; 11] = [
     WORKSPACE_INVITATION_TASK,
 ];
 
-/// True for the eleven D-07 mail/notification task names. The worker
-/// forwards them to the Python plane until the domain gate flips ownership.
+/// True for the eleven D-07 mail/notification task names (routing
+/// predicate; ownership itself lives in the worker registry — see
+/// [`crate::worker::route_for`]).
 pub fn is_mail_task(task: &str) -> bool {
     TASK_NAMES.contains(&task)
 }
 
-/// The T5 handler table exists but is not called yet: every D-07 name must
-/// stay Python-owned until the domain gate flips ownership after the
-/// PIDASHCONV-21 proxy pass.
+/// True when `registry` leaves the D-07 name `task` unregistered (so the
+/// worker would forward it to the Python plane).
 pub fn assert_python_owned(registry: &Registry, task: &str) -> bool {
     !registry.owns(task) && is_mail_task(task)
 }
@@ -141,10 +137,8 @@ pub fn assert_python_owned(registry: &Registry, task: &str) -> bool {
 /// Register the T4 `notifications` task name on `registry` (F-WIRE-MAIL name,
 /// plain `@shared_task`: default ack-on-success, no `autoretry_for` — the
 /// handler always acknowledges, mirroring the swallow-everything body).
-/// Like [`register_auth_mail_tasks`], this only builds the handler table —
-/// flipping the live worker to it is the domain gate's call (PIDASHCONV-218,
-/// after the PIDASHCONV-21 proxy pass), so the name still routes to
-/// `PythonOwned` (see [`crate::worker::route_for`]).
+/// The worker calls this (PIDASHCONV-834), so the name routes `Local`
+/// (see [`crate::worker::route_for`]).
 pub fn register_notifications_task(registry: &mut Registry, pool: sqlx::PgPool) {
     registry.register(
         NOTIFICATIONS_TASK,
@@ -155,6 +149,8 @@ pub fn register_notifications_task(registry: &mut Registry, pool: sqlx::PgPool) 
 /// Register all four T5 task names on `registry` (F-WIRE-MAIL names, plain
 /// `@shared_task`: default ack-on-success, no `autoretry_for` — handlers
 /// always acknowledge, mirroring the swallow-everything bodies).
+/// The worker calls this (PIDASHCONV-1103), so the names route `Local`
+/// (see [`crate::worker::route_for`]).
 pub fn register_auth_mail_tasks(registry: &mut Registry, pool: sqlx::PgPool) {
     registry.register(auth_mail::MAGIC_LINK_TASK, magic_link_handler(pool.clone()));
     registry.register(

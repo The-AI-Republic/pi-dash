@@ -4,8 +4,11 @@
 # lines>` so the oracle can execute these tasks; this file (never
 # apps/api) is where the registration gap is closed for tests. Each
 # standalone-Rust task-port issue appends its own modules here.
+pi_dash.bgtasks.forgot_password_task
+pi_dash.bgtasks.magic_link_code_task
 pi_dash.bgtasks.project_add_user_email_task
 pi_dash.bgtasks.project_invitation_task
 pi_dash.bgtasks.user_activation_email_task
 pi_dash.bgtasks.user_deactivation_email_task
+pi_dash.bgtasks.user_email_update_task
 pi_dash.bgtasks.workspace_invitation_task

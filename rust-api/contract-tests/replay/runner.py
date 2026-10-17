@@ -23,9 +23,10 @@ drives HTTP + SQL + broker drains against live infrastructure):
 - Rust: ``REPLAY_RUST_URL`` serving ``REPLAY_RUST_DB`` with every
   ``PIDASH_RUST_*`` flag on and ``PIDASH_DJANGO_UPSTREAM`` pointing at
   Django-upstream. Most handlers enqueue into ``rust_job_queue``; a few
-  (forgot-password, space assets, ...) publish direct to the AMQP broker
-  at ``REPLAY_RUST_AMQP_URL``. No workers and no beat anywhere:
-  enqueued jobs accumulate observably instead of executing.
+  (space assets, ...) still publish direct to the AMQP broker at
+  ``REPLAY_RUST_AMQP_URL`` (forgot-password moved to ``rust_job_queue``
+  in PIDASHCONV-1103). No workers and no beat anywhere: enqueued jobs
+  accumulate observably instead of executing.
 
 Sinks (``_harness.sinks.Worker*Sink``) run in the pytest process on the
 fixed ports the servers were booted against.
