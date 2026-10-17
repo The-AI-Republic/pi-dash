@@ -11,6 +11,7 @@
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDate, nullableDateTime, nullableUuid, uuid } from "./fields.js";
+import { AgentStatus, AgentTicker } from "./issue-agent.js";
 
 export const ISSUE_PRIORITIES = ["urgent", "high", "medium", "low", "none"] as const;
 
@@ -84,8 +85,8 @@ export const Issue = z.object({
   is_synced: z.boolean(),
   description_html: z.string(),
   is_subscribed: z.boolean(),
-  agent_ticker: z.nullable(z.unknown()),
-  agent_status: z.nullable(z.unknown()),
+  agent_ticker: z.nullable(AgentTicker),
+  agent_status: z.nullable(AgentStatus),
   relations_summary: IssueRelationsSummary,
   has_open_blockers: z.boolean(),
 });

@@ -318,6 +318,81 @@ export {
 } from "./contracts/issue-reactions.js";
 export { IssueLite, IssueMeta, getIssueByIdentifier, getIssueMeta } from "./contracts/issue-identity.js";
 export {
+  AddSubIssuesResponse,
+  AddedSubIssue,
+  SubIssueItem,
+  SubIssuesResponse,
+  addSubIssues,
+  listSubIssues,
+} from "./contracts/issue-subissues.js";
+export type { SubIssuesQuery } from "./contracts/issue-subissues.js";
+export {
+  AddedIssueRelation,
+  ISSUE_RELATION_TYPES,
+  IssueRelations,
+  RelatedIssue,
+  addIssueRelations,
+  listIssueRelations,
+  removeIssueRelation,
+} from "./contracts/issue-relations.js";
+export type { IssueRelationType } from "./contracts/issue-relations.js";
+export {
+  IssueLink,
+  IssueLinkList,
+  LinkAuthor,
+  createIssueLink,
+  deleteIssueLink,
+  listIssueLinks,
+  updateIssueLink,
+} from "./contracts/issue-links.js";
+export type { IssueLinkInput } from "./contracts/issue-links.js";
+export {
+  AttachmentUploadGrant,
+  IssueAttachment,
+  IssueAttachmentList,
+  completeAttachmentUpload,
+  deleteIssueAttachment,
+  listIssueAttachments,
+  requestAttachmentUpload,
+  uploadIssueAttachment,
+} from "./contracts/issue-attachments.js";
+export type {
+  AttachmentByteUpload,
+  AttachmentByteUploadResponse,
+  AttachmentUploadInput,
+} from "./contracts/issue-attachments.js";
+export {
+  DraftIssue,
+  DraftIssueListResponse,
+  PromotedIssue,
+  createDraftIssue,
+  deleteDraftIssue,
+  getDraftIssue,
+  listDraftIssues,
+  promoteDraftIssue,
+  updateDraftIssue,
+} from "./contracts/issue-drafts.js";
+export type { DraftIssueCreateInput, DraftIssueListQuery } from "./contracts/issue-drafts.js";
+export {
+  CODE_REVIEW_STATES,
+  CodeReviewLink,
+  CodeReviewLinkList,
+  attachCodeReview,
+  detachCodeReview,
+  listCodeReviews,
+} from "./contracts/issue-code-reviews.js";
+export type { CodeReviewState } from "./contracts/issue-code-reviews.js";
+export {
+  DescriptionVersion,
+  DescriptionVersionDetail,
+  DescriptionVersionListResponse,
+  getDescriptionVersion,
+  listDescriptionVersions,
+} from "./contracts/issue-versions.js";
+export { IssueSearchHit, IssueSearchResults, searchIssues } from "./contracts/issue-search.js";
+export type { IssueSearchQuery } from "./contracts/issue-search.js";
+export { AgentLiveState, AgentRunSummary, AgentStatus, AgentTicker } from "./contracts/issue-agent.js";
+export {
   Favorite,
   FavoriteList,
   SidebarPreferences,
