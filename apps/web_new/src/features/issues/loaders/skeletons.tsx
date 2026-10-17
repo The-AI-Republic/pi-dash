@@ -4,12 +4,14 @@
 // Per-layout loading skeletons (parity/specs/issues.md §1, ISS-004/ISS-005).
 // Each layout shows its own placeholder while its first load runs; list and
 // spreadsheet reuse the row skeletons for pagination, calendar its pulsing
-// blocks plus the top reload bar.
+// blocks plus the top reload bar. The list skeleton stands alone in the
+// eager ListSkeleton leaf (the route pending component renders it).
 
 import { Skeleton } from "@pidash/kit";
 import * as React from "react";
 
 import type { LayoutKind } from "../layouts/kinds.js";
+import { ListSkeleton } from "./ListSkeleton.js";
 
 const PLACEHOLDER_ROWS = 8;
 const BOARD_COLUMNS = 3;
@@ -19,25 +21,6 @@ const GANTT_ROWS = 6;
 
 function rows(count: number): number[] {
   return Array.from({ length: count }, (_, index) => index);
-}
-
-/** List placeholder: key, title and badge shapes per row (ISS-004/005). */
-export function ListSkeleton(): React.ReactElement {
-  return (
-    <div data-testid="issues-skeleton-list" className="flex h-full flex-col">
-      {rows(PLACEHOLDER_ROWS).map((index) => (
-        <div
-          key={index}
-          data-skeleton-row="true"
-          className="flex h-11 items-center gap-(--space-3) border-b border-(--border) px-(--space-4)"
-        >
-          <Skeleton width="64px" />
-          <Skeleton height="14px" />
-          <Skeleton width="48px" />
-        </div>
-      ))}
-    </div>
-  );
 }
 
 /** Spreadsheet placeholder: header plus body cell rows (ISS-004/005). */

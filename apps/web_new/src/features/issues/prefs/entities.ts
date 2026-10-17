@@ -3,15 +3,11 @@
 // See the LICENSE file for details.
 // Issues-bearing entities (parity/specs/issues.md §1, ISS-001/ISS-002).
 // Each entity carries its own layout root and its own user-properties
-// record; this module maps an entity to its preference endpoint and to
-// the query-key parts beneath which its lists and prefs live.
+// record. Reads live in the eager prefsQuery leaf (the route prefetches
+// them); this module holds the write side plus the shared types, loaded
+// with the lazy layout code.
 
 import {
-  getCycleUserProperties,
-  getEpicUserProperties,
-  getModuleUserProperties,
-  getProjectUserProperties,
-  getWorkspaceUserProperties,
   updateCycleUserProperties,
   updateEpicUserProperties,
   updateModuleUserProperties,
@@ -37,22 +33,6 @@ export interface PrefsRecord {
   rich_filters: Record<string, unknown>;
 }
 
-/** Key parts beneath `issueKeys.prefs` for one entity. */
-export function entityPrefsKeyPart(entity: IssuesEntity): string[] {
-  switch (entity.scope) {
-    case "project":
-      return ["project", entity.projectId];
-    case "cycle":
-      return ["cycle", entity.projectId, entity.cycleId];
-    case "module":
-      return ["module", entity.projectId, entity.moduleId];
-    case "epics":
-      return ["epics", entity.projectId];
-    case "workspace":
-      return ["workspace"];
-  }
-}
-
 /** Key parts beneath `issueKeys.lists` for one entity's lists. */
 export function entityListsKeyPart(entity: IssuesEntity): string[] {
   switch (entity.scope) {
@@ -67,22 +47,6 @@ export function entityListsKeyPart(entity: IssuesEntity): string[] {
       return ["epics", entity.projectId];
     case "workspace":
       return ["workspace"];
-  }
-}
-
-/** Read one entity's user-properties record through its contract. */
-export function readEntityPrefs(client: ApiClient, workspaceSlug: string, entity: IssuesEntity): Promise<PrefsRecord> {
-  switch (entity.scope) {
-    case "project":
-      return getProjectUserProperties(client, workspaceSlug, entity.projectId);
-    case "cycle":
-      return getCycleUserProperties(client, workspaceSlug, entity.projectId, entity.cycleId);
-    case "module":
-      return getModuleUserProperties(client, workspaceSlug, entity.projectId, entity.moduleId);
-    case "epics":
-      return getEpicUserProperties(client, workspaceSlug, entity.projectId);
-    case "workspace":
-      return getWorkspaceUserProperties(client, workspaceSlug);
   }
 }
 

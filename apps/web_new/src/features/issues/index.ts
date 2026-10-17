@@ -18,12 +18,12 @@ export {
 export type { LayoutKind } from "./layouts/kinds.js";
 export { IssuesLayoutRoot } from "./layouts/IssuesLayoutRoot.js";
 export type { IssuesLayoutRootProps, LayoutRenderer } from "./layouts/IssuesLayoutRoot.js";
-export { entityListsKeyPart, entityPrefsKeyPart, readEntityPrefs, writeEntityPrefs } from "./prefs/entities.js";
+export { entityListsKeyPart, writeEntityPrefs } from "./prefs/entities.js";
 export type { IssuesEntity, PrefsRecord } from "./prefs/entities.js";
+export { entityPrefsKeyPart, prefsQueryOptions, readEntityPrefs } from "./prefs/prefsQuery.js";
 export {
   buildPrefsPatch,
   parseDisplayPrefs,
-  prefsQueryOptions,
   selectDisplayPrefs,
   useEntityPrefs,
   useUpdateDisplayPrefs,
@@ -40,9 +40,9 @@ export {
   GanttSkeleton,
   KanbanSkeleton,
   LayoutSkeleton,
-  ListSkeleton,
   SpreadsheetSkeleton,
 } from "./loaders/skeletons.js";
+export { ListSkeleton } from "./loaders/ListSkeleton.js";
 export {
   FRESH_WINDOW_MS,
   createTempId,

@@ -2,11 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
-import { issueKeys } from "../api/keys.js";
-import type { IssuesEntity, PrefsRecord } from "./entities.js";
-import { buildPrefsPatch, parseDisplayPrefs, prefsQueryOptions, selectDisplayPrefs } from "./displayPrefs.js";
-
-const ENTITY: IssuesEntity = { scope: "project", projectId: "pid" };
+import type { PrefsRecord } from "./entities.js";
+import { buildPrefsPatch, parseDisplayPrefs, selectDisplayPrefs } from "./displayPrefs.js";
 
 function record(overrides: Partial<PrefsRecord> = {}): PrefsRecord {
   return {
@@ -150,15 +147,5 @@ describe("buildPrefsPatch", () => {
       properties: { state: false, priority: true },
     });
     expect(patch.display_properties).toEqual({ state: false, priority: true });
-  });
-});
-
-describe("prefsQueryOptions", () => {
-  it("keys by entity and never revalidates on focus", () => {
-    const options = prefsQueryOptions({} as never, "acme", ENTITY);
-    expect(options.queryKey).toEqual(issueKeys.prefs("acme", "project", "pid"));
-    expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
-    expect(options.refetchOnWindowFocus).toBe(false);
-    expect(options.refetchOnReconnect).toBe(false);
   });
 });

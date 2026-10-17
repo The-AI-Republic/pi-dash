@@ -19,12 +19,8 @@ import { HighlightProvider } from "../freshness/highlight.js";
 import { LayoutBody } from "../loaders/LayoutBody.js";
 import { IssuesLoaderProvider, useIssuesLoader } from "../loaders/loaderContext.js";
 import { MutationSpinner } from "../loaders/MutationSpinner.js";
-import {
-  selectDisplayPrefs,
-  prefsQueryOptions,
-  useUpdateDisplayPrefs,
-  type DisplayPrefs,
-} from "../prefs/displayPrefs.js";
+import { selectDisplayPrefs, useUpdateDisplayPrefs, type DisplayPrefs } from "../prefs/displayPrefs.js";
+import { prefsQueryOptions } from "../prefs/prefsQuery.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { resolveActiveLayout, type LayoutKind } from "./kinds.js";
 

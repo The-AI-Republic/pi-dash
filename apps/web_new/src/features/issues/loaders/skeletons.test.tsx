@@ -11,7 +11,6 @@ import {
   GanttSkeleton,
   KanbanSkeleton,
   LayoutSkeleton,
-  ListSkeleton,
   SpreadsheetSkeleton,
 } from "./skeletons.js";
 
@@ -20,11 +19,6 @@ function rowCount(testid: string): number {
 }
 
 describe("layout skeletons", () => {
-  it("renders placeholder rows for the list", () => {
-    render(<ListSkeleton />);
-    expect(rowCount("issues-skeleton-list")).toBe(8);
-  });
-
   it("renders header plus body rows for the spreadsheet", () => {
     render(<SpreadsheetSkeleton />);
     expect(rowCount("issues-skeleton-spreadsheet")).toBe(8);

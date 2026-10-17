@@ -17,7 +17,7 @@ import { isProjectGateError } from "../../../../../../features/auth/index.js";
 import {
   IssueList,
   IssuesLayoutRoot,
-  LayoutSkeleton,
+  ListSkeleton,
   issuesQueryOptions,
   parseIssueSearch,
   prefsQueryOptions,
@@ -68,7 +68,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
   // not in the URL), so the pending window always shows the list
   // placeholder; the layout renders its own skeleton once mounted.
   pendingComponent: function IssuesPending() {
-    return <LayoutSkeleton kind="list" />;
+    return <ListSkeleton />;
   },
   errorComponent: function IssueListError({ error, reset }: { error: unknown; reset: () => void }) {
     return (

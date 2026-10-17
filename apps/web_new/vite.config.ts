@@ -127,11 +127,16 @@ export default defineConfig(({ mode }) => {
           // The projects list-display store and its math are side-effect-free
           // (the sign-out registration lives in the list view's effect), so
           // lazy-only use must not pin them into the initial bundle through
-          // the feature barrel (NEWFRONT-523, size gate). Every other module
-          // keeps the default: a blanket false reshapes the TanStack route
-          // splits the size gate keys on.
+          // the feature barrel (NEWFRONT-523, size gate). The issues row
+          // highlight and mutation loader are likewise pure context plus
+          // components, lazy-only behind the layout root (NEWFRONT-614).
+          // Every other module keeps the default: a blanket false reshapes
+          // the TanStack route splits the size gate keys on.
           moduleSideEffects: (id) =>
-            id.includes("features/projects/store/list-display.") || id.includes("features/projects/lib/list-display.")
+            id.includes("features/projects/store/list-display.") ||
+            id.includes("features/projects/lib/list-display.") ||
+            id.includes("features/issues/freshness/highlight.") ||
+            id.includes("features/issues/loaders/loaderContext.")
               ? false
               : true,
         },

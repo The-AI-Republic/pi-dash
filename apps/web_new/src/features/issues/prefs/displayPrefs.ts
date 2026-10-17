@@ -9,22 +9,16 @@
 // sent key wholesale), apply optimistically, roll back with a toast on
 // failure, and refetch the entity's lists under the mutation loader.
 
-import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ApiClient, PrefsPatch } from "@pidash/api-client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { PrefsPatch } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { issueKeys } from "../api/keys.js";
 import { parseLayoutKind, type LayoutKind } from "../layouts/kinds.js";
 import { useIssuesLoader } from "../loaders/loaderContext.js";
-import {
-  entityListsKeyPart,
-  entityPrefsKeyPart,
-  readEntityPrefs,
-  writeEntityPrefs,
-  type IssuesEntity,
-  type PrefsRecord,
-} from "./entities.js";
+import { entityListsKeyPart, writeEntityPrefs, type IssuesEntity, type PrefsRecord } from "./entities.js";
+import { entityPrefsKeyPart, prefsQueryOptions } from "./prefsQuery.js";
 
 /** Calendar options inside display_filters.calendar. */
 export interface DisplayCalendarPrefs {
@@ -94,17 +88,6 @@ export function parseDisplayPrefs(
 /** Parse one preference record's display keys. */
 export function selectDisplayPrefs(record: PrefsRecord): DisplayPrefs {
   return parseDisplayPrefs(record.display_filters, record.display_properties);
-}
-
-/** One entity's preference record: fetched once, never on window focus. */
-export function prefsQueryOptions(client: ApiClient, workspaceSlug: string, entity: IssuesEntity) {
-  return queryOptions({
-    queryKey: issueKeys.prefs(workspaceSlug, ...entityPrefsKeyPart(entity)),
-    queryFn: () => readEntityPrefs(client, workspaceSlug, entity),
-    staleTime: Number.POSITIVE_INFINITY,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-  });
 }
 
 /** One entity's raw preference record. */
