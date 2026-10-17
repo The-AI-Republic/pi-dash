@@ -36,7 +36,7 @@ mod turn;
 
 use clap::{Parser, Subcommand};
 use pidash_api::{with_routes, AppState, EdgeHandle};
-use pidash_db::config::Settings;
+use pidash_db::config::{NoOverlay, Profile, Settings};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -139,9 +139,34 @@ async fn connect_serve_pools() -> Result<pidash_db::Pools, Box<dyn std::error::E
     Ok(pools)
 }
 
+/// Resolve [`Settings`] the way Django resolves its settings module:
+/// `DJANGO_SETTINGS_MODULE`'s last segment picks the [`Profile`]
+/// (`test` / `local` / `production`); anything else, including unset,
+/// keeps [`Profile::Common`]. `serve` and `worker` boot the same profile
+/// as the Django server/worker they run beside, so profile-driven
+/// settings — `EMAIL_BACKEND` first among them (PIDASHCONV-1126) — agree
+/// instead of Rust always answering with the common (SMTP) resolution.
+fn settings_from_env() -> MainResult<Settings> {
+    Ok(Settings::from_env_with(
+        profile_from_settings_module(),
+        &NoOverlay,
+    )?)
+}
+
+/// Pure mapping behind [`settings_from_env`], split out for unit tests.
+fn profile_from_settings_module() -> Profile {
+    let module = std::env::var("DJANGO_SETTINGS_MODULE").unwrap_or_default();
+    match module.rsplit('.').next().unwrap_or("") {
+        "test" => Profile::Test,
+        "local" => Profile::Local,
+        "production" => Profile::Production,
+        _ => Profile::Common,
+    }
+}
+
 async fn serve(bind: &str) -> MainResult {
     let addr: SocketAddr = bind.parse()?;
-    let settings = Settings::from_env()?;
+    let settings = settings_from_env()?;
     let edge = EdgeHandle::from_env()?;
     let pools = connect_serve_pools().await?;
     // Enqueue paths (magic-link mail, password mail, …) INSERT into the
@@ -217,7 +242,7 @@ async fn worker(concurrency: u32) -> MainResult {
     // exactly as before; registration itself is a pure function of
     // the context.
     let mut registry = pidash_jobs::Registry::new();
-    let settings = Settings::from_env()?;
+    let settings = settings_from_env()?;
     let mongo = pidash_db::tasks_cleanup::cleanup_queries::MongoSink::from_env().await;
     if mongo.is_none() {
         tracing::info!("MongoDB not configured; cleanup tasks will delete from Postgres only");
@@ -373,6 +398,31 @@ mod tests {
             if let Some(value) = saved {
                 std::env::set_var("DATABASE_URL", value);
             }
+        }
+    }
+
+    /// PIDASHCONV-1126: `serve`/`worker` boot the profile matching
+    /// `DJANGO_SETTINGS_MODULE`'s last segment, Common when unset or
+    /// unknown — the same module Django itself boots from.
+    #[test]
+    fn settings_module_selects_profile() {
+        let _guard = env_lock();
+        let saved = std::env::var("DJANGO_SETTINGS_MODULE").ok();
+        for (module, expected) in [
+            ("pi_dash.settings.test", Profile::Test),
+            ("pi_dash.settings.local", Profile::Local),
+            ("pi_dash.settings.production", Profile::Production),
+            ("pi_dash.settings.common", Profile::Common),
+            ("something.else", Profile::Common),
+            ("", Profile::Common),
+        ] {
+            std::env::set_var("DJANGO_SETTINGS_MODULE", module);
+            assert_eq!(profile_from_settings_module(), expected, "module={module}");
+        }
+        std::env::remove_var("DJANGO_SETTINGS_MODULE");
+        assert_eq!(profile_from_settings_module(), Profile::Common);
+        if let Some(value) = saved {
+            std::env::set_var("DJANGO_SETTINGS_MODULE", value);
         }
     }
 
