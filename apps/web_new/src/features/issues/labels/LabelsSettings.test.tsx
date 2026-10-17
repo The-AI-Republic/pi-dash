@@ -398,13 +398,19 @@ describe("LabelsSettings row menus", () => {
 
   it("edits a child and a group parent through their rows", async () => {
     const user = userEvent.setup();
-    setup({ labels: grouped });
+    const { calls } = setup({ labels: grouped });
     await waitFor(() => expect(screen.getByText("Kid")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Actions for Kid" }));
     expect(menuTexts()).toEqual(["Remove from group", "Edit label"]);
     await user.click(screen.getByRole("menuitem", { name: "Edit label" }));
     expect(screen.getByTestId("label-form-name")).toHaveValue("Kid");
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.clear(screen.getByTestId("label-form-name"));
+    await user.type(screen.getByTestId("label-form-name"), "Kiddo");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.getByText("Kiddo")).toBeInTheDocument());
+    const childPatch = calls.find((call) => call.method === "PATCH");
+    expect(childPatch?.url).toContain(KID);
+    expect(JSON.parse(childPatch?.body ?? "{}")).toMatchObject({ name: "Kiddo" });
     fireEvent.click(screen.getByRole("button", { name: "Actions for Alpha" }));
     expect(menuTexts()).toEqual(["Edit label", "Delete label"]);
     await user.click(screen.getByRole("menuitem", { name: "Edit label" }));
@@ -566,6 +572,52 @@ describe("LabelsSettings drag", () => {
     pointerUp();
     expect(await patchBody(calls)).toEqual({ parent: AID, sort_order: 6000 });
     await waitFor(() => expect(visibleNames()).toEqual(["Alpha", "Beta", "Kid"]));
+  });
+
+  it("nests onto a group with the ring, appending past its children", async () => {
+    const { calls } = setup({ labels: [flat[0]!, flat[1]!, labelRow(KID, "Kid", 12000, AID)] });
+    await waitFor(() => expect(screen.getByText("Kid")).toBeInTheDocument());
+    stubSlotRects({ [AID]: { top: 0, bottom: 40 }, [KID]: { top: 40, bottom: 80 }, [BID]: { top: 80, bottom: 120 } });
+    fireEvent.pointerDown(gripByName("Beta"));
+    pointerMove(200, 20);
+    expect(ringed("Alpha")).toBe(true);
+    expect(rowByName("Alpha").querySelector('[data-drop-into="true"]')).toHaveClass("ring-2", "ring-(--accent)");
+    expect(screen.queryByTestId("label-drop-line")).not.toBeInTheDocument();
+    pointerUp();
+    expect(await patchBody(calls)).toEqual({ parent: AID, sort_order: 22000 });
+    await waitFor(() => expect(visibleNames()).toEqual(["Alpha", "Kid", "Beta"]));
+  });
+
+  it("reorders above a group row with the insertion line", async () => {
+    const { calls } = setup({ labels: [flat[0]!, flat[1]!, labelRow(KID, "Kid", 12000, AID)] });
+    await waitFor(() => expect(screen.getByText("Kid")).toBeInTheDocument());
+    stubSlotRects({ [AID]: { top: 0, bottom: 40 }, [KID]: { top: 40, bottom: 80 }, [BID]: { top: 80, bottom: 120 } });
+    fireEvent.pointerDown(gripByName("Beta"));
+    pointerMove(200, 2);
+    const line = screen.getByTestId("label-drop-line");
+    expect(line).toHaveAttribute("data-position", "above");
+    expect(line.closest('[data-testid="label-row"]')).toBe(rowByName("Alpha"));
+    pointerUp();
+    expect(await patchBody(calls)).toEqual({ parent: null, sort_order: 5000 });
+    await waitFor(() => expect(visibleNames()).toEqual(["Beta", "Alpha", "Kid"]));
+  });
+
+  it("reorders below a collapsed group", async () => {
+    const { calls } = setup({
+      labels: [labelRow(BID, "Beta", 10000), labelRow(AID, "Alpha", 20000), labelRow(KID, "Kid", 12000, AID)],
+    });
+    await waitFor(() => expect(visibleNames()).toEqual(["Beta", "Alpha", "Kid"]));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse Alpha" }));
+    expect(visibleNames()).toEqual(["Beta", "Alpha"]);
+    stubSlotRects({ [BID]: { top: 0, bottom: 40 }, [AID]: { top: 40, bottom: 80 } });
+    fireEvent.pointerDown(gripByName("Beta"));
+    pointerMove(200, 500);
+    const line = screen.getByTestId("label-drop-line");
+    expect(line).toHaveAttribute("data-position", "below");
+    expect(line.closest('[data-testid="label-row"]')).toBe(rowByName("Alpha"));
+    pointerUp();
+    expect(await patchBody(calls)).toEqual({ parent: null, sort_order: 30000 });
+    await waitFor(() => expect(visibleNames()).toEqual(["Alpha", "Beta"]));
   });
 
   it("refuses self drops silently", async () => {

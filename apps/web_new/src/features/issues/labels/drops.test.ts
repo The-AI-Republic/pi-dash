@@ -260,4 +260,10 @@ describe("resolveLabelDrop", () => {
       sortOrder: 35000,
     });
   });
+
+  it("refuses a parent slotted at its own child", () => {
+    const labels = [...flat, row("kid", 12000, "a")];
+    expect(resolveLabelDrop({ labels, sourceId: "a", slot: { id: "kid", after: false }, into: null })).toBe(null);
+    expect(resolveLabelDrop({ labels, sourceId: "a", slot: { id: "kid", after: true }, into: null })).toBe(null);
+  });
 });

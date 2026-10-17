@@ -208,8 +208,9 @@ export function resolveLabelDrop(args: {
     if (insertion === from) return null;
   }
   const order = neighborLabelOrder(siblings, insertion);
-  // Siblings always hold the slot target, so the order always resolves;
-  // the null arm only guards the checker.
+  // A null order refuses the drop: a parent slotted at its own child
+  // hoists above itself and misses the sibling list (insertion -1),
+  // so there is no order to write.
   if (order === null) return null;
   return { parent: destParent, sortOrder: order };
 }
