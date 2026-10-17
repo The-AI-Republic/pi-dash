@@ -38,7 +38,14 @@ describe("withIssueFields", () => {
   it("patches rows inside grouped buckets and keeps stray entries", () => {
     expect(
       withIssueFields(
-        { count: 1, results: { todo: { results: [row(ISSUE_ID)], total_results: 1 }, stray: 7 } },
+        {
+          count: 1,
+          results: {
+            todo: { results: [row(ISSUE_ID)], total_results: 1 },
+            empty: { total_results: 0 },
+            stray: 7,
+          },
+        },
         ISSUE_ID,
         PATCH
       )
@@ -46,6 +53,7 @@ describe("withIssueFields", () => {
       count: 1,
       results: {
         todo: { results: [{ ...row(ISSUE_ID), ...PATCH }], total_results: 1 },
+        empty: { total_results: 0 },
         stray: 7,
       },
     });
