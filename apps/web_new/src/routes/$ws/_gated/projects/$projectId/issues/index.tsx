@@ -1,10 +1,11 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Project issue list (first vertical slice). Thin: the single search
-// param validated by zod, a loader that prefetches in parallel with the
-// code split, and the read-only list. Layouts, filters and detail arrive
-// with NEWFRONT-71.
+// Project issues (parity/specs/issues.md §1, ISS-001–006). Thin: the single
+// search param validated by zod, a loader that prefetches issues plus
+// display preferences in parallel with the code split, and the per-entity
+// layout root. Layout slices extend the offered list with their renderer;
+// context empty-state copy arrives with ISS-068.
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
@@ -13,18 +14,46 @@ import * as React from "react";
 
 import { invalidateWorkspace } from "../../../../../../core/query/optimistic.js";
 import { isProjectGateError } from "../../../../../../features/auth/index.js";
-import { IssueList, issuesQueryOptions, parseIssueSearch } from "../../../../../../features/issues/index.js";
+import {
+  IssueList,
+  IssuesLayoutRoot,
+  ListSkeleton,
+  issuesQueryOptions,
+  parseIssueSearch,
+  prefsQueryOptions,
+} from "../../../../../../features/issues/index.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
 import { notifyError } from "../../../../../../shared/shell/index.js";
+
+function ProjectIssuesEmptyState(): React.ReactElement {
+  return (
+    <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
+      <h2 className="text-h3 text-(--text)">No issues yet</h2>
+      <p className="text-body text-(--text-muted)">New issues in this project will appear here.</p>
+    </section>
+  );
+}
+
+function ProjectIssuesNoMatchState(): React.ReactElement {
+  return (
+    <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
+      <h2 className="text-h3 text-(--text)">No matching issues</h2>
+      <p className="text-body text-(--text-muted)">No issues match the current filters.</p>
+    </section>
+  );
+}
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")({
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
   beforeLoad: async ({ context, params, search }) => {
     try {
-      await context.queryClient.ensureQueryData(
-        issuesQueryOptions(context.apiClient, params.ws, params.projectId, search)
-      );
+      await Promise.all([
+        context.queryClient.ensureQueryData(issuesQueryOptions(context.apiClient, params.ws, params.projectId, search)),
+        context.queryClient.ensureQueryData(
+          prefsQueryOptions(context.apiClient, params.ws, { scope: "project", projectId: params.projectId })
+        ),
+      ]);
     } catch (error) {
       // Denial statuses belong to the project gate (AUTH-024): let them
       // through so the gate renders the denial screen instead of the load
@@ -34,6 +63,12 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
   },
   loader: async ({ context, params }) => {
     await context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws));
+  },
+  // The stored layout is unknown while the prefetch runs (it is fetched,
+  // not in the URL), so the pending window always shows the list
+  // placeholder; the layout renders its own skeleton once mounted.
+  pendingComponent: function IssuesPending() {
+    return <ListSkeleton />;
   },
   errorComponent: function IssueListError({ error, reset }: { error: unknown; reset: () => void }) {
     return (
@@ -89,17 +124,19 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
     }
 
     return (
-      <section aria-label="Issue list" className="flex h-full flex-col">
-        <div className="flex shrink-0 items-center gap-(--space-3) border-b border-(--border) px-(--space-4) py-(--space-3)">
-          <h2 className="text-h3 text-(--text)">{project.name}</h2>
-          <span className="text-body text-(--text-muted)">
-            {issues.total_count} issue{issues.total_count === 1 ? "" : "s"}
-          </span>
-        </div>
-        <div className="min-h-0 flex-1">
+      <IssuesLayoutRoot
+        workspaceSlug={params.ws}
+        entity={{ scope: "project", projectId: params.projectId }}
+        title={project.name}
+        totalCount={issues.total_count}
+        resultCount={issues.results.length}
+        offered={["list"]}
+        renderLayout={() => (
           <IssueList issues={issues.results} projectIdentifier={project.identifier} layout={search.layout ?? "list"} />
-        </div>
-      </section>
+        )}
+        emptyState={<ProjectIssuesEmptyState />}
+        noMatchState={<ProjectIssuesNoMatchState />}
+      />
     );
   },
 });

@@ -1,13 +1,15 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Per-context display preferences: the cycle, module and epics
-// user-properties records each context's filters, layout and visible
-// properties. Project and workspace scopes already live in projects.ts;
-// saved views carry the same payload on the view record (issue-views.ts).
+// Per-context display preferences: the project, workspace, cycle, module
+// and epics user-properties records each context's filters, layout and
+// visible properties. Project and workspace record reads live in
+// projects.ts; saved views carry the same payload on the view record
+// (issue-views.ts).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableUuid, uuid } from "./fields.js";
+import { ProjectUserProperties, WorkspaceUserProperties } from "./projects.js";
 
 /** The four filter keys every user-properties record carries. */
 export interface PrefsPatch {
@@ -141,4 +143,37 @@ export async function updateEpicUserProperties(
   const path = `/api/workspaces/${slug}/projects/${projectId}/epics-user-properties/`;
   const envelope = await client.sendJson<unknown>("PATCH", path, { json: patch });
   return client.parse(EpicUserProperties, envelope.data, `PATCH ${path}`);
+}
+
+/**
+ * Project display preferences for the caller: same PATCH semantics as
+ * cycle/module (sent keys replaced wholesale, others untouched), so
+ * callers send complete key objects. Reads via getProjectUserProperties
+ * (projects.ts); the tab-preference PATCH beside it only covers
+ * sort_order/preferences.
+ */
+export async function updateProjectDisplayPreferences(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  patch: PrefsPatch
+): Promise<ProjectUserProperties> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/user-properties/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: patch });
+  return client.parse(ProjectUserProperties, envelope.data, `PATCH ${path}`);
+}
+
+/**
+ * Workspace display preferences for the caller (the global all-issues
+ * scope): same PATCH semantics as the project record. Reads via
+ * getWorkspaceUserProperties (projects.ts).
+ */
+export async function updateWorkspaceDisplayPreferences(
+  client: ApiClient,
+  slug: string,
+  patch: PrefsPatch
+): Promise<WorkspaceUserProperties> {
+  const path = `/api/workspaces/${slug}/user-properties/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: patch });
+  return client.parse(WorkspaceUserProperties, envelope.data, `PATCH ${path}`);
 }

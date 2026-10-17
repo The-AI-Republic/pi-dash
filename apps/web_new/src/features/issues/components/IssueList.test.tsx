@@ -77,4 +77,76 @@ describe("IssueList", () => {
     expect(screen.getByText("No issues yet")).toBeInTheDocument();
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
   });
+
+  it("tones every priority", () => {
+    render(
+      <IssueList
+        issues={[
+          row({ id: UUID, name: "Urgent", sequence_id: 1, priority: "urgent" }),
+          row({ id: UUID2, name: "Medium", sequence_id: 2, priority: "medium" }),
+        ]}
+        projectIdentifier="WEB"
+        layout="list"
+      />
+    );
+    expect(screen.getByText("urgent")).toBeInTheDocument();
+    expect(screen.getByText("medium")).toBeInTheDocument();
+  });
+
+  it("mounts fresh rows in a highlighted strip above the virtual list", () => {
+    const now = new Date().toISOString();
+    render(
+      <IssueList
+        issues={[
+          row({ id: UUID, name: "Stale", sequence_id: 1 }),
+          row({ id: UUID2, name: "Fresh", sequence_id: 2, created_at: now, updated_at: now }),
+        ]}
+        projectIdentifier="WEB"
+        layout="list"
+      />
+    );
+    const strip = screen.getByTestId("issues-fresh-strip");
+    expect(strip).toHaveTextContent("Fresh");
+    expect(strip).not.toHaveTextContent("Stale");
+    expect(screen.getByLabelText("WEB-2")).toHaveAttribute("data-highlight", "true");
+    expect(screen.getByLabelText("WEB-1")).not.toHaveAttribute("data-highlight");
+    expect(screen.getByLabelText("WEB-1")).toHaveAttribute("id", `issue-${UUID}`);
+  });
+
+  it("paints temp rows with a pulsing overlay and a saving name", () => {
+    const now = new Date().toISOString();
+    render(
+      <IssueList
+        issues={[row({ id: "temp-abc", name: "Draft title", sequence_id: 0, created_at: now, updated_at: now })]}
+        projectIdentifier="WEB"
+        layout="list"
+      />
+    );
+    const temp = screen.getByLabelText("Draft title, saving");
+    expect(temp).toHaveAttribute("data-temprow", "true");
+    expect(temp.querySelector(".animate-pulse")).not.toBeNull();
+    expect(temp).toHaveTextContent("…");
+    expect(temp).not.toHaveTextContent("WEB-0");
+  });
+
+  it("highlights the explicitly highlighted row", () => {
+    render(
+      <IssueList
+        issues={[row({ id: UUID, name: "First", sequence_id: 1 }), row({ id: UUID2, name: "Second", sequence_id: 2 })]}
+        projectIdentifier="WEB"
+        layout="list"
+        highlightedId={UUID2}
+      />
+    );
+    expect(screen.getByLabelText("WEB-2")).toHaveAttribute("data-highlight", "true");
+    expect(screen.getByLabelText("WEB-1")).not.toHaveAttribute("data-highlight");
+    expect(screen.queryByTestId("issues-fresh-strip")).not.toBeInTheDocument();
+  });
+
+  it("renders compact rows when the density param selects compact", () => {
+    render(<IssueList issues={[row()]} projectIdentifier="WEB" layout="compact" />);
+    const article = screen.getByLabelText("WEB-42");
+    expect(article).toHaveClass("h-8");
+    expect(article).not.toHaveClass("h-11");
+  });
 });

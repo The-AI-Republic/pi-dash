@@ -273,6 +273,8 @@ export {
   updateCycleUserProperties,
   updateEpicUserProperties,
   updateModuleUserProperties,
+  updateProjectDisplayPreferences,
+  updateWorkspaceDisplayPreferences,
 } from "./contracts/issue-prefs.js";
 export type { PrefsPatch } from "./contracts/issue-prefs.js";
 export {
