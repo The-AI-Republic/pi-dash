@@ -80,3 +80,33 @@ export type { BrowseDetailProps } from "./components/BrowseDetail.js";
 export { IssueList } from "./components/IssueList.js";
 export type { IssueListProps } from "./components/IssueList.js";
 export { IssueLayout, IssueSearch, parseIssueSearch } from "./filters/search.js";
+export {
+  CAPTION_YEAR_MAX,
+  CAPTION_YEAR_MIN,
+  DEFAULT_WEEK_START,
+  MONTH_ABBREVS,
+  MONTH_NAMES,
+  WEEKDAY_NAMES,
+  WEEKDAY_SHORT,
+  applyRangeClick,
+  formatDay,
+  formatDayLong,
+  formatMergedRange,
+  isDayInRange,
+  isIsoDay,
+  monthGrid,
+  normalizeWeekStart,
+  orderedWeekdays,
+  parseIsoDay,
+  shiftMonth,
+  todayIsoDay,
+  toIsoDay,
+} from "./dropdowns/calendar.js";
+export type { CalendarDay, RangeValue } from "./dropdowns/calendar.js";
+export { DateCalendar, DatePicker } from "./dropdowns/DatePicker.js";
+export type { DateCalendarProps, DatePickerProps } from "./dropdowns/DatePicker.js";
+export { DateRangeCalendar, DateRangePicker } from "./dropdowns/DateRangePicker.js";
+export type { DateRangeCalendarProps, DateRangeMode, DateRangePickerProps } from "./dropdowns/DateRangePicker.js";
+export { useWeekStart } from "./dropdowns/weekStart.js";
+export { ISSUE_DATES_FAILED_TITLE, useUpdateIssueDates, withIssueDates } from "./api/dates.js";
+export type { IssueDatesInput } from "./api/dates.js";
