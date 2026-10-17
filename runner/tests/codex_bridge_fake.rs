@@ -302,6 +302,8 @@ fn codex_request_params_serialize_in_v2_shape() {
             }],
             model: Some("gpt-5-codex".into()),
             effort: None,
+            approval_policy: None,
+            sandbox_policy: None,
         },
     )
     .expect("serialize turn/start");
@@ -309,4 +311,7 @@ fn codex_request_params_serialize_in_v2_shape() {
     assert_eq!(turn["params"]["threadId"], "thread-123");
     assert_eq!(turn["params"]["input"][0]["type"], "text");
     assert_eq!(turn["params"]["input"][0]["text"], "hello");
+    // No posture change, no override: the thread keeps what it started with.
+    assert!(turn["params"].get("approvalPolicy").is_none());
+    assert!(turn["params"].get("sandboxPolicy").is_none());
 }

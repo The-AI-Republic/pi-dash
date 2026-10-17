@@ -465,6 +465,15 @@ impl AgentBridge {
         }
     }
 
+    /// Switch the approval `mode` for the turns that follow. Only the built-in
+    /// codex engine has a per-thread posture to retune; the other agents take
+    /// no mode at spawn either, so for them this is a no-op.
+    pub fn set_approval_mode(&mut self, mode: crate::cloud::protocol::ApprovalMode) {
+        if let AgentBridge::Codex(b) = self {
+            b.set_engine_settings(crate::approval::engine_thread_settings(mode));
+        }
+    }
+
     pub async fn run(&mut self, payload: &RunPayload, cwd: &Path) -> Result<AgentCursor> {
         match self {
             AgentBridge::Codex(b) => Ok(AgentCursor::Codex(b.run(payload, cwd).await?)),
