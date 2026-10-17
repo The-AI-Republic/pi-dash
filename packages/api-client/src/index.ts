@@ -393,7 +393,7 @@ export {
   assistantEventsUrl,
   parseAssistantEventFrames,
 } from "./contracts/assistant-events.js";
-export { LlmConfigTestResult, deleteLlmConfig, putLlmConfig, testLlmConfig } from "./contracts/assistant-config.js";
+export { deleteLlmConfig, putLlmConfig } from "./contracts/assistant-config.js";
 export type { LlmConfigInput } from "./contracts/assistant-config.js";
 export {
   DictationDisabledPayload,

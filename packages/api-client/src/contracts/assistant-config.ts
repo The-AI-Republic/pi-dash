@@ -4,7 +4,6 @@
 // Provider-key lifecycle: the per-user model config write and remove
 // plus the connectivity check. The read lives in assistant.ts; the
 // key itself is write-only — the API only ever reports its presence.
-import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { LlmConfig } from "./assistant.js";
 
@@ -40,19 +39,8 @@ export async function deleteLlmConfig(client: ApiClient): Promise<void> {
 }
 
 /**
- * The connectivity verdict. Always 200: success carries only the flag
- * (and stamps the verified time), failure names a machine code.
+ * The connectivity probe lives in assistant.ts (NEWFRONT-641 merged the
+ * same endpoint first); re-exported here so the lifecycle module keeps
+ * its surface for the probe assertions in this area's suites.
  */
-export const LlmConfigTestResult = z.object({
-  ok: z.boolean(),
-  error_code: z.optional(z.string()),
-  detail: z.optional(z.string()),
-});
-export type LlmConfigTestResult = z.infer<typeof LlmConfigTestResult>;
-
-/** Probe the saved provider with a one-word completion. */
-export async function testLlmConfig(client: ApiClient): Promise<LlmConfigTestResult> {
-  const path = "/api/users/me/ai-assistant/config/test/";
-  const envelope = await client.sendJson<unknown>("POST", path);
-  return client.parse(LlmConfigTestResult, envelope.data, `POST ${path}`);
-}
+export { LlmConfigTestResult, testLlmConfig } from "./assistant.js";
