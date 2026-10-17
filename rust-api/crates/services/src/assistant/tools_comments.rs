@@ -56,10 +56,12 @@ pub fn guest_denial() -> ToolScopeError {
 }
 
 /// Empty-body check (`comments.py:48-49`): `None`, `""`, and
-/// whitespace-only bodies are retried with the exact message.
+/// whitespace-only bodies are retried with the exact message. The
+/// strip is Python's (`str.strip` also strips U+001C-U+001F, which
+/// Rust `str::trim` keeps), via [`super::tools_issues::py_strip`].
 pub fn validate_body(body_md: Option<&str>) -> Result<&str, ToolScopeError> {
     match body_md {
-        Some(body) if !body.trim().is_empty() => Ok(body),
+        Some(body) if !super::tools_issues::py_strip(body).is_empty() => Ok(body),
         _ => Err(ToolScopeError::Permission(EMPTY_BODY_MESSAGE.to_string())),
     }
 }
@@ -155,6 +157,22 @@ mod tests {
                 "Comment body cannot be empty."
             );
         }
+    }
+
+    #[test]
+    fn body_check_uses_python_strip() {
+        // `str.strip()` strips U+001C-U+001F; Rust `str::trim` does not.
+        for bad in [Some("\u{1c}\u{1d}\u{1e}\u{1f}"), Some("\u{1c}  \u{1f}")] {
+            assert_eq!(
+                validate_body(bad).unwrap_err().to_string(),
+                "Comment body cannot be empty."
+            );
+        }
+        // Non-blank survives, returned verbatim (Python checks, then uses raw).
+        assert_eq!(
+            validate_body(Some("\u{1c}hi\u{1f}")).expect("kept"),
+            "\u{1c}hi\u{1f}"
+        );
     }
 
     #[test]
