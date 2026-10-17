@@ -16,7 +16,6 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use uuid::Uuid;
@@ -26,13 +25,13 @@ use crate::cloud::http::{
     CreateRunnerRequest, MachineClient, PollMessage, TransportError, create_runner,
 };
 use crate::cloud::protocol::{CreateRunnerCmd, MachineMsg};
+use crate::cloud::reconnect::{Backoff, jittered};
 use crate::config::schema::AgentKind;
 use crate::daemon::state::StateHandle;
 use crate::daemon::supervisor::RunnerSpawnCtx;
 
 /// Server default; the open response's welcome frame can override it.
 const DEFAULT_LONG_POLL_SECS: u64 = 25;
-const BACKOFF_CAP_SECS: u64 = 30;
 /// Bound on the in-memory duplicate-delivery guard.
 const SEEN_CAP: usize = 256;
 
@@ -56,12 +55,15 @@ impl MachineControl {
     }
 
     /// Session lifecycle: open with backoff → poll until evicted or a
-    /// fatal auth error → reopen. Mirrors `HttpLoop::run`'s inline
-    /// 1→30s doubling with reset-on-success.
+    /// fatal auth error → reopen. Uses the same schedule as `HttpLoop`
+    /// (PDASHOSS01-306): opens back off 30 s → 6 h, polls 1 s → 6 h, both
+    /// jittered, reset on success or a reconnect kick (wake, network
+    /// change, `pidash reconnect`).
     pub async fn run(self) {
         let shutdown = self.daemon_state.shutdown_notified();
         let shutdown_fut = shutdown.notified();
         tokio::pin!(shutdown_fut);
+        let kick = self.daemon_state.reconnect_notified();
 
         // At-least-once delivery guard: a message handled but not yet
         // acked (crash / eviction between poll cycles) redelivers on the
@@ -72,7 +74,8 @@ impl MachineControl {
         // the cloud-side result key means the operator sees the first
         // outcome either way.)
         let mut seen_mids: HashSet<String> = HashSet::new();
-        let mut backoff_secs: u64 = 1;
+        let mut open_backoff = Backoff::bootstrap();
+        let mut poll_backoff = Backoff::poll();
 
         loop {
             let opened = tokio::select! {
@@ -82,7 +85,8 @@ impl MachineControl {
             };
             let session_id = match opened {
                 Ok(resp) => {
-                    backoff_secs = 1;
+                    open_backoff.reset();
+                    poll_backoff.reset();
                     tracing::info!(session_id = %resp.session_id, "machine control session open");
                     resp.session_id
                 }
@@ -91,15 +95,17 @@ impl MachineControl {
                         tracing::error!("machine control session unrecoverable: {e}");
                         return;
                     }
+                    let delay = jittered(open_backoff.next_base());
                     tracing::warn!(
-                        "machine session open failed (retrying in {backoff_secs}s): {e}"
+                        "machine session open failed (retrying in {}s): {e}",
+                        delay.as_secs()
                     );
                     tokio::select! {
                         biased;
                         _ = &mut shutdown_fut => return,
-                        _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
+                        _ = kick.notified() => open_backoff.reset(),
+                        _ = tokio::time::sleep(delay) => {}
                     }
-                    backoff_secs = (backoff_secs * 2).min(BACKOFF_CAP_SECS);
                     continue;
                 }
             };
@@ -116,7 +122,7 @@ impl MachineControl {
                 };
                 match polled {
                     Ok(resp) => {
-                        backoff_secs = 1;
+                        poll_backoff.reset();
                         for msg in resp.messages {
                             acks.push(msg.stream_id.clone());
                             if !msg.mid.is_empty() && !seen_mids.insert(msg.mid.clone()) {
@@ -138,13 +144,17 @@ impl MachineControl {
                             tracing::error!("machine control session unrecoverable: {e}");
                             return;
                         }
-                        tracing::warn!("machine poll failed (retrying in {backoff_secs}s): {e}");
+                        let delay = jittered(poll_backoff.next_base());
+                        tracing::warn!(
+                            "machine poll failed (retrying in {}s): {e}",
+                            delay.as_secs()
+                        );
                         tokio::select! {
                             biased;
                             _ = &mut shutdown_fut => return,
-                            _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
+                            _ = kick.notified() => poll_backoff.reset(),
+                            _ = tokio::time::sleep(delay) => {}
                         }
-                        backoff_secs = (backoff_secs * 2).min(BACKOFF_CAP_SECS);
                     }
                 }
             }

@@ -209,7 +209,7 @@ def classify_run_error(error: str) -> dict[str, Any] | None:
             "action": "Choose a model the agent account can access, then retry the run.",
         }
 
-    if "runner_not_found" in lowered or "run_not_owned_by_runner" in lowered:
+    if "runner_not_found" in lowered or "runner_gone" in lowered or "run_not_owned_by_runner" in lowered:
         return {
             "source": "pidash_cloud",
             "source_label": "Pi Dash cloud",
