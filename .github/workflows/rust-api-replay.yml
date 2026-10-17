@@ -24,9 +24,14 @@ on:
 permissions:
   contents: read
 
+# Pull requests cancel their superseded run. Pushes to rust-dev do not: with
+# merges landing every few minutes a cancelled-on-push run never finishes, so
+# the branch would have no post-merge result. Same group without cancel means
+# at most one run in progress and one pending (a newer push replaces the
+# pending one).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   replay:
