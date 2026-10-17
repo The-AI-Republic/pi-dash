@@ -226,3 +226,61 @@ def test_delete_non_uuid_pk_is_django_404(admin_api):
     # falls through to the proxy for Django's own 404.
     res = admin_api.delete("/api/instances/admins/not-a-uuid/")
     assert res.status_code == 404
+
+
+def _non_canonical_spellings(row_id):
+    # Every spelling `uuid.UUID()` (and Rust's `Uuid::parse_str`) accepts
+    # but Django's `<uuid:pk>` converter (`[0-9a-f]{8}-…`, matched
+    # case-sensitively) does not route.
+    return {
+        "uppercase": row_id.upper(),
+        "simple": row_id.replace("-", ""),
+        "braced": "{" + row_id + "}",
+        "urn": "urn:uuid:" + row_id,
+    }
+
+
+def _assert_resolver_404(res):
+    # Resolving the URL precedes auth and the view entirely: the answer is
+    # the resolver's HTML 404, never DRF's JSON body or a 401/403/204.
+    assert res.status_code == 404, res.text
+    assert res.headers["content-type"].startswith("text/html"), res.headers.get(
+        "content-type"
+    )
+
+
+def _admin_row_live(db, row_id):
+    with db.connect() as conn:
+        return conn.execute(
+            "select count(*) from instance_admins where id = %s and deleted_at is null;",
+            (row_id,),
+        ).fetchone()[0]
+
+
+@pytest.mark.parametrize("spelling", ["uppercase", "simple", "braced", "urn"])
+def test_delete_admin_non_canonical_spelling_404s_without_soft_delete(
+    admin_api, world, spelling
+):
+    # PIDASHCONV-1132: an admin DELETE of a non-canonical spelling must
+    # not reach the view. Rust parses the segment with Uuid::parse_str,
+    # which accepts all four spellings, so without the canonical gate it
+    # answers 204 and soft-deletes the row Django refuses to route.
+    db = world["db"]
+    doomed = db.make_user("doomed@example.com")
+    row = db.make_admin(world["instance"]["id"], doomed["id"])
+    segment = _non_canonical_spellings(row["id"])[spelling]
+    res = admin_api.delete(f"/api/instances/admins/{segment}/")
+    _assert_resolver_404(res)
+    assert _admin_row_live(db, row["id"]) == 1, spelling
+
+
+@pytest.mark.parametrize("spelling", ["uppercase", "simple", "braced", "urn"])
+def test_delete_admin_non_canonical_spelling_anonymous_404s(anon_api, world, spelling):
+    # Resolver 404 precedes auth: an anonymous caller gets 404, not 401.
+    db = world["db"]
+    doomed = db.make_user("doomed@example.com")
+    row = db.make_admin(world["instance"]["id"], doomed["id"])
+    segment = _non_canonical_spellings(row["id"])[spelling]
+    res = anon_api.delete(f"/api/instances/admins/{segment}/")
+    _assert_resolver_404(res)
+    assert _admin_row_live(db, row["id"]) == 1, spelling
