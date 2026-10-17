@@ -185,6 +185,7 @@ type CommentRowTuple = (
 );
 type MemberRowTuple = (Option<Uuid>, Option<String>, Option<String>, i16);
 type GroupedReadTuple = (Uuid, String, i32, String, Option<String>, Option<String>);
+type LockedIssueTuple = (Uuid, Option<Uuid>, Option<String>, Option<String>);
 
 /// The other end of a grouped relation (`relations._item` inputs).
 #[derive(Debug, Clone, PartialEq)]
@@ -235,9 +236,10 @@ pub struct NewIssueInput {
 }
 
 /// Field patch for the issue update (`issues.update_issue :337-361`).
-/// `state_given` distinguishes "untouched" from "set to null" (an
-/// explicit empty `state_id` resolves to the default, which may itself
-/// be null — still a state write).
+/// `state_given` is set only when the state arm runs (`if to_state is
+/// not None`, `issues.py:351`): an explicit empty `state_id` that
+/// resolves to no state (stateless project) skips the arm entirely —
+/// no write, no `changed` entry.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct IssuePatch {
     pub name: Option<String>,
@@ -247,6 +249,17 @@ pub struct IssuePatch {
     pub state_id: Option<Uuid>,
     pub parent_touched: bool,
     pub parent_id: Option<Uuid>,
+}
+
+/// The locked row's pre-save state (`from_state = locked.state`,
+/// `issues.py:336-339`) for the transition check: the id plus the
+/// name and group the drive renders. `None` when the issue is
+/// stateless; a dangling state FK decodes name/group as `""`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockedState {
+    pub id: Uuid,
+    pub name: String,
+    pub group: String,
 }
 
 /// Inputs to the comment create (`comments.create_comment :53-65` plus
@@ -471,14 +484,14 @@ pub trait ToolStore {
     /// Row-locked patch: `SELECT FOR UPDATE`, the `save(update_fields)`
     /// column write (exactly the tool's fields — `description_stripped`
     /// stays stale, as in Python), returning the saved row plus the
-    /// pre-save state id for the transition check.
+    /// locked row's pre-save state for the transition check.
     async fn update_issue_row(
         &self,
         patch: &IssuePatch,
         issue_id: &Uuid,
         actor_id: &Uuid,
         now: &DateTime<Utc>,
-    ) -> Result<(IssueRow, Option<Uuid>), StoreError>;
+    ) -> Result<(IssueRow, Option<LockedState>), StoreError>;
 
     /// `handle_issue_state_transition(..., dispatch_immediate=True)`
     /// with an immediate drain, exactly as the tools call it (actor, no
@@ -696,10 +709,13 @@ impl ToolStore for PgToolStore {
     }
 
     async fn member_projects(&self, deps: &AssistantDeps) -> Result<Vec<ProjectRow>, StoreError> {
+        // `DISTINCT` (`_scoping.py:45-49`): remove+re-add leaves two
+        // `is_active` rows (soft-delete never clears it); without it
+        // the project lists twice.
         let rows: Vec<(Uuid, String, String, Uuid, bool)> = sqlx::query_as(&format!(
-            "SELECT projects.id, projects.identifier, projects.name, projects.workspace_id, \
-             projects.guest_view_all_features {MEMBER_PROJECTS_FILTER} \
-             ORDER BY projects.name LIMIT 50"
+            "SELECT DISTINCT projects.id, projects.identifier, projects.name, \
+             projects.workspace_id, projects.guest_view_all_features \
+             {MEMBER_PROJECTS_FILTER} ORDER BY projects.name LIMIT 50"
         ))
         .bind(deps.user_id)
         .bind(&deps.workspace_slug)
@@ -926,12 +942,14 @@ impl ToolStore for PgToolStore {
         project_id: &Uuid,
     ) -> Result<Vec<StateRow>, StoreError> {
         // `_scoping.project_states`: the `State` default manager
-        // excludes soft-deleted and triage rows (`state.py:79-84`).
+        // excludes soft-deleted and triage rows (`state.py:79-84`),
+        // ordered by `State.Meta.ordering` (`sequence`).
         let rows: Vec<(Uuid, String, String, bool, f64)> = sqlx::query_as(
             "SELECT states.id, states.name, states.group, states.default, states.sequence \
              FROM states INNER JOIN workspaces ON workspaces.id = states.workspace_id \
              WHERE states.project_id = $1 AND workspaces.slug = $2 \
-             AND states.deleted_at IS NULL AND NOT (states.group = 'triage')",
+             AND states.deleted_at IS NULL AND NOT (states.group = 'triage') \
+             ORDER BY states.sequence",
         )
         .bind(project_id)
         .bind(&deps.workspace_slug)
@@ -994,15 +1012,19 @@ impl ToolStore for PgToolStore {
     ) -> Result<Option<IssueRow>, StoreError> {
         // The `issue_objects` manager without the member joins: slug +
         // identifier + sequence, triage/archived/draft excluded.
+        // `.first()` under `Issue.Meta.ordering` (`-created_at`); the
+        // `::int` cast makes out-of-int4 tails raise exactly as
+        // Django's int4 bind does (miss-vs-500 parity).
         let row: Option<IssueRowTuple> = sqlx::query_as(&format!(
             "SELECT {ISSUE_ROW_COLUMNS} FROM issues \
              INNER JOIN projects ON projects.id = issues.project_id \
              INNER JOIN workspaces ON workspaces.id = issues.workspace_id \
              LEFT OUTER JOIN states ON states.id = issues.state_id \
              WHERE workspaces.slug = $1 AND UPPER(projects.identifier) = UPPER($2) \
-             AND issues.sequence_id = $3 AND issues.deleted_at IS NULL \
+             AND issues.sequence_id = $3::int AND issues.deleted_at IS NULL \
              AND NOT (states.group = 'triage') AND NOT (issues.archived_at IS NOT NULL) \
-             AND NOT (projects.archived_at IS NOT NULL) AND NOT (issues.is_draft)"
+             AND NOT (projects.archived_at IS NOT NULL) AND NOT (issues.is_draft) \
+             ORDER BY issues.created_at DESC LIMIT 1"
         ))
         .bind(&deps.workspace_slug)
         .bind(project_ident)
@@ -1025,7 +1047,8 @@ impl ToolStore for PgToolStore {
              INNER JOIN workspaces ON workspaces.id = project_members.workspace_id \
              LEFT OUTER JOIN users ON users.id = project_members.member_id \
              WHERE project_members.project_id = $1 AND workspaces.slug = $2 \
-             AND project_members.is_active AND project_members.deleted_at IS NULL",
+             AND project_members.is_active AND project_members.deleted_at IS NULL \
+             ORDER BY project_members.created_at DESC",
         )
         .bind(project_id)
         .bind(&deps.workspace_slug)
@@ -1083,9 +1106,13 @@ impl ToolStore for PgToolStore {
         project_ident: &str,
         sequence_id: i64,
     ) -> Result<Option<IssueRow>, StoreError> {
+        // `.first()` under `Issue.Meta.ordering` (`-created_at`);
+        // the `::int` cast keeps int4-range parity with Django's bind
+        // (out-of-range tails raise instead of missing).
         let sql = format!(
             "SELECT {ISSUE_ROW_COLUMNS} {SCOPED_ISSUES_FILTER} \
-             AND UPPER(projects.identifier) = UPPER($3) AND issues.sequence_id = $4"
+             AND UPPER(projects.identifier) = UPPER($3) AND issues.sequence_id = $4::int \
+             ORDER BY issues.created_at DESC LIMIT 1"
         );
         let rows = sqlx::query(&sql)
             .bind(deps.user_id)
@@ -1165,8 +1192,9 @@ impl ToolStore for PgToolStore {
         now: &DateTime<Utc>,
     ) -> Result<(), StoreError> {
         // `row.delete()` (`relations.unrelate :258-260`): soft-delete
-        // plus the related-objects sweep enqueue (fire-and-forget, as
-        // `.delay()` is — a queue failure must not fail the op).
+        // plus the related-objects sweep enqueue. Best-effort by repo
+        // precedent (unlike `.delay()`, which propagates a broker
+        // failure): a queue failure must not fail the op.
         sqlx::query(
             "UPDATE issue_relations SET deleted_at = $1, updated_at = $2, updated_by_id = $3 \
              WHERE id = $4",
@@ -1184,7 +1212,8 @@ impl ToolStore for PgToolStore {
             pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
             vec![
                 Value::String("db".to_owned()),
-                Value::String("IssueRelation".to_owned()),
+                // `self._meta.model_name` (`mixins.py:78`): lowercase.
+                Value::String("issuerelation".to_owned()),
                 Value::String(row_id.to_string()),
             ],
             kwargs,
@@ -1301,11 +1330,12 @@ impl ToolStore for PgToolStore {
         let mut tx = self.pool.begin().await?;
         // The tool's `Project.objects.select_for_update().get(...)`
         // (`issues.py:259`); missing is `DoesNotExist` → internal.
-        let locked: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM projects WHERE id = $1 FOR UPDATE")
-                .bind(input.project_id)
-                .fetch_optional(&mut *tx)
-                .await?;
+        let locked: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM projects WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(input.project_id)
+        .fetch_optional(&mut *tx)
+        .await?;
         if locked.is_none() {
             return Err(StoreError::Missing { model: "Project" });
         }
@@ -1317,23 +1347,28 @@ impl ToolStore for PgToolStore {
             .bind(convert_uuid_to_integer(&input.project_id))
             .execute(&mut *tx)
             .await?;
-        let last: Option<i32> =
-            sqlx::query_scalar("SELECT MAX(sequence) FROM issue_sequences WHERE project_id = $1")
-                .bind(input.project_id)
-                .fetch_one(&mut *tx)
-                .await?;
-        let sequence: i64 = last.map(i64::from).map(|value| value + 1).unwrap_or(1);
+        // `IssueSequence.objects` is the soft-delete manager, and
+        // `sequence` is a `PositiveBigIntegerField` (int8).
+        let last: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(sequence) FROM issue_sequences \
+             WHERE project_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(input.project_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let sequence: i64 = last.map(|value| value.saturating_add(1)).unwrap_or(1);
         // `Issue.save` None-state resolution (`issue.py:286-301`):
         // default non-triage state, else the first non-triage row
-        // (unordered `.first()`), else None. Note `is_triage`, not the
-        // group — a separate column.
+        // (`.first()` under `State.Meta.ordering`, so lowest
+        // `sequence`), else None. Note `is_triage`, not the group — a
+        // separate column.
         let state_id =
             match input.state_id {
                 Some(id) => Some(id),
                 None => {
                     let default: Option<Uuid> = sqlx::query_scalar(
                         "SELECT id FROM states WHERE project_id = $1 AND is_triage = FALSE \
-                     AND deleted_at IS NULL AND states.default LIMIT 1",
+                     AND deleted_at IS NULL AND states.default ORDER BY sequence LIMIT 1",
                     )
                     .bind(input.project_id)
                     .fetch_optional(&mut *tx)
@@ -1342,7 +1377,7 @@ impl ToolStore for PgToolStore {
                         Some(id) => Some(id),
                         None => sqlx::query_scalar(
                             "SELECT id FROM states WHERE project_id = $1 AND is_triage = FALSE \
-                             AND deleted_at IS NULL LIMIT 1",
+                             AND deleted_at IS NULL ORDER BY sequence LIMIT 1",
                         )
                         .bind(input.project_id)
                         .fetch_optional(&mut *tx)
@@ -1480,19 +1515,29 @@ impl ToolStore for PgToolStore {
         issue_id: &Uuid,
         actor_id: &Uuid,
         now: &DateTime<Utc>,
-    ) -> Result<(IssueRow, Option<Uuid>), StoreError> {
+    ) -> Result<(IssueRow, Option<LockedState>), StoreError> {
         let mut tx = self.pool.begin().await?;
         // `Issue.objects.select_for_update().get(pk)` (`issues.py:336`);
-        // missing is `DoesNotExist` → internal.
-        let locked: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
-            "SELECT id, state_id FROM issues WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        // missing is `DoesNotExist` → internal. The states join reads
+        // the locked row's pre-save name/group (`from_state =
+        // locked.state`, `issues.py:339`) — the pre-lock read may be
+        // stale under a concurrent edit.
+        let locked: Option<LockedIssueTuple> = sqlx::query_as(
+            "SELECT issues.id, issues.state_id, states.name, states.group FROM issues \
+             LEFT OUTER JOIN states ON states.id = issues.state_id \
+             WHERE issues.id = $1 AND issues.deleted_at IS NULL FOR UPDATE OF issues",
         )
         .bind(issue_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((_, from_state)) = locked else {
+        let Some((_, from_id, from_name, from_group)) = locked else {
             return Err(StoreError::Missing { model: "Issue" });
         };
+        let from_state = from_id.map(|id| LockedState {
+            id,
+            name: from_name.unwrap_or_default(),
+            group: from_group.unwrap_or_default(),
+        });
         // `locked.save(update_fields=...)` (`issues.py:337-361`):
         // exactly the tool's columns. `description_stripped` is
         // recomputed in memory but NOT written (it is absent from
@@ -1620,13 +1665,16 @@ impl ToolStore for PgToolStore {
             jitter_secs: 0.0,
             created_by,
         };
-        // One transaction for the whole drive. That is exact for the
-        // `update_issue` path (Python wraps save + transition in one
-        // outer atomic). The `dispatch_coding_run` path has no outer
-        // atomic in Python (reconcile commits before the builder scope),
-        // so a mid-builder failure there would keep reconcile's writes
-        // where this rolls them back — the only divergence, confined to
-        // a failure that already fails the turn internal either way.
+        // One transaction for the whole drive. On the
+        // `dispatch_coding_run` path that matches Python (reconcile
+        // commits before the builder scope; no outer atomic). On the
+        // `update_issue` path it does not: Python wraps save +
+        // transition in one outer atomic (`issues.py:334`), while the
+        // save already committed in `update_issue_row` — so a
+        // mid-drive failure here keeps the edit where Python rolls it
+        // back (both fail the turn internal). Fusing the drive into
+        // the save transaction needs tx-threading design and is
+        // tracked by PIDASHCONV-1124 (update path only).
         let tx = pidash_db::tx::Transaction::begin(&self.pool).await?;
         let mut store = LiveCreationStore::new(tx, &self.pool, make_deps());
         let mut preflight = TurnPreflight {
@@ -1701,13 +1749,11 @@ impl ToolStore for PgToolStore {
         sqlx::query(
             "INSERT INTO issue_comments (id, created_at, updated_at, deleted_at, issue_id, \
              project_id, workspace_id, actor_id, access, comment_json, comment_html, \
-             comment_stripped, labels, speaker_type, speaker_label, speaker_run_id, \
-             external_source, external_id, external_url, actor_agent_model, assignee_id, \
-             parent_id, assignee_sequence, attachments, description_id, edited_at, feedback, \
-             feedback_metadata, created_by_id, updated_by_id) \
+             comment_stripped, labels, speaker_type, speaker_label, external_source, \
+             external_id, parent_id, attachments, description_id, edited_at, created_by_id, \
+             updated_by_id) \
              VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, 'INTERNAL', $8, $9, $10, $11, 'agent', \
-             'Pi Dash AI', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $12, NULL, NULL, \
-             NULL, NULL, $13, NULL)",
+             'Pi Dash AI', NULL, NULL, NULL, $12, NULL, NULL, $13, NULL)",
         )
         .bind(comment_id)
         .bind(now)
@@ -1817,26 +1863,20 @@ impl ToolStore for PgToolStore {
         // Event row (`events.append_event`): own transaction, thread
         // locked, thread-scoped seq; the payload embeds the envelope.
         let created_at = pidash_api::runner_enroll::enroll::render_isoformat(*now);
-        let mut envelope = serde_json::Map::with_capacity(9);
-        envelope.insert("id".to_owned(), Value::String(message_id.to_string()));
-        envelope.insert("role".to_owned(), Value::String("tool".to_owned()));
-        envelope.insert("content".to_owned(), Value::String(summary.to_owned()));
-        envelope.insert("status".to_owned(), Value::String("completed".to_owned()));
-        envelope.insert("seq".to_owned(), Value::from(message_seq));
-        envelope.insert(
-            "turn_id".to_owned(),
-            turn.map(|id| Value::String(id.to_string()))
-                .unwrap_or(Value::Null),
+        let envelope = message_envelope(
+            &message_id,
+            summary,
+            message_seq,
+            turn,
+            message_payload,
+            &created_at,
         );
-        envelope.insert("payload".to_owned(), message_payload);
-        envelope.insert("created_at".to_owned(), Value::String(created_at.clone()));
-        envelope.insert("completed_at".to_owned(), Value::Null);
         let mut event_payload = serde_json::Map::with_capacity(2);
         event_payload.insert(
             "turn_id".to_owned(),
             Value::String(deps.turn_id.to_string()),
         );
-        event_payload.insert("message".to_owned(), Value::Object(envelope));
+        event_payload.insert("message".to_owned(), envelope);
         let event_payload = Value::Object(event_payload);
         let event_seq: i64;
         {
@@ -2046,9 +2086,45 @@ where
     }
 }
 
-/// Best-effort post-write task fan-out (the `.delay()` calls): without
-/// a queue row the op still stands (the `v1_work_items`
-/// `enqueue_best_effort` precedent).
+/// The `message_envelope` wire shape (`events.message_envelope`,
+/// `assistant/runtime/events.py:128-140`): `kind` → `role`
+/// (`tool_result` on this path), `turn_id` null when the turn row is
+/// gone. Key order is parse-equal only.
+fn message_envelope(
+    message_id: &Uuid,
+    summary: &str,
+    message_seq: i64,
+    turn: Option<Uuid>,
+    payload: Value,
+    created_at: &str,
+) -> Value {
+    let mut envelope = serde_json::Map::with_capacity(9);
+    envelope.insert("id".to_owned(), Value::String(message_id.to_string()));
+    envelope.insert(
+        "role".to_owned(),
+        Value::String(pidash_services::assistant::tools_results::TOOL_RESULT_KIND.to_owned()),
+    );
+    envelope.insert("content".to_owned(), Value::String(summary.to_owned()));
+    envelope.insert("status".to_owned(), Value::String("completed".to_owned()));
+    envelope.insert("seq".to_owned(), Value::from(message_seq));
+    envelope.insert(
+        "turn_id".to_owned(),
+        turn.map(|id| Value::String(id.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    envelope.insert("payload".to_owned(), payload);
+    envelope.insert(
+        "created_at".to_owned(),
+        Value::String(created_at.to_owned()),
+    );
+    envelope.insert("completed_at".to_owned(), Value::Null);
+    Value::Object(envelope)
+}
+
+/// Best-effort post-write task fan-out for the `.delay()` call
+/// sites: without a queue row the op still stands (the
+/// `v1_work_items` `enqueue_best_effort` precedent — a deliberate
+/// divergence from `.delay()`, which propagates broker failures).
 async fn enqueue_best_effort(
     pool: &PgPool,
     task: &str,
@@ -2073,6 +2149,48 @@ mod tests {
 
     fn squashed(text: &str) -> String {
         text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The event envelope carries `role: "tool_result"` (`kind` →
+    /// `role`, `events.message_envelope`), with the full 9-key shape
+    /// (`runtime/events.py:128-140`, parse-equal: key order differs).
+    #[test]
+    fn message_envelope_reports_tool_result_role() {
+        let message_id = Uuid::from_u128(11);
+        let turn_id = Uuid::from_u128(12);
+        let out = message_envelope(
+            &message_id,
+            "Did the thing",
+            3,
+            Some(turn_id),
+            serde_json::json!({"links": []}),
+            "2026-03-13T12:00:00+00:00",
+        );
+        assert_eq!(
+            out,
+            serde_json::json!({
+                "id": message_id.to_string(),
+                "role": "tool_result",
+                "content": "Did the thing",
+                "status": "completed",
+                "seq": 3,
+                "turn_id": turn_id.to_string(),
+                "payload": {"links": []},
+                "created_at": "2026-03-13T12:00:00+00:00",
+                "completed_at": null,
+            })
+        );
+        // A gone turn row renders `turn_id: null` (the filter-first
+        // still renders `str(deps.turn_id)` in the outer payload).
+        let out = message_envelope(
+            &message_id,
+            "Did the thing",
+            3,
+            None,
+            serde_json::json!({"links": []}),
+            "2026-03-13T12:00:00+00:00",
+        );
+        assert_eq!(out["turn_id"], serde_json::Value::Null);
     }
 
     /// The inlined FROM/WHERE fragments equal the reviewed services

@@ -123,7 +123,13 @@ pub fn parse_uuid_token(raw: &str) -> Option<Uuid> {
         .filter(|b| **b != b'_')
         .map(|b| *b as char)
         .collect();
-    Uuid::parse_str(&hex).ok()
+    // `Uuid::parse_str` needs exactly 32 hex digits, but Python's
+    // `int(hex, 16)` accepts the 31-digit remainder when one
+    // underscore was stripped (a small value with a leading zero
+    // nibble), so parse as a number. The loop above already
+    // restricted every char to hex-or-single-underscore, so this
+    // cannot fail on reachable inputs.
+    u128::from_str_radix(&hex, 16).ok().map(Uuid::from_u128)
 }
 
 /// A `resolve_refs` reference (`relations.py:138-168`): a UUID id, a
@@ -157,7 +163,10 @@ pub fn classify_issue_ref(raw: &str) -> IssueRef {
         {
             match tail.parse::<i64>() {
                 // Beyond i64 the lookup cannot match (the column is
-                // int4): Python queries and misses, so miss here.
+                // int4): Python's query raises (internal) on the
+                // out-of-range bind while the port misses (retry) —
+                // the documented retry-vs-internal deviation. In-range
+                // tails keep exact parity via the `::int` casts.
                 Ok(sequence_id) => IssueRef::Identifier {
                     project_code: code.to_owned(),
                     sequence_id,
@@ -175,23 +184,27 @@ pub fn classify_issue_ref(raw: &str) -> IssueRef {
 
 /// Python `repr()` for a short string (the unknown-tool message,
 /// `tool_manager.py:369`): single quotes, backslash/quote/control
-/// escapes. Tool names from models are identifiers in practice; the
-/// exotic arms (non-printables) render raw rather than `\x`-escaped —
-/// the only deliberate gap, unreachable from real tool calls.
+/// escapes — or double quotes, unescaped `'`, when the value contains
+/// a `'` but no `"` (CPython `unicode_repr` quote choice). Tool names
+/// from models are identifiers in practice; the exotic arms
+/// (non-printables) render raw rather than `\x`-escaped — the only
+/// deliberate gap, unreachable from real tool calls.
 fn py_repr_str(text: &str) -> String {
+    let use_double = text.contains('\'') && !text.contains('"');
+    let quote = if use_double { '"' } else { '\'' };
     let mut out = String::with_capacity(text.len() + 2);
-    out.push('\'');
+    out.push(quote);
     for ch in text.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
+            '\'' if !use_double => out.push_str("\\'"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             _ => out.push(ch),
         }
     }
-    out.push('\'');
+    out.push(quote);
     out
 }
 
@@ -552,10 +565,15 @@ async fn executor_resolve_ref<S: ToolStore>(
         IssueRef::Unresolved => None,
     };
     found.ok_or_else(|| {
+        // `ref or str(raw)` (`relations.py:160`): padded refs report
+        // stripped, but whitespace-only originals report verbatim.
+        let shown = if reference.is_empty() {
+            raw
+        } else {
+            reference.as_str()
+        };
         ToolFailure::retry(
-            pidash_services::assistant::tools_issues::unresolved_refs_message(
-                &[reference.as_str()],
-            ),
+            pidash_services::assistant::tools_issues::unresolved_refs_message(&[shown]),
         )
     })
 }
@@ -572,6 +590,10 @@ pub async fn execute_search_issues<S: ToolStore>(
     args: &tool_args::SearchIssuesArgs,
 ) -> Result<Value, ToolFailure> {
     use pidash_services::assistant::tools_issues::{clamp_limit, clamp_offset};
+    // `scoped_issues` → `user_for` is the first statement
+    // (`issues.py:62`, `_scoping.py:65`): a missing user fails the
+    // turn internal before the project scope check.
+    executor_actor(store, deps).await?;
     let limit = clamp_limit(saturate_i64(args.limit));
     let offset = clamp_offset(saturate_i64(args.offset));
     let project_id = match &args.project_id {
@@ -613,14 +635,22 @@ fn resolve_state_tokens(
     }
     if !unknown.is_empty() {
         // Python joins a *set* (deduped); the port's list sorts
-        // deterministically (see `valid_name_list`).
+        // deterministically (see `valid_name_list`). Unlike the
+        // labels branch, the states branch has no `or "(none)"`
+        // (`issue_filters.py:515` vs `:543`): a project with no
+        // states renders `Valid states: .`.
         let mut names: Vec<&str> = states.iter().map(|state| state.name.as_str()).collect();
         names.sort();
         names.dedup();
+        let valid = if names.is_empty() {
+            String::new()
+        } else {
+            valid_name_list(&names)
+        };
         return Err(ToolFailure::retry(format!(
             "Unknown state name(s): {}. Valid states: {}.",
             unknown.join(", "),
-            valid_name_list(&names)
+            valid
         )));
     }
     Ok(ids)
@@ -674,8 +704,9 @@ fn resolve_label_tokens(
 /// `PROJ-123` identifiers resolve against the workspace (a miss retries
 /// as unknown); anything else retries as invalid. The digit tail is
 /// ASCII-only (the documented `search_sequence_tokens` limitation);
-/// beyond-i64 tails cannot match the int4 column, so they miss exactly
-/// as Python's query-then-miss does.
+/// beyond-i64 tails miss (retry) where Python's out-of-range bind
+/// raises (internal) — the documented retry-vs-internal deviation.
+/// In-range tails keep exact parity via the `::int` casts.
 async fn resolve_parent_tokens<S: ToolStore>(
     store: &S,
     deps: &AssistantDeps,
@@ -732,19 +763,23 @@ pub async fn execute_list_issues<S: ToolStore>(
     let project = executor_get_project(store, deps, &args.project_id).await?;
     let limit = clamp_limit(saturate_i64(args.limit));
     let offset = clamp_offset(saturate_i64(args.offset));
-    // `work_item_list_filters` (`issue_filters.py:573-641`): resolve
-    // names/identifiers (each miss is an `IssueFilterError` → retry),
-    // then the enum/null validation half.
+    // `work_item_list_filters` (`issue_filters.py:573-641`) validates
+    // in states → groups → priorities → parents → labels order, and
+    // the first bad filter wins the retry message. The enum/null half
+    // lives in `normalize_list_filters`, so run it once up front with
+    // the unresolved parent tokens (groups, priorities and the
+    // null-combo; the predicates are discarded), then resolve parents
+    // and labels, then normalize again for the real predicates.
     let states = store.project_states(deps, &project.id).await?;
     let state_ids = resolve_state_tokens(&split_tokens(args.state.as_deref()), &states)?;
-    let project_labels = store.project_labels(deps, &project.id).await?;
-    let workspace_labels = store.workspace_labels(deps).await?;
-    let label_ids = resolve_label_tokens(
-        &split_tokens(args.labels.as_deref()),
-        &project_labels,
-        &workspace_labels,
-    )?;
     let parent_tokens = split_tokens(args.parent_issue_id.as_deref());
+    let _ = normalize_list_filters(&ListFilterInput {
+        state_ids: Vec::new(),
+        state_groups: split_tokens(args.state_group.as_deref()),
+        priorities: split_tokens(args.priority.as_deref()),
+        parent_tokens: parent_tokens.clone(),
+        label_ids: Vec::new(),
+    })?;
     // Nulls are detected on the raw tokens (`issue_filters.py:616`),
     // before any resolution: `_resolve_parents` never sees them.
     let has_null_parents = parent_tokens
@@ -755,6 +790,13 @@ pub async fn execute_list_issues<S: ToolStore>(
     } else {
         resolve_parent_tokens(store, deps, &parent_tokens).await?
     };
+    let project_labels = store.project_labels(deps, &project.id).await?;
+    let workspace_labels = store.workspace_labels(deps).await?;
+    let label_ids = resolve_label_tokens(
+        &split_tokens(args.labels.as_deref()),
+        &project_labels,
+        &workspace_labels,
+    )?;
     let filters = normalize_list_filters(&ListFilterInput {
         state_ids,
         state_groups: split_tokens(args.state_group.as_deref()),
@@ -762,6 +804,10 @@ pub async fn execute_list_issues<S: ToolStore>(
         parent_tokens: parent_for_norm,
         label_ids,
     })?;
+    // `scoped_issues` → `user_for` runs after filter validation and
+    // before the page query (`issues.py:113-116`): a missing user
+    // fails internal, but bad filters still retry first.
+    executor_actor(store, deps).await?;
     let rows = store
         .list_issues_page(deps, &project.id, &filters, limit, offset)
         .await?;
@@ -777,6 +823,10 @@ pub async fn execute_list_my_issues<S: ToolStore>(
     args: &tool_args::ListMyIssuesArgs,
 ) -> Result<Value, ToolFailure> {
     use pidash_services::assistant::tools_issues::{clamp_limit, clamp_offset};
+    // `my_issues` → `user_for` (`issues.py:141`, `_scoping.py:68`):
+    // the scope fallback below is infallible, so this check first
+    // matches Python's order exactly.
+    executor_actor(store, deps).await?;
     let scope = match args.scope.as_str() {
         "assigned" | "created" => args.scope.as_str(),
         _ => "all",
@@ -798,6 +848,10 @@ pub async fn execute_get_issue<S: ToolStore>(
     use pidash_services::assistant::tools_issues::{
         comment_author, detail_comment_row, detail_shape, truncate, COMMENT_CAP, DESC_CAP,
     };
+    // `get_issue` → `scoped_issues` → `user_for` runs before the
+    // malformed-id translation (`_scoping.py:73-81`): a missing user
+    // fails internal even for a malformed id.
+    executor_actor(store, deps).await?;
     let issue = executor_get_issue(store, deps, &args.issue_id).await?;
     let comments = store.issue_comments(&issue.id).await?;
     // Newest-first read, oldest ten kept (`[:10]`), reversed to
@@ -930,6 +984,9 @@ pub async fn execute_get_run_status<S: ToolStore>(
     args: &tool_args::IssueIdArgs,
 ) -> Result<Value, ToolFailure> {
     use pidash_services::assistant::tools_runs::{run_row, run_status_result};
+    // `get_issue` → `scoped_issues` → `user_for` runs before the
+    // malformed-id translation (`runs.py:21`, `_scoping.py:73-81`).
+    executor_actor(store, deps).await?;
     let issue = executor_get_issue(store, deps, &args.issue_id).await?;
     let runs = store.agent_runs(&issue.id).await?;
     let rows: Vec<Value> = runs
@@ -1127,7 +1184,11 @@ pub async fn execute_update_issue<S: ToolStore>(
         changed.push("priority");
         patch.priority = Some(prio);
     }
-    if state_given {
+    // `if to_state is not None` (`issues.py:351`): a `state_id` of
+    // `""` on a stateless project resolves to no state, so the arm is
+    // skipped entirely (no write, no `changed` entry) — gating on
+    // `state_given` would write `state_id=NULL` and report `state`.
+    if to_state.is_some() {
         changed.push("state");
         patch.state_given = true;
         patch.state_id = to_state.as_ref().map(|state| state.id);
@@ -1137,23 +1198,29 @@ pub async fn execute_update_issue<S: ToolStore>(
         patch.parent_touched = true;
         patch.parent_id = new_parent.as_ref().map(|parent| parent.id);
     }
-    let (row, from_state_id) = store
+    let (row, from_state) = store
         .update_issue_row(&patch, &issue.id, &actor, &env.now)
         .await?;
     // `to_state is not None and from_state != to_state` (`:373`): the
     // ORM instances compare by pk, and a stateless issue always counts
     // as changed.
+    let from_state_id = from_state.as_ref().map(|state| state.id);
     let state_changed =
         to_state.is_some() && from_state_id != to_state.as_ref().map(|state| state.id);
     let mut run_id: Option<String> = None;
     if state_given && state_changed {
         let to = to_state.as_ref().expect("changed implies a target");
+        // Name/group come from the locked row (`from_state =
+        // locked.state`, `issues.py:339`), not the pre-lock read —
+        // a concurrent edit may have moved the issue meanwhile.
         let from_view =
-            from_state_id.map(|id| pidash_services::orchestration::creation::StateView {
-                id,
-                name: issue.state_name.clone().unwrap_or_default(),
-                group: issue.state_group.clone().unwrap_or_default(),
-            });
+            from_state.map(
+                |state| pidash_services::orchestration::creation::StateView {
+                    id: state.id,
+                    name: state.name,
+                    group: state.group,
+                },
+            );
         let outcome = store
             .drive_transition(
                 &issue.id,
@@ -1223,7 +1290,19 @@ async fn relation_write_prefix<S: ToolStore>(
     for raw in related_issues {
         match executor_resolve_ref(store, deps, raw).await {
             Ok(target) => targets.push(target),
-            Err(_) => unresolved.push(raw.as_str()),
+            // Only resolution misses (`Retry`) join the unresolved
+            // list; store failures propagate instead of masquerading
+            // as "not found" (item 21). Each miss reports
+            // stripped-or-raw (`ref or str(raw)`, `relations.py:160`).
+            Err(ToolFailure::Retry { .. }) => {
+                let stripped = pidash_services::assistant::tools_issues::py_strip(raw);
+                unresolved.push(if stripped.is_empty() {
+                    raw.as_str()
+                } else {
+                    stripped
+                });
+            }
+            Err(other) => return Err(other),
         }
     }
     if !unresolved.is_empty() {
@@ -1612,6 +1691,10 @@ pub async fn execute_list_issue_relations<S: ToolStore>(
     args: &tool_args::IssueRefArgs,
 ) -> Result<Value, ToolFailure> {
     use pidash_services::assistant::tools_issues::tool_identifier;
+    // `_resolve_issue_refs` → `scoped_issues` → `user_for`
+    // (`issues.py:402-406`): same missing-user-internal as the other
+    // read paths (item 7 also covers this path).
+    executor_actor(store, deps).await?;
     let (source,) = (executor_resolve_ref(store, deps, &args.issue).await?,);
     Ok(json!({
         "issue": tool_identifier(&source.project_identifier, source.sequence_id),
@@ -1925,6 +2008,12 @@ mod tests {
     struct FixtureStore {
         user_id: Uuid,
         missing_user: bool,
+        /// When set, identifier lookups fail `Db` (pins error
+        /// propagation out of multi-target resolution).
+        fail_identifier_lookups: bool,
+        /// When set, the pre-lock `scoped_issue` read reports a stale
+        /// state name/group (pins the locked-row `from_view`).
+        stale_pre_lock_state: bool,
         projects: Vec<ProjectRow>,
         member_project_ids: Vec<Uuid>,
         write_project_ids: Vec<Uuid>,
@@ -1946,6 +2035,9 @@ mod tests {
         transition_outcome: TransitionOutcome,
         created_comments: Mutex<Vec<NewCommentInput>>,
         record_writes: Mutex<Vec<(String, Vec<Value>)>>,
+        /// `from_state` views received by `drive_transition`, in call
+        /// order (pins the locked-row `from_view`).
+        transition_from: Mutex<Vec<Option<(Uuid, String, String)>>>,
         binding_configs: HashMap<(String, String, String), Value>,
         sync_creds: HashMap<(String, String), Value>,
         decrypt_map: HashMap<String, String>,
@@ -2186,6 +2278,8 @@ mod tests {
             Self {
                 user_id: user,
                 missing_user: false,
+                fail_identifier_lookups: false,
+                stale_pre_lock_state: false,
                 projects: vec![proj.clone(), other, nowrite.clone()],
                 member_project_ids: vec![proj.id, nowrite.id],
                 write_project_ids: vec![proj.id],
@@ -2213,6 +2307,7 @@ mod tests {
                 },
                 created_comments: Mutex::new(Vec::new()),
                 record_writes: Mutex::new(Vec::new()),
+                transition_from: Mutex::new(Vec::new()),
                 binding_configs: HashMap::new(),
                 sync_creds: HashMap::new(),
                 decrypt_map: HashMap::new(),
@@ -2304,10 +2399,20 @@ mod tests {
             _deps: &AssistantDeps,
             issue_id: &Uuid,
         ) -> Result<Option<IssueRow>, StoreError> {
-            Ok(self
+            let mut found = self
                 .scoped()
                 .into_iter()
-                .find(|issue| issue.id == *issue_id))
+                .find(|issue| issue.id == *issue_id);
+            // Model a concurrent state move between the pre-lock read
+            // and the lock: the name/group here go stale while the
+            // locked read in `update_issue_row` stays current.
+            if self.stale_pre_lock_state {
+                if let Some(row) = found.as_mut() {
+                    row.state_name = Some("Stale".to_owned());
+                    row.state_group = Some("stale".to_owned());
+                }
+            }
+            Ok(found)
         }
 
         async fn search_issues_page(
@@ -2459,6 +2564,9 @@ mod tests {
             project_ident: &str,
             sequence_id: i64,
         ) -> Result<Option<IssueRow>, StoreError> {
+            if self.fail_identifier_lookups {
+                return Err(StoreError::Db("injected identifier failure".to_owned()));
+            }
             Ok(self
                 .issues
                 .iter()
@@ -2495,6 +2603,9 @@ mod tests {
             project_ident: &str,
             sequence_id: i64,
         ) -> Result<Option<IssueRow>, StoreError> {
+            if self.fail_identifier_lookups {
+                return Err(StoreError::Db("injected identifier failure".to_owned()));
+            }
             Ok(self.scoped().into_iter().find(|issue| {
                 issue.project_identifier.eq_ignore_ascii_case(project_ident)
                     && issue.sequence_id == sequence_id
@@ -2671,18 +2782,26 @@ mod tests {
             issue_id: &Uuid,
             _actor_id: &Uuid,
             now: &DateTime<chrono::Utc>,
-        ) -> Result<(IssueRow, Option<Uuid>), StoreError> {
+        ) -> Result<(IssueRow, Option<LockedState>), StoreError> {
             self.updated_issues
                 .lock()
                 .unwrap()
                 .push((*issue_id, patch.clone()));
-            let issue = self
+            let Some(issue) = self
                 .issues
                 .iter()
                 .find(|issue| issue.id == *issue_id)
                 .cloned()
-                .unwrap();
-            let from_state = issue.state_id;
+            else {
+                // A lost race (`DoesNotExist` → internal), never a
+                // panic.
+                return Err(StoreError::Missing { model: "Issue" });
+            };
+            let from_state = issue.state_id.map(|id| LockedState {
+                id,
+                name: issue.state_name.clone().unwrap_or_default(),
+                group: issue.state_group.clone().unwrap_or_default(),
+            });
             let mut row = issue;
             if let Some(name) = &patch.name {
                 row.name = name.clone();
@@ -2716,13 +2835,17 @@ mod tests {
         async fn drive_transition(
             &self,
             issue_id: &Uuid,
-            _from_state: Option<pidash_services::orchestration::creation::StateView>,
+            from_state: Option<pidash_services::orchestration::creation::StateView>,
             _to_state: pidash_services::orchestration::creation::StateView,
             _actor_id: &Uuid,
             _created_by: Option<Uuid>,
             _now: &DateTime<chrono::Utc>,
         ) -> Result<TransitionOutcome, StoreError> {
             self.transitions.lock().unwrap().push(*issue_id);
+            self.transition_from
+                .lock()
+                .unwrap()
+                .push(from_state.map(|state| (state.id, state.name, state.group)));
             Ok(self.transition_outcome.clone())
         }
 
@@ -4511,6 +4634,21 @@ mod tests {
         );
         assert_eq!(parse_uuid_token("PROJ-1"), None);
         assert_eq!(parse_uuid_token(""), None);
+        // `int(hex, 16)` accepts single underscores between digits, so
+        // a 32-char token with one interior underscore parses (a small
+        // value with a leading zero nibble); leading, trailing, and
+        // doubled underscores stay rejected.
+        assert_eq!(
+            parse_uuid_token("aaaaaaaaaaaaaaa_bbbbbbbbbbbbbbbb"),
+            Some(Uuid::from_u128(0xaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb))
+        );
+        assert_eq!(
+            classify_issue_ref("aaaaaaaaaaaaaaa_bbbbbbbbbbbbbbbb"),
+            IssueRef::Id(Uuid::from_u128(0xaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb))
+        );
+        assert_eq!(parse_uuid_token("_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), None);
+        assert_eq!(parse_uuid_token("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_"), None);
+        assert_eq!(parse_uuid_token("aaaaaaaaaaaaaa__bbbbbbbbbbbbbbbb"), None);
         // References: UUID, identifier at the last dash, unresolved.
         assert_eq!(
             classify_issue_ref(&uid(301).to_string()),
@@ -4558,6 +4696,265 @@ mod tests {
         assert_eq!(
             retry_message(&out),
             "Issues not found or not accessible: PROJ-99999999999999999999999"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Review fix pins (PIDASHCONV-1113 run 3)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_issues_filter_error_precedence() {
+        // `work_item_list_filters` validates states → groups →
+        // priorities → parents → labels; the first bad filter wins
+        // (`issue_filters.py:593-641`).
+        let store = FixtureStore::standard();
+        let project = uid(101).to_string();
+        for (params, message) in [
+            // States still beat everything.
+            (
+                json!({"project_id": project.clone(), "state": "Nope", "state_group": "bogus"}),
+                "Unknown state name(s): Nope. Valid states: Backlog, Done, In Progress, In Review.",
+            ),
+            // Groups beat priorities, parents, and labels.
+            (
+                json!({"project_id": project.clone(), "state_group": "bogus", "priority": "bogus"}),
+                "Unknown state group(s): bogus. Valid groups: backlog, unstarted, started, review, test, completed, cancelled.",
+            ),
+            (
+                json!({"project_id": project.clone(), "state_group": "bogus", "parent_issue_id": "bogus"}),
+                "Unknown state group(s): bogus. Valid groups: backlog, unstarted, started, review, test, completed, cancelled.",
+            ),
+            // Priorities beat parents and labels.
+            (
+                json!({"project_id": project.clone(), "priority": "bogus", "labels": "nope"}),
+                "Unknown priority value(s): bogus. Valid priorities: urgent, high, medium, low, none.",
+            ),
+            // The null-combo beats labels.
+            (
+                json!({"project_id": project.clone(), "parent_issue_id": "null,PROJ-1", "labels": "nope"}),
+                "parent=null cannot be combined with specific parent issues.",
+            ),
+            // Parents beat labels.
+            (
+                json!({"project_id": project.clone(), "parent_issue_id": "bogus", "labels": "nope"}),
+                "Invalid parent 'bogus': expected an issue UUID, an identifier like PROJ-123, or null.",
+            ),
+            (
+                json!({"project_id": project.clone(), "parent_issue_id": "PROJ-999", "labels": "nope"}),
+                "Unknown parent issue 'PROJ-999'.",
+            ),
+        ] {
+            let result = call(&store, "list_issues", params).await;
+            assert_eq!(retry_message(&result), message);
+        }
+    }
+
+    #[tokio::test]
+    async fn list_issues_unknown_state_names_empty_project() {
+        // Only the labels branch has `or "(none)"`
+        // (`issue_filters.py:515` vs `:543`): a project with no states
+        // renders `Valid states: .`.
+        let mut store = FixtureStore::standard();
+        store.states.insert(uid(101), Vec::new());
+        let result = call(
+            &store,
+            "list_issues",
+            json!({"project_id": uid(101).to_string(), "state": "Nope"}),
+        )
+        .await;
+        assert_eq!(
+            retry_message(&result),
+            "Unknown state name(s): Nope. Valid states: ."
+        );
+    }
+
+    #[tokio::test]
+    async fn update_issue_empty_state_on_stateless_project_skips_state() {
+        // `if to_state is not None` (`issues.py:351`): `state_id: ""`
+        // on a stateless project resolves to no state, so the arm is
+        // skipped entirely — no write, no `changed` entry, no drive.
+        let mut store = FixtureStore::standard();
+        store.states.insert(uid(101), Vec::new());
+        let out = ok_value(
+            call(
+                &store,
+                "update_issue",
+                json!({
+                    "issue_id": uid(301).to_string(),
+                    "name": "Renamed",
+                    "state_id": "",
+                }),
+            )
+            .await,
+        );
+        assert_eq!(out["updated"], json!(true));
+        assert_eq!(out["changed"], json!(["name"]));
+        assert!(out.get("dispatched_run_id").is_none());
+        let updated = store.updated_issues.lock().unwrap();
+        assert_eq!(updated.len(), 1);
+        assert!(!updated[0].1.state_given);
+        assert_eq!(updated[0].1.state_id, None);
+        assert!(store.transitions.lock().unwrap().is_empty());
+        let writes = store.record_writes.lock().unwrap();
+        assert_eq!(writes[0].0, "Updated issue PROJ-1 (name)");
+    }
+
+    #[tokio::test]
+    async fn missing_user_fails_read_paths_internal() {
+        // Every read path that reaches `scoped_issues`/`my_issues` /
+        // `get_issue` hits `User.objects.get` (missing → internal),
+        // positioned per Python order (`_scoping.py:39-64`).
+        let mut store = FixtureStore::standard();
+        store.missing_user = true;
+        for (name, params) in [
+            ("search_issues", json!({"query": "x"})),
+            ("list_issues", json!({"project_id": uid(101).to_string()})),
+            ("list_my_issues", json!({})),
+            ("get_issue", json!({"issue_id": uid(301).to_string()})),
+            ("get_run_status", json!({"issue_id": uid(301).to_string()})),
+            ("list_issue_relations", json!({"issue": "PROJ-1"})),
+        ] {
+            let result = call(&store, name, params).await;
+            assert_eq!(
+                internal_message(&result),
+                "User matching query does not exist.",
+                "{name} must fail internal on a missing user"
+            );
+        }
+        // The user check precedes the malformed-id translation on the
+        // `get_issue` path (`_scoping.py:73-81`).
+        let result = call(&store, "get_issue", json!({"issue_id": "bogus"})).await;
+        assert_eq!(
+            internal_message(&result),
+            "User matching query does not exist."
+        );
+        // ... but filter validation still precedes it on the list path
+        // (`issues.py:104-113`).
+        let result = call(
+            &store,
+            "list_issues",
+            json!({"project_id": uid(101).to_string(), "state": "Nope"}),
+        )
+        .await;
+        assert_eq!(
+            retry_message(&result),
+            "Unknown state name(s): Nope. Valid states: Backlog, Done, In Progress, In Review."
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_refs_report_stripped_or_raw() {
+        // `ref or str(raw)` (`relations.py:160`): padded refs report
+        // stripped, whitespace-only originals report verbatim.
+        let store = FixtureStore::standard();
+        let result = call(
+            &store,
+            "list_issue_relations",
+            json!({"issue": "  PROJ-999  "}),
+        )
+        .await;
+        assert_eq!(
+            retry_message(&result),
+            "Issues not found or not accessible: PROJ-999"
+        );
+        let result = call(&store, "list_issue_relations", json!({"issue": "   "})).await;
+        assert_eq!(
+            retry_message(&result),
+            "Issues not found or not accessible:    "
+        );
+        let result = call(
+            &store,
+            "relate_issues",
+            json!({
+                "issue": "PROJ-1",
+                "relation_type": "blocked_by",
+                "related_issues": ["  PROJ-999  ", "   "],
+            }),
+        )
+        .await;
+        assert_eq!(
+            retry_message(&result),
+            "Issues not found or not accessible: PROJ-999,    "
+        );
+    }
+
+    #[tokio::test]
+    async fn relate_target_store_error_propagates_internal() {
+        // Only resolution misses join the unresolved list; a store
+        // failure on a target propagates instead of masquerading as
+        // "not found".
+        let mut store = FixtureStore::standard();
+        store.fail_identifier_lookups = true;
+        let result = call(
+            &store,
+            "relate_issues",
+            json!({
+                "issue": uid(302).to_string(),
+                "relation_type": "blocked_by",
+                "related_issues": ["PROJ-1"],
+            }),
+        )
+        .await;
+        assert_eq!(internal_message(&result), "injected identifier failure");
+    }
+
+    #[tokio::test]
+    async fn update_from_view_comes_from_locked_row() {
+        // `from_state = locked.state` (`issues.py:339`): the drive's
+        // from-view name/group come from the locked row, not the
+        // pre-lock read (which a concurrent edit may have staled).
+        let mut store = FixtureStore::standard();
+        store.stale_pre_lock_state = true;
+        let out = ok_value(
+            call(
+                &store,
+                "update_issue",
+                json!({
+                    "issue_id": uid(301).to_string(),
+                    "state_id": uid(202).to_string(),
+                }),
+            )
+            .await,
+        );
+        assert_eq!(out["changed"], json!(["state"]));
+        assert_eq!(
+            *store.transition_from.lock().unwrap(),
+            vec![Some((uid(201), "Backlog".to_owned(), "backlog".to_owned()))]
+        );
+    }
+
+    #[tokio::test]
+    async fn fixture_update_missing_issue_returns_missing() {
+        // A lost race between the scope read and the lock is
+        // `DoesNotExist` → internal, never a panic.
+        let store = FixtureStore::standard();
+        let error = store
+            .update_issue_row(&IssuePatch::default(), &uid(999), &uid(1), &store.env().now)
+            .await
+            .expect_err("unknown issue must miss");
+        assert_eq!(error.message(), "Issue matching query does not exist.");
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_message_double_quotes_apostrophe() {
+        // CPython `repr` quote choice: a value containing `'` but no
+        // `"` wraps in double quotes, `'` unescaped.
+        let store = FixtureStore::standard();
+        let result = call(&store, "don't", json!({})).await;
+        assert!(
+            retry_message(&result)
+                .starts_with("Unknown tool name: \"don't\". Available tools: 'create_comment'"),
+            "got: {}",
+            retry_message(&result)
+        );
+        // A value containing both quote kinds stays single-quoted
+        // with the `'` escaped.
+        let result = call(&store, "a'b\"c", json!({})).await;
+        assert!(
+            retry_message(&result).starts_with("Unknown tool name: 'a\\'b\"c'."),
+            "got: {}",
+            retry_message(&result)
         );
     }
 }
