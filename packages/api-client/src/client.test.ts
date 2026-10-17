@@ -261,4 +261,49 @@ describe("ApiClient", () => {
     await expect(client.getJson("/x/")).resolves.toEqual({ a: 1 });
     expect(fetchLike).toHaveBeenCalledOnce();
   });
+
+  it("carries the parsed error body on HTTP failures", async () => {
+    const cases: Array<{ status: number; payload: unknown }> = [
+      { status: 403, payload: { error_code: "5001", error_message: "denied" } },
+      { status: 404, payload: { detail: "Not found." } },
+      { status: 400, payload: { code: "bad", message: "Bad." } },
+      {
+        status: 402,
+        payload: {
+          error: "quota_exceeded",
+          code: "free_issue_creation_limit_exceeded",
+          limit: 500,
+          used: 500,
+        },
+      },
+      { status: 400, payload: { name: ["This field is required."] } },
+      { status: 500, payload: [1, 2] },
+    ];
+    for (const { status, payload } of cases) {
+      const transport = recordingTransport(() => jsonResponse(payload, status));
+      const client = createClient({ baseUrl: "https://api.test", transport });
+      const error = await client.getJson("/x/").catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).status).toBe(status);
+      expect((error as ApiError).body).toEqual(payload);
+    }
+  });
+
+  it("leaves the error body null without a parsed body", async () => {
+    const empty = recordingTransport(() => fakeResponse({ status: 500, body: "" }));
+    const emptyError = await createClient({ baseUrl: "https://api.test", transport: empty })
+      .getJson("/x/")
+      .catch((e: unknown) => e);
+    expect((emptyError as ApiError).body).toBeNull();
+    const failing = recordingTransport(() => {
+      throw new Error("fetch failed");
+    });
+    const networkError = await createClient({ baseUrl: "https://api.test", transport: failing })
+      .getJson("/x/")
+      .catch((e: unknown) => e);
+    expect((networkError as ApiError).code).toBe("network");
+    expect((networkError as ApiError).body).toBeNull();
+    expect(new ApiError({ code: "network", message: "x" }).body).toBeNull();
+    expect(new ApiError({ code: "http", message: "x", body: { a: 1 } }).body).toEqual({ a: 1 });
+  });
 });

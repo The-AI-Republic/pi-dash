@@ -14,6 +14,7 @@ export interface ApiErrorInit {
   code: ApiErrorCode | string;
   message: string;
   fields?: ApiErrorFields;
+  body?: unknown;
   cause?: unknown;
 }
 
@@ -22,11 +23,15 @@ export interface ApiErrorInit {
  * bodies and contract violations. `code` carries a machine-readable reason:
  * one of the client codes above, or the server's own code (`error_code`,
  * DRF `code`) passed through untouched, in decimal for numeric codes.
+ * `body` carries the parsed JSON error body when the server sent one
+ * (shape readers like the quota-refusal parser validate it further);
+ * null when the failure has no body to read.
  */
 export class ApiError extends Error {
   readonly status: number;
   readonly code: ApiErrorCode | string;
   readonly fields: ApiErrorFields | undefined;
+  readonly body: unknown;
 
   constructor(init: ApiErrorInit) {
     super(init.message, init.cause === undefined ? undefined : { cause: init.cause });
@@ -34,6 +39,7 @@ export class ApiError extends Error {
     this.status = init.status ?? 0;
     this.code = init.code;
     this.fields = init.fields;
+    this.body = init.body ?? null;
   }
 }
 
