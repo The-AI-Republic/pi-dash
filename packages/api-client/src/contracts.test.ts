@@ -1713,6 +1713,15 @@ describe("thin contextual palette contracts", () => {
     expect(selectActiveEstimate([{ ...listedEstimates[0]!, last_used: false }])).toBeUndefined();
   });
 
+  it("lists cycles whose rows omit status", async () => {
+    const { client } = shellClient(() => ({
+      body: JSON.stringify([{ id: UUID, project_id: UUID2, name: "Sprint 1", is_favorite: false }]),
+    }));
+    const listed = await listCycles(client, "acme", UUID2);
+    expect(listed).toEqual([{ id: UUID, project_id: UUID2, name: "Sprint 1", is_favorite: false }]);
+    expect(listed[0]).not.toHaveProperty("status");
+  });
+
   it("drives the page lock, access, archive and favorite endpoints", async () => {
     const { client, transport } = shellClient((call) => ({
       body: JSON.stringify(call.url.endsWith("/archive/") ? { archived_at: "2026-10-15T00:00:00Z" } : {}),

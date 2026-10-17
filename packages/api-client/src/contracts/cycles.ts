@@ -33,8 +33,9 @@ export const CycleListItem = z.object({
   is_favorite: z.boolean(),
   // Lifecycle marker the cycle picker filters on (completed cycles are
   // excluded). The server sends it uppercase (DRAFT, ACTIVE, ...), so
-  // readers compare case-insensitively.
-  status: z.string(),
+  // readers compare case-insensitively. Optional: rows already held by
+  // existing readers omit it, and those readers must keep parsing.
+  status: z.optional(z.string()),
 });
 export type CycleListItem = z.infer<typeof CycleListItem>;
 
