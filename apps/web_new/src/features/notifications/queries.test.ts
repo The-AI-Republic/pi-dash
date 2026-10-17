@@ -66,6 +66,20 @@ describe("notifications list query", () => {
     expect(notificationKeys.list("acme", { mentioned: false })).toEqual(notificationKeys.list("acme", {}));
   });
 
+  it("keys set type and read filters as their own entries", () => {
+    expect(notificationKeys.list("acme", { type: "assigned", snoozed: false, archived: false, read: true })).toEqual([
+      "ws",
+      "acme",
+      "notifications",
+      "list",
+      "assigned",
+      false,
+      false,
+      true,
+      false,
+    ]);
+  });
+
   it("fetches the first page with the fixed page size and initial cursor", async () => {
     const page = { results: [], next_page_results: false };
     const getJson = vi.fn(async () => page);
