@@ -390,7 +390,7 @@ pub fn base_plot_count_sql(
     filters_sql: &str,
 ) -> Option<String> {
     let (dim_expr, dim_join) = dimension_sql(x_axis)?;
-    let (seg_select, seg_group, seg_join) = match segment {
+    let (seg_select, seg_outer, seg_group, seg_join) = match segment {
         Some(segment) if !segment.is_empty() => {
             let (expr, join) = dimension_sql(segment)?;
             let aliased = if is_date_axis(segment) {
@@ -401,17 +401,18 @@ pub fn base_plot_count_sql(
             (
                 format!(", {aliased} AS \"segment\""),
                 ", \"segment\"".to_owned(),
+                ", \"segment\"".to_owned(),
                 join,
             )
         }
-        _ => (String::new(), String::new(), String::new()),
+        _ => (String::new(), String::new(), String::new(), String::new()),
     };
     // NULL dimensions are excluded for every axis (`analytics_plot.py:84-86`):
     // the guard repeats the inlined expression (a SELECT alias is not visible
     // in the same level's WHERE).
     let null_guard = format!(" AND {dim_expr} IS NOT NULL");
     Some(format!(
-        "SELECT \"dimension\", COUNT(*) AS \"count\" FROM (SELECT {dim_expr} AS \"dimension\"{seg_select} \
+        "SELECT \"dimension\"{seg_outer}, COUNT(*) AS \"count\" FROM (SELECT {dim_expr} AS \"dimension\"{seg_select} \
          FROM \"{ISSUE_TABLE}\"{dim_join}{seg_join}{scope}{null_guard}) AS \"plot\" GROUP BY \"dimension\"{seg_group} \
          ORDER BY \"dimension\" ASC",
         scope = workspace_scope().replace("{filters}", filters_sql),
@@ -1900,6 +1901,18 @@ mod tests {
         assert!(
             segmented_sql.contains(") AS \"plot\" GROUP BY \"dimension\""),
             "segmented count plot FROM subquery lacks an alias: {segmented_sql}"
+        );
+        // The segmented outer SELECT must project "segment" (Python
+        // `.values("dimension", "segment")`, analytics_plot.py:106) or every
+        // wrapper selecting the segment column fails (`column "segment"
+        // does not exist`, PIDASHCONV-1125).
+        assert!(
+            segmented_sql.contains("SELECT \"dimension\", \"segment\", COUNT(*) AS \"count\""),
+            "segmented count plot outer SELECT omits segment: {segmented_sql}"
+        );
+        assert!(
+            sql.contains("SELECT \"dimension\", COUNT(*) AS \"count\""),
+            "flat count plot outer SELECT changed shape: {sql}"
         );
         assert!(sql.contains("GROUP BY \"dimension\""));
         assert!(sql.contains("ORDER BY \"dimension\" ASC"));
