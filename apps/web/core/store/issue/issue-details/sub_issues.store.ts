@@ -61,6 +61,8 @@ export interface IIssueSubIssuesStore extends IIssueSubIssuesStoreActions {
   // actions
   fetchOtherProjectProperties: (workspaceSlug: string, projectIds: string[]) => Promise<void>;
   setSubIssueHelpers: (parentIssueId: string, key: TSubIssueHelpersKeys, value: string) => void;
+  markSubIssueHelper: (parentIssueId: string, key: TSubIssueHelpersKeys, value: string) => void;
+  unmarkSubIssueHelper: (parentIssueId: string, key: TSubIssueHelpersKeys, value: string) => void;
 }
 
 export class IssueSubIssuesStore implements IIssueSubIssuesStore {
@@ -86,6 +88,8 @@ export class IssueSubIssuesStore implements IIssueSubIssuesStore {
       loader: observable.ref,
       // actions
       setSubIssueHelpers: action,
+      markSubIssueHelper: action,
+      unmarkSubIssueHelper: action,
       fetchSubIssues: action,
       createSubIssues: action,
       updateSubIssue: action,
@@ -123,6 +127,26 @@ export class IssueSubIssuesStore implements IIssueSubIssuesStore {
       if (_subIssueHelpers.includes(value)) return pull(_subIssueHelpers, value);
       return concat(_subIssueHelpers, value);
     });
+  };
+
+  // idempotent variants of setSubIssueHelpers, for callers that may run more than
+  // once for the same value (e.g. StrictMode double-invoked mount effects) and
+  // must not flip the flag back off
+  markSubIssueHelper = (parentIssueId: string, key: TSubIssueHelpersKeys, value: string) => {
+    if (!parentIssueId || !key || !value) return;
+
+    update(this.subIssueHelpers, [parentIssueId, key], (_subIssueHelpers: string[] = []) => {
+      if (_subIssueHelpers.includes(value)) return _subIssueHelpers;
+      return concat(_subIssueHelpers, value);
+    });
+  };
+
+  unmarkSubIssueHelper = (parentIssueId: string, key: TSubIssueHelpersKeys, value: string) => {
+    if (!parentIssueId || !key || !value) return;
+
+    update(this.subIssueHelpers, [parentIssueId, key], (_subIssueHelpers: string[] = []) =>
+      pull(_subIssueHelpers, value)
+    );
   };
 
   fetchSubIssues = async (workspaceSlug: string, projectId: string, parentIssueId: string) => {
@@ -186,10 +210,10 @@ export class IssueSubIssuesStore implements IIssueSubIssuesStore {
         });
       });
 
-      const issueIds = subIssues.map((issue) => issue.id);
+      const newSubIssueIds = subIssues.map((issue) => issue.id);
       update(this.subIssues, [parentIssueId], (issues) => {
-        if (!issues) return issueIds;
-        return concat(issues, issueIds);
+        if (!issues) return newSubIssueIds;
+        return concat(issues, newSubIssueIds);
       });
     });
 
