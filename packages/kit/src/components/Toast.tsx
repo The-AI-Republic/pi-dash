@@ -98,6 +98,7 @@ export function ToastHost({ manager }: { manager: ToastHostManager }): React.Rea
     <BaseToast.Provider toastManager={manager}>
       <BaseToast.Viewport
         data-testid="toast-stack"
+        aria-label="Notifications"
         className="pointer-events-none fixed right-(--space-8) bottom-(--space-8) z-50 flex w-80 flex-col gap-(--space-4)"
       >
         <ToastList manager={manager} />

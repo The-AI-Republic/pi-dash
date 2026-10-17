@@ -2,20 +2,28 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Apps page view (written from parity/specs/cloud.md §5, CLOUD-022 and
-// CLOUD-030). The status read gates the catalog: only a connected
-// status mounts it, and every other outcome explains itself — a stale
-// session points at sign-out-and-back-in, a disconnected one shows the
-// server's own detail, and a failed read (HTTP or transport alike)
-// renders an error panel with a retry.
+// CLOUD-030, and §6, CLOUD-026). The status read gates the catalog:
+// only a connected status mounts it, and every other outcome explains
+// itself — a stale session points at sign-out-and-back-in, a
+// disconnected one shows the server's own detail, and a failed read
+// (HTTP or transport alike) renders an error panel with a retry. A
+// bounced connect outcome reports once and cleans its own address no
+// matter which state the gate lands in.
 import { Button, Spinner } from "@pidash/kit";
 import * as React from "react";
 
+import { notifyError } from "../../../shared/shell/index.js";
 import { useOpenhubStatus } from "../api/queries.js";
+import { cleanedBounceHref, hasBounceError, hasOutcomeParams } from "../lib/connect.js";
 import { catalogFailureMessage } from "../lib/errors.js";
 import { AppsCatalog } from "./AppsCatalog.js";
 
 export const APPS_UNAVAILABLE_HEADING = "Apps are unavailable";
 export const APPS_STALE_HEADING = "Reconnect to load your apps";
+
+/** A connect that never started bounces back with an error parameter. */
+export const CONNECTION_FAILED_TITLE = "Connection failed";
+export const CONNECTION_FAILED_MESSAGE = "The connection did not start. Try again from the app card.";
 
 /**
  * Stale-session guidance. The oracle pins the sign-out-and-back-in
@@ -66,6 +74,17 @@ function DisconnectedPanel({ detail }: { detail: string | undefined }): React.Re
 
 export function AppsView({ workspaceSlug }: { workspaceSlug: string }): React.ReactElement {
   const status = useOpenhubStatus(workspaceSlug);
+  // Above the gate: the bounce reports no matter which state lands.
+  // Reading the live address keeps the effect idempotent across
+  // re-runs — after the cleanup there is nothing left to report, so
+  // later searches stay silent (CLOUD-026).
+  React.useEffect(() => {
+    if (!hasOutcomeParams(window.location.search)) return;
+    if (hasBounceError(window.location.search)) {
+      notifyError(CONNECTION_FAILED_TITLE, CONNECTION_FAILED_MESSAGE);
+    }
+    window.history.replaceState(null, "", cleanedBounceHref(window.location));
+  }, []);
   if (status.isPending) {
     return (
       <AppsFallback>

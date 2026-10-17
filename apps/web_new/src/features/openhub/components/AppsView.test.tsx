@@ -10,6 +10,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { sessionKeys } from "../../../core/session/queries.js";
+
+vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
+  return { ...original, notifyError: vi.fn() };
+});
+
+import { notifyError } from "../../../shared/shell/index.js";
 import { openhubKeys } from "../api/keys.js";
 import {
   APPS_DISCONNECTED_FALLBACK,
@@ -17,6 +24,8 @@ import {
   APPS_STALE_HEADING,
   APPS_UNAVAILABLE_HEADING,
   AppsView,
+  CONNECTION_FAILED_MESSAGE,
+  CONNECTION_FAILED_TITLE,
 } from "./AppsView.js";
 
 type StatusAnswer = { status: number; body: unknown } | Promise<{ status: number; body: unknown }>;
@@ -75,6 +84,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  window.history.replaceState(null, "", "/");
   resetAppClient();
 });
 
@@ -189,5 +199,45 @@ describe("AppsView", () => {
 
     expect(await screen.findByText("Loading apps")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("reports a bounced error once and cleans the address on any gate state (CLOUD-026)", async () => {
+    window.history.replaceState(null, "", "/acme/apps/?error=openhub_unavailable&connected=1&kept=yes");
+    const { transport } = statusTransport(() => ({
+      status: 200,
+      body: { connected: false, has_gateway_scopes: true, hub_url: "https://hub.test" },
+    }));
+    renderView(transport, seedCatalog);
+
+    // Above the gate: the disconnected page reports too.
+    expect(await screen.findByText(APPS_DISCONNECTED_FALLBACK)).toBeInTheDocument();
+    expect(notifyError).toHaveBeenCalledTimes(1);
+    expect(notifyError).toHaveBeenCalledWith(CONNECTION_FAILED_TITLE, CONNECTION_FAILED_MESSAGE);
+    expect(CONNECTION_FAILED_TITLE).toContain("Connection failed");
+    // Stripped, with the unrelated param kept: later searches re-run
+    // the effect against a clean address and stay silent.
+    expect(window.location.pathname).toBe("/acme/apps/");
+    expect(window.location.search).toBe("?kept=yes");
+  });
+
+  it("strips a lone outcome param without reporting (CLOUD-026)", async () => {
+    window.history.replaceState(null, "", "/acme/apps/?connected=1");
+    const { transport } = statusTransport(() => ({ status: 200, body: connectedStatus() }));
+    renderView(transport, seedCatalog);
+
+    expect(await screen.findByText("Notes Pro")).toBeInTheDocument();
+    expect(notifyError).not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe("/acme/apps/");
+    expect(window.location.search).toBe("");
+  });
+
+  it("leaves addresses without outcome params alone (CLOUD-026)", async () => {
+    window.history.replaceState(null, "", "/acme/apps/?kept=yes");
+    const { transport } = statusTransport(() => ({ status: 200, body: connectedStatus() }));
+    renderView(transport, seedCatalog);
+
+    expect(await screen.findByText("Notes Pro")).toBeInTheDocument();
+    expect(notifyError).not.toHaveBeenCalled();
+    expect(window.location.search).toBe("?kept=yes");
   });
 });

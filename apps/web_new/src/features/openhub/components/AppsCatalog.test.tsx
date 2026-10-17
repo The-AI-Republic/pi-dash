@@ -18,6 +18,12 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
   return { ...original, updateProfile: updateProfileMock };
 });
 
+vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
+  return { ...original, notifyError: vi.fn(), notifyInfo: vi.fn(), notifySuccess: vi.fn() };
+});
+
+import { notifyInfo, notifySuccess } from "../../../shared/shell/index.js";
 import { AGENT_TOOLS_LABEL } from "./AppsToggle.js";
 import {
   APPS_EMPTY_DESCRIPTION,
@@ -81,6 +87,10 @@ interface CatalogTransportOptions {
     call: number
   ) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }>;
   profile?: Record<string, unknown> | "hang";
+  install?: (appId: string) => { status: number; body: unknown };
+  uninstall?: (appId: string) => { status: number; body: unknown };
+  authStatus?: (appId: string) => { status: number; body: unknown };
+  apiKey?: (appId: string) => { status: number; body: unknown };
 }
 
 function catalogTransport(options: CatalogTransportOptions = {}): { calls: CatalogCall[]; transport: Transport } {
@@ -89,27 +99,45 @@ function catalogTransport(options: CatalogTransportOptions = {}): { calls: Catal
   const transport: Transport = async (url, init) => {
     calls.push({ method: init.method, url });
     const parsed = new URL(url);
+    const answer = (status: number, body: unknown) => ({
+      status,
+      url,
+      headers: { get: () => null },
+      text: async () => JSON.stringify(body),
+    });
+    if (parsed.pathname === "/auth/get-csrf-token/") {
+      return answer(200, { csrf_token: "test-csrf-token" });
+    }
     if (parsed.pathname === "/api/openhub/apps/marketplace/") {
       marketCalls += 1;
-      const answer = (await options.marketplace?.(parsed.searchParams, marketCalls)) ?? {
+      const hit = (await options.marketplace?.(parsed.searchParams, marketCalls)) ?? {
         status: 200,
         body: pageJson([]),
       };
-      return {
-        status: answer.status,
-        url,
-        headers: { get: () => null },
-        text: async () => JSON.stringify(answer.body),
-      };
+      return answer(hit.status, hit.body);
     }
     if (parsed.pathname === "/api/users/me/profile/" && init.method === "GET") {
       if (options.profile === "hang") return new Promise<never>(() => {});
-      return {
-        status: 200,
-        url,
-        headers: { get: () => null },
-        text: async () => JSON.stringify(options.profile ?? profileJson(false)),
-      };
+      return answer(200, options.profile ?? profileJson(false));
+    }
+    const install = /^\/api\/openhub\/apps\/([^/]+)\/install\/$/.exec(parsed.pathname);
+    if (install !== null) {
+      const appId = install[1] ?? "";
+      const hit =
+        init.method === "POST"
+          ? (options.install?.(appId) ?? { status: 200, body: { installed: true } })
+          : (options.uninstall?.(appId) ?? { status: 200, body: { installed: false } });
+      return answer(hit.status, hit.body);
+    }
+    const auth = /^\/api\/openhub\/apps\/([^/]+)\/auth\/status\/$/.exec(parsed.pathname);
+    if (auth !== null) {
+      const hit = options.authStatus?.(auth[1] ?? "") ?? { status: 200, body: { type: "none", status: "active" } };
+      return answer(hit.status, hit.body);
+    }
+    const key = /^\/api\/openhub\/apps\/([^/]+)\/auth\/api-key\/$/.exec(parsed.pathname);
+    if (key !== null) {
+      const hit = options.apiKey?.(key[1] ?? "") ?? { status: 200, body: { connected: true } };
+      return answer(hit.status, hit.body);
     }
     throw new Error(`unexpected request ${init.method} ${url}`);
   };
@@ -370,5 +398,100 @@ describe("AppsCatalog", () => {
 
     resolveFirst({ status: 200, body: pageJson([appJson("app-notes", "Notes Pro")]) });
     expect(await screen.findByText("Notes Pro")).toBeInTheDocument();
+  });
+
+  it("installs from the card, refreshes, and toasts success (CLOUD-024)", async () => {
+    let installed = false;
+    const { calls, transport } = catalogTransport({
+      marketplace: () => ({
+        status: 200,
+        body: pageJson([
+          {
+            ...appJson("app-plain", "Plain App"),
+            authType: "none",
+            isInstalled: installed,
+            suggestedAction: installed ? "none" : "install",
+          },
+        ]),
+      }),
+      install: () => {
+        installed = true;
+        return { status: 200, body: { installed: true } };
+      },
+    });
+    renderCatalog(transport);
+    expect(await screen.findByText("Plain App")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Install" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Installed Plain App"));
+    // The refresh rendered: the card now reads installed.
+    expect(await screen.findByText("Installed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Uninstall" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Install" })).not.toBeInTheDocument();
+    expect(marketParams(calls)).toHaveLength(2);
+  });
+
+  it("connects a key app through the dialog and closes on success (CLOUD-027)", async () => {
+    const { calls, transport } = catalogTransport({
+      marketplace: () => ({
+        status: 200,
+        body: pageJson([
+          {
+            ...appJson("app-manual", "Manual CRM"),
+            authType: "api_key",
+            isInstalled: true,
+            suggestedAction: "connect_auth",
+          },
+        ]),
+      }),
+      authStatus: () => ({
+        status: 200,
+        body: {
+          type: "api_key",
+          status: "needs_auth",
+          manualSetup: {
+            fields: [{ key: "api_key", label: "API key", type: "secret", placeholder: "sk-..." }],
+          },
+        },
+      }),
+    });
+    renderCatalog(transport);
+    expect(await screen.findByText("Manual CRM")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    const dialog = await screen.findByRole("dialog", { name: "Connect Manual CRM" });
+    fireEvent.change(within(dialog).getByLabelText("API key"), { target: { value: "sk-abcd99" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Connect" }));
+
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Connected Manual CRM"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Connect Manual CRM" })).not.toBeInTheDocument());
+    expect(calls.some((call) => call.url.includes("/auth/api-key/"))).toBe(true);
+    await waitFor(() => expect(marketParams(calls).length).toBeGreaterThan(1));
+  });
+
+  it("removes from the card and reports (CLOUD-024)", async () => {
+    let installed = true;
+    const { transport } = catalogTransport({
+      marketplace: () => ({
+        status: 200,
+        body: pageJson([
+          {
+            ...appJson("app-old", "Old App"),
+            isInstalled: installed,
+            suggestedAction: installed ? "none" : "install",
+          },
+        ]),
+      }),
+      uninstall: () => {
+        installed = false;
+        return { status: 200, body: { installed: false } };
+      },
+    });
+    renderCatalog(transport);
+    expect(await screen.findByText("Old App")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Uninstall" }));
+    await waitFor(() => expect(notifyInfo).toHaveBeenCalledWith("Uninstalled Old App"));
+    expect(await screen.findByRole("button", { name: "Install" })).toBeInTheDocument();
   });
 });
