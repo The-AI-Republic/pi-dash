@@ -80,3 +80,19 @@ export type { BrowseDetailProps } from "./components/BrowseDetail.js";
 export { IssueList } from "./components/IssueList.js";
 export type { IssueListProps } from "./components/IssueList.js";
 export { IssueLayout, IssueSearch, parseIssueSearch } from "./filters/search.js";
+export {
+  labelKeys,
+  labelsQueryOptions,
+  useCreateLabel,
+  useDeleteLabel,
+  useLabels,
+  useMoveLabel,
+  useUpdateLabel,
+} from "./labels/api.js";
+export type { LabelMoveInput, LabelUpdateInput } from "./labels/api.js";
+export { LabelsSettings } from "./labels/LabelsSettings.js";
+export type { LabelsSettingsProps } from "./labels/LabelsSettings.js";
+export { LabelPicker } from "./labels/LabelPicker.js";
+export type { LabelPickerProps } from "./labels/LabelPicker.js";
+export { LabelChips } from "./labels/LabelChips.js";
+export type { LabelChipsProps } from "./labels/LabelChips.js";
