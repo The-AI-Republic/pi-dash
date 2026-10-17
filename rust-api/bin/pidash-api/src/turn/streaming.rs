@@ -773,7 +773,10 @@ impl PartsManager {
                 }
             },
         }
-        if let Some(id) = tool_call_id {
+        // `if self.tool_call_id:` (`messages.py:2656,2687`): only a
+        // non-empty id replaces; the final `or` in `as_part` then
+        // generates exactly like the SDK.
+        if let Some(id) = tool_call_id.filter(|id| !id.is_empty()) {
             *call_id = Some(id.to_owned());
         }
         Ok(())
@@ -937,6 +940,7 @@ pub struct OpenAIStream<'a> {
     response_id: Option<String>,
     provider_details: Option<Map<String, Value>>,
     done: bool,
+    seen_chunk: bool,
 }
 
 impl<'a> OpenAIStream<'a> {
@@ -954,6 +958,7 @@ impl<'a> OpenAIStream<'a> {
             response_id: None,
             provider_details: None,
             done: false,
+            seen_chunk: false,
         }
     }
 
@@ -979,22 +984,27 @@ impl<'a> OpenAIStream<'a> {
     }
 
     /// Assemble the final result (`get()`): parts, accumulated
-    /// usage, finish, and the provider stamps.
-    pub fn finish(self) -> StreamedTurn {
+    /// usage, finish, and the provider stamps. A stream with zero
+    /// data dispatches raises exactly like the SDK's empty-stream
+    /// peek (`openai.py:1189-1192`).
+    pub fn finish(self) -> Result<StreamedTurn, ProviderError> {
+        if !self.seen_chunk {
+            return Err(empty_stream());
+        }
         let mut details = self.provider_details;
         if !self.refusal_text.is_empty() {
             details
                 .get_or_insert_with(Map::new)
                 .insert("refusal".to_owned(), Value::String(self.refusal_text));
         }
-        StreamedTurn {
+        Ok(StreamedTurn {
             parts: self.manager.parts(),
             usage: self.usage,
             finish: self.finish,
             model_name: self.model_name,
             response_id: self.response_id,
             provider_details: details,
-        }
+        })
     }
 
     fn chunk(&mut self, data: &str, out: &mut Vec<StreamEvent>) -> Result<(), ProviderError> {
@@ -1014,6 +1024,25 @@ impl<'a> OpenAIStream<'a> {
                 .filter(|text| !text.is_empty())
                 .unwrap_or("An error occurred during streaming");
             return Err(ProviderError::InvalidResponse(message.to_owned()));
+        }
+        // The first chunk's `created` stamp lands in provider details
+        // when truthy (`_provider_timestamp`,
+        // `openai.py:1198,3232-3234`): real providers always send it,
+        // the oracle's `0` leaves the key unset. Set before any
+        // `finish_reason` insert so the key order stays
+        // `timestamp`-first, like the SDK merge.
+        if !self.seen_chunk {
+            self.seen_chunk = true;
+            if let Some(created) = value
+                .get("created")
+                .and_then(Value::as_i64)
+                .filter(|created| *created != 0)
+            {
+                self.provider_details.get_or_insert_with(Map::new).insert(
+                    "timestamp".to_owned(),
+                    Value::String(stream_created_timestamp(created)),
+                );
+            }
         }
         let chunk_usage = value
             .get("usage")
@@ -1117,6 +1146,28 @@ impl<'a> OpenAIStream<'a> {
     }
 }
 
+/// The empty-stream failure both lanes raise when the peeked
+/// first item is missing (`openai.py:1189-1192`,
+/// `anthropic.py:980-982`): `UnexpectedModelBehavior`, which
+/// classifies `internal` on text alone.
+fn empty_stream() -> ProviderError {
+    ProviderError::InvalidResponse(
+        "Streamed response ended without content or tool calls".to_owned(),
+    )
+}
+
+/// `number_to_datetime` (`_utils.py:547-548`): epoch seconds rendered
+/// UTC ISO-8601 with the `Z` suffix pydantic's JSON mode emits
+/// (probed: `1760716800` dumps `"2025-10-17T16:00:00Z"`). Same shape
+/// as the D-11 non-streaming port, whose helper is crate-private —
+/// but unlike that path there is no now-backfill: a falsy
+/// first-chunk `created` leaves the `timestamp` detail unset.
+fn stream_created_timestamp(created: i64) -> String {
+    chrono::DateTime::from_timestamp(created, 0)
+        .map(|when| when.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default()
+}
+
 /// `_CHAT_FINISH_REASON_MAP` (`openai.py:254-262`): unknown keys read
 /// `None` (`.get`), like Python.
 fn openai_finish_reason(raw: &str) -> Option<Finish> {
@@ -1151,6 +1202,7 @@ pub struct AnthropicStream<'a> {
     response_id: Option<String>,
     provider_details: Option<Map<String, Value>>,
     seen_start: bool,
+    seen_event: bool,
 }
 
 impl<'a> AnthropicStream<'a> {
@@ -1167,6 +1219,7 @@ impl<'a> AnthropicStream<'a> {
             response_id: None,
             provider_details: None,
             seen_start: false,
+            seen_event: false,
         }
     }
 
@@ -1205,16 +1258,22 @@ impl<'a> AnthropicStream<'a> {
         Ok(out)
     }
 
-    /// Assemble the final result (`get()`).
-    pub fn finish(self) -> StreamedTurn {
-        StreamedTurn {
+    /// Assemble the final result (`get()`). A stream with zero
+    /// events raises exactly like the SDK's empty-stream peek
+    /// (`anthropic.py:980-982`); heartbeats never count (the SDK
+    /// reader skips `ping` before the peek).
+    pub fn finish(self) -> Result<StreamedTurn, ProviderError> {
+        if !self.seen_event {
+            return Err(empty_stream());
+        }
+        Ok(StreamedTurn {
             parts: self.manager.parts(),
             usage: self.usage,
             finish: self.finish,
             model_name: self.model_name,
             response_id: self.response_id,
             provider_details: self.provider_details,
-        }
+        })
     }
 
     fn event(&mut self, event: &SseEvent, out: &mut Vec<StreamEvent>) -> Result<(), ProviderError> {
@@ -1223,6 +1282,7 @@ impl<'a> AnthropicStream<'a> {
                 "Invalid response from anthropic messages endpoint, expected JSON data".to_owned(),
             )
         })?;
+        self.seen_event = true;
         // `_process_streamed_response` asserts the first event is a
         // `message_start` (`anthropic.py:975-995`).
         if !self.seen_start {
@@ -1521,7 +1581,9 @@ pub struct StreamRequest<'a> {
     pub endpoint_url: String,
     pub body: Vec<u8>,
     /// Per-request timeout, seconds (the transport-level `timeout`,
-    /// never a body key).
+    /// never a body key). Zero clamps to one second — a zero
+    /// `Duration` would time out immediately — so pass the SDK
+    /// default (600) explicitly for default behavior.
     pub timeout_secs: u64,
     pub extract: &'a ProviderTable,
 }
@@ -1559,7 +1621,7 @@ pub async fn stream_turn(
                     Err(_) => return Err(ProviderError::Connection),
                 }
             }
-            Ok(stream.finish())
+            Ok(stream.finish()?)
         }
         Lane::Anthropic { .. } => {
             let mut stream = AnthropicStream::new(request.extract, &provider_url, &model);
@@ -1575,7 +1637,7 @@ pub async fn stream_turn(
                     Err(_) => return Err(ProviderError::Connection),
                 }
             }
-            Ok(stream.finish())
+            Ok(stream.finish()?)
         }
     }
 }
@@ -2094,7 +2156,14 @@ mod tests {
                         }
                     }
                     TurnMessage::Response { parts, .. } => {
-                        if !parts.is_empty() {
+                        // Like the builder: a block is emitted for every
+                        // tool call and every non-empty text, and the
+                        // message only when a block exists.
+                        let emitted = parts.iter().any(|part| match part {
+                            TurnResponsePart::ToolCall { .. } => true,
+                            TurnResponsePart::Text { text, .. } => !text.is_empty(),
+                        });
+                        if emitted {
                             cursor += 1;
                         }
                     }
@@ -2359,7 +2428,7 @@ mod tests {
                 events.is_empty(),
                 "{name}#{index} tool-only stream emits no text events"
             );
-            let turned = stream.finish();
+            let turned = stream.finish().unwrap();
             let mut response_parts = Vec::new();
             let mut returns = Vec::new();
             for part in &turned.parts {
@@ -2714,14 +2783,14 @@ mod tests {
                         for feed in &feeds {
                             events.extend(stream.feed(feed).unwrap());
                         }
-                        (events, stream.finish())
+                        (events, stream.finish().unwrap())
                     } else {
                         let mut stream = AnthropicStream::new(&table, provider_url, model);
                         let mut events = Vec::new();
                         for feed in &feeds {
                             events.extend(stream.feed(feed).unwrap());
                         }
-                        (events, stream.finish())
+                        (events, stream.finish().unwrap())
                     };
                     assert_turned_matches_stored(&turned, &stored, &context);
                     assert_events_rebuild_text(&events, &turned, &context);
@@ -2757,7 +2826,7 @@ mod tests {
         let mut stream = AnthropicStream::new(&table, "https://api.anthropic.com/", "c");
         let events = stream.feed(sse.as_bytes()).unwrap();
         assert!(events.is_empty(), "no text events");
-        let turned = stream.finish();
+        let turned = stream.finish().unwrap();
         assert_eq!(turned.parts.len(), 1);
         let StreamPart::ToolCall(call) = &turned.parts[0] else {
             panic!("streams a tool call");
@@ -2804,7 +2873,7 @@ mod tests {
         }
         // Feeding after [DONE] is a no-op.
         assert!(stream.feed(b"data: {}\n\n").unwrap().is_empty());
-        let turned = stream.finish();
+        let turned = stream.finish().unwrap();
         assert_eq!(
             events,
             vec![StreamEvent::TextStart {
@@ -2838,7 +2907,7 @@ mod tests {
             )
             .unwrap();
         assert!(
-            stream.finish().parts.is_empty(),
+            stream.finish().unwrap().parts.is_empty(),
             "nameless slots are dropped"
         );
 
@@ -2853,7 +2922,7 @@ mod tests {
                 .as_bytes(),
             )
             .unwrap();
-        let turned = stream.finish();
+        let turned = stream.finish().unwrap();
         let StreamPart::ToolCall(call) = &turned.parts[0] else {
             panic!("call assembles");
         };
@@ -2862,6 +2931,122 @@ mod tests {
             "generated call id: {}",
             call.call_id
         );
+    }
+
+    /// A truthy first-chunk `created` lands in provider details
+    /// as the UTC ISO `timestamp` pydantic's JSON mode emits
+    /// (`openai.py:1198,3232-3234`); a falsy `created` — every
+    /// oracle capture — leaves the key unset. Only the first
+    /// chunk's stamp counts (the SDK peeks it once).
+    #[test]
+    fn openai_created_stamp_lands_in_details() {
+        let table = provider_table();
+        let chunk = |created: i64| {
+            format!(
+                "data: {{\"id\": \"s\", \"created\": {created}, \"model\": \"m\", \"choices\": [{{\"index\": 0, \"delta\": {{\"content\": \"ok\"}}, \"finish_reason\": \"stop\"}}] }}\n\n"
+            )
+        };
+        let mut stream = OpenAIStream::new(&table, "http://stub/v1/", "m");
+        stream.feed(chunk(1760716800).as_bytes()).unwrap();
+        stream.feed(b"data: [DONE]\n\n").unwrap();
+        let turned = stream.finish().unwrap();
+        let details = turned.provider_details.unwrap();
+        assert_eq!(
+            details.get("timestamp").and_then(Value::as_str),
+            Some("2025-10-17T16:00:00Z"),
+            "probed pydantic JSON bytes"
+        );
+        assert_eq!(
+            details.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["timestamp", "finish_reason"],
+            "timestamp merges first"
+        );
+        // Falsy first stamp: no key, even when a later chunk carries one.
+        let mut stream = OpenAIStream::new(&table, "http://stub/v1/", "m");
+        stream.feed(chunk(0).as_bytes()).unwrap();
+        stream.feed(chunk(1760716800).as_bytes()).unwrap();
+        let turned = stream.finish().unwrap();
+        assert_eq!(
+            turned.provider_details,
+            Some(Map::from_iter([(
+                "finish_reason".to_owned(),
+                Value::String("stop".to_owned())
+            )])),
+            "first chunk decides"
+        );
+    }
+
+    /// An empty tool-call id never replaces the stored one (`if
+    /// self.tool_call_id:`, `messages.py:2656,2687`).
+    #[test]
+    fn empty_tool_call_id_does_not_replace() {
+        let mut manager = PartsManager::default();
+        manager
+            .tool_delta(VendorId::Index(0), Some("n"), None, Some("call_a"))
+            .unwrap();
+        manager
+            .tool_delta(VendorId::Index(0), None, None, Some(""))
+            .unwrap();
+        let parts = manager.parts();
+        assert_eq!(parts.len(), 1);
+        let StreamPart::ToolCall(call) = &parts[0] else {
+            panic!("one call");
+        };
+        assert_eq!(call.call_id, "call_a");
+    }
+
+    /// Streams with zero data dispatches raise exactly like the
+    /// SDK's empty-stream peek (`openai.py:1189-1192`,
+    /// `anthropic.py:980-982`), and classify `internal`.
+    /// `[DONE]`-only, comment-only, and ping-only streams all count
+    /// as empty (none yields a reader item).
+    #[test]
+    fn empty_streams_raise() {
+        let table = provider_table();
+        let openai = Lane::OpenAICompatible {
+            model: "m".to_owned(),
+            base_url: "http://stub/v1".to_owned(),
+            api_key: "k".to_owned(),
+        };
+        for (name, bytes) in [
+            ("empty", b"".as_slice()),
+            ("done-only", b"data: [DONE]\n\n".as_slice()),
+            ("comment-only", b": heartbeat\n\n".as_slice()),
+        ] {
+            let mut stream = OpenAIStream::new(&table, "http://stub/v1/", "m");
+            assert!(stream.feed(bytes).unwrap().is_empty(), "{name} no events");
+            let error = stream.finish().unwrap_err();
+            assert!(
+                matches!(&error, ProviderError::InvalidResponse(message) if message == "Streamed response ended without content or tool calls"),
+                "{name}: {error:?}"
+            );
+            assert_eq!(
+                classify_provider_error(&openai, &error),
+                ("internal", "The assistant hit an unexpected error."),
+                "{name} classifies"
+            );
+        }
+        let anthropic = Lane::Anthropic {
+            model: "c".to_owned(),
+            api_key: "k".to_owned(),
+        };
+        for (name, bytes) in [
+            ("empty", b"".as_slice()),
+            ("ping-only", b"event: ping\ndata: {}\n\n".as_slice()),
+        ] {
+            let mut stream = AnthropicStream::new(&table, "https://api.anthropic.com/", "c");
+            assert!(stream.feed(bytes).unwrap().is_empty(), "{name} no events");
+            let error = stream.finish().unwrap_err();
+            assert!(
+                matches!(&error, ProviderError::InvalidResponse(message) if message == "Streamed response ended without content or tool calls"),
+                "{name}: {error:?}"
+            );
+            assert_eq!(
+                classify_provider_error(&anthropic, &error),
+                ("internal", "The assistant hit an unexpected error."),
+                "{name} classifies"
+            );
+        }
     }
 
     /// Mixed string/dict argument deltas raise, like
@@ -3899,7 +4084,7 @@ mod tests {
             let mut stream = OpenAIStream::new(&table, "http://stub/v1/", "oracle-stub");
             let events = stream.feed(sse.as_bytes()).unwrap();
             assert!(events.is_empty(), "usage_limit#{index} no text events");
-            let turned = stream.finish();
+            let turned = stream.finish().unwrap();
             assert_eq!(turned.parts.len(), 1, "usage_limit#{index} one part");
             let StreamPart::ToolCall(call) = &turned.parts[0] else {
                 panic!("usage_limit#{index} streams a tool call");
