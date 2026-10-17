@@ -28,6 +28,7 @@ SEED_AUTOSET_EMAIL = "contract.autoset@example.com"
 SEED_PASSWORD = os.environ.get("PIDASH_CONTRACT_PASSWORD", "Contract123!")
 SEED_WORKSPACE_SLUG = "contract-acme"
 SEED_PROJECT_IDENTIFIER = "CT"
+SEED_DESKTOP_SESSION_KEY = os.environ.get("PIDASH_CONTRACT_DESKTOP_SESSION_KEY", "contractdesktopsession000001")
 
 
 def database_target():
@@ -102,6 +103,37 @@ def seed():
         user.is_active = True
         user.save()
     note("user", user.email, user_created)
+
+    # Desktop session: the desktop-gated suites (NEWFRONT-585) call
+    # desktop-gated endpoints, which refuse browser sessions. No HTTP flow in
+    # this build stamps the desktop marker (the exchange that does is
+    # edition-only), so the seed mints a fixed-key session row carrying it;
+    # the suites send its key as the session cookie. Re-seed refreshes the
+    # row and its expiry. Written through the model (not the store: the
+    # store drops a fixed key whose row does not exist yet).
+    from pi_dash.db.models.session import Session, SessionStore  # noqa: E402
+    from pi_dash.ee.authentication.desktop import (  # noqa: E402
+        DESKTOP_CLIENT,
+        DESKTOP_SESSION_KEY,
+    )
+
+    encoder = SessionStore()
+    _, desktop_created = Session.objects.update_or_create(
+        session_key=SEED_DESKTOP_SESSION_KEY,
+        defaults={
+            "session_data": encoder.encode(
+                {
+                    "_auth_user_id": user._meta.pk.value_to_string(user),
+                    "_auth_user_backend": "django.contrib.auth.backends.ModelBackend",
+                    "_auth_user_hash": user.get_session_auth_hash(),
+                    DESKTOP_SESSION_KEY: DESKTOP_CLIENT,
+                }
+            ),
+            "expire_date": encoder.get_expiry_date(),
+            "user_id": user._meta.pk.value_to_string(user),
+        },
+    )
+    note("desktop-session", SEED_DESKTOP_SESSION_KEY, desktop_created)
 
     # Instance admin: the god-mode contract suites (NEWFRONT-502/503) sign in
     # as the seed user, so that user holds an InstanceAdmin grant. Revived

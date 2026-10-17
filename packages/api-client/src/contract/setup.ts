@@ -16,6 +16,8 @@ export const CONTRACT_PROJECT_IDENTIFIER = "CT";
 export const CONTRACT_SECONDARY_EMAIL = process.env["PIDASH_CONTRACT_SECONDARY_EMAIL"] ?? "contract.probe@example.com";
 export const CONTRACT_AUTOSET_EMAIL = process.env["PIDASH_CONTRACT_AUTOSET_EMAIL"] ?? "contract.autoset@example.com";
 export const CONTRACT_ADMIN_EMAIL = process.env["PIDASH_CONTRACT_ADMIN_EMAIL"] ?? "contract.admin@example.com";
+export const CONTRACT_DESKTOP_SESSION_KEY =
+  process.env["PIDASH_CONTRACT_DESKTOP_SESSION_KEY"] ?? "contractdesktopsession000001";
 
 /**
  * Cloud-edition contract backend. The cloud endpoints (openhub catalog,
@@ -107,6 +109,31 @@ export async function sharedSignedIn(): Promise<ApiClient> {
     sharedClient = client;
   }
   return sharedClient;
+}
+
+let sharedDesktopClient: ApiClient | null = null;
+
+/**
+ * One desktop-marked session for the desktop-gated suites (NEWFRONT-585).
+ * The desktop-gated endpoints refuse browser sessions, and no HTTP flow in
+ * this build stamps the desktop marker, so the suites ride the fixed-key
+ * session row the seed script mints instead of signing in. The jar is
+ * preloaded with that session cookie (`session-id`, per
+ * SESSION_COOKIE_NAME); CSRF and later cookies accumulate from there like
+ * any signed-in client.
+ */
+export async function sharedDesktopSignedIn(): Promise<ApiClient> {
+  if (!sharedDesktopClient) {
+    if (!contractEnabled) throw new Error("PIDASH_CONTRACT_BASE_URL is not set");
+    const jar = new Map<string, string>([["session-id", CONTRACT_DESKTOP_SESSION_KEY]]);
+    const client = createClient({ baseUrl: CONTRACT_BASE_URL, transport: contractTransport(jar), validate: true });
+    const me = await client.getJson<{ email?: unknown }>("/api/users/me/").catch(() => null);
+    if (!me || typeof me.email !== "string") {
+      throw new Error("contract desktop session is missing: re-run seed-contracts.py --apply");
+    }
+    sharedDesktopClient = client;
+  }
+  return sharedDesktopClient;
 }
 
 let sharedAdminClient: ApiClient | null = null;

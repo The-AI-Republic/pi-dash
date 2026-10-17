@@ -123,6 +123,7 @@ export type {
 } from "./contracts/invitations.js";
 export { Project, ProjectList, ProjectLite, listProjects } from "./contracts/projects.js";
 export {
+  AgentExecutorOption,
   ProjectDetail,
   ProjectDetails,
   ProjectDetailsList,

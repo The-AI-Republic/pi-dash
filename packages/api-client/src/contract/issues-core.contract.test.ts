@@ -351,3 +351,13 @@ describe.skipIf(!contractEnabled)("grouped and filtered issue list contract", ()
     expect(one.next_page_results).toBe(true);
   });
 });
+
+describe.skipIf(!contractEnabled)("issue executor pin contract", () => {
+  it("reads the executor pin off the issue detail", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const issueId = await seededIssueId(client, projectId, "Contract issue one");
+    const row = await getIssue(client, CONTRACT_WORKSPACE, projectId, issueId);
+    expect(row.agent_executor === null || typeof row.agent_executor === "string").toBe(true);
+  });
+});

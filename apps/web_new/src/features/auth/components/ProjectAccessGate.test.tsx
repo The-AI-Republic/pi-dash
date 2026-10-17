@@ -63,6 +63,12 @@ function projectRow() {
     guest_view_all_features: false,
     project_lead: null,
     network: 2,
+    agent_executor_options: [
+      { kind: "cloud_agent", available: false, reason_code: "cloud_agent_unavailable" },
+      { kind: "local_runner", available: true, reason_code: "" },
+      { kind: "managed_runner", available: false, reason_code: "managed_runner_disabled" },
+    ],
+    default_agent_executor: "local_runner",
     created_at: "2024-01-02T03:04:05Z",
     updated_at: "2024-02-03T04:05:06Z",
     created_by: null,
