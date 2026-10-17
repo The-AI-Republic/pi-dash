@@ -88,6 +88,12 @@ pub fn is_not_found(error: &ModelDataError) -> bool {
     matches!(error, ModelDataError::NotFound(_, _))
 }
 
+/// True when `event` has no `MODEL_MAPPER` binding (the `ValueError`
+/// path — the fan-out checks before querying).
+pub fn binding_unknown(event: &str) -> bool {
+    pidash_services::tasks_webhooks::webhook_data::binding_for(event).is_none()
+}
+
 /// `web_base_url` (`pi_dash/utils/host.py`): `WEB_URL or APP_BASE_URL`
 /// with the trailing slash stripped. Empty/unset on both sides yields
 /// `None` (the `""` Python returns is falsy at every caller).

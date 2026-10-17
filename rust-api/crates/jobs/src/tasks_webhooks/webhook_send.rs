@@ -9,12 +9,13 @@
 //! `.delay()` kwargs constructors, the HTTP-action map, the delivery
 //! envelope, the HMAC-SHA256 signature input rendering, the log-document
 //! builder (mongo → postgres fallback), the max-retries deactivation
-//! cascade and the deactivation-email builders. The impure edges — the
-//! webhook-row fetch, the `requests.post` send, the mongo insert, the
-//! postgres insert and the SMTP send — stay with the Python workers
-//! until the domain gate flips ownership, so (like the D-09 export
-//! tasks) no local handler is registered here: [`is_webhook_task`] is
-//! the routing predicate and every name routes to `PythonOwned`.
+//! cascade and the deactivation-email builders. The live section below
+//! (PIDASHCONV-1105, stage 8) wires those decisions to Postgres, the
+//! raw requests-faithful HTTP client ([`webhook_http`][crate::tasks_webhooks::webhook_http]),
+//! mongo, and SMTP, and registers both handlers in
+//! [`oss_worker`][crate::oss_worker]: the Rust worker owns these tasks
+//! now. [`is_webhook_task`] stays the routing predicate for the
+//! pre-registration layers.
 //!
 //! The `event_data` / `activity` DjangoJSONEncoder round-trip
 //! (`:293-295`) normalises live Python objects (tuples to lists,
@@ -26,11 +27,14 @@
 //! Ported bugs (translate, don't redesign):
 //!
 //! * BUG-1 (`:314-318`): the signature is computed over
-//!   `json.dumps(payload)` with *default* separators (`', '`, `': '`),
-//!   not over the wire bytes `requests` sends for `json=payload`
-//!   (compact separators). [`render_signature_input`] reproduces the
-//!   default-separator, `ensure_ascii=True` rendering byte for byte;
-//!   the fixture's sample hex pins it.
+//!   `json.dumps(payload)` with *default* separators (`', '`, `': '`).
+//!   The wire body `requests` sends for `json=payload` is byte-identical
+//!   (stdlib `dumps` defaults — raw-socket probe, PIDASHCONV-1105), so
+//!   Django signs exactly what it transmits; a receiver that re-signs
+//!   compact bytes mismatches. (An earlier note here claimed compact
+//!   wire bytes; the probe refuted it.) [`render_signature_input`]
+//!   reproduces the default-separator, `ensure_ascii=True` rendering
+//!   byte for byte; the fixture's sample hex pins it.
 //! * BUG-2 (`:297-302`): unknown HTTP verbs pass through the action map
 //!   unchanged (`GET` stays `GET`). [`map_action`] keeps the fallback.
 //! * BUG-3 (`:370`): past max retries the task raises a *bare*
@@ -205,50 +209,10 @@ fn render_number(number: &serde_json::Number, out: &mut String) {
     } else if let Some(signed) = number.as_i64() {
         out.push_str(&signed.to_string());
     } else if let Some(float) = number.as_f64() {
-        out.push_str(&py_float_repr(float));
+        out.push_str(&crate::celery::py_float_repr(float));
     } else {
         out.push_str(&number.to_string());
     }
-}
-
-/// Python `repr(float)` for finite values: shortest round-trip like
-/// `ryu`, but the exponent always carries a sign with at least two
-/// digits (`1e+16`, `1e-05`). `serde_json::Value` cannot hold
-/// NaN/infinity, so those tokens are unreachable here.
-fn py_float_repr(float: f64) -> String {
-    let text = serde_json::Number::from_f64(float)
-        .map(|number| number.to_string())
-        .unwrap_or_else(|| "null".to_owned());
-    if let Some(exponent_at) = text.find(['e', 'E']) {
-        let (mantissa, exponent) = text.split_at(exponent_at);
-        let shift: i32 = exponent[1..].parse().unwrap_or(0);
-        return format!("{mantissa}e{shift:+03}");
-    }
-    // Python switches to exponent form once the decimal exponent drops
-    // below -4 (`1e-05`), while `serde_json` still prints that decade
-    // fixed (`0.00001`). A fixed fraction with four or more leading
-    // zeros is exactly that decade, so rewrite it to the exponent form.
-    let (sign, digits) = match text.strip_prefix('-') {
-        Some(rest) => ("-", rest),
-        None => ("", text.as_str()),
-    };
-    if let Some(fraction) = digits.strip_prefix("0.") {
-        let zeros = fraction.bytes().take_while(|byte| *byte == b'0').count();
-        if zeros >= 4 {
-            let sig = fraction[zeros..].trim_end_matches('0');
-            if sig.is_empty() {
-                return text;
-            }
-            let head = &sig[..1];
-            let tail = &sig[1..];
-            let shift = zeros + 1;
-            if tail.is_empty() {
-                return format!("{sign}{head}e-{shift:02}");
-            }
-            return format!("{sign}{head}.{tail}e-{shift:02}");
-        }
-    }
-    text
 }
 
 /// Python `json.dumps` string escaping with `ensure_ascii=True`:
@@ -601,6 +565,603 @@ pub fn email_tls_flags(email_use_tls: &str, email_use_ssl: &str) -> (bool, bool)
 /// `except` and the send is swallowed.
 pub fn parse_email_port(port: &str) -> Result<i64, std::num::ParseIntError> {
     port.trim().parse::<i64>()
+}
+
+use sqlx::Row as _;
+
+/// Live `webhook_send_task` + `send_webhook_deactivation_email` execution
+/// (PIDASHCONV-1105). The decision layer above stays the contract; this
+/// section wires it to Postgres, the raw HTTP client, mongo, and SMTP.
+///
+/// Python `str()` over JSON values (headers, envelope scalars, f-strings,
+/// log slots): `None`/`True`/`False`, ints plain, floats via `repr`,
+/// strings raw, containers via `repr` (`str(dict) is repr(dict)`).
+pub fn py_json_str(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_owned(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Number(n) => {
+            if n.is_f64() {
+                crate::celery::py_float_repr(n.as_f64().unwrap_or(0.0))
+            } else {
+                n.to_string()
+            }
+        }
+        Value::String(s) => s.clone(),
+        other => py_repr(other),
+    }
+}
+
+/// Envelope `action` value: `ACTION_VERB.get(action, action)` — mapped
+/// verbs for the three HTTP methods, anything else (including `None`
+/// and numbers) passes through with its JSON type intact.
+pub fn envelope_action(action: &Value) -> Value {
+    match action {
+        Value::String(text) => Value::String(map_action(text).to_owned()),
+        other => other.clone(),
+    }
+}
+
+/// Bound `webhook_send_task(webhook_id, slug, event, event_data, action,
+/// current_site, activity)` call. `current_site` rides along unused (the
+/// body never reads it) but stays required like every parameter.
+pub struct WebhookSendCall {
+    pub webhook_id: Value,
+    pub slug: Value,
+    pub event: Value,
+    pub event_data: Value,
+    pub action: Value,
+    pub current_site: Value,
+    pub activity: Value,
+}
+
+/// How a call-binding failure surfaces: every shape mismatch is
+/// Python's `TypeError` (unknown/missing/duplicated argument), which the
+/// send task does not autoretry — the job parks as failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallTypeError(pub String);
+
+/// Bind positional-or-keyword args in signature order. Positional spill,
+/// unknown kwargs, missing values, and positional+kwarg duplicates are
+/// all `TypeError` (never the swallow path). A row whose `args`/`kwargs`
+/// are not a list/dict cannot bind either (kombu would reject the wire
+/// body the same way).
+pub fn parse_webhook_send_call(
+    args: &Value,
+    kwargs: &Value,
+) -> Result<WebhookSendCall, CallTypeError> {
+    const PARAMS: [&str; 7] = [
+        "webhook_id",
+        "slug",
+        "event",
+        "event_data",
+        "action",
+        "current_site",
+        "activity",
+    ];
+    bind_call(WEBHOOK_SEND_TASK_NAME, &PARAMS, args, kwargs).map(|bound| WebhookSendCall {
+        webhook_id: bound[0].clone(),
+        slug: bound[1].clone(),
+        event: bound[2].clone(),
+        event_data: bound[3].clone(),
+        action: bound[4].clone(),
+        current_site: bound[5].clone(),
+        activity: bound[6].clone(),
+    })
+}
+
+/// Bound `send_webhook_deactivation_email(webhook_id, receiver_id,
+/// current_site, reason)` call (signature order).
+pub struct DeactivationEmailCall {
+    pub webhook_id: Value,
+    pub receiver_id: Value,
+    pub current_site: Value,
+    pub reason: Value,
+}
+
+pub fn parse_deactivation_email_call(
+    args: &Value,
+    kwargs: &Value,
+) -> Result<DeactivationEmailCall, CallTypeError> {
+    const PARAMS: [&str; 4] = ["webhook_id", "receiver_id", "current_site", "reason"];
+    bind_call(DEACTIVATION_EMAIL_TASK_NAME, &PARAMS, args, kwargs).map(|bound| {
+        DeactivationEmailCall {
+            webhook_id: bound[0].clone(),
+            receiver_id: bound[1].clone(),
+            current_site: bound[2].clone(),
+            reason: bound[3].clone(),
+        }
+    })
+}
+
+/// Shared positional-or-keyword binder (signature order, `TypeError`
+/// on spill/unknown/missing/duplicate). The fan-out's live binders reuse
+/// it; only the fan-out's `origin` default differs (handled by its own
+/// wrapper).
+pub(crate) fn bind_call(
+    task: &str,
+    params: &[&str],
+    args: &Value,
+    kwargs: &Value,
+) -> Result<Vec<Value>, CallTypeError> {
+    let args = args.as_array().ok_or_else(|| {
+        CallTypeError(format!("{task}() args must be a list"))
+    })?;
+    let kwargs = kwargs.as_object().ok_or_else(|| {
+        CallTypeError(format!("{task}() kwargs must be a dict"))
+    })?;
+    if args.len() > params.len() {
+        return Err(CallTypeError(format!(
+            "{task}() takes {want} positional arguments but {got} were given",
+            want = params.len(),
+            got = args.len()
+        )));
+    }
+    for key in kwargs.keys() {
+        if !params.contains(&key.as_str()) {
+            return Err(CallTypeError(format!(
+                "{task}() got an unexpected keyword argument '{key}'"
+            )));
+        }
+    }
+    let mut bound = Vec::with_capacity(params.len());
+    for (index, name) in params.iter().enumerate() {
+        let positional = args.get(index);
+        let keyword = kwargs.get(*name);
+        match (positional, keyword) {
+            (Some(_), Some(_)) => {
+                return Err(CallTypeError(format!(
+                    "{task}() got multiple values for argument '{name}'"
+                )));
+            }
+            (Some(value), None) | (None, Some(value)) => bound.push(value.clone()),
+            (None, None) => {
+                return Err(CallTypeError(format!(
+                    "{task}() missing 1 required positional argument: '{name}'"
+                )));
+            }
+        }
+    }
+    Ok(bound)
+}
+
+/// One `webhooks` row as the send task reads it
+/// (`Webhook.objects.get(id=webhook_id, workspace__slug=slug)`).
+pub struct WebhookRow {
+    pub id: uuid::Uuid,
+    pub workspace_id: uuid::Uuid,
+    pub url: String,
+    pub secret_key: String,
+    pub created_by_id: Option<uuid::Uuid>,
+}
+
+async fn fetch_webhook(
+    pool: &sqlx::PgPool,
+    webhook_id: uuid::Uuid,
+    slug: &str,
+) -> Result<Option<WebhookRow>, sqlx::Error> {
+    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
+        "SELECT w.id, w.workspace_id, w.url, w.secret_key, w.created_by_id \
+         FROM webhooks w JOIN workspaces ws ON ws.id = w.workspace_id \
+         WHERE w.id = $1 AND ws.slug = $2",
+    )
+    .bind(webhook_id)
+    .bind(slug)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|row| WebhookRow {
+        id: row.get("id"),
+        workspace_id: row.get("workspace_id"),
+        url: row.get("url"),
+        secret_key: row.get("secret_key"),
+        created_by_id: row.try_get("created_by_id").unwrap_or(None),
+    }))
+}
+
+/// `save_webhook_log` (`:94-140`): mongo first (when configured), the
+/// Postgres `webhook_logs` row when mongo is absent or its write fails;
+/// every error swallowed after logging.
+async fn save_log_doc(
+    pool: &sqlx::PgPool,
+    mongo: Option<&pidash_db::tasks_cleanup::cleanup_queries::MongoSink>,
+    doc: &Map<String, Value>,
+) {
+    if let Some(sink) = mongo {
+        let document = match pidash_db::tasks_cleanup::cleanup_queries::json_to_bson(
+            &Value::Object(doc.clone()),
+        ) {
+            bson::Bson::Document(document) => document,
+            _ => bson::Document::new(),
+        };
+        match sink.archive(MONGO_LOG_COLLECTION, vec![document]).await {
+            Ok(()) => {
+                tracing::info!(target: "pi_dash.worker", "Webhook log saved successfully to mongo");
+                return;
+            }
+            Err(error) => {
+                tracing::error!(target: "pi_dash.exception", "Failed to save webhook log: {error:?}");
+            }
+        }
+    }
+    let get = |key: &str| doc.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
+    let retry_count = doc.get("retry_count").and_then(Value::as_u64).unwrap_or(0) as i32;
+    // `WebhookLog.objects.create(**log_data)`: the model's own columns;
+    // audit columns default (`created_at`/`updated_at` now, the rest null).
+    let stored = sqlx::query(
+        "INSERT INTO webhook_logs \
+         (workspace_id, webhook_id, event_type, request_method, request_headers, \
+         request_body, response_status, response_headers, response_body, retry_count) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(get("workspace_id").parse::<uuid::Uuid>().ok())
+    .bind(get("webhook").parse::<uuid::Uuid>().ok())
+    .bind(get("event_type"))
+    .bind(get("request_method"))
+    .bind(get("request_headers"))
+    .bind(get("request_body"))
+    .bind(get("response_status"))
+    .bind(get("response_headers"))
+    .bind(get("response_body"))
+    .bind(retry_count)
+    .execute(pool)
+    .await;
+    match stored {
+        Ok(_) => tracing::info!(target: "pi_dash.worker", "Webhook log saved successfully to database"),
+        Err(error) => tracing::error!(target: "pi_dash.exception", "Failed to save webhook log: {error}"),
+    }
+}
+
+/// Celery's retry countdown for this task
+/// (`get_exponential_backoff_interval(600, retries, 600, full_jitter)`):
+/// `min(600, 600 * 2^retries)`, then uniform `0..=countdown`.
+pub fn celery_backoff_delay_secs(retries: u32) -> u64 {
+    let cap = WEBHOOK_SEND_RETRY.backoff_secs;
+    let countdown = (WEBHOOK_SEND_RETRY.backoff_secs as u128)
+        .saturating_mul(1u128 << retries.min(20))
+        .min(cap as u128) as u64;
+    rand::random_range(0..=countdown)
+}
+
+/// `requests`-merge header order for the wire: the `requests` defaults
+/// first (custom `User-Agent` overriding in place), the task's headers
+/// next, `Content-Length` appended by the transport, the signature (when
+/// computed) in task order after `X-Pi Dash-Event`.
+pub fn wire_headers(event: &str, delivery_id: &str, signature: Option<&str>) -> Vec<(String, String)> {
+    let mut headers = vec![
+        ("User-Agent".to_owned(), USER_AGENT.to_owned()),
+        ("Accept-Encoding".to_owned(), "gzip, deflate".to_owned()),
+        ("Accept".to_owned(), "*/*".to_owned()),
+        ("Connection".to_owned(), "keep-alive".to_owned()),
+        (HEADER_CONTENT_TYPE.to_owned(), CONTENT_TYPE_JSON.to_owned()),
+        (HEADER_DELIVERY.to_owned(), delivery_id.to_owned()),
+        (HEADER_EVENT.to_owned(), event.to_owned()),
+    ];
+    if let Some(signature) = signature {
+        headers.push((HEADER_SIGNATURE.to_owned(), signature.to_owned()));
+    }
+    headers
+}
+
+/// Driver outcome for the send handler: ack (all success and swallow
+/// paths), Celery-mirrored retry, or parked failure (bind `TypeError`,
+/// deactivation-phase store errors).
+pub enum SendOutcome {
+    Ack,
+    Retry { delay_secs: u64 },
+    Fail { error: String },
+}
+
+/// Live `webhook_send_task` (`:282-374`).
+///
+/// * Bind `TypeError` → [`SendOutcome::Fail`] (no autoretry for it).
+/// * First-`try` failures (bad id/slug shapes, missing row, store
+///   errors, non-dict `event_data`) → logged, acked, no log row.
+/// * Transport errors → failure log row, then
+///   [`after_failure`]`(attempts)`: [`SendOutcome::Retry`] with the
+///   Celery backoff, or deactivate + enqueue the deactivation email and
+///   ack. Deactivation-phase store errors park the job as failed (the
+///   `.delay`/`update` calls sit outside any `try` in Python).
+pub async fn run_webhook_send(
+    pool: &sqlx::PgPool,
+    mongo: Option<&pidash_db::tasks_cleanup::cleanup_queries::MongoSink>,
+    job: &crate::queue::JobRow,
+    call: &WebhookSendCall,
+) -> SendOutcome {
+    use crate::tasks_mail::notifications::py_truthy;
+    // `Webhook.objects.get(id=webhook_id, workspace__slug=slug)`: a
+    // garbage id is `ValidationError`, a non-string slug breaks the
+    // lookup — both land in the first `try`'s swallow.
+    let webhook_id = match call.webhook_id.as_str().and_then(|raw| raw.parse::<uuid::Uuid>().ok()) {
+        Some(id) => id,
+        None => {
+            tracing::error!(
+                target: "pi_dash.exception",
+                task = WEBHOOK_SEND_TASK_NAME,
+                "invalid webhook id: {}",
+                py_json_str(&call.webhook_id)
+            );
+            return SendOutcome::Ack;
+        }
+    };
+    let slug = match call.slug.as_str() {
+        Some(slug) => slug,
+        None => {
+            tracing::error!(
+                target: "pi_dash.exception",
+                task = WEBHOOK_SEND_TASK_NAME,
+                "invalid workspace slug"
+            );
+            return SendOutcome::Ack;
+        }
+    };
+    let event_data = match call.event_data.as_object() {
+        Some(data) => data,
+        None => {
+            tracing::error!(
+                target: "pi_dash.exception",
+                task = WEBHOOK_SEND_TASK_NAME,
+                "event_data has no .get"
+            );
+            return SendOutcome::Ack;
+        }
+    };
+    let webhook = match fetch_webhook(pool, webhook_id, slug).await {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::error!(target: "pi_dash.exception", task = WEBHOOK_SEND_TASK_NAME, "{error}");
+            return SendOutcome::Ack;
+        }
+    };
+    let Some(webhook) = webhook else {
+        tracing::error!(
+            target: "pi_dash.exception",
+            task = WEBHOOK_SEND_TASK_NAME,
+            "No webhook found for id {webhook_id} in workspace {slug}"
+        );
+        return SendOutcome::Ack;
+    };
+
+    // `"action" if event_data.get("id") else map_action(action)` (`:292`).
+    let id_value = event_data.get("id").unwrap_or(&Value::Null);
+    let action_value = if py_truthy(id_value) {
+        Value::String("action".to_owned())
+    } else {
+        envelope_action(&call.action)
+    };
+    // `json.dumps(json.loads(...))` round-trips are identity over JSON
+    // values at this layer (no tuples/datetimes survive the wire).
+    let event_str = py_json_str(&call.event);
+    let delivery_id = uuid::Uuid::new_v4().to_string();
+    let mut envelope = build_envelope(
+        &event_str,
+        "",
+        &webhook_id.to_string(),
+        &webhook.workspace_id.to_string(),
+        Some(Value::Object(event_data.clone())),
+        Some(call.activity.clone()),
+    );
+    envelope.insert("action".to_owned(), action_value);
+    let payload_json = render_signature_input(&Value::Object(envelope));
+    let signature = if webhook.secret_key.is_empty() {
+        None
+    } else {
+        Some(sign_payload_hex(&webhook.secret_key, &payload_json))
+    };
+    let wire = wire_headers(&event_str, &delivery_id, signature.as_deref());
+    // The logged headers are the task's dict (insertion order, with the
+    // signature appended when computed — QUIRK-3).
+    let mut logged = base_headers(&event_str, &delivery_id);
+    if let Some(signature) = &signature {
+        logged.insert(
+            HEADER_SIGNATURE.to_owned(),
+            Value::String(signature.clone()),
+        );
+    }
+    let attempts = u32::try_from(job.attempts).unwrap_or(0);
+    match super::webhook_http::post(&webhook.url, &wire, payload_json.as_bytes(), WEBHOOK_POST_TIMEOUT_SECS).await {
+        Ok(response) => {
+            let doc = build_log_doc(
+                &webhook.workspace_id.to_string(),
+                &webhook_id.to_string(),
+                &event_str,
+                "POST",
+                &Value::Object(logged),
+                &call.event_data,
+                response.status,
+                &super::webhook_http::headers_repr(&response.headers),
+                &super::webhook_http::response_text(&response.headers, &response.body),
+                attempts,
+            );
+            save_log_doc(pool, mongo, &doc).await;
+            SendOutcome::Ack
+        }
+        Err(error) => {
+            // BUG-3: the failure row logs the bare `500`/empty/`str(e)`
+            // triple; the retry then raises a *bare* `RequestException`
+            // (message discarded) — mirrored by carrying no cause past
+            // this point.
+            let doc = build_log_doc(
+                &webhook.workspace_id.to_string(),
+                &webhook_id.to_string(),
+                &event_str,
+                "POST",
+                &Value::Object(logged),
+                &call.event_data,
+                500u16,
+                "",
+                &error,
+                attempts,
+            );
+            save_log_doc(pool, mongo, &doc).await;
+            match after_failure(attempts) {
+                AfterFailure::Retry => SendOutcome::Retry {
+                    delay_secs: celery_backoff_delay_secs(attempts),
+                },
+                AfterFailure::Deactivate => {
+                    // BUG-4: filtered update, `updated_at` untouched.
+                    if let Err(error) = sqlx::query("UPDATE webhooks SET is_active = false WHERE id = $1")
+                        .bind(webhook.id)
+                        .execute(pool)
+                        .await
+                    {
+                        return SendOutcome::Fail { error: error.to_string() };
+                    }
+                    if webhook.created_by_id.is_some() {
+                        // kwargs ride through with their JSON types intact
+                        // (`current_site=None` stays null, like `.delay`).
+                        let mut kwargs = Map::with_capacity(4);
+                        kwargs.insert("webhook_id".to_owned(), Value::String(webhook_id.to_string()));
+                        kwargs.insert(
+                            "receiver_id".to_owned(),
+                            Value::String(webhook.created_by_id.map(|id| id.to_string()).unwrap_or_default()),
+                        );
+                        kwargs.insert("reason".to_owned(), Value::String(error));
+                        kwargs.insert("current_site".to_owned(), call.current_site.clone());
+                        let email = crate::queue::NewJob::new(
+                            DEACTIVATION_EMAIL_TASK_NAME.to_owned(),
+                            Value::Array(Vec::new()),
+                            Value::Object(kwargs),
+                        );
+                        if let Err(error) = crate::queue::enqueue(pool, &email).await {
+                            return SendOutcome::Fail { error: error.to_string() };
+                        }
+                    }
+                    SendOutcome::Ack
+                }
+            }
+        }
+    }
+}
+
+/// Deactivation email template source (`:224`).
+pub const DEACTIVATION_HTML_SOURCE: &str =
+    include_str!("../../../../../apps/api/templates/emails/notifications/webhook-deactivate.html");
+
+/// Live `send_webhook_deactivation_email` (`:190-249`): receiver +
+/// webhook + workspace lookups (misses log and return through the broad
+/// `except`), then the shared mail send (which swallows internally).
+/// Always acks — bind `TypeError` parks via the handler, like Python.
+pub async fn run_deactivation_email(pool: &sqlx::PgPool, call: &DeactivationEmailCall) {
+    let webhook_id = call.webhook_id.as_str().and_then(|raw| raw.parse::<uuid::Uuid>().ok());
+    let receiver_id = call.receiver_id.as_str().and_then(|raw| raw.parse::<uuid::Uuid>().ok());
+    let (Some(webhook_id), Some(receiver_id)) = (webhook_id, receiver_id) else {
+        tracing::error!(target: "pi_dash.exception", task = DEACTIVATION_EMAIL_TASK_NAME, "invalid ids");
+        return;
+    };
+    let receiver: Option<sqlx::postgres::PgRow> =
+        sqlx::query("SELECT email FROM users WHERE id = $1")
+            .bind(receiver_id)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
+    let receiver_email: Option<String> = receiver.and_then(|row| {
+        row.try_get("email").unwrap_or(None)
+    });
+    let webhook: Option<sqlx::postgres::PgRow> =
+        sqlx::query("SELECT id, url, workspace_id FROM webhooks WHERE id = $1")
+            .bind(webhook_id)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
+    let (Some(receiver_email), Some(webhook)) = (receiver_email, webhook) else {
+        tracing::error!(
+            target: "pi_dash.exception",
+            task = DEACTIVATION_EMAIL_TASK_NAME,
+            "receiver or webhook missing"
+        );
+        return;
+    };
+    let url: String = {
+        webhook.get("url")
+    };
+    let workspace_id: uuid::Uuid = {
+        webhook.get("workspace_id")
+    };
+    let slug: Option<String> = sqlx::query("SELECT slug FROM workspaces WHERE id = $1")
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None)
+        .and_then(|row| {
+                row.try_get("slug").unwrap_or(None)
+        });
+    let Some(slug) = slug else {
+        tracing::error!(target: "pi_dash.exception", task = DEACTIVATION_EMAIL_TASK_NAME, "workspace missing");
+        return;
+    };
+    // `f"{current_site}/..."`: `None` formats as `"None"`.
+    let current_site = py_json_str(&call.current_site);
+    let context = std::collections::HashMap::from([
+        ("email".to_owned(), receiver_email.clone()),
+        ("message".to_owned(), deactivation_message(&url)),
+        (
+            "webhook_url".to_owned(),
+            deactivation_webhook_url(&current_site, &slug, &webhook_id.to_string()),
+        ),
+    ]);
+    crate::tasks_mail::mail_send::send_mail(
+        pool,
+        DEACTIVATION_HTML_SOURCE,
+        DEACTIVATION_SUBJECT,
+        &context,
+        &receiver_email,
+        "Deactivation email sent successfully",
+    )
+    .await;
+}
+
+/// Register the send-task handler: bind `TypeError` parks (no autoretry
+/// for it); the driver maps the rest to ack / Celery-mirrored retry.
+pub fn register_webhook_send_task(
+    registry: &mut crate::worker::Registry,
+    pools: pidash_db::pool::Pools,
+    mongo: Option<pidash_db::tasks_cleanup::cleanup_queries::MongoSink>,
+) {
+    let handler: crate::worker::Handler = std::sync::Arc::new(move |job: crate::queue::JobRow| {
+        let pools = pools.clone();
+        let mongo = mongo.clone();
+        Box::pin(async move {
+            let outcome = match parse_webhook_send_call(&job.args, &job.kwargs) {
+                Err(error) => {
+                    return Ok(crate::worker::Verdict::Fail { error: format!("TypeError: {}", error.0) });
+                }
+                Ok(call) => {
+                    run_webhook_send(pools.primary(), mongo.as_ref(), &job, &call).await
+                }
+            };
+            Ok(match outcome {
+                SendOutcome::Ack => crate::worker::Verdict::Ack,
+                SendOutcome::Retry { delay_secs } => crate::worker::Verdict::Retry { delay_secs },
+                SendOutcome::Fail { error } => crate::worker::Verdict::Fail { error },
+            })
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+    });
+    registry.register(WEBHOOK_SEND_TASK_NAME, handler);
+}
+
+/// Register the deactivation-email handler (always acks past binding).
+pub fn register_deactivation_email_task(
+    registry: &mut crate::worker::Registry,
+    pools: pidash_db::pool::Pools,
+) {
+    let handler: crate::worker::Handler = std::sync::Arc::new(move |job: crate::queue::JobRow| {
+        let pools = pools.clone();
+        Box::pin(async move {
+            match parse_deactivation_email_call(&job.args, &job.kwargs) {
+                Err(error) => Ok(crate::worker::Verdict::Fail {
+                    error: format!("TypeError: {}", error.0),
+                }),
+                Ok(call) => {
+                    run_deactivation_email(pools.primary(), &call).await;
+                    Ok(crate::worker::Verdict::Ack)
+                }
+            }
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+    });
+    registry.register(DEACTIVATION_EMAIL_TASK_NAME, handler);
 }
 
 #[cfg(test)]

@@ -2144,6 +2144,110 @@ def issue_chain(conn, slug: str) -> dict:
             "state": state, "issue": issue}
 
 
+# ---------------------------------------------------------------------------
+# Cycle / module / comment / intake seeds (PIDASHCONV-1105 webhooks fan-out)
+# ---------------------------------------------------------------------------
+
+def cycle(conn, workspace_id, project_id, owned_by_id, name="C1", **extra) -> dict:
+    values = {
+        "workspace_id": str(workspace_id),
+        "project_id": str(project_id),
+        "owned_by_id": str(owned_by_id),
+        "name": name,
+        "description": "",
+        "logo_props": {},
+        "progress_snapshot": {},
+        "sort_order": 65535,
+        "timezone": "UTC",
+        "version": 1,
+        "view_props": {},
+    }
+    values.update(extra)
+    return insert_row(conn, "cycles", values)
+
+
+def cycle_issue(conn, workspace_id, project_id, cycle_id, issue_id, **extra) -> dict:
+    values = {
+        "workspace_id": str(workspace_id),
+        "project_id": str(project_id),
+        "cycle_id": str(cycle_id),
+        "issue_id": str(issue_id),
+    }
+    values.update(extra)
+    return insert_row(conn, "cycle_issues", values)
+
+
+def module(conn, workspace_id, project_id, name="M1", **extra) -> dict:
+    values = {
+        "workspace_id": str(workspace_id),
+        "project_id": str(project_id),
+        "name": name,
+        "description": "",
+        "logo_props": {},
+        "sort_order": 65535,
+        "status": "planned",
+        "view_props": {},
+    }
+    values.update(extra)
+    return insert_row(conn, "modules", values)
+
+
+def module_issue(conn, workspace_id, project_id, module_id, issue_id, **extra) -> dict:
+    values = {
+        "workspace_id": str(workspace_id),
+        "project_id": str(project_id),
+        "module_id": str(module_id),
+        "issue_id": str(issue_id),
+    }
+    values.update(extra)
+    return insert_row(conn, "module_issues", values)
+
+
+def issue_comment(conn, workspace_id, project_id, issue_id, **extra) -> dict:
+    values = {
+        "workspace_id": str(workspace_id),
+        "project_id": str(project_id),
+        "issue_id": str(issue_id),
+        "access": "EXTERNAL",
+        "attachments": [],
+        "comment_html": "<p>hi</p>",
+        "comment_json": {},
+        "comment_stripped": "hi",
+        "labels": [],
+        "speaker_label": "",
+        "speaker_type": "human",
+    }
+    values.update(extra)
+    return insert_row(conn, "issue_comments", values)
+
+
+def intake(conn, workspace_id, project_id, name="intake", is_default=True, **extra) -> dict:
+    values = {
+        "workspace_id": str(workspace_id),
+        "project_id": str(project_id),
+        "name": name,
+        "description": "",
+        "is_default": is_default,
+        "logo_props": {},
+        "view_props": {},
+    }
+    values.update(extra)
+    return insert_row(conn, "intakes", values)
+
+
+def intake_issue(conn, workspace_id, project_id, intake_id, issue_id, **extra) -> dict:
+    values = {
+        "workspace_id": str(workspace_id),
+        "project_id": str(project_id),
+        "intake_id": str(intake_id),
+        "issue_id": str(issue_id),
+        "extra": {},
+        "status": 1,
+    }
+    values.update(extra)
+    return insert_row(conn, "intake_issues", values)
+
+
 def email_log(conn, receiver_id, actor_id, entity_id: str, **extra) -> dict:
     values = {
         "receiver_id": str(receiver_id),
