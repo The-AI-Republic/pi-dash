@@ -665,20 +665,25 @@ pub fn parse_live_webhook_activity(
     args: &Value,
     kwargs: &Value,
 ) -> Result<LiveWebhookActivityCall, super::webhook_send::CallTypeError> {
-    super::webhook_send::bind_call(WEBHOOK_ACTIVITY_TASK_NAME, &WEBHOOK_ACTIVITY_PARAMS_ORDER, args, kwargs)
-        .map(|bound| LiveWebhookActivityCall {
-            event: bound[0].clone(),
-            verb: bound[1].clone(),
-            field: bound[2].clone(),
-            old_value: bound[3].clone(),
-            new_value: bound[4].clone(),
-            actor_id: bound[5].clone(),
-            slug: bound[6].clone(),
-            current_site: bound[7].clone(),
-            event_id: bound[8].clone(),
-            old_identifier: bound[9].clone(),
-            new_identifier: bound[10].clone(),
-        })
+    super::webhook_send::bind_call(
+        WEBHOOK_ACTIVITY_TASK_NAME,
+        &WEBHOOK_ACTIVITY_PARAMS_ORDER,
+        args,
+        kwargs,
+    )
+    .map(|bound| LiveWebhookActivityCall {
+        event: bound[0].clone(),
+        verb: bound[1].clone(),
+        field: bound[2].clone(),
+        old_value: bound[3].clone(),
+        new_value: bound[4].clone(),
+        actor_id: bound[5].clone(),
+        slug: bound[6].clone(),
+        current_site: bound[7].clone(),
+        event_id: bound[8].clone(),
+        old_identifier: bound[9].clone(),
+        new_identifier: bound[10].clone(),
+    })
 }
 
 /// Bound live `model_activity` call: six required params plus `origin`
@@ -711,10 +716,14 @@ pub fn parse_live_model_activity(
         "slug",
     ];
     let args_list = args.as_array().ok_or_else(|| {
-        super::webhook_send::CallTypeError(format!("{MODEL_ACTIVITY_TASK_NAME}() args must be a list"))
+        super::webhook_send::CallTypeError(format!(
+            "{MODEL_ACTIVITY_TASK_NAME}() args must be a list"
+        ))
     })?;
     let kwargs_map = kwargs.as_object().ok_or_else(|| {
-        super::webhook_send::CallTypeError(format!("{MODEL_ACTIVITY_TASK_NAME}() kwargs must be a dict"))
+        super::webhook_send::CallTypeError(format!(
+            "{MODEL_ACTIVITY_TASK_NAME}() kwargs must be a dict"
+        ))
     })?;
     if args_list.len() > MODEL_ACTIVITY_PARAMS_ORDER.len() {
         return Err(super::webhook_send::CallTypeError(format!(
@@ -777,11 +786,16 @@ pub enum FanoutOutcome {
 /// Live `webhook_activity` (`:389-460`).
 ///
 /// * Bind `TypeError` → [`FanoutOutcome::Fail`] (plain task, no retry).
-/// * Non-string/unknown `event`, bad `actor_id`/`event_id` shapes,
-///   store errors, `model_data` misses-that-raise → logged (or silent
-///   for `NotFound`) ack, sends skipped from that row on — QUIRK-2
-///   recomputes `event_data` + actor per webhook, so a mid-loop abort
-///   keeps the rows already enqueued.
+/// * The flag filter runs first (non-string/unknown events match no
+///   branch, so every active webhook fires); model lookups happen
+///   per row — the `deleted` verb never touches `get_model_data` for
+///   `event_data`, so unknown events still fan out on deletes, exactly
+///   like the source loop.
+/// * Bad `actor_id`/`event_id` shapes, store errors, unknown models →
+///   logged ack from that row on; `NotFound` rows ack silently (the
+///   `ObjectDoesNotExist` race path). QUIRK-2 recomputes `event_data` +
+///   actor per webhook, so a mid-loop abort keeps the rows already
+///   enqueued.
 /// * Send jobs enqueue with `max_retries=5` (the send task's budget);
 ///   an enqueue failure aborts the remaining rows and acks (the
 ///   `.delay` sits inside the `try`).
@@ -790,26 +804,7 @@ pub async fn run_webhook_activity(
     web_base: Option<&str>,
     call: &LiveWebhookActivityCall,
 ) -> FanoutOutcome {
-    let event = match call.event.as_str() {
-        Some(event) => event.to_owned(),
-        None => {
-            tracing::error!(
-                target: "pi_dash.exception",
-                task = WEBHOOK_ACTIVITY_TASK_NAME,
-                "Model not found for event: {}",
-                super::webhook_send::py_json_str(&call.event)
-            );
-            return FanoutOutcome::Ack;
-        }
-    };
-    if super::model_data::binding_unknown(&event) {
-        tracing::error!(
-            target: "pi_dash.exception",
-            task = WEBHOOK_ACTIVITY_TASK_NAME,
-            "Model not found for event: {event}"
-        );
-        return FanoutOutcome::Ack;
-    }
+    let deleted = call.verb.as_str() == Some("deleted");
     // `slug=None` filters to the empty set (`IS NULL` on a non-null
     // column); any other non-string breaks the lookup (swallowed).
     let slug = match &call.slug {
@@ -824,9 +819,12 @@ pub async fn run_webhook_activity(
             return FanoutOutcome::Ack;
         }
     };
+    // Only string events match the `:420-433` branches; anything else
+    // leaves the queryset unfiltered, like Python's `==` chain.
+    let flag = call.event.as_str().and_then(event_flag_for);
     let webhook_ids = match slug {
         None => Vec::new(),
-        Some(slug) => match fetch_fanout_webhooks(pool, &slug, &event).await {
+        Some(slug) => match fetch_fanout_webhooks(pool, &slug, flag).await {
             Ok(ids) => ids,
             Err(error) => {
                 tracing::error!(target: "pi_dash.exception", task = WEBHOOK_ACTIVITY_TASK_NAME, "{error}");
@@ -834,7 +832,6 @@ pub async fn run_webhook_activity(
             }
         },
     };
-    let deleted = call.verb.as_str() == Some("deleted");
     for webhook_id in webhook_ids {
         // QUIRK-2: `event_data` + actor recompute per row.
         let event_data = if deleted {
@@ -842,6 +839,20 @@ pub async fn run_webhook_activity(
             data.insert("id".to_owned(), call.event_id.clone());
             Value::Object(data)
         } else {
+            // `get_model_data` checks the model before the id
+            // (`:159-166`): a non-string event is the same `ValueError`.
+            let event = match call.event.as_str() {
+                Some(event) => event,
+                None => {
+                    tracing::error!(
+                        target: "pi_dash.exception",
+                        task = WEBHOOK_ACTIVITY_TASK_NAME,
+                        "Model not found for event: {}",
+                        super::webhook_send::py_json_str(&call.event)
+                    );
+                    return FanoutOutcome::Ack;
+                }
+            };
             let event_id = match call.event_id.as_str() {
                 Some(id) => id,
                 None => {
@@ -853,7 +864,7 @@ pub async fn run_webhook_activity(
                     return FanoutOutcome::Ack;
                 }
             };
-            match super::model_data::get_model_data(pool, &event, event_id, web_base).await {
+            match super::model_data::get_model_data(pool, event, event_id, web_base).await {
                 Ok(data) => data,
                 Err(error) if super::model_data::is_not_found(&error) => return FanoutOutcome::Ack,
                 Err(error) => {
@@ -873,7 +884,8 @@ pub async fn run_webhook_activity(
                 return FanoutOutcome::Ack;
             }
         };
-        let actor = match super::model_data::get_model_data(pool, "user", actor_id, web_base).await {
+        let actor = match super::model_data::get_model_data(pool, "user", actor_id, web_base).await
+        {
             Ok(data) => data,
             Err(error) if super::model_data::is_not_found(&error) => return FanoutOutcome::Ack,
             Err(error) => {
@@ -897,7 +909,9 @@ pub async fn run_webhook_activity(
         let mut kwargs = Map::with_capacity(7);
         kwargs.insert("webhook_id".to_owned(), Value::String(webhook_id));
         kwargs.insert("slug".to_owned(), call.slug.clone());
-        kwargs.insert("event".to_owned(), Value::String(event.clone()));
+        // `event` rides through raw (`:439` passes the parameter, not a
+        // stringified copy).
+        kwargs.insert("event".to_owned(), call.event.clone());
         kwargs.insert("event_data".to_owned(), event_data);
         kwargs.insert("action".to_owned(), call.verb.clone());
         kwargs.insert("current_site".to_owned(), call.current_site.clone());
@@ -917,14 +931,13 @@ pub async fn run_webhook_activity(
 }
 
 /// Webhook ids for the fan-out: workspace slug + active + event flag
-/// (no flag filter for unknown events — unreachable here, the driver
-/// returns before querying), newest first (`Meta.ordering`).
+/// (`None` leaves the flag off — unknown/non-string events fire every
+/// active webhook), newest first (`Meta.ordering`).
 async fn fetch_fanout_webhooks(
     pool: &sqlx::PgPool,
     slug: &str,
-    event: &str,
+    flag: Option<&str>,
 ) -> Result<Vec<String>, sqlx::Error> {
-    let flag = event_flag_for(event);
     let sql = match flag {
         Some(column) => format!(
             "SELECT w.id FROM webhooks w JOIN workspaces ws ON ws.id = w.workspace_id \
@@ -980,7 +993,10 @@ pub async fn run_model_activity(
         Some(raw) => raw,
         None => {
             return FanoutOutcome::Fail {
-                error: "TypeError: the JSON object must be str, not the bound value".to_owned(),
+                error: format!(
+                    "TypeError: the JSON object must be str, bytes or bytearray, not {}",
+                    json_type_name(&call.current_instance)
+                ),
             };
         }
     };
@@ -995,7 +1011,10 @@ pub async fn run_model_activity(
         Value::String(text) => text.chars().map(|c| Value::String(c.to_string())).collect(),
         other => {
             return FanoutOutcome::Fail {
-                error: format!("TypeError: argument of type '{}' is not iterable", json_type_name(other)),
+                error: format!(
+                    "TypeError: argument of type '{}' is not iterable",
+                    json_type_name(other)
+                ),
             };
         }
     };
@@ -1074,7 +1093,9 @@ async fn enqueue_activity(pool: &sqlx::PgPool, kwargs: Map<String, Value>) -> Fa
     );
     match crate::queue::enqueue(pool, &job).await {
         Ok(_) => FanoutOutcome::Ack,
-        Err(error) => FanoutOutcome::Fail { error: error.to_string() },
+        Err(error) => FanoutOutcome::Fail {
+            error: error.to_string(),
+        },
     }
 }
 
@@ -1082,7 +1103,13 @@ fn json_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "NoneType",
         Value::Bool(_) => "bool",
-        Value::Number(_) => "int",
+        Value::Number(number) => {
+            if number.is_i64() || number.is_u64() {
+                "int"
+            } else {
+                "float"
+            }
+        }
         Value::String(_) => "str",
         Value::Array(_) => "list",
         Value::Object(_) => "dict",
@@ -1097,9 +1124,7 @@ fn member_of(key: &Value, instance: &Value) -> Result<bool, String> {
         Value::Object(map) => match key {
             Value::String(name) => Ok(map.contains_key(name)),
             Value::Bool(_) | Value::Number(_) | Value::Null => Ok(false),
-            Value::Array(_) | Value::Object(_) => {
-                Err("TypeError: unhashable type".to_owned())
-            }
+            Value::Array(_) | Value::Object(_) => Err("TypeError: unhashable type".to_owned()),
         },
         Value::Array(items) => Ok(items.iter().any(|item| py_json_eq(item, key))),
         Value::String(text) => match key {
@@ -1127,7 +1152,11 @@ fn index_requested(requested: &Value, key: &Value) -> Result<Value, String> {
         },
         Value::Array(items) => {
             let index = int_index(key)?;
-            let resolved = if index < 0 { items.len() as i64 + index } else { index };
+            let resolved = if index < 0 {
+                items.len() as i64 + index
+            } else {
+                index
+            };
             items
                 .get(resolved as usize)
                 .cloned()
@@ -1136,7 +1165,11 @@ fn index_requested(requested: &Value, key: &Value) -> Result<Value, String> {
         Value::String(text) => {
             let index = int_index(key)?;
             let chars: Vec<char> = text.chars().collect();
-            let resolved = if index < 0 { chars.len() as i64 + index } else { index };
+            let resolved = if index < 0 {
+                chars.len() as i64 + index
+            } else {
+                index
+            };
             chars
                 .get(resolved as usize)
                 .map(|c| Value::String(c.to_string()))
@@ -1190,16 +1223,13 @@ pub fn register_webhook_activity_task(
                 Err(error) => FanoutOutcome::Fail {
                     error: format!("TypeError: {}", error.0),
                 },
-                Ok(call) => {
-                    run_webhook_activity(pools.primary(), web_base.as_deref(), &call).await
-                }
+                Ok(call) => run_webhook_activity(pools.primary(), web_base.as_deref(), &call).await,
             };
             Ok(match outcome {
                 FanoutOutcome::Ack => crate::worker::Verdict::Ack,
                 FanoutOutcome::Fail { error } => crate::worker::Verdict::Fail { error },
             })
-        })
-            as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
     });
     registry.register(WEBHOOK_ACTIVITY_TASK_NAME, handler);
 }
@@ -1222,8 +1252,7 @@ pub fn register_model_activity_task(
                 FanoutOutcome::Ack => crate::worker::Verdict::Ack,
                 FanoutOutcome::Fail { error } => crate::worker::Verdict::Fail { error },
             })
-        })
-            as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
     });
     registry.register(MODEL_ACTIVITY_TASK_NAME, handler);
 }

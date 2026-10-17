@@ -125,7 +125,9 @@ pub fn parse_url(url: &str) -> Result<ParsedUrl, String> {
         (format!("[{ip}]"), port)
     } else {
         match hostport.rsplit_once(':') {
-            Some((host, text)) if !text.is_empty() => (host.to_owned(), Some(parse_port(text, url)?)),
+            Some((host, text)) if !text.is_empty() => {
+                (host.to_owned(), Some(parse_port(text, url)?))
+            }
             _ => (hostport.trim_end_matches(':').to_owned(), None),
         }
     };
@@ -136,8 +138,14 @@ pub fn parse_url(url: &str) -> Result<ParsedUrl, String> {
         return Err(format!("Invalid URL {url:?}: URL has an invalid label."));
     }
     // The fragment never reaches the wire (`prepare_url` drops it).
-    let path = path.split_once('#').map_or(path.clone(), |(head, _)| head.to_owned());
-    let path = if path.is_empty() { "/".to_owned() } else { path };
+    let path = path
+        .split_once('#')
+        .map_or(path.clone(), |(head, _)| head.to_owned());
+    let path = if path.is_empty() {
+        "/".to_owned()
+    } else {
+        path
+    };
     let default_port = if scheme == "https" { 443 } else { 80 };
     Ok(ParsedUrl {
         https: scheme == "https",
@@ -152,9 +160,13 @@ fn parse_port(text: &str, url: &str) -> Result<u16, String> {
     if text.len() > 5 {
         return Err(format!("Invalid URL {url:?}: Port out of range"));
     }
-    text.parse::<u32>().ok().filter(|p| *p <= 65535).map(|p| p as u16).ok_or_else(|| {
-        format!("Invalid URL {url:?}: Port could not be cast to integer value as {text:?}")
-    })
+    text.parse::<u32>()
+        .ok()
+        .filter(|p| *p <= 65535)
+        .map(|p| p as u16)
+        .ok_or_else(|| {
+            format!("Invalid URL {url:?}: Port could not be cast to integer value as {text:?}")
+        })
 }
 
 impl ParsedUrl {
@@ -175,7 +187,8 @@ impl ParsedUrl {
         use base64::Engine;
         self.userinfo.as_ref().map(|info| {
             let (user, password) = info.split_once(':').unwrap_or((info.as_str(), ""));
-            let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+            let token =
+                base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
             format!("Basic {token}")
         })
     }
@@ -269,7 +282,10 @@ pub fn parse_header_block(block: &[u8]) -> Result<Vec<(String, String)>, String>
         if name.is_empty() {
             return Err("Invalid header line in response".to_owned());
         }
-        match headers.iter_mut().find(|(key, _)| key.eq_ignore_ascii_case(&name)) {
+        match headers
+            .iter_mut()
+            .find(|(key, _)| key.eq_ignore_ascii_case(&name))
+        {
             Some((_, existing)) => {
                 existing.push_str(", ");
                 existing.push_str(&value);
@@ -280,10 +296,14 @@ pub fn parse_header_block(block: &[u8]) -> Result<Vec<(String, String)>, String>
     Ok(headers)
 }
 
+/// Parsed status line + header block: status, headers, and the byte
+/// offset where the body starts.
+pub type StatusAndHeaders = (u16, Vec<(String, String)>, usize);
+
 /// Parse the status line + header block; returns the status, headers,
 /// and the byte offset where the body starts. Only `HTTP/1.0` and
 /// `HTTP/1.1` parse (else `BadStatusLine`, a transport error).
-pub fn parse_status_and_headers(bytes: &[u8]) -> Result<(u16, Vec<(String, String)>, usize), String> {
+pub fn parse_status_and_headers(bytes: &[u8]) -> Result<StatusAndHeaders, String> {
     let end = bytes
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -328,9 +348,12 @@ pub fn decode_chunked(bytes: &[u8]) -> Result<(Vec<u8>, usize), String> {
             .ok_or_else(|| "Truncated chunked body".to_owned())?
             + at;
         let size_text = latin1(&bytes[at..line_end]);
-        let size_text = size_text.split_once(';').map_or(size_text.as_str(), |(n, _)| n).trim();
-        let size = usize::from_str_radix(size_text, 16)
-            .map_err(|_| "Invalid chunked body".to_owned())?;
+        let size_text = size_text
+            .split_once(';')
+            .map_or(size_text.as_str(), |(n, _)| n)
+            .trim();
+        let size =
+            usize::from_str_radix(size_text, 16).map_err(|_| "Invalid chunked body".to_owned())?;
         at = line_end + 2;
         if size == 0 {
             // Consume trailers through the blank line.
@@ -414,7 +437,11 @@ fn decode_raw_deflate(body: &[u8]) -> Result<Vec<u8>, String> {
             continue;
         }
         match decompress
-            .decompress(&body[consumed..], &mut out[filled..], FlushDecompress::Finish)
+            .decompress(
+                &body[consumed..],
+                &mut out[filled..],
+                FlushDecompress::Finish,
+            )
             .map_err(|e| format!("Content decoding failed: {e}"))?
         {
             Status::StreamEnd => {
@@ -519,16 +546,13 @@ pub fn response_text(headers: &[(String, String)], body: &[u8]) -> String {
         Charset::Utf8 => String::from_utf8_lossy(body).into_owned(),
         Charset::Ascii => body
             .iter()
-            .map(|b| {
-                if *b < 0x80 {
-                    *b as char
-                } else {
-                    '\u{FFFD}'
-                }
-            })
+            .map(|b| if *b < 0x80 { *b as char } else { '\u{FFFD}' })
             .collect(),
         Charset::Latin1 => latin1(body),
-        Charset::Windows1252 => body.iter().map(|b| windows_1252(*b).unwrap_or('\u{FFFD}')).collect(),
+        Charset::Windows1252 => body
+            .iter()
+            .map(|b| windows_1252(*b).unwrap_or('\u{FFFD}'))
+            .collect(),
     }
 }
 
@@ -575,7 +599,7 @@ pub fn redirect_method(status: u16, method: &str) -> String {
 /// strips; the http→https standard-ports upgrade keeps; otherwise strip
 /// when the port or scheme changed.
 pub fn should_strip_auth(old: &ParsedUrl, new: &ParsedUrl) -> bool {
-    if old.host.to_ascii_lowercase() != new.host.to_ascii_lowercase() {
+    if !old.host.eq_ignore_ascii_case(&new.host) {
         return true;
     }
     let old_scheme = if old.https { "https" } else { "http" };
@@ -676,21 +700,21 @@ pub fn resolve_url(base: &str, location: &str) -> String {
     }
     if location.starts_with('?') {
         // Query-only reference keeps the base path.
-        let path_end = rest.find('?').map_or(rest.len(), |q| q);
+        let path_end = rest.find('?').unwrap_or(rest.len());
         let base_no_query = &rest[..path_end];
         return inherit_fragment(&format!("{scheme}://{base_no_query}{location}"), base);
     }
     // Relative path: merge with the base directory, dot-normalize.
     let base_no_query = rest.find('?').map_or(rest, |q| &rest[..q]);
-    let base_path = base_no_query.strip_prefix(authority).unwrap_or(base_no_query);
-    let base_dir = base_path.rsplit_once('/').map_or("/", |(dir, _)| {
-        if dir.is_empty() {
-            "/"
-        } else {
-            dir
-        }
-    });
-    let (loc_path, loc_query) = location.split_once('?').map_or((location.as_str(), ""), |(p, q)| (p, q));
+    let base_path = base_no_query
+        .strip_prefix(authority)
+        .unwrap_or(base_no_query);
+    let base_dir = base_path
+        .rsplit_once('/')
+        .map_or("/", |(dir, _)| if dir.is_empty() { "/" } else { dir });
+    let (loc_path, loc_query) = location
+        .split_once('?')
+        .map_or((location.as_str(), ""), |(p, q)| (p, q));
     let merged = if base_dir == "/" {
         format!("/{loc_path}")
     } else {
@@ -817,7 +841,7 @@ async fn tls_connect(
 
 enum Stream {
     Plain(tokio::net::TcpStream),
-    Tls(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
+    Tls(Box<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>),
 }
 
 async fn read_exact_timeout(
@@ -839,10 +863,7 @@ async fn read_exact_timeout(
         .map_err(|e| format!("Connection failed: {e}"))
 }
 
-async fn read_until_headers(
-    stream: &mut Stream,
-    timeout: Duration,
-) -> Result<Vec<u8>, String> {
+async fn read_until_headers(stream: &mut Stream, timeout: Duration) -> Result<Vec<u8>, String> {
     use tokio::io::AsyncReadExt;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -882,7 +903,9 @@ async fn read_body(
         return Ok(Vec::new());
     }
     let transfer = header_value(headers, "transfer-encoding").unwrap_or("");
-    let chunked = transfer.split(',').any(|c| c.trim().eq_ignore_ascii_case("chunked"));
+    let chunked = transfer
+        .split(',')
+        .any(|c| c.trim().eq_ignore_ascii_case("chunked"));
     if chunked {
         // Chunked framing must parse incrementally: read to close, then
         // decode (trailer handling needs the terminal chunk).
@@ -904,7 +927,8 @@ async fn read_body(
             }
             buf.extend_from_slice(&chunk[..read]);
         }
-        let (body, _) = decode_chunked(&buf).map_err(|detail| format!("Chunked encoding error: {detail}"))?;
+        let (body, _) =
+            decode_chunked(&buf).map_err(|detail| format!("Chunked encoding error: {detail}"))?;
         return Ok(body);
     }
     if let Some(length) = header_value(headers, "content-length") {
@@ -971,7 +995,7 @@ async fn fetch_once(
         let tls = tokio::time::timeout(timeout, tls_connect(tcp, host))
             .await
             .map_err(|_| "TLS handshake timed out".to_owned())??;
-        Stream::Tls(tls)
+        Stream::Tls(Box::new(tls))
     } else {
         Stream::Plain(tcp)
     };
@@ -991,7 +1015,11 @@ async fn fetch_once(
     let already = raw[body_at..].to_vec();
     let wire_body = read_body(&mut stream, already, &headers, status, timeout).await?;
     let body = decode_content(&headers, &wire_body)?;
-    Ok(HttpResponse { status, headers, body })
+    Ok(HttpResponse {
+        status,
+        headers,
+        body,
+    })
 }
 
 /// `requests.post(url, headers=headers, body, timeout=30)` with redirect
@@ -1237,22 +1265,10 @@ mod tests {
             resolve_url("http://h/a/b?x=1#f", "/c?y=2"),
             "http://h/c?y=2#f"
         );
-        assert_eq!(
-            resolve_url("http://h/a/b", "c"),
-            "http://h/a/c"
-        );
-        assert_eq!(
-            resolve_url("http://h/a/b", "../c"),
-            "http://h/c"
-        );
-        assert_eq!(
-            resolve_url("http://h/a/b", "?y=2"),
-            "http://h/a/b?y=2"
-        );
-        assert_eq!(
-            resolve_url("http://h/a", "//o/d"),
-            "http://o/d"
-        );
+        assert_eq!(resolve_url("http://h/a/b", "c"), "http://h/a/c");
+        assert_eq!(resolve_url("http://h/a/b", "../c"), "http://h/c");
+        assert_eq!(resolve_url("http://h/a/b", "?y=2"), "http://h/a/b?y=2");
+        assert_eq!(resolve_url("http://h/a", "//o/d"), "http://o/d");
         assert_eq!(requote_uri("/a b/%7e"), "/a%20b/~");
         assert_eq!(requote_uri("/a%2G"), "/a%252G");
     }
@@ -1335,8 +1351,8 @@ mod tests {
     /// the final response returned.
     #[tokio::test]
     async fn loopback_redirect_rebuilds_like_requests() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_server = seen.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1378,7 +1394,7 @@ mod tests {
         .unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"done");
-        let seen = seen.lock().unwrap();
+        let seen = seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 2);
         assert!(seen[0].starts_with("POST /start "), "{}", seen[0]);
         assert!(seen[1].starts_with("GET /next "), "{}", seen[1]);

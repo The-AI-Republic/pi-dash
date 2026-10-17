@@ -152,15 +152,20 @@ fn opt_uuid(id: &Option<Uuid>) -> Value {
 }
 
 fn opt_str(text: &Option<String>) -> Value {
-    text.as_ref().map_or(Value::Null, |s| Value::String(s.clone()))
+    text.as_ref()
+        .map_or(Value::Null, |s| Value::String(s.clone()))
 }
 
 fn opt_datetime(value: &Option<DateTime<Utc>>) -> Value {
-    value.as_ref().map_or(Value::Null, |dt| Value::String(drf_datetime(dt)))
+    value
+        .as_ref()
+        .map_or(Value::Null, |dt| Value::String(drf_datetime(dt)))
 }
 
 fn opt_date(value: &Option<NaiveDate>) -> Value {
-    value.as_ref().map_or(Value::Null, |d| Value::String(drf_date(d)))
+    value
+        .as_ref()
+        .map_or(Value::Null, |d| Value::String(drf_date(d)))
 }
 
 fn float_value(value: f64) -> Value {
@@ -190,7 +195,10 @@ pub fn asset_url(
             ))
         }
         Some(
-            "ISSUE_DESCRIPTION" | "COMMENT_DESCRIPTION" | "PAGE_DESCRIPTION" | "DRAFT_ISSUE_DESCRIPTION",
+            "ISSUE_DESCRIPTION"
+            | "COMMENT_DESCRIPTION"
+            | "PAGE_DESCRIPTION"
+            | "DRAFT_ISSUE_DESCRIPTION",
         ) => {
             let slug = workspace_slug?;
             let project = project_id?;
@@ -307,7 +315,10 @@ async fn fetch_user(pool: &PgPool, id: Uuid) -> Result<Option<UserRow>, sqlx::Er
 pub fn render_user(row: &UserRow, avatar_url: Option<&str>) -> Map<String, Value> {
     let mut out = Map::with_capacity(7);
     out.insert("id".to_owned(), uuid_value(&row.id));
-    out.insert("first_name".to_owned(), Value::String(row.first_name.clone()));
+    out.insert(
+        "first_name".to_owned(),
+        Value::String(row.first_name.clone()),
+    );
     out.insert("last_name".to_owned(), Value::String(row.last_name.clone()));
     out.insert("email".to_owned(), opt_str(&row.email));
     out.insert("avatar".to_owned(), Value::String(row.avatar.clone()));
@@ -315,7 +326,10 @@ pub fn render_user(row: &UserRow, avatar_url: Option<&str>) -> Map<String, Value
         "avatar_url".to_owned(),
         avatar_url.map_or(Value::Null, |u| Value::String(u.to_owned())),
     );
-    out.insert("display_name".to_owned(), Value::String(row.display_name.clone()));
+    out.insert(
+        "display_name".to_owned(),
+        Value::String(row.display_name.clone()),
+    );
     out
 }
 
@@ -460,11 +474,23 @@ pub fn render_project(row: &ProjectRow, cover_image_url: Option<&str>) -> Map<St
     );
     out.insert("deleted_at".to_owned(), opt_datetime(&row.deleted_at));
     out.insert("name".to_owned(), Value::String(row.name.clone()));
-    out.insert("description".to_owned(), Value::String(row.description.clone()));
-    out.insert("description_text".to_owned(), opt_str(&row.description_text));
-    out.insert("description_html".to_owned(), opt_str(&row.description_html));
+    out.insert(
+        "description".to_owned(),
+        Value::String(row.description.clone()),
+    );
+    out.insert(
+        "description_text".to_owned(),
+        opt_str(&row.description_text),
+    );
+    out.insert(
+        "description_html".to_owned(),
+        opt_str(&row.description_html),
+    );
     out.insert("network".to_owned(), Value::from(row.network));
-    out.insert("identifier".to_owned(), Value::String(row.identifier.clone()));
+    out.insert(
+        "identifier".to_owned(),
+        Value::String(row.identifier.clone()),
+    );
     out.insert("emoji".to_owned(), opt_str(&row.emoji));
     out.insert(
         "icon_prop".to_owned(),
@@ -504,7 +530,10 @@ pub fn render_project(row: &ProjectRow, cover_image_url: Option<&str>) -> Map<St
     out.insert("external_source".to_owned(), opt_str(&row.external_source));
     out.insert("external_id".to_owned(), opt_str(&row.external_id));
     out.insert("repo_url".to_owned(), Value::String(row.repo_url.clone()));
-    out.insert("base_branch".to_owned(), Value::String(row.base_branch.clone()));
+    out.insert(
+        "base_branch".to_owned(),
+        Value::String(row.base_branch.clone()),
+    );
     out.insert(
         "agent_default_interval_seconds".to_owned(),
         Value::from(row.agent_default_interval_seconds),
@@ -532,9 +561,15 @@ pub fn render_project(row: &ProjectRow, cover_image_url: Option<&str>) -> Map<St
     out.insert("created_by".to_owned(), opt_uuid(&row.created_by_id));
     out.insert("updated_by".to_owned(), opt_uuid(&row.updated_by_id));
     out.insert("workspace".to_owned(), uuid_value(&row.workspace_id));
-    out.insert("default_assignee".to_owned(), opt_uuid(&row.default_assignee_id));
+    out.insert(
+        "default_assignee".to_owned(),
+        opt_uuid(&row.default_assignee_id),
+    );
     out.insert("project_lead".to_owned(), opt_uuid(&row.project_lead_id));
-    out.insert("cover_image_asset".to_owned(), opt_uuid(&row.cover_image_asset_id));
+    out.insert(
+        "cover_image_asset".to_owned(),
+        opt_uuid(&row.cover_image_asset_id),
+    );
     out.insert("estimate".to_owned(), opt_uuid(&row.estimate_id));
     out.insert("default_state".to_owned(), opt_uuid(&row.default_state_id));
     out
@@ -680,7 +715,10 @@ pub fn render_label_lite(row: &LabelLiteRow) -> Map<String, Value> {
 /// Issue labels in prefetch order: `label_issue.all()` walks the through
 /// rows in `IssueLabel.Meta.ordering` (`-created_at`) and dereferences
 /// each label — no label-side filter, no label-side ordering.
-async fn fetch_issue_labels(pool: &PgPool, issue_id: Uuid) -> Result<Vec<LabelLiteRow>, sqlx::Error> {
+async fn fetch_issue_labels(
+    pool: &PgPool,
+    issue_id: Uuid,
+) -> Result<Vec<LabelLiteRow>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT l.id, l.name, l.color FROM labels l \
          JOIN issue_labels il ON il.label_id = l.id \
@@ -770,9 +808,11 @@ pub fn render_issue(
     );
     out.insert(
         "description_binary".to_owned(),
-        row.description_binary.as_ref().map_or(Value::Null, |bytes| {
-            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes))
-        }),
+        row.description_binary
+            .as_ref()
+            .map_or(Value::Null, |bytes| {
+                Value::String(base64::engine::general_purpose::STANDARD.encode(bytes))
+            }),
     );
     out.insert("priority".to_owned(), Value::String(row.priority.clone()));
     out.insert(
@@ -799,7 +839,10 @@ pub fn render_issue(
     out.insert("project".to_owned(), uuid_value(&row.project_id));
     out.insert("workspace".to_owned(), uuid_value(&row.workspace_id));
     out.insert("parent".to_owned(), opt_uuid(&row.parent_id));
-    out.insert("estimate_point".to_owned(), opt_uuid(&row.estimate_point_id));
+    out.insert(
+        "estimate_point".to_owned(),
+        opt_uuid(&row.estimate_point_id),
+    );
     out.insert("type".to_owned(), opt_uuid(&row.type_id));
     out.insert("assigned_pod".to_owned(), opt_uuid(&row.assigned_pod_id));
     out
@@ -887,7 +930,10 @@ pub fn render_cycle(row: &CycleRow) -> Map<String, Value> {
     );
     out.insert("deleted_at".to_owned(), opt_datetime(&row.deleted_at));
     out.insert("name".to_owned(), Value::String(row.name.clone()));
-    out.insert("description".to_owned(), Value::String(row.description.clone()));
+    out.insert(
+        "description".to_owned(),
+        Value::String(row.description.clone()),
+    );
     out.insert("start_date".to_owned(), opt_datetime(&row.start_date));
     out.insert("end_date".to_owned(), opt_datetime(&row.end_date));
     out.insert("view_props".to_owned(), row.view_props.clone());
@@ -1007,9 +1053,18 @@ pub fn render_module(row: &ModuleRow, members: &[Uuid]) -> Map<String, Value> {
     );
     out.insert("deleted_at".to_owned(), opt_datetime(&row.deleted_at));
     out.insert("name".to_owned(), Value::String(row.name.clone()));
-    out.insert("description".to_owned(), Value::String(row.description.clone()));
-    out.insert("description_text".to_owned(), opt_str(&row.description_text));
-    out.insert("description_html".to_owned(), opt_str(&row.description_html));
+    out.insert(
+        "description".to_owned(),
+        Value::String(row.description.clone()),
+    );
+    out.insert(
+        "description_text".to_owned(),
+        opt_str(&row.description_text),
+    );
+    out.insert(
+        "description_html".to_owned(),
+        opt_str(&row.description_html),
+    );
     out.insert("start_date".to_owned(), opt_date(&row.start_date));
     out.insert("target_date".to_owned(), opt_date(&row.target_date));
     out.insert("status".to_owned(), Value::String(row.status.clone()));
@@ -1026,7 +1081,12 @@ pub fn render_module(row: &ModuleRow, members: &[Uuid]) -> Map<String, Value> {
     out.insert("lead".to_owned(), opt_uuid(&row.lead_id));
     out.insert(
         "members".to_owned(),
-        Value::Array(members.iter().map(|id| Value::String(id.to_string())).collect()),
+        Value::Array(
+            members
+                .iter()
+                .map(|id| Value::String(id.to_string()))
+                .collect(),
+        ),
     );
     out
 }
@@ -1079,11 +1139,7 @@ async fn fetch_link(
 /// Render a link row: `id`, audit columns, then the two link ends in
 /// model order (`issue, cycle` / `module, issue`; `sub_issues_count`
 /// skips per QUIRK-ND-2).
-pub fn render_link(
-    row: &LinkRow,
-    first_name: &str,
-    second_name: &str,
-) -> Map<String, Value> {
+pub fn render_link(row: &LinkRow, first_name: &str, second_name: &str) -> Map<String, Value> {
     let mut out = Map::with_capacity(10);
     out.insert("id".to_owned(), uuid_value(&row.id));
     out.insert(
@@ -1135,7 +1191,10 @@ pub struct IssueCommentRow {
     pub parent_id: Option<Uuid>,
 }
 
-async fn fetch_issue_comment(pool: &PgPool, id: Uuid) -> Result<Option<IssueCommentRow>, sqlx::Error> {
+async fn fetch_issue_comment(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<IssueCommentRow>, sqlx::Error> {
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         "SELECT id, created_at, updated_at, deleted_at, comment_html, attachments, labels, \
          access, external_source, external_id, speaker_type, speaker_label, \
@@ -1197,17 +1256,28 @@ pub fn render_issue_comment(row: &IssueCommentRow, url: Option<&str>) -> Map<Str
     out.insert(
         "attachments".to_owned(),
         Value::Array(
-            row.attachments.iter().map(|a| Value::String(a.clone())).collect(),
+            row.attachments
+                .iter()
+                .map(|a| Value::String(a.clone()))
+                .collect(),
         ),
     );
     out.insert(
         "labels".to_owned(),
-        Value::Array(row.labels.iter().map(|l| Value::String(l.clone())).collect()),
+        Value::Array(
+            row.labels
+                .iter()
+                .map(|l| Value::String(l.clone()))
+                .collect(),
+        ),
     );
     out.insert("access".to_owned(), Value::String(row.access.clone()));
     out.insert("external_source".to_owned(), opt_str(&row.external_source));
     out.insert("external_id".to_owned(), opt_str(&row.external_id));
-    out.insert("speaker_type".to_owned(), Value::String(row.speaker_type.clone()));
+    out.insert(
+        "speaker_type".to_owned(),
+        Value::String(row.speaker_type.clone()),
+    );
     out.insert(
         "speaker_label".to_owned(),
         Value::String(row.speaker_label.clone()),
@@ -1272,7 +1342,10 @@ pub struct IntakeIssueRow {
     pub duplicate_to_id: Option<Uuid>,
 }
 
-async fn fetch_intake_issue(pool: &PgPool, id: Uuid) -> Result<Option<IntakeIssueRow>, sqlx::Error> {
+async fn fetch_intake_issue(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<IntakeIssueRow>, sqlx::Error> {
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         "SELECT id, intake_id, issue_id, created_at, updated_at, deleted_at, status, \
          snoozed_till, source, source_email, external_source, external_id, extra, \
@@ -1307,7 +1380,10 @@ async fn fetch_intake_issue(pool: &PgPool, id: Uuid) -> Result<Option<IntakeIssu
 /// Render `IntakeIssueSerializer`: `id`, the nested `issue_detail`
 /// (unexpanded), `inbox` (the intake id as UUID string), then the model
 /// fields in model order.
-pub fn render_intake_issue(row: &IntakeIssueRow, issue_detail: Map<String, Value>) -> Map<String, Value> {
+pub fn render_intake_issue(
+    row: &IntakeIssueRow,
+    issue_detail: Map<String, Value>,
+) -> Map<String, Value> {
     let mut out = Map::with_capacity(20);
     out.insert("id".to_owned(), uuid_value(&row.id));
     out.insert("issue_detail".to_owned(), Value::Object(issue_detail));
@@ -1357,14 +1433,12 @@ impl std::error::Error for StoreError {}
 
 /// Assemble one issue rendering: the row plus labels/assignees/state in
 /// `expand` mode (`expand=true`: objects; `false`: id-string lists).
-async fn issue_value(
-    pool: &PgPool,
-    row: &IssueRow,
-    expand: bool,
-) -> Result<Value, StoreError> {
+async fn issue_value(pool: &PgPool, row: &IssueRow, expand: bool) -> Result<Value, StoreError> {
     let map_store = |e: sqlx::Error| StoreError(e.to_string());
     let labels = fetch_issue_labels(pool, row.id).await.map_err(map_store)?;
-    let assignees = fetch_issue_assignees(pool, row.id).await.map_err(map_store)?;
+    let assignees = fetch_issue_assignees(pool, row.id)
+        .await
+        .map_err(map_store)?;
     let (labels_value, assignees_value) = if expand {
         let mut expanded_assignees = Vec::with_capacity(assignees.len());
         for assignee in &assignees {
@@ -1375,15 +1449,26 @@ async fn issue_value(
         }
         (
             Value::Array(
-                labels.iter().map(|l| Value::Object(render_label_lite(l))).collect(),
+                labels
+                    .iter()
+                    .map(|l| Value::Object(render_label_lite(l)))
+                    .collect(),
             ),
             Value::Array(expanded_assignees),
         )
     } else {
         (
-            Value::Array(labels.iter().map(|l| Value::String(l.id.to_string())).collect()),
             Value::Array(
-                assignees.iter().map(|a| Value::String(a.id.to_string())).collect(),
+                labels
+                    .iter()
+                    .map(|l| Value::String(l.id.to_string()))
+                    .collect(),
+            ),
+            Value::Array(
+                assignees
+                    .iter()
+                    .map(|a| Value::String(a.id.to_string()))
+                    .collect(),
             ),
         )
     };
@@ -1421,19 +1506,26 @@ pub async fn get_model_data(
     if pidash_services::tasks_webhooks::webhook_data::binding_for(event).is_none() {
         return Err(ModelDataError::UnknownModel(event.to_owned()));
     }
-    let id = Uuid::parse_str(event_id).map_err(|_| ModelDataError::InvalidId(event_id.to_owned()))?;
+    let id =
+        Uuid::parse_str(event_id).map_err(|_| ModelDataError::InvalidId(event_id.to_owned()))?;
     let map_store = |e: sqlx::Error| ModelDataError::Store(e.to_string());
     let missing = || ModelDataError::NotFound(event.to_owned(), event_id.to_owned());
     match event {
         "user" => {
-            let row = fetch_user(pool, id).await.map_err(map_store)?.ok_or_else(missing)?;
+            let row = fetch_user(pool, id)
+                .await
+                .map_err(map_store)?
+                .ok_or_else(missing)?;
             let url = image_url(pool, row.avatar_asset_id, &row.avatar)
                 .await
                 .map_err(map_store)?;
             Ok(Value::Object(render_user(&row, url.as_deref())))
         }
         "project" => {
-            let row = fetch_project(pool, id).await.map_err(map_store)?.ok_or_else(missing)?;
+            let row = fetch_project(pool, id)
+                .await
+                .map_err(map_store)?
+                .ok_or_else(missing)?;
             let cover = row.cover_image.clone().unwrap_or_default();
             let url = image_url(pool, row.cover_image_asset_id, &cover)
                 .await
@@ -1441,17 +1533,26 @@ pub async fn get_model_data(
             Ok(Value::Object(render_project(&row, url.as_deref())))
         }
         "issue" => {
-            let row = fetch_issue(pool, id).await.map_err(map_store)?.ok_or_else(missing)?;
+            let row = fetch_issue(pool, id)
+                .await
+                .map_err(map_store)?
+                .ok_or_else(missing)?;
             issue_value(pool, &row, true)
                 .await
                 .map_err(|e| ModelDataError::Store(e.to_string()))
         }
         "cycle" => {
-            let row = fetch_cycle(pool, id).await.map_err(map_store)?.ok_or_else(missing)?;
+            let row = fetch_cycle(pool, id)
+                .await
+                .map_err(map_store)?
+                .ok_or_else(missing)?;
             Ok(Value::Object(render_cycle(&row)))
         }
         "module" => {
-            let row = fetch_module(pool, id).await.map_err(map_store)?.ok_or_else(missing)?;
+            let row = fetch_module(pool, id)
+                .await
+                .map_err(map_store)?
+                .ok_or_else(missing)?;
             let members = fetch_module_members(pool, id).await.map_err(map_store)?;
             Ok(Value::Object(render_module(&row, &members)))
         }
@@ -1470,16 +1571,28 @@ pub async fn get_model_data(
             Ok(Value::Object(render_link(&row, "module", "issue")))
         }
         "issue_comment" => {
-            let row = fetch_issue_comment(pool, id).await.map_err(map_store)?.ok_or_else(missing)?;
+            let row = fetch_issue_comment(pool, id)
+                .await
+                .map_err(map_store)?
+                .ok_or_else(missing)?;
             // `obj.workspace.slug if obj.workspace_id else None`, per part.
-            let slug = workspace_slug(pool, row.workspace_id).await.map_err(map_store)?;
-            let identifier = project_identifier(pool, row.project_id).await.map_err(map_store)?;
-            let sequence = issue_sequence(pool, row.issue_id).await.map_err(map_store)?;
+            let slug = workspace_slug(pool, row.workspace_id)
+                .await
+                .map_err(map_store)?;
+            let identifier = project_identifier(pool, row.project_id)
+                .await
+                .map_err(map_store)?;
+            let sequence = issue_sequence(pool, row.issue_id)
+                .await
+                .map_err(map_store)?;
             let url = issue_web_url(web_base, slug.as_deref(), identifier.as_deref(), sequence);
             Ok(Value::Object(render_issue_comment(&row, url.as_deref())))
         }
         "intake_issue" => {
-            let row = fetch_intake_issue(pool, id).await.map_err(map_store)?.ok_or_else(missing)?;
+            let row = fetch_intake_issue(pool, id)
+                .await
+                .map_err(map_store)?
+                .ok_or_else(missing)?;
             let issue = fetch_issue(pool, row.issue_id)
                 .await
                 .map_err(map_store)?
@@ -1511,7 +1624,9 @@ mod tests {
 
     fn golden(event: &str) -> Value {
         let parsed = fixture();
-        let raw = parsed["events"][event]["json"].as_str().expect("golden json");
+        let raw = parsed["events"][event]["json"]
+            .as_str()
+            .expect("golden json");
         serde_json::from_str(raw).expect("golden parses")
     }
 
@@ -1594,9 +1709,18 @@ mod tests {
             avatar_asset_id: None,
             display_name: g["display_name"].as_str().unwrap().to_owned(),
         };
-        assert_render("user", render_user(&row, str_opt(&g["avatar_url"]).as_deref()));
+        assert_render(
+            "user",
+            render_user(&row, str_opt(&g["avatar_url"]).as_deref()),
+        );
         // The doubled `email` Meta.fields entry collapses to one key.
-        assert_eq!(golden_keys("user").iter().filter(|k| k.as_str() == "email").count(), 1);
+        assert_eq!(
+            golden_keys("user")
+                .iter()
+                .filter(|k| k.as_str() == "email")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1657,7 +1781,8 @@ mod tests {
             external_id: str_opt(&g["external_id"]),
             repo_url: g["repo_url"].as_str().unwrap().to_owned(),
             base_branch: g["base_branch"].as_str().unwrap().to_owned(),
-            agent_default_interval_seconds: g["agent_default_interval_seconds"].as_i64().unwrap() as i32,
+            agent_default_interval_seconds: g["agent_default_interval_seconds"].as_i64().unwrap()
+                as i32,
             agent_default_max_ticks: g["agent_default_max_ticks"].as_i64().unwrap() as i32,
             agent_review_default_interval_seconds: g["agent_review_default_interval_seconds"]
                 .as_i64()
@@ -1744,7 +1869,12 @@ mod tests {
         let row = issue_row(&g);
         assert_render(
             "issue",
-            render_issue(&row, g["labels"].clone(), g["assignees"].clone(), g["state"].clone()),
+            render_issue(
+                &row,
+                g["labels"].clone(),
+                g["assignees"].clone(),
+                g["state"].clone(),
+            ),
         );
         // QUIRK-ND-1: cycle/module always skip (reverse-FK manager).
         assert!(g.get("cycle").is_none());
@@ -1767,8 +1897,16 @@ mod tests {
         // QUIRK-ND-4: b"\x00\xffABC\x7f\x80" -> 'AP9BQkN/gA=='.
         let mut row = issue_row(&golden("issue"));
         row.description_binary = Some(vec![0x00, 0xff, b'A', b'B', b'C', 0x7f, 0x80]);
-        let rendered = render_issue(&row, Value::Array(vec![]), Value::Array(vec![]), Value::Null);
-        assert_eq!(rendered["description_binary"], serde_json::json!("AP9BQkN/gA=="));
+        let rendered = render_issue(
+            &row,
+            Value::Array(vec![]),
+            Value::Array(vec![]),
+            Value::Null,
+        );
+        assert_eq!(
+            rendered["description_binary"],
+            serde_json::json!("AP9BQkN/gA==")
+        );
     }
 
     #[test]
@@ -1828,12 +1966,7 @@ mod tests {
             workspace_id: uid(&g["workspace"]),
             lead_id: uid_opt(&g["lead"]),
         };
-        let members: Vec<Uuid> = g["members"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(uid)
-            .collect();
+        let members: Vec<Uuid> = g["members"].as_array().unwrap().iter().map(uid).collect();
         assert_render("module", render_module(&row, &members));
         assert_eq!(golden_keys("module").last().unwrap(), "members");
     }
@@ -1863,7 +1996,11 @@ mod tests {
         let module_issue = golden("module_issue");
         assert_render(
             "module_issue",
-            render_link(&link_row(&module_issue, "module", "issue"), "module", "issue"),
+            render_link(
+                &link_row(&module_issue, "module", "issue"),
+                "module",
+                "issue",
+            ),
         );
         assert!(cycle_issue.get("sub_issues_count").is_none());
     }
@@ -2004,8 +2141,14 @@ mod tests {
             Some("http://a/ws/browse/GLD-7".to_owned())
         );
         assert_eq!(issue_web_url(None, Some("ws"), Some("GLD"), Some(7)), None);
-        assert_eq!(issue_web_url(Some("http://a"), None, Some("GLD"), Some(7)), None);
-        assert_eq!(issue_web_url(Some("http://a"), Some("ws"), Some("GLD"), None), None);
+        assert_eq!(
+            issue_web_url(Some("http://a"), None, Some("GLD"), Some(7)),
+            None
+        );
+        assert_eq!(
+            issue_web_url(Some("http://a"), Some("ws"), Some("GLD"), None),
+            None
+        );
     }
 
     #[test]
@@ -2018,7 +2161,13 @@ mod tests {
             Some(format!("/api/assets/v2/static/{id}/"))
         );
         assert_eq!(
-            asset_url(&id, Some("ISSUE_ATTACHMENT"), Some("ws"), Some(&pid), Some(&iid)),
+            asset_url(
+                &id,
+                Some("ISSUE_ATTACHMENT"),
+                Some("ws"),
+                Some(&pid),
+                Some(&iid)
+            ),
             Some(format!(
                 "/api/assets/v2/workspaces/ws/projects/{pid}/issues/{iid}/attachments/{id}/"
             ))
@@ -2027,7 +2176,16 @@ mod tests {
             asset_url(&id, Some("PAGE_DESCRIPTION"), Some("ws"), Some(&pid), None),
             Some(format!("/api/assets/v2/workspaces/ws/projects/{pid}/{id}/"))
         );
-        assert_eq!(asset_url(&id, Some("DRAFT_ISSUE_ATTACHMENT"), Some("ws"), Some(&pid), Some(&iid)), None);
+        assert_eq!(
+            asset_url(
+                &id,
+                Some("DRAFT_ISSUE_ATTACHMENT"),
+                Some("ws"),
+                Some(&pid),
+                Some(&iid)
+            ),
+            None
+        );
         assert_eq!(asset_url(&id, None, None, None, None), None);
     }
 
@@ -2037,7 +2195,10 @@ mod tests {
             ModelDataError::UnknownModel("nope".to_owned()).to_string(),
             "Model not found for event: nope"
         );
-        assert!(is_not_found(&ModelDataError::NotFound("issue".to_owned(), "x".to_owned())));
+        assert!(is_not_found(&ModelDataError::NotFound(
+            "issue".to_owned(),
+            "x".to_owned()
+        )));
         assert!(!is_not_found(&ModelDataError::UnknownModel("x".to_owned())));
         assert!(!is_not_found(&ModelDataError::InvalidId("x".to_owned())));
         assert_eq!(
