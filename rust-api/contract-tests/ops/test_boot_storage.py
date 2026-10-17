@@ -101,7 +101,7 @@ EXPECTED_LEAVES = [
     ("assistant", "0004_usersttconfig"),
     ("auth", "0012_alter_user_first_name_max_length"),
     ("contenttypes", "0002_remove_content_type_name"),
-    ("db", "0167_wait_budget"),
+    ("db", "0168_ticker_stop_signal_disarm_reason"),
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
