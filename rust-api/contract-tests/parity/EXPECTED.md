@@ -21,7 +21,7 @@ Counts (2026-10-17, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 521 OWNED, 7 MISSING (all listed below),
   9 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 87 tasks — 69 OWNED, 18 proxied by design, 0 MISSING;
+- Jobs: 87 tasks — 70 OWNED, 17 proxied by design, 0 MISSING;
   beat 28/28 OWNED (same task, same cadence on both sides).
 
 ## Routes
@@ -200,13 +200,16 @@ handler); the send/stack rows are gone here (live `RedisMail`/`MailDb`/
 ```expected-jobs
 ```
 
-### W-export (0 rows; reclassified to PROXIED)
+### W-export (0 rows; fixed)
 
-Fix: PIDASHCONV-835 (hybrid-worker decision, not wiring: the Python
-worker stays the owner post-switchover — see the `delete_old_s3_link`
-bullet under "Proxied by design". No register fn exists and Rust has
-no live S3 delete path, so there is nothing to wire; the `W-export`
-gap id stays reserved in `WIRE_GAPS`).
+Fix: PIDASHCONV-858 (landed; revisits the PIDASHCONV-835 hybrid-worker
+decision, whose 2027-04-10 backstop the Standalone Rust rule withdrew).
+`register_expiry` is wired in `worker()` with the live S3 deleter (one
+signed `DELETE` per truthy key over `pidash-storage` SigV4 + reqwest;
+any S3 error fails the task like Django's uncaught `ClientError`, so
+an outage parks instead of ack-and-clearing). The row reclassified to
+OWNED (signature deleted). The `W-export` gap id stays reserved in
+`WIRE_GAPS`.
 
 ```expected-jobs
 ```
@@ -222,7 +225,7 @@ The row reclassified to OWNED (signature deleted).
 ```expected-jobs
 ```
 
-### Proxied by design (18 rows)
+### Proxied by design (17 rows)
 
 No fix issue: forwarding preserves Django's outcome on every row.
 
@@ -230,18 +233,6 @@ No fix issue: forwarding preserves Django's outcome on every row.
 - `django-drops-too` (6): called but unregistered in Django
   (PDASHOSS01-292) — the Python worker drops them; forwarding drops
   them identically.
-- `delete_old_s3_link`: hybrid worker (PIDASHCONV-835). Registered
-  and beat-scheduled (twice daily), but the body deletes objects from
-  a live S3 bucket and Rust has no live S3 delete path (`ObjectStore`
-  has head/copy only; the worker wires `UnavailableObjectStore`;
-  "Sinks, never live buckets"). A Rust handler would clear `url`
-  without deleting objects, diverging from Django — so the Python
-  worker stays the owner post-switchover (the AMQP broker stays too:
-  the Rust scheduler keeps firing both beat entries and the Rust
-  worker forwards to Python over Celery protocol). Decision owner:
-  stage-8 switchover track (PIDASHCONV-835); revisit PIDASHCONV-858
-  by 2027-04-10, or when Rust ships a live S3 delete path, whichever
-  comes first.
 - `assistant.run_turn`: hybrid worker (PIDASHCONV-857). Published on
   every assistant message POST (`messages.py:103`), but the body runs
   the pydantic-ai agent loop and Rust has no live `TurnSeam`/agent
@@ -271,7 +262,6 @@ PROXIED :: celery.starmap :: celery-builtin; no canvas usage
 PROXIED :: pi_dash.bgtasks.analytic_plot_export.analytic_export_task :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email :: dead (defined, never referenced)
 PROXIED :: pi_dash.bgtasks.export_task.issue_export_task :: django-drops-too (PDASHOSS01-292)
-PROXIED :: pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link :: hybrid worker (no live S3 delete in Rust); forward preserves full python execution (PIDASHCONV-835)
 PROXIED :: pi_dash.bgtasks.webhook_task.model_activity :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.webhook_task.send_webhook_deactivation_email :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.webhook_task.webhook_activity :: django-drops-too (PDASHOSS01-292)

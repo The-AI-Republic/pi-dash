@@ -147,8 +147,11 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     crate::tasks_cleanup::register_cleanup_handlers(registry, ctx.pools.clone(), ctx.mongo.clone());
     crate::tasks_cleanup::register_versions(registry, ctx.pools.primary().clone());
     // D-09 remaining groups (PIDASHCONV-224; kept in sync with
-    // `tests::worker_registry_owns_all_d09_local_tasks`). The four export
-    // tasks stay Python-owned: never register them here.
+    // `tests::worker_registry_owns_all_d09_local_tasks`). The three
+    // export tasks stay Python-owned: never register them here.
+    // `delete_old_s3_link` flipped to Rust in PIDASHCONV-858 (below):
+    // the live S3 deleter fails the task on any S3 error, so an S3
+    // outage parks instead of ack-and-clearing.
     crate::tasks_cleanup::register_deletion_tasks(registry, ctx.pools.clone());
     // `register_assets` installs sweep + metadata + copy (assets.rs:692).
     crate::tasks_cleanup::assets::register_assets(
@@ -156,6 +159,13 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         std::sync::Arc::new(crate::tasks_cleanup::assets::UnavailableObjectStore),
         std::sync::Arc::new(crate::tasks_cleanup::assets::NoopLiveConvert),
+    );
+    crate::tasks_cleanup::register_expiry(
+        registry,
+        ctx.pools.primary().clone(),
+        std::sync::Arc::new(crate::tasks_cleanup::expiry::LiveS3Deleter::from_settings(
+            &ctx.settings,
+        )),
     );
     crate::tasks_cleanup::register_workspace_seed(
         registry,
@@ -440,7 +450,7 @@ mod tests {
 
     /// PIDASHCONV-918: the helper owns exactly the OSS task set — the
     /// same const union the binary's `mirror_registry_matches_tasks_table`
-    /// pins (69 names), while the Python-owned sentinels stay
+    /// pins (70 names), while the Python-owned sentinels stay
     /// unregistered. `Pools::primary_only` over a lazy pool keeps the
     /// test hermetic: registration constructs handlers without I/O, and
     /// none of them runs here.
@@ -481,6 +491,7 @@ mod tests {
             crate::tasks_cleanup::HARD_DELETE_TASK,
             crate::tasks_cleanup::WORKSPACE_SEED_TASK_NAME,
             crate::tasks_cleanup::dummy_data::TASK_NAME,
+            crate::tasks_cleanup::TASK_DELETE_OLD_S3_LINK,
             crate::tasks_webhooks::PROCESS_LOGS_TASK,
             crate::tasks_webhooks::TRACK_EVENT_TASK,
             crate::tasks_webhooks::RECENT_VISITED_TASK_NAME,
@@ -524,7 +535,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected.len(), 69, "worker-owned count drifted");
+        assert_eq!(expected.len(), 70, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");
@@ -540,10 +551,17 @@ mod tests {
             assert!(!registry.owns(name), "{name} must stay Python-owned");
             assert_eq!(route_for(&registry, name), Route::PythonOwned);
         }
+        // Three of the four export names stay Python-owned;
+        // `delete_old_s3_link` flipped to Rust (PIDASHCONV-858).
         assert_eq!(crate::tasks_cleanup::EXPORT_TASK_NAMES.len(), 4);
         for name in crate::tasks_cleanup::EXPORT_TASK_NAMES {
-            assert!(!registry.owns(name), "{name} must stay Python-owned");
-            assert_eq!(route_for(&registry, name), Route::PythonOwned);
+            if name == crate::tasks_cleanup::TASK_DELETE_OLD_S3_LINK {
+                assert!(registry.owns(name), "{name} must be worker-owned");
+                assert_eq!(route_for(&registry, name), Route::Local);
+            } else {
+                assert!(!registry.owns(name), "{name} must stay Python-owned");
+                assert_eq!(route_for(&registry, name), Route::PythonOwned);
+            }
         }
     }
 }

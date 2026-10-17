@@ -10,12 +10,12 @@
 //! pure row/CSV/ZIP/S3/mail decisions live in `pidash-services`
 //! (`tasks_cleanup::exports`); the DTOs in `pidash-types`.
 //!
-//! Ownership: these tasks stay Python-owned. No local handler is
-//! registered here — registering one would steal live traffic from the
-//! Python workers while S3, SMTP and the exporter serializers still
-//! live there. The domain gate flips ownership after the oracle replay
-//! passes on both backends. Until then [`is_export_task`] is the routing
-//! predicate the worker consults, and every name routes to `PythonOwned`.
+//! Ownership: the three export tasks stay Python-owned (their S3 upload,
+//! presigned-URL minting and SMTP bodies still live there — registering
+//! one would steal live traffic from the Python workers). The expiry
+//! task flipped to Rust in PIDASHCONV-858 ([`expiry`] owns its handler).
+//! [`is_export_task`] still recognises all four D-09 export names; only
+//! the three unregistered ones route to `PythonOwned`.
 //!
 //! * [`workspace_seed`] — `bgtasks/workspace_seed_task.py` (PIDASHCONV-190).
 //!
@@ -48,15 +48,18 @@ pub use pidash_types::tasks_cleanup::exports_dto::EXPORT_TASK_NAMES;
 pub mod assets;
 pub mod cleanup;
 pub mod deletion;
+pub mod expiry;
 
 pub use cleanup::register_cleanup_handlers;
 pub use deletion::{
     hard_delete_handler, register_deletion_tasks, soft_delete_handler, HARD_DELETE_TASK,
     RESTORE_TASK_NAME, SOFT_DELETE_TASK,
 };
+pub use expiry::{register_expiry, TASK_DELETE_OLD_S3_LINK};
 
-/// True for the four D-09 export task names. The worker forwards them to
-/// the Python plane until the domain gate flips ownership.
+/// True for the four D-09 export task names. The three still-unregistered
+/// names route to the Python plane; `delete_old_s3_link` is worker-owned
+/// since PIDASHCONV-858.
 pub fn is_export_task(task: &str) -> bool {
     EXPORT_TASK_NAMES.contains(&task)
 }

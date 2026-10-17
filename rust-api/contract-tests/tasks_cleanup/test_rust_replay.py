@@ -49,13 +49,16 @@ Ownership split (mirrors the worker registry):
 
 - Locally-owned tasks assert the SAME row-level DB diffs as the Django
   oracle, seed for seed: cleanup deletes, page-version windowing,
-  unuploaded-asset soft delete, hard delete, ETA delay, redelivery,
-  workspace_seed before/after. No skipped or weakened assertions.
-- The 4 export tasks stay Python-owned (``is_export_task`` /
-  ``EXPORT_TASK_NAMES``): the Rust worker forwards them to AMQP. Their
-  replay form asserts observable forwarding — the ``rust_job_queue``
-  row is acked AND the broker ``celery`` queue grows while the Django
-  worker is stopped — instead of local DB effects.
+  unuploaded-asset soft delete, expired-exporter URL clear (+ live S3
+  object delete for truthy keys, PIDASHCONV-858), hard delete, ETA
+  delay, redelivery, workspace_seed before/after. No skipped or
+  weakened assertions.
+- The 3 remaining export tasks stay Python-owned (``is_export_task`` /
+  ``EXPORT_TASK_NAMES`` minus the flipped expiry task): the Rust worker
+  forwards them to AMQP. Their replay form asserts observable
+  forwarding — the ``rust_job_queue`` row is acked AND the broker
+  ``celery`` queue grows while the Django worker is stopped — instead
+  of local DB effects.
 """
 
 import json as _json
@@ -66,14 +69,16 @@ import pytest
 from psycopg.rows import dict_row
 
 from _harness import broker_probe, rust_queue, taskspec as _taskspec
+from _harness import s3 as s3_helpers
 from _harness import seed as seed_helpers
 from _harness.db import insert_row, snapshot, wait_for_condition as wait_for
 
 M = "pi_dash.bgtasks"
 
+# The still-Python-owned export tasks (`delete_old_s3_link` flipped to
+# Rust in PIDASHCONV-858 and replays locally below).
 EXPORT_TASKS = [
     f"{M}.export_task.issue_export_task",
-    f"{M}.exporter_expired_task.delete_old_s3_link",
     f"{M}.analytic_plot_export.analytic_export_task",
     f"{M}.analytic_plot_export.export_analytics_to_csv_email",
 ]
@@ -225,6 +230,72 @@ def test_rust_delete_unuploaded_file_asset(db_conn, broker_url):
     assert wait_for(
         lambda: _soft_deleted(db_conn, "file_assets", row["id"]),
         what="stale unuploaded file_assets row soft-deleted by rust worker",
+    )
+
+
+def test_rust_delete_old_s3_link_clears_expired_url(db_conn, broker_url):
+    """Rust replay of the empty-key case: URL clears, no S3 call (PIDASHCONV-858)."""
+    owner = seed_helpers.user(db_conn, "rust-replay-exporter-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplayexporter", owner["id"])
+    row = insert_row(
+        db_conn,
+        "exporters",
+        {
+            "workspace_id": str(workspace["id"]),
+            "type": "issue_exports",
+            "provider": "csv",
+            "status": "completed",
+            "reason": "",
+            "url": "https://example.com/expired.zip",
+            "key": "",
+            "token": f"rust-replay-{uuid.uuid4().hex}",
+            "initiated_by_id": str(owner["id"]),
+            "created_at": _old(days=9),
+        },
+    )
+    rust_queue.publish(f"{M}.exporter_expired_task.delete_old_s3_link")
+    assert wait_for(
+        lambda: _column_is_null(db_conn, "exporters", row["id"], "url"),
+        what="expired exporter url cleared by rust worker",
+    )
+
+
+def test_rust_delete_old_s3_link_deletes_truthy_key_object(db_conn, broker_url):
+    """Rust replay of the truthy-key case: the S3 object is deleted from
+    the live endpoint AND the URL clears (PIDASHCONV-858)."""
+    bucket = s3_helpers.contract_bucket()
+    s3_helpers.s3_setup_bucket(bucket)
+    key = f"rust-replay-expiry-{uuid.uuid4().hex}.zip"
+    s3_helpers.s3_put_key(bucket, key, b"rust-replay-expiry-probe")
+    assert s3_helpers.s3_key_exists(bucket, key)
+    owner = seed_helpers.user(db_conn, "rust-replay-exporter-s3-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplayexporters3", owner["id"])
+    row = insert_row(
+        db_conn,
+        "exporters",
+        {
+            "workspace_id": str(workspace["id"]),
+            "type": "issue_exports",
+            "provider": "csv",
+            "status": "completed",
+            "reason": "",
+            "url": "https://example.com/expired-s3.zip",
+            "key": key,
+            "token": f"rust-replay-{uuid.uuid4().hex}",
+            "initiated_by_id": str(owner["id"]),
+            "created_at": _old(days=9),
+        },
+    )
+    rust_queue.publish(f"{M}.exporter_expired_task.delete_old_s3_link")
+    assert wait_for(
+        lambda: _column_is_null(db_conn, "exporters", row["id"], "url"),
+        what="expired exporter url cleared by rust worker",
+    )
+    # The delete precedes the clear per row, so the object is already
+    # gone; poll anyway so a missed delete fails loudly, not flakes.
+    assert wait_for(
+        lambda: not s3_helpers.s3_key_exists(bucket, key),
+        what="expired exporter S3 object deleted by rust worker",
     )
 
 
@@ -1448,19 +1519,19 @@ def test_rust_storage_aware_tasks_consumed_without_crash(db_conn, broker_url):
 
 
 def test_rust_exports_forward_to_python(db_conn, broker_url):
-    """Export parity: the 4 Python-owned tasks forward over AMQP, observably.
+    """Export parity: the 3 Python-owned tasks forward over AMQP, observably.
 
     The Rust worker has no local handler for these names (``is_export_task``)
-    while S3/SMTP and the exporter serializers still live on the Python
-    plane. Each job's ``rust_job_queue`` row must therefore be acked via the
-    forward path, AND its Celery v2 message must arrive on the broker
-    ``celery`` queue — which grows because the Django worker is stopped.
+    while S3 upload/SMTP and the exporter serializers still live on the
+    Python plane. Each job's ``rust_job_queue`` row must therefore be acked
+    via the forward path, AND its Celery v2 message must arrive on the
+    broker ``celery`` queue — which grows because the Django worker is
+    stopped.
     """
     probe_args = {
         EXPORT_TASKS[0]: (["csv", "ws-1", [], "tok-9", False, "slug"], {}),
-        EXPORT_TASKS[1]: ([], {}),
-        EXPORT_TASKS[2]: (["probe@example.com", {"metric": "count"}, "slug"], {}),
-        EXPORT_TASKS[3]: (([{}], ["H"], ["k"], "probe@example.com", "slug"), {}),
+        EXPORT_TASKS[1]: (["probe@example.com", {"metric": "count"}, "slug"], {}),
+        EXPORT_TASKS[2]: (([{}], ["H"], ["k"], "probe@example.com", "slug"), {}),
     }
     baseline = broker_probe.queue_depth()
     celery_ids = []

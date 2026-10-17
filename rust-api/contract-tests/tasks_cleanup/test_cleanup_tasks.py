@@ -19,6 +19,7 @@ import pytest
 from psycopg.rows import dict_row
 
 from _harness import broker_probe, celery_wire, taskspec
+from _harness import s3 as s3_helpers
 from _harness import seed as seed_helpers
 from _harness.db import insert_row, snapshot, wait_for_condition as wait_for
 
@@ -352,6 +353,46 @@ def test_delete_old_s3_link_clears_expired_url(db_conn, broker_url):
         what="expired exporter url cleared",
     )
     assert cleared
+
+
+def test_delete_old_s3_link_deletes_truthy_key_object(db_conn, broker_url):
+    """Expired exporter with a truthy key: the S3 object is deleted (live
+    endpoint) AND the URL clears (PIDASHCONV-858)."""
+    bucket = s3_helpers.contract_bucket()
+    s3_helpers.s3_setup_bucket(bucket)
+    key = f"contract-expiry-{uuid.uuid4().hex}.zip"
+    s3_helpers.s3_put_key(bucket, key, b"contract-expiry-probe")
+    assert s3_helpers.s3_key_exists(bucket, key)
+    owner = seed_helpers.user(db_conn, "contract-exporter-s3-owner")
+    workspace = seed_helpers.workspace(db_conn, "contractexporters3", owner["id"])
+    row = insert_row(
+        db_conn,
+        "exporters",
+        {
+            "workspace_id": str(workspace["id"]),
+            "type": "issue_exports",
+            "provider": "csv",
+            "status": "completed",
+            "reason": "",
+            "url": "https://example.com/expired-s3.zip",
+            "key": key,
+            "token": f"contract-{uuid.uuid4().hex}",
+            "initiated_by_id": str(owner["id"]),
+            "created_at": _old(days=9),
+        },
+    )
+    celery_wire.publish(f"{M}.exporter_expired_task.delete_old_s3_link")
+    cleared = wait_for(
+        lambda: _column_is_null(db_conn, "exporters", row["id"], "url"),
+        what="expired exporter url cleared",
+    )
+    assert cleared
+    # The delete precedes the clear per row, so the object is already
+    # gone; poll anyway so a missed delete fails loudly, not flakes.
+    assert wait_for(
+        lambda: not s3_helpers.s3_key_exists(bucket, key),
+        what="expired exporter S3 object deleted",
+    )
 
 
 def test_hard_delete_removes_tombstoned_rows(db_conn, broker_url):
