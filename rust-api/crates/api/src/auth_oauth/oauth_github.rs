@@ -1318,14 +1318,19 @@ async fn process_invitations(
 
     // Accepted project invites → workspace members (role clamped to 5/15)
     // + project members, `ignore_conflicts=True` on both.
-    let project_invites: Vec<(Uuid, Uuid, i16, Option<Uuid>)> = sqlx::query_as(
-        r#"SELECT workspace_id, project_id, role, created_by_id FROM project_member_invites
+    // Ported bug PB-1008 (`workspace_project_join.py:76-87`): the
+    // `ProjectMember` bulk omits `project` although
+    // `project_members.project_id` is NOT NULL, so any accepted project
+    // invite raises into the 500 after the rows above commit (google and
+    // gitlab omit the column too; gitea binds explicit NULL).
+    let project_invites: Vec<(Uuid, i16, Option<Uuid>)> = sqlx::query_as(
+        r#"SELECT workspace_id, role, created_by_id FROM project_member_invites
            WHERE email = $1 AND accepted AND deleted_at IS NULL"#,
     )
     .bind(email)
     .fetch_all(pool)
     .await?;
-    for (workspace_id, project_id, role, created_by) in &project_invites {
+    for (workspace_id, role, created_by) in &project_invites {
         let clamped = if *role == 5 || *role == 15 { *role } else { 15 };
         sqlx::query(
             r#"INSERT INTO "workspace_members" ("id", "created_at", "updated_at", "workspace_id",
@@ -1345,14 +1350,13 @@ async fn process_invitations(
         .await?;
         sqlx::query(
             r#"INSERT INTO "project_members" ("id", "created_at", "updated_at", "workspace_id",
-               "project_id", "member_id", "role", "created_by_id", "view_props", "default_props", "preferences",
+               "member_id", "role", "created_by_id", "view_props", "default_props", "preferences",
                "sort_order", "is_active")
-               VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $8, $9, 65535, TRUE) ON CONFLICT DO NOTHING"#,
+               VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $7, $8, 65535, TRUE) ON CONFLICT DO NOTHING"#,
         )
         .bind(Uuid::new_v4())
         .bind(now)
         .bind(workspace_id)
-        .bind(project_id)
         .bind(user_id)
         .bind(clamped)
         .bind(created_by)
