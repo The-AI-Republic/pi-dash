@@ -96,3 +96,24 @@ export { LabelPicker } from "./labels/LabelPicker.js";
 export type { LabelPickerProps } from "./labels/LabelPicker.js";
 export { LabelChips } from "./labels/LabelChips.js";
 export type { LabelChipsProps } from "./labels/LabelChips.js";
+export {
+  DISPLAY_SECTION_ORDER,
+  DISPLAY_SECTION_TITLES,
+  DISPLAY_SWITCH_LABELS,
+  EPIC_SUB_ISSUE_COUNT_LABEL,
+  GROUP_DIMENSION_LABELS,
+  GROUP_NONE_LABEL,
+  ORDER_OPTION_LABELS,
+  PROPERTY_PILL_LABELS,
+  groupDimensionLabel,
+  isPropertyShown,
+  layoutDisplayMatrix,
+  propertyPillLabel,
+  visibleGroupDimensions,
+  visiblePropertyKeys,
+} from "./display/matrix.js";
+export type { DisplayFeatureFlags, DisplaySection, DisplaySwitchKey, LayoutDisplayMatrix } from "./display/matrix.js";
+export { DisplayPanel } from "./display/DisplayPanel.js";
+export type { DisplayPanelProps, DisplayPanelState } from "./display/DisplayPanel.js";
+export { DisplayControl } from "./display/DisplayControl.js";
+export type { DisplayControlProps } from "./display/DisplayControl.js";
