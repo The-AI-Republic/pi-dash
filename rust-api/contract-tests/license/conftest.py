@@ -12,6 +12,7 @@ import pytest
 
 from _harness import Database, admin_client, anon_client
 from _harness.settings import database_url, redis_url, secret_key
+from _harness.throttle import reset_throttle_counters
 
 
 @pytest.fixture(scope="session")
@@ -41,6 +42,10 @@ def clean_db(db):
             cur.execute("DELETE FROM file_assets")
         conn.commit()
     db.reset()
+    # The anon throttle (30/min per IP, redis-backed) is never a contract
+    # answer; the suite's anon GETs burst past it over a full-dir run
+    # (PIDASHCONV-1096 tipped it over), so reset counters per test.
+    reset_throttle_counters()
     yield
 
 
