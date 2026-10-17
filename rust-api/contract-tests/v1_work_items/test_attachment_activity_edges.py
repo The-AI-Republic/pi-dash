@@ -114,6 +114,34 @@ def test_attachment_post_float_spellings(api, world, spelling, canonical):
     assert response.json()["attachment"]["attributes"]["size"] == float(canonical)
 
 
+def test_attachment_post_external_negative_zero(api, world, db):
+    """Raw -0 externals store and echo as "0" (PIDASHCONV-1121).
+
+    -0 is falsy so it skips the dup probe, but still stores through the
+    CharField prep (str(int(-0)) == "0") on both backends. Raw bytes are
+    load-bearing: Python json.dumps(-0) emits 0.
+    """
+    issue_id = world["issue"]["id"]
+    response = api.post(
+        attachment_url(world, issue_id),
+        content=(
+            '{"name": "ext.pdf", "type": "%s", "size": 10,'
+            ' "external_id": -0, "external_source": -0}' % PDF
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 200, response.text
+    attachment = response.json()["attachment"]
+    assert attachment["external_id"] == "0"
+    assert attachment["external_source"] == "0"
+    row = db.fetchone(
+        "SELECT external_id, external_source FROM file_assets WHERE id = %s",
+        (response.json()["asset_id"],),
+    )
+    assert row["external_id"] == "0"
+    assert row["external_source"] == "0"
+
+
 def test_attachment_post_numeric_name_spelling(api, world):
     """A numeric name rides the storage key in its float spelling."""
     issue_id = world["issue"]["id"]

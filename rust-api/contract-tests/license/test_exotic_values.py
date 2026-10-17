@@ -7,6 +7,12 @@
 Float tokens, huge integers, backslashes/quotes/control chars, bools and
 composites cross JSON→Python-string bridges on instance PATCH, config PATCH
 and workspace POST. Every test asserts the stored row plus the response body.
+
+Negative-zero tokens (PIDASHCONV-1121): ``-0`` is the only JSON int token
+whose verbatim text differs from ``str(int(token))``. Every bridge below
+renders it ``"0"`` on both backends — pinned here as a regression net over
+the token-shape convention. Raw request bytes are load-bearing: Python
+``json.dumps(-0)`` emits ``0``, so ``json={...}`` cannot send the token.
 """
 
 HUGE = 2**100
@@ -166,3 +172,73 @@ def test_workspace_logo_asset_negative_huge_int(admin_api, world):
     assert res.json() == {
         "logo_asset": [f"“{NEG_HUGE_DECIMAL}” is not a valid UUID."]
     }
+
+
+def _workspace_text_row(db, slug):
+    with db.connect() as conn:
+        return conn.execute(
+            "select logo, organization_size, background_color from workspaces"
+            " where slug = %s;",
+            (slug,),
+        ).fetchone()
+
+
+def test_instance_name_negative_zero(admin_api, world):
+    res = admin_api.patch(
+        "/api/instances/", content=b'{"instance_name": -0}', headers=JSON_HEADERS
+    )
+    assert res.status_code == 200
+    assert res.json()["instance_name"] == "0"
+    assert _instance_name_row(world["db"]) == "0"
+
+
+def test_config_negative_zero(admin_api, world):
+    world["db"].make_config("EXOTIC_NEGZERO", "old", category="general")
+    res = admin_api.patch(
+        "/api/instances/configurations/",
+        content=b'{"EXOTIC_NEGZERO": -0}',
+        headers=JSON_HEADERS,
+    )
+    assert res.status_code == 200
+    assert res.json()[0]["value"] == "0"
+    assert _config_row(world["db"], "EXOTIC_NEGZERO") == "0"
+
+
+def test_config_nested_negative_zero(admin_api, world):
+    world["db"].make_config("EXOTIC_NEGZERO_NESTED", "old", category="general")
+    res = admin_api.patch(
+        "/api/instances/configurations/",
+        content=b'{"EXOTIC_NEGZERO_NESTED": [-0]}',
+        headers=JSON_HEADERS,
+    )
+    assert res.status_code == 200
+    assert res.json()[0]["value"] == "[0]"
+    assert _config_row(world["db"], "EXOTIC_NEGZERO_NESTED") == "[0]"
+
+
+def test_workspace_negative_zero_text_fields(admin_api, world):
+    res = admin_api.post(
+        "/api/instances/workspaces/",
+        content=(
+            b'{"name": "NegZero", "slug": "ws-negzero", "company_role": -0,'
+            b' "logo": -0, "organization_size": -0, "background_color": -0}'
+        ),
+        headers=JSON_HEADERS,
+    )
+    assert res.status_code == 201, res.text
+    assert _member_role_row(world["db"], "ws-negzero") == "0"
+    assert _workspace_text_row(world["db"], "ws-negzero") == ("0", "0", "0")
+    body = res.json()
+    assert body["logo"] == "0"
+    assert body["organization_size"] == "0"
+    assert body["background_color"] == "0"
+
+
+def test_workspace_timezone_negative_zero_message(admin_api, world):
+    res = admin_api.post(
+        "/api/instances/workspaces/",
+        content=b'{"name": "NegZeroTz", "slug": "ws-negzero-tz", "timezone": -0}',
+        headers=JSON_HEADERS,
+    )
+    assert res.status_code == 400
+    assert res.json() == {"timezone": ['"0" is not a valid choice.']}
