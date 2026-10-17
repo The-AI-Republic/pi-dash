@@ -4,7 +4,7 @@
 import { ApiError } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
-import { catalogFailureMessage } from "./lib/errors.js";
+import { catalogFailureMessage, writeFailureMessage } from "./lib/errors.js";
 
 describe("catalog failure message", () => {
   it("repeats the server detail when it sent one (CLOUD-030)", () => {
@@ -20,5 +20,17 @@ describe("catalog failure message", () => {
   it("falls back generically off-protocol", () => {
     expect(catalogFailureMessage(new Error("boom"))).toContain("did not load");
     expect(catalogFailureMessage("boom")).toContain("did not load");
+  });
+});
+
+describe("write failure message", () => {
+  it("repeats the server detail for refused writes (CLOUD-024/027)", () => {
+    const error = new ApiError({ status: 502, code: "http", message: "Hub refused the install." });
+    expect(writeFailureMessage(error)).toBe("Hub refused the install.");
+  });
+
+  it("falls back generically off-protocol", () => {
+    expect(writeFailureMessage(new Error("boom"))).toContain("went wrong");
+    expect(writeFailureMessage("boom")).toContain("went wrong");
   });
 });

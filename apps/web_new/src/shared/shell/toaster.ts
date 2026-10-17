@@ -20,6 +20,10 @@ export function notifySuccess(title: string, description?: string): void {
   showToast(getToastManager(), { title, ...(description === undefined ? {} : { description }) });
 }
 
+export function notifyInfo(title: string, description?: string): void {
+  showToast(getToastManager(), { title, ...(description === undefined ? {} : { description }) });
+}
+
 export function notifyError(title: string, description?: string): void {
   showToast(getToastManager(), {
     title,

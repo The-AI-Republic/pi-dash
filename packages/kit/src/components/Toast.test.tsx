@@ -29,6 +29,11 @@ describe("Toast", () => {
     expect(screen.getByTestId("toast-stack")).toHaveTextContent("Saved");
   });
 
+  it("labels the stack as the Notifications region (CLOUD-024/025/026)", () => {
+    setup();
+    expect(screen.getByTestId("toast-stack")).toHaveAttribute("aria-label", "Notifications");
+  });
+
   it("runs the action and dismisses", async () => {
     const user = userEvent.setup();
     const manager = setup();

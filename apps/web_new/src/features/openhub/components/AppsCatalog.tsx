@@ -2,20 +2,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Connected catalog (written from parity/specs/cloud.md §5,
-// CLOUD-022/023/029/030): viewer-ownership intro, debounced search,
-// agent-tools switch, card grid, cursor pager, and the inline catalog
-// states. Mounted only behind a connected status read (AppsView gates).
+// CLOUD-022/023/029/030, and §6, CLOUD-024/027/028): viewer-ownership
+// intro, debounced search, agent-tools switch, card grid, cursor
+// pager, the inline catalog states, and the install/connect/remove
+// card flows with the credential dialog. Mounted only behind a
+// connected status read (AppsView gates).
 import { Button, EmptyState, Input, Spinner } from "@pidash/kit";
 import { Blocks, SearchX } from "lucide-react";
 import * as React from "react";
 
 import { useDebouncedValue } from "../../../shared/commands/index.js";
+import { useAppCardActions } from "../api/actions.js";
 import { useAgentToolsEnabled, useSetAgentToolsEnabled } from "../api/mutations.js";
 import { APPS_SEARCH_DEBOUNCE_MS, useMarketplacePage } from "../api/queries.js";
 import { catalogFailureMessage } from "../lib/errors.js";
 import { useCatalogPager } from "../lib/pager.js";
 import { AppCard } from "./AppCard.js";
 import { AppsToggle } from "./AppsToggle.js";
+import { ConnectDialog } from "./ConnectDialog.js";
 
 /**
  * Viewer-ownership intro. The oracle pins the yours/teammates wording
@@ -44,6 +48,8 @@ export function AppsCatalog({ workspaceSlug }: { workspaceSlug: string }): React
   const marketplace = useMarketplacePage(workspaceSlug, { query: settled, cursor: pager.cursor });
   const agentTools = useAgentToolsEnabled();
   const setAgentTools = useSetAgentToolsEnabled();
+  const cardActions = useAppCardActions(workspaceSlug);
+  const dialog = cardActions.dialog;
   const nextCursor = marketplace.data?.nextCursor ?? null;
   const pagerVisible = pager.page > 1 || nextCursor !== null;
 
@@ -92,7 +98,13 @@ export function AppsCatalog({ workspaceSlug }: { workspaceSlug: string }): React
         <>
           <ul data-testid="apps-catalog-grid" aria-label="Apps" aria-busy={marketplace.isFetching}>
             {marketplace.data.items.map((app) => (
-              <AppCard key={app.appId} app={app} />
+              <AppCard
+                key={app.appId}
+                app={app}
+                onInstall={cardActions.install}
+                onConnect={cardActions.connect}
+                onUninstall={cardActions.remove}
+              />
             ))}
           </ul>
           {pagerVisible ? (
@@ -109,6 +121,14 @@ export function AppsCatalog({ workspaceSlug }: { workspaceSlug: string }): React
             </nav>
           ) : null}
         </>
+      )}
+      {dialog === null ? null : (
+        <ConnectDialog
+          app={dialog.app}
+          auth={dialog.auth}
+          onSubmit={(fields) => cardActions.submitCredentials(dialog.app, fields)}
+          onClose={cardActions.closeDialog}
+        />
       )}
     </div>
   );

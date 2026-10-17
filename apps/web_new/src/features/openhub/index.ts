@@ -3,6 +3,20 @@
 // See the LICENSE file for details.
 // Public API of the Apps catalog feature. Other features import only from here.
 
+export {
+  COULD_NOT_CONNECT_TITLE,
+  HUB_REFUSED_DESCRIPTION,
+  INSTALL_FAILED_TITLE,
+  INSTALLED_UNCONNECTED_TITLE,
+  POPUP_BLOCKED_DESCRIPTION,
+  UNINSTALL_FAILED_TITLE,
+  connectedTitle,
+  installedTitle,
+  refreshMarketplace,
+  uninstalledTitle,
+  useAppCardActions,
+} from "./api/actions.js";
+export type { AppCardActions, ConnectDialogState } from "./api/actions.js";
 export { openhubKeys } from "./api/keys.js";
 export {
   AGENT_TOOLS_SAVE_FAILED_MESSAGE,
@@ -21,7 +35,8 @@ export {
   useOpenhubStatus,
 } from "./api/queries.js";
 export type { MarketplacePageParams } from "./api/queries.js";
-export { AppCard } from "./components/AppCard.js";
+export { APP_INSTALLED_BADGE, APP_NEEDS_CONNECTION_BADGE, AppCard } from "./components/AppCard.js";
+export type { AppCardProps } from "./components/AppCard.js";
 export {
   APPS_CATALOG_INTRO,
   APPS_EMPTY_DESCRIPTION,
@@ -40,8 +55,53 @@ export {
   APPS_STALE_HEADING,
   APPS_UNAVAILABLE_HEADING,
   AppsView,
+  CONNECTION_FAILED_MESSAGE,
+  CONNECTION_FAILED_TITLE,
 } from "./components/AppsView.js";
-export { catalogFailureMessage } from "./lib/errors.js";
+export {
+  CONNECT_DIALOG_CANCEL,
+  CONNECT_DIALOG_SETUP_LINK,
+  CONNECT_DIALOG_SUBMIT,
+  ConnectDialog,
+  connectDialogTitle,
+} from "./components/ConnectDialog.js";
+export type { ConnectDialogProps } from "./components/ConnectDialog.js";
+export {
+  CONNECT_ERROR_PARAM,
+  CONNECT_OUTCOME_PARAM,
+  CONNECT_TAB_TITLE,
+  CREDENTIAL_FORMAT_ERROR,
+  CREDENTIAL_REQUIRED_ERROR,
+  FALLBACK_CREDENTIAL_FIELD,
+  appMechanism,
+  cleanInstructions,
+  cleanedBounceHref,
+  connectReturnPath,
+  dialogFields,
+  hasBounceError,
+  hasOutcomeParams,
+  hubAppUrl,
+  isSafeSetupUrl,
+  isSecretField,
+  reserveConnectTab,
+  stripOutcomeParams,
+  trimCredentialValues,
+  validateCredentialValues,
+} from "./lib/connect.js";
+export type { AppMechanism } from "./lib/connect.js";
+export {
+  appCardActions,
+  appCardBadge,
+  appIconSource,
+  appLetter,
+  appNeedsConnection,
+  firstIconStage,
+  isAppInstalled,
+  nextIconStage,
+  svgGraphicSource,
+} from "./lib/cards.js";
+export type { AppCardAction, AppCardBadge, AppIconStage } from "./lib/cards.js";
+export { catalogFailureMessage, writeFailureMessage } from "./lib/errors.js";
 export {
   createCatalogPager,
   currentPagerCursor,
