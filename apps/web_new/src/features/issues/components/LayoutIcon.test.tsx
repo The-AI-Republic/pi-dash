@@ -14,4 +14,11 @@ describe("LayoutIcon", () => {
     expect(svg).not.toBeNull();
     expect(svg).toHaveAttribute("aria-hidden", "true");
   });
+
+  it("honors an explicit size", () => {
+    const { container } = render(<LayoutIcon kind="list" size={24} />);
+    const svg = container.querySelector("svg");
+    expect(svg).toHaveAttribute("width", "24");
+    expect(svg).toHaveAttribute("height", "24");
+  });
 });

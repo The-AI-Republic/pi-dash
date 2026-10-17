@@ -80,11 +80,13 @@ describe("temp rows", () => {
     insertTempRow(client, [...PREFIX], tempIssueRow("temp-1", "Draft title"));
     removeTempRow(client, [...PREFIX], "temp-1");
     client.setQueryData([...PREFIX, "junk"], "not-a-record");
+    client.setQueryData([...PREFIX, "nullish"], null);
     client.setQueryData([...PREFIX, "norows"], { total_count: 1 });
     client.setQueryData([...PREFIX, "nototal"], { results: [] });
     insertTempRow(client, [...PREFIX], tempIssueRow("temp-1", "Draft title"));
     removeTempRow(client, [...PREFIX], "temp-1");
     expect(client.getQueryData([...PREFIX, "junk"])).toBe("not-a-record");
+    expect(client.getQueryData([...PREFIX, "nullish"])).toBeNull();
     expect(client.getQueryData([...PREFIX, "norows"])).toEqual({ total_count: 1 });
     expect(client.getQueryData([...PREFIX, "nototal"])).toEqual({ results: [] });
   });

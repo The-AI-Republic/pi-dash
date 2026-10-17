@@ -142,4 +142,11 @@ describe("IssueList", () => {
     expect(screen.getByLabelText("WEB-1")).not.toHaveAttribute("data-highlight");
     expect(screen.queryByTestId("issues-fresh-strip")).not.toBeInTheDocument();
   });
+
+  it("renders compact rows when the density param selects compact", () => {
+    render(<IssueList issues={[row()]} projectIdentifier="WEB" layout="compact" />);
+    const article = screen.getByLabelText("WEB-42");
+    expect(article).toHaveClass("h-8");
+    expect(article).not.toHaveClass("h-11");
+  });
 });
