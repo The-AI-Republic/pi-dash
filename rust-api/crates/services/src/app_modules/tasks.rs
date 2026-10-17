@@ -8,7 +8,7 @@
 //! * `ModuleViewSet.create`, `model_activity.delay(...)` (`base.py:339-347`):
 //!   `model_id=str(module id)`, `current_instance=None`.
 //! * `ModuleViewSet.retrieve`, `recent_visited_task.delay(...)`
-//!   (`base.py:641-647`): visit upsert, deferred (see NO-OP note below).
+//!   (`base.py:641-647`): visit upsert, deferred (see deferral note below).
 //! * `ModuleViewSet.partial_update`, `model_activity.delay(...)`
 //!   (`base.py:708-716`): `current_instance` is the
 //!   `json.dumps(ModuleSerializer(current_module).data)` snapshot taken
@@ -60,16 +60,20 @@
 //! The dump *text* (`requested_data`, `current_instance`, `origin`) is the
 //! caller's job: `json.dumps(..., cls=DjangoJSONEncoder)` in Python, i.e.
 //! CPython `", "` / `": "` separators (the `api` crate's `python_dumps`
-//! owns that rendering). No worker `Registry` handler is registered for
-//! any of these names: all three are Python-owned, so the worker forwards
-//! them to RabbitMQ in Celery protocol v2.
+//! owns that rendering). Worker `Registry` handlers are registered for
+//! `issue_activity` (PIDASHCONV-836) and `recent_visited_task`
+//! (PIDASHCONV-1107), so the Rust worker runs those two; only
+//! `model_activity` is still Python-owned (PIDASHCONV-1105), and only it
+//! forwards to RabbitMQ in Celery protocol v2.
 //!
-//! `recent_visited_task` NO-OP note (pilot-2 pattern,
+//! `recent_visited_task` deferral note (pilot-2 pattern,
 //! `api/src/app_issues/mod.rs` `record_recent_visit`): in every
 //! environment the contract suite runs (memory broker, no worker), Django
 //! writes no `user_recent_visits` row from `.delay()`; the call site is
 //! kept but performs no inline write (an inline upsert broke the gate's
-//! teardown with a `ForeignKeyViolation` Django never produces).
+//! teardown with a `ForeignKeyViolation` Django never produces). The
+//! published message is real work, not a no-op: the Rust worker owns the
+//! task since PIDASHCONV-1107 and executes it on consume.
 //! [`RecentVisitedEmit`] pins the kwargs the deferred publish carries so
 //! the handler-side call site (PIDASHCONV-391) fires the exact message.
 //!
@@ -515,7 +519,7 @@ pub fn link_destroy_instance(module_name: &str) -> String {
 /// Kwargs in call order: `slug`, `entity_name`, `entity_identifier`,
 /// `user_id`, `project_id`. `entity_name` is always `"module"`;
 /// `entity_identifier` is the raw `pk` kwarg (string form on the wire).
-/// Deferred publish only (NO-OP note above): handlers keep the call site
+/// Deferred publish only (deferral note above): handlers keep the call site
 /// but perform no inline write.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecentVisitedEmit {

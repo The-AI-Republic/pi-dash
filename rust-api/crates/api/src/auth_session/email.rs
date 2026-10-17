@@ -46,8 +46,9 @@
 //!   success (the space twins pass no callback): the member
 //!   bulk-writes + invite deletes are replayed; the per-workspace
 //!   cache invalidation is a documented no-op (Rust serves no cached
-//!   members rows, so there is nothing to invalidate — same reasoning
-//!   as the D-32 `recent_visited_task` no-op), and each
+//!   members rows, so there is nothing to invalidate — the former D-32
+//!   `recent_visited_task` analogy is retired now that task executes in
+//!   the Rust worker (PIDASHCONV-1107)), and each
 //!   `track_event.delay` publishes its full kwargs (including
 //!   `event_properties`) through the F-09 publisher.
 //! * The email-check throttle is the process-local DRF loop from the
