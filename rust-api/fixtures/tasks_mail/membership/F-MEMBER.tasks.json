@@ -6,7 +6,8 @@
     "apps/api/pi_dash/bgtasks/user_activation_email_task.py:23-69",
     "apps/api/pi_dash/bgtasks/user_deactivation_email_task.py:23-71",
     "apps/api/pi_dash/bgtasks/project_add_user_email_task.py:25-89",
-    "apps/api/pi_dash/bgtasks/workspace_invitation_task.py:23-89"
+    "apps/api/pi_dash/bgtasks/workspace_invitation_task.py:23-89",
+    "apps/api/pi_dash/bgtasks/project_invitation_task.py:24-85 (PIDASHCONV-1104)"
   ],
   "tasks": {
     "project_add_user_email(current_site, project_member_id, invitor_id)": {
@@ -65,6 +66,26 @@
       "subject": "{first_name or display_name or email} has invited you to join them in {workspace.name} on Pi Dash",
       "template": "emails/invitations/workspace_invitation.html",
       "write": "workspace_member_invite.message = text_content; .save() (plain-text body stored on the invite)"
+    },
+    "project_invitation(email, project_id, token, current_site, invitor)": {
+      "reads": [
+        "User.objects.get(email=invitor) (lookup BY EMAIL, invitor is an address)",
+        "Project.objects.get(pk=project_id)",
+        "ProjectMemberInvite.objects.get(token=token, email=email)"
+      ],
+      "relative_link": "/project-invitations/?invitation_id={invite.id}&email={email}&slug={project.workspace.slug}&project_id={str(project_id arg verbatim)}",
+      "abs_url": "current_site + relative_link",
+      "subject": "{first_name or display_name or email} invited you to join {project.name} on Pi Dash",
+      "context": {
+        "email": "email",
+        "first_name": "user.first_name BARE (no or-chain, unlike the workspace task)",
+        "project_name": "project.name",
+        "invitation_url": "abs_url",
+        "current_site": "current_site"
+      },
+      "template": "emails/invitations/project_invitation.html",
+      "write": "project_member_invite.message = text_content; .save() BEFORE the send (full-field save; also NULLs created_by/updated_by in the worker \u2014 see PB-2009)",
+      "exceptions": "except (Project.DoesNotExist, ProjectMemberInvite.DoesNotExist): silent return (NOTE: User.DoesNotExist NOT caught -> falls to log_exception path)"
     }
   }
 }

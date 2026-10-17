@@ -249,7 +249,12 @@ jobs:
           # -E (worker_send_events): the ticker fan-out tests observe
           # task-received events, which are broadcast and never race the
           # worker's own queue consumption the way draining would.
-          nohup celery -A pi_dash worker -E --pool=solo --loglevel=info \
+          # -I (oracle includes, PIDASHCONV-1104): task modules the stock
+          # worker never imports (PDASHOSS01-292), one per line in the
+          # harness file (each task-port issue appends its own); without
+          # them the oracle cannot execute the unregistered tasks.
+          INCLUDES=$(grep -v '^[[:space:]]*#' ../../rust-api/contract-tests/_harness/oracle_worker_includes.txt | grep -v '^[[:space:]]*$' | paste -sd,)
+          nohup celery -A pi_dash worker -E --pool=solo -I "$INCLUDES" --loglevel=info \
             > /tmp/contract-worker.log 2>&1 &
 
       - name: Start Celery beat
@@ -275,11 +280,11 @@ jobs:
         # without this the django plugin tries to import pi_dash from this dir
         # and collection fails before any test runs. The oracle never touches
         # Django (wire format + DB diff + sinks only).
-        # Replay suites (tasks_*/test_rust_replay.py) need the Rust-owned
+        # Replay suites (tasks_*/test_rust_replay*.py) need the Rust-owned
         # rust_job_queue table and the Rust worker, neither of which exists
         # in this Django-only job — they have their own *-rust jobs. Exclude
         # by glob so future replay suites are skipped here too.
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py
 
       - name: Upload service logs on failure
         if: failure()

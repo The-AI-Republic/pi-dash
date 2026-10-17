@@ -1,4 +1,5 @@
-//! The four D-07 membership mail tasks (T6, PIDASHCONV-217).
+//! The four D-07 membership mail tasks (T6, PIDASHCONV-217), plus the
+//! project invitation task (PIDASHCONV-1104).
 //!
 //! Ports (translation only):
 //!
@@ -36,16 +37,32 @@
 //!   `emails/invitations/workspace_invitation.html`; the plain-text body is
 //!   written back (`invite.message = text_content; .save()`) BEFORE the
 //!   SMTP send, so a failed send still leaves the message stored.
+//! * `project_invitation(email, project_id, token, current_site, invitor)`
+//!   (`bgtasks/project_invitation_task.py:24-85`, PIDASHCONV-1104): the D-07
+//!   split skipped it as dead code, but Django d656243d fixed the
+//!   `invite.py` call site, so it is live. Same shape as the workspace
+//!   task: inviter `User.objects.get(email=invitor)` (miss logs),
+//!   `Project` / `ProjectMemberInvite` misses return silently (`:82`);
+//!   `relativelink =
+//!   /project-invitations/?invitation_id={id}&email={email}&slug={slug}&project_id={arg}`
+//!   (the project id is the wire arg verbatim, NOT a re-rendered UUID);
+//!   subject `{or-name} invited you to join {project} on Pi Dash`; context
+//!   `{email, first_name, project_name, invitation_url, current_site}` —
+//!   NOTE the context `first_name` is the bare `user.first_name` (`:37`),
+//!   not the or-chain the workspace task uses; template
+//!   `emails/invitations/project_invitation.html`; message stored BEFORE
+//!   the send, like the workspace task.
 //!
 //! SQL semantics: `users` has no `deleted_at` column (plain `WHERE`
 //! lookups). Direct `.objects.get(pk)` reads (`ProjectMember`,
-//! `Workspace`, `WorkspaceMemberInvite`) carry the default manager scope
+//! `Workspace`, `WorkspaceMemberInvite`, `Project`,
+//! `ProjectMemberInvite`) carry the default manager scope
 //! (`deleted_at IS NULL`) — the same convention as the sibling jobs
 //! (`license/tasks.rs:36`). The lazy FK-descriptor hops
-//! (`project_member.project/workspace/member`) resolve through Django's
-//! `_base_manager` (plain `Manager`: no `base_manager_name` is set
-//! anywhere under `apps/api/pi_dash`), so they carry no `deleted_at`
-//! scope. Sends go through T5's
+//! (`project_member.project/workspace/member`, `project.workspace`)
+//! resolve through Django's `_base_manager` (plain `Manager`: no
+//! `base_manager_name` is set anywhere under `apps/api/pi_dash`), so they
+//! carry no `deleted_at` scope. Sends go through T5's
 //! shared [`super::mail_send::send_mail`] (reused, never forked); the
 //! invite `message` UPDATE renders via the same [`super::mail_send`]
 //! helpers, which is byte-identical to the send's own render (all four
@@ -56,9 +73,14 @@
 //! Registration lives in [`super::register_membership_mail_tasks`]
 //! (`mod.rs`).
 //!
-//! PORT BUGS (ported, not fixed): none in these four bodies beyond the
+//! PORT BUGS (ported, not fixed): none in these bodies beyond the
 //! shared `str(None) == "None"` email rendering, which falls out of
-//! [`super::mail_send::py_str`] exactly like Python's `str()`.
+//! [`super::mail_send::py_str`] exactly like Python's `str()` — plus the
+//! invite `save()` audit wipe (PIDASHCONV-1104): both invitation tasks'
+//! `invite.save()` runs with no current user in the worker, so
+//! `BaseModel.save()` blanks `created_by`/`updated_by` and the full-field
+//! save persists the NULLs, discarding the inviter recorded at creation.
+//! Both UPDATEs below NULL the two columns exactly like Django.
 
 use std::sync::Arc;
 
@@ -81,6 +103,11 @@ pub const PROJECT_ADD_USER_EMAIL_TASK: &str =
 /// `pi_dash.bgtasks.workspace_invitation_task.workspace_invitation`.
 pub const WORKSPACE_INVITATION_TASK: &str =
     "pi_dash.bgtasks.workspace_invitation_task.workspace_invitation";
+/// `pi_dash.bgtasks.project_invitation_task.project_invitation`
+/// (PIDASHCONV-1104; live since Django d656243d fixed the `invite.py`
+/// call site).
+pub const PROJECT_INVITATION_TASK: &str =
+    "pi_dash.bgtasks.project_invitation_task.project_invitation";
 
 /// All four names, in fixture order.
 pub const MEMBERSHIP_MAIL_TASKS: [&str; 4] = [
@@ -104,6 +131,10 @@ pub const PROJECT_ADDITION_TEMPLATE: &str =
 /// `workspace_invitation`.
 pub const WORKSPACE_INVITATION_TEMPLATE: &str =
     include_str!("../../../../../apps/api/templates/emails/invitations/workspace_invitation.html");
+/// `emails/invitations/project_invitation.html` — serves
+/// `project_invitation` (PIDASHCONV-1104).
+pub const PROJECT_INVITATION_TEMPLATE: &str =
+    include_str!("../../../../../apps/api/templates/emails/invitations/project_invitation.html");
 
 /// Python `first_name or display_name or email`: empty strings fall
 /// through; the caller passes the email already through [`py_str`] (so a
@@ -159,6 +190,27 @@ pub fn invite_abs_url(current_site: &str, relative_link: &str) -> String {
 /// `workspace_invitation_task.py:49` subject.
 pub fn invite_subject(name: &str, workspace_name: &str) -> String {
     format!("{name} has invited you to join them in {workspace_name} on Pi Dash")
+}
+
+/// `project_invitation_task.py:30`: raw interpolation, no encoding.
+/// `project_id_arg` is the wire arg VERBATIM: Python formats
+/// `str(project_id)` on the deserialized arg (a string already after the
+/// JSON round-trip), so an oddly-cased UUID keeps its casing — a
+/// re-rendered `Uuid` would lowercase it.
+pub fn project_invite_relative_link(
+    invite_id: &Uuid,
+    email: &str,
+    workspace_slug: &str,
+    project_id_arg: &str,
+) -> String {
+    format!(
+        "/project-invitations/?invitation_id={invite_id}&email={email}&slug={workspace_slug}&project_id={project_id_arg}"
+    )
+}
+
+/// `project_invitation_task.py:33` subject.
+pub fn project_invite_subject(name: &str, project_name: &str) -> String {
+    format!("{name} invited you to join {project_name} on Pi Dash")
 }
 
 /// Extract the exact positional string args: `len != arity` or non-empty
@@ -503,11 +555,18 @@ pub fn workspace_invitation_handler(pool: PgPool) -> Handler {
                             ("abs_url", abs_url),
                         ]);
                         // `render_to_string` + plain text, then the DB
-                        // write BEFORE the send (`:55-63`).
+                        // write BEFORE the send (`:55-63`). The write
+                        // NULLs both audit columns: `BaseModel.save()`
+                        // (`db/models/base.py:24-42`) blanks
+                        // `created_by`/`updated_by` when crum has no
+                        // current user, which is always true in a
+                        // worker, and the full-field save persists the
+                        // NULLs (PIDASHCONV-1104; pinned by the oracle +
+                        // replay invite tests, which seed `created_by`).
                         let html = render_template(WORKSPACE_INVITATION_TEMPLATE, &context)?;
                         let text = plain_text_from_html(&html);
                         sqlx::query(
-                            "UPDATE workspace_member_invites SET message = $1, updated_at = NOW() WHERE id = $2",
+                            "UPDATE workspace_member_invites SET message = $1, updated_at = NOW(), created_by_id = NULL, updated_by_id = NULL WHERE id = $2",
                         )
                         .bind(&text)
                         .bind(invite_id)
@@ -536,6 +595,142 @@ pub fn workspace_invitation_handler(pool: PgPool) -> Handler {
                 }
                 None => {
                     log_swallowed(WORKSPACE_INVITATION_TASK, "bad args");
+                }
+            }
+            Ok(Verdict::Ack)
+        })
+    })
+}
+
+/// Handler for [`PROJECT_INVITATION_TASK`]:
+/// `project_invitation(email, project_id, token, current_site, invitor)`
+/// (PIDASHCONV-1104; the D-07 split skipped it as dead code, but Django
+/// d656243d fixed the `invite.py` call site, so it is live).
+///
+/// `User.DoesNotExist` (inviter lookup by email) takes the generic
+/// `log_exception` path; only `Project` / `ProjectMemberInvite` misses
+/// return silently (`:82`). The plain-text body is stored on the invite
+/// BEFORE the send, exactly like Python `:47-48` — and the write NULLs
+/// `created_by_id`/`updated_by_id`, the same `BaseModel.save()` worker
+/// semantics as the workspace port above.
+pub fn project_invitation_handler(pool: PgPool) -> Handler {
+    Arc::new(move |job: JobRow| {
+        let pool = pool.clone();
+        Box::pin(async move {
+            match positional(&job, 5) {
+                Some(args) => {
+                    let outcome: Result<Option<()>, String> = async {
+                        let email = args[0].clone();
+                        let project_id_arg = args[1].clone();
+                        let project_id = Uuid::parse_str(&project_id_arg)
+                            .map_err(|e| e.to_string())?;
+                        let token = args[2].clone();
+                        let current_site = args[3].clone();
+                        let invitor = args[4].clone();
+                        // `User.objects.get(email=invitor)`: NOT in the
+                        // silent tuple — a miss logs.
+                        let user = load_user_by_email(&pool, &invitor)
+                            .await
+                            .map_err(|e| e.to_string())?
+                            .ok_or_else(|| "User.DoesNotExist".to_owned())?;
+                        // `Project.objects.get(pk=...)`: silent miss
+                        // (default manager: soft-deleted rows invisible).
+                        let project_row: Option<(String, Uuid)> = sqlx::query_as(
+                            "SELECT name, workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL",
+                        )
+                        .bind(project_id)
+                        .fetch_optional(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        let Some((project_name, workspace_id)) = project_row else {
+                            return Ok(None);
+                        };
+                        // `ProjectMemberInvite.objects.get(token, email)`
+                        // (`:28`): silent miss. Read BEFORE the workspace
+                        // hop below — Python only touches
+                        // `project.workspace.slug` while building the link
+                        // (`:30`), after the invite lookup.
+                        let invite_row: Option<(Uuid,)> = sqlx::query_as(
+                            "SELECT id FROM project_member_invites WHERE token = $1 AND email = $2 AND deleted_at IS NULL",
+                        )
+                        .bind(&token)
+                        .bind(&email)
+                        .fetch_optional(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        let Some((invite_id,)) = invite_row else {
+                            return Ok(None);
+                        };
+                        // Lazy `project.workspace.slug` hop (`:30`): the FK
+                        // descriptor reads through `_base_manager`
+                        // (unfiltered — no `base_manager_name` is set), and
+                        // a miss is NOT silent (only `Project` /
+                        // `ProjectMemberInvite` misses are).
+                        let workspace_row: Option<(String,)> =
+                            sqlx::query_as("SELECT slug FROM workspaces WHERE id = $1")
+                                .bind(workspace_id)
+                                .fetch_optional(&pool)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        let (workspace_slug,) = workspace_row
+                            .ok_or_else(|| "Workspace.DoesNotExist".to_owned())?;
+                        let email_str = user.email.as_deref().map_or_else(
+                            || py_str(&serde_json::Value::Null),
+                            str::to_owned,
+                        );
+                        let name = or_name(&user.first_name, &user.display_name, &email_str);
+                        let relative = project_invite_relative_link(
+                            &invite_id,
+                            &email,
+                            &workspace_slug,
+                            &project_id_arg,
+                        );
+                        let abs_url = invite_abs_url(&current_site, &relative);
+                        // NOTE the bare `first_name` (`:37`): unlike the
+                        // workspace task's or-chain, project passes
+                        // `user.first_name` straight through.
+                        let context = escape_context(&[
+                            ("email", email.clone()),
+                            ("first_name", user.first_name.clone()),
+                            ("project_name", project_name.clone()),
+                            ("invitation_url", abs_url),
+                            ("current_site", current_site.clone()),
+                        ]);
+                        // `render_to_string` + plain text, then the DB
+                        // write BEFORE the send (`:43-48`).
+                        let html = render_template(PROJECT_INVITATION_TEMPLATE, &context)?;
+                        let text = plain_text_from_html(&html);
+                        sqlx::query(
+                            "UPDATE project_member_invites SET message = $1, updated_at = NOW(), created_by_id = NULL, updated_by_id = NULL WHERE id = $2",
+                        )
+                        .bind(&text)
+                        .bind(invite_id)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        send_mail(
+                            &pool,
+                            PROJECT_INVITATION_TEMPLATE,
+                            &project_invite_subject(&name, &project_name),
+                            &context,
+                            &email,
+                            // Trailing period — verbatim from `:80`
+                            // (the workspace task has none).
+                            "Email sent successfully.",
+                        )
+                        .await;
+                        Ok(Some(()))
+                    }
+                    .await;
+                    match outcome {
+                        Ok(_) => {}
+                        Err(error) => {
+                            log_swallowed(PROJECT_INVITATION_TASK, &error);
+                        }
+                    }
+                }
+                None => {
+                    log_swallowed(PROJECT_INVITATION_TASK, "bad args");
                 }
             }
             Ok(Verdict::Ack)
@@ -613,6 +808,26 @@ mod tests {
             invite_subject("Inviter", "Acme"),
             "Inviter has invited you to join them in Acme on Pi Dash"
         );
+        // PIDASHCONV-1104: the project invitation link keeps the wire
+        // arg verbatim (odd casing preserved, not re-rendered).
+        let project_relative = project_invite_relative_link(
+            &invite_id,
+            "contract@example.com",
+            "acme",
+            "AAAAAAAA-1111-1111-1111-111111111111",
+        );
+        assert_eq!(
+            project_relative,
+            "/project-invitations/?invitation_id=22222222-2222-2222-2222-222222222222&email=contract@example.com&slug=acme&project_id=AAAAAAAA-1111-1111-1111-111111111111"
+        );
+        assert_eq!(
+            invite_abs_url("example.com", &project_relative),
+            "example.com/project-invitations/?invitation_id=22222222-2222-2222-2222-222222222222&email=contract@example.com&slug=acme&project_id=AAAAAAAA-1111-1111-1111-111111111111"
+        );
+        assert_eq!(
+            project_invite_subject("Inviter", "Rocket"),
+            "Inviter invited you to join Rocket on Pi Dash"
+        );
     }
 
     #[test]
@@ -635,6 +850,13 @@ mod tests {
             "pi_dash.bgtasks.workspace_invitation_task.workspace_invitation"
         );
         assert_eq!(MEMBERSHIP_MAIL_TASKS.len(), 4);
+        // PIDASHCONV-1104: the project invitation name lives beside the
+        // T6 four (same module, separate const — the routing table in
+        // `mod.rs` still pins the D-07 oracle eleven).
+        assert_eq!(
+            PROJECT_INVITATION_TASK,
+            "pi_dash.bgtasks.project_invitation_task.project_invitation"
+        );
     }
 
     #[test]
@@ -668,7 +890,11 @@ mod tests {
             Ok(Verdict::Ack)
         );
         assert_eq!(
-            workspace_invitation_handler(pool)(bad).await,
+            workspace_invitation_handler(pool.clone())(bad.clone()).await,
+            Ok(Verdict::Ack)
+        );
+        assert_eq!(
+            project_invitation_handler(pool)(bad).await,
             Ok(Verdict::Ack)
         );
     }

@@ -2314,3 +2314,22 @@ def project_invite(conn, project_id, workspace_id, email: str | None = None, **o
     }
     values.update(over)
     return insert_row(conn, "project_member_invites", values)
+
+
+def workspace_invite(conn, workspace_id, email: str | None = None, **over) -> dict:
+    """One WorkspaceMemberInvite row (PIDASHCONV-1104).
+
+    Mirrors ``project_invite`` for the workspace table (no project_id).
+    Pass ``created_by_id=`` to pin the invite-task audit wipe: the worker's
+    ``invite.save()`` NULLs both audit columns.
+    """
+    tag = _tag8()
+    values = {
+        "email": email or "invite-%s@example.com" % tag,
+        "accepted": False,
+        "token": uuid.uuid4().hex,
+        "role": 15,
+        "workspace_id": str(workspace_id),
+    }
+    values.update(over)
+    return insert_row(conn, "workspace_member_invites", values)

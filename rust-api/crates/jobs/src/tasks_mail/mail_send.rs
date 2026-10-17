@@ -340,11 +340,96 @@ pub struct OutgoingMail {
     pub html_body: String,
 }
 
+/// True when any `\n`-separated line of `body` exceeds 998 UTF-8 bytes:
+/// the SMTP line limit that flips Django to quoted-printable (probed
+/// from `EmailMultiAlternatives`, PIDASHCONV-1104: ASCII 998 → `7bit`,
+/// 999 → QP; `q`*997+é, 999 bytes → QP, `q`*990+é, 992 bytes → `8bit`).
+/// A trailing `\r` is not measured: Django splits with `splitlines()`
+/// (`SafeMIMEText.set_payload`), which strips the `\r` of `\r\n`.
+fn body_needs_qp(body: &str) -> bool {
+    body.split('\n')
+        .any(|line| line.strip_suffix('\r').unwrap_or(line).len() > 998)
+}
+
+/// `quopri.body_encode` (CPython `email/quoprimime.py`, `maxlinelen=76`):
+/// every byte outside tab / `0x20-0x3C` / `0x3E-0x7E` becomes `=XX`
+/// (uppercase hex); lines wrap at 75 content chars + a `=` soft break,
+/// never splitting an escape (a chunk ending on a literal `=` needs no
+/// extra break); a trailing space/tab is encoded (or pushed past a soft
+/// break when the line is full). Byte-oriented over the UTF-8 bytes,
+/// exactly like the latin1 round-trip in `Charset.body_encode`. Joined
+/// with `\n`; the caller's CRLF normalization runs after assembly.
+/// NOTE the `room == 2` shape: CPython appends `line[-1] + soft_break`
+/// (the break's own eol lives INSIDE the chunk), so the join newline
+/// survives as a real line break — the break line is followed by an
+/// empty line, never glue to the next chunk.
+fn quoted_printable_encode(body: &str) -> String {
+    let mut translated = String::with_capacity(body.len());
+    for &byte in body.as_bytes() {
+        if byte == b'\t'
+            || (0x20..=0x3c).contains(&byte)
+            || (0x3e..=0x7e).contains(&byte)
+            || byte == b'\r'
+            || byte == b'\n'
+        {
+            translated.push(byte as char);
+        } else {
+            translated.push_str(&format!("={byte:02X}"));
+        }
+    }
+    if translated.is_empty() {
+        return translated;
+    }
+    let mut encoded_lines: Vec<String> = Vec::new();
+    for raw_line in translated.split('\n') {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let bytes = line.as_bytes();
+        let mut start = 0usize;
+        // Wrap while the remainder exceeds 76 chars (CPython: `while
+        // start <= len - 77`).
+        while bytes.len() - start >= 77 {
+            let stop = start + 75;
+            if bytes[stop - 2] == b'=' {
+                encoded_lines.push(line[start..stop - 1].to_owned());
+                start = stop - 2;
+            } else if bytes[stop - 1] == b'=' {
+                encoded_lines.push(line[start..stop].to_owned());
+                start = stop - 1;
+            } else {
+                encoded_lines.push(format!("{}=", &line[start..stop]));
+                start = stop;
+            }
+        }
+        let rest = &line[start..];
+        match rest.as_bytes().last() {
+            Some(last) if *last == b' ' || *last == b'\t' => {
+                let room = 77 - rest.len();
+                let quoted = format!("={last:02X}");
+                if room >= 3 {
+                    encoded_lines.push(format!("{}{quoted}", &rest[..rest.len() - 1]));
+                } else if room == 2 {
+                    // `line[-1] + soft_break`, then the real break:
+                    // CPython's chunk ends with the break's own eol, so
+                    // the join newline survives (`...X=\n\n<next>`).
+                    encoded_lines.push(format!("{}{}=", &rest[..rest.len() - 1], *last as char));
+                    encoded_lines.push(String::new());
+                } else {
+                    encoded_lines.push(format!("{}=", &rest[..rest.len() - 1]));
+                    encoded_lines.push(quoted);
+                }
+            }
+            _ => encoded_lines.push(rest.to_owned()),
+        }
+    }
+    encoded_lines.join("\n")
+}
+
 /// Render the MIME bytes (`EmailMessage.message()` shape, verified against
 /// the interpreter): `multipart/alternative` with `text/plain` then
-/// `text/html` (`charset="utf-8"`, `7bit` CTE for ASCII parts, `8bit`
-/// otherwise, raw UTF-8 either way), `From`/`To`/`Subject` verbatim,
-/// `Date`/`Message-ID` synthesized like Django's.
+/// `text/html` (`charset="utf-8"`, CTE `7bit` for short ASCII parts,
+/// `8bit` for short non-ASCII parts, `quoted-printable` when any body
+/// line exceeds 998 bytes — the probed Django selection), `From`/`To`/
+/// `Subject` verbatim, `Date`/`Message-ID` synthesized like Django's.
 pub fn message_bytes(
     from: &str,
     mail: &OutgoingMail,
@@ -353,9 +438,15 @@ pub fn message_bytes(
     msg_id: &str,
 ) -> Vec<u8> {
     let part = |ctype: &str, body: &str| {
-        let cte = if body.is_ascii() { "7bit" } else { "8bit" };
+        let (cte, encoded) = if body_needs_qp(body) {
+            ("quoted-printable", quoted_printable_encode(body))
+        } else if body.is_ascii() {
+            ("7bit", body.to_owned())
+        } else {
+            ("8bit", body.to_owned())
+        };
         format!(
-            "--{boundary}\r\nContent-Type: {ctype}; charset=\"utf-8\"\r\nContent-Transfer-Encoding: {cte}\r\n\r\n{body}\r\n"
+            "--{boundary}\r\nContent-Type: {ctype}; charset=\"utf-8\"\r\nContent-Transfer-Encoding: {cte}\r\n\r\n{encoded}\r\n"
         )
     };
     let mut out = format!(
@@ -1284,5 +1375,126 @@ mod tests {
         assert!(text.contains("Content-Transfer-Encoding: 7bit\r\n\r\nplain"));
         assert!(text.contains("Content-Transfer-Encoding: 8bit"));
         assert!(text.ends_with("--b--\r\n"));
+    }
+
+    #[test]
+    fn cte_selection_matches_django_boundary() {
+        // Probed from `EmailMultiAlternatives` (PIDASHCONV-1104): a part
+        // flips to quoted-printable exactly when a UTF-8 body line
+        // exceeds 998 bytes.
+        assert!(!body_needs_qp(&"q".repeat(998)));
+        assert!(body_needs_qp(&"q".repeat(999)));
+        assert!(!body_needs_qp(&format!("{}é", "q".repeat(990))));
+        assert!(body_needs_qp(&format!("{}é", "q".repeat(997))));
+        assert!(!body_needs_qp("short\nlines\nok"));
+        assert!(!body_needs_qp("short\nok\n"));
+        let mail = OutgoingMail {
+            to: "t@e.st".to_owned(),
+            subject: "s".to_owned(),
+            text_body: "q".repeat(999),
+            html_body: "<p>é</p>".to_owned(),
+        };
+        let text =
+            String::from_utf8(message_bytes("f@x.io", &mail, "b", "date", "<id>")).expect("utf-8");
+        assert!(text.contains("Content-Transfer-Encoding: quoted-printable"));
+        // The short non-ASCII part stays 8bit.
+        assert!(text.contains("Content-Transfer-Encoding: 8bit"));
+    }
+
+    /// Minimal quoted-printable decoder for the roundtrip pin below
+    /// (soft breaks + `=XX`; the encoder never emits lowercase hex).
+    fn qp_decode(encoded: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        let bytes = encoded.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'=' {
+                if bytes.get(i + 1) == Some(&b'\n') {
+                    i += 2;
+                    continue;
+                }
+                if bytes.get(i + 1) == Some(&b'\r') && bytes.get(i + 2) == Some(&b'\n') {
+                    i += 3;
+                    continue;
+                }
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).expect("hex pair");
+                out.push(u8::from_str_radix(hex, 16).expect("hex value"));
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn quoted_printable_matches_quopri_shape() {
+        // Wrapping: 75 content chars + soft `=`, all lines short.
+        let encoded = quoted_printable_encode(&"q".repeat(200));
+        for line in encoded.split('\n') {
+            assert!(line.len() <= 76, "{line:?}");
+        }
+        assert!(encoded.contains('='));
+        assert_eq!(qp_decode(&encoded), vec![b'q'; 200]);
+        // Non-ASCII becomes uppercase `=XX`; escapes never split.
+        let encoded = quoted_printable_encode(&format!("é{}", "q".repeat(200)));
+        assert!(encoded.starts_with("=C3=A9"));
+        assert_eq!(
+            qp_decode(&encoded),
+            format!("é{}", "q".repeat(200)).into_bytes()
+        );
+        for line in encoded.split('\n') {
+            assert!(line.len() <= 76, "{line:?}");
+            assert!(!line.ends_with('=') || line.len() == 76);
+        }
+        // `=` itself is encoded; trailing spaces/tabs never survive raw.
+        assert_eq!(quoted_printable_encode("a=b"), "a=3Db");
+        assert_eq!(quoted_printable_encode("a "), "a=20");
+        assert_eq!(quoted_printable_encode("a\t"), "a=09");
+        assert_eq!(qp_decode(&quoted_printable_encode("a ")), b"a ");
+        // Empty and short bodies pass through the translate-only path.
+        assert_eq!(quoted_printable_encode(""), "");
+        assert_eq!(quoted_printable_encode("hi"), "hi");
+    }
+
+    #[test]
+    fn quoted_printable_matches_quopri_goldens() {
+        // Byte-for-byte against CPython `quopri.body_encode`
+        // (`/tmp/probe1104_qp.py`): escapes never split at wrap points,
+        // full trailing-whitespace lines encode.
+        let break_case = format!("{}é{}", "q".repeat(73), "q".repeat(100));
+        let encoded = quoted_printable_encode(&break_case);
+        let lines: Vec<&str> = encoded.split('\n').collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], format!("{}=", "q".repeat(73)));
+        assert!(lines[1].starts_with("=C3=A9"));
+        assert_eq!(lines[1].len(), 76);
+        assert_eq!(lines[2], "q".repeat(31));
+        assert_eq!(qp_decode(&encoded), break_case.into_bytes());
+        let room1 = format!("{} ", "q".repeat(75));
+        assert_eq!(
+            quoted_printable_encode(&room1),
+            format!("{}=\n=20", "q".repeat(75))
+        );
+        assert_eq!(
+            quoted_printable_encode("café ’ =\t\nline2 "),
+            "caf=C3=A9 =E2=80=99 =3D=09\nline2=20"
+        );
+        // `room == 2` (75-char line, trailing whitespace): the soft
+        // break keeps its own eol, so the real line break survives
+        // (review fuzz vs `quoprimime.body_encode`: `...X=\n\n<next>`).
+        assert_eq!(
+            quoted_printable_encode(&format!("{} ", "q".repeat(74))),
+            format!("{} =\n", "q".repeat(74))
+        );
+        assert_eq!(
+            quoted_printable_encode(&format!("{} \nx", "q".repeat(74))),
+            format!("{} =\n\nx", "q".repeat(74))
+        );
+        assert_eq!(
+            quoted_printable_encode(&format!("{}\t", "q".repeat(74))),
+            format!("{}\t=\n", "q".repeat(74))
+        );
     }
 }

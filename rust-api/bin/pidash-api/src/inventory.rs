@@ -1393,11 +1393,11 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.project_add_user_email_task.project_add_user_email",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.project_invitation_task.project_invitation",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.recent_visited_task.recent_visited_task",
@@ -1417,11 +1417,11 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.user_activation_email_task.user_activation_email",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.user_deactivation_email_task.user_deactivation_email",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.user_email_update_task.send_email_update_confirmation",
@@ -1453,7 +1453,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.workspace_invitation_task.workspace_invitation",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.workspace_seed_task.workspace_seed",
@@ -1901,6 +1901,10 @@ mod tests {
             ),
         );
         pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pool.clone());
+        // D-07 membership mail (PIDASHCONV-1104): the same calls
+        // `worker()` makes — the T6 four plus project_invitation.
+        pidash_jobs::tasks_mail::register_membership_mail_tasks(&mut registry, pool.clone());
+        pidash_jobs::tasks_mail::register_project_invitation_task(&mut registry, pool.clone());
         // Runner tasks (PIDASHCONV-859): the real `worker()` calls —
         // the providers construct with no I/O (lazy pool, no Redis
         // client, test-default settings).
@@ -2027,6 +2031,10 @@ mod tests {
         expected_rust.extend(pidash_jobs::runner_runs::TASK_NAMES);
         expected_rust.insert(pidash_jobs::tasks_mail::SEND_EMAIL_NOTIFICATION_TASK);
         expected_rust.insert(pidash_jobs::tasks_mail::STACK_EMAIL_NOTIFICATION_TASK);
+        // D-07 membership mail (PIDASHCONV-1104): the T6 four plus the
+        // project invitation task.
+        expected_rust.extend(pidash_jobs::tasks_mail::membership_mail::MEMBERSHIP_MAIL_TASKS);
+        expected_rust.insert(pidash_jobs::tasks_mail::membership_mail::PROJECT_INVITATION_TASK);
         // Count pins: a const that grows must update the table too.
         assert_eq!(
             tasks_cleanup::cleanup::TASKS.len(),
@@ -2058,7 +2066,12 @@ mod tests {
             13,
             "runner_runs group drifted"
         );
-        assert_eq!(expected_rust.len(), 56, "worker-owned count drifted");
+        assert_eq!(
+            pidash_jobs::tasks_mail::membership_mail::MEMBERSHIP_MAIL_TASKS.len(),
+            4,
+            "membership group drifted"
+        );
+        assert_eq!(expected_rust.len(), 61, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()

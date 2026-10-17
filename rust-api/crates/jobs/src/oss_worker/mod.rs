@@ -285,6 +285,14 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // pool-only handler exists, so the Rust worker owns it —
     // otherwise the task is lost at switchover (parity gap W-mail).
     crate::tasks_mail::register_notifications_task(registry, ctx.pools.primary().clone());
+    // D-07 membership mail (PIDASHCONV-1104; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). The four
+    // T6 handlers exist and the project invitation port lands in the same
+    // module, so the Rust worker owns all five — otherwise the tasks are
+    // lost at switchover (parity gap W-mail). The auth mail ports stay
+    // Python-owned until PIDASHCONV-1103 — never register them here.
+    crate::tasks_mail::register_membership_mail_tasks(registry, ctx.pools.primary().clone());
+    crate::tasks_mail::register_project_invitation_task(registry, ctx.pools.primary().clone());
     // Runner tasks (PIDASHCONV-859; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The
     // beat entries fire the sweeps and the L6 handlers exist with
@@ -410,7 +418,7 @@ mod tests {
 
     /// PIDASHCONV-918: the helper owns exactly the OSS task set — the
     /// same const union the binary's `mirror_registry_matches_tasks_table`
-    /// pins (56 names), while the Python-owned sentinels stay
+    /// pins (61 names), while the Python-owned sentinels stay
     /// unregistered. `Pools::primary_only` over a lazy pool keeps the
     /// test hermetic: registration constructs handlers without I/O, and
     /// none of them runs here.
@@ -474,7 +482,16 @@ mod tests {
         expected.extend(crate::runner_runs::TASK_NAMES);
         expected.insert(crate::tasks_mail::SEND_EMAIL_NOTIFICATION_TASK);
         expected.insert(crate::tasks_mail::STACK_EMAIL_NOTIFICATION_TASK);
-        assert_eq!(expected.len(), 56, "worker-owned count drifted");
+        // D-07 membership mail (PIDASHCONV-1104): the four T6 names plus
+        // the project invitation task.
+        expected.extend(crate::tasks_mail::membership_mail::MEMBERSHIP_MAIL_TASKS);
+        expected.insert(crate::tasks_mail::membership_mail::PROJECT_INVITATION_TASK);
+        assert_eq!(
+            crate::tasks_mail::membership_mail::MEMBERSHIP_MAIL_TASKS.len(),
+            4,
+            "membership group drifted"
+        );
+        assert_eq!(expected.len(), 61, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");

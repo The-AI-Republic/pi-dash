@@ -512,12 +512,10 @@ def _diff_task(name: str, task: dict, own: str) -> dict:
             "detail": "django-drops-too (PDASHOSS01-292); rust explicitly unregistered (early-return would swallow forward)",
             "gap": "-",
         }
-    if name == "pi_dash.bgtasks.project_invitation_task.project_invitation":
-        return base | {
-            "disposition": "PROXIED",
-            "detail": "task never invoked (invite.py:105 calls .delay on a list; PDASHOSS01-292)",
-            "gap": "-",
-        }
+    # NOTE (PIDASHCONV-1104): the project_invitation special-case lived
+    # here ("task never invoked") until Django d656243d fixed the invite.py
+    # call site; the task is Rust-owned now and classifies via the
+    # `own == "rust"` arm above.
     if task["called"] or task["scheduled"]:
         return base | {
             "disposition": "PROXIED",
