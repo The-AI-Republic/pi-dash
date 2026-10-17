@@ -8,7 +8,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import type { ExecutionTargetPatch } from "../dropdowns/podOptions.js";
+import type { ExecutionTargetPatch } from "../../../shared/pickers/index.js";
 import { EXECUTION_TARGET_FAILED_TITLE, useUpdateExecutionTarget } from "./executionTarget.js";
 import { issueKeys } from "./keys.js";
 
