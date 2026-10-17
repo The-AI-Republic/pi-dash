@@ -26,13 +26,14 @@ export interface DisplayCalendarPrefs {
   showWeekends: boolean;
 }
 
-/** Parsed per-entity display preferences (ISS-002). */
+/** Parsed per-entity display preferences (ISS-002, ISS-079). */
 export interface DisplayPrefs {
   layout: LayoutKind;
   groupBy: string | null;
   subGroupBy: string | null;
   orderBy: string;
   showEmptyGroups: boolean;
+  showSubIssues: boolean;
   calendar: DisplayCalendarPrefs;
   /** Visible property columns by key; absent keys read as shown. */
   properties: Record<string, boolean>;
@@ -66,9 +67,12 @@ function parseProperties(value: unknown): Record<string, boolean> {
 }
 
 /**
- * Parse the stored filter keys into display preferences. Empty groups
- * default to hidden: the ISS-002 oracle restores grouping without a
- * show_empty_groups key and sees only the populated group.
+ * Parse the stored filter keys into display preferences. Empty groups and
+ * sub-issues default to hidden: the ISS-002 oracle restores grouping
+ * without a show_empty_groups key and sees only the populated group, and
+ * the ISS-079/ISS-080 oracle renders both switches unchecked when their
+ * keys are absent. Fresh server records seed both keys true, so new users
+ * still start with everything shown.
  */
 export function parseDisplayPrefs(
   displayFilters: Record<string, unknown>,
@@ -80,6 +84,7 @@ export function parseDisplayPrefs(
     subGroupBy: parseGroupKey(displayFilters["sub_group_by"]),
     orderBy: parseOrderBy(displayFilters["order_by"]),
     showEmptyGroups: displayFilters["show_empty_groups"] === true,
+    showSubIssues: displayFilters["sub_issue"] === true,
     calendar: parseCalendar(displayFilters["calendar"]),
     properties: parseProperties(displayProperties),
   };
@@ -123,6 +128,7 @@ export function buildPrefsPatch(record: PrefsRecord, partial: Partial<DisplayPre
       sub_group_by: next.subGroupBy,
       order_by: next.orderBy,
       show_empty_groups: next.showEmptyGroups,
+      sub_issue: next.showSubIssues,
       calendar: { ...storedCalendar, layout: next.calendar.mode, show_weekends: next.calendar.showWeekends },
     },
     display_properties: { ...record.display_properties, ...next.properties },
