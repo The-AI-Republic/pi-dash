@@ -4,6 +4,12 @@
 
 """GET / PATCH /api/instances/ — public console snapshot + admin update."""
 
+import uuid
+from datetime import datetime, timezone
+
+from _harness import admin_client
+from _harness.settings import secret_key as _secret
+
 CONFIG_KEYS = {
     "enable_signup",
     "is_workspace_creation_disabled",
@@ -115,3 +121,63 @@ def test_patch_ignores_read_only_fields(admin_api, world):
 def test_patch_rejects_overlong_name(admin_api):
     res = admin_api.patch("/api/instances/", json={"instance_name": "n" * 300})
     assert res.status_code == 400
+
+
+def test_patch_without_instance_denies_before_write(db):
+    # Empty instances table (fresh install): InstanceAdminPermission denies
+    # (filter on the non-nullable instance FK matches nothing) before the
+    # handler runs, so the create path is unreachable via HTTP on both
+    # backends — verified live against Django: 403, nothing written.
+    user = db.make_user("admin@example.com")
+    with admin_client(db.mint_admin_session(user, _secret())) as client:
+        res = client.patch("/api/instances/", json={"edition": "x"})
+    assert res.status_code == 403
+    assert res.content == b'{"detail":"You do not have permission to perform this action."}'
+    with db.connect() as conn:
+        count = conn.execute("select count(*) from instances;").fetchone()[0]
+    assert count == 0
+
+
+def _make_soft_deleted_instance(db, instance_id):
+    iid = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """insert into instances (created_at, updated_at, deleted_at, id, instance_name,
+                    instance_id, current_version, last_checked_at,
+                    is_telemetry_enabled, is_support_required, is_setup_done,
+                    is_signup_screen_visited, is_verified, domain, edition,
+                    is_test, is_current_version_deprecated)
+                   values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    now, now, now, iid, "Deleted Instance", instance_id,
+                    "1.0.0", now, True, True, True, False, False, "",
+                    "PI_DASH_COMMUNITY", False, False,
+                ),
+            )
+        conn.commit()
+    return iid
+
+
+def test_patch_instance_id_colliding_soft_deleted_row_is_invalid_payload(admin_api, world):
+    # instance_id is a FULL unique: the live-scoped pre-checks (DRF
+    # UniqueValidator / reject_duplicate_instance_id) pass, then the write
+    # collides with the soft-deleted row. Django maps that IntegrityError
+    # to 400 {"error": "The payload is not valid"}; Rust must do the same.
+    taken = "soft-deleted-collision-1"
+    _make_soft_deleted_instance(world["db"], taken)
+    with world["db"].connect() as conn:
+        before = conn.execute(
+            "select instance_id from instances where deleted_at is null;"
+        ).fetchone()[0]
+    res = admin_api.patch("/api/instances/", json={"instance_id": taken})
+    assert res.status_code == 400
+    assert res.content == b'{"error":"The payload is not valid"}'
+    with world["db"].connect() as conn:
+        row = conn.execute(
+            "select instance_id from instances where deleted_at is null;"
+        ).fetchone()
+        count = conn.execute("select count(*) from instances;").fetchone()[0]
+    assert row[0] == before
+    assert count == 2
