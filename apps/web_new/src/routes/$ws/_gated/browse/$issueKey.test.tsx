@@ -359,6 +359,14 @@ describe("browse route", () => {
     expect(box).toHaveValue("Fix login");
   });
 
+  it("shows the history line read-only for archived issues", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, archivedIssue: true });
+    // Membership resolves (the line renders), yet the title stays a heading.
+    await screen.findByRole("button", { name: /Edited by/ });
+    expect(screen.getByRole("heading", { name: "Fix login" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+  });
+
   it("renders unknown keys without the strip, linking home", async () => {
     renderBrowse(false);
     await screen.findByRole("heading", { name: "No work item matches this address" });

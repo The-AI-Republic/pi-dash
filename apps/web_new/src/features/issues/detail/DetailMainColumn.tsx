@@ -24,7 +24,7 @@ export interface DetailMainColumnProps {
   workspaceSlug: string;
   projectId: string;
   issue: Issue;
-  /** Project member/admin standing on a live issue; guests read. */
+  /** Project member/admin standing on a live project; guests read. Archived and synced rows still render read-only. */
   editable: boolean;
   /** Header row, left of the save indicator (identifier/type). */
   topSlot?: React.ReactNode;
@@ -60,8 +60,8 @@ export function DetailMainColumn({
     if (restored !== null && issue.description_html === restored.html) setRestored(null);
   }, [issue.description_html, restored]);
 
-  const readOnly = !editable || issue.is_synced;
   const archived = issue.archived_at !== null;
+  const readOnly = !editable || archived || issue.is_synced;
 
   return (
     <div className="flex min-w-0 flex-1 flex-col gap-(--space-6)">

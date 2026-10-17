@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Issue } from "@pidash/api-client";
 import * as React from "react";
@@ -123,6 +123,9 @@ function renderRoot(props: Partial<React.ComponentProps<typeof IssueDetailRoot>>
 }
 
 afterEach(() => {
+  // Unmount first: the store reset re-renders subscribers, and the
+  // re-rendered column reads the client this hook just dropped.
+  cleanup();
   vi.unstubAllGlobals();
   resetAppClient();
   resetRegisteredStores();

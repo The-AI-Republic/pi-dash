@@ -22,7 +22,7 @@ export interface IssueDetailRootProps {
   workspaceSlug: string;
   projectId: string;
   issue: Issue;
-  /** Project member/admin standing on a live issue; guests read. */
+  /** Project member/admin standing on a live project; guests read. Archived and synced rows still render read-only. */
   editable: boolean;
   /** Properties sidebar content (rows from later slices). */
   sidebar?: React.ReactNode;

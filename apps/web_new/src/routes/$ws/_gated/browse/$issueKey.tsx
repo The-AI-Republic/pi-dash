@@ -122,9 +122,10 @@ function BrowseIssueDetail({
   const projectQuery = useQuery(projectDetailsQueryOptions(context.apiClient, workspaceSlug));
   const project = projectQuery.data?.find((row) => row.id === projectId);
   useDocumentHead({ title: `${issueKey} ${issue.name}`, robots: "noindex, nofollow" });
-  const editable =
-    canEditInProject({ memberRole: project?.member_role ?? null, archived: project?.archived_at != null }) &&
-    issue.archived_at === null;
+  const editable = canEditInProject({
+    memberRole: project?.member_role ?? null,
+    archived: project?.archived_at != null,
+  });
   const palette = useWorkItemPaletteContext({
     workspaceSlug,
     projectId,

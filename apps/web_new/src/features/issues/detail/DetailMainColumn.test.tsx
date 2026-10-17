@@ -227,6 +227,8 @@ describe("DetailMainColumn", () => {
     expect(within(dialog).queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     rerender({ issue: issueFixture({ archived_at: "2024-03-04T00:00:00Z" }) });
+    expect(screen.getByRole("heading", { name: "Fix login" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: TITLE_LABEL })).not.toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: /Edited by/ }));
     await user.click(await screen.findByRole("menuitem", { name: "Ada L 1 hour ago" }));
     const reopened = await screen.findByRole("dialog", { name: "Description history" });
