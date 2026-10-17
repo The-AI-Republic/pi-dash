@@ -22,6 +22,7 @@ from pi_dash.app.serializers.base import BaseSerializer
 from pi_dash.bgtasks._rrule import RRuleValidationError, validate_rrule_string
 from pi_dash.db.models.scheduler import Scheduler, SchedulerBinding
 from pi_dash.runner.models import Pod
+from pi_dash.scheduler.builtins import BUILTIN_SLUGS
 
 
 EXTRA_CONTEXT_MAX_LENGTH = 16 * 1024
@@ -73,6 +74,7 @@ def _validate_iso_datetime_list(values: Iterable, field: str) -> list[str]:
 
 class SchedulerSerializer(BaseSerializer):
     active_binding_count = serializers.SerializerMethodField()
+    is_builtin = serializers.SerializerMethodField()
 
     class Meta:
         model = Scheduler
@@ -85,6 +87,7 @@ class SchedulerSerializer(BaseSerializer):
             "prompt",
             "color",
             "source",
+            "is_builtin",
             "is_enabled",
             "active_binding_count",
             "created_at",
@@ -94,6 +97,7 @@ class SchedulerSerializer(BaseSerializer):
             "id",
             "workspace",
             "source",
+            "is_builtin",
             "active_binding_count",
             "created_at",
             "updated_at",
@@ -107,10 +111,26 @@ class SchedulerSerializer(BaseSerializer):
             return annotated
         return obj.bindings.filter(deleted_at__isnull=True).count()
 
+    def get_is_builtin(self, obj: Scheduler) -> bool:
+        # ``source`` defaults to ``builtin`` for user-created rows too, so
+        # catalog membership of the slug is the reliable signal.
+        return obj.slug in BUILTIN_SLUGS
+
     def validate_color(self, value: str) -> str:
         return _validate_color(value)
 
     def validate_slug(self, value: str) -> str:
+        # ``ensure_builtin_schedulers`` matches built-in rows by slug; a
+        # renamed built-in would get a second copy seeded next to it on the
+        # next sync.
+        if (
+            self.instance is not None
+            and value != self.instance.slug
+            and self.instance.slug in BUILTIN_SLUGS
+        ):
+            raise serializers.ValidationError(
+                "The slug of a built-in scheduler cannot be changed."
+            )
         # Mirror the conditional DB constraint
         # ``scheduler_unique_workspace_slug_when_active`` so a duplicate slug
         # comes back as a field error ({"slug": [...]}) instead of an

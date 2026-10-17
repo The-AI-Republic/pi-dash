@@ -499,3 +499,108 @@ def test_post_duplicate_slug_returns_slug_field_error(session_client, scheduler,
     assert resp.status_code == 400
     assert "slug" in resp.data
     assert Scheduler.objects.filter(workspace=workspace, slug="test-scheduler").count() == 1
+
+
+# --- slug edit on PATCH ---------------------------------------------------
+# A user-created scheduler's slug is editable after creation. Built-ins are
+# not: ``ensure_builtin_schedulers`` matches catalog rows by slug, so a
+# renamed built-in would get a second copy seeded next to it.
+
+
+def _scheduler_url(workspace, scheduler):
+    return f"/api/workspaces/{workspace.slug}/schedulers/{scheduler.pk}/"
+
+
+@pytest.mark.unit
+def test_patch_renames_user_scheduler_slug(session_client, scheduler, binding, workspace):
+    """The rename lands on the row; the binding (keyed by scheduler id) is
+    untouched and surfaces the new slug everywhere it is read."""
+    from pi_dash.prompting.composer import build_scheduler_turn
+    from pi_dash.runner.models import AgentRun
+
+    next_run_at = binding.next_run_at
+    resp = session_client.patch(
+        _scheduler_url(workspace, scheduler), {"slug": "renamed-scheduler"}, format="json"
+    )
+    assert resp.status_code == 200
+    assert resp.data["slug"] == "renamed-scheduler"
+    assert resp.data["is_builtin"] is False
+
+    listed = session_client.get(f"/api/workspaces/{workspace.slug}/schedulers/")
+    assert "renamed-scheduler" in {row["slug"] for row in listed.data}
+    assert "test-scheduler" not in {row["slug"] for row in listed.data}
+
+    binding.refresh_from_db()
+    assert binding.scheduler_id == scheduler.pk
+    assert binding.deleted_at is None
+    assert binding.next_run_at == next_run_at
+    assert SchedulerBindingSerializer(binding).data["scheduler_slug"] == "renamed-scheduler"
+
+    run = AgentRun.objects.create(
+        workspace=workspace,
+        prompt="",
+        created_by=binding.actor,
+        pod=Pod.objects.get(project=binding.project, is_default=True),
+        scheduler_binding=binding,
+    )
+    prompt = build_scheduler_turn(binding, run)
+    assert "`renamed-scheduler`" in prompt
+    assert "test-scheduler" not in prompt
+
+
+@pytest.mark.unit
+def test_patch_name_only_keeps_slug(session_client, scheduler, workspace):
+    resp = session_client.patch(
+        _scheduler_url(workspace, scheduler), {"name": "Renamed"}, format="json"
+    )
+    assert resp.status_code == 200
+    assert resp.data["name"] == "Renamed"
+    assert resp.data["slug"] == "test-scheduler"
+
+
+@pytest.mark.unit
+def test_patch_duplicate_slug_returns_slug_field_error(
+    session_client, scheduler, other_scheduler, workspace
+):
+    resp = session_client.patch(
+        _scheduler_url(workspace, scheduler), {"slug": "test-other-scheduler"}, format="json"
+    )
+    assert resp.status_code == 400
+    assert "slug" in resp.data
+    scheduler.refresh_from_db()
+    assert scheduler.slug == "test-scheduler"
+
+
+@pytest.mark.unit
+def test_patch_builtin_slug_change_rejected(session_client, workspace):
+    from pi_dash.scheduler.builtins import BUILTINS, ensure_builtin_schedulers
+
+    builtin = Scheduler.objects.get(workspace=workspace, slug="security-audit")
+    resp = session_client.patch(
+        _scheduler_url(workspace, builtin), {"slug": "my-audit", "name": "Mine"}, format="json"
+    )
+    assert resp.status_code == 400
+    assert list(resp.data.keys()) == ["slug"]
+    builtin.refresh_from_db()
+    assert builtin.slug == "security-audit"
+
+    # The sync still sees exactly one row per catalog slug.
+    ensure_builtin_schedulers(workspace)
+    for entry in BUILTINS:
+        assert Scheduler.objects.filter(workspace=workspace, slug=entry.slug).count() == 1
+    assert Scheduler.objects.filter(workspace=workspace).count() == len(BUILTINS)
+
+
+@pytest.mark.unit
+def test_patch_builtin_with_unchanged_slug_accepted(session_client, workspace):
+    """Clients that echo the whole row back must still be able to edit a
+    built-in's other fields."""
+    builtin = Scheduler.objects.get(workspace=workspace, slug="security-audit")
+    resp = session_client.patch(
+        _scheduler_url(workspace, builtin),
+        {"slug": "security-audit", "is_enabled": False},
+        format="json",
+    )
+    assert resp.status_code == 200
+    assert resp.data["is_builtin"] is True
+    assert resp.data["is_enabled"] is False

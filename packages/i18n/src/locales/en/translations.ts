@@ -257,6 +257,7 @@ export default {
   "Browse projects": "Browse projects",
   Budget: "Budget",
   "Built-in": "Built-in",
+  "Built-in schedulers keep their slug.": "Built-in schedulers keep their slug.",
   busy: "busy",
   Calendar: "Calendar",
   "Calendar Layout": "Calendar Layout",
@@ -918,8 +919,8 @@ export default {
   "Looks like all your projects are still active—great job!":
     "Looks like all your projects are still active—great job!",
   Low: "Low",
-  "Lowercase identifier used in URLs. Cannot be changed after creation.":
-    "Lowercase identifier used in URLs. Cannot be changed after creation.",
+  "Lowercase identifier for this scheduler. Unique within the workspace.":
+    "Lowercase identifier for this scheduler. Unique within the workspace.",
   Machine: "Machine",
   "Machines that have authenticated with Pi Dash or host runners for this workspace.":
     "Machines that have authenticated with Pi Dash or host runners for this workspace.",

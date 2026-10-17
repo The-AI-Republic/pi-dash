@@ -22,8 +22,10 @@ type Props<T extends FieldValues> = {
   descriptionName: RhfPath<T>;
   promptName: RhfPath<T>;
   colorName: RhfPath<T>;
-  /** Lock the slug field (edit mode — slug is immutable after creation). */
+  /** Lock the slug field (built-in schedulers — the catalog sync matches them by slug). */
   slugDisabled?: boolean;
+  /** One-line reason shown under the slug field while it is locked. */
+  slugDisabledReason?: string;
   /**
    * Return false to skip required/pattern validation, e.g. when these fields
    * sit behind an inactive tab. RHF keeps hidden fields registered by
@@ -50,6 +52,7 @@ export function SchedulerDefinitionFields<T extends FieldValues>({
   promptName,
   colorName,
   slugDisabled,
+  slugDisabledReason,
   isActive,
 }: Props<T>) {
   const { t } = useTranslation();
@@ -124,7 +127,9 @@ export function SchedulerDefinitionFields<T extends FieldValues>({
           )}
         />
         <p className="text-12 text-secondary">
-          {t("Lowercase identifier used in URLs. Cannot be changed after creation.")}
+          {slugDisabled && slugDisabledReason
+            ? slugDisabledReason
+            : t("Lowercase identifier for this scheduler. Unique within the workspace.")}
         </p>
         {slugErr?.message && <p className="text-12 text-danger-primary">{String(slugErr.message)}</p>}
       </div>
