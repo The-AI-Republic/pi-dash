@@ -8309,26 +8309,123 @@ export class WebNewDriver implements ParityDriver {
   async notificationsSetSnoozedMode(_on: boolean): Promise<void> {
     return todo("notificationsSetSnoozedMode");
   }
+  // --- Notifications email preferences (NEWFRONT-575, NTF-024/025/031).
+  // --- The settings page mounts one switch per topic behind a loader;
+  // --- switches carry their topic heading as the accessible name and the
+  // --- completed-only refinement sits in its own indented nest.
+
+  /** Accessible names of the email toggles, keyed by preference. */
+  private static readonly emailPrefNames: Record<NotificationsEmailPref, string> = {
+    property_change: "Property changes",
+    state_change: "State changes",
+    issue_completed: "Completed items only",
+    comment: "Comments",
+    mention: "Mentions",
+  };
+
+  private emailPrefSwitch(pref: NotificationsEmailPref): Locator {
+    return this.page
+      .getByTestId("email-prefs-form")
+      .first()
+      .getByRole("switch", { name: WebNewDriver.emailPrefNames[pref], exact: true });
+  }
+
   async notificationsOpenEmailPreferences(): Promise<void> {
-    return todo("notificationsOpenEmailPreferences");
+    await this.page.goto("/settings/profile/notifications", { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page
+      .getByTestId("email-prefs-form")
+      .first()
+      .getByRole("switch")
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async notificationsEmailPreferencesLoaderShown(): Promise<boolean> {
-    return todo("notificationsEmailPreferencesLoaderShown");
+    const pattern = "**/api/users/me/notification-preferences/";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "GET") {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      await route.continue();
+    });
+    try {
+      await this.page.goto("/settings/profile/notifications", { timeout: 60_000 });
+      const seen = await this.page
+        .getByTestId("email-prefs-loader")
+        .first()
+        .waitFor({ timeout: 10_000 })
+        .then(
+          () => true,
+          () => false
+        );
+      await this.page
+        .getByTestId("email-prefs-form")
+        .first()
+        .getByRole("switch")
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS });
+      return seen;
+    } finally {
+      await this.page.unroute(pattern);
+    }
   }
+
   async notificationsEmailPreferences(): Promise<Record<NotificationsEmailPref, boolean>> {
-    return todo("notificationsEmailPreferences");
+    const prefs: NotificationsEmailPref[] = [
+      "property_change",
+      "state_change",
+      "issue_completed",
+      "comment",
+      "mention",
+    ];
+    const out = {} as Record<NotificationsEmailPref, boolean>;
+    for (const pref of prefs) {
+      out[pref] = (await this.emailPrefSwitch(pref).getAttribute("aria-checked")) === "true";
+    }
+    return out;
   }
-  async notificationsEmailPreferencesToggle(_pref: NotificationsEmailPref): Promise<void> {
-    return todo("notificationsEmailPreferencesToggle");
+
+  async notificationsEmailPreferencesToggle(pref: NotificationsEmailPref): Promise<void> {
+    const saveWait = this.page.waitForResponse(
+      (response) =>
+        response.request().method() === "PATCH" && response.url().includes("/users/me/notification-preferences/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.emailPrefSwitch(pref).click({ timeout: WebNewDriver.WAIT_MS });
+    await saveWait;
   }
+
   async notificationsEmailPreferencesCompletedNested(): Promise<boolean> {
-    return todo("notificationsEmailPreferencesCompletedNested");
+    const nest = this.page.getByTestId("email-prefs-completed-nest").first();
+    if ((await nest.getByRole("switch").count()) !== 1) return false;
+    // Both rows spread their switch to the trailing edge, so the switches
+    // sit at the same x; the nesting shows in the headings instead.
+    const form = this.page.getByTestId("email-prefs-form").first();
+    const stateBox = await form
+      .getByRole("heading", { name: WebNewDriver.emailPrefNames.state_change, exact: true })
+      .boundingBox()
+      .catch(() => null);
+    const completedBox = await nest
+      .getByRole("heading", { name: WebNewDriver.emailPrefNames.issue_completed, exact: true })
+      .boundingBox()
+      .catch(() => null);
+    if (stateBox === null || completedBox === null) return false;
+    return completedBox.x > stateBox.x;
   }
-  async notificationsFailEmailPreferenceSaves(_status: number): Promise<void> {
-    return todo("notificationsFailEmailPreferenceSaves");
+
+  async notificationsFailEmailPreferenceSaves(status: number): Promise<void> {
+    await this.page.route("**/api/users/me/notification-preferences/", async (route) => {
+      if (route.request().method() === "PATCH") {
+        await route.fulfill({ status, body: JSON.stringify({ detail: "parity prefs failure" }) });
+      } else {
+        await route.continue();
+      }
+    });
   }
+
   async notificationsClearEmailPreferenceSaveFailure(): Promise<void> {
-    return todo("notificationsClearEmailPreferenceSaveFailure");
+    await this.page.unroute("**/api/users/me/notification-preferences/");
   }
 
   async notificationsEntryListQuery(_workspaceSlug: string): Promise<NotificationsListQuery> {
