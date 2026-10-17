@@ -154,6 +154,56 @@ def test_attachment_post_numeric_name_spelling(api, world):
     assert response.json()["upload_data"]["fields"]["key"].endswith("-100.0")
 
 
+def test_attachment_post_float_external_tokens(api, world, db):
+    """Raw float tokens in the externals stringify like Python `str(float)`:
+    `1e3` stores and echoes `1000.0`, not serde's normalized `1e+3`
+    (PIDASHCONV-1130)."""
+    issue_id = world["issue"]["id"]
+    raw = (
+        '{"name": "f.pdf", "type": "%s", "size": 10,'
+        ' "external_id": 1e3, "external_source": "s"}' % PDF
+    ).encode()
+    response = api.post(
+        attachment_url(world, issue_id),
+        content=raw,
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["attachment"]["external_id"] == "1000.0"
+    assert body["attachment"]["external_source"] == "s"
+    row = db.fetchone(
+        "SELECT external_id, external_source FROM file_assets WHERE id = %s",
+        (body["asset_id"],),
+    )
+    assert row["external_id"] == "1000.0"
+    assert row["external_source"] == "s"
+
+
+def test_attachment_post_nested_float_external(api, world, db):
+    """A float nested in a container external stringifies the whole
+    container (`repr`), so `[1e3]` stores and echoes `[1000.0]`
+    (PIDASHCONV-1130)."""
+    issue_id = world["issue"]["id"]
+    raw = (
+        '{"name": "n.pdf", "type": "%s", "size": 10,'
+        ' "external_id": [1e3], "external_source": "s"}' % PDF
+    ).encode()
+    response = api.post(
+        attachment_url(world, issue_id),
+        content=raw,
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["attachment"]["external_id"] == "[1000.0]"
+    row = db.fetchone(
+        "SELECT external_id FROM file_assets WHERE id = %s",
+        (body["asset_id"],),
+    )
+    assert row["external_id"] == "[1000.0]"
+
+
 def test_attachment_post_multipart_file_matrix(api, world):
     """An uploaded file part is truthy; the missing field trips first (400).
     A text size trips min() before the MIME check (500)."""
