@@ -27,9 +27,6 @@ mod inventory;
 mod model_runtime;
 #[cfg(test)]
 mod runner_seams;
-/// Live assistant turn runtime (PIDASHCONV-863): the provider-backed
-/// half of `assistant.run_turn` behind the `TurnSeam` boundary.
-mod turn;
 
 use clap::{Parser, Subcommand};
 use pidash_api::{with_routes, AppState, EdgeHandle};
