@@ -12,8 +12,14 @@ import maintenanceModeLightModeImage from "@/app/assets/instance/maintenance-mod
 import DefaultLayout from "@/layouts/default-layout";
 // components
 import { MaintenanceMessage } from "@/pi-dash-web/components/instance";
+import { ServerUnreachableMessage } from "./server-unreachable";
 
-export function MaintenanceView() {
+type TMaintenanceView = {
+  // Set when the desktop app could not connect to its server at all.
+  unreachableServer?: string;
+};
+
+export function MaintenanceView({ unreachableServer }: TMaintenanceView) {
   // hooks
   const { resolvedTheme } = useTheme();
   // derived values
@@ -31,7 +37,7 @@ export function MaintenanceView() {
           />
         </div>
         <div className="relative mt-4 flex w-full flex-col gap-4">
-          <MaintenanceMessage />
+          {unreachableServer ? <ServerUnreachableMessage server={unreachableServer} /> : <MaintenanceMessage />}
         </div>
       </div>
     </DefaultLayout>
