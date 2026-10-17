@@ -29,18 +29,20 @@ export function signOutCommand(options: { userLabel: string; onSignOut: () => vo
 /**
  * The sign-out action every surface invokes: resolve the useSignOut
  * mutation, then hand its landing target to the caller for navigation. A
- * rejection means the hook already toasted the failure, so the action
- * just returns and the user stays where they are.
+ * rejection means the hook already toasted the failure, and a null
+ * landing means the user cancelled the desktop confirmation, so the
+ * action just returns and the user stays where they are.
  */
 export async function runSignOutAction(
-  mutateAsync: () => Promise<string>,
+  mutateAsync: () => Promise<string | null>,
   onLanded: (landing: string) => void
 ): Promise<void> {
-  let landing: string;
+  let landing: string | null;
   try {
     landing = await mutateAsync();
   } catch {
     return;
   }
+  if (landing === null) return;
   onLanded(landing);
 }

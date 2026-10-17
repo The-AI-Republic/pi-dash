@@ -33,4 +33,10 @@ describe("runSignOutAction", () => {
     }, onLanded);
     expect(onLanded).not.toHaveBeenCalled();
   });
+
+  it("stays put when the user cancels the desktop confirmation", async () => {
+    const onLanded = vi.fn();
+    await runSignOutAction(async () => null, onLanded);
+    expect(onLanded).not.toHaveBeenCalled();
+  });
 });

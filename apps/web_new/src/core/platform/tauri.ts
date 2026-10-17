@@ -8,7 +8,18 @@
 // build-time alias; the no-Tauri bundle check proves it.
 
 import { createPersistentStore } from "./storage.js";
-import type { EventStream, Platform, StreamInit, StreamMessage, TitleBarApi, Unsubscribe } from "./types.js";
+import type {
+  AgentEngineProfile,
+  AgentHostCheck,
+  AgentRuntimeApi,
+  EventStream,
+  Platform,
+  SessionTeardownApi,
+  StreamInit,
+  StreamMessage,
+  TitleBarApi,
+  Unsubscribe,
+} from "./types.js";
 
 /** Subset of the Tauri webview globals this module touches. */
 interface TauriInvokeCore {
@@ -281,6 +292,92 @@ function trackFocus(callback: (focused: boolean) => void): Unsubscribe {
   };
 }
 
+/** Invoke a native command. Rejects without the desktop bridge. */
+function invokeNative<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const native = nativeApiOrigin();
+  if (!native) {
+    return Promise.reject(new Error(`${command} needs the native bridge`));
+  }
+  return native.core.invoke<T>(command, args);
+}
+
+interface NativeHostCheck {
+  runner_present?: unknown;
+  engine_present?: unknown;
+  host_label?: unknown;
+}
+
+function toHostCheck(raw: NativeHostCheck): AgentHostCheck {
+  return {
+    runnerPresent: raw.runner_present === true,
+    enginePresent: raw.engine_present === true,
+    hostLabel: typeof raw.host_label === "string" ? raw.host_label : "",
+  };
+}
+
+/** Grace period the daemon stop waits when the caller names none. */
+export const DAEMON_STOP_GRACE_SECONDS = 5;
+
+const desktopAgentRuntime: AgentRuntimeApi = {
+  isAvailable: async () => {
+    try {
+      const check = toHostCheck(await invokeNative<NativeHostCheck>("managed_doctor"));
+      return check.runnerPresent && check.enginePresent;
+    } catch {
+      return false;
+    }
+  },
+  checkHost: async () => toHostCheck(await invokeNative<NativeHostCheck>("managed_doctor")),
+  writeEngineConfig: (input: { account: string; profile: AgentEngineProfile }) =>
+    invokeNative("managed_write_engine_config", { account: input.account, profile: input.profile }),
+  writeModelToken: (token: string) => invokeNative("managed_write_model_token", { token }),
+  bootstrapMachine: (input: { cloudUrl: string; workspace: string; machineToken: string; devMachineId: string }) =>
+    invokeNative("managed_bootstrap", {
+      cloudUrl: input.cloudUrl,
+      workspace: input.workspace,
+      machineToken: input.machineToken,
+      devMachineId: input.devMachineId,
+    }),
+  enrollProject: (input: { account: string; workspace: string; project: string; hostLabel: string }) =>
+    invokeNative("managed_enroll", {
+      account: input.account,
+      workspace: input.workspace,
+      project: input.project,
+      hostLabel: input.hostLabel,
+    }),
+  startDaemon: (input: { account: string; workspace: string }) =>
+    invokeNative("managed_start_daemon", { account: input.account, workspace: input.workspace }),
+  stopDaemon: (graceSeconds?: number | undefined) =>
+    invokeNative("managed_stop_daemon", { graceSeconds: graceSeconds ?? DAEMON_STOP_GRACE_SECONDS }),
+  signOutNative: (input?: { deleteChatHistoryAccount?: string | undefined } | undefined) =>
+    invokeNative(
+      "managed_sign_out",
+      input?.deleteChatHistoryAccount === undefined
+        ? undefined
+        : { clearChatHistory: { account: input.deleteChatHistoryAccount } }
+    ),
+  saveApprovalModes: (account: string, modes: Record<string, string>) =>
+    invokeNative("chat_approval_modes_save", { account, modes }),
+  loadApprovalModes: async (account: string) => {
+    const modes = await invokeNative<Record<string, string> | null>("chat_approval_modes_load", { account });
+    return modes ?? {};
+  },
+};
+
+const desktopSessionTeardown: SessionTeardownApi = {
+  clearLocalSession: async () => {
+    // Runs after the sign-out POST, which still needs its cookie. A failed
+    // wipe must not strand the user: landing on sign-in stays right, and the
+    // next sign-in overwrites whatever survived. Without the bridge there is
+    // no native store to wipe, so that resolves too.
+    try {
+      await invokeNative("desktop_clear_web_data");
+    } catch {
+      // Nothing useful to do — see above.
+    }
+  },
+};
+
 export const platform: Platform = {
   kind: "desktop",
   fetch: (input, init) => desktopFetch(input, init),
@@ -303,4 +400,6 @@ export const platform: Platform = {
   storage: createPersistentStore("pidash.desktop"),
   onFocusChange: trackFocus,
   window: desktopWindow,
+  agentRuntime: desktopAgentRuntime,
+  sessionTeardown: desktopSessionTeardown,
 };

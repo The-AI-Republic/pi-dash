@@ -114,6 +114,12 @@ const PersonalizeDialog = React.lazy(() =>
 const LazyUpdatesDialog = React.lazy(() =>
   import("../../../shared/shell/UpdatesDialog.js").then((module) => ({ default: module.UpdatesDialog }))
 );
+// The agent-runtime supervisor splits off the same way (RUN-044): it is a
+// background desktop service, so it loads right after first paint instead
+// of weighing the initial chain.
+const LazyRuntimeSupervisor = React.lazy(() =>
+  import("../../../features/runners/index.js").then((module) => ({ default: module.RuntimeSupervisor }))
+);
 
 export const Route = createFileRoute("/$ws/_gated")({
   beforeLoad: async ({ context, location }) => {
@@ -167,25 +173,31 @@ export const Route = createFileRoute("/$ws/_gated")({
     const signOut = useSignOut();
 
     return (
-      <WorkspaceShell
-        workspaceSlug={params.ws}
-        currentPath={pathname}
-        childProjectId={lastParam(matches, "projectId")}
-        onSelectWorkspace={(slug) => navigate({ to: "/$ws", params: { ws: slug } })}
-        onSelectProject={(projectId) =>
-          navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: params.ws, projectId }, search: {} })
-        }
-        onSelectSearchResult={(hit: SearchResultHit) => navigate(resolveSearchTarget(hit, params.ws))}
-        onNavigateHref={(href: string) => navigate({ href })}
-        onSignOut={() => {
-          void runSignOutAction(
-            () => signOut.mutateAsync(),
-            (landing) => {
-              void navigate({ href: landing });
-            }
-          );
-        }}
-      />
+      <>
+        {/* Background agent-runtime supervisor (RUN-044): desktop only, renders nothing on web. */}
+        <React.Suspense fallback={null}>
+          <LazyRuntimeSupervisor />
+        </React.Suspense>
+        <WorkspaceShell
+          workspaceSlug={params.ws}
+          currentPath={pathname}
+          childProjectId={lastParam(matches, "projectId")}
+          onSelectWorkspace={(slug) => navigate({ to: "/$ws", params: { ws: slug } })}
+          onSelectProject={(projectId) =>
+            navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: params.ws, projectId }, search: {} })
+          }
+          onSelectSearchResult={(hit: SearchResultHit) => navigate(resolveSearchTarget(hit, params.ws))}
+          onNavigateHref={(href: string) => navigate({ href })}
+          onSignOut={() => {
+            void runSignOutAction(
+              () => signOut.mutateAsync(),
+              (landing) => {
+                void navigate({ href: landing });
+              }
+            );
+          }}
+        />
+      </>
     );
   },
 });

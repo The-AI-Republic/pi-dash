@@ -7,6 +7,8 @@
 // branch on the target themselves.
 
 export type {
+  AgentEngineProfile,
+  AgentHostCheck,
   AgentRuntimeApi,
   DeepLinkApi,
   EventStream,

@@ -115,7 +115,7 @@ function stubTransport(handler: (url: string, init: TransportInit) => StubRoute 
 const CSRF = JSON.stringify({ csrf_token: "csrf" });
 
 interface Settlement {
-  landing?: string | undefined;
+  landing?: string | null | undefined;
   error?: unknown;
 }
 

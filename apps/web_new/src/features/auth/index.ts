@@ -122,6 +122,7 @@ export {
 export type { WorkspaceStepView } from "./workspace.js";
 
 export { performSignOut, SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE, signOutLandingTarget } from "./signOut.js";
+export type { PerformSignOutArgs } from "./signOut.js";
 export { useSignOut } from "./signOut.js";
 export {
   describeDeviceApprovalFailure,

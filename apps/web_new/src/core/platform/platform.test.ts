@@ -31,8 +31,13 @@ describe("platform selection", () => {
     expect(webPlatform.sessionTeardown).toBeUndefined();
   });
 
-  it("leaves the session-teardown seam unimplemented until the desktop epic lands it", () => {
-    expect(desktopPlatform.sessionTeardown).toBeUndefined();
+  it("implements the agent-runtime and session-teardown seams (RUN-044, RUN-047)", () => {
+    expect(desktopPlatform.agentRuntime).toBeDefined();
+    expect(desktopPlatform.sessionTeardown).toBeDefined();
+  });
+
+  it("resolves the session wipe without the native bridge", async () => {
+    await expect(desktopPlatform.sessionTeardown?.clearLocalSession()).resolves.toBeUndefined();
   });
 
   it("exposes the title-bar capability on the desktop platform", () => {

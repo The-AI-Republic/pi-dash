@@ -164,6 +164,12 @@ vi.mock("../../../features/sidebar/components/PersonalizeDialog.js", async () =>
   };
 });
 
+// Runtime-supervisor stand-in: the supervisor's own suite owns its
+// behavior (and it needs router context this suite does not provide).
+vi.mock("../../../features/runners/index.js", () => ({
+  RuntimeSupervisor: () => null,
+}));
+
 // Updates stand-in: capture the dialog props; the dialog's own suite
 // owns its behavior.
 vi.mock("../../../shared/shell/UpdatesDialog.js", async () => {
