@@ -149,6 +149,36 @@ def test_signup_success_creates_admin_and_logs_in(bare_world):
         assert body["user"]["email"] == "fresh@example.com"
 
 
+def test_signup_nulls_both_instance_audit_columns(bare_world):
+    # The sign-up instance.save() runs while still anonymous
+    # (admin.py:234, before user_login at :237), so Django NULLs both
+    # audit columns on the pre-existing row (db/models/base.py:31-33).
+    db = bare_world["db"]
+    prior = db.make_user("priorauthor@example.com")
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "update instances set created_by_id = %s, updated_by_id = %s where id = %s;",
+                (prior["id"], prior["id"], bare_world["instance"]["id"]),
+            )
+        conn.commit()
+    client = _primed_client()
+    res = client.post(
+        "/api/instances/admins/sign-up/",
+        data={
+            "email": "auditnull@example.com",
+            "password": STRONG_PASSWORD,
+            "first_name": "Audit",
+            "company_name": "Acme",
+        },
+    )
+    assert_success_redirect(res, base=_admin_base())
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("select created_by_id, updated_by_id from instances;")
+            assert cur.fetchone() == (None, None)
+
+
 def test_signup_minimal_form_uses_defaults(bare_world):
     db = bare_world["db"]
     client = _primed_client()

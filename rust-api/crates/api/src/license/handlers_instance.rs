@@ -1306,7 +1306,8 @@ async fn signup_screen_visited(
         ));
     };
     // `BaseModel.save` stamps `updated_by` with the current user when there
-    // is one (`db/models/base.py:26-40`); anonymous posts leave it NULL.
+    // is one (`db/models/base.py:26-40`); anonymous posts wipe both audit
+    // columns, even on updates.
     let now = chrono::Utc::now();
     if let Some(actor) = actor {
         sqlx::query(
@@ -1320,7 +1321,7 @@ async fn signup_screen_visited(
         .map_err(|_| HandlerError::ServerError)?;
     } else {
         sqlx::query(
-            "UPDATE instances SET is_signup_screen_visited = TRUE, updated_at = $1, updated_by_id = NULL WHERE id = $2",
+            "UPDATE instances SET is_signup_screen_visited = TRUE, updated_at = $1, created_by_id = NULL, updated_by_id = NULL WHERE id = $2",
         )
         .bind(now)
         .bind(instance.id)
