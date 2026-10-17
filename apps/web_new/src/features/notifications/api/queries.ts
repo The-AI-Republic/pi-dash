@@ -1,14 +1,33 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Notification queries. The route loader prefetches the unread count
-// for the top-bar inbox dot (SHELL-065); the query stays disabled
-// without a workspace so no request fires.
-import { queryOptions } from "@tanstack/react-query";
-import { getUnreadNotifications, type ApiClient } from "@pidash/api-client";
+// Notification queries (written from parity/specs/notifications.md §1,
+// §2, §4, NTF-001-005). The sibling slices build on these two reads: the
+// unread totals behind the tab badges (and the shell's inbox dot, whose
+// prefetch already lives in the gated layout) and the paginated inbox
+// list for one stream. Both stay disabled without a workspace so no
+// request fires.
+import { queryOptions, useQuery } from "@tanstack/react-query";
+import {
+  getUnreadNotifications,
+  listNotificationsPage,
+  type ApiClient,
+  type NotificationListQuery,
+} from "@pidash/api-client";
 
+import { getAppClient } from "../../../core/api/client.js";
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
 import { notificationKeys } from "./keys.js";
+
+/** Fixed inbox page size (spec §6: 300 rows per page). */
+export const NOTIFICATIONS_PAGE_SIZE = 300;
+
+/**
+ * Cursor for a fresh stream load: first page at zero offset. Continuations
+ * (the explicit next-page control, NTF-010) follow the stored next cursor
+ * and belong to the sibling slice.
+ */
+export const NOTIFICATIONS_FIRST_CURSOR = `${NOTIFICATIONS_PAGE_SIZE}:0:0`;
 
 export function unreadNotificationsQueryOptions(client: ApiClient, workspaceSlug: string) {
   return queryOptions({
@@ -17,4 +36,29 @@ export function unreadNotificationsQueryOptions(client: ApiClient, workspaceSlug
     staleTime: LIST_STALE_TIME_MS,
     enabled: workspaceSlug.length > 0,
   });
+}
+
+/** Unread totals for one workspace; components read through this hook. */
+export function useUnreadNotifications(workspaceSlug: string) {
+  return useQuery(unreadNotificationsQueryOptions(getAppClient(), workspaceSlug));
+}
+
+/** First page of one inbox stream (tab, later filter/mode queries too). */
+export function notificationsListQueryOptions(client: ApiClient, workspaceSlug: string, query: NotificationListQuery) {
+  return queryOptions({
+    queryKey: notificationKeys.list(workspaceSlug, query),
+    queryFn: () =>
+      listNotificationsPage(client, workspaceSlug, {
+        ...query,
+        perPage: NOTIFICATIONS_PAGE_SIZE,
+        cursor: NOTIFICATIONS_FIRST_CURSOR,
+      }),
+    staleTime: LIST_STALE_TIME_MS,
+    enabled: workspaceSlug.length > 0,
+  });
+}
+
+/** First page of one inbox stream; components read through this hook. */
+export function useNotificationsList(workspaceSlug: string, query: NotificationListQuery) {
+  return useQuery(notificationsListQueryOptions(getAppClient(), workspaceSlug, query));
 }

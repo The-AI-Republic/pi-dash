@@ -26,4 +26,21 @@ export {
   pendingFlipTopic,
 } from "./components/EmailPreferencesPage.js";
 export type { EmailPreferenceRow, PendingFlip } from "./components/EmailPreferencesPage.js";
-export { unreadNotificationsQueryOptions } from "./api/queries.js";
+export {
+  NOTIFICATIONS_FIRST_CURSOR,
+  NOTIFICATIONS_PAGE_SIZE,
+  notificationsListQueryOptions,
+  unreadNotificationsQueryOptions,
+  useNotificationsList,
+  useUnreadNotifications,
+} from "./api/queries.js";
+export { InboxShell } from "./components/InboxShell.js";
+export { InboxView } from "./components/InboxView.js";
+export { NotificationCard } from "./components/NotificationCard.js";
+export { StreamTabs } from "./components/StreamTabs.js";
+export { selectUnreadBadgeCount } from "./lib/badgeCount.js";
+export { describeNotificationChange, resolveNotificationCard, resolveNotificationCards } from "./lib/card.js";
+export type { NotificationCardData, NotificationChange } from "./lib/card.js";
+export { formatNotificationAge } from "./lib/relativeAge.js";
+export { NOTIFICATION_TABS, notificationTabQuery } from "./lib/stream.js";
+export type { NotificationTab } from "./lib/stream.js";
