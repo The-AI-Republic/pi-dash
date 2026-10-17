@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // @pidash/api-client: fetch client, endpoint contracts, contract-test harness.
-export { SignedUserAsset, uploadUserAvatar } from "./contracts/assets.js";
+export {
+  SignedUserAsset,
+  deleteLegacyWorkspaceFileAsset,
+  deleteWorkspaceLogoAsset,
+  uploadUserAvatar,
+  uploadWorkspaceLogo,
+} from "./contracts/assets.js";
 export type { ByteUpload, ByteUploadResponse } from "./contracts/assets.js";
 export { ApiError, isApiError, isRetryable } from "./errors.js";
 export type { ApiErrorCode, ApiErrorFields, ApiErrorInit } from "./errors.js";
@@ -65,14 +71,29 @@ export {
 } from "./contracts/workspaces.js";
 export {
   CreatedWorkspace,
+  WorkspaceDetails,
   WorkspaceMember,
   WorkspaceMemberList,
+  WorkspaceRosterMember,
+  WorkspaceRosterMemberList,
+  WorkspaceRosterUser,
   WorkspaceSlugStatus,
   checkWorkspaceSlug,
   createWorkspace,
+  deleteWorkspace,
+  getWorkspace,
+  leaveWorkspace,
   listWorkspaceMembers,
+  listWorkspaceRoster,
+  removeWorkspaceMember,
+  updateWorkspace,
+  updateWorkspaceMemberRole,
 } from "./contracts/workspace-management.js";
-export type { WorkspaceCreateInput } from "./contracts/workspace-management.js";
+export type {
+  WorkspaceCreateInput,
+  WorkspaceMemberRoleInput,
+  WorkspaceUpdateInput,
+} from "./contracts/workspace-management.js";
 export {
   BulkInviteResult,
   InvitationAnswer,
@@ -86,14 +107,18 @@ export {
   answerWorkspaceInvitation,
   createWorkspaceJoinRequest,
   getWorkspaceInvitation,
+  listPendingWorkspaceInvites,
   listWorkspaceInvitations,
   listWorkspaceJoinRequests,
   sendWorkspaceInvitations,
+  updateWorkspaceInviteRole,
+  withdrawWorkspaceInvite,
 } from "./contracts/invitations.js";
 export type {
   InvitationAnswerInput,
   JoinRequestInput,
   WorkspaceInviteInput,
+  WorkspaceInviteRoleInput,
   WorkspaceInvitee,
 } from "./contracts/invitations.js";
 export { Project, ProjectList, ProjectLite, listProjects } from "./contracts/projects.js";
