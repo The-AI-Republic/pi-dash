@@ -147,9 +147,18 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     crate::tasks_cleanup::register_cleanup_handlers(registry, ctx.pools.clone(), ctx.mongo.clone());
     crate::tasks_cleanup::register_versions(registry, ctx.pools.primary().clone());
     // D-09 remaining groups (PIDASHCONV-224; kept in sync with
-    // `tests::worker_registry_owns_all_d09_local_tasks`). The four export
-    // tasks stay Python-owned: never register them here.
+    // `tests::worker_registry_owns_all_d09_local_tasks`). `delete_old_s3_link`
+    // (PIDASHCONV-858) and the dead `export_analytics_to_csv_email` stay
+    // Python-owned: never register them here.
     crate::tasks_cleanup::register_deletion_tasks(registry, ctx.pools.clone());
+    // Export tasks (PIDASHCONV-1106; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). The
+    // pool-only handlers exist with live mail/S3 seams, so the Rust
+    // worker owns `issue_export_task` and `analytic_export_task` —
+    // otherwise the exports are lost at switchover (parity gap
+    // W-export). Django drops both (PDASHOSS01-292); Rust runs them.
+    crate::tasks_export::register_issue_export_task(registry, ctx.pools.primary().clone());
+    crate::tasks_export::register_analytic_task(registry, ctx.pools.primary().clone());
     // `register_assets` installs sweep + metadata + copy (assets.rs:692).
     crate::tasks_cleanup::assets::register_assets(
         registry,
@@ -511,7 +520,11 @@ mod tests {
             4,
             "membership group drifted"
         );
-        assert_eq!(expected.len(), 65, "worker-owned count drifted");
+        expected.extend([
+            crate::tasks_export::ISSUE_EXPORT_TASK,
+            crate::tasks_export::ANALYTIC_EXPORT_TASK,
+        ]);
+        assert_eq!(expected.len(), 67, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");
@@ -528,7 +541,13 @@ mod tests {
             assert_eq!(route_for(&registry, name), Route::PythonOwned);
         }
         assert_eq!(crate::tasks_cleanup::EXPORT_TASK_NAMES.len(), 4);
-        for name in crate::tasks_cleanup::EXPORT_TASK_NAMES {
+        // Two of the four export names are worker-owned now
+        // (PIDASHCONV-1106); the S3-expiry forward (PIDASHCONV-858) and
+        // the dead CSV-mail name stay Python-owned.
+        for name in [
+            pidash_types::tasks_cleanup::exports_dto::DELETE_OLD_S3_LINK_TASK_NAME,
+            pidash_types::tasks_cleanup::exports_dto::EXPORT_ANALYTICS_CSV_TASK_NAME,
+        ] {
             assert!(!registry.owns(name), "{name} must stay Python-owned");
             assert_eq!(route_for(&registry, name), Route::PythonOwned);
         }

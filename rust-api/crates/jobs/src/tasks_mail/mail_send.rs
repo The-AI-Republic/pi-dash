@@ -73,6 +73,10 @@ pub const FORGOT_PASSWORD_TEMPLATE: &str =
 /// `emails/user/email_updated.html` — serves `send_email_update_confirmation`.
 pub const EMAIL_UPDATED_TEMPLATE: &str =
     include_str!("../../../../../apps/api/templates/emails/user/email_updated.html");
+/// `emails/exports/analytics.html` — serves `analytic_export_task`
+/// (`analytic_plot_export.py:55`, rendered with `{}`).
+pub const ANALYTICS_EXPORT_TEMPLATE: &str =
+    include_str!("../../../../../apps/api/templates/emails/exports/analytics.html");
 
 /// Django's `DEFAULT_FROM_EMAIL` global default: the project does not
 /// override it, so a null `EMAIL_FROM` row falls back here
@@ -457,10 +461,15 @@ pub fn message_bytes(
     out.push_str(&part("text/plain", &mail.text_body));
     out.push_str(&part("text/html", &mail.html_body));
     out.push_str(&format!("--{boundary}--\r\n"));
-    // `message.as_bytes(linesep="\r\n")` (what `EmailBackend.send`
-    // transmits): normalize every line ending to CRLF first…
+    crlf_dot_stuff(out)
+}
+
+/// `message.as_bytes(linesep="\r\n")` (what `EmailBackend.send`
+/// transmits): normalize every line ending to CRLF first, then
+/// dot-stuffing (`smtplib.data` quotes leading periods). Shared by the
+/// `alternative` and `mixed` builders (same bytes either way).
+fn crlf_dot_stuff(out: String) -> Vec<u8> {
     let crlf = out.replace("\r\n", "\n").replace('\n', "\r\n");
-    // …then dot-stuffing (`smtplib.data` quotes leading periods).
     let mut stuffed = String::with_capacity(crlf.len());
     for line in crlf.split_inclusive('\n') {
         if line.starts_with('.') {
@@ -469,6 +478,104 @@ pub fn message_bytes(
         stuffed.push_str(line);
     }
     stuffed.into_bytes()
+}
+
+/// One file attached to an outgoing mail: `msg.attach(filename,
+/// content)` (`analytic_plot_export.py:86` attaches the CSV text).
+/// Content is always `str` on this path (never bytes).
+pub struct MailAttachment<'a> {
+    pub filename: String,
+    pub content: &'a str,
+}
+
+/// The attachment MIME type the way `EmailMessage.attach` guesses it:
+/// `mimetypes.guess_type(filename)[0]`. The export task only ever
+/// attaches `{slug}-analytics.csv` (`text/csv`, in CPython's builtin
+/// table on every platform); anything else is the `None.split`
+/// `AttributeError` path, which fails the send like Python.
+pub fn attachment_mimetype(filename: &str) -> Result<&'static str, String> {
+    if filename.to_ascii_lowercase().ends_with(".csv") {
+        return Ok("text/csv");
+    }
+    Err(format!("cannot guess mimetype for {filename:?}"))
+}
+
+/// `Content-Disposition` filename parameter: quoted ASCII verbatim, or
+/// RFC 2231 (`filename*=utf-8''...`) when the name is non-ASCII (what
+/// `Message.add_header` emits). Slugs are ASCII in practice; the
+/// fallback only makes the builder total.
+fn disposition_filename(filename: &str) -> String {
+    if filename.is_ascii() {
+        return format!("filename=\"{filename}\"");
+    }
+    let mut encoded = String::with_capacity(filename.len());
+    for byte in filename.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("filename*=utf-8''{encoded}")
+}
+
+/// Render the MIME bytes for a body + attachments mail with no HTML
+/// alternative (`EmailMessage.message()` shape, probed against Django
+/// 4.2): outer `multipart/mixed`, the `text/plain` body first, then one
+/// part per attachment (`{mimetype}; charset="utf-8"`,
+/// `Content-Disposition: attachment`). Each part carries its own
+/// `MIME-Version: 1.0`; CTE is `7bit` for ASCII payloads, `8bit`
+/// otherwise (raw UTF-8 either way — Django never base64s `str`
+/// attachments). Header order is Django's (`Content-Type`,
+/// `MIME-Version`, `Subject`, `From`, `To`, `Date`, `Message-ID`).
+#[allow(clippy::too_many_arguments)]
+pub fn message_bytes_mixed(
+    from: &str,
+    to: &str,
+    subject: &str,
+    text_body: &str,
+    attachments: &[MailAttachment<'_>],
+    boundary: &str,
+    date: &str,
+    msg_id: &str,
+) -> Result<Vec<u8>, String> {
+    let cte = |body: &str| if body.is_ascii() { "7bit" } else { "8bit" };
+    let mut out = format!(
+        "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\
+         MIME-Version: 1.0\r\n\
+         Subject: {subject}\r\n\
+         From: {from}\r\n\
+         To: {to}\r\n\
+         Date: {date}\r\n\
+         Message-ID: {msg_id}\r\n\
+         \r\n"
+    );
+    out.push_str(&format!(
+        "--{boundary}\r\n\
+         Content-Type: text/plain; charset=\"utf-8\"\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Transfer-Encoding: {body_cte}\r\n\
+         \r\n\
+         {text_body}\r\n",
+        body_cte = cte(text_body),
+    ));
+    for attachment in attachments {
+        let mimetype = attachment_mimetype(&attachment.filename)?;
+        out.push_str(&format!(
+            "--{boundary}\r\n\
+             Content-Type: {mimetype}; charset=\"utf-8\"\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Transfer-Encoding: {part_cte}\r\n\
+             Content-Disposition: attachment; {disposition}\r\n\
+             \r\n\
+             {content}\r\n",
+            part_cte = cte(attachment.content),
+            disposition = disposition_filename(&attachment.filename),
+            content = attachment.content,
+        ));
+    }
+    out.push_str(&format!("--{boundary}--\r\n"));
+    Ok(crlf_dot_stuff(out))
 }
 
 /// `smtplib.quoteaddr`: display name off, bare addr-spec in `<>`.
@@ -718,6 +825,41 @@ pub async fn smtp_send(cfg: &SmtpSend, mail: &OutgoingMail) -> Result<(), String
         // `EmailMessage.message()` header validation (`BadHeaderError`).
         return Err("invalid email header".to_owned());
     }
+    let boundary = make_boundary();
+    let date = make_date();
+    let msg_id = format!("<{boundary}@pidash>");
+    let content = message_bytes(&cfg.from_email, mail, &boundary, &date, &msg_id);
+    smtp_deliver(cfg, port, &mail.to, &content).await
+}
+
+/// Per-send MIME boundary: nanos-since-epoch + pid in hex (varies per
+/// send like Django's, which mixes time + pid + random).
+fn make_boundary() -> String {
+    format!(
+        "{:x}{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        std::process::id()
+    )
+}
+
+/// `Date` header: `email.utils.formatdate(localtime=True)` shape with a
+/// UTC `-0000` offset (the worker runs on UTC; Django renders the same
+/// shape with the local offset).
+fn make_date() -> String {
+    chrono::Utc::now()
+        .format("%a, %d %b %Y %H:%M:%S -0000")
+        .to_string()
+}
+
+/// The `EmailBackend.open/send` conversation for prebuilt `content`:
+/// connect (+implicit TLS), greeting, EHLO, STARTTLS, AUTH, `MAIL`,
+/// `RCPT`, `DATA`, best-effort `QUIT`. Shared by [`smtp_send`] and the
+/// attachment variant (same wire, never a fork). Any failure is `Err` —
+/// the caller swallows it.
+async fn smtp_deliver(cfg: &SmtpSend, port: u16, to: &str, content: &[u8]) -> Result<(), String> {
     let stream = tokio::net::TcpStream::connect((cfg.host.as_str(), port))
         .await
         .map_err(|e| format!("SMTP connect failed: {e}"))?;
@@ -781,7 +923,7 @@ pub async fn smtp_send(cfg: &SmtpSend, mail: &OutgoingMail) -> Result<(), String
     if code != 250 {
         return Err("SMTP sender refused".to_owned());
     }
-    io.write_str(&format!("RCPT TO:{}", quote_address(&mail.to)))
+    io.write_str(&format!("RCPT TO:{}", quote_address(to)))
         .await?;
     let (code, _) = io.read_reply().await?;
     if code != 250 && code != 251 {
@@ -792,20 +934,7 @@ pub async fn smtp_send(cfg: &SmtpSend, mail: &OutgoingMail) -> Result<(), String
     if code != 354 {
         return Err("SMTP DATA rejected".to_owned());
     }
-    let boundary = format!(
-        "{:x}{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-        std::process::id()
-    );
-    let date = chrono::Utc::now()
-        .format("%a, %d %b %Y %H:%M:%S -0000")
-        .to_string();
-    let msg_id = format!("<{boundary}@pidash>");
-    let content = message_bytes(&cfg.from_email, mail, &boundary, &date, &msg_id);
-    io.write_bytes(&content).await?;
+    io.write_bytes(content).await?;
     io.write_bytes(b"\r\n.\r\n").await?;
     let (code, _) = io.read_reply().await?;
     if code != 250 {
@@ -815,6 +944,41 @@ pub async fn smtp_send(cfg: &SmtpSend, mail: &OutgoingMail) -> Result<(), String
     // once the send itself succeeded.
     let _ = io.write_str("QUIT").await;
     Ok(())
+}
+
+/// [`smtp_send`] for a body + attachments mail with no HTML alternative
+/// (`send_export_email`, `analytic_plot_export.py:52-88`): same header
+/// validation, same conversation, `multipart/mixed` content.
+#[allow(clippy::too_many_arguments)]
+pub async fn smtp_send_mixed(
+    cfg: &SmtpSend,
+    to: &str,
+    subject: &str,
+    text_body: &str,
+    attachments: &[MailAttachment<'_>],
+) -> Result<(), String> {
+    let port: u16 = u16::try_from(cfg.port).map_err(|_| format!("bad SMTP port: {}", cfg.port))?;
+    if [subject, cfg.from_email.as_str(), to]
+        .iter()
+        .any(|h| h.contains(['\r', '\n']))
+    {
+        // `EmailMessage.message()` header validation (`BadHeaderError`).
+        return Err("invalid email header".to_owned());
+    }
+    let boundary = make_boundary();
+    let date = make_date();
+    let msg_id = format!("<{boundary}@pidash>");
+    let content = message_bytes_mixed(
+        &cfg.from_email,
+        to,
+        subject,
+        text_body,
+        attachments,
+        &boundary,
+        &date,
+        &msg_id,
+    )?;
+    smtp_deliver(cfg, port, to, &content).await
 }
 
 /// Full pipeline for one mail: resolve config → render → plain text →
@@ -862,6 +1026,72 @@ async fn try_send_mail(
             text_body: text,
             html_body: html,
         },
+    )
+    .await
+}
+
+/// [`send_mail`] for a body + attachments mail with no HTML alternative
+/// (`send_export_email`, `analytic_plot_export.py:52-88`): resolve config
+/// → render → plain text → attach → send. Success logs `success_log`
+/// (`pi_dash.worker`), ANY failure logs the error (`pi_dash.exception`)
+/// and returns normally — swallow, never retry.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_mail_with_attachment(
+    pool: &sqlx::PgPool,
+    template_source: &str,
+    subject: &str,
+    context: &HashMap<String, String>,
+    to: &str,
+    attachment_name: &str,
+    attachment_content: &str,
+    success_log: &str,
+) {
+    match try_send_mail_with_attachment(
+        pool,
+        template_source,
+        subject,
+        context,
+        to,
+        attachment_name,
+        attachment_content,
+    )
+    .await
+    {
+        Ok(()) => tracing::info!(target: "pi_dash.worker", "{success_log}"),
+        Err(error) => tracing::error!(target: "pi_dash.exception", "{error}"),
+    }
+}
+
+async fn try_send_mail_with_attachment(
+    pool: &sqlx::PgPool,
+    template_source: &str,
+    subject: &str,
+    context: &HashMap<String, String>,
+    to: &str,
+    attachment_name: &str,
+    attachment_content: &str,
+) -> Result<(), String> {
+    // `get_email_configuration()` runs INSIDE the `try` (`:60-68`): a
+    // store failure is swallowed like any other error.
+    let store = pidash_db::config::PgConfigStore::new(pool.clone());
+    let keyring = pidash_db::config::encryption::Keyring::from_env();
+    let registry: &ConfigRegistry = pidash_db::config::registry::global();
+    let values =
+        pidash_services::license::config::get_email_configuration(&store, &keyring, registry)
+            .await
+            .map_err(|e| format!("email configuration failed: {e}"))?;
+    let cfg = resolve_smtp(&values)?;
+    let html = render_template(template_source, context)?;
+    let text = plain_text_from_html(&html);
+    smtp_send_mixed(
+        &cfg,
+        to,
+        subject,
+        &text,
+        &[MailAttachment {
+            filename: attachment_name.to_owned(),
+            content: attachment_content,
+        }],
     )
     .await
 }
@@ -1496,5 +1726,104 @@ mod tests {
             quoted_printable_encode(&format!("{}\t", "q".repeat(74))),
             format!("{}\t=\n", "q".repeat(74))
         );
+    }
+
+    #[test]
+    fn mixed_shape_matches_probed_django() {
+        // Pinned to the Django 4.2 probe: body + one CSV attach, no
+        // HTML alternative (`send_export_email` shape).
+        let csv = "\"X-Axis\",\"Y-Axis\"\r\n\"a\",\"1\"\r\n";
+        let bytes = message_bytes_mixed(
+            "Team Pi Dash <team@airepublic.com>",
+            "contract@example.com",
+            "Your Export is ready",
+            "plain ascii body",
+            &[MailAttachment {
+                filename: "acme-analytics.csv".to_owned(),
+                content: csv,
+            }],
+            "b",
+            "date",
+            "<id>",
+        )
+        .expect("builds");
+        let text = String::from_utf8(bytes).expect("utf-8");
+        assert!(!text.replace("\r\n", "").contains('\n'));
+        // Header order is Django's.
+        let head = text.split("\r\n\r\n").next().expect("headers");
+        let order: Vec<&str> = head
+            .split("\r\n")
+            .map(|l| l.split(':').next().unwrap())
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "Content-Type",
+                "MIME-Version",
+                "Subject",
+                "From",
+                "To",
+                "Date",
+                "Message-ID"
+            ]
+        );
+        assert!(text.contains("Content-Type: multipart/mixed; boundary=\"b\""));
+        assert!(text.contains(
+            "--b\r\nContent-Type: text/plain; charset=\"utf-8\"\r\nMIME-Version: 1.0\r\n\
+             Content-Transfer-Encoding: 7bit\r\n\r\nplain ascii body\r\n"
+        ));
+        assert!(text.contains(
+            "--b\r\nContent-Type: text/csv; charset=\"utf-8\"\r\nMIME-Version: 1.0\r\n\
+             Content-Transfer-Encoding: 7bit\r\n\
+             Content-Disposition: attachment; filename=\"acme-analytics.csv\"\r\n\
+             \r\n\"X-Axis\",\"Y-Axis\"\r\n\"a\",\"1\"\r\n"
+        ));
+        assert!(text.ends_with("--b--\r\n"));
+    }
+
+    #[test]
+    fn mixed_non_ascii_part_is_8bit_raw() {
+        // Probed: non-ASCII bodies/attachments stay raw UTF-8 with
+        // `8bit` (Django never base64s `str` parts).
+        let bytes = message_bytes_mixed(
+            "f@x.io",
+            "t@x.io",
+            "s",
+            "café",
+            &[MailAttachment {
+                filename: "s-analytics.csv".to_owned(),
+                content: "\"café\"\r\n",
+            }],
+            "b",
+            "date",
+            "<id>",
+        )
+        .expect("builds");
+        let text = String::from_utf8(bytes).expect("utf-8");
+        assert!(text.contains("Content-Transfer-Encoding: 8bit\r\n\r\ncafé\r\n"));
+        assert!(
+            text.contains("Content-Transfer-Encoding: 8bit\r\nContent-Disposition: attachment;")
+        );
+        assert!(text.contains("\"café\"\r\n\r\n--b--\r\n"));
+    }
+
+    #[test]
+    fn mixed_unknown_extension_fails_send() {
+        // `mimetypes.guess_type(...)[0]` is `None` → `.split` raises in
+        // Python; here the builder errors and the send fails the same way.
+        let result = message_bytes_mixed(
+            "f@x.io",
+            "t@x.io",
+            "s",
+            "b",
+            &[MailAttachment {
+                filename: "file.unknownext".to_owned(),
+                content: "x",
+            }],
+            "b",
+            "date",
+            "<id>",
+        );
+        assert!(result.is_err());
     }
 }

@@ -2821,6 +2821,7 @@ dependencies = [
  "minijinja",
  "pidash-db",
  "pidash-services",
+ "pidash-storage",
  "pidash-types",
  "rand 0.8.8",
  "rand 0.9.5",

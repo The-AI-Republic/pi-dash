@@ -568,6 +568,9 @@ mod tests {
         );
         tasks_cleanup::register_workspace_seed(&mut registry, pool.clone(), std::env::temp_dir());
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
+        // Export tasks (PIDASHCONV-1106): the same calls `worker()` makes.
+        pidash_jobs::tasks_export::register_issue_export_task(&mut registry, pool.clone());
+        pidash_jobs::tasks_export::register_analytic_task(&mut registry, pool.clone());
         // Stub-backed: the exact names the `Pools`-taking registers own.
         for spec in tasks_cleanup::cleanup::TASKS {
             let handler: Handler = std::sync::Arc::new(|_| Box::pin(async { Ok(Verdict::Ack) }));
@@ -605,15 +608,27 @@ mod tests {
             );
         }
 
-        // Still Python-owned: restore (BUG-DEL-2) plus the four exports.
+        // Still Python-owned: restore (BUG-DEL-2) plus the two remaining
+        // exports (the S3-expiry forward PIDASHCONV-858 + the dead CSV-mail
+        // name); the other two are worker-owned (PIDASHCONV-1106).
         assert!(!registry.owns(tasks_cleanup::RESTORE_TASK_NAME));
         assert_eq!(
             route_for(&registry, tasks_cleanup::RESTORE_TASK_NAME),
             Route::PythonOwned
         );
         assert_eq!(tasks_cleanup::EXPORT_TASK_NAMES.len(), 4);
-        for name in tasks_cleanup::EXPORT_TASK_NAMES {
-            assert!(tasks_cleanup::is_export_task(name));
+        for name in [
+            pidash_jobs::tasks_export::ISSUE_EXPORT_TASK,
+            pidash_jobs::tasks_export::ANALYTIC_EXPORT_TASK,
+        ] {
+            assert!(tasks_cleanup::EXPORT_TASK_NAMES.contains(&name));
+            assert!(registry.owns(name), "{name} must be worker-owned");
+            assert_eq!(route_for(&registry, name), Route::Local);
+        }
+        for name in tasks_cleanup::EXPORT_TASK_NAMES.iter().filter(|name| {
+            **name != pidash_jobs::tasks_export::ISSUE_EXPORT_TASK
+                && **name != pidash_jobs::tasks_export::ANALYTIC_EXPORT_TASK
+        }) {
             assert!(!registry.owns(name), "{name} must stay Python-owned");
             assert_eq!(route_for(&registry, name), Route::PythonOwned);
         }

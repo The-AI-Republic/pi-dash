@@ -141,8 +141,9 @@ pub fn resolve_server_endpoint(
 ///
 /// Send with the HTTP client as `method url` carrying exactly these headers:
 /// `authorization`, `x-amz-date`, `x-amz-content-sha256`, plus
-/// `content-type` when present. Any added, dropped, or re-cased signed
-/// header invalidates the signature.
+/// `content-type` when present and every [`SignedRequest::extra_headers`]
+/// entry. Any added, dropped, or re-cased signed header invalidates the
+/// signature.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignedRequest {
     /// `PUT` or `DELETE`.
@@ -157,6 +158,8 @@ pub struct SignedRequest {
     pub content_sha256: String,
     /// Value for the `Content-Type` header (PUT only).
     pub content_type: Option<String>,
+    /// Extra signed headers to send verbatim (`(lowercase-name, value)`).
+    pub extra_headers: Vec<(String, String)>,
 }
 
 /// Sign a server-side PUT of `payload` bytes as `object_key`.
@@ -201,6 +204,69 @@ pub fn sign_put(
         amz_date: amz_datetime.to_owned(),
         content_sha256: payload_hash,
         content_type: Some(content_type.to_owned()),
+        extra_headers: Vec::new(),
+    })
+}
+
+/// Sign a server-side PUT with extra signed headers (the MinIO export
+/// upload, `export_task.py:57-62`, signs `x-amz-acl: public-read` along
+/// the `ContentType`). `extra` entries are `(lowercase-name, value)`;
+/// the canonical headers sort by name (botocore sorts too) and the
+/// returned [`SignedRequest::extra_headers`] carries the same pairs for
+/// the caller to send. Otherwise identical to [`sign_put`].
+#[allow(clippy::too_many_arguments)]
+pub fn sign_put_extra(
+    storage: &StorageSettings,
+    scheme: &str,
+    host: &str,
+    object_key: &str,
+    content_type: &str,
+    payload: &[u8],
+    extra: &[(&str, &str)],
+    amz_datetime: &str,
+    date_stamp: &str,
+) -> Result<SignedRequest, StorageError> {
+    let payload_hash = sha256_hex(payload);
+    let endpoint = resolve_server_endpoint(storage, scheme, host)?;
+    let path = canonical_path(&endpoint, &storage.bucket_name, object_key);
+    let mut names: Vec<&str> = vec!["content-type", "host", "x-amz-content-sha256", "x-amz-date"];
+    names.extend(extra.iter().map(|(name, _)| *name));
+    names.sort_unstable();
+    let value_of = |name: &str| match name {
+        "content-type" => content_type.to_owned(),
+        "host" => endpoint.signed_host.clone(),
+        "x-amz-content-sha256" => payload_hash.clone(),
+        "x-amz-date" => amz_datetime.to_owned(),
+        other => extra
+            .iter()
+            .find(|(key, _)| *key == other)
+            .map(|(_, value)| (*value).to_owned())
+            .unwrap_or_default(),
+    };
+    let canonical_headers = names
+        .iter()
+        .map(|name| format!("{name}:{}\n", value_of(name)))
+        .collect::<String>();
+    let signed_headers = names.join(";");
+    let canonical = format!("PUT\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
+    let authorization = authorization(
+        storage,
+        &canonical,
+        amz_datetime,
+        date_stamp,
+        &signed_headers,
+    );
+    Ok(SignedRequest {
+        method: "PUT",
+        url: format!("{}{path}", endpoint.url_base),
+        authorization,
+        amz_date: amz_datetime.to_owned(),
+        content_sha256: payload_hash,
+        content_type: Some(content_type.to_owned()),
+        extra_headers: extra
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
     })
 }
 
@@ -241,6 +307,7 @@ pub fn sign_head(
         amz_date: amz_datetime.to_owned(),
         content_sha256: payload_hash,
         content_type: None,
+        extra_headers: Vec::new(),
     })
 }
 
@@ -279,7 +346,75 @@ pub fn sign_delete(
         amz_date: amz_datetime.to_owned(),
         content_sha256: payload_hash,
         content_type: None,
+        extra_headers: Vec::new(),
     })
+}
+
+/// A presigned-URL endpoint: the base the signed path hangs under, the
+/// host the signature covers, and the addressing style. Unlike
+/// [`ResolvedEndpoint`] this is caller-assembled per export branch
+/// (the MinIO presign endpoint is the custom-domain URL, not the upload
+/// endpoint).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresignEndpoint {
+    /// Base URL without trailing slash (`http://localhost:8123`,
+    /// `https://uploads.s3.us-west-2.amazonaws.com`).
+    pub url_base: String,
+    /// `host` header value the signature covers (with port when present).
+    pub signed_host: String,
+    /// Path-style (`/{bucket}/{key}`) vs virtual-host (`/{key}`).
+    pub path_style: bool,
+}
+
+/// Mint a SigV4 query-auth presigned GET URL (`generate_presigned_url(
+/// "get_object", ExpiresIn=...)`, `export_task.py:63-67,87-91,108-112`):
+/// canonical query (`X-Amz-Algorithm`, `X-Amz-Credential`,
+/// `X-Amz-Date`, `X-Amz-Expires`, `X-Amz-SignedHeaders=host`), the
+/// canonical request (whose payload hash is the empty-body SHA256 —
+/// botocore's `SigV4QueryAuth` signs `e3b0c44...`, not
+/// `UNSIGNED-PAYLOAD`), and the hex signature appended as
+/// `X-Amz-Signature`. Verified byte-for-byte against botocore vectors
+/// (see tests).
+#[allow(clippy::too_many_arguments)]
+pub fn presign_get_url(
+    endpoint: &PresignEndpoint,
+    bucket: &str,
+    object_key: &str,
+    access_key: &str,
+    secret_key: &str,
+    region: &str,
+    amz_datetime: &str,
+    date_stamp: &str,
+    expires_secs: u64,
+) -> String {
+    let scope = format!("{date_stamp}/{region}/s3/aws4_request");
+    let credential = format!("{access_key}/{scope}");
+    let query = format!(
+        "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={}&X-Amz-Date={amz_datetime}&X-Amz-Expires={expires_secs}&X-Amz-SignedHeaders=host",
+        uri_encode(&credential),
+    );
+    let path = if endpoint.path_style {
+        format!("/{bucket}/{}", uri_encode_path(object_key))
+    } else {
+        format!("/{}", uri_encode_path(object_key))
+    };
+    let canonical = format!(
+        "GET\n{path}\n{query}\nhost:{}\n\nhost\n{}",
+        endpoint.signed_host,
+        sha256_hex(&[]),
+    );
+    let to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_datetime}\n{scope}\n{}",
+        sha256_hex(canonical.as_bytes())
+    );
+    let signature = hex(&hmac_sha256(
+        &signing_key(secret_key, date_stamp, region),
+        to_sign.as_bytes(),
+    ));
+    format!(
+        "{}{path}?{query}&X-Amz-Signature={signature}",
+        endpoint.url_base,
+    )
 }
 
 fn canonical_path(endpoint: &ResolvedEndpoint, bucket: &str, object_key: &str) -> String {
@@ -653,6 +788,104 @@ mod tests {
                 Err(StorageError::Config(_))
             ),
             "empty secret fails pre-flight, never a 500"
+        );
+    }
+
+    /// Byte-for-byte against the frozen botocore vectors: MinIO
+    /// custom-domain presign (path-style) and region presign
+    /// (virtual-host). Same inputs, same signature.
+    #[test]
+    fn presign_matches_botocore_vectors() {
+        let key = "ws-1/export-an-abcdef-2026-09-28.zip";
+        let minio = presign_get_url(
+            &PresignEndpoint {
+                url_base: "http://localhost:8123".to_owned(),
+                signed_host: "localhost:8123".to_owned(),
+                path_style: true,
+            },
+            "uploads",
+            key,
+            "ak",
+            "sk",
+            "us-east-1",
+            "20261017T065234Z",
+            "20261017",
+            604800,
+        );
+        assert_eq!(
+            minio,
+            "http://localhost:8123/uploads/ws-1/export-an-abcdef-2026-09-28.zip\
+             ?X-Amz-Algorithm=AWS4-HMAC-SHA256\
+             &X-Amz-Credential=ak%2F20261017%2Fus-east-1%2Fs3%2Faws4_request\
+             &X-Amz-Date=20261017T065234Z&X-Amz-Expires=604800\
+             &X-Amz-SignedHeaders=host\
+             &X-Amz-Signature=dd69daec777bff84091463170f51df2a430e3c43d0e9648f8019abb1b4f12e00"
+        );
+        let region = presign_get_url(
+            &PresignEndpoint {
+                url_base: "https://uploads.s3.us-west-2.amazonaws.com".to_owned(),
+                signed_host: "uploads.s3.us-west-2.amazonaws.com".to_owned(),
+                path_style: false,
+            },
+            "uploads",
+            key,
+            "ak",
+            "sk",
+            "us-west-2",
+            "20261017T065234Z",
+            "20261017",
+            604800,
+        );
+        assert_eq!(
+            region,
+            "https://uploads.s3.us-west-2.amazonaws.com/ws-1/export-an-abcdef-2026-09-28.zip\
+             ?X-Amz-Algorithm=AWS4-HMAC-SHA256\
+             &X-Amz-Credential=ak%2F20261017%2Fus-west-2%2Fs3%2Faws4_request\
+             &X-Amz-Date=20261017T065234Z&X-Amz-Expires=604800\
+             &X-Amz-SignedHeaders=host\
+             &X-Amz-Signature=3c92d5d720cc0697d7877b107caba731f39e31708e1274b7009e81649500db2b"
+        );
+    }
+
+    /// The MinIO upload signs `x-amz-acl` alongside the PUT headers:
+    /// same frozen vector as botocore's header auth.
+    #[test]
+    fn put_extra_signs_acl_like_botocore() {
+        let storage = StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: "ak".to_owned(),
+            secret_access_key: "sk".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some("http://127.0.0.1:9000".to_owned()),
+            signed_url_expiration_secs: 3600,
+        };
+        let req = sign_put_extra(
+            &storage,
+            "http",
+            "unused.example",
+            "ws-1/export-an-abcdef-2026-09-28.zip",
+            "application/zip",
+            b"PK-test-bytes",
+            &[("x-amz-acl", "public-read")],
+            "20261017T065234Z",
+            "20261017",
+        )
+        .expect("signs");
+        assert_eq!(
+            req.url,
+            "http://127.0.0.1:9000/uploads/ws-1/export-an-abcdef-2026-09-28.zip"
+        );
+        assert_eq!(
+            req.authorization,
+            "AWS4-HMAC-SHA256 Credential=ak/20261017/us-east-1/s3/aws4_request, \
+             SignedHeaders=content-type;host;x-amz-acl;x-amz-content-sha256;x-amz-date, \
+             Signature=46d8292fa9c02f8bd6f7a42be2cb625c5d777101cad5b717e6e06dc87460cbb7"
+        );
+        assert_eq!(
+            req.extra_headers,
+            vec![("x-amz-acl".to_owned(), "public-read".to_owned())]
         );
     }
 }

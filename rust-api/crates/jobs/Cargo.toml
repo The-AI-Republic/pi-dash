@@ -8,6 +8,9 @@ pidash-types = { path = "../types" }
 pidash-db = { path = "../db" }
 # Version-task flows call the D-09 decision layer (api-crate precedent).
 pidash-services = { path = "../services" }
+# Export uploads sign through the shared SigV4 crate (PIDASHCONV-1106),
+# never a local signer (same pin as pidash-api/db: no new downloads).
+pidash-storage = { path = "../storage" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1", features = ["v4", "v7"] }
