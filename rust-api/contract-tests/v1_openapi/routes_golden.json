@@ -315,6 +315,15 @@
     "get",
     "patch"
   ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/": [
+    "get"
+  ],
+  "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/runs/": [
+    "get"
+  ],
   "/api/v1/workspaces/{slug}/projects/{project_id}/states/": [
     "get",
     "post"
@@ -411,6 +420,9 @@
   ],
   "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/wait/": [
     "post"
+  ],
+  "/api/v1/workspaces/{slug}/schedulers/": [
+    "get"
   ],
   "/api/v1/workspaces/{slug}/stickies/": [
     "get",
