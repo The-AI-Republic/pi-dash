@@ -80,10 +80,6 @@ vi.mock("@pi-dash/ui", async () => {
 vi.mock("@/components/project/scheduler-bindings/binding-schedule-fields", () => ({
   BindingScheduleFields: () => null,
 }));
-vi.mock("@/components/project/scheduler-bindings/binding-outcome-mode-field", () => ({
-  BindingOutcomeModeField: () => null,
-  DEFAULT_OUTCOME_MODE: "create_issue",
-}));
 vi.mock("@/components/project/scheduler-bindings/binding-pod-field", () => ({
   BindingPodField: () => null,
 }));
@@ -184,6 +180,9 @@ describe("NewSchedulerModal", () => {
           expect.objectContaining({ scheduler: "sched-1", project: "proj-1" })
         );
       });
+      // The install carries no work-mode setting: what a run does is the prompt's to say.
+      expect(createBinding.mock.calls[0][2]).not.toHaveProperty("outcome_mode");
+      expect(screen.queryByText("What to do with findings")).not.toBeInTheDocument();
       expect(createScheduler).not.toHaveBeenCalled();
       expect(onInstalled).toHaveBeenCalledWith({ id: "bind-1" });
       expect(onClose).toHaveBeenCalled();
@@ -207,6 +206,11 @@ describe("NewSchedulerModal", () => {
   });
 
   describe("create path", () => {
+    it("tells the author the prompt must say what to do with results", async () => {
+      renderModal({ availableSchedulers: [] });
+      expect(screen.getByText(/must say what the run should do with what it finds/)).toBeInTheDocument();
+    });
+
     it("auto-derives the slug from the name until the slug is edited", async () => {
       const user = userEvent.setup();
       renderModal({ availableSchedulers: [] });

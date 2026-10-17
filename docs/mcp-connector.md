@@ -73,7 +73,7 @@ a non-member gets the API's normal permission error.
   `description`, `prompt`, `source`, `is_enabled`, `color`) with its
   `bindings`: the per-project installs, each carrying the cadence
   (`dtstart` / `tzid` / `rrule` / `rdates` / `exdates`), `enabled`,
-  `outcome_mode`, the pod override (`pod` / `pod_name`), `next_run_at`
+  `extra_context`, the pod override (`pod` / `pod_name`), `next_run_at`
   (next occurrence) and the last occurrence (`last_run`,
   `last_run_status`, `last_run_started_at`, `last_run_ended_at`,
   `last_error`). The workspace-wide form includes bindings only for

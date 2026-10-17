@@ -22,7 +22,6 @@ from pi_dash.bgtasks.scheduler import (
     scan_due_bindings,
 )
 from pi_dash.db.models import Project, Scheduler, SchedulerBinding
-from pi_dash.db.models.scheduler import OutcomeMode, outcome_mode_directive
 from pi_dash.runner.models import AgentRun, AgentRunStatus, Pod, Runner, RunnerStatus
 
 
@@ -237,63 +236,48 @@ def test_fire_falls_back_to_default_when_override_pod_soft_deleted(binding, proj
 
 
 # ---------------------------------------------------------------------------
-# fire_scheduler_binding — outcome_mode work-mode directive
+# fire_scheduler_binding — the task is the operator's text, nothing appended
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_fire_appends_create_issue_directive_by_default(binding):
-    """A scheduler with the default outcome_mode (create_issue) appends the
-    create-issue directive after the task prompt."""
+def test_fire_appends_no_work_mode_directive(binding):
+    """PDASHOSS01-281: the platform no longer appends a work-mode section.
+    A prompt that does not say what to do with findings gets no filing
+    instruction added behind the operator's back."""
     fire_scheduler_binding(str(binding.pk))
     binding.refresh_from_db()
     prompt = binding.last_run.prompt
-    assert "Work mode: create issues" in prompt
-    assert "pidash issue create" in prompt
-    # Task prompt comes first; directive is appended after it.
-    assert prompt.index("Scan the project.") < prompt.index("Work mode: create issues")
+    assert "Scan the project." in prompt
+    assert "Work mode" not in prompt
+    assert "For each distinct finding, file a Pi Dash issue" not in prompt
 
 
 @pytest.mark.unit
-def test_fire_appends_apply_fix_directive(binding):
-    binding.outcome_mode = OutcomeMode.APPLY_FIX
-    binding.save(update_fields=["outcome_mode"])
+def test_fire_carries_extra_context_after_the_scheduler_prompt(binding):
+    """What a run does with findings now lives in the binding's own text."""
+    binding.extra_context = "Open one pull request per fix; do NOT merge it."
+    binding.save(update_fields=["extra_context"])
     fire_scheduler_binding(str(binding.pk))
     binding.refresh_from_db()
     prompt = binding.last_run.prompt
-    assert "Work mode: apply fix" in prompt
-    assert "open a pull request" in prompt
-    assert "do NOT merge" in prompt
-    # The other modes' directives must not leak in.
-    assert "Work mode: create issues" not in prompt
-    assert "Work mode: file issue and delegate fix" not in prompt
+    assert "Scan the project.\n\nOpen one pull request per fix; do NOT merge it." in prompt
 
 
 @pytest.mark.unit
-def test_fire_appends_fix_and_review_directive(binding):
-    """fix_and_review files an agent-ready issue and moves it to In Progress —
-    the In Progress transition auto-delegates the fix to the issue agent, so
-    the scheduler run itself must NOT modify code or open a PR."""
-    binding.outcome_mode = OutcomeMode.FIX_AND_REVIEW
-    binding.save(update_fields=["outcome_mode"])
+@pytest.mark.parametrize("mode", ["apply_fix", "fix_and_review", "create_issue"])
+def test_fire_after_migration_renders_the_old_directive(binding, mode):
+    """A binding migrated by 0169 dispatches the same instructions its
+    outcome mode used to append."""
+    import importlib
+
+    migration = importlib.import_module("pi_dash.db.migrations.0169_remove_schedulerbinding_outcome_mode")
+    binding.extra_context = migration.migrated_extra_context(mode, binding.scheduler.prompt, "Focus on auth.")
+    binding.save(update_fields=["extra_context"])
     fire_scheduler_binding(str(binding.pk))
     binding.refresh_from_db()
-    prompt = binding.last_run.prompt
-    assert "Work mode: file issue and delegate fix" in prompt
-    assert "pidash issue create" in prompt
-    assert "Do NOT modify code or open a pull request in this run" in prompt
-    assert 'pidash issue patch <IDENT> --state "In Progress"' in prompt
-    # The old in-run fix instruction must be gone: the issue agent, not the
-    # scheduler run, moves the issue through review.
-    assert 'pidash issue patch <IDENT> --state "In Review"' not in prompt
-
-
-@pytest.mark.unit
-def test_outcome_mode_directive_falls_back_for_unknown_value():
-    """A stale / unrecognized mode never yields an empty directive — it falls
-    back to the create-issue guidance so a run is never dispatched without a
-    work-mode instruction."""
-    assert "Work mode: create issues" in outcome_mode_directive("nonexistent_mode")
+    expected = "Scan the project.\n\nFocus on auth.\n\n" + migration.DIRECTIVES[mode]
+    assert expected in binding.last_run.prompt
 
 
 @pytest.mark.unit

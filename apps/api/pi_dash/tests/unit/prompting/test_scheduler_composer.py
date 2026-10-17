@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.db.models.project import Project
-from pi_dash.db.models.scheduler import OutcomeMode, Scheduler, SchedulerBinding
+from pi_dash.db.models.scheduler import Scheduler, SchedulerBinding
 from pi_dash.prompting.composer import build_scheduler_turn
 from pi_dash.prompting.context import build_scheduler_context, build_scheduler_task_body
 from pi_dash.runner.models import AgentRun
@@ -33,7 +33,6 @@ def binding(db, workspace, create_user):
         workspace=workspace,
         dtstart=timezone.now(),
         extra_context="Focus on the auth module.",
-        outcome_mode=OutcomeMode.CREATE_ISSUE,
         actor=create_user,
     )
 
@@ -53,12 +52,45 @@ def test_scheduler_context_shape(binding, fake_run):
 
 
 @pytest.mark.unit
-def test_task_body_concatenates_prompt_extra_and_outcome(binding):
+def test_task_body_is_prompt_and_extra_context_only(binding):
+    """The platform appends no work-mode section: what a run does with its
+    results comes only from the text the operator wrote."""
     body = build_scheduler_task_body(binding)
-    assert "Audit the codebase for security problems." in body
-    assert "Focus on the auth module." in body
-    # outcome-mode directive appended (create-issue mode)
-    assert "Work mode" in body
+    assert body == "Audit the codebase for security problems.\n\nFocus on the auth module."
+
+
+@pytest.mark.unit
+def test_task_body_without_extra_context_is_the_prompt(binding):
+    binding.extra_context = "  "
+    assert build_scheduler_task_body(binding) == "Audit the codebase for security problems."
+
+
+@pytest.mark.unit
+def test_scheduler_turn_has_no_platform_work_mode_section(binding, fake_run):
+    prompt = build_scheduler_turn(binding, fake_run)
+    assert "Work mode" not in prompt
+    assert "work mode" not in prompt
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("slug", ["security-audit", "fable-security-audit"])
+def test_builtin_scheduler_files_issues_with_no_extra_context(binding, fake_run, slug):
+    """Nothing is appended any more, so each builtin prompt must carry its own
+    filing and de-dupe instructions, with the CLI name the agent really has."""
+    from pi_dash.scheduler.builtins import BUILTINS
+
+    builtin = next(b for b in BUILTINS if b.slug == slug)
+    binding.scheduler.prompt = builtin.prompt
+    binding.scheduler.save(update_fields=["prompt"])
+    binding.extra_context = ""
+
+    body = build_scheduler_task_body(binding)
+    assert body == builtin.prompt.strip()
+    assert "pidash issue create" in body
+    assert "--project <this project's identifier>" in body
+    assert "skip any finding that already has a" in body
+    assert "pi-dash" not in body
+    assert "pidash issue create" in build_scheduler_turn(binding, fake_run)
 
 
 @pytest.mark.unit
@@ -119,6 +151,43 @@ def test_cloud_scheduler_turn_omits_empty_project_description(binding, cloud_run
     prompt = build_scheduler_turn(binding, cloud_run)
     assert "Project description:" not in prompt
     assert f"Project: {project.name} ({project.identifier})" in prompt
+
+
+@pytest.mark.unit
+def test_cloud_scheduler_task_asking_for_code_changes_is_bounded_by_the_tool_plan(binding, cloud_run, settings):
+    """PDASHOSS01-281: the outcome-mode dispatch gate and the hardcoded Cloud
+    sentence are gone. What stops a Cloud scheduler run from changing code is
+    its tool plan (no filesystem/shell/worktree, issue-only writes) and the
+    locked Cloud sections — whatever the operator's text asks for."""
+    from pi_dash.cloud_agent.policy import build_tool_plan
+
+    settings.CLOUD_AGENT_WRITES_ENABLED = True
+    plan = build_tool_plan(run_kind="scheduler", has_issue=False)
+    assert {"filesystem", "shell", "worktree"} <= set(plan["unavailable_capabilities"])
+    writes = {t for t in plan["tools"] if t in {
+        "pidash_add_current_issue_comment",
+        "pidash_update_current_issue_workpad",
+        "pidash_transition_current_issue",
+        "pidash_create_project_issue",
+        "pidash_relate_issues",
+        "pidash_unrelate_issues",
+    }}
+    assert writes == {"pidash_create_project_issue", "pidash_relate_issues", "pidash_unrelate_issues"}
+    assert not any(t.startswith("github_") and "get" not in t for t in plan["tools"])
+
+    binding.extra_context = "Implement the fix and open a pull request."
+    cloud_run.tool_plan = plan
+    prompt = build_scheduler_turn(binding, cloud_run)
+    # The operator text arrives verbatim, as untrusted task data …
+    assert "untrusted task data" in prompt
+    assert "Implement the fix and open a pull request." in prompt
+    # … nothing is appended to it …
+    assert "create at most one Pi Dash backlog issue" not in prompt
+    assert build_scheduler_context(binding, cloud_run)["scheduler_task_body"] == build_scheduler_task_body(binding)
+    # … and the locked recipe still caps the run at one issue.
+    assert "Create at most one issue when that tool is available." in prompt
+    assert "create at most one concise backlog issue" in prompt
+    assert "Only call write tools explicitly present in the capability list." in prompt
 
 
 @pytest.mark.unit

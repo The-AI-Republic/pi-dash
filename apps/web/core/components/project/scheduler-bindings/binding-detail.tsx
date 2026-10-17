@@ -210,7 +210,6 @@ export const SchedulerBindingDetail = observer(function SchedulerBindingDetail(p
           <ConfigRow label={t("Starts at")} value={formatTs(binding.dtstart)} />
           <ConfigRow label={t("Time zone")} value={binding.tzid || "UTC"} />
           <ConfigRow label={t("Next run")} value={formatTs(binding.next_run_at)} />
-          <ConfigRow label={t("Outcome mode")} value={binding.outcome_mode} />
           <ConfigRow label={t("Pod")} value={binding.pod_name ?? t("(default pod)")} />
           {binding.rdates.length > 0 && (
             <ConfigRow
