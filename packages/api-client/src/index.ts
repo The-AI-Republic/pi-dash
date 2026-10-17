@@ -354,3 +354,75 @@ export type {
   CloudAuthProbe,
   InstancePatch,
 } from "./contracts/instance.js";
+export { Pod, PodList, PodMini, createPod, deletePod, getPod, listPods, updatePod } from "./contracts/pods.js";
+export type { PodCreateInput, PodListScope, PodPatch } from "./contracts/pods.js";
+export {
+  CreateRunnerAccepted,
+  CreateRunnerStatus,
+  CREATE_RUNNER_STATUSES,
+  DevMachine,
+  DevMachineList,
+  DevMachineMini,
+  createRunnerOnMachine,
+  deleteDevMachine,
+  getCreateRunnerStatus,
+  listDevMachines,
+  revokeDevMachine,
+  rotateDevMachine,
+} from "./contracts/dev-machines.js";
+export type { CreateRunnerOnMachineInput, CreateRunnerStatusValue } from "./contracts/dev-machines.js";
+export {
+  Runner,
+  RunnerDevMetadata,
+  RunnerList,
+  RunnerLiveState,
+  RUNNER_PROVISIONINGS,
+  RUNNER_STATUSES,
+  deleteRunner,
+  getRunner,
+  listRunners,
+  revokeRunner,
+} from "./contracts/runners.js";
+export type { RunnerListScope, RunnerProvisioning, RunnerStatus } from "./contracts/runners.js";
+export {
+  AgentRun,
+  AgentRunCreateResult,
+  AgentRunPage,
+  AgentRunQueued,
+  EXECUTOR_KINDS,
+  RunErrorDiagnostic,
+  RunEvent,
+  RUN_ERROR_SOURCES,
+  RunSchedulerBinding,
+  RUN_STATUSES,
+  RunToolCall,
+  RunToolPlan,
+  TOOL_CALL_STATUSES,
+  cancelRun,
+  commentAndRun,
+  createRun,
+  getRun,
+  listRuns,
+  reTickIssue,
+  ReTickResponse,
+  runAi,
+} from "./contracts/runs.js";
+export type {
+  DispatchInput,
+  ExecutorKind,
+  RunCreateInput,
+  RunErrorSource,
+  RunListQuery,
+  RunStatus,
+  ToolCallStatus,
+} from "./contracts/runs.js";
+export {
+  ApprovalRequest,
+  ApprovalRequestList,
+  APPROVAL_DECISIONS,
+  APPROVAL_KINDS,
+  APPROVAL_STATUSES,
+  decideApproval,
+  listApprovals,
+} from "./contracts/approvals.js";
+export type { ApprovalDecision, ApprovalKind, ApprovalStatus } from "./contracts/approvals.js";

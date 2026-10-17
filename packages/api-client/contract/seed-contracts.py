@@ -490,6 +490,180 @@ def seed():
         )
         note("instance-config", key, row_created)
 
+    from pi_dash.runner.models import (  # noqa: E402
+        AgentRun,
+        AgentRunEvent,
+        AgentRunStatus,
+        ApprovalKind,
+        ApprovalRequest,
+        ApprovalStatus,
+        DevMachine,
+        MachineToken,
+        Pod,
+        Runner,
+        RunnerStatus,
+    )
+
+    # Runners area (NEWFRONT-530): fixtures for the runners, pods,
+    # dev-machines, runs and approvals contract suites. The suites only
+    # read the keeper rows; every row a suite mutates is repaired here
+    # (revoked flags cleared, consumed rows re-created) so re-seeding
+    # restores first-run semantics after a full suite run.
+    default_pod = Pod.objects.filter(project=project, is_default=True).first()
+    if default_pod is None:
+        default_pod = Pod.objects.filter(project=project).order_by("created_at").first()
+    if default_pod is None:
+        raise RuntimeError("contract seed: project has no pod; the default-pod signal did not fire")
+    note("pod", default_pod.name, False)
+    # Crash backstop for the pod lifecycle suite: a run that dies
+    # mid-promote leaves a probe pod holding the default flag. Clear
+    # first (exactly-one-default is a partial unique constraint), then
+    # restore the auto-created default.
+    Pod.objects.filter(project=project, is_default=True).exclude(pk=default_pod.pk).update(is_default=False)
+    if not default_pod.is_default:
+        default_pod.is_default = True
+        default_pod.save(update_fields=["is_default"])
+        note("pod-default-restored", default_pod.name, False)
+
+    def seed_machine(label):
+        machine = DevMachine.objects.filter(owner=user, label=label).order_by("created_at").first()
+        if machine is None:
+            machine = DevMachine.objects.create(owner=user, label=label, host_label=f"{label}-host")
+            note("dev-machine", label, True)
+        else:
+            note("dev-machine", label, False)
+        return machine
+
+    keeper_machine = seed_machine("contract-machine")
+    rotate_machine = seed_machine("contract-machine-rotate")
+    revoke_machine = seed_machine("contract-machine-revoke")
+    delete_machine = seed_machine("contract-machine-delete")
+    if revoke_machine.revoked_at is not None:
+        revoke_machine.revoked_at = None
+        revoke_machine.save(update_fields=["revoked_at"])
+        note("dev-machine-unrevoked", revoke_machine.label, False)
+
+    def seed_token(machine):
+        token = (
+            MachineToken.objects.filter(user=user, workspace=workspace, dev_machine=machine)
+            .order_by("created_at")
+            .first()
+        )
+        if token is None:
+            token = MachineToken.objects.create(
+                user=user,
+                workspace=workspace,
+                dev_machine=machine,
+                host_label=machine.host_label,
+                token_hash=f"contract-seed-{machine.label}",
+                label=machine.label,
+            )
+            note("machine-token", machine.label, True)
+        elif token.revoked_at is not None:
+            token.revoked_at = None
+            token.save(update_fields=["revoked_at"])
+            note("machine-token-repaired", machine.label, False)
+        else:
+            note("machine-token", machine.label, False)
+
+    # Scope anchors: a machine is only visible (and only actionable)
+    # in a workspace where it backs a runner or a token. The keeper
+    # machine is anchored by the keeper runner below; the probe
+    # machines are anchored by tokens.
+    for probe_machine in (rotate_machine, revoke_machine, delete_machine):
+        seed_token(probe_machine)
+
+    def seed_runner(name, machine=None):
+        runner = Runner.objects.filter(workspace=workspace, name=name).first()
+        if runner is None:
+            runner = Runner.objects.create(
+                owner=user,
+                workspace=workspace,
+                pod=default_pod,
+                name=name,
+                dev_machine=machine,
+            )
+            note("runner", name, True)
+        else:
+            note("runner", name, False)
+        return runner
+
+    seed_runner("contract-runner", keeper_machine)
+    revoke_runner = seed_runner("contract-runner-revoke")
+    seed_runner("contract-runner-delete")
+    if revoke_runner.revoked_at is not None:
+        revoke_runner.revoked_at = None
+        revoke_runner.revoked_reason = ""
+        revoke_runner.status = RunnerStatus.OFFLINE
+        revoke_runner.save(update_fields=["revoked_at", "revoked_reason", "status"])
+        note("runner-unrevoked", revoke_runner.name, False)
+
+    detail_run = AgentRun.objects.filter(workspace=workspace, prompt="contract-seed-run").first()
+    if detail_run is None:
+        detail_run = AgentRun.objects.create(
+            workspace=workspace,
+            created_by=user,
+            pod=default_pod,
+            prompt="contract-seed-run",
+        )
+        note("agent-run", "contract-seed-run", True)
+    else:
+        note("agent-run", "contract-seed-run", False)
+    for seq, kind in ((1, "run_started"), (2, "agent_narrative")):
+        _, event_created = AgentRunEvent.objects.get_or_create(
+            agent_run=detail_run,
+            seq=seq,
+            defaults={"kind": kind, "payload": {"contract": True, "seq": seq}},
+        )
+        note("agent-run-event", f"contract-seed-run/{seq}", event_created)
+
+    terminal = [
+        AgentRunStatus.BLOCKED,
+        AgentRunStatus.COMPLETED,
+        AgentRunStatus.FAILED,
+        AgentRunStatus.CANCELLED,
+        AgentRunStatus.REFUSED,
+    ]
+    cancel_run = (
+        AgentRun.objects.filter(workspace=workspace, prompt="contract-seed-run-cancel")
+        .exclude(status__in=terminal)
+        .first()
+    )
+    if cancel_run is None:
+        cancel_run = AgentRun.objects.create(
+            workspace=workspace,
+            created_by=user,
+            pod=default_pod,
+            prompt="contract-seed-run-cancel",
+        )
+        note("agent-run", "contract-seed-run-cancel", True)
+    else:
+        note("agent-run", "contract-seed-run-cancel", False)
+
+    approval = (
+        ApprovalRequest.objects.filter(agent_run=detail_run, reason="contract approval probe")
+        .order_by("-requested_at")
+        .first()
+    )
+    if approval is None or approval.status != ApprovalStatus.PENDING:
+        if approval is not None:
+            approval.status = ApprovalStatus.PENDING
+            approval.decision_source = ""
+            approval.decided_by = None
+            approval.decided_at = None
+            approval.save(update_fields=["status", "decision_source", "decided_by", "decided_at"])
+            note("approval-repaired", str(approval.pk), False)
+        else:
+            approval = ApprovalRequest.objects.create(
+                agent_run=detail_run,
+                kind=ApprovalKind.COMMAND_EXECUTION,
+                payload={"command": "contract-probe"},
+                reason="contract approval probe",
+            )
+            note("approval", str(approval.pk), True)
+    else:
+        note("approval", str(approval.pk), False)
+
     return {
         "email": user.email,
         "workspace_slug": workspace.slug,
