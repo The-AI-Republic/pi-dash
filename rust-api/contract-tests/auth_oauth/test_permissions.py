@@ -24,6 +24,13 @@ Known oracle limits (pinned in stage 1):
   suites sharing the database. The deterministic hermetic contract is the
   error surface pinned here; the success branch stays covered by the
   provider unit tests in ``apps/api``.
+
+  Addendum (PIDASHCONV-1089): the gitea success branch IS now covered
+  hermetically — ``test_invite_soft_delete.py`` points ``GITEA_HOST`` at
+  a loopback stub with function-scoped ``instance_configurations`` rows
+  (inserted + deleted inside the fixture, so no module observes them
+  mid-test). Google stays sealed (hardcoded URLs); its success net is
+  the ``google_kernel_*`` live tests in ``oauth_google.rs``.
 """
 
 import os
