@@ -284,9 +284,6 @@ async fn patch_configurations(
     // (`AttributeError` -> base 500). File parts merge into the keys.
     let data = match decode_json_body(&headers, &body, state.settings().file_size_limit) {
         Ok(data) => data,
-        // This view wraps parsing in `except Exception` (generic 500),
-        // unlike the email-check/workspace views sharing the decoder.
-        Err(Denial::BadRequestPage) => return Denial::ServerError.into_response(),
         Err(denial) => return denial.into_response(),
     };
     if data.object().is_none() {
@@ -475,16 +472,16 @@ fn decode_json_body(
             .map_err(|err| Denial::BadDetail(format!("JSON parse error - {err}"))),
         Some(BodyKind::Form) => match parse_form_body(body) {
             Ok(pairs) => Ok(ParsedBody::form(pairs)),
-            // The email-check and workspace views have no catch-all, so
-            // cap errors escape to Django's 400 page; the configurations
-            // call site remaps to the 500 its `except Exception` answers.
-            Err(_) => Err(Denial::BadRequestPage),
+            // Cap errors escape every license view into the base
+            // `handle_exception` (generic 500) — the POST-only 400 page
+            // seen locally is the Debug Toolbar re-parsing the body in
+            // middleware (DEBUG-only; prod has no toolbar).
+            Err(_) => Err(Denial::ServerError),
         },
         Some(BodyKind::Multipart) => match parse_multipart_body(content_type, body, memory_limit) {
             Ok(pairs) => Ok(ParsedBody::form(pairs)),
             Err(BodyFail::Parse(message)) => Err(Denial::BadDetail(message)),
-            Err(BodyFail::Fatal) => Err(Denial::ServerError),
-            Err(BodyFail::TooMany) => Err(Denial::BadRequestPage),
+            Err(BodyFail::Fatal) | Err(BodyFail::TooMany) => Err(Denial::ServerError),
         },
         None => Err(Denial::UnsupportedMediaType(format!(
             "Unsupported media type \"{content_type}\" in request."
@@ -3384,6 +3381,32 @@ mod handler_tests {
         assert!(json_truthy(BodyField::Json(&json!("x"))));
         assert!(json_truthy(BodyField::Json(&json!(1))));
         assert!(json_truthy(BodyField::Json(&json!([0]))));
+    }
+
+    #[test]
+    fn decode_caps_answer_server_error_on_every_endpoint() {
+        use axum::http::header;
+        let headers_for = |content_type: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+            headers
+        };
+        // Upload caps escape every license view into the base
+        // `handle_exception` (generic 500) — the POST-only 400 page seen
+        // locally is the Debug Toolbar re-parsing the body in middleware
+        // (DEBUG-only; prod has no toolbar — probed with DEBUG=False).
+        let over = (0..1001)
+            .map(|i| format!("u{i}=v"))
+            .collect::<Vec<_>>()
+            .join("&");
+        assert!(matches!(
+            decode_json_body(
+                &headers_for("application/x-www-form-urlencoded"),
+                over.as_bytes(),
+                5_242_880
+            ),
+            Err(Denial::ServerError)
+        ));
     }
 
     #[test]
