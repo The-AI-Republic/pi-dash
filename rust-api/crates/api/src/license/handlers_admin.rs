@@ -87,6 +87,7 @@ use crate::edge;
 use crate::middleware::SessionHandle;
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
+use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
 
 /// Register the seven owned endpoints. Cutover granularity is the
 /// route + method (pilot `owned()` pattern): sibling methods on these
@@ -619,11 +620,10 @@ fn render_admin(
 
 /// Parse a POST body the way DRF `_parse` + `JSONParser` do: empty body
 /// is `{}` without parsing; a non-JSON content-type with a body is 415;
-/// otherwise the body must be UTF-8 (a decode error is not a `ValueError`,
-/// so it escapes the parser into the generic 500); unparsable JSON is
-/// `ParseError` 400 with the
-/// `{"detail"}` shape. The message is input-dependent, but the all-blank
-/// case is deterministic CPython output, reproduced exactly.
+/// otherwise the body parses through the shared CPython layer
+/// (`json_cpython`, PIDASHCONV-1128), so malformed JSON, strict
+/// constants, int-limit and codec errors carry CPython's exact text as
+/// `ParseError` 400 `{"detail"}`; past the depth cap is Django's JSON 500.
 fn parse_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
     if body.is_empty() {
         return Ok(Value::Object(serde_json::Map::new()));
@@ -647,9 +647,9 @@ fn parse_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
             "Unsupported media type \"{content_type}\" in request."
         )));
     }
-    let text = std::str::from_utf8(body).map_err(|_| Denial::ServerError)?;
-    match serde_json::from_str::<Value>(text) {
-        Ok(data) => {
+    match json_cpython::parse_request_bytes(body) {
+        Ok(jval) => {
+            let data = json_cpython::to_serde_publish(&jval);
             if data.is_object() {
                 Ok(data)
             } else {
@@ -658,15 +658,11 @@ fn parse_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
                 Err(Denial::ServerError)
             }
         }
-        Err(_) if text.trim().is_empty() => {
-            let len = text.len();
-            Err(Denial::BadDetail(format!(
-                "JSON parse error - Expecting value: line 1 column {} (char {})",
-                len + 1,
-                len
-            )))
-        }
-        Err(_) => Err(Denial::BadDetail("JSON parse error.".to_owned())),
+        Err(JsonFail::Message(detail)) => Err(Denial::BadDetail(format!(
+            "{}{detail}",
+            json_cpython::JSON_PARSE_PREFIX
+        ))),
+        Err(JsonFail::Recursion) => Err(Denial::ServerError),
     }
 }
 
@@ -2505,11 +2501,20 @@ mod tests {
             parse_json_body(&json_headers(), br"null"),
             Err(Denial::ServerError)
         ));
-        // Non-UTF-8 escapes the parser the same way.
-        assert!(matches!(
-            parse_json_body(&json_headers(), &[0xff]),
-            Err(Denial::ServerError)
-        ));
+        // Malformed JSON carries CPython's exact text (PIDASHCONV-1128).
+        let err = parse_json_body(&json_headers(), b"{bad}").expect_err("malformed 400s");
+        let (status, body) = err.status_and_body();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            r#"{"detail":"JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"}"#
+        );
+        // Non-UTF-8 is a codec `ParseError` 400 (DRF catches `ValueError`,
+        // which includes `UnicodeDecodeError`), not a 500.
+        let err = parse_json_body(&json_headers(), &[0xff]).expect_err("codec 400s");
+        let (status, body) = err.status_and_body();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("codec can't decode byte 0xff"), "{body}");
     }
 
     #[test]

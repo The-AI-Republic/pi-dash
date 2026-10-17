@@ -100,6 +100,7 @@ use super::{
     QueryMap,
 };
 use crate::state::AppState;
+use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
 
 /// Register the five configuration/workspace paths. Sibling license paths
 /// stay unmatched and proxy to Django; unowned methods on these paths
@@ -444,7 +445,10 @@ fn py_repr_str(s: &str) -> String {
 /// the verbatim header in the detail; otherwise JSON-parse, 400 on failure.
 /// The base match lowercases like Django's `parse_header_parameters`, so
 /// `Application/JSON`, charset params, and the `*/*`, `application/*`,
-/// and `*/json` wildcards all serve.
+/// and `*/json` wildcards all serve. Bodies parse through the shared
+/// CPython layer (`json_cpython`, PIDASHCONV-1128), so malformed JSON,
+/// strict constants, int-limit and codec errors carry CPython's exact
+/// text; past the depth cap is Django's JSON 500.
 fn decode_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
     if body.is_empty() {
         return Ok(Value::Object(serde_json::Map::new()));
@@ -468,8 +472,14 @@ fn decode_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
             "Unsupported media type \"{content_type}\" in request."
         )));
     }
-    serde_json::from_slice(body)
-        .map_err(|err| Denial::BadDetail(format!("JSON parse error - {err}")))
+    match json_cpython::parse_request_bytes(body) {
+        Ok(jval) => Ok(json_cpython::to_serde_publish(&jval)),
+        Err(JsonFail::Message(detail)) => Err(Denial::BadDetail(format!(
+            "{}{detail}",
+            json_cpython::JSON_PARSE_PREFIX
+        ))),
+        Err(JsonFail::Recursion) => Err(Denial::ServerError),
+    }
 }
 
 /// `DELETE configurations/disable-email-feature/`
