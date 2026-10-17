@@ -1,0 +1,355 @@
+{
+ "_meta": {
+  "generator": "pydantic-ai 1.107.0 in-process Agent.run vs OpenAI-compatible stub",
+  "probes": [
+   "/tmp/863-phase12-capture.py",
+   "/tmp/863-phase12b-tools.py"
+  ],
+  "captured_at": "2026-10-17",
+  "volatile": [
+   "timestamps (part + message)",
+   "run_id / conversation_id (uuid7 per run)",
+   "provider_url (stub port)",
+   "provider_response_id (provider chunk id)"
+  ],
+  "notes": [
+   "text_turn mirrors the oracle _StubProvider chunks ('Hello', ' world') with no finish chunk: finish_reason/provider_details are null.",
+   "tool_turn stub sends finish chunks: tool_calls -> finish_reason 'tool_call' + provider_details.finish_reason 'tool_calls'; stop -> 'stop'.",
+   "ToolCallPart.args is the provider's raw arguments STRING, preserved verbatim (spaces intact).",
+   "ToolReturnPart.content is the structured value (dict), outcome 'success'.",
+   "Request bodies carry stream=true + stream_options.include_usage=true; instructions arrive as a leading system message; tool results map to role=tool messages with compact-JSON string content.",
+   "Wire tool schemas are OpenAI strict (strict:true, additionalProperties:false)."
+  ]
+ },
+ "text_turn": {
+  "new_messages": [
+   {
+    "parts": [
+     {
+      "content": "do a thing",
+      "timestamp": "2026-10-17T06:19:46.080018Z",
+      "part_kind": "user-prompt"
+     }
+    ],
+    "timestamp": "2026-10-17T06:19:46.080350Z",
+    "instructions": "You are a test.",
+    "kind": "request",
+    "run_id": "01a14884-33fc-75db-8a6a-03b58602e002",
+    "conversation_id": "01a14884-33fc-75db-8a6a-03b46ce75561",
+    "metadata": null
+   },
+   {
+    "parts": [
+     {
+      "content": "Hello world",
+      "id": null,
+      "provider_name": null,
+      "provider_details": null,
+      "part_kind": "text"
+     }
+    ],
+    "usage": {
+     "input_tokens": 0,
+     "cache_write_tokens": 0,
+     "cache_read_tokens": 0,
+     "output_tokens": 0,
+     "input_audio_tokens": 0,
+     "cache_audio_read_tokens": 0,
+     "output_audio_tokens": 0,
+     "details": {}
+    },
+    "model_name": "oracle-stub",
+    "timestamp": "2026-10-17T06:19:46.410971Z",
+    "kind": "response",
+    "provider_name": "openai",
+    "provider_url": "http://127.0.0.1:34785/v1/",
+    "provider_details": null,
+    "provider_response_id": "stub",
+    "finish_reason": null,
+    "run_id": "01a14884-33fc-75db-8a6a-03b58602e002",
+    "conversation_id": "01a14884-33fc-75db-8a6a-03b46ce75561",
+    "metadata": null,
+    "state": "complete"
+   }
+  ],
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "total_tokens": 0,
+   "requests": 1,
+   "tool_calls": 0
+  },
+  "stream_events": [
+   "PartStartEvent:TextPart",
+   "FinalResultEvent:NoneType",
+   "PartDeltaEvent:TextPartDelta",
+   "PartEndEvent:TextPart"
+  ],
+  "provider_requests": [
+   {
+    "path": "/v1/chat/completions",
+    "body": {
+     "messages": [
+      {
+       "role": "system",
+       "content": "You are a test."
+      },
+      {
+       "role": "user",
+       "content": "do a thing"
+      }
+     ],
+     "model": "oracle-stub",
+     "stream": true,
+     "stream_options": {
+      "include_usage": true
+     }
+    }
+   }
+  ]
+ },
+ "tool_turn": {
+  "new_messages": [
+   {
+    "parts": [
+     {
+      "content": "look up ENG-1",
+      "timestamp": "2026-10-17T06:20:12.617439Z",
+      "part_kind": "user-prompt"
+     }
+    ],
+    "timestamp": "2026-10-17T06:20:12.617648Z",
+    "instructions": "You are a test.",
+    "kind": "request",
+    "run_id": "01a14884-9bc0-759c-9785-b2fce00fa057",
+    "conversation_id": "01a14884-9bc0-759c-9785-b2fbe429e7a0",
+    "metadata": null
+   },
+   {
+    "parts": [
+     {
+      "tool_name": "get_issue",
+      "args": "{\"issue\": \"ENG-1\"}",
+      "tool_call_id": "call_1",
+      "tool_kind": null,
+      "id": null,
+      "provider_name": null,
+      "provider_details": null,
+      "part_kind": "tool-call"
+     }
+    ],
+    "usage": {
+     "input_tokens": 0,
+     "cache_write_tokens": 0,
+     "cache_read_tokens": 0,
+     "output_tokens": 0,
+     "input_audio_tokens": 0,
+     "cache_audio_read_tokens": 0,
+     "output_audio_tokens": 0,
+     "details": {}
+    },
+    "model_name": "oracle-stub",
+    "timestamp": "2026-10-17T06:20:12.772931Z",
+    "kind": "response",
+    "provider_name": "openai",
+    "provider_url": "http://127.0.0.1:44863/v1/",
+    "provider_details": {
+     "finish_reason": "tool_calls"
+    },
+    "provider_response_id": "stub1",
+    "finish_reason": "tool_call",
+    "run_id": "01a14884-9bc0-759c-9785-b2fce00fa057",
+    "conversation_id": "01a14884-9bc0-759c-9785-b2fbe429e7a0",
+    "metadata": null,
+    "state": "complete"
+   },
+   {
+    "parts": [
+     {
+      "tool_name": "get_issue",
+      "content": {
+       "identifier": "ENG-1",
+       "title": "T"
+      },
+      "tool_call_id": "call_1",
+      "tool_kind": null,
+      "metadata": null,
+      "timestamp": "2026-10-17T06:20:12.776881Z",
+      "outcome": "success",
+      "part_kind": "tool-return"
+     }
+    ],
+    "timestamp": "2026-10-17T06:20:12.777351Z",
+    "instructions": "You are a test.",
+    "kind": "request",
+    "run_id": "01a14884-9bc0-759c-9785-b2fce00fa057",
+    "conversation_id": "01a14884-9bc0-759c-9785-b2fbe429e7a0",
+    "metadata": null
+   },
+   {
+    "parts": [
+     {
+      "content": "Issue ENG-1.",
+      "id": null,
+      "provider_name": null,
+      "provider_details": null,
+      "part_kind": "text"
+     }
+    ],
+    "usage": {
+     "input_tokens": 0,
+     "cache_write_tokens": 0,
+     "cache_read_tokens": 0,
+     "output_tokens": 0,
+     "input_audio_tokens": 0,
+     "cache_audio_read_tokens": 0,
+     "output_audio_tokens": 0,
+     "details": {}
+    },
+    "model_name": "oracle-stub",
+    "timestamp": "2026-10-17T06:20:12.782100Z",
+    "kind": "response",
+    "provider_name": "openai",
+    "provider_url": "http://127.0.0.1:44863/v1/",
+    "provider_details": {
+     "finish_reason": "stop"
+    },
+    "provider_response_id": "stub2",
+    "finish_reason": "stop",
+    "run_id": "01a14884-9bc0-759c-9785-b2fce00fa057",
+    "conversation_id": "01a14884-9bc0-759c-9785-b2fbe429e7a0",
+    "metadata": null,
+    "state": "complete"
+   }
+  ],
+  "usage": {
+   "input_tokens": 0,
+   "output_tokens": 0,
+   "total_tokens": 0,
+   "requests": 2,
+   "tool_calls": 1
+  },
+  "stream_events": [
+   "PartStartEvent:ToolCallPart''",
+   "PartDeltaEvent:ToolCallPartDelta'{\"iss'",
+   "PartDeltaEvent:ToolCallPartDelta'ue\": \"ENG'",
+   "PartDeltaEvent:ToolCallPartDelta'-1\"}'",
+   "PartEndEvent:ToolCallPart'{\"issue\": \"ENG-1\"}'",
+   "FunctionToolCallEvent:ToolCallPart'{\"issue\": \"ENG-1\"}'",
+   "FunctionToolResultEvent:ToolReturnPart{'identifier': 'ENG-1', 'title': 'T'}",
+   "PartStartEvent:TextPart'Issue '",
+   "FinalResultEvent:",
+   "PartDeltaEvent:TextPartDelta'ENG-1.'",
+   "PartEndEvent:TextPart'Issue ENG-1.'"
+  ],
+  "provider_requests": [
+   {
+    "n": 1,
+    "path": "/v1/chat/completions",
+    "body": {
+     "messages": [
+      {
+       "role": "system",
+       "content": "You are a test."
+      },
+      {
+       "role": "user",
+       "content": "look up ENG-1"
+      }
+     ],
+     "model": "oracle-stub",
+     "stream": true,
+     "stream_options": {
+      "include_usage": true
+     },
+     "tool_choice": "auto",
+     "tools": [
+      {
+       "type": "function",
+       "function": {
+        "name": "get_issue",
+        "description": "",
+        "parameters": {
+         "additionalProperties": false,
+         "properties": {
+          "issue": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "issue"
+         ],
+         "type": "object"
+        },
+        "strict": true
+       }
+      }
+     ]
+    }
+   },
+   {
+    "n": 2,
+    "path": "/v1/chat/completions",
+    "body": {
+     "messages": [
+      {
+       "role": "system",
+       "content": "You are a test."
+      },
+      {
+       "role": "user",
+       "content": "look up ENG-1"
+      },
+      {
+       "role": "assistant",
+       "content": null,
+       "tool_calls": [
+        {
+         "id": "call_1",
+         "type": "function",
+         "function": {
+          "name": "get_issue",
+          "arguments": "{\"issue\": \"ENG-1\"}"
+         }
+        }
+       ]
+      },
+      {
+       "role": "tool",
+       "tool_call_id": "call_1",
+       "content": "{\"identifier\":\"ENG-1\",\"title\":\"T\"}"
+      }
+     ],
+     "model": "oracle-stub",
+     "stream": true,
+     "stream_options": {
+      "include_usage": true
+     },
+     "tool_choice": "auto",
+     "tools": [
+      {
+       "type": "function",
+       "function": {
+        "name": "get_issue",
+        "description": "",
+        "parameters": {
+         "additionalProperties": false,
+         "properties": {
+          "issue": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "issue"
+         ],
+         "type": "object"
+        },
+        "strict": true
+       }
+      }
+     ]
+    }
+   }
+  ]
+ }
+}
