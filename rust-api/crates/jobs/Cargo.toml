@@ -8,6 +8,10 @@ pidash-types = { path = "../types" }
 pidash-db = { path = "../db" }
 # Version-task flows call the D-09 decision layer (api-crate precedent).
 pidash-services = { path = "../services" }
+# Expiry-task S3 deletes (PIDASHCONV-858): the one shared SigV4 signer
+# (offline builders; the handler executes with the reqwest pin below).
+# Same locked hmac/sha2/thiserror as the workspace (no lock churn).
+pidash-storage = { path = "../storage" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1", features = ["v4", "v7"] }

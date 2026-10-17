@@ -541,12 +541,13 @@ mod tests {
     }
 
     /// PIDASHCONV-224: the worker owns every local D-09 task name, while
-    /// `restore_related_objects` and the four export tasks still route to
-    /// Python. Mirrors the `worker()` registration block: the `PgPool`
-    /// groups register for real (lazy pool, no I/O); the `Pools` groups
-    /// (cleanup, deletion) register stubs over the same name constants
-    /// the real register fns consume — `Pools` cannot be built without a
-    /// database (same precedent as `all_five_tasks_registered`).
+    /// `restore_related_objects` and the three remaining export tasks
+    /// still route to Python (`delete_old_s3_link` flipped to Rust in
+    /// PIDASHCONV-858). Mirrors the `worker()` registration block: the
+    /// `PgPool` groups register for real (lazy pool, no I/O); the `Pools`
+    /// groups (cleanup, deletion) register stubs over the same name
+    /// constants the real register fns consume — `Pools` cannot be built
+    /// without a database (same precedent as `all_five_tasks_registered`).
     #[tokio::test]
     async fn worker_registry_owns_all_d09_local_tasks() {
         use pidash_jobs::tasks_cleanup;
@@ -568,6 +569,13 @@ mod tests {
         );
         tasks_cleanup::register_workspace_seed(&mut registry, pool.clone(), std::env::temp_dir());
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
+        tasks_cleanup::register_expiry(
+            &mut registry,
+            pool.clone(),
+            std::sync::Arc::new(tasks_cleanup::expiry::LiveS3Deleter::from_settings(
+                &pidash_db::config::Settings::test_defaults(),
+            )),
+        );
         // Stub-backed: the exact names the `Pools`-taking registers own.
         for spec in tasks_cleanup::cleanup::TASKS {
             let handler: Handler = std::sync::Arc::new(|_| Box::pin(async { Ok(Verdict::Ack) }));
@@ -593,19 +601,23 @@ mod tests {
             tasks_cleanup::assets::TASK_COPY_S3_OBJECTS,
             tasks_cleanup::WORKSPACE_SEED_TASK_NAME,
             tasks_cleanup::dummy_data::TASK_NAME,
+            tasks_cleanup::TASK_DELETE_OLD_S3_LINK,
         ]);
         local.extend(tasks_cleanup::versions::ALL_VERSION_TASKS);
-        assert_eq!(local.len(), 19, "D-09 local task count drifted");
+        assert_eq!(local.len(), 20, "D-09 local task count drifted");
         for name in local {
             assert!(registry.owns(name), "{name} must be worker-owned");
             assert_eq!(route_for(&registry, name), Route::Local);
-            assert!(
-                !tasks_cleanup::is_export_task(name),
-                "{name} must not be an export task"
-            );
+            if name != tasks_cleanup::TASK_DELETE_OLD_S3_LINK {
+                assert!(
+                    !tasks_cleanup::is_export_task(name),
+                    "{name} must not be an export task"
+                );
+            }
         }
 
-        // Still Python-owned: restore (BUG-DEL-2) plus the four exports.
+        // Still Python-owned: restore (BUG-DEL-2) plus the three
+        // remaining exports (`delete_old_s3_link` is worker-owned now).
         assert!(!registry.owns(tasks_cleanup::RESTORE_TASK_NAME));
         assert_eq!(
             route_for(&registry, tasks_cleanup::RESTORE_TASK_NAME),
@@ -614,8 +626,13 @@ mod tests {
         assert_eq!(tasks_cleanup::EXPORT_TASK_NAMES.len(), 4);
         for name in tasks_cleanup::EXPORT_TASK_NAMES {
             assert!(tasks_cleanup::is_export_task(name));
-            assert!(!registry.owns(name), "{name} must stay Python-owned");
-            assert_eq!(route_for(&registry, name), Route::PythonOwned);
+            if name == tasks_cleanup::TASK_DELETE_OLD_S3_LINK {
+                assert!(registry.owns(name), "{name} must be worker-owned");
+                assert_eq!(route_for(&registry, name), Route::Local);
+            } else {
+                assert!(!registry.owns(name), "{name} must stay Python-owned");
+                assert_eq!(route_for(&registry, name), Route::PythonOwned);
+            }
         }
     }
 

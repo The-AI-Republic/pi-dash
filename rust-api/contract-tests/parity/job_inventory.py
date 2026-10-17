@@ -264,26 +264,18 @@ DORMANT_TASKS = {
 # forwarding preserves the full Python execution. Verified by hand per
 # task; each entry carries its own detail (and revisit) below.
 HYBRID_WORKER_TASKS = {
-    # The body deletes objects from a live S3 bucket and Rust has no live
-    # S3 delete path (ObjectStore has head/copy only, the worker wires
-    # UnavailableObjectStore, "Sinks, never live buckets"): a Rust handler
-    # would clear URLs without deleting objects.
-    # (PIDASHCONV-835; revisit PIDASHCONV-858 by 2027-04-10).
-    "pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link",
     # The body runs the pydantic-ai agent loop and Rust has no live
     # TurnSeam/agent runtime (only #[cfg(test)] fakes; Agent.run has no
     # Rust counterpart): a Rust handler would fail or ACK every turn
     # while running nothing.
     # (PIDASHCONV-857; revisit PIDASHCONV-863 by 2027-04-10).
     "assistant.run_turn",
+    # `delete_old_s3_link` was hybrid under PIDASHCONV-835; PIDASHCONV-858
+    # shipped the live S3 delete path and flipped it to Rust-owned.
 }
 
 # Live-check detail per hybrid task (byte-matched against EXPECTED.md).
 HYBRID_WORKER_DETAILS = {
-    "pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link": (
-        "hybrid worker (no live S3 delete in Rust); "
-        "forward preserves full python execution (PIDASHCONV-835)"
-    ),
     "assistant.run_turn": (
         "hybrid worker (no live TurnSeam/agent runtime in Rust); "
         "forward preserves full python execution (PIDASHCONV-857)"

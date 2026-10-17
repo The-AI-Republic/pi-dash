@@ -1297,7 +1297,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.file_asset_task.delete_unuploaded_file_asset",
@@ -1867,6 +1867,16 @@ mod tests {
         );
         tasks_cleanup::register_workspace_seed(&mut registry, pool.clone(), std::env::temp_dir());
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
+        // The same call `worker()` makes (PIDASHCONV-858): construction
+        // does no I/O (lazy client, resolved settings), so the lazy
+        // pool suffices and no S3 endpoint is needed here.
+        tasks_cleanup::register_expiry(
+            &mut registry,
+            pool.clone(),
+            std::sync::Arc::new(tasks_cleanup::expiry::LiveS3Deleter::from_settings(
+                &pidash_db::config::Settings::test_defaults(),
+            )),
+        );
         pidash_jobs::integrations::git_sync::register_git_sync_tasks(
             &mut registry,
             pool.clone(),
@@ -2026,6 +2036,7 @@ mod tests {
             tasks_cleanup::HARD_DELETE_TASK,
             tasks_cleanup::WORKSPACE_SEED_TASK_NAME,
             tasks_cleanup::dummy_data::TASK_NAME,
+            tasks_cleanup::TASK_DELETE_OLD_S3_LINK,
             pidash_jobs::tasks_webhooks::PROCESS_LOGS_TASK,
             pidash_jobs::tasks_webhooks::TRACK_EVENT_TASK,
             pidash_jobs::tasks_webhooks::RECENT_VISITED_TASK_NAME,
@@ -2100,7 +2111,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 69, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 70, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()
