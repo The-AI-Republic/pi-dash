@@ -596,20 +596,42 @@ async fn run_page_transaction(pool: &PgPool, args: PageTransactionArgs) -> Drive
 
     // `bulk_create(..., batch_size=50, ignore_conflicts=True)`: skipped
     // when empty; `ON CONFLICT DO NOTHING` over unique(page,
-    // transaction) makes re-inserts silent no-ops.
+    // transaction) makes re-inserts silent no-ops. The ids parse to
+    // `Uuid` before binding (PIDASHCONV-1107): sqlx binds `String` as
+    // text and Postgres refuses text into uuid columns, while Django
+    // sends UUID-typed params. A garbage id fails its chunk exactly
+    // like the `bulk_create` batch it poisons (earlier chunks stay
+    // inserted on both backends).
     let now = Utc::now();
     for chunk in plan.inserts.chunks(50) {
+        let mut bound: Vec<(Uuid, Option<Uuid>, &PlannedPageLog)> = Vec::with_capacity(chunk.len());
+        for item in chunk {
+            let transaction = item.transaction.parse().map_err(|_| {
+                DriverFailure::Log("page_transaction: insert: invalid transaction id".to_owned())
+            })?;
+            let entity_identifier = item
+                .entity_identifier
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(|_| {
+                    DriverFailure::Log(
+                        "page_transaction: insert: invalid entity_identifier".to_owned(),
+                    )
+                })?;
+            bound.push((transaction, entity_identifier, item));
+        }
         let mut builder = sqlx::QueryBuilder::new(
             "INSERT INTO page_logs (id, created_at, updated_at, transaction, page_id, \
              entity_identifier, entity_name, entity_type, workspace_id) ",
         );
-        builder.push_values(chunk, |mut row, item| {
+        builder.push_values(bound, |mut row, (transaction, entity_identifier, item)| {
             row.push_bind(Uuid::new_v4())
                 .push_bind(now)
                 .push_bind(now)
-                .push_bind(item.transaction.clone())
+                .push_bind(transaction)
                 .push_bind(page_id)
-                .push_bind(item.entity_identifier.clone())
+                .push_bind(entity_identifier)
                 .push_bind(item.entity_name.clone())
                 .push_bind(item.entity_type.clone())
                 .push_bind(workspace_id);

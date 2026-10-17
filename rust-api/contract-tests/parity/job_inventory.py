@@ -494,22 +494,10 @@ def _diff_task(name: str, task: dict, own: str) -> dict:
             "detail": "dead (defined, never referenced)",
             "gap": "-",
         }
-    if name == "pi_dash.bgtasks.recent_visited_task.recent_visited_task":
-        return base | {
-            "disposition": "PROXIED",
-            "detail": "documented no-op (memory broker, no worker by design)",
-            "gap": "-",
-        }
     if name == "managed_runner.expire_waiting_runs":
         return base | {
             "disposition": "PROXIED",
             "detail": "cloud-only app; oss beat fires into the void on both sides",
-            "gap": "-",
-        }
-    if name == "pi_dash.bgtasks.event_tracking_task.track_event":
-        return base | {
-            "disposition": "PROXIED",
-            "detail": "django-drops-too (PDASHOSS01-292); rust explicitly unregistered (early-return would swallow forward)",
             "gap": "-",
         }
     # NOTE (PIDASHCONV-1104): the project_invitation special-case lived

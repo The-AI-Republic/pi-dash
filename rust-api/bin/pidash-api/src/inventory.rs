@@ -1289,7 +1289,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.event_tracking_task.track_event",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.export_task.issue_export_task",
@@ -1385,7 +1385,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.page_transaction_task.page_transaction",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.page_version_task.track_page_version",
@@ -1401,7 +1401,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.recent_visited_task.recent_visited_task",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.scheduler.fire_scheduler_binding",
@@ -1449,7 +1449,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.workspace_invitation_task.workspace_invitation",
@@ -1838,6 +1838,21 @@ mod tests {
             registry.register(name, stub());
         }
         registry.register(pidash_jobs::tasks_webhooks::PROCESS_LOGS_TASK, stub());
+        // `register_sink_tasks`, `register_visit_page_handlers` and
+        // `register_link_crawl_handler` take `Pools` too (PIDASHCONV-1107):
+        // stubs over the same name consts the real calls register.
+        registry.register(pidash_jobs::tasks_webhooks::TRACK_EVENT_TASK, stub());
+        registry.register(
+            pidash_jobs::tasks_webhooks::RECENT_VISITED_TASK_NAME,
+            stub(),
+        );
+        registry.register(
+            pidash_jobs::tasks_webhooks::PAGE_TRANSACTION_TASK_NAME,
+            stub(),
+        );
+        for name in pidash_jobs::tasks_webhooks::link_crawl::TASK_NAMES {
+            registry.register(name, stub());
+        }
         registry.register(pidash_jobs::tasks_webhooks::ARCHIVE_AND_CLOSE_TASK, stub());
         // `register_activity_task` takes `Pools` too (PIDASHCONV-836): a
         // stub over the same name const the real call registers.
@@ -2009,8 +2024,12 @@ mod tests {
             tasks_cleanup::WORKSPACE_SEED_TASK_NAME,
             tasks_cleanup::dummy_data::TASK_NAME,
             pidash_jobs::tasks_webhooks::PROCESS_LOGS_TASK,
+            pidash_jobs::tasks_webhooks::TRACK_EVENT_TASK,
+            pidash_jobs::tasks_webhooks::RECENT_VISITED_TASK_NAME,
+            pidash_jobs::tasks_webhooks::PAGE_TRANSACTION_TASK_NAME,
             pidash_jobs::tasks_webhooks::ISSUE_ACTIVITY_TASK,
         ]);
+        expected_rust.extend(pidash_jobs::tasks_webhooks::link_crawl::TASK_NAMES);
         expected_rust.extend(pidash_jobs::integrations::git_sync::TASK_NAMES);
         expected_rust.extend(pidash_jobs::integrations::github_sync::TASK_NAMES);
         expected_rust.insert(pidash_jobs::license::tasks::TASK_NAME);
@@ -2071,7 +2090,7 @@ mod tests {
             4,
             "membership group drifted"
         );
-        assert_eq!(expected_rust.len(), 61, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 65, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()

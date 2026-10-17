@@ -475,3 +475,90 @@ def webhook_sink():
     sink.start(config.WEBHOOK_SINK_BASE)
     yield sink
     sink.stop()
+
+
+class WorkerPosthogSinkHandler(BaseHTTPRequestHandler):
+    sink = None  # set per server instance
+
+    def log_message(self, *args):  # keep test output clean
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b""
+        try:
+            parsed = json.loads(raw) if raw else None
+        except ValueError:
+            parsed = None
+        with self.sink._lock:
+            self.sink.captures.append(
+                {
+                    "path": self.path,
+                    "headers": dict(self.headers),
+                    "body": raw.decode("utf-8", "replace"),
+                    "json": parsed,
+                }
+            )
+        payload = b'{"status": 1}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+
+class WorkerPosthogSink:
+    """Collects PostHog /batch/ captures (PIDASHCONV-1107).
+
+    Same fixed-port session shape as WorkerWebhookSink: the worker
+    under test POSTs here because its POSTHOG_HOST points at
+    POSTHOG_SINK_BASE. Answers 200 {"status": 1} like the real API.
+    """
+
+    def __init__(self):
+        self.captures = []
+        self._lock = threading.Lock()
+        self._server = None
+        self._thread = None
+
+    def start(self, base_url: str) -> None:
+        from urllib.parse import urlparse
+
+        parts = urlparse(base_url)
+        handler = type(
+            "BoundPosthogHandler",
+            (WorkerPosthogSinkHandler,),
+            {"sink": self},
+        )
+        self._server = ThreadingHTTPServer((parts.hostname, parts.port), handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._thread.join(timeout=10)
+            self._server.server_close()
+            self._server = None
+
+    def clear(self) -> None:
+        with self._lock:
+            self.captures = []
+
+    def snapshot(self) -> list:
+        with self._lock:
+            return list(self.captures)
+
+    def wait_for_count(self, n: int, what: str = "posthog captures") -> list:
+        return wait_for_condition(
+            lambda: self.snapshot() if len(self.snapshot()) >= n else None,
+            what=what,
+        )
+
+
+@pytest.fixture(scope="session")
+def posthog_sink():
+    sink = WorkerPosthogSink()
+    sink.start(config.POSTHOG_SINK_BASE)
+    yield sink
+    sink.stop()

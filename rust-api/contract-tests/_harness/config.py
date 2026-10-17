@@ -98,6 +98,11 @@ SMTP_SINK_PORT = int(optional("SMTP_SINK_PORT", "1025"))
 # pointing at <base>/hook/<token>.
 WEBHOOK_SINK_BASE = optional("WEBHOOK_SINK_BASE", "http://127.0.0.1:18099")
 
+# Base URL of the PostHog sink the harness starts (PIDASHCONV-1107). The
+# worker under test (Django or Rust) must point its PostHog host here via
+# POSTHOG_HOST; track_event POSTs its /batch/ capture to <base>/batch/.
+POSTHOG_SINK_BASE = optional("POSTHOG_SINK_BASE", "http://127.0.0.1:18098")
+
 # Redis the Django worker reads (mail send tasks look up the per-issue base
 # URL under the issue id; tests prime it before publishing).
 REDIS_URL = optional("REDIS_URL", "redis://localhost:6379/0")

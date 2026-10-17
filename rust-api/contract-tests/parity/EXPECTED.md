@@ -147,16 +147,18 @@ Python worker and Django's outcome is preserved — each row says why),
 MISSING (live registered task Rust forwards that would be lost at
 switchover — one fix issue per register fn).
 
-Note: 11 OWNED tasks are Rust-superset executions — called in Django
+Note: 15 OWNED tasks are Rust-superset executions — called in Django
 but unregistered there (dropped; PDASHOSS01-292), while the Rust
 worker runs them: `copy_s3_objects_of_description_and_assets`,
 `issue_description_version_task`, `process_logs`, `track_page_version`,
 `get_asset_object_metadata`, `workspace_seed` (domain gates + V-01),
 `user_activation_email`, `user_deactivation_email`,
 `project_add_user_email`, `workspace_invitation`, `project_invitation`
-(PIDASHCONV-1104). Deliberate (accepted by their domain gates);
-recorded here and in the V-01 PR, for the V-05 ported-bug register
-to catalog.
+(PIDASHCONV-1104), plus `track_event`, `page_transaction`,
+`recent_visited_task` and `crawl_work_item_link_title` (PIDASHCONV-1107;
+standalone-Rust rule — the Rust worker runs them, Django drops them).
+Deliberate (accepted by their domain gates); recorded here and in the
+V-01 PR, for the V-05 ported-bug register to catalog.
 
 ### W-assistant (0 rows; sweep wired, turn reclassified to PROXIED)
 
@@ -217,15 +219,14 @@ The row reclassified to OWNED (signature deleted).
 ```expected-jobs
 ```
 
-### Proxied by design (26 rows)
+### Proxied by design (22 rows)
 
 No fix issue: forwarding preserves Django's outcome on every row.
 
 - `celery.*` (9): Celery canvas builtins; no canvas usage in the codebase.
-- `django-drops-too` (13): called but unregistered in Django
+- `django-drops-too` (10): called but unregistered in Django
   (PDASHOSS01-292) — the Python worker drops them; forwarding drops
-  them identically. `track_event` is explicitly unregistered in Rust
-  because an early-return handler would swallow the forward.
+  them identically.
 - `delete_old_s3_link`: hybrid worker (PIDASHCONV-835). Registered
   and beat-scheduled (twice daily), but the body deletes objects from
   a live S3 bucket and Rust has no live S3 delete path (`ObjectStore`
@@ -251,8 +252,6 @@ No fix issue: forwarding preserves Django's outcome on every row.
   switchover track (PIDASHCONV-857); revisit PIDASHCONV-863 by
   2027-04-10, or when Rust ships a live TurnSeam, whichever comes
   first.
-- `recent_visited_task`: documented no-op (memory broker, no worker by
-  design).
 - `export_analytics_to_csv_email`: dead (defined, never referenced).
 
 ```expected-jobs
@@ -268,20 +267,16 @@ PROXIED :: celery.map :: celery-builtin; no canvas usage
 PROXIED :: celery.starmap :: celery-builtin; no canvas usage
 PROXIED :: pi_dash.bgtasks.analytic_plot_export.analytic_export_task :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email :: dead (defined, never referenced)
-PROXIED :: pi_dash.bgtasks.event_tracking_task.track_event :: django-drops-too (PDASHOSS01-292); rust explicitly unregistered (early-return would swallow forward)
 PROXIED :: pi_dash.bgtasks.export_task.issue_export_task :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link :: hybrid worker (no live S3 delete in Rust); forward preserves full python execution (PIDASHCONV-835)
 PROXIED :: pi_dash.bgtasks.forgot_password_task.forgot_password :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.magic_link_code_task.magic_link :: django-drops-too (PDASHOSS01-292)
-PROXIED :: pi_dash.bgtasks.page_transaction_task.page_transaction :: django-drops-too (PDASHOSS01-292)
-PROXIED :: pi_dash.bgtasks.recent_visited_task.recent_visited_task :: documented no-op (memory broker, no worker by design)
 PROXIED :: pi_dash.bgtasks.user_email_update_task.send_email_update_confirmation :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.user_email_update_task.send_email_update_magic_code :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.webhook_task.model_activity :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.webhook_task.send_webhook_deactivation_email :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.webhook_task.webhook_activity :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.webhook_task.webhook_send_task :: django-drops-too (PDASHOSS01-292)
-PROXIED :: pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title :: django-drops-too (PDASHOSS01-292)
 ```
 
 ## Beat
