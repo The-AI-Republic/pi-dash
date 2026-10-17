@@ -35,6 +35,7 @@
 //! exercised by its unit tests only.
 
 pub mod history;
+pub mod instructions;
 pub mod mcp_client;
 #[cfg(test)]
 mod mcp_parity;
