@@ -2510,7 +2510,11 @@ fn validate_datetime(
 
 /// One `parse_drf_datetime` outcome: DRF distinguishes the unparseable
 /// `invalid` 400 from the `astimezone` `overflow` 400.
-enum DttmParse {
+///
+/// `pub(crate)`: the license `deleted_at` validators (PIDASHCONV-1099)
+/// share this parser — Django/DRF datetime parsing is identical across
+/// the versions in play, so there is one oracle and one implementation.
+pub(crate) enum DttmParse {
     Ok(DateTime<Utc>),
     Invalid,
     Overflow,
@@ -2526,7 +2530,7 @@ impl DttmParse {
     }
 }
 
-fn parse_drf_datetime(text: &str, timezone: Tz) -> DttmParse {
+pub(crate) fn parse_drf_datetime(text: &str, timezone: Tz) -> DttmParse {
     let Some(parsed) = parse_iso_core(text)
         .or_else(|| parse_iso_regex(text))
         .or_else(|| {
