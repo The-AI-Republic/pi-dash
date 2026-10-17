@@ -1360,15 +1360,18 @@ impl ToolStore for PgToolStore {
         // `Issue.save` None-state resolution (`issue.py:286-301`):
         // default non-triage state, else the first non-triage row
         // (`.first()` under `State.Meta.ordering`, so lowest
-        // `sequence`), else None. Note `is_triage`, not the group — a
-        // separate column.
+        // `sequence`), else None. Both the `is_triage` filter from the
+        // query expression and the `StateManager` group exclusion apply:
+        // seeded Triage rows carry `is_triage = FALSE` (the project seed
+        // never sets it), so the column alone would admit them.
         let state_id =
             match input.state_id {
                 Some(id) => Some(id),
                 None => {
                     let default: Option<Uuid> = sqlx::query_scalar(
                         "SELECT id FROM states WHERE project_id = $1 AND is_triage = FALSE \
-                     AND deleted_at IS NULL AND states.default ORDER BY sequence LIMIT 1",
+                         AND deleted_at IS NULL AND NOT (states.group = 'triage') \
+                         AND states.default ORDER BY sequence LIMIT 1",
                     )
                     .bind(input.project_id)
                     .fetch_optional(&mut *tx)
@@ -1377,7 +1380,8 @@ impl ToolStore for PgToolStore {
                         Some(id) => Some(id),
                         None => sqlx::query_scalar(
                             "SELECT id FROM states WHERE project_id = $1 AND is_triage = FALSE \
-                             AND deleted_at IS NULL ORDER BY sequence LIMIT 1",
+                             AND deleted_at IS NULL AND NOT (states.group = 'triage') \
+                             ORDER BY sequence LIMIT 1",
                         )
                         .bind(input.project_id)
                         .fetch_optional(&mut *tx)
