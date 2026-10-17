@@ -1,0 +1,141 @@
+{
+  "call": {
+    "args": {
+      "text": "hi"
+    },
+    "fabricate": false,
+    "tool": "mcp_probe_echo"
+  },
+  "case": "call_structured_empty",
+  "expect": {
+    "call": {
+      "result": {
+        "kind": "text",
+        "value": "hi"
+      }
+    },
+    "delete_seen": true,
+    "failures": {
+      "after_call": null,
+      "after_enter": null,
+      "after_list": null,
+      "at_exit": null
+    },
+    "tools": {
+      "mcp_probe_add": {
+        "description": "Add two numbers.",
+        "schema": {
+          "properties": {
+            "a": {
+              "type": "number"
+            },
+            "b": {
+              "type": "number"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "mcp_probe_echo": {
+        "description": "Echo back the input text.",
+        "schema": {
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        }
+      }
+    }
+  },
+  "flow": [
+    "enter",
+    "list",
+    "call"
+  ],
+  "ported_from": "d656243d3700dd5ff749f1bfeb2bc74c918a33ba",
+  "stack": {
+    "fastmcp": "3.4.4",
+    "mcp": "1.30.0",
+    "pydantic_ai_slim": "1.107.0",
+    "python": "3.12"
+  },
+  "stub": {
+    "framing": "json",
+    "raw": {
+      "tools/call": {
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"structuredContent\":{}}}",
+        "content_type": "application/json",
+        "status": 200
+      }
+    }
+  },
+  "toolset": {
+    "auth": false,
+    "prefix": "mcp_probe",
+    "read_timeout": 5.0,
+    "server_name": "probe",
+    "timeout": 10.0,
+    "url_path": "/mcp"
+  },
+  "trace": "apps/api/pi_dash/assistant/runtime/mcp.py + pydantic-ai-slim==1.107.0/fastmcp==3.4.4/mcp==1.30.0 (review-added: derived from mcp 1.30.0 SDK source, no probe run)",
+  "wire": [
+    {
+      "body": "{\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"mcp\",\"version\":\"0.1.0\"}},\"jsonrpc\":\"2.0\",\"id\":0}",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/mcp"
+    },
+    {
+      "body": "{\"method\":\"notifications/initialized\",\"jsonrpc\":\"2.0\"}",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25",
+        "mcp-session-id": "probe-session-1"
+      },
+      "method": "POST",
+      "path": "/mcp"
+    },
+    {
+      "body": "{\"method\":\"tools/list\",\"jsonrpc\":\"2.0\",\"id\":1}",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25",
+        "mcp-session-id": "probe-session-1"
+      },
+      "method": "POST",
+      "path": "/mcp"
+    },
+    {
+      "body": "{\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"hi\"},\"_meta\":{\"progressToken\":2}},\"jsonrpc\":\"2.0\",\"id\":2}",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25",
+        "mcp-session-id": "probe-session-1"
+      },
+      "method": "POST",
+      "path": "/mcp"
+    },
+    {
+      "body": "",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": "2025-11-25",
+        "mcp-session-id": "probe-session-1"
+      },
+      "method": "DELETE",
+      "path": "/mcp"
+    }
+  ]
+}

@@ -45,6 +45,7 @@
       "after_call": null,
       "at_exit": "HTTPStatusError"
     },
+    "close_message": "Redirect to http://127.0.0.1:9/mcp not followed; use that URL as the endpoint if it is the intended server",
     "delete_seen": false
   }
 }

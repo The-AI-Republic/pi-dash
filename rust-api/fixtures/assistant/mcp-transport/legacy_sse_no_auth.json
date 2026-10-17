@@ -36,7 +36,8 @@
       "method": "GET",
       "path": "/sse",
       "headers": {
-        "accept": "text/event-stream"
+        "accept": "text/event-stream",
+        "cache-control": "no-store"
       },
       "body": ""
     },

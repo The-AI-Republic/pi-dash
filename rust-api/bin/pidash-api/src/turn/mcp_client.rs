@@ -30,8 +30,7 @@
 //!   reach the user via `tool_servers_skipped` events, so they are matched
 //!   exactly (`RuntimeError`, `McpError`, `HTTPStatusError`, `ReadTimeout`,
 //!   `RemoteProtocolError`, `ConnectError`, `BrokenResourceError`,
-//!   `ValidationError`, `Error`, `TooManyRedirects`; tool errors pass
-//!   through as model retries).
+//!   `ValidationError`, `Error`; tool errors pass through as model retries).
 //!
 //! Deliberate deviations from the Python stack, each pinned by a fixture:
 //!
@@ -88,11 +87,13 @@ const MAX_REDIRECTS: u32 = 20;
 
 /// Whether `url` selects the legacy SSE transport
 /// (`fastmcp/mcp_config.py`, `infer_transport_type_from_url`):
-/// `/sse` followed by `/`, `?`, `&` or end of path.
+/// `/sse` followed by `/`, `?`, `&` or end of path. The `?` arm is dead
+/// in practice (`urlparse` strips the query first), but `&` can appear
+/// in a path segment.
 pub fn is_sse_url(url: &str) -> bool {
     let path = url_path_of(url);
     let path = path.split(['?', '#']).next().unwrap_or(path);
-    path.contains("/sse/") || path.ends_with("/sse")
+    path.contains("/sse/") || path.ends_with("/sse") || path.contains("/sse&")
 }
 
 /// Path-plus part of an http(s) URL (`/mcp`, `/sse?x=1`, …).
@@ -246,23 +247,65 @@ impl SseParser {
     }
 
     /// Feed newly arrived bytes, returning every event completed by them.
+    /// Only complete blocks are decoded; the partial tail stays raw bytes
+    /// so a multi-byte char or `\r\n` pair split across chunks survives.
     pub fn push(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
         self.buf.extend_from_slice(chunk);
-        // Normalize line endings once: \r\n and lone \r both mean \n.
-        let text = String::from_utf8_lossy(&self.buf).replace("\r\n", "\n");
-        let text = text.replace('\r', "\n");
         let mut events = Vec::new();
-        let mut rest = text.as_str();
-        while let Some(end) = rest.find("\n\n") {
-            let (block, tail) = rest.split_at(end);
-            if let Some(event) = parse_event_block(block) {
+        while let Some((start, end)) = event_boundary(&self.buf) {
+            let block: Vec<u8> = self.buf.drain(..start).collect();
+            self.buf.drain(..(end - start));
+            // Normalize line endings: \r\n and lone \r both mean \n.
+            // The split points are ASCII, so no char spans the decode.
+            let text = String::from_utf8_lossy(&block).replace("\r\n", "\n");
+            let text = text.replace('\r', "\n");
+            if let Some(event) = parse_event_block(&text) {
                 events.push(event);
             }
-            rest = &tail[2..];
         }
-        self.buf = rest.as_bytes().to_vec();
         events
     }
+}
+
+/// Byte offsets of the first complete blank-line boundary: the start of
+/// its first line break and just past its second. A `\r` at the very end
+/// of the buffer is ambiguous (a split `\r\n`) and never completes one.
+fn event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
+    let mut at = 0;
+    let mut first: Option<usize> = None;
+    while at < buf.len() {
+        let (is_break, len) = if buf[at] == b'\n' {
+            (true, 1)
+        } else if buf[at] == b'\r' {
+            if at + 1 < buf.len() && buf[at + 1] == b'\n' {
+                (true, 2)
+            } else if at + 1 == buf.len() {
+                return None;
+            } else {
+                (true, 1)
+            }
+        } else {
+            (false, 1)
+        };
+        if is_break {
+            if let Some(start) = first {
+                return Some((start, at + len));
+            }
+            first = Some(at);
+        } else {
+            first = None;
+        }
+        at += len;
+    }
+    None
+}
+
+/// Whether an SSE event can carry a request answer: only `message`
+/// events resolve (`_handle_sse_event`, `sse_reader`); anything else —
+/// including unnamed events, which httpx-sse reports with an empty
+/// name — is skipped.
+fn is_answer_event(event: &SseEvent) -> bool {
+    event.event.as_deref() == Some("message") && !event.data.is_empty()
 }
 
 /// Parse one blank-line-delimited event block; comments and empty blocks
@@ -354,8 +397,27 @@ impl McpError {
     }
 
     /// Redirect the client refuses to follow
-    /// (`_raise_for_unfollowed_redirect`).
-    pub fn unfollowed_redirect(location: &str) -> Self {
+    /// (`_raise_for_unfollowed_redirect`). The named location drops
+    /// userinfo, query and fragment (`redirect_location`); an https
+    /// endpoint refusing a plain-http target gets the downgrade text.
+    pub fn unfollowed_redirect(request: &reqwest::Url, target: &reqwest::Url) -> Self {
+        let mut location = target.clone();
+        let _ = location.set_username("");
+        let _ = location.set_password(None);
+        location.set_query(None);
+        location.set_fragment(None);
+        if request.scheme() == "https" && location.scheme() == "http" {
+            let mut upgrade = location.clone();
+            let _ = upgrade.set_scheme("https");
+            return Self::new(
+                "HTTPStatusError",
+                format!(
+                    "Redirect to {location} not followed: it would downgrade this HTTPS endpoint to plain HTTP.\n\
+                     The server is likely behind a TLS-terminating proxy whose forwarded headers it does not trust,\n\
+                     often combined with a trailing-slash difference. Try {upgrade} instead, or fix the proxy settings."
+                ),
+            );
+        }
         Self::new(
             "HTTPStatusError",
             format!(
@@ -420,14 +482,6 @@ impl McpError {
         )
     }
 
-    /// SSE `endpoint` URL on another origin (`mcp/client/sse.py`).
-    pub fn endpoint_origin_mismatch(url: &str) -> Self {
-        Self::new(
-            "ValueError",
-            format!("Endpoint origin does not match connection origin: {url}"),
-        )
-    }
-
     /// Tool declares `outputSchema` but returned no `structuredContent`.
     pub fn schema_missing(tool: &str) -> Self {
         Self::new(
@@ -486,12 +540,6 @@ impl McpError {
     /// name is literally `Error`).
     pub fn base64(detail: &str) -> Self {
         Self::new("Error", detail)
-    }
-
-    /// Redirect chain past the httpx cap (derived from the SDK loop; no
-    /// fixture — no sane stub does this).
-    pub fn too_many_redirects() -> Self {
-        Self::new("TooManyRedirects", "Exceeded 20 redirects.")
     }
 }
 
@@ -597,8 +645,11 @@ pub enum CallResult {
     Absorbed { text: String },
 }
 
-/// Map one `CallToolResult` content block. Unknown block types fail the
-/// parse the way the SDK's `CallToolResult` validation does.
+/// Map one `CallToolResult` content block. Unknown block types and
+/// missing or mistyped required fields fail the parse the way the SDK's
+/// `CallToolResult` validation does (`TextContent.text`,
+/// `ImageContent`/`AudioContent` `data` + `mimeType`, `ResourceLink.uri`
+/// are all required).
 fn map_content_block(block: &Value) -> Result<McpContent, McpError> {
     let kind = block
         .get("type")
@@ -606,23 +657,28 @@ fn map_content_block(block: &Value) -> Result<McpContent, McpError> {
         .unwrap_or_default();
     match kind {
         "text" => {
-            let text = block
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            let text = require_str(block, "text", "text block without text")?;
             Ok(map_text(text))
         }
         "image" => {
-            let (data, media_type) = decode_blob(block, "image/png")?;
-            Ok(McpContent::Image { media_type, data })
+            let data = decode_data(require_str(block, "data", "image block without data")?)?;
+            let media_type = require_str(block, "mimeType", "image block without mimeType")?;
+            Ok(McpContent::Image {
+                media_type: media_type.to_string(),
+                data,
+            })
         }
         "audio" => {
-            let (data, media_type) = decode_blob(block, "audio/mpeg")?;
-            Ok(McpContent::Binary { media_type, data })
+            let data = decode_data(require_str(block, "data", "audio block without data")?)?;
+            let media_type = require_str(block, "mimeType", "audio block without mimeType")?;
+            Ok(McpContent::Binary {
+                media_type: media_type.to_string(),
+                data,
+            })
         }
         "resource" => map_embedded(block),
         "resource_link" => {
-            let uri = block.get("uri").and_then(Value::as_str).unwrap_or_default();
+            let uri = require_str(block, "uri", "resource link without uri")?;
             Ok(McpContent::Text(uri.to_string()))
         }
         other => Err(McpError::bad_result(&format!(
@@ -631,12 +687,21 @@ fn map_content_block(block: &Value) -> Result<McpContent, McpError> {
     }
 }
 
+/// Required string field, else the SDK's `ValidationError`.
+fn require_str<'a>(block: &'a Value, field: &str, missing: &str) -> Result<&'a str, McpError> {
+    block
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| McpError::bad_result(missing))
+}
+
 /// Text blocks starting with `[` or `{` are JSON-parsed
-/// (`pydantic_core.from_json`, strict); unparseable stays text.
+/// (`pydantic_core.from_json`, strict); unparseable stays text. The check
+/// runs on the raw text (`str.startswith`, no strip): leading whitespace
+/// reads as plain text in Python.
 fn map_text(text: &str) -> McpContent {
-    let trimmed = text.trim_start();
-    if trimmed.starts_with('[') || trimmed.starts_with('{') {
-        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+    if text.starts_with('[') || text.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<Value>(text) {
             return McpContent::Json(value);
         }
     }
@@ -647,39 +712,41 @@ fn map_text(text: &str) -> McpContent {
 /// `validate=False` does: alphabet characters are kept, everything else
 /// discarded, then strict-decoded. Residual failure (bad padding) is the
 /// same `binascii.Error` Python would raise.
-fn decode_blob(block: &Value, default_mime: &str) -> Result<(Vec<u8>, String), McpError> {
+fn decode_data(encoded: &str) -> Result<Vec<u8>, McpError> {
     use base64::Engine as _;
-    let field = if block.get("data").is_some() {
-        "data"
-    } else {
-        "blob"
-    };
-    let encoded = block.get(field).and_then(Value::as_str).unwrap_or_default();
     let filtered: String = encoded
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
         .collect();
-    let data = base64::engine::general_purpose::STANDARD
+    base64::engine::general_purpose::STANDARD
         .decode(filtered.as_bytes())
-        .map_err(|err| McpError::base64(&err.to_string()))?;
-    let media_type = block
-        .get("mimeType")
-        .and_then(Value::as_str)
-        .unwrap_or(default_mime)
-        .to_string();
-    Ok((data, media_type))
+        .map_err(|err| McpError::base64(&err.to_string()))
 }
 
 /// Embedded resources: text inlines, blobs narrow to image/binary by media
-/// type (`BinaryContent.narrow_type`, `is_image`).
+/// type (`BinaryContent.narrow_type`, `is_image`). The union tries text
+/// first, like the SDK's `TextResourceContents | BlobResourceContents`;
+/// `uri` is required on both, `mimeType` optional.
 fn map_embedded(block: &Value) -> Result<McpContent, McpError> {
     let resource = block
         .get("resource")
+        .filter(|resource| resource.is_object())
         .ok_or_else(|| McpError::bad_result("embedded resource without a resource payload"))?;
+    require_str(resource, "uri", "embedded resource without a uri")?;
     if let Some(text) = resource.get("text").and_then(Value::as_str) {
         return Ok(McpContent::Text(text.to_string()));
     }
-    let (data, media_type) = decode_blob(resource, "application/octet-stream")?;
+    let Some(blob) = resource.get("blob").and_then(Value::as_str) else {
+        return Err(McpError::bad_result(
+            "embedded resource without text or a blob",
+        ));
+    };
+    let data = decode_data(blob)?;
+    let media_type = resource
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or("application/octet-stream")
+        .to_string();
     if media_type.starts_with("image/") {
         Ok(McpContent::Image { media_type, data })
     } else {
@@ -715,7 +782,7 @@ fn map_call_result(
             .unwrap_or_else(|| format!("Tool '{tool}' returned an error"));
         return MappedCall::Retry(message);
     }
-    if let Some(structured) = structured.filter(|v| !v.is_null()) {
+    if let Some(structured) = structured.filter(|v| is_structured_present(v)) {
         let all_text = content
             .iter()
             .all(|block| block.get("type").and_then(Value::as_str) == Some("text"));
@@ -737,6 +804,18 @@ fn map_call_result(
         MappedCall::Value(McpValue::Single(mapped.pop().expect("one mapped")))
     } else {
         MappedCall::Value(McpValue::List(mapped))
+    }
+}
+
+/// Whether `structuredContent` counts as present for the preference
+/// (`if (structured := ...)`): null and `{}` are falsy and fall through
+/// to the content mapping. Validation still sees `{}` (see
+/// `validate_output`), exactly like the SDK.
+fn is_structured_present(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Object(object) => !object.is_empty(),
+        _ => true,
     }
 }
 
@@ -812,6 +891,16 @@ fn redirect_allowed(previous: &reqwest::Url, next: &reqwest::Url) -> bool {
         && previous.host_str() == next.host_str()
         && previous.port_or_known_default() == Some(80)
         && next.port_or_known_default() == Some(443)
+}
+
+/// Whether an SSE `endpoint` URL is on the GET URL's origin
+/// (`mcp/client/sse.py` compares scheme and netloc). Ports compare by
+/// value: URL parsing already normalizes an explicit default port away,
+/// so unlike the SDK's string compare, `:80` matches an implicit one.
+fn endpoint_origin_ok(base: &reqwest::Url, endpoint: &reqwest::Url) -> bool {
+    base.scheme() == endpoint.scheme()
+        && base.host_str() == endpoint.host_str()
+        && base.port_or_known_default() == endpoint.port_or_known_default()
 }
 
 /// Classify a reqwest transport failure mid-session: fresh-connection
@@ -970,8 +1059,11 @@ struct Post<'a> {
 }
 
 /// POST with redirects followed by hand (`request_within_origin`): a POST
-/// keeps its method on 307/308 same-origin only; anything else surfaces
-/// `HTTPStatusError` without following. All hops share the op deadline.
+/// keeps its method on 307/308 same-origin only. Anything else — a
+/// method-changing or off-origin redirect, or the 21st hop past the
+/// budget — surfaces the redirect itself as `HTTPStatusError`
+/// (`_raise_for_unfollowed_redirect`); the SDK never reports
+/// `TooManyRedirects` with following off. All hops share the op deadline.
 async fn post_follow(post: Post<'_>) -> Result<reqwest::Response, SessionFault> {
     let Post {
         client,
@@ -986,7 +1078,8 @@ async fn post_follow(post: Post<'_>) -> Result<reqwest::Response, SessionFault> 
         accept,
     } = post;
     let original_scheme = url.scheme().to_string();
-    for _ in 0..=MAX_REDIRECTS {
+    let mut followed = 0u32;
+    loop {
         let strip_auth = url.scheme() != original_scheme;
         let headers = base_headers(
             if strip_auth { None } else { auth },
@@ -1016,26 +1109,28 @@ async fn post_follow(post: Post<'_>) -> Result<reqwest::Response, SessionFault> 
             .and_then(|location| url.join(location).ok());
         let Some(next) = location else {
             // Redirect without a target: not a redirect at all, just an
-            // unusable answer for the caller to wait out.
+            // unusable answer for the caller to dispatch by content.
             return Ok(response);
         };
-        if !matches!(status, 307 | 308) || !redirect_allowed(&url, &next) {
-            let error = McpError::unfollowed_redirect(next.as_str());
+        if followed == MAX_REDIRECTS
+            || !matches!(status, 307 | 308)
+            || !redirect_allowed(&url, &next)
+        {
+            let error = McpError::unfollowed_redirect(&url, &next);
             return Err(SessionFault::wedge_same(error, true));
         }
         url = next;
+        followed += 1;
     }
-    Err(SessionFault::wedge_same(
-        McpError::too_many_redirects(),
-        true,
-    ))
 }
 
 /// Read one request's answer off a final POST response: JSON object or SSE
 /// stream. Complete-but-unusable answers (202, empty stream, wrong id,
-/// unparseable body, unexpected content type) wait out the op deadline and
-/// fail with the waiter timeout while the session stays clean — the waiter
-/// outlives stream errors that never resolve it.
+/// unparseable body, unexpected content type, bare 3xx) wait out the op
+/// deadline and fail with the waiter timeout while the session stays
+/// clean — the waiter outlives stream errors that never resolve it. A
+/// bare 3xx without a target dispatches by content type like a 2xx
+/// (`raise_for_status` is a no-op for it); only 4xx/5xx wedge.
 async fn read_request_response(
     response: reqwest::Response,
     id: i64,
@@ -1050,7 +1145,7 @@ async fn read_request_response(
     if status == 404 {
         return Err(SessionFault::logical(McpError::session_terminated()));
     }
-    if !(200..300).contains(&status) {
+    if (400..600).contains(&status) {
         let url = response.url().clone();
         return Err(SessionFault::wedge_same(
             McpError::http_status(status, url.as_str()),
@@ -1150,7 +1245,7 @@ async fn read_sse_answer(
             SessionFault::wedge_same(error, true)
         })?;
         for event in parser.push(&chunk) {
-            if event.data.is_empty() {
+            if !is_answer_event(&event) {
                 continue;
             }
             match match_response_body(event.data.as_bytes(), id) {
@@ -1246,10 +1341,14 @@ impl StreamableSession {
         })
         .await?;
         if capture_session {
-            // The id is captured off every 2xx initialize answer but a
-            // bare 202 (whose waiter never resolves): error bodies count.
+            // The id is captured off initialize answers that survive
+            // `raise_for_status`: 2xx but a bare 202 (whose waiter never
+            // resolves), plus bare 3xx without a target. Error bodies
+            // count; 4xx/5xx raise before the extraction runs.
             let status = response.status().as_u16();
-            if status != 202 {
+            let survives =
+                (200..300).contains(&status) && status != 202 || (300..400).contains(&status);
+            if survives {
                 if let Some(session_id) = response
                     .headers()
                     .get("mcp-session-id")
@@ -1412,6 +1511,9 @@ struct ListedTool {
 }
 
 /// Strict `ListToolsResult` shape: tools with names and input schemas.
+/// Field types follow the SDK (`Tool.inputSchema` is a required object,
+/// `outputSchema`/`description`/`nextCursor` are object/string-or-null):
+/// mistyped fields fail the parse instead of degrading.
 fn parse_list_result(result: &Value) -> Result<(Vec<ListedTool>, Option<String>), McpError> {
     let object = result
         .as_object()
@@ -1426,24 +1528,44 @@ fn parse_list_result(result: &Value) -> Result<(Vec<ListedTool>, Option<String>)
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| McpError::bad_result("listed tool has no name"))?;
-        let input_schema = tool.get("inputSchema").cloned().ok_or_else(|| {
-            McpError::bad_result(format!("listed tool {name} has no inputSchema").as_str())
-        })?;
+        let input_schema = tool
+            .get("inputSchema")
+            .filter(|schema| schema.is_object())
+            .cloned()
+            .ok_or_else(|| {
+                McpError::bad_result(format!("listed tool {name} has no inputSchema").as_str())
+            })?;
         listed.push(ListedTool {
             name: name.to_string(),
-            description: tool
-                .get("description")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            description: opt_str(tool, "description", &format!("listed tool {name}"))?,
             input_schema,
-            output_schema: tool.get("outputSchema").cloned(),
+            output_schema: opt_object(tool, "outputSchema", &format!("listed tool {name}"))?,
         });
     }
-    let next = object
-        .get("nextCursor")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let next = opt_str(result, "nextCursor", "tools/list result")?;
     Ok((listed, next))
+}
+
+/// Optional string-or-null field: present-but-mistyped fails the parse.
+fn opt_str(block: &Value, field: &str, what: &str) -> Result<Option<String>, McpError> {
+    match block.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(McpError::bad_result(&format!(
+            "{what} has a mistyped {field}"
+        ))),
+    }
+}
+
+/// Optional object-or-null field: present-but-mistyped fails the parse.
+fn opt_object(block: &Value, field: &str, what: &str) -> Result<Option<Value>, McpError> {
+    match block.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(object @ Value::Object(_)) => Ok(Some(object.clone())),
+        Some(_) => Err(McpError::bad_result(&format!(
+            "{what} has a mistyped {field}"
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1486,7 +1608,14 @@ impl LegacySseSession {
         read_secs: f64,
         include_instructions: bool,
     ) -> Result<Self, McpError> {
-        let headers = base_headers(auth.as_deref(), None, None, SSE_MIME);
+        // The event-stream GET carries no content type; `Cache-Control:
+        // no-store` keeps proxies from caching it (`_SSE_HEADERS`).
+        let mut headers = base_headers(auth.as_deref(), None, None, SSE_MIME);
+        headers.remove(reqwest::header::CONTENT_TYPE);
+        headers.insert(
+            "cache-control",
+            reqwest::header::HeaderValue::from_static("no-store"),
+        );
         let mut url = base.clone();
         for _ in 0..=MAX_REDIRECTS {
             let send = client.get(url.clone()).headers(headers.clone()).send();
@@ -1516,16 +1645,19 @@ impl LegacySseSession {
                 .get(reqwest::header::LOCATION)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|location| url.join(location).ok());
+            // The GET stream follows any status same-origin. Anything else
+            // — off-origin, targetless, or past the budget — reads as an
+            // empty stream below (`raise_for_status` is a no-op for 3xx),
+            // so the connect reports the same missing endpoint.
             let Some(next) = next else {
-                return Err(McpError::connect_failed("redirect without a target"));
+                return Err(McpError::sse_no_endpoint());
             };
-            // The GET stream follows any status same-origin.
             if !redirect_allowed(&url, &next) {
-                return Err(McpError::unfollowed_redirect(next.as_str()));
+                return Err(McpError::sse_no_endpoint());
             }
             url = next;
         }
-        Err(McpError::too_many_redirects())
+        Err(McpError::sse_no_endpoint())
     }
 
     /// Read events until the `endpoint` URL arrives.
@@ -1557,14 +1689,11 @@ impl LegacySseSession {
                 let endpoint = base.join(&event.data).map_err(|err| {
                     McpError::connect_failed(&format!("bad endpoint URL {}: {err}", event.data))
                 })?;
-                // Same netloc (host:port) as the GET URL; the SDK compares
-                // netlocs, ignoring the scheme. A mismatch fails open here
+                // Same origin as the GET URL. A mismatch fails open here
                 // instead of hanging (see the module docs); the class
                 // follows `_connect`, which wraps everything but
                 // HTTPStatusError/McpError.
-                if endpoint.host_str() != base.host_str()
-                    || endpoint.port_or_known_default() != base.port_or_known_default()
-                {
+                if !endpoint_origin_ok(&base, &endpoint) {
                     return Err(McpError::connect_failed(&format!(
                         "Endpoint origin does not match connection origin: {endpoint}"
                     )));
@@ -1703,7 +1832,7 @@ impl LegacySseSession {
                 }
             };
             for event in self.get.parser.push(&chunk) {
-                if event.data.is_empty() {
+                if !is_answer_event(&event) {
                     continue;
                 }
                 match match_response_body(event.data.as_bytes(), id) {
@@ -1900,11 +2029,23 @@ impl LiveSession {
             .get("content")
             .and_then(Value::as_array)
             .ok_or_else(|| McpError::bad_result("tools/call result has no content"))?;
-        let structured = object.get("structuredContent");
-        let is_error = object
-            .get("isError")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let structured = object.get("structuredContent").filter(|v| !v.is_null());
+        if structured.is_some_and(|structured| !structured.is_object()) {
+            return Err(McpError::bad_result(
+                "tools/call structuredContent is not an object",
+            ));
+        }
+        let is_error = match object.get("isError") {
+            None => false,
+            Some(Value::Bool(error)) => *error,
+            // Pydantic lax bools: 0/1 coerce, everything else (null,
+            // strings, other numbers) fails validation.
+            Some(Value::Number(number)) if number.as_u64() == Some(0) => false,
+            Some(Value::Number(number)) if number.as_u64() == Some(1) => true,
+            Some(_) => {
+                return Err(McpError::bad_result("tools/call isError is not a bool"));
+            }
+        };
         if !is_error {
             match schema {
                 SchemaLookup::Listed(output_schema) => {
@@ -2264,6 +2405,7 @@ mod tests {
             "http://h/sse/",
             "http://h/x/sse/y",
             "https://h:8443/a/sse?x=1",
+            "http://h/a/sse&x=1",
         ] {
             assert!(is_sse_url(url), "{url}");
         }
@@ -2303,6 +2445,27 @@ mod tests {
     }
 
     #[test]
+    fn sse_parser_survives_chunk_splits() {
+        // A multi-byte char split across chunks decodes whole, not as
+        // replacement chars ("caf\u{e9}", never "caf\u{fffd}\u{fffd}").
+        let mut parser = SseParser::new();
+        // "data: caf" + first byte of "\u{e9}".
+        assert!(parser.push(b"data: caf\xc3").is_empty());
+        // Second byte of "\u{e9}", still no event until the blank line.
+        assert!(parser.push(b"\xa9").is_empty());
+        let events = parser.push(b"\n\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "caf\u{e9}");
+        // A \r\n pair split across chunks is one line break, not a blank
+        // line: the two data lines stay one event.
+        let mut parser = SseParser::new();
+        assert!(parser.push(b"data: x\r").is_empty());
+        let events = parser.push(b"\ndata: y\n\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "x\ny");
+    }
+
+    #[test]
     fn redirect_rules() {
         let prev: reqwest::Url = "http://h:80/mcp".parse().unwrap();
         let same: reqwest::Url = "http://h:80/mcp2".parse().unwrap();
@@ -2313,6 +2476,21 @@ mod tests {
         assert!(redirect_allowed(&prev, &upgrade));
         assert!(!redirect_allowed(&prev, &cross_port));
         assert!(!redirect_allowed(&prev, &cross_host));
+    }
+
+    #[test]
+    fn endpoint_origin_rules() {
+        let base: reqwest::Url = "http://h/sse".parse().unwrap();
+        let same: reqwest::Url = "http://h/messages?x=1".parse().unwrap();
+        let cross_scheme: reqwest::Url = "https://h/messages".parse().unwrap();
+        let cross_host: reqwest::Url = "http://x/messages".parse().unwrap();
+        let cross_port: reqwest::Url = "http://h:9/messages".parse().unwrap();
+        let explicit_port: reqwest::Url = "http://h:80/messages".parse().unwrap();
+        assert!(endpoint_origin_ok(&base, &same));
+        assert!(!endpoint_origin_ok(&base, &cross_scheme));
+        assert!(!endpoint_origin_ok(&base, &cross_host));
+        assert!(!endpoint_origin_ok(&base, &cross_port));
+        assert!(endpoint_origin_ok(&base, &explicit_port));
     }
 
     #[test]
@@ -2342,9 +2520,26 @@ mod tests {
         assert!(McpError::http_status(404, "http://h/mcp")
             .message
             .starts_with("Client error '404 Not Found'"));
+        let plain: reqwest::Url = "http://h/mcp".parse().unwrap();
+        let target: reqwest::Url = "http://x/mcp".parse().unwrap();
         assert_eq!(
-            McpError::unfollowed_redirect("http://x/mcp").message,
+            McpError::unfollowed_redirect(&plain, &target).message,
             "Redirect to http://x/mcp not followed; use that URL as the endpoint if it is the intended server"
+        );
+        // Userinfo, query and fragment never reach the message.
+        let noisy: reqwest::Url = "http://u:p@x/mcp?k=v#frag".parse().unwrap();
+        assert_eq!(
+            McpError::unfollowed_redirect(&plain, &noisy).message,
+            "Redirect to http://x/mcp not followed; use that URL as the endpoint if it is the intended server"
+        );
+        // An https endpoint refusing a plain-http target names the downgrade.
+        let secure: reqwest::Url = "https://h/mcp".parse().unwrap();
+        let downgrade: reqwest::Url = "http://h/mcp".parse().unwrap();
+        assert_eq!(
+            McpError::unfollowed_redirect(&secure, &downgrade).message,
+            "Redirect to http://h/mcp not followed: it would downgrade this HTTPS endpoint to plain HTTP.\n\
+             The server is likely behind a TLS-terminating proxy whose forwarded headers it does not trust,\n\
+             often combined with a trailing-slash difference. Try https://h/mcp instead, or fix the proxy settings."
         );
         assert_eq!(
             McpError::init_timeout().message,
@@ -2367,7 +2562,10 @@ mod tests {
     fn text_mapping_parses_json_only() {
         assert_eq!(map_text("hi"), McpContent::Text("hi".to_string()));
         assert_eq!(map_text("[1, 2]"), McpContent::Json(json!([1, 2])));
-        assert_eq!(map_text("  {\"a\": 1}"), McpContent::Json(json!({"a": 1})));
+        assert_eq!(
+            map_text("  {\"a\": 1}"),
+            McpContent::Text("  {\"a\": 1}".to_string())
+        );
         assert_eq!(map_text("[oops"), McpContent::Text("[oops".to_string()));
         assert_eq!(map_text("42"), McpContent::Text("42".to_string()));
     }
@@ -2427,6 +2625,61 @@ mod tests {
             map_call_result(&[json!({"type": "future"})], None, "echo", false),
             MappedCall::Invalid(error) if error.class == "ValidationError"
         ));
+        // Empty structured payloads are falsy: the content mapping wins.
+        assert!(matches!(
+            map_call_result(&[text("hi")], Some(&json!({})), "echo", false),
+            MappedCall::Value(McpValue::Single(McpContent::Text(text))) if text == "hi"
+        ));
+    }
+
+    #[test]
+    fn strict_shapes() {
+        let invalid = |block: Value| map_content_block(&block).unwrap_err().class.to_string();
+        // Required content fields: missing or mistyped fails validation.
+        assert_eq!(invalid(json!({"type": "text"})), "ValidationError");
+        assert_eq!(
+            invalid(json!({"type": "text", "text": 5})),
+            "ValidationError"
+        );
+        assert_eq!(
+            invalid(json!({"type": "image", "data": "aGk="})),
+            "ValidationError"
+        );
+        assert_eq!(
+            invalid(json!({"type": "image", "mimeType": "image/png"})),
+            "ValidationError"
+        );
+        assert_eq!(
+            invalid(json!({"type": "audio", "data": "aGk="})),
+            "ValidationError"
+        );
+        assert_eq!(
+            invalid(json!({"type": "resource_link", "name": "r"})),
+            "ValidationError"
+        );
+        assert_eq!(
+            invalid(json!({"type": "resource", "resource": {"text": "x"}})),
+            "ValidationError"
+        );
+        assert_eq!(
+            invalid(json!({"type": "resource", "resource": {"uri": "u:"}})),
+            "ValidationError"
+        );
+        // Well-formed blocks still map.
+        assert!(map_content_block(&json!({"type": "text", "text": "hi"})).is_ok());
+        assert!(
+            map_content_block(&json!({"type": "resource_link", "uri": "u:", "name": "r"})).is_ok()
+        );
+        // Listed tools: inputSchema must be an object, the optionals keep
+        // their types.
+        let listed = |tool: Value| parse_list_result(&json!({"tools": [tool]}));
+        assert!(listed(json!({"name": "a", "inputSchema": {}})).is_ok());
+        assert!(listed(json!({"name": "a", "inputSchema": []})).is_err());
+        assert!(listed(json!({"name": "a"})).is_err());
+        assert!(listed(json!({"name": "a", "inputSchema": {}, "description": 5})).is_err());
+        assert!(listed(json!({"name": "a", "inputSchema": {}, "outputSchema": []})).is_err());
+        assert!(parse_list_result(&json!({"tools": [], "nextCursor": 5})).is_err());
+        assert!(parse_list_result(&json!({"tools": [], "nextCursor": Value::Null})).is_ok());
     }
 
     #[test]
@@ -2460,6 +2713,18 @@ mod tests {
         assert_eq!(secs_to_duration(-1.0), Duration::ZERO);
         assert_eq!(secs_to_duration(f64::NAN), Duration::ZERO);
         assert!(secs_to_duration(f64::INFINITY) > Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn answer_events() {
+        let event = |name: Option<&str>, data: &str| SseEvent {
+            event: name.map(str::to_string),
+            data: data.to_string(),
+        };
+        assert!(is_answer_event(&event(Some("message"), "{}")));
+        assert!(!is_answer_event(&event(Some("message"), "")));
+        assert!(!is_answer_event(&event(Some("endpoint"), "{}")));
+        assert!(!is_answer_event(&event(None, "{}")));
     }
 
     #[test]

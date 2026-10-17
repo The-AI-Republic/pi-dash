@@ -49,6 +49,7 @@ pub struct StubDsl {
     pub sse_post_status: Option<u16>,
     pub sse_endpoint: Option<String>,
     pub sse_empty: Option<String>,
+    pub sse_redirect: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -316,6 +317,10 @@ async fn handle_conn(
         // The legacy SSE stream takes over its connection.
         if request.method == "GET" && request.path == "/sse" {
             log_request(&log, &request).await;
+            if let Some(target) = dsl.sse_redirect.as_deref() {
+                write_response(&mut stream, 307, &[("location", target.to_string())], b"").await;
+                return;
+            }
             serve_sse_get(&mut stream, &dsl, &queues, &done).await;
             return;
         }
@@ -360,10 +365,15 @@ async fn serve_one(
         return true;
     }
     if request.path == "/mcpx" {
+        // Userinfo, query and fragment ride along so the redirect message
+        // assertion proves they are stripped from the reported location.
         write_response(
             stream,
             307,
-            &[("location", "http://127.0.0.1:9/mcp".to_string())],
+            &[(
+                "location",
+                "http://probe:secret@127.0.0.1:9/mcp?session=abc#frag".to_string(),
+            )],
             b"",
         )
         .await;

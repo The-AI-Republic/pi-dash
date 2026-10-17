@@ -32,7 +32,7 @@
       "path": "/sse",
       "headers": {
         "accept": "text/event-stream",
-        "content-type": "application/json"
+        "cache-control": "no-store"
       },
       "body": ""
     }
