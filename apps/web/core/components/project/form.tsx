@@ -268,6 +268,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       network: formData.network,
       identifier: formData.identifier,
       description: formData.description,
+      context: formData.context ?? "",
 
       logo_props: formData.logo_props,
       timezone: formData.timezone,
@@ -445,6 +446,26 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
               />
             )}
           />
+        </div>
+        <div className="flex flex-col gap-1">
+          <h4 className="text-13">{t("Project context")}</h4>
+          <Controller
+            name="context"
+            control={control}
+            render={({ field: { value, onChange } }) => (
+              <TextArea
+                id="context"
+                name="context"
+                value={value}
+                placeholder={t("Enter instructions and background for AI agents")}
+                onChange={onChange}
+                className="max-h-[640px] min-h-[204px] text-13 font-medium"
+                hasError={Boolean(errors?.context)}
+                disabled={!isAdmin}
+              />
+            )}
+          />
+          <span className="text-11 text-tertiary">{t("Shown to AI agents on every run in this project.")}</span>
         </div>
         <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
           <div className="flex flex-col gap-1 md:col-span-2">
