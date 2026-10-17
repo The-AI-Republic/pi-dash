@@ -138,6 +138,21 @@ SESSIONS = (
         auth_users=("admin", "member", "outsider"),
         seed=_seed_extras,
         static_context={"newcomer": NEWCOMER_ID},
+        # The invite worker job echoes the minted token (args/2):
+        # each side's token must exist in its own invites table
+        # (workspace_invitation pattern).
+        payload_db_values={
+            "pi_dash.bgtasks.project_invitation_task.project_invitation": [
+                ("args/2", "project_member_invites", "token"),
+            ],
+        },
+        # Invite tokens are timestamped JWTs, minted per backend, so
+        # the stored column compares blanked (workspace_member_invites
+        # pattern); the queued token is still validated against each
+        # side's own table above.
+        generated_columns={
+            "project_member_invites": ["token"],
+        },
         # NOTE (rebase): PIDASHCONV-870 landed (fced7590); the default
         # pod pin tripped stale and was removed.
         requests=(
@@ -240,7 +255,7 @@ SESSIONS = (
                 "POST", _P + "/invitations/",
                 route="/api/workspaces/{slug}/projects/{project_id}/invitations/",
                 json={"emails": [{"email": "bug@example.com", "role": 15}]},
-                auth="admin", expect_status=500,
+                auth="admin", expect_status=200,
             ),
             Request(
                 "POST", _P + "/invitations/",
@@ -251,7 +266,12 @@ SESSIONS = (
             Request(
                 "GET", _P + "/invitations/",
                 route="/api/workspaces/{slug}/projects/{project_id}/invitations/",
-                auth="admin", capture={"inv": "0/id"}, expect_status=200,
+                # The token leaf is a per-backend JWT: it compares via
+                # captures (workspace GET-invites pattern). No
+                # invite_link interpolation here (model fields only),
+                # so no regex blanks are needed.
+                auth="admin", capture={"inv": "0/id", "itok": "0/token"},
+                expect_status=200,
             ),
             Request(
                 "DELETE", _P + "/invitations/{inv}/",

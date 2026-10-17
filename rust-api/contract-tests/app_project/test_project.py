@@ -393,16 +393,62 @@ def test_invitations_list_and_retrieve_shape(world):
     assert_keys(resp.json(), INVITE_KEYS, "invitations-retrieve")
 
 
-def test_invitations_create_is_500_known_bug(world):
-    # Known bug, pinned: the view calls .delay() on the bulk_create result
-    # list instead of on the invitation task, so creation always 500s after
-    # persisting the rows. The Rust port must reproduce this.
+def test_invitations_create_guest_matching_role(world, db):
+    # Mirrors Django test_invite_workspace_guest_with_matching_role
+    # (d656243d): a workspace guest invited with their own role succeeds.
+    client, _, ws, project = world.full_stack()
+    guest = world.user("guest")
+    world.ws_member(ws, guest, 5)
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/invitations/",
+        json={"emails": [{"email": guest["email"], "role": 5}]})
+    assert resp.status_code == 200
+    assert resp.json() == {"message": "Email sent successfully"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT role, accepted FROM project_member_invites "
+            "WHERE project_id=%s AND email=%s",
+            (str(project["id"]), guest["email"]))
+        row = cur.fetchone()
+        assert row is not None and row["role"] == 5 and row["accepted"] is False
+
+
+def test_invitations_create_non_member(world, db):
+    # Mirrors Django test_invite_non_workspace_member (d656243d): the
+    # role lookup finds nothing, so the check passes the invite through.
     client, _, ws, project = world.full_stack()
     resp = client.post(
         f"/api/workspaces/{ws['slug']}/projects/{project['id']}/invitations/",
-        json={"emails": [{"email": "bug@example.com", "role": 15}]})
-    assert resp.status_code == 500
-    assert resp.json() == {"error": "Something went wrong please try again later"}
+        json={"emails": [{"email": "outsider-cte@example.com", "role": 15}]})
+    assert resp.status_code == 200
+    assert resp.json() == {"message": "Email sent successfully"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT role FROM project_member_invites "
+            "WHERE project_id=%s AND email=%s",
+            (str(project["id"]), "outsider-cte@example.com"))
+        row = cur.fetchone()
+        assert row is not None and row["role"] == 15
+
+
+def test_invitations_create_role_mismatch(world, db):
+    # Mirrors Django test_invite_workspace_guest_with_different_role (d656243d):
+    # a workspace guest invited with a different role is rejected with 200
+    # (yes, 200, ported as-is) and nothing is created or enqueued.
+    client, _, ws, project = world.full_stack()
+    guest = world.user("guest")
+    world.ws_member(ws, guest, 5)
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/invitations/",
+        json={"emails": [{"email": guest["email"], "role": 15}]})
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "error": "You cannot invite a user with different role than workspace role"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM project_member_invites WHERE project_id=%s",
+            (str(project["id"]),))
+        assert cur.fetchone()["n"] == 0
 
 
 def test_invitations_create_empty_400(world):

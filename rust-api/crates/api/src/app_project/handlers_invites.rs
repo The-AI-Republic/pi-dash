@@ -55,10 +55,16 @@
 //!
 //! Ported bugs and quirks (translate, don't redesign; also listed in the PR):
 //!
-//! * Invite create always 500s on a non-empty payload: `invite.py:62`
-//!   reads `.role` off a queryset (`AttributeError`, before `bulk_create`,
-//!   so 0 rows persist) and the `.delay`-on-a-list at `:104` is unreachable
-//!   (FX-APROJ-08). The role-mismatch 400 inside that loop is dead with it.
+//! * Invite create (re-synced to Django `d656243d`, PIDASHCONV-1085 —
+//!   PB-0499 retired): the pre-fix port always 500s (`invite.py:62` read
+//!   `.role` off a queryset, FX-APROJ-08). The fixed view reads the
+//!   invitee workspace role with `values_list("role").first()` (`None`
+//!   for non-members, who pass the check through), answers 200
+//!   `{"error": "You cannot invite a user with different role than
+//!   workspace role"}` when a 5/20 workspace role differs from the
+//!   requested role (yes, 200, ported as-is), then bulk-creates the
+//!   invites and enqueues `project_invitation.delay(email, project_id,
+//!   token, current_site, inviter)` once per row.
 //! * Favorites list 500s: the viewset has no `serializer_class`, so the
 //!   DRF-default list raises `AssertionError` (FX-APROJ-06/08).
 //! * Board retrieve / partial_update / destroy look the row up globally:
@@ -92,6 +98,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
 use axum::Router;
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use sqlx::Row;
@@ -114,7 +121,8 @@ use pidash_services::app_project::ser_member::{
 };
 use pidash_services::app_project::ser_project::{DeployBoardRead, DEPLOY_BOARD_INITIAL_BODY};
 use pidash_services::app_project::tasks::{
-    INTEGRITY_ERROR_BODY, OBJECT_NOT_FOUND_BODY, SERVER_ERROR_BODY, VALIDATION_ERROR_BODY,
+    invite_token, INTEGRITY_ERROR_BODY, OBJECT_NOT_FOUND_BODY, SERVER_ERROR_BODY,
+    VALIDATION_ERROR_BODY,
 };
 use pidash_types::{ProjectId, WorkspaceId};
 
@@ -221,6 +229,23 @@ const BOARD_NOT_FOUND_BODY: &str = r#"{"detail":"No DeployBoard matches the give
 /// `ProjectInvitationsViewset.create` with a missing or empty `emails`
 /// (`invite.py:58-59`).
 const EMAILS_REQUIRED_BODY: &str = r#"{"error":"Emails are required"}"#;
+/// `ProjectInvitationsViewset.create` when the invitee's workspace role is
+/// 5 or 20 and differs from the requested role (`invite.py:66-67` at
+/// `d656243d`): Django returns a bare `Response(...)` — status 200,
+/// ported as-is.
+const ROLE_MISMATCH_BODY: &str =
+    r#"{"error":"You cannot invite a user with different role than workspace role"}"#;
+/// `ProjectInvitationsViewset.create` success (`invite.py:113`).
+const INVITES_SENT_BODY: &str = r#"{"message":"Email sent successfully"}"#;
+/// `bulk_create(..., batch_size=10)` (`invite.py:98-100`): one INSERT per
+/// 10 rows, each committed separately in autocommit.
+const INVITE_BULK_BATCH_SIZE: usize = 10;
+/// `pi_dash.bgtasks.project_invitation_task.project_invitation`: the
+/// `@shared_task` default name (module path + function name), enqueued
+/// once per created invitation (`invite.py:104-111`). Defined locally:
+/// the jobs crate is read-only for port agents and still records this
+/// task as dead code (no caller before `d656243d`).
+const PROJECT_INVITATION_TASK: &str = "pi_dash.bgtasks.project_invitation_task.project_invitation";
 /// `ProjectJoinEndpoint.post` accept (`invite.py:236-239`).
 const JOIN_ACCEPTED_BODY: &str = r#"{"message":"Project Invitation Accepted"}"#;
 /// `ProjectJoinEndpoint.post` decline (`invite.py:241-244`).
@@ -1583,6 +1608,482 @@ async fn create_project_member(
 }
 
 // ---------------------------------------------------------------------------
+// Invite create: Python semantics + writes (`invite.py:54-113` at `d656243d`)
+// ---------------------------------------------------------------------------
+
+/// Python `str.strip()` with no arguments, over the shared
+/// [`is_py_strip_ws`] (Rust `White_Space` plus U+001C-U+001F).
+fn py_strip(value: &str) -> &str {
+    value.trim_matches(is_py_strip_ws)
+}
+
+/// What CPython `int()` strips: Unicode whitespace EXCEPT `\x1c`-`\x1f`
+/// (probed in the `app_workspace` port — `int("\x1c5")` raises while
+/// `"\x1c5".strip()` is `"5"`), i.e. exactly `char::is_whitespace`.
+fn py_int_strip(value: &str) -> &str {
+    value.trim_matches(|c: char| c.is_whitespace())
+}
+
+/// Python `int()` over a JSON value (the stored invite `role`,
+/// `IntegerField.get_prep_value`): bools are 0/1, floats truncate toward
+/// zero, strings parse after stripping with an optional sign
+/// (underscores allowed between digits, ASCII digits only — non-ASCII
+/// digit strings are a documented approximation). Anything else (null,
+/// arrays, objects, unparseable strings) is a `TypeError` / `ValueError`,
+/// which `handle_exception` answers 500 for. (Copy of the merged
+/// `app_workspace::handlers_invites::py_int`; that module keeps its
+/// private copy, as `v1_projects` keeps its own `py_strip`.)
+fn py_int(value: &Value) -> Result<i128, ()> {
+    match value {
+        Value::Bool(true) => Ok(1),
+        Value::Bool(false) => Ok(0),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(i as i128)
+            } else if let Some(u) = n.as_u64() {
+                Ok(u as i128)
+            } else if let Some(f) = n.as_f64() {
+                // `arbitrary_precision` numbers that fit neither int form
+                // are floats; huge magnitudes saturate (still off-scale
+                // for the smallint column, which is all the caller needs).
+                Ok(f.trunc().clamp(i128::MIN as f64, i128::MAX as f64) as i128)
+            } else if !n.to_string().contains(['.', 'e', 'E']) {
+                // `as_f64` filters non-finite, so `None` on a digit-only
+                // literal is a Python int past f64 range (`int()` still
+                // succeeds): saturate by sign like the string arm below.
+                Ok(if n.to_string().starts_with('-') {
+                    -i128::MAX
+                } else {
+                    i128::MAX
+                })
+            } else {
+                // A float literal past f64 range (`1e999`): Python's
+                // `int()` raises `OverflowError` → 500.
+                Err(())
+            }
+        }
+        Value::String(raw) => {
+            let text = py_int_strip(raw);
+            let digits = text
+                .strip_prefix('+')
+                .or_else(|| text.strip_prefix('-'))
+                .unwrap_or(text);
+            if digits.is_empty() {
+                return Err(());
+            }
+            // Underscores only between digits (`int("2_0") == 20`).
+            let mut cleaned = String::with_capacity(digits.len());
+            let mut prev_underscore = true;
+            for c in digits.chars() {
+                if c == '_' {
+                    if prev_underscore {
+                        return Err(());
+                    }
+                    prev_underscore = true;
+                } else if c.is_ascii_digit() {
+                    cleaned.push(c);
+                    prev_underscore = false;
+                } else {
+                    return Err(());
+                }
+            }
+            if prev_underscore {
+                return Err(());
+            }
+            // Saturate on overflow: a huge value still 500s the smallint
+            // column — the same outcome unbounded Python ints get.
+            let magnitude: i128 = cleaned.parse().unwrap_or(i128::MAX);
+            Ok(if text.starts_with('-') {
+                -magnitude
+            } else {
+                magnitude
+            })
+        }
+        Value::Null | Value::Array(_) | Value::Object(_) => Err(()),
+    }
+}
+
+/// Python truthiness (`if not emails`, `invite.py:58`).
+/// (Copy of the merged `app_workspace` port.)
+fn py_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i != 0
+            } else if let Some(u) = n.as_u64() {
+                u != 0
+            } else {
+                // `as_f64` filters non-finite, so `None` here is a ±inf
+                // literal — and Python `bool(inf)` is `True`.
+                n.as_f64().is_none_or(|f| f != 0.0)
+            }
+        }
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(m) => !m.is_empty(),
+    }
+}
+
+/// Python `repr()` of a JSON scalar's float: the shortest round-trip
+/// digits (as `serde_json` renders them) laid out by CPython's rule —
+/// fixed notation when `-4 < point <= 16` (where the value is
+/// `0.digits × 10^point`), scientific with `e±XX` otherwise, and a
+/// `.0` whenever fixed notation would show no point (`1e16` →
+/// `"1e+16"`, `1.5e-5` → `"1.5e-05"`, `5.0` → `"5.0"`).
+/// (Copy of the merged `app_workspace` port.)
+fn py_float_repr(f: f64) -> String {
+    if f == 0.0 {
+        return if f.is_sign_negative() {
+            "-0.0".to_owned()
+        } else {
+            "0.0".to_owned()
+        };
+    }
+    let raw = serde_json::Number::from_f64(f.abs())
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    // Split the ryu rendering into digit string + decimal point.
+    let (mantissa, exp_value) = match raw.split_once('e') {
+        Some((mantissa, exp)) => (mantissa, exp.parse::<i32>().unwrap_or(0)),
+        None => (raw.as_str(), 0),
+    };
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((int_part, frac_part)) => (int_part, frac_part),
+        None => (mantissa, ""),
+    };
+    let digits = format!("{int_part}{frac_part}");
+    let digits = digits.trim_start_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    // value = D × 10^E with D = int(digits).
+    let exp_total = exp_value - frac_part.len() as i32;
+    let point = exp_total + digits.len() as i32;
+    let sign = if f.is_sign_negative() { "-" } else { "" };
+    if !(-4 < point && point <= 16) {
+        let head = &digits[..1];
+        let tail = &digits[1..];
+        let tail = tail.trim_end_matches('0');
+        let coefficient = if tail.is_empty() {
+            head.to_owned()
+        } else {
+            format!("{head}.{tail}")
+        };
+        let exp = point - 1;
+        let (esign, edigits) = if exp < 0 {
+            ("-", (-exp).to_string())
+        } else {
+            ("+", exp.to_string())
+        };
+        let edigits = if edigits.len() < 2 {
+            format!("0{edigits}")
+        } else {
+            edigits
+        };
+        return format!("{sign}{coefficient}e{esign}{edigits}");
+    }
+    if point <= 0 {
+        return format!("{sign}0.{}{digits}", "0".repeat(-point as usize));
+    }
+    if point as usize >= digits.len() {
+        let mut out = format!(
+            "{sign}{digits}{}",
+            "0".repeat(point as usize - digits.len())
+        );
+        out.push_str(".0");
+        return out;
+    }
+    let (head, tail) = digits.split_at(point as usize);
+    format!("{sign}{head}.{tail}")
+}
+
+/// Python `str()` of a JSON number (`TextField.get_prep_value` for the
+/// role-loop `member__email` lookup): ints render exact digits, float
+/// literals render via [`py_float_repr`], and float literals past f64
+/// range render `"inf"`/`"-inf"`. A digit-only literal past f64 range is
+/// a Python int and keeps its exact digits.
+/// (Copy of the merged `app_workspace` port.)
+fn py_num_str(n: &serde_json::Number) -> String {
+    if let Some(i) = n.as_i64() {
+        i.to_string()
+    } else if let Some(u) = n.as_u64() {
+        u.to_string()
+    } else if let Some(f) = n.as_f64() {
+        let raw = n.to_string();
+        if raw.contains(['.', 'e', 'E']) {
+            py_float_repr(f)
+        } else {
+            raw
+        }
+    } else {
+        let raw = n.to_string();
+        if raw.contains(['.', 'e', 'E']) {
+            if raw.starts_with('-') {
+                "-inf".to_owned()
+            } else {
+                "inf".to_owned()
+            }
+        } else {
+            raw
+        }
+    }
+}
+
+/// Python `repr()` of a JSON string: single quotes unless the value holds
+/// a single quote and no double quote; control characters escaped,
+/// printable Unicode verbatim.
+/// (Copy of the merged `app_workspace` port.)
+fn py_str_repr(value: &str) -> String {
+    let use_double = value.contains('\'') && !value.contains('"');
+    let quote = if use_double { '"' } else { '\'' };
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push(quote);
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c if c.is_control() => {
+                let code = c as u32;
+                if code <= 0xffff {
+                    out.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{code:08x}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// Python `repr()` of a JSON value, for the invalid-email 400
+/// (`invite.py:92`): dicts render insertion-ordered with single-quoted
+/// keys (`serde_json` runs with `preserve_order`, so the wire order
+/// survives parsing).
+/// (Copy of the merged `app_workspace` port.)
+fn py_repr(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_owned(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Number(n) => py_num_str(n),
+        Value::String(s) => py_str_repr(s),
+        Value::Array(items) => {
+            let inner: Vec<String> = items.iter().map(py_repr).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        Value::Object(map) => {
+            let inner: Vec<String> = map
+                .iter()
+                .map(|(k, v)| format!("{}: {}", py_str_repr(k), py_repr(v)))
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+    }
+}
+
+/// `datetime.now().timestamp()` (`invite.py:81`): epoch seconds as an f64.
+/// Microsecond precision like CPython (whole microseconds, exactly
+/// representable below 2^53).
+/// (Copy of the merged `app_workspace` port.)
+fn epoch_float(now: &DateTime<Utc>) -> f64 {
+    let micros = now.timestamp_micros();
+    micros as f64 / 1_000_000.0
+}
+
+/// How the `emails` input classifies (`invite.py:55-59`): missing,
+/// null, or falsy input 400s (`if not emails`); a truthy non-list
+/// iterates to an `AttributeError`/`TypeError` (500) — only a
+/// non-empty list reaches the role loop.
+enum EmailsInput<'a> {
+    /// A non-empty list: validate each entry.
+    Entries(&'a Vec<Value>),
+    /// Missing/null/falsy: the emails-required 400.
+    Missing,
+    /// Truthy non-list: 500.
+    ServerError,
+}
+
+fn classify_emails_input(value: Option<&Value>) -> EmailsInput<'_> {
+    match value {
+        Some(Value::Array(entries)) if !entries.is_empty() => EmailsInput::Entries(entries),
+        Some(value) if py_truthy(value) => EmailsInput::ServerError,
+        _ => EmailsInput::Missing,
+    }
+}
+
+/// Split the direct `validate_email` call (`invite.py:74`) into
+/// Django's three outcomes (probed live in the `app_workspace` port):
+/// falsy input (`None`, `""`, `0`, `[]`, …) fails the validator's
+/// `not value` check (`ValidationError` → 400); a container holding
+/// `"@"` passes the membership check and dies in `.rsplit`
+/// (`AttributeError` → 500); containers without it fail validation
+/// (400); truthy numbers/bools fail the `in` check (`TypeError` → 500);
+/// strings go to the `EmailValidator` port.
+enum EmailCheck {
+    /// Failed validation: answer the invalid-email 400.
+    Invalid,
+    /// `TypeError`/`AttributeError`: answer 500.
+    TypeError,
+    /// A string to run through [`is_valid_email_str`].
+    Candidate(String),
+}
+
+fn classify_invite_email(value: Option<&Value>) -> EmailCheck {
+    match value {
+        None | Some(Value::Null) => EmailCheck::Invalid,
+        Some(value) if !py_truthy(value) => EmailCheck::Invalid,
+        Some(Value::String(s)) => EmailCheck::Candidate(s.clone()),
+        // `"@" in value`: element equality for lists, key lookup for
+        // dicts — reaching `.rsplit` 500s; missing it 400s.
+        Some(Value::Array(items))
+            if items
+                .iter()
+                .any(|item| item.as_str().is_some_and(|s| s == "@")) =>
+        {
+            EmailCheck::TypeError
+        }
+        Some(Value::Object(map)) if map.contains_key("@") => EmailCheck::TypeError,
+        Some(Value::Array(_)) | Some(Value::Object(_)) => EmailCheck::Invalid,
+        Some(_) => EmailCheck::TypeError,
+    }
+}
+
+/// Reuse the merged Django `EmailValidator` port rather than forking it
+/// (`v1_projects::handlers_members::is_valid_email`, probed against
+/// Django 4.2 in PIDASHCONV-371).
+fn is_valid_email_str(value: &str) -> bool {
+    crate::v1_projects::handlers_members::is_valid_email(value)
+}
+
+/// The `member__email` lookup value for the role loop (`invite.py:62`):
+/// `EmailField.get_prep_value` stringifies (`None` becomes the `IS NULL`
+/// lookup, which matches no row — `email` is non-null — so `None`
+/// short-circuits to no query at all).
+fn invite_lookup_email(value: Option<&Value>) -> Option<String> {
+    match value {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Number(n)) => Some(py_num_str(n)),
+        Some(Value::Bool(true)) => Some("True".to_owned()),
+        Some(Value::Bool(false)) => Some("False".to_owned()),
+        // Only arrays/objects remain: `str(value)` is the `repr`.
+        Some(container) => Some(py_repr(container)),
+    }
+}
+
+/// The role-mismatch comparison (`invite.py:66`,
+/// `workspace_role != email.get("role", 5)`): true when the requested
+/// role EQUALS the workspace role (no error). A missing key defaults to
+/// int 5; numbers compare numerically (`5 == 5.0` in Python); bools are
+/// 0/1; anything else (strings, null, containers) is unequal.
+fn role_matches_workspace(workspace_role: i16, requested: Option<&Value>) -> bool {
+    let expected = i128::from(workspace_role);
+    match requested {
+        None => expected == 5,
+        Some(Value::Number(n)) => {
+            if let Some(i) = n.as_i64() {
+                i128::from(i) == expected
+            } else if let Some(u) = n.as_u64() {
+                expected >= 0 && u == expected as u64
+            } else if let Some(f) = n.as_f64() {
+                f == f64::from(workspace_role)
+            } else {
+                false
+            }
+        }
+        Some(Value::Bool(true)) => expected == 1,
+        Some(Value::Bool(false)) => expected == 0,
+        Some(_) => false,
+    }
+}
+
+/// The invitee's workspace role (`invite.py:61-65`):
+/// `WorkspaceMember.objects.filter(workspace__slug=slug,
+/// member__email=email, is_active=True).values_list("role",
+/// flat=True).first()` — `None` for non-members. Forward-FK joins carry
+/// no related-manager filter (no `workspaces.deleted_at` guard — same
+/// SQL semantics as Django, per [`membership`]). Django's `.first()`
+/// applies the model's `-created_at` ordering, but at most one live row
+/// ever matches (`users.email` is unique and `(workspace, member)` is
+/// live-unique), so the `ORDER BY wm.id` tiebreak below never decides.
+async fn fetch_invitee_workspace_role(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    email: &str,
+) -> Result<Option<i16>, Denial> {
+    let row: Option<(Option<i16>,)> = sqlx::query_as(
+        r#"SELECT wm.role FROM workspace_members wm
+           JOIN workspaces w ON w.id = wm.workspace_id
+           JOIN users u ON u.id = wm.member_id
+           WHERE w.slug = $1 AND u.email = $2 AND wm.is_active AND wm.deleted_at IS NULL
+           ORDER BY wm.id LIMIT 1"#,
+    )
+    .bind(slug)
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(row.and_then(|row| row.0))
+}
+
+/// `Workspace.objects.get(slug=slug)` (`invite.py:69`): the live-only
+/// default manager, so deleted workspaces miss; a miss is the L8
+/// `ObjectDoesNotExist` 404 (unreachable past the gate in practice —
+/// a missing slug denies first — but mapped all the same).
+async fn fetch_workspace_id(pool: &sqlx::PgPool, slug: &str) -> Result<uuid::Uuid, Denial> {
+    let row: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL")
+            .bind(slug)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    row.map(|row| row.0).ok_or(Denial::ObjectNotFound)
+}
+
+/// One validated invite-create row: the stored address, the raw
+/// requested role (`None` when the key is missing — Django defaults to
+/// 5; an explicit null stores NULL and dies with `IntegrityError` in
+/// the bulk), and the token.
+struct PendingInvite {
+    email: String,
+    role: Option<Value>,
+    token: String,
+}
+
+/// `project_invitation.delay(email, project_id, token, current_site,
+/// invitor)` (`invite.py:104-111`): five positional args, no kwargs.
+fn project_invitation_message(
+    email: &str,
+    project_id: &uuid::Uuid,
+    token: &str,
+    current_site: &str,
+    inviter: &str,
+) -> pidash_jobs::celery::CeleryTaskMessage {
+    pidash_jobs::celery::CeleryTaskMessage::new(
+        PROJECT_INVITATION_TASK,
+        vec![
+            Value::String(email.to_owned()),
+            Value::String(project_id.to_string()),
+            Value::String(token.to_owned()),
+            Value::String(current_site.to_owned()),
+            Value::String(inviter.to_owned()),
+        ],
+        Map::new(),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Handlers: project invitations
 // ---------------------------------------------------------------------------
 
@@ -1624,11 +2125,10 @@ async fn invite_list(
     Ok(json_response(StatusCode::OK, out))
 }
 
-/// `POST .../projects/<project_id>/invitations/` (`invite.py:54-113`,
-/// ADMIN-gated): an empty `emails` answers the 400; anything else raises
-/// `AttributeError` at `:62` (`.role` off a queryset) before any row is
-/// written — the generic 500 with 0 rows persisted (FX-APROJ-08). The
-/// role-mismatch 400 and the `.delay`-on-a-list at `:104` are dead with it.
+/// `POST .../projects/<project_id>/invitations/` (`invite.py:54-113` at
+/// `d656243d`, ADMIN-gated), in Django's order: emails-required →
+/// role-match loop → workspace → per-email validate → bulk-create →
+/// per-row enqueues → 200.
 async fn invite_create(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
@@ -1652,31 +2152,179 @@ async fn invite_create(
         Err(response) => return Ok(response),
     };
     // `request.data.get("emails", [])` — a non-dict body has no `.get`
-    // (`AttributeError` → 500); a missing or empty `emails` is the 400.
-    let emails = match body.as_object() {
-        Some(map) => map.get("emails"),
+    // (`AttributeError` → 500).
+    let data = match body.as_object() {
+        Some(data) => data,
         None => return Err(Denial::ServerError),
     };
-    let empty = match emails {
-        None => true,
-        Some(Value::Null) => true,
-        Some(Value::Array(items)) => items.is_empty(),
-        Some(Value::Object(map)) => map.is_empty(),
-        Some(Value::String(s)) => s.is_empty(),
-        Some(Value::Bool(flag)) => !flag,
-        Some(Value::Number(number)) => {
-            number.as_i64() == Some(0) || number.as_u64() == Some(0) || number.as_f64() == Some(0.0)
+    // `if not emails` — missing, null, and falsy values 400; a truthy
+    // non-list 500s in the iteration (`:61`).
+    let entries: &Vec<Value> = match classify_emails_input(data.get("emails")) {
+        EmailsInput::Entries(entries) => entries,
+        EmailsInput::Missing => {
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                EMAILS_REQUIRED_BODY.to_owned(),
+            ));
         }
+        EmailsInput::ServerError => return Err(Denial::ServerError),
     };
-    if empty {
-        return Ok(json_response(
-            StatusCode::BAD_REQUEST,
-            EMAILS_REQUIRED_BODY.to_owned(),
-        ));
+    // The role-match loop (`:61-67`): a non-dict entry has no `.get`
+    // (500); a 5/20 invitee workspace role that differs from the
+    // requested role answers the mismatch 200 — before the workspace
+    // fetch, exactly like Django.
+    for entry in entries.iter() {
+        let Some(item) = entry.as_object() else {
+            return Err(Denial::ServerError);
+        };
+        let workspace_role = match invite_lookup_email(item.get("email")) {
+            Some(address) => fetch_invitee_workspace_role(&pool, &slug, &address).await?,
+            None => None,
+        };
+        if let Some(role @ (5 | 20)) = workspace_role {
+            if !role_matches_workspace(role, item.get("role")) {
+                return Ok(json_response(StatusCode::OK, ROLE_MISMATCH_BODY.to_owned()));
+            }
+        }
     }
-    // `:62` raises before any row is written (FX-APROJ-08): the generic
-    // 500, no database touch.
-    Err(Denial::ServerError)
+    // The workspace (`:69`): a direct `Workspace.objects.get`.
+    let workspace_id = fetch_workspace_id(&pool, &slug).await?;
+    // Per-email validate + row build (`:72-95`): the FIRST invalid email
+    // aborts (nothing is created — the bulk runs after the loop).
+    let now = Utc::now();
+    let secret = state.settings().secret_key.clone();
+    let mut pending: Vec<PendingInvite> = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        let Some(item) = entry.as_object() else {
+            return Err(Denial::ServerError);
+        };
+        let valid = match classify_invite_email(item.get("email")) {
+            EmailCheck::Invalid => false,
+            EmailCheck::TypeError => return Err(Denial::ServerError),
+            EmailCheck::Candidate(candidate) => is_valid_email_str(&candidate),
+        };
+        if !valid {
+            // Single key, so key order is fixed; `serde_json` escapes
+            // exactly like DRF's compact rendering.
+            let mut error = Map::new();
+            error.insert(
+                "error".to_owned(),
+                Value::String(format!(
+                    "Invalid email - {} provided a valid email address is required to send the invite",
+                    py_repr(entry)
+                )),
+            );
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::to_string(&Value::Object(error)).expect("error serializes"),
+            ));
+        }
+        let address = item
+            .get("email")
+            .and_then(Value::as_str)
+            .ok_or(Denial::ServerError)?;
+        // `varchar(255)` (`db/models/project.py:315`): `validate_email`
+        // allows 320 chars, so overlong addresses die in the bulk with a
+        // `DataError` (500, not `IntegrityError`).
+        let stored = py_strip(address).to_lowercase();
+        if stored.chars().count() > 255 {
+            return Err(Denial::ServerError);
+        }
+        let token = invite_token(item, epoch_float(&now), &secret);
+        if token.len() > 255 {
+            return Err(Denial::ServerError);
+        }
+        pending.push(PendingInvite {
+            email: stored,
+            role: item.get("role").cloned(),
+            token,
+        });
+    }
+    // `bulk_create(batch_size=10, ignore_conflicts=True)` (`:98-100`):
+    // one INSERT per 10 rows, each committed separately in autocommit —
+    // so the per-batch role/length prep runs against the CURRENT batch
+    // only (a bad row in batch 2 leaves batch 1 persisted, exactly like
+    // Django). `bulk_create` skips `save()`: no audit stamp beyond the
+    // explicit `created_by`, `accepted` false, `message`/`responded_at`
+    // NULL. The table carries no unique constraint besides the pk, so
+    // `ON CONFLICT DO NOTHING` only ever meets uuid collisions.
+    for batch in pending.chunks(INVITE_BULK_BATCH_SIZE) {
+        let mut roles: Vec<Option<i16>> = Vec::with_capacity(batch.len());
+        for invite in batch.iter() {
+            let role = match invite.role.as_ref() {
+                // Missing key: `email.get("role", 5)`.
+                None => Some(5),
+                // Explicit null: `get_prep_value` passes NULL through and
+                // the NOT NULL column raises `IntegrityError` (400) —
+                // bind NULL and let the bulk raise it.
+                Some(Value::Null) => None,
+                Some(value) => match py_int(value) {
+                    Ok(role) if (i128::from(i16::MIN)..=i128::from(i16::MAX)).contains(&role) => {
+                        Some(role as i16)
+                    }
+                    _ => return Err(Denial::ServerError),
+                },
+            };
+            roles.push(role);
+        }
+        let mut values: Vec<String> = Vec::with_capacity(batch.len());
+        for index in 0..batch.len() {
+            let base = index * 9;
+            values.push(format!(
+                "(${}, ${}, ${}, ${}, NULL, NULL, ${}, ${}, ${}, FALSE, ${}, NULL, NULL, ${})",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6,
+                base + 7,
+                base + 8,
+                base + 9
+            ));
+        }
+        let sql = format!(
+            "INSERT INTO project_member_invites \
+             (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
+             project_id, workspace_id, email, accepted, token, message, responded_at, role) \
+             VALUES {} ON CONFLICT DO NOTHING",
+            values.join(", ")
+        );
+        let mut query = sqlx::query(&sql);
+        for (invite, role) in batch.iter().zip(roles.iter()) {
+            query = query
+                .bind(uuid::Uuid::new_v4())
+                .bind(now)
+                .bind(now)
+                .bind(resolved.id)
+                .bind(project_id)
+                .bind(workspace_id)
+                .bind(&invite.email)
+                .bind(&invite.token)
+                .bind(*role);
+        }
+        if let Err(error) = query.execute(&pool).await {
+            return Err(integrity_denial(error));
+        }
+    }
+    // Per-row enqueues (`:104-111`): one `project_invitation` job per
+    // invitation, best-effort (without the queue the response stands).
+    let current_site = crate::v1_projects::handlers_project::app_origin(&state);
+    let inviter = resolved.email.clone().unwrap_or_default();
+    for invite in pending.iter() {
+        enqueue_message(
+            &pool,
+            project_invitation_message(
+                &invite.email,
+                &project_id,
+                &invite.token,
+                &current_site,
+                &inviter,
+            ),
+        )
+        .await;
+    }
+    Ok(json_response(StatusCode::OK, INVITES_SENT_BODY.to_owned()))
 }
 
 /// `GET .../invitations/<uuid:pk>/` (`invite.py:37-51`): DRF-default
@@ -3359,9 +4007,7 @@ async fn board_partial_update(
 mod tests {
     use super::*;
     use pidash_services::app_project::tasks::ViewError;
-    use pidash_services::app_project::tasks::{
-        detail_body, handle_exception, invite_create_failure,
-    };
+    use pidash_services::app_project::tasks::{detail_body, handle_exception};
 
     fn fixture(name: &str) -> Value {
         let path = format!(
@@ -3384,7 +4030,6 @@ mod tests {
             (500, SERVER_ERROR_BODY.to_owned()),
             handle_exception(&ViewError::Other)
         );
-        assert_eq!(invite_create_failure(), (500, SERVER_ERROR_BODY));
         assert_eq!(
             RESOLVE_NOT_FOUND_BODY,
             handle_exception(&ViewError::Http404("Project not found".to_owned())).1
@@ -3474,11 +4119,126 @@ mod tests {
             parse(SECRET_JOIN_BODY),
             fx["user_invites"]["user_invite_join_secret_403"]["body"]
         );
-        // The two ported 500s render the generic FX-APROJ-08 body.
+        // The remaining ported 500 (favorites list) renders the generic
+        // FX-APROJ-08 body. (Invite create no longer 500s since the
+        // `d656243d` re-sync, PIDASHCONV-1085; the `invite_create_500`
+        // fixture entry is the pre-fix probe record.)
         let fx08 = fixture("FX-APROJ-08.tasks.json");
         assert_eq!(parse(SERVER_ERROR_BODY), fx08["generic_500_body"]);
-        assert_eq!(parse(SERVER_ERROR_BODY), fx08["invite_create_500"]["body"]);
         assert_eq!(parse(SERVER_ERROR_BODY), fx08["favorites_list_500"]["body"]);
+        // The fixed invite-create bodies (no fixture entry — pinned here).
+        assert_eq!(
+            parse(ROLE_MISMATCH_BODY),
+            serde_json::json!({"error": "You cannot invite a user with different role than workspace role"})
+        );
+        assert_eq!(
+            parse(INVITES_SENT_BODY),
+            serde_json::json!({"message": "Email sent successfully"})
+        );
+    }
+
+    #[test]
+    fn invite_message_shape() {
+        let project_id = uuid::Uuid::parse_str("5952e951-baad-4770-8ee8-64faf7f753fd").unwrap();
+        let message = project_invitation_message(
+            "new@example.com",
+            &project_id,
+            "tok",
+            "https://app.example",
+            "boss@example.com",
+        );
+        assert_eq!(
+            message.task,
+            "pi_dash.bgtasks.project_invitation_task.project_invitation"
+        );
+        assert_eq!(
+            message.args,
+            vec![
+                Value::String("new@example.com".to_owned()),
+                Value::String("5952e951-baad-4770-8ee8-64faf7f753fd".to_owned()),
+                Value::String("tok".to_owned()),
+                Value::String("https://app.example".to_owned()),
+                Value::String("boss@example.com".to_owned()),
+            ]
+        );
+        assert!(message.kwargs.is_empty());
+    }
+
+    #[test]
+    fn role_match_matrix() {
+        // Equal roles pass; anything else rejects.
+        assert!(role_matches_workspace(5, Some(&serde_json::json!(5))));
+        assert!(role_matches_workspace(20, Some(&serde_json::json!(20))));
+        assert!(role_matches_workspace(5, None));
+        assert!(!role_matches_workspace(20, None));
+        assert!(!role_matches_workspace(5, Some(&serde_json::json!(15))));
+        assert!(!role_matches_workspace(20, Some(&serde_json::json!(5))));
+        // Python numeric equality: 5 == 5.0.
+        assert!(role_matches_workspace(5, Some(&serde_json::json!(5.0))));
+        // Strings, bools, null and containers never equal the int.
+        assert!(!role_matches_workspace(5, Some(&serde_json::json!("5"))));
+        assert!(!role_matches_workspace(5, Some(&serde_json::json!(true))));
+        assert!(!role_matches_workspace(5, Some(&serde_json::json!(null))));
+        assert!(!role_matches_workspace(5, Some(&serde_json::json!([5]))));
+    }
+
+    #[test]
+    fn emails_input_classification() {
+        assert!(matches!(classify_emails_input(None), EmailsInput::Missing));
+        for falsy in [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(""),
+            serde_json::json!(0),
+            serde_json::json!(false),
+        ] {
+            assert!(
+                matches!(classify_emails_input(Some(&falsy)), EmailsInput::Missing),
+                "falsy pins Missing: {falsy}"
+            );
+        }
+        for truthy in [
+            serde_json::json!("x"),
+            serde_json::json!(5),
+            serde_json::json!({"a": 1}),
+            serde_json::json!(true),
+        ] {
+            assert!(
+                matches!(
+                    classify_emails_input(Some(&truthy)),
+                    EmailsInput::ServerError
+                ),
+                "truthy non-list pins 500: {truthy}"
+            );
+        }
+        let entries = serde_json::json!([{"email": "a@b.c"}]);
+        assert!(matches!(
+            classify_emails_input(Some(&entries)),
+            EmailsInput::Entries(_)
+        ));
+    }
+
+    #[test]
+    fn lookup_email_rendering() {
+        assert_eq!(invite_lookup_email(None), None);
+        assert_eq!(invite_lookup_email(Some(&serde_json::json!(null))), None);
+        assert_eq!(
+            invite_lookup_email(Some(&serde_json::json!("a@b.c"))),
+            Some("a@b.c".to_owned())
+        );
+        assert_eq!(
+            invite_lookup_email(Some(&serde_json::json!(5))),
+            Some("5".to_owned())
+        );
+        assert_eq!(
+            invite_lookup_email(Some(&serde_json::json!(true))),
+            Some("True".to_owned())
+        );
+        assert_eq!(
+            invite_lookup_email(Some(&serde_json::json!({"a": 1}))),
+            Some("{'a': 1}".to_owned())
+        );
     }
 
     #[test]

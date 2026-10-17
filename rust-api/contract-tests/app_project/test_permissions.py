@@ -44,7 +44,7 @@ def test_guest_cannot_create_project(world):
 
 def test_member_cannot_invite(world):
     # Invitations are admin-only; the decorator is the sole gate, so removing
-    # it turns this 403 into a 500 (the known .delay bug path).
+    # it turns this 403 into a 200 (the invite succeeds for non-members).
     client, _, ws, project = world.full_stack()
     _, member_client = world.add_member(ws, project, ws_role=15, proj_role=15,
                                         name="inviter")
