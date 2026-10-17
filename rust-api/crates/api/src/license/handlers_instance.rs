@@ -770,6 +770,11 @@ fn validate_partial(
     // are `incorrect_type`; strings parse as UUIDs; integers coerce through
     // `uuid.UUID(int=…)` (valid for `[0, 2**128)`) and are looked up;
     // floats, lists and dicts fail with the Python `str()` of the value.
+    // The exact empty string clears: `RelatedField.run_validation`
+    // forces `""` to `None` on every path, JSON included
+    // (`relations.py:151-155`), and `allow_null` (from `null=True`)
+    // accepts it. Only the exact `""`: `" "` still fails below as an
+    // invalid UUID.
     for field in ["created_by", "updated_by"] {
         if let Some(value) = get(field) {
             match value {
@@ -780,6 +785,9 @@ fn validate_partial(
                         datatype_name(value)
                     )],
                 )),
+                serde_json::Value::String(raw) if raw.is_empty() => {
+                    sets.push(Assignment::NullableUuid(field, None));
+                }
                 serde_json::Value::String(raw) => match raw.parse::<Uuid>() {
                     Ok(id) => sets.push(Assignment::NullableUuid(field, Some((id, raw.clone())))),
                     Err(_) => errors.push((field.to_owned(), vec![invalid_uuid_message(raw)])),
@@ -880,7 +888,7 @@ async fn patch_instance(
         serde_json::Value::Object(object) => object.clone(),
         other => return Err(non_object_error(other)),
     };
-    let sets = validate_partial(&object, actor.timezone).map_err(|rejection| {
+    let mut sets = validate_partial(&object, actor.timezone).map_err(|rejection| {
         let PatchRejection::FieldErrors(errors) = rejection;
         HandlerError::FieldErrors(render_field_errors(&errors))
     })?;
@@ -897,6 +905,13 @@ async fn patch_instance(
     }
     // `created_by` / `updated_by` existence (DRF `does_not_exist`).
     check_user_assignments(pool, &sets).await?;
+    // `BaseModel.save` unconditionally overwrites `updated_by` with the
+    // request user on update (`db/models/base.py:36-42`): the explicit
+    // value is validated above (format, then existence — Django 400s
+    // before saving) but never written. [`apply_patch`]'s trailing
+    // actor-set is that overwrite; emitting both would assign the same
+    // column twice in one `UPDATE`.
+    sets.retain(|set| !matches!(set, Assignment::NullableUuid("updated_by", _)));
     let updated_id = match row {
         Some(current) => {
             apply_patch(pool, &current.id, &sets, &actor.id).await?;
@@ -1398,6 +1413,33 @@ mod tests {
         assert_eq!(
             validate_partial(&body, Tz::UTC).expect("nulls skipped"),
             vec![]
+        );
+    }
+
+    #[test]
+    fn patch_empty_string_clears_nullable_fk_like_drf() {
+        // `RelatedField.run_validation` forces the exact `""` to `None`
+        // on every path; `allow_null` clears. Whitespace is not empty:
+        // `" "` fails as an invalid UUID. (`updated_by` assignments are
+        // validated here and dropped at write time — `BaseModel.save`
+        // overwrites with the actor — so the unit layer still sees them.)
+        let body = obj(serde_json::json!({"created_by": ""}));
+        assert_eq!(
+            validate_partial(&body, Tz::UTC).expect("empty clears"),
+            vec![Assignment::NullableUuid("created_by", None)]
+        );
+        let body = obj(serde_json::json!({"updated_by": ""}));
+        assert_eq!(
+            validate_partial(&body, Tz::UTC).expect("empty validates"),
+            vec![Assignment::NullableUuid("updated_by", None)]
+        );
+        let body = obj(serde_json::json!({"created_by": " "}));
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            render_field_errors(&errors),
+            "{\"created_by\":[\"\u{201c} \u{201d} is not a valid UUID.\"]}"
         );
     }
 

@@ -2885,6 +2885,11 @@ async fn validate_workspace_input(
         Some(Value::String(s)) => trimmed_text(s, "logo", &mut errors, true),
     };
     // `logo_asset`: writable `PrimaryKeyRelatedField` over live rows.
+    // The exact empty string clears: `RelatedField.run_validation`
+    // forces `""` to `None` on every path, JSON included
+    // (`relations.py:151-155`), and `allow_null` (from `null=True`)
+    // stores NULL. Only the exact `""`: `" "` still fails below as an
+    // invalid UUID.
     let logo_asset = match map.get("logo_asset") {
         None | Some(Value::Null) => None,
         Some(Value::Bool(_)) => {
@@ -2896,6 +2901,7 @@ async fn validate_workspace_input(
             None
         }
         Some(Value::Number(n)) => asset_by_number(pool, n, &mut errors).await?,
+        Some(Value::String(raw)) if raw.is_empty() => None,
         Some(Value::String(raw)) => asset_by_pk(pool, raw, &mut errors).await?,
         Some(Value::Array(_) | Value::Object(_)) => {
             let raw = py_repr(map.get("logo_asset").expect("matched"));
