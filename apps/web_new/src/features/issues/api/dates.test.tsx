@@ -57,7 +57,14 @@ describe("withIssueDates", () => {
   it("patches rows inside grouped buckets and keeps stray entries", () => {
     expect(
       withIssueDates(
-        { count: 1, results: { todo: { results: [row(ISSUE_ID)], total_results: 1 }, stray: 7 } },
+        {
+          count: 1,
+          results: {
+            todo: { results: [row(ISSUE_ID)], total_results: 1 },
+            empty: { total_results: 0 },
+            stray: 7,
+          },
+        },
         ISSUE_ID,
         DATES
       )
@@ -68,6 +75,7 @@ describe("withIssueDates", () => {
           results: [{ ...row(ISSUE_ID), start_date: "2026-10-10", target_date: "2026-10-20" }],
           total_results: 1,
         },
+        empty: { total_results: 0 },
         stray: 7,
       },
     });
