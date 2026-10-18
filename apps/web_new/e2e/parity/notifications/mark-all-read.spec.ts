@@ -208,7 +208,11 @@ test(
           names.created
         );
         // Assignee: a colleague creates the item and assigns the fresh
-        // member; unsubscribing afterwards keeps it out of "subscribed".
+        // member. The assignment itself fans out the one "assigned"
+        // notification, so this issue gets no comment of its own: a second
+        // fan-out would put two cards (same title) on one issue and break
+        // the one-notification-per-origin fixture. Unsubscribing afterwards
+        // keeps it out of "subscribed".
         const assignedId = await serverCreateIssue(seed.workspaceSlug, seed.projectId, memberSession, names.assigned);
         await serverPatchIssue(
           seed.workspaceSlug,
@@ -233,14 +237,7 @@ test(
           provisioned.session,
           `<p>subscribing ${tag}</p>`
         );
-        await serverCreateComment(
-          seed.workspaceSlug,
-          seed.projectId,
-          assignedId,
-          provisioned.session,
-          `<p>subscribing ${tag}</p>`
-        );
-        for (const issueId of [createdId, assignedId, subscribedId]) {
+        for (const issueId of [createdId, subscribedId]) {
           await serverCreateComment(
             seed.workspaceSlug,
             seed.projectId,
@@ -249,8 +246,9 @@ test(
             `<p>scope check ${tag}</p>`
           );
         }
-        await serverUnsubscribeIssue(seed.workspaceSlug, seed.projectId, assignedId, provisioned.session);
-
+        // Wait for the assignment fan-out to create its notification before
+        // unsubscribing: dropping the subscriber row earlier would let the
+        // async worker skip the "assigned" item entirely.
         await expect
           .poll(
             async () => {
@@ -260,6 +258,8 @@ test(
             { timeout: 90_000 }
           )
           .toEqual([true, true, true]);
+
+        await serverUnsubscribeIssue(seed.workspaceSlug, seed.projectId, assignedId, provisioned.session);
 
         const created = await serverNotificationsList(seed.workspaceSlug, provisioned.session, { type: "created" });
         expect(created.map((row) => row.entityIdentifier)).toContain(createdId);

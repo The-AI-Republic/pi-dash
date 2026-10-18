@@ -196,8 +196,9 @@ scope as read at once. The request posts the current scope to `POST
 /api/workspaces/{workspaceSlug}/users/notifications/mark-all-read/`: the
 origin set joined into `type` in the list's vocabulary (absent when no
 origin is active; `subscribed` is its own value), plus the snoozed and
-archived flags and, as the old app sends it, the read flag. The read flag is
-inert — the bulk endpoint only ever reads unread rows. While
+archived flags (the old app also carried a `read` flag when its unread-only
+mode was on). That flag is inert — the bulk endpoint only ever reads unread
+rows — and the new inbox does not send it. While
 it runs the control shows progress and repeat presses are ignored. Afterwards
 every cached notification in scope carries a read timestamp, the current
 tab's unread counter zeroes (other tabs' counters are untouched), and the tab
