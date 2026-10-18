@@ -40,3 +40,12 @@ export function useIssuesLoader(): IssuesLoader {
   if (loader === null) throw new Error("useIssuesLoader must be used under IssuesLoaderProvider.");
   return loader;
 }
+
+/**
+ * Read the loader when one is mounted. Header builders can sit above the
+ * layout root that owns the provider; their writes still apply and refetch,
+ * they just cannot raise the layout's floating spinner.
+ */
+export function useOptionalIssuesLoader(): IssuesLoader | null {
+  return React.useContext(IssuesLoaderContext);
+}
