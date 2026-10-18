@@ -1826,8 +1826,8 @@ pub async fn archive_project_inner(
     project_id_raw: &str,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     // Archive is a POST: the workspace admin-or-member branch.
     require_project_base(
         &pre.pool,
@@ -1880,8 +1880,8 @@ pub async fn unarchive_project_inner(
     project_id_raw: &str,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_project_base(
         &pre.pool,
         &workspace_id,
@@ -1930,11 +1930,11 @@ pub async fn summary_inner(
     query: &QueryMap,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     // The slug->UUID rewrite runs in `initial()` before `check_permissions`
     // (`api/views/base.py:110`), so identifier misses 404 even for callers
     // the admin gate would deny.
     let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     // `WorkSpaceAdminPermission`: workspace ADMIN or MEMBER, active.
     {
         use super::perms::{decide, gate_for, V1Route};
@@ -2923,8 +2923,8 @@ pub async fn retrieve_project_inner(
     query: &QueryMap,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, pk).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_project_base(
         &pre.pool,
         &workspace_id,
@@ -2967,8 +2967,8 @@ pub async fn patch_project_inner(
 ) -> Result<Response, Denial> {
     use pidash_services::v1_projects::ser_project as ser;
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, pk).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_project_base(
         &pre.pool,
         &workspace_id,
@@ -3368,8 +3368,8 @@ pub async fn delete_project_inner(
     pk: &str,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     let project_id = rewrite_project_id(&pre.pool, slug, pk).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
     require_project_base(
         &pre.pool,
         &workspace_id,
