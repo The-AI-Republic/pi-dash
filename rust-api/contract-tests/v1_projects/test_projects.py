@@ -5,6 +5,7 @@ plus identifier-slug routing, one denied case and one tenant-isolation case.
 """
 
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -461,3 +462,133 @@ def test_unknown_workspace_uuid_ref_403(seed):
     )
     for r in responses:
         assert r.json() == PERMISSION_DENIED
+# --- cover_image_url: odd cover assets (PIDASHCONV-1148) --------------------
+#
+# `Project.cover_image_url` (db/models/project.py:175-185) returns
+# `cover_image_asset.asset_url` verbatim when an asset is attached — it never
+# falls back to the `cover_image` text. `asset_url` (db/models/asset.py:80-101)
+# returns None for a NULL/unmapped entity_type (JSON null) and raises a plain
+# AttributeError for an attachment/description asset with a NULL workspace,
+# which DRF's `Field.get_attribute` turns into `SkipField` for the read-only
+# `cover_image_url = CharField(read_only=True)`: the key is left out (200).
+
+COVER_DESCRIPTION_TYPES = (
+    "ISSUE_DESCRIPTION",
+    "COMMENT_DESCRIPTION",
+    "PAGE_DESCRIPTION",
+    "DRAFT_ISSUE_DESCRIPTION",
+)
+
+
+def _add_cover_asset(conn, entity_type, *, workspace_id=None, project_id=None,
+                     issue_id=None):
+    aid = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO file_assets (id, attributes, asset, entity_type,
+                workspace_id, project_id, issue_id, is_deleted, is_archived,
+                size, is_uploaded, created_at, updated_at)
+            VALUES (%s, '{}', 'ct/cover.png', %s, %s, %s, %s,
+                false, false, 0, false, now(), now())
+            """,
+            (aid, entity_type, workspace_id, project_id, issue_id),
+        )
+    conn.commit()
+    return aid
+
+
+def _set_project_cover(conn, project_id, *, asset_id=None, cover_image="COVER_TEXT"):
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET cover_image_asset_id = %s, cover_image = %s"
+            " WHERE id = %s",
+            (asset_id, cover_image, project_id),
+        )
+    conn.commit()
+
+
+def _cover_project(seed, conn, tag):
+    pid = db.create_project(conn, seed["ws_a"]["id"], tag,
+                            created_by_id=seed["owner"]["id"])["id"]
+    db.add_project_member(conn, seed["ws_a"]["id"], pid, seed["owner"]["id"], db.ADMIN)
+    return pid
+
+
+def test_cover_image_url_unmapped_asset_renders_null(seed, conn):
+    # (a) NULL / unmapped entity_type: Django renders "cover_image_url": null
+    # even with non-empty cover_image text (no fallback), on detail and list.
+    key = seed["keys"][KEY]
+    for entity in (None, "DRAFT_ISSUE_ATTACHMENT"):
+        pid = _cover_project(seed, conn, db.new_tag())
+        aid = _add_cover_asset(conn, entity)
+        _set_project_cover(conn, pid, asset_id=aid, cover_image="COVER_TEXT_XYZ")
+
+        detail = http.get(key, f"{base(seed)}/{pid}/").json()
+        assert "cover_image_url" in detail
+        assert detail["cover_image_url"] is None
+
+        body = http.get(key, base(seed) + "/", params={"per_page": "100"}).json()
+        row = next(p for p in body["results"] if p["id"] == pid)
+        assert "cover_image_url" in row
+        assert row["cover_image_url"] is None
+
+
+def test_cover_image_url_null_workspace_attachment_omits_key(seed, conn):
+    # (b) attachment/description asset with a NULL workspace_id: Django raises
+    # AttributeError (None.slug) inside the property, so DRF leaves the
+    # cover_image_url key out of the 200 response, on detail and list.
+    key = seed["keys"][KEY]
+    for entity in ("ISSUE_ATTACHMENT",) + COVER_DESCRIPTION_TYPES:
+        pid = _cover_project(seed, conn, db.new_tag())
+        aid = _add_cover_asset(conn, entity)
+        _set_project_cover(conn, pid, asset_id=aid, cover_image="COVER_TEXT_XYZ")
+
+        detail = http.get(key, f"{base(seed)}/{pid}/").json()
+        assert "cover_image_url" not in detail, entity
+
+        body = http.get(key, base(seed) + "/", params={"per_page": "100"}).json()
+        row = next(p for p in body["results"] if p["id"] == pid)
+        assert "cover_image_url" not in row, entity
+
+
+def test_cover_image_url_no_asset_keeps_text_fallback(seed, conn):
+    # Control: a project with no cover asset still renders the cover_image
+    # text (the branch the asset case must NOT fall back into).
+    key = seed["keys"][KEY]
+    pid = _cover_project(seed, conn, db.new_tag())
+    _set_project_cover(conn, pid, asset_id=None, cover_image="COVER_TEXT_XYZ")
+    detail = http.get(key, f"{base(seed)}/{pid}/").json()
+    assert detail["cover_image_url"] == "COVER_TEXT_XYZ"
+    body = http.get(key, base(seed) + "/", params={"per_page": "100"}).json()
+    row = next(p for p in body["results"] if p["id"] == pid)
+    assert row["cover_image_url"] == "COVER_TEXT_XYZ"
+
+
+def test_cover_image_url_static_cover_asset(seed, conn):
+    # Control: a mapped PROJECT_COVER asset renders its static URL verbatim.
+    key = seed["keys"][KEY]
+    pid = _cover_project(seed, conn, db.new_tag())
+    aid = _add_cover_asset(conn, "PROJECT_COVER")
+    _set_project_cover(conn, pid, asset_id=aid, cover_image="COVER_TEXT_XYZ")
+    expected = f"/api/assets/v2/static/{aid}/"
+    detail = http.get(key, f"{base(seed)}/{pid}/").json()
+    assert detail["cover_image_url"] == expected
+    body = http.get(key, base(seed) + "/", params={"per_page": "100"}).json()
+    row = next(p for p in body["results"] if p["id"] == pid)
+    assert row["cover_image_url"] == expected
+
+
+def test_cover_image_url_attachment_null_project_renders_none_text(seed, conn):
+    # An ISSUE_ATTACHMENT asset with a workspace but NULL project_id/issue_id:
+    # the Python f-string renders str(None) == "None" into the URL path.
+    key = seed["keys"][KEY]
+    pid = _cover_project(seed, conn, db.new_tag())
+    aid = _add_cover_asset(conn, "ISSUE_ATTACHMENT", workspace_id=seed["ws_a"]["id"])
+    _set_project_cover(conn, pid, asset_id=aid, cover_image="COVER_TEXT_XYZ")
+    expected = (
+        f"/api/assets/v2/workspaces/{seed['ws_a']['slug']}/projects/None"
+        f"/issues/None/attachments/{aid}/"
+    )
+    detail = http.get(key, f"{base(seed)}/{pid}/").json()
+    assert detail["cover_image_url"] == expected

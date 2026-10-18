@@ -72,6 +72,7 @@ use sqlx::{PgPool, Row};
 use pidash_auth::permissions::{project, workspace};
 use pidash_auth::scope::TenantScope;
 
+use crate::license::AssetUrl;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -789,87 +790,62 @@ fn row_json_opt(row: &sqlx::postgres::PgRow, col: &str) -> Result<Value, Denial>
 }
 
 /// `Project.cover_image_url` (`db/models/project.py:175-185`): the cover
-/// asset's URL when an asset is attached, else the `cover_image` text, else
-/// `None`. The asset branch applies `FileAsset.asset_url`
-/// (`db/models/asset.py:80-98`).
+/// asset's URL when an asset is attached — used *verbatim*, so an unmapped
+/// entity type renders `null` and a NULL-workspace attachment/description
+/// omits the key — else the `cover_image` text when non-empty, else `None`.
+/// The asset branch applies `FileAsset.asset_url` (`db/models/asset.py:80-98`)
+/// through [`file_asset_url`].
 async fn cover_image_url(
     pool: &PgPool,
     asset_id: Option<uuid::Uuid>,
     cover_image: Option<&str>,
-) -> Result<Value, Denial> {
+) -> Result<AssetUrl, Denial> {
     if let Some(id) = asset_id {
-        if let Some(url) = file_asset_url(pool, &id).await? {
-            return Ok(Value::String(url));
-        }
+        return file_asset_url(pool, &id).await;
     }
-    Ok(cover_image
-        .filter(|s| !s.is_empty())
-        .map(|s| Value::String(s.to_owned()))
-        .unwrap_or(Value::Null))
+    Ok(AssetUrl::Present(
+        cover_image.filter(|s| !s.is_empty()).map(str::to_owned),
+    ))
 }
 
-/// `FileAsset.asset_url` for one asset row.
-async fn file_asset_url(pool: &PgPool, asset_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
-    let row: Option<FileAssetLookup> =
-        sqlx::query_as(
-            r#"SELECT fa."entity_type", fa."workspace_id", fa."project_id", fa."issue_id" FROM "file_assets" fa WHERE fa."id" = $1"#,
-        )
-        .bind(asset_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+/// `FileAsset.asset_url` for one asset row, resolved unscoped (the forward-FK
+/// descriptor reads through `_base_manager`). The entity-type map lives once,
+/// in [`crate::license::file_asset_url`]: `Present(Some(url))` renders the
+/// URL, `Present(None)` renders JSON null (a NULL/unmapped `entity_type`),
+/// and `Skip` drops the key — the plain `AttributeError` from `None.slug` on
+/// an attachment/description asset with a NULL workspace, which DRF's
+/// `Field.get_attribute` (`fields.py:445-451`) turns into `SkipField` for a
+/// read-only field.
+async fn file_asset_url(pool: &PgPool, asset_id: &uuid::Uuid) -> Result<AssetUrl, Denial> {
+    let row: Option<FileAssetLookup> = sqlx::query_as(
+        r#"SELECT fa."entity_type", fa."workspace_id", fa."project_id", fa."issue_id" FROM "file_assets" fa WHERE fa."id" = $1"#,
+    )
+    .bind(asset_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
     let Some((entity_type, workspace_id, project_id, issue_id)) = row else {
-        return Ok(None);
+        // Forward-FK row gone (FK-unreachable in practice): the missing
+        // attribute reads as null.
+        return Ok(AssetUrl::Present(None));
     };
-    match entity_type.as_deref() {
-        Some("WORKSPACE_LOGO")
-        | Some("USER_AVATAR")
-        | Some("USER_COVER")
-        | Some("PROJECT_COVER") => Ok(Some(format!("/api/assets/v2/static/{asset_id}/"))),
-        Some("ISSUE_ATTACHMENT") => {
-            let slug: Option<String> = match workspace_id {
-                Some(id) => {
-                    sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-                        .bind(id)
-                        .fetch_optional(pool)
-                        .await
-                        .map_err(|_| Denial::ServerError)?
-                        .flatten()
-                }
-                None => None,
-            };
-            Ok(slug.map(|s| {
-                format!(
-                    "/api/assets/v2/workspaces/{s}/projects/{}/issues/{}/attachments/{asset_id}/",
-                    project_id.map(|v| v.to_string()).unwrap_or_default(),
-                    issue_id.map(|v| v.to_string()).unwrap_or_default(),
-                )
-            }))
-        }
-        Some("ISSUE_DESCRIPTION")
-        | Some("COMMENT_DESCRIPTION")
-        | Some("PAGE_DESCRIPTION")
-        | Some("DRAFT_ISSUE_DESCRIPTION") => {
-            let slug: Option<String> = match workspace_id {
-                Some(id) => {
-                    sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-                        .bind(id)
-                        .fetch_optional(pool)
-                        .await
-                        .map_err(|_| Denial::ServerError)?
-                        .flatten()
-                }
-                None => None,
-            };
-            Ok(slug.map(|s| {
-                format!(
-                    "/api/assets/v2/workspaces/{s}/projects/{}/{asset_id}/",
-                    project_id.map(|v| v.to_string()).unwrap_or_default(),
-                )
-            }))
-        }
-        _ => Ok(None),
-    }
+    let workspace_slug: Option<String> = match workspace_id {
+        Some(id) => sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .flatten(),
+        None => None,
+    };
+    Ok(crate::license::file_asset_url(
+        asset_id,
+        entity_type.as_deref(),
+        workspace_id.as_ref(),
+        project_id.as_ref(),
+        issue_id.as_ref(),
+        workspace_slug.as_deref(),
+    ))
 }
 
 /// Render one project row in `ProjectSerializer` bytes: annotations, then
@@ -929,11 +905,16 @@ pub async fn render_project(
     }
     let asset_id: Option<uuid::Uuid> = row_uuid_opt(row, "cover_image_asset_id")?;
     let cover_text: Option<String> = row_string_opt(row, "cover_image")?;
-    put(
-        &mut map,
-        "cover_image_url",
-        cover_image_url(pool, asset_id, cover_text.as_deref()).await?,
-    );
+    match cover_image_url(pool, asset_id, cover_text.as_deref()).await? {
+        AssetUrl::Present(url) => put(
+            &mut map,
+            "cover_image_url",
+            url.map(Value::String).unwrap_or(Value::Null),
+        ),
+        // DRF `SkipField`: a read-only field whose source raises a plain
+        // `AttributeError` leaves its key out of the response entirely.
+        AssetUrl::Skip => {}
+    }
 
     let created_at: chrono::DateTime<chrono::Utc> =
         row.try_get("created_at").map_err(|_| Denial::ServerError)?;
@@ -1186,7 +1167,16 @@ async fn expand_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Value, Denia
         return Ok(Value::Null);
     };
     let avatar_url = match avatar_asset {
-        Some(id) => file_asset_url(pool, &id).await?,
+        Some(id) => match file_asset_url(pool, &id).await? {
+            AssetUrl::Present(url) => url,
+            // `UserLiteSerializer` renders a fixed `avatar_url` slot (a
+            // foundation-crate kernel cannot drop the key), so a
+            // NULL-workspace attachment/description asset keeps rendering
+            // null here; the pinned contract
+            // `test_expand_user_avatar_asset_unresolvable_renders_null`
+            // fixes this slot's shape.
+            AssetUrl::Skip => None,
+        },
         None => None,
     };
     let avatar_url = pidash_services::v1_projects::ser_collab::resolve_avatar_url(
