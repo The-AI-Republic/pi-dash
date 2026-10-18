@@ -419,6 +419,25 @@ one handler, and hosts an empty extension slot below the built-in rows in
 the community build; edition-gated slot contributions need the cloud build.
 Same project update. Oracle: `prompts/automations-gate.spec.ts`. (AGT-037)
 
+Built in `apps/web_new` (NEWFRONT-600): `features/automations` owns the
+screen, its queries and the rules; `routes/$ws/_gated/settings/projects/
+$projectId/automations.tsx` composes it. Reads: the workspace's
+project-details collection (the only read carrying the delays and the
+state target) and the project's state list; writes go through the
+project update and fold the answered row back into the collection
+cache, so a refused write leaves the stored values on screen. The page
+waits for the project collection before painting the rows. The
+extension slot is a mount point with no community contributions;
+edition contributions still need the cloud build to prove. Selectors
+the oracle probes: the section heading "Automations", level-4 row
+headings, role=switch toggles, a delay trigger named by its row lead
+and reading "N month(s)", role=option presets, a dialog titled
+"Customize time range" with an "Enter Months" field, and the refusal
+heading "Oops! You are not authorized to view this page". The dialog
+turns off native form validation so zero and over-range whole counts
+still reach its handler and raise the range message, while a
+fractional count is refused silently and never forwarded.
+
 ## 9. Assistant landing, setup, composer gates (AGT-038–041, AGT-048, slice NEWFRONT-603)
 
 The assistant landing (`/{ws}/assistant`) greets a keyed member with a

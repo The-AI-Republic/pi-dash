@@ -67,6 +67,7 @@ import { Route as WsGatedProjectsProjectIdModulesIndexRouteImport } from './rout
 import { Route as WsGatedProjectsProjectIdPagesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/pages/index'
 import { Route as WsGatedProjectsProjectIdSchedulersIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/schedulers/index'
 import { Route as WsGatedProjectsProjectIdViewsIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/views/index'
+import { Route as WsGatedSettingsProjectsProjectIdAutomationsRouteImport } from './routes/$ws/_gated/settings/projects/$projectId/automations'
 import { Route as WsGatedSettingsProjectsProjectIdLabelsRouteImport } from './routes/$ws/_gated/settings/projects/$projectId/labels'
 
 const IndexRoute = IndexRouteImport.update({
@@ -382,6 +383,12 @@ const WsGatedProjectsProjectIdViewsIndexRoute =
     path: '/views/',
     getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
   } as any)
+const WsGatedSettingsProjectsProjectIdAutomationsRoute =
+  WsGatedSettingsProjectsProjectIdAutomationsRouteImport.update({
+    id: '/settings/projects/$projectId/automations',
+    path: '/settings/projects/$projectId/automations',
+    getParentRoute: () => WsGatedRouteRoute,
+  } as any)
 const WsGatedSettingsProjectsProjectIdLabelsRoute =
   WsGatedSettingsProjectsProjectIdLabelsRouteImport.update({
     id: '/settings/projects/$projectId/labels',
@@ -439,6 +446,7 @@ export interface FileRoutesByFullPath {
   '/$ws/projects/$projectId/': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/projects/archives/': typeof WsGatedProjectsArchivesIndexRoute
   '/$ws/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
+  '/$ws/settings/projects/$projectId/automations': typeof WsGatedSettingsProjectsProjectIdAutomationsRoute
   '/$ws/settings/projects/$projectId/labels': typeof WsGatedSettingsProjectsProjectIdLabelsRoute
   '/$ws/projects/$projectId/cycles/': typeof WsGatedProjectsProjectIdCyclesIndexRoute
   '/$ws/projects/$projectId/intake/': typeof WsGatedProjectsProjectIdIntakeIndexRoute
@@ -493,6 +501,7 @@ export interface FileRoutesByTo {
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/projects/archives': typeof WsGatedProjectsArchivesIndexRoute
   '/$ws/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
+  '/$ws/settings/projects/$projectId/automations': typeof WsGatedSettingsProjectsProjectIdAutomationsRoute
   '/$ws/settings/projects/$projectId/labels': typeof WsGatedSettingsProjectsProjectIdLabelsRoute
   '/$ws/projects/$projectId/cycles': typeof WsGatedProjectsProjectIdCyclesIndexRoute
   '/$ws/projects/$projectId/intake': typeof WsGatedProjectsProjectIdIntakeIndexRoute
@@ -555,6 +564,7 @@ export interface FileRoutesById {
   '/$ws/_gated/projects/$projectId/': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/_gated/projects/archives/': typeof WsGatedProjectsArchivesIndexRoute
   '/$ws/_gated/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
+  '/$ws/_gated/settings/projects/$projectId/automations': typeof WsGatedSettingsProjectsProjectIdAutomationsRoute
   '/$ws/_gated/settings/projects/$projectId/labels': typeof WsGatedSettingsProjectsProjectIdLabelsRoute
   '/$ws/_gated/projects/$projectId/cycles/': typeof WsGatedProjectsProjectIdCyclesIndexRoute
   '/$ws/_gated/projects/$projectId/intake/': typeof WsGatedProjectsProjectIdIntakeIndexRoute
@@ -616,6 +626,7 @@ export interface FileRouteTypes {
     | '/$ws/projects/$projectId/'
     | '/$ws/projects/archives/'
     | '/$ws/projects/$projectId/issues/$issueId'
+    | '/$ws/settings/projects/$projectId/automations'
     | '/$ws/settings/projects/$projectId/labels'
     | '/$ws/projects/$projectId/cycles/'
     | '/$ws/projects/$projectId/intake/'
@@ -670,6 +681,7 @@ export interface FileRouteTypes {
     | '/$ws/projects/$projectId'
     | '/$ws/projects/archives'
     | '/$ws/projects/$projectId/issues/$issueId'
+    | '/$ws/settings/projects/$projectId/automations'
     | '/$ws/settings/projects/$projectId/labels'
     | '/$ws/projects/$projectId/cycles'
     | '/$ws/projects/$projectId/intake'
@@ -731,6 +743,7 @@ export interface FileRouteTypes {
     | '/$ws/_gated/projects/$projectId/'
     | '/$ws/_gated/projects/archives/'
     | '/$ws/_gated/projects/$projectId/issues/$issueId'
+    | '/$ws/_gated/settings/projects/$projectId/automations'
     | '/$ws/_gated/settings/projects/$projectId/labels'
     | '/$ws/_gated/projects/$projectId/cycles/'
     | '/$ws/_gated/projects/$projectId/intake/'
@@ -1170,6 +1183,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedProjectsProjectIdViewsIndexRouteImport
       parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
     }
+    '/$ws/_gated/settings/projects/$projectId/automations': {
+      id: '/$ws/_gated/settings/projects/$projectId/automations'
+      path: '/settings/projects/$projectId/automations'
+      fullPath: '/$ws/settings/projects/$projectId/automations'
+      preLoaderRoute: typeof WsGatedSettingsProjectsProjectIdAutomationsRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
     '/$ws/_gated/settings/projects/$projectId/labels': {
       id: '/$ws/_gated/settings/projects/$projectId/labels'
       path: '/settings/projects/$projectId/labels'
@@ -1231,6 +1251,7 @@ interface WsGatedRouteRouteChildren {
   WsGatedRunnersIndexRoute: typeof WsGatedRunnersIndexRoute
   WsGatedSchedulersIndexRoute: typeof WsGatedSchedulersIndexRoute
   WsGatedProjectsArchivesIndexRoute: typeof WsGatedProjectsArchivesIndexRoute
+  WsGatedSettingsProjectsProjectIdAutomationsRoute: typeof WsGatedSettingsProjectsProjectIdAutomationsRoute
   WsGatedSettingsProjectsProjectIdLabelsRoute: typeof WsGatedSettingsProjectsProjectIdLabelsRoute
 }
 
@@ -1248,6 +1269,8 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedRunnersIndexRoute: WsGatedRunnersIndexRoute,
   WsGatedSchedulersIndexRoute: WsGatedSchedulersIndexRoute,
   WsGatedProjectsArchivesIndexRoute: WsGatedProjectsArchivesIndexRoute,
+  WsGatedSettingsProjectsProjectIdAutomationsRoute:
+    WsGatedSettingsProjectsProjectIdAutomationsRoute,
   WsGatedSettingsProjectsProjectIdLabelsRoute:
     WsGatedSettingsProjectsProjectIdLabelsRoute,
 }
