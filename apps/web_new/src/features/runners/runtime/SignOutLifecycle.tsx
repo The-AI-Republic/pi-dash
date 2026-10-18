@@ -13,7 +13,7 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { platform, type AgentRuntimeApi } from "../../../core/platform/index.js";
 import { registerRuntimeSignOutHooks } from "../../../core/session/index.js";
-import { confirmRuntimeSignOut } from "./signOutPrompt.js";
+import { beginSignOutPromptLoad, confirmRuntimeSignOut, failSignOutPromptLoad } from "./signOutPrompt.js";
 
 const runtime = platform.agentRuntime;
 
@@ -24,21 +24,27 @@ interface SignOutDialogModule {
 let dialogModule: Promise<SignOutDialogModule> | null = null;
 
 function loadSignOutDialog(): Promise<SignOutDialogModule> {
-  dialogModule ??= import("./SignOutDialog.js");
+  beginSignOutPromptLoad();
+  dialogModule ??= import("./SignOutDialog.js").catch((error: unknown) => {
+    // A chunk that cannot load means nothing can ask the user; pending and
+    // later confirmations keep the history rather than trapping them here.
+    failSignOutPromptLoad();
+    throw error;
+  });
   return dialogModule;
 }
 
 /**
- * Open the confirmation. The host loads this chunk at mount, so by the
- * time a user can start a sign-out the prompt is registered; a chunk that
- * failed to load keeps the history and lets sign-out proceed rather than
- * trapping the user.
+ * Open the confirmation. The fetch starts when the hooks register, and a
+ * request that arrives mid-fetch waits for the dialog to mount, so a sign-out
+ * never skips confirmation just because the chunk was slow.
  */
 async function promptWithDialog(): Promise<Awaited<ReturnType<typeof confirmRuntimeSignOut>>> {
   try {
     await loadSignOutDialog();
   } catch {
-    return { deleteChatHistory: false };
+    // The bridge has marked the dialog unavailable and settled anything
+    // queued; asking now takes the same keep-history default.
   }
   return confirmRuntimeSignOut();
 }
@@ -46,6 +52,7 @@ async function promptWithDialog(): Promise<Awaited<ReturnType<typeof confirmRunt
 /** Register the desktop hooks; missing web capability is deliberately inert. */
 export function registerRuntimeSignOutLifecycle(runtimeApi: AgentRuntimeApi | null | undefined): void {
   if (!runtimeApi) return;
+  beginSignOutPromptLoad();
   registerRuntimeSignOutHooks({
     confirmRuntimeSignOut: () => promptWithDialog(),
     disposeRuntimeForSignOut: async (choice) => {

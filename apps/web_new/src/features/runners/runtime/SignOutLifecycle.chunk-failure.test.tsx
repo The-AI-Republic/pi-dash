@@ -16,7 +16,9 @@ vi.mock("../../../core/platform/index.js", async (importOriginal) => {
 });
 
 vi.mock("./signOutPrompt.js", () => ({
+  beginSignOutPromptLoad: vi.fn(),
   confirmRuntimeSignOut: harness.confirmRuntimeSignOut,
+  failSignOutPromptLoad: vi.fn(),
   registerSignOutPrompt: harness.registerSignOutPrompt,
 }));
 
@@ -35,7 +37,8 @@ afterEach(() => {
 describe("RuntimeSignOutLifecycle without its dialog chunk", () => {
   it("keeps the history default instead of trapping the user", async () => {
     await expect(getRuntimeSignOutHooks()?.confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false });
-    expect(harness.confirmRuntimeSignOut).not.toHaveBeenCalled();
+    expect(harness.confirmRuntimeSignOut).toHaveBeenCalledTimes(1);
+    expect(harness.registerSignOutPrompt).not.toHaveBeenCalled();
   });
 
   it("renders nothing and registers no prompt", async () => {
