@@ -424,3 +424,86 @@ def test_nested_array_ordering_follows_model_meta(clients, seed, db_conn):
             cur.execute("DELETE FROM labels WHERE id IN (%s,%s)", (la, lb))
             cur.execute("DELETE FROM users WHERE id IN (%s,%s)", (ua, ub))
             cur.execute("DELETE FROM issues WHERE id = %s", (oid,))
+
+
+# --- M2M through-table filtering -------------------------------------------
+#
+# Django's forward M2M manager builds a queryset over the *target* model
+# (`django/db/models/fields/related_descriptors.py:create_forward_many_to_many_manager`
+# sets `self.model = rel.model`), so it applies the target model's manager
+# filter — `labels.deleted_at IS NULL` for `labels` — and nothing on the
+# through/link row.  `users` has no `deleted_at`, so `assignees` filters
+# nothing at all.  The API's remove-label / remove-assignee path soft-deletes
+# the *link* row (`issue_labels` / `issue_assignees`.`deleted_at`), so the
+# item keeps appearing under `?expand=`.  This seeds a live target with a
+# soft-deleted link row to pin it.
+
+def test_m2m_expand_ignores_through_soft_delete(clients, seed, db_conn):
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    from app_issues.conftest import ISSUE_COLUMNS, USER_COLUMNS, _issue_row, _user_row
+
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project"]
+    ws_id = seed["ws"]
+    T = datetime.now(timezone.utc)
+    oid = str(_uuid.uuid4())
+    lid = str(_uuid.uuid4())
+    uid = str(_uuid.uuid4())
+    lname = "SD_L_" + _uuid.uuid4().hex[:8]
+    uname = "sd_u_" + _uuid.uuid4().hex[:8]
+    try:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO issues (%s) VALUES (%s)"
+                % (ISSUE_COLUMNS, ",".join(["%s"] * 19)),
+                _issue_row(oid, "through soft-delete probe", "low", 901,
+                           seed["admin"], pid, seed["state_backlog"], ws_id),
+            )
+            # Live label; its issue_labels link row is soft-deleted.
+            cur.execute(
+                "INSERT INTO labels (created_at, updated_at, id, name,"
+                " description, created_by_id, project_id, updated_by_id,"
+                " workspace_id, color, sort_order)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (T, T, lid, lname, "", seed["admin"], pid, seed["admin"],
+                 ws_id, "#123456", 0.0),
+            )
+            cur.execute(
+                "INSERT INTO issue_labels (created_at, updated_at, id,"
+                " created_by_id, issue_id, label_id, project_id,"
+                " updated_by_id, workspace_id, deleted_at)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (T, T, str(_uuid.uuid4()), seed["admin"], oid, lid, pid,
+                 seed["admin"], ws_id, T),
+            )
+            # Live user; its issue_assignees link row is soft-deleted.
+            cur.execute(
+                "INSERT INTO users (%s) VALUES (%s)"
+                % (USER_COLUMNS, ",".join(["%s"] * 29)),
+                _user_row(uid, uname, uname + "@example.com", uname),
+            )
+            cur.execute(
+                "INSERT INTO issue_assignees (created_at, updated_at, id,"
+                " assignee_id, created_by_id, issue_id, project_id,"
+                " updated_by_id, workspace_id, deleted_at)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (T, T, str(_uuid.uuid4()), uid, seed["admin"], oid, pid,
+                 seed["admin"], ws_id, T),
+            )
+
+        detail = f"{_base(ws, pid)}/issues/{oid}/"
+
+        labels = _get(admin, detail, "labels").json()["labels"]
+        assert lid in {row["id"] for row in labels}, labels
+
+        assignees = _get(admin, detail, "assignees").json()["assignees"]
+        assert uid in {row["id"] for row in assignees}, assignees
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute("DELETE FROM issue_labels WHERE issue_id = %s", (oid,))
+            cur.execute("DELETE FROM issue_assignees WHERE issue_id = %s", (oid,))
+            cur.execute("DELETE FROM labels WHERE id = %s", (lid,))
+            cur.execute("DELETE FROM users WHERE id = %s", (uid,))
+            cur.execute("DELETE FROM issues WHERE id = %s", (oid,))

@@ -385,13 +385,17 @@ async fn render_issue_lite(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denia
     serde_json::to_value(issue_lite_to_representation(&input)).map_err(|_| Denial::ServerError)
 }
 
-/// `issue.assignees` — the user lite fleet, through `issue_assignees` (both
-/// the link row and the user row must be live).
+/// `issue.assignees` — the user lite fleet. Django builds this from the
+/// forward `ManyToManyField(through=IssueAssignee)` manager, which filters the
+/// *target* model only (`create_forward_many_to_many_manager` sets
+/// `self.model = rel.model`); `users` has no `deleted_at`, so the through row
+/// is not filtered at all — a removed assignee (soft-deleted link row) still
+/// renders.
 async fn render_assignees(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial> {
     let rows = super::fetch_json_rows(
         pool,
         "SELECT u.id FROM issue_assignees ia JOIN users u ON u.id = ia.assignee_id \
-         WHERE ia.issue_id = $1 AND ia.deleted_at IS NULL \
+         WHERE ia.issue_id = $1 \
          ORDER BY u.created_at DESC",
         vec![uuid_value(issue_id)],
     )
@@ -405,13 +409,16 @@ async fn render_assignees(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial
     Ok(Value::Array(out))
 }
 
-/// `issue.labels` — app `LabelSerializer` over `issue_labels`.
+/// `issue.labels` — app `LabelSerializer` over `issue_labels`. Django's
+/// forward `ManyToManyField(through=IssueLabel)` manager filters the *target*
+/// model only (`labels.deleted_at`), never the link row, so a removed label
+/// (soft-deleted `issue_labels` row) still renders.
 async fn render_labels(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial> {
     let rows = super::fetch_json_rows(
         pool,
         "SELECT l.parent_id, l.name, l.color, l.id, l.project_id, l.workspace_id, l.sort_order \
          FROM labels l JOIN issue_labels il ON il.label_id = l.id \
-         WHERE il.issue_id = $1 AND il.deleted_at IS NULL AND l.deleted_at IS NULL \
+         WHERE il.issue_id = $1 AND l.deleted_at IS NULL \
          ORDER BY l.created_at DESC",
         vec![uuid_value(issue_id)],
     )
