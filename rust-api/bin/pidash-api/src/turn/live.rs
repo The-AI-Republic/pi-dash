@@ -25,7 +25,10 @@
 //!   rather than per SSE delta, and dropping the stream aborts the run.
 //! * The ported [`rt::ToolsetHandle`] is a string, so each handle carries
 //!   its turn id; `runtime_failures` reads the live sessions back through
-//!   the per-turn record the handle names.
+//!   the per-turn record the handle names. The record is held only for the
+//!   life of the turn's [`LiveStream`] and reclaimed when the driver drops
+//!   it (plus on the pre-stream error exits where no stream exists), so the
+//!   process-lifetime seam never retains a resolved lane or an old toolset.
 //! * The async decrypt runs before the ported synchronous key cache is
 //!   consulted, so a cache hit costs one extra KMS round-trip; the caching
 //!   policy itself (TTL, LRU, ciphertext keying, empty-token bypass) is the
@@ -186,12 +189,20 @@ fn turn_usage_from_run(usage: &RunUsage) -> TurnUsage {
 // --------------------------------------------------------------------------- //
 
 /// One turn's agent stream: the driver's receive half of the spawned run,
-/// the outcome slot `dump_messages`/`extract_usage` read, and the task
-/// handle so dropping the stream (cancel, failure) aborts the run.
+/// the outcome slot `dump_messages`/`extract_usage` read, the task handle so
+/// dropping the stream (cancel, failure) aborts the run, and the shared
+/// per-turn record so dropping the stream reclaims it.
 pub struct LiveStream {
     rx: tokio::sync::mpsc::UnboundedReceiver<StreamMessage>,
     outcome: Arc<Mutex<Option<TurnAgentOutcome>>>,
     handle: tokio::task::JoinHandle<()>,
+    /// The seam's per-turn record map (shared, so the seam's process-lifetime
+    /// owner and this stream agree). The driver holds the stream for the whole
+    /// drive and reads the record through the seam up to `complete_turn`/
+    /// `cancel_turn`/`fail_turn`, so reclaiming on `Drop` is the point where
+    /// the record is provably no longer needed.
+    runs: Arc<Mutex<HashMap<Uuid, PreparedTurn>>>,
+    turn_id: Uuid,
 }
 
 enum StreamMessage {
@@ -204,6 +215,12 @@ enum StreamMessage {
 impl Drop for LiveStream {
     fn drop(&mut self) {
         self.handle.abort();
+        // Release the resolved lane (decrypted BYOK key included) and the
+        // toolset as soon as the drive is done with them, like Python's
+        // `_run_turn` releasing its `model`/`toolsets` locals.
+        if let Ok(mut runs) = self.runs.lock() {
+            runs.remove(&self.turn_id);
+        }
     }
 }
 
@@ -426,7 +443,11 @@ pub struct LiveTurnSeam {
     tool_store: Arc<PgToolStore>,
     ssrf_resolver: Arc<dyn ssrf::HostResolver + Send + Sync>,
     key_cache: Mutex<KeyCache>,
-    runs: Mutex<HashMap<Uuid, PreparedTurn>>,
+    /// Per-turn state between the `drive_turn` steps, keyed by turn id. Shared
+    /// with each [`LiveStream`] so the stream reclaims its entry on drop; the
+    /// seam is process-lifetime (`worker()` builds it once), so an entry kept
+    /// past its turn would retain the decrypted BYOK key forever.
+    runs: Arc<Mutex<HashMap<Uuid, PreparedTurn>>>,
     started: Instant,
 }
 
@@ -469,9 +490,18 @@ impl LiveTurnSeam {
             tool_store,
             ssrf_resolver: Arc::new(ssrf::SystemResolver),
             key_cache: Mutex::new(key_cache),
-            runs: Mutex::new(HashMap::new()),
+            runs: Arc::new(Mutex::new(HashMap::new())),
             started: Instant::now(),
         })
+    }
+
+    /// Drop a turn's record. Used where the drive exits before a [`LiveStream`]
+    /// exists to own the reclaim (a history read failure), so no path leaves a
+    /// record behind.
+    fn reclaim_turn(&self, turn_id: Uuid) {
+        if let Ok(mut runs) = self.runs.lock() {
+            runs.remove(&turn_id);
+        }
     }
 
     /// The tool environment for one run (`ToolEnv`: settings + clock).
@@ -1085,12 +1115,20 @@ impl TurnSeam for LiveTurnSeam {
             self.settings.assistant.history_max_turns,
             self.settings.assistant.loop_history_max_turns,
         );
-        let blobs: Vec<Value> = sqlx::query_scalar(&events::load_history_sql())
+        let blobs: Vec<Value> = match sqlx::query_scalar(&events::load_history_sql())
             .bind(ctx.thread_id)
             .bind(limit)
             .fetch_all(&self.pool)
             .await
-            .map_err(db_error)?;
+        {
+            Ok(blobs) => blobs,
+            Err(error) => {
+                // `drive_turn` returns on this error before `open_stream`, so
+                // no stream exists to reclaim the record.
+                self.reclaim_turn(ctx.turn_id);
+                return Err(db_error(error));
+            }
+        };
         let mut blobs = blobs;
         blobs.reverse();
         Ok(Value::Array(events::decode_history_blobs(&blobs)))
@@ -1120,16 +1158,30 @@ impl TurnSeam for LiveTurnSeam {
         toolsets: &[ToolsetHandle],
     ) -> Result<Self::Stream, AgentError> {
         let (lane, tools) = {
-            let runs = self.runs.lock().map_err(internal_agent_error)?;
-            let prepared = runs.get(&ctx.turn_id).ok_or_else(|| AgentError::Typed {
-                code: rt::CODE_INTERNAL.to_owned(),
-                detail: "assistant turn: model was not resolved".to_owned(),
-            })?;
-            let tools = prepared.tools.clone().ok_or_else(|| AgentError::Typed {
-                code: rt::CODE_INTERNAL.to_owned(),
-                detail: "assistant turn: toolsets were not resolved".to_owned(),
-            })?;
-            (prepared.lane.clone(), tools)
+            let guard = self.runs.lock().map_err(internal_agent_error)?;
+            let resolved = guard
+                .get(&ctx.turn_id)
+                .map(|prepared| (prepared.lane.clone(), prepared.tools.clone()));
+            drop(guard);
+            match resolved {
+                Some((lane, Some(tools))) => (lane, tools),
+                // Unreachable in practice (`resolve_model` inserts the record
+                // and `resolve_toolsets` fills `tools`), but a missing record
+                // here still returns before any stream exists to reclaim it.
+                Some((_, None)) => {
+                    self.reclaim_turn(ctx.turn_id);
+                    return Err(AgentError::Typed {
+                        code: rt::CODE_INTERNAL.to_owned(),
+                        detail: "assistant turn: toolsets were not resolved".to_owned(),
+                    });
+                }
+                None => {
+                    return Err(AgentError::Typed {
+                        code: rt::CODE_INTERNAL.to_owned(),
+                        detail: "assistant turn: model was not resolved".to_owned(),
+                    });
+                }
+            }
         };
         let _ = toolsets;
         // Toolset entry (`MCPToolset.__aenter__` then `get_tools`):
@@ -1147,10 +1199,17 @@ impl TurnSeam for LiveTurnSeam {
         let messages: Vec<TurnMessage> = if history.is_null() {
             Vec::new()
         } else {
-            history::parse_blob(history).map_err(|error| AgentError::Typed {
-                code: rt::CODE_INTERNAL.to_owned(),
-                detail: error.to_string(),
-            })?
+            match history::parse_blob(history) {
+                Ok(messages) => messages,
+                Err(error) => {
+                    // No stream exists yet, so reclaim the record here.
+                    self.reclaim_turn(ctx.turn_id);
+                    return Err(AgentError::Typed {
+                        code: rt::CODE_INTERNAL.to_owned(),
+                        detail: error.to_string(),
+                    });
+                }
+            }
         };
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let instructions = instructions::instructions(&InstructionsContext {
@@ -1206,6 +1265,8 @@ impl TurnSeam for LiveTurnSeam {
             rx,
             outcome,
             handle,
+            runs: self.runs.clone(),
+            turn_id: ctx.turn_id,
         })
     }
 
@@ -1761,6 +1822,42 @@ mod tests {
         assert_eq!(
             rt::cancel_key(&id),
             "assistant:cancel:12345678-1234-5678-1234-567812345678"
+        );
+    }
+
+    /// Dropping the stream reclaims its per-turn record. The seam outlives
+    /// every turn (`worker()` builds it once), so a record kept past its turn
+    /// would retain the decrypted BYOK key and grow the map without bound
+    /// (PR #1682 review).
+    #[tokio::test]
+    async fn prepared_turn_is_reclaimed_when_the_stream_drops() {
+        let turn_id = Uuid::parse_str("66666666-7777-8888-9999-aaaaaaaaaaaa").expect("uuid");
+        let runs: Arc<Mutex<HashMap<Uuid, PreparedTurn>>> = Arc::new(Mutex::new(HashMap::new()));
+        runs.lock().expect("lock").insert(
+            turn_id,
+            PreparedTurn {
+                lane: Lane::Anthropic {
+                    model: "claude-3-5-sonnet".to_owned(),
+                    api_key: "sk-secret".to_owned(),
+                },
+                model_label: "anthropic:claude-3-5-sonnet".to_owned(),
+                tools: None,
+            },
+        );
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = tokio::spawn(async {});
+        let stream = LiveStream {
+            rx,
+            outcome: Arc::new(Mutex::new(None)),
+            handle,
+            runs: runs.clone(),
+            turn_id,
+        };
+        assert!(runs.lock().expect("lock").contains_key(&turn_id));
+        drop(stream);
+        assert!(
+            !runs.lock().expect("lock").contains_key(&turn_id),
+            "the per-turn record is gone once the stream drops"
         );
     }
 }
