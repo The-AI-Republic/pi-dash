@@ -7585,78 +7585,300 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Prompts + project automations (NEWFRONT-186, AGT-023–037) ---
-  async promptsOpen(_workspaceSlug: string): Promise<void> {
-    return todo("promptsOpen");
+  private static readonly PROMPT_SECTIONS_PATTERN = "**/api/workspaces/*/prompt-sections*";
+
+  private promptsSectionsNav(): Locator {
+    return this.page.getByRole("navigation", { name: "Prompt sections", exact: true });
+  }
+
+  private promptsReceiptNavigation(): Locator {
+    return this.page.getByRole("navigation", { name: "Prompt receipt", exact: true });
+  }
+
+  private promptsCards(): Locator {
+    return this.page.locator('article[id^="prompt-section-"]');
+  }
+
+  private promptsCard(key: string): Locator {
+    return this.page.locator(`article[id="prompt-section-${key}"]`);
+  }
+
+  private promptsOpenEditorRoot(): Locator {
+    return this.page.locator('article[id^="prompt-section-"]', { has: this.page.locator("textarea") });
+  }
+
+  private async promptsReadCard(root: Locator): Promise<PromptSectionCard | null> {
+    const id = await root.getAttribute("id").catch(() => null);
+    if (id === null || !id.startsWith("prompt-section-")) return null;
+
+    const badgeLabels = new Set([
+      "Pi Dash default",
+      "Workspace override",
+      "Your override",
+      "Locked",
+      "Admin-managed",
+      "Coding task",
+      "Review",
+      "Scheduler",
+    ]);
+    const badgeSpans = root.locator(":scope > div").first().locator("span");
+    const badgeTexts: string[] = [];
+    for (let index = 0; index < (await badgeSpans.count()); index++) {
+      const text = (
+        (await badgeSpans
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (badgeLabels.has(text)) badgeTexts.push(text);
+    }
+
+    const sourceBadge =
+      badgeTexts.find(
+        (text) => text === "Pi Dash default" || text === "Workspace override" || text === "Your override"
+      ) ?? "";
+    const kinds = badgeTexts.filter((text) => text === "Coding task" || text === "Review" || text === "Scheduler");
+    const badges = badgeTexts.filter((text) => text !== sourceBadge);
+    const buttons = root.getByRole("button");
+    let workspaceEditLabel: string | null = null;
+    let personalEditLabel: string | null = null;
+    for (let index = 0; index < (await buttons.count()); index++) {
+      const text = (
+        (await buttons
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text === "Edit workspace default" || text === "Customize for workspace") workspaceEditLabel = text;
+      if (text === "Edit my override" || text === "Customize for me") personalEditLabel = text;
+    }
+
+    return {
+      key: id.slice("prompt-section-".length),
+      title: (
+        (await root
+          .getByRole("heading", { level: 2 })
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+      sourceBadge,
+      badges,
+      kinds,
+      staleWarning: await this.isShown(
+        root.getByText("The default changed after this override was saved", { exact: false })
+      ),
+      body: (
+        (await root
+          .locator(":scope > pre")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trimEnd(),
+      workspaceEditLabel,
+      personalEditLabel,
+    };
+  }
+
+  async promptsOpen(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/prompts`);
+    await this.page.getByRole("heading", { name: "Prompts", exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.promptsSectionsNav()
+      .or(this.page.getByText("Loading…", { exact: true }))
+      .or(this.page.getByText("Could not load prompt sections for this workspace.", { exact: true }))
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async promptsActiveTab(): Promise<"Sections" | "Receipt"> {
-    return todo("promptsActiveTab");
+    return (await this.isShown(this.promptsReceiptNavigation())) ? "Receipt" : "Sections";
   }
-  async promptsOpenTab(_tab: "Sections" | "Receipt"): Promise<void> {
-    return todo("promptsOpenTab");
+  async promptsOpenTab(tab: "Sections" | "Receipt"): Promise<void> {
+    const destination = tab === "Sections" ? this.promptsSectionsNav() : this.promptsReceiptNavigation();
+    if (await this.isShown(destination)) return;
+    await this.page.getByRole("button", { name: tab, exact: true }).click();
+    await destination.waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async promptsSectionCards(): Promise<PromptSectionCard[]> {
-    return todo("promptsSectionCards");
+    const roots = this.promptsCards();
+    const cards: PromptSectionCard[] = [];
+    for (let index = 0; index < (await roots.count()); index++) {
+      const card = await this.promptsReadCard(roots.nth(index));
+      if (card !== null) cards.push(card);
+    }
+    return cards;
   }
-  async promptsSectionCard(_key: string): Promise<PromptSectionCard | null> {
-    return todo("promptsSectionCard");
+  async promptsSectionCard(key: string): Promise<PromptSectionCard | null> {
+    const root = this.promptsCard(key);
+    if ((await root.count()) === 0) return null;
+    return this.promptsReadCard(root.first());
   }
   async promptsSectionNav(): Promise<{ title: string; key: string }[]> {
-    return todo("promptsSectionNav");
+    const links = this.promptsSectionsNav().getByRole("link");
+    const entries: { title: string; key: string }[] = [];
+    for (let index = 0; index < (await links.count()); index++) {
+      const link = links.nth(index);
+      const href = (await link.getAttribute("href").catch(() => null)) ?? "";
+      const title = (
+        (await link
+          .locator("span")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      entries.push({ title, key: href.replace(/^#prompt-section-/, "") });
+    }
+    return entries;
   }
-  async promptsSectionNavJump(_key: string): Promise<string> {
-    return todo("promptsSectionNavJump");
+  async promptsSectionNavJump(key: string): Promise<string> {
+    await this.promptsSectionsNav().locator(`a[href="#prompt-section-${key}"]`).click();
+    await this.promptsCard(key).waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return this.page.evaluate(() => window.location.hash);
   }
   async promptsLoadingVisible(): Promise<boolean> {
-    return todo("promptsLoadingVisible");
+    return this.isShown(this.page.getByText("Loading…", { exact: true }));
   }
   async promptsSectionsErrorVisible(): Promise<boolean> {
-    return todo("promptsSectionsErrorVisible");
+    return this.isShown(this.page.getByText("Could not load prompt sections for this workspace.", { exact: true }));
   }
   async promptsWorkspaceWarningVisible(): Promise<boolean> {
-    return todo("promptsWorkspaceWarningVisible");
+    return this.isShown(this.page.getByText("workspace editing is unavailable", { exact: false }));
   }
-  async promptsFailSectionsStart(_scope: "user" | "workspace"): Promise<void> {
-    return todo("promptsFailSectionsStart");
+  async promptsFailSectionsStart(scope: "user" | "workspace"): Promise<void> {
+    await this.page.route(WebNewDriver.PROMPT_SECTIONS_PATTERN, async (route) => {
+      const request = route.request();
+      if (request.method() === "GET" && request.url().includes(`scope=${scope}`)) {
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity sections failure" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
   }
   async promptsFailSectionsStop(): Promise<void> {
-    return todo("promptsFailSectionsStop");
+    await this.page.unroute(WebNewDriver.PROMPT_SECTIONS_PATTERN).catch(() => undefined);
   }
-  async promptsDelaySectionsOnce(_ms: number): Promise<void> {
-    return todo("promptsDelaySectionsOnce");
+  async promptsDelaySectionsOnce(ms: number): Promise<void> {
+    let armed = true;
+    await this.page.route(WebNewDriver.PROMPT_SECTIONS_PATTERN, async (route) => {
+      if (armed && route.request().method() === "GET") {
+        armed = false;
+        await this.page.waitForTimeout(ms);
+      }
+      await route.continue();
+    });
   }
   async promptsFailUpsertOnce(): Promise<void> {
-    return todo("promptsFailUpsertOnce");
+    let armed = true;
+    await this.page.route(WebNewDriver.PROMPT_SECTIONS_PATTERN, async (route) => {
+      if (armed && route.request().method() === "PUT") {
+        armed = false;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity upsert failure" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
   }
-  async promptsOpenSectionEditor(_key: string, _scope: "workspace" | "user"): Promise<void> {
-    return todo("promptsOpenSectionEditor");
+  async promptsOpenSectionEditor(key: string, scope: "workspace" | "user"): Promise<void> {
+    const label =
+      scope === "workspace"
+        ? /^(Edit workspace default|Customize for workspace)$/
+        : /^(Edit my override|Customize for me)$/;
+    const root = this.promptsCard(key);
+    await root.getByRole("button", { name: label }).click();
+    await root.locator("textarea").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async promptsEditorState(): Promise<PromptEditorState | null> {
-    return todo("promptsEditorState");
+    const root = this.promptsOpenEditorRoot().first();
+    if ((await root.count()) === 0) return null;
+
+    const textarea = root.locator("textarea");
+    const defaultPane = root.locator("pre").first();
+    const defaultVisible = await this.isShown(defaultPane);
+    const errorBox = root.getByRole("alert").first();
+    const errorVisible = await this.isShown(errorBox);
+    return {
+      scopeLabel: (
+        (await root
+          .getByText(/^(Workspace default|Your personal override)$/, { exact: true })
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+      draft: (await textarea.inputValue().catch(() => "")) ?? "",
+      saveEnabled: await root
+        .getByRole("button", { name: "Save", exact: true })
+        .isEnabled()
+        .catch(() => false),
+      defaultVisible,
+      defaultBody: defaultVisible ? ((await defaultPane.innerText().catch(() => "")) ?? "").trimEnd() : null,
+      revertVisible: await this.isShown(root.getByRole("button", { name: "Revert to default", exact: true })),
+      error: errorVisible ? ((await errorBox.innerText().catch(() => "")) ?? "").trim() || null : null,
+    };
   }
-  async promptsEditorFill(_text: string): Promise<void> {
-    return todo("promptsEditorFill");
+  async promptsEditorFill(text: string): Promise<void> {
+    await this.promptsOpenEditorRoot().first().locator("textarea").fill(text);
   }
   async promptsEditorSave(): Promise<void> {
-    return todo("promptsEditorSave");
+    await this.promptsOpenEditorRoot().first().getByRole("button", { name: "Save", exact: true }).click();
   }
   async promptsEditorCancel(): Promise<void> {
-    return todo("promptsEditorCancel");
+    const root = this.promptsOpenEditorRoot().first();
+    await root.getByRole("button", { name: "Cancel", exact: true }).click();
+    await root.locator("textarea").waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async promptsEditorToggleCompare(): Promise<void> {
-    return todo("promptsEditorToggleCompare");
+    await this.promptsOpenEditorRoot()
+      .first()
+      .getByRole("button", { name: /^(Show default|Hide default)$/ })
+      .click();
   }
   async promptsEditorRevertOpen(): Promise<void> {
-    return todo("promptsEditorRevertOpen");
+    await this.promptsOpenEditorRoot().first().getByRole("button", { name: "Revert to default", exact: true }).click();
+    await this.page
+      .getByRole("heading", { name: "Revert to default?", exact: true })
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async promptsRevertDialog(): Promise<PromptRevertDialog | null> {
-    return todo("promptsRevertDialog");
+    const heading = this.page.getByRole("heading", { name: "Revert to default?", exact: true });
+    if (!(await this.isShown(heading))) return null;
+    const dialog = this.page.getByRole("dialog").filter({ has: heading });
+    const confirm = dialog.getByRole("button", { name: /^Revert/ }).first();
+    return {
+      title: ((await heading.innerText().catch(() => "")) ?? "").trim(),
+      body: (
+        (await dialog
+          .locator("p")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+      confirmLabel: ((await confirm.innerText().catch(() => "")) ?? "").trim(),
+    };
   }
   async promptsRevertConfirm(): Promise<void> {
-    return todo("promptsRevertConfirm");
+    const heading = this.page.getByRole("heading", { name: "Revert to default?", exact: true });
+    await this.page
+      .getByRole("dialog")
+      .filter({ has: heading })
+      .getByRole("button", { name: "Revert", exact: true })
+      .click();
   }
   async promptsRevertCancel(): Promise<void> {
-    return todo("promptsRevertCancel");
+    const heading = this.page.getByRole("heading", { name: "Revert to default?", exact: true });
+    await this.page
+      .getByRole("dialog")
+      .filter({ has: heading })
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click();
+    await heading.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+  // Receipt composition and preview methods below belong to NEWFRONT-599.
   async promptsReceiptCards(): Promise<PromptReceiptCard[]> {
     return todo("promptsReceiptCards");
   }
