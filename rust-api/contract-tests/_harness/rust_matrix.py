@@ -41,12 +41,15 @@ KNOWN_FAILURES_MD = CT / "KNOWN_RUST_FAILURES.md"
 # diff, covered by the worker-plane oracle and the *-rust replay workflows);
 # ops drives the pidash-api ops binary via subprocess (covered by the
 # rust-api-contract-tests-ops*.yml workflows); replay drives HTTP against
-# its own two-database topology (covered by rust-api-replay.yml). Add a
-# directory here only with a justification; ``check`` fails on any other
-# unlisted directory.
+# its own two-database topology (covered by rust-api-replay.yml); exports
+# drives its own two-workflow oracle (exports Django oracle +
+# rust-api-contract-tests-exports-rust.yml), never HTTP. Add a directory
+# here only with a justification; ``check`` fails on any other unlisted
+# directory.
 TASK_ONLY_DIRS = frozenset(
     {
         "dispatch",
+        "exports",
         "integrations",
         "ops",
         "replay",
