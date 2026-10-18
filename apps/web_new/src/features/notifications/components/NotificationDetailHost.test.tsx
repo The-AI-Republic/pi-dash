@@ -23,6 +23,13 @@ vi.mock("../../issues/index.js", async () => {
         {issue.name}
       </div>
     ),
+    // The seam's own read-only rendering is covered by its component test;
+    // here it proves the host routes triage selections through it.
+    TriageDetailRoot: ({ issue, reference }: { issue: Issue; reference: string }) => (
+      <div data-testid="issue-triage-root" data-reference={reference}>
+        {issue.name}
+      </div>
+    ),
   };
 });
 
@@ -96,6 +103,11 @@ function response(url: string, body: unknown, status = 200): TransportResponse {
   } as TransportResponse;
 }
 
+/** The per-project access read the pane gates on. */
+function isAccess(url: string): boolean {
+  return url.endsWith(`/projects/${PROJECT}/project-members/me/`);
+}
+
 function renderHost(value: NotificationCardData | null, onClose = vi.fn()) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return {
@@ -134,9 +146,9 @@ describe("NotificationDetailHost", () => {
       releaseIssue = resolve;
     });
     createAppClient("https://api.test", (async (url: string) => {
-      if (url.includes("/project-roles/")) {
+      if (url.endsWith(`/projects/${PROJECT}/project-members/me/`)) {
         await accessGate;
-        return response(url, { [PROJECT]: 15 });
+        return response(url, { id: "923e4567-e89b-12d3-a456-426614174009", role: 15 });
       }
       await issueGate;
       return response(url, issue());
@@ -164,11 +176,38 @@ describe("NotificationDetailHost", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it("shows the loading state while the per-project access read is in flight", async () => {
+    let releaseAccess!: () => void;
+    const accessGate = new Promise<void>((resolve) => {
+      releaseAccess = resolve;
+    });
+    const seen: string[] = [];
+    createAppClient("https://api.test", (async (url: string) => {
+      seen.push(url);
+      if (isAccess(url)) {
+        await accessGate;
+        return response(url, { id: "923e4567-e89b-12d3-a456-426614174009", role: 15 });
+      }
+      return response(url, issue());
+    }) as never);
+    renderHost(selection());
+    expect(screen.getByTestId("notifications-detail-loading")).toBeInTheDocument();
+    expect(seen.some((url) => isAccess(url))).toBe(true);
+    expect(seen.some((url) => url.includes("/project-roles/"))).toBe(false);
+    releaseAccess();
+    await waitFor(() =>
+      expect(screen.getByTestId("notifications-detail-pane")).toHaveAttribute("data-detail-variant", "peek")
+    );
+    expect(screen.queryByTestId("notifications-detail-loading")).not.toBeInTheDocument();
+  });
+
   it("routes triage selections to read-only issue-owned content", async () => {
     createAppClient("https://api.test", (async (url: string) =>
-      url.includes("/project-roles/") ? response(url, { [PROJECT]: 20 }) : response(url, issue())) as never);
+      isAccess(url)
+        ? response(url, { id: "923e4567-e89b-12d3-a456-426614174009", role: 20 })
+        : response(url, issue())) as never);
     renderHost(selection({ triage: true }));
-    await waitFor(() => expect(screen.getByTestId("issue-detail-root")).toHaveAttribute("data-editable", "false"));
+    await within(await screen.findByTestId("notifications-detail-pane")).findByTestId("issue-triage-root");
     const pane = screen.getByTestId("notifications-detail-pane");
     expect(pane).toHaveAttribute("data-detail-variant", "triage");
     expect(within(pane).getByText("Triage work item")).toBeInTheDocument();
@@ -176,15 +215,32 @@ describe("NotificationDetailHost", () => {
       "Ada Lovelace commented: detail note"
     );
     expect(within(pane).getByTestId("notifications-detail-close")).toBeInTheDocument();
-    expect(within(pane).getByTestId("issue-detail-root")).toBeInTheDocument();
+    // The triage branch renders the issues-owned triage content with the
+    // selected item, not the ordinary detail root.
+    expect(within(pane).getByTestId("issue-triage-root")).toHaveTextContent("Ship it");
+    expect(within(pane).getByTestId("issue-triage-root")).toHaveAttribute("data-reference", "ENG-12");
+    expect(within(pane).queryByTestId("issue-detail-root")).not.toBeInTheDocument();
+  });
+
+  it("keeps the ordinary peek free of the triage decision strip", async () => {
+    createAppClient("https://api.test", (async (url: string) =>
+      isAccess(url)
+        ? response(url, { id: "923e4567-e89b-12d3-a456-426614174009", role: 20 })
+        : response(url, issue())) as never);
+    renderHost(selection());
+    await waitFor(() =>
+      expect(screen.getByTestId("notifications-detail-pane")).toHaveAttribute("data-detail-variant", "peek")
+    );
+    expect(screen.queryByTestId("issue-triage-root")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
   });
 
   it.each([
-    ["guest access", { [PROJECT]: ROLE_GUEST }],
-    ["missing project access", {}],
+    ["guest access", { id: "923e4567-e89b-12d3-a456-426614174009", role: ROLE_GUEST }],
+    ["missing project access", null],
   ])("keeps an ordinary peek read-only with %s", async (_label, roles) => {
     createAppClient("https://api.test", (async (url: string) =>
-      url.includes("/project-roles/") ? response(url, roles) : response(url, issue())) as never);
+      isAccess(url) ? response(url, roles) : response(url, issue())) as never);
     renderHost(selection());
     await waitFor(() => expect(screen.getByTestId("issue-detail-root")).toHaveAttribute("data-editable", "false"));
     expect(screen.getByTestId("notifications-detail-pane")).toHaveAttribute("data-detail-variant", "peek");
@@ -193,7 +249,9 @@ describe("NotificationDetailHost", () => {
 
   it("renders the actor avatar when the notification carries one", async () => {
     createAppClient("https://api.test", (async (url: string) =>
-      url.includes("/project-roles/") ? response(url, { [PROJECT]: 20 }) : response(url, issue())) as never);
+      isAccess(url)
+        ? response(url, { id: "923e4567-e89b-12d3-a456-426614174009", role: 20 })
+        : response(url, issue())) as never);
     renderHost(selection({ actorAvatarUrl: "https://cdn.test/ada.png" }));
     const pane = screen.getByTestId("notifications-detail-pane");
     const avatar = await within(pane).findByRole("img", { name: "Ada Lovelace" });
@@ -202,7 +260,9 @@ describe("NotificationDetailHost", () => {
 
   it("keeps a useful read-only summary when the issue hydrate fails", async () => {
     createAppClient("https://api.test", (async (url: string) =>
-      url.includes("/project-roles/") ? response(url, {}) : response(url, { detail: "not found" }, 404)) as never);
+      isAccess(url)
+        ? response(url, { detail: "no access" }, 404)
+        : response(url, { detail: "not found" }, 404)) as never);
     renderHost(selection());
     const pane = screen.getByTestId("notifications-detail-pane");
     await waitFor(() =>

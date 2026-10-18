@@ -93,6 +93,8 @@ export { IssueDescriptionField } from "./detail/IssueDescriptionField.js";
 export type { IssueDescriptionFieldProps, RestoredDescription } from "./detail/IssueDescriptionField.js";
 export { IssueDetailRoot } from "./detail/IssueDetailRoot.js";
 export type { IssueDetailRootProps } from "./detail/IssueDetailRoot.js";
+export { TriageDetailRoot } from "./detail/TriageDetailRoot.js";
+export type { TriageDetailRootProps } from "./detail/TriageDetailRoot.js";
 export { IssueTitleField, TITLE_AUTOSAVE_MS, TITLE_MAX_LENGTH } from "./detail/IssueTitleField.js";
 export type { IssueTitleFieldProps } from "./detail/IssueTitleField.js";
 export { SaveIndicator } from "./detail/SaveIndicator.js";

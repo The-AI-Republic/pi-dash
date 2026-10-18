@@ -324,7 +324,13 @@ import {
   listIssueReactions,
 } from "./contracts/issue-reactions.js";
 import { getIssueByIdentifier, getIssueMeta } from "./contracts/issue-identity.js";
-import { createLabel, deleteLabel, getIntakeState, updateLabel } from "./contracts/reference.js";
+import {
+  createLabel,
+  deleteLabel,
+  getIntakeState,
+  getMyProjectMembership,
+  updateLabel,
+} from "./contracts/reference.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const UUID2 = "223e4567-e89b-12d3-a456-426614174001";
@@ -1133,6 +1139,44 @@ describe("reference contracts", () => {
     const parsed = await listMembers(client, "acme", UUID2);
     expect(parsed[0]?.role).toBe(20);
     expect(parsed[0]?.member).toBe(UUID);
+  });
+
+  it("reads the caller's own project membership as a role", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({ body: JSON.stringify({ id: UUID, role: 15 }), url: `https://api.test/api/project-members/me/` })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(getMyProjectMembership(client, "acme", UUID2)).resolves.toEqual({ id: UUID, role: 15 });
+    expect(transport.calls[0]?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/project-members/me/`);
+  });
+
+  it("reports a missing project membership as null instead of failing", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: recordingTransport(() =>
+        fakeResponse({
+          status: 404,
+          body: JSON.stringify({ error: "The required object does not exist." }),
+          headers: { "content-type": "application/json" },
+        })
+      ),
+    });
+    await expect(getMyProjectMembership(client, "acme", UUID2)).resolves.toBeNull();
+  });
+
+  it("keeps other failures from the membership read", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: recordingTransport(() =>
+        fakeResponse({
+          status: 500,
+          body: JSON.stringify({ error: "boom" }),
+          headers: { "content-type": "application/json" },
+        })
+      ),
+    });
+    const error = await getMyProjectMembership(client, "acme", UUID2).catch((e: unknown) => e);
+    expect((error as ApiError).status).toBe(500);
   });
 });
 

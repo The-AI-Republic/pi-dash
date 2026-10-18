@@ -147,6 +147,7 @@ export type { DesktopEntrySearch, DesktopSignInFailure } from "./desktop.js";
 export { authStepInputProps, pointerOnlyControlProps, swallowEnterInTextField, useFocusOnMount } from "./focus.js";
 export {
   membershipQueryOptions,
+  projectMembershipQueryOptions,
   projectQueryOptions,
   projectRolesQueryOptions,
   useProjectRoles,

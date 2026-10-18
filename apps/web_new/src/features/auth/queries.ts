@@ -5,7 +5,13 @@
 // through these hooks, never raw client calls.
 
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import { getMyProjectRoles, getMyWorkspaceMembership, getProject, type ApiClient } from "@pidash/api-client";
+import {
+  getMyProjectMembership,
+  getMyProjectRoles,
+  getMyWorkspaceMembership,
+  getProject,
+  type ApiClient,
+} from "@pidash/api-client";
 
 import { getAppClient } from "../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../core/query/client.js";
@@ -18,6 +24,8 @@ export const authKeys = {
   myJoinRequests: ["auth", "my-join-requests"] as const,
   project: (slug: string, projectId: string) => [...workspaceScope(slug), "auth", "project", projectId] as const,
   projectRoles: (slug: string) => [...workspaceScope(slug), "auth", "project-roles"] as const,
+  projectMembership: (slug: string, projectId: string) =>
+    [...workspaceScope(slug), "auth", "project-membership", projectId] as const,
 };
 
 /**
@@ -38,6 +46,21 @@ export function projectRolesQueryOptions(client: ApiClient, slug: string) {
   return queryOptions({
     queryKey: authKeys.projectRoles(slug),
     queryFn: () => getMyProjectRoles(client, slug),
+    staleTime: REFERENCE_STALE_TIME_MS,
+  });
+}
+
+/**
+ * The caller's own membership row in one project, read inline. The
+ * notification detail pane resolves triage versus ordinary content from
+ * this lookup, so it stays separate from the warmed per-workspace role
+ * map: each selection really reaches the server and its own fetch status
+ * drives the pane's loading state (parity/specs/notifications.md §5).
+ */
+export function projectMembershipQueryOptions(client: ApiClient, slug: string, projectId: string) {
+  return queryOptions({
+    queryKey: authKeys.projectMembership(slug, projectId),
+    queryFn: () => getMyProjectMembership(client, slug, projectId),
     staleTime: REFERENCE_STALE_TIME_MS,
   });
 }

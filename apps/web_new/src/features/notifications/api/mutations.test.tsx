@@ -302,6 +302,46 @@ describe("writeRowToStream", () => {
     expect(next?.pages[1]?.results.map((entry) => entry.id)).toEqual(["823e4567-e89b-12d3-a456-426614174007"]);
   });
 
+  it("updates a card in place on the continuation page that lists it", () => {
+    const first = page([row({ id: OTHER })]);
+    const second = page([row(), row({ id: "823e4567-e89b-12d3-a456-426614174007" })]);
+    const next = writeRowToStream(
+      { pages: [first, second], pageParams: ["a", "b"] },
+      query,
+      row({ read_at: "now" })
+    ) as Extract<StreamData, { pages: unknown }>;
+    // The card stays on page 2 once, updated; page 1 gains no copy.
+    expect(next?.pages[0]).toBe(first);
+    expect(next?.pages[1]?.results.map((entry) => [entry.id, entry.read_at])).toEqual([
+      [row().id, "now"],
+      ["823e4567-e89b-12d3-a456-426614174007", null],
+    ]);
+  });
+
+  it("keeps a card's first-page position when it is listed there", () => {
+    const first = page([row(), row({ id: OTHER })]);
+    const second = page([row({ id: "823e4567-e89b-12d3-a456-426614174007" })]);
+    const next = writeRowToStream(
+      { pages: [first, second], pageParams: ["a", "b"] },
+      query,
+      row({ read_at: "now" })
+    ) as Extract<StreamData, { pages: unknown }>;
+    expect(next?.pages[0]?.results.map((entry) => entry.read_at)).toEqual(["now", null]);
+    expect(next?.pages[1]).toBe(second);
+  });
+
+  it("drops a leaving card from its continuation page and leaves other pages alone", () => {
+    const first = page([row({ id: OTHER })]);
+    const second = page([row({ id: "823e4567-e89b-12d3-a456-426614174007" })]);
+    const next = writeRowToStream(
+      { pages: [first, second], pageParams: ["a", "b"] },
+      { snoozed: false, archived: true },
+      row()
+    ) as Extract<StreamData, { pages: unknown }>;
+    expect(next?.pages[0]).toBe(first);
+    expect(next?.pages[1]).toBe(second);
+  });
+
   it("adds a joining row to the newest page only", () => {
     const first = page([row({ id: OTHER })]);
     const second = page([row({ id: "823e4567-e89b-12d3-a456-426614174007" })]);
@@ -517,6 +557,22 @@ describe("cursor stream writes", () => {
 
     expect(pageRows(client, base)).toEqual([[ID, OTHER], [OTHER]]);
     expect(pageRows(client, { snoozed: false, archived: true })).toEqual([[]]);
+  });
+
+  it("updates a page-2 card in place inside the cached stream", async () => {
+    stubApi();
+    const client = seededClient();
+    const query = { snoozed: false, archived: false };
+    seedPages(client, query, [[row({ id: OTHER })], [row()]]);
+    const { result } = renderHook(() => useToggleNotificationRead(WS), { wrapper: wrapper(client) });
+
+    await result.current.mutateAsync({ id: ID, unread: true, flags: FLAGS });
+
+    // No duplicate: page 1 is unchanged, and page 2 carries the card once,
+    // now read.
+    expect(pageRows(client, query)).toEqual([[OTHER], [ID]]);
+    const pages = client.getQueryData<Extract<StreamData, { pages: unknown }>>(notificationKeys.pages(WS, query));
+    expect(pages?.pages[1]?.results[0]?.read_at).not.toBeNull();
   });
 
   it("settles the server row into the cursor page and keeps stream flags", async () => {

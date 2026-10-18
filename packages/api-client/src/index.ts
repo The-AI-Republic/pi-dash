@@ -194,6 +194,7 @@ export type { HomePreferencePatch, HomeWidgetKey, QuickLinkInput } from "./contr
 export {
   Label,
   LabelList,
+  OwnProjectMembership,
   ProjectMember,
   ProjectMemberList,
   STATE_GROUPS,
@@ -202,6 +203,7 @@ export {
   createLabel,
   deleteLabel,
   getIntakeState,
+  getMyProjectMembership,
   listLabels,
   listMembers,
   listStates,

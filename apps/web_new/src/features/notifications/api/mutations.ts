@@ -82,10 +82,11 @@ export function streamPages(data: StreamData | undefined): NotificationListRespo
 }
 
 /**
- * Write a row into a cached stream. A card that joins a stream belongs on
- * its first page (reads walk from the newest row); a card that leaves or
- * changes is removed from whichever later page still lists it, and those
- * pages keep their own contents otherwise.
+ * Write a row into a cached stream. The card keeps its place on whichever
+ * page already lists it — earlier pages are walked first, so the cursor
+ * pages never duplicate a card loaded from a later page (spec §6). A card
+ * that joins the stream lands on its first page (reads walk from the
+ * newest row); a card that leaves is dropped from whichever page holds it.
  */
 export function writeRowToStream(
   data: StreamData | undefined,
@@ -94,14 +95,21 @@ export function writeRowToStream(
 ): StreamData | undefined {
   if (data === undefined) return undefined;
   if (isPage(data)) return applyRowToPage(data, query, row) ?? data;
+  const listedOn = data.pages.findIndex((page) => page.results.some((entry) => entry.id === row.id));
+  const target = listedOn === -1 ? 0 : listedOn;
   return {
     ...data,
     pages: data.pages.map((page, index) =>
-      index === 0
-        ? (applyRowToPage(page, query, row) ?? page)
-        : { ...page, results: page.results.filter((entry) => entry.id !== row.id) }
+      index === target ? (applyRowToPage(page, query, row) ?? page) : withoutRow(page, row.id)
     ),
   };
+}
+
+/** One cursor page with a card dropped, or the same object when absent. */
+function withoutRow(page: NotificationListResponse, id: string): NotificationListResponse {
+  return page.results.some((entry) => entry.id === id)
+    ? { ...page, results: page.results.filter((entry) => entry.id !== id) }
+    : page;
 }
 
 /**

@@ -14,8 +14,8 @@ import * as React from "react";
 import { Avatar, IconButton, Spinner } from "@pidash/kit";
 import { getAppClient } from "../../../core/api/client.js";
 import { ROLE_MEMBER } from "../../../core/session/index.js";
-import { projectRolesQueryOptions } from "../../auth/index.js";
-import { IssueDetailRoot, issueDetailQueryOptions } from "../../issues/index.js";
+import { projectMembershipQueryOptions } from "../../auth/index.js";
+import { IssueDetailRoot, TriageDetailRoot, issueDetailQueryOptions } from "../../issues/index.js";
 import type { NotificationCardData } from "../lib/card.js";
 import { formatNotificationAge } from "../lib/relativeAge.js";
 
@@ -30,8 +30,12 @@ export function NotificationDetailHost({
   selection,
   onClose,
 }: NotificationDetailHostProps): React.ReactElement {
+  // The access read is per project and per selection, never the warmed
+  // workspace role map: its own fetch runs while the pane shows the
+  // loading state, and a triage item then embeds the issues-owned
+  // triage content (spec §5, §12).
   const access = useQuery({
-    ...projectRolesQueryOptions(getAppClient(), workspaceSlug),
+    ...projectMembershipQueryOptions(getAppClient(), workspaceSlug, selection?.projectId ?? ""),
     enabled: selection !== null,
   });
   const issue = useQuery({
@@ -69,7 +73,7 @@ export function NotificationDetailHost({
     );
   }
 
-  const role = access.data?.[selection.projectId] ?? null;
+  const role = access.data?.role ?? null;
   const variant = selection.triage ? "triage" : "peek";
   const editable = !selection.triage && role !== null && role >= ROLE_MEMBER;
 
@@ -123,6 +127,13 @@ export function NotificationDetailHost({
           <p className="text-emphasis text-(--text)">{selection.title}</p>
           <p className="text-body text-(--text-muted)">The work item details could not be loaded.</p>
         </div>
+      ) : selection.triage ? (
+        <TriageDetailRoot
+          workspaceSlug={workspaceSlug}
+          projectId={selection.projectId}
+          issue={issue.data}
+          reference={selection.reference}
+        />
       ) : (
         <IssueDetailRoot
           workspaceSlug={workspaceSlug}
