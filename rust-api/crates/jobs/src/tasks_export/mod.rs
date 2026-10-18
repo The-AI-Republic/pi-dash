@@ -17,13 +17,11 @@
 //! [`pidash_services::tasks_cleanup::exports`] and the shared wire
 //! constants in `pidash-types` — all reused here, never re-implemented.
 //!
-//! Ownership: this task stays Python-owned. No local handler is
-//! registered here — registering one would steal live traffic from the
-//! Python workers while the S3 upload, the presigned-URL minting and the
-//! ORM prefetch cascade still live there. [`is_export_task`] is the
-//! routing predicate the worker consults; the domain gate flips
-//! ownership after the oracle replay passes on both backends (the
-//! `tasks_webhooks` precedent).
+//! Ownership: worker-owned since PIDASHCONV-1106 (stage 8). The two
+//! registry handlers live in [`issue`] and [`analytic`]; the wire
+//! surface and the pure decisions stay here. [`is_export_task`] is the
+//! legacy D-35 routing predicate, kept for its fixture test — the live
+//! task resolves through the registry, not through it.
 //!
 //! Ack parity: the bare `@shared_task` carries no autoretry and every
 //! Python control path ends in `return` (success, `ValueError` failure or
@@ -34,7 +32,12 @@
 
 use serde_json::{Map, Value};
 
-use pidash_services::app_analytics::queries::ISSUE_OBJECTS_SCOPE;
+pub mod analytic;
+pub mod issue;
+
+pub use analytic::{register_analytic_task, ANALYTIC_EXPORT_TASK};
+pub use issue::register_issue_export_task;
+
 use pidash_services::tasks_cleanup::exports as cleanup;
 use pidash_types::tasks_cleanup::exports_dto as dto;
 
@@ -96,7 +99,9 @@ pub struct ExportTaskCall {
     pub slug: String,
 }
 
-/// Routing predicate: true while this task name is Python-owned.
+/// Legacy D-35 routing predicate for the issue-export task name. The
+/// task is worker-owned since PIDASHCONV-1106; the registry handler
+/// serves it, not this predicate.
 pub fn is_export_task(name: &str) -> bool {
     name == ISSUE_EXPORT_TASK
 }
@@ -214,10 +219,12 @@ pub fn validate_task_provider(provider: &str) -> Result<(), String> {
 
 /// `ExporterHistory.objects.get(token=token_id)` (`export_task.py:143`):
 /// single-row fetch by the unique token (repo `LIMIT 1` convention for
-/// `.get()` fetches).
+/// `.get()` fetches). Only `id` + `initiated_by_id` are read (the
+/// handler decodes `(Uuid, Uuid)` positionally, and `exporters.*`
+/// starts with the `TIMESTAMPTZ` stamp columns).
 pub fn fetch_exporter_by_token_sql(token_ph: &str) -> String {
     format!(
-        "SELECT \"exporters\".* FROM \"exporters\" WHERE \"exporters\".\"token\" = {token_ph} LIMIT 1"
+        "SELECT \"exporters\".\"id\", \"exporters\".\"initiated_by_id\" FROM \"exporters\" WHERE \"exporters\".\"token\" = {token_ph} LIMIT 1"
     )
 }
 
@@ -247,12 +254,34 @@ pub fn mark_uploaded_sql(status_ph: &str, url_ph: &str, key_ph: &str, id_ph: &st
     )
 }
 
-/// The task's base issue queryset (`export_task.py:148-155`):
-/// workspace + `project_id__in` + requesting-member active + project
-/// unarchived, over the `Issue.issue_objects` manager scope (triage,
-/// archived, project-archived and draft exclusions plus soft-delete —
-/// [`ISSUE_OBJECTS_SCOPE`], `db/models/issue.py:95-104`). `project_phs`
-/// is the caller's `project_id__in` placeholder list.
+/// The parenthesized `WHERE` predicate of the task's base issue
+/// queryset (`export_task.py:148-155`): workspace + `project_id__in` +
+/// requesting-member active + project unarchived, over the plain
+/// `Issue.objects` manager scope — soft-delete only
+/// (`SoftDeletionManager`, `db/mixins.py:56-58`). The task does NOT
+/// read through `Issue.issue_objects`, so triage, archived and draft
+/// issues all ship (the oracle pins all four seed rows).
+/// `project_phs` is the caller's `project_id__in` placeholder list.
+/// [`export_issues_filter_sql`] and the live handler share this so the
+/// predicate text cannot drift between the two.
+pub fn export_issues_where_sql(
+    workspace_ph: &str,
+    project_phs: &[String],
+    member_ph: &str,
+) -> String {
+    format!(
+        "(\"issues\".\"workspace_id\" = {workspace_ph} \
+         AND \"issues\".\"project_id\" IN ({}) \
+         AND \"project_members\".\"member_id\" = {member_ph} \
+         AND \"project_members\".\"is_active\" \
+         AND \"projects\".\"archived_at\" IS NULL \
+         AND \"issues\".\"deleted_at\" IS NULL)",
+        project_phs.join(", ")
+    )
+}
+
+/// The task's base issue queryset: the scope joins plus
+/// [`export_issues_where_sql`].
 pub fn export_issues_filter_sql(
     workspace_ph: &str,
     project_phs: &[String],
@@ -261,15 +290,10 @@ pub fn export_issues_filter_sql(
     format!(
         "SELECT \"issues\".* FROM \"issues\" \
          INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") \
-         INNER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") \
+         LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") \
          INNER JOIN \"project_members\" ON (\"projects\".\"id\" = \"project_members\".\"project_id\") \
-         WHERE (\"issues\".\"workspace_id\" = {workspace_ph} \
-         AND \"issues\".\"project_id\" IN ({}) \
-         AND \"project_members\".\"member_id\" = {member_ph} \
-         AND \"project_members\".\"is_active\" \
-         AND \"projects\".\"archived_at\" IS NULL \
-         AND {ISSUE_OBJECTS_SCOPE})",
-        project_phs.join(", ")
+         WHERE {}",
+        export_issues_where_sql(workspace_ph, project_phs, member_ph)
     )
 }
 
@@ -376,7 +400,7 @@ mod tests {
     fn status_sql_pins_columns() {
         assert_eq!(
             fetch_exporter_by_token_sql("$1"),
-            "SELECT \"exporters\".* FROM \"exporters\" WHERE \"exporters\".\"token\" = $1 LIMIT 1"
+            "SELECT \"exporters\".\"id\", \"exporters\".\"initiated_by_id\" FROM \"exporters\" WHERE \"exporters\".\"token\" = $1 LIMIT 1"
         );
         assert_eq!(
             mark_processing_sql("$1", "$2"),
@@ -403,9 +427,14 @@ mod tests {
         assert!(sql.contains("\"project_members\".\"member_id\" = $4"));
         assert!(sql.contains("\"project_members\".\"is_active\""));
         assert!(sql.contains("\"projects\".\"archived_at\" IS NULL"));
-        // The IssueManager exclusions ride along verbatim.
-        assert!(sql.contains("\"states\".\"group\" != 'triage'"));
-        assert!(sql.contains("\"issues\".\"is_draft\" = FALSE"));
+        // Plain `Issue.objects` scope: soft-delete only. Triage and
+        // draft issues ship (the oracle pins all four seed rows).
+        assert!(sql.contains("\"issues\".\"deleted_at\" IS NULL"));
+        assert!(!sql.contains("triage"));
+        assert!(!sql.contains("is_draft"));
+        // `select_related("state")` is a LEFT join: `state_id` is
+        // nullable (`db/models/issue.py:122-128`).
+        assert!(sql.contains("LEFT OUTER JOIN \"states\""));
         assert_eq!(
             export_project_narrow_clause("$1"),
             "\"issues\".\"project_id\" = $1"

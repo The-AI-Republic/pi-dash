@@ -688,8 +688,9 @@ async fn create_inner(
     .map_err(|_| Denial::ServerError)?;
     // `issue_export_task.delay(provider, workspace_id, project_ids,
     // token_id=token, multiple, slug)` (`base.py:49-56`): the Celery v2
-    // body (all kwargs, no positional args) onto the Postgres queue, from
-    // which the worker forwards Python-owned names to the broker.
+    // body (all kwargs, no positional args) onto the Postgres queue. Rust
+    // owns the body (PIDASHCONV-1106), so the Rust worker runs it directly
+    // rather than forwarding the name to the broker.
     let mut kwargs = serde_json::Map::new();
     kwargs.insert("provider".to_owned(), Value::String(provider.clone()));
     kwargs.insert(

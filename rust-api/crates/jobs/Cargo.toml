@@ -11,6 +11,8 @@ pidash-services = { path = "../services" }
 # Expiry-task S3 deletes (PIDASHCONV-858): the one shared SigV4 signer
 # (offline builders; the handler executes with the reqwest pin below).
 # Same locked hmac/sha2/thiserror as the workspace (no lock churn).
+# Export uploads sign through the shared SigV4 crate (PIDASHCONV-1106),
+# never a local signer (same pin as pidash-api/db: no new downloads).
 pidash-storage = { path = "../storage" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

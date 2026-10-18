@@ -1237,7 +1237,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.analytic_plot_export.analytic_export_task",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email",
@@ -1293,7 +1293,7 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.export_task.issue_export_task",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link",
@@ -2023,6 +2023,10 @@ mod tests {
                 std::sync::Arc::new(pidash_jobs::tasks_mail::live::SmtpMailer::new()),
             ),
         );
+        // Export tasks (PIDASHCONV-1106): the same calls `worker()` makes
+        // (pool-only handlers, no I/O at registration).
+        pidash_jobs::tasks_export::register_issue_export_task(&mut registry, pool.clone());
+        pidash_jobs::tasks_export::register_analytic_task(&mut registry, pool.clone());
 
         // The const union, independent of the table.
         let mut expected_rust = std::collections::BTreeSet::new();
@@ -2070,6 +2074,10 @@ mod tests {
         expected_rust.insert(pidash_jobs::tasks_mail::membership_mail::PROJECT_INVITATION_TASK);
         // Auth mail (PIDASHCONV-1103): the T5 four.
         expected_rust.extend(pidash_jobs::tasks_mail::AUTH_MAIL_TASKS);
+        expected_rust.extend([
+            pidash_jobs::tasks_export::ISSUE_EXPORT_TASK,
+            pidash_jobs::tasks_export::ANALYTIC_EXPORT_TASK,
+        ]);
         // Count pins: a const that grows must update the table too.
         assert_eq!(
             tasks_cleanup::cleanup::TASKS.len(),
@@ -2111,7 +2119,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 70, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 72, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()

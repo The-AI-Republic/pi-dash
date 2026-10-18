@@ -577,6 +577,9 @@ mod tests {
                 &pidash_db::config::Settings::test_defaults(),
             )),
         );
+        // Export tasks (PIDASHCONV-1106): the same calls `worker()` makes.
+        pidash_jobs::tasks_export::register_issue_export_task(&mut registry, pool.clone());
+        pidash_jobs::tasks_export::register_analytic_task(&mut registry, pool.clone());
         // Stub-backed: the exact names the `Pools`-taking registers own.
         for spec in tasks_cleanup::cleanup::TASKS {
             let handler: Handler = std::sync::Arc::new(|_| Box::pin(async { Ok(Verdict::Ack) }));
@@ -617,8 +620,9 @@ mod tests {
             }
         }
 
-        // Still Python-owned: restore (BUG-DEL-2) plus the three
-        // remaining exports (`delete_old_s3_link` is worker-owned now).
+        // Still Python-owned: restore (BUG-DEL-2) plus the dead CSV-mail
+        // export name. `delete_old_s3_link` (PIDASHCONV-858) and the two
+        // live exports (PIDASHCONV-1106) are worker-owned now.
         assert!(!registry.owns(tasks_cleanup::RESTORE_TASK_NAME));
         assert_eq!(
             route_for(&registry, tasks_cleanup::RESTORE_TASK_NAME),
@@ -627,7 +631,10 @@ mod tests {
         assert_eq!(tasks_cleanup::EXPORT_TASK_NAMES.len(), 4);
         for name in tasks_cleanup::EXPORT_TASK_NAMES {
             assert!(tasks_cleanup::is_export_task(name));
-            if name == tasks_cleanup::TASK_DELETE_OLD_S3_LINK {
+            if name == tasks_cleanup::TASK_DELETE_OLD_S3_LINK
+                || name == pidash_jobs::tasks_export::ISSUE_EXPORT_TASK
+                || name == pidash_jobs::tasks_export::ANALYTIC_EXPORT_TASK
+            {
                 assert!(registry.owns(name), "{name} must be worker-owned");
                 assert_eq!(route_for(&registry, name), Route::Local);
             } else {
