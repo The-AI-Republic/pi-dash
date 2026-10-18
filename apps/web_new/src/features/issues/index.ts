@@ -210,6 +210,7 @@ export { IssueList } from "./components/IssueList.js";
 export type { IssueListProps } from "./components/IssueList.js";
 export { CalendarLayout } from "./calendar/CalendarLayout.js";
 export type { CalendarLayoutProps } from "./calendar/CalendarLayout.js";
+export { CalendarEntry } from "./calendar/CalendarEntry.js";
 export { CalendarHeader } from "./calendar/CalendarHeader.js";
 export type { CalendarHeaderProps, CalendarOptionsValue } from "./calendar/CalendarHeader.js";
 export { CalendarGrid } from "./calendar/CalendarGrid.js";
