@@ -60,6 +60,10 @@
 //!   contract suite pins 404 and is green against Django.
 //! - key order of serializer objects follows the Rust view declaration,
 //!   not DRF's `user_detail`-first order; the suites compare parsed JSON.
+//! - POST 201 echoes the raw request `role` (`ChoiceField` over the
+//!   still-raw in-memory attribute: only `"20"` maps to `20`, floats,
+//!   bools and padded strings echo verbatim), not the stored `i32`
+//!   (PIDASHCONV-1129).
 
 use axum::extract::{ConnectInfo, Extension, Request, State};
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
@@ -92,6 +96,7 @@ use super::{file_asset_url, AssetUrl};
 use crate::auth_session::render::render_csrf_failure;
 use crate::edge;
 use crate::middleware::SessionHandle;
+use crate::paginator::py_float_str;
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
@@ -881,11 +886,50 @@ fn lookup_email(found: BodyField<'_>) -> Result<String, Denial> {
 }
 
 fn json_response(status: StatusCode, body: Value) -> Response {
+    json_response_text(status, body.to_string())
+}
+
+fn json_response_text(status: StatusCode, text: String) -> Response {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_string()))
+        .body(axum::body::Body::from(text))
         .expect("json response")
+}
+
+/// Sentinel marking the 201 `role` slot for the echo splice below. NUL
+/// cannot come from Postgres text, and an int-parseable echo literal never
+/// contains one, so the quoted needle is unique in the body.
+const ROLE_ECHO_SENTINEL: &str = "\u{0}role\u{0}";
+const ROLE_ECHO_QUOTED: &str = "\"\\u0000role\\u0000\"";
+
+/// Render the 201 `role` slot's exact literal from the raw echo
+/// [`role_from_value`] produced. That helper applies the `ChoiceField`
+/// map (`str(value) == "20"` -> the `20` number) and returns the raw
+/// input otherwise; this turns the value into the bytes Django writes.
+/// Serde cannot spell Python floats (`1e-05`, never `1e-5`), so floats go
+/// through [`py_float_str`]; ints render as `str(int)` (`-0` -> `0`);
+/// strings keep their JSON quoting (DRF's `ensure_ascii=False` matches
+/// serde's raw UTF-8); bools are JSON `true`/`false` (PIDASHCONV-1129).
+fn role_echo_literal(echo: &Value) -> String {
+    match echo {
+        Value::Number(n) if n.as_i64().is_none() => n
+            .as_f64()
+            .map(py_float_str)
+            .unwrap_or_else(|| n.to_string()),
+        Value::String(s) => serde_json::to_string(s).unwrap_or_else(|_| "\"20\"".to_owned()),
+        other => other.to_string(),
+    }
+}
+
+/// Splice a pre-rendered 201 `role` literal into a serialized admin body
+/// over the sentinel slot. `serde_json` cannot emit Python float spellings
+/// (`1e-05`) or the verbatim echo, so the literal goes in as text; the
+/// overwrite keeps the `role` key exactly where the view declared it.
+fn splice_role_echo(body: &Value, echo: &str) -> String {
+    let mut owned = body.clone();
+    owned["role"] = Value::String(ROLE_ECHO_SENTINEL.to_owned());
+    owned.to_string().replace(ROLE_ECHO_QUOTED, echo)
 }
 
 /// `POST /api/instances/admins/` (`admin.py:49-68`).
@@ -958,7 +1002,7 @@ async fn create_admin(
     let user = fetch_user(pool, &user_id)
         .await?
         .ok_or(Denial::ServerError)?;
-    let mut body = render_admin(
+    let body = render_admin(
         &admin_id,
         &now,
         &now,
@@ -975,9 +1019,14 @@ async fn create_admin(
     // The 201 renders the in-memory `create()` instance, whose `role`
     // is still the RAW input: the `choices` `ChoiceField` echoes it
     // unless `str(value) == "20"`. The shared row struct only carries
-    // the INSERT int (foundation-owned), so the echo overwrites here.
-    body["role"] = role_echo;
-    Ok(json_response(StatusCode::CREATED, body))
+    // the INSERT int (foundation-owned), and serde cannot spell Python
+    // floats (`1e-05`), so `role_from_value` returns the raw echo and
+    // this splices its exact literal over the `role` slot (PIDASHCONV-1129).
+    let echo = role_echo_literal(&role_echo);
+    Ok(json_response_text(
+        StatusCode::CREATED,
+        splice_role_echo(&body, &echo),
+    ))
 }
 
 /// `GET /api/instances/admins/` (`admin.py:70-80`): the 2h
@@ -2982,6 +3031,55 @@ mod tests {
         ));
         assert!(role(r#"{"role":2147483648}"#).is_err());
         assert!(role(r#"{"role":[20]}"#).is_err());
+    }
+
+    #[test]
+    fn role_echo_matches_choicefield_over_raw_input() {
+        let echo = |raw: &str| {
+            let data: Value = serde_json::from_str(raw).expect("json");
+            let (_, raw_echo) =
+                role_from_value(ParsedBody::json(data).field("role")).expect("role");
+            role_echo_literal(&raw_echo)
+        };
+        // Missing means the default 20; only `str(value) == "20"` maps to
+        // the `20` number (int 20 and string "20" alike).
+        assert_eq!(echo("{}"), "20");
+        assert_eq!(echo(r#"{"role":20}"#), "20");
+        assert_eq!(echo(r#"{"role":"20"}"#), "20");
+        assert_eq!(echo(r#"{"role":1}"#), "1");
+        assert_eq!(echo(r#"{"role":-0}"#), "0");
+        // Floats echo in Python spelling, including exponents, which serde
+        // alone would spell `1e-5`.
+        assert_eq!(echo(r#"{"role":2147483647.5}"#), "2147483647.5");
+        assert_eq!(echo(r#"{"role":20.0}"#), "20.0");
+        assert_eq!(echo(r#"{"role":0.00001}"#), "1e-05");
+        assert_eq!(echo(r#"{"role":1E-5}"#), "1e-05");
+        assert_eq!(echo(r#"{"role":-0.5}"#), "-0.5");
+        // Bools echo as JSON bools, not 1/0.
+        assert_eq!(echo(r#"{"role":true}"#), "true");
+        assert_eq!(echo(r#"{"role":false}"#), "false");
+        // Non-canonical numeric strings echo as strings.
+        assert_eq!(echo(r#"{"role":" 20 "}"#), r#"" 20 ""#);
+        assert_eq!(echo(r#"{"role":"+20"}"#), r#""+20""#);
+        assert_eq!(echo(r#"{"role":"020"}"#), r#""020""#);
+        let nbsp = format!("{{\"role\":\"{}20\"}}", '\u{a0}');
+        assert_eq!(echo(&nbsp), format!("\"{}20\"", '\u{a0}'));
+    }
+
+    #[test]
+    fn role_echo_splice_replaces_only_the_role_slot() {
+        let body = serde_json::json!({"id": "abc", "role": 20, "user_detail": {"email": "a@b.c"}});
+        let out = splice_role_echo(&body, "2147483647.5");
+        assert_eq!(
+            out,
+            r#"{"id":"abc","role":2147483647.5,"user_detail":{"email":"a@b.c"}}"#
+        );
+        // String echoes stay quoted; key order is untouched; no sentinel
+        // survives (this also pins `ROLE_ECHO_QUOTED` against serde's
+        // escaping of the sentinel).
+        let out = splice_role_echo(&body, r#"" 20 ""#);
+        assert!(out.contains(r#""role":" 20 ""#), "{out}");
+        assert!(!out.contains("u0000"), "{out}");
     }
 
     #[test]

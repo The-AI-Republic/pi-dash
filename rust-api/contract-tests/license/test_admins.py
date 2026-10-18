@@ -100,6 +100,129 @@ def test_create_admin_min_boundary_float_rejected_by_check(admin_api, world):
     assert count == 0
 
 
+@pytest.mark.parametrize(
+    "role,expected_bytes,stored",
+    [
+        # The 201 body echoes the RAW request role (DRF ChoiceField over the
+        # still-raw in-memory attribute), not the stored i32 (PIDASHCONV-1129).
+        # Parsed checks alone are vacuous here (20.0 == 20), so every case
+        # also pins the exact response bytes.
+        (2147483647.5, b'"role":2147483647.5', 2147483647),
+        (20.5, b'"role":20.5', 20),
+        (20.0, b'"role":20.0', 20),
+        (0.00001, b'"role":1e-05', 0),
+        (-0.5, b'"role":-0.5', 0),
+    ],
+)
+def test_create_admin_float_role_echoes_raw(admin_api, world, role, expected_bytes, stored):
+    newcomer = world["db"].make_user("floatecho@example.com")
+    res = admin_api.post("/api/instances/admins/", json={"role": role, "email": newcomer["email"]})
+    assert res.status_code == 201
+    assert isinstance(res.json()["role"], float)
+    assert expected_bytes in res.content
+    with world["db"].connect() as conn:
+        assert (
+            conn.execute(
+                "select role from instance_admins where user_id = %s;", (newcomer["id"],)
+            ).fetchone()[0]
+            == stored
+        )
+
+
+def test_create_admin_float_token_normalizes_to_python_repr(admin_api, world):
+    # The echo re-renders the parsed float (Python repr), it does not repeat
+    # the request token: 1E-5 arrives spelled with a capital E and echoes as
+    # 1e-05 on both backends (PIDASHCONV-1129).
+    newcomer = world["db"].make_user("floattoken@example.com")
+    raw = '{"email": "%s", "role": 1E-5}' % newcomer["email"]
+    res = admin_api.post(
+        "/api/instances/admins/",
+        content=raw.encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert res.status_code == 201
+    assert res.json()["role"] == 1e-05
+    assert b'"role":1e-05' in res.content
+    with world["db"].connect() as conn:
+        assert (
+            conn.execute(
+                "select role from instance_admins where user_id = %s;", (newcomer["id"],)
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@pytest.mark.parametrize(
+    "role,expected_bytes,stored",
+    [
+        (True, b'"role":true', 1),
+        (False, b'"role":false', 0),
+    ],
+)
+def test_create_admin_bool_role_echoes_raw(admin_api, world, role, expected_bytes, stored):
+    # ChoiceField str(True) is "True", not a choice, so the bool echoes as a
+    # JSON bool while the column stores 1/0 (PIDASHCONV-1129). `is` (not
+    # `==`) because 1 == True.
+    newcomer = world["db"].make_user("boolecho@example.com")
+    res = admin_api.post("/api/instances/admins/", json={"role": role, "email": newcomer["email"]})
+    assert res.status_code == 201
+    assert res.json()["role"] is role
+    assert expected_bytes in res.content
+    with world["db"].connect() as conn:
+        assert (
+            conn.execute(
+                "select role from instance_admins where user_id = %s;", (newcomer["id"],)
+            ).fetchone()[0]
+            == stored
+        )
+
+
+@pytest.mark.parametrize("role", [" 20 ", "+20", "020", "\u00a020"])
+def test_create_admin_padded_string_role_echoes_raw(admin_api, world, role):
+    # Only the exact string "20" maps to the 20 number; every other
+    # int-parseable spelling echoes as a JSON string (PIDASHCONV-1129).
+    newcomer = world["db"].make_user("stringecho@example.com")
+    res = admin_api.post("/api/instances/admins/", json={"role": role, "email": newcomer["email"]})
+    assert res.status_code == 201
+    assert res.json()["role"] == role
+    assert ('"role":"%s"' % role).encode() in res.content
+    with world["db"].connect() as conn:
+        assert (
+            conn.execute(
+                "select role from instance_admins where user_id = %s;", (newcomer["id"],)
+            ).fetchone()[0]
+            == 20
+        )
+
+
+@pytest.mark.parametrize(
+    "role,expected,expected_bytes",
+    [
+        (20, 20, b'"role":20'),
+        ("20", 20, b'"role":20'),
+        (1, 1, b'"role":1'),
+    ],
+)
+def test_create_admin_canonical_role_renders_int(admin_api, world, role, expected, expected_bytes):
+    # Controls: canonical inputs render as JSON ints on both backends — the
+    # ChoiceField map (str "20" -> 20) and non-choice ints echo unchanged
+    # (PIDASHCONV-1129 guards against over-echoing).
+    newcomer = world["db"].make_user("canonecho@example.com")
+    res = admin_api.post("/api/instances/admins/", json={"role": role, "email": newcomer["email"]})
+    assert res.status_code == 201
+    assert res.json()["role"] == expected
+    assert isinstance(res.json()["role"], int)
+    assert expected_bytes in res.content
+
+
+def test_create_admin_missing_role_defaults_and_renders_20(admin_api, world):
+    newcomer = world["db"].make_user("defaultrole@example.com")
+    res = admin_api.post("/api/instances/admins/", json={"email": newcomer["email"]})
+    assert res.status_code == 201
+    assert res.json()["role"] == 20
+    assert b'"role":20' in res.content
+
+
 def test_delete_admin_soft_deletes(admin_api, world):
     # Deletes here are soft: the row stays with deleted_at set and drops
     # out of the default manager (SoftDeletionQuerySet).
