@@ -33,10 +33,10 @@ describe("rangeLabel", () => {
 describe("slotSource", () => {
   it("maps each entity-backed stem to its read", () => {
     expect(slotSource(field("state_id"))).toBe("states");
-    expect(slotSource(field("assignee"))).toBe("members");
-    expect(slotSource(field("created_by"))).toBe("members");
-    expect(slotSource(field("mention"))).toBe("members");
-    expect(slotSource(field("label"))).toBe("labels");
+    expect(slotSource(field("assignee_id"))).toBe("members");
+    expect(slotSource(field("created_by_id"))).toBe("members");
+    expect(slotSource(field("mention_id"))).toBe("members");
+    expect(slotSource(field("label_id"))).toBe("labels");
     expect(slotSource(field("cycle_id"))).toBe("cycles");
     expect(slotSource(field("module_id"))).toBe("modules");
     expect(slotSource(field("project_id"))).toBe("projects");
@@ -53,7 +53,7 @@ describe("slotEditor", () => {
     expect(slotEditor(field("target_date"))).toBe("date");
     expect(slotEditor(field("start_date"))).toBe("range");
     expect(slotEditor(field("priority"))).toBe("choice");
-    expect(slotEditor(field("assignee"))).toBe("pick");
+    expect(slotEditor(field("assignee_id"))).toBe("pick");
     expect(slotEditor(field("state_id"))).toBe("pick");
   });
 });
@@ -113,9 +113,9 @@ describe("togglePick", () => {
   });
 
   it("keeps a single field to one value, replacing on a new pick and clearing on the same one", () => {
-    expect(togglePick(field("created_by"), "a", "b")).toBe("b");
-    expect(togglePick(field("created_by"), "a", "a")).toBeNull();
-    expect(togglePick(field("assignee"), ["a"], "b")).toEqual(["a", "b"]);
+    expect(togglePick(field("target_date"), "2026-01-01", "b")).toBe("b");
+    expect(togglePick(field("target_date"), "2026-01-01", "2026-01-01")).toBeNull();
+    expect(togglePick(field("assignee_id"), ["a"], "b")).toEqual(["a", "b"]);
   });
 });
 
@@ -124,6 +124,7 @@ describe("pickTriggerLabel", () => {
     expect(pickTriggerLabel([])).toBe(EMPTY_SLOT_LABEL);
     expect(pickTriggerLabel(["Todo"])).toBe("Todo");
     expect(pickTriggerLabel(["Todo", "Done"])).toBe("Todo, Done");
-    expect(pickTriggerLabel(["a", "b", "c"])).toBe("3 selected");
+    expect(pickTriggerLabel(["a", "b", "c"])).toBe("a, b +1 more");
+    expect(pickTriggerLabel(["a", "b", "c", "d"])).toBe("a, b +2 more");
   });
 });

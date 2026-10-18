@@ -8,9 +8,10 @@
 // filter icon toggling the row. Every edit persists through the entity's
 // user-properties record, except in temporary mode (ISS-105), which keeps
 // the expression in memory and registers its field configs while
-// mounted. The row's right side carries clear-all and the view actions
-// (ISS-104). ISS-095 resolves to per-condition removal: no chip bar
-// renders on issues surfaces (NEWFRONT-148).
+// mounted, and in saved-view mode, where edits stay local until "Update
+// view" PATCHes the record. The row's right side carries clear-all and
+// the view actions (ISS-104). ISS-095 resolves to per-condition removal:
+// no chip bar renders on issues surfaces (NEWFRONT-148).
 
 import type { SavedView } from "@pidash/api-client";
 import { Button, IconButton, Tooltip } from "@pidash/kit";
@@ -19,11 +20,12 @@ import * as React from "react";
 
 import { useMe, usePermissions } from "../../../../core/session/index.js";
 import type { IssuesEntity } from "../../prefs/entities.js";
-import { selectDisplayPrefs, useEntityPrefs } from "../../prefs/displayPrefs.js";
+import { parseDisplayPrefs, selectDisplayPrefs, useEntityPrefs } from "../../prefs/displayPrefs.js";
 import {
   addCondition,
   hasRichConditions,
   isConditionComplete,
+  parseRichExpression,
   removeCondition,
   richFilterFields,
   serializeRichExpression,
@@ -77,9 +79,10 @@ export interface RichFilterBuilderParts {
 export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterBuilderParts {
   const { workspaceSlug, projectId, entity, hideCycle, hideModule } = props;
   const temporary = props.temporary ?? false;
-  const entityPrefs = useEntityPrefs(workspaceSlug, entity, !temporary);
-  const { conditions: stored } = useRichFilters(workspaceSlug, entity, !temporary);
-  const { updateRichFilters, failureCount } = useUpdateRichFilters(workspaceSlug, entity);
+  const isView = props.view !== undefined;
+  const entityPrefs = useEntityPrefs(workspaceSlug, entity, !temporary && !isView);
+  const { conditions: stored } = useRichFilters(workspaceSlug, entity, !temporary && !isView);
+  const { updateRichFilters, failureCount } = useUpdateRichFilters(workspaceSlug, entity, !isView);
   const permissions = usePermissions(workspaceSlug);
   const me = useMe();
   // A persisted instance is named after its entity; a temporary one gets
@@ -88,29 +91,54 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
     temporary ? temporaryInstanceId() : `${entity.scope}:${entityIdOf(entity)}`
   );
   // A temporary row starts from whatever the caller seeded and keeps its
-  // own copy for the life of the mount; a persisted row follows the server.
+  // own copy for the life of the mount; a saved-view row starts from the
+  // view's stored expression and keeps edits local until Update view; a
+  // persisted entity row follows the server.
   const [local, setLocal] = React.useState<readonly RichCondition[]>([]);
-  const conditions = temporary ? local : stored;
+  const [viewConditions, setViewConditions] = React.useState<readonly RichCondition[]>(() =>
+    isView ? parseRichExpression(props.view?.view.rich_filters ?? {}) : []
+  );
+  const [viewRecord, setViewRecord] = React.useState<SavedView | null>(props.view?.view ?? null);
+  React.useEffect(() => {
+    if (props.view === undefined) return;
+    setViewRecord(props.view.view);
+    setViewConditions(parseRichExpression(props.view.view.rich_filters));
+  }, [props.view]);
+  const conditions = temporary ? local : isView ? viewConditions : stored;
   const [open, setOpen] = React.useState(true);
   const fields = React.useMemo(() => richFilterFields({ hideCycle, hideModule }), [hideCycle, hideModule]);
   const [draft, setDraft] = React.useState<readonly RichCondition[] | null>(null);
   const rows = draft ?? conditions;
 
   const viewContext = React.useMemo<ViewContext>(() => {
-    if (props.view === undefined) return entityViewContext();
+    if (viewRecord === null) return entityViewContext();
     return {
       isView: true,
-      viewScope: props.view.view.project === null ? "workspace" : "project",
-      viewId: props.view.view.id,
-      ownerId: props.view.view.owned_by,
-      locked: props.view.view.is_locked,
-      isDefault: props.view.isDefault,
-      storedExpression: props.view.view.rich_filters,
-      storedDisplayFilters: props.view.view.display_filters,
-      storedDisplayProperties: props.view.view.display_properties,
+      viewScope: viewRecord.project === null ? "workspace" : "project",
+      viewId: viewRecord.id,
+      ownerId: viewRecord.owned_by,
+      locked: viewRecord.is_locked,
+      isDefault: props.view?.isDefault ?? false,
+      storedExpression: viewRecord.rich_filters,
+      storedDisplayFilters: viewRecord.display_filters,
+      storedDisplayProperties: viewRecord.display_properties,
     };
-  }, [props.view]);
+  }, [props.view?.isDefault, viewRecord]);
   const snapshot = React.useMemo<ViewSnapshot>(() => {
+    if (viewRecord !== null) {
+      const display = parseDisplayPrefs(viewRecord.display_filters, viewRecord.display_properties);
+      return {
+        expression: serializeRichExpression(rows),
+        displayFilters: {
+          ...viewRecord.display_filters,
+          layout: display.layout,
+          group_by: display.groupBy,
+          sub_group_by: display.subGroupBy,
+          order_by: display.orderBy,
+        },
+        displayProperties: viewRecord.display_properties,
+      };
+    }
     const record = entityPrefs.data;
     if (record === undefined) {
       return { expression: serializeRichExpression(rows), displayFilters: {}, displayProperties: {} };
@@ -127,7 +155,7 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
       },
       displayProperties: record.display_properties,
     };
-  }, [entityPrefs.data, rows]);
+  }, [entityPrefs.data, rows, viewRecord]);
 
   const serverFingerprint = React.useMemo(
     () => JSON.stringify(conditions.map((row) => [row.key, row.property, row.operator, row.negated, row.value])),
@@ -162,8 +190,9 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
 
   function commit(next: readonly RichCondition[]): void {
     setDraft(next);
-    if (temporary) {
-      setLocal(next);
+    if (temporary || isView) {
+      if (temporary) setLocal(next);
+      else setViewConditions(next);
       return;
     }
     // A condition stays a draft until it is complete: adding a field picks
@@ -259,7 +288,12 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
             commit([]);
           }}
           onCreated={props.onViewCreated}
-          onUpdated={props.onViewUpdated}
+          onUpdated={(stored) => {
+            setViewRecord(stored);
+            setViewConditions(parseRichExpression(stored.rich_filters));
+            setDraft(null);
+            props.onViewUpdated?.(stored);
+          }}
         />
       </div>
     ) : null;

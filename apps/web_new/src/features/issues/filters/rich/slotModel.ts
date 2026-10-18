@@ -92,8 +92,9 @@ export function togglePick(field: RichFilterField, value: unknown, id: string): 
   return field.kind === "multi" ? [...current, id] : id;
 }
 
-/** Trigger text for a pick: both labels, or a count past two. */
+/** Trigger text for a pick: the first two labels plus an overflow count. */
 export function pickTriggerLabel(labels: readonly string[]): string {
   if (labels.length === 0) return EMPTY_SLOT_LABEL;
-  return labels.length <= 2 ? labels.join(", ") : `${labels.length} selected`;
+  if (labels.length <= 2) return labels.join(", ");
+  return `${labels.slice(0, 2).join(", ")} +${labels.length - 2} more`;
 }

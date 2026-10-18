@@ -41,8 +41,12 @@ export function useRichFilters(workspaceSlug: string, entity: IssuesEntity, enab
   };
 }
 
-/** Persist the edited condition list as the entity's rich expression. */
-export function useUpdateRichFilters(workspaceSlug: string, entity: IssuesEntity) {
+/**
+ * Persist the edited condition list as the entity's rich expression.
+ * Saved-view rows pass `enabled: false`: their edits live in the view
+ * record and only "Update view" patches them.
+ */
+export function useUpdateRichFilters(workspaceSlug: string, entity: IssuesEntity, enabled = true) {
   const queryClient = useQueryClient();
   const loader = useOptionalIssuesLoader();
   const [failureCount, setFailureCount] = React.useState(0);
@@ -76,6 +80,6 @@ export function useUpdateRichFilters(workspaceSlug: string, entity: IssuesEntity
     isSaving: mutation.isPending,
     /** Increments after each failed write so the builder can drop its draft. */
     failureCount,
-    updateRichFilters: (conditions: readonly RichCondition[]) => mutation.mutate(conditions),
+    updateRichFilters: enabled ? (conditions: readonly RichCondition[]) => mutation.mutate(conditions) : () => {},
   };
 }

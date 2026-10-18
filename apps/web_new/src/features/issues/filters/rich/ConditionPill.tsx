@@ -18,6 +18,7 @@ import {
   isUnresolvableCondition,
   operatorLabel,
   operatorOptions,
+  payloadOperator,
   replaceConditionProperty,
   type OperatorOption,
   type RichCondition,
@@ -118,7 +119,7 @@ export function ConditionPill({
       <Combobox
         trigger={
           <Button variant="ghost" size="small" disabled={locked}>
-            {operatorLabel(condition.operator, condition.negated)}
+            {operatorLabel(payloadOperator(condition.operator, condition.value), condition.negated)}
             <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
           </Button>
         }

@@ -317,6 +317,8 @@ export {
   createWorkspaceView,
   deleteProjectView,
   deleteWorkspaceView,
+  getProjectView,
+  getWorkspaceView,
   updateProjectView,
   updateWorkspaceView,
 } from "./contracts/issue-views.js";

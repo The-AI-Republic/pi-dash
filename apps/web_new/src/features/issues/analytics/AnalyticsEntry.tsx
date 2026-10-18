@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Issues-header analytics entry (parity/specs/issues.md §9, ISS-107).
-// The button shows only to people who can create work items and opens a
-// work-items dialog scoped to the current project, with the epic flag
+// The button shows only to people who can create work items in *this*
+// project — project admins and members, plus workspace admins — and opens
+// a work-items dialog scoped to the current project, with the epic flag
 // carried through. The analytics area owns the destination; until it
 // lands this mount names the project and the server's total, plus the
 // per-group counts once the full list is loaded.
@@ -13,6 +14,8 @@ import { ChartColumn } from "lucide-react";
 import * as React from "react";
 
 import { usePermissions } from "../../../core/session/index.js";
+import { ROLE_ADMIN, ROLE_MEMBER } from "../../../core/session/permissions.js";
+import { useProjectRoles } from "../../auth/index.js";
 import { usePickerStates } from "../../../shared/pickers/index.js";
 
 export interface AnalyticsEntryProps {
@@ -55,13 +58,20 @@ export function AnalyticsEntry({
   totalCount = 0,
 }: AnalyticsEntryProps): React.ReactElement | null {
   const permissions = usePermissions(workspaceSlug);
+  const projectRoles = useProjectRoles(workspaceSlug);
   const [open, setOpen] = React.useState(false);
   // Groups resolve only while the dialog is open; the header entry costs
   // no extra read on a plain list visit.
   const states = usePickerStates(workspaceSlug, projectId, open);
-  // Fail closed while the role resolves, so a guest never sees the entry
-  // flash in and out; members and admins can create work items.
-  if (permissions.isLoading || !permissions.canEdit) return null;
+  // Fail closed while either role read resolves, so nobody sees the entry
+  // flash in and out. Workspace admins pass everywhere; otherwise the row
+  // needs admin or member standing on this project, which is exactly the
+  // set that may create work items here.
+  if (permissions.isLoading || projectRoles.isPending) return null;
+  const workspaceAdmin = permissions.role !== null && permissions.role >= ROLE_ADMIN;
+  const projectRole = projectRoles.data?.[projectId];
+  const allowed = workspaceAdmin || (projectRole !== undefined && projectRole >= ROLE_MEMBER);
+  if (!allowed) return null;
   // A partial page would undercount, so the breakdown waits for the full
   // list; the server total is authoritative either way.
   const groups = rows.length === totalCount ? groupCounts(rows, states.data) : [];

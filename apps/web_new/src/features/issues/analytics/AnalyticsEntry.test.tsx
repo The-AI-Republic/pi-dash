@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/permissions.js";
 import { sessionKeys } from "../../../core/session/queries.js";
+import { authKeys } from "../../auth/queries.js";
 import { pickerKeys } from "../../../shared/pickers/index.js";
 import { AnalyticsEntry, groupCounts, type AnalyticsRow } from "./AnalyticsEntry.js";
 
@@ -24,7 +25,11 @@ const STATES = [
   { id: IN_PROGRESS, group: "started" },
 ];
 
-function harness(role: number, props: Partial<React.ComponentProps<typeof AnalyticsEntry>> = {}): React.ReactElement {
+function harness(
+  role: number,
+  props: Partial<React.ComponentProps<typeof AnalyticsEntry>> = {},
+  projectRole: number | null = role
+): React.ReactElement {
   const workspaces = [{ id: WORKSPACE, name: "Acme", slug: "acme", logo_url: null, total_members: 3, role }];
   createAppClient("https://api.test", (async () => ({
     status: 200,
@@ -34,6 +39,7 @@ function harness(role: number, props: Partial<React.ComponentProps<typeof Analyt
   })) as never);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   client.setQueryData(sessionKeys.workspaces, workspaces);
+  client.setQueryData(authKeys.projectRoles("acme"), projectRole === null ? {} : { [PROJECT]: projectRole });
   client.setQueryData(pickerKeys.states("acme", PROJECT), STATES);
   return (
     <QueryClientProvider client={client}>
@@ -52,6 +58,30 @@ describe("AnalyticsEntry", () => {
     // Let the role read settle, then assert it never rendered.
     await waitFor(() => expect(screen.queryByTestId("issues-analytics-entry")).not.toBeInTheDocument());
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("hides from a workspace member who is not a member of this project", async () => {
+    const { container } = render(harness(ROLE_MEMBER, {}, null));
+    await waitFor(() => expect(screen.queryByTestId("issues-analytics-entry")).not.toBeInTheDocument());
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("hides from a project guest", async () => {
+    render(harness(ROLE_MEMBER, {}, ROLE_GUEST));
+    await waitFor(() => expect(screen.queryByTestId("issues-analytics-entry")).not.toBeInTheDocument());
+  });
+
+  it("shows to a project member even without workspace edit rights", async () => {
+    // A guest-role workspace row with project membership is unusual but
+    // the gate is the project role; the workspace admin path is separate.
+    const { container } = render(harness(ROLE_GUEST, { totalCount: 1 }, ROLE_MEMBER));
+    await waitFor(() => expect(container).not.toBeEmptyDOMElement());
+    expect(await screen.findByTestId("issues-analytics-entry")).toBeInTheDocument();
+  });
+
+  it("shows to a workspace admin regardless of project membership", async () => {
+    render(harness(20, { totalCount: 1 }, null));
+    expect(await screen.findByTestId("issues-analytics-entry")).toBeInTheDocument();
   });
 
   it("opens a project-scoped dialog with the total and group counts", async () => {

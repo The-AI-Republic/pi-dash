@@ -138,12 +138,28 @@ describe("serializeRichExpression", () => {
         condition({ key: "a", property: "priority", value: "urgent" }),
         condition({ key: "b", property: "state_id", value: ["todo"], negated: true }),
       ])
-    ).toEqual({ and: [{ priority__in: "urgent" }, { not: { state_id__in: ["todo"] } }] });
+    ).toEqual({ and: [{ priority__in: "urgent" }, { not: { state_id__exact: "todo" } }] });
   });
 
   it("round-trips the shapes the parser accepts", () => {
     const expression = { and: [{ priority__in: "urgent" }, { not: { state_id__in: ["todo"] } }] };
-    expect(serializeRichExpression(parseRichExpression(expression))).toEqual(expression);
+    expect(serializeRichExpression(parseRichExpression(expression))).toEqual({
+      and: [{ priority__in: "urgent" }, { not: { state_id__exact: "todo" } }],
+    });
+  });
+
+  it("sends collection picks as one comma-separated value", () => {
+    expect(
+      serializeRichExpression([condition({ property: "assignee_id", operator: "in", value: ["a", "b", "c"] })])
+    ).toEqual({ assignee_id__in: "a,b,c" });
+  });
+
+  it("sends a date range as its two ends in order", () => {
+    expect(
+      serializeRichExpression([
+        condition({ property: "start_date", operator: "range", value: ["2026-01-01", "2026-01-31"] }),
+      ])
+    ).toEqual({ start_date__range: "2026-01-01,2026-01-31" });
   });
 });
 
@@ -213,6 +229,37 @@ describe("field catalogue", () => {
     expect(richFilterFields({ hideCycle: true, hideModule: true })).toHaveLength(all.length - 2);
     expect(richFilterFields({ hideCycle: false, hideModule: false })).toHaveLength(all.length);
     expect(richFilterFields()).toHaveLength(all.length);
+  });
+
+  it("uses the field kinds the old filter set offers", () => {
+    // Every id/static dimension is a multi pick (one pick still stores
+    // under exact); the dates are a single day plus a range.
+    for (const stem of [
+      "state_id",
+      "state_group",
+      "priority",
+      "assignee_id",
+      "created_by_id",
+      "mention_id",
+      "label_id",
+      "project_id",
+      "cycle_id",
+      "module_id",
+    ]) {
+      expect(findField(richFilterFields(), stem)?.kind, stem).toBe("multi");
+    }
+    expect(findField(richFilterFields(), "target_date")?.kind).toBe("date");
+    expect(findField(richFilterFields(), "start_date")?.kind).toBe("date_range");
+  });
+
+  it("carries optional bounds for the date kinds", () => {
+    const bounded: RichFilterField = {
+      ...(findField(richFilterFields(), "target_date") as RichFilterField),
+      min: "2026-01-01",
+      max: "2026-12-31",
+    };
+    expect(bounded.min).toBe("2026-01-01");
+    expect(bounded.max).toBe("2026-12-31");
   });
 
   it("drops exactly the dimension the surface hides", () => {

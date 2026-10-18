@@ -26,6 +26,7 @@ import { projectsQueryOptions } from "../../../../../../features/projects/index.
 import { clearCommands, listCommands } from "../../../../../../shared/commands/index.js";
 import * as queryModule from "../../../../../../core/query/optimistic.js";
 import * as shellModule from "../../../../../../shared/shell/index.js";
+import { authKeys } from "../../../../../../features/auth/queries.js";
 import { sessionKeys } from "../../../../../../core/session/queries.js";
 import { Route } from "./index.js";
 
@@ -290,6 +291,7 @@ function renderScreen(
         role: options.role ?? 20,
       },
     ]);
+    queryClient.setQueryData(authKeys.projectRoles(PARAMS.ws), { [PARAMS.projectId]: options.role ?? 20 });
   }
   queryClient.setQueryData(
     issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, search, options.richFilters).queryKey,

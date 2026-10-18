@@ -10,6 +10,8 @@
 // row's two entries.
 
 import type { SavedView, SavedViewCreate, SavedViewPatch } from "@pidash/api-client";
+import { issueKeys } from "../../api/keys.js";
+import type { RichExpression } from "./expression.js";
 
 /** The row's view context: which record it edits, if any. */
 export interface ViewContext {
@@ -36,6 +38,11 @@ export interface ViewSnapshot {
   expression: Record<string, unknown>;
   displayFilters: Record<string, unknown>;
   displayProperties: Record<string, unknown>;
+}
+
+/** The route a saved view opens after creation. */
+export function projectViewHref(workspaceSlug: string, projectId: string, viewId: string): string {
+  return `/${workspaceSlug}/projects/${projectId}/views/${viewId}`;
 }
 
 /** Create payload for "Save view": name plus the live snapshot. */
@@ -138,4 +145,21 @@ export function entityViewContext(): ViewContext {
     storedDisplayFilters: {},
     storedDisplayProperties: {},
   };
+}
+
+/** Saved-view query keys: workspace-scoped so sign-out clears them. */
+export const savedViewKeys = {
+  project: (workspaceSlug: string, projectId: string, viewId: string) =>
+    [...issueKeys.all(workspaceSlug), "saved-view", projectId, viewId] as const,
+  workspace: (workspaceSlug: string, viewId: string) =>
+    [...issueKeys.all(workspaceSlug), "saved-view", "workspace", viewId] as const,
+};
+
+/**
+ * A view record's stored filter expression, applied to the list query and
+ * the builder. The record is written by the same view contract, so the
+ * shape is the builder's own.
+ */
+export function viewExpression(view: SavedView): RichExpression {
+  return view.rich_filters;
 }
