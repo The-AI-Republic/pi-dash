@@ -195,6 +195,10 @@ impl SweepStore for LiveSweepStore {
         use super::run_turn as rt;
         let code = rt::truncate_code(code).to_owned();
         let detail = rt::truncate_detail(detail).to_owned();
+        // `created_at` on the two rows below is `auto_now_add` in Django:
+        // stamped at insert, supplied explicitly here (`events.create_message`
+        // / `events.append_event`).
+        let now = Utc::now();
         let mut tx = self
             .pool
             .begin()
@@ -245,6 +249,7 @@ impl SweepStore for LiveSweepStore {
             .bind(ctx.thread_id)
             .bind(ctx.turn_id)
             .bind(&content)
+            .bind(now)
             .execute(&mut *tx)
             .await
             .map_err(|e| SeamError(e.to_string()))?;
@@ -258,6 +263,7 @@ impl SweepStore for LiveSweepStore {
             .bind(ctx.turn_id)
             .bind(message_id)
             .bind(payload)
+            .bind(now)
             .execute(&mut *tx)
             .await
             .map_err(|e| SeamError(e.to_string()))?;
