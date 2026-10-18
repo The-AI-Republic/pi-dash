@@ -952,6 +952,17 @@ const ISSUE_COLS: &str = "created_at, updated_at, id, name, description_json, pr
      estimate_point_id, type_id, deleted_at, git_work_branch, assigned_pod_id, workpad, \
      created_via, agent_executor, complexity_score";
 
+/// [`ISSUE_COLS`] with every column qualified by the `issues` table — for
+/// reads that join another table (e.g. `workspaces`), where the bare column
+/// names are ambiguous.
+fn issue_cols_qualified() -> String {
+    ISSUE_COLS
+        .split(", ")
+        .map(|col| format!("issues.{col}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 // ---------------------------------------------------------------------------
 // Renders (`IntakeIssueSerializer` + `IssueExpandSerializer` read shapes)
 // ---------------------------------------------------------------------------
@@ -11123,11 +11134,22 @@ async fn intake_destroy(
     let intake_row =
         get_intake_issue(&ctx.pool, &issue_id, &slug, &ctx.project_id, &intake_id).await?;
     if v1_perm::destroy_cascades_to_issue(intake_row.status) {
-        // `.first()` + attribute access: a missing issue is the 500
-        // `AttributeError`, not a 404.
-        let sql = format!("SELECT {ISSUE_COLS} FROM issues WHERE id = $1 AND deleted_at IS NULL");
+        // `views/intake.py:477`: `Issue.objects.filter(workspace__slug=slug,
+        // project_id=project_id, pk=issue_id).first()` — scoped to the
+        // workspace and project, not id alone; an issue moved to another
+        // project is a miss. `.first()` -> `None`, and the caller then reads
+        // `issue.created_by_id` (`:478`) -> AttributeError -> 500, no writes.
+        let sql = format!(
+            "SELECT {cols} FROM issues \
+             INNER JOIN workspaces w ON w.id = issues.workspace_id \
+             WHERE issues.id = $1 AND w.slug = $2 AND issues.project_id = $3 \
+             AND issues.deleted_at IS NULL",
+            cols = issue_cols_qualified(),
+        );
         let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
             .bind(issue_id)
+            .bind(&slug)
+            .bind(ctx.project_id)
             .fetch_optional(&ctx.pool)
             .await
             .map_err(|_| Denial::ServerError)?;
