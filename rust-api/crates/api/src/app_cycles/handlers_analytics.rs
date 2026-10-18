@@ -284,10 +284,12 @@ async fn membership(
 // ---------------------------------------------------------------------------
 
 /// `Project` has a `"points"` estimate (`base.py:832-837`).
+/// `Project.objects` is the soft-deletion manager (`mixins.py:61-67`), so a
+/// soft-deleted project is excluded.
 const ESTIMATE_TYPE_SQL: &str = "SELECT EXISTS(SELECT 1 FROM projects p \
      JOIN workspaces w ON w.id = p.workspace_id AND w.slug = $1 \
      JOIN estimates e ON e.id = p.estimate_id AND e.type = 'points' \
-     WHERE p.id = $2)";
+     WHERE p.id = $2 AND p.deleted_at IS NULL)";
 
 /// Cycle row plus the `total_issues` annotation (`base.py:791-805`):
 /// distinct bridged issues that are not archived, not draft, not
@@ -295,8 +297,10 @@ const ESTIMATE_TYPE_SQL: &str = "SELECT EXISTS(SELECT 1 FROM projects p \
 /// the `IssueManager` excludes (Django never applies a related
 /// model's default manager across a join): no triage predicate, no
 /// project-archive predicate — unlike `DIST_WHERE_SQL` below, which
-/// queries through `issue_objects`. No `deleted_at` predicate on the
-/// cycle itself (plain manager — shared quirk with progress B1).
+/// queries through `issue_objects`. `Cycle.objects` is the soft-deletion
+/// manager (`mixins.py:61-67`), so a soft-deleted cycle reads as missing:
+/// `.first()` returns None and the view 500s on the `start_date`
+/// dereference (`base.py:789-807`), the same as an unknown id.
 const CYCLE_SQL: &str = "SELECT c.id, c.start_date, c.end_date, c.progress_snapshot, \
      (SELECT COUNT(DISTINCT ci.issue_id) FROM cycle_issues ci \
       JOIN issues i ON i.id = ci.issue_id AND i.deleted_at IS NULL \
@@ -304,7 +308,7 @@ const CYCLE_SQL: &str = "SELECT c.id, c.start_date, c.end_date, c.progress_snaps
       WHERE ci.cycle_id = c.id AND ci.deleted_at IS NULL) AS total_issues \
      FROM cycles c \
      JOIN workspaces w ON w.id = c.workspace_id AND w.slug = $1 \
-     WHERE c.project_id = $2 AND c.id = $3";
+     WHERE c.project_id = $2 AND c.id = $3 AND c.deleted_at IS NULL";
 
 /// Base scope shared by the four distribution queries: live bridge row
 /// plus the `IssueManager` excludes (the explicit archived/draft
