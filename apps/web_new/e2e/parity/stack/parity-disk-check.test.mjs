@@ -43,6 +43,7 @@ const DOCKER_STUB = [
   'case "$*" in',
   "  *run*)",
   '    if [ "${VM_DF_FAIL:-0}" = "1" ]; then exit 1; fi',
+  '    if [ "${VM_DF_GARBAGE:-0}" = "1" ]; then echo "garbage"; exit 0; fi',
   '    vm_pct="${VM_DISK_PCT:-50}"',
   "    vm_used=$((vm_pct * 1000))",
   "    vm_avail=$(((100 - vm_pct) * 1000))",
@@ -174,6 +175,49 @@ describe("parity disk guard", () => {
     });
     assert.equal(result.status, 1);
     assert.match(result.stdout, /REFUSED: \/vm\/no\/such\/docker-root at 94% used/);
+  });
+
+  it("warns but proceeds when the VM disk is between warn and refuse", () => {
+    const result = runChecker(stubBin(), {
+      env: {
+        DF_ROOT_PCT: "50",
+        DOCKER_OS: "Docker Desktop",
+        DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
+        VM_DISK_PCT: "85",
+      },
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /WARNING: \/vm\/no\/such\/docker-root at 85% used/);
+    assert.match(result.stdout, /measured inside the daemon/);
+  });
+
+  it("treats Darwin as VM-backed even when OperatingSystem is not Docker Desktop", () => {
+    const result = runChecker(stubBin(), {
+      env: {
+        DF_ROOT_PCT: "50",
+        DOCKER_OS: "Debian GNU/Linux 12 (bookworm)",
+        DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
+        UNAME_S: "Darwin",
+        VM_DISK_PCT: "33",
+      },
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /measured inside the daemon/);
+    assert.match(result.stdout, /at 33% used/);
+  });
+
+  it("warns and continues when the in-VM df output is unparseable", () => {
+    const result = runChecker(stubBin(), {
+      env: {
+        DF_ROOT_PCT: "50",
+        DOCKER_OS: "Docker Desktop",
+        DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
+        VM_DF_GARBAGE: "1",
+      },
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stderr, /VM disk was not checked, host \/ check only/);
+    assert.match(result.stdout, /disk check ok/);
   });
 
   it("warns and continues when the VM disk cannot be measured", () => {
