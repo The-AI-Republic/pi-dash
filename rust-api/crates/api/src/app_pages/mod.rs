@@ -66,9 +66,15 @@
 //! favorites `@allow_permission([ADMIN, MEMBER])` project-role gate is ported
 //! inline here (it performs no page lookup, unlike the class); field
 //! validation mirrors `pidash_services::app_pages::shape` (binary decode,
-//! HTML substitution rule, DRF error bodies); the HTML cleaner and
-//! `strip_tags` come from `crate::space::sanitize` (`ammonia`, the same
-//! crate `nh3` binds); publishes use the merged
+//! HTML substitution rule, DRF error bodies); the HTML cleaner comes from
+//! `crate::space::sanitize` (`ammonia`, the same crate `nh3` binds). The
+//! `description_stripped` recompute is NOT `crate::space::sanitize::strip_tags`
+//! (that ports Django's `django.utils.html.strip_tags`, which keeps entities
+//! verbatim): `Page.save()` uses `pi_dash.utils.html_processor.strip_tags`
+//! (an `MLStripper` with `convert_charrefs=True`), ported as
+//! `pidash_db::app_pages::strip::sync_description_stripped`. Every write
+//! below that recomputes the column goes through that helper. Publishes use
+//! the merged
 //! `pidash_jobs::app_pages` constructors and enqueue best-effort post-commit
 //! like the D-02 intake handlers.
 //!
@@ -1511,16 +1517,14 @@ fn access_int_str(raw: &str) -> Option<i32> {
 
 /// `Page.save()`'s `description_stripped` recompute
 /// (`db/models/page.py:70-77`): `None` when the stored HTML is empty,
-/// else `strip_tags`. Every state-op write below is a plain `save()`, so
-/// it rewrites the column with the recomputed value (a no-op here — the
-/// HTML is untouched — but ported so the statement writes what Django
-/// writes).
+/// else `pi_dash.utils.html_processor.strip_tags` — the `MLStripper` port
+/// ([`pidash_db::app_pages::strip::sync_description_stripped`]), which
+/// DECODES entities (`&amp;` -> `&`). Every state-op write below is a plain
+/// `save()`, so it rewrites the column with the recomputed value (a no-op
+/// here — the HTML is untouched — but ported so the statement writes what
+/// Django writes).
 fn stripped_of(html: &str) -> Option<String> {
-    if html.is_empty() {
-        None
-    } else {
-        Some(crate::space::sanitize::strip_tags(html))
-    }
+    pidash_db::app_pages::strip::sync_description_stripped(Some(html))
 }
 
 /// `request.data` for the access endpoint (`base.py:272`): empty bodies
@@ -2342,19 +2346,17 @@ pub async fn description_partial_update(
     };
     // `update()` (`page.py:213-225`) plus `Page.save()`'s
     // `description_stripped` recompute (`db/models/page.py:70-77`: `None`
-    // when the final HTML is empty, else `strip_tags`). Django's `save()`
-    // writes every column, so the UPDATE is static with computed values.
+    // when the final HTML is empty, else the MLStripper `strip_tags`).
+    // Django's `save()` writes every column, so the UPDATE is static with
+    // computed values.
     let final_binary = patch.binary.or(page.description_binary);
     let final_html = patch.html.unwrap_or(page.description_html);
     let final_json: Option<Value> = match patch.json {
         Some(value) => value,
         None => page.description_json,
     };
-    let final_stripped: Option<String> = if final_html.is_empty() {
-        None
-    } else {
-        Some(crate::space::sanitize::strip_tags(final_html.as_str()))
-    };
+    let final_stripped: Option<String> =
+        pidash_db::app_pages::strip::sync_description_stripped(Some(final_html.as_str()));
     let final_json_text: Option<String> =
         final_json.map(|value| serde_json::to_string(&value).expect("json serializes"));
     if sqlx::query(
@@ -3572,11 +3574,8 @@ pub async fn page_create(
         Html::Default => "<p></p>".to_owned(),
         Html::Text(text) => text.clone(),
     };
-    let stored_stripped: Option<String> = if stored_html.is_empty() {
-        None
-    } else {
-        Some(crate::space::sanitize::strip_tags(stored_html.as_str()))
-    };
+    let stored_stripped: Option<String> =
+        pidash_db::app_pages::strip::sync_description_stripped(Some(stored_html.as_str()));
     let stored_json = serde_json::to_string(&description_json).expect("json serializes");
     let page_id = uuid::Uuid::new_v4();
     // `auto_now_add` / `auto_now` are two Python `now()` calls (the
@@ -3910,11 +3909,8 @@ pub async fn page_partial_update(
         .description_html
         .clone()
         .unwrap_or(page.description_html);
-    let final_stripped: Option<String> = if final_html.is_empty() {
-        None
-    } else {
-        Some(crate::space::sanitize::strip_tags(final_html.as_str()))
-    };
+    let final_stripped: Option<String> =
+        pidash_db::app_pages::strip::sync_description_stripped(Some(final_html.as_str()));
     let mut sql = String::from("UPDATE pages SET updated_at = now(), updated_by_id = $1");
     let mut tail = 2u32;
     macro_rules! column {
