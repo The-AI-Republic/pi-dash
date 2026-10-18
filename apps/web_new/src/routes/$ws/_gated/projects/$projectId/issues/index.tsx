@@ -221,6 +221,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
                   hideCycle={!project.cycle_view}
                   hideModule={!project.module_view}
                   hideEstimate={project.estimate === null}
+                  richExpression={preferences.rich_filters}
                 />
               </React.Suspense>
             );

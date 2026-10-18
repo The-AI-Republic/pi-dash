@@ -21,6 +21,7 @@ import { useUpdateDisplayPrefs, type DisplayPrefs } from "../prefs/displayPrefs.
 import type { IssuesEntity } from "../prefs/entities.js";
 import { useWeekStart } from "../dropdowns/weekStart.js";
 import { usePickerCycles } from "../../../shared/pickers/reference.js";
+import type { RichExpression } from "../filters/rich/expression.js";
 import { sheetSubIssuesQueryOptions } from "./subIssues.js";
 import {
   isSheetRowReadOnly,
@@ -66,6 +67,8 @@ export interface SpreadsheetLayoutProps {
   hideEstimate: boolean;
   /** Explicitly highlighted row id (drops); fresh rows highlight themselves. */
   highlightedId?: string | null;
+  /** Stored rich filters shared with the list layout. */
+  richExpression?: RichExpression;
 }
 
 interface DisplayRow {
@@ -85,12 +88,14 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     hideModule,
     hideEstimate,
     highlightedId = null,
+    richExpression = {},
   } = props;
   const client = getAppClient();
   const query = useInfiniteQuery(
     sheetIssuesQueryOptions(client, workspaceSlug, projectId, {
       orderBy: prefs.orderBy,
       showSubIssues: prefs.showSubIssues,
+      richExpression,
     })
   );
   const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(new Set());
@@ -296,7 +301,9 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
         projectIdentifier={projectIdentifier}
         disabled={!canEdit}
         pending={create.isPending}
-        onCreate={(name) => create.mutateAsync({ name })}
+        onCreate={async (name) => {
+          await create.mutateAsync({ name });
+        }}
       />
       {peekIssue === null ? null : (
         <PeekPanel

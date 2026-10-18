@@ -210,6 +210,27 @@ describe("spreadsheet writes", () => {
     expect(off.queryKey).not.toEqual(options.queryKey);
   });
 
+  it("sends the stored rich filter and keys the sheet query on the expression", async () => {
+    const state: StubState = { calls: [], failWrite: false };
+    const client = stubClient(state);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const expression = { priority__in: "urgent" };
+    const options = sheetIssuesQueryOptions(client, SLUG, PROJECT, {
+      orderBy: "-created_at",
+      richExpression: expression,
+    });
+    await queryClient.fetchInfiniteQuery(options);
+    const call = state.calls.find((entry) => entry.url.includes(`/projects/${PROJECT}/issues/`));
+    expect(new URL(call?.url ?? "", "https://api.test").searchParams.get("filters")).toBe(JSON.stringify(expression));
+    const other = sheetIssuesQueryOptions(client, SLUG, PROJECT, {
+      orderBy: "-created_at",
+      richExpression: { priority__in: "low" },
+    });
+    expect(other.queryKey).not.toEqual(options.queryKey);
+    const empty = sheetIssuesQueryOptions(client, SLUG, PROJECT, { orderBy: "-created_at" });
+    expect(empty.queryKey).not.toEqual(options.queryKey);
+  });
+
   it("adds to and clears from a cycle through the bridge", async () => {
     const state: StubState = { calls: [], failWrite: false };
     const { queryClient, key, wrapper } = setup(state);

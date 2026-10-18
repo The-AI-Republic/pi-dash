@@ -29,6 +29,8 @@ import { rollbackSnapshots, snapshotQueries } from "../../../core/query/optimist
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { createTempId } from "../freshness/fresh.js";
 import { issueKeys } from "../api/keys.js";
+import type { RichExpression } from "../filters/rich/expression.js";
+import { richFiltersParam, withRichFilters } from "../filters/rich/query.js";
 
 /** Sheet page size (spec §3: one hundred flat rows). */
 export const SHEET_PAGE_SIZE = 100;
@@ -42,6 +44,8 @@ export interface SheetQuery {
   perPage?: number;
   /** Flat rows include sub-work items when the display switch is on. */
   showSubIssues?: boolean;
+  /** Stored rich-filter expression applied by every layout. */
+  richExpression?: RichExpression;
 }
 
 /** Infinite sheet pages under the entity's list prefix. */
@@ -51,6 +55,7 @@ export function sheetIssuesQueryOptions(
   projectId: string,
   query: SheetQuery
 ) {
+  const richExpression = query.richExpression ?? {};
   return infiniteQueryOptions({
     queryKey: [
       ...issueKeys.lists(workspaceSlug, projectId),
@@ -58,14 +63,23 @@ export function sheetIssuesQueryOptions(
       query.orderBy,
       query.perPage ?? SHEET_PAGE_SIZE,
       query.showSubIssues === true,
+      richFiltersParam(richExpression),
     ],
     queryFn: ({ pageParam }) =>
-      listIssues(client, workspaceSlug, projectId, {
-        perPage: query.perPage ?? SHEET_PAGE_SIZE,
-        orderBy: query.orderBy,
-        filters: { sub_issue: String(query.showSubIssues === true) },
-        ...(pageParam === "" ? {} : { cursor: pageParam }),
-      }),
+      listIssues(
+        client,
+        workspaceSlug,
+        projectId,
+        withRichFilters(
+          {
+            perPage: query.perPage ?? SHEET_PAGE_SIZE,
+            orderBy: query.orderBy,
+            filters: { sub_issue: String(query.showSubIssues === true) },
+            ...(pageParam === "" ? {} : { cursor: pageParam }),
+          },
+          richExpression
+        )
+      ),
     initialPageParam: "",
     getNextPageParam: (lastPage) =>
       lastPage.next_page_results && lastPage.next_cursor !== "" ? lastPage.next_cursor : undefined,
@@ -77,7 +91,14 @@ export function sheetIssuesQueryOptions(
 export function flattenSheetPages(data: { pages: IssueListResponse[] } | undefined): IssueListItem[] {
   if (data === undefined) return [];
   const rows: IssueListItem[] = [];
-  for (const page of data.pages) rows.push(...page.results);
+  const seen = new Set<string>();
+  for (const page of data.pages) {
+    for (const issue of page.results) {
+      if (seen.has(issue.id)) continue;
+      seen.add(issue.id);
+      rows.push(issue);
+    }
+  }
   return rows;
 }
 

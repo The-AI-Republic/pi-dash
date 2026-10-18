@@ -82,6 +82,19 @@ describe("spreadsheet data", () => {
     expect(sheetTotalCount(undefined)).toBe(0);
   });
 
+  it("dedupes overlapping cursor pages by issue id, keeping first-seen order", () => {
+    const data = infinite([
+      page([row(ID1, "First"), row(ID2, "Second")]),
+      page([row(ID2, "Second again"), row(ID1, "First again"), row("623e4567-e89b-12d3-a456-426614174006", "Third")]),
+    ]);
+    expect(flattenSheetPages(data).map((issue) => issue.id)).toEqual([
+      ID1,
+      ID2,
+      "623e4567-e89b-12d3-a456-426614174006",
+    ]);
+    expect(flattenSheetPages(data).map((issue) => issue.name)).toEqual(["First", "Second", "Third"]);
+  });
+
   it("leaves values that are not infinite pages untouched", () => {
     const flat = [row(ID1, "First")];
     expect(withSheetPages(flat, (entry) => entry)).toBe(flat);
