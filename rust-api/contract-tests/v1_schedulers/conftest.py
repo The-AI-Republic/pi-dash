@@ -136,26 +136,27 @@ def _seed_issue(conn, *, workspace_id, project_id, name, sequence_id):
     )
 
 
-def _seed_comment(conn, *, workspace_id, project_id, issue_id, actor_id, run_id):
-    return db.insert_row(
-        conn,
-        "issue_comments",
-        {
-            "workspace_id": workspace_id,
-            "project_id": project_id,
-            "comment_stripped": "test comment",
-            "comment_json": {},
-            "comment_html": "<p>test comment</p>",
-            "attachments": "{}",
-            "labels": "{}",
-            "issue_id": issue_id,
-            "actor_id": actor_id,
-            "access": "EXTERNAL",
-            "speaker_type": "agent",
-            "speaker_label": "",
-            "speaker_agent_run_id": run_id,
-        },
-    )
+def _seed_comment(
+    conn, *, workspace_id, project_id, issue_id, actor_id, run_id, created_at=None
+):
+    values = {
+        "workspace_id": workspace_id,
+        "project_id": project_id,
+        "comment_stripped": "test comment",
+        "comment_json": {},
+        "comment_html": "<p>test comment</p>",
+        "attachments": "{}",
+        "labels": "{}",
+        "issue_id": issue_id,
+        "actor_id": actor_id,
+        "access": "EXTERNAL",
+        "speaker_type": "agent",
+        "speaker_label": "",
+        "speaker_agent_run_id": run_id,
+    }
+    if created_at is not None:
+        values["created_at"] = created_at
+    return db.insert_row(conn, "issue_comments", values)
 
 
 @pytest.fixture(scope="session")
@@ -342,5 +343,119 @@ def seed(conn):
         "issue_filed": issue_filed,
         "issue_visible": issue_visible,
         "issue_hidden": issue_hidden,
+        "keys": keys,
+    }
+
+
+# PIDASHCONV-1204: a run that commented on the same issue more than once must
+# list one entry per comment, newest comment first — Django's ``_issues_by_run``
+# is ``.values_list(...).distinct()`` with ``IssueComment.Meta.ordering``
+# (``-created_at``), and Django's compiler adds the ordering column to the
+# ``SELECT DISTINCT`` list, so each comment is its own row.
+REPEAT_T0 = "2026-10-13T00:00:00+00:00"
+REPEAT_T1 = "2026-10-13T01:00:00+00:00"
+REPEAT_T2 = "2026-10-13T02:00:00+00:00"
+REPEAT_RUN_AT = "2026-10-12T00:00:00+00:00"
+
+
+@pytest.fixture(scope="session")
+def repeat_seed(conn):
+    """A run R with comments on I1 (t0), I2 (t1), I1 (t2), t0 < t1 < t2."""
+    tag = db.new_tag()
+    owner = db.create_user(conn, tag + "o", first_name="CtRepeatOwner")
+    ws = db.create_workspace(conn, tag + "w", owner["id"])
+    db.add_workspace_member(conn, ws["id"], owner["id"], db.ADMIN)
+    project = db.create_project(conn, ws["id"], tag + "p", created_by_id=owner["id"])
+    db.add_project_member(conn, ws["id"], project["id"], owner["id"], db.ADMIN)
+
+    scheduler = _seed_scheduler(
+        conn,
+        workspace_id=ws["id"],
+        slug=f"repeat-{tag}",
+        name=f"CT Repeat {tag}",
+        created_by_id=owner["id"],
+    )
+    binding = _seed_binding(
+        conn,
+        workspace_id=ws["id"],
+        project_id=project["id"],
+        scheduler_id=scheduler["id"],
+        actor_id=owner["id"],
+    )
+    pod = db.insert_row(
+        conn,
+        "pod",
+        {
+            "name": f"pod-repeat-{tag}",
+            "description": "Seeded for contract tests",
+            "is_default": True,
+            "workspace_id": ws["id"],
+            "project_id": project["id"],
+        },
+    )
+    run = _seed_run(
+        conn,
+        workspace_id=ws["id"],
+        pod_id=pod["id"],
+        binding_id=binding["id"],
+        created_by_id=owner["id"],
+        status="completed",
+        created_at=REPEAT_RUN_AT,
+        started_at=REPEAT_RUN_AT,
+    )
+    issue_1 = _seed_issue(
+        conn,
+        workspace_id=ws["id"],
+        project_id=project["id"],
+        name="Repeated issue",
+        sequence_id=21,
+    )
+    issue_2 = _seed_issue(
+        conn,
+        workspace_id=ws["id"],
+        project_id=project["id"],
+        name="Once issue",
+        sequence_id=22,
+    )
+    _seed_comment(
+        conn,
+        workspace_id=ws["id"],
+        project_id=project["id"],
+        issue_id=issue_1["id"],
+        actor_id=owner["id"],
+        run_id=run["id"],
+        created_at=REPEAT_T0,
+    )
+    _seed_comment(
+        conn,
+        workspace_id=ws["id"],
+        project_id=project["id"],
+        issue_id=issue_2["id"],
+        actor_id=owner["id"],
+        run_id=run["id"],
+        created_at=REPEAT_T1,
+    )
+    _seed_comment(
+        conn,
+        workspace_id=ws["id"],
+        project_id=project["id"],
+        issue_id=issue_1["id"],
+        actor_id=owner["id"],
+        run_id=run["id"],
+        created_at=REPEAT_T2,
+    )
+
+    keys = {"rn": db.create_api_token(conn, owner["id"], tag + "rn")["token"]}
+    return {
+        "tag": tag,
+        "owner": owner,
+        "ws_a": ws,
+        "project": project,
+        "scheduler": scheduler,
+        "binding": binding,
+        "pod": pod,
+        "run": run,
+        "issue_1": issue_1,
+        "issue_2": issue_2,
         "keys": keys,
     }
