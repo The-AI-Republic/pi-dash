@@ -93,3 +93,37 @@ def test_description_cross_workspace_isolation(user_client, world, world2):
     response = user_client.get(_desc_url(world, world2["page"]["id"]))
     assert response.status_code == 404
     assert response.json() == {"error": "The required object does not exist."}
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_description_update_blank_binary_500_row_unchanged(user_client, world, seeder, db, blank):
+    """A blank/whitespace-only ``description_binary`` validates (``CharField``
+    trims to ``""``) but the ``BinaryField`` save raises ``TypeError``: both
+    backends answer the generic 500 and leave the stored row untouched, so a
+    "clear" PATCH never wipes the document (PB-0474)."""
+    binary = b"\x89contract-blank-binary-1174"
+    page = seeder.create_page(
+        world["workspace"]["id"],
+        world["owner"]["id"],
+        name="Blank binary",
+        description_binary=binary,
+    )
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], page["id"])
+    columns = (
+        "description_binary, description_html, description_json, "
+        "description_stripped, updated_at, updated_by_id"
+    )
+
+    def snapshot():
+        row = db.fetchone(f"SELECT {columns} FROM pages WHERE id=%s", (page["id"],))
+        return {**row, "description_binary": bytes(row["description_binary"])}
+
+    before = snapshot()
+    response = user_client.patch(_desc_url(world, page["id"]), json={"description_binary": blank})
+    assert response.status_code == 500
+    assert response.json() == {"error": "Something went wrong please try again later"}
+    assert snapshot() == before
+    assert (
+        bytes(db.fetchval("SELECT description_binary FROM pages WHERE id=%s", (page["id"],)))
+        == binary
+    )

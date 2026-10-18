@@ -2070,6 +2070,13 @@ pub enum PatchRejection {
     NonDict(String),
     /// Per-field errors in declaration order.
     Fields(Vec<(String, String)>),
+    /// Blank `description_binary` (`page.py:182-183`, `:213-224`): the
+    /// falsy value clears DRF validation untouched, then `update()` assigns
+    /// `""` and `save()`'s `BinaryField.get_db_prep_value` wraps it in
+    /// `psycopg.Binary("")`, whose client-side binding raises `TypeError:
+    /// string argument without an encoding`. `handle_exception` maps that to
+    /// the generic 500 before any write or enqueue (PB-0474).
+    ServerError,
 }
 
 /// Mirror `CharField(required=False, allow_blank=True)` input handling
@@ -2140,15 +2147,19 @@ pub fn validate_patch_body(body: &Value) -> Result<ValidPatch, PatchRejection> {
     };
     let mut errors: Vec<(String, String)> = Vec::new();
     let mut binary: Option<Vec<u8>> = None;
+    // A blank `description_binary` passes DRF validation unchanged
+    // (`page.py:182-183`) but the later `save()` raises `TypeError`; track it
+    // so the 500 fires after every collected field error has won.
+    let mut binary_blank = false;
     let mut html: Option<String> = None;
     let mut json: Option<Option<Value>> = None;
     if let Some(value) = object.get(BINARY_FIELD) {
         match char_internal(value) {
             Err(message) => errors.push((BINARY_FIELD.to_owned(), message.to_owned())),
-            Ok(coerced) if coerced.is_empty() => binary = Some(Vec::new()),
+            Ok(coerced) if coerced.is_empty() => binary_blank = true,
             Ok(coerced) => match validate_description_binary(&coerced) {
                 Ok(BinaryFieldOutcome::Decoded(bytes)) => binary = Some(bytes),
-                Ok(BinaryFieldOutcome::Passthrough) => binary = Some(Vec::new()),
+                Ok(BinaryFieldOutcome::Passthrough) => binary_blank = true,
                 Err(message) => errors.push((BINARY_FIELD.to_owned(), message)),
             },
         }
@@ -2174,6 +2185,9 @@ pub fn validate_patch_body(body: &Value) -> Result<ValidPatch, PatchRejection> {
     }
     if !errors.is_empty() {
         return Err(PatchRejection::Fields(errors));
+    }
+    if binary_blank {
+        return Err(PatchRejection::ServerError);
     }
     Ok(ValidPatch {
         binary,
@@ -2343,6 +2357,10 @@ pub async fn description_partial_update(
         Err(PatchRejection::Fields(errors)) => {
             return Denial::BadJson(field_errors_body(&errors)).into_response();
         }
+        // Blank `description_binary` (`page.py:213-224`): the `BinaryField`
+        // save raises `TypeError` and `handle_exception` answers the generic
+        // 500 before the transaction and version tasks (:555-556).
+        Err(PatchRejection::ServerError) => return Denial::ServerError.into_response(),
     };
     // `update()` (`page.py:213-225`) plus `Page.save()`'s
     // `description_stripped` recompute (`db/models/page.py:70-77`: `None`
@@ -4385,12 +4403,15 @@ mod tests {
                 "{INVALID_BINARY_PREFIX}Binary data contains suspicious content patterns"
             ))
         );
-        // Empty binary passes through (falsy guard, no decode attempted).
+        // Empty binary passes validation untouched (falsy guard, no decode
+        // attempted) but the save raises `TypeError`: the PATCH answers the
+        // generic 500 before writing (PB-0474).
         let empty = case("empty binary passes through");
         assert_eq!(empty["input"]["description_binary"], serde_json::json!(""));
-        let patch = validate_patch_body(&serde_json::json!({"description_binary": ""}))
-            .expect("empty binary");
-        assert_eq!(patch.binary, Some(Vec::new()));
+        assert_eq!(
+            validate_patch_body(&serde_json::json!({"description_binary": ""})),
+            Err(PatchRejection::ServerError)
+        );
         // HTML sanitize substitution replaces the input with the cleaned HTML.
         let sanitize = case("HTML sanitize substitution");
         let patch = validate_patch_body(&serde_json::json!({
@@ -4443,10 +4464,27 @@ mod tests {
                 format!("{INVALID_BINARY_PREFIX}Binary data contains suspicious content patterns")
             )]
         );
-        // Empty passes through as an empty overwrite.
-        let patch = validate_patch_body(&serde_json::json!({"description_binary": ""}))
-            .expect("empty binary");
-        assert_eq!(patch.binary, Some(Vec::new()));
+        // Empty/whitespace-only binary rejects with the generic 500, not an
+        // empty overwrite (PB-0474).
+        for blank in ["", "   ", "\t"] {
+            assert_eq!(
+                validate_patch_body(&serde_json::json!({"description_binary": blank})),
+                Err(PatchRejection::ServerError)
+            );
+        }
+        // A field error on another key still wins as 400 (`is_valid()` runs
+        // before `save()`): the blank binary does not force the 500.
+        let mixed_errors = match validate_patch_body(&serde_json::json!({
+            "description_binary": "",
+            "description_html": "p".repeat(crate::space::sanitize::MAX_HTML_BYTES + 1),
+        })) {
+            Err(PatchRejection::Fields(errors)) => errors,
+            other => panic!("expected field errors, got {other:?}"),
+        };
+        assert_eq!(
+            mixed_errors,
+            vec![(HTML_FIELD.to_owned(), HTML_TOO_LARGE_MESSAGE.to_owned())]
+        );
         // Error bodies render byte-identically.
         assert_eq!(
             field_errors_body(&errors).to_string(),
