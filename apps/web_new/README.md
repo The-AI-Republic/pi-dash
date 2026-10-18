@@ -111,3 +111,4 @@ LICENSE_HEADER.txt    the ONE file defining the license header (interim
    are only reached through `import()` — never a static import.
 7. Adding a runtime dependency needs review: update `allowlist.json`, explain
    in the PR why an existing choice does not work, and note its gzipped size.
+
