@@ -951,10 +951,12 @@ async fn project_estimates_points(
 /// by physical row order. Python sums the queryset in return order
 /// (no `order_by`), which is `ctid` order on a plain seqscan — the
 /// `ORDER BY i.ctid` reproduces that summation order so float
-/// accumulation matches bit for bit.
+/// accumulation matches bit for bit. The completion date is
+/// `TruncDate(completed_at)` in the actor's active zone, bound as `$4`
+/// (`TimezoneMixin` activates `user_timezone`).
 fn burndown_points_sql() -> String {
     format!(
-        "SELECT (i.completed_at AT TIME ZONE 'UTC')::date AS d, \
+        "SELECT (i.completed_at AT TIME ZONE $4)::date AS d, \
            CAST(ep.value AS FLOAT) AS v \
          {from} \
          {est} \
@@ -966,11 +968,11 @@ fn burndown_points_sql() -> String {
     )
 }
 
-/// Issues-burndown rows: completed counts per UTC date (`TruncDate`
-/// renders in `TIME_ZONE "UTC"`).
+/// Issues-burndown rows: completed counts per date, truncated in the
+/// actor's active zone (bound as `$4`).
 fn burndown_issues_sql() -> String {
     format!(
-        "SELECT (i.completed_at AT TIME ZONE 'UTC')::date AS d, COUNT(*) AS n \
+        "SELECT (i.completed_at AT TIME ZONE $4)::date AS d, COUNT(*) AS n \
          {from} \
          WHERE {scope} AND i.completed_at IS NOT NULL \
          GROUP BY d ORDER BY d",
@@ -1331,11 +1333,13 @@ async fn fetch_burndown_points(
     slug: &str,
     project_id: &uuid::Uuid,
     cycle_id: &uuid::Uuid,
+    timezone: &str,
 ) -> Result<Vec<(Option<NaiveDate>, ChartValue)>, Denial> {
     let rows = sqlx::query(&burndown_points_sql())
         .bind(slug)
         .bind(project_id)
         .bind(cycle_id)
+        .bind(timezone)
         .fetch_all(pool)
         .await
         .map_err(|_| Denial::ServerError)?;
@@ -1355,11 +1359,13 @@ async fn fetch_burndown_issues(
     slug: &str,
     project_id: &uuid::Uuid,
     cycle_id: &uuid::Uuid,
+    timezone: &str,
 ) -> Result<Vec<(Option<NaiveDate>, ChartValue)>, Denial> {
     let rows = sqlx::query(&burndown_issues_sql())
         .bind(slug)
         .bind(project_id)
         .bind(cycle_id)
+        .bind(timezone)
         .fetch_all(pool)
         .await
         .map_err(|_| Denial::ServerError)?;
@@ -1497,7 +1503,14 @@ async fn archived_retrieve(
                 .await?;
         let mut chart = String::from("{}");
         if let (Some(start), Some(end)) = (start, end) {
-            let points = fetch_burndown_points(&pool, &slug, &project_id, &pk).await?;
+            let points = fetch_burndown_points(
+                &pool,
+                &slug,
+                &project_id,
+                &pk,
+                resolved.timezone.name(),
+            )
+            .await?;
             // Python `sum(issue_estimates)` starts at int 0 and adds in
             // queryset order — the fold below is that sum, typed.
             let total = points
@@ -1531,7 +1544,14 @@ async fn archived_retrieve(
     let labels = fetch_label_counts(&pool, &slug, &project_id, &pk).await?;
     let mut chart = String::from("{}");
     if let (Some(start), Some(end)) = (start, end) {
-        let issues = fetch_burndown_issues(&pool, &slug, &project_id, &pk).await?;
+        let issues = fetch_burndown_issues(
+            &pool,
+            &slug,
+            &project_id,
+            &pk,
+            resolved.timezone.name(),
+        )
+        .await?;
         chart = burndown_chart(
             ChartValue::Int(total_issues),
             &issues,
@@ -1989,17 +2009,21 @@ mod tests {
         }
         assert!(!fetch_list_sql().contains("$5"));
         assert!(fetch_detail_sql().contains("c.id = $5"));
-        // Distributions bind exactly three (slug, project, cycle).
+        // Distributions bind exactly three (slug, project, cycle); the
+        // burndown queries add `$4` (the actor's zone).
         for sql in [
             assignee_estimate_sql(),
             label_estimate_sql(),
             assignee_count_sql(),
             label_count_sql(),
-            burndown_points_sql(),
-            burndown_issues_sql(),
         ] {
             assert!(sql.contains("ci.cycle_id = $3"), "cycle bind");
             assert!(!sql.contains("$4"), "no fourth bind");
+            assert!(!sql.contains("$5"), "no fifth bind");
+        }
+        for sql in [burndown_points_sql(), burndown_issues_sql()] {
+            assert!(sql.contains("ci.cycle_id = $3"), "cycle bind");
+            assert!(sql.contains("AT TIME ZONE $4"), "actor zone bind");
             assert!(!sql.contains("$5"), "no fifth bind");
         }
     }

@@ -39,9 +39,12 @@
 //! - `completion_chart` is `burndown_plot` (`utils/analytics_plot.py:
 //!   123-264`, cycle path): per-day pending (total minus completed on
 //!   or before the day) over the inclusive start..end range; future
-//!   days are `null`; `TruncDate` runs in UTC (`TIME_ZONE = "UTC"`).
-//!   The `points` chart needs the points estimate (only called when it
-//!   exists); the `issues` chart counts completions per day.
+//!   days are `null`; the range endpoints and "today" are UTC
+//!   (`TruncDate` on a range endpoint is a plain date), while the
+//!   completion buckets truncate in the actor's active zone
+//!   (`TimezoneMixin` activates `user_timezone`). The `points` chart
+//!   needs the points estimate (only called when it exists); the
+//!   `issues` chart counts completions per day.
 //!
 //! Fixture oracle: F-C27-09
 //! (`rust-api/fixtures/app_cycles/analytics.json` + `TRACE.md`).
@@ -352,10 +355,11 @@ fn issues_label_sql() -> String {
 
 /// Burndown completion rows, points flavor
 /// (`analytics_plot.py:166-180`, cycle path): every bridged issue with
-/// an estimate, datestamp from `TruncDate(completed_at)` in UTC; the
-/// caller drops `NULL` dates (`item["date"] is not None`).
+/// an estimate, datestamp from `TruncDate(completed_at)` in the actor's
+/// active zone (`TimezoneMixin` activates `user_timezone`), bound as
+/// `$4`; the caller drops `NULL` dates (`item["date"] is not None`).
 const BURNDOWN_POINTS_SQL: &str =
-    "SELECT (i.completed_at AT TIME ZONE 'UTC')::date AS d, ep.value AS v \
+    "SELECT (i.completed_at AT TIME ZONE $4)::date AS d, ep.value AS v \
      FROM issues i \
      JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $3 AND ci.deleted_at IS NULL \
      JOIN workspaces w ON w.id = i.workspace_id AND w.slug = $1 \
@@ -367,9 +371,10 @@ const BURNDOWN_POINTS_SQL: &str =
      ORDER BY d";
 
 /// Burndown completion rows, issues flavor
-/// (`analytics_plot.py:182-193`, cycle path): per-day completed counts.
+/// (`analytics_plot.py:182-193`, cycle path): per-day completed counts,
+/// truncated in the actor's active zone (bound as `$4`).
 const BURNDOWN_ISSUES_SQL: &str =
-    "SELECT (i.completed_at AT TIME ZONE 'UTC')::date AS d, COUNT(*) AS c \
+    "SELECT (i.completed_at AT TIME ZONE $4)::date AS d, COUNT(*) AS c \
      FROM issues i \
      JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $3 AND ci.deleted_at IS NULL \
      JOIN workspaces w ON w.id = i.workspace_id AND w.slug = $1 \
@@ -745,6 +750,7 @@ async fn analytics_get(
             .bind(&slug)
             .bind(project_id)
             .bind(cycle_id)
+            .bind(resolved.timezone.name())
             .fetch_all(&pool)
             .await
             .map_err(|_| Denial::ServerError)?;
@@ -818,6 +824,7 @@ async fn analytics_get(
             .bind(&slug)
             .bind(project_id)
             .bind(cycle_id)
+            .bind(resolved.timezone.name())
             .fetch_all(&pool)
             .await
             .map_err(|_| Denial::ServerError)?;
@@ -1055,7 +1062,10 @@ mod tests {
         assert!(issues_assignee_sql().contains("COUNT(u.id)"));
         assert!(issues_label_sql().contains("COUNT(l.id)"));
         assert!(points_assignee_sql().contains("/api/assets/v2/static/"));
-        assert!(BURNDOWN_POINTS_SQL.contains("AT TIME ZONE 'UTC'"));
+        // PIDASHCONV-1184: only the completion buckets truncate in the
+        // actor's active zone; the range endpoints and "today" stay UTC.
+        assert!(BURNDOWN_POINTS_SQL.contains("AT TIME ZONE $4"));
+        assert!(BURNDOWN_ISSUES_SQL.contains("AT TIME ZONE $4"));
         assert!(CYCLE_SQL.contains("COUNT(DISTINCT ci.issue_id)"));
         assert!(ESTIMATE_TYPE_SQL.contains("e.type = 'points'"));
     }
