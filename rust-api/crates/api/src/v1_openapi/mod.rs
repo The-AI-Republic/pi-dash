@@ -27,6 +27,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
+pub mod negotiate;
 pub mod schema;
 pub mod throttle;
 pub mod ui;
@@ -46,7 +47,8 @@ use axum::Router;
 use crate::edge;
 use crate::state::AppState;
 
-use throttle::{DenialRenderer, SchemaThrottled};
+use negotiate::Renderer;
+use throttle::SchemaThrottled;
 
 /// `Allow` on every response from these views (DRF
 /// `default_response_headers`, `views.py:154-162`; verified against the
@@ -448,7 +450,7 @@ pub(crate) fn view_shell(mut response: Response, vary_accept: bool) -> Response 
 /// Build one response with content type and the view shell.
 pub(crate) fn view_response(
     status: StatusCode,
-    content_type: &'static str,
+    content_type: &str,
     body: Vec<u8>,
     vary_accept: bool,
 ) -> Response {
@@ -463,11 +465,12 @@ pub(crate) fn view_response(
 /// Answer a throttled request: the renderer-appropriate 429 denial plus
 /// the view shell (`Allow`, and `Vary` on the doc routes).
 pub(crate) fn throttled(
-    renderer: DenialRenderer,
+    renderer: Renderer,
+    media_type: String,
     wait: Option<f64>,
     vary_accept: bool,
 ) -> Response {
-    let denied = SchemaThrottled::new(renderer, wait).into_response();
+    let denied = SchemaThrottled::new(renderer, media_type, wait).into_response();
     view_shell(denied, vary_accept)
 }
 
