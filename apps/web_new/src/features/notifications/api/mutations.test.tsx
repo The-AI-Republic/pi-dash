@@ -32,6 +32,9 @@ import {
   applyRowToPage,
   mergeWrittenRow,
   rowBelongsToStream,
+  streamPages,
+  writeRowToStream,
+  type StreamData,
   useSnoozeNotification,
   useToggleNotificationArchive,
   useToggleNotificationRead,
@@ -161,6 +164,25 @@ function seededClient(
   return client;
 }
 
+/** Seed the cursor stream the inbox actually reads, plus its first page. */
+function seedPages(
+  client: QueryClient,
+  query: { snoozed: boolean; archived: boolean },
+  pages: NotificationItem[][]
+): void {
+  const built = pages.map(page);
+  client.setQueryData(notificationKeys.list(WS, query), built[0]);
+  client.setQueryData(notificationKeys.pages(WS, query), {
+    pages: built,
+    pageParams: built.map((_page, index) => `300:${index * 300}:${index}`),
+  });
+}
+
+function pageRows(client: QueryClient, query: { snoozed: boolean; archived: boolean }): string[][] {
+  const data = client.getQueryData<Extract<StreamData, { pages: unknown }>>(notificationKeys.pages(WS, query));
+  return (data?.pages ?? []).map((entry) => entry.results.map((result) => result.id));
+}
+
 function streamRows(client: QueryClient, query: { snoozed: boolean; archived: boolean }): string[] {
   const data = client.getQueryData<NotificationListResponse>(notificationKeys.list(WS, query));
   return (data?.results ?? []).map((entry) => entry.id);
@@ -230,6 +252,67 @@ describe("applyRowToPage", () => {
 
   it("passes an absent page through", () => {
     expect(applyRowToPage(undefined, {}, row())).toBeUndefined();
+  });
+});
+
+describe("streamPages", () => {
+  it("reads a first-page cache as one page", () => {
+    const first = page([row()]);
+    expect(streamPages(first)).toEqual([first]);
+  });
+
+  it("keeps cursor pages in order", () => {
+    const first = page([row()]);
+    const second = page([row({ id: OTHER })]);
+    expect(streamPages({ pages: [first, second], pageParams: ["a", "b"] })).toEqual([first, second]);
+  });
+
+  it("reads an absent stream as no pages", () => {
+    expect(streamPages(undefined)).toEqual([]);
+  });
+});
+
+describe("writeRowToStream", () => {
+  const query = { snoozed: false, archived: false };
+
+  it("passes an absent stream through", () => {
+    expect(writeRowToStream(undefined, query, row())).toBeUndefined();
+  });
+
+  it("writes a first-page cache in place", () => {
+    const next = writeRowToStream(page([row(), row({ id: OTHER })]), query, row({ read_at: "now" }));
+    expect(next).toEqual(page([row({ read_at: "now" }), row({ id: OTHER })]));
+  });
+
+  it("leaves a first-page cache untouched when the row neither lists nor joins it", () => {
+    const original = page([row({ id: OTHER })]);
+    expect(writeRowToStream(original, { snoozed: false, archived: true }, row())).toBe(original);
+  });
+
+  it("drops a leaving row from a later page and keeps the other rows", () => {
+    const first = page([row({ id: OTHER })]);
+    const second = page([row(), row({ id: "823e4567-e89b-12d3-a456-426614174007" })]);
+    const next = writeRowToStream(
+      { pages: [first, second], pageParams: ["a", "b"] },
+      { snoozed: false, archived: true },
+      row()
+    ) as Extract<StreamData, { pages: unknown }>;
+    // The page object keeps its cursor bookkeeping; only its rows shrink.
+    expect(next?.pages[0]).toBe(first);
+    expect(next?.pages[1]?.results.map((entry) => entry.id)).toEqual(["823e4567-e89b-12d3-a456-426614174007"]);
+  });
+
+  it("adds a joining row to the newest page only", () => {
+    const first = page([row({ id: OTHER })]);
+    const second = page([row({ id: "823e4567-e89b-12d3-a456-426614174007" })]);
+    const archived = row({ archived_at: "now" });
+    const next = writeRowToStream(
+      { pages: [first, second], pageParams: ["a", "b"] },
+      { snoozed: false, archived: true },
+      archived
+    ) as Extract<StreamData, { pages: unknown }>;
+    expect(next?.pages[0]?.results).toEqual([archived, row({ id: OTHER })]);
+    expect(next?.pages[1]).toEqual(second);
   });
 });
 
@@ -402,6 +485,55 @@ describe("useToggleNotificationArchive", () => {
 
     expect(client.getQueryData(notificationKeys.list(WS, { snoozed: false, archived: false }))).toEqual(before);
     expect(notifySuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe("cursor stream writes", () => {
+  it("reads the card out of the page it sits on and leaves the other pages alone", async () => {
+    stubApi();
+    const client = seededClient();
+    const query = { snoozed: false, archived: false };
+    seedPages(client, query, [[row({ id: OTHER })], [row({ id: ID })]]);
+    seedPages(client, { snoozed: false, archived: true }, [[]]);
+    const { result } = renderHook(() => useToggleNotificationArchive(WS), { wrapper: wrapper(client) });
+
+    await result.current.mutateAsync({ id: ID, archived: true, flags: FLAGS });
+
+    // The card leaves the older page; the first page keeps its row.
+    expect(pageRows(client, query)).toEqual([[OTHER], []]);
+    expect(pageRows(client, { snoozed: false, archived: true })).toEqual([[ID]]);
+  });
+
+  it("puts a card that rejoins a stream on its newest page", async () => {
+    stubApi();
+    const client = seededClient();
+    // Rejoin the default stream, which already holds older pages.
+    const base = { snoozed: false, archived: false };
+    seedPages(client, base, [[row({ id: OTHER })], [row({ id: OTHER, created_at: "2026-10-01T00:00:00Z" })]]);
+    seedPages(client, { snoozed: false, archived: true }, [[row({ id: ID })]]);
+    const { result } = renderHook(() => useToggleNotificationArchive(WS), { wrapper: wrapper(client) });
+
+    await result.current.mutateAsync({ id: ID, archived: false, flags: FLAGS });
+
+    expect(pageRows(client, base)).toEqual([[ID, OTHER], [OTHER]]);
+    expect(pageRows(client, { snoozed: false, archived: true })).toEqual([[]]);
+  });
+
+  it("settles the server row into the cursor page and keeps stream flags", async () => {
+    stubApi({ echo: () => row({ snoozed_till: "2026-10-19T17:30:00.000Z" }) });
+    const client = seededClient();
+    seedPages(client, { snoozed: false, archived: false }, [[row()]]);
+    seedPages(client, { snoozed: true, archived: false }, [[]]);
+    const { result } = renderHook(() => useSnoozeNotification(WS), { wrapper: wrapper(client) });
+
+    await result.current.mutateAsync({ id: ID, snoozedTill: "2026-10-19T17:30:00.000Z", flags: FLAGS });
+
+    const snoozed = client.getQueryData<Extract<StreamData, { pages: unknown }>>(
+      notificationKeys.pages(WS, { snoozed: true, archived: false })
+    );
+    expect(snoozed?.pages).toHaveLength(1);
+    expect(snoozed?.pages[0]?.results[0]?.snoozed_till).toBe("2026-10-19T17:30:00.000Z");
+    expect(snoozed?.pages[0]?.results[0]?.is_inbox_issue).toBe(true);
   });
 });
 

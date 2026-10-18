@@ -8,7 +8,7 @@
 // toast. Stream membership follows the write: a card leaves a stream whose
 // flags exclude its new state and joins the matching one. Toggling a
 // failed write again therefore retries cleanly.
-import { useMutation, useQueryClient, type QueryClient, type QueryKey } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type InfiniteData, type QueryClient, type QueryKey } from "@tanstack/react-query";
 import {
   archiveNotification,
   markNotificationRead,
@@ -66,6 +66,43 @@ function withStreamFlags(row: NotificationItem, flags: StreamFlags): Notificatio
 
 /** What a cached stream page answers to. */
 type StreamPage = NotificationListResponse | undefined;
+
+/** A cached stream: either the first page alone or the cursor pages. */
+export type StreamData = NotificationListResponse | InfiniteData<NotificationListResponse, string>;
+
+function isPage(value: unknown): value is NotificationListResponse {
+  return typeof value === "object" && value !== null && Array.isArray((value as { results?: unknown }).results);
+}
+
+/** Every page a cached stream holds, oldest page last. */
+export function streamPages(data: StreamData | undefined): NotificationListResponse[] {
+  if (data === undefined) return [];
+  if (isPage(data)) return [data];
+  return data.pages;
+}
+
+/**
+ * Write a row into a cached stream. A card that joins a stream belongs on
+ * its first page (reads walk from the newest row); a card that leaves or
+ * changes is removed from whichever later page still lists it, and those
+ * pages keep their own contents otherwise.
+ */
+export function writeRowToStream(
+  data: StreamData | undefined,
+  query: NotificationListQuery,
+  row: NotificationItem
+): StreamData | undefined {
+  if (data === undefined) return undefined;
+  if (isPage(data)) return applyRowToPage(data, query, row) ?? data;
+  return {
+    ...data,
+    pages: data.pages.map((page, index) =>
+      index === 0
+        ? (applyRowToPage(page, query, row) ?? page)
+        : { ...page, results: page.results.filter((entry) => entry.id !== row.id) }
+    ),
+  };
+}
 
 /**
  * Whether a card belongs in a stream: archived mode holds only archived
@@ -148,8 +185,9 @@ function applyCardWrite(
     // so the delta is computed once (archived and snoozed views can both
     // hold the same card).
     const source = listEntries
-      .map(({ query: listed }) => (listed.state.data as StreamPage)?.results.find((entry) => entry.id === id))
-      .find((candidate) => candidate !== undefined);
+      .flatMap(({ query: listed }) => streamPages(listed.state.data as StreamData | undefined))
+      .flatMap((page) => page.results)
+      .find((entry) => entry.id === id);
     if (totals === undefined || source === undefined) continue;
     const delta = unreadDelta(source, quote(withStreamFlags(source, flags)));
     if (delta !== 0) {
@@ -160,10 +198,14 @@ function applyCardWrite(
     }
   }
   for (const { query, streamQuery } of listEntries) {
-    const page = query.state.data as NotificationListResponse;
-    const row = page.results.find((entry) => entry.id === id);
+    const row = streamPages(query.state.data as StreamData | undefined)
+      .flatMap((page) => page.results)
+      .find((entry) => entry.id === id);
     if (row === undefined) continue;
-    client.setQueryData(query.queryKey, applyRowToPage(page, streamQuery, quote(withStreamFlags(row, flags))));
+    const written = quote(withStreamFlags(row, flags));
+    client.setQueryData(query.queryKey, (current: StreamData | undefined) =>
+      writeRowToStream(current, streamQuery, written)
+    );
   }
   return { snapshots };
 }
@@ -184,18 +226,20 @@ async function settleWrite(
   for (const query of client.getQueryCache().findAll({ queryKey: notificationKeys.all(workspaceSlug) })) {
     const streamQuery = notificationListQueryFromKey(workspaceSlug, query.queryKey);
     if (streamQuery === null) continue;
-    const page = query.state.data as NotificationListResponse;
     // The optimistic pass already placed the card where it now belongs;
     // settle only swaps the server's row in for the optimistic one,
     // keeping the annotations the mutation echo drops. The card's own
     // flags came from the listed row before the write.
     const listed = snapshots
       .filter((snapshot) => notificationListQueryFromKey(workspaceSlug, snapshot.queryKey) !== null)
-      .map((snapshot) => (snapshot.data as StreamPage)?.results.find((entry) => entry.id === written.id))
-      .find((entry) => entry !== undefined);
+      .flatMap((snapshot) => streamPages(snapshot.data as StreamData | undefined))
+      .flatMap((page) => page.results)
+      .find((entry) => entry.id === written.id);
     if (listed === undefined) continue;
     const fresh = mergeWrittenRow(withStreamFlags(listed, flags), written);
-    client.setQueryData(query.queryKey, applyRowToPage(page, streamQuery, fresh));
+    client.setQueryData(query.queryKey, (current: StreamData | undefined) =>
+      writeRowToStream(current, streamQuery, fresh)
+    );
   }
 }
 

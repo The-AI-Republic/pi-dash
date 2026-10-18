@@ -24,8 +24,9 @@ export function notificationListQueryFromKey(
 ): NotificationListQuery | null {
   const root = notificationKeys.lists(workspaceSlug);
   // The key is the lists root (which already ends in "list") followed by
-  // the five query parts.
-  if (key.length !== root.length + 5) return null;
+  // the five query parts and, for the cursor stream, a trailing "pages".
+  const isPages = key.length === root.length + 6 && key[root.length + 5] === "pages";
+  if (!isPages && key.length !== root.length + 5) return null;
   if (root.some((part, index) => key[index] !== part)) return null;
   const [type, snoozed, archived, read, mentioned] = key.slice(root.length) as [
     string | null,

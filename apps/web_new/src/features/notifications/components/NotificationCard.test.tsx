@@ -14,6 +14,8 @@ import { NotificationCard, type NotificationCardActions } from "./NotificationCa
 function card(overrides: Partial<NotificationCardData> = {}): NotificationCardData {
   return {
     id: "523e4567-e89b-12d3-a456-426614174004",
+    issueId: "123e4567-e89b-12d3-a456-426614174000",
+    projectId: "223e4567-e89b-12d3-a456-426614174001",
     actorName: "Ada Lovelace",
     actorAvatarUrl: "https://cdn.test/ada.png",
     summary: "Ada Lovelace commented: looks good",
@@ -21,6 +23,8 @@ function card(overrides: Partial<NotificationCardData> = {}): NotificationCardDa
     title: "Ship it",
     createdAt: new Date(Date.now() - 30_000).toISOString(),
     unread: true,
+    mentioned: false,
+    triage: false,
     archivedAt: null,
     snoozedTill: null,
     streamFlags: { is_inbox_issue: true, is_intake_issue: false, is_mentioned_notification: false },

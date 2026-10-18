@@ -43,6 +43,9 @@ function selection(overrides: Partial<NotificationCardData> = {}): NotificationC
     unread: false,
     mentioned: false,
     triage: false,
+    archivedAt: null,
+    snoozedTill: null,
+    streamFlags: { is_inbox_issue: false, is_intake_issue: false, is_mentioned_notification: false },
     ...overrides,
   };
 }

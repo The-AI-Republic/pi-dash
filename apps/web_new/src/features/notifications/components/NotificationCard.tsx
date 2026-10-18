@@ -129,6 +129,7 @@ export function NotificationCard({
 }: NotificationCardProps): React.ReactElement {
   return (
     <div
+      role="article"
       data-testid="inbox-card"
       data-unread={card.unread ? "true" : "false"}
       data-selected={selected ? "true" : "false"}

@@ -392,8 +392,9 @@ describe("InboxView", () => {
     const user = userEvent.setup();
     const first = renderView({ serveReads: true, defaultPage: page([row()]) });
     const card = await screen.findByTestId("inbox-card");
+    const openButton = within(card).getByTestId("inbox-card-select");
     expect(screen.getByTestId("notifications-detail-placeholder")).toBeInTheDocument();
-    await user.click(card);
+    await user.click(openButton);
     await waitFor(() => expect(card).toHaveAttribute("data-unread", "false"));
     await waitFor(() =>
       expect(screen.getByTestId("notifications-detail-pane")).toHaveAttribute("data-detail-variant", "peek")
@@ -410,7 +411,7 @@ describe("InboxView", () => {
 
     await user.click(within(pane).getByTestId("notifications-detail-close"));
     expect(screen.getByTestId("notifications-detail-placeholder")).toBeInTheDocument();
-    await user.click(card);
+    await user.click(openButton);
     await waitFor(() =>
       expect(first.calls.filter((url) => /\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname))).toHaveLength(1)
     );
@@ -426,11 +427,11 @@ describe("InboxView", () => {
     const user = userEvent.setup();
     const { calls } = renderView({ serveReads: true, defaultPage: page([row()]), failFirstRead: true });
     const card = await screen.findByTestId("inbox-card");
-    await user.click(card);
+    await user.click(within(card).getByTestId("inbox-card-select"));
     await waitFor(() =>
       expect(calls.filter((url) => /\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname))).toHaveLength(1)
     );
-    await user.click(card);
+    await user.click(within(card).getByTestId("inbox-card-select"));
     await waitFor(() => expect(card).toHaveAttribute("data-unread", "false"));
     expect(calls.filter((url) => /\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname))).toHaveLength(2);
   });
@@ -447,10 +448,10 @@ describe("InboxView", () => {
     const [firstCard, secondCard] = await screen.findAllByTestId("inbox-card");
     if (firstCard === undefined || secondCard === undefined) throw new Error("expected two notification cards");
 
-    await user.click(firstCard);
-    await user.click(secondCard);
+    await user.click(within(firstCard).getByTestId("inbox-card-select"));
+    await user.click(within(secondCard).getByTestId("inbox-card-select"));
     await waitFor(() => expect(firstReadDidFail()).toBe(true));
-    await user.click(firstCard);
+    await user.click(within(firstCard).getByTestId("inbox-card-select"));
 
     await waitFor(() =>
       expect(calls.filter((url) => /\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname))).toHaveLength(3)

@@ -99,7 +99,7 @@ function renderInbox(): { writes: string[] } {
     total_unread_notifications_count: 2,
     mention_unread_notifications_count: 0,
   });
-  client.setQueryData(notificationKeys.list("acme", { snoozed: false, archived: false }), {
+  const listPage = {
     grouped_by: null,
     sub_grouped_by: null,
     total_count: 2,
@@ -110,6 +110,11 @@ function renderInbox(): { writes: string[] } {
     count: 2,
     total_results: 2,
     results: ROWS,
+  };
+  client.setQueryData(notificationKeys.list("acme", { snoozed: false, archived: false }), listPage);
+  client.setQueryData(notificationKeys.pages("acme", { snoozed: false, archived: false }), {
+    pages: [listPage],
+    pageParams: ["300:0:0"],
   });
   render(
     <QueryClientProvider client={client}>
