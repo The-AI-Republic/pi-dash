@@ -66,4 +66,10 @@ describe("orderLabelOptions", () => {
     expect(orderLabelOptions(labels, ["1"]).map((entry) => entry.id)).toEqual(["1", "2", "3"]);
     expect(orderLabelOptions(labels, []).map((entry) => entry.name)).toEqual(["Alpha", "beta", "zeta"]);
   });
+
+  it("sorts applied labels among themselves and leaves the rest after them", () => {
+    const labels = [label("1", "zeta"), label("2", "Alpha"), label("3", "beta")];
+    expect(orderLabelOptions(labels, ["1", "2"]).map((entry) => entry.name)).toEqual(["Alpha", "zeta", "beta"]);
+    expect(orderLabelOptions(labels, ["3", "1"]).map((entry) => entry.name)).toEqual(["beta", "zeta", "Alpha"]);
+  });
 });

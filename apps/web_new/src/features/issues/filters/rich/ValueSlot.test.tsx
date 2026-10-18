@@ -279,6 +279,79 @@ describe("ValueSlot", () => {
     expect(onChange).toHaveBeenLastCalledWith(null);
   });
 
+  it("renders the fixed state-group set with icons", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, "state_group")!}
+          condition={{ key: "a", property: "state_group", operator: "in", negated: false, value: null }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    const list = await screen.findByRole("listbox", { name: "State Group values" });
+    const options = within(list).getAllByRole("option");
+    expect(options).toHaveLength(5);
+    for (const option of options) expect(option.querySelector("svg")).not.toBeNull();
+  });
+
+  it("shows an empty list for a field with no source and no static values", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={{
+            stem: "custom",
+            label: "Custom",
+            kind: "multi",
+            defaultOperator: "in",
+            defaultNegated: false,
+            operators: ["in"],
+            allowNegative: true,
+          }}
+          condition={{ key: "a", property: "custom", operator: "in", negated: false, value: null }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    expect(await screen.findByText("No matching values")).toBeInTheDocument();
+  });
+
+  it("leaves a static value with no icon unshaped", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={{
+            stem: "custom",
+            label: "Custom",
+            kind: "multi",
+            defaultOperator: "in",
+            defaultNegated: false,
+            operators: ["in"],
+            allowNegative: true,
+            staticValues: [{ value: "one", label: "One" }],
+          }}
+          condition={{ key: "a", property: "custom", operator: "in", negated: false, value: null }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    const list = await screen.findByRole("listbox", { name: "Custom values" });
+    expect(within(list).getAllByRole("option")).toHaveLength(1);
+    expect(within(list).getByRole("option", { name: "One" }).querySelector("svg")).toBeNull();
+  });
+
   it("counts more than two picks", () => {
     render(
       wrap(
@@ -321,7 +394,7 @@ describe("ValueSlot member and label sources", () => {
   const ZOE = "523e4567-e89b-12d3-a456-426614174004";
   const ME = "623e4567-e89b-12d3-a456-426614174005";
 
-  function directoryMember(id: string, name: string) {
+  function directoryMember(id: string, name: string, avatarUrl: string | null = null) {
     return {
       id: `${id}-membership`,
       member: {
@@ -329,7 +402,7 @@ describe("ValueSlot member and label sources", () => {
         first_name: name,
         last_name: "",
         avatar: "",
-        avatar_url: null,
+        avatar_url: avatarUrl,
         display_name: name,
         is_bot: false,
       },
@@ -471,6 +544,59 @@ describe("ValueSlot member and label sources", () => {
     ).toEqual(["Zeta", "Alpha"]);
     await user.click(within(list).getByRole("option", { name: /Alpha/ }));
     expect(onChange).toHaveBeenCalledWith(["label-z", "label-a"]);
+  });
+
+  it("renders a member avatar image when the directory has one", async () => {
+    const user = userEvent.setup();
+    const AVATAR = "https://cdn.test/ana.png";
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, "assignee_id")!}
+          condition={{ key: "a", property: "assignee_id", operator: "in", negated: false, value: null }}
+          onChange={() => {}}
+        />,
+        (url) => {
+          if (url.endsWith("/api/users/me/")) return ME_ROW;
+          if (url.includes("/projects/") && url.endsWith("/members/")) {
+            return [
+              {
+                id: "923e4567-e89b-12d3-a456-426614174008",
+                role: 15,
+                member: ANA,
+                project: PROJECT,
+                original_role: 15,
+                created_at: "2026-01-01T00:00:00.000Z",
+              },
+            ];
+          }
+          if (url.endsWith("/members/")) {
+            return [
+              {
+                id: "a23e4567-e89b-12d3-a456-426614174009",
+                member: {
+                  id: ANA,
+                  first_name: "Ana",
+                  last_name: "Roa",
+                  avatar: "",
+                  avatar_url: AVATAR,
+                  display_name: "Ana Roa",
+                  is_bot: false,
+                },
+                role: 15,
+                is_active: true,
+              },
+            ];
+          }
+          return null;
+        }
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    const option = await screen.findByRole("option", { name: /Ana/ });
+    expect(option.querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
   });
 
   it("shows the loading row while the member directory resolves", async () => {
