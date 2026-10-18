@@ -43,7 +43,10 @@ KNOWN_FAILURES_MD = CT / "KNOWN_RUST_FAILURES.md"
 # rust-api-contract-tests-ops*.yml workflows); replay drives HTTP against
 # its own two-database topology (covered by rust-api-replay.yml); exports
 # drives its own two-workflow oracle (exports Django oracle +
-# rust-api-contract-tests-exports-rust.yml), never HTTP. Add a directory
+# rust-api-contract-tests-exports-rust.yml), never HTTP. tasks_assistant
+# seeds rust_job_queue with the assistant.run_turn wire payloads and diffs
+# the turn/message rows against a live Rust worker (PIDASHCONV-863, covered
+# by rust-api-contract-tests-tasks-assistant-rust.yml). Add a directory
 # here only with a justification; ``check`` fails on any other unlisted
 # directory.
 TASK_ONLY_DIRS = frozenset(
@@ -53,6 +56,7 @@ TASK_ONLY_DIRS = frozenset(
         "integrations",
         "ops",
         "replay",
+        "tasks_assistant",
         "tasks_cleanup",
         "tasks_mail",
         "tasks_ticker",
