@@ -4,17 +4,19 @@
 // The client-side sign-out sequence (AUTH-017). Every entry point — the
 // shell menus and palette, the switch and deactivation dialogs, and later
 // the not-found screen and the change-email dialog — runs this one path:
-// a fresh-CSRF sign-out POST, then client clearing, then the desktop local
-// teardown, then the signed-out landing. Written from
-// parity/specs/auth.md; there is no agent runtime to dispose in this app,
-// and on desktop the daemon lifecycle rides the teardown seam the desktop
-// epic owns (DESK-010).
+// the desktop runtime disposal first (RUN-047: confirm, then daemon stop
+// and server enrollment removal while the session is still live), then a
+// fresh-CSRF sign-out POST, then client clearing, then the native webview
+// wipe, then the signed-out landing. Written from parity/specs/auth.md;
+// the runtime steps arrive through the registered hooks the runners
+// feature owns, so this file never imports a domain feature.
 
 import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { signOut as postSignOut, type ApiClient } from "@pidash/api-client";
 
 import { getAppClient } from "../../core/api/client.js";
 import { platform, type SessionTeardownApi } from "../../core/platform/index.js";
+import { getRuntimeSignOutHooks } from "../../core/session/index.js";
 import { signOut as clearSession } from "../../core/session/store.js";
 import { notifyError } from "../../shared/shell/index.js";
 
@@ -29,19 +31,43 @@ export function signOutLandingTarget(kind: "web" | "desktop"): string {
   return kind === "desktop" ? "/login" : "/";
 }
 
+export interface PerformSignOutArgs {
+  client: ApiClient;
+  queryClient: QueryClient;
+  teardown?: SessionTeardownApi | undefined;
+  /**
+   * Skip the desktop runtime confirmation (for sign-outs the user already
+   * confirmed: account switch, deactivation, email change). The runtime is
+   * still disposed, keeping chat history.
+   */
+  skipRuntimeConfirm?: boolean | undefined;
+}
+
 /**
  * Run the sign-out sequence against the given client and cache. A failed
  * POST toasts and rethrows so the caller leaves the user where they are;
  * a failed local teardown is swallowed because the server session is
  * already gone and landing on sign-in stays right. Resolves to the
- * signed-out landing target.
+ * signed-out landing target, or null when the user cancels the desktop
+ * runtime confirmation (nothing is signed out then).
+ *
+ * When runtime hooks are registered (desktop), the runtime disposal runs
+ * before the POST: server enrollment removal needs a live session. The
+ * disposal itself is best-effort, so a failed revocation never traps the
+ * user; a failed POST afterwards still leaves the session intact.
  */
-export async function performSignOut(args: {
-  client: ApiClient;
-  queryClient: QueryClient;
-  teardown?: SessionTeardownApi | undefined;
-}): Promise<string> {
+export function performSignOut(args: PerformSignOutArgs & { skipRuntimeConfirm: true }): Promise<string>;
+export function performSignOut(
+  args: PerformSignOutArgs & { skipRuntimeConfirm?: false | undefined }
+): Promise<string | null>;
+export async function performSignOut(args: PerformSignOutArgs): Promise<string | null> {
   const { client, queryClient, teardown } = args;
+  const runtime = getRuntimeSignOutHooks();
+  if (runtime) {
+    const choice = args.skipRuntimeConfirm ? { deleteChatHistory: false } : await runtime.confirmRuntimeSignOut();
+    if (choice === null) return null;
+    await runtime.disposeRuntimeForSignOut(choice);
+  }
   client.clearCsrfCache();
   try {
     await postSignOut(client);
@@ -64,7 +90,8 @@ export async function performSignOut(args: {
 /**
  * Sign out everywhere (AUTH-017): end the server session, then clear every
  * client store and the query cache, then the desktop local teardown.
- * Resolves to the signed-out landing target; a failed POST toasts and
+ * Resolves to the signed-out landing target, or null when the user
+ * cancels the desktop runtime confirmation; a failed POST toasts and
  * rejects instead, so the caller leaves the user where they are.
  */
 export function useSignOut() {

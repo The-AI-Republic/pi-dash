@@ -14,6 +14,7 @@ import * as React from "react";
 
 import { LanguageProvider } from "../core/i18n/LanguageProvider.js";
 import { ThemeProvider } from "../core/theme/ThemeProvider.js";
+import { RuntimeSignOutLifecycle } from "../features/runners/runtime/SignOutLifecycle.js";
 import { NotFoundPage, markInitialColorScheme, notifyError, useDocumentHead } from "../shared/shell/index.js";
 
 export interface RouterContext {
@@ -33,6 +34,7 @@ export const Route = createRootRouteWithContext<RouterContext>()({
       <QueryClientProvider client={context.queryClient}>
         <ThemeProvider notifyError={notifyError}>
           <LanguageProvider notifyError={notifyError}>
+            <RuntimeSignOutLifecycle />
             <Outlet />
           </LanguageProvider>
         </ThemeProvider>

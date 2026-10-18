@@ -43,5 +43,7 @@ export {
   workspacesQueryOptions,
 } from "./queries.js";
 export type { WorkspaceGateDecision } from "./queries.js";
+export { getRuntimeSignOutHooks, registerRuntimeSignOutHooks } from "./signOutHooks.js";
+export type { RuntimeSignOutChoice, RuntimeSignOutHooks } from "./signOutHooks.js";
 export { registerStoreReset, resetRegisteredStores, signOut, useSessionStore } from "./store.js";
 export type { SessionStatus, StoreReset } from "./store.js";

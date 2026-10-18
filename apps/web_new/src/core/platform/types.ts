@@ -68,17 +68,66 @@ export interface DeepLinkApi {
   onOpenUrl(callback: (url: string) => void): Unsubscribe;
 }
 
+/** What the host self-check reports: which bundled pieces exist, and this machine's label. */
+export interface AgentHostCheck {
+  runnerPresent: boolean;
+  enginePresent: boolean;
+  hostLabel: string;
+}
+
+/**
+ * Engine setup the host writes from the server profile. Keys match the
+ * host schema exactly (the host deserializes them as-is); the runners
+ * feature maps the profile contract onto this shape.
+ */
+export interface AgentEngineProfile {
+  available: boolean;
+  base_url: string;
+  model: string;
+  reason_code: string;
+}
+
 /** Bundled or managed agent runner controls (desktop only). */
 export interface AgentRuntimeApi {
   /** True when a runner is reachable from this build. */
   isAvailable(): Promise<boolean>;
+  /** Self-check the bundled binaries and read this machine's label. */
+  checkHost(): Promise<AgentHostCheck>;
+  /** Write the account's engine setup from the server profile. */
+  writeEngineConfig(input: { account: string; profile: AgentEngineProfile }): Promise<void>;
+  /** Store the short-lived model credential for the engine. */
+  writeModelToken(token: string): Promise<void>;
+  /** Register this machine against a workspace (answers the daemon stdout; ignored). */
+  bootstrapMachine(input: {
+    cloudUrl: string;
+    workspace: string;
+    machineToken: string;
+    devMachineId: string;
+  }): Promise<void>;
+  /** Register one project runner on this machine. */
+  enrollProject(input: { account: string; workspace: string; project: string; hostLabel: string }): Promise<void>;
+  /** Start the bundled daemon (a no-op while it runs; restarts it if it died). */
+  startDaemon(input: { account: string; workspace: string }): Promise<void>;
+  /** Stop the daemon, waiting up to the grace period (5 seconds when omitted). */
+  stopDaemon(graceSeconds?: number | undefined): Promise<void>;
+  /**
+   * Native sign-out: stop the daemon and destroy every local credential.
+   * Pass the account to also delete its on-machine chat history.
+   */
+  signOutNative(input?: { deleteChatHistoryAccount?: string | undefined } | undefined): Promise<void>;
+  /** Hand approval modes to the host so they survive the webview wipe. */
+  saveApprovalModes(account: string, modes: Record<string, string>): Promise<void>;
+  /** Read back the modes stashed for an account (empty when there are none). */
+  loadApprovalModes(account: string): Promise<Record<string, string>>;
 }
 
 /**
- * Local session teardown (desktop only). The auth area calls this around
- * sign-out (AUTH-017); the desktop epic implements and proves it
- * (DESK-010: daemon stop, credential destroy, enrollment removal, webview
- * wipe). Callers swallow failures: landing on sign-in stays right.
+ * Local session teardown (desktop only). The auth area calls this after the
+ * sign-out POST (AUTH-017): the daemon stop, credential destroy and server
+ * enrollment removal run before the POST through the runners disposal
+ * (RUN-047 — revocation needs a live session), and this hook wipes the
+ * webview store the POST no longer needs. Callers swallow failures:
+ * landing on sign-in stays right.
  */
 export interface SessionTeardownApi {
   /** Wipe local session artifacts. Rejects when the wipe fails. */

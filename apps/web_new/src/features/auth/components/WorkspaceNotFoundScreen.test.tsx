@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Transport } from "@pidash/api-client";
 import * as React from "react";
@@ -12,6 +12,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 
 const navigate = vi.fn();
+const runtimeHarness = vi.hoisted(() => ({
+  dispose: vi.fn(async (_input: unknown) => undefined),
+}));
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
@@ -26,6 +29,16 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   };
 });
 
+vi.mock("../../../core/platform/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../core/platform/index.js")>();
+  return { ...original, platform: { ...original.platform, kind: "desktop", agentRuntime: {} } };
+});
+
+vi.mock("../../runners/runtime/service.js", () => ({
+  disposeRuntimeForSignOut: (input: unknown) => runtimeHarness.dispose(input),
+}));
+
+import { RuntimeSignOutLifecycle } from "../../runners/runtime/SignOutLifecycle.js";
 import { WorkspaceNotFoundScreen } from "./WorkspaceNotFoundScreen.js";
 
 function stubTransport(handler: (url: string) => { status: number; body: string; url: string }): Transport {
@@ -57,6 +70,7 @@ function renderScreen(email: string, workspaceCount: number, signOutStatus = 200
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
+      <RuntimeSignOutLifecycle />
       <WorkspaceNotFoundScreen email={email} workspaceCount={workspaceCount} />
     </QueryClientProvider>
   );
@@ -66,6 +80,7 @@ function renderScreen(email: string, workspaceCount: number, signOutStatus = 200
 afterEach(() => {
   resetAppClient();
   navigate.mockClear();
+  runtimeHarness.dispose.mockClear();
 });
 
 describe("WorkspaceNotFoundScreen", () => {
@@ -87,10 +102,18 @@ describe("WorkspaceNotFoundScreen", () => {
     expect(screen.queryByRole("link", { name: "Go Home" })).not.toBeInTheDocument();
   });
 
-  it("signs out from the header and lands on the entry", async () => {
+  it("confirms and disposes the desktop runtime before signing out from the non-gated header", async () => {
     const seen = renderScreen("ada@example.com", 1);
     await userEvent.setup().click(screen.getByRole("button", { name: "Sign out" }));
+    const dialog = await screen.findByRole("dialog", { name: "Sign out?" });
+    expect(seen.posts).toHaveLength(0);
+    await userEvent.setup().click(within(dialog).getByRole("button", { name: "Sign out" }));
+    await waitFor(() =>
+      expect(runtimeHarness.dispose).toHaveBeenCalledWith(
+        expect.objectContaining({ choice: { deleteChatHistory: false }, runtime: {} })
+      )
+    );
     await waitFor(() => expect(seen.posts).toHaveLength(1));
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ href: "/" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ href: "/login" }));
   });
 });

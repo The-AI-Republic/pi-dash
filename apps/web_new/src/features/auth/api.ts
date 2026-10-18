@@ -367,6 +367,7 @@ export function useSwitchAccount() {
         client: getAppClient(),
         queryClient,
         teardown: platform.sessionTeardown,
+        skipRuntimeConfirm: true,
       });
       markInitialColorScheme();
       return landing;
@@ -398,7 +399,7 @@ export function useDeactivateAccount() {
         throw error;
       }
       notifySuccess(DEACTIVATE_SUCCESS_TITLE, DEACTIVATE_SUCCESS_MESSAGE);
-      return performSignOut({ client, queryClient, teardown: platform.sessionTeardown });
+      return performSignOut({ client, queryClient, teardown: platform.sessionTeardown, skipRuntimeConfirm: true });
     },
   });
 }

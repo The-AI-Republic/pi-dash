@@ -5,6 +5,42 @@
 // routes import only from here. The area shell keeps this surface stable:
 // later slices mount their screens through `RunnersAreaShell`, build their
 // child links with `runnersPath`, and read data through the api hooks.
+
+// Desktop runtime lifecycle (NEWFRONT-552). The root lifecycle (mounted in
+// the app shell) owns sign-out registration; the hooks below are its API.
+export { APPROVAL_MODE_STORAGE_PREFIX, restoreApprovalModes, stashApprovalModes } from "./runtime/approvalModes.js";
+export type { ApprovalModeCarryInput } from "./runtime/approvalModes.js";
+export { isManagedRunnerAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./runtime/queries.js";
+export {
+  CREDENTIAL_RENEW_BEFORE_MS,
+  connectProject,
+  disposeRuntimeForSignOut,
+  EngineUnavailableError,
+  ensureChatRuntime,
+  getRuntimeAccount,
+  HEARTBEAT_POLL_ATTEMPTS,
+  HEARTBEAT_POLL_INTERVAL_MS,
+  MANAGED_RUNNER_KIND,
+  prepareAgentRun,
+  refreshRuntime,
+  resumeRuntime,
+} from "./runtime/service.js";
+export type { AgentRunTarget, HeartbeatPoll, RuntimeDeps } from "./runtime/service.js";
+export { confirmRuntimeSignOut, registerSignOutPrompt } from "./runtime/signOutPrompt.js";
+export { RuntimeSignOutDialog } from "./runtime/SignOutDialog.js";
+export { registerRuntimeSignOutLifecycle, RuntimeSignOutLifecycle } from "./runtime/SignOutLifecycle.js";
+export {
+  AVAILABILITY_POLL_INTERVAL_MS,
+  matchProjectIdentifier,
+  RUNTIME_CONNECTED_TEXT,
+  RUNTIME_PREPARING_TEXT,
+  RUNTIME_REFRESH_INTERVAL_MS,
+  RUNTIME_WAITING_TEXT,
+  RuntimeSupervisor,
+  selectRuntimeNotice,
+} from "./runtime/Supervisor.js";
+export type { RuntimeNoticeInput, RuntimeSupervisorProps } from "./runtime/Supervisor.js";
+
 export { decideProjectRunnersAccess, decideWorkspaceRunnersAccess, type RunnersAccess } from "./access.js";
 export { buildRunnersAreaValue, RunnersAreaProvider, useRunnersArea, type RunnersAreaValue } from "./area.js";
 export { runnersKeys, type RunnersScope } from "./api/keys.js";
