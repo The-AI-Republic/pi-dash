@@ -115,6 +115,7 @@ use sha2::Sha256;
 use sqlx::Row;
 use uuid::Uuid;
 
+use crate::license::form_body::{select_body_kind, BodyKind};
 use crate::state::AppState;
 use pidash_auth::token as auth_token;
 use pidash_db::v1_assets::asset_queries;
@@ -429,32 +430,50 @@ struct MachineTokenLookup {
 }
 
 // ---------------------------------------------------------------------------
-// Request-data parsing (JSON; empty/malformed proxy to Django)
+// Request-data parsing (DRF `_parse`: JSON parses; empty/form/multipart
+// and malformed proxy to Django; unmatched media type 415s)
 // ---------------------------------------------------------------------------
 
-/// Parse `request.data` for the JSON bodies the contract suites send.
+/// Parse `request.data` the way DRF `Request._parse` does for the JSON
+/// bodies the contract suites send.
 ///
-/// A well-formed JSON object parses as-is. Anything else keeps Django's
-/// exact bytes: an empty or malformed body is proxied to Django (DRF
-/// `ParseError`), while a well-formed non-object body (list/scalar)
-/// answers the generic 500 — the `AttributeError` the view's `.get`
-/// raises on it (`asset.py` post/patch read `request.data.get(...)`
-/// before anything else validates).
+/// A well-formed JSON object parses as-is. An empty body keeps Django's
+/// exact bytes (DRF returns `{}` without touching a parser), and any
+/// form/multipart body keeps proxying to Django (the FormParser /
+/// MultiPartParser path — this module does not parse them). A malformed
+/// JSON body also proxies (DRF `ParseError`), while a well-formed
+/// non-object body (list/scalar) answers the generic 500 — the
+/// `AttributeError` the view's `.get` raises on it (`asset.py` post/patch
+/// read `request.data.get(...)` before anything else validates). Any
+/// other media type with a non-empty body — including a missing header —
+/// is DRF's 415 `UnsupportedMediaType`, the header echoed verbatim;
+/// matching is the merged license decoder (`select_body_kind`,
+/// PIDASHCONV-1102/1117).
 #[allow(clippy::result_large_err)]
-fn parse_object(body: &Bytes) -> Result<Map<String, Value>, ProxyOr500> {
+fn parse_object(headers: &HeaderMap, body: &Bytes) -> Result<Map<String, Value>, ProxyOr500> {
     if body.is_empty() {
         return Err(ProxyOr500::Proxy);
     }
-    match serde_json::from_slice::<Value>(body) {
-        Ok(Value::Object(map)) => Ok(map),
-        Ok(_) => Err(ProxyOr500::ServerError),
-        Err(_) => Err(ProxyOr500::Proxy),
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    match select_body_kind(content_type) {
+        Some(BodyKind::Json) => match serde_json::from_slice::<Value>(body) {
+            Ok(Value::Object(map)) => Ok(map),
+            Ok(_) => Err(ProxyOr500::ServerError),
+            Err(_) => Err(ProxyOr500::Proxy),
+        },
+        Some(BodyKind::Form | BodyKind::Multipart) => Err(ProxyOr500::Proxy),
+        None => Err(ProxyOr500::Unsupported(content_type.to_owned())),
     }
 }
 
 enum ProxyOr500 {
     Proxy,
     ServerError,
+    /// 415, DRF `UnsupportedMediaType` for an unmatched non-empty body.
+    Unsupported(String),
 }
 
 /// Rebuild a request from its parts and proxy it to Django.
@@ -996,12 +1015,16 @@ pub(crate) async fn handle_post(
     if let Err(denial) = activate_timezone(actor.timezone.as_deref()) {
         return denial.into_response();
     }
-    let data = match parse_object(&body) {
+    let data = match parse_object(&headers, &body) {
         Ok(data) => data,
         Err(ProxyOr500::Proxy) => {
             return proxy_through(state, method, uri, headers, body).await;
         }
         Err(ProxyOr500::ServerError) => return server_error("request.data has no .get"),
+        Err(ProxyOr500::Unsupported(content_type)) => {
+            return crate::v1_assets::sticky::Denial::UnsupportedMediaType(content_type)
+                .into_response();
+        }
     };
     // `size = int(request.data.get("size", FILE_SIZE_LIMIT))` runs BEFORE
     // the guards (BUG-size-500): null/non-numeric sizes 500.
@@ -1135,12 +1158,16 @@ pub(crate) async fn handle_patch(
         Err(error) => return server_error(error),
     };
     // `request.data` parses here — after the lookup, like Python.
-    let data = match parse_object(&body) {
+    let data = match parse_object(&headers, &body) {
         Ok(data) => data,
         Err(ProxyOr500::Proxy) => {
             return proxy_through(state, method, uri, headers, body).await;
         }
         Err(ProxyOr500::ServerError) => return server_error("request.data has no .get"),
+        Err(ProxyOr500::Unsupported(content_type)) => {
+            return crate::v1_assets::sticky::Denial::UnsupportedMediaType(content_type)
+                .into_response();
+        }
     };
     // `if not asset.storage_metadata: delay` — before the save, exactly
     // like Python (`asset.py:214-215`).
