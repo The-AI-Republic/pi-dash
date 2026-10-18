@@ -1183,10 +1183,15 @@ async fn get_project_asset(
     if !asset.is_uploaded {
         return raw(StatusCode::NOT_FOUND, ASSET_MISSING_BODY);
     }
-    // `filename=attributes.get("name")` (`:624`): plain `.get`, no
-    // fallback — a missing name mints a fresh hex, like `_get_content_
-    // disposition(..., None)`.
-    let filename = match asset.attributes.as_ref().and_then(|a| a.get("name")) {
+    // `filename=attributes.get("name")` (`:624`): a NULL or non-object
+    // `attributes` raises (`AttributeError` → 500); a missing/null name
+    // inside an object mints a fresh hex (`_get_content_disposition(...,
+    // None)`).
+    let attributes = match asset.attributes.as_ref() {
+        Some(Value::Object(map)) => map,
+        _ => return server_error(),
+    };
+    let filename = match attributes.get("name") {
         None | Some(Value::Null) => Filename::FreshHex,
         Some(Value::String(s)) if s.is_empty() => Filename::Bare,
         Some(Value::String(s)) => Filename::Name(s.clone()),
@@ -1629,30 +1634,30 @@ async fn post_duplicate_asset(
         Ok(asset) => asset,
         Err(_) => return server_error(),
     };
+    // A NULL or non-object `attributes` raises on the first `.get` in the
+    // destination-key f-string (`:760`) — before any insert or S3 copy.
+    let original_attributes = match original.attributes.as_ref() {
+        Some(Value::Object(map)) => map,
+        _ => return server_error(),
+    };
     // Attribute copies render `.get(...)` with no fallback (`:762-766`):
     // missing keys become JSON null.
-    let attr_name = original
-        .attributes
-        .as_ref()
-        .and_then(|a| a.get("name"))
+    let attr_name = original_attributes
+        .get("name")
         .cloned()
         .unwrap_or(Value::Null);
-    let attr_type = original
-        .attributes
-        .as_ref()
-        .and_then(|a| a.get("type"))
+    let attr_type = original_attributes
+        .get("type")
         .cloned()
         .unwrap_or(Value::Null);
-    let attr_size = original
-        .attributes
-        .as_ref()
-        .and_then(|a| a.get("size"))
+    let attr_size = original_attributes
+        .get("size")
         .cloned()
         .unwrap_or(Value::Null);
     // The f-string renders `.get('name')` with Python `str()`
     // (`:760`): non-string names (e.g. mint `"name": 5` → `...-5`)
     // render instead of falling back to `None`.
-    let (name_display, _) = python_str(original.attributes.as_ref().and_then(|a| a.get("name")));
+    let (name_display, _) = python_str(original_attributes.get("name"));
     let destination_key = q::duplicate_destination_key(
         &workspace_id.to_string(),
         &Uuid::new_v4().simple().to_string(),
@@ -1883,10 +1888,15 @@ async fn download_lookup(
         Ok(asset) => asset,
         Err(_) => return server_error(),
     };
-    // `attributes.get("name", uuid.hex)` (`:804, :832`): a fresh hex per
-    // call when `name` is absent; empty string renders the bare
+    // `attributes.get("name", uuid.hex)` (`:804, :832`): a NULL or
+    // non-object `attributes` raises (`AttributeError` → 500); a fresh hex
+    // per call when `name` is absent; empty string renders the bare
     // disposition; other non-strings raise → 500.
-    let filename = match asset.attributes.as_ref().and_then(|a| a.get("name")) {
+    let attributes = match asset.attributes.as_ref() {
+        Some(Value::Object(map)) => map,
+        _ => return server_error(),
+    };
+    let filename = match attributes.get("name") {
         None | Some(Value::Null) => Filename::FreshHex,
         Some(Value::String(s)) if s.is_empty() => Filename::Bare,
         Some(Value::String(s)) => Filename::Name(s.clone()),
