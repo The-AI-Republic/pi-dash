@@ -1301,12 +1301,7 @@ async fn cycle_issue_create(
         }
     }
     // `issue_activity.delay(type="cycle.activity.created", ...)` (`:281-295`).
-    let origin = state
-        .settings()
-        .urls
-        .app_base_url
-        .clone()
-        .ok_or(Denial::ServerError)?;
+    let origin = super::activity_origin(&state).ok_or(Denial::ServerError)?;
     let updated_activity: Vec<Value> = moved
         .iter()
         .map(|(old_cycle_id, issue_id)| {
@@ -1406,12 +1401,7 @@ async fn cycle_issue_destroy(
         cycle_issue_context(&state, &slug, &project_raw, gate_for_destroy(), extension).await?;
     let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
     let issue_id = parse_uuid_or_invalid(&issue_raw)?;
-    let origin = state
-        .settings()
-        .urls
-        .app_base_url
-        .clone()
-        .ok_or(Denial::ServerError)?;
+    let origin = super::activity_origin(&state).ok_or(Denial::ServerError)?;
     let mut kwargs = Map::new();
     kwargs.insert(
         "type".to_owned(),
