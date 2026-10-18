@@ -71,6 +71,18 @@ describe("issues denial tolerance", () => {
   it("loads through when the issues and preferences reads succeed", async () => {
     const apiClient = failingClient(200);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {}).queryKey, {
+      grouped_by: null,
+      sub_grouped_by: null,
+      total_count: 0,
+      next_cursor: "",
+      prev_cursor: "",
+      next_page_results: false,
+      prev_page_results: false,
+      count: 0,
+      total_results: 0,
+      results: [],
+    } satisfies IssueListResponse);
     queryClient.setQueryData(
       listPageQueryOptions(apiClient, PARAMS.ws, {
         entity: { scope: "project", projectId: PARAMS.projectId },
@@ -512,6 +524,23 @@ describe("project issues screen", () => {
         richFilters: rich,
       }).queryKey,
       {
+        grouped_by: null,
+        sub_grouped_by: null,
+        total_count: 1,
+        next_cursor: "",
+        prev_cursor: "",
+        next_page_results: false,
+        prev_page_results: false,
+        count: 0,
+        total_results: 1,
+        results: [],
+      } satisfies IssueListResponse
+    );
+    queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, {
+      ...prefsSeed(),
+      rich_filters: rich,
+    });
+    queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {}, rich).queryKey, {
       grouped_by: null,
       sub_grouped_by: null,
       total_count: 1,
@@ -521,13 +550,8 @@ describe("project issues screen", () => {
       prev_page_results: false,
       count: 0,
       total_results: 1,
-        results: [],
-      } satisfies IssueListResponse
-    );
-    queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, {
-      ...prefsSeed(),
-      rich_filters: rich,
-    });
+      results: [],
+    } satisfies IssueListResponse);
     const Component = Route.options.component;
     if (!Component) throw new Error("issues route has no component");
     render(
