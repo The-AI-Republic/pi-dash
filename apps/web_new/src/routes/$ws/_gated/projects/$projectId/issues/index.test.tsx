@@ -9,7 +9,7 @@
 // title, its rows and the interim empty states; layouts themselves belong
 // to the issues area.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ApiError, createClient } from "@pidash/api-client";
 import type { IssueListItem, IssueListResponse, Project } from "@pidash/api-client";
 import * as React from "react";
@@ -23,7 +23,9 @@ import {
   type PrefsRecord,
 } from "../../../../../../features/issues/index.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
-import { clearCommands } from "../../../../../../shared/commands/index.js";
+import { clearCommands, listCommands } from "../../../../../../shared/commands/index.js";
+import * as queryModule from "../../../../../../core/query/optimistic.js";
+import * as shellModule from "../../../../../../shared/shell/index.js";
 import { Route } from "./index.js";
 
 const PARAMS = { ws: "acme", projectId: "223e4567-e89b-12d3-a456-426614174001" };
@@ -111,6 +113,71 @@ describe("issues denial tolerance", () => {
   });
 });
 
+describe("issues route loader", () => {
+  it("prefetches the issue list in the stored order at 100 a page", async () => {
+    const seen: string[] = [];
+    const apiClient = createAppClient("https://api.test", (async (url: string) => {
+      seen.push(url);
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () =>
+          JSON.stringify(
+            url.includes("user-properties")
+              ? {
+                  ...prefsSeed(),
+                  id: ISSUE_UUID,
+                  workspace: ISSUE_UUID,
+                  user: ISSUE_UUID,
+                  project: PARAMS.projectId,
+                  preferences: {},
+                  sort_order: 1,
+                  display_filters: { layout: "list", order_by: "-created_at" },
+                  created_by: null,
+                  updated_by: null,
+                  created_at: "2024-01-02T03:04:05Z",
+                  updated_at: "2024-02-03T04:05:06Z",
+                }
+              : {
+                  grouped_by: null,
+                  sub_grouped_by: null,
+                  total_count: 0,
+                  next_cursor: "",
+                  prev_cursor: "",
+                  next_page_results: false,
+                  prev_page_results: false,
+                  count: 0,
+                  total_results: 0,
+                  results: [],
+                }
+          ),
+      };
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    await beforeLoad({ context: { queryClient, apiClient }, params: PARAMS, search: {} } as never);
+    expect(seen).toContain(
+      `https://api.test/api/workspaces/${PARAMS.ws}/projects/${PARAMS.projectId}/issues/?per_page=100&order_by=-created_at`
+    );
+  });
+
+  it("prefetches the workspace project list", async () => {
+    const apiClient = createAppClient("https://api.test", (async (url: string) => ({
+      status: 200,
+      url,
+      headers: { get: () => null },
+      text: async () => JSON.stringify([projectSeed()]),
+    })) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const loader = Route.options.loader as unknown as (input: unknown) => Promise<unknown>;
+    if (!loader) throw new Error("missing loader");
+    await expect(loader({ context: { queryClient, apiClient }, params: PARAMS } as never)).resolves.toBeUndefined();
+    expect(queryClient.getQueryData(projectsQueryOptions(apiClient, PARAMS.ws).queryKey)).toHaveLength(1);
+  });
+});
+
 describe("issues pending placeholder", () => {
   it("shows the list skeleton while the prefetch runs", () => {
     const pending = Route.options.pendingComponent;
@@ -188,7 +255,13 @@ function prefsSeed(): PrefsRecord {
 
 // Seeded render: the loaders own fetching, so the transport throws if a
 // query misses its seed instead of hanging the suite on a timeout.
-function renderScreen(search: IssueSearch, totalCount: number, rows: IssueListItem[]): void {
+function renderScreen(
+  search: IssueSearch,
+  totalCount: number,
+  rows: IssueListItem[],
+  displayFilters: Record<string, unknown> = { layout: "list", group_by: null, order_by: "sort_order" },
+  projects: Project[] = [projectSeed()]
+): void {
   vi.spyOn(Route, "useParams").mockReturnValue({ ws: PARAMS.ws, projectId: PARAMS.projectId });
   vi.spyOn(Route, "useSearch").mockReturnValue(search);
   const apiClient = createAppClient("https://api.test", (() => {
@@ -196,7 +269,7 @@ function renderScreen(search: IssueSearch, totalCount: number, rows: IssueListIt
   }) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.spyOn(Route, "useRouteContext").mockReturnValue({ queryClient, apiClient } as never);
-  queryClient.setQueryData(projectsQueryOptions(apiClient, PARAMS.ws).queryKey, [projectSeed()]);
+  queryClient.setQueryData(projectsQueryOptions(apiClient, PARAMS.ws).queryKey, projects);
   queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, search).queryKey, {
     grouped_by: null,
     sub_grouped_by: null,
@@ -209,7 +282,10 @@ function renderScreen(search: IssueSearch, totalCount: number, rows: IssueListIt
     total_results: totalCount,
     results: rows,
   } satisfies IssueListResponse);
-  queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, prefsSeed());
+  queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, {
+    ...prefsSeed(),
+    display_filters: displayFilters,
+  });
   const Component = Route.options.component;
   if (!Component) throw new Error("issues route has no component");
   render(
@@ -309,6 +385,75 @@ describe("project issues screen", () => {
     const row = screen.getByLabelText("WEB-42");
     expect(row).toHaveClass("h-8");
     expect(row).not.toHaveClass("h-11");
+  });
+
+  it("offers the timeline in the layout switcher", () => {
+    renderScreen({}, 1, [issueRow()]);
+
+    const switcher = screen.getByTestId("layout-switcher-segmented");
+    expect(switcher.querySelector('[data-layout="gantt_chart"]')).not.toBeNull();
+  });
+
+  it("renders the timeline when it is the stored layout", async () => {
+    renderScreen({}, 1, [issueRow()], {
+      layout: "gantt_chart",
+      group_by: null,
+      order_by: "sort_order",
+    });
+
+    // The timeline is a lazy leaf; the route chunk shows the list skeleton
+    // until its module resolves.
+    expect(await screen.findByTestId("gantt-layout")).toBeInTheDocument();
+    expect(screen.getAllByTestId("gantt-sidebar-row")).toHaveLength(1);
+    expect(screen.getByTestId("gantt-count")).toHaveTextContent("1 work item");
+    expect(screen.queryByLabelText("WEB-42")).toBeNull();
+  });
+
+  it("explains a project that is not in the visible list", () => {
+    renderScreen({}, 1, [issueRow()], undefined, [{ ...projectSeed(), id: ISSUE_UUID }]);
+
+    expect(screen.getByRole("heading", { name: "Project not found" })).toBeInTheDocument();
+    expect(screen.getByText("Pick another project from the sidebar.")).toBeInTheDocument();
+    expect(screen.queryByTestId("layout-switcher-segmented")).not.toBeInTheDocument();
+  });
+
+  it("registers a refresh command that invalidates the workspace", async () => {
+    const invalidate = vi.spyOn(queryModule, "invalidateWorkspace").mockResolvedValue({} as never);
+    renderScreen({}, 1, [issueRow()]);
+    const command = listCommands().find((entry) => entry.id === "issues.refresh-list");
+    expect(command?.title).toBe("Refresh issue list");
+    expect(command?.hint).toBe("Website");
+    command?.run();
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith(expect.anything(), PARAMS.ws));
+  });
+
+  it("toasts when the refresh fails", async () => {
+    vi.spyOn(queryModule, "invalidateWorkspace").mockRejectedValue(new Error("offline"));
+    const notify = vi.spyOn(shellModule, "notifyError").mockImplementation(() => undefined);
+    renderScreen({}, 1, [issueRow()]);
+    await waitFor(() => expect(listCommands().length).toBeGreaterThan(0));
+    listCommands()
+      .find((entry) => entry.id === "issues.refresh-list")
+      ?.run();
+    await waitFor(() => expect(notify).toHaveBeenCalledWith("Could not refresh issues", expect.any(String)));
+  });
+
+  it("renders the load error with its message and a retry", () => {
+    const errorComponent = Route.options.errorComponent;
+    if (!errorComponent) throw new Error("missing errorComponent");
+    const reset = vi.fn();
+    render(React.createElement(errorComponent, { error: new Error("Boom"), reset }));
+    expect(screen.getByRole("heading", { name: "Could not load issues" })).toBeInTheDocument();
+    expect(screen.getByText("Boom")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(reset).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a generic load error message for non-errors", () => {
+    const errorComponent = Route.options.errorComponent;
+    if (!errorComponent) throw new Error("missing errorComponent");
+    render(React.createElement(errorComponent, { error: "nope", reset: () => {} }));
+    expect(screen.getByText("Something went wrong.")).toBeInTheDocument();
   });
 
   it("renders the interim empty state when the project has no issues", () => {

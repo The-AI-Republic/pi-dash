@@ -178,3 +178,26 @@ export type { LayoutOption } from "./dropdowns/layoutOptions.js";
 export { ESTIMATE_POINT_FAILED_TITLE, useUpdateEstimatePoint } from "./api/estimates.js";
 export { EXECUTION_TARGET_FAILED_TITLE, useUpdateExecutionTarget } from "./api/executionTarget.js";
 export { withIssueFields } from "./api/optimisticRows.js";
+export { GanttLayout, barColorsFor, orderedRows } from "./gantt/GanttLayout.js";
+export type { GanttLayoutProps } from "./gantt/GanttLayout.js";
+export { GanttChart, SIDEBAR_WIDTH } from "./gantt/GanttChart.js";
+export type { GanttChartProps } from "./gantt/GanttChart.js";
+export { GanttHeader } from "./gantt/GanttHeader.js";
+export type { GanttHeaderProps } from "./gantt/GanttHeader.js";
+export { ROW_HEIGHT } from "./gantt/rows.js";
+export type { GanttBarBox, GanttRow } from "./gantt/rows.js";
+export {
+  DAY_WIDTHS,
+  GANTT_ZOOMS,
+  GANTT_ZOOM_LABELS,
+  addDays,
+  centeredScroll,
+  dayOffset,
+  diffDays,
+  headerTiers,
+  initialRange,
+  todaySegment,
+} from "./gantt/scale.js";
+export type { GanttDay, GanttRange, GanttSegment, GanttZoom } from "./gantt/scale.js";
+export { useGanttViewport, clampScroll, FALLBACK_VIEWPORT_WIDTH } from "./gantt/useGanttViewport.js";
+export type { GanttViewport } from "./gantt/useGanttViewport.js";

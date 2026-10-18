@@ -82,7 +82,25 @@ describe("issues query", () => {
     expect(options.queryKey[0]).toBe("ws");
     const data = await new QueryClient().fetchQuery(options);
     expect(data.total_count).toBe(0);
-    expect(seen[0]).toBe("https://api.test/api/workspaces/acme/projects/pid/issues/?per_page=50&order_by=-created_at");
+    expect(seen[0]).toBe("https://api.test/api/workspaces/acme/projects/pid/issues/?per_page=100&order_by=sort_order");
+  });
+
+  it("sends the stored order in the request and the key", async () => {
+    const seen: string[] = [];
+    const inner = stubTransport(ENVELOPE);
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: async (url, init) => {
+        seen.push(url);
+        return inner(url, init);
+      },
+      validate: true,
+    });
+    const options = issuesQueryOptions(client, "acme", "pid", { layout: "list" }, {}, "-created_at");
+    await new QueryClient().fetchQuery(options);
+    expect(seen[0]).toBe("https://api.test/api/workspaces/acme/projects/pid/issues/?per_page=100&order_by=-created_at");
+    expect(options.queryKey).toEqual([...issueKeys.list("acme", "pid", { layout: "list" }, "-created_at"), null]);
+    expect(options.queryKey).not.toEqual([...issueKeys.list("acme", "pid", { layout: "list" }, "sort_order"), null]);
   });
 
   it("sends the stored rich expression as the filters parameter", async () => {
@@ -112,6 +130,8 @@ describe("issues query", () => {
     expect(seen[0]).toContain(
       `filters=${encodeURIComponent(JSON.stringify({ and: [{ priority__in: "urgent" }, { not: { state_id__in: ["a"] } }] }))}`
     );
+    expect(seen[0]).toContain("per_page=100");
+    expect(seen[0]).toContain("order_by=sort_order");
   });
 });
 
