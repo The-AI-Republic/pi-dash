@@ -13,7 +13,13 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { platform, type AgentRuntimeApi } from "../../../core/platform/index.js";
 import { registerRuntimeSignOutHooks } from "../../../core/session/index.js";
-import { beginSignOutPromptLoad, confirmRuntimeSignOut, failSignOutPromptLoad } from "./signOutPrompt.js";
+import {
+  attachSignOutPromptHost,
+  beginSignOutPromptLoad,
+  confirmRuntimeSignOut,
+  detachSignOutPromptHost,
+  failSignOutPromptLoad,
+} from "./signOutPrompt.js";
 
 const runtime = platform.agentRuntime;
 
@@ -76,6 +82,7 @@ export function RuntimeSignOutLifecycle(): React.ReactElement | null {
 
   React.useEffect(() => {
     if (!runtime) return;
+    attachSignOutPromptHost();
     let cancelled = false;
     void loadSignOutDialog().then(
       (loaded) => {
@@ -87,6 +94,7 @@ export function RuntimeSignOutLifecycle(): React.ReactElement | null {
     );
     return () => {
       cancelled = true;
+      detachSignOutPromptHost();
     };
   }, []);
 

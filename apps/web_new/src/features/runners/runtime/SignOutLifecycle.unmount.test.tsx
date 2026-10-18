@@ -23,6 +23,7 @@ vi.mock("./SignOutDialog.js", async () => {
   return { RuntimeSignOutDialog: () => <p>sign-out dialog</p> };
 });
 
+import { getRuntimeSignOutHooks, registerRuntimeSignOutHooks } from "../../../core/session/index.js";
 import { RuntimeSignOutLifecycle } from "./SignOutLifecycle.js";
 
 it("drops a dialog chunk that arrives after unmount", async () => {
@@ -33,4 +34,19 @@ it("drops a dialog chunk that arrives after unmount", async () => {
   expect(screen.queryByText("sign-out dialog")).not.toBeInTheDocument();
   render(<RuntimeSignOutLifecycle />);
   expect(await screen.findByText("sign-out dialog")).toBeVisible();
+});
+
+it("settles a confirmation queued while the chunk loads when the host unmounts", async () => {
+  const first = render(<RuntimeSignOutLifecycle />);
+  const pending = getRuntimeSignOutHooks()!.confirmRuntimeSignOut();
+  let settled = false;
+  void pending.then(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(settled).toBe(false);
+  first.unmount();
+  registerRuntimeSignOutHooks(null);
+  await expect(pending).resolves.toEqual({ deleteChatHistory: false });
+  gate.release();
 });

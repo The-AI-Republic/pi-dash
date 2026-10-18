@@ -5,8 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeSignOutChoice } from "../../../core/session/index.js";
 import {
+  attachSignOutPromptHost,
   beginSignOutPromptLoad,
   confirmRuntimeSignOut,
+  detachSignOutPromptHost,
   failSignOutPromptLoad,
   registerSignOutPrompt,
 } from "./signOutPrompt.js";
@@ -55,5 +57,46 @@ describe("confirmRuntimeSignOut", () => {
     registerSignOutPrompt(null);
     await expect(pending.promise).resolves.toEqual({ deleteChatHistory: false });
     await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false });
+  });
+});
+
+describe("confirmation host lifetime", () => {
+  it("settles a queued request when its host unmounts before registering the dialog", async () => {
+    attachSignOutPromptHost();
+    beginSignOutPromptLoad();
+    const pending = track();
+    detachSignOutPromptHost();
+    await Promise.resolve();
+    expect(pending.settled()).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(pending.promise).resolves.toEqual({ deleteChatHistory: false });
+    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false });
+  });
+
+  it("keeps a queued request waiting across a remount in the same commit", async () => {
+    attachSignOutPromptHost();
+    beginSignOutPromptLoad();
+    const pending = track();
+    detachSignOutPromptHost();
+    attachSignOutPromptHost();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(pending.settled()).toBe(false);
+    registerSignOutPrompt((resolve) => resolve(null));
+    await expect(pending.promise).resolves.toBeNull();
+    detachSignOutPromptHost();
+  });
+
+  it("leaves other hosts in charge while one of them is still mounted", async () => {
+    attachSignOutPromptHost();
+    attachSignOutPromptHost();
+    beginSignOutPromptLoad();
+    const pending = track();
+    detachSignOutPromptHost();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(pending.settled()).toBe(false);
+    registerSignOutPrompt((resolve) => resolve({ deleteChatHistory: true }));
+    await expect(pending.promise).resolves.toEqual({ deleteChatHistory: true });
+    detachSignOutPromptHost();
+    registerSignOutPrompt(null);
   });
 });

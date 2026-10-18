@@ -15,9 +15,16 @@ type LoadState = "idle" | "loading" | "ready" | "unavailable";
 let activePrompt: SignOutPrompt | null = null;
 let loadState: LoadState = "idle";
 let waiting: Array<(choice: RuntimeSignOutChoice | null) => void> = [];
+let hosts = 0;
 
 function keepHistory(): RuntimeSignOutChoice {
   return { deleteChatHistory: false };
+}
+
+function settleWaiting(): void {
+  const queued = waiting;
+  waiting = [];
+  for (const resolve of queued) resolve(keepHistory());
 }
 
 /**
@@ -36,9 +43,32 @@ export function beginSignOutPromptLoad(): void {
  */
 export function failSignOutPromptLoad(): void {
   loadState = "unavailable";
-  const queued = waiting;
-  waiting = [];
-  for (const resolve of queued) resolve(keepHistory());
+  settleWaiting();
+}
+
+/**
+ * The confirmation host mounted. It owns the dialog chunk from here on, so
+ * a host that goes away before registering the prompt releases anyone who
+ * was waiting instead of leaving them hanging.
+ */
+export function attachSignOutPromptHost(): void {
+  hosts += 1;
+}
+
+/**
+ * The confirmation host went away. If no other host picks the chunk up in
+ * the same commit (StrictMode mounts, unmounts and mounts again), queued
+ * confirmations settle with the keep-history default: nothing can ask the
+ * user any more, and sign-out must not trap them.
+ */
+export function detachSignOutPromptHost(): void {
+  hosts = Math.max(0, hosts - 1);
+  if (hosts > 0) return;
+  queueMicrotask(() => {
+    if (hosts > 0 || loadState !== "loading") return;
+    loadState = "idle";
+    settleWaiting();
+  });
 }
 
 /** Mount (or, with null, unmount) the prompt confirmRuntimeSignOut opens. */
@@ -48,9 +78,7 @@ export function registerSignOutPrompt(prompt: SignOutPrompt | null): void {
     // The confirmation UI went away with the app shell; anyone who was
     // still waiting signs out keeping their history rather than hanging.
     loadState = "idle";
-    const queued = waiting;
-    waiting = [];
-    for (const resolve of queued) resolve(keepHistory());
+    settleWaiting();
     return;
   }
   loadState = "ready";

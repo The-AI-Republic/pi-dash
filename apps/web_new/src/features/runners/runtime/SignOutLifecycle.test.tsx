@@ -24,7 +24,9 @@ vi.mock("../../../core/platform/index.js", () => ({
 }));
 
 vi.mock("./signOutPrompt.js", () => ({
+  attachSignOutPromptHost: vi.fn(),
   beginSignOutPromptLoad: vi.fn(),
+  detachSignOutPromptHost: vi.fn(),
   confirmRuntimeSignOut: harness.confirmRuntimeSignOut,
   failSignOutPromptLoad: vi.fn(),
   registerSignOutPrompt: harness.registerSignOutPrompt,
