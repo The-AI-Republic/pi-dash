@@ -6417,7 +6417,7 @@ export class WebNewDriver implements ParityDriver {
           .getAttribute("data-day")
           .catch(() => null)) ?? "";
       const parsed = new Date(`${iso}T00:00:00Z`).getUTCDay();
-      starts.push(iso === "" || Number.isNaN(parsed) ? "" : (labels[parsed] ?? ""));
+      starts.push(iso === "" || Number.isNaN(parsed) ? "" : labels[parsed]);
     }
     return starts;
   }
