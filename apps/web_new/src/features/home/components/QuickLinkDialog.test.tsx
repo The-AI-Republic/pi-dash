@@ -44,7 +44,19 @@ function stubTransport(status: number, calls: Array<{ url: string; method: strin
   }) as never);
 }
 
-function setup(link: QuickLink | null, status = 200) {
+/**
+ * Base UI mounts the dialog synchronously but moves initial focus into it in
+ * a follow-up task. Typing before that task lands lets the focus move steal
+ * keystrokes (the dialog's close button, or the popup itself, takes focus
+ * mid-type), so tests must wait for the focus move before touching the form.
+ */
+async function waitForDialogFocus(): Promise<HTMLElement> {
+  const dialog = screen.getByRole("dialog");
+  await waitFor(() => expect(dialog).toContainElement(document.activeElement as HTMLElement));
+  return dialog;
+}
+
+async function setup(link: QuickLink | null, status = 200) {
   const calls: Array<{ url: string; method: string }> = [];
   stubTransport(status, calls);
   const onOpenChange = vi.fn();
@@ -54,6 +66,7 @@ function setup(link: QuickLink | null, status = 200) {
       <QuickLinkDialog workspaceSlug="acme" link={link} open onOpenChange={onOpenChange} />
     </QueryClientProvider>
   );
+  await waitForDialogFocus();
   return { calls, onOpenChange };
 }
 
@@ -68,7 +81,7 @@ afterEach(() => {
 describe("QuickLinkDialog", () => {
   it("saves a fresh link with a completed scheme and closes", async () => {
     const user = userEvent.setup();
-    const { calls, onOpenChange } = setup(null);
+    const { calls, onOpenChange } = await setup(null);
     expect(screen.getByRole("dialog", { name: "Add link" })).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("Address"), "example.com/docs");
@@ -82,7 +95,7 @@ describe("QuickLinkDialog", () => {
 
   it("saves an edit through PATCH and closes", async () => {
     const user = userEvent.setup();
-    const { calls, onOpenChange } = setup(SAVED);
+    const { calls, onOpenChange } = await setup(SAVED);
     expect(screen.getByRole("dialog", { name: "Edit link" })).toBeInTheDocument();
     expect(screen.getByLabelText("Address")).toHaveValue("https://example.com/docs");
     expect(screen.getByLabelText("Name")).toHaveValue("Team docs");
@@ -98,7 +111,7 @@ describe("QuickLinkDialog", () => {
 
   it("blocks an empty address inline and keeps the dialog", async () => {
     const user = userEvent.setup();
-    const { calls, onOpenChange } = setup(null);
+    const { calls, onOpenChange } = await setup(null);
     await user.click(screen.getByRole("button", { name: "Save link" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Enter the link address.");
@@ -109,7 +122,7 @@ describe("QuickLinkDialog", () => {
 
   it("blocks a malformed address inline", async () => {
     const user = userEvent.setup();
-    setup(null);
+    await setup(null);
     await user.type(screen.getByLabelText("Address"), "not a url");
     await user.click(screen.getByRole("button", { name: "Save link" }));
 
@@ -118,7 +131,7 @@ describe("QuickLinkDialog", () => {
 
   it("clears the error while the address is edited", async () => {
     const user = userEvent.setup();
-    setup(null);
+    await setup(null);
     await user.click(screen.getByRole("button", { name: "Save link" }));
     expect(await screen.findByRole("alert")).toBeInTheDocument();
 
@@ -128,7 +141,7 @@ describe("QuickLinkDialog", () => {
 
   it("submits from the keyboard through the form", async () => {
     const user = userEvent.setup();
-    const { onOpenChange } = setup(null);
+    const { onOpenChange } = await setup(null);
     await user.type(screen.getByLabelText("Address"), "example.com/docs");
     fireEvent.submit(screen.getByLabelText("Address").closest("form") as HTMLFormElement);
 
@@ -159,6 +172,7 @@ describe("QuickLinkDialog", () => {
         <QuickLinkDialog workspaceSlug="acme" link={null} open onOpenChange={onOpenChange} />
       </QueryClientProvider>
     );
+    await waitForDialogFocus();
 
     await user.type(screen.getByLabelText("Address"), "example.com/docs");
     await user.click(screen.getByRole("button", { name: "Save link" }));
@@ -175,7 +189,7 @@ describe("QuickLinkDialog", () => {
 
   it("keeps the dialog open with a failure notice when the write fails", async () => {
     const user = userEvent.setup();
-    const { onOpenChange } = setup(null, 500);
+    const { onOpenChange } = await setup(null, 500);
     await user.type(screen.getByLabelText("Address"), "example.com/docs");
     await user.click(screen.getByRole("button", { name: "Save link" }));
 
@@ -186,7 +200,7 @@ describe("QuickLinkDialog", () => {
 
   it("cancels without storing", async () => {
     const user = userEvent.setup();
-    const { calls, onOpenChange } = setup(null);
+    const { calls, onOpenChange } = await setup(null);
     await user.type(screen.getByLabelText("Address"), "example.com/docs");
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
