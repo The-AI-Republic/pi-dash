@@ -279,6 +279,32 @@ describe("resolveNotificationCard", () => {
       title: "Ship it",
       createdAt: "2026-10-16T12:00:00Z",
       unread: true,
+      archivedAt: null,
+      snoozedTill: null,
+      streamFlags: {
+        is_inbox_issue: undefined,
+        is_intake_issue: undefined,
+        is_mentioned_notification: false,
+      },
+    });
+  });
+
+  it("carries the archive, snooze and stream flags the actions reuse", () => {
+    const card = resolveNotificationCard(
+      row({
+        archived_at: "2026-10-16T13:00:00Z",
+        snoozed_till: "2026-10-19T17:30:00Z",
+        is_inbox_issue: true,
+        is_intake_issue: false,
+        is_mentioned_notification: true,
+      })
+    );
+    expect(card?.archivedAt).toBe("2026-10-16T13:00:00Z");
+    expect(card?.snoozedTill).toBe("2026-10-19T17:30:00Z");
+    expect(card?.streamFlags).toEqual({
+      is_inbox_issue: true,
+      is_intake_issue: false,
+      is_mentioned_notification: true,
     });
   });
 

@@ -1,14 +1,15 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Inbox card data (written from parity/specs/notifications.md §4,
-// NTF-005, NTF-006). One resolver turns a list row into the card's four
-// elements — actor, change summary, item reference with title, relative
-// age — plus the read flag. Rows that cannot be resolved (missing
-// workspace, project, item, actor or change description) resolve to null
-// and the list skips them. Summary sentences are fresh wording over the
-// change vocabulary; kinds outside it fall back to a verb-based sentence
-// with the raw new value.
+// Inbox card data (written from parity/specs/notifications.md §4, §9,
+// NTF-005, NTF-006, NTF-022). One resolver turns a list row into the
+// card's four elements — actor, change summary, item reference with
+// title, relative age — plus the read flag, and carries the archive and
+// snooze timestamps the actions and the resume label need. Rows that
+// cannot be resolved (missing workspace, project, item, actor or change
+// description) resolve to null and the list skips them. Summary
+// sentences are fresh wording over the change vocabulary; kinds outside
+// it fall back to a verb-based sentence with the raw new value.
 import type { NotificationItem } from "@pidash/api-client";
 
 /** The narrowed activity payload behind one card's summary. */
@@ -31,6 +32,16 @@ export interface NotificationCardData {
   title: string;
   createdAt: string;
   unread: boolean;
+  /** Archive moment; a non-null value means the card is archived. */
+  archivedAt: string | null;
+  /** Scheduled resume moment; a non-null value means the card is snoozed. */
+  snoozedTill: string | null;
+  /**
+   * The row's stream annotations as the list carried them. Actions reuse
+   * them when the write's echo (a bare instance) omits the flags, so the
+   * settled card stays in the stream it was listed in.
+   */
+  streamFlags: Pick<NotificationItem, "is_inbox_issue" | "is_intake_issue" | "is_mentioned_notification">;
 }
 
 /**
@@ -154,6 +165,13 @@ export function resolveNotificationCard(row: NotificationItem): NotificationCard
     title,
     createdAt: row.created_at,
     unread: row.read_at === null,
+    archivedAt: row.archived_at,
+    snoozedTill: row.snoozed_till,
+    streamFlags: {
+      is_inbox_issue: row.is_inbox_issue,
+      is_intake_issue: row.is_intake_issue,
+      is_mentioned_notification: row.is_mentioned_notification,
+    },
   };
 }
 

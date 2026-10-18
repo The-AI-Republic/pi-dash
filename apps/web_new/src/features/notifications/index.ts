@@ -3,7 +3,22 @@
 // See the LICENSE file for details.
 // Public API of the notifications feature. Other features import only from here.
 
-export { notificationKeys } from "./api/keys.js";
+export { notificationKeys, notificationListQueryFromKey } from "./api/keys.js";
+export {
+  applyRowToPage,
+  MARKED_ARCHIVED_TITLE,
+  MARKED_READ_TITLE,
+  MARKED_UNREAD_TITLE,
+  mergeWrittenRow,
+  rowBelongsToStream,
+  SNOOZED_TITLE,
+  UNARCHIVED_TITLE,
+  UNSNOOZED_TITLE,
+  useSnoozeNotification,
+  useToggleNotificationArchive,
+  useToggleNotificationRead,
+} from "./api/mutations.js";
+export type { ArchiveToggle, ReadToggle, SnoozeWrite, StreamFlags } from "./api/mutations.js";
 export {
   applyEmailPreferenceFlip,
   EMAIL_PREFS_FAILED_TITLE,
@@ -36,11 +51,41 @@ export {
 } from "./api/queries.js";
 export { InboxShell } from "./components/InboxShell.js";
 export { InboxView } from "./components/InboxView.js";
+export { CUSTOM_SNOOZE_ENTRY, REMOVE_SNOOZE_ENTRY, SnoozeMenu } from "./components/SnoozeMenu.js";
+export type { SnoozeMenuProps } from "./components/SnoozeMenu.js";
+export {
+  CUSTOM_SNOOZE_CANCEL,
+  CUSTOM_SNOOZE_SUBMIT,
+  CustomSnoozeDialog,
+  DATE_PLACEHOLDER,
+  DATE_SECTION_HEADING,
+  NO_SLOTS_LEFT,
+  TIME_PLACEHOLDER,
+  TIME_SECTION_HEADING,
+} from "./components/CustomSnoozeDialog.js";
+export type { CustomSnoozeDialogProps, Meridiem } from "./components/CustomSnoozeDialog.js";
 export { NotificationCard } from "./components/NotificationCard.js";
+export type { NotificationCardActions, NotificationCardProps } from "./components/NotificationCard.js";
 export { StreamTabs } from "./components/StreamTabs.js";
 export { selectUnreadBadgeCount } from "./lib/badgeCount.js";
 export { describeNotificationChange, resolveNotificationCard, resolveNotificationCards } from "./lib/card.js";
 export type { NotificationCardData, NotificationChange } from "./lib/card.js";
 export { formatNotificationAge } from "./lib/relativeAge.js";
+export {
+  SNOOZE_PRESETS,
+  composeResumeInstant,
+  dayIsFullyElapsed,
+  earliestSnoozeDay,
+  formatResumeLabel,
+  offeredSlots,
+  pickedDayLabel,
+  presetResumeInstant,
+  slotLabels,
+  slotTo24Hour,
+  SLOTS_PER_MERIDIEM,
+  slotToMinutes,
+  snoozePresetByLabel,
+} from "./lib/snooze.js";
+export type { SnoozePreset } from "./lib/snooze.js";
 export { NOTIFICATION_TABS, notificationTabQuery } from "./lib/stream.js";
 export type { NotificationTab } from "./lib/stream.js";
