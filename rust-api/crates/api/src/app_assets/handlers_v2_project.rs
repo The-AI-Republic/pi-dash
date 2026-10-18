@@ -865,6 +865,11 @@ async fn post_project_asset(
     let Some(data) = parse_data(content_type(&headers).as_deref(), &body) else {
         return server_error();
     };
+    // `size = int(...)` raises before either validation (`v2.py:516`).
+    let size = match parse_size(data.get("size"), state.settings().file_size_limit) {
+        Some(size) => size,
+        None => return server_error(),
+    };
     let entity_type = match data.get("entity_type").and_then(Value::as_str) {
         Some(t) if ENTITY_TYPES.contains(&t) => t.to_owned(),
         _ => return raw(StatusCode::BAD_REQUEST, INVALID_ENTITY_TYPE_BODY),
@@ -875,10 +880,6 @@ async fn post_project_asset(
     if !ALLOWED_TYPES.contains(&mime) {
         return raw(StatusCode::BAD_REQUEST, INVALID_FILE_TYPE_BODY);
     }
-    let size = match parse_size(data.get("size"), state.settings().file_size_limit) {
-        Some(size) => size,
-        None => return server_error(),
-    };
     let size_limit = state.settings().file_size_limit.min(size);
     // `Workspace.objects.get(slug=slug)` (`:548`) — after the 400s.
     let workspace_id = match workspace_lookup(&pool, &slug).await {
