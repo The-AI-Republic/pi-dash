@@ -294,7 +294,7 @@ describe("ValueSlot", () => {
         />
       )
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    await user.click(screen.getByRole("button", { name: "--" }));
     const list = await screen.findByRole("listbox", { name: "State Group values" });
     const options = within(list).getAllByRole("option");
     expect(options).toHaveLength(5);
@@ -322,7 +322,7 @@ describe("ValueSlot", () => {
         />
       )
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    await user.click(screen.getByRole("button", { name: "--" }));
     expect(await screen.findByText("No matching values")).toBeInTheDocument();
   });
 
@@ -348,7 +348,7 @@ describe("ValueSlot", () => {
         />
       )
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    await user.click(screen.getByRole("button", { name: "--" }));
     const list = await screen.findByRole("listbox", { name: "Custom values" });
     expect(within(list).getAllByRole("option")).toHaveLength(1);
     expect(within(list).getByRole("option", { name: "One" }).querySelector("svg")).toBeNull();
@@ -596,7 +596,7 @@ describe("ValueSlot member and label sources", () => {
         }
       )
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    await user.click(screen.getByRole("button", { name: "--" }));
     const option = await screen.findByRole("option", { name: /Ana/ });
     expect(option.querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
   });
