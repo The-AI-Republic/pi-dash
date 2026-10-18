@@ -308,6 +308,23 @@ describe("SpreadsheetLayout", () => {
     expect(screen.getByRole("row", { name: /Second/ })).toHaveAttribute("data-highlight", "true");
   });
 
+  it("reserves space for rows below the viewport with a bottom spacer", async () => {
+    const rows = Array.from({ length: 20 }, (_, index) =>
+      issue(`123e4567-e89b-12d3-a456-${String(426614174000 + index)}`, `Fix login ${index}`, index + 1)
+    );
+    stub({ pages: [page(rows)] });
+    renderSheet();
+    await screen.findByRole("table");
+    await waitFor(() => expect(screen.getByText("Fix login 0")).toBeInTheDocument());
+    const spacer = await waitFor(() => {
+      const node = screen.getByRole("table").querySelector("tbody tr[aria-hidden='true']") as HTMLElement | null;
+      expect(node).not.toBeNull();
+      return node;
+    });
+    expect(spacer).not.toBeNull();
+    expect(spacer?.querySelector("td")?.style.height).not.toBe("");
+  });
+
   it("offers ascending, descending and clear on a sorted header, then writes order_by", async () => {
     const state = stub();
     renderSheet();

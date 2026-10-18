@@ -301,9 +301,7 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
         projectIdentifier={projectIdentifier}
         disabled={!canEdit}
         pending={create.isPending}
-        onCreate={async (name) => {
-          await create.mutateAsync({ name });
-        }}
+        onCreate={(name) => create.mutateAsync({ name })}
       />
       {peekIssue === null ? null : (
         <PeekPanel
@@ -578,7 +576,7 @@ function QuickAddRow({
   projectIdentifier: string;
   disabled: boolean;
   pending: boolean;
-  onCreate: (name: string) => Promise<void>;
+  onCreate: (name: string) => Promise<unknown>;
 }): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   const [name, setName] = React.useState("");
