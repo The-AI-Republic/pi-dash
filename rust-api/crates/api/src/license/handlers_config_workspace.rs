@@ -19,7 +19,9 @@
 //! - `POST /api/instances/email-credentials-check/` —
 //!   `EmailCredentialCheckEndpoint.post` (`configuration.py:90-172`):
 //!   `receiver_email`-required 400; `get_email_configuration`;
-//!   `int(EMAIL_PORT)`; SMTP send with the 9-branch error matrix plus the
+//!   `int(EMAIL_PORT)`; a non-empty array/object receiver is the generic
+//!   400 Django's SMTP `sanitize_address` raises for (nothing sent);
+//!   otherwise SMTP send with the 9-branch error matrix plus the
 //!   generic-`Exception` fallthrough, every message string verbatim.
 //! - `GET /api/instances/workspace-slug-check/` —
 //!   `InstanceWorkSpaceAvailabilityCheckEndpoint.get`
@@ -552,7 +554,7 @@ async fn email_credential_check(
     if !json_truthy(receiver) {
         return Denial::BadError("Receiver email is required".to_owned()).into_response();
     }
-    let recipients = json_string_list(receiver);
+    let recipient = json_recipient(receiver);
     // `get_email_configuration()` runs outside the `try`
     // (`configuration.py:98-106`): a store failure escapes to the base
     // 500, exactly like a DB error in Python.
@@ -588,6 +590,15 @@ async fn email_credential_check(
         },
         None => return Denial::ServerError.into_response(),
     };
+    // `to=[receiver_email]` (`configuration.py:120-127`): Django's SMTP
+    // `sanitize_address` `force_str`s the value and parses it as one
+    // mailbox. An array/object repr (`"['a@x.test', 'b@x.test']"`) never
+    // parses, so `send()` raises inside the view's `try` and the generic
+    // 400 is answered with nothing delivered (`configuration.py:168-172`).
+    let Some(recipient) = recipient else {
+        return Denial::BadError(smtp::MailError::Failed.message().to_owned()).into_response();
+    };
+    let recipients = [recipient];
     match smtp::send_test_email(smtp::EmailConfig {
         host: host.as_deref().unwrap_or(""),
         port,
@@ -632,20 +643,19 @@ fn json_truthy(found: BodyField<'_>) -> bool {
     }
 }
 
-/// `msg = ...; to=[receiver_email]`: a bare string is one recipient, a
-/// list is many (`sendmail` wraps a bare string). Non-string entries are
-/// stringified the way the envelope path would carry them; a file
-/// recipient is its name (probed).
-fn json_string_list(found: BodyField<'_>) -> Vec<String> {
-    let value = match found {
-        BodyField::File(file) => return vec![file.filename.clone()],
-        BodyField::Json(value) => Some(value),
+/// `msg = ...; to=[receiver_email]` (`configuration.py:120-127`): Django
+/// `force_str`s the single value and parses it as one mailbox
+/// (`sanitize_address`), so a string or scalar is one recipient and an
+/// uploaded file is its name (`str(file)`, probed). `None` is the shape
+/// that never parses as a mailbox — an array or object repr — which the
+/// caller answers with the generic 400 and no send (`Missing` is falsy, so
+/// the required-email 400 returns before this function is reached).
+fn json_recipient(found: BodyField<'_>) -> Option<String> {
+    match found {
+        BodyField::File(file) => Some(file.filename.clone()),
+        BodyField::Json(Value::Array(_) | Value::Object(_)) => None,
+        BodyField::Json(value) => Some(json_scalar_string(value)),
         BodyField::Missing => None,
-    };
-    match value {
-        Some(Value::Array(items)) => items.iter().map(json_scalar_string).collect(),
-        Some(other) => vec![json_scalar_string(other)],
-        None => Vec::new(),
     }
 }
 
@@ -3300,6 +3310,38 @@ pub fn slug_syntax_ok(slug: &str) -> bool {
 mod handler_tests {
     use super::*;
     use serde_json::json;
+
+    /// `to=[receiver_email]` (`configuration.py:120-127`): a string or
+    /// scalar is one recipient, an array or object repr is not a mailbox
+    /// and the handler answers Django's generic 400 without a send.
+    #[test]
+    fn email_recipient_shapes_match_django() {
+        assert_eq!(
+            json_recipient(BodyField::Json(&json!("a@x.test"))),
+            Some("a@x.test".to_owned())
+        );
+        assert_eq!(
+            json_recipient(BodyField::Json(&json!(5))),
+            Some("5".to_owned())
+        );
+        assert_eq!(
+            json_recipient(BodyField::Json(&json!(true))),
+            Some("True".to_owned())
+        );
+        assert_eq!(
+            json_recipient(BodyField::Json(&json!(1.5))),
+            Some("1.5".to_owned())
+        );
+        assert_eq!(json_recipient(BodyField::Json(&json!(["a@x.test"]))), None);
+        assert_eq!(
+            json_recipient(BodyField::Json(&json!({"email": "a@x.test"}))),
+            None
+        );
+        assert_eq!(
+            smtp::MailError::Failed.message(),
+            "Could not send email. Please check your configuration"
+        );
+    }
 
     #[test]
     fn py_str_coercion_matches_python() {
