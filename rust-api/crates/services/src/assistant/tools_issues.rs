@@ -843,13 +843,23 @@ impl ListFilterPredicates {
     /// alias used by [`SCOPED_ISSUES_SQL`]. `$N` placeholders continue the
     /// caller's numbering (`$1`/`$2` are taken there); values are pushed in
     /// order into `params`.
+    ///
+    /// The id arms (`state_id`, `parent_id`, `label_id`) render each
+    /// placeholder as `$N::uuid`: the caller binds `params` as strings and
+    /// sqlx-postgres sends explicit text type OIDs, so an uncast comparison
+    /// against a uuid column raises 42883 (`operator does not exist: uuid =
+    /// text`). The values are pre-validated canonical UUIDs upstream
+    /// ([`normalize_list_filters`] drops non-UUID state/parent tokens and
+    /// label ids arrive resolved), so the cast cannot fail on reachable
+    /// inputs. The text arms (`states.group`, `issues.priority`) compare
+    /// text columns and stay uncast.
     pub fn to_sql(&self, params: &mut Vec<String>, first_param: i32) -> String {
         let mut next = first_param;
         let mut parts: Vec<String> = Vec::new();
-        let mut take = |count: usize| {
+        let mut take = |count: usize, cast: &str| {
             let placeholders: Vec<String> = (0..count)
                 .map(|_| {
-                    let p = format!("${next}");
+                    let p = format!("${next}{cast}");
                     next += 1;
                     p
                 })
@@ -857,31 +867,31 @@ impl ListFilterPredicates {
             placeholders.join(", ")
         };
         if !self.state_in.is_empty() {
-            let list = take(self.state_in.len());
+            let list = take(self.state_in.len(), "::uuid");
             params.extend(self.state_in.iter().cloned());
             parts.push(format!("issues.state_id IN ({list})"));
         }
         if !self.state_group_in.is_empty() {
-            let list = take(self.state_group_in.len());
+            let list = take(self.state_group_in.len(), "");
             params.extend(self.state_group_in.iter().cloned());
             parts.push(format!(
                 "issues.state_id IN (SELECT states.id FROM states WHERE states.group IN ({list}))"
             ));
         }
         if !self.priority_in.is_empty() {
-            let list = take(self.priority_in.len());
+            let list = take(self.priority_in.len(), "");
             params.extend(self.priority_in.iter().cloned());
             parts.push(format!("issues.priority IN ({list})"));
         }
         if self.parent_is_null {
             parts.push("issues.parent_id IS NULL".to_owned());
         } else if !self.parent_in.is_empty() {
-            let list = take(self.parent_in.len());
+            let list = take(self.parent_in.len(), "::uuid");
             params.extend(self.parent_in.iter().cloned());
             parts.push(format!("issues.parent_id IN ({list})"));
         }
         if !self.label_ids_in.is_empty() {
-            let list = take(self.label_ids_in.len());
+            let list = take(self.label_ids_in.len(), "::uuid");
             params.extend(self.label_ids_in.iter().cloned());
             parts.push(format!(
                 "EXISTS (SELECT 1 FROM issue_labels WHERE issue_labels.issue_id = issues.id \
@@ -2009,6 +2019,188 @@ mod tests {
         assert!(out.state_in.is_empty());
         assert_eq!(out.state_group_in, vec!["review"]);
         assert_eq!(out.priority_in, vec!["high"]);
+    }
+
+    /// PIDASHCONV-1122: the id arms render `$N::uuid` (the caller binds
+    /// `params` as strings, so uncast placeholders compare uuid columns
+    /// to text params and raise 42883 live); the text arms stay uncast.
+    #[test]
+    fn list_filter_sql_casts_uuid_arms_only() {
+        let filters = ListFilterPredicates {
+            state_in: vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            state_group_in: vec!["started".to_owned()],
+            priority_in: vec!["high".to_owned()],
+            parent_is_null: false,
+            parent_in: vec!["22222222-2222-2222-2222-222222222222".to_owned()],
+            label_ids_in: vec!["33333333-3333-3333-3333-333333333333".to_owned()],
+        };
+        let mut params: Vec<String> = Vec::new();
+        let sql = filters.to_sql(&mut params, 4);
+        assert_eq!(
+            sql,
+            "issues.state_id IN ($4::uuid) AND issues.state_id IN (SELECT states.id FROM states WHERE states.group IN ($5)) AND issues.priority IN ($6) AND issues.parent_id IN ($7::uuid) AND EXISTS (SELECT 1 FROM issue_labels WHERE issue_labels.issue_id = issues.id AND issue_labels.label_id IN ($8::uuid) AND issue_labels.deleted_at IS NULL)"
+        );
+        assert_eq!(
+            params,
+            vec![
+                "11111111-1111-1111-1111-111111111111",
+                "started",
+                "high",
+                "22222222-2222-2222-2222-222222222222",
+                "33333333-3333-3333-3333-333333333333",
+            ]
+        );
+    }
+
+    async fn live_filter_pool() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL").expect("export DATABASE_URL for live filter tests");
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("pool connects")
+    }
+
+    /// Runs the rendered predicates the way `list_issues_page` does: params
+    /// bound as strings, in order, from `$1`.
+    async fn filtered_ids(pool: &sqlx::PgPool, filters: &ListFilterPredicates) -> Vec<String> {
+        let mut params: Vec<String> = Vec::new();
+        let rendered = filters.to_sql(&mut params, 1);
+        let sql = format!("SELECT issues.id::text FROM issues WHERE {rendered} ORDER BY 1");
+        let mut statement = sqlx::query_scalar::<_, String>(&sql);
+        for param in &params {
+            statement = statement.bind(param);
+        }
+        statement.fetch_all(pool).await.expect("filter query runs")
+    }
+
+    /// PIDASHCONV-1122: every filter arm runs against live Postgres with
+    /// string-bound params (no 42883) and returns the filtered rows. Temp
+    /// tables shadow any migrated names for this session only.
+    #[tokio::test]
+    #[ignore = "needs scratch DB via DATABASE_URL"]
+    async fn live_list_filter_arms_return_filtered_rows() {
+        let pool = live_filter_pool().await;
+        sqlx::query("CREATE TEMP TABLE states (id uuid PRIMARY KEY, \"group\" text NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("temp states");
+        sqlx::query(
+            "CREATE TEMP TABLE issues (id uuid PRIMARY KEY, state_id uuid, parent_id uuid, priority text NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("temp issues");
+        sqlx::query(
+            "CREATE TEMP TABLE issue_labels (issue_id uuid NOT NULL, label_id uuid NOT NULL, deleted_at timestamptz)",
+        )
+        .execute(&pool)
+        .await
+        .expect("temp issue_labels");
+        sqlx::query(
+            "INSERT INTO states (id, \"group\") VALUES \
+             ('11111111-1111-1111-1111-111111111111', 'started'), \
+             ('22222222-2222-2222-2222-222222222222', 'backlog')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed states");
+        sqlx::query(
+            "INSERT INTO issues (id, state_id, parent_id, priority) VALUES \
+             ('33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111', NULL, 'high'), \
+             ('44444444-4444-4444-4444-444444444444', '22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', 'low'), \
+             ('55555555-5555-5555-5555-555555555555', '11111111-1111-1111-1111-111111111111', '33333333-3333-3333-3333-333333333333', 'low')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed issues");
+        sqlx::query(
+            "INSERT INTO issue_labels (issue_id, label_id, deleted_at) VALUES \
+             ('33333333-3333-3333-3333-333333333333', '66666666-6666-6666-6666-666666666666', NULL), \
+             ('44444444-4444-4444-4444-444444444444', '66666666-6666-6666-6666-666666666666', now()), \
+             ('55555555-5555-5555-5555-555555555555', '77777777-7777-7777-7777-777777777777', NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed issue_labels");
+
+        let base = ListFilterPredicates::default();
+        // state arm (uuid column, string-bound param).
+        let filters = ListFilterPredicates {
+            state_in: vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            ..base.clone()
+        };
+        assert_eq!(
+            filtered_ids(&pool, &filters).await,
+            vec![
+                "33333333-3333-3333-3333-333333333333",
+                "55555555-5555-5555-5555-555555555555",
+            ]
+        );
+        // state_group arm (text column via the states subquery).
+        let filters = ListFilterPredicates {
+            state_group_in: vec!["started".to_owned()],
+            ..base.clone()
+        };
+        assert_eq!(
+            filtered_ids(&pool, &filters).await,
+            vec![
+                "33333333-3333-3333-3333-333333333333",
+                "55555555-5555-5555-5555-555555555555",
+            ]
+        );
+        // priority arm (text column).
+        let filters = ListFilterPredicates {
+            priority_in: vec!["high".to_owned()],
+            ..base.clone()
+        };
+        assert_eq!(
+            filtered_ids(&pool, &filters).await,
+            vec!["33333333-3333-3333-3333-333333333333"]
+        );
+        // parent arm (uuid column, string-bound param).
+        let filters = ListFilterPredicates {
+            parent_in: vec!["33333333-3333-3333-3333-333333333333".to_owned()],
+            ..base.clone()
+        };
+        assert_eq!(
+            filtered_ids(&pool, &filters).await,
+            vec![
+                "44444444-4444-4444-4444-444444444444",
+                "55555555-5555-5555-5555-555555555555",
+            ]
+        );
+        // top-level-only arm (no params).
+        let filters = ListFilterPredicates {
+            parent_is_null: true,
+            ..base.clone()
+        };
+        assert_eq!(
+            filtered_ids(&pool, &filters).await,
+            vec!["33333333-3333-3333-3333-333333333333"]
+        );
+        // label arm (uuid column, string-bound param; the soft-deleted
+        // link on 4444... must not match).
+        let filters = ListFilterPredicates {
+            label_ids_in: vec!["66666666-6666-6666-6666-666666666666".to_owned()],
+            ..base.clone()
+        };
+        assert_eq!(
+            filtered_ids(&pool, &filters).await,
+            vec!["33333333-3333-3333-3333-333333333333"]
+        );
+        // combined arms intersect.
+        let filters = ListFilterPredicates {
+            state_in: vec!["11111111-1111-1111-1111-111111111111".to_owned()],
+            priority_in: vec!["low".to_owned()],
+            parent_in: vec!["33333333-3333-3333-3333-333333333333".to_owned()],
+            label_ids_in: vec!["77777777-7777-7777-7777-777777777777".to_owned()],
+            ..base.clone()
+        };
+        assert_eq!(
+            filtered_ids(&pool, &filters).await,
+            vec!["55555555-5555-5555-5555-555555555555"]
+        );
     }
 
     #[test]
