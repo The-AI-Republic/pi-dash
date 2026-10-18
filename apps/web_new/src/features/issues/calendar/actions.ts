@@ -7,7 +7,14 @@
 // onto the day. Every write reports failure through the shared toast.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { createIssue, deleteIssue, updateIssue, type IssueListItem } from "@pidash/api-client";
+import {
+  addIssueToCycle,
+  createIssue,
+  deleteIssue,
+  setIssueModules,
+  updateIssue,
+  type IssueListItem,
+} from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
@@ -72,15 +79,39 @@ export interface CalendarCreateInput {
   day: string;
 }
 
+/** Membership a contextual calendar applies to items it creates or attaches. */
+export interface CalendarMembershipContext {
+  cycleId?: string;
+  moduleId?: string;
+}
+
+async function attachMembership(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  context: CalendarMembershipContext | undefined
+): Promise<void> {
+  if (context === undefined) return;
+  if (context.cycleId !== undefined) {
+    await addIssueToCycle(getAppClient(), workspaceSlug, projectId, context.cycleId, issueId);
+  }
+  if (context.moduleId !== undefined) {
+    await setIssueModules(getAppClient(), workspaceSlug, projectId, issueId, { modules: [context.moduleId] });
+  }
+}
+
 /** Create a work item already dated to the tile that launched it. */
-export function useCalendarCreate(workspaceSlug: string, projectId: string) {
+export function useCalendarCreate(workspaceSlug: string, projectId: string, context?: CalendarMembershipContext) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: CalendarCreateInput) =>
-      createIssue(getAppClient(), workspaceSlug, projectId, {
+    mutationFn: async (input: CalendarCreateInput) => {
+      const created = await createIssue(getAppClient(), workspaceSlug, projectId, {
         name: input.name,
         target_date: input.day,
-      }),
+      });
+      await attachMembership(workspaceSlug, projectId, created.id, context);
+      return created;
+    },
     onSuccess: () => {
       notifySuccess(CALENDAR_CREATE_SUCCESS_TITLE);
     },
@@ -99,14 +130,15 @@ export interface CalendarAttachInput {
 }
 
 /** Add existing work items to a day by re-dating each selected item. */
-export function useCalendarAttach(workspaceSlug: string, projectId: string) {
+export function useCalendarAttach(workspaceSlug: string, projectId: string, context?: CalendarMembershipContext) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: CalendarAttachInput) =>
       Promise.all(
-        input.issueIds.map((issueId) =>
-          updateIssue(getAppClient(), workspaceSlug, projectId, issueId, { target_date: input.day })
-        )
+        input.issueIds.map(async (issueId) => {
+          await updateIssue(getAppClient(), workspaceSlug, projectId, issueId, { target_date: input.day });
+          await attachMembership(workspaceSlug, projectId, issueId, context);
+        })
       ),
     onSuccess: () => {
       notifySuccess(CALENDAR_ATTACH_SUCCESS_TITLE);
@@ -114,9 +146,7 @@ export function useCalendarAttach(workspaceSlug: string, projectId: string) {
     onError: () => {
       notifyError(CALENDAR_ATTACH_FAILED_TITLE, "Nothing was changed — check your connection and try again.");
     },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug, projectId) });
-    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug, projectId) }),
   });
 }
 

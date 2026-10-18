@@ -49,7 +49,7 @@ describe("parseDisplayPrefs", () => {
       orderBy: "sort_order",
       showEmptyGroups: false,
       showSubIssues: true,
-      calendar: { mode: "month", showWeekends: true },
+      calendar: { mode: "month", showWeekends: false },
       properties: {},
     });
   });
@@ -73,16 +73,16 @@ describe("parseDisplayPrefs", () => {
     expect(prefs.orderBy).toBe("sort_order");
     expect(prefs.showEmptyGroups).toBe(false);
     expect(prefs.showSubIssues).toBe(true);
-    expect(prefs.calendar).toEqual({ mode: "month", showWeekends: true });
+    expect(prefs.calendar).toEqual({ mode: "month", showWeekends: false });
     expect(prefs.properties).toEqual({ priority: true });
   });
 
   it("keeps a mistyped order and null calendar read as defaults", () => {
     expect(parseDisplayPrefs({ order_by: 42 }, {}).orderBy).toBe("sort_order");
-    expect(parseDisplayPrefs({ calendar: null }, {}).calendar).toEqual({ mode: "month", showWeekends: true });
+    expect(parseDisplayPrefs({ calendar: null }, {}).calendar).toEqual({ mode: "month", showWeekends: false });
     expect(parseDisplayPrefs({ calendar: { layout: "month" } }, {}).calendar).toEqual({
       mode: "month",
-      showWeekends: true,
+      showWeekends: false,
     });
   });
 
@@ -107,7 +107,7 @@ describe("buildPrefsPatch", () => {
         sub_group_by: null,
         show_empty_groups: false,
         sub_issue: true,
-        calendar: { layout: "month", show_weekends: true },
+        calendar: { layout: "month", show_weekends: false },
       },
       display_properties: {},
     });
@@ -138,7 +138,7 @@ describe("buildPrefsPatch", () => {
     );
     expect(patch.display_filters?.["future_key"]).toBe("kept");
     expect(patch.display_filters?.["order_by"]).toBe("-created_at");
-    expect(patch.display_filters?.["calendar"]).toEqual({ layout: "month", future_cal: 1, show_weekends: true });
+    expect(patch.display_filters?.["calendar"]).toEqual({ layout: "month", future_cal: 1, show_weekends: false });
     expect(patch.display_properties?.["future_prop"]).toBe("kept");
   });
 
@@ -154,7 +154,7 @@ describe("buildPrefsPatch", () => {
     const patch = buildPrefsPatch(record({ display_filters: { layout: "calendar", calendar: "june" } }), {
       layout: "calendar",
     });
-    expect(patch.display_filters?.["calendar"]).toEqual({ layout: "month", show_weekends: true });
+    expect(patch.display_filters?.["calendar"]).toEqual({ layout: "month", show_weekends: false });
   });
 
   it("merges property visibility over the stored map", () => {

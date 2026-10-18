@@ -10,6 +10,7 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/index.js";
 import { CalendarLayout } from "./CalendarLayout.js";
 import { CALENDAR_ADD_EXISTING_ITEM, CALENDAR_ADD_ITEM, CALENDAR_TITLE_PLACEHOLDER } from "./CalendarDay.js";
 import { ADD_EXISTING_SUBMIT } from "./AddExistingDialog.js";
@@ -36,7 +37,9 @@ const state = vi.hoisted(() => ({
   calls: [] as { method: string; url: string }[],
   reDate: vi.fn(),
   create: vi.fn(),
+  createContext: undefined as unknown,
   attach: vi.fn(),
+  attachContext: undefined as unknown,
   remove: vi.fn(),
 }));
 
@@ -60,9 +63,15 @@ vi.mock("../prefs/displayPrefs.js", async (importOriginal) => {
 
 vi.mock("./actions.js", () => ({
   useRedateIssue: () => ({ isSaving: false, reDate: state.reDate }),
-  useCalendarCreate: () => ({ mutate: state.create }),
-  useCalendarAttach: () => ({ isPending: false, mutate: state.attach }),
-  useCalendarDelete: () => ({ mutate: state.remove }),
+  useCalendarCreate: (_slug: string, _projectId: string, context?: unknown) => {
+    state.createContext = context;
+    return { mutate: state.create, isPending: false };
+  },
+  useCalendarAttach: (_slug: string, _projectId: string, context?: unknown) => {
+    state.attachContext = context;
+    return { isPending: false, mutate: state.attach };
+  },
+  useCalendarDelete: () => ({ mutate: state.remove, isPending: false }),
 }));
 
 const today = new Date();
@@ -221,6 +230,10 @@ function tile(iso: string): HTMLElement {
   return document.querySelector(`[data-calendar-day="${iso}"]`) as HTMLElement;
 }
 
+function pointerEvent(type: string, clientX: number, clientY: number): MouseEvent {
+  return new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
+}
+
 beforeEach(() => {
   state.narrow = false;
   state.touch = false;
@@ -249,12 +262,16 @@ beforeEach(() => {
   state.updatePrefs.mockReset();
   state.reDate.mockReset();
   state.create.mockReset();
+  state.createContext = undefined;
   state.remove.mockReset();
+  state.remove.mockImplementation((_id: string, options?: { onSuccess?: () => void }) => options?.onSuccess?.());
   state.attach.mockReset();
+  state.attachContext = undefined;
   state.attach.mockImplementation((_input: unknown, options?: { onSuccess?: () => void }) => {
     options?.onSuccess?.();
   });
   installTransport();
+  document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
   window.history.replaceState({}, "", "/acme/projects/1/issues");
 });
 
@@ -285,6 +302,14 @@ describe("CalendarLayout", () => {
     await user.click(screen.getByRole("button", { name: "Options" }));
     await user.click(screen.getByRole("button", { name: /Week layout/ }));
     expect(state.updatePrefs).not.toHaveBeenCalled();
+  });
+
+  it("starts with five columns when the record has no weekend preference", async () => {
+    state.prefs = { filters: {}, display_filters: {}, display_properties: {}, rich_filters: {} };
+    renderLayout();
+    await screen.findByTestId("issues-calendar");
+    expect(screen.getByText("Mon")).toBeInTheDocument();
+    expect(screen.queryByText("Sat")).not.toBeInTheDocument();
   });
 
   it("steps months, jumps to today, and picks a month", async () => {
@@ -333,7 +358,8 @@ describe("CalendarLayout", () => {
   it("re-dates on drop, highlights the block, and ignores a same-day drop", async () => {
     renderLayout();
     const block = await screen.findByRole("link", { name: "WEB-42" });
-    fireEvent.pointerDown(block);
+    fireEvent(block, pointerEvent("pointerdown", 10, 10));
+    fireEvent(block, pointerEvent("pointermove", 30, 10));
     fireEvent.pointerEnter(tile(nextIso));
     fireEvent.pointerUp(tile(nextIso));
     expect(state.reDate).toHaveBeenCalledWith({
@@ -343,7 +369,8 @@ describe("CalendarLayout", () => {
     await waitFor(() => expect(block).toHaveAttribute("data-highlight", "true"));
 
     state.reDate.mockReset();
-    fireEvent.pointerDown(block);
+    fireEvent(block, pointerEvent("pointerdown", 10, 10));
+    fireEvent(block, pointerEvent("pointermove", 30, 10));
     fireEvent.pointerEnter(tile(todayIso));
     fireEvent.pointerUp(tile(todayIso));
     expect(state.reDate).not.toHaveBeenCalled();
@@ -356,7 +383,8 @@ describe("CalendarLayout", () => {
     state.windowRows = [row({ target_date: emptyIso, start_date: nextIso })];
     renderLayout();
     const block = await screen.findByRole("link", { name: "WEB-42" });
-    fireEvent.pointerDown(block);
+    fireEvent(block, pointerEvent("pointerdown", 10, 10));
+    fireEvent(block, pointerEvent("pointermove", 30, 10));
     fireEvent.pointerEnter(tile(todayIso));
     fireEvent.pointerUp(tile(todayIso));
     expect(state.reDate).toHaveBeenCalledWith({
@@ -369,19 +397,28 @@ describe("CalendarLayout", () => {
     renderLayout();
     const user = userEvent.setup();
     await user.click(await screen.findByRole("link", { name: "WEB-42" }));
-    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Fix login");
+    expect(screen.getByTestId("issue-preview")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Work item title" })).toHaveValue("Fix login");
     expect(window.location.search).toContain(`peekIssueId=${ISSUE_ID}`);
-    await user.click(screen.getByRole("button", { name: "Close" }));
-    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+    expect(state.reDate).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Close preview" }));
+    expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
     expect(window.location.search).not.toContain("peekIssueId");
   });
 
   it("opens peek from the deep link and closes on Escape", async () => {
     window.history.replaceState({}, "", `/acme/projects/1/issues?peekIssueId=${ISSUE_ID}`);
     renderLayout();
-    expect(await screen.findByRole("textbox", { name: "Title" })).toHaveValue("Fix login");
+    expect(await screen.findByRole("textbox", { name: "Work item title" })).toHaveValue("Fix login");
     fireEvent.keyDown(document, { key: "Escape" });
-    expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
+  });
+
+  it("forwards contextual cycle and module membership to calendar writes", async () => {
+    renderLayout({ membership: { cycleId: "823e4567-e89b-12d3-a456-426614174007" } });
+    await screen.findByRole("link", { name: "WEB-42" });
+    expect(state.createContext).toEqual({ cycleId: "823e4567-e89b-12d3-a456-426614174007" });
+    expect(state.attachContext).toEqual({ cycleId: "823e4567-e89b-12d3-a456-426614174007" });
   });
 
   it("deletes and edits from block quick actions", async () => {
@@ -393,9 +430,14 @@ describe("CalendarLayout", () => {
       const block = await screen.findByRole("link", { name: "WEB-42" });
       fireEvent.click(within(block).getByRole("button", { name: "Quick actions" }));
       fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
-      expect(state.remove).toHaveBeenCalledWith(ISSUE_ID);
+      expect(state.remove).not.toHaveBeenCalled();
+      expect(screen.getByRole("dialog", { name: /Delete work item/ })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+      expect(state.remove).toHaveBeenCalledWith(ISSUE_ID, expect.objectContaining({ onSuccess: expect.any(Function) }));
 
-      fireEvent.click(within(block).getByRole("button", { name: "Quick actions" }));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: /Delete work item/ })).not.toBeInTheDocument());
+      const blockAfterDelete = await screen.findByRole("link", { name: "WEB-42" });
+      fireEvent.click(within(blockAfterDelete).getByRole("button", { name: "Quick actions" }));
       fireEvent.click(await screen.findByRole("menuitem", { name: "Edit" }));
       expect(location.href).toBe("/acme/browse/WEB-42");
     } finally {
@@ -420,13 +462,18 @@ describe("CalendarLayout", () => {
     fireEvent.click(within(dayTile).getByText(CALENDAR_ADD_ITEM));
     fireEvent.click(await screen.findByRole("menuitem", { name: CALENDAR_ADD_EXISTING_ITEM }));
     expect(await screen.findByText("Existing item")).toBeInTheDocument();
+    state.windowRows = [
+      row({ target_date: todayIso }),
+      row({ id: SEARCH_ID, name: "Existing item", sequence_id: 45, target_date: todayIso }),
+    ];
     await user.click(screen.getByText("Existing item"));
     await user.click(screen.getByRole("button", { name: ADD_EXISTING_SUBMIT }));
     expect(state.attach).toHaveBeenCalledWith(
       { issueIds: [SEARCH_ID], day: todayIso },
       expect.objectContaining({ onSuccess: expect.any(Function) })
     );
-    await waitFor(() => expect(screen.queryByText("Existing item")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("checkbox")).not.toBeInTheDocument());
+    await waitFor(() => expect(within(tile(todayIso)).getByText("Existing item")).toBeInTheDocument());
   });
 
   it("shows a pulsing temp block until the create settles", async () => {
@@ -462,6 +509,28 @@ describe("CalendarLayout", () => {
     expect(await screen.findByText("Existing item")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByText("Existing item")).not.toBeInTheDocument());
+  });
+
+  it("hides quick actions and clears drag sources for read-only viewers", async () => {
+    renderLayout({ canEdit: false });
+    const block = await screen.findByRole("link", { name: "WEB-42" });
+    expect(within(block).queryByRole("button", { name: "Quick actions" })).not.toBeInTheDocument();
+    fireEvent(block, pointerEvent("pointerdown", 10, 10));
+    fireEvent(block, pointerEvent("pointermove", 40, 40));
+    fireEvent.pointerEnter(tile(nextIso));
+    fireEvent.pointerUp(tile(nextIso));
+    expect(state.reDate).not.toHaveBeenCalled();
+  });
+
+  it("keeps blocks visible but non-draggable on touch layouts", async () => {
+    state.touch = true;
+    renderLayout();
+    const block = await screen.findByRole("link", { name: "WEB-42" });
+    fireEvent(block, pointerEvent("pointerdown", 10, 10));
+    fireEvent(block, pointerEvent("pointermove", 40, 40));
+    fireEvent.pointerEnter(tile(nextIso));
+    fireEvent.pointerUp(tile(nextIso));
+    expect(state.reDate).not.toHaveBeenCalled();
   });
 
   it("pages a crowded day with the server cursor instead of skipping a page", async () => {

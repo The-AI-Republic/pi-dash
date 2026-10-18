@@ -69,6 +69,7 @@ function renderDay(overrides: Partial<React.ComponentProps<typeof CalendarDay>> 
       highlightedId={null}
       narrow={false}
       canEdit
+      canDrag
       canAddExisting
       selected={false}
       isDropTarget={false}
@@ -144,6 +145,20 @@ describe("CalendarDay", () => {
   it("hides add controls when the caller cannot edit", () => {
     renderDay({ canEdit: false });
     expect(screen.queryByText(CALENDAR_ADD_ITEM)).not.toBeInTheDocument();
+  });
+
+  it("hides block quick actions for read-only viewers", () => {
+    renderDay({ rows: [row()], totalRows: 1, canEdit: false, canDrag: false });
+    expect(screen.getByRole("link", { name: "WEB-42" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Quick actions" })).not.toBeInTheDocument();
+  });
+
+  it("keeps blocks visible but not draggable on touch layouts", () => {
+    const handlers = renderDay({ rows: [row()], totalRows: 1, canDrag: false });
+    const block = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(block, new MouseEvent("pointerdown", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    fireEvent(block, new MouseEvent("pointermove", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
   });
 
   it("selects the day from the compact face and renders no blocks", async () => {

@@ -23,6 +23,7 @@ import {
   useCalendarDelete,
   useRedateIssue,
 } from "./actions.js";
+import { issueKeys } from "../api/keys.js";
 
 vi.mock("../../../shared/shell/index.js", () => ({
   notifyError: vi.fn(),
@@ -87,6 +88,14 @@ function harness(status = 204) {
       url,
       body: typeof init.body === "string" ? init.body : "",
     });
+    if (url.includes("/cycle-issues/") || url.includes("/modules/")) {
+      return {
+        status: 201,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ message: "ok" }),
+      };
+    }
     return {
       status,
       url,
@@ -186,6 +195,47 @@ describe("calendar actions", () => {
     expect(calls).toHaveLength(2);
     expect(calls.every((call) => call.method === "PATCH")).toBe(true);
     expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ target_date: "2026-10-09" });
+  });
+
+  it("marks the calendar list window stale after attaching items", async () => {
+    const { queryClient } = harness();
+    const calendarKey = [...issueKeys.lists("acme", PROJECT_ID), "calendar", "2026-10-01", "2026-10-31", 4];
+    queryClient.setQueryData(calendarKey, { results: {} });
+    const { result } = renderHook(() => useCalendarAttach("acme", PROJECT_ID), { wrapper: wrapper(queryClient) });
+    result.current.mutate({ issueIds: [ISSUE_ID], day: "2026-10-09" });
+    await waitFor(() => expect(queryClient.getQueryState(calendarKey)?.isInvalidated).toBe(true));
+  });
+
+  it("attaches a cycle and module when the calendar has contextual membership", async () => {
+    const { calls, queryClient } = harness();
+    const { result } = renderHook(
+      () =>
+        useCalendarAttach("acme", PROJECT_ID, {
+          cycleId: "823e4567-e89b-12d3-a456-426614174007",
+          moduleId: "923e4567-e89b-12d3-a456-426614174008",
+        }),
+      { wrapper: wrapper(queryClient) }
+    );
+    result.current.mutate({ issueIds: [ISSUE_ID], day: "2026-10-09" });
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(CALENDAR_ATTACH_SUCCESS_TITLE));
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      `PATCH https://api.test/api/workspaces/acme/projects/${PROJECT_ID}/issues/${ISSUE_ID}/`,
+      `POST https://api.test/api/workspaces/acme/projects/${PROJECT_ID}/cycles/823e4567-e89b-12d3-a456-426614174007/cycle-issues/`,
+      `POST https://api.test/api/workspaces/acme/projects/${PROJECT_ID}/issues/${ISSUE_ID}/modules/`,
+    ]);
+    expect(JSON.parse(calls[2]?.body ?? "{}")).toEqual({ modules: ["923e4567-e89b-12d3-a456-426614174008"] });
+  });
+
+  it("attaches created items to the contextual cycle or module", async () => {
+    const { calls, queryClient } = harness(201);
+    const { result } = renderHook(
+      () => useCalendarCreate("acme", PROJECT_ID, { cycleId: "823e4567-e89b-12d3-a456-426614174007" }),
+      { wrapper: wrapper(queryClient) }
+    );
+    result.current.mutate({ name: "Dated item", day: "2026-10-08" });
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(CALENDAR_CREATE_SUCCESS_TITLE));
+    expect(calls.map((call) => call.method)).toEqual(["POST", "POST"]);
+    expect(calls[1]?.url).toContain("/cycles/823e4567-e89b-12d3-a456-426614174007/cycle-issues/");
   });
 
   it("toasts an attach failure", async () => {

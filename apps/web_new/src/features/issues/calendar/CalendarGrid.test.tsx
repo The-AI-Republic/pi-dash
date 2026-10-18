@@ -71,6 +71,7 @@ function renderGrid(overrides: Partial<React.ComponentProps<typeof CalendarGrid>
       highlightedId={null}
       narrow={false}
       canEdit
+      canDrag
       canAddExisting
       selectedDay={null}
       dropTarget={null}

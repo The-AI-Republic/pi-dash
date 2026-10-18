@@ -11,15 +11,25 @@ import type { IssueListItem } from "@pidash/api-client";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { DeleteWorkItemDialog } from "../../../shared/shell/contextual/index.js";
+import { PeekPanel } from "../../../shared/shell/index.js";
+import { issueDetailQueryOptions } from "../api/queries.js";
+import { useUpdateIssue } from "../api/mutations.js";
+import { issueKeys } from "../api/keys.js";
 import { CalendarReloadBar } from "../loaders/skeletons.js";
 import { selectDisplayPrefs, useEntityPrefs, useUpdateDisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { useWeekStart } from "../dropdowns/weekStart.js";
 import { AddExistingDialog } from "./AddExistingDialog.js";
-import { CalendarBlock } from "./CalendarBlock.js";
 import { CalendarGrid } from "./CalendarGrid.js";
 import { CalendarHeader } from "./CalendarHeader.js";
-import { useCalendarAttach, useCalendarCreate, useCalendarDelete, useRedateIssue } from "./actions.js";
+import {
+  useCalendarAttach,
+  useCalendarCreate,
+  useCalendarDelete,
+  useRedateIssue,
+  type CalendarMembershipContext,
+} from "./actions.js";
 import { createTempId } from "../freshness/fresh.js";
 import { tempIssueRow } from "../freshness/tempRows.js";
 import {
@@ -58,6 +68,8 @@ export interface CalendarLayoutProps {
   canEdit: boolean;
   /** Epics-only calendars offer creation, not add-existing. */
   canAddExisting?: boolean;
+  /** Cycle or module whose detail screen hosts this calendar. */
+  membership?: CalendarMembershipContext;
 }
 
 interface CalendarPeekState {
@@ -89,6 +101,7 @@ export function CalendarLayout({
   entity,
   canEdit,
   canAddExisting = true,
+  membership,
 }: CalendarLayoutProps): React.ReactElement {
   const narrow = useNarrowViewport();
   const touch = useTouchInput();
@@ -106,12 +119,13 @@ export function CalendarLayout({
   const [dayTotals, setDayTotals] = React.useState<Record<string, number>>({});
   const [dayCursors, setDayCursors] = React.useState<Record<string, string>>({});
   const [peek, setPeek] = React.useState<CalendarPeekState | null>(null);
+  const [deleteTarget, setDeleteTarget] = React.useState<IssueListItem | null>(null);
   const [loadingDay, setLoadingDay] = React.useState<string | null>(null);
   const [reloadBar, setReloadBar] = React.useState(false);
   const [pendingByDay, setPendingByDay] = React.useState<PendingRowsByDay>({});
 
   const mode = selectMode(prefs?.calendar.mode);
-  const showWeekends = prefs?.calendar.showWeekends ?? true;
+  const showWeekends = prefs?.calendar.showWeekends ?? false;
   const year = anchor.getFullYear();
   const month0 = anchor.getMonth();
   const today = isoToday();
@@ -127,15 +141,25 @@ export function CalendarLayout({
   const statesQuery = useQuery(calendarStatesQueryOptions(getAppClient(), workspaceSlug, projectId));
   const queryClient = useQueryClient();
   const redate = useRedateIssue(workspaceSlug, projectId);
-  const create = useCalendarCreate(workspaceSlug, projectId);
-  const attach = useCalendarAttach(workspaceSlug, projectId);
+  const create = useCalendarCreate(workspaceSlug, projectId, membership);
+  const attach = useCalendarAttach(workspaceSlug, projectId, membership);
   const remove = useCalendarDelete(workspaceSlug, projectId);
+  const rename = useUpdateIssue({
+    workspaceSlug,
+    projectId,
+    issueId: peek?.issue.id ?? "",
+    failureTitle: "Couldn't save the title",
+  });
 
   const rows = React.useMemo(
     () => (calendarQuery.data === undefined ? [] : rowsFromResponse(calendarQuery.data)),
     [calendarQuery.data]
   );
   const grouped = React.useMemo(() => groupRowsByDate(rows), [rows]);
+  const peekDetail = useQuery({
+    ...issueDetailQueryOptions(getAppClient(), workspaceSlug, projectId, peek?.issue.id ?? ""),
+    enabled: peek !== null,
+  });
   const totalsByDay = React.useMemo(() => {
     const totals = new Map<string, number>();
     if (calendarQuery.data !== undefined) {
@@ -286,6 +310,7 @@ export function CalendarLayout({
         highlightedId={highlightedId}
         narrow={narrow && touch}
         canEdit={canEdit}
+        canDrag={canEdit && !touch}
         canAddExisting={canAddExisting}
         selectedDay={selectedDay}
         dropTarget={dropTarget}
@@ -308,7 +333,7 @@ export function CalendarLayout({
             globalThis.window.location.href = `/${workspaceSlug}/browse/${projectIdentifier}-${issue.sequence_id}`;
           }
         }}
-        onDelete={(issue) => remove.mutate(issue.id)}
+        onDelete={(issue) => setDeleteTarget(issue)}
         onDragStart={(issue, event) => {
           event.preventDefault();
           setDragged(issue);
@@ -344,40 +369,43 @@ export function CalendarLayout({
         }}
         onSubmit={(issueIds) => {
           if (addExistingDay === null) return;
-          attach.mutate({ issueIds, day: addExistingDay }, { onSuccess: () => setAddExistingDay(null) });
+          attach.mutate(
+            { issueIds, day: addExistingDay },
+            {
+              onSuccess: async () => {
+                await queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug, projectId) });
+                setAddExistingDay(null);
+              },
+            }
+          );
         }}
       />
       {peek !== null ? (
-        <div className="absolute top-0 right-0 bottom-0 z-40 flex w-[min(28rem,92vw)] flex-col gap-(--space-4) border-l border-(--border) bg-(--surface) p-(--space-6)">
-          <div className="flex items-start justify-between gap-(--space-4)">
-            <p className="text-caption text-(--text-muted)">
-              {projectIdentifier}-{peek.issue.sequence_id}
-            </p>
-            <button type="button" className="text-caption text-(--text-muted)" onClick={closePeek}>
-              Close
-            </button>
-          </div>
-          <textarea
-            aria-label="Title"
-            className="text-h3 w-full resize-none bg-transparent text-(--text) outline-none"
-            value={peek.issue.name}
-            readOnly
-            rows={2}
-          />
-          <div className="flex gap-(--space-2)">
-            <CalendarBlock
-              issue={peek.issue}
-              projectIdentifier={projectIdentifier}
-              stateColor={peek.issue.state_id === null ? null : (stateColors.get(peek.issue.state_id) ?? null)}
-              highlighted={false}
-              onOpen={() => undefined}
-              onEdit={() => undefined}
-              onDelete={() => undefined}
-              onDragStart={() => undefined}
-            />
-          </div>
-        </div>
+        <PeekPanel
+          eyebrow={`${projectIdentifier}-${peek.issue.sequence_id}`}
+          title={peekDetail.data?.name ?? peek.issue.name}
+          titleLabel="Work item title"
+          onClose={closePeek}
+          onCommitTitle={canEdit ? (next) => rename.mutate({ name: next }) : undefined}
+        >
+          <p className="text-body text-(--text-muted)">
+            {peekDetail.isLoading ? "Loading work item…" : "Dates, properties and activity open in the full view."}
+          </p>
+        </PeekPanel>
       ) : null}
+      <DeleteWorkItemDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+        noun="Work item"
+        title={deleteTarget?.name ?? ""}
+        deleting={remove.isPending}
+        onConfirm={() => {
+          if (deleteTarget === null) return;
+          remove.mutate(deleteTarget.id, { onSuccess: () => setDeleteTarget(null) });
+        }}
+      />
     </div>
   );
 }

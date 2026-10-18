@@ -53,7 +53,9 @@ function parseCalendar(value: unknown): DisplayCalendarPrefs {
   const record = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
   return {
     mode: record?.["layout"] === "week" ? "week" : "month",
-    showWeekends: record?.["show_weekends"] !== false,
+    // The old calendar starts with weekends hidden when the preference
+    // key is absent; only an explicit true opts back into seven columns.
+    showWeekends: record?.["show_weekends"] === true,
   };
 }
 

@@ -7,7 +7,12 @@ import userEvent from "@testing-library/user-event";
 import type { IssueListItem } from "@pidash/api-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { CALENDAR_BLOCK_PREVIEW_DELAY_MS, CalendarBlock, blockIdentifier } from "./CalendarBlock.js";
+import {
+  CALENDAR_BLOCK_PREVIEW_DELAY_MS,
+  CALENDAR_DRAG_THRESHOLD_PX,
+  CalendarBlock,
+  blockIdentifier,
+} from "./CalendarBlock.js";
 
 const ISSUE_ID = "323e4567-e89b-12d3-a456-426614174002";
 const STATE_ID = "423e4567-e89b-12d3-a456-426614174003";
@@ -40,7 +45,11 @@ function row(overrides: Partial<IssueListItem> = {}): IssueListItem {
   };
 }
 
-function renderBlock(issue = row(), highlighted = false) {
+function renderBlock(
+  issue = row(),
+  highlighted = false,
+  overrides: Partial<React.ComponentProps<typeof CalendarBlock>> = {}
+) {
   const handlers = {
     onOpen: vi.fn(),
     onEdit: vi.fn(),
@@ -48,9 +57,22 @@ function renderBlock(issue = row(), highlighted = false) {
     onDragStart: vi.fn(),
   };
   render(
-    <CalendarBlock issue={issue} projectIdentifier="WEB" stateColor="#00ff00" highlighted={highlighted} {...handlers} />
+    <CalendarBlock
+      issue={issue}
+      projectIdentifier="WEB"
+      stateColor="#00ff00"
+      highlighted={highlighted}
+      draggable
+      quickActions
+      {...handlers}
+      {...overrides}
+    />
   );
   return handlers;
+}
+
+function pointerEvent(type: string, clientX: number, clientY: number): MouseEvent {
+  return new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
 }
 
 afterEach(() => {
@@ -94,15 +116,51 @@ describe("CalendarBlock", () => {
     expect(handlers.onDelete).toHaveBeenCalledOnce();
   });
 
-  it("starts a pointer drag and marks a highlighted temp row", () => {
+  it("starts a pointer drag after movement and marks a highlighted temp row", () => {
     const issue = row({ id: "temp-abc", name: "Draft" });
     const handlers = renderBlock(issue, true);
     const link = screen.getByRole("link", { name: "Draft, saving" });
     expect(link).toHaveClass("highlight");
     expect(link).toHaveAttribute("data-temprow", "true");
     expect(link.querySelector(".animate-pulse")).not.toBeNull();
-    fireEvent.pointerDown(link);
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(link, pointerEvent("pointermove", 10 + CALENDAR_DRAG_THRESHOLD_PX, 10));
     expect(handlers.onDragStart).toHaveBeenCalledWith(issue, expect.anything());
+  });
+
+  it("does not start a drag for a click without movement", () => {
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(link, pointerEvent("pointermove", 11, 11));
+    fireEvent(link, pointerEvent("pointerup", 11, 11));
+    fireEvent.click(link);
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+    expect(handlers.onOpen).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a click that follows a drag from opening peek", () => {
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(link, pointerEvent("pointermove", 30, 30));
+    fireEvent(link, pointerEvent("pointerup", 30, 30));
+    fireEvent.click(link);
+    expect(handlers.onDragStart).toHaveBeenCalledOnce();
+    expect(handlers.onOpen).not.toHaveBeenCalled();
+  });
+
+  it("does not start a drag when the block is not draggable", () => {
+    const handlers = renderBlock(row(), false, { draggable: false });
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(link, pointerEvent("pointermove", 40, 40));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("hides quick actions for read-only viewers", () => {
+    renderBlock(row(), false, { quickActions: false });
+    expect(screen.queryByRole("button", { name: "Quick actions" })).not.toBeInTheDocument();
   });
 
   it("omits the state edge colour and handles focus previews", () => {

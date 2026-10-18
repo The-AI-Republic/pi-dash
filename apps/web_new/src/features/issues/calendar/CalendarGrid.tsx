@@ -24,6 +24,7 @@ export interface CalendarGridProps {
   highlightedId: string | null;
   narrow: boolean;
   canEdit: boolean;
+  canDrag: boolean;
   canAddExisting: boolean;
   selectedDay: string | null;
   dropTarget: string | null;
@@ -51,6 +52,7 @@ function Day({ cell, props }: { cell: CalendarCell; props: CalendarGridProps }):
       highlightedId={props.highlightedId}
       narrow={props.narrow}
       canEdit={props.canEdit}
+      canDrag={props.canDrag}
       canAddExisting={props.canAddExisting}
       selected={props.selectedDay === cell.iso}
       isDropTarget={props.dropTarget === cell.iso}

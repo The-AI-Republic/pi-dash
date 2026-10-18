@@ -27,6 +27,8 @@ export interface CalendarDayProps {
   highlightedId: string | null;
   narrow: boolean;
   canEdit: boolean;
+  /** False on touch layouts even when the viewer may edit. */
+  canDrag: boolean;
   canAddExisting: boolean;
   selected: boolean;
   isDropTarget: boolean;
@@ -57,6 +59,7 @@ export function CalendarDay({
   highlightedId,
   narrow,
   canEdit,
+  canDrag,
   canAddExisting,
   selected,
   isDropTarget,
@@ -132,7 +135,9 @@ export function CalendarDay({
               onOpen={onOpen}
               onEdit={onEdit}
               onDelete={onDelete}
-              onDragStart={canEdit ? onDragStart : () => undefined}
+              onDragStart={onDragStart}
+              draggable={canDrag}
+              quickActions={canEdit}
             />
           ))}
           {hasMore ? (
