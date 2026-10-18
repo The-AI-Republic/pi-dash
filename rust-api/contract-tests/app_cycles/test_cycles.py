@@ -222,6 +222,37 @@ def test_date_check_open_conflict_and_missing(admin):
     assert r.json() == {"error": "Start date and end date both are required"}
 
 
+def test_date_check_rejects_dates_python_strptime_rejects(admin):
+    """CPython's `%Y-%m-%d` is anchored and strict: not four digits for the
+    year, a sign, or a leading space before the month is a ValueError, which
+    Django's `convert_to_utc` lets escape as the generic 500 (PB-0112). The
+    Rust port must answer the same 500, never a 200 overlap verdict."""
+    urls = cycle_urls(admin)
+    for start in (" 2026-03-01", "26-03-01", "+2026-03-01", "2026- 3-01"):
+        r = admin["client"].post(
+            urls["date_check"],
+            json={"start_date": start, "end_date": "2026-03-31"},
+        )
+        assert r.status_code == 500, (start, r.status_code, r.text[:200])
+        assert r.json() == {
+            "error": "Something went wrong please try again later"
+        }, start
+
+
+def test_date_check_accepts_dates_python_strptime_accepts(admin):
+    """The forms both parsers accept: a 1-digit month/day and a
+    space-padded single-digit day. Both answer 200 with the clear verdict
+    (the isolated tenant has no cycle on those dates)."""
+    urls = cycle_urls(admin)
+    for start in ("2026-3-1", "2026-03- 1"):
+        r = admin["client"].post(
+            urls["date_check"],
+            json={"start_date": start, "end_date": "2026-03-31"},
+        )
+        assert r.status_code == 200, (start, r.status_code, r.text[:200])
+        assert r.json() == {"status": True}, start
+
+
 def test_progress_shape(admin):
     urls = cycle_urls(admin)
     r = admin["client"].get(urls["progress"](admin["cycle"]["id"]))

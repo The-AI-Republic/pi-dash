@@ -719,9 +719,10 @@ pub fn py_str(value: Option<&Value>) -> String {
 /// are [`Denial::ServerError`] here, never a fallback.
 pub fn convert_start_date(raw: &str, project_tz: &str) -> Result<DateTime<Utc>, Denial> {
     let tz: Tz = project_tz.parse().map_err(|_| Denial::ServerError)?;
-    // `datetime.strptime(date, "%Y-%m-%d").date()` — strict calendar
-    // date (ValueError → 500 on garbage: BUG-date-check-bad-format-500).
-    let day = NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|_| Denial::ServerError)?;
+    // `datetime.strptime(date, "%Y-%m-%d").date()` — CPython's strict
+    // field grammar, not chrono's lax one (ValueError → 500 on any
+    // mismatch: BUG-date-check-bad-format-500). See [`strptime_ymd`].
+    let day = strptime_ymd(raw).ok_or(Denial::ServerError)?;
     let naive = day.and_hms_opt(0, 0, 1).ok_or(Denial::ServerError)?;
     let local = tz
         .from_local_datetime(&naive)
@@ -739,13 +740,64 @@ pub fn convert_start_date(raw: &str, project_tz: &str) -> Result<DateTime<Utc>, 
 /// [`convert_start_date`].
 pub fn convert_end_date(raw: &str, project_tz: &str) -> Result<DateTime<Utc>, Denial> {
     let tz: Tz = project_tz.parse().map_err(|_| Denial::ServerError)?;
-    let day = NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|_| Denial::ServerError)?;
+    let day = strptime_ymd(raw).ok_or(Denial::ServerError)?;
     let naive = day.and_hms_opt(23, 59, 0).ok_or(Denial::ServerError)?;
     let local = tz
         .from_local_datetime(&naive)
         .single()
         .ok_or(Denial::ServerError)?;
     Ok(local.with_timezone(&Utc))
+}
+
+/// CPython `datetime.strptime(raw, "%Y-%m-%d")` for the date-check path.
+///
+/// `_strptime`'s compiled patterns are anchored over the whole string:
+/// `%Y` = exactly four ASCII digits, `%m` = `1[0-2]|0[1-9]|[1-9]`, `%d` =
+/// `3[01]|[12]\d|0[1-9]|[1-9]| [1-9]` (the last alternative is a literal
+/// space then one digit). `datetime()` then rejects out-of-range calendar
+/// values — month 13, day 32, Feb 30 — and `MINYEAR` rejects year 0. Any
+/// rejection is a `ValueError` → the generic 500, so this returns `None`
+/// for every such input and the caller maps it to [`Denial::ServerError`].
+/// `chrono`'s `%Y`/`%m`/`%d` are laxer (it trims leading whitespace,
+/// accepts a sign and a 1-digit year), so `NaiveDate::parse_from_str`
+/// cannot be used here.
+fn strptime_ymd(raw: &str) -> Option<NaiveDate> {
+    let mut parts = raw.split('-');
+    let year_raw = parts.next()?;
+    let month_raw = parts.next()?;
+    let day_raw = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let year = strptime_fixed_4(year_raw)?;
+    let month = strptime_num(month_raw, 1, 12)?;
+    let day = match day_raw.strip_prefix(' ') {
+        // ` [1-9]`: exactly one space then one digit in 1..=9.
+        Some(rest) if rest.len() == 1 => strptime_num(rest, 1, 9)?,
+        Some(_) => return None,
+        None => strptime_num(day_raw, 1, 31)?,
+    };
+    NaiveDate::from_ymd_opt(year, month, day)
+}
+
+/// `%Y`: exactly four ASCII digits, year ≥ 1 (`datetime.MINYEAR`).
+fn strptime_fixed_4(raw: &str) -> Option<i32> {
+    if raw.len() == 4 && raw.bytes().all(|b| b.is_ascii_digit()) {
+        let year: i32 = raw.parse().ok()?;
+        (year >= 1).then_some(year)
+    } else {
+        None
+    }
+}
+
+/// One `_strptime` numeric field: 1-2 ASCII digits, no sign or leading
+/// whitespace, value within `[min, max]`.
+fn strptime_num(raw: &str, min: u32, max: u32) -> Option<u32> {
+    if raw.is_empty() || raw.len() > 2 || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let value: u32 = raw.parse().ok()?;
+    (min..=max).contains(&value).then_some(value)
 }
 
 /// The overlap probe (`base.py:539-547`): a cycle in this workspace +
@@ -2375,6 +2427,52 @@ mod tests {
             convert_start_date("2024-01-01", "No/Such_Zone"),
             Err(Denial::ServerError)
         ));
+    }
+
+    #[test]
+    fn convert_dates_match_python_strptime_grammar() {
+        // CPython `%Y-%m-%d` is stricter than chrono's: a leading space, a
+        // short or signed year, a space-padded month, year 0, and trailing
+        // whitespace are all ValueError → 500
+        // (BUG-date-check-bad-format-500; PB-0112). Lax chrono inputs.
+        for bad in [
+            " 2026-03-01",
+            "26-03-01",
+            "+2026-03-01",
+            "-2026-03-01",
+            "2026- 3-01",
+            "2026-03-01 ",
+            "0000-01-01",
+            "2026-02-30",
+            "2026-13-01",
+            "2026-00-01",
+            "2026-03-00",
+            "2026-03-32",
+        ] {
+            assert!(
+                matches!(convert_start_date(bad, "UTC"), Err(Denial::ServerError)),
+                "start {bad:?} must be a 500"
+            );
+            assert!(
+                matches!(convert_end_date(bad, "UTC"), Err(Denial::ServerError)),
+                "end {bad:?} must be a 500"
+            );
+        }
+        // Forms both parsers accept: 1-digit month/day, a space-padded
+        // single-digit day, and a 4-digit year below 1000.
+        for (raw, y, m, d) in [
+            ("2026-3-1", 2026, 3, 1),
+            ("2026-03- 1", 2026, 3, 1),
+            ("0026-03-01", 26, 3, 1),
+        ] {
+            assert_eq!(
+                strptime_ymd(raw),
+                NaiveDate::from_ymd_opt(y, m, d),
+                "{raw:?} must parse"
+            );
+            assert!(convert_start_date(raw, "UTC").is_ok(), "{raw:?} start ok");
+            assert!(convert_end_date(raw, "UTC").is_ok(), "{raw:?} end ok");
+        }
     }
 
     #[test]
