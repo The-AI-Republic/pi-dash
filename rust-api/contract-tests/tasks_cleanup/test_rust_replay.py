@@ -53,12 +53,15 @@ Ownership split (mirrors the worker registry):
   object delete for truthy keys, PIDASHCONV-858), hard delete, ETA
   delay, redelivery, workspace_seed before/after. No skipped or
   weakened assertions.
-- The 3 remaining export tasks stay Python-owned (``is_export_task`` /
-  ``EXPORT_TASK_NAMES`` minus the flipped expiry task): the Rust worker
-  forwards them to AMQP. Their replay form asserts observable
+- One export task stays Python-owned: ``export_analytics_to_csv_email``
+  (dead — defined, never referenced; EXPECTED.md PROXIED row). The Rust
+  worker forwards it to AMQP, so its replay form asserts observable
   forwarding — the ``rust_job_queue`` row is acked AND the broker
   ``celery`` queue grows while the Django worker is stopped — instead
-  of local DB effects.
+  of local DB effects. ``issue_export_task`` and ``analytic_export_task``
+  flipped to Rust-owned in PIDASHCONV-1106 (``oss_worker::
+  register_oss_handlers``) and are replayed against captures by the
+  ``exports/`` suite, so they are not forwarding cases here.
 """
 
 import json as _json
@@ -76,10 +79,9 @@ from _harness.db import insert_row, snapshot, wait_for_condition as wait_for
 M = "pi_dash.bgtasks"
 
 # The still-Python-owned export tasks (`delete_old_s3_link` flipped to
-# Rust in PIDASHCONV-858 and replays locally below).
+# Rust in PIDASHCONV-858; `issue_export_task` / `analytic_export_task`
+# flipped to Rust in PIDASHCONV-1106 and replay locally in exports/).
 EXPORT_TASKS = [
-    f"{M}.export_task.issue_export_task",
-    f"{M}.analytic_plot_export.analytic_export_task",
     f"{M}.analytic_plot_export.export_analytics_to_csv_email",
 ]
 
@@ -1519,19 +1521,24 @@ def test_rust_storage_aware_tasks_consumed_without_crash(db_conn, broker_url):
 
 
 def test_rust_exports_forward_to_python(db_conn, broker_url):
-    """Export parity: the 3 Python-owned tasks forward over AMQP, observably.
+    """Export parity: the still-Python-owned export task forwards, observably.
 
-    The Rust worker has no local handler for these names (``is_export_task``)
-    while S3 upload/SMTP and the exporter serializers still live on the
-    Python plane. Each job's ``rust_job_queue`` row must therefore be acked
-    via the forward path, AND its Celery v2 message must arrive on the
-    broker ``celery`` queue — which grows because the Django worker is
-    stopped.
+    ``export_analytics_to_csv_email`` is the only export name the Rust
+    worker does not own (``register_oss_handlers`` deliberately omits it;
+    it is dead Python — defined, never referenced — so it keeps the
+    EXPECTED.md PROXIED row). Its job's ``rust_job_queue`` row must be
+    acked via the forward path, AND its Celery v2 message must arrive on
+    the broker ``celery`` queue — which grows because the Django worker
+    is stopped.
+
+    ``issue_export_task`` and ``analytic_export_task`` are Rust-owned as
+    of PIDASHCONV-1106, so they are not forwarding cases: their local
+    execution is replayed against the committed captures by the
+    ``exports/`` suite, and their ``Route::Local`` ownership is pinned by
+    the ``oss_worker`` registry test.
     """
     probe_args = {
-        EXPORT_TASKS[0]: (["csv", "ws-1", [], "tok-9", False, "slug"], {}),
-        EXPORT_TASKS[1]: (["probe@example.com", {"metric": "count"}, "slug"], {}),
-        EXPORT_TASKS[2]: (([{}], ["H"], ["k"], "probe@example.com", "slug"), {}),
+        EXPORT_TASKS[0]: (([{}], ["H"], ["k"], "probe@example.com", "slug"), {}),
     }
     baseline = broker_probe.queue_depth()
     celery_ids = []
