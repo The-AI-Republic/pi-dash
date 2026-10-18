@@ -5,7 +5,7 @@
 // test:parity-disk-check). Stubs df(1) and docker(1) on PATH so every
 // threshold branch is exercised without touching the real host disk.
 import { strict as assert } from "node:assert";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -24,9 +24,9 @@ const DF_STUB = [
   "  exit 0",
   "fi",
   'case "${2:-}" in',
+  '  /) pct="${DF_ROOT_PCT:-50}" ;;',
   '  /extra) pct="${DF_EXTRA_PCT:-50}" ;;',
-  '  /var/lib/docker) pct="${DF_DOCKER_PCT:-50}" ;;',
-  '  *) pct="${DF_ROOT_PCT:-50}" ;;',
+  '  *) pct="${DF_DOCKER_PCT:-50}" ;;',
   "esac",
   "used=$((pct * 1000))",
   "avail=$(((100 - pct) * 1000))",
@@ -38,7 +38,28 @@ const DF_STUB = [
 const DOCKER_STUB = [
   "#!/bin/sh",
   'if [ "${DOCKER_DOWN:-0}" = "1" ]; then exit 1; fi',
-  'echo "${DOCKER_ROOT_DIR:-/var/lib/docker}"',
+  // The script asks for OperatingSystem|DockerRootDir first; a separate
+  // format request (the VM measurement's container) gets df-like output.
+  'case "$*" in',
+  "  *run*)",
+  '    if [ "${VM_DF_FAIL:-0}" = "1" ]; then exit 1; fi',
+  '    vm_pct="${VM_DISK_PCT:-50}"',
+  "    vm_used=$((vm_pct * 1000))",
+  "    vm_avail=$(((100 - vm_pct) * 1000))",
+  '    echo "Filesystem 1024-blocks Used Available Capacity Mounted on"',
+  '    echo "overlay 100000 $vm_used $vm_avail ${vm_pct}% /"',
+  "    exit 0 ;;",
+  "esac",
+  'echo "${DOCKER_OS:-}|${DOCKER_ROOT_DIR:-/var/lib/docker}"',
+  "",
+].join("\n");
+
+const UNAME_STUB = [
+  "#!/bin/sh",
+  'case "$1" in',
+  '-s) echo "${UNAME_S:-Darwin}" ;;',
+  '*) echo "${UNAME_S:-Darwin}" ;;',
+  "esac",
   "",
 ].join("\n");
 
@@ -46,30 +67,27 @@ function stubBin() {
   const bin = mkdtempSync(join(tmpdir(), "parity-disk-bin-"));
   writeFileSync(join(bin, "df"), DF_STUB, { mode: 0o755 });
   writeFileSync(join(bin, "docker"), DOCKER_STUB, { mode: 0o755 });
+  writeFileSync(join(bin, "uname"), UNAME_STUB, { mode: 0o755 });
   return bin;
 }
 
 const text = (value) => (value == null ? "" : String(value));
 
 function runChecker(bin, { env = {}, args = [] } = {}) {
-  try {
-    const stdout = execFileSync(checker, args, {
-      env: {
-        ...process.env,
-        PATH: `${bin}${delimiter}${process.env.PATH}`,
-        ...env,
-      },
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return { status: 0, stdout: text(stdout), stderr: "" };
-  } catch (err) {
-    return {
-      status: err.status,
-      stdout: text(err.stdout),
-      stderr: text(err.stderr),
-    };
-  }
+  const result = spawnSync(checker, args, {
+    env: {
+      ...process.env,
+      PATH: `${bin}${delimiter}${process.env.PATH}`,
+      ...env,
+    },
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return {
+    status: result.status,
+    stdout: text(result.stdout),
+    stderr: text(result.stderr),
+  };
 }
 
 describe("parity disk guard", () => {
@@ -120,11 +138,84 @@ describe("parity disk guard", () => {
   });
 
   it("also refuses when only Docker's data-root filesystem is full", () => {
+    const dataRoot = mkdtempSync(join(tmpdir(), "parity-docker-root-"));
     const result = runChecker(stubBin(), {
-      env: { DF_ROOT_PCT: "50", DF_DOCKER_PCT: "95" },
+      env: { DF_ROOT_PCT: "50", DF_DOCKER_PCT: "95", DOCKER_ROOT_DIR: dataRoot },
     });
     assert.equal(result.status, 1);
-    assert.match(result.stdout, /\/var\/lib\/docker at 95% used/);
+    assert.match(result.stdout, new RegExp(`${dataRoot} at 95% used`));
+  });
+
+  it("measures a VM-backed daemon's disk inside the daemon instead of failing", () => {
+    // Docker Desktop: the data-root only exists inside the daemon VM, so
+    // the host df cannot read it. The guard must measure the VM disk.
+    const result = runChecker(stubBin(), {
+      env: {
+        DF_ROOT_PCT: "20",
+        DOCKER_OS: "Docker Desktop",
+        DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
+        VM_DISK_PCT: "42",
+      },
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /measured inside the daemon/);
+    assert.match(result.stdout, /\/vm\/no\/such\/docker-root .* at 42% used/);
+    assert.match(result.stdout, /disk check ok: worst 42% used on \/vm\/no\/such\/docker-root/);
+  });
+
+  it("applies the same refusal threshold to the VM disk", () => {
+    const result = runChecker(stubBin(), {
+      env: {
+        DF_ROOT_PCT: "50",
+        DOCKER_OS: "Docker Desktop",
+        DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
+        VM_DISK_PCT: "94",
+      },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /REFUSED: \/vm\/no\/such\/docker-root at 94% used/);
+  });
+
+  it("warns and continues when the VM disk cannot be measured", () => {
+    const result = runChecker(stubBin(), {
+      env: {
+        DF_ROOT_PCT: "50",
+        DOCKER_OS: "Docker Desktop",
+        DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
+        VM_DF_FAIL: "1",
+      },
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stderr, /VM disk was not checked, host \/ check only/);
+    assert.match(result.stdout, /disk check ok/);
+  });
+
+  it("still exits 2 for a genuinely bad data-root on a Linux host", () => {
+    const result = runChecker(stubBin(), {
+      env: {
+        DF_ROOT_PCT: "50",
+        DOCKER_OS: "Debian GNU/Linux 12 (bookworm)",
+        DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
+        UNAME_S: "Linux",
+      },
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /cannot read disk usage for '\/vm\/no\/such\/docker-root'/);
+  });
+
+  it("keeps the host df check when the data-root exists on the host", () => {
+    const dataRoot = mkdtempSync(join(tmpdir(), "parity-docker-root-"));
+    const result = runChecker(stubBin(), {
+      env: {
+        DF_ROOT_PCT: "50",
+        DF_DOCKER_PCT: "93",
+        DOCKER_OS: "Docker Desktop",
+        DOCKER_ROOT_DIR: dataRoot,
+      },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, new RegExp(`${dataRoot} at 93% used`));
+    assert.doesNotMatch(result.stdout, /measured inside the daemon/);
   });
 
   it("falls back to / when docker is unreachable", () => {
