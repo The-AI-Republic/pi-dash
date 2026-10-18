@@ -660,6 +660,7 @@ describe("issue-search contracts", () => {
       issueId: UUID2,
       cycle: true,
       module: UUID,
+      targetDate: "none",
     });
     expect(hits.map((hit) => hit.id)).toEqual([UUID]);
     const url = new URL(transport.calls[0]?.url ?? "");
@@ -671,6 +672,7 @@ describe("issue-search contracts", () => {
     expect(url.searchParams.get("issue_id")).toBe(UUID2);
     expect(url.searchParams.get("cycle")).toBe("true");
     expect(url.searchParams.get("module")).toBe(UUID);
+    expect(url.searchParams.get("target_date")).toBe("none");
   });
 
   it("omits unset flags from the query", async () => {

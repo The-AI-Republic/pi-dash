@@ -13,7 +13,6 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/index.js";
 import { CalendarLayout } from "./CalendarLayout.js";
 import { CALENDAR_ADD_EXISTING_ITEM, CALENDAR_ADD_ITEM, CALENDAR_TITLE_PLACEHOLDER } from "./CalendarDay.js";
-import { ADD_EXISTING_SUBMIT } from "./AddExistingDialog.js";
 import { monthTitle, stepMonth } from "./model.js";
 import type { PrefsRecord } from "../prefs/entities.js";
 
@@ -467,7 +466,7 @@ describe("CalendarLayout", () => {
       row({ id: SEARCH_ID, name: "Existing item", sequence_id: 45, target_date: todayIso }),
     ];
     await user.click(screen.getByText("Existing item"));
-    await user.click(screen.getByRole("button", { name: ADD_EXISTING_SUBMIT }));
+    await user.click(screen.getByRole("button", { name: "Add selected work items" }));
     expect(state.attach).toHaveBeenCalledWith(
       { issueIds: [SEARCH_ID], day: todayIso },
       expect.objectContaining({ onSuccess: expect.any(Function) })

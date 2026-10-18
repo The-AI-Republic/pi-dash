@@ -43,6 +43,8 @@ export interface IssueSearchQuery {
   cycle?: boolean;
   /** Add-existing picker: exclude issues already in this module. */
   module?: string;
+  /** Add-existing picker: only issues that have no target date yet. */
+  targetDate?: "none";
 }
 
 export async function searchIssues(
@@ -62,6 +64,7 @@ export async function searchIssues(
       issue_id: query.issueId,
       cycle: query.cycle === undefined ? undefined : String(query.cycle),
       module: query.module,
+      target_date: query.targetDate,
     },
   });
   return client.parse(IssueSearchResults, body, `GET ${path}`);

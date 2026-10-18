@@ -38,6 +38,17 @@ vi.mock("../../../shared/pickers/reference.js", () => ({
   pickerModulesQueryOptions: mocks.pickerModules,
 }));
 
+vi.mock("../calendar/CalendarEntry.js", () => ({
+  CalendarEntry: (props: Record<string, unknown>) => (
+    <div
+      data-testid="calendar-entry"
+      data-entity={JSON.stringify(props.entity)}
+      data-can-edit={String(props.canEdit)}
+      data-membership={JSON.stringify(props.membership ?? {})}
+    />
+  ),
+}));
+
 vi.mock("../display/DisplayControl.js", () => ({
   DisplayControl: (props: { hideCycle: boolean; hideModule: boolean; offered: readonly string[] }) => (
     <div data-testid="display-control" data-cycle={String(props.hideCycle)} data-module={String(props.hideModule)}>
@@ -70,6 +81,7 @@ vi.mock("../layouts/IssuesLayoutRoot.js", () => ({
       <div data-testid="empty-state">{props.emptyState}</div>
       <div data-testid="no-match-state">{props.noMatchState}</div>
       <div data-testid="layout">{props.renderLayout("list", { layout: "list", groupBy: null })}</div>
+      <div data-testid="calendar-layout">{props.renderLayout("calendar", { layout: "calendar", groupBy: null })}</div>
     </div>
   ),
 }));
@@ -89,6 +101,7 @@ vi.mock("./lazy.js", async (importOriginal) => {
             data-cycle={String(props.cycleId ?? "")}
             data-module={String(props.moduleId ?? "")}
             data-completed={String(props.completedCycle ?? false)}
+            data-module-completed={String(props.completedModule ?? false)}
             data-compact={String(props.compact ?? false)}
             data-project={String(props.projectId)}
             data-can-edit={String(props.canEdit ?? "unset")}
@@ -118,10 +131,10 @@ function project(overrides: Record<string, unknown> = {}) {
     id: PROJECT,
     name: "Website",
     identifier: "WEB",
-    member_role: 20,
-    archived_at: null,
     cycle_view: true,
     module_view: true,
+    member_role: 20,
+    archived_at: null,
     ...overrides,
   };
 }
@@ -176,7 +189,7 @@ describe("EntityListScreen", () => {
     expect(root).toHaveAttribute("data-title", "Sprint 1");
     expect(root).toHaveAttribute("data-total", "7");
     expect(root).toHaveAttribute("data-results", "2");
-    expect(root).toHaveAttribute("data-offered", "list");
+    expect(root).toHaveAttribute("data-offered", "list,calendar");
     expect(await screen.findByTestId("list-layout")).toHaveTextContent("WEB");
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-cycle", CYCLE);
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-compact", "true");
@@ -226,6 +239,28 @@ describe("EntityListScreen", () => {
     expect(screen.getByTestId("layout-root")).toHaveAttribute("data-title", "Cycle");
   });
 
+  it("mounts the calendar with the entity and its cycle membership", () => {
+    setup();
+    const calendar = screen.getByTestId("calendar-entry");
+    expect(calendar).toHaveAttribute(
+      "data-entity",
+      JSON.stringify({ scope: "cycle", projectId: PROJECT, cycleId: CYCLE })
+    );
+    expect(calendar).toHaveAttribute("data-membership", JSON.stringify({ cycleId: CYCLE }));
+    expect(calendar).toHaveAttribute("data-can-edit", "true");
+  });
+
+  it("mounts the module calendar read-only for a completed context", () => {
+    setup({
+      entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
+      moduleId: MODULE,
+      completedModule: true,
+    });
+    const calendar = screen.getByTestId("calendar-entry");
+    expect(calendar).toHaveAttribute("data-membership", JSON.stringify({ moduleId: MODULE }));
+    expect(calendar).toHaveAttribute("data-can-edit", "false");
+  });
+
   it("reads the flat first page for the entity", () => {
     setup();
     expect(mocks.listPage).toHaveBeenCalledWith(expect.anything(), "acme", {
@@ -255,6 +290,15 @@ describe("EntityListScreen", () => {
     });
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-module", MODULE);
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-completed", "true");
+  });
+
+  it("forwards a completed module context to the list", () => {
+    setup({
+      entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
+      moduleId: MODULE,
+      completedModule: true,
+    });
+    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-module-completed", "true");
   });
 
   it("passes project standing rather than the workspace role alone", () => {

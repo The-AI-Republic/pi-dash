@@ -100,6 +100,27 @@ describe("AddExistingModal", () => {
     expect(await screen.findByText("Couldn't search work items.")).toBeInTheDocument();
   });
 
+  it("asks for undated issues and hides ones that start after the day", async () => {
+    mocks.search.mockResolvedValue([
+      hit(ONE, "Fix auth", 1),
+      hit(TWO, "Fix billing", 2),
+      { ...hit(ONE, "Late item", 3), start_date: "2026-10-20" },
+    ]);
+    setup({ undatedOnly: true, attachableDay: "2026-10-15" });
+    await waitFor(() => expect(mocks.search).toHaveBeenCalled());
+    expect(mocks.search).toHaveBeenCalledWith({ stub: true }, "acme", PROJECT, {
+      search: "",
+      targetDate: "none",
+    });
+    expect(await screen.findByText("Fix auth")).toBeInTheDocument();
+    expect(screen.queryByText("Late item")).not.toBeInTheDocument();
+  });
+
+  it("scopes the search key by the undated filter", () => {
+    expect(addExistingSearchKey("acme", PROJECT, "", true)).toContain("undated");
+    expect(addExistingSearchKey("acme", PROJECT, "", false)).not.toContain("undated");
+  });
+
   it("filters already-attached rows from the results", async () => {
     mocks.search.mockResolvedValue([hit(ONE, "Fix auth", 1), hit(TWO, "Fix billing", 2)]);
     setup({ excludeIds: [ONE] });

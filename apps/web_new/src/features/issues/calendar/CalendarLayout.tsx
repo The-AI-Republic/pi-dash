@@ -16,11 +16,12 @@ import { PeekPanel } from "../../../shared/shell/index.js";
 import { issueDetailQueryOptions } from "../api/queries.js";
 import { useUpdateIssue } from "../api/mutations.js";
 import { issueKeys } from "../api/keys.js";
+import { entityListsKeyPart } from "../prefs/entities.js";
 import { CalendarReloadBar } from "../loaders/skeletons.js";
+import { AddExistingModal } from "../list/AddExistingModal.js";
 import { selectDisplayPrefs, useEntityPrefs, useUpdateDisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { useWeekStart } from "../dropdowns/weekStart.js";
-import { AddExistingDialog } from "./AddExistingDialog.js";
 import { CalendarGrid } from "./CalendarGrid.js";
 import { CalendarHeader } from "./CalendarHeader.js";
 import {
@@ -137,13 +138,15 @@ export function CalendarLayout({
   );
   const range = rangeForCells(weeks);
   const perPage = mode === "month" ? MONTH_PER_PAGE : WEEK_PER_PAGE;
-  const calendarQuery = useQuery(calendarQueryOptions(getAppClient(), workspaceSlug, projectId, { ...range, perPage }));
+  const calendarQuery = useQuery(
+    calendarQueryOptions(getAppClient(), workspaceSlug, projectId, entity, { ...range, perPage })
+  );
   const statesQuery = useQuery(calendarStatesQueryOptions(getAppClient(), workspaceSlug, projectId));
   const queryClient = useQueryClient();
-  const redate = useRedateIssue(workspaceSlug, projectId);
-  const create = useCalendarCreate(workspaceSlug, projectId, membership);
-  const attach = useCalendarAttach(workspaceSlug, projectId, membership);
-  const remove = useCalendarDelete(workspaceSlug, projectId);
+  const redate = useRedateIssue(workspaceSlug, projectId, entity);
+  const create = useCalendarCreate(workspaceSlug, projectId, membership, entity);
+  const attach = useCalendarAttach(workspaceSlug, projectId, membership, entity);
+  const remove = useCalendarDelete(workspaceSlug, projectId, entity);
   const rename = useUpdateIssue({
     workspaceSlug,
     projectId,
@@ -246,7 +249,7 @@ export function CalendarLayout({
     const cursor = dayCursors[day] ?? `${perPage}:1:0`;
     setLoadingDay(day);
     void queryClient
-      .fetchQuery(calendarDayQueryOptions(getAppClient(), workspaceSlug, projectId, { day, perPage, cursor }))
+      .fetchQuery(calendarDayQueryOptions(getAppClient(), workspaceSlug, projectId, entity, { day, perPage, cursor }))
       .then((response) => {
         const incoming = rowsFromResponse(response);
         setExtraByDay((current) => {
@@ -364,22 +367,25 @@ export function CalendarLayout({
           projectIdentifier={projectIdentifier}
         />
       ) : null}
-      <AddExistingDialog
+      <AddExistingModal
         open={addExistingDay !== null}
-        day={addExistingDay ?? today}
-        workspaceSlug={workspaceSlug}
-        projectId={projectId}
-        submitting={attach.isPending}
         onOpenChange={(open) => {
           if (!open) setAddExistingDay(null);
         }}
-        onSubmit={(issueIds) => {
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        excludeIds={rows.map((row) => row.id)}
+        undatedOnly
+        attachableDay={addExistingDay ?? today}
+        onAttach={async (issueIds) => {
           if (addExistingDay === null) return;
           attach.mutate(
             { issueIds, day: addExistingDay },
             {
               onSuccess: async () => {
-                await queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug, projectId) });
+                await queryClient.invalidateQueries({
+                  queryKey: issueKeys.lists(workspaceSlug, ...entityListsKeyPart(entity)),
+                });
                 setAddExistingDay(null);
               },
             }

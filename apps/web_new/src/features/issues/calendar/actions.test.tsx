@@ -207,6 +207,36 @@ describe("calendar actions", () => {
     await waitFor(() => expect(queryClient.getQueryState(calendarKey)?.isInvalidated).toBe(true));
   });
 
+  it("invalidates the contextual entity's list prefix after a re-date", async () => {
+    const { queryClient } = harness();
+    const cycleKey = [
+      ...issueKeys.lists("acme", "cycle", PROJECT_ID, "823e4567-e89b-12d3-a456-426614174007"),
+      "calendar",
+      "2026-10-01",
+      "2026-10-31",
+      4,
+    ];
+    queryClient.setQueryData(cycleKey, { results: {} });
+    const { result } = renderHook(
+      () =>
+        useRedateIssue("acme", PROJECT_ID, {
+          scope: "cycle",
+          projectId: PROJECT_ID,
+          cycleId: "823e4567-e89b-12d3-a456-426614174007",
+        }),
+      { wrapper: wrapper(queryClient) }
+    );
+    result.current.reDate({
+      issue: {
+        id: ISSUE_ID,
+        target_date: "2026-10-08",
+        start_date: null,
+      } as never,
+      destination: "2026-10-09",
+    });
+    await waitFor(() => expect(queryClient.getQueryState(cycleKey)?.isInvalidated).toBe(true));
+  });
+
   it("attaches a cycle and module when the calendar has contextual membership", async () => {
     const { calls, queryClient } = harness();
     const { result } = renderHook(

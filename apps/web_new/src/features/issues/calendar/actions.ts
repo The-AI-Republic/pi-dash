@@ -20,6 +20,7 @@ import {
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { issueKeys } from "../api/keys.js";
+import { entityListsKeyPart, type IssuesEntity } from "../prefs/entities.js";
 import { decideDrop, type DropDecision } from "./model.js";
 
 /** Failure copy for a refused or failed re-date. */
@@ -41,6 +42,11 @@ export const CALENDAR_DELETE_FORBIDDEN_DETAIL = "Only the creator or a project a
 /** Success copy when a block's delete action lands. */
 export const CALENDAR_DELETE_SUCCESS_TITLE = "Work item deleted";
 
+/** Invalidate the visible lists of the entity that owns the calendar. */
+function listScope(workspaceSlug: string, projectId: string, entity: IssuesEntity | undefined): readonly unknown[] {
+  return issueKeys.lists(workspaceSlug, ...(entity === undefined ? [projectId] : entityListsKeyPart(entity)));
+}
+
 export interface RedateInput {
   issue: Pick<IssueListItem, "id" | "target_date" | "start_date">;
   destination: string;
@@ -52,7 +58,7 @@ export function dropOutcome(input: RedateInput): DropDecision {
 }
 
 /** Re-date one issue; no-op and rejection return before the network. */
-export function useRedateIssue(workspaceSlug: string, projectId: string) {
+export function useRedateIssue(workspaceSlug: string, projectId: string, entity?: IssuesEntity) {
   const queryClient = useQueryClient();
   const mutation = useMutation<DropDecision, Error, RedateInput>({
     mutationFn: async (input) => {
@@ -68,7 +74,7 @@ export function useRedateIssue(workspaceSlug: string, projectId: string) {
       if (decision.kind === "apply") notifySuccess(REDATE_SUCCESS_TITLE);
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug, projectId) });
+      void queryClient.invalidateQueries({ queryKey: listScope(workspaceSlug, projectId, entity) });
     },
   });
   return {
@@ -104,7 +110,12 @@ async function attachMembership(
 }
 
 /** Create a work item already dated to the tile that launched it. */
-export function useCalendarCreate(workspaceSlug: string, projectId: string, context?: CalendarMembershipContext) {
+export function useCalendarCreate(
+  workspaceSlug: string,
+  projectId: string,
+  context?: CalendarMembershipContext,
+  entity?: IssuesEntity
+) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (input: CalendarCreateInput) => {
@@ -122,7 +133,7 @@ export function useCalendarCreate(workspaceSlug: string, projectId: string, cont
       notifyError(CALENDAR_CREATE_FAILED_TITLE, "Nothing was created — check your connection and try again.");
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug, projectId) });
+      void queryClient.invalidateQueries({ queryKey: listScope(workspaceSlug, projectId, entity) });
     },
   });
 }
@@ -133,7 +144,12 @@ export interface CalendarAttachInput {
 }
 
 /** Add existing work items to a day by re-dating each selected item. */
-export function useCalendarAttach(workspaceSlug: string, projectId: string, context?: CalendarMembershipContext) {
+export function useCalendarAttach(
+  workspaceSlug: string,
+  projectId: string,
+  context?: CalendarMembershipContext,
+  entity?: IssuesEntity
+) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: CalendarAttachInput) =>
@@ -149,12 +165,12 @@ export function useCalendarAttach(workspaceSlug: string, projectId: string, cont
     onError: () => {
       notifyError(CALENDAR_ATTACH_FAILED_TITLE, "Nothing was changed — check your connection and try again.");
     },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug, projectId) }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: listScope(workspaceSlug, projectId, entity) }),
   });
 }
 
 /** Delete a work item from its block quick actions. */
-export function useCalendarDelete(workspaceSlug: string, projectId: string) {
+export function useCalendarDelete(workspaceSlug: string, projectId: string, entity?: IssuesEntity) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (issueId: string) => deleteIssue(getAppClient(), workspaceSlug, projectId, issueId),
@@ -170,7 +186,7 @@ export function useCalendarDelete(workspaceSlug: string, projectId: string) {
       );
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug, projectId) });
+      void queryClient.invalidateQueries({ queryKey: listScope(workspaceSlug, projectId, entity) });
     },
   });
 }

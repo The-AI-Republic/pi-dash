@@ -12,6 +12,8 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { projectsQueryOptions } from "../../projects/index.js";
+import { canEditInProject } from "../../../shared/shell/contextual/index.js";
+import { CalendarEntry } from "../calendar/CalendarEntry.js";
 import { DisplayControl } from "../display/DisplayControl.js";
 import type { LayoutKind } from "../layouts/kinds.js";
 import { IssuesLayoutRoot } from "../layouts/IssuesLayoutRoot.js";
@@ -20,7 +22,6 @@ import { selectDisplayPrefs } from "../prefs/displayPrefs.js";
 import { listPageQueryOptions } from "./pages.js";
 import { resolvedListLayout } from "./lazy.js";
 import type { IssuesEntity } from "../prefs/entities.js";
-import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { pickerCyclesQueryOptions, pickerModulesQueryOptions } from "../../../shared/pickers/reference.js";
 import { isCompletedCycle } from "../../../shared/pickers/cycles.js";
 
@@ -34,6 +35,8 @@ export interface EntityListScreenProps {
   moduleId?: string | undefined;
   /** Completed cycles render read-only. */
   completedCycle?: boolean | undefined;
+  /** Completed modules render read-only. */
+  completedModule?: boolean | undefined;
   peekKey: string | null;
   onPeekChange: (key: string | null) => void;
   compact: boolean;
@@ -57,6 +60,7 @@ export function EntityListScreen({
   cycleId,
   moduleId,
   completedCycle = false,
+  completedModule = false,
   peekKey,
   onPeekChange,
   compact,
@@ -105,8 +109,14 @@ export function EntityListScreen({
   // The cycle/module routes await the chunk in `beforeLoad`; render the
   // resolved component directly so the layout mounts once (NEWFRONT-619).
   const ListLayout = resolvedListLayout();
-  const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at != null });
-  const offered: readonly LayoutKind[] = ["list"];
+  const canEdit =
+    canEditInProject({
+      memberRole: project.member_role,
+      archived: project.archived_at != null,
+    }) &&
+    !resolvedCompletedCycle &&
+    !completedModule;
+  const offered: readonly LayoutKind[] = ["list", "calendar"];
   const display = (
     <DisplayControl
       workspaceSlug={workspaceSlug}
@@ -124,23 +134,39 @@ export function EntityListScreen({
       totalCount={firstPage.total_count}
       resultCount={Array.isArray(firstPage.results) ? firstPage.results.length : firstPage.count}
       offered={offered}
-      renderLayout={(_layout, prefs) => (
-        <ListLayout
-          workspaceSlug={workspaceSlug}
-          entity={entity}
-          projectId={projectId}
-          projectIdentifier={project.identifier}
-          prefs={prefs}
-          canEdit={canEdit}
-          richFilters={richFilters}
-          cycleId={cycleId}
-          moduleId={moduleId}
-          completedCycle={resolvedCompletedCycle}
-          peekKey={peekKey}
-          onPeekChange={onPeekChange}
-          compact={compact}
-        />
-      )}
+      renderLayout={(layout, prefs) =>
+        layout === "calendar" ? (
+          <CalendarEntry
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            projectIdentifier={project.identifier}
+            entity={entity}
+            canEdit={canEdit}
+            canAddExisting
+            membership={{
+              ...(entity.scope === "cycle" ? { cycleId: entity.cycleId } : {}),
+              ...(entity.scope === "module" ? { moduleId: entity.moduleId } : {}),
+            }}
+          />
+        ) : (
+          <ListLayout
+            workspaceSlug={workspaceSlug}
+            entity={entity}
+            projectId={projectId}
+            projectIdentifier={project.identifier}
+            prefs={prefs}
+            canEdit={canEdit}
+            richFilters={richFilters}
+            cycleId={cycleId}
+            moduleId={moduleId}
+            completedCycle={resolvedCompletedCycle}
+            completedModule={completedModule}
+            peekKey={peekKey}
+            onPeekChange={onPeekChange}
+            compact={compact}
+          />
+        )
+      }
       emptyState={<EntityEmptyState title={resolvedTitle} />}
       noMatchState={<EntityEmptyState title={resolvedTitle} />}
       headerActions={display}

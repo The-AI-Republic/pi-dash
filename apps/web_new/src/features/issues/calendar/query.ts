@@ -9,8 +9,9 @@
 import { queryOptions } from "@tanstack/react-query";
 import {
   listStates,
+  listGroupedCycleIssues,
   listGroupedIssues,
-  searchIssues,
+  listGroupedModuleIssues,
   type ApiClient,
   type GroupedIssueRow,
   type GroupedIssueListResponse,
@@ -19,6 +20,7 @@ import {
 
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
 import { issueKeys } from "../api/keys.js";
+import { entityListsKeyPart, type IssuesEntity } from "../prefs/entities.js";
 import type { CalendarRange } from "./model.js";
 
 /** Month tiles load four rows per day; week tiles show a fuller day. */
@@ -52,8 +54,38 @@ export interface CalendarQuery {
 }
 
 /** Key beneath the entity's list prefix; the range is part of the key. */
-export function calendarListKey(workspaceSlug: string, projectId: string, query: CalendarQuery): readonly unknown[] {
-  return [...issueKeys.lists(workspaceSlug, projectId), "calendar", query.after, query.before, query.perPage];
+export function calendarListKey(workspaceSlug: string, entity: IssuesEntity, query: CalendarQuery): readonly unknown[] {
+  return [
+    ...issueKeys.lists(workspaceSlug, ...entityListsKeyPart(entity)),
+    "calendar",
+    query.after,
+    query.before,
+    query.perPage,
+  ];
+}
+
+/** The entity-scoped read behind a calendar window. */
+function readWindow(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  entity: IssuesEntity,
+  query: CalendarQuery,
+  cursor?: string
+) {
+  const input = {
+    groupBy: "target_date" as const,
+    perPage: query.perPage,
+    ...(cursor === undefined ? {} : { cursor }),
+    filters: { target_date: targetDateFilter(query) },
+  };
+  if (entity.scope === "cycle") {
+    return listGroupedCycleIssues(client, workspaceSlug, projectId, entity.cycleId, input);
+  }
+  if (entity.scope === "module") {
+    return listGroupedModuleIssues(client, workspaceSlug, projectId, entity.moduleId, input);
+  }
+  return listGroupedIssues(client, workspaceSlug, projectId, input);
 }
 
 /** Windowed grouped read for the calendar grid. */
@@ -61,16 +93,12 @@ export function calendarQueryOptions(
   client: ApiClient,
   workspaceSlug: string,
   projectId: string,
+  entity: IssuesEntity,
   query: CalendarQuery
 ) {
   return queryOptions({
-    queryKey: calendarListKey(workspaceSlug, projectId, query),
-    queryFn: () =>
-      listGroupedIssues(client, workspaceSlug, projectId, {
-        groupBy: "target_date",
-        perPage: query.perPage,
-        filters: { target_date: targetDateFilter(query) },
-      }),
+    queryKey: calendarListKey(workspaceSlug, entity, query),
+    queryFn: () => readWindow(client, workspaceSlug, projectId, entity, query),
     staleTime: LIST_STALE_TIME_MS,
   });
 }
@@ -96,38 +124,38 @@ export interface CalendarDayQuery {
   cursor?: string | undefined;
 }
 
-export function calendarDayKey(workspaceSlug: string, projectId: string, query: CalendarDayQuery): readonly unknown[] {
-  return [...issueKeys.lists(workspaceSlug, projectId), "calendar-day", query.day, query.perPage, query.cursor ?? ""];
+export function calendarDayKey(
+  workspaceSlug: string,
+  entity: IssuesEntity,
+  query: CalendarDayQuery
+): readonly unknown[] {
+  return [
+    ...issueKeys.lists(workspaceSlug, ...entityListsKeyPart(entity)),
+    "calendar-day",
+    query.day,
+    query.perPage,
+    query.cursor ?? "",
+  ];
 }
 
 export function calendarDayQueryOptions(
   client: ApiClient,
   workspaceSlug: string,
   projectId: string,
+  entity: IssuesEntity,
   query: CalendarDayQuery
 ) {
   return queryOptions({
-    queryKey: calendarDayKey(workspaceSlug, projectId, query),
+    queryKey: calendarDayKey(workspaceSlug, entity, query),
     queryFn: () =>
-      listGroupedIssues(client, workspaceSlug, projectId, {
-        groupBy: "target_date",
-        perPage: query.perPage,
-        ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
-        filters: { target_date: `${query.day};after,${query.day};before` },
-      }),
-    staleTime: LIST_STALE_TIME_MS,
-  });
-}
-
-/** Add-existing choices narrow to root items through the shared picker read. */
-export function calendarSearchKey(workspaceSlug: string, projectId: string): readonly unknown[] {
-  return [...issueKeys.lists(workspaceSlug, projectId), "calendar-search"];
-}
-
-export function calendarSearchQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string) {
-  return queryOptions({
-    queryKey: calendarSearchKey(workspaceSlug, projectId),
-    queryFn: () => searchIssues(client, workspaceSlug, projectId, { subIssue: true }),
+      readWindow(
+        client,
+        workspaceSlug,
+        projectId,
+        entity,
+        { after: query.day, before: query.day, perPage: query.perPage },
+        query.cursor
+      ),
     staleTime: LIST_STALE_TIME_MS,
   });
 }

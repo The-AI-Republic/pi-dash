@@ -219,12 +219,9 @@ export { CalendarDay as CalendarTile } from "./calendar/CalendarDay.js";
 export type { CalendarDayProps as CalendarTileProps } from "./calendar/CalendarDay.js";
 export { CalendarBlock } from "./calendar/CalendarBlock.js";
 export type { CalendarBlockProps } from "./calendar/CalendarBlock.js";
-export { AddExistingDialog } from "./calendar/AddExistingDialog.js";
-export type { AddExistingDialogProps } from "./calendar/AddExistingDialog.js";
 export {
   calendarDayQueryOptions,
   calendarQueryOptions,
-  calendarSearchQueryOptions,
   calendarStatesQueryOptions,
   rowsFromResponse,
 } from "./calendar/query.js";

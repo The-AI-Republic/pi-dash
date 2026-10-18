@@ -7,7 +7,6 @@ import {
   calendarDayQueryOptions,
   calendarListKey,
   calendarQueryOptions,
-  calendarSearchQueryOptions,
   calendarStatesQueryOptions,
   dayTotalFromResponse,
   daysBetween,
@@ -28,9 +27,62 @@ describe("calendar queries", () => {
   });
 
   it("builds range-scoped list keys", () => {
-    const key = calendarListKey("acme", "project-1", { after: "a", before: "b", perPage: 4 });
+    const key = calendarListKey(
+      "acme",
+      { scope: "project", projectId: "project-1" },
+      {
+        after: "a",
+        before: "b",
+        perPage: 4,
+      }
+    );
     expect(key).toContain("calendar");
     expect(key.slice(-3)).toEqual(["a", "b", 4]);
+  });
+
+  it("scopes cycle and module windows to their own entity reads", async () => {
+    const getJson = vi.fn(async (_url: string, _init: unknown) => ({
+      grouped_by: "target_date",
+      sub_grouped_by: null,
+      total_count: 0,
+      next_cursor: "",
+      prev_cursor: "",
+      next_page_results: false,
+      prev_page_results: false,
+      count: 0,
+      total_results: 0,
+      results: {},
+    }));
+    const client = {
+      getJson,
+      parse: vi.fn((_schema: unknown, body: unknown) => body),
+    } as never;
+    const query = { after: "2026-10-05", before: "2026-10-05", perPage: 4 };
+    const cycle = calendarQueryOptions(
+      client,
+      "acme",
+      "project-1",
+      { scope: "cycle", projectId: "project-1", cycleId: "cycle-1" },
+      query
+    );
+    expect(cycle.queryKey).toContain("cycle");
+    await cycle.queryFn?.({} as never);
+    expect(getJson).toHaveBeenLastCalledWith(
+      "/api/workspaces/acme/projects/project-1/cycles/cycle-1/cycle-issues/",
+      expect.anything()
+    );
+    const moduleWindow = calendarQueryOptions(
+      client,
+      "acme",
+      "project-1",
+      { scope: "module", projectId: "project-1", moduleId: "module-1" },
+      query
+    );
+    await moduleWindow.queryFn?.({} as never);
+    expect(getJson).toHaveBeenLastCalledWith(
+      "/api/workspaces/acme/projects/project-1/modules/module-1/issues/",
+      expect.anything()
+    );
   });
 
   it("flattens every grouped bucket", () => {
@@ -87,13 +139,14 @@ describe("calendar queries", () => {
       getJson: vi.fn(async () => response),
       parse: vi.fn((_schema: unknown, body: unknown) => body),
     } as never;
-    const list = calendarQueryOptions(client, "acme", "project-1", {
+    const entity = { scope: "project", projectId: "project-1" } as const;
+    const list = calendarQueryOptions(client, "acme", "project-1", entity, {
       after: "2026-09-27",
       before: "2026-11-07",
       perPage: 4,
     });
     await expect(list.queryFn?.({} as never)).resolves.toEqual(response);
-    const day = calendarDayQueryOptions(client, "acme", "project-1", {
+    const day = calendarDayQueryOptions(client, "acme", "project-1", entity, {
       day: "2026-10-05",
       perPage: 4,
       cursor: "4:1:0",
@@ -101,14 +154,11 @@ describe("calendar queries", () => {
     await expect(day.queryFn?.({} as never)).resolves.toEqual(response);
   });
 
-  it("reads add-existing choices and project state colours", async () => {
+  it("reads project state colours", async () => {
     const client = {
-      getJson: vi.fn(async (url: string) => (url.includes("search-issues") ? [] : [])),
+      getJson: vi.fn(async (_url: string) => []),
       parse: vi.fn((_schema: unknown, body: unknown) => body),
     } as never;
-    const search = calendarSearchQueryOptions(client, "acme", "project-1");
-    expect(search.queryKey).toContain("calendar-search");
-    await expect(search.queryFn?.({} as never)).resolves.toEqual([]);
     const states = calendarStatesQueryOptions(client, "acme", "project-1");
     expect(states.queryKey).toContain("calendar-states");
     await expect(states.queryFn?.({} as never)).resolves.toEqual([]);
