@@ -191,7 +191,15 @@ function GanttLanes({
               peekedId === row.id && "bg-(--accent-subtle)/50"
             )}
           >
-            {box === null ? (
+            {row.unconfirmed ? (
+              // An unconfirmed create is not a real issue yet: its lane
+              // pulses instead of offering dates or a bar (ISS-006/049).
+              <span
+                aria-hidden="true"
+                data-testid="gantt-lane-unconfirmed"
+                className="absolute inset-x-(--space-3) top-1/2 h-4 -translate-y-1/2 animate-pulse rounded-(--radius-control) bg-(--subtle)/60"
+              />
+            ) : box === null ? (
               <span className="text-caption absolute inset-y-0 left-0 flex items-center px-(--space-3) text-(--text-muted)/70">
                 No dates
               </span>

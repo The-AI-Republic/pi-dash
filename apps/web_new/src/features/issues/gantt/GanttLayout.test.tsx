@@ -196,6 +196,18 @@ describe("GanttLayout", () => {
     }
   });
 
+  it("keeps an unconfirmed create visible but inert in the timeline", () => {
+    // A quick create prepends a temp row to the list cache; it has no
+    // server identity, so it must not link or open a 404ing peek (ISS-049).
+    renderLayout({
+      issues: [issue({ id: "temp-abc", name: "Draft title", sequence_id: 0 }), ...ISSUES],
+    });
+    expect(screen.getAllByTestId("gantt-sidebar-row")).toHaveLength(4);
+    expect(screen.queryByRole("link", { name: "Draft title" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("gantt-row-unconfirmed"));
+    expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
+  });
+
   it("opens the shared peek for a clicked row and closes it", () => {
     renderLayout();
     expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();

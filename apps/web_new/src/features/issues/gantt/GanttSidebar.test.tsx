@@ -5,7 +5,8 @@
 // Timeline sidebar (parity/specs/issues.md §6, ISS-049): identifier plus
 // name per row, a duration only for fully dated rows, the virtualization
 // window, hover/peek marks, click behavior (open, or leave modified
-// clicks to the browser) and the loading placeholder.
+// clicks to the browser), the inert pulsing row for an unconfirmed create
+// and the loading placeholder.
 import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -23,6 +24,7 @@ function row(overrides: Partial<GanttRow> = {}): GanttRow {
     durationDays: null,
     stateId: null,
     archived: false,
+    unconfirmed: false,
     ...overrides,
   };
 }
@@ -138,6 +140,25 @@ describe("GanttSidebar", () => {
     const spacers = container.querySelectorAll<HTMLElement>("[aria-hidden='true']");
     expect(spacers[0]?.style.height).toBe(`${ROW_HEIGHT}px`);
     expect(spacers[1]?.style.height).toBe(`${ROW_HEIGHT}px`);
+  });
+
+  it("renders an unconfirmed create as an inert pulsing row", () => {
+    const h = renderSidebar({
+      rows: [row({ id: "temp-abc", identifier: "WEB-0", name: "Draft title", unconfirmed: true }), row()],
+    });
+    // No key, no link and no peek target until the server confirms it.
+    expect(screen.queryByRole("link", { name: "Draft title" })).not.toBeInTheDocument();
+    expect(document.getElementById("issue-temp-abc")).toBeNull();
+    const placeholder = screen.getByTestId("gantt-row-unconfirmed");
+    expect(placeholder).toHaveTextContent("Draft title");
+    expect(placeholder).not.toHaveTextContent("WEB-0");
+    expect(placeholder).toHaveAttribute("aria-label", "Draft title, saving");
+    const sidebarRow = placeholder.closest('[data-testid="gantt-sidebar-row"]');
+    expect(sidebarRow?.querySelector(".animate-pulse")).not.toBeNull();
+    fireEvent.click(placeholder);
+    expect(h.onOpenRow).not.toHaveBeenCalled();
+    // The confirmed row beside it keeps its link.
+    expect(screen.getByRole("link", { name: "First" })).toHaveAttribute("href", "/acme/browse/WEB-1");
   });
 
   it("shows the load-more placeholder only while rows are arriving", () => {

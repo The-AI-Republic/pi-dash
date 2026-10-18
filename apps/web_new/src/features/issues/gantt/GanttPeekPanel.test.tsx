@@ -32,6 +32,7 @@ const ROW: GanttRow = {
   durationDays: 5,
   stateId: null,
   archived: false,
+  unconfirmed: false,
 };
 
 function issue(overrides: Partial<Issue> = {}): Issue {

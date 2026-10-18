@@ -7,7 +7,9 @@
 // with the chart's vertical axis, are windowed to the visible slice, and
 // mark the hovered and peeked row. The href is absolute (workspace browse
 // route) so Cmd/middle-click and copy-link land on the work item; a plain
-// click opens the row through the layout instead.
+// click opens the row through the layout instead. An unconfirmed create has
+// no server key yet: its row pulses and is inert (no link, no peek), matching
+// the list layout's temporary row (ISS-006/049).
 
 import { cn } from "@pidash/kit";
 import * as React from "react";
@@ -49,6 +51,7 @@ export function SidebarRowItem({
   onOpenRow,
 }: SidebarRowProps): React.ReactElement {
   const duration = durationLabel(row);
+  const disabled = row.unconfirmed;
   return (
     <div
       data-testid="gantt-sidebar-row"
@@ -62,27 +65,51 @@ export function SidebarRowItem({
         peeked && "bg-(--accent-subtle)"
       )}
     >
-      <a
-        id={`issue-${row.id}`}
-        href={`/${workspaceSlug}/browse/${row.identifier}`}
-        aria-label={row.name}
-        data-archived={row.archived ? "true" : undefined}
-        data-peeked={peeked ? "true" : undefined}
-        onClick={(event) => {
-          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-          event.preventDefault();
-          onOpenRow(row);
-        }}
+      <div
         className={cn(
-          "flex min-w-0 flex-1 items-center gap-(--space-2) truncate rounded-(--radius-control) px-(--space-1) py-(--space-1) text-left",
-          "text-body text-(--text) hover:underline focus-visible:outline-none"
+          "relative flex min-w-0 flex-1 items-center gap-(--space-2) rounded-(--radius-control) px-(--space-1) py-(--space-1)",
+          "text-body text-(--text)"
         )}
       >
-        <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">
-          {row.identifier}
-        </span>
-        <span className="min-w-0 flex-1 truncate">{row.name}</span>
-      </a>
+        {disabled ? (
+          <>
+            <span
+              aria-label={`${row.name}, saving`}
+              data-testid="gantt-row-unconfirmed"
+              className="flex min-w-0 flex-1 items-center gap-(--space-2)"
+            >
+              <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">…</span>
+              <span className="min-w-0 flex-1 truncate">{row.name}</span>
+            </span>
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 animate-pulse rounded-(--radius-control) bg-(--subtle)/60"
+            />
+          </>
+        ) : (
+          <a
+            id={`issue-${row.id}`}
+            href={`/${workspaceSlug}/browse/${row.identifier}`}
+            aria-label={row.name}
+            data-archived={row.archived ? "true" : undefined}
+            data-peeked={peeked ? "true" : undefined}
+            onClick={(event) => {
+              if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              event.preventDefault();
+              onOpenRow(row);
+            }}
+            className={cn(
+              "flex min-w-0 flex-1 items-center gap-(--space-2) truncate text-left",
+              "hover:underline focus-visible:outline-none"
+            )}
+          >
+            <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">
+              {row.identifier}
+            </span>
+            <span className="min-w-0 flex-1 truncate">{row.name}</span>
+          </a>
+        )}
+      </div>
       {duration !== null ? (
         <span data-testid="gantt-row-duration" className="text-caption shrink-0 text-(--text-muted)">
           {duration}

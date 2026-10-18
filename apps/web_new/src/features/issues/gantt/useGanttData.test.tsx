@@ -52,6 +52,7 @@ function row(overrides: Partial<GanttRow> = {}): GanttRow {
     durationDays: null,
     stateId: null,
     archived: false,
+    unconfirmed: false,
     ...overrides,
   };
 }
@@ -150,6 +151,16 @@ describe("useGanttStates", () => {
     expect(navigate).not.toHaveBeenCalled();
     act(() => result.current.closePeek());
     expect(result.current.peek).toBeNull();
+  });
+
+  it("does nothing for an unconfirmed row on either viewport", () => {
+    for (const narrow of [false, true]) {
+      stubViewport(narrow);
+      const { result } = renderHook(() => useGanttPeek(SLUG));
+      act(() => result.current.openRow(row({ id: "temp-abc", identifier: "WEB-0", unconfirmed: true })));
+      expect(result.current.peek).toBeNull();
+      expect(navigate).not.toHaveBeenCalled();
+    }
   });
 
   it("leaves for the browse route on a narrow viewport", () => {

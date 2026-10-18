@@ -53,7 +53,8 @@ export interface GanttPeekHandle {
  * Row activation (ISS-049/165): desktop opens the shared peek panel with
  * the issue's detail query; a narrow viewport goes to the browse route.
  * Detail is hydrated through its query options so the panel paints from
- * the cache the route already owns.
+ * the cache the route already owns. An unconfirmed create has no server
+ * row to read yet, so activating it does nothing (ISS-006/049).
  */
 export function useGanttPeek(workspaceSlug: string): GanttPeekHandle {
   const [peek, setPeek] = React.useState<GanttPeek | null>(null);
@@ -61,6 +62,7 @@ export function useGanttPeek(workspaceSlug: string): GanttPeekHandle {
   const navigate = useNavigate();
   const openRow = React.useCallback(
     (row: GanttRow) => {
+      if (row.unconfirmed) return;
       if (narrow) {
         void navigate({ to: "/$ws/browse/$issueKey", params: { ws: workspaceSlug, issueKey: row.identifier } });
         return;

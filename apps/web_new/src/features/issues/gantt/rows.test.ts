@@ -80,6 +80,12 @@ describe("buildRows", () => {
     const [row] = buildRows([issue({ archived_at: "2026-01-03" })], "WEB");
     expect(row?.archived).toBe(true);
   });
+
+  it("flags temp ids as unconfirmed and leaves server rows confirmed", () => {
+    const [temp, real] = buildRows([issue({ id: "temp-abc" }), issue({ id: "real-1" })], "WEB");
+    expect(temp?.unconfirmed).toBe(true);
+    expect(real?.unconfirmed).toBe(false);
+  });
 });
 
 describe("barBox", () => {
@@ -92,6 +98,7 @@ describe("barBox", () => {
     durationDays: 3,
     stateId: null,
     archived: false,
+    unconfirmed: false,
   };
 
   it("places a dated bar by day column, inclusive", () => {
@@ -113,6 +120,10 @@ describe("barBox", () => {
     expect(hasBar(row)).toBe(true);
     expect(hasBar({ ...row, startIso: null, targetIso: null })).toBe(false);
     expect(barBox({ ...row, startIso: null, targetIso: null }, RANGE, "week")).toBeNull();
+  });
+
+  it("never draws a bar for an unconfirmed row", () => {
+    expect(hasBar({ ...row, unconfirmed: true })).toBe(false);
   });
 
   it("decides visibility against the visible slice", () => {

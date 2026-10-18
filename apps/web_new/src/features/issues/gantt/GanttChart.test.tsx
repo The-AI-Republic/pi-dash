@@ -38,6 +38,7 @@ function row(overrides: Partial<GanttRow> = {}): GanttRow {
     durationDays: null,
     stateId: null,
     archived: false,
+    unconfirmed: false,
     ...overrides,
   };
 }
@@ -174,6 +175,19 @@ describe("GanttChart layout", () => {
     renderChart();
     expect(screen.getByText("No dates")).toBeInTheDocument();
     expect(document.querySelector("#gantt-block-row-2")).toBeNull();
+  });
+
+  it("shows an unconfirmed create as a pulsing lane with no bar or dates prompt", () => {
+    renderChart({
+      rows: [
+        row({ id: "temp-abc", identifier: "WEB-0", name: "Draft title", unconfirmed: true }),
+        row({ id: "row-3", name: "Far right" }),
+      ],
+    });
+    const lane = document.querySelector('[data-lane="temp-abc"]');
+    expect(lane?.querySelector('[data-testid="gantt-lane-unconfirmed"]')).not.toBeNull();
+    expect(lane?.textContent).not.toContain("No dates");
+    expect(document.querySelector("#gantt-block-temp-abc")).toBeNull();
   });
 
   it("opens a row from its bar and from its sidebar link", () => {
