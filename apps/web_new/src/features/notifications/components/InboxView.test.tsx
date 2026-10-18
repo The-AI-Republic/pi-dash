@@ -172,17 +172,10 @@ function renderView(options: ViewOptions = {}): {
     text: async () => JSON.stringify(payload),
   });
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+    const requestMethod = init.method ?? "GET";
     calls.push(url);
-    const method = init.method ?? "GET";
     if (url.endsWith("/auth/get-csrf-token/")) return json({ csrf_token: "csrf" }, url);
-    if (method !== "GET") {
-      if (postReply === undefined) {
-        return { status: 404, url, headers: { get: () => null }, text: async () => "{}" };
-      }
-      return postReply(url, String(init.body ?? ""));
-    }
-    if (!serveReads && listReply === undefined && unreadReply === undefined) return new Promise<never>(() => {});
-    if (method === "POST" && /\/users\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname)) {
+    if (requestMethod === "POST" && /\/users\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname)) {
       readWrites += 1;
       if (failFirstRead && readWrites === 1) {
         if (firstReadFailureDelayMs > 0) {
@@ -194,6 +187,13 @@ function renderView(options: ViewOptions = {}): {
       const notificationId = new URL(url).pathname.split("/").at(-3) ?? row().id;
       return json(row({ id: notificationId, read_at: "2026-10-17T12:30:00Z" }), url);
     }
+    if (requestMethod !== "GET") {
+      if (postReply === undefined) {
+        return { status: 404, url, headers: { get: () => null }, text: async () => "{}" };
+      }
+      return postReply(url, String(init.body ?? ""));
+    }
+    if (!serveReads && listReply === undefined && unreadReply === undefined) return new Promise<never>(() => {});
     if (url.includes("/project-roles/")) return json({ [PROJECT_ID]: ROLE_ADMIN }, url);
     if (url.includes(`/projects/${PROJECT_ID}/issues/${ISSUE_ID}/`)) {
       return { ...json({ detail: "not hydrated in this integration fixture" }, url), status: 404 };
@@ -713,9 +713,11 @@ describe("InboxView card actions", () => {
 
   it("removes an existing snooze from the menu", async () => {
     const user = userEvent.setup();
+    // A due snooze: a future one stays out of the default stream (NTF-017)
+    // until its resume moment, so it would never render here.
     const snoozed = storyRow("Nap time", {
       id: "e23e4567-e89b-12d3-a456-426614174013",
-      snoozed_till: "2026-10-19T17:30:00Z",
+      snoozed_till: "2026-10-15T17:30:00Z",
     });
     const { writes } = renderWritable({ rows: [snoozed] });
     await screen.findByText("Nap time");

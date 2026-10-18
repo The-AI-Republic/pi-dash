@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { NotificationListResponse } from "@pidash/api-client";
 
 import { applyBulkRead, isRowInBulkReadScope, markPageRead, type CachedListPage } from "./bulkRead.js";
+import { streamPages } from "./streamData.js";
 
 const READ_AT = "2026-10-17T12:00:00.000Z";
 
@@ -126,7 +127,7 @@ describe("apply bulk read", () => {
     );
     expect(patched.map(([key]) => key)).toEqual([inScope.key, unreadOnly.key]);
     for (const [, result] of patched) {
-      expect(result.results[0]?.read_at).toBe(READ_AT);
+      expect(streamPages(result)[0]?.results[0]?.read_at).toBe(READ_AT);
     }
   });
 

@@ -62,6 +62,7 @@ export function InboxView({ workspaceSlug }: { workspaceSlug: string }): React.R
   const [modes, setModes] = React.useState<StreamModes>(DEFAULT_STREAM_MODES);
   const [customFor, setCustomFor] = React.useState<string | null>(null);
   const [pendingId, setPendingId] = React.useState<string | null>(null);
+  const attemptedReads = React.useRef(new Set<string>());
   const unread = useUnreadNotifications(workspaceSlug);
   const query = React.useMemo(() => notificationStreamQuery(tab, origins, modes), [tab, origins, modes]);
   const list = useNotificationPages(workspaceSlug, query);

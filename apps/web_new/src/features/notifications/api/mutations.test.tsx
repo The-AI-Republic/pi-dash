@@ -34,7 +34,6 @@ import {
   applyRowToPage,
   mergeWrittenRow,
   rowBelongsToStream,
-  streamPages,
   writeRowToStream,
   type StreamData,
   useSnoozeNotification,
@@ -43,6 +42,7 @@ import {
   useToggleNotificationRead,
   type StreamFlags,
 } from "./mutations.js";
+import { streamPages } from "../lib/streamData.js";
 
 const WS = "acme";
 const ID = "523e4567-e89b-12d3-a456-426614174004";
