@@ -25,7 +25,9 @@ import {
   prefsQueryOptions,
   type LayoutKind,
 } from "../../../../../../features/issues/index.js";
-import { useRichFilterBuilder } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
+import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
+
+const LazyIssueFilters = React.lazy(() => import("../../../../../../features/issues/filters/rich/IssueFilters.js"));
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
 import { notifyError } from "../../../../../../shared/shell/index.js";
@@ -102,13 +104,6 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
     const { data: issues } = useSuspenseQuery(
       issuesQueryOptions(context.apiClient, params.ws, params.projectId, search, preferences.rich_filters)
     );
-    const richFilter = useRichFilterBuilder({
-      workspaceSlug: params.ws,
-      projectId: params.projectId,
-      entity: { scope: "project", projectId: params.projectId },
-      hideCycle: !project?.cycle_view,
-      hideModule: !project?.module_view,
-    });
 
     React.useEffect(
       () =>
@@ -149,7 +144,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         hideModule={!project.module_view}
       />
     );
-    return (
+    const renderWithFilters = (richFilter: RichFilterBuilderParts | null): React.ReactElement => (
       <IssuesLayoutRoot
         workspaceSlug={params.ws}
         entity={{ scope: "project", projectId: params.projectId }}
@@ -164,9 +159,21 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         noMatchState={<ProjectIssuesNoMatchState />}
         headerActions={display}
         displayControl={display}
-        filterControl={richFilter.control}
-        filterRow={richFilter.row}
+        filterControl={richFilter?.control}
+        filterRow={richFilter?.row}
       />
+    );
+    return (
+      <React.Suspense fallback={renderWithFilters(null)}>
+        <LazyIssueFilters
+          workspaceSlug={params.ws}
+          projectId={params.projectId}
+          hideCycle={!project.cycle_view}
+          hideModule={!project.module_view}
+        >
+          {renderWithFilters}
+        </LazyIssueFilters>
+      </React.Suspense>
     );
   },
 });

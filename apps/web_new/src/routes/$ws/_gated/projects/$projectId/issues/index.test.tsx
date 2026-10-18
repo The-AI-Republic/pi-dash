@@ -240,10 +240,10 @@ describe("project issues screen", () => {
     expect(row).not.toHaveClass("h-8");
   });
 
-  it("mounts the rich-filter entry in the desktop and mobile headers", () => {
+  it("mounts the rich-filter entry in the desktop and mobile headers", async () => {
     renderScreen({}, 1, [issueRow()]);
 
-    const triggers = screen.getAllByTestId("rich-filter-add");
+    const triggers = await screen.findAllByTestId("rich-filter-add");
     expect(triggers).toHaveLength(2);
     for (const trigger of triggers) {
       expect(trigger).toHaveAccessibleName(/Add filter/);
@@ -251,7 +251,7 @@ describe("project issues screen", () => {
     expect(screen.queryByTestId("rich-filter-row")).not.toBeInTheDocument();
   });
 
-  it("renders stored rich filters and passes them to the list query", () => {
+  it("renders stored rich filters and passes them to the list query", async () => {
     const rich = { priority__in: "urgent" };
     vi.spyOn(Route, "useParams").mockReturnValue({ ws: PARAMS.ws, projectId: PARAMS.projectId });
     vi.spyOn(Route, "useSearch").mockReturnValue({});
@@ -287,7 +287,7 @@ describe("project issues screen", () => {
       </QueryClientProvider>
     );
 
-    expect(screen.getByTestId("rich-filter-row")).toBeInTheDocument();
+    expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
     expect(screen.getAllByTestId("rich-condition")).toHaveLength(1);
     expect(screen.getByTestId("rich-condition")).toHaveTextContent("Urgent");
   });
