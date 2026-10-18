@@ -17,7 +17,7 @@ import {
 } from "../../../../shared/pickers/index.js";
 import { meQueryOptions } from "../../../../core/session/queries.js";
 import { labelsQueryOptions } from "../../labels/api.js";
-import { findField, richFilterFields, type RichCondition } from "./expression.js";
+import { findField, parseRichExpression, richFilterFields, type RichCondition } from "./expression.js";
 import { ValueSlot, selectedValues } from "./ValueSlot.js";
 
 afterEach(() => {
@@ -976,5 +976,15 @@ describe("ValueSlot date editors", () => {
     );
     expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10 → 2026-02-12");
     expect(screen.getByRole("button", { name: /2026-02-10/ })).toHaveAttribute("data-empty", "false");
+  });
+
+  it("renders both ends of a range read back from its stored string", () => {
+    const [stored] = parseRichExpression({ start_date__range: "2026-02-10,2026-02-12" });
+    render(
+      wrap(<ValueSlot workspaceSlug="acme" projectId={PROJECT} field={START} condition={stored!} onChange={() => {}} />)
+    );
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10 → 2026-02-12");
+    expect(screen.getByTestId("rich-value-trigger").parentElement).not.toHaveAttribute("data-incomplete", "true");
+    expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument();
   });
 });

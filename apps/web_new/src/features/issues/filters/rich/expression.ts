@@ -55,10 +55,17 @@ function singleLeaf(value: Record<string, unknown>): { field: string; operator: 
  * reads CSV), so a multi pick reopens as its list of ids rather than as
  * one id containing commas — otherwise the next edit serializes the
  * joined string again as a single value and the pick loses every other
- * member. A single value keeps its scalar form.
+ * member. A date range persists as `"start,end"` and reopens as its two
+ * ends so the slot can render and re-save it. A single value keeps its
+ * scalar form.
  */
 export function parseLeafValue(operator: string, value: unknown): unknown {
-  if (operator !== "in" || typeof value !== "string" || !value.includes(",")) return value;
+  if (typeof value !== "string" || !value.includes(",")) return value;
+  if (operator === "range") {
+    const ends = value.split(",").map((entry) => entry.trim());
+    return ends.length === 2 && ends.every((entry) => entry !== "") ? ends : value;
+  }
+  if (operator !== "in") return value;
   const entries = value
     .split(",")
     .map((entry) => entry.trim())

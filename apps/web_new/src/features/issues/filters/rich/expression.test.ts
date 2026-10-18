@@ -120,13 +120,30 @@ describe("parseRichExpression", () => {
     });
   });
 
-  it("leaves a scalar, a date range and a single exact value alone", () => {
+  it("leaves a scalar and a single exact value alone", () => {
     expect(parseRichExpression({ state_group__in: "started" })[0]?.value).toBe("started");
     expect(parseRichExpression({ priority__in: "urgent" })[0]?.value).toBe("urgent");
-    expect(parseRichExpression({ start_date__range: "2026-01-01,2026-01-31" })[0]?.value).toBe("2026-01-01,2026-01-31");
     expect(parseRichExpression({ assignee_id__exact: "a,b" })[0]?.value).toBe("a,b");
     // A separator-only string has no entries to read back.
     expect(parseRichExpression({ assignee_id__in: "," })[0]?.value).toBe(",");
+  });
+
+  it("splits a stored date range back into its two ends", () => {
+    expect(parseRichExpression({ start_date__range: "2026-01-01,2026-01-31" })[0]?.value).toEqual([
+      "2026-01-01",
+      "2026-01-31",
+    ]);
+    expect(parseRichExpression({ and: [{ not: { start_date__range: "2026-01-01,2026-01-31" } }] })[0]).toMatchObject({
+      negated: true,
+      value: ["2026-01-01", "2026-01-31"],
+    });
+    // A half-filled stored range keeps its raw string rather than becoming a pair.
+    expect(parseRichExpression({ start_date__range: "2026-01-01," })[0]?.value).toBe("2026-01-01,");
+  });
+
+  it("round-trips a date range through serialize and parse", () => {
+    const stored = { start_date__range: "2026-01-01,2026-01-31" };
+    expect(serializeRichExpression(parseRichExpression(stored))).toEqual(stored);
   });
 
   it("round-trips a multi pick through serialize and parse", () => {
