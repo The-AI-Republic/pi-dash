@@ -694,6 +694,9 @@ mod tests {
         let mut window = vec![b'a'; 193];
         window.push(0xFF);
         window.extend_from_slice(b"<script>");
-        assert_eq!(validate_binary_data(&window), Err(BINARY_SUSPICIOUS_MESSAGE));
+        assert_eq!(
+            validate_binary_data(&window),
+            Err(BINARY_SUSPICIOUS_MESSAGE)
+        );
     }
 }
