@@ -7,9 +7,11 @@
 // without bringing up the parity stack.
 
 import type { Page, Route } from "@playwright/test";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WebNewDriver } from "./web-new";
+
+afterEach(() => vi.restoreAllMocks());
 
 interface FakeLocatorOptions {
   count?: number;
@@ -553,6 +555,18 @@ describe("WebNewDriver prompt revert dialog", () => {
     });
   });
 
+  it.each(["rejected", "nullish"] as const)("normalizes %s dialog text reads", async (failure) => {
+    const fixture = dialogFixture(true);
+    const textRead = vi.spyOn(FakeLocator.prototype, "innerText");
+    if (failure === "rejected") textRead.mockRejectedValue(new Error("detached dialog"));
+    else textRead.mockResolvedValue(null as unknown as string);
+    await expect(new WebNewDriver(fixture.page).promptsRevertDialog()).resolves.toEqual({
+      title: "",
+      body: "",
+      confirmLabel: "",
+    });
+  });
+
   it("confirms and cancels through the scoped dialog", async () => {
     const fixture = dialogFixture(true);
     const driver = new WebNewDriver(fixture.page);
@@ -563,5 +577,50 @@ describe("WebNewDriver prompt revert dialog", () => {
     expect(fixture.buttons.get("Revert")?.click).toHaveBeenCalledOnce();
     expect(fixture.buttons.get("Cancel")?.click).toHaveBeenCalledOnce();
     expect(fixture.heading.waitFor).toHaveBeenCalledWith({ state: "detached", timeout: 30_000 });
+  });
+});
+
+describe("WebNewDriver prompt read fallbacks", () => {
+  it.each(["rejected", "nullish"] as const)("normalizes %s card, nav and editor reads", async (failure) => {
+    const textRead = vi.spyOn(FakeLocator.prototype, "innerText");
+    const inputRead = vi.spyOn(FakeLocator.prototype, "inputValue");
+    const enabledRead = vi.spyOn(FakeLocator.prototype, "isEnabled");
+    const attributeRead = vi.spyOn(FakeLocator.prototype, "getAttribute");
+    if (failure === "rejected") {
+      textRead.mockRejectedValue(new Error("detached text"));
+      inputRead.mockRejectedValue(new Error("detached input"));
+      enabledRead.mockRejectedValue(new Error("detached button"));
+    } else {
+      textRead.mockResolvedValue(null as unknown as string);
+      inputRead.mockResolvedValue(null as unknown as string);
+    }
+    const sparse = card({ badges: ["unknown"], buttons: ["unknown"] });
+    const driver = new WebNewDriver(navigationPage({ cardByKey: { alpha: sparse } }).page);
+    await expect(driver.promptsSectionCard("alpha")).resolves.toMatchObject({
+      title: "",
+      body: "",
+      sourceBadge: "",
+      badges: [],
+      kinds: [],
+      workspaceEditLabel: null,
+      personalEditLabel: null,
+    });
+    // A disappearing card has no usable id; unrelated ids are ignored too.
+    attributeRead.mockResolvedValueOnce("unrelated");
+    await expect(driver.promptsSectionCard("alpha")).resolves.toBeNull();
+    attributeRead.mockRejectedValueOnce(new Error("detached card"));
+    await expect(driver.promptsSectionCard("alpha")).resolves.toBeNull();
+
+    const nav = navigationPage({ links: [new FakeLocator()] });
+    if (failure === "rejected") attributeRead.mockRejectedValueOnce(new Error("detached link"));
+    await expect(new WebNewDriver(nav.page).promptsSectionNav()).resolves.toEqual([{ title: "", key: "" }]);
+    const editor = editorFixture();
+    await expect(new WebNewDriver(editor.page).promptsEditorState()).resolves.toMatchObject({
+      scopeLabel: "",
+      draft: "",
+      defaultBody: "",
+      error: null,
+      ...(failure === "rejected" ? { saveEnabled: false } : {}),
+    });
   });
 });

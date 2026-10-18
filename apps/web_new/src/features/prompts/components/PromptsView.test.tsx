@@ -139,7 +139,12 @@ describe("PromptsView", () => {
         return Promise.resolve(listResponse(options.kind ?? "coding-task", "user", [row()]));
       }
     );
-    renderView(ROLE_ADMIN);
+    const queryClient = renderView(ROLE_ADMIN);
+    // Wait for all member reads to settle: the remaining loading state
+    // must come from the workspace baseline, rather than the first render.
+    await waitFor(() =>
+      expect(queryClient.isFetching({ predicate: (query) => query.queryKey.at(-1) === "user" })).toBe(0)
+    );
     await waitFor(() => expect(screen.getByText(PROMPTS_LOADING_TEXT)).toBeInTheDocument());
     expect(screen.queryByRole("heading", { name: "Autonomy" })).not.toBeInTheDocument();
   });

@@ -170,6 +170,16 @@ describe("SectionCard", () => {
     expect(onEdit).toHaveBeenCalledWith("user");
   });
 
+  it("offers workspace editing alone on an admin-managed section", () => {
+    const { onEdit } = renderCard({
+      section: section({ user: row({ customizable: "workspace", editable_at_personal: false }) }),
+    });
+    expect(screen.getByText("Admin-managed")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Customize for me" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Customize for workspace" }));
+    expect(onEdit).toHaveBeenCalledWith("workspace");
+  });
+
   it("hides the edit row when nothing is editable", () => {
     renderCard({ viewer: { isAdmin: false, canEdit: false, baselineLoaded: false } });
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
