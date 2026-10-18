@@ -126,7 +126,7 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
               <User size={16} strokeWidth={1.5} aria-hidden="true" />
             ) : (
               <Avatar
-                name={name ?? prompt}
+                name={displayNameOf(current)}
                 {...(current.avatarUrl === null ? {} : { src: current.avatarUrl })}
                 size="small"
               />
@@ -139,7 +139,7 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
           {current === undefined ? null : (
             <span aria-hidden="true" className="inline-flex shrink-0 items-center">
               <Avatar
-                name={name ?? prompt}
+                name={displayNameOf(current)}
                 {...(current.avatarUrl === null ? {} : { src: current.avatarUrl })}
                 size="small"
               />

@@ -155,6 +155,63 @@ describe("ModulePicker", () => {
     expect(calls).toEqual([]);
   });
 
+  it("reports open changes to a controlled caller", async () => {
+    const { queryClient } = harness(MODULES);
+    const onOpenChange = vi.fn();
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <ModulePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={null}
+          onChange={() => undefined}
+          open={false}
+          onOpenChange={onOpenChange}
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "No module" }));
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <ModulePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={null}
+          onChange={() => undefined}
+          open
+          onOpenChange={onOpenChange}
+        />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("option", { name: "Alpha" })).toBeInTheDocument();
+  });
+
+  it("counts an unknown module and opens icon-only without a handler", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { queryClient } = harness(MODULES);
+    const missing = "99999999-9999-4999-8999-999999999999";
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <ModulePicker workspaceSlug="acme" projectId={PROJECT} multiple value={[missing]} onChange={onChange} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("button", { name: "1 module" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "1 module" }));
+    expect(await screen.findByRole("option", { name: "Alpha" })).toBeInTheDocument();
+    await user.click(document.body);
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <ModulePicker workspaceSlug="acme" projectId={PROJECT} value={null} onChange={onChange} iconOnly />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "No module" }));
+    expect(await screen.findByRole("listbox", { name: "Modules" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: "Alpha" }));
+    expect(onChange).toHaveBeenCalledWith(ALPHA);
+  });
+
   it("renders icon-only and custom triggers", async () => {
     const user = userEvent.setup();
     const { queryClient } = harness(MODULES);

@@ -190,6 +190,49 @@ describe("StatePicker", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load states.");
   });
 
+  it("reports open changes to a controlled caller", async () => {
+    const { queryClient } = harness(STATES);
+    const onOpenChange = vi.fn();
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <StatePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={null}
+          onChange={() => undefined}
+          open={false}
+          onOpenChange={onOpenChange}
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select state" }));
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <StatePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={null}
+          onChange={() => undefined}
+          open
+          onOpenChange={onOpenChange}
+        />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("option", { name: "Todo" })).toBeInTheDocument();
+  });
+
+  it("opens without an open-change handler", async () => {
+    const { queryClient } = harness(STATES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <StatePicker workspaceSlug="acme" projectId={PROJECT} value={null} onChange={() => undefined} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select state" }));
+    expect(await screen.findByRole("option", { name: "Todo" })).toBeInTheDocument();
+  });
+
   it("blocks reads while disabled", () => {
     const { queryClient, calls } = harness(STATES);
     render(

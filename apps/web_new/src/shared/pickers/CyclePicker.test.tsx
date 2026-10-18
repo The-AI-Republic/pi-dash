@@ -147,6 +147,49 @@ describe("CyclePicker", () => {
     expect(calls).toEqual([]);
   });
 
+  it("reports open changes to a controlled caller", async () => {
+    const { queryClient } = harness(CYCLES);
+    const onOpenChange = vi.fn();
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <CyclePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={null}
+          onChange={() => undefined}
+          open={false}
+          onOpenChange={onOpenChange}
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "No cycle" }));
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <CyclePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={null}
+          onChange={() => undefined}
+          open
+          onOpenChange={onOpenChange}
+        />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("option", { name: "Current" })).toBeInTheDocument();
+  });
+
+  it("opens without an open-change handler", async () => {
+    const { queryClient } = harness(CYCLES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <CyclePicker workspaceSlug="acme" projectId={PROJECT} value={null} onChange={() => undefined} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "No cycle" }));
+    expect(await screen.findByRole("option", { name: "Current" })).toBeInTheDocument();
+  });
+
   it("renders icon-only and custom triggers", async () => {
     const user = userEvent.setup();
     const { queryClient } = harness(CYCLES);

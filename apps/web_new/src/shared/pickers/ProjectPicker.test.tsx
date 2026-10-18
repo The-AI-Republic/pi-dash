@@ -194,6 +194,62 @@ describe("ProjectPicker", () => {
     expect(calls).toEqual([]);
   });
 
+  it("reports open changes to a controlled caller", async () => {
+    const { queryClient } = harness(PROJECTS);
+    const onOpenChange = vi.fn();
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <ProjectPicker
+          workspaceSlug="acme"
+          value={null}
+          onChange={() => undefined}
+          open={false}
+          onOpenChange={onOpenChange}
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select project" }));
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <ProjectPicker workspaceSlug="acme" value={null} onChange={() => undefined} open onOpenChange={onOpenChange} />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("option", { name: "Seed project" })).toBeInTheDocument();
+  });
+
+  it("counts an unknown selection, overflows long stacks and opens without a handler", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = harness(PROJECTS);
+    const onChange = vi.fn();
+    const missing = "99999999-9999-4999-8999-999999999999";
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <ProjectPicker workspaceSlug="acme" multiple value={[missing]} onChange={onChange} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("button", { name: "1 project" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "1 project" }));
+    expect(await screen.findByRole("option", { name: "Seed project" })).toBeInTheDocument();
+    await user.click(document.body);
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <ProjectPicker workspaceSlug="acme" multiple value={[SEED, OTHER, missing]} onChange={onChange} iconOnly />
+      </QueryClientProvider>
+    );
+    const trigger = screen.getByRole("button", { name: "3 projects" });
+    expect(trigger).toHaveTextContent("+1");
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <ProjectPicker workspaceSlug="acme" value={null} onChange={onChange} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select project" }));
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: "Seed project" }));
+    expect(onChange).toHaveBeenCalledWith(SEED);
+  });
+
   it("renders icon-only and custom triggers", async () => {
     const { queryClient } = harness(PROJECTS);
     const { rerender } = render(

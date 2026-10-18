@@ -63,6 +63,23 @@ describe("PriorityPicker", () => {
     expect(screen.getByRole("listbox")).toBeInTheDocument();
   });
 
+  it("reports open changes to a controlled caller", () => {
+    const onOpenChange = vi.fn();
+    const { rerender } = render(
+      <PriorityPicker value="medium" onChange={() => undefined} open={false} onOpenChange={onOpenChange} />
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Medium" }));
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    rerender(<PriorityPicker value="medium" onChange={() => undefined} open onOpenChange={onOpenChange} />);
+    expect(screen.getByRole("listbox", { name: "Priorities" })).toBeInTheDocument();
+  });
+
+  it("opens without an open-change handler", () => {
+    render(<PriorityPicker value="medium" onChange={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Medium" }));
+    expect(screen.getByRole("listbox", { name: "Priorities" })).toBeInTheDocument();
+  });
+
   it("disables without reads", () => {
     render(<PriorityPicker value="medium" onChange={() => undefined} disabled />);
     expect(screen.getByRole("button", { name: "Medium" })).toBeDisabled();

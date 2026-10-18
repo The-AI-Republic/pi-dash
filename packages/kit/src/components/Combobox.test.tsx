@@ -108,6 +108,24 @@ describe("Combobox", () => {
     expect(onOpenChange).toHaveBeenCalledWith(true);
   });
 
+  it("opens without an open-change handler", async () => {
+    const user = userEvent.setup();
+    render(
+      <Combobox
+        trigger={<Button>Priority</Button>}
+        options={OPTIONS}
+        value={null}
+        onSelect={() => undefined}
+        listLabel="Priorities"
+        emptyText="No matching results"
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Priority" }));
+    expect(screen.getByRole("listbox", { name: "Priorities" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
   it("filters on search and names the empty state", async () => {
     const user = userEvent.setup();
     setup();
@@ -313,6 +331,20 @@ describe("Combobox", () => {
     expect(trigger).toBeDisabled();
     expect(trigger.className).toContain("cursor-not-allowed");
     fireEvent.click(trigger);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("blocks opening when a custom trigger ignores the disabled prop", () => {
+    const { onOpenChange } = setup({
+      disabled: true,
+      trigger: (
+        <div role="button" tabIndex={0}>
+          Priority
+        </div>
+      ),
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Priority" }));
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     expect(onOpenChange).not.toHaveBeenCalled();
   });

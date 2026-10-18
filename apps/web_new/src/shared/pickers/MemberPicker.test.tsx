@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
 import { setSessionClient } from "../../core/session/queries.js";
 import { MemberPicker } from "./MemberPicker.js";
+import { pickerKeys } from "./reference.js";
 
 const ME = "11111111-1111-4111-8111-111111111111";
 const ANA = "22222222-2222-4222-8222-222222222222";
@@ -51,7 +52,13 @@ function projectRow(userId: string, role = 15) {
   };
 }
 
-function directoryRow(userId: string, displayName: string, role = 15, isActive = true) {
+function directoryRow(
+  userId: string,
+  displayName: string,
+  role = 15,
+  isActive = true,
+  avatarUrl: string | null = null
+) {
   return {
     id: `${userId.slice(0, -1)}3`,
     member: {
@@ -59,7 +66,7 @@ function directoryRow(userId: string, displayName: string, role = 15, isActive =
       first_name: displayName,
       last_name: "",
       avatar: "",
-      avatar_url: null,
+      avatar_url: avatarUrl,
       display_name: displayName,
       is_bot: false,
     },
@@ -69,10 +76,11 @@ function directoryRow(userId: string, displayName: string, role = 15, isActive =
 }
 
 const PROJECT_MEMBERS = [projectRow(ME), projectRow(ANA), projectRow(ZOE), projectRow(MAX), projectRow(GUEST, 5)];
+const AVATAR = "https://cdn.test/avatars/ana.png";
 const DIRECTORY = [
   directoryRow(ME, "Parity User"),
-  directoryRow(ANA, "Ana"),
-  directoryRow(ZOE, "Zoe", 15, false),
+  directoryRow(ANA, "Ana", 15, true, AVATAR),
+  directoryRow(ZOE, "Zoe", 15, false, "https://cdn.test/avatars/zoe.png"),
   directoryRow(MAX, "Max"),
   directoryRow(GUEST, "Parity Guest", 5),
 ];
@@ -163,6 +171,7 @@ describe("MemberPicker", () => {
     expect(await screen.findByRole("option", { name: "You" })).toBeInTheDocument();
     expect(optionNames()).toEqual(["You", "Ana", "Zoe", "Max"]);
     expect(screen.getByText("Suspended")).toBeInTheDocument();
+    expect(document.querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
     expect(calls.some((url) => url.includes("/projects/") && url.endsWith("/members/"))).toBe(true);
     expect(calls.some((url) => url === "https://api.test/api/workspaces/acme/members/")).toBe(true);
     expect(screen.queryByRole("option", { name: "Parity Guest" })).not.toBeInTheDocument();
@@ -435,6 +444,107 @@ describe("MemberPicker", () => {
         />
       </QueryClientProvider>
     );
+    expect(await screen.findByRole("option", { name: "You" })).toBeInTheDocument();
+  });
+
+  it("waits for the project memberships before listing a project-scoped picker", () => {
+    const { queryClient } = harness(memberRoutes());
+    queryClient.setQueryData(pickerKeys.workspaceMembers("acme"), DIRECTORY);
+    setupPicker(queryClient, { value: null, open: true });
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Loading members");
+  });
+
+  it("falls back to the prompt for unknown single values and avatar triggers", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = harness(memberRoutes());
+    const onChange = vi.fn();
+    const missing = "99999999-9999-4999-8999-999999999999";
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <MemberPicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={missing}
+          onChange={onChange}
+          placeholder="Choose"
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("button", { name: "Choose" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Choose" }));
+    expect(await screen.findByRole("option", { name: "You" })).toBeInTheDocument();
+    await user.click(document.body);
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <MemberPicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={missing}
+          onChange={onChange}
+          placeholder="Choose"
+          iconOnly
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("button", { name: "Choose" })).toBeInTheDocument();
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <MemberPicker workspaceSlug="acme" projectId={PROJECT} value={missing} onChange={onChange} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("button", { name: "Select member" })).toBeInTheDocument();
+  });
+
+  it("renders avatars on the option and trigger forms once the directory has loaded", () => {
+    const { queryClient } = harness(memberRoutes());
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <MemberPicker workspaceSlug="acme" projectId={PROJECT} value={ANA} onChange={() => undefined} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select member" }));
+    return screen.findByRole("option", { name: "Ana" }).then((option) => {
+      expect(option.querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
+      fireEvent.click(option);
+      expect(screen.getByRole("button", { name: "Ana" }).querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
+      rerender(
+        <QueryClientProvider client={queryClient}>
+          <MemberPicker workspaceSlug="acme" projectId={PROJECT} value={ANA} onChange={() => undefined} iconOnly />
+        </QueryClientProvider>
+      );
+      expect(screen.getByRole("button", { name: "Ana" }).querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
+      rerender(
+        <QueryClientProvider client={queryClient}>
+          <MemberPicker
+            workspaceSlug="acme"
+            projectId={PROJECT}
+            multiple
+            value={[ANA, ZOE]}
+            onChange={() => undefined}
+          />
+        </QueryClientProvider>
+      );
+      expect(screen.getByRole("button", { name: "Ana, Zoe" }).querySelectorAll("img")).toHaveLength(2);
+      rerender(
+        <QueryClientProvider client={queryClient}>
+          <MemberPicker workspaceSlug="acme" projectId={PROJECT} value={MAX} onChange={() => undefined} iconOnly />
+        </QueryClientProvider>
+      );
+      const initials = screen.getByRole("button", { name: "Max" });
+      expect(initials.querySelector("img")).toBeNull();
+      expect(initials).toHaveTextContent("MA");
+    });
+  });
+
+  it("opens without an open-change handler", async () => {
+    const { queryClient } = harness(memberRoutes());
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemberPicker workspaceSlug="acme" projectId={PROJECT} value={null} onChange={() => undefined} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select member" }));
     expect(await screen.findByRole("option", { name: "You" })).toBeInTheDocument();
   });
 
