@@ -117,6 +117,7 @@ use uuid::Uuid;
 
 use crate::license::form_body::{select_body_kind, BodyKind};
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::token as auth_token;
 use pidash_db::v1_assets::asset_queries;
 
@@ -1131,9 +1132,12 @@ pub(crate) async fn handle_patch(
     asset_raw: &str,
     body: Bytes,
 ) -> Response {
-    let asset_id: Uuid = match asset_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
+    let asset_id = match classify_uuid_segment(asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical => {
+            return proxy_through(state, method, uri, headers, body).await;
+        }
+        UuidSegment::Garbage => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
     };
     let Some(pool) = pool(&state) else {
         return server_error("no database pool");
@@ -1211,9 +1215,11 @@ pub(crate) async fn handle_patch(
 async fn user_delete(
     State(state): State<AppState>,
     Path(asset_raw): Path<String>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
-    handle_delete(state, headers, &asset_raw).await
+    handle_delete(state, method, uri, headers, &asset_raw).await
 }
 
 /// Shared DELETE core (the server twin at `asset.py:387-400` is identical —
@@ -1221,12 +1227,17 @@ async fn user_delete(
 /// touches `request.data` here.
 pub(crate) async fn handle_delete(
     state: AppState,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     asset_raw: &str,
 ) -> Response {
-    let asset_id: Uuid = match asset_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
+    let asset_id = match classify_uuid_segment(asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical => {
+            return proxy_through(state, method, uri, headers, Bytes::new()).await;
+        }
+        UuidSegment::Garbage => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
     };
     let Some(pool) = pool(&state) else {
         return server_error("no database pool");

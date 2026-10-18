@@ -110,6 +110,7 @@ use uuid::Uuid;
 
 use crate::license::form_body::{select_body_kind, BodyKind};
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::token as auth_token;
 use pidash_db::v1_assets::asset_queries;
 
@@ -934,13 +935,20 @@ async fn publish_metadata(pool: &sqlx::PgPool, asset_id: &Uuid) {
 async fn generic_get(
     State(state): State<AppState>,
     Path((slug, asset_raw)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let _ = body;
-    let asset_id: Uuid = match asset_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
+    // Classify the raw segment before auth, exactly like Django's resolver:
+    // canonical serves; parseable-but-non-canonical proxies so Django's
+    // resolver 404 answers; garbage keeps the local prod resolver body.
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical => {
+            return proxy_through(state, method, uri, headers, body).await;
+        }
+        UuidSegment::Garbage => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
     };
     let Some(pool) = pool(&state) else {
         return get_server_error("no database pool");
@@ -1234,9 +1242,12 @@ async fn generic_patch(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let asset_id: Uuid = match asset_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical => {
+            return proxy_through(state, method, uri, headers, body).await;
+        }
+        UuidSegment::Garbage => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
     };
     let Some(pool) = pool(&state) else {
         return server_error("no database pool");

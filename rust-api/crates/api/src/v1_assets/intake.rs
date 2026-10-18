@@ -61,7 +61,7 @@ use std::collections::HashMap;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
@@ -88,6 +88,7 @@ use crate::paginator::{
 };
 use crate::space::sanitize::{sanitize_html, Sanitize};
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use crate::v1_cycles_modules::cycle as cycle_mod;
 use pidash_db::v1_assets::model::sticky::strip_tags_ml;
 
@@ -148,10 +149,12 @@ pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// the `BaseAPIView` spelling — `BaseViewSet` (sticky) says "The required
 /// object does not exist.", which is wrong here.
 pub const RESOURCE_MISSING_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
-/// DRF's default `Http404` body: a non-UUID `issue_id` never reaches the
-/// view (the `<uuid:>` converter 404s at URL resolve); the closest Rust
-/// cutover approximation is the DRF body (the sticky `{pk}` precedent).
-pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
+/// Global `handler404` body (`pi_dash/urls.py:15` ->
+/// `app/views/error_404.py:10`): a non-UUID `issue_id` never reaches the
+/// view, because Django's `<uuid:>` converter 404s at URL resolve with this
+/// exact prod body. The asset modules already answer garbage this way
+/// (`asset_user.rs` / `asset_generic.rs` `PAGE_NOT_FOUND_BODY`).
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error":"Page not found."}"#;
 /// `handle_exception`'s `IntegrityError` branch (`base.py:136-140`): the
 /// triage-creation race (unique `name`+`project`) 400s here.
 pub const PAYLOAD_INVALID_BODY: &str = r#"{"error":"The payload is not valid"}"#;
@@ -178,8 +181,8 @@ pub enum Denial {
     ProjectNotFound,
     /// 404, `.get()` miss (`ObjectDoesNotExist` branch).
     ResourceMissing,
-    /// 404, non-UUID `issue_id` (URL-converter approximation).
-    NotFoundDetail,
+    /// 404, non-UUID `issue_id` (the `<uuid:>` resolver-404 body).
+    PageNotFound,
     /// 400, `{"Detail": ...}` (`ParseError`: per_page / cursor).
     BadDetail(String),
     /// 400, `{"error":<message>}` (`KeyError` branch: unknown zone name).
@@ -212,7 +215,7 @@ impl Denial {
             Denial::Forbidden => (StatusCode::FORBIDDEN, v1_perm::CLASS_DENIAL_BODY.to_owned()),
             Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
             Denial::ResourceMissing => (StatusCode::NOT_FOUND, RESOURCE_MISSING_BODY.to_owned()),
-            Denial::NotFoundDetail => (StatusCode::NOT_FOUND, NOT_FOUND_DETAIL_BODY.to_owned()),
+            Denial::PageNotFound => (StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned()),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
@@ -374,11 +377,23 @@ fn fields_param(params: &HashMap<String, String>, key: &str) -> Option<Vec<Strin
     }
 }
 
-/// A non-UUID `issue_id` never reaches the Django view (the `<uuid:>`
-/// converter 404s at URL resolve); approximate with the DRF `Http404`
-/// body (the sticky `{pk}` precedent).
-fn parse_uuid_or_invalid(raw: &str) -> Result<Uuid, Denial> {
-    raw.parse::<Uuid>().map_err(|_| Denial::NotFoundDetail)
+/// Rebuild the inbound request and proxy it to Django (non-canonical UUID
+/// spellings: routing precedes auth, so Django's resolver 404 answers
+/// before any 401 — the `v1_cli_auth` PIDASHCONV-1095 precedent).
+async fn proxy_through(
+    state: AppState,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(axum::body::Body::from(body))
+        .expect("rebuild proxy request");
+    *req.headers_mut() = headers;
+    crate::edge::proxy(State(state), req).await
 }
 
 // ---------------------------------------------------------------------------
@@ -10738,11 +10753,22 @@ async fn intake_create(
 async fn intake_retrieve(
     State(state): State<AppState>,
     Path((slug, raw_project_id, raw_issue_id)): Path<(String, String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
 ) -> HandlerResult {
-    // URL-resolve precedence: a non-UUID `issue_id` 404s before auth.
-    let issue_id = parse_uuid_or_invalid(&raw_issue_id)?;
+    // URL-resolve precedence: Django's `<uuid:issue_id>` converter runs
+    // before auth. Canonical serves; parseable-but-non-canonical proxies so
+    // Django's resolver 404 answers; garbage keeps the prod resolver body.
+    let issue_id = match classify_uuid_segment(&raw_issue_id) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical => {
+            return Ok(proxy_through(state, method, uri, headers, body).await);
+        }
+        UuidSegment::Garbage => return Err(Denial::PageNotFound),
+    };
     let ctx = context(&state, &headers, &slug, &raw_project_id).await?;
     let project = fetch_project(&ctx.pool, &ctx.project_id).await?;
     let intake_id = fetch_intake_id(&ctx.pool, &slug, &ctx.project_id).await?;
@@ -10805,10 +10831,18 @@ async fn intake_retrieve(
 async fn intake_update(
     State(state): State<AppState>,
     Path((slug, raw_project_id, raw_issue_id)): Path<(String, String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> HandlerResult {
-    let issue_id = parse_uuid_or_invalid(&raw_issue_id)?;
+    let issue_id = match classify_uuid_segment(&raw_issue_id) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical => {
+            return Ok(proxy_through(state, method, uri, headers, body).await);
+        }
+        UuidSegment::Garbage => return Err(Denial::PageNotFound),
+    };
     let ctx = context(&state, &headers, &slug, &raw_project_id).await?;
     let intake_id = fetch_intake_id(&ctx.pool, &slug, &ctx.project_id).await?;
     let project = fetch_project(&ctx.pool, &ctx.project_id).await?;
@@ -11067,9 +11101,17 @@ async fn fetch_state_group_optional(
 async fn intake_destroy(
     State(state): State<AppState>,
     Path((slug, raw_project_id, raw_issue_id)): Path<(String, String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
 ) -> HandlerResult {
-    let issue_id = parse_uuid_or_invalid(&raw_issue_id)?;
+    let issue_id = match classify_uuid_segment(&raw_issue_id) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical => {
+            return Ok(proxy_through(state, method, uri, headers, Bytes::new()).await);
+        }
+        UuidSegment::Garbage => return Err(Denial::PageNotFound),
+    };
     let ctx = context(&state, &headers, &slug, &raw_project_id).await?;
     let intake_id = fetch_intake_id(&ctx.pool, &slug, &ctx.project_id).await?;
     let project = fetch_project(&ctx.pool, &ctx.project_id).await?;
