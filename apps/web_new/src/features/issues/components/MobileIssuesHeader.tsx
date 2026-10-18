@@ -19,6 +19,8 @@ export interface MobileIssuesHeaderProps {
   onSwitch: (kind: LayoutKind) => void;
   /** Display control from the display slice (ISS-075). */
   displayControl?: React.ReactNode;
+  /** Rich-filter control from the filter slice (ISS-096). */
+  filterControl?: React.ReactNode;
   /** Analytics entry from the filter-inputs slice (ISS-107). */
   analyticsControl?: React.ReactNode;
 }
@@ -28,6 +30,7 @@ export function MobileIssuesHeader({
   active,
   onSwitch,
   displayControl,
+  filterControl,
   analyticsControl,
 }: MobileIssuesHeaderProps): React.ReactElement {
   const kinds = mobileOfferedLayouts(offered);
@@ -46,6 +49,7 @@ export function MobileIssuesHeader({
         items={layoutMenuItems(kinds, active, onSwitch)}
       />
       <div className="ml-auto flex items-center gap-(--space-2)">
+        {filterControl}
         {displayControl}
         {analyticsControl}
       </div>

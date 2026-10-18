@@ -84,6 +84,35 @@ describe("issues query", () => {
     expect(data.total_count).toBe(0);
     expect(seen[0]).toBe("https://api.test/api/workspaces/acme/projects/pid/issues/?per_page=50&order_by=-created_at");
   });
+
+  it("sends the stored rich expression as the filters parameter", async () => {
+    const seen: string[] = [];
+    const inner = stubTransport(ENVELOPE);
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: async (url, init) => {
+        seen.push(url);
+        return inner(url, init);
+      },
+      validate: true,
+    });
+    const options = issuesQueryOptions(
+      client,
+      "acme",
+      "pid",
+      { layout: "list" },
+      {
+        and: [{ priority__in: "urgent" }, { not: { state_id__in: ["a"] } }],
+      }
+    );
+    expect(options.queryKey).toContain(
+      JSON.stringify({ and: [{ priority__in: "urgent" }, { not: { state_id__in: ["a"] } }] })
+    );
+    await new QueryClient().fetchQuery(options);
+    expect(seen[0]).toContain(
+      `filters=${encodeURIComponent(JSON.stringify({ and: [{ priority__in: "urgent" }, { not: { state_id__in: ["a"] } }] }))}`
+    );
+  });
 });
 
 const DETAIL_ROW = {

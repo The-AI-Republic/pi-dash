@@ -25,6 +25,7 @@ import {
   prefsQueryOptions,
   type LayoutKind,
 } from "../../../../../../features/issues/index.js";
+import { useRichFilterBuilder } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
 import { notifyError } from "../../../../../../shared/shell/index.js";
@@ -95,9 +96,19 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
     const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, params.ws));
     const project = projects.find((entry) => entry.id === params.projectId) ?? null;
 
-    const { data: issues } = useSuspenseQuery(
-      issuesQueryOptions(context.apiClient, params.ws, params.projectId, search)
+    const { data: preferences } = useSuspenseQuery(
+      prefsQueryOptions(context.apiClient, params.ws, { scope: "project", projectId: params.projectId })
     );
+    const { data: issues } = useSuspenseQuery(
+      issuesQueryOptions(context.apiClient, params.ws, params.projectId, search, preferences.rich_filters)
+    );
+    const richFilter = useRichFilterBuilder({
+      workspaceSlug: params.ws,
+      projectId: params.projectId,
+      entity: { scope: "project", projectId: params.projectId },
+      hideCycle: !project?.cycle_view,
+      hideModule: !project?.module_view,
+    });
 
     React.useEffect(
       () =>
@@ -153,6 +164,8 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         noMatchState={<ProjectIssuesNoMatchState />}
         headerActions={display}
         displayControl={display}
+        filterControl={richFilter.control}
+        filterRow={richFilter.row}
       />
     );
   },

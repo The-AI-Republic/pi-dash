@@ -240,6 +240,58 @@ describe("project issues screen", () => {
     expect(row).not.toHaveClass("h-8");
   });
 
+  it("mounts the rich-filter entry in the desktop and mobile headers", () => {
+    renderScreen({}, 1, [issueRow()]);
+
+    const triggers = screen.getAllByTestId("rich-filter-add");
+    expect(triggers).toHaveLength(2);
+    for (const trigger of triggers) {
+      expect(trigger).toHaveAccessibleName(/Add filter/);
+    }
+    expect(screen.queryByTestId("rich-filter-row")).not.toBeInTheDocument();
+  });
+
+  it("renders stored rich filters and passes them to the list query", () => {
+    const rich = { priority__in: "urgent" };
+    vi.spyOn(Route, "useParams").mockReturnValue({ ws: PARAMS.ws, projectId: PARAMS.projectId });
+    vi.spyOn(Route, "useSearch").mockReturnValue({});
+    const apiClient = createAppClient("https://api.test", (() => {
+      throw new Error("unexpected network fetch in a seeded render");
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    vi.spyOn(Route, "useRouteContext").mockReturnValue({ queryClient, apiClient } as never);
+    queryClient.setQueryData(projectsQueryOptions(apiClient, PARAMS.ws).queryKey, [projectSeed()]);
+    queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {}, rich).queryKey, {
+      grouped_by: null,
+      sub_grouped_by: null,
+      total_count: 1,
+      next_cursor: "",
+      prev_cursor: "",
+      next_page_results: false,
+      prev_page_results: false,
+      count: 0,
+      total_results: 1,
+      results: [],
+    } satisfies IssueListResponse);
+    queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, {
+      ...prefsSeed(),
+      rich_filters: rich,
+    });
+    const Component = Route.options.component;
+    if (!Component) throw new Error("issues route has no component");
+    render(
+      <QueryClientProvider client={queryClient}>
+        <React.Suspense fallback={<p>loading</p>}>
+          <Component />
+        </React.Suspense>
+      </QueryClientProvider>
+    );
+
+    expect(screen.getByTestId("rich-filter-row")).toBeInTheDocument();
+    expect(screen.getAllByTestId("rich-condition")).toHaveLength(1);
+    expect(screen.getByTestId("rich-condition")).toHaveTextContent("Urgent");
+  });
+
   it("mounts the Display control in the desktop and mobile headers", () => {
     renderScreen({}, 1, [issueRow()]);
 

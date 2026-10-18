@@ -45,8 +45,12 @@ export interface IssuesLayoutRootProps {
   noMatchState: React.ReactNode;
   /** Trailing desktop controls from later slices. */
   headerActions?: React.ReactNode;
+  /** Rich-filter row, mounted directly beneath both headers. */
+  filterRow?: React.ReactNode;
   /** Display control from the display slice (ISS-075). */
   displayControl?: React.ReactNode;
+  /** Rich-filter control from the filter slice (ISS-096). */
+  filterControl?: React.ReactNode;
   /** Analytics entry from the filter-inputs slice (ISS-107). */
   analyticsControl?: React.ReactNode;
 }
@@ -72,7 +76,9 @@ function IssuesLayoutRootInner({
   emptyState,
   noMatchState,
   headerActions,
+  filterRow,
   displayControl,
+  filterControl,
   analyticsControl,
 }: IssuesLayoutRootProps): React.ReactElement {
   const { data: record } = useSuspenseQuery(prefsQueryOptions(getAppClient(), workspaceSlug, entity));
@@ -91,15 +97,22 @@ function IssuesLayoutRootInner({
         offered={offered}
         active={active}
         onSwitch={handleSwitch}
-        actions={headerActions}
+        actions={
+          <>
+            {filterControl}
+            {headerActions}
+          </>
+        }
       />
       <MobileIssuesHeader
         offered={offered}
         active={active}
         onSwitch={handleSwitch}
         displayControl={displayControl}
+        filterControl={filterControl}
         analyticsControl={analyticsControl}
       />
+      {filterRow}
       {isMutationLoading ? <MutationSpinner /> : null}
       <div className="min-h-0 flex-1">
         <LayoutBody

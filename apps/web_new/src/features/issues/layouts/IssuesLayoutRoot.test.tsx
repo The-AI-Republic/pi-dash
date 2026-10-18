@@ -53,7 +53,13 @@ function renderRoot(
     offered?: readonly LayoutKind[];
     totalCount?: number;
     resultCount?: number;
-    slots?: { headerActions?: React.ReactNode; displayControl?: React.ReactNode; analyticsControl?: React.ReactNode };
+    slots?: {
+      headerActions?: React.ReactNode;
+      displayControl?: React.ReactNode;
+      filterControl?: React.ReactNode;
+      filterRow?: React.ReactNode;
+      analyticsControl?: React.ReactNode;
+    };
   } = {}
 ) {
   let serverFilters: Record<string, unknown> = {
@@ -115,6 +121,8 @@ function renderRoot(
           noMatchState={<p>No issues match</p>}
           headerActions={options.slots?.headerActions}
           displayControl={options.slots?.displayControl}
+          filterControl={options.slots?.filterControl}
+          filterRow={options.slots?.filterRow}
           analyticsControl={options.slots?.analyticsControl}
         />
       </React.Suspense>
@@ -191,6 +199,18 @@ describe("IssuesLayoutRoot", () => {
     holdPatch.release();
     await waitFor(() => expect(screen.queryByTestId("issues-mutation-spinner")).not.toBeInTheDocument());
     expect(screen.getByText("layout:list")).toBeInTheDocument();
+  });
+
+  it("mounts the filter control in both headers and the row beneath them", async () => {
+    renderRoot({
+      slots: {
+        filterControl: <button type="button">Filters</button>,
+        filterRow: <div data-testid="filter-row-slot">row</div>,
+      },
+    });
+    expect(await screen.findByText("layout:kanban")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Filters" })).toHaveLength(2);
+    expect(screen.getByTestId("filter-row-slot")).toBeInTheDocument();
   });
 
   it("routes zero totals and empty matches to the empty states", async () => {

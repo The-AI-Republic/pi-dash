@@ -15,13 +15,28 @@ import {
 } from "@pidash/api-client";
 
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
+import type { RichExpression } from "../filters/rich/expression.js";
+import { richFiltersParam, withRichFilters } from "../filters/rich/query.js";
 import type { IssueSearch } from "../filters/search.js";
 import { issueKeys } from "./keys.js";
 
-export function issuesQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string, search: IssueSearch) {
+export function issuesQueryOptions(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  search: IssueSearch,
+  richExpression: RichExpression = {}
+) {
+  const filters = richFiltersParam(richExpression);
   return queryOptions({
-    queryKey: issueKeys.list(workspaceSlug, projectId, search),
-    queryFn: () => listIssues(client, workspaceSlug, projectId, { perPage: 50, orderBy: "-created_at" }),
+    queryKey: [...issueKeys.list(workspaceSlug, projectId, search), filters],
+    queryFn: () =>
+      listIssues(
+        client,
+        workspaceSlug,
+        projectId,
+        withRichFilters({ perPage: 50, orderBy: "-created_at" }, richExpression)
+      ),
     staleTime: LIST_STALE_TIME_MS,
   });
 }

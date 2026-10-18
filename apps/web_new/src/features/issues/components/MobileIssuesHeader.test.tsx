@@ -46,16 +46,19 @@ describe("MobileIssuesHeader", () => {
         active="list"
         onSwitch={() => {}}
         displayControl={<button type="button">Display</button>}
+        filterControl={<button type="button">Filters</button>}
         analyticsControl={<button type="button">Analytics</button>}
       />
     );
     expect(screen.getByRole("button", { name: "Display" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Filters" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Analytics" })).toBeInTheDocument();
   });
 
   it("renders no control slots until their slices land", () => {
     render(<MobileIssuesHeader offered={["list"]} active="list" onSwitch={() => {}} />);
     expect(screen.queryByRole("button", { name: "Display" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Filters" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Analytics" })).not.toBeInTheDocument();
   });
 });
