@@ -261,6 +261,37 @@ import {
   LocalChatNewSession,
   LocalChatSessionRecord,
 } from "./contracts/local-chat.js";
+import {
+  AddedEpicWorkItemsResponse,
+  Epic,
+  EpicArchiveResult,
+  EpicCreateResult,
+  EpicLink,
+  EpicLinkList,
+  EpicListItem,
+  EpicListResponse,
+  EpicWorkItemsResponse,
+  GroupedEpicListResponse,
+  MovedEpic,
+  SubGroupedEpicListResponse,
+  addEpicWorkItems,
+  archiveEpic,
+  createEpic,
+  createEpicLink,
+  deleteEpic,
+  deleteEpicLink,
+  epicsCollection,
+  getEpic,
+  listEpicLinks,
+  listEpicWorkItems,
+  listEpics,
+  listGroupedEpics,
+  listSubGroupedEpics,
+  moveEpicToProject,
+  restoreEpic,
+  updateEpic,
+  updateEpicLink,
+} from "./contracts/epics.js";
 import { fakeResponse, recordingTransport } from "./client.test.js";
 import type { RecordedCall } from "./client.test.js";
 import { createPod, deletePod, getPod, listPods, updatePod } from "./contracts/pods.js";
@@ -3907,6 +3938,347 @@ describe("cloud-only issues contracts", () => {
   });
 });
 
+describe("epics-segment contracts (cloud-only)", () => {
+  // The OSS backend has no `epics/` routes, so nothing here can run
+  // against a live local server. These stubs prove the URLs mirror the
+  // issues endpoints (with the two renamed segments) and that the shared
+  // response shapes parse.
+
+  const issueRow = {
+    id: UUID,
+    name: "Epic: onboarding",
+    state_id: UUID2,
+    sort_order: 1.5,
+    completed_at: null,
+    estimate_point: null,
+    priority: "high",
+    start_date: null,
+    target_date: null,
+    sequence_id: 7,
+    project_id: UUID2,
+    parent_id: null,
+    cycle_id: null,
+    module_ids: [],
+    label_ids: [],
+    assignee_ids: [],
+    sub_issues_count: 2,
+    attachment_count: null,
+    link_count: 1,
+    created_at: "2024-01-02T03:04:05Z",
+    updated_at: "2024-02-03T04:05:06Z",
+    created_by: null,
+    updated_by: null,
+    is_draft: false,
+    archived_at: null,
+  };
+
+  const epicDetail = {
+    ...issueRow,
+    is_epic: true,
+    complexity_score: 0,
+    agent_executor: null,
+    is_synced: false,
+    description_html: "<p>Body</p>",
+    is_subscribed: false,
+    agent_ticker: null,
+    agent_status: null,
+    relations_summary: { blocked_by: [], blocking: [] },
+    has_open_blockers: false,
+  };
+
+  const epic = { ...issueRow, is_epic: true };
+
+  const envelope = {
+    grouped_by: null,
+    sub_grouped_by: null,
+    total_count: 1,
+    next_cursor: "1:1:0",
+    prev_cursor: "1:0:0",
+    next_page_results: false,
+    prev_page_results: false,
+    count: 1,
+    total_results: 1,
+    results: [epic],
+  };
+
+  const epicsBase = `https://api.test/api/workspaces/acme/projects/${UUID2}/epics/`;
+
+  function clientFor(body: unknown, status = 200) {
+    const transport = recordingTransport(() =>
+      fakeResponse({ status, body: JSON.stringify(body), url: "https://api.test/" })
+    );
+    return { transport, client: createClient({ baseUrl: "https://api.test", transport }) };
+  }
+
+  it("builds the epics collection path from the issues shape", () => {
+    expect(epicsCollection("acme", UUID2)).toBe(`/api/workspaces/acme/projects/${UUID2}/epics/`);
+    expect(EpicListResponse).toBeDefined();
+    expect(EpicListItem).toBeDefined();
+  });
+
+  it("lists epics at .../epics/ with the shared list params", async () => {
+    const { transport, client } = clientFor(envelope);
+    const parsed = await listEpics(client, "acme", UUID2, { perPage: 50, cursor: "1:1:0", orderBy: "-created_at" });
+    expect(parsed.results[0]?.name).toBe("Epic: onboarding");
+    expect(parsed.results[0]?.is_epic).toBe(true);
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe(epicsBase);
+    expect(url.searchParams.get("per_page")).toBe("50");
+    expect(url.searchParams.get("cursor")).toBe("1:1:0");
+    expect(url.searchParams.get("order_by")).toBe("-created_at");
+  });
+
+  it("passes legacy filters through on the epic list", async () => {
+    const { transport, client } = clientFor(envelope);
+    await listEpics(client, "acme", UUID2, { filters: { priority: ["high", "urgent"], state: "backlog" } });
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.searchParams.get("priority")).toBe("high,urgent");
+    expect(url.searchParams.get("state")).toBe("backlog");
+  });
+
+  it("treats a missing epic marker as a plain row", async () => {
+    const { client } = clientFor({ ...envelope, results: [issueRow] });
+    const parsed = await listEpics(client, "acme", UUID2);
+    expect(parsed.results[0]?.is_epic).toBeUndefined();
+    expect(parsed.results[0]?.id).toBe(UUID);
+  });
+
+  it("lists grouped epics through the same collection", async () => {
+    const { transport, client } = clientFor({
+      ...envelope,
+      grouped_by: "state__group",
+      results: { backlog: { results: [epic], total_results: 1 } },
+    });
+    const parsed = await listGroupedEpics(client, "acme", UUID2, { groupBy: "state__group" });
+    expect(parsed.results["backlog"]?.total_results).toBe(1);
+    expect(GroupedEpicListResponse).toBeDefined();
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe(epicsBase);
+    expect(url.searchParams.get("group_by")).toBe("state__group");
+  });
+
+  it("lists sub-grouped epics through the same collection", async () => {
+    const { transport, client } = clientFor({
+      ...envelope,
+      grouped_by: "state__group",
+      sub_grouped_by: "assignees__id",
+      results: { backlog: { results: {}, total_results: 0 } },
+    });
+    const parsed = await listSubGroupedEpics(client, "acme", UUID2, {
+      groupBy: "state__group",
+      subGroupBy: "assignees__id",
+    });
+    expect(parsed.sub_grouped_by).toBe("assignees__id");
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe(epicsBase);
+    expect(SubGroupedEpicListResponse).toBeDefined();
+  });
+
+  it("reads epic detail at .../epics/<id>/", async () => {
+    const { transport, client } = clientFor(epicDetail);
+    const parsed = await getEpic(client, "acme", UUID2, UUID);
+    expect(parsed.name).toBe("Epic: onboarding");
+    expect(parsed.is_epic).toBe(true);
+    expect(parsed.description_html).toBe("<p>Body</p>");
+    expect(transport.calls[0]?.url).toBe(`${epicsBase}${UUID}/`);
+  });
+
+  it("parses epic detail without the epic marker", async () => {
+    const { client } = clientFor({ ...epicDetail, is_epic: undefined });
+    const parsed = await getEpic(client, "acme", UUID2, UUID);
+    expect(parsed.is_epic).toBeUndefined();
+  });
+
+  it("creates an epic and parses the created row", async () => {
+    const { transport, client } = clientFor({ ...issueRow, sequence_id: 8, deleted_at: null }, 201);
+    const parsed = await createEpic(client, "acme", UUID2, { name: "New epic", priority: "urgent" });
+    expect(parsed.sequence_id).toBe(8);
+    const call = transport.calls.find((entry) => entry.init.method === "POST");
+    expect(call?.url).toBe(epicsBase);
+    expect(call?.init.body).toBe(JSON.stringify({ name: "New epic", priority: "urgent" }));
+    expect(EpicCreateResult).toBeDefined();
+  });
+
+  it("patches an epic and accepts the empty 204", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 204, body: "" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(updateEpic(client, "acme", UUID2, UUID, { state_id: UUID2 })).resolves.toBeUndefined();
+    const call = transport.calls.find((entry) => entry.init.method === "PATCH");
+    expect(call?.url).toBe(`${epicsBase}${UUID}/`);
+    expect(call?.init.body).toBe(JSON.stringify({ state_id: UUID2 }));
+  });
+
+  it("deletes an epic at .../epics/<id>/", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 204, body: "" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteEpic(client, "acme", UUID2, UUID)).resolves.toBeUndefined();
+    const call = transport.calls.find((entry) => entry.init.method === "DELETE");
+    expect(call?.url).toBe(`${epicsBase}${UUID}/`);
+  });
+
+  it("archives an epic and parses the stamp", async () => {
+    const { transport, client } = clientFor({ archived_at: "2024-03-01" });
+    const parsed = await archiveEpic(client, "acme", UUID2, UUID);
+    expect(parsed.archived_at).toBe("2024-03-01");
+    const call = transport.calls.find((entry) => entry.init.method === "POST");
+    expect(call?.url).toBe(`${epicsBase}${UUID}/archive/`);
+    expect(EpicArchiveResult).toBeDefined();
+  });
+
+  it("restores an epic by deleting the archive record", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 204, body: "" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(restoreEpic(client, "acme", UUID2, UUID)).resolves.toBeUndefined();
+    const call = transport.calls.find((entry) => entry.init.method === "DELETE");
+    expect(call?.url).toBe(`${epicsBase}${UUID}/archive/`);
+  });
+
+  it("moves an epic through the shared work-items move endpoint", async () => {
+    const moved = { ...epicDetail, project_id: UUID, sequence_id: 9 };
+    const { transport, client } = clientFor(moved);
+    const parsed = await moveEpicToProject(client, "acme", UUID2, UUID, UUID2);
+    expect(parsed.project_id).toBe(UUID);
+    const call = transport.calls.find((entry) => entry.init.method === "POST");
+    expect(call?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/work-items/${UUID}/move/`);
+    expect(call?.init.body).toBe(JSON.stringify({ project: UUID2 }));
+    expect(MovedEpic).toBeDefined();
+  });
+
+  it("reads epic children from the issues segment under epics", async () => {
+    const { transport, client } = clientFor({
+      sub_issues: [{ ...issueRow, state_group: "started" }],
+      state_distribution: { started: [UUID] },
+    });
+    const parsed = await listEpicWorkItems(client, "acme", UUID2, UUID, { perPage: 20 });
+    expect(parsed.sub_issues[0]?.state_group).toBe("started");
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe(`${epicsBase}${UUID}/issues/`);
+    expect(url.searchParams.get("per_page")).toBe("20");
+    expect(EpicWorkItemsResponse).toBeDefined();
+  });
+
+  it("reads epic children with no query params", async () => {
+    const { transport, client } = clientFor({ sub_issues: [], state_distribution: {} });
+    const parsed = await listEpicWorkItems(client, "acme", UUID2, UUID);
+    expect(parsed.sub_issues).toEqual([]);
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.search).toBe("");
+  });
+
+  it("attaches work items to an epic with the sub_issue_ids payload", async () => {
+    const { transport, client } = clientFor(
+      {
+        sub_issues: [
+          {
+            ...epicDetail,
+            estimate_point: null,
+            assigned_pod_id: null,
+            start_date: null,
+            target_date: null,
+            archived_at: null,
+          },
+        ],
+        state_distribution: { started: [UUID] },
+      },
+      201
+    );
+    const parsed = await addEpicWorkItems(client, "acme", UUID2, UUID, [UUID]);
+    expect(parsed.sub_issues[0]?.is_synced).toBe(false);
+    const call = transport.calls.find((entry) => entry.init.method === "POST");
+    expect(call?.url).toBe(`${epicsBase}${UUID}/issues/`);
+    expect(call?.init.body).toBe(JSON.stringify({ sub_issue_ids: [UUID] }));
+    expect(AddedEpicWorkItemsResponse).toBeDefined();
+  });
+
+  it("lists epic links from the links collection", async () => {
+    const link = {
+      id: UUID,
+      created_at: "2024-01-02T03:04:05Z",
+      updated_at: "2024-02-03T04:05:06Z",
+      created_by: UUID2,
+      updated_by: null,
+      deleted_at: null,
+      project: UUID2,
+      workspace: UUID2,
+      title: "Design doc",
+      url: "https://example.test/doc",
+      issue: UUID,
+      metadata: {},
+      created_by_detail: null,
+    };
+    const { transport, client } = clientFor([link]);
+    const parsed = await listEpicLinks(client, "acme", UUID2, UUID);
+    expect(parsed[0]?.title).toBe("Design doc");
+    expect(transport.calls[0]?.url).toBe(`${epicsBase}${UUID}/links/`);
+    expect(EpicLinkList).toBeDefined();
+    expect(EpicLink).toBeDefined();
+  });
+
+  it("creates, patches and deletes an epic link on the link id", async () => {
+    const link = {
+      id: UUID,
+      created_at: "2024-01-02T03:04:05Z",
+      updated_at: "2024-02-03T04:05:06Z",
+      created_by: UUID2,
+      updated_by: null,
+      deleted_at: null,
+      project: UUID2,
+      workspace: UUID2,
+      title: null,
+      url: "https://example.test/doc",
+      issue: UUID,
+      metadata: {},
+      created_by_detail: null,
+    };
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "DELETE") return fakeResponse({ status: 204, body: "" });
+      return fakeResponse({ status: call.init.method === "POST" ? 201 : 200, body: JSON.stringify(link) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await createEpicLink(client, "acme", UUID2, UUID, { url: "example.test/doc" });
+    await updateEpicLink(client, "acme", UUID2, UUID, UUID2, { title: "Renamed" });
+    await expect(deleteEpicLink(client, "acme", UUID2, UUID, UUID2)).resolves.toBeUndefined();
+
+    const post = transport.calls.find((entry) => entry.init.method === "POST");
+    expect(post?.url).toBe(`${epicsBase}${UUID}/links/`);
+    expect(post?.init.body).toBe(JSON.stringify({ url: "example.test/doc" }));
+    const patch = transport.calls.find((entry) => entry.init.method === "PATCH");
+    expect(patch?.url).toBe(`${epicsBase}${UUID}/links/${UUID2}/`);
+    expect(patch?.init.body).toBe(JSON.stringify({ title: "Renamed" }));
+    const del = transport.calls.find((entry) => entry.init.method === "DELETE" && entry.url.includes("/links/"));
+    expect(del?.url).toBe(`${epicsBase}${UUID}/links/${UUID2}/`);
+  });
+
+  it("rejects an epic detail without the issue fields", async () => {
+    const { client } = clientFor({ id: UUID, name: "Bare", is_epic: true });
+    const error = await getEpic(client, "acme", UUID2, UUID).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+    expect(Epic).toBeDefined();
+  });
+
+  it("rejects an epic list row without a project id", async () => {
+    const { client } = clientFor({ ...envelope, results: [{ ...epic, project_id: "nope" }] });
+    const error = await listEpics(client, "acme", UUID2).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
 describe("issue comment contracts", () => {
   const actor = {
     id: UUID,
@@ -5799,7 +6171,7 @@ describe("prompt contracts", () => {
     expect(posts[0]?.url.endsWith("/prompts/coding-task/preview")).toBe(true);
     expect(posts[1]?.init.body).toContain(UUID2);
   });
-})
+});
 
 const CHAT_RUNNER_ECHO = {
   id: UUID,

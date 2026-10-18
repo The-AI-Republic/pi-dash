@@ -230,6 +230,38 @@ export {
 } from "./contracts/issues.js";
 export type { IssueListQuery } from "./contracts/issues.js";
 export {
+  AddedEpicWorkItemsResponse,
+  Epic,
+  EpicArchiveResult,
+  EpicCreateResult,
+  EpicLink,
+  EpicLinkList,
+  EpicListItem,
+  EpicListResponse,
+  EpicWorkItemsResponse,
+  GroupedEpicListResponse,
+  MovedEpic,
+  SubGroupedEpicListResponse,
+  addEpicWorkItems,
+  archiveEpic,
+  createEpic,
+  createEpicLink,
+  deleteEpic,
+  deleteEpicLink,
+  epicsCollection,
+  getEpic,
+  listEpicLinks,
+  listEpicWorkItems,
+  listEpics,
+  listGroupedEpics,
+  listSubGroupedEpics,
+  moveEpicToProject,
+  restoreEpic,
+  updateEpic,
+  updateEpicLink,
+} from "./contracts/epics.js";
+export type { EpicCreateInput, EpicLinkInput, EpicListQuery, EpicPatch } from "./contracts/epics.js";
+export {
   IssueCreateResult,
   IssueSubscription,
   MembershipWriteResult,
