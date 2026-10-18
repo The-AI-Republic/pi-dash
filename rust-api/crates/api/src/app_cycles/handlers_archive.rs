@@ -844,6 +844,18 @@ fn estimate_join() -> String {
         .to_owned()
 }
 
+/// Distribution-only estimate join (PIDASHCONV-1185): Django's points
+/// distributions annotate `Sum("estimate_point__value")` over the full
+/// `Issue.issue_objects` base with no `estimate_point` filter, so the ORM
+/// emits a LEFT OUTER JOIN against the nullable FK (`db/models/issue.py:130-136`)
+/// and issues without an estimate point keep their group with NULL sums.
+/// The `estimates.type = 'points'` predicate the burndown needs does not
+/// belong here — Django's points check is the separate project-level
+/// `exists()` (see project_estimates_points).
+fn estimate_left_join() -> String {
+    "LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id".to_owned()
+}
+
 /// Assignee estimate distribution (`archive.py:367-419`): one row per
 /// assignee (plus the NULL row for unassigned issues), ordered by
 /// display name. The joins are LEFT (annotation-side) with no
@@ -861,7 +873,7 @@ fn assignee_estimate_sql() -> String {
         avatar = avatar_url_case(),
         sums = estimate_sums_select(),
         from = distribution_from(),
-        est = estimate_join(),
+        est = estimate_left_join(),
         scope = distribution_scope_where(),
     )
 }
@@ -880,7 +892,7 @@ fn label_estimate_sql() -> String {
          ORDER BY l.name ASC",
         sums = estimate_sums_select(),
         from = distribution_from(),
-        est = estimate_join(),
+        est = estimate_left_join(),
         scope = distribution_scope_where(),
     )
 }
