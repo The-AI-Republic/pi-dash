@@ -97,6 +97,7 @@ use crate::state::AppState;
 
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
+use pidash_services::v1_work_items::python_number_str;
 use pidash_types::WorkspaceId;
 
 // ---------------------------------------------------------------------------
@@ -1059,12 +1060,15 @@ fn render_python_datetime(value: &DateTime<Utc>) -> String {
 /// `description_html` before sanitizing (`serializers/project.py:47`):
 /// strings pass through; numbers/bools render like Python; objects/arrays
 /// render like CPython `repr` (single quotes, `True`/`False`/`None`).
+/// Numbers go through [`python_number_str`], so a JSON float literal past
+/// `f64` range spells `inf`/`-inf` (CPython `str(float)`), not serde's
+/// normalized `1e+999` (PIDASHCONV-1146).
 fn python_str(value: &Value) -> String {
     match value {
         Value::Null => "None".to_owned(),
         Value::Bool(true) => "True".to_owned(),
         Value::Bool(false) => "False".to_owned(),
-        Value::Number(number) => number.to_string(),
+        Value::Number(number) => python_number_str(number),
         Value::String(text) => text.clone(),
         Value::Array(items) => {
             let parts: Vec<String> = items.iter().map(python_repr).collect();
@@ -2185,7 +2189,9 @@ fn validate_char(
 
 /// `CharField` coercion without the length/content validators: null →
 /// the null error, blank → the blank error (or `""` when allowed),
-/// bool/dict/list → invalid, else the stripped string.
+/// bool/dict/list → invalid, else the stripped string. Numbers coerce via
+/// [`python_number_str`] (CPython `str(float)`), so an out-of-range float
+/// literal is `"inf"` (PIDASHCONV-1146).
 fn char_to_string(value: &Value, allow_blank: bool) -> Result<String, Vec<String>> {
     if value.is_null() {
         return Err(vec!["This field may not be null.".to_owned()]);
@@ -2200,7 +2206,7 @@ fn char_to_string(value: &Value, allow_blank: bool) -> Result<String, Vec<String
             }
             Ok(strip_py(text))
         }
-        Value::Number(number) => Ok(number.to_string()),
+        Value::Number(number) => Ok(python_number_str(number)),
         _ => Err(vec!["Not a valid string.".to_owned()]),
     }
 }
@@ -2451,7 +2457,7 @@ fn validate_str_choice(value: &Value, choices: &[&str]) -> Result<String, String
     }
     let text = match value {
         Value::String(text) => text.clone(),
-        Value::Number(number) => number.to_string(),
+        Value::Number(number) => python_number_str(number),
         Value::Bool(true) => "True".to_owned(),
         Value::Bool(false) => "False".to_owned(),
         Value::Array(_) | Value::Object(_) => python_str(value),
@@ -2473,7 +2479,7 @@ fn validate_network(value: &Value) -> Result<i32, String> {
     }
     let text = match value {
         Value::String(text) => text.clone(),
-        Value::Number(number) => number.to_string(),
+        Value::Number(number) => python_number_str(number),
         Value::Bool(true) => "True".to_owned(),
         Value::Bool(false) => "False".to_owned(),
         Value::Array(_) | Value::Object(_) => python_str(value),
@@ -3355,7 +3361,7 @@ async fn validate_fk(
     if row.is_none() {
         let rendered = match value {
             Value::String(text) => text.clone(),
-            Value::Number(number) => number.to_string(),
+            Value::Number(number) => python_number_str(number),
             _ => python_str(value),
         };
         return Err(Ok(format!(
