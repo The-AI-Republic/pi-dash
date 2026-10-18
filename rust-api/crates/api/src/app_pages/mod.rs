@@ -2584,10 +2584,28 @@ fn py_scalar(value: &Value) -> String {
                 int.to_string()
             } else if let Some(uint) = number.as_u64() {
                 uint.to_string()
-            } else if let Some(float) = number.as_f64() {
-                crate::paginator::py_float_str(float)
             } else {
-                number.to_string()
+                // Beyond i64/u64. A digit-only literal is a Python `int`,
+                // and `str()` echoes its exact digits however many
+                // (PIDASHCONV-1175); float-syntax tokens (`.`, `e`, `E`)
+                // render through the `repr` path below.
+                let token = number.to_string();
+                let is_float = token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E'));
+                match number.as_f64() {
+                    Some(float) if is_float => crate::paginator::py_float_str(float),
+                    // `as_f64` returns `None` for float-syntax tokens past
+                    // f64 range, which are `inf`/`-inf` for Python; a
+                    // bigint keeps its digits.
+                    Some(_) => token,
+                    None if is_float => {
+                        if token.starts_with('-') {
+                            "-inf".to_owned()
+                        } else {
+                            "inf".to_owned()
+                        }
+                    }
+                    None => token,
+                }
             }
         }
         Value::String(text) => text.clone(),
@@ -2680,17 +2698,7 @@ fn coerce_access(value: &Value) -> Result<i32, String> {
                 "False".to_owned()
             }
         }
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                int.to_string()
-            } else if let Some(uint) = number.as_u64() {
-                uint.to_string()
-            } else if let Some(float) = number.as_f64() {
-                crate::paginator::py_float_str(float)
-            } else {
-                number.to_string()
-            }
-        }
+        Value::Number(_) => py_scalar(value),
         Value::String(text) => text.clone(),
         _ => py_scalar(value),
     };
@@ -5009,6 +5017,15 @@ mod tests {
         assert_eq!(
             coerce_access(&serde_json::json!(true)),
             Err("\"True\" is not a valid choice.".to_owned())
+        );
+        // A huge JSON integer past i64/u64 renders its exact digits, not an
+        // f64 spelling, and the `access` miss spells it the same way
+        // (PIDASHCONV-1175).
+        let huge: Value = serde_json::from_str("1267650600228229401496703205376").unwrap();
+        assert_eq!(py_scalar(&huge), "1267650600228229401496703205376");
+        assert_eq!(
+            coerce_access(&huge),
+            Err("\"1267650600228229401496703205376\" is not a valid choice.".to_owned())
         );
         // Booleans: case-insensitive sets, numeric 1/0 (and 1.0/0.0).
         assert_eq!(coerce_bool(&serde_json::json!("TRUE")), Ok(true));
