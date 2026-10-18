@@ -16,7 +16,8 @@
 //! statements) and the jobs orchestration drivers. Unit tests drive the
 //! executors through a fixture store (see `tools_local` tests); live-DB
 //! proof of this file's SQL comes with PIDASHCONV-863's oracle replay,
-//! the D-11 `tools_exec` precedent.
+//! the D-11 `tools_exec` precedent — except the fused update, whose
+//! failure-injection live test lives in this file (PIDASHCONV-1124).
 
 use std::sync::Arc;
 
@@ -251,17 +252,6 @@ pub struct IssuePatch {
     pub parent_id: Option<Uuid>,
 }
 
-/// The locked row's pre-save state (`from_state = locked.state`,
-/// `issues.py:336-339`) for the transition check: the id plus the
-/// name and group the drive renders. `None` when the issue is
-/// stateless; a dangling state FK decodes name/group as `""`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LockedState {
-    pub id: Uuid,
-    pub name: String,
-    pub group: String,
-}
-
 /// Inputs to the comment create (`comments.create_comment :53-65` plus
 /// the `IssueComment.save` `Description` sync).
 #[derive(Debug, Clone, PartialEq)]
@@ -481,23 +471,32 @@ pub trait ToolStore {
         now: &DateTime<Utc>,
     ) -> Result<IssueRow, StoreError>;
 
-    /// Row-locked patch: `SELECT FOR UPDATE`, the `save(update_fields)`
-    /// column write (exactly the tool's fields — `description_stripped`
-    /// stays stale, as in Python), returning the saved row plus the
-    /// locked row's pre-save state for the transition check.
+    /// Row-locked patch plus fused transition drive: `SELECT FOR
+    /// UPDATE`, the `save(update_fields)` column write (exactly the
+    /// tool's fields — `description_stripped` stays stale, as in
+    /// Python), and — when `to_state` is given and differs from the
+    /// locked row's pre-save state — `handle_issue_state_transition`
+    /// on the SAME transaction, one commit (`issues.update_issue
+    /// :334-381`). Returns the saved row plus the drive outcome
+    /// (`None` when no drive ran). A mid-drive failure rolls the edit
+    /// back, as in Python (PIDASHCONV-1124).
     async fn update_issue_row(
         &self,
         patch: &IssuePatch,
         issue_id: &Uuid,
+        to_state: Option<pidash_services::orchestration::creation::StateView>,
         actor_id: &Uuid,
         now: &DateTime<Utc>,
-    ) -> Result<(IssueRow, Option<LockedState>), StoreError>;
+    ) -> Result<(IssueRow, Option<TransitionOutcome>), StoreError>;
 
     /// `handle_issue_state_transition(..., dispatch_immediate=True)`
     /// with an immediate drain, exactly as the tools call it (actor, no
-    /// `moved_by_run`). `created_by` is the crum user for the ticker
-    /// create-shape: `Some(actor)` on the `update_issue` path (which
-    /// runs impersonated), `None` on the `dispatch_coding_run` path.
+    /// `moved_by_run`). Serves `dispatch_coding_run` only since
+    /// PIDASHCONV-1124 (the update path fuses its drive into
+    /// `update_issue_row`). `created_by` is the crum user for the
+    /// ticker create-shape: `Some(actor)` on the `update_issue` path
+    /// (which runs impersonated), `None` on the `dispatch_coding_run`
+    /// path.
     async fn drive_transition(
         &self,
         issue_id: &Uuid,
@@ -1517,10 +1516,53 @@ impl ToolStore for PgToolStore {
         &self,
         patch: &IssuePatch,
         issue_id: &Uuid,
+        to_state: Option<pidash_services::orchestration::creation::StateView>,
         actor_id: &Uuid,
         now: &DateTime<Utc>,
-    ) -> Result<(IssueRow, Option<LockedState>), StoreError> {
-        let mut tx = self.pool.begin().await?;
+    ) -> Result<(IssueRow, Option<TransitionOutcome>), StoreError> {
+        use pidash_jobs::orchestration::{LiveCreationStore, RunnerSeamCache, StoreDeps};
+        use pidash_services::orchestration::entries::{
+            handle_issue_state_transition, TransitionRequest,
+        };
+        // The creator's BYOK key presence for the managed-LLM profile
+        // closure (D-11 `drive_transition`); a pre-tx pool read, as the
+        // drive's was before fusing.
+        let key_row: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+            "SELECT api_key_encrypted FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1",
+        )
+        .bind(actor_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
+        let actor = *actor_id;
+        let cloud = self.cloud.clone();
+        let managed = self.managed.clone();
+        let toolsets = Arc::clone(&self.toolsets);
+        let now_unix_secs = now.timestamp();
+        // Built up to three times (the probe, drive, and bounce stores
+        // each take owned deps).
+        let make_deps = || StoreDeps {
+            cloud: cloud.clone(),
+            managed: managed.clone(),
+            cache: RunnerSeamCache::default(),
+            toolsets: Arc::clone(&toolsets),
+            has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
+            llm_profile: move |user: Option<Uuid>| {
+                let key = user == Some(actor) && has_key;
+                let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
+                pidash_services::dispatch::LlmProfile {
+                    available: profile.available,
+                    reason_code: profile.reason_code,
+                }
+            },
+            now_unix_secs,
+        };
+        // One transaction for lock + save + drive (`issues.py:334-381`
+        // runs all three under one `transaction.atomic()`): a mid-drive
+        // failure rolls the edit back. The `pidash_db` tx starts here
+        // so the save runs on `tx.inner()` and the drive stores take
+        // the same tx by value (the `tools_exec` precedent).
+        let mut tx = pidash_db::tx::Transaction::begin(&self.pool).await?;
         // `Issue.objects.select_for_update().get(pk)` (`issues.py:336`);
         // missing is `DoesNotExist` → internal. The states join reads
         // the locked row's pre-save name/group (`from_state =
@@ -1532,16 +1574,11 @@ impl ToolStore for PgToolStore {
              WHERE issues.id = $1 AND issues.deleted_at IS NULL FOR UPDATE OF issues",
         )
         .bind(issue_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx.inner())
         .await?;
         let Some((_, from_id, from_name, from_group)) = locked else {
             return Err(StoreError::Missing { model: "Issue" });
         };
-        let from_state = from_id.map(|id| LockedState {
-            id,
-            name: from_name.unwrap_or_default(),
-            group: from_group.unwrap_or_default(),
-        });
         // `locked.save(update_fields=...)` (`issues.py:337-361`):
         // exactly the tool's columns. `description_stripped` is
         // recomputed in memory but NOT written (it is absent from
@@ -1591,7 +1628,7 @@ impl ToolStore for PgToolStore {
             statement = statement.bind(patch.parent_id);
         }
         statement = statement.bind(now).bind(actor_id).bind(issue_id);
-        statement.execute(&mut *tx).await?;
+        statement.execute(&mut **tx.inner()).await?;
         // Post-save read (unscoped: scope was verified pre-lock; this
         // mirrors the in-memory `locked` row plus joined names).
         let row: Option<IssueRowTuple> = sqlx::query_as(&format!(
@@ -1601,13 +1638,208 @@ impl ToolStore for PgToolStore {
              WHERE issues.id = $1"
         ))
         .bind(issue_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx.inner())
         .await?;
-        tx.commit().await?;
         let row = row
             .map(issue_row_from_tuple)
             .ok_or(StoreError::Missing { model: "Issue" })?;
-        Ok((row, from_state))
+        // `to_state is not None and from_state != to_state`
+        // (`issues.py:373`): the ORM instances compare by pk, and a
+        // stateless issue always counts as changed.
+        let changed = to_state.as_ref().is_some_and(|to| from_id != Some(to.id));
+        let (tx, drive_outcome, post_commit) = if changed {
+            let to = to_state.expect("changed implies a target");
+            // Name/group come from the locked row (`from_state =
+            // locked.state`, `issues.py:339`), not the pre-lock read —
+            // a concurrent edit may have moved the issue meanwhile. A
+            // dangling state FK decodes name/group as `""`.
+            let from_view = from_id.map(|id| pidash_services::orchestration::creation::StateView {
+                id,
+                name: from_name.unwrap_or_default(),
+                group: from_group.unwrap_or_default(),
+            });
+            // `jitter_secs: 0.0`: the L5 quirk-5 precedent (the v1
+            // human-move drivers pass 0.0 as well). `moved_by_run:
+            // None`: the tools are human-equivalent moves, so the
+            // entry-run builder is reachable. `created_by:
+            // Some(actor)`: the update path runs impersonated.
+            let request = TransitionRequest {
+                issue_id: *issue_id,
+                from_state: from_view,
+                to_state: Some(to),
+                actor: Some(*actor_id),
+                dispatch_immediate: true,
+                moved_by_run: None,
+                now: *now,
+                jitter_secs: 0.0,
+                created_by: Some(*actor_id),
+            };
+            // Preflight on the fused transaction: Python's bounce
+            // atomic nests inside the outer atomic, so the bounce reads
+            // the saved row and its writes roll back with the edit. A
+            // pool-side preflight (as `TurnPreflight` runs on the
+            // dispatch path) cannot run here — its bounce UPDATE would
+            // block on this transaction's row lock with no statement
+            // timeout to break the wait — and the driver lends the tx
+            // to only one seam at a time, so the fused stores below
+            // take it in turn: probe the decision behind a savepoint
+            // (the probe's bounce writes roll back), drive with a
+            // fixed-decision stub, and — only when stubbed false —
+            // re-run the services preflight after the drive, so the
+            // real bounce lands post-reconcile, exactly as in Python
+            // (the re-run re-derives its reason from current reads). A
+            // concurrent eligibility flip between probe and re-run
+            // degrades to an armed ticker the next tick covers.
+            let matcher =
+                pidash_api::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone());
+            let triggered_by =
+                pidash_db::dispatch::status::AgentRunTrigger::StateTransition.value();
+            sqlx::query("SAVEPOINT turn_preflight_probe")
+                .execute(&mut **tx.inner())
+                .await?;
+            let mut probe_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+            // `resolve_pod_for_issue` reads issue + pods only (no
+            // ticker), so probing pre-reconcile decides identically to
+            // Python's post-reconcile preflight. `None` still stubs
+            // false: the drive re-resolves the pod itself, and only
+            // consults the stub when it finds one (the appear-race) —
+            // the re-run then derives the true decision.
+            let probed_pod = pidash_services::orchestration::creation::resolve_pod_for_issue(
+                &mut probe_store,
+                *issue_id,
+            )
+            .await
+            .map_err(|error| StoreError::Transition(error.to_string()))?;
+            let proceed = match probed_pod {
+                Some(pod_id) => {
+                    let probe =
+                        pidash_services::orchestration::dispatch::preflight_eligibility_or_bounce(
+                            &mut probe_store,
+                            *issue_id,
+                            Some(actor),
+                            pod_id,
+                            triggered_by,
+                            &matcher,
+                            *now,
+                            0.0,
+                        )
+                        .await
+                        .map_err(|error| StoreError::Transition(error.to_string()))?;
+                    probe.proceed
+                }
+                None => false,
+            };
+            // The probe's outboxes stay empty (the bounce dispatches,
+            // defers, and finalizes nothing), so only the tx is
+            // recovered; the savepoint rollback erases the probe's
+            // writes, and its log lines are dropped (the re-run emits
+            // the real bounce's lines once).
+            let (mut tx, _, _, _, _, _) = probe_store.into_parts();
+            sqlx::query("ROLLBACK TO SAVEPOINT turn_preflight_probe")
+                .execute(&mut **tx.inner())
+                .await?;
+            let mut drive_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+            let mut stub = FixedPreflight {
+                proceed,
+                consulted: false,
+            };
+            let outcome =
+                handle_issue_state_transition(&mut drive_store, &mut stub, &request).await;
+            let (tx, _, cache, mut dispatches, mut deferred, mut terminal_effects) =
+                drive_store.into_parts();
+            let outcome = outcome.map_err(|error| match error {
+                pidash_services::orchestration::entries::EntriesError::Store(store) => {
+                    StoreError::Transition(store.to_string())
+                }
+                other => StoreError::Transition(other.to_string()),
+            })?;
+            // Only a consulted stub owes the re-run: early returns
+            // (parked, queued, no creator/pod, race lost) consult
+            // nothing, and Python bounces on none of them.
+            let tx = if !proceed && stub.consulted {
+                // The re-run IS the real bounce when it still says so
+                // (same services fn, same tx, post-reconcile state);
+                // when eligibility flipped concurrently it proceeds and
+                // the armed ticker covers the entry on the next tick.
+                // Fresh pod first (closest to Python's read position),
+                // the probed id when the pod vanished mid-drive (as
+                // Python's single read would have seen it).
+                let mut bounce_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+                let fresh_pod = pidash_services::orchestration::creation::resolve_pod_for_issue(
+                    &mut bounce_store,
+                    *issue_id,
+                )
+                .await
+                .map_err(|error| StoreError::Transition(error.to_string()))?;
+                if let Some(pod_id) = fresh_pod.or(probed_pod) {
+                    let rerun =
+                        pidash_services::orchestration::dispatch::preflight_eligibility_or_bounce(
+                            &mut bounce_store,
+                            *issue_id,
+                            Some(actor),
+                            pod_id,
+                            triggered_by,
+                            &matcher,
+                            *now,
+                            0.0,
+                        )
+                        .await
+                        .map_err(|error| StoreError::Transition(error.to_string()))?;
+                    for log in &rerun.logs {
+                        if log.level == "WARNING" {
+                            tracing::warn!(target: "pidash.preflight", "{}", log.message);
+                        } else {
+                            tracing::info!(target: "pidash.preflight", "{}", log.message);
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        target: "pidash.preflight",
+                        "turn fused drive: pod vanished mid-drive for issue {issue_id}, skipping bounce",
+                    );
+                }
+                let (tx, _, _, redispatches, redeferred, reterminal) = bounce_store.into_parts();
+                dispatches.extend(redispatches);
+                deferred.extend(redeferred);
+                terminal_effects.extend(reterminal);
+                tx
+            } else {
+                tx
+            };
+            (
+                tx,
+                Some(TransitionOutcome {
+                    created_run_id: outcome.created_run,
+                    reason: outcome.reason,
+                }),
+                Some((cache, dispatches, deferred, terminal_effects)),
+            )
+        } else {
+            (tx, None, None)
+        };
+        tx.commit().await?;
+        // Post-commit dispatch drain (the `dispatch_coding_run` drain
+        // shape, duplicated: unlike D-11 — whose `moved_by_run` makes
+        // the outbox unreachable — human moves dispatch here, after the
+        // commit, so the runner read sees the rows).
+        if let Some((cache, dispatches, deferred, terminal_effects)) = post_commit {
+            for run_id in dispatches {
+                pidash_jobs::dispatch::dispatch_agent_run(&self.pool, &self.cloud, run_id, *now)
+                    .await
+                    .map_err(StoreError::from)?;
+            }
+            for consume in &deferred {
+                pidash_services::dispatch::admission::consume_admission_token(&cache, consume);
+            }
+            if !terminal_effects.is_empty() {
+                // Python's transition never finalizes a run: fail closed.
+                return Err(StoreError::Transition(
+                    "turn transition finalized a run: unreachable, no finalization on this path"
+                        .to_owned(),
+                ));
+            }
+        }
+        Ok((row, drive_outcome))
     }
 
     async fn drive_transition(
@@ -1669,16 +1901,13 @@ impl ToolStore for PgToolStore {
             jitter_secs: 0.0,
             created_by,
         };
-        // One transaction for the whole drive. On the
-        // `dispatch_coding_run` path that matches Python (reconcile
-        // commits before the builder scope; no outer atomic). On the
-        // `update_issue` path it does not: Python wraps save +
-        // transition in one outer atomic (`issues.py:334`), while the
-        // save already committed in `update_issue_row` — so a
-        // mid-drive failure here keeps the edit where Python rolls it
-        // back (both fail the turn internal). Fusing the drive into
-        // the save transaction needs tx-threading design and is
-        // tracked by PIDASHCONV-1124 (update path only).
+        // One transaction for the whole drive. This entry serves the
+        // `dispatch_coding_run` path only: Python has no outer atomic
+        // there (`runs.py:37-96`), so the drive owns its transaction
+        // and no row lock is held while the pool-side preflight runs.
+        // The `update_issue` path fuses its drive into the save
+        // transaction instead (see `update_issue_row`,
+        // PIDASHCONV-1124).
         let tx = pidash_db::tx::Transaction::begin(&self.pool).await?;
         let mut store = LiveCreationStore::new(tx, &self.pool, make_deps());
         let mut preflight = TurnPreflight {
@@ -2033,13 +2262,40 @@ impl ToolStore for PgToolStore {
     }
 }
 
+/// Fixed-decision preflight for the fused update drive: the decision
+/// was probed on the fused transaction behind a savepoint (see
+/// `update_issue_row`), and the driver consults this at most once, in
+/// exactly the position Python consults
+/// `scheduling.preflight_eligibility_or_bounce`. `consulted` tells the
+/// fused drive whether the re-run owes a real bounce (early returns
+/// never consult, and Python bounces on none of them).
+struct FixedPreflight {
+    proceed: bool,
+    consulted: bool,
+}
+
+impl pidash_services::orchestration::entries::PreflightSeam for FixedPreflight {
+    async fn preflight_eligibility_or_bounce(
+        &mut self,
+        _issue_id: Uuid,
+        _creator_id: Uuid,
+        _pod_id: Uuid,
+        _triggered_by: &str,
+    ) -> Result<bool, pidash_services::orchestration::creation::CreationError> {
+        self.consulted = true;
+        Ok(self.proceed)
+    }
+}
+
 /// The human-move preflight (the `v1_work_items` `CorePreflight`
 /// shape): the jobs eligibility driver in its own transaction and
 /// commit — like Django's bounce atomic — over the actions
-/// `LiveMatcher`, logs emitted, `proceed` returned. The deps travel
-/// by `Option` because the driver takes them by value while the seam
-/// only lends `&mut self`; the driver consults preflight at most once
-/// per drive, so the `None` arm is defensive.
+/// `LiveMatcher`, logs emitted, `proceed` returned. Serves the
+/// `dispatch_coding_run` drive only (no row lock is held there, so
+/// the pool-side bounce never blocks). The deps travel by `Option`
+/// because the driver takes them by value while the seam only lends
+/// `&mut self`; the driver consults preflight at most once per
+/// drive, so the `None` arm is defensive.
 struct TurnPreflight<C, H, P> {
     pool: PgPool,
     deps: Option<pidash_jobs::orchestration::StoreDeps<C, H, P>>,
@@ -2195,6 +2451,298 @@ mod tests {
             "2026-03-13T12:00:00+00:00",
         );
         assert_eq!(out["turn_id"], serde_json::Value::Null);
+    }
+
+    async fn live_pool() -> PgPool {
+        let url = std::env::var("DATABASE_URL").expect("export DATABASE_URL for live turn tests");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await
+            .expect("connect scratch database");
+        let db: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&pool)
+            .await
+            .expect("current database");
+        assert_ne!(db, "postgres", "refusing the shared postgres database");
+        pool
+    }
+
+    fn live_cloud_settings() -> pidash_db::config::CloudAgentSettings {
+        pidash_db::config::CloudAgentSettings {
+            enabled: false,
+            writes_enabled: false,
+            github_tools_enabled: true,
+            disabled_tools: Vec::new(),
+            reconcile_interval_secs: 30,
+            model_request_timeout_secs: 60,
+            execution_timeout_secs: 285,
+            run_soft_limit_secs: 300,
+            run_hard_limit_secs: 330,
+            stale_grace_secs: 60,
+            dispatch_lease_secs: 60,
+            dispatch_backoff_secs: 10,
+            dispatch_scan_interval_secs: 10,
+            sweep_interval_secs: 30,
+            dispatch_scan_batch: 100,
+            max_queue_age_secs: 900,
+            model_request_limit: 25,
+            tool_call_limit: 20,
+            write_call_limit: 3,
+            input_token_limit: 144_000,
+            output_token_limit: 16_000,
+            total_token_limit: 160_000,
+            max_output_tokens_per_request: 4096,
+            max_queued_per_workspace: 20,
+            max_running_per_workspace: 2,
+            user_creation_rate_per_minute: 6,
+            workspace_creation_rate_per_minute: 30,
+            tool_timeout_secs: 20,
+            max_tool_result_bytes: 65536,
+            max_prompt_bytes: 262_144,
+            max_final_result_bytes: 65536,
+            max_events: 500,
+            block_private_urls: true,
+        }
+    }
+
+    fn live_managed_settings() -> pidash_db::config::ManagedRunnerSettings {
+        pidash_db::config::ManagedRunnerSettings {
+            enabled: false,
+            max_per_user_project: 1,
+            queued_max_age_secs: 43200,
+            graceful_stop_secs: 30,
+            sweep_interval_secs: 300,
+            desktop_min_version: String::new(),
+        }
+    }
+
+    struct LiveGraph {
+        user: Uuid,
+        ws: Uuid,
+        project: Uuid,
+        pod: Uuid,
+        backlog: Uuid,
+        in_progress: Uuid,
+        issue: Uuid,
+        seed_at: DateTime<Utc>,
+    }
+
+    /// Seed a local-runner project + default pod + Backlog / In Progress
+    /// states + one issue on Backlog (the fx6 `seed_graph` shape; ids
+    /// and slugs are unique per run).
+    async fn seed_live_graph(pool: &PgPool) -> LiveGraph {
+        let seed_at = DateTime::parse_from_rfc3339("2026-06-01T12:00:00Z")
+            .expect("frozen clock")
+            .with_timezone(&Utc);
+        let uniq = Uuid::new_v4().to_string()[..8].to_owned();
+        let user = Uuid::new_v4();
+        let ws = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let pod = Uuid::new_v4();
+        let backlog = Uuid::new_v4();
+        let in_progress = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, email, password, first_name, last_name, \
+             display_name, avatar, created_location, last_location, last_login_ip, \
+             last_login_medium, last_login_uagent, last_logout_ip, user_timezone, token, \
+             is_active, is_bot, is_email_valid, is_email_verified, is_managed, \
+             is_password_autoset, is_password_expired, is_password_reset_required, \
+             is_staff, is_superuser, created_at, updated_at, date_joined) \
+             VALUES ($1, $2, $3, '!', '', '', '', '', '', '', '', 'email', '', '', 'UTC', \
+             $4, true, false, false, false, false, false, false, false, false, false, \
+             $5, $5, $5)",
+        )
+        .bind(user)
+        .bind(format!("t1124-{uniq}"))
+        .bind(format!("t1124-{uniq}@example.com"))
+        .bind(Uuid::new_v4().to_string())
+        .bind(seed_at)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, background_color, \
+             owner_id, slug, timezone) \
+             VALUES ($1, $2, $2, $3, '#f6c8dB', $4, $5, 'UTC')",
+        )
+        .bind(ws)
+        .bind(seed_at)
+        .bind("T1124 ws")
+        .bind(user)
+        .bind(format!("t1124-ws-{uniq}"))
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO projects (id, created_at, updated_at, name, identifier, description, \
+             network, module_view, cycle_view, issue_views_view, page_view, intake_view, \
+             is_time_tracking_enabled, is_issue_type_enabled, is_default, \
+             guest_view_all_features, members_can_edit_states, archive_in, close_in, \
+             logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, \
+             agent_default_max_ticks, agent_review_default_interval_seconds, \
+             agent_test_default_interval_seconds, agent_ticking_enabled, \
+             default_agent_executor, workspace_id) \
+             VALUES ($1, $2, $2, 'T1124', $3, '', 2, false, false, false, true, false, false, \
+             false, false, false, true, 0, 0, '{}', 'UTC', 'https://example.com/t1124.git', \
+             'main', 10800, 10, 10800, 10800, true, 'local_runner', $4)",
+        )
+        .bind(project)
+        .bind(seed_at)
+        .bind(format!("T24{}", &uniq[..6]))
+        .bind(ws)
+        .execute(pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            "INSERT INTO pod (id, created_at, updated_at, description, is_default, name, \
+             project_id, workspace_id) \
+             VALUES ($1, $2, $2, '', true, $3, $4, $5)",
+        )
+        .bind(pod)
+        .bind(seed_at)
+        .bind(format!("t1124-pod-{uniq}"))
+        .bind(project)
+        .bind(ws)
+        .execute(pool)
+        .await
+        .expect("seed pod");
+        for (id, name, group, default, sequence) in [
+            (backlog, "Backlog", "backlog", true, 0.0),
+            (in_progress, "In Progress", "started", false, 1.0),
+        ] {
+            sqlx::query(
+                "INSERT INTO states (id, created_at, updated_at, name, description, color, slug, \
+                 project_id, workspace_id, sequence, \"group\", \"default\", is_triage) \
+                 VALUES ($1, $2, $2, $3, '', '', $4, $5, $6, $7, $8, $9, false)",
+            )
+            .bind(id)
+            .bind(seed_at)
+            .bind(name)
+            .bind(format!(
+                "t1124-{uniq}-{}",
+                name.to_lowercase().replace(' ', "-")
+            ))
+            .bind(project)
+            .bind(ws)
+            .bind(sequence)
+            .bind(group)
+            .bind(default)
+            .execute(pool)
+            .await
+            .expect("seed state");
+        }
+        sqlx::query(
+            "INSERT INTO issues (id, created_at, updated_at, name, description_json, priority, \
+             sequence_id, created_by_id, project_id, state_id, workspace_id, description_html, \
+             description_stripped, sort_order, is_draft, git_work_branch, workpad, \
+             complexity_score) \
+             VALUES ($1, $2, $2, 'T1124 orig', '{}', 'none', 1, $3, $4, $5, $6, '', NULL, 0.0, \
+             false, '', '', 0)",
+        )
+        .bind(issue)
+        .bind(seed_at)
+        .bind(user)
+        .bind(project)
+        .bind(backlog)
+        .bind(ws)
+        .execute(pool)
+        .await
+        .expect("seed issue");
+        LiveGraph {
+            user,
+            ws,
+            project,
+            pod,
+            backlog,
+            in_progress,
+            issue,
+            seed_at,
+        }
+    }
+
+    async fn cleanup_live_graph(pool: &PgPool, graph: &LiveGraph) {
+        for (table, column, id) in [
+            ("issue_comments", "issue_id", graph.issue),
+            ("issue_agent_ticker", "issue_id", graph.issue),
+            ("agent_run", "work_item_id", graph.issue),
+            ("issues", "id", graph.issue),
+            ("states", "id", graph.backlog),
+            ("states", "id", graph.in_progress),
+            ("pod", "id", graph.pod),
+            ("projects", "id", graph.project),
+            ("workspaces", "id", graph.ws),
+            ("users", "id", graph.user),
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE {column} = $1"))
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("cleanup row");
+        }
+    }
+
+    /// The fused update is one atomic unit (`issues.py:334-381`): with
+    /// the ticker table hidden, the drive fails mid-flight (after the
+    /// save) and the issue row must read back unedited — name, state,
+    /// and stamps. Pre-fix this fails: the save commits before the
+    /// drive runs, so the edit survives. No runners are seeded on
+    /// purpose: the bounce path touches the ticker too, so the
+    /// injection fires whichever way preflight decides.
+    #[tokio::test]
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    async fn live_fused_update_rolls_back_save_on_middrive_error() {
+        let pool = live_pool().await;
+        let graph = seed_live_graph(&pool).await;
+        let store = PgToolStore::new(
+            pool.clone(),
+            None,
+            live_cloud_settings(),
+            live_managed_settings(),
+        )
+        .expect("build store");
+        let now = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
+            .expect("frozen clock")
+            .with_timezone(&Utc);
+        sqlx::query("ALTER TABLE issue_agent_ticker RENAME TO issue_agent_ticker_hidden_1124")
+            .execute(&pool)
+            .await
+            .expect("hide ticker table");
+        let patch = IssuePatch {
+            name: Some("T1124 edited".to_owned()),
+            state_given: true,
+            state_id: Some(graph.in_progress),
+            ..Default::default()
+        };
+        let to = pidash_services::orchestration::creation::StateView {
+            id: graph.in_progress,
+            name: "In Progress".to_owned(),
+            group: "started".to_owned(),
+        };
+        let error = store
+            .update_issue_row(&patch, &graph.issue, Some(to), &graph.user, &now)
+            .await
+            .expect_err("hidden ticker table must fail the drive");
+        sqlx::query("ALTER TABLE issue_agent_ticker_hidden_1124 RENAME TO issue_agent_ticker")
+            .execute(&pool)
+            .await
+            .expect("restore ticker table");
+        assert!(
+            error.message().contains("issue_agent_ticker"),
+            "unexpected failure: {}",
+            error.message()
+        );
+        let row: (String, Option<Uuid>, DateTime<Utc>) =
+            sqlx::query_as("SELECT name, state_id, updated_at FROM issues WHERE id = $1")
+                .bind(graph.issue)
+                .fetch_one(&pool)
+                .await
+                .expect("reread issue");
+        cleanup_live_graph(&pool, &graph).await;
+        assert_eq!(row.0, "T1124 orig", "name edit must roll back");
+        assert_eq!(row.1, Some(graph.backlog), "state edit must roll back");
+        assert_eq!(row.2, graph.seed_at, "audit stamps must roll back");
     }
 
     /// The inlined FROM/WHERE fragments equal the reviewed services
