@@ -3941,15 +3941,22 @@ pub async fn page_partial_update(
         Err(failure) => return failure_response(failure),
     };
     let old_html = page.description_html.clone();
-    // `update()` label replacement (`page.py:108-126`): wipe the live
-    // `PageLabel` rows, then bulk-create the new set (`batch_size=10`)
-    // with the page's own audit ids — never the requester's.
+    // `update()` label replacement (`page.py:108-126`): soft-stamp the live
+    // `PageLabel` rows, then bulk-create the new set (`batch_size=10`) with
+    // the page's own audit ids — never the requester's. `PageLabel` is a
+    // `BaseModel`, so `PageLabel.objects` is a `SoftDeletionManager` and its
+    // queryset `delete()` defaults to `soft=True` (`db/mixins.py:48-53`):
+    // the replaced rows stay in `page_labels` with `deleted_at` set, and the
+    // unfiltered `label_ids` traversal join keeps returning them. A hard
+    // `DELETE` here would diverge on both the read bodies and the stored rows.
     if let Some(labels) = &valid.labels {
-        if sqlx::query(r#"DELETE FROM page_labels WHERE page_id = $1 AND deleted_at IS NULL"#)
-            .bind(page_id)
-            .execute(pool)
-            .await
-            .is_err()
+        if sqlx::query(
+            r#"UPDATE page_labels SET deleted_at = now() WHERE page_id = $1 AND deleted_at IS NULL"#,
+        )
+        .bind(page_id)
+        .execute(pool)
+        .await
+        .is_err()
         {
             return Denial::ServerError.into_response();
         }

@@ -354,3 +354,76 @@ def test_summary_shape(user_client, world, seeder):
 
 def test_summary_requires_auth(anon_client, world):
     assert anon_client.get(f"{pages_base(world)}/pages-summary/").status_code in (401, 403)
+
+
+def _page_label_rows(db, page_id):
+    """``(label_id, deleted_at_is_null)`` for the page, label-id ordered."""
+    return [
+        (str(row["label_id"]), row["deleted_at"] is None)
+        for row in db.fetchall(
+            "SELECT label_id, deleted_at FROM page_labels WHERE page_id=%s ORDER BY label_id",
+            (page_id,),
+        )
+    ]
+
+
+def test_partial_update_labels_replace_stays_soft(user_client, world, seeder, db):
+    """PATCH labels ``[Y]`` -> ``[X]`` soft-stamps Y, never hard-deletes it.
+
+    Django replaces labels with ``PageLabel.objects.filter(page=instance)
+    .delete()`` (``serializers/page.py:111``). ``PageLabel`` is a
+    ``BaseModel``, so ``objects`` is a ``SoftDeletionManager`` and the
+    queryset delete defaults to ``soft=True``: it stamps ``deleted_at`` and
+    leaves the row in place (``db/mixins.py:48-53``). The ``label_ids``
+    annotation (``views/page/base.py:112-119``) joins ``page_labels`` with no
+    ``deleted_at`` predicate, so the replaced id keeps surfacing on retrieve
+    and list. ``test_pages.py:PARTIAL_UPDATE_ROW_KEYS`` pins the PATCH body;
+    this pins the label rows and the two read bodies.
+    """
+    label_x = seeder.create_label(world["workspace"]["id"], world["project"]["id"], name="X")
+    label_y = seeder.create_label(world["workspace"]["id"], world["project"]["id"], name="Y")
+    seeder.create_page_label(world["workspace"]["id"], world["page"]["id"], label_y["id"])
+
+    response = user_client.patch(page_url(world, world["page"]["id"]), json={"labels": [label_x["id"]]})
+    assert response.status_code == 200
+
+    expected = sorted([label_x["id"], label_y["id"]])
+    retrieve = user_client.get(page_url(world, world["page"]["id"])).json()
+    rows = user_client.get(page_url(world)).json()
+    assert retrieve["label_ids"] == expected
+    assert len(rows) == 1
+    assert rows[0]["id"] == world["page"]["id"]
+    assert rows[0]["label_ids"] == expected
+    # Both rows persist; Y is soft-stamped, X is live.
+    assert _page_label_rows(db, world["page"]["id"]) == sorted(
+        [(label_x["id"], True), (label_y["id"], False)]
+    )
+
+
+def test_partial_update_labels_clear_keeps_soft_rows(user_client, world, seeder, db):
+    """PATCH labels ``[Y]`` -> ``[X]`` -> ``[]`` keeps every row soft-stamped.
+
+    Django's ``[]`` runs the same soft queryset delete, so it stamps the live
+    rows and the reads still surface every id ever attached (the unfiltered
+    ``label_ids`` join), while all ``page_labels`` rows stay behind.
+    """
+    label_x = seeder.create_label(world["workspace"]["id"], world["project"]["id"], name="X")
+    label_y = seeder.create_label(world["workspace"]["id"], world["project"]["id"], name="Y")
+    seeder.create_page_label(world["workspace"]["id"], world["page"]["id"], label_y["id"])
+
+    assert user_client.patch(
+        page_url(world, world["page"]["id"]), json={"labels": [label_x["id"]]}
+    ).status_code == 200
+    assert user_client.patch(
+        page_url(world, world["page"]["id"]), json={"labels": []}
+    ).status_code == 200
+
+    expected = sorted([label_x["id"], label_y["id"]])
+    retrieve = user_client.get(page_url(world, world["page"]["id"])).json()
+    rows = user_client.get(page_url(world)).json()
+    assert retrieve["label_ids"] == expected
+    assert rows[0]["label_ids"] == expected
+    # Every row survives, soft-stamped.
+    assert _page_label_rows(db, world["page"]["id"]) == sorted(
+        [(label_x["id"], False), (label_y["id"], False)]
+    )
