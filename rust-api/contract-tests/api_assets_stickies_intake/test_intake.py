@@ -12,6 +12,8 @@ also deletes the underlying issue.
 
 import uuid
 
+import pytest
+
 from . import seed_d21
 
 INTAKE_KEYS = {
@@ -395,3 +397,92 @@ def test_intake_retrieve_ignores_cursor(org):
     )
     assert r.status_code == 200
     assert r.json() == created
+
+
+# ---------------------------------------------------------------------------
+# PIDASHCONV-1163: an unknown stored ``user_timezone`` is a 400, not a 500
+# ---------------------------------------------------------------------------
+# ``TimezoneMixin.initial`` (``api/views/base.py:42-47``) runs after
+# authentication and the permission gate and calls
+# ``zoneinfo.ZoneInfo(request.user.user_timezone)``. An unknown name raises
+# ``ZoneInfoNotFoundError`` — a ``KeyError`` subclass — which
+# ``BaseAPIView.handle_exception`` (``base.py:160-164``) answers
+# ``400 {"error": "The required key does not exist."}``. An EMPTY zone 500s
+# (``ZoneInfo('')`` raises ``ValueError``, not ``KeyError``) and a NULL zone
+# 500s too, so only unknown, non-empty zones 400. Intake shares one preamble
+# (``intake.rs::context``) across all five actions, so each is pinned.
+
+KEY_ERROR_BODY = {"error": "The required key does not exist."}
+SERVER_ERROR_BODY = {"error": "Something went wrong please try again later"}
+BAD_ZONE = "Not/AZone"
+# ``zoneinfo`` names are case-sensitive on a case-sensitive filesystem;
+# live-probed against Django: ``america/new_york`` 400s like ``Not/AZone``.
+WRONG_CASE_ZONE = "america/new_york"
+EMPTY_ZONE = ""
+
+
+def _set_user_timezone(org, user_id, zone):
+    org.conn.execute(
+        "UPDATE users SET user_timezone = %s WHERE id = %s", (zone, user_id)
+    )
+
+
+def _intake_actions(org, issue_id):
+    """The five intake actions: name -> (method, path, json-payload-or-None)."""
+    base = _base(org)
+    detail = f"{base}{issue_id}/"
+    return {
+        "list": ("GET", base, None),
+        "create": ("POST", base, {"issue": {"name": "tz probe"}}),
+        "retrieve": ("GET", detail, None),
+        "patch": ("PATCH", detail, {"issue": {"name": "tz patched"}}),
+        "delete": ("DELETE", detail, None),
+    }
+
+
+def _call_intake(org, method, path, payload, role="admin"):
+    kw = {"json": payload} if payload is not None else {}
+    return org.request(method, path, role, **kw)
+
+
+ACTIONS = ["list", "create", "retrieve", "patch", "delete"]
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_intake_unknown_zone_400(org, action):
+    created = org.create_intake_issue(name="tz target")
+    _set_user_timezone(org, org.admin["id"], BAD_ZONE)
+    method, path, payload = _intake_actions(org, created["issue"])[action]
+    r = _call_intake(org, method, path, payload)
+    assert r.status_code == 400, r.text
+    assert r.json() == KEY_ERROR_BODY
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_intake_wrong_case_zone_400(org, action):
+    created = org.create_intake_issue(name="tz target")
+    _set_user_timezone(org, org.admin["id"], WRONG_CASE_ZONE)
+    method, path, payload = _intake_actions(org, created["issue"])[action]
+    r = _call_intake(org, method, path, payload)
+    assert r.status_code == 400, r.text
+    assert r.json() == KEY_ERROR_BODY
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_intake_empty_zone_500(org, action):
+    # ``ZoneInfo('')`` raises ``ValueError`` -> the generic 500 branch.
+    created = org.create_intake_issue(name="tz target")
+    _set_user_timezone(org, org.admin["id"], EMPTY_ZONE)
+    method, path, payload = _intake_actions(org, created["issue"])[action]
+    r = _call_intake(org, method, path, payload)
+    assert r.status_code == 500, r.text
+    assert r.json() == SERVER_ERROR_BODY
+
+
+def test_intake_denied_caller_bad_zone_still_403(org):
+    # The permission gate runs before ``TimezoneMixin.initial``: a denied
+    # caller with an unknown zone 403s, never 400/500.
+    org.create_intake_issue(name="tz denied")
+    _set_user_timezone(org, org.outsider["id"], BAD_ZONE)
+    r = _call_intake(org, "GET", _base(org), None, role="outsider")
+    assert r.status_code == 403, r.text
