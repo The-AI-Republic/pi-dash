@@ -52,7 +52,7 @@ export {
 export type { AutomationRowsProps } from "./components/AutomationRows.js";
 export { AutomationRow } from "./components/AutomationRow.js";
 export type { AutomationRowProps } from "./components/AutomationRow.js";
-export { CloseTargetPicker, STATE_FALLBACK_LABEL } from "./components/CloseTargetPicker.js";
+export { CloseTargetPicker, STATE_FALLBACK_LABEL, STATE_PICKER_LIST_LABEL } from "./components/CloseTargetPicker.js";
 export type { CloseTargetPickerProps } from "./components/CloseTargetPicker.js";
 export { CUSTOM_MONTH_SEED, CUSTOM_MONTH_TITLE, CustomMonthDialog } from "./components/CustomMonthDialog.js";
 export type { CustomMonthDialogProps } from "./components/CustomMonthDialog.js";

@@ -66,7 +66,7 @@ export function DelayPicker({
     <div ref={rootRef} className="relative">
       <button
         type="button"
-        aria-label={label}
+        aria-label={`${label}, ${delayLabel(value)}`}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listId : undefined}

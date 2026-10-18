@@ -22,7 +22,16 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { AUTOMATION_UPDATE_FAILED_MESSAGE, AUTOMATION_UPDATE_FAILED_TITLE } from "../api/automationQueries.js";
-import { ARCHIVE_ROW_TITLE, CLOSE_ROW_TITLE, STATE_FALLBACK_LABEL } from "../index.js";
+import {
+  ARCHIVE_DELAY_LEAD,
+  ARCHIVE_ROW_DESCRIPTION,
+  ARCHIVE_ROW_TITLE,
+  AUTOMATIONS_INTRO,
+  CLOSE_DELAY_LEAD,
+  CLOSE_ROW_DESCRIPTION,
+  CLOSE_ROW_TITLE,
+  STATE_FALLBACK_LABEL,
+} from "../index.js";
 import { AutomationsScreen, AutomationsSettings } from "./AutomationsSettings.js";
 
 const SLUG = "acme";
@@ -110,6 +119,8 @@ interface StubOptions {
   memberRole?: number;
   patchStatus?: number;
   hangProjects?: boolean;
+  rolesStatus?: number;
+  membershipStatus?: number;
 }
 
 interface Call {
@@ -131,8 +142,14 @@ function stubTransport(options: StubOptions = {}) {
       text: async () => JSON.stringify(body),
     });
     if (url.endsWith("/auth/get-csrf-token/")) return json(200, { csrf_token: "csrf" });
-    if (url.includes("/project-roles/")) return json(200, options.roles ?? { [PROJECT]: 20 });
-    if (url.includes("/workspace-members/me/")) return json(200, { role: options.memberRole ?? 20 });
+    if (url.includes("/project-roles/")) {
+      if (options.rolesStatus !== undefined) return json(options.rolesStatus, {});
+      return json(200, options.roles ?? { [PROJECT]: 20 });
+    }
+    if (url.includes("/workspace-members/me/")) {
+      if (options.membershipStatus !== undefined) return json(options.membershipStatus, {});
+      return json(200, { role: options.memberRole ?? 20 });
+    }
     if (url.endsWith(`/api/workspaces/${SLUG}/projects/details/`)) {
       if (options.hangProjects) return new Promise<never>(() => undefined);
       if (options.status !== undefined) return json(options.status, {});
@@ -208,28 +225,36 @@ describe("AutomationsSettings gate", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps a failed standing read open for the server to refuse writes", async () => {
-    createAppClient("https://api.test", (async (url: string) => {
-      const json = (status: number, body: unknown) => ({
-        status,
-        url,
-        headers: { get: () => null },
-        text: async () => JSON.stringify(body),
-      });
-      if (url.endsWith("/auth/get-csrf-token/")) return json(200, { csrf_token: "csrf" });
-      if (url.includes("/project-roles/")) return json(500, {});
-      if (url.includes("/workspace-members/me/")) return json(500, {});
-      if (url.endsWith(`/api/workspaces/${SLUG}/projects/details/`)) return json(200, [projectRow()]);
-      if (url.endsWith(`/api/workspaces/${SLUG}/projects/${PROJECT}/states/`)) return json(200, []);
-      throw new Error(`unexpected request ${url}`);
-    }) as never);
-    render(
-      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-        <AutomationsSettings workspaceSlug={SLUG} projectId={PROJECT} />
-      </QueryClientProvider>
-    );
-    expect(await screen.findByRole("heading", { level: 4, name: ARCHIVE_ROW_TITLE })).toBeInTheDocument();
-    expect(screen.queryByText("Oops! You are not authorized to view this page")).not.toBeInTheDocument();
+  it("refuses a known member when the membership read fails", async () => {
+    setup({ roles: { [PROJECT]: 15 }, membershipStatus: 500 });
+    expect(
+      await screen.findByRole("heading", { name: "Oops! You are not authorized to view this page" })
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("automations-settings")).not.toBeInTheDocument();
+  });
+
+  it("refuses a known guest when the membership read fails", async () => {
+    setup({ roles: { [PROJECT]: 5 }, membershipStatus: 500 });
+    expect(
+      await screen.findByRole("heading", { name: "Oops! You are not authorized to view this page" })
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("automations-settings")).not.toBeInTheDocument();
+  });
+
+  it("refuses without admin evidence when the role read fails", async () => {
+    setup({ rolesStatus: 500 });
+    expect(
+      await screen.findByRole("heading", { name: "Oops! You are not authorized to view this page" })
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("automations-settings")).not.toBeInTheDocument();
+  });
+
+  it("refuses when both standing reads fail", async () => {
+    setup({ rolesStatus: 500, membershipStatus: 500 });
+    expect(
+      await screen.findByRole("heading", { name: "Oops! You are not authorized to view this page" })
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("automations-settings")).not.toBeInTheDocument();
   });
 
   it("renders the built-in rows and an empty extension slot for an admin", async () => {
@@ -239,12 +264,9 @@ describe("AutomationsSettings gate", () => {
     expect(screen.getByText("Automations")).toBeInTheDocument();
     const slot = screen.getByTestId("automations-extension");
     expect(slot).toBeEmptyDOMElement();
-    expect(
-      within(row(ARCHIVE_ROW_TITLE)).getByText(
-        "Pi Dash will auto archive work items that have been completed or canceled."
-      )
-    ).toBeInTheDocument();
-    expect(within(row(CLOSE_ROW_TITLE)).getByText(/haven't been completed or canceled/)).toBeInTheDocument();
+    expect(within(row(ARCHIVE_ROW_TITLE)).getByText(ARCHIVE_ROW_DESCRIPTION)).toBeInTheDocument();
+    expect(within(row(CLOSE_ROW_TITLE)).getByText(CLOSE_ROW_DESCRIPTION)).toBeInTheDocument();
+    expect(screen.getByText(AUTOMATIONS_INTRO)).toBeInTheDocument();
     expect(within(row(ARCHIVE_ROW_TITLE)).queryByRole("button", { name: /months?/ })).toBeNull();
   });
 });
@@ -283,7 +305,7 @@ describe("archive row", () => {
     await waitFor(() => expect(patches(calls)).toEqual([JSON.stringify({ archive_in: 1 })]));
     await waitFor(() => expect(rowSwitch(ARCHIVE_ROW_TITLE)).toHaveAttribute("aria-checked", "true"));
     const trigger = within(row(ARCHIVE_ROW_TITLE)).getByRole("button", {
-      name: "Auto-archive work items that are closed for",
+      name: new RegExp(`^${ARCHIVE_DELAY_LEAD},`),
     });
     expect(trigger).toHaveTextContent("1 month");
   });
@@ -296,7 +318,7 @@ describe("archive row", () => {
     await waitFor(() => expect(patches(calls)).toEqual([JSON.stringify({ archive_in: 0 })]));
     await waitFor(() => expect(rowSwitch(ARCHIVE_ROW_TITLE)).toHaveAttribute("aria-checked", "false"));
     expect(
-      within(row(ARCHIVE_ROW_TITLE)).queryByRole("button", { name: "Auto-archive work items that are closed for" })
+      within(row(ARCHIVE_ROW_TITLE)).queryByRole("button", { name: new RegExp(`^${ARCHIVE_DELAY_LEAD},`) })
     ).toBeNull();
   });
 
@@ -305,13 +327,13 @@ describe("archive row", () => {
     const { calls } = setup({ project: { archive_in: 1 } });
     await waitFor(() => expect(rowSwitch(ARCHIVE_ROW_TITLE)).toHaveAttribute("aria-checked", "true"));
     await user.click(
-      within(row(ARCHIVE_ROW_TITLE)).getByRole("button", { name: "Auto-archive work items that are closed for" })
+      within(row(ARCHIVE_ROW_TITLE)).getByRole("button", { name: new RegExp(`^${ARCHIVE_DELAY_LEAD},`) })
     );
     await user.click(screen.getByRole("option", { name: "6 months" }));
     await waitFor(() => expect(patches(calls)).toEqual([JSON.stringify({ archive_in: 6 })]));
     await waitFor(() =>
       expect(
-        within(row(ARCHIVE_ROW_TITLE)).getByRole("button", { name: "Auto-archive work items that are closed for" })
+        within(row(ARCHIVE_ROW_TITLE)).getByRole("button", { name: new RegExp(`^${ARCHIVE_DELAY_LEAD},`) })
       ).toHaveTextContent("6 months")
     );
   });
@@ -321,7 +343,7 @@ describe("archive row", () => {
     const { calls } = setup({ project: { archive_in: 1 } });
     await waitFor(() => expect(rowSwitch(ARCHIVE_ROW_TITLE)).toHaveAttribute("aria-checked", "true"));
     await user.click(
-      within(row(ARCHIVE_ROW_TITLE)).getByRole("button", { name: "Auto-archive work items that are closed for" })
+      within(row(ARCHIVE_ROW_TITLE)).getByRole("button", { name: new RegExp(`^${ARCHIVE_DELAY_LEAD},`) })
     );
     await user.click(screen.getByRole("button", { name: "Customize time range" }));
     const dialog = await screen.findByRole("dialog", { name: "Customize time range" });
@@ -398,9 +420,7 @@ describe("close row", () => {
       states: [stateRow(DROPPED, "Dropped", "cancelled")],
     });
     await waitFor(() => expect(rowSwitch(CLOSE_ROW_TITLE)).toHaveAttribute("aria-checked", "true"));
-    await user.click(
-      within(row(CLOSE_ROW_TITLE)).getByRole("button", { name: "Auto-close work items that are inactive for" })
-    );
+    await user.click(within(row(CLOSE_ROW_TITLE)).getByRole("button", { name: new RegExp(`^${CLOSE_DELAY_LEAD},`) }));
     await user.click(screen.getByRole("option", { name: "3 months" }));
     await waitFor(() => expect(patches(calls)).toEqual([JSON.stringify({ close_in: 3 })]));
   });

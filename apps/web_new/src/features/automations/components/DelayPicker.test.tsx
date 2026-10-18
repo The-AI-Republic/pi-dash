@@ -19,7 +19,7 @@ function setup(props: Partial<React.ComponentProps<typeof DelayPicker>> = {}) {
 describe("DelayPicker", () => {
   it("labels the closed trigger with the current delay", () => {
     setup({ value: 3 });
-    const trigger = screen.getByRole("button", { name: "Delay" });
+    const trigger = screen.getByRole("button", { name: /^Delay,/ });
     expect(trigger).toHaveTextContent("3 months");
     expect(trigger).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("listbox")).toBeNull();
@@ -28,7 +28,7 @@ describe("DelayPicker", () => {
   it("opens a listbox with every preset and the custom entry", async () => {
     const user = userEvent.setup();
     setup();
-    await user.click(screen.getByRole("button", { name: "Delay" }));
+    await user.click(screen.getByRole("button", { name: /^Delay,/ }));
     const list = screen.getByRole("listbox", { name: "Delay" });
     expect(
       within(list)
@@ -42,7 +42,7 @@ describe("DelayPicker", () => {
   it("reports a preset and closes", async () => {
     const user = userEvent.setup();
     const { onSelect, onCustomize } = setup();
-    await user.click(screen.getByRole("button", { name: "Delay" }));
+    await user.click(screen.getByRole("button", { name: /^Delay,/ }));
     await user.click(screen.getByRole("option", { name: "9 months" }));
     expect(onSelect).toHaveBeenCalledWith(9);
     expect(onCustomize).not.toHaveBeenCalled();
@@ -52,7 +52,7 @@ describe("DelayPicker", () => {
   it("opens the custom dialog without choosing a preset", async () => {
     const user = userEvent.setup();
     const { onSelect, onCustomize } = setup();
-    await user.click(screen.getByRole("button", { name: "Delay" }));
+    await user.click(screen.getByRole("button", { name: /^Delay,/ }));
     await user.click(screen.getByRole("button", { name: CUSTOMIZE_DELAY_LABEL }));
     expect(onCustomize).toHaveBeenCalledTimes(1);
     expect(onSelect).not.toHaveBeenCalled();
@@ -62,10 +62,10 @@ describe("DelayPicker", () => {
   it("closes on Escape and on an outside click without reporting", async () => {
     const user = userEvent.setup();
     const { onSelect, onCustomize } = setup();
-    await user.click(screen.getByRole("button", { name: "Delay" }));
+    await user.click(screen.getByRole("button", { name: /^Delay,/ }));
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("listbox")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Delay" }));
+    await user.click(screen.getByRole("button", { name: /^Delay,/ }));
     await user.click(document.body);
     expect(screen.queryByRole("listbox")).toBeNull();
     expect(onSelect).not.toHaveBeenCalled();
@@ -75,7 +75,7 @@ describe("DelayPicker", () => {
   it("toggles closed from the trigger", async () => {
     const user = userEvent.setup();
     setup();
-    const trigger = screen.getByRole("button", { name: "Delay" });
+    const trigger = screen.getByRole("button", { name: /^Delay,/ });
     await user.click(trigger);
     expect(trigger).toHaveAttribute("aria-expanded", "true");
     await user.click(trigger);
@@ -85,7 +85,7 @@ describe("DelayPicker", () => {
   it("stays closed while disabled", async () => {
     const user = userEvent.setup();
     setup({ disabled: true });
-    const trigger = screen.getByRole("button", { name: "Delay" });
+    const trigger = screen.getByRole("button", { name: /^Delay,/ });
     expect(trigger).toBeDisabled();
     await user.click(trigger);
     expect(screen.queryByRole("listbox")).toBeNull();

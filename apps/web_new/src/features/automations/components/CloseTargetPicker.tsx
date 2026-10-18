@@ -14,6 +14,7 @@ import * as React from "react";
 import { isStatePickerEnabled } from "../lib/rows.js";
 
 export const STATE_FALLBACK_LABEL = "State";
+export const STATE_PICKER_LIST_LABEL = "Cancelled states";
 
 export interface CloseTargetPickerProps {
   /** The cancelled states the picker offers. */
@@ -70,7 +71,7 @@ export function CloseTargetPicker({ states, selected, onSelect }: CloseTargetPic
         <ul
           id={listId}
           role="listbox"
-          aria-label="Auto-close status"
+          aria-label={STATE_PICKER_LIST_LABEL}
           className="shadow-popover absolute z-10 mt-(--space-1) w-full rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-1)"
         >
           {states.map((state) => (

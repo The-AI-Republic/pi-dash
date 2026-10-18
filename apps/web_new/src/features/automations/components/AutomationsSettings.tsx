@@ -31,7 +31,7 @@ import { AutomationRows } from "./AutomationRows.js";
 
 export const AUTOMATIONS_HEADING = "Automations";
 export const AUTOMATIONS_INTRO =
-  "Configure automated actions to streamline your project management workflow and reduce manual tasks.";
+  "Hand routine housekeeping to the project: finished and dormant items move on without manual upkeep.";
 export const AUTOMATIONS_LOADING_LABEL = "Loading automations";
 export const AUTOMATIONS_EXTENSION_SLOT = "automations-extension";
 
@@ -59,11 +59,12 @@ export function AutomationsSettings({
   const update = useUpdateAutomation(workspaceSlug);
 
   const standingPending = roles.isPending || membership.isPending;
-  const standingFailed = roles.isError || membership.isError;
-  // The denial view follows the project role only. A failed standing read
-  // keeps the page open for the server to refuse writes, rather than
-  // guessing the viewer's role.
-  const admin = standingFailed || isProjectAdmin(roles.data?.[projectId] ?? null);
+  // Admin standing needs evidence from both reads: the project role must
+  // succeed, and the membership read must confirm the caller is in the
+  // workspace. A failed read therefore refuses the page rather than
+  // handing out enabled controls; a known member or guest who also failed
+  // the membership read stays refused.
+  const admin = roles.isSuccess && membership.isSuccess && isProjectAdmin(roles.data?.[projectId] ?? null);
 
   const change = React.useCallback(
     (patch: AutomationPatch) => {

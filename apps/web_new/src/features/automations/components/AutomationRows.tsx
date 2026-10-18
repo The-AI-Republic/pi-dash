@@ -9,7 +9,7 @@
 // always present by then (the page waits for it).
 
 import type { ProjectDetails, State } from "@pidash/api-client";
-import { ArchiveRestore, ArchiveX } from "lucide-react";
+import { PackageCheck, PackageMinus } from "lucide-react";
 import * as React from "react";
 
 import type { AutomationPatch } from "../api/automationQueries.js";
@@ -21,13 +21,14 @@ import { CustomMonthDialog } from "./CustomMonthDialog.js";
 import { DelayPicker } from "./DelayPicker.js";
 
 export const ARCHIVE_ROW_TITLE = "Auto-archive closed work items";
-export const ARCHIVE_ROW_DESCRIPTION = "Pi Dash will auto archive work items that have been completed or canceled.";
-export const ARCHIVE_DELAY_LEAD = "Auto-archive work items that are closed for";
+export const ARCHIVE_ROW_DESCRIPTION =
+  "Closed items move to the project archive once the waiting period below has passed.";
+export const ARCHIVE_DELAY_LEAD = "Archiving window";
 export const CLOSE_ROW_TITLE = "Auto-close work items";
 export const CLOSE_ROW_DESCRIPTION =
-  "Pi Dash will automatically close work items that haven't been completed or canceled.";
-export const CLOSE_DELAY_LEAD = "Auto-close work items that are inactive for";
-export const CLOSE_STATE_LEAD = "Auto-close status";
+  "Inactive items are moved to a cancelled state after the waiting period below, keeping open lists current.";
+export const CLOSE_DELAY_LEAD = "Closing window";
+export const CLOSE_STATE_LEAD = "Cancelled state";
 
 export interface AutomationRowsProps {
   /** The project row; undefined while it loads. */
@@ -79,7 +80,7 @@ function ArchiveRow({ project, onChange }: RowProps): React.ReactElement {
       <AutomationRow
         title={ARCHIVE_ROW_TITLE}
         description={ARCHIVE_ROW_DESCRIPTION}
-        icon={<ArchiveRestore size={16} strokeWidth={1.5} />}
+        icon={<PackageCheck size={16} strokeWidth={1.5} />}
         checked={open}
         onToggle={(next) => onChange(archiveTogglePatch(next))}
       >
@@ -116,7 +117,7 @@ function CloseRow({ project, states, onChange }: RowProps & { states: readonly S
       <AutomationRow
         title={CLOSE_ROW_TITLE}
         description={CLOSE_ROW_DESCRIPTION}
-        icon={<ArchiveX size={16} strokeWidth={1.5} />}
+        icon={<PackageMinus size={16} strokeWidth={1.5} />}
         checked={open}
         onToggle={(next) => onChange(closeTogglePatch(next, cancelled))}
       >
