@@ -18,5 +18,15 @@ describe("InboxShell", () => {
     const detailPane = screen.getByTestId("inbox-detail-pane");
     expect(detailPane).toHaveAttribute("aria-label", "Details");
     expect(detailPane).toContainElement(screen.getByTestId("detail-content"));
+    expect(listPane).toHaveClass("flex");
+    expect(detailPane).toHaveClass("hidden", "md:block");
+  });
+
+  it("gives a narrow viewport to the selected detail", () => {
+    render(
+      <InboxShell selected list={<div data-testid="list-content" />} detail={<div data-testid="detail-content" />} />
+    );
+    expect(screen.getByTestId("inbox-list-pane")).toHaveClass("hidden", "md:flex");
+    expect(screen.getByTestId("inbox-detail-pane")).toHaveClass("block");
   });
 });

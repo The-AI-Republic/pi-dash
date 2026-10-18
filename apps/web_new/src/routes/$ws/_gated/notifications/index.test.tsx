@@ -20,6 +20,10 @@ afterEach(() => {
 });
 
 describe("notifications route", () => {
+  it("declares no shareable selection, tab or filter search state (NTF-027)", () => {
+    expect(Route.options).not.toHaveProperty("validateSearch");
+  });
+
   it("mounts the inbox view for the workspace", () => {
     vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme" });
     createAppClient("https://api.test", () => new Promise<never>(() => {}));

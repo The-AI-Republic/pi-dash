@@ -25,6 +25,8 @@ export interface NotificationChange {
 /** Everything one inbox card renders. */
 export interface NotificationCardData {
   id: string;
+  issueId: string;
+  projectId: string;
   actorName: string;
   actorAvatarUrl: string | null;
   summary: string;
@@ -32,6 +34,8 @@ export interface NotificationCardData {
   title: string;
   createdAt: string;
   unread: boolean;
+  mentioned: boolean;
+  triage: boolean;
   /** Archive moment; a non-null value means the card is archived. */
   archivedAt: string | null;
   /** Scheduled resume moment; a non-null value means the card is snoozed. */
@@ -137,6 +141,8 @@ export function resolveNotificationCard(row: NotificationItem): NotificationCard
   if (!isRecord(row.data)) return null;
   const issue = row.data["issue"];
   if (!isRecord(issue)) return null;
+  const issueId = textField(issue, "id");
+  if (issueId === "") return null;
   const title = textField(issue, "name");
   if (title === "") return null;
   const identifier = textField(issue, "identifier");
@@ -154,6 +160,8 @@ export function resolveNotificationCard(row: NotificationItem): NotificationCard
   const excerpt = field === "description" ? stripMarkup(newValue) : textField(activity, "issue_comment").trim();
   return {
     id: row.id,
+    issueId,
+    projectId: row.project,
     actorName: actor.display_name,
     actorAvatarUrl: actor.avatar_url,
     summary: describeNotificationChange(
@@ -165,6 +173,8 @@ export function resolveNotificationCard(row: NotificationItem): NotificationCard
     title,
     createdAt: row.created_at,
     unread: row.read_at === null,
+    mentioned: row.is_mentioned_notification === true,
+    triage: row.is_inbox_issue === true || row.is_intake_issue === true,
     archivedAt: row.archived_at,
     snoozedTill: row.snoozed_till,
     streamFlags: {

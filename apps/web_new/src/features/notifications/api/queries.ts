@@ -7,11 +7,12 @@
 // prefetch already lives in the gated layout) and the paginated inbox
 // list for one stream. Both stay disabled without a workspace so no
 // request fires.
-import { queryOptions, useQuery } from "@tanstack/react-query";
+import { infiniteQueryOptions, queryOptions, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import {
   getUnreadNotifications,
   listNotificationsPage,
   type ApiClient,
+  type NotificationListResponse,
   type NotificationListQuery,
 } from "@pidash/api-client";
 
@@ -61,4 +62,31 @@ export function notificationsListQueryOptions(client: ApiClient, workspaceSlug: 
 /** First page of one inbox stream; components read through this hook. */
 export function useNotificationsList(workspaceSlug: string, query: NotificationListQuery) {
   return useQuery(notificationsListQueryOptions(getAppClient(), workspaceSlug, query));
+}
+
+/** The next opaque cursor, or no continuation once the server is exhausted. */
+export function nextNotificationCursor(page: NotificationListResponse): string | undefined {
+  return page.next_page_results && page.next_cursor !== "" ? page.next_cursor : undefined;
+}
+
+/** All pages of one stream; only an explicit fetchNextPage reads a continuation. */
+export function notificationPagesQueryOptions(client: ApiClient, workspaceSlug: string, query: NotificationListQuery) {
+  return infiniteQueryOptions({
+    queryKey: notificationKeys.pages(workspaceSlug, query),
+    queryFn: ({ pageParam }: { pageParam: string }) =>
+      listNotificationsPage(client, workspaceSlug, {
+        ...query,
+        perPage: NOTIFICATIONS_PAGE_SIZE,
+        cursor: pageParam,
+      }),
+    initialPageParam: NOTIFICATIONS_FIRST_CURSOR,
+    getNextPageParam: nextNotificationCursor,
+    staleTime: LIST_STALE_TIME_MS,
+    enabled: workspaceSlug.length > 0,
+  });
+}
+
+/** Connected cursor stream used by the inbox list. */
+export function useNotificationPages(workspaceSlug: string, query: NotificationListQuery) {
+  return useInfiniteQuery(notificationPagesQueryOptions(getAppClient(), workspaceSlug, query));
 }

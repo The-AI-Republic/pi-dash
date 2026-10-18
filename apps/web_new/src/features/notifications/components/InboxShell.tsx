@@ -12,19 +12,24 @@ import * as React from "react";
 export interface InboxShellProps {
   list: React.ReactNode;
   detail: React.ReactNode;
+  selected?: boolean;
 }
 
-export function InboxShell({ list, detail }: InboxShellProps): React.ReactElement {
+export function InboxShell({ list, detail, selected = false }: InboxShellProps): React.ReactElement {
   return (
     <div data-testid="inbox-shell" className="flex h-full min-h-0">
       <section
         aria-label="Notifications"
         data-testid="inbox-list-pane"
-        className="flex w-full shrink-0 flex-col overflow-y-auto border-r border-(--border) md:w-80 lg:w-96"
+        className={`${selected ? "hidden md:flex" : "flex"} w-full shrink-0 flex-col overflow-y-auto border-r border-(--border) md:w-80 lg:w-96`}
       >
         {list}
       </section>
-      <section aria-label="Details" data-testid="inbox-detail-pane" className="min-w-0 flex-1">
+      <section
+        aria-label="Details"
+        data-testid="inbox-detail-pane"
+        className={`${selected ? "block" : "hidden md:block"} min-w-0 flex-1`}
+      >
         {detail}
       </section>
     </div>

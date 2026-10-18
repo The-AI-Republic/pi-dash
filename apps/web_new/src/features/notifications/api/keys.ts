@@ -31,4 +31,6 @@ export const notificationKeys = {
       // absent are the same stream server-side; key them as one entry.
       query.mentioned === true,
     ] as const,
+  pages: (workspaceSlug: string, query: NotificationListQuery) =>
+    [...notificationKeys.list(workspaceSlug, query), "pages"] as const,
 };

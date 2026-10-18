@@ -64,6 +64,25 @@ describe("NotificationCard", () => {
     expect(container.querySelector('img[src="https://cdn.test/ada.png"]')).toBeInTheDocument();
   });
 
+  it("selects through its native button and reports the selected state", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(<NotificationCard card={card()} selected onSelect={onSelect} />);
+    const wrapper = screen.getByTestId("inbox-card");
+    expect(wrapper).toHaveAttribute("data-selected", "true");
+    const button = screen.getByTestId("inbox-card-select");
+    expect(button).toHaveAttribute("aria-pressed", "true");
+    await user.click(button);
+    expect(onSelect).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the selection button and the action row as sibling controls", () => {
+    render(<NotificationCard card={card()} actions={cardActions()} />);
+    const row = screen.getByTestId("inbox-card-actions");
+    expect(row).not.toContainElement(screen.getByTestId("inbox-card-select"));
+    expect(screen.getByTestId("inbox-card-select")).toHaveAttribute("aria-pressed", "false");
+  });
+
   it("keeps the action row hidden at rest and reveals it on this card's hover only", () => {
     const actions = cardActions();
     render(
