@@ -730,10 +730,17 @@ async fn project_scheduler_detail(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    // A non-UUID segment never reaches the Django view (the `<uuid:>`
-    // converter rejects it), so proxy for the exact resolver-404 bytes.
-    let Ok(scheduler_id) = scheduler_raw.parse::<uuid::Uuid>() else {
-        return proxy_through(state, method, uri, headers, body).await;
+    // Django routes this segment through the `<uuid:>` converter
+    // (`api/urls/scheduler.py:26`), whose regex is lowercase-hyphenated
+    // canonical form only and is matched case-sensitively, so every other
+    // spelling resolver-404s before auth (and before the view). `Uuid::parse`
+    // also accepts uppercase, simple, braced and URN spellings, so gate on the
+    // raw segment first and proxy the rest — parseable-but-non-canonical and
+    // garbage alike — for Django's own resolver 404 (PIDASHCONV-1095 /
+    // -1132 / -1170 / -1180 / -1193 precedent).
+    let scheduler_id = match scheduler_raw.parse::<uuid::Uuid>() {
+        Ok(scheduler_id) if is_canonical_uuid(&scheduler_raw) => scheduler_id,
+        _ => return proxy_through(state, method, uri, headers, body).await,
     };
     into_result_response(
         project_scheduler_detail_inner(&state, &headers, &slug, &project_raw, &scheduler_id).await,
@@ -791,8 +798,12 @@ async fn project_scheduler_runs(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Ok(scheduler_id) = scheduler_raw.parse::<uuid::Uuid>() else {
-        return proxy_through(state, method, uri, headers, body).await;
+    // Same canonical-spelling gate as the detail handler: only a
+    // lowercase-hyphenated segment matches Django's `<uuid:>` route;
+    // everything else proxies for the resolver 404 (PIDASHCONV-1205).
+    let scheduler_id = match scheduler_raw.parse::<uuid::Uuid>() {
+        Ok(scheduler_id) if is_canonical_uuid(&scheduler_raw) => scheduler_id,
+        _ => return proxy_through(state, method, uri, headers, body).await,
     };
     into_result_response(
         project_scheduler_runs_inner(&state, &headers, &slug, &project_raw, &scheduler_id, &query)
@@ -848,6 +859,23 @@ async fn project_scheduler_runs_inner(
     let next = crate::paginator::next_cursor(per_page, cursor.offset, has_more);
     let prev = crate::paginator::prev_cursor(per_page, cursor.offset);
     envelope(total_count, per_page, &next, &prev, Value::Array(rendered))
+}
+
+/// Whether a path segment is spelled exactly the way Django's
+/// `UUIDConverter` routes it: lowercase hex, hyphenated, 36 characters
+/// (`django/urls/converters.py:25`; the `v1_cli_auth` PIDASHCONV-1095 and
+/// `license` PIDASHCONV-1132 precedents).
+fn is_canonical_uuid(raw: &str) -> bool {
+    if raw.len() != 36 {
+        return false;
+    }
+    raw.bytes().enumerate().all(|(index, byte)| {
+        if index == 8 || index == 13 || index == 18 || index == 23 {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1076,5 +1104,24 @@ mod tests {
             bmap["dtstart"],
             Value::String("2026-10-01T00:00:00Z".to_owned())
         );
+    }
+
+    #[test]
+    fn canonical_uuid_accepts_lowercase_hyphenated_only() {
+        assert!(is_canonical_uuid("12345678-1234-1234-1234-1234567890ab"));
+        assert!(is_canonical_uuid("00000000-0000-0000-0000-000000000000"));
+        // Every spelling `Uuid::parse` accepts but Django's `<uuid:>`
+        // converter does not route.
+        for raw in [
+            "12345678-1234-1234-1234-1234567890AB",
+            "123456781234123412341234567890ab",
+            "{12345678-1234-1234-1234-1234567890ab}",
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
+            "12345678-1234-1234-1234-1234567890a",
+            "12345678-1234-1234-1234-1234567890abc",
+            "123456781234-1234-1234-1234567890ab",
+        ] {
+            assert!(!is_canonical_uuid(raw), "{raw}");
+        }
     }
 }

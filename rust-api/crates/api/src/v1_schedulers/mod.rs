@@ -34,10 +34,12 @@
 //!   [`crate::app_scheduler::gate::DISABLED_BODY`], checked in every `get()`
 //!   body here — unlike the app-surface occurrences quirk), then the
 //!   timezone activation, then the body.
-//! * A non-UUID `<uuid:scheduler_id>` segment never reaches the Django view
-//!   (the `<uuid:>` converter rejects it), so the detail/runs handlers proxy
-//!   it before auth for Django's exact resolver-404 bytes (the
-//!   `v1_projects` member-detail precedent).
+//! * A `<uuid:scheduler_id>` segment that is not the canonical
+//!   lowercase-hyphenated spelling never reaches the Django view (the
+//!   `<uuid:>` converter's regex is that form only), so the detail/runs
+//!   handlers proxy it before auth for Django's exact resolver-404 bytes —
+//!   non-UUID and parseable-but-non-canonical (uppercase, simple, braced,
+//!   URN) alike (the `v1_projects` member-detail precedent; PIDASHCONV-1205).
 //!
 //! Ported bugs and quirks (translate, don't redesign; also listed in the PR):
 //!
