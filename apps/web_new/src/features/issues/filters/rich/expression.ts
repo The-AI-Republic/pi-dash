@@ -263,15 +263,23 @@ const DEFAULT_FIELDS: readonly RichFilterField[] = [
   },
 ];
 
+/** Drop the dimensions a project with those features switched off must not offer. */
+export function hideRichFilterFields(
+  fields: readonly RichFilterField[],
+  input: { hideCycle?: boolean; hideModule?: boolean }
+): RichFilterField[] {
+  return fields.filter((field) => {
+    if (field.stem === "cycle_id" && (input.hideCycle ?? false)) return false;
+    if (field.stem === "module_id" && (input.hideModule ?? false)) return false;
+    return true;
+  });
+}
+
 /** The field catalogue for one project surface. */
 export function richFilterFields(input?: { hideCycle?: boolean; hideModule?: boolean }): RichFilterField[] {
   // Legacy dimensions (assignee, labels, cycle, module, project, dates)
   // register their fields as their slices land (ISS-082–094, ISS-100–103).
-  return DEFAULT_FIELDS.filter((field) => {
-    if (field.stem === "cycle_id" && (input?.hideCycle ?? false)) return false;
-    if (field.stem === "module_id" && (input?.hideModule ?? false)) return false;
-    return true;
-  });
+  return hideRichFilterFields(DEFAULT_FIELDS, input ?? {});
 }
 
 /** Find a field by its stored stem. */

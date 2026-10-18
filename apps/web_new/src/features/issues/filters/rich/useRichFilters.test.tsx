@@ -15,7 +15,7 @@ vi.mock("../../../../shared/shell/index.js", () => ({
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
 import { notifyError } from "../../../../shared/shell/index.js";
 import { issueKeys } from "../../api/keys.js";
-import { IssuesLoaderProvider } from "../../loaders/loaderContext.js";
+import { IssuesLoaderProvider, useIssuesLoader } from "../../loaders/loaderContext.js";
 import { entityListsKeyPart, type IssuesEntity, type PrefsRecord } from "../../prefs/entities.js";
 import { prefsQueryOptions } from "../../prefs/prefsQuery.js";
 import type { RichCondition } from "./expression.js";
@@ -51,8 +51,10 @@ function row(overrides: Partial<RichCondition> = {}): RichCondition {
   return { key: "a", property: "priority", operator: "in", negated: false, value: ["urgent"], ...overrides };
 }
 
-function harness(options: { failPatch?: boolean } = {}) {
+function harness(options: { failPatch?: boolean; holdPatch?: boolean } = {}) {
   const calls: Array<{ method: string; url: string; body: unknown }> = [];
+  let release = (): void => {};
+  const gate = new Promise<void>((resolve) => (release = resolve));
   const client = createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     if (url.endsWith("/auth/get-csrf-token/")) {
       return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
@@ -60,6 +62,7 @@ function harness(options: { failPatch?: boolean } = {}) {
     const method = init.method ?? "GET";
     if (method === "PATCH") {
       calls.push({ method, url, body: JSON.parse(init.body ?? "{}") });
+      if (options.holdPatch === true) await gate;
       if (options.failPatch === true) throw new Error("offline");
       const patch = JSON.parse(init.body ?? "{}") as Partial<PrefsRecord>;
       const next = { ...ROW, ...patch };
@@ -79,7 +82,7 @@ function harness(options: { failPatch?: boolean } = {}) {
       </QueryClientProvider>
     );
   }
-  return { calls, client, queryClient, wrapper };
+  return { calls, client, queryClient, wrapper, release };
 }
 
 afterEach(() => {
@@ -96,6 +99,22 @@ describe("rich filter selectors", () => {
 });
 
 describe("useRichFilters", () => {
+  it("reports no conditions before the preferences read lands", () => {
+    const { client } = harness();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, enabled: false } } });
+    function Scoped({ children }: { children: React.ReactNode }): React.ReactElement {
+      return (
+        <QueryClientProvider client={queryClient}>
+          <React.Fragment>{children}</React.Fragment>
+        </QueryClientProvider>
+      );
+    }
+    const { result } = renderHook(() => useRichFilters("acme", ENTITY), { wrapper: Scoped });
+    expect(client).toBeDefined();
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.conditions).toEqual([]);
+  });
+
   it("reads the seeded conditions", () => {
     const { client } = harness();
     const queryClient = new QueryClient();
@@ -132,6 +151,38 @@ describe("useUpdateRichFilters", () => {
         queryKey: issueKeys.lists("acme", ...entityListsKeyPart(ENTITY)),
       })
     );
+  });
+
+  it("raises the issues loader for the write and lowers it when the write settles", async () => {
+    const { release, wrapper } = harness({ holdPatch: true });
+    const { result } = renderHook(() => ({ write: useUpdateRichFilters("acme", ENTITY), loader: useIssuesLoader() }), {
+      wrapper,
+    });
+    expect(result.current.loader.isMutationLoading).toBe(false);
+
+    act(() => result.current.write.updateRichFilters([row()]));
+    await waitFor(() => expect(result.current.write.isSaving).toBe(true));
+    expect(result.current.loader.isMutationLoading).toBe(true);
+
+    release();
+    await waitFor(() => expect(result.current.write.isSaving).toBe(false));
+    expect(result.current.loader.isMutationLoading).toBe(false);
+  });
+
+  it("writes without a mounted loader when the builder sits above the layout root", async () => {
+    const { calls, queryClient } = harness();
+    function Unloaded({ children }: { children: React.ReactNode }): React.ReactElement {
+      return (
+        <QueryClientProvider client={queryClient}>
+          <React.Fragment>{children}</React.Fragment>
+        </QueryClientProvider>
+      );
+    }
+    const { result } = renderHook(() => useUpdateRichFilters("acme", ENTITY), { wrapper: Unloaded });
+
+    act(() => result.current.updateRichFilters([row({ value: "low" })]));
+    await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
+    expect(calls.find((call) => call.method === "PATCH")!.body).toEqual({ rich_filters: { priority__in: "low" } });
   });
 
   it("rolls the optimistic write back and toasts when the patch fails", async () => {

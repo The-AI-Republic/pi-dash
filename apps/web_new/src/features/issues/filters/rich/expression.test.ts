@@ -8,6 +8,7 @@ import {
   conditionKey,
   findField,
   hasRichConditions,
+  hideRichFilterFields,
   isOperatorLocked,
   isUnresolvableCondition,
   isValueComplete,
@@ -27,6 +28,16 @@ import {
 
 const PRIORITY = findField(richFilterFields(), "priority") as RichFilterField;
 const STATE = findField(richFilterFields(), "state_id") as RichFilterField;
+const CYCLE_FIELD: RichFilterField = {
+  stem: "cycle_id",
+  label: "Cycle",
+  kind: "multi" as const,
+  defaultOperator: "in",
+  defaultNegated: false,
+  operators: ["in"],
+  allowNegative: true,
+};
+const MODULE_FIELD: RichFilterField = { ...CYCLE_FIELD, stem: "module_id", label: "Module" };
 const START = {
   stem: "start_date",
   label: "Start date",
@@ -88,6 +99,13 @@ describe("parseRichExpression", () => {
     expect(parseRichExpression({ not: { a: 1, b: 2 } })).toMatchObject([{ property: "" }]);
     expect(parseRichExpression({ and: [{ not: { a: 1, b: 2 } }] })).toMatchObject([{ property: "" }]);
     expect(parseRichExpression({ nolookup: 1 })).toMatchObject([{ property: "" }]);
+  });
+
+  it("keeps a nested non-leaf AND child as an invalid condition", () => {
+    expect(parseRichExpression({ and: [{ and: [{ priority__in: "urgent" }] }] })).toMatchObject([
+      { key: "and-0", property: "" },
+    ]);
+    expect(parseRichExpression({ and: [{ not: "nope" }] })).toMatchObject([{ key: "and-0", property: "" }]);
   });
 
   it("does not merge two operators on one leaf", () => {
@@ -179,6 +197,20 @@ describe("field catalogue", () => {
 
   it("filters cycle and module when the flags hide them", () => {
     expect(richFilterFields({ hideCycle: true, hideModule: true })).toHaveLength(3);
+    expect(richFilterFields({ hideCycle: false, hideModule: false })).toHaveLength(3);
+    expect(richFilterFields()).toHaveLength(3);
+  });
+
+  it("drops exactly the dimension the surface hides", () => {
+    const withDimensions = [...richFilterFields(), CYCLE_FIELD, MODULE_FIELD];
+    expect(hideRichFilterFields(withDimensions, { hideCycle: true }).map((field) => field.stem)).not.toContain(
+      "cycle_id"
+    );
+    expect(hideRichFilterFields(withDimensions, { hideModule: true }).map((field) => field.stem)).not.toContain(
+      "module_id"
+    );
+    expect(hideRichFilterFields(withDimensions, {})).toHaveLength(5);
+    expect(hideRichFilterFields(withDimensions, { hideCycle: false, hideModule: false })).toHaveLength(5);
   });
 
   it("exposes static values and the priority order", () => {
@@ -217,6 +249,15 @@ describe("operators", () => {
     expect(operatorLabel("exact", true)).toBe("is not");
     expect(operatorLabel("range", true)).toBe("not between");
     expect(operatorLabel("custom", false)).toBe("custom");
+    expect(operatorLabel("custom", true)).toBe("not custom");
+  });
+
+  it("falls back to the raw lookup for an operator with no label", () => {
+    expect(operatorOptions({ ...PRIORITY, operators: ["custom"] })[0]).toEqual({
+      base: "custom",
+      negated: false,
+      label: "custom",
+    });
   });
 });
 
@@ -242,6 +283,11 @@ describe("value completeness and labels", () => {
     expect(valueLabel(PRIORITY, "none")).toBe("None");
     expect(valueLabel(PRIORITY, [])).toBeNull();
     expect(valueLabel(PRIORITY, ["missing"])).toBeNull();
+  });
+
+  it("treats a non-string stored value as unresolvable", () => {
+    expect(valueLabel(PRIORITY, [1])).toBeNull();
+    expect(valueLabel(PRIORITY, 1)).toBeNull();
   });
 
   it("labels dates and ranges", () => {
