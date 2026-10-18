@@ -1,8 +1,8 @@
-# Notifications area spec — inbox, detail, snooze, email preferences (NTF-001–031)
+# Notifications area spec — inbox, detail, snooze, email preferences (NTF-001–032)
 
 Parent epic NEWFRONT-76. Inventory
 `.ai_design/new_frontend_implementation/parity/inventory/notifications.md` (rows
-NTF-001–031, all oracle green). Oracle scenarios
+NTF-001–032, all oracle green). Oracle scenarios
 `apps/web_new/e2e/parity/notifications/` (25 spec files, green on `apps/web`).
 
 Method: the old frontend was read as a behavior reference only — the
@@ -192,9 +192,13 @@ invisible until the member refreshes, switches tabs or filters, or re-enters
 (see NTF-028 in §11). Oracle: `refresh.spec.ts`.
 
 A header mark-all-read control marks every notification in the current filter
-scope as read at once. The request posts the current scope (origin, snoozed,
-archived and read flags) to `POST
-/api/workspaces/{workspaceSlug}/users/notifications/mark-all-read/`. While
+scope as read at once. The request posts the current scope to `POST
+/api/workspaces/{workspaceSlug}/users/notifications/mark-all-read/`: the
+origin set joined into `type` in the list's vocabulary (absent when no
+origin is active; `subscribed` is its own value), plus the snoozed and
+archived flags (the old app also carried a `read` flag when its unread-only
+mode was on). That flag is inert — the bulk endpoint only ever reads unread
+rows — and the new inbox does not send it. While
 it runs the control shows progress and repeat presses are ignored. Afterwards
 every cached notification in scope carries a read timestamp, the current
 tab's unread counter zeroes (other tabs' counters are untouched), and the tab
@@ -203,8 +207,47 @@ badges and server totals agree at zero for the scope. Oracle:
 unprovable against chrome that renders a presence dot rather than counts —
 see §3; the tab badges plus server totals are the pinned proof.)
 
+Scope fidelity is its own row, NTF-032 (§7a). The server's bulk endpoint does
+not yet share the list's origin vocabulary, so the old app widens a
+subscribed-only or multi-origin bulk read to the whole workspace; that
+deviation is recorded in §13 under NEWFRONT-665.
+
 Reads and writes: the list endpoint with the current-view cursor for
 refresh; the mark-all-read endpoint with the scope body for bulk read.
+
+## 7a. Bulk-read scope fidelity (NTF-032)
+
+The bulk read must cover exactly the stream on screen. With one origin
+active, unread items outside that origin stay unread; with several active,
+the union of those origins is read and anything else stays unread. The
+control is never allowed to reach beyond the visible scope.
+
+The old app only partly does this, because its two notification endpoints
+use different origin vocabularies. The list treats `type` as a comma-joined
+set of `assigned`, `created` and `subscribed`, where `subscribed` means
+following the item without having created it or been assigned to it. The
+bulk endpoint compares `type` against one value and recognizes only
+`assigned`, `created`, and its own name for subscriptions (`watching`); its
+subscription branch lacks the list's created/assigned exclusion, and the
+read flag it receives is never used. A subscribed-only scope therefore
+matches no branch, and a two-origin scope such as `assigned,created` matches
+none either, so both widen the read to every unread item in the workspace.
+Only a lone `assigned` or `created` stays within its origin instead of reading
+the whole workspace, and even then the missing exclusion can pull in items
+that qualify for the subscription too. The inbox flips only the cached pages
+it has in scope, so the widening becomes visible on the next read.
+
+Target: the bulk read honours the joined origin scope exactly like the list,
+including the list's subscription rule. Until the backend contract settles
+(§13, NEWFRONT-665), the inbox keeps posting the list value unchanged — it
+must not invent a translation that disagrees with the list. The intended
+fix is on the server side: accept the list's comma-joined vocabulary and
+treat `subscribed` with the list's rule. Oracle: a `bug:` scenario in
+`mark-all-read.spec.ts` pins the observed widening for a subscribed-only and
+a two-origin scope.
+
+Reads and writes: the list endpoint for the visible stream; the bulk
+endpoint with the same origin scope.
 
 ## 8. Origin filters and stream modes (NTF-015, NTF-016, NTF-017, slice NEWFRONT-562)
 
@@ -415,6 +458,14 @@ from. None is encoded silently; each names its tracker.
 - NEWFRONT-215 (NTF-025): disabling the comment topic does not stop its
   emails while the property topic stays on. Target: independent per-topic
   gating consumed by the mailer (§10, §12).
+- NEWFRONT-665 (NTF-032): bulk mark-all-read uses a different origin
+  vocabulary from the list, so a subscribed-only or multi-origin scope
+  widens to every unread item in the workspace; its subscription rule also
+  does not exclude created/assigned items, and it ignores the read facet.
+  Target: the bulk read honours the list's joined origin scope and
+  subscription rule (§7a). The backend fix lives outside the frontend
+  allowlist; the inbox keeps posting the list value unchanged until it lands,
+  and the `bug:` scenario pins the old widening.
 
 Smaller oracle-vs-inventory notes, all honored above: tab identity is pinned
 by position and stream key rather than label wording (§2); only comment-type
@@ -437,7 +488,7 @@ slug; all per-item paths interpolate the notification id.
   next cursor for continuations). Envelope: result rows plus pagination info
   with the next-page flag and next cursor.
 - Unread totals: `GET
-  /api/workspaces/{workspaceSlug}/users/notifications/unread/`, no
+/api/workspaces/{workspaceSlug}/users/notifications/unread/`, no
   parameters. Response fields: overall unread count and mention unread count
   (`total_unread_notifications_count`,
   `mention_unread_notifications_count`).
@@ -448,9 +499,12 @@ slug; all per-item paths interpolate the notification id.
 - Snooze and unsnooze: `PATCH .../users/notifications/{id}/` with a partial
   body carrying the resume timestamp field (`snoozed_till`) set or cleared.
 - Bulk mark read: `POST
-  /api/workspaces/{workspaceSlug}/users/notifications/mark-all-read/` with a
-  body mirroring the current list scope (origin, snoozed, archived and read
-  flags).
+/api/workspaces/{workspaceSlug}/users/notifications/mark-all-read/` with a
+  body mirroring the current list scope (origin, snoozed and archived
+  flags). The origin value is the list's comma-joined vocabulary, including
+  `subscribed` on its own. The endpoint currently recognizes a different
+  vocabulary and ignores read (NEWFRONT-665, §7a); the client still posts
+  the list value verbatim.
 - Email preferences: `GET /api/users/me/notification-preferences/` to load;
   `PATCH` the same path with the single changed topic key per toggle
   (property change, state change, comment, mention, completed-only
