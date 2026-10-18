@@ -6,7 +6,8 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { confirmRuntimeSignOut, registerSignOutPrompt, RuntimeSignOutDialog } from "./SignOutDialog.js";
+import { confirmRuntimeSignOut, registerSignOutPrompt } from "./signOutPrompt.js";
+import { RuntimeSignOutDialog } from "./SignOutDialog.js";
 
 afterEach(() => {
   registerSignOutPrompt(null);

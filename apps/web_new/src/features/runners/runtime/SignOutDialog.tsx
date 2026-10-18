@@ -6,37 +6,14 @@
 // built-in agent stay on this computer, hidden until that account signs
 // in again. The switch below is the one place a user can ask for them to
 // be deleted instead, so it starts off every time the dialog opens. The
-// supervisor mounts this on desktop only; with no dialog mounted,
-// confirmation resolves to the keep-history default.
+// root lifecycle loads this chunk on desktop only; with no dialog
+// mounted, confirmation resolves to the keep-history default.
 
 import { Button, Dialog, Switch } from "@pidash/kit";
 import * as React from "react";
 
 import type { RuntimeSignOutChoice } from "../../../core/session/index.js";
-
-type SignOutPrompt = (resolve: (choice: RuntimeSignOutChoice | null) => void) => void;
-
-let signOutPrompt: SignOutPrompt | null = null;
-
-/**
- * Mount (or, with null, unmount) the dialog confirmRuntimeSignOut opens
- * through. Owned by RuntimeSignOutDialog.
- */
-export function registerSignOutPrompt(prompt: SignOutPrompt | null): void {
-  signOutPrompt = prompt;
-}
-
-/**
- * Ask the user to confirm a sign-out they started, and whether to delete
- * this account's chat history with it. Resolves null when they cancel.
- * Deletion is opt-in: with no dialog to ask through, sign-out proceeds
- * and keeps the history.
- */
-export function confirmRuntimeSignOut(): Promise<RuntimeSignOutChoice | null> {
-  const prompt = signOutPrompt;
-  if (!prompt) return Promise.resolve({ deleteChatHistory: false });
-  return new Promise((resolve) => prompt(resolve));
-}
+import { registerSignOutPrompt } from "./signOutPrompt.js";
 
 export function RuntimeSignOutDialog(): React.ReactElement {
   const [isOpen, setIsOpen] = React.useState(false);

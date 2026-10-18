@@ -20,8 +20,8 @@ vi.mock("../../core/platform/index.js", () => ({
   },
 }));
 
-vi.mock("./runtime/SignOutDialog.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./runtime/SignOutDialog.js")>();
+vi.mock("./runtime/signOutPrompt.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./runtime/signOutPrompt.js")>();
   return {
     ...original,
     confirmRuntimeSignOut: () => harness.confirmRuntimeSignOut(),
