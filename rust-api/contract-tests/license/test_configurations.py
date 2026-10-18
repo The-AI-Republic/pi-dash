@@ -89,3 +89,51 @@ def test_email_check_requires_receiver(admin_api):
     res = admin_api.post("/api/instances/email-credentials-check/", json={})
     assert res.status_code == 400
     assert res.json() == {"error": "Receiver email is required"}
+
+
+def _seed_unroutable_mail(db, port="9"):
+    # 127.0.0.1:9 (discard, closed): a backend that dials out fails here
+    # fast with refused, while console/locmem never dial and succeed.
+    db.make_config("EMAIL_HOST", "127.0.0.1", category="email")
+    db.make_config("EMAIL_HOST_USER", "mailer", category="email")
+    db.make_config("EMAIL_HOST_PASSWORD", "s3cret", category="email")
+    db.make_config("ENABLE_SMTP", "1", category="email")
+    db.make_config("EMAIL_PORT", port, category="email")
+    db.make_config("EMAIL_FROM", "noreply@example.com", category="email")
+
+
+def test_email_check_live_send_success(admin_api, world):
+    # PIDASHCONV-1126: under the suite's non-SMTP email backend the send
+    # succeeds without touching the network, even though no SMTP server
+    # could accept it. The pre-fix Rust dialed out and 400d here.
+    _seed_unroutable_mail(world["db"])
+    res = admin_api.post(
+        "/api/instances/email-credentials-check/",
+        json={"receiver_email": "probe@example.com"},
+    )
+    assert res.status_code == 200
+    assert res.json() == {"message": "Email successfully sent."}
+
+
+def test_email_check_bad_header_receiver(admin_api, world):
+    # Header validation still runs on the non-network backends: the
+    # newline raises BadHeaderError inside msg.send(), inside the try.
+    _seed_unroutable_mail(world["db"])
+    res = admin_api.post(
+        "/api/instances/email-credentials-check/",
+        json={"receiver_email": "a@b.com\nBcc: x@example.com"},
+    )
+    assert res.status_code == 400
+    assert res.json() == {"error": "Invalid email header."}
+
+
+def test_email_check_unparsable_port_is_500(admin_api, world):
+    # port=int(EMAIL_PORT) runs outside the try (BUG-2): ValueError
+    # escapes to the base 500 on every backend.
+    _seed_unroutable_mail(world["db"], port="bogus")
+    res = admin_api.post(
+        "/api/instances/email-credentials-check/",
+        json={"receiver_email": "probe@example.com"},
+    )
+    assert res.status_code == 500
+    assert res.json() == {"error": "Something went wrong please try again later"}
