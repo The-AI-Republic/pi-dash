@@ -34,6 +34,7 @@ import {
   SHEET_SORT_STORAGE_KEY,
   serializeSheetSort,
   sheetFirstCellId,
+  sheetSortOrder,
   visibleSheetColumns,
   type SheetColumn,
   type SheetSortState,
@@ -61,6 +62,8 @@ export interface SpreadsheetLayoutProps {
   canEdit: boolean;
   hideCycle: boolean;
   hideModule: boolean;
+  /** The project has no estimate system, so the column stays hidden. */
+  hideEstimate: boolean;
   /** Explicitly highlighted row id (drops); fresh rows highlight themselves. */
   highlightedId?: string | null;
 }
@@ -80,10 +83,16 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     canEdit,
     hideCycle,
     hideModule,
+    hideEstimate,
     highlightedId = null,
   } = props;
   const client = getAppClient();
-  const query = useInfiniteQuery(sheetIssuesQueryOptions(client, workspaceSlug, projectId, { orderBy: prefs.orderBy }));
+  const query = useInfiniteQuery(
+    sheetIssuesQueryOptions(client, workspaceSlug, projectId, {
+      orderBy: prefs.orderBy,
+      showSubIssues: prefs.showSubIssues,
+    })
+  );
   const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(new Set());
   const [peekIssue, setPeekIssue] = React.useState<IssueListItem | null>(null);
   const [scrolled, setScrolled] = React.useState(false);
@@ -99,8 +108,8 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
   const { updateDisplayPrefs } = useUpdateDisplayPrefs(workspaceSlug, entity);
 
   const columns = React.useMemo(
-    () => visibleSheetColumns(prefs.properties, { hideCycle, hideModule }),
-    [prefs.properties, hideCycle, hideModule]
+    () => visibleSheetColumns(prefs.properties, { hideCycle, hideModule, hideEstimate }),
+    [prefs.properties, hideCycle, hideModule, hideEstimate]
   );
   const activeSort = React.useMemo(
     () => resolveSheetSort(columns, prefs.orderBy, localSort),
@@ -135,6 +144,7 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     void navigate({
       to: "/$ws/browse/$issueKey",
       params: { ws: workspaceSlug, issueKey: `${projectIdentifier}-${issue.sequence_id}` },
+      hash: "sub-issues",
     });
   };
   const openWorkItem = (issue: IssueListItem): void => {
@@ -156,12 +166,10 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     weekStart,
     isRowReadOnly: (issue) => isSheetRowReadOnly(issue, cycles.data ?? []),
     onUpdate: (issueId, patch) => fields.mutateAsync({ issueId, patch }),
-    onCycle: async (issue, cycleId) => {
-      await cycleWrite.mutateAsync({ issueId: issue.id, cycleId, previousCycleId: issue.cycle_id });
-    },
-    onModules: async (issue, moduleIds) => {
-      await moduleWrite.mutateAsync({ issueId: issue.id, moduleIds, previousModuleIds: issue.module_ids });
-    },
+    onCycle: (issue, cycleId) =>
+      cycleWrite.mutateAsync({ issueId: issue.id, cycleId, previousCycleId: issue.cycle_id }),
+    onModules: (issue, moduleIds) =>
+      moduleWrite.mutateAsync({ issueId: issue.id, moduleIds, previousModuleIds: issue.module_ids }),
     onOpenSubIssues: openSubIssues,
     focusCell,
   };
@@ -171,15 +179,15 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     const direction = arrowDirection(event.key);
     if (direction === null) return;
     event.preventDefault();
-    const rowIndex = Number(event.currentTarget.dataset["rowIndex"] ?? "0");
-    const columnIndex = Number(event.currentTarget.dataset["columnIndex"] ?? "0");
+    const rowIndex = Number(event.currentTarget.dataset["rowIndex"]);
+    const columnIndex = Number(event.currentTarget.dataset["columnIndex"]);
     const next = moveSheetFocus({ row: rowIndex, column: columnIndex }, direction, rows.length, columns.length + 1);
-    const targetRow = rows[next.row];
-    if (targetRow === undefined) return;
+    // moveSheetFocus clamps inside the grid, so the target is always a real cell.
+    const targetRow = rows[next.row] as DisplayRow;
     const id =
       next.column === 0
         ? sheetFirstCellId(targetRow.issue.id)
-        : `sheet-cell-${targetRow.issue.id}-${columns[next.column - 1]?.key ?? ""}`;
+        : `sheet-cell-${targetRow.issue.id}-${columns[next.column - 1]!.key}`;
     document.getElementById(id)?.focus();
   };
 
@@ -224,12 +232,15 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
                   column={column}
                   sorted={activeSort?.column === column.key ? activeSort : null}
                   onSort={(direction) => {
-                    const orderBy = direction === "ascending" ? column.sort?.ascending : column.sort?.descending;
-                    if (orderBy === undefined) return;
+                    const orderBy = sheetSortOrder(column, direction);
                     const next = { column: column.key, direction, orderBy };
                     storeSheetSort(next);
                     setLocalSort(next);
-                    updateDisplayPrefs({ orderBy });
+                    // Re-picking the server's current order only refreshes
+                    // the local pair (which distinguishes created-on
+                    // ascending from the unsorted default); it does not
+                    // rewrite the same key.
+                    if (prefs.orderBy !== orderBy) updateDisplayPrefs({ orderBy });
                   }}
                   onClear={() => {
                     storeSheetSort(null);
@@ -385,12 +396,10 @@ function SpacerRow({ height, columnCount }: { height: number; columnCount: numbe
 }
 
 function readStoredSheetSort(): SheetSortState | null {
-  if (typeof window === "undefined") return null;
   return parseStoredSheetSort(window.localStorage.getItem(SHEET_SORT_STORAGE_KEY));
 }
 
 function storeSheetSort(state: SheetSortState | null): void {
-  if (typeof window === "undefined") return;
   window.localStorage.setItem(SHEET_SORT_STORAGE_KEY, serializeSheetSort(state));
 }
 

@@ -15,8 +15,8 @@ import { isCompletedCycle } from "../../../shared/pickers/cycles.js";
 export interface SheetColumn {
   key: string;
   label: string;
-  /** Column header sort metadata; absent means not sortable. */
-  sort?: SheetSort;
+  /** Column header sort metadata. */
+  sort: SheetSort;
 }
 
 export interface SheetSort {
@@ -118,7 +118,6 @@ export interface SheetSortState {
 
 /** The sort state a column reports from the stored orderBy. */
 export function sheetSortState(column: SheetColumn, orderBy: string): SheetSortState | null {
-  if (column.sort === undefined) return null;
   if (orderBy === column.sort.ascending) {
     return { column: column.key, direction: "ascending", orderBy };
   }
@@ -171,8 +170,7 @@ export function isSheetRowReadOnly(
 }
 
 /** The order_by a menu pick writes. */
-export function sheetSortOrder(column: SheetColumn, direction: SheetSortDirection, currentOrder: string): string {
-  if (column.sort === undefined) return currentOrder;
+export function sheetSortOrder(column: SheetColumn, direction: SheetSortDirection): string {
   return direction === "ascending" ? column.sort.ascending : column.sort.descending;
 }
 
@@ -187,6 +185,7 @@ export function visibleSheetColumns(properties: Record<string, boolean>, flags: 
     SHEET_COLUMNS.map((column) => column.key),
     flags
   )
+    .filter((key) => !(key === "estimate" && flags.hideEstimate))
     .filter((key) => isPropertyShown(properties, key))
     .map((key) => SHEET_COLUMNS.find((column) => column.key === key))
     .filter((column): column is SheetColumn => column !== undefined);

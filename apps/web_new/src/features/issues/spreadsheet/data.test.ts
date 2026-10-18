@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   flattenSheetPages,
   insertSheetTempRow,
+  patchElsewhere,
   removeSheetTempRow,
   replaceTempWithCreated,
   sheetFailureDetail,
@@ -166,5 +167,24 @@ describe("spreadsheet data", () => {
     expect(sheetFailureDetail(new ApiError({ status: 400, code: "http", message: "" }))).toBe(
       "The cell is unchanged — check your connection and try again."
     );
+  });
+
+  it("patches non-sheet caches: flat arrays, single rows and older list envelopes", () => {
+    const flat = [row(ID1, "First"), row(ID2, "Second")];
+    expect(patchElsewhere(flat, ID1, { priority: "urgent" })).toMatchObject([
+      { priority: "urgent" },
+      { priority: "none" },
+    ]);
+    expect(patchElsewhere(row(ID1, "Single"), ID1, { name: "Renamed" })).toMatchObject({ name: "Renamed" });
+    const envelope = { results: [row(ID1, "First"), row(ID2, "Second")] };
+    expect(patchElsewhere(envelope, ID2, { name: "Changed" })).toEqual({
+      results: [row(ID1, "First"), { ...row(ID2, "Second"), name: "Changed" }],
+    });
+    const detail = { id: ID1, name: "Detail" };
+    expect(patchElsewhere(detail, ID1, { name: "Detail changed" })).toEqual({ id: ID1, name: "Detail changed" });
+    expect(patchElsewhere(null, ID1, {})).toBeNull();
+    expect(patchElsewhere(42, ID1, {})).toBe(42);
+    const unrelated = { count: 1 };
+    expect(patchElsewhere(unrelated, ID1, {})).toBe(unrelated);
   });
 });

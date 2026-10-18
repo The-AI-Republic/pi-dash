@@ -40,6 +40,8 @@ const SHEET_UPDATE_FAILED_BODY = "The cell is unchanged — check your connectio
 export interface SheetQuery {
   orderBy: string;
   perPage?: number;
+  /** Flat rows include sub-work items when the display switch is on. */
+  showSubIssues?: boolean;
 }
 
 /** Infinite sheet pages under the entity's list prefix. */
@@ -50,11 +52,18 @@ export function sheetIssuesQueryOptions(
   query: SheetQuery
 ) {
   return infiniteQueryOptions({
-    queryKey: [...issueKeys.lists(workspaceSlug, projectId), "sheet", query.orderBy, query.perPage ?? SHEET_PAGE_SIZE],
+    queryKey: [
+      ...issueKeys.lists(workspaceSlug, projectId),
+      "sheet",
+      query.orderBy,
+      query.perPage ?? SHEET_PAGE_SIZE,
+      query.showSubIssues === true,
+    ],
     queryFn: ({ pageParam }) =>
       listIssues(client, workspaceSlug, projectId, {
         perPage: query.perPage ?? SHEET_PAGE_SIZE,
         orderBy: query.orderBy,
+        filters: { sub_issue: String(query.showSubIssues === true) },
         ...(pageParam === "" ? {} : { cursor: pageParam }),
       }),
     initialPageParam: "",
@@ -213,7 +222,7 @@ export async function runSheetWrite(
 }
 
 /** Patch non-sheet shapes (detail and older flat list caches). */
-function patchElsewhere(value: unknown, issueId: string, patch: Record<string, unknown>): unknown {
+export function patchElsewhere(value: unknown, issueId: string, patch: Record<string, unknown>): unknown {
   if (Array.isArray(value)) return value.map((row) => withRowFields(row, issueId, patch));
   if (typeof value !== "object" || value === null) return value;
   const record = value as Record<string, unknown>;

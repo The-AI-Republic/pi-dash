@@ -63,7 +63,8 @@ export function SheetPropertyCell({
   columnIndex: number;
   onKeyDown: (event: React.KeyboardEvent<HTMLTableCellElement>) => void;
 }): React.ReactElement {
-  const editable = context.editable && !context.isRowReadOnly(issue) && isEditableColumn(column.key);
+  const editableKey = asEditableKey(column.key);
+  const editable = context.editable && !context.isRowReadOnly(issue) && editableKey !== null;
   const focus = (): void => context.focusCell(issue.id, column.key, columnIndex);
   return (
     <td
@@ -75,8 +76,8 @@ export function SheetPropertyCell({
       className={cellClasses}
       aria-label={`${column.label} for ${issue.name}`}
     >
-      {editable ? (
-        <EditableCell issue={issue} column={column} context={context} onDone={focus} />
+      {editable && editableKey !== null ? (
+        <EditableCell columnKey={editableKey} issue={issue} context={context} onDone={focus} disabled={false} />
       ) : (
         <ReadOnlyCell issue={issue} column={column} context={context} />
       )}
@@ -101,99 +102,141 @@ export function isEditableColumn(key: string): boolean {
   return EDITABLE_KEYS.has(key);
 }
 
-function EditableCell({
-  issue,
-  column,
-  context,
-  onDone,
-}: {
+type EditableKey =
+  | "state"
+  | "priority"
+  | "assignee"
+  | "start_date"
+  | "due_date"
+  | "estimate"
+  | "labels"
+  | "cycle"
+  | "modules";
+
+function asEditableKey(key: string): EditableKey | null {
+  return EDITABLE_KEYS.has(key) ? (key as EditableKey) : null;
+}
+
+type EditableCellProps = {
   issue: IssueListItem;
-  column: SheetColumn;
   context: SheetCellContext;
   onDone: () => void;
-}): React.ReactElement {
-  const disabled = !context.editable || context.isRowReadOnly(issue);
-  switch (column.key) {
-    case "state":
-      return (
-        <StatePicker
-          workspaceSlug={context.workspaceSlug}
-          projectId={context.projectId}
-          value={issue.state_id}
-          disabled={disabled}
-          variant="ghost"
-          onChange={(id) => {
-            void context.onUpdate(issue.id, { state_id: id }).finally(onDone);
-          }}
-        />
-      );
-    case "priority":
-      return (
-        <PriorityPicker
-          value={issue.priority}
-          disabled={disabled}
-          variant="ghost"
-          onChange={(level) => {
-            void context.onUpdate(issue.id, { priority: level }).finally(onDone);
-          }}
-        />
-      );
-    case "assignee":
-      return (
-        <MemberPicker
-          workspaceSlug={context.workspaceSlug}
-          projectId={context.projectId}
-          multiple
-          value={issue.assignee_ids}
-          disabled={disabled}
-          variant="ghost"
-          placeholder="Assignees"
-          onChange={(ids) => {
-            void context.onUpdate(issue.id, { assignee_ids: ids }).finally(onDone);
-          }}
-        />
-      );
-    case "start_date":
-      return (
-        <DatePicker
-          value={issue.start_date ?? null}
-          onChange={(iso) => {
-            void context
-              .onUpdate(issue.id, { start_date: iso, target_date: issue.target_date ?? null })
-              .finally(onDone);
-          }}
-          max={issue.target_date ?? null}
-          weekStart={context.weekStart}
-          label="Start date"
-          placeholder="Start date"
-          disabled={disabled}
-          testId={`sheet-start-${issue.id}`}
-        />
-      );
-    case "due_date":
-      return <DueDateCell issue={issue} context={context} onDone={onDone} disabled={disabled} />;
-    case "estimate":
-      return (
-        <EstimatePicker
-          workspaceSlug={context.workspaceSlug}
-          projectId={context.projectId}
-          value={estimateValue(issue.estimate_point)}
-          disabled={disabled}
-          variant="ghost"
-          onChange={(id) => {
-            void context.onUpdate(issue.id, { estimate_point: id }).finally(onDone);
-          }}
-        />
-      );
-    case "labels":
-      return <LabelCell issue={issue} context={context} onDone={onDone} disabled={disabled} />;
-    case "cycle":
-      return <CycleCell issue={issue} context={context} onDone={onDone} disabled={disabled} />;
-    case "modules":
-      return <ModuleCell issue={issue} context={context} onDone={onDone} disabled={disabled} />;
-    default:
-      return <ReadOnlyCell issue={issue} column={column} context={context} />;
-  }
+  disabled: boolean;
+};
+
+function StateCell({ issue, context, onDone, disabled }: EditableCellProps): React.ReactElement {
+  return (
+    <StatePicker
+      workspaceSlug={context.workspaceSlug}
+      projectId={context.projectId}
+      value={issue.state_id}
+      disabled={disabled}
+      variant="ghost"
+      onChange={(id) => {
+        writeThenRefocus(() => context.onUpdate(issue.id, { state_id: id }), onDone);
+      }}
+    />
+  );
+}
+
+function PriorityCell({ issue, context, onDone, disabled }: EditableCellProps): React.ReactElement {
+  return (
+    <PriorityPicker
+      value={issue.priority}
+      disabled={disabled}
+      variant="ghost"
+      onChange={(level) => {
+        writeThenRefocus(() => context.onUpdate(issue.id, { priority: level }), onDone);
+      }}
+    />
+  );
+}
+
+function AssigneeCell({ issue, context, onDone, disabled }: EditableCellProps): React.ReactElement {
+  return (
+    <MemberPicker
+      workspaceSlug={context.workspaceSlug}
+      projectId={context.projectId}
+      multiple
+      value={issue.assignee_ids}
+      disabled={disabled}
+      variant="ghost"
+      placeholder="Assignees"
+      onChange={(ids) => {
+        writeThenRefocus(() => context.onUpdate(issue.id, { assignee_ids: ids }), onDone);
+      }}
+    />
+  );
+}
+
+function StartDateCell({ issue, context, onDone, disabled }: EditableCellProps): React.ReactElement {
+  return (
+    <DatePicker
+      value={issue.start_date ?? null}
+      onChange={(iso) => {
+        writeThenRefocus(
+          () => context.onUpdate(issue.id, { start_date: iso, target_date: issue.target_date ?? null }),
+          onDone
+        );
+      }}
+      max={issue.target_date ?? null}
+      weekStart={context.weekStart}
+      label="Start date"
+      placeholder="Start date"
+      disabled={disabled}
+      testId={`sheet-start-${issue.id}`}
+    />
+  );
+}
+
+function EstimateCell({ issue, context, onDone, disabled }: EditableCellProps): React.ReactElement {
+  return (
+    <EstimatePicker
+      workspaceSlug={context.workspaceSlug}
+      projectId={context.projectId}
+      value={estimateValue(issue.estimate_point)}
+      disabled={disabled}
+      variant="ghost"
+      onChange={(id) => {
+        writeThenRefocus(() => context.onUpdate(issue.id, { estimate_point: id }), onDone);
+      }}
+    />
+  );
+}
+
+function EditableCell({ columnKey, ...props }: EditableCellProps & { columnKey: EditableKey }): React.ReactElement {
+  const Renderer = EDITABLE_CELLS[columnKey];
+  return <Renderer {...props} />;
+}
+
+/** Renderers for the editable property keys, keyed by the display property. */
+const EDITABLE_CELLS: Record<EditableKey, (props: EditableCellProps) => React.ReactElement> = {
+  state: StateCell,
+  priority: PriorityCell,
+  assignee: AssigneeCell,
+  start_date: StartDateCell,
+  due_date: DueDateCell,
+  estimate: EstimateCell,
+  labels: LabelCell,
+  cycle: CycleCell,
+  modules: ModuleCell,
+};
+
+/**
+ * Run one cell write, then return focus whether it landed or was
+ * refused. The data layer reports the refusal (toast and rollback), so
+ * the cell only has to settle the promise without leaking a rejection.
+ */
+function writeThenRefocus(write: () => Promise<void>, onDone: () => void): void {
+  void (async () => {
+    try {
+      await write();
+    } catch {
+      // Reported by runSheetWrite; the cell still returns focus.
+    } finally {
+      onDone();
+    }
+  })();
 }
 
 function DueDateCell({
@@ -208,13 +251,18 @@ function DueDateCell({
   disabled: boolean;
 }): React.ReactElement {
   const today = todayIsoDay();
-  const overdue = issue.target_date !== null && issue.target_date !== undefined && issue.target_date < today;
+  const states = usePickerStates(context.workspaceSlug, context.projectId, true);
+  const stateGroup = states.data?.find((state) => state.id === issue.state_id)?.group;
+  const overdue = isOverdue(issue.target_date ?? null, stateGroup, today);
   return (
     <span className={overdue ? "text-(--danger)" : undefined}>
       <DatePicker
         value={issue.target_date ?? null}
         onChange={(iso) => {
-          void context.onUpdate(issue.id, { start_date: issue.start_date ?? null, target_date: iso }).finally(onDone);
+          writeThenRefocus(
+            () => context.onUpdate(issue.id, { start_date: issue.start_date ?? null, target_date: iso }),
+            onDone
+          );
         }}
         min={issue.start_date ?? null}
         weekStart={context.weekStart}
@@ -225,6 +273,16 @@ function DueDateCell({
       />
     </span>
   );
+}
+
+/**
+ * Whether a due date reads as overdue. Completed and cancelled work is
+ * never flagged, and neither is a row whose state group is unknown yet.
+ */
+export function isOverdue(date: string | null, stateGroup: string | undefined, today: string): boolean {
+  if (date === null || stateGroup === undefined) return false;
+  if (stateGroup === "completed" || stateGroup === "cancelled") return false;
+  return date < today;
 }
 
 function estimateValue(point: IssueListItem["estimate_point"]): string | null {
@@ -251,7 +309,7 @@ function LabelCell({
       value={issue.label_ids}
       disabled={disabled}
       onChange={(ids) => {
-        void context.onUpdate(issue.id, { label_ids: ids }).finally(onDone);
+        writeThenRefocus(() => context.onUpdate(issue.id, { label_ids: ids }), onDone);
       }}
       label={`Labels for ${issue.name}${selectedLabelCount(labels.data ?? [], issue.label_ids)}`}
     />
@@ -285,7 +343,7 @@ function CycleCell({
       disabled={disabled || completed}
       variant="ghost"
       onChange={(cycleId) => {
-        void context.onCycle(issue, cycleId).finally(onDone);
+        writeThenRefocus(() => context.onCycle(issue, cycleId), onDone);
       }}
     />
   );
@@ -321,7 +379,7 @@ function ModuleCell({
         iconOnly
         placeholder="Modules"
         onChange={(ids) => {
-          void context.onModules(issue, ids).finally(onDone);
+          writeThenRefocus(() => context.onModules(issue, ids), onDone);
         }}
       />
     </span>
@@ -350,9 +408,11 @@ function ReadOnlyCell({
       return (
         <button
           type="button"
-          disabled={(issue.sub_issues_count ?? 0) === 0}
-          onClick={() => context.onOpenSubIssues(issue)}
-          className="cursor-pointer text-(--text) hover:underline disabled:cursor-default disabled:no-underline"
+          aria-disabled={(issue.sub_issues_count ?? 0) === 0}
+          onClick={() => {
+            if ((issue.sub_issues_count ?? 0) > 0) context.onOpenSubIssues(issue);
+          }}
+          className="cursor-pointer text-(--text) hover:underline aria-disabled:cursor-default aria-disabled:no-underline"
         >
           {issue.sub_issues_count ?? 0} sub-work item{(issue.sub_issues_count ?? 0) === 1 ? "" : "s"}
         </button>

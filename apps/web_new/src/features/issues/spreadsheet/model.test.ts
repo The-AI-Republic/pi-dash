@@ -12,7 +12,6 @@ import {
   resolveSheetSort,
   serializeSheetSort,
   SHEET_COLUMNS,
-  SHEET_DEFAULT_ORDER,
   sheetCellId,
   sheetFirstCellId,
   sheetSortOrder,
@@ -61,6 +60,16 @@ describe("spreadsheet model", () => {
     expect(keys).toContain("state");
   });
 
+  it("drops the estimate column while the project has no estimate system", () => {
+    const keys = visibleSheetColumns(shown, { hideCycle: false, hideModule: false, hideEstimate: true }).map(
+      (column) => column.key
+    );
+    expect(keys).not.toContain("estimate");
+    expect(visibleSheetColumns(shown, { hideCycle: false, hideModule: false }).map((column) => column.key)).toContain(
+      "estimate"
+    );
+  });
+
   it("reads a column's sort state from order_by", () => {
     const state = SHEET_COLUMNS[0]!;
     expect(sheetSortState(state, "state__name")).toEqual({
@@ -70,13 +79,14 @@ describe("spreadsheet model", () => {
     });
     expect(sheetSortState(state, "-state__name")).toMatchObject({ direction: "descending" });
     expect(sheetSortState(state, "-created_at")).toBeNull();
-    expect(sheetSortState({ key: "x", label: "X" }, "x")).toBeNull();
+    expect(sheetSortState({ key: "x", label: "X", sort: { ascending: "x", descending: "-x" } }, "y")).toBeNull();
   });
 
   it("finds the one active sort across all columns", () => {
     expect(activeSheetSort(SHEET_COLUMNS, "-created_at")).toBeNull();
     expect(activeSheetSort(SHEET_COLUMNS, "state__name")?.column).toBe("state");
     expect(activeSheetSort(SHEET_COLUMNS, "target_date")?.column).toBe("due_date");
+    expect(activeSheetSort(SHEET_COLUMNS, "not_a_sort_key")).toBeNull();
   });
 
   it("uses the remembered pair to distinguish created-on ascending from the default", () => {
@@ -102,11 +112,10 @@ describe("spreadsheet model", () => {
     ).toMatchObject({ column: "state", direction: "ascending" });
   });
 
-  it("writes the ascending or descending key, falling back for unsortable columns", () => {
+  it("writes the ascending or descending key", () => {
     const priority = SHEET_COLUMNS.find((column) => column.key === "priority")!;
-    expect(sheetSortOrder(priority, "ascending", "sort_order")).toBe("priority");
-    expect(sheetSortOrder(priority, "descending", "sort_order")).toBe("-priority");
-    expect(sheetSortOrder({ key: "x", label: "X" }, "ascending", SHEET_DEFAULT_ORDER)).toBe(SHEET_DEFAULT_ORDER);
+    expect(sheetSortOrder(priority, "ascending")).toBe("priority");
+    expect(sheetSortOrder(priority, "descending")).toBe("-priority");
   });
 
   it("only marks the spec's editable columns", () => {
@@ -148,6 +157,7 @@ describe("spreadsheet model", () => {
     expect(parseStoredSheetSort("")).toBeNull();
     expect(parseStoredSheetSort("{")).toBeNull();
     expect(parseStoredSheetSort("[]")).toBeNull();
+    expect(parseStoredSheetSort("5")).toBeNull();
     expect(parseStoredSheetSort(JSON.stringify({ column: "state", direction: "up", orderBy: "x" }))).toBeNull();
     expect(parseStoredSheetSort(JSON.stringify({ column: 1, direction: "ascending", orderBy: "x" }))).toBeNull();
   });

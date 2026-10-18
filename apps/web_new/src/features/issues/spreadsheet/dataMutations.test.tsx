@@ -9,6 +9,7 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { issueKeys } from "../api/keys.js";
 import {
   SHEET_CREATED_TITLE,
   SHEET_UPDATE_FAILED_TITLE,
@@ -95,6 +96,14 @@ function stubClient(state: StubState) {
       };
     }
     if (state.hold) await new Promise<void>((resolve) => (state.release = resolve));
+    if (init.method === undefined || init.method === "GET") {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(page([row(ISSUE, "Fix login")])),
+      };
+    }
     if (init.method === "POST" && url.endsWith("/issues/")) {
       if (state.failWrite) {
         return {
@@ -137,6 +146,10 @@ function setup(state: StubState = { calls: [], failWrite: false }) {
   queryClient.setQueryData(key, {
     pages: [page([row(ISSUE, "Fix login"), row(OTHER, "Second")])],
     pageParams: [""],
+  });
+  queryClient.setQueryData(issueKeys.detail(SLUG, ISSUE), row(ISSUE, "Fix login"));
+  queryClient.setQueryData(issueKeys.list(SLUG, PROJECT, {} as never), {
+    results: [row(ISSUE, "Fix login")],
   });
   const wrapper = ({ children }: { children: React.ReactNode }) => (
     <QueryClientProvider client={queryClient}>
@@ -185,6 +198,18 @@ describe("spreadsheet writes", () => {
     expect(notifyError).toHaveBeenCalledWith(SHEET_UPDATE_FAILED_TITLE, "Refused");
   });
 
+  it("sends the sub_issue filter with every sheet list read", async () => {
+    const state: StubState = { calls: [], failWrite: false };
+    const client = stubClient(state);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const options = sheetIssuesQueryOptions(client, SLUG, PROJECT, { orderBy: "-created_at", showSubIssues: true });
+    await queryClient.fetchInfiniteQuery(options);
+    const call = state.calls.find((entry) => entry.url.includes(`/projects/${PROJECT}/issues/`));
+    expect(new URL(call?.url ?? "", "https://api.test").searchParams.get("sub_issue")).toBe("true");
+    const off = sheetIssuesQueryOptions(client, SLUG, PROJECT, { orderBy: "-created_at", showSubIssues: false });
+    expect(off.queryKey).not.toEqual(options.queryKey);
+  });
+
   it("adds to and clears from a cycle through the bridge", async () => {
     const state: StubState = { calls: [], failWrite: false };
     const { queryClient, key, wrapper } = setup(state);
@@ -224,6 +249,26 @@ describe("spreadsheet writes", () => {
     expect(firstRow(queryClient, key).module_ids).toEqual([MODULE]);
     const call = state.calls.find((entry) => entry.method === "POST" && entry.url.includes("modules"));
     expect(call?.body).toContain(MODULE);
+  });
+
+  it("sends removed modules and patches detail and flat-list caches", async () => {
+    const state: StubState = { calls: [], failWrite: false };
+    const { queryClient, key, wrapper } = setup(state);
+    queryClient.setQueryData(key, {
+      pages: [page([row(ISSUE, "Fix login", { module_ids: [MODULE] })])],
+      pageParams: [""],
+    });
+    const { result } = renderHook(() => useSheetModuleUpdate(SLUG, PROJECT), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({ issueId: ISSUE, moduleIds: [], previousModuleIds: [MODULE] });
+    });
+    const call = state.calls.find((entry) => entry.method === "POST" && entry.url.includes("modules"));
+    expect(call?.body).toContain("removed_modules");
+    expect(queryClient.getQueryData<IssueListItem>(issueKeys.detail(SLUG, ISSUE))?.module_ids).toEqual([]);
+    expect(
+      queryClient.getQueryData<{ results: IssueListItem[] }>(issueKeys.list(SLUG, PROJECT, {} as never))?.results[0]
+        ?.module_ids
+    ).toEqual([]);
   });
 
   it("quick-add inserts a temp row, then swaps in the created row and toasts", async () => {

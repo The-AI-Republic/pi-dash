@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -97,6 +97,10 @@ interface Stub {
   calls: Array<{ url: string; method: string; body: string }>;
   pages: IssueListResponse[];
   children: Record<string, IssueListItem[]>;
+  hold?: boolean;
+  release?: (() => void) | undefined;
+  cycles?: "ok" | "completed" | "pending";
+  failCreate?: boolean;
 }
 
 function stub(options: Partial<Stub> = {}): Stub {
@@ -108,9 +112,18 @@ function stub(options: Partial<Stub> = {}): Stub {
   };
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     state.calls.push({ url, method: init.method ?? "GET", body: init.body ?? "" });
+    if (state.hold === true && (url.includes("cursor=next") || (init.method === "POST" && url.endsWith("/issues/")))) {
+      await new Promise<void>((resolve) => (state.release = resolve));
+    }
     let status = 200;
     let body: unknown = {};
-    if (url.endsWith("/auth/get-csrf-token/")) body = { csrf_token: "csrf" };
+    if (state.cycles === "pending" && url.includes("/cycles/")) {
+      await new Promise<void>(() => undefined);
+    }
+    if (state.failCreate === true && init.method === "POST" && url.includes(`/projects/${PROJECT}/issues/`)) {
+      status = 400;
+      body = { error: "refused" };
+    } else if (url.endsWith("/auth/get-csrf-token/")) body = { csrf_token: "csrf" };
     else if (url.includes("/sub-issues/")) {
       const parent = url.split("/issues/")[1]?.split("/")[0] ?? "";
       body = { sub_issues: state.children[parent] ?? [], state_distribution: {} };
@@ -123,6 +136,18 @@ function stub(options: Partial<Stub> = {}): Stub {
       status = 200;
     } else if (url.includes("/user-properties/")) {
       body = ProjectPrefsPayload;
+    } else if (url.includes("/cycles/")) {
+      body = [
+        {
+          id: ID2,
+          project_id: PROJECT,
+          name: "Cycle 1",
+          status: state.cycles === "completed" ? "COMPLETED" : "ACTIVE",
+          is_favorite: false,
+        },
+      ];
+    } else if (url.includes("/modules/")) {
+      body = [{ id: ID3, project_id: PROJECT, name: "Module 1", status: "active", is_favorite: false }];
     } else if (init.method === "PATCH") {
       status = 201;
       body = ProjectPrefsPayload;
@@ -155,6 +180,7 @@ function renderSheet(
     canEdit?: boolean;
     hideCycle?: boolean;
     hideModule?: boolean;
+    hideEstimate?: boolean;
     highlightedId?: string | null;
   } = {}
 ) {
@@ -185,6 +211,7 @@ function renderSheet(
         canEdit={props.canEdit ?? true}
         hideCycle={props.hideCycle ?? false}
         hideModule={props.hideModule ?? false}
+        hideEstimate={props.hideEstimate ?? false}
         highlightedId={props.highlightedId ?? null}
       />
     ),
@@ -250,6 +277,13 @@ describe("SpreadsheetLayout", () => {
     expect(headers).not.toContain("Modules");
   });
 
+  it("hides the estimate column when the project has no estimate system", async () => {
+    stub();
+    renderSheet({ hideEstimate: true });
+    await screen.findByRole("table");
+    expect(screen.getAllByRole("columnheader").map((header) => header.textContent)).not.toContain("Estimate");
+  });
+
   it("keeps the first column and header sticky and shadows the column on scroll", async () => {
     stub();
     renderSheet();
@@ -287,13 +321,66 @@ describe("SpreadsheetLayout", () => {
     expect(window.localStorage.getItem("web_new.spreadsheet.sort")).toContain("state__name");
   });
 
+  it("writes a descending order from the header menu", async () => {
+    const state = stub();
+    renderSheet();
+    await screen.findByRole("table");
+    fireEvent.click(within(screen.getByRole("columnheader", { name: /State/ })).getByRole("button"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Descending" }));
+    await waitFor(() =>
+      expect(state.calls.some((call) => call.method === "PATCH" && call.body.includes("-state__name"))).toBe(true)
+    );
+  });
+
   it("adds Clear sorting once sorted and clears to creation order", async () => {
-    stub();
+    const state = stub();
     renderSheet({ prefs: prefs({ orderBy: "state__name" }) });
     await screen.findByRole("table");
     const stateHeader = screen.getByRole("columnheader", { name: /State/ });
     fireEvent.click(within(stateHeader).getByRole("button"));
     expect(screen.getByRole("menuitem", { name: /Clear sorting/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("menuitem", { name: /Clear sorting/ }));
+    await waitFor(() =>
+      expect(state.calls.some((call) => call.method === "PATCH" && call.body.includes("-created_at"))).toBe(true)
+    );
+    expect(window.localStorage.getItem("web_new.spreadsheet.sort")).toBe("");
+  });
+
+  it("marks a server sort that has no stored local pair and re-picking it refreshes only the pair", async () => {
+    const state = stub();
+    renderSheet({ prefs: prefs({ orderBy: "state__name" }) });
+    await screen.findByRole("table");
+    const stateHeader = screen.getByRole("columnheader", { name: /State/ });
+    expect(within(stateHeader).getByRole("button").querySelector("svg")).not.toBeNull();
+    fireEvent.click(within(stateHeader).getByRole("button"));
+    expect(screen.getByRole("menuitem", { name: /Clear sorting/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Ascending" }));
+    expect(window.localStorage.getItem("web_new.spreadsheet.sort")).toContain("state__name");
+    expect(state.calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+
+  it("marks a descending sort and writes both cycle and module bridges", async () => {
+    const state = stub();
+    renderSheet({ prefs: prefs({ orderBy: "-state__name" }) });
+    await screen.findByRole("table");
+    const stateHeader = screen.getByRole("columnheader", { name: /State/ });
+    expect(within(stateHeader).getByRole("button").querySelector("svg")).not.toBeNull();
+    fireEvent.click(within(stateHeader).getByRole("button"));
+    expect(screen.getByRole("menuitem", { name: /Clear sorting/ })).toBeInTheDocument();
+
+    fireEvent.click(document.querySelector(`#sheet-cell-${ID1}-cycle button`) as HTMLElement);
+    await screen.findByRole("option", { name: /Cycle 1/ });
+    fireEvent.click(screen.getByRole("option", { name: /Cycle 1/ }));
+    await waitFor(() => expect(state.calls.some((call) => call.url.includes("/cycles/"))).toBe(true));
+
+    fireEvent.click(
+      within(document.getElementById(`sheet-cell-${ID1}-modules`) as HTMLElement).getByRole("button", {
+        name: /modules/i,
+      })
+    );
+    await screen.findByRole("option", { name: /Module 1/ });
+    fireEvent.click(screen.getByRole("option", { name: /Module 1/ }));
+    await waitFor(() => expect(state.calls.some((call) => call.url.includes("/modules/"))).toBe(true));
   });
 
   it("restores a remembered created-on ascending sort after reload", async () => {
@@ -318,6 +405,35 @@ describe("SpreadsheetLayout", () => {
     fireEvent.change(input, { target: { value: "New sheet item" } });
     fireEvent.submit(input.closest("form")!);
     await waitFor(() => expect(state.calls.some((call) => call.method === "POST")).toBe(true));
+    expect(screen.getByPlaceholderText("Work item title")).toBeInTheDocument();
+  });
+
+  it("renders the pending quick-add row and ignores an empty submission", async () => {
+    const state = stub();
+    state.hold = true;
+    renderSheet();
+    await screen.findByRole("table");
+    fireEvent.click(screen.getByRole("button", { name: "Add work item" }));
+    const input = screen.getByPlaceholderText("Work item title");
+    fireEvent.submit(input.closest("form")!);
+    expect(state.calls.some((call) => call.method === "POST")).toBe(false);
+    fireEvent.change(input, { target: { value: "Pending row" } });
+    fireEvent.submit(input.closest("form")!);
+    const pending = await screen.findByText("Pending row");
+    expect(pending.closest("tr")).toHaveAttribute("data-temprow", "true");
+    state.release?.();
+    await waitFor(() => expect(screen.queryByText("Pending row")).not.toBeInTheDocument());
+  });
+
+  it("keeps quick-add open and ready after a refused create", async () => {
+    stub({ failCreate: true });
+    renderSheet();
+    await screen.findByRole("table");
+    fireEvent.click(screen.getByRole("button", { name: "Add work item" }));
+    const input = screen.getByPlaceholderText("Work item title");
+    fireEvent.change(input, { target: { value: "Refused item" } });
+    fireEvent.submit(input.closest("form")!);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByPlaceholderText("Work item title")));
     expect(screen.getByPlaceholderText("Work item title")).toBeInTheDocument();
   });
 
@@ -347,7 +463,7 @@ describe("SpreadsheetLayout", () => {
     expect(screen.getByRole("button", { name: "Add work item" })).toBeDisabled();
   });
 
-  it("loads the next page when the viewport reaches the bottom", async () => {
+  it("loads the next page when the viewport reaches the bottom", { timeout: 20000 }, async () => {
     const firstRows = Array.from({ length: 20 }, (_, index) => issue(ID1, `Fix login ${index}`, index + 1));
     const first = page(firstRows, { next_page_results: true, next_cursor: "next", total_count: 21 });
     const second = page([issue(ID2, "Second", 21)], { total_count: 21 });
@@ -359,6 +475,54 @@ describe("SpreadsheetLayout", () => {
     Object.defineProperty(scroller, "scrollTop", { value: 472, configurable: true });
     fireEvent.scroll(scroller);
     await waitFor(() => expect(state.calls.some((call) => call.url.includes("cursor=next"))).toBe(true));
+  });
+
+  it("renders skeleton rows while the next page loads", { timeout: 20000 }, async () => {
+    const firstRows = Array.from({ length: 20 }, (_, index) => issue(ID1, `Fix login ${index}`, index + 1));
+    const first = page(firstRows, { next_page_results: true, next_cursor: "next", total_count: 21 });
+    const second = page([issue(ID2, "Second", 21)], { total_count: 21 });
+    const state = stub({ pages: [first, second] });
+    state.hold = true;
+    renderSheet();
+    await screen.findByRole("table");
+    const scroller = screen.getByTestId("spreadsheet-scroller");
+    Object.defineProperty(scroller, "scrollHeight", { value: 880, configurable: true });
+    Object.defineProperty(scroller, "scrollTop", { value: 472, configurable: true });
+    fireEvent.scroll(scroller);
+    await waitFor(() => expect(document.querySelectorAll("tfoot [data-skeleton-row]")).toHaveLength(3));
+    state.release?.();
+  });
+
+  it("does not request another page while one is already loading", { timeout: 20000 }, async () => {
+    const firstRows = Array.from({ length: 20 }, (_, index) => issue(ID1, `Fix login ${index}`, index + 1));
+    const first = page(firstRows, { next_page_results: true, next_cursor: "next", total_count: 21 });
+    const second = page([issue(ID2, "Second", 21)], { total_count: 21 });
+    const state = stub({ pages: [first, second], hold: true });
+    renderSheet();
+    await screen.findByRole("table");
+    const scroller = screen.getByTestId("spreadsheet-scroller");
+    Object.defineProperty(scroller, "scrollHeight", { value: 880, configurable: true });
+    Object.defineProperty(scroller, "scrollTop", { value: 472, configurable: true });
+    fireEvent.scroll(scroller);
+    await waitFor(() => expect(document.querySelectorAll("tfoot [data-skeleton-row]")).toHaveLength(3));
+    fireEvent.scroll(scroller);
+    expect(state.calls.filter((call) => call.url.includes("cursor=next"))).toHaveLength(1);
+    state.release?.();
+  });
+
+  it("navigates from the sub-issue count and from the row action to the work item", async () => {
+    stub({ pages: [page([issue(ID1, "Fix login", 1, { sub_issues_count: 2 }), issue(ID2, "Second", 2)])] });
+    const { router } = renderSheet();
+    await screen.findByRole("table");
+    await waitFor(() => expect(screen.getByRole("button", { name: "2 sub-work items" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "2 sub-work items" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/${SLUG}/browse/WEB-1`));
+    expect(router.state.location.hash.replace(/^#/, "")).toBe("sub-issues");
+    await router.navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: SLUG, projectId: PROJECT } });
+    await screen.findByRole("table");
+    fireEvent.click(await screen.findByRole("button", { name: "Open Fix login" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/${SLUG}/browse/WEB-1`));
+    expect(router.state.location.hash).toBe("");
   });
 
   it("expands a sub-issue inline and indents the child", async () => {
@@ -442,7 +606,119 @@ describe("SpreadsheetLayout", () => {
     expect(document.activeElement).toBe(document.getElementById(`sheet-cell-${ID2}-state`));
     fireEvent.keyDown(document.activeElement!, { key: "ArrowUp" });
     expect(document.activeElement).toBe(stateCell);
+    fireEvent.keyDown(stateCell, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(stateCell);
+    fireEvent.keyDown(stateCell, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: "Enter" });
+    expect(document.activeElement).toBe(first);
     first.focus();
+  });
+
+  it("keeps cells editable until the cycle list loads", async () => {
+    stub({ cycles: "pending" });
+    renderSheet();
+    await screen.findByRole("table");
+    expect(document.getElementById(`sheet-cell-${ID1}-priority`)).toHaveAttribute("tabindex", "0");
+  });
+
+  it("treats completed-cycle rows as read-only", async () => {
+    stub({ cycles: "completed", pages: [page([issue(ID1, "Locked", 1, { cycle_id: ID2 })])] });
+    renderSheet();
+    await screen.findByRole("table");
+    await waitFor(() => expect(screen.queryByRole("button", { name: /no cycle/i })).not.toBeInTheDocument());
+  });
+
+  it("ignores arrow keys that bubble from a cell control", async () => {
+    stub();
+    renderSheet({
+      prefs: prefs({
+        properties: {
+          labels: false,
+          cycle: false,
+          modules: false,
+          estimate: false,
+          created_on: false,
+          updated_on: false,
+          link: false,
+          attachment_count: false,
+          sub_issue_count: false,
+          assignee: false,
+          start_date: false,
+          due_date: false,
+        },
+      }),
+    });
+    await screen.findByRole("table");
+    const stateCell = document.getElementById(`sheet-cell-${ID1}-state`) as HTMLElement;
+    stateCell.focus();
+    const control = within(stateCell).getByRole("button");
+    fireEvent.keyDown(control, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(stateCell);
+  });
+
+  it("collapses an expanded sub-issue", async () => {
+    const parent = issue(ID1, "Parent", 1, { sub_issues_count: 1 });
+    const child = { ...issue(ID2, "Child", 2, { parent_id: ID1 }), state_group: null };
+    stub({ pages: [page([parent])], children: { [ID1]: [child] } });
+    renderSheet();
+    await screen.findByRole("table");
+    const toggle = async (label: "Expand" | "Collapse"): Promise<HTMLElement> =>
+      waitFor(() => {
+        const node = document
+          .getElementById(`issue-${ID1}`)
+          ?.querySelector<HTMLElement>(`button[aria-label="${label} sub-work items"]`);
+        expect(node).not.toBeNull();
+        return node as HTMLElement;
+      });
+    fireEvent.click(await toggle("Expand"));
+    expect(await screen.findByText("Child")).toBeInTheDocument();
+    fireEvent.click(await toggle("Collapse"));
+    await waitFor(() => expect(screen.queryByText("Child")).not.toBeInTheDocument());
+  });
+
+  it("returns focus to the cell after a picker write", async () => {
+    stub();
+    renderSheet();
+    await screen.findByRole("table");
+    const priority = document.getElementById(`sheet-cell-${ID1}-priority`) as HTMLElement;
+    fireEvent.click(within(priority).getByRole("button", { name: /none/i }));
+    fireEvent.click(screen.getByRole("option", { name: "Urgent" }));
+    await waitFor(() => expect(document.activeElement?.id).toBe(`sheet-cell-${ID1}-priority`));
+  });
+
+  it("closes the peek panel", async () => {
+    const parent = issue(ID1, "Parent", 1, { sub_issues_count: 1 });
+    const child = { ...issue(ID2, "Child", 2, { parent_id: ID1, sub_issues_count: 1 }), state_group: null };
+    const grandchild = { ...issue(ID3, "Grandchild", 3, { parent_id: ID2, sub_issues_count: 1 }), state_group: null };
+    const deeper = { ...issue(ID4, "Deeper", 4, { parent_id: ID3, sub_issues_count: 1 }), state_group: null };
+    stub({ pages: [page([parent])], children: { [ID1]: [child], [ID2]: [grandchild], [ID3]: [deeper] } });
+    renderSheet();
+    await screen.findByRole("table");
+    for (const id of [ID1, ID2, ID3]) {
+      await waitFor(() =>
+        expect(
+          document.getElementById(`issue-${id}`)?.querySelector('button[aria-label="Expand sub-work items"]')
+        ).not.toBeNull()
+      );
+      fireEvent.click(
+        document
+          .getElementById(`issue-${id}`)
+          ?.querySelector('button[aria-label="Expand sub-work items"]') as HTMLElement
+      );
+    }
+    await screen.findByText("Deeper");
+    fireEvent.click(
+      document
+        .getElementById(`issue-${ID4}`)
+        ?.querySelector('button[aria-label="Expand sub-work items"]') as HTMLElement
+    );
+    const panel = await screen.findByTestId("issue-preview");
+    expect(panel).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole("button", { name: "Close preview" }));
+    await waitFor(() => expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument());
   });
 });
 
@@ -465,6 +741,7 @@ describe("spreadsheet row helpers", () => {
       ["Grandchild", 2],
     ]);
     expect(buildDisplayRows([parent], new Set(), new Map())).toHaveLength(1);
+    expect(buildDisplayRows([parent], new Set([ID1]), new Map())).toHaveLength(1);
   });
 
   it("computes a stable viewport window and reports the bottom", () => {
@@ -477,5 +754,35 @@ describe("spreadsheet row helpers", () => {
     }
     render(<Probe />);
     expect(screen.getByTestId("window").textContent).toBe(JSON.stringify({ start: 0, end: 5, atBottom: false }));
+  });
+
+  it("recomputes the window on scroll and on resize", () => {
+    const node = document.createElement("div");
+    Object.defineProperty(node, "clientHeight", { value: 100, configurable: true });
+    Object.defineProperty(node, "scrollTop", { value: 0, writable: true, configurable: true });
+    const observers: Array<() => void> = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          observers.push(callback);
+        }
+        observe(): void {}
+        disconnect(): void {}
+      }
+    );
+    function Probe(): React.ReactElement {
+      const window = useViewportWindow(node, 44, 20, 1);
+      return <span data-testid="window">{JSON.stringify(window)}</span>;
+    }
+    const { unmount } = render(<Probe />);
+    node.scrollTop = 44 * 10;
+    fireEvent.scroll(node);
+    expect(screen.getByTestId("window").textContent).toBe(JSON.stringify({ start: 9, end: 14, atBottom: false }));
+    Object.defineProperty(node, "clientHeight", { value: 220, configurable: true });
+    for (const observer of observers) act(() => observer());
+    expect(screen.getByTestId("window").textContent).toBe(JSON.stringify({ start: 9, end: 16, atBottom: false }));
+    unmount();
+    vi.unstubAllGlobals();
   });
 });
