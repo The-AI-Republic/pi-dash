@@ -17,11 +17,36 @@ import { createAppClient, resetAppClient } from "../../../../core/api/client.js"
 import { IssuesLoaderProvider } from "../../loaders/loaderContext.js";
 import type { IssuesEntity, PrefsRecord } from "../../prefs/entities.js";
 import { prefsQueryOptions } from "../../prefs/prefsQuery.js";
+import { richFilterFields } from "./expression.js";
+import { sessionKeys } from "../../../../core/session/queries.js";
 import { useRichFilterBuilder, type RichFilterBuilderProps } from "./RichFilterBuilder.js";
+import { FieldConfigRegistry } from "./temporary.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const ENTITY: IssuesEntity = { scope: "project", projectId: PROJECT };
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
+const VIEW_RECORD = {
+  id: "323e4567-e89b-12d3-a456-426614174002",
+  workspace: UUID,
+  project: PROJECT,
+  name: "Triage",
+  description: "",
+  query: {},
+  filters: {},
+  display_filters: { layout: "list" },
+  display_properties: {},
+  rich_filters: {},
+  access: 0,
+  sort_order: 1,
+  logo_props: {},
+  owned_by: UUID,
+  is_locked: false,
+  archived_at: null,
+  created_by: UUID,
+  updated_by: UUID,
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+};
 
 function record(richFilters: Record<string, unknown>): PrefsRecord & Record<string, unknown> {
   return {
@@ -108,7 +133,20 @@ describe("rich filter builder empty state", () => {
       within(list)
         .getAllByRole("option")
         .map((row) => row.textContent)
-    ).toEqual(["State", "State Group", "Priority", "Assignees", "Created by", "Mentions", "Label"]);
+    ).toEqual([
+      "State",
+      "State Group",
+      "Priority",
+      "Assignees",
+      "Created by",
+      "Mentions",
+      "Label",
+      "Project",
+      "Cycle",
+      "Module",
+      "Target date",
+      "Start date",
+    ]);
   });
 
   it("adds a draft condition without patching an unchanged expression", async () => {
@@ -161,11 +199,11 @@ describe("rich filter builder populated state", () => {
     expect(patches).toHaveLength(0);
 
     const second = screen.getAllByTestId("rich-condition")[1]!;
-    await user.click(within(second).getByRole("button", { name: /Select value/ }));
+    await user.click(within(second).getByRole("button", { name: /^--$/ }));
     await user.click(await screen.findByRole("option", { name: "Started" }));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0]).toEqual({
-      rich_filters: { and: [{ priority__in: "none" }, { state_group__in: ["started"] }] },
+      rich_filters: { and: [{ priority__in: "none" }, { state_group__exact: "started" }] },
     });
   });
 
@@ -176,7 +214,7 @@ describe("rich filter builder populated state", () => {
     await user.click(within(pill).getByRole("button", { name: /Priority/ }));
     await user.click(await screen.findByRole("option", { name: "State Group" }));
     expect(within(pill).getByRole("button", { name: /State Group/ })).toBeInTheDocument();
-    expect(within(pill).getByRole("button", { name: /Select value/ })).toBeInTheDocument();
+    expect(within(pill).getByRole("button", { name: /^--$/ })).toBeInTheDocument();
     // The reset value makes the stored condition incomplete, so the old
     // filter leaves the record and the new one waits for a value.
     await waitFor(() => expect(patches).toHaveLength(1));
@@ -204,15 +242,7 @@ describe("rich filter builder populated state", () => {
   it("marks used fields out of the add picker and shows exhaustion", async () => {
     const user = userEvent.setup();
     setup({
-      and: [
-        { state_id__in: [UUID] },
-        { state_group__in: "started" },
-        { priority__in: "none" },
-        { assignee_id__in: [UUID] },
-        { created_by_id__in: [UUID] },
-        { mention_id__in: [UUID] },
-        { label_id__in: [UUID] },
-      ],
+      and: richFilterFields().map((field) => ({ [`${field.stem}__in`]: "x" })),
     });
     await user.click(screen.getByRole("button", { name: "Add filter" }));
     const exhausted = await screen.findByRole("option", { name: "All filters applied" });
@@ -225,7 +255,7 @@ describe("rich filter builder populated state", () => {
     await user.click(screen.getByRole("button", { name: "Add filter" }));
     await user.click(await screen.findByRole("option", { name: "State Group" }));
     const second = screen.getAllByTestId("rich-condition")[1]!;
-    await user.click(within(second).getByRole("button", { name: /Select value/ }));
+    await user.click(within(second).getByRole("button", { name: /^--$/ }));
     await user.click(await screen.findByRole("option", { name: "Started" }));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(hold).toBe(true);
@@ -246,5 +276,243 @@ describe("rich filter builder populated state", () => {
     await user.click(within(first).getByRole("button", { name: "Remove filter" }));
     await waitFor(() => expect(patches).toHaveLength(1));
     await waitFor(() => expect(screen.getAllByTestId("rich-condition")).toHaveLength(2));
+  });
+
+  it("clear all drops every condition and stores the empty expression", async () => {
+    const user = userEvent.setup();
+    const { patches } = setup({ and: [{ priority__in: "none" }, { state_group__in: "started" }] });
+    await user.click(screen.getByTestId("rich-clear-all"));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]).toEqual({ rich_filters: {} });
+    // An empty expression hides the row and returns the Add control.
+    await waitFor(() => expect(screen.getByTestId("rich-filter-add")).toBeInTheDocument());
+  });
+});
+
+describe("view row wiring", () => {
+  function ViewHarness(props: {
+    richFilters: Record<string, unknown>;
+    view?: RichFilterBuilderProps["view"];
+    onViewUpdated?: (view: import("@pidash/api-client").SavedView) => void;
+  }): React.ReactElement {
+    const { row } = useRichFilterBuilder({
+      workspaceSlug: "acme",
+      projectId: PROJECT,
+      entity: ENTITY,
+      hideCycle: false,
+      hideModule: false,
+      view: props.view,
+      onViewUpdated: props.onViewUpdated,
+    });
+    return <div>{row}</div>;
+  }
+
+  function setupView(
+    richFilters: Record<string, unknown>,
+    view?: RichFilterBuilderProps["view"]
+  ): { patches: Array<Record<string, unknown>>; onViewUpdated: ReturnType<typeof vi.fn> } {
+    const patches: Array<Record<string, unknown>> = [];
+    createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
+      }
+      if (init.method === "PATCH") {
+        const body = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
+        patches.push(body);
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ ...VIEW_RECORD, rich_filters: body["rich_filters"] }),
+        };
+      }
+      return { status: 200, url, headers: { get: () => null }, text: async () => JSON.stringify(record(richFilters)) };
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(prefsQueryOptions({} as never, "acme", ENTITY).queryKey, record(richFilters));
+    queryClient.setQueryData(sessionKeys.me, { id: VIEW_RECORD.owned_by });
+    queryClient.setQueryData(sessionKeys.workspaces, [
+      { id: UUID, name: "Acme", slug: "acme", logo_url: null, total_members: 3, role: 20 },
+    ]);
+    const onViewUpdated = vi.fn();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <IssuesLoaderProvider>
+          <ViewHarness richFilters={richFilters} view={view} onViewUpdated={onViewUpdated} />
+        </IssuesLoaderProvider>
+      </QueryClientProvider>
+    );
+    return { patches, onViewUpdated };
+  }
+
+  it("offers Update view for a changed owned view and reports the patch payload", async () => {
+    const user = userEvent.setup();
+    const { patches, onViewUpdated } = setupView(
+      { priority__in: "none" },
+      {
+        view: { ...VIEW_RECORD, rich_filters: { priority__in: "urgent" } } as never,
+        isDefault: false,
+      }
+    );
+    await user.click(await screen.findByRole("button", { name: "Update view" }));
+    await waitFor(() => expect(onViewUpdated).toHaveBeenCalledTimes(1));
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.["rich_filters"]).toEqual({ priority__in: "none" });
+    expect(onViewUpdated.mock.calls[0]?.[0]).toMatchObject({ id: VIEW_RECORD.id });
+  });
+
+  it("treats a view with no project as a workspace view", async () => {
+    const user = userEvent.setup();
+    const { patches } = setupView(
+      { priority__in: "none" },
+      {
+        view: { ...VIEW_RECORD, project: null, rich_filters: { priority__in: "urgent" } } as never,
+        isDefault: false,
+      }
+    );
+    await user.click(await screen.findByRole("button", { name: "Update view" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+  });
+
+  it("offers Save as for a saved view and Save view on a bare list", async () => {
+    const user = userEvent.setup();
+    setupView(
+      { priority__in: "none" },
+      {
+        view: {
+          ...VIEW_RECORD,
+          rich_filters: { priority__in: "none" },
+          // A view saved from this row carries the full display snapshot.
+          display_filters: { layout: "list", group_by: null, sub_group_by: null, order_by: "sort_order" },
+        } as never,
+        isDefault: false,
+      }
+    );
+    expect(await screen.findByRole("button", { name: "Save as" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
+    const first = screen.getByTestId("rich-condition");
+    await user.click(within(first).getByRole("button", { name: "Remove filter" }));
+  });
+});
+
+describe("temporary builder instances", () => {
+  function TemporaryHarness({
+    temporary,
+    registry,
+  }: {
+    temporary: boolean;
+    registry?: FieldConfigRegistry | undefined;
+  }): React.ReactElement {
+    const { control, row, instanceId } = useRichFilterBuilder({
+      workspaceSlug: "acme",
+      projectId: PROJECT,
+      entity: ENTITY,
+      hideCycle: false,
+      hideModule: false,
+      temporary,
+      temporaryRegistry: registry,
+    });
+    return (
+      <div>
+        <span data-testid="instance-id">{instanceId}</span>
+        <div data-testid="control-slot">{control}</div>
+        {row}
+      </div>
+    );
+  }
+
+  function mountTemporary(registry?: FieldConfigRegistry): void {
+    // No transport at all: a persisted read would throw here, so mounting
+    // proves the temporary branch never touches the prefs query.
+    createAppClient("https://api.test", (() => {
+      throw new Error("temporary instances must not read the server");
+    }) as never);
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <IssuesLoaderProvider>
+          <TemporaryHarness temporary registry={registry} />
+        </IssuesLoaderProvider>
+      </QueryClientProvider>
+    );
+  }
+
+  it("mints a TEMP- id and starts with an add control", () => {
+    mountTemporary();
+    expect(screen.getByTestId("instance-id")).toHaveTextContent(/^TEMP-\d+$/);
+    expect(screen.getByTestId("rich-filter-add")).toBeInTheDocument();
+    expect(screen.queryByTestId("rich-filter-row")).not.toBeInTheDocument();
+  });
+
+  it("keeps edits in memory and never patches", async () => {
+    const user = userEvent.setup();
+    mountTemporary();
+    await user.click(screen.getByTestId("rich-filter-add"));
+    await user.click(await screen.findByRole("option", { name: "Priority" }));
+    const pill = await screen.findByTestId("rich-condition");
+    await user.click(within(pill).getByRole("button", { name: /^--$/ }));
+    await user.click(await screen.findByRole("option", { name: "Urgent" }));
+    expect(screen.getByTestId("rich-condition")).toHaveTextContent("Urgent");
+    // A second condition proves the in-memory list keeps accumulating.
+    await user.click(screen.getByRole("button", { name: "Add filter" }));
+    await user.click(await screen.findByRole("option", { name: "State group" }));
+    expect(screen.getAllByTestId("rich-condition")).toHaveLength(2);
+  });
+
+  it("names persisted instances after their entity", () => {
+    createAppClient("https://api.test", (() => {
+      throw new Error("seeded instance ids need no read");
+    }) as never);
+    const scopes: IssuesEntity[] = [
+      { scope: "project", projectId: PROJECT },
+      { scope: "cycle", projectId: PROJECT, cycleId: "cycle-1" },
+      { scope: "module", projectId: PROJECT, moduleId: "module-1" },
+      { scope: "epics", projectId: PROJECT },
+      { scope: "workspace" },
+    ];
+    const expected = [
+      `project:${PROJECT}`,
+      `cycle:${PROJECT}/cycle-1`,
+      `module:${PROJECT}/module-1`,
+      `epics:epics/${PROJECT}`,
+      "workspace:workspace",
+    ];
+    scopes.forEach((entity, index) => {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      queryClient.setQueryData(prefsQueryOptions({} as never, "acme", entity).queryKey, record({}));
+      function ScopedHarness(): React.ReactElement {
+        const { instanceId } = useRichFilterBuilder({
+          workspaceSlug: "acme",
+          projectId: PROJECT,
+          entity,
+          hideCycle: false,
+          hideModule: false,
+        });
+        return <span data-testid="instance-id">{instanceId}</span>;
+      }
+      const { unmount } = render(
+        <QueryClientProvider client={queryClient}>
+          <IssuesLoaderProvider>
+            <ScopedHarness />
+          </IssuesLoaderProvider>
+        </QueryClientProvider>
+      );
+      expect(screen.getByTestId("instance-id")).toHaveTextContent(expected[index]!);
+      unmount();
+    });
+  });
+
+  it("registers held fields in the temporary registry", async () => {
+    const user = userEvent.setup();
+    const registry = new FieldConfigRegistry();
+    mountTemporary(registry);
+    expect(registry.activeProperties()).toEqual([]);
+    await user.click(screen.getByTestId("rich-filter-add"));
+    await user.click(await screen.findByRole("option", { name: "Priority" }));
+    await waitFor(() => expect(registry.activeProperties()).toEqual(["priority"]));
+    // Clear all stays available in memory; save and update do not, since a
+    // temp instance has no record to write.
+    expect(screen.getByTestId("rich-clear-all")).toBeInTheDocument();
+    expect(screen.queryByTestId("rich-save-view")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
   });
 });

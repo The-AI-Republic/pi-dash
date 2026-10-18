@@ -113,9 +113,35 @@ function parseExpressionChild(child: unknown, key: string): RichCondition[] {
   return parseLeaf(child, key);
 }
 
+/**
+ * The stored lookup for a base operator and value. A collection pick with
+ * one item stores the scalar lookup under the same field, matching the
+ * filter set; two or more keep the collection lookup. The UI operator
+ * stays the base one either way.
+ */
+export function payloadOperator(operator: string, value: unknown): string {
+  if (operator === "in" && Array.isArray(value) && value.length <= 1) return "exact";
+  return operator;
+}
+
+/**
+ * The list endpoint's filter leaves carry scalar strings. Multi picks
+ * become one comma-separated value under `__in` (the FilterSet's
+ * collection widgets parse CSV), and a date range becomes `"start,end"`
+ * under `__range`.
+ */
+function payloadValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const entries = value.filter((entry) => typeof entry === "string" && entry !== "");
+    return entries.length === 1 ? entries[0] : entries.join(",");
+  }
+  return value;
+}
+
 /** Serialize one leaf; the caller wraps negation when needed. */
 function serializeLeaf(condition: RichCondition): Record<string, unknown> {
-  return { [`${condition.property}__${condition.operator}`]: condition.value };
+  const operator = payloadOperator(condition.operator, condition.value);
+  return { [`${condition.property}__${operator}`]: payloadValue(condition.value) };
 }
 
 /**
@@ -218,6 +244,10 @@ export interface RichFilterField {
   operators: readonly string[];
   /** Whether the field offers the negated form of each lookup. */
   allowNegative: boolean;
+  /** Earliest selectable day for a date kind, ISO (`YYYY-MM-DD`). */
+  min?: string | undefined;
+  /** Latest selectable day for a date kind, ISO (`YYYY-MM-DD`). */
+  max?: string | undefined;
   /** Static values for single/multi fields, when the field needs no read. */
   staticValues?: readonly { value: string; label: string }[];
   /** Where the value list comes from; absent means the static values. */
@@ -318,11 +348,14 @@ export function hideRichFilterFields(
   });
 }
 
-/** The field catalogue for one project surface. */
+/**
+ * The field catalogue for one project surface: the core choice fields
+ * plus the value-input fields this slice edits (ISS-100–103). Cycle and
+ * module disappear when their project features are off.
+ */
 export function richFilterFields(input?: { hideCycle?: boolean; hideModule?: boolean }): RichFilterField[] {
-  // Cycle, module, project and date dimensions register their fields as
-  // their slices land (ISS-089–094, ISS-100–103).
-  return hideRichFilterFields(DEFAULT_FIELDS, input ?? {});
+  const fields = withValueInputFields(DEFAULT_FIELDS);
+  return hideRichFilterFields(fields, input ?? {});
 }
 
 /** Find a field by its stored stem. */
@@ -417,4 +450,55 @@ export function valueLabel(field: RichFilterField, value: unknown): string | nul
     }
   }
   return labels.length === 0 ? null : labels.join(", ");
+}
+
+/** Build a catalogue entry with the common defaults spelled once. */
+function catalogField(input: {
+  stem: string;
+  label: string;
+  kind: RichFilterKind;
+  operators?: readonly string[];
+  allowNegative?: boolean;
+  source?: RichFilterField["source"];
+  min?: string;
+  max?: string;
+}): RichFilterField {
+  const operators = input.operators ?? ["in"];
+  return {
+    stem: input.stem,
+    label: input.label,
+    kind: input.kind,
+    defaultOperator: operators[0]!,
+    defaultNegated: false,
+    operators,
+    allowNegative: input.allowNegative ?? true,
+    ...(input.source === undefined ? {} : { source: input.source }),
+    ...(input.min === undefined ? {} : { min: input.min }),
+    ...(input.max === undefined ? {} : { max: input.max }),
+  };
+}
+
+/**
+ * Value-input fields (parity/specs/issues.md §9, ISS-100–103). Each entry
+ * carries the kind its value slot renders: searchable multi picks over the
+ * project (assignee, creator, mentions, labels, project, cycle, module),
+ * one bounded date (target date, no clear control) and a bounded date range
+ * (start date, which also offers the plain is lookup the oracle drives).
+ * Stems are the filter set's field names; entity-backed fields resolve
+ * their labels from the shared pickers, so reads stay lazy on open.
+ */
+export function valueInputFields(): RichFilterField[] {
+  return [
+    catalogField({ stem: "project_id", label: "Project", kind: "multi" }),
+    catalogField({ stem: "cycle_id", label: "Cycle", kind: "multi" }),
+    catalogField({ stem: "module_id", label: "Module", kind: "multi" }),
+    catalogField({ stem: "target_date", label: "Target date", kind: "date", operators: ["exact"] }),
+    catalogField({ stem: "start_date", label: "Start date", kind: "date_range", operators: ["exact", "range"] }),
+  ];
+}
+
+/** Merge the value-input fields into the base catalogue without duplicates. */
+export function withValueInputFields(fields: readonly RichFilterField[]): RichFilterField[] {
+  const known = new Set(fields.map((field) => field.stem));
+  return [...fields, ...valueInputFields().filter((field) => !known.has(field.stem))];
 }

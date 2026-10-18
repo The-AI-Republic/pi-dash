@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -27,6 +27,8 @@ afterEach(() => {
 const FIELDS = richFilterFields();
 const PRIORITY = findField(FIELDS, "priority")!;
 const STATE = findField(FIELDS, "state_id")!;
+const TARGET = findField(FIELDS, "target_date")!;
+const START = findField(FIELDS, "start_date")!;
 const PROJECT = "123e4567-e89b-12d3-a456-426614174000";
 const STATE_ID = "323e4567-e89b-12d3-a456-426614174002";
 const ME_ID = "11111111-1111-4111-8111-111111111111";
@@ -233,8 +235,8 @@ describe("ValueSlot", () => {
         />
       )
     );
-    expect(screen.getByRole("button", { name: /Select value/ })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    expect(screen.getByRole("button", { name: /^--$/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^--$/ }));
     const list = await screen.findByRole("listbox", { name: "Priority values" });
     expect(within(list).getAllByRole("option")).toHaveLength(5);
     await user.click(within(list).getByRole("option", { name: "Urgent" }));
@@ -352,7 +354,7 @@ describe("ValueSlot", () => {
     expect(within(list).getByRole("option", { name: "One" }).querySelector("svg")).toBeNull();
   });
 
-  it("counts more than two picks", () => {
+  it("shows the first two picks plus the overflow count", () => {
     render(
       wrap(
         <ValueSlot
@@ -364,7 +366,7 @@ describe("ValueSlot", () => {
         />
       )
     );
-    expect(screen.getByRole("button", { name: /3 selected/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Urgent, High +1 more" })).toBeInTheDocument();
   });
 
   it("lazy-loads workflow states and labels a resolved id", async () => {
@@ -488,7 +490,7 @@ describe("ValueSlot member and label sources", () => {
         />
       )
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    await user.click(screen.getByRole("button", { name: /^--$/ }));
     const list = await screen.findByRole("listbox", { name: "Assignees values" });
     expect(
       within(list)
@@ -619,7 +621,7 @@ describe("ValueSlot member and label sources", () => {
         />
       </QueryClientProvider>
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    await user.click(screen.getByRole("button", { name: /^--$/ }));
     expect((await screen.findAllByText("Loading values")).length).toBeGreaterThan(0);
   });
 });
@@ -645,7 +647,7 @@ describe("ValueSlot failure and suspended rows", () => {
         />
       </QueryClientProvider>
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    await user.click(screen.getByRole("button", { name: /^--$/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load assignees values.");
   });
 
@@ -698,10 +700,193 @@ describe("ValueSlot failure and suspended rows", () => {
         }
       )
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    await user.click(screen.getByRole("button", { name: /^--$/ }));
     const suspended = await screen.findByRole("option", { name: /Zoe/ });
     expect(suspended).toBeDisabled();
     await user.click(suspended);
     expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("ValueSlot date editors", () => {
+  it("opens the empty date slot by itself and closes after a day is picked", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition(null), property: "target_date", operator: "exact" }}
+          onChange={onChange}
+        />
+      )
+    );
+    const calendar = await screen.findByTestId("rich-date-calendar");
+    const firstDay = within(calendar).getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ })[0]!;
+    await user.click(firstDay);
+    expect(onChange).toHaveBeenCalledWith(firstDay.getAttribute("data-day"));
+    await waitFor(() => expect(screen.queryByTestId("rich-date-calendar")).not.toBeInTheDocument());
+  });
+
+  it("labels a set date and offers no clear control", async () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("2026-02-10"), property: "target_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    const trigger = screen.getByRole("button", { name: /2026-02-10/ });
+    expect(trigger).toHaveAttribute("data-empty", "false");
+    fireEvent.click(trigger);
+    const calendar = await screen.findByTestId("rich-date-calendar");
+    expect(within(calendar).queryByRole("button", { name: /clear/i })).not.toBeInTheDocument();
+  });
+
+  it("disables days outside the field's bounds", async () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={{ ...TARGET, min: "2026-02-05", max: "2026-02-20" }}
+          condition={{ ...condition("2026-02-10"), property: "target_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
+    const calendar = await screen.findByTestId("rich-date-calendar");
+    expect(within(calendar).getByRole("button", { name: "Thursday, February 5, 2026" })).toBeEnabled();
+    expect(within(calendar).getByRole("button", { name: "Wednesday, February 4, 2026" })).toBeDisabled();
+    expect(within(calendar).getByRole("button", { name: "Friday, February 20, 2026" })).toBeEnabled();
+    expect(within(calendar).getByRole("button", { name: "Saturday, February 21, 2026" })).toBeDisabled();
+  });
+
+  it("bounds the range calendar as well", async () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={{ ...START, min: "2026-02-05", max: "2026-02-20" }}
+          condition={{ ...condition(["2026-02-10", "2026-02-12"]), property: "start_date", operator: "range" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    expect(within(calendar).getByRole("button", { name: "Wednesday, February 4, 2026" })).toBeDisabled();
+    expect(within(calendar).getByRole("button", { name: "Saturday, February 21, 2026" })).toBeDisabled();
+  });
+
+  it("opens an incomplete range, warns, and commits only once both ends land", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(["2026-02-10", "2026-02-12"]), property: "start_date", operator: "range" }}
+          onChange={onChange}
+        />
+      )
+    );
+    expect(screen.getByTestId("rich-value-trigger").parentElement).toHaveAttribute("data-incomplete", "false");
+    fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    expect(within(calendar).getByRole("button", { name: "Tuesday, February 10, 2026" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+  });
+
+  it("keeps the first end in the slot and commits nothing", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(null), property: "start_date", operator: "range" }}
+          onChange={onChange}
+        />
+      )
+    );
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    const day = within(calendar).getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ })[0]!;
+    await user.click(day);
+    // The host value is untouched until both ends exist.
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getByTestId("rich-range-calendar")).toBeInTheDocument();
+    expect(screen.getByTestId("rich-value-trigger").parentElement).toHaveAttribute("data-incomplete", "true");
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent(`${day.getAttribute("data-day")} → …`);
+  });
+
+  it("commits both ends when the pending range completes", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(null), property: "start_date", operator: "range" }}
+          onChange={onChange}
+        />
+      )
+    );
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    const days = within(calendar).getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ });
+    const first = days[5]!;
+    const last = days[9]!;
+    await user.click(first);
+    await user.click(last);
+    expect(onChange).toHaveBeenCalledWith([first.getAttribute("data-day"), last.getAttribute("data-day")]);
+    await waitFor(() => expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument());
+  });
+
+  it("labels a start-only range with the open end", () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(["2026-02-10", null]), property: "start_date", operator: "range" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10 → …");
+    expect(screen.getByTestId("rich-value-trigger").parentElement).toHaveAttribute("data-incomplete", "true");
+  });
+
+  it("labels a complete range with both ends", () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(["2026-02-10", "2026-02-12"]), property: "start_date", operator: "range" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10 → 2026-02-12");
+    expect(screen.getByRole("button", { name: /2026-02-10/ })).toHaveAttribute("data-empty", "false");
   });
 });

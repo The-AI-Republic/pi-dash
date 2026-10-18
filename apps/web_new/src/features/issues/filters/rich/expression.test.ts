@@ -191,7 +191,7 @@ describe("condition operations", () => {
 });
 
 describe("field catalogue", () => {
-  it("offers the core fields this slice can edit", () => {
+  it("offers the core fields plus the value-input fields this slice edits", () => {
     expect(richFilterFields().map((field) => field.stem)).toEqual([
       "state_id",
       "state_group",
@@ -200,13 +200,19 @@ describe("field catalogue", () => {
       "created_by_id",
       "mention_id",
       "label_id",
+      "project_id",
+      "cycle_id",
+      "module_id",
+      "target_date",
+      "start_date",
     ]);
   });
 
   it("filters cycle and module when the flags hide them", () => {
-    expect(richFilterFields({ hideCycle: true, hideModule: true })).toHaveLength(7);
-    expect(richFilterFields({ hideCycle: false, hideModule: false })).toHaveLength(7);
-    expect(richFilterFields()).toHaveLength(7);
+    const all = richFilterFields();
+    expect(richFilterFields({ hideCycle: true, hideModule: true })).toHaveLength(all.length - 2);
+    expect(richFilterFields({ hideCycle: false, hideModule: false })).toHaveLength(all.length);
+    expect(richFilterFields()).toHaveLength(all.length);
   });
 
   it("drops exactly the dimension the surface hides", () => {
@@ -217,8 +223,10 @@ describe("field catalogue", () => {
     expect(hideRichFilterFields(withDimensions, { hideModule: true }).map((field) => field.stem)).not.toContain(
       "module_id"
     );
-    expect(hideRichFilterFields(withDimensions, {})).toHaveLength(9);
-    expect(hideRichFilterFields(withDimensions, { hideCycle: false, hideModule: false })).toHaveLength(9);
+    expect(hideRichFilterFields(withDimensions, {})).toHaveLength(withDimensions.length);
+    expect(hideRichFilterFields(withDimensions, { hideCycle: false, hideModule: false })).toHaveLength(
+      withDimensions.length
+    );
   });
 
   it("labels the state group picker entry and names each value source", () => {

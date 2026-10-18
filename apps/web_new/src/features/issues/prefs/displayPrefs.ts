@@ -95,9 +95,9 @@ export function selectDisplayPrefs(record: PrefsRecord): DisplayPrefs {
   return parseDisplayPrefs(record.display_filters, record.display_properties);
 }
 
-/** One entity's raw preference record. */
-export function useEntityPrefs(workspaceSlug: string, entity: IssuesEntity) {
-  return useQuery(prefsQueryOptions(getAppClient(), workspaceSlug, entity));
+/** One entity's raw preference record; temporary rows disable the read. */
+export function useEntityPrefs(workspaceSlug: string, entity: IssuesEntity, enabled = true) {
+  return useQuery({ ...prefsQueryOptions(getAppClient(), workspaceSlug, entity), enabled });
 }
 
 function mergeCalendar(

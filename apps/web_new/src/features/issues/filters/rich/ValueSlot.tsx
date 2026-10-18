@@ -1,15 +1,17 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Rich-filter value slot (parity/specs/issues.md §9, ISS-082–088).
+// Rich-filter value slot (parity/specs/issues.md §9, ISS-082–105).
 // The slot adapts to the field's source: workflow states with their group
 // glyph, the fixed state-group and priority sets, project members with
 // avatars for assignee/creator/mentions, and project labels with colored
 // dots. Multi-select slots stay open across picks and clear a re-picked
-// value. Single/date editors arrive with ISS-100–103.
+// value, reading as the first two names plus an overflow count (ISS-101).
+// Date kinds get bounded calendars: one final day (ISS-102), or two ends
+// committed only as a complete pair (ISS-103).
 
-import { Avatar, Button, Combobox, type ComboboxOption } from "@pidash/kit";
-import { ChevronDown } from "lucide-react";
+import { Avatar, Button, Combobox, Popover, type ComboboxOption } from "@pidash/kit";
+import { CalendarDays, ChevronDown } from "lucide-react";
 import * as React from "react";
 
 import { useMe } from "../../../../core/session/hooks.js";
@@ -25,8 +27,25 @@ import {
   type StateGroup,
 } from "../../../../shared/pickers/index.js";
 import { useLabels } from "../../labels/api.js";
-import type { RichCondition, RichFilterField } from "./expression.js";
+import { DateCalendar } from "../../dropdowns/DatePicker.js";
+import { DateRangeCalendar } from "../../dropdowns/DateRangePicker.js";
+import { useWeekStart } from "../../dropdowns/weekStart.js";
+import type { RangeValue } from "../../dropdowns/calendar.js";
+import {
+  isValueComplete,
+  type RichCondition,
+  type RichFilterField,
+} from "./expression.js";
 import { orderLabelOptions, orderMemberOptions, selectedIds } from "./filterValues.js";
+import {
+  EMPTY_SLOT_LABEL,
+  opensWhenIncomplete,
+  pickTriggerLabel,
+  rangeEnds,
+  rangeLabel,
+  rangeValue,
+  slotEditor,
+} from "./slotModel.js";
 
 export interface ValueSlotProps {
   workspaceSlug: string;
@@ -41,14 +60,11 @@ export function selectedValues(value: unknown): string[] {
   return selectedIds(value);
 }
 
-function chosenLabel(field: RichFilterField, values: readonly string[], labels: ReadonlyMap<string, string>): string {
-  if (values.length === 0) return "Select value";
-  const names = values.map((value) => labels.get(value) ?? value);
-  if (names.length <= 2) return names.join(", ");
-  return `${names.length} selected`;
+function chosenLabel(values: readonly string[], labels: ReadonlyMap<string, string>): string {
+  return pickTriggerLabel(values.map((value) => labels.get(value) ?? value));
 }
 
-export function ValueSlot({
+function PickSlot({
   workspaceSlug,
   projectId,
   field,
@@ -158,7 +174,7 @@ export function ValueSlot({
     });
   }, [field.source, field.staticValues, field.stem, labelOptions, memberOptions, stateOptions]);
 
-  function toggle(id: string): void {
+  function togglePick(id: string): void {
     const next = selected.includes(id) ? selected.filter((entry) => entry !== id) : [...selected, id];
     onChange(next.length === 0 ? null : next);
   }
@@ -177,15 +193,15 @@ export function ValueSlot({
   return (
     <Combobox
       trigger={
-        <Button variant="ghost" size="small">
-          <span className="max-w-48 truncate">{chosenLabel(field, selected, labelsById)}</span>
+        <Button variant="ghost" size="small" data-testid="rich-value-trigger" data-empty={selected.length === 0}>
+          <span className="max-w-48 truncate">{chosenLabel(selected, labelsById)}</span>
           <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
         </Button>
       }
       options={options}
       value={selected}
       multiple
-      onSelect={toggle}
+      onSelect={togglePick}
       listLabel={`${field.label} values`}
       searchLabel={`Search ${field.label.toLowerCase()} values`}
       emptyText="No matching values"
@@ -196,4 +212,127 @@ export function ValueSlot({
       onOpenChange={setOpen}
     />
   );
+}
+
+/**
+ * Calendar trigger. A popover trigger is a render target: Base UI merges
+ * its own click/ref props into the element, so the wrapper must forward
+ * everything it receives rather than closing over a bare Button.
+ */
+function CalendarTrigger({
+  label,
+  empty,
+  ...rest
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; empty: boolean }): React.ReactElement {
+  return (
+    <Button variant="ghost" size="small" data-testid="rich-value-trigger" data-empty={empty} {...rest}>
+      <CalendarDays size={14} strokeWidth={2} aria-hidden="true" />
+      <span className="max-w-48 truncate">{label}</span>
+    </Button>
+  );
+}
+
+/** One bounded day; a picked day is final (no clear control). */
+function DateSlot({
+  field,
+  value,
+  onChange,
+  autoOpen,
+}: {
+  field: RichFilterField;
+  value: unknown;
+  onChange: (value: unknown) => void;
+  autoOpen: boolean;
+}): React.ReactElement {
+  const [open, setOpen] = React.useState(autoOpen);
+  const weekStart = useWeekStart();
+  const day = typeof value === "string" && value.length > 0 ? value : null;
+  return (
+    <Popover
+      open={open}
+      onOpenChange={setOpen}
+      trigger={<CalendarTrigger label={day ?? EMPTY_SLOT_LABEL} empty={day === null} />}
+    >
+      <DateCalendar
+        value={day}
+        min={field.min ?? null}
+        max={field.max ?? null}
+        weekStart={weekStart}
+        testId="rich-date-calendar"
+        onSelect={(iso) => {
+          onChange(iso);
+          setOpen(false);
+        }}
+      />
+    </Popover>
+  );
+}
+
+/**
+ * Two bounded ends. The pending half lives here so the host only ever
+ * receives a complete pair; while one end is set the calendar stays open,
+ * warns, and the next click fills the other end.
+ */
+function RangeSlot({
+  field,
+  value,
+  onChange,
+  autoOpen,
+}: {
+  field: RichFilterField;
+  value: unknown;
+  onChange: (value: unknown) => void;
+  autoOpen: boolean;
+}): React.ReactElement {
+  const [open, setOpen] = React.useState(autoOpen);
+  const weekStart = useWeekStart();
+  const [pending, setPending] = React.useState<RangeValue | null>(null);
+  const ends: RangeValue = pending ?? rangeEnds(value);
+  const incomplete = (ends.start === null) !== (ends.end === null);
+  const label = rangeLabel(ends);
+  return (
+    <Popover
+      open={open}
+      onOpenChange={setOpen}
+      trigger={
+        <span data-incomplete={incomplete ? "true" : "false"} className={incomplete ? "text-(--danger)" : undefined}>
+          <CalendarTrigger label={label} empty={ends.start === null && ends.end === null} />
+        </span>
+      }
+    >
+      <DateRangeCalendar
+        value={ends}
+        min={field.min ?? null}
+        max={field.max ?? null}
+        weekStart={weekStart}
+        testId="rich-range-calendar"
+        onChange={(next) => {
+          const complete = next.start !== null && next.end !== null;
+          if (complete) {
+            setPending(null);
+            onChange(rangeValue(next.start, next.end));
+            setOpen(false);
+            return;
+          }
+          setPending(next);
+          setOpen(true);
+        }}
+      />
+    </Popover>
+  );
+}
+
+/** The kind-specific editor for one condition's value. */
+export function ValueSlot(props: ValueSlotProps): React.ReactElement {
+  const { field, condition, onChange } = props;
+  const complete = isValueComplete(field.kind, condition.value);
+  const autoOpen = opensWhenIncomplete(field, condition.value, complete);
+  switch (slotEditor(field)) {
+    case "date":
+      return <DateSlot field={field} value={condition.value} onChange={onChange} autoOpen={autoOpen} />;
+    case "range":
+      return <RangeSlot field={field} value={condition.value} onChange={onChange} autoOpen={autoOpen} />;
+    default:
+      return <PickSlot {...props} />;
+  }
 }

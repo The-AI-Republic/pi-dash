@@ -16,6 +16,7 @@ export interface IssueFiltersProps {
   projectId: string;
   hideCycle: boolean;
   hideModule: boolean;
+  viewsEnabled?: boolean | undefined;
   children: (parts: RichFilterBuilderParts) => React.ReactNode;
 }
 
@@ -24,6 +25,7 @@ export default function IssueFilters({
   projectId,
   hideCycle,
   hideModule,
+  viewsEnabled,
   children,
 }: IssueFiltersProps): React.ReactElement {
   const parts = useRichFilterBuilder({
@@ -32,6 +34,7 @@ export default function IssueFilters({
     entity: { scope: "project", projectId },
     hideCycle,
     hideModule,
+    viewsEnabled,
   });
   return <React.Fragment>{children(parts)}</React.Fragment>;
 }

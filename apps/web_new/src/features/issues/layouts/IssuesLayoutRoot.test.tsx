@@ -246,6 +246,7 @@ describe("IssuesLayoutRoot", () => {
     expect(await screen.findByText("layout:kanban")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Filters" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Display" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Analytics" })).toBeInTheDocument();
+    // Desktop header and the compact mobile bar both host the entry.
+    expect(screen.getAllByRole("button", { name: "Analytics" })).toHaveLength(2);
   });
 });

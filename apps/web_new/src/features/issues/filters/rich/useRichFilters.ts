@@ -32,9 +32,9 @@ export function buildRichFiltersPatch(record: PrefsRecord, expression: RichExpre
   return { rich_filters: expression };
 }
 
-/** One entity's stored rich-filter expression. */
-export function useRichFilters(workspaceSlug: string, entity: IssuesEntity) {
-  const query = useQuery(prefsQueryOptions(getAppClient(), workspaceSlug, entity));
+/** One entity's stored rich-filter expression; disabled for temporary rows. */
+export function useRichFilters(workspaceSlug: string, entity: IssuesEntity, enabled = true) {
+  const query = useQuery({ ...prefsQueryOptions(getAppClient(), workspaceSlug, entity), enabled });
   return {
     ...query,
     conditions: query.data === undefined ? [] : selectRichConditions(query.data),

@@ -100,6 +100,7 @@ function IssuesLayoutRootInner({
         actions={
           <>
             {filterControl}
+            {analyticsControl}
             {headerActions}
           </>
         }

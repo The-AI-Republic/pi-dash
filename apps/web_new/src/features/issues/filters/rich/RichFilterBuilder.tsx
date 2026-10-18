@@ -1,19 +1,25 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Rich-filter builder (parity/specs/issues.md §9, ISS-095–099). One
+// Rich-filter builder (parity/specs/issues.md §9, ISS-095–105). One
 // component owns the stored expression, the header entry and the
 // condition row it toggles. Empty expressions render an "Add filter"
 // button that opens the field picker; non-empty ones render an accent
 // filter icon toggling the row. Every edit persists through the entity's
-// user-properties record. ISS-095 resolves to per-condition removal: no
-// chip bar renders on issues surfaces (NEWFRONT-148).
+// user-properties record, except in temporary mode (ISS-105), which keeps
+// the expression in memory and registers its field configs while
+// mounted. The row's right side carries clear-all and the view actions
+// (ISS-104). ISS-095 resolves to per-condition removal: no chip bar
+// renders on issues surfaces (NEWFRONT-148).
 
+import type { SavedView } from "@pidash/api-client";
 import { Button, IconButton, Tooltip } from "@pidash/kit";
 import { Filter, Plus } from "lucide-react";
 import * as React from "react";
 
+import { useMe, usePermissions } from "../../../../core/session/index.js";
 import type { IssuesEntity } from "../../prefs/entities.js";
+import { selectDisplayPrefs, useEntityPrefs } from "../../prefs/displayPrefs.js";
 import {
   addCondition,
   hasRichConditions,
@@ -24,10 +30,15 @@ import {
   updateCondition,
   usedProperties,
   type RichCondition,
+  type RichFilterField,
 } from "./expression.js";
 import { ConditionPill, conditionField } from "./ConditionPill.js";
 import { FieldPicker } from "./FieldPicker.js";
+import { temporaryInstanceId, useTemporaryFieldConfigs, type FieldConfigRegistry } from "./temporary.js";
 import { useRichFilters, useUpdateRichFilters } from "./useRichFilters.js";
+import { ViewActions } from "./ViewActions.js";
+import type { ViewContext, ViewSnapshot } from "./views.js";
+import { entityViewContext } from "./views.js";
 
 export interface RichFilterBuilderProps {
   workspaceSlug: string;
@@ -36,6 +47,17 @@ export interface RichFilterBuilderProps {
   /** Cycle/module properties hide while their project features are off. */
   hideCycle: boolean;
   hideModule: boolean;
+  /** In-memory instance: no reads or writes, TEMP- id, configs on mount. */
+  temporary?: boolean | undefined;
+  /** Custom config registry for the temporary instance; session-wide by default. */
+  temporaryRegistry?: FieldConfigRegistry | undefined;
+  /** Saved-view record the row edits; absent on bare entity lists. */
+  view?: { view: SavedView; isDefault: boolean } | undefined;
+  /** Project view saving waits for the project's views feature. */
+  viewsEnabled?: boolean | undefined;
+  /** Fired after a view create/update so the host can adopt the record. */
+  onViewCreated?: ((view: SavedView) => void) | undefined;
+  onViewUpdated?: ((view: SavedView) => void) | undefined;
 }
 
 export interface RichFilterBuilderParts {
@@ -43,6 +65,8 @@ export interface RichFilterBuilderParts {
   control: React.ReactNode;
   /** Builder row, mounted beneath the header. */
   row: React.ReactNode;
+  /** Client id of this instance: the entity's, or a TEMP- id when ephemeral. */
+  instanceId: string;
 }
 
 /**
@@ -52,12 +76,59 @@ export interface RichFilterBuilderParts {
  */
 export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterBuilderParts {
   const { workspaceSlug, projectId, entity, hideCycle, hideModule } = props;
-  const { conditions } = useRichFilters(workspaceSlug, entity);
+  const temporary = props.temporary ?? false;
+  const entityPrefs = useEntityPrefs(workspaceSlug, entity, !temporary);
+  const { conditions: stored } = useRichFilters(workspaceSlug, entity, !temporary);
   const { updateRichFilters, failureCount } = useUpdateRichFilters(workspaceSlug, entity);
+  const permissions = usePermissions(workspaceSlug);
+  const me = useMe();
+  // A persisted instance is named after its entity; a temporary one gets
+  // a client-only TEMP- id that dies with the mount.
+  const [instanceId] = React.useState(() =>
+    temporary ? temporaryInstanceId() : `${entity.scope}:${entityIdOf(entity)}`
+  );
+  // A temporary row starts from whatever the caller seeded and keeps its
+  // own copy for the life of the mount; a persisted row follows the server.
+  const [local, setLocal] = React.useState<readonly RichCondition[]>([]);
+  const conditions = temporary ? local : stored;
   const [open, setOpen] = React.useState(true);
   const fields = React.useMemo(() => richFilterFields({ hideCycle, hideModule }), [hideCycle, hideModule]);
   const [draft, setDraft] = React.useState<readonly RichCondition[] | null>(null);
   const rows = draft ?? conditions;
+
+  const viewContext = React.useMemo<ViewContext>(() => {
+    if (props.view === undefined) return entityViewContext();
+    return {
+      isView: true,
+      viewScope: props.view.view.project === null ? "workspace" : "project",
+      viewId: props.view.view.id,
+      ownerId: props.view.view.owned_by,
+      locked: props.view.view.is_locked,
+      isDefault: props.view.isDefault,
+      storedExpression: props.view.view.rich_filters,
+      storedDisplayFilters: props.view.view.display_filters,
+      storedDisplayProperties: props.view.view.display_properties,
+    };
+  }, [props.view]);
+  const snapshot = React.useMemo<ViewSnapshot>(() => {
+    const record = entityPrefs.data;
+    if (record === undefined) {
+      return { expression: serializeRichExpression(rows), displayFilters: {}, displayProperties: {} };
+    }
+    const display = selectDisplayPrefs(record);
+    return {
+      expression: serializeRichExpression(rows),
+      displayFilters: {
+        ...record.display_filters,
+        layout: display.layout,
+        group_by: display.groupBy,
+        sub_group_by: display.subGroupBy,
+        order_by: display.orderBy,
+      },
+      displayProperties: record.display_properties,
+    };
+  }, [entityPrefs.data, rows]);
+
   const serverFingerprint = React.useMemo(
     () => JSON.stringify(conditions.map((row) => [row.key, row.property, row.operator, row.negated, row.value])),
     [conditions]
@@ -84,11 +155,17 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
       setDraft(null);
     }
   }, [failureCount]);
+  // Temporary instances report their field configs while mounted.
+  useTemporaryFieldConfigs(temporary ? rows : [], props.temporaryRegistry);
   const used = React.useMemo(() => usedProperties(rows), [rows]);
   const hasConditions = hasRichConditions(rows);
 
   function commit(next: readonly RichCondition[]): void {
     setDraft(next);
+    if (temporary) {
+      setLocal(next);
+      return;
+    }
     // A condition stays a draft until it is complete: adding a field picks
     // its property and operator first and the value second, so persisting
     // here would write an unchanged expression and the server echo would
@@ -169,8 +246,41 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
             commit(addCondition(rows, field));
           }}
         />
+        <ViewActions
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          snapshot={snapshot}
+          context={viewContext}
+          canEdit={permissions.canEdit && !temporary}
+          viewsEnabled={props.viewsEnabled ?? true}
+          meId={me.data?.id ?? null}
+          hasConditions={hasConditions}
+          onClearAll={() => {
+            commit([]);
+          }}
+          onCreated={props.onViewCreated}
+          onUpdated={props.onViewUpdated}
+        />
       </div>
     ) : null;
 
-  return { control, row };
+  return { control, row, instanceId };
 }
+
+/** Stable entity id segment for a persisted instance. */
+function entityIdOf(entity: IssuesEntity): string {
+  switch (entity.scope) {
+    case "project":
+      return entity.projectId;
+    case "cycle":
+      return `${entity.projectId}/${entity.cycleId}`;
+    case "module":
+      return `${entity.projectId}/${entity.moduleId}`;
+    case "epics":
+      return `epics/${entity.projectId}`;
+    case "workspace":
+      return "workspace";
+  }
+}
+
+export type { RichFilterField };

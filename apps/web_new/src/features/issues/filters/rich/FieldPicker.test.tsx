@@ -12,22 +12,15 @@ import { richFilterFields } from "./expression.js";
 
 describe("fieldPickerOptions", () => {
   it("lists only unused fields in catalogue order", () => {
-    const options = fieldPickerOptions(richFilterFields(), new Set(["state_group"]));
-    expect(options.map((option) => option.id)).toEqual([
-      "state_id",
-      "priority",
-      "assignee_id",
-      "created_by_id",
-      "mention_id",
-      "label_id",
-    ]);
+    const fields = richFilterFields();
+    const options = fieldPickerOptions(fields, new Set(["state_group"]));
+    expect(options.map((option) => option.id)).toEqual(
+      fields.filter((field) => field.stem !== "state_group").map((field) => field.stem)
+    );
   });
 
   it("returns one disabled exhaustion row when every field is used", () => {
-    const options = fieldPickerOptions(
-      richFilterFields(),
-      new Set(["state_id", "state_group", "priority", "assignee_id", "created_by_id", "mention_id", "label_id"])
-    );
+    const options = fieldPickerOptions(richFilterFields(), new Set(richFilterFields().map((field) => field.stem)));
     expect(options).toEqual([{ id: "__exhausted__", label: "All filters applied", disabled: true }]);
   });
 });
@@ -66,9 +59,7 @@ describe("FieldPicker", () => {
     render(
       <FieldPicker
         fields={richFilterFields()}
-        used={
-          new Set(["state_id", "state_group", "priority", "assignee_id", "created_by_id", "mention_id", "label_id"])
-        }
+        used={new Set(richFilterFields().map((field) => field.stem))}
         onPick={onPick}
         trigger={<Button>Add</Button>}
       />
