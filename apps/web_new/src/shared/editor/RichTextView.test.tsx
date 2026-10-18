@@ -24,6 +24,12 @@ describe("RichTextView", () => {
     expect(region).toHaveTextContent("ok");
   });
 
+  it("appends a caller class to the content frame", () => {
+    render(<RichTextView html="<p>body</p>" label="Body" className="mt-4" />);
+    const region = screen.getByRole("region", { name: "Body" });
+    expect(region).toHaveClass("rich-text-content", "mt-4");
+  });
+
   it("re-sanitizes when the stored HTML changes", () => {
     const { rerender } = render(<RichTextView html="<p>first</p>" label="Body" />);
     rerender(<RichTextView html="<p>second</p>" label="Body" />);

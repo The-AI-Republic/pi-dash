@@ -106,6 +106,18 @@ describe("IssueDescriptionField", () => {
     await waitFor(() => expect(status()).toBe("saved"));
   });
 
+  it("does not save text the user typed and then deleted", async () => {
+    const user = userEvent.setup();
+    const { onSave } = renderField();
+    const editable = await openEditor();
+    editable.focus();
+    await user.keyboard(" plus");
+    await user.keyboard("{Backspace}{Backspace}{Backspace}{Backspace}{Backspace}");
+    fireEvent.blur(editable);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it("autosaves after standing idle", async () => {
     const user = userEvent.setup();
     const { onSave } = renderField();

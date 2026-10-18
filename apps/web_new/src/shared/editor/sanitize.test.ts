@@ -40,6 +40,15 @@ describe("storedTextContent", () => {
     expect(storedTextContent("<p></p>")).toBe("");
   });
 
+  it("reads text from documents whose body holds no text", () => {
+    const parse = vi.fn(() => ({ body: { textContent: null } }));
+    vi.stubGlobal("DOMParser", function StubParser() {
+      return { parseFromString: parse };
+    });
+    expect(storedTextContent("<p>hi</p>")).toBe("");
+    expect(parse).toHaveBeenCalledWith("<p>hi</p>", "text/html");
+  });
+
   it("returns an empty string where no DOM parser exists", () => {
     vi.stubGlobal("DOMParser", undefined);
     expect(storedTextContent("<p>hi</p>")).toBe("");

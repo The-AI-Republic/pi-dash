@@ -236,6 +236,21 @@ describe("DetailMainColumn", () => {
     expect(within(reopened).queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
   });
 
+  it("saves description edits through the item update", async () => {
+    const user = userEvent.setup();
+    const { patches } = renderColumn();
+    await user.click(screen.getByRole("button", { name: "Edit description" }));
+    const editable = await screen.findByLabelText(DESCRIPTION_LABEL);
+    editable.focus();
+    await user.keyboard(" more");
+    fireEvent.blur(editable);
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.url).toContain(`/issues/${ISSUE}/`);
+    expect(JSON.parse(patches[0]?.body ?? "{}")).toEqual({
+      description_html: "<p>Current words more</p>",
+    });
+  });
+
   it("renders the header and below-description slots", () => {
     renderColumn({ topSlot: <p>header slot</p>, belowDescription: <p>widget slot</p> });
     expect(screen.getByText("header slot")).toBeInTheDocument();

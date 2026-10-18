@@ -129,11 +129,11 @@ export function IssueDescriptionField({
 
   // A restore replaces the buffer wholesale and closes the editor; the
   // view shows the version at once, ahead of the server round-trip.
-  // Keyed on the token alone: the HTML it applies is the render's own.
+  // Keyed on the token alone: the render's own object carries the HTML.
   const restoredToken = restored?.token;
   React.useEffect(() => {
-    if (restoredToken === undefined) return;
-    const html = restored?.html ?? value;
+    if (restored === null || restored === undefined) return;
+    const html = restored.html;
     savedRef.current = html;
     latestRef.current = html;
     dirtyRef.current = false;
@@ -222,7 +222,16 @@ export function IssueDescriptionField({
                 return;
               }
             }
-            if (html === savedRef.current) return;
+            // Back at the saved HTML: nothing is owed. Settle the
+            // pipeline and drop the pending debounce, or it would send
+            // the stale buffer captured before this emission.
+            if (html === savedRef.current) {
+              latestRef.current = html;
+              dirtyRef.current = false;
+              clearTimer();
+              pipeline.markSaved();
+              return;
+            }
             latestRef.current = html;
             dirtyRef.current = true;
             pipeline.markSaving();
