@@ -272,7 +272,10 @@ describe("RunnersOverview row actions", () => {
     await waitFor(() =>
       expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" })).toBeDisabled()
     );
-    expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" })).toBeDisabled();
+    const cancel = within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" });
+    expect(cancel).toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(cancel);
+    expect(screen.getByRole("dialog", { name: "Delete runner?" })).toBeInTheDocument();
     await userEvent.keyboard("{Escape}");
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     release();

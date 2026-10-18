@@ -53,7 +53,7 @@ export function RunnerConfirmDialog({
       bodyClassName="mt-(--space-4)"
       actions={
         <>
-          <Button variant="ghost" disabled={pending} onClick={onCancel}>
+          <Button variant="ghost" aria-disabled={pending || undefined} onClick={() => !pending && onCancel()}>
             Cancel
           </Button>
           <Button variant="danger" loading={pending} onClick={onConfirm}>

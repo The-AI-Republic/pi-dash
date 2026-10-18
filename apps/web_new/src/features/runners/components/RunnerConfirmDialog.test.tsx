@@ -96,7 +96,15 @@ describe("RunnerConfirmDialog", () => {
 
   it("blocks every dismissal path while the write is in flight", async () => {
     const { onCancel, onConfirm } = setup({ pending: true });
-    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    // Cancel stays focusable/visible but inert: the old app leaves it
+    // clickable and ignores the click, and the shared parity driver clicks
+    // it mid-flight expecting no dismissal (a truly disabled button would
+    // time out the click).
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    expect(cancel).not.toBeDisabled();
+    expect(cancel).toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(cancel);
+    expect(onCancel).not.toHaveBeenCalled();
     const confirm = screen.getByRole("button", { name: "Delete" });
     expect(confirm).toBeDisabled();
     expect(confirm).toHaveAttribute("aria-busy", "true");

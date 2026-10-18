@@ -6812,7 +6812,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private runnersRailRoot(): Locator {
-    return this.page.getByRole("main").locator("xpath=../aside");
+    // The workspace shell already renders a `<main>` (AppShell) and the
+    // area nests its own content main, so a bare `main` resolves to two
+    // rows and `xpath=../aside` also picks up the workspace sidebar. Anchor
+    // on the area's named content main so the sibling is the runners rail.
+    return this.page.getByRole("main", { name: "Runners content" }).locator("xpath=../aside");
   }
 
   async runnersRail(): Promise<RunnersRail> {

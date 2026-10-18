@@ -343,6 +343,22 @@ describe("runnersModalCopy and runnersCancelModal", () => {
 
     expect(cancel.click).toHaveBeenCalled();
   });
+
+  it("does not assert a disabled cancel: the app leaves it inert, not disabled", async () => {
+    // Mid-flight dismissal checks click Cancel and expect the dialog to
+    // stay. The kit button stays enabled so the click resolves and the
+    // handler ignores it; a disabled control would make the driver click
+    // time out instead.
+    const cancel = stubLocator({ isDisabled: vi.fn(async () => false) });
+    const dialog = stubLocator({ getByRole: vi.fn(() => cancel) });
+    const page = pageStub({ getByRole: vi.fn(() => stubLocator({ first: () => dialog })) });
+    const driver = new WebNewDriver(page);
+
+    await driver.runnersCancelModal();
+
+    await expect(cancel.isDisabled()).resolves.toBe(false);
+    expect(cancel.click).toHaveBeenCalled();
+  });
 });
 
 describe("mutation shaping", () => {
@@ -428,7 +444,8 @@ describe("runnersRail", () => {
       ),
       getByText: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })),
     });
-    const page = pageStub({ getByRole: vi.fn(() => stubLocator({ locator: vi.fn(() => rail) })) });
+    const main = stubLocator({ locator: vi.fn(() => rail) });
+    const page = pageStub({ getByRole: vi.fn(() => main) });
     const driver = new WebNewDriver(page);
 
     await expect(driver.runnersRail()).resolves.toEqual({
@@ -437,7 +454,13 @@ describe("runnersRail", () => {
       contacts: [{ name: "alpha", href: "/acme/runners/chat/r-1", hasDot: true }],
       emptyVisible: false,
     });
-    expect((page.getByRole as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![0]).toBe("main");
+    // The rail anchors on the area's named content main: a bare `main`
+    // resolves to the shell main and the nested content main, so `../aside`
+    // also catches the workspace sidebar.
+    expect((page.getByRole as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]).toEqual([
+      "main",
+      { name: "Runners content" },
+    ]);
   });
 });
 
