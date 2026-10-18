@@ -296,9 +296,7 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
         projectIdentifier={projectIdentifier}
         disabled={!canEdit}
         pending={create.isPending}
-        onCreate={async (name) => {
-          await create.mutateAsync({ name });
-        }}
+        onCreate={(name) => create.mutateAsync({ name })}
       />
       {peekIssue === null ? null : (
         <PeekPanel
