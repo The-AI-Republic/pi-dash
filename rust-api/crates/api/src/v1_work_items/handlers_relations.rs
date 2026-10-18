@@ -269,6 +269,7 @@ impl From<crate::v1_projects::handlers_project::Denial> for Denial {
             D::NotFound => Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()),
             D::ProjectNotFound => Denial::ProjectNotFound,
             D::BadDetail(message) => Denial::BadDetail(message),
+            D::UnsupportedMediaType(message) => Denial::UnsupportedMediaType(message),
             D::BadError(message) => Denial::BadError(message),
             // Unreachable from the reused preamble/rewrite/facts calls
             // (pure auth + lookup, no serializer runs); preserved rather
