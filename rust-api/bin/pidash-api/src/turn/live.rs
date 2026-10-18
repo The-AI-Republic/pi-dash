@@ -1430,7 +1430,12 @@ impl TurnSeam for LiveTurnSeam {
         Ok(())
     }
 
-    /// `_fail_turn` (`tasks.py:181-201`).
+    /// `_fail_turn` (`tasks.py:181-201`): the atomic terminal write (turn
+    /// status/code/detail, close the streaming rows, clear the in-flight
+    /// pointer), then — in their own transactions exactly like Python — the
+    /// `error` message row (`events.create_message`), the `turn_failed`
+    /// event with its envelope and Redis publish (`events.append_event`) and
+    /// the delta prune.
     async fn fail_turn(
         &self,
         ctx: &TurnContext,
@@ -1439,6 +1444,7 @@ impl TurnSeam for LiveTurnSeam {
     ) -> Result<(), SeamError> {
         let code = rt::truncate_code(code).to_owned();
         let detail = rt::truncate_detail(detail).to_owned();
+        let now = Utc::now();
         let mut tx = self.pool.begin().await.map_err(db_error)?;
         sqlx::query(&rt::lock_turn_select())
             .bind(ctx.turn_id)
@@ -1464,44 +1470,47 @@ impl TurnSeam for LiveTurnSeam {
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
-        sqlx::query(&rt::thread_lock_select())
-            .bind(ctx.thread_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
-        let message_id = Uuid::new_v4();
+        tx.commit().await.map_err(db_error)?;
+        // `events.create_message(..., display_content=detail or code,
+        // status=FAILED)` (`tasks.py:191-193`): own transaction, thread
+        // locked, thread-scoped seq.
         let content = if detail.is_empty() {
             code.clone()
         } else {
             detail.clone()
         };
-        sqlx::query(&rt::error_message_insert())
-            .bind(message_id)
-            .bind(ctx.thread_id)
-            .bind(ctx.turn_id)
-            .bind(&content)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
-        let payload = serde_json::json!({
+        let payload = empty_payload();
+        let (message_id, _seq) = self
+            .create_message(
+                ctx.thread_id,
+                Some(ctx.turn_id),
+                rt::KIND_ERROR,
+                &content,
+                &payload,
+                rt::MSG_FAILED,
+                now,
+            )
+            .await?;
+        // `events.append_event(..., "turn_failed", ...)` (`tasks.py:194-200`).
+        let event_payload = serde_json::json!({
             "turn_id": ctx.turn_id.to_string(),
             "error_code": code,
             "detail": detail,
         });
-        sqlx::query(&rt::turn_failed_event_insert())
-            .bind(ctx.thread_id)
-            .bind(ctx.turn_id)
-            .bind(message_id)
-            .bind(&payload)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
+        self.append_event(
+            ctx.thread_id,
+            Some(ctx.turn_id),
+            rt::EVENT_TURN_FAILED,
+            &event_payload,
+            Some(message_id),
+            now,
+        )
+        .await?;
         sqlx::query(&rt::prune_turn_deltas_delete())
             .bind(ctx.turn_id)
-            .execute(&mut *tx)
+            .execute(&self.pool)
             .await
             .map_err(db_error)?;
-        tx.commit().await.map_err(db_error)?;
         Ok(())
     }
 
