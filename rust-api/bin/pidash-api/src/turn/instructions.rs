@@ -32,6 +32,7 @@ pub const ROLE_GUEST: i32 = 5;
 
 /// Seven-day default for `LOOP_MAX_WRITES`
 /// (`settings/common.py:293`, `get_config("LOOP_MAX_WRITES", 10)`).
+#[allow(dead_code)] // Python's `getattr(settings, "LOOP_MAX_WRITES", 10)` fallback; the resolved settings carry it
 pub const LOOP_MAX_WRITES_DEFAULT: i64 = 10;
 
 /// `BASE_INSTRUCTIONS` (`instructions.py:20-52`), byte for byte — the

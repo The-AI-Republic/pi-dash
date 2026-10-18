@@ -37,6 +37,7 @@
 pub mod agent;
 pub mod history;
 pub mod instructions;
+pub mod live;
 pub mod mcp_client;
 #[cfg(test)]
 mod mcp_parity;

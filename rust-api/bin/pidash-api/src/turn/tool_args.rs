@@ -1025,9 +1025,11 @@ impl DispatchRunArgs {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // schema marker for tools whose executor takes no arguments
 pub struct NoArgs;
 
 impl NoArgs {
+    #[allow(dead_code)] // exercised by the schema tests; the seam parses via the registry
     pub fn parse(args: &Value) -> Result<Self, Vec<ArgError>> {
         validate_tool_args(NO_ARGS_SPEC, args)?;
         Ok(Self)

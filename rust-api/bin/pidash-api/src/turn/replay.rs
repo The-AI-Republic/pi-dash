@@ -35,6 +35,7 @@ pub fn load_fixture(name: &str) -> Value {
 
 /// One request a stub server recorded.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // capture record: the assertions read body/matches, not these
 pub struct StubRequest {
     pub method: String,
     pub path: String,

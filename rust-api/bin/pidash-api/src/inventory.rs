@@ -1169,7 +1169,7 @@ pub const TASKS: &[TaskRow] = &[
     // `mirror_registry_matches_tasks_table` on each `cargo test` run.
     TaskRow {
         name: "assistant.run_turn",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "assistant.sweep_stale_turns",
@@ -2045,6 +2045,21 @@ mod tests {
         // (pool-only handlers, no I/O at registration).
         pidash_jobs::tasks_export::register_issue_export_task(&mut registry, pool.clone());
         pidash_jobs::tasks_export::register_analytic_task(&mut registry, pool.clone());
+        // Assistant turn (PIDASHCONV-863): the same call `worker()` makes
+        // (live seam over the lazy pool, no Redis client, test-default
+        // settings; construction does no I/O).
+        pidash_jobs::assistant::register_turn_handler(
+            &mut registry,
+            pool.clone(),
+            std::sync::Arc::new(
+                crate::turn::live::LiveTurnSeam::new(
+                    pool.clone(),
+                    std::sync::Arc::new(execute_settings.clone()),
+                    None,
+                )
+                .expect("live turn seam builds"),
+            ),
+        );
 
         // The const union, independent of the table.
         let mut expected_rust = std::collections::BTreeSet::new();
@@ -2073,7 +2088,7 @@ mod tests {
         expected_rust.extend(pidash_jobs::integrations::git_sync::TASK_NAMES);
         expected_rust.extend(pidash_jobs::integrations::github_sync::TASK_NAMES);
         expected_rust.insert(pidash_jobs::license::tasks::TASK_NAME);
-        expected_rust.extend([pidash_jobs::assistant::SWEEP_TASK]);
+        expected_rust.extend(pidash_jobs::assistant::TASK_NAMES);
         expected_rust.extend(pidash_jobs::loop_scan::TASK_NAMES);
         expected_rust.insert(pidash_jobs::tasks_webhooks::ARCHIVE_AND_CLOSE_TASK);
         expected_rust.extend([
@@ -2141,7 +2156,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 76, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 77, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()
@@ -2161,10 +2176,6 @@ mod tests {
         // Deliberately unregistered: restore (BUG-DEL-2) is not a Django
         // task at all, so it is not in the table either.
         assert!(!registry.owns(tasks_cleanup::RESTORE_TASK_NAME));
-        // Deliberately unregistered: `assistant.run_turn` has no live
-        // `TurnSeam` (hybrid worker per PIDASHCONV-857), so it stays
-        // Python-owned.
-        assert!(!registry.owns(pidash_jobs::assistant::RUN_TURN_TASK));
     }
 
     /// The schedule serializer: spot-check set shapes (full content is

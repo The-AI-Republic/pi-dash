@@ -1800,6 +1800,7 @@ fn unit_random() -> f64 {
 /// (`tasks.py` `_classify_error:442-480`). Only `Http` carries a
 /// `status_code` attribute — timeouts, connections, mid-stream
 /// errors, and malformed payloads classify on text alone.
+#[allow(dead_code)] // the loop hands the raw message/status to `drive_turn`'s classifier; pinned here by tests
 pub fn classify_provider_error(lane: &Lane, error: &ProviderError) -> (&'static str, &'static str) {
     let status = match error {
         ProviderError::Http { status, .. } => Some(*status),

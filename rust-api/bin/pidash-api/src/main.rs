@@ -27,14 +27,11 @@ mod inventory;
 mod model_runtime;
 #[cfg(test)]
 mod runner_seams;
-/// Live assistant turn runtime (stage 8 split: PIDASHCONV-1110…1113 land
-/// library modules here; PIDASHCONV-863 wires them into `worker()`).
-/// Unwired by design until the wiring lands — that is the split working
-/// as designed, not dead code.
-// Turn runtime layers (PIDASHCONV-1110…1113): library modules with unit
-// tests. The allow expires with the 863 wiring; until then nothing
-// outside `#[cfg(test)]` calls in.
-#[allow(dead_code)]
+/// Live assistant turn runtime: the provider-backed half of
+/// `assistant.run_turn` behind the jobs-crate `TurnSeam`.
+/// PIDASHCONV-1110…1113 shipped the codec, provider streaming, MCP client
+/// and local tools as tested library modules; PIDASHCONV-863 adds the agent
+/// loop and the live seam, and `worker()` registers the handler.
 mod turn;
 
 use clap::{Parser, Subcommand};
@@ -260,6 +257,29 @@ async fn worker(concurrency: u32) -> MainResult {
         std::sync::Arc::new(pidash_api::assistant::model_seam::CeAssistantSeam::new(
             std::sync::Arc::new(settings.clone()),
         ));
+    // The live assistant turn seam (PIDASHCONV-863): the multiplexed Redis
+    // client for the cancel key and the SSE publishes (`None` when
+    // `REDIS_URL` is unset, exactly like Django's swallowed
+    // `redis_instance()`), the worker pool, and settings. Construction does
+    // no I/O.
+    let turn_redis = match settings.redis.url.as_deref().filter(|url| !url.is_empty()) {
+        Some(url) => match redis::Client::open(url) {
+            Ok(client) => Some(std::sync::Arc::new(client)),
+            Err(error) => {
+                tracing::warn!(%error, "assistant: REDIS_URL unparsable; cancel key disabled");
+                None
+            }
+        },
+        None => None,
+    };
+    let turn_seam = std::sync::Arc::new(
+        turn::live::LiveTurnSeam::new(
+            pools.primary().clone(),
+            std::sync::Arc::new(settings.clone()),
+            turn_redis,
+        )
+        .map_err(|error| format!("assistant turn seam: {error}"))?,
+    );
     pidash_jobs::register_oss_handlers(
         &mut registry,
         &pidash_jobs::OssWorkerCtx {
@@ -271,6 +291,15 @@ async fn worker(concurrency: u32) -> MainResult {
             assistant_seam,
         },
     )?;
+    // The turn handler (PIDASHCONV-863): `worker()` now owns
+    // `assistant.run_turn` (the sweep above is registered by
+    // `register_oss_handlers`). Registering flips the name from
+    // Python-forwarded to locally executed (`worker::route_for`).
+    pidash_jobs::assistant::register_turn_handler(
+        &mut registry,
+        pools.primary().clone(),
+        turn_seam,
+    );
     let worker_config = pidash_jobs::WorkerConfig {
         concurrency: concurrency.max(1) as usize,
         ..Default::default()

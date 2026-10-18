@@ -423,6 +423,7 @@ Requires write access. Identical to dragging the issue into that state in the UI
 }
 
 /// Look up one tool's schema by name.
+#[allow(dead_code)] // lookup used by the tests; `all_tool_schemas` is what the seam exposes
 pub fn tool_schema(name: &str) -> Option<ToolSchema> {
     all_tool_schemas()
         .into_iter()

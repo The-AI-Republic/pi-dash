@@ -237,6 +237,7 @@ pub struct TurnAgentConfig<'a> {
 pub struct TurnAgentOutcome {
     pub messages: Vec<TurnMessage>,
     pub usage: RunUsage,
+    #[allow(dead_code)] // carried for parity; the seam reads usage/messages only
     pub output: String,
 }
 
