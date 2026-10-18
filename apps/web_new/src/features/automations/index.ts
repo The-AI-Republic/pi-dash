@@ -35,6 +35,7 @@ export {
   AUTOMATIONS_HEADING,
   AUTOMATIONS_INTRO,
   AUTOMATIONS_LOADING_LABEL,
+  AUTOMATIONS_UNAVAILABLE_MESSAGE,
   AutomationsScreen,
   AutomationsSettings,
   NotAuthorizedView,

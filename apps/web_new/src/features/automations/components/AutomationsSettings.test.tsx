@@ -27,6 +27,7 @@ import {
   ARCHIVE_ROW_DESCRIPTION,
   ARCHIVE_ROW_TITLE,
   AUTOMATIONS_INTRO,
+  AUTOMATIONS_UNAVAILABLE_MESSAGE,
   CLOSE_DELAY_LEAD,
   CLOSE_ROW_DESCRIPTION,
   CLOSE_ROW_TITLE,
@@ -119,6 +120,8 @@ interface StubOptions {
   memberRole?: number;
   patchStatus?: number;
   hangProjects?: boolean;
+  hangStates?: boolean;
+  statesStatus?: number;
   rolesStatus?: number;
   membershipStatus?: number;
 }
@@ -156,6 +159,8 @@ function stubTransport(options: StubOptions = {}) {
       return json(200, [row, projectRow({ id: OTHER_PROJECT, name: "Other", identifier: "OTH" })]);
     }
     if (url.endsWith(`/api/workspaces/${SLUG}/projects/${PROJECT}/states/`)) {
+      if (options.hangStates) return new Promise<never>(() => undefined);
+      if (options.statesStatus !== undefined) return json(options.statesStatus, {});
       return json(200, options.states ?? []);
     }
     if (url.endsWith(`/api/workspaces/${SLUG}/projects/${PROJECT}/`) && method === "PATCH") {
@@ -269,6 +274,25 @@ describe("AutomationsSettings gate", () => {
     expect(screen.getByText(AUTOMATIONS_INTRO)).toBeInTheDocument();
     expect(within(row(ARCHIVE_ROW_TITLE)).queryByRole("button", { name: /months?/ })).toBeNull();
   });
+
+  it("shows an unavailable notice instead of enabled rows when the project read fails", async () => {
+    setup({ status: 500, states: [stateRow(DROPPED, "Dropped", "cancelled")] });
+    expect(await screen.findByRole("alert")).toHaveTextContent(AUTOMATIONS_UNAVAILABLE_MESSAGE);
+    expect(screen.queryByRole("switch", { name: ARCHIVE_ROW_TITLE })).toBeNull();
+    expect(screen.queryByRole("switch", { name: CLOSE_ROW_TITLE })).toBeNull();
+  });
+
+  it("shows the same notice instead of enabled rows when the state read fails", async () => {
+    const calls = stubTransport({ statesStatus: 500 });
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <AutomationsSettings workspaceSlug={SLUG} projectId={PROJECT} />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(AUTOMATIONS_UNAVAILABLE_MESSAGE);
+    expect(screen.queryByRole("switch", { name: CLOSE_ROW_TITLE })).toBeNull();
+    expect(patches(calls)).toEqual([]);
+  });
 });
 
 describe("AutomationsScreen", () => {
@@ -357,6 +381,18 @@ describe("archive row", () => {
 });
 
 describe("close row", () => {
+  it("holds the rows until the state list answers, so enabling never writes a null target", async () => {
+    const user = userEvent.setup();
+    const { calls } = setup({ hangStates: true });
+    const loading = await screen.findByRole("status", { name: "Loading automations" });
+    expect(loading).toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: CLOSE_ROW_TITLE })).toBeNull();
+    expect(screen.queryByRole("switch", { name: ARCHIVE_ROW_TITLE })).toBeNull();
+    expect(patches(calls)).toEqual([]);
+    await user.click(document.body);
+    expect(patches(calls)).toEqual([]);
+  });
+
   it("toggles on with a one-month delay and the first cancelled state", async () => {
     const user = userEvent.setup();
     const { calls } = setup({

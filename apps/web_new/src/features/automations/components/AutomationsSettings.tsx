@@ -33,6 +33,7 @@ export const AUTOMATIONS_HEADING = "Automations";
 export const AUTOMATIONS_INTRO =
   "Hand routine housekeeping to the project: finished and dormant items move on without manual upkeep.";
 export const AUTOMATIONS_LOADING_LABEL = "Loading automations";
+export const AUTOMATIONS_UNAVAILABLE_MESSAGE = "We could not load these settings. Check your connection and try again.";
 export const AUTOMATIONS_EXTENSION_SLOT = "automations-extension";
 
 export interface AutomationsSettingsProps {
@@ -65,6 +66,13 @@ export function AutomationsSettings({
   // handing out enabled controls; a known member or guest who also failed
   // the membership read stays refused.
   const admin = roles.isSuccess && membership.isSuccess && isProjectAdmin(roles.data?.[projectId] ?? null);
+  // Rows write whole-field automation values: the close toggle needs the
+  // cancelled-state list to name its target, and switching on needs the
+  // stored row. Until both the project collection and the state list have
+  // answered, hold the rows in their loading shape rather than letting an
+  // early click write a null target or a value over an unknown stored one.
+  const rowsPending = projects.isPending || states.isPending;
+  const rowsFailed = projects.isError || states.isError;
 
   const change = React.useCallback(
     (patch: AutomationPatch) => {
@@ -86,10 +94,14 @@ export function AutomationsSettings({
     return <NotAuthorizedView />;
   }
 
+  if (rowsFailed) {
+    return <AutomationsUnavailable />;
+  }
+
   return (
     <AutomationsScreen
       project={project}
-      projectPending={projects.isPending}
+      projectPending={rowsPending}
       states={states.data ?? []}
       onChange={change}
       extensions={extensions}
@@ -145,6 +157,21 @@ function AutomationsSkeleton(): React.ReactElement {
     <section aria-label={AUTOMATIONS_HEADING} role="status" aria-busy="true" className="flex flex-col">
       <RowSkeleton />
       <RowSkeleton />
+    </section>
+  );
+}
+
+function AutomationsUnavailable(): React.ReactElement {
+  return (
+    <section
+      aria-label={AUTOMATIONS_HEADING}
+      data-testid="automations-unavailable"
+      className="flex flex-col gap-(--space-4)"
+    >
+      <h2 className="text-h3 text-(--text)">{AUTOMATIONS_HEADING}</h2>
+      <p role="alert" className="text-body text-(--text-muted)">
+        {AUTOMATIONS_UNAVAILABLE_MESSAGE}
+      </p>
     </section>
   );
 }
