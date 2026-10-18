@@ -1433,19 +1433,19 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "pi_dash.bgtasks.webhook_task.model_activity",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.webhook_task.send_webhook_deactivation_email",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.webhook_task.webhook_activity",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.webhook_task.webhook_send_task",
-        owner: Owner::Python,
+        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title",
@@ -1857,6 +1857,24 @@ mod tests {
         // `register_activity_task` takes `Pools` too (PIDASHCONV-836): a
         // stub over the same name const the real call registers.
         registry.register(pidash_jobs::tasks_webhooks::ISSUE_ACTIVITY_TASK, stub());
+        // The webhook send + fan-out registers take `Pools` as well
+        // (PIDASHCONV-1105): stubs over the same name consts.
+        registry.register(
+            pidash_jobs::tasks_webhooks::webhook_send::WEBHOOK_SEND_TASK_NAME,
+            stub(),
+        );
+        registry.register(
+            pidash_jobs::tasks_webhooks::webhook_send::DEACTIVATION_EMAIL_TASK_NAME,
+            stub(),
+        );
+        registry.register(
+            pidash_jobs::tasks_webhooks::webhook_fanout::WEBHOOK_ACTIVITY_TASK_NAME,
+            stub(),
+        );
+        registry.register(
+            pidash_jobs::tasks_webhooks::webhook_fanout::MODEL_ACTIVITY_TASK_NAME,
+            stub(),
+        );
         // Real registrations (the same calls `worker()` makes).
         tasks_cleanup::register_versions(&mut registry, pool.clone());
         tasks_cleanup::assets::register_assets(
@@ -2046,6 +2064,10 @@ mod tests {
             pidash_jobs::tasks_webhooks::RECENT_VISITED_TASK_NAME,
             pidash_jobs::tasks_webhooks::PAGE_TRANSACTION_TASK_NAME,
             pidash_jobs::tasks_webhooks::ISSUE_ACTIVITY_TASK,
+            pidash_jobs::tasks_webhooks::webhook_send::WEBHOOK_SEND_TASK_NAME,
+            pidash_jobs::tasks_webhooks::webhook_send::DEACTIVATION_EMAIL_TASK_NAME,
+            pidash_jobs::tasks_webhooks::webhook_fanout::WEBHOOK_ACTIVITY_TASK_NAME,
+            pidash_jobs::tasks_webhooks::webhook_fanout::MODEL_ACTIVITY_TASK_NAME,
         ]);
         expected_rust.extend(pidash_jobs::tasks_webhooks::link_crawl::TASK_NAMES);
         expected_rust.extend(pidash_jobs::integrations::git_sync::TASK_NAMES);
@@ -2119,7 +2141,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 72, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 76, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> = TASKS
             .iter()

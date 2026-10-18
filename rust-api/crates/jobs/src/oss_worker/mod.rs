@@ -429,6 +429,34 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.clone(),
         redis_origin::OriginRedis::from_env(),
     );
+    // D-08 webhook send + fan-out (PIDASHCONV-1105; kept in sync with
+    // `inventory::tests::mirror_registry_matches_tasks_table`). The
+    // four `webhook_task` jobs run locally now: the send task POSTs
+    // through the raw requests-faithful client and logs to
+    // mongo-else-postgres, the fan-out renders `get_model_data` live
+    // and enqueues sends into the Rust queue, and the deactivation
+    // email goes through the shared mail send.
+    crate::tasks_webhooks::webhook_send::register_webhook_send_task(
+        registry,
+        ctx.pools.clone(),
+        ctx.mongo.clone(),
+    );
+    crate::tasks_webhooks::webhook_send::register_deactivation_email_task(
+        registry,
+        ctx.pools.clone(),
+    );
+    crate::tasks_webhooks::webhook_fanout::register_webhook_activity_task(
+        registry,
+        ctx.pools.clone(),
+        crate::tasks_webhooks::model_data::web_base_url(
+            ctx.settings.urls.web_url.as_deref(),
+            ctx.settings.urls.app_base_url.as_deref(),
+        ),
+    );
+    crate::tasks_webhooks::webhook_fanout::register_model_activity_task(
+        registry,
+        ctx.pools.clone(),
+    );
     Ok(())
 }
 
@@ -505,6 +533,10 @@ mod tests {
             crate::tasks_webhooks::RECENT_VISITED_TASK_NAME,
             crate::tasks_webhooks::PAGE_TRANSACTION_TASK_NAME,
             crate::tasks_webhooks::ISSUE_ACTIVITY_TASK,
+            crate::tasks_webhooks::webhook_send::WEBHOOK_SEND_TASK_NAME,
+            crate::tasks_webhooks::webhook_send::DEACTIVATION_EMAIL_TASK_NAME,
+            crate::tasks_webhooks::webhook_fanout::WEBHOOK_ACTIVITY_TASK_NAME,
+            crate::tasks_webhooks::webhook_fanout::MODEL_ACTIVITY_TASK_NAME,
         ]);
         expected.extend(crate::tasks_webhooks::link_crawl::TASK_NAMES);
         expected.extend(crate::integrations::git_sync::TASK_NAMES);
@@ -547,7 +579,7 @@ mod tests {
             crate::tasks_export::ISSUE_EXPORT_TASK,
             crate::tasks_export::ANALYTIC_EXPORT_TASK,
         ]);
-        assert_eq!(expected.len(), 72, "worker-owned count drifted");
+        assert_eq!(expected.len(), 76, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");
