@@ -486,6 +486,15 @@ warns at `PARITY_DISK_WARN_PCT` (default 80% used) and refuses to start at
 `PARITY_DISK_MAX_USE_PCT` (default 90%). Run it by hand before a long
 sweep against a kept stack, where no fresh bring-up runs the gate:
 
+On Docker Desktop (macOS and Windows) the data-root only exists inside the
+daemon's Linux VM, so the host cannot `df` it. The guard then measures the
+VM disk from a throwaway container (`docker run --rm --network none
+alpine:3.20 df -P /`) and applies the same thresholds. If that container
+cannot run, it prints a warning that the VM disk was not checked and
+continues with the host `/` check; a data-root that exists on the host is
+always checked as before, and an unreadable data-root on a non-Desktop
+Linux host is still a configuration error (exit 2).
+
 ```sh
 apps/web_new/e2e/parity/stack/parity-disk-check.sh [--path <dir>]...
 ```

@@ -95,14 +95,12 @@ usage_for() {
 WORST_USE=0
 WORST_PATH=""
 
-check_path() {
-  local path use avail dev avail_gb info
+record_usage() {
+  local path use avail dev avail_gb
   path="$1"
-  if ! info="$(usage_for "$path")"; then
-    echo "[parity] disk check: cannot read disk usage for '$path' (df failed)" >&2
-    exit 2
-  fi
-  read -r use avail dev <<< "$info"
+  use="$2"
+  avail="$3"
+  dev="$4"
   avail_gb="$(awk -v a="$avail" 'BEGIN {printf "%.1f", a/1048576}')"
   echo "[parity] disk: $path on $dev at ${use}% used (${avail_gb}G free)"
   if [ "$use" -gt "$WORST_USE" ]; then
@@ -111,17 +109,75 @@ check_path() {
   fi
 }
 
+check_path() {
+  local path use avail dev info
+  path="$1"
+  if ! info="$(usage_for "$path")"; then
+    echo "[parity] disk check: cannot read disk usage for '$path' (df failed)" >&2
+    exit 2
+  fi
+  read -r use avail dev <<< "$info"
+  record_usage "$path" "$use" "$avail" "$dev"
+}
+
+# vm_usage_for <path>: like usage_for, but df runs inside a throwaway
+# container with no mounts. A container's / sits on the daemon VM's disk,
+# so this measures the filesystem that actually holds the data-root when
+# the daemon is VM-backed (Docker Desktop on macOS/Windows).
+vm_usage_for() {
+  local path df_out use avail dev
+  path="$1"
+  df_out="$(docker run --rm --network none --pull=missing alpine:3.20 df -P / 2>/dev/null)" || return 1
+  use="$(echo "$df_out" | awk 'NR==2 {print $5}')"
+  avail="$(echo "$df_out" | awk 'NR==2 {print $4}')"
+  dev="$(echo "$df_out" | awk 'NR==2 {print $1}')"
+  use="${use%\%}"
+  case "$use" in ''|*[!0-9]*) return 1 ;; esac
+  case "$avail" in ''|*[!0-9]*) return 1 ;; esac
+  echo "$use $avail $dev"
+}
+
 check_path "/"
 
 DOCKER_ROOT=""
+DOCKER_OS=""
 if command -v docker >/dev/null 2>&1; then
-  DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+  DOCKER_INFO="$(docker info --format '{{.OperatingSystem}}|{{.DockerRootDir}}' 2>/dev/null || true)"
+  DOCKER_OS="${DOCKER_INFO%%|*}"
+  DOCKER_ROOT="${DOCKER_INFO#*|}"
+  if [ "$DOCKER_INFO" = "$DOCKER_ROOT" ]; then
+    DOCKER_OS=""
+  fi
 fi
 if [ -n "$DOCKER_ROOT" ]; then
   if [ "$DOCKER_ROOT" = "/" ]; then
     echo "[parity] disk: docker data-root is / (same filesystem)"
-  else
+  elif [ -e "$DOCKER_ROOT" ]; then
     check_path "$DOCKER_ROOT"
+  else
+    # The data-root is not visible on this host. That is normal for a
+    # VM-backed daemon (Docker Desktop on macOS/Windows), where the path
+    # exists only inside the daemon's Linux VM; on a Linux host it means a
+    # genuinely unreadable path and stays a config error.
+    case "$DOCKER_OS" in
+      *"Docker Desktop"*) VM_BACKED=1 ;;
+      *) VM_BACKED=0 ;;
+    esac
+    if [ "$(uname -s)" = "Darwin" ]; then
+      VM_BACKED=1
+    fi
+    if [ "$VM_BACKED" = "1" ]; then
+      if info="$(vm_usage_for "$DOCKER_ROOT")"; then
+        read -r use avail dev <<< "$info"
+        echo "[parity] disk: Docker Desktop VM data-root $DOCKER_ROOT measured inside the daemon"
+        record_usage "$DOCKER_ROOT" "$use" "$avail" "$dev"
+      else
+        echo "[parity] disk check WARNING: Docker data-root '$DOCKER_ROOT' lives in a VM and its disk could not be measured; VM disk was not checked, host / check only" >&2
+      fi
+    else
+      echo "[parity] disk check: cannot read disk usage for '$DOCKER_ROOT' (df failed)" >&2
+      exit 2
+    fi
   fi
 else
   echo "[parity] disk: docker not reachable; checked / only"
