@@ -38,14 +38,14 @@ vi.mock("./runtime/service.js", async (importOriginal) => {
 
 import { getRuntimeSignOutHooks, registerRuntimeSignOutHooks } from "../../core/session/index.js";
 
-describe("runners feature sign-out wiring", () => {
+describe("root runtime sign-out lifecycle", () => {
   afterEach(() => {
     registerRuntimeSignOutHooks(null);
     vi.clearAllMocks();
   });
 
   it("registers the runtime hooks on import", async () => {
-    await import("./index.js");
+    await import("./runtime/SignOutLifecycle.js");
     const hooks = getRuntimeSignOutHooks();
     expect(hooks).not.toBeNull();
     await hooks?.confirmRuntimeSignOut();
@@ -56,5 +56,11 @@ describe("runners feature sign-out wiring", () => {
       client: harness.client,
       runtime: harness.agentRuntime,
     });
+  });
+
+  it("does not register hooks without a desktop runtime", async () => {
+    const { registerRuntimeSignOutLifecycle } = await import("./runtime/SignOutLifecycle.js");
+    registerRuntimeSignOutLifecycle(undefined);
+    expect(getRuntimeSignOutHooks()).toBeNull();
   });
 });

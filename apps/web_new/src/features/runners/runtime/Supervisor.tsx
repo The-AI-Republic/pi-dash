@@ -21,7 +21,6 @@ import { useMe } from "../../../core/session/index.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { isManagedRunnerAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./queries.js";
 import { connectProject, refreshRuntime, resumeRuntime } from "./service.js";
-import { RuntimeSignOutDialog } from "./SignOutDialog.js";
 
 /** Background engine-setup refresh cadence (plus every window focus). */
 export const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
@@ -115,7 +114,8 @@ export function RuntimeSupervisor(props: RuntimeSupervisorProps): React.ReactEle
     // soon as the cached row reports the agent available. Leaving the
     // project stops it via the enabled flag; a focus-triggered reconnect
     // re-reads the row, restarting the wait when the agent went away.
-    refetchInterval: (query) => (isManagedRunnerAvailable(query.state.data) ? false : AVAILABILITY_POLL_INTERVAL_MS),
+    refetchInterval: (query) =>
+      query.state.error || !isManagedRunnerAvailable(query.state.data) ? AVAILABILITY_POLL_INTERVAL_MS : false,
   });
   const available = isManagedRunnerAvailable(availability.data);
   const availabilityError = availability.isError ? errorMessage(availability.error) : null;
@@ -154,6 +154,7 @@ export function RuntimeSupervisor(props: RuntimeSupervisorProps): React.ReactEle
     let active = true;
     resumeRuntime(userId, { client, runtime });
     const reconnect = (): void => {
+      setConnectError(null);
       void connectProject({ client, runtime, workspaceSlug: ws, projectId }).then(
         () => {
           if (!active) return;
@@ -179,19 +180,13 @@ export function RuntimeSupervisor(props: RuntimeSupervisorProps): React.ReactEle
   }, [runtime, userId, ws, projectId, client, queryClient]);
 
   if (!runtime) return null;
-  return (
-    <>
-      {/* Mounted on every page: sign-out can be started from any of them. */}
-      <RuntimeSignOutDialog />
-      {userId && projectId ? (
-        <div
-          role="status"
-          data-testid="runtime-notice"
-          className="text-caption fixed bottom-(--space-4) left-1/2 z-40 w-max max-w-[min(36rem,92vw)] -translate-x-1/2 rounded-(--radius-full) border border-(--border) bg-(--surface) px-(--space-6) py-(--space-2) text-(--text)"
-        >
-          {notice}
-        </div>
-      ) : null}
-    </>
-  );
+  return userId && projectId ? (
+    <div
+      role="status"
+      data-testid="runtime-notice"
+      className="text-caption fixed bottom-(--space-4) left-1/2 z-40 w-max max-w-[min(36rem,92vw)] -translate-x-1/2 rounded-(--radius-full) border border-(--border) bg-(--surface) px-(--space-6) py-(--space-2) text-(--text)"
+    >
+      {notice}
+    </div>
+  ) : null;
 }

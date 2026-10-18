@@ -71,6 +71,7 @@ vi.mock("./service.js", () => ({
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import {
+  AVAILABILITY_POLL_INTERVAL_MS,
   matchProjectIdentifier,
   RUNTIME_CONNECTED_TEXT,
   RUNTIME_PREPARING_TEXT,
@@ -219,6 +220,15 @@ describe("RuntimeSupervisor", () => {
     await screen.findByText("daemon refused");
   });
 
+  it("clears a transient enrollment failure when focus reconnects", async () => {
+    harness.connect.mockRejectedValueOnce(new Error("daemon refused")).mockResolvedValue(undefined);
+    renderSupervisor();
+    await screen.findByText("daemon refused");
+    act(() => focusApp(true));
+    await screen.findByText(RUNTIME_WAITING_TEXT);
+    expect(harness.connect).toHaveBeenCalledTimes(2);
+  });
+
   it("shows non-error enrollment failures as text", async () => {
     harness.connect.mockRejectedValue("boom");
     renderSupervisor();
@@ -229,6 +239,31 @@ describe("RuntimeSupervisor", () => {
     harness.getProject.mockRejectedValue(new Error("project read failed"));
     renderSupervisor();
     await screen.findByText("project read failed");
+  });
+
+  it("resumes polling after a failed availability re-check with stale available data", async () => {
+    harness.getProject.mockResolvedValue(readyProject());
+    renderSupervisor();
+    await screen.findByText(RUNTIME_CONNECTED_TEXT);
+    vi.useFakeTimers();
+    try {
+      harness.getProject.mockRejectedValueOnce(new Error("re-check failed"));
+      act(() => focusApp(true));
+      await act(async () => undefined);
+      await act(async () => {
+        vi.advanceTimersByTime(0);
+      });
+      expect(screen.getByText("re-check failed")).toBeVisible();
+
+      harness.getProject.mockResolvedValue(waitingProject());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(AVAILABILITY_POLL_INTERVAL_MS * 4);
+      });
+      expect(screen.getByText(RUNTIME_WAITING_TEXT)).toBeVisible();
+      expect(harness.getProject.mock.calls.length).toBeGreaterThanOrEqual(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("re-polls availability while waiting", async () => {
@@ -322,6 +357,22 @@ describe("RuntimeSupervisor", () => {
     rendered.unmount();
     await act(async () => {
       release();
+    });
+  });
+
+  it("ignores a refresh failure that settles after unmount", async () => {
+    let reject!: (error: unknown) => void;
+    harness.refresh.mockReturnValue(new Promise<void>((_resolve, rejectPromise) => void (reject = rejectPromise)));
+    const rendered = render(
+      <QueryClientProvider client={queryClient}>
+        <RuntimeSupervisor />
+      </QueryClientProvider>
+    );
+    await act(async () => undefined);
+    act(() => focusApp(true));
+    rendered.unmount();
+    await act(async () => {
+      reject(new Error("late refresh"));
     });
   });
 
