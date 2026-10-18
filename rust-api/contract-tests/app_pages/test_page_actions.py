@@ -194,6 +194,61 @@ def test_access_requires_auth(anon_client, world):
     assert anon_client.post(f"{page_url(world, world['page']['id'])}access/").status_code in (401, 403)
 
 
+# -- access body handling: the raw `.get` root and the read order ------------
+#
+# ``PageViewSet.access`` (``base.py:271-289``) reads ``request.data`` and
+# calls the *raw* ``.get("access", …)`` — no serializer — so a well-formed
+# non-object body raises ``AttributeError`` inside the view and Django's
+# ``handle_exception`` renders the generic 500 (the same root as PB-0485 on
+# the page write paths). And because ``request.data`` is read at ``:272``
+# *before* the project-scoped fetch at ``:273-278``, a malformed body is
+# DRF's 400 ``ParseError`` even when that fetch would miss.
+
+_ACCESS_NON_OBJECT_BODIES = ["[1]", '"x"', "5", "null"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    _ACCESS_NON_OBJECT_BODIES,
+    ids=["list", "string", "number", "null"],
+)
+def test_access_non_object_body_is_generic_500(user_client, world, db, raw):
+    before = db.fetchval("SELECT access FROM pages WHERE id=%s", (world["page"]["id"],))
+    response = user_client.post(
+        f"{page_url(world, world['page']['id'])}access/",
+        content=raw,
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 500
+    assert response.json() == {"error": "Something went wrong please try again later"}
+    # the failed call never reaches the save: the row is untouched.
+    assert db.fetchval("SELECT access FROM pages WHERE id=%s", (world["page"]["id"],)) == before
+
+
+def test_access_parses_body_before_project_scoped_fetch(user_client, world, db):
+    # A page the requester owns (so the permission/gate lookup passes) whose
+    # project_pages link to the URL project is soft-deleted: the scoped fetch
+    # at ``base.py:273-278`` would 404, but ``request.data`` is read first
+    # (``:272``), so a malformed body still answers the 400 ParseError.
+    db.execute(
+        "UPDATE project_pages SET deleted_at=now() WHERE page_id=%s AND project_id=%s",
+        (world["page"]["id"], world["project"]["id"]),
+    )
+    response = user_client.post(
+        f"{page_url(world, world['page']['id'])}access/",
+        content='{"access":',
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert set(body) == {"detail"}
+    # DRF's ParseError detail; Django appends the decoder message
+    # ("- Expecting value: line 1 column 11 (char 10)") while the Rust backend
+    # pins the shared prefix (a pre-existing app_pages divergence, out of scope
+    # here — see PIDASHCONV-1172).
+    assert body["detail"].startswith("JSON parse error")
+
+
 def test_cross_workspace_action_isolation(user_client, world, world2, db):
     # NOTE (ported behavior): the permission lookup scopes by the URL
     # workspace, so another workspace's page id raises DoesNotExist there —

@@ -1884,23 +1884,27 @@ pub async fn access_page(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
-    let page = match fetch_state_page(pool, &slug, &project_id, &page_id).await {
-        Ok(page) => page,
-        Err(denial) => return denial.into_response(),
-    };
-    let Some(page) = page else {
-        return Denial::ObjectNotFound.into_response();
-    };
+    // `request.data` is read HERE (`base.py:272`, `_base_manager` scoped
+    // fetch at `:273-278` follows it): a malformed body is DRF's 400
+    // `ParseError` even when the project-scoped page fetch would miss.
     let parsed = match read_json_body(req).await {
         Ok(parsed) => parsed,
         Err(denial) => return denial.into_response(),
     };
     let object = match parsed.as_object() {
         Some(object) => object,
-        // `request.data.get("access", …)` on a non-object body: Django
-        // raises before the view runs — the 400 detail branch, ported as
-        // observed on the description PATCH sibling.
-        None => return Denial::BadDetail("Invalid request".to_owned()).into_response(),
+        // `request.data.get("access", …)` on a non-object body is a raw
+        // `.get`, not a serializer: Django's `AttributeError` reaches
+        // `BaseViewSet.handle_exception` and renders the generic 500 (the
+        // same root as PB-0485 on the page write paths).
+        None => return Denial::ServerError.into_response(),
+    };
+    let page = match fetch_state_page(pool, &slug, &project_id, &page_id).await {
+        Ok(page) => page,
+        Err(denial) => return denial.into_response(),
+    };
+    let Some(page) = page else {
+        return Denial::ObjectNotFound.into_response();
     };
     // Guard input (`:281`): the absent key defaults to the stored value
     // (never denies); a present key carries its integer, or a
