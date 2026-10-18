@@ -185,12 +185,13 @@ def test_intake_garbage_segment_body_matches_asset_resolver_404(org, method, ass
     404, not DRF's ``{"detail":"Not found."}``.
 
     The asset handlers already answer garbage with the prod ``handler404``
-    body (``{"error":"Page not found."}``); intake did not. Compare the two
-    responses: identical status and content type, and — when the backend
-    answers JSON (Rust, and Django with DEBUG=False) — identical bytes pinned
-    to the prod body. On the harness Django (DEBUG=True) both surfaces answer
-    the HTML technical 404, which carries the request path and so is compared
-    by content type only.
+    body (``{"error": "Page not found."}`` — plain Django ``JsonResponse``
+    bytes, i.e. ``json.dumps`` defaults with the space after the colon);
+    intake did not. Compare the two responses: identical status and content
+    type, and — when the backend answers JSON (Rust, and Django with
+    DEBUG=False) — byte-identical to the prod body. On the harness Django
+    (DEBUG=True) both surfaces answer the HTML technical 404, which carries
+    the request path and so is compared by content type only.
     """
     kw = _body_kw(method)
     intake = org.request(method, f"{_intake_base(org)}not-a-uuid/", "admin", **kw)
@@ -199,5 +200,7 @@ def test_intake_garbage_segment_body_matches_asset_resolver_404(org, method, ass
         assert r.status_code == 404, r.text
     assert _ctype(intake) == _ctype(asset), (intake.headers, asset.headers)
     if _ctype(intake) == "application/json":
-        assert intake.json() == {"error": "Page not found."}, intake.text
-        assert intake.content == asset.content, (intake.text, asset.text)
+        # The prod resolver-404 bytes, exactly: a parsed-dict comparison
+        # would not catch JsonResponse's space after the colon.
+        assert intake.content == b'{"error": "Page not found."}', intake.content
+        assert asset.content == intake.content, (asset.content, intake.content)

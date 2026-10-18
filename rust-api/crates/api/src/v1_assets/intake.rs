@@ -151,10 +151,11 @@ pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 pub const RESOURCE_MISSING_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
 /// Global `handler404` body (`pi_dash/urls.py:15` ->
 /// `app/views/error_404.py:10`): a non-UUID `issue_id` never reaches the
-/// view, because Django's `<uuid:>` converter 404s at URL resolve with this
-/// exact prod body. The asset modules already answer garbage this way
-/// (`asset_user.rs` / `asset_generic.rs` `PAGE_NOT_FOUND_BODY`).
-pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error":"Page not found."}"#;
+/// view, because Django's `<uuid:>` converter 404s at URL resolve. The
+/// view is a plain Django `JsonResponse`, so the bytes are `json.dumps`
+/// defaults — a space after the colon (the `asset_user.rs` /
+/// `asset_generic.rs` `PAGE_NOT_FOUND_BODY`).
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// `handle_exception`'s `IntegrityError` branch (`base.py:136-140`): the
 /// triage-creation race (unique `name`+`project`) 400s here.
 pub const PAYLOAD_INVALID_BODY: &str = r#"{"error":"The payload is not valid"}"#;

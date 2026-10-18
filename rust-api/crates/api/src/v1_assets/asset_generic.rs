@@ -147,8 +147,10 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `APIKeyAuthentication` failure (invalid, revoked, expired, inactive).
 pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"}"#;
 /// Resolver 404 for a non-UUID `<uuid:asset_id>` segment (global
-/// `handler404`, `pi_dash/urls.py:15`).
-pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error":"Page not found."}"#;
+/// `handler404`, `pi_dash/urls.py:15` -> `app/views/error_404.py`):
+/// `custom_404_view` is a plain Django `JsonResponse`, so the bytes are
+/// `json.dumps` defaults — a space after the colon.
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 /// POST dedupe-hit message (`asset.py:543-545`).
 pub const DEDUPE_MESSAGE: &str = "Asset with same external id and source already exists";
@@ -1872,7 +1874,7 @@ mod tests {
             INVALID_TOKEN_BODY,
             r#"{"detail":"Given API token is not valid"}"#
         );
-        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error":"Page not found."}"#);
+        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error": "Page not found."}"#);
         assert_eq!(
             DEDUPE_MESSAGE,
             "Asset with same external id and source already exists"

@@ -143,8 +143,11 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `APIKeyAuthentication` failure (invalid, revoked, expired, inactive).
 pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"}"#;
 /// Resolver 404 for a non-UUID `<uuid:asset_id>` segment (global
-/// `handler404`, `pi_dash/urls.py:15`).
-pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error":"Page not found."}"#;
+/// `handler404`, `pi_dash/urls.py:15` -> `app/views/error_404.py`):
+/// `custom_404_view` is a plain Django `JsonResponse`, so the bytes are
+/// `json.dumps` defaults — a space after the colon (the
+/// `app_workspace`/`runner_sessions` resolver-404 constants).
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 /// POST entity guard allowlist (`asset.py:126`).
 pub const USER_ENTITY_TYPES: &[&str] = &["USER_AVATAR", "USER_COVER"];
@@ -1678,7 +1681,7 @@ mod tests {
             INVALID_TOKEN_BODY,
             r#"{"detail":"Given API token is not valid"}"#
         );
-        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error":"Page not found."}"#);
+        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error": "Page not found."}"#);
     }
 
     // Response key order: DRF renders declaration order.
