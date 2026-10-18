@@ -505,11 +505,7 @@ fn parse_request_part(part: &Value) -> Result<TurnRequestPart, CodecError> {
             let content = match object.get("content") {
                 Some(Value::String(text)) => TurnRetryContent::Text(text.clone()),
                 Some(Value::Array(details)) => {
-                    let mut parsed = Vec::with_capacity(details.len());
-                    for detail in details {
-                        parsed.push(parse_retry_detail(detail)?);
-                    }
-                    TurnRetryContent::Errors(parsed)
+                    TurnRetryContent::Errors(parse_retry_details(details)?)
                 }
                 _ => return Err(err("retry-prompt content must be a string or error list")),
             };
@@ -561,6 +557,16 @@ fn parse_response_part(part: &Value) -> Result<TurnResponsePart, CodecError> {
         }
         kind => Err(err(format!("unsupported response part_kind: {kind}"))),
     }
+}
+
+/// Parse a pydantic error-details array (`list[ErrorDetails]`, the
+/// `RetryPromptPart` error form) from a raw JSON value.
+///
+/// The agent loop uses this to turn a tool's arg-validation failure
+/// into a retry prompt without re-deriving the field rules; the stored
+/// blob reader uses it through the same parser.
+pub fn parse_retry_details(details: &[Value]) -> Result<Vec<RetryErrorDetail>, CodecError> {
+    details.iter().map(parse_retry_detail).collect()
 }
 
 fn parse_retry_detail(detail: &Value) -> Result<RetryErrorDetail, CodecError> {

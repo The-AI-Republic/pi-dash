@@ -926,6 +926,7 @@ struct DeadSession {
     /// original error otherwise). Ignored when `inflight` is false.
     close_error: McpError,
     /// An in-flight REQUEST wedged: no `DELETE` is attempted.
+    #[allow(dead_code)] // fixture bookkeeping; the assertions read the error class
     inflight: bool,
 }
 
@@ -1578,6 +1579,7 @@ fn opt_object(block: &Value, field: &str, what: &str) -> Result<Option<Value>, M
 /// shared stream reader serves every op — no dispatcher task needed.
 struct LegacySseSession {
     client: reqwest::Client,
+    #[allow(dead_code)] // parsed for the base-URL check; the session dials via `client`
     base: reqwest::Url,
     auth: Option<String>,
     endpoint: reqwest::Url,
@@ -2293,17 +2295,20 @@ impl ResilientSession {
         &self.spec.server_name
     }
 
+    #[allow(dead_code)] // ported accessor; the seam reads server_name/failure
     pub fn prefix(&self) -> &str {
         &self.spec.prefix
     }
 
     /// The server's `instructions`, when requested and offered.
+    #[allow(dead_code)] // `include_instructions` is false on the turn path (Python's default)
     pub fn instructions(&self) -> Option<&str> {
         self.instructions.as_deref()
     }
 
     /// The last recorded error's message, for logs (the class is what the
     /// user sees).
+    #[allow(dead_code)] // diagnostics accessor; the seam reports the exception class
     pub fn last_message(&self) -> Option<&str> {
         self.last_message.as_deref()
     }
@@ -2354,6 +2359,7 @@ fn strip_prefix(prefix: &str, name: &str) -> String {
 /// (`mcp.py:257-265` + `crypto.py:89-96`): the backend's decryptor adapts a
 /// ciphertext into the header or a classified failure — a missing key is
 /// `AssistantError` (surfaced by code), anything else unreadable is opaque.
+#[allow(dead_code)] // the seam decrypts through `assistant::common` directly (same call)
 pub fn decrypt_auth_header(
     token: &[u8],
     decrypt: impl FnOnce(&[u8]) -> Result<String, CryptoError>,

@@ -166,15 +166,16 @@ Deliberate (accepted by their domain gates);
 recorded here and in the V-01 PR, for the V-05 ported-bug register to
 catalog.
 
-### W-assistant (0 rows; sweep wired, turn reclassified to PROXIED)
+### W-assistant (0 rows; fixed)
 
-Fix: PIDASHCONV-857 (hybrid-worker decision, not wiring: the Python
-worker stays the owner post-switchover — see the `assistant.run_turn`
-bullet under "Proxied by design". The sweep row is gone (wired by
-PIDASHCONV-831: `register_sweep_handler` in `worker()`, live store);
-`run_turn` needs a live `TurnSeam`/agent runtime and none exists, so
-there is nothing to wire; the `W-assistant` gap id stays reserved in
-`WIRE_GAPS`).
+Fix: PIDASHCONV-863 (landed; revisits the PIDASHCONV-857 hybrid-worker
+decision, whose 2027-04-10 backstop the Standalone Rust rule withdrew).
+`register_turn_handler` is wired in `worker()` with the live
+`LiveTurnSeam` — the D-11 provider lanes, the PIDASHCONV-1111/1112/1113
+streaming/MCP/local-tool modules, the agent loop, and the ported SQL over
+the worker pool (the sweep row went first, wired by PIDASHCONV-831). The
+row reclassified to OWNED (signature deleted). The `W-assistant` gap id
+stays reserved in `WIRE_GAPS`.
 
 ```expected-jobs
 ```
@@ -228,28 +229,14 @@ The row reclassified to OWNED (signature deleted).
 ```expected-jobs
 ```
 
-### Proxied by design (11 rows)
+### Proxied by design (10 rows)
 
 No fix issue: forwarding preserves Django's outcome on every row.
 
 - `celery.*` (9): Celery canvas builtins; no canvas usage in the codebase.
-- `assistant.run_turn`: hybrid worker (PIDASHCONV-857). Published on
-  every assistant message POST (`messages.py:103`), but the body runs
-  the pydantic-ai agent loop and Rust has no live `TurnSeam`/agent
-  runtime (only `#[cfg(test)]` fakes; `Agent.run` has no Rust
-  counterpart; the PIDASHCONV-254 rmcp/schemars/provider-client plan
-  was never built). A Rust handler would fail or ACK every turn while
-  running nothing, diverging from Django — so the Python worker stays
-  the owner post-switchover (the AMQP broker stays too: the Rust
-  handler enqueues into `rust_job_queue` and the Rust worker forwards
-  to Python over Celery protocol). Decision owner: stage-8
-  switchover track (PIDASHCONV-857); revisit PIDASHCONV-863 by
-  2027-04-10, or when Rust ships a live TurnSeam, whichever comes
-  first.
 - `export_analytics_to_csv_email`: dead (defined, never referenced).
 
 ```expected-jobs
-PROXIED :: assistant.run_turn :: hybrid worker (no live TurnSeam/agent runtime in Rust); forward preserves full python execution (PIDASHCONV-857)
 PROXIED :: celery.accumulate :: celery-builtin; no canvas usage
 PROXIED :: celery.backend_cleanup :: celery-builtin; no canvas usage
 PROXIED :: celery.chain :: celery-builtin; no canvas usage

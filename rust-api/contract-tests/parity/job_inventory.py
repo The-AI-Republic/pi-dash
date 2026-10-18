@@ -263,24 +263,15 @@ DORMANT_TASKS = {
 # for the body, so the Python worker stays the owner post-switchover and
 # forwarding preserves the full Python execution. Verified by hand per
 # task; each entry carries its own detail (and revisit) below.
-HYBRID_WORKER_TASKS = {
-    # The body runs the pydantic-ai agent loop and Rust has no live
-    # TurnSeam/agent runtime (only #[cfg(test)] fakes; Agent.run has no
-    # Rust counterpart): a Rust handler would fail or ACK every turn
-    # while running nothing.
-    # (PIDASHCONV-857; revisit PIDASHCONV-863 by 2027-04-10).
-    "assistant.run_turn",
-    # `delete_old_s3_link` was hybrid under PIDASHCONV-835; PIDASHCONV-858
-    # shipped the live S3 delete path and flipped it to Rust-owned.
-}
+# Empty: each hybrid task has since been flipped to a live Rust
+# execution path. `assistant.run_turn` was the last one (PIDASHCONV-857
+# hybrid decision; PIDASHCONV-863 shipped the live `TurnSeam`/agent
+# runtime and `register_turn_handler`), after `delete_old_s3_link`
+# (PIDASHCONV-858, live S3 delete).
+HYBRID_WORKER_TASKS: set[str] = set()
 
 # Live-check detail per hybrid task (byte-matched against EXPECTED.md).
-HYBRID_WORKER_DETAILS = {
-    "assistant.run_turn": (
-        "hybrid worker (no live TurnSeam/agent runtime in Rust); "
-        "forward preserves full python execution (PIDASHCONV-857)"
-    ),
-}
+HYBRID_WORKER_DETAILS: dict[str, str] = {}
 
 # Defined but never referenced anywhere (dead tasks).
 DEAD_TASKS = {

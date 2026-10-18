@@ -113,6 +113,7 @@ pub struct StubServer {
     /// `http://127.0.0.1:<port>`
     pub base: String,
     log: Arc<Mutex<Vec<LoggedRequest>>>,
+    #[allow(dead_code)] // fixture stub bookkeeping; only the senders matter
     queues: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>,
     done: Arc<Notify>,
     finished: Arc<Mutex<bool>>,

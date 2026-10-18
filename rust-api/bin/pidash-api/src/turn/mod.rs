@@ -34,12 +34,17 @@
 //! live seam, parity flip, replay proof). Until then this tree is
 //! exercised by its unit tests only.
 
+pub mod agent;
 pub mod history;
+pub mod instructions;
+pub mod live;
 pub mod mcp_client;
 #[cfg(test)]
 mod mcp_parity;
 #[cfg(test)]
 mod mcp_stub;
+#[cfg(test)]
+mod replay;
 pub mod streaming;
 pub mod tool_args;
 pub mod tool_schemas;
