@@ -2,12 +2,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { NotificationItem, NotificationListResponse } from "@pidash/api-client";
 import * as React from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
@@ -131,11 +131,14 @@ interface ViewOptions {
   unreadReply?: () => Promise<Response> | Response;
   /** Answer a write (mark-all-read) with a JSON body. */
   postReply?: (url: string, body: string) => Promise<Response> | Response;
+  /** Query freshness; the reconnect test makes the reads stale at once. */
+  staleTime?: number;
 }
 
 function renderView(options: ViewOptions = {}): {
   calls: string[];
   firstReadDidFail: () => boolean;
+  queryClient: QueryClient;
   unmount: () => void;
 } {
   if (document.getElementById(FULL_SCREEN_PORTAL_ID) === null) {
@@ -157,6 +160,7 @@ function renderView(options: ViewOptions = {}): {
     listReply,
     unreadReply,
     postReply,
+    staleTime,
   } = options;
   const calls: string[] = [];
   let readWrites = 0;
@@ -210,7 +214,9 @@ function renderView(options: ViewOptions = {}): {
     }
     return { status: 404, url, headers: { get: () => null }, text: async () => "{}" };
   }) as never);
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: staleTime === undefined ? { retry: false } : { retry: false, staleTime } },
+  });
   if (seedWorkspace) {
     queryClient.setQueryData(sessionKeys.workspaces, [workspaceEntry(role)]);
   }
@@ -238,7 +244,7 @@ function renderView(options: ViewOptions = {}): {
       <InboxView workspaceSlug="acme" />
     </QueryClientProvider>
   );
-  return { calls, firstReadDidFail: () => firstReadFailed, unmount: rendered.unmount };
+  return { calls, firstReadDidFail: () => firstReadFailed, queryClient, unmount: rendered.unmount };
 }
 
 function cardTitles(): string[] {
@@ -250,6 +256,12 @@ function cardTitles(): string[] {
 beforeEach(() => {
   resetAppClient();
   vi.clearAllMocks();
+});
+
+afterEach(() => {
+  // A reconnect test puts the shared online manager offline; restore the
+  // default so a later file's queries are not held back.
+  onlineManager.setOnline(true);
 });
 
 describe("InboxView", () => {
@@ -779,6 +791,10 @@ function listCalls(calls: string[]): URLSearchParams[] {
   return calls.filter((url) => url.includes("/users/notifications?")).map((url) => new URL(url).searchParams);
 }
 
+function unreadCalls(calls: string[]): string[] {
+  return calls.filter((url) => url.includes("/users/notifications/unread/"));
+}
+
 describe("InboxView stream controls (NTF-013-017, NTF-028)", () => {
   it("refreshes the current stream once, with progress, and ignores repeat presses", async () => {
     const gate = deferred<Response>();
@@ -948,6 +964,141 @@ describe("InboxView stream controls (NTF-013-017, NTF-028)", () => {
     });
     renderView({ unread: UNREAD, defaultPage: page([row(), future]) });
     expect(cardTitles()).toEqual(["Ship it"]);
+  });
+
+  it("re-reads the list and the unread totals together on refresh", async () => {
+    let unreadServed = 0;
+    let listServed = 0;
+    const { calls } = renderView({
+      serveReads: true,
+      unreadReply: () => {
+        unreadServed += 1;
+        return jsonResponse(
+          unreadServed === 1 ? UNREAD : { total_unread_notifications_count: 4, mention_unread_notifications_count: 1 }
+        );
+      },
+      listReply: () => {
+        listServed += 1;
+        return jsonResponse(
+          page([commentRow(listServed === 1 ? "Old story" : "Arrived story", "023e4567-e89b-12d3-a456-426614174020")])
+        );
+      },
+    });
+    expect(await screen.findByText("Old story")).toBeInTheDocument();
+    expect(within(screen.getByTestId("inbox-tab-all")).getByText("3")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText("Arrived story")).toBeInTheDocument();
+    await waitFor(() => expect(within(screen.getByTestId("inbox-tab-all")).getByText("4")).toBeInTheDocument());
+    expect(unreadCalls(calls)).toHaveLength(2);
+    expect(listCalls(calls)).toHaveLength(2);
+  });
+
+  it("re-reads the totals on a tab change without leaving the tab", async () => {
+    let unreadServed = 0;
+    const { calls } = renderView({
+      serveReads: true,
+      unreadReply: () => {
+        unreadServed += 1;
+        return jsonResponse(
+          unreadServed === 1 ? UNREAD : { total_unread_notifications_count: 0, mention_unread_notifications_count: 5 }
+        );
+      },
+    });
+    expect(await screen.findByRole("tablist")).toBeInTheDocument();
+    await waitFor(() => expect(within(screen.getByTestId("inbox-tab-mentions")).getByText("1")).toBeInTheDocument());
+    const user = menuUser();
+    await user.click(screen.getByTestId("inbox-tab-mentions"));
+    await waitFor(() => expect(listCalls(calls)).toHaveLength(2));
+    await waitFor(() => expect(within(screen.getByTestId("inbox-tab-mentions")).getByText("5")).toBeInTheDocument());
+    expect(within(screen.getByTestId("inbox-tab-all")).queryByText("0")).not.toBeInTheDocument();
+    expect(unreadCalls(calls)).toHaveLength(2);
+  });
+
+  it("re-reads the totals on origin and mode changes", async () => {
+    let unreadServed = 0;
+    const { calls } = renderView({
+      serveReads: true,
+      unreadReply: () => {
+        unreadServed += 1;
+        return jsonResponse({
+          total_unread_notifications_count: unreadServed,
+          mention_unread_notifications_count: 1,
+        });
+      },
+    });
+    await waitFor(() => expect(listCalls(calls)).toHaveLength(1));
+    const user = menuUser();
+    await toggleOrigin(user, "assigned");
+    await waitFor(() => expect(within(screen.getByTestId("inbox-tab-all")).getByText("2")).toBeInTheDocument());
+    await toggleMode(user, "archived");
+    await waitFor(() => expect(within(screen.getByTestId("inbox-tab-all")).getByText("3")).toBeInTheDocument());
+    expect(unreadCalls(calls)).toHaveLength(3);
+  });
+
+  it("re-reads fresh cached totals when the inbox is entered again", async () => {
+    let unreadServed = 0;
+    const first = renderView({
+      serveReads: true,
+      unreadReply: () => {
+        unreadServed += 1;
+        return jsonResponse({
+          total_unread_notifications_count: unreadServed,
+          mention_unread_notifications_count: 0,
+        });
+      },
+    });
+    expect(await screen.findByRole("tablist")).toBeInTheDocument();
+    await waitFor(() => expect(within(screen.getByTestId("inbox-tab-all")).getByText("1")).toBeInTheDocument());
+    first.unmount();
+    // The remount shares the cache entry, which is still fresh by
+    // staleTime; a re-entry must read both surfaces anyway.
+    const second = render(
+      <QueryClientProvider client={first.queryClient}>
+        <InboxView workspaceSlug="acme" />
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(within(screen.getByTestId("inbox-tab-all")).getByText("2")).toBeInTheDocument());
+    await waitFor(() => expect(unreadCalls(first.calls)).toHaveLength(2));
+    second.unmount();
+  });
+
+  it("ignores a reconnect that would reveal arrivals without a permitted action (NTF-028)", async () => {
+    let unreadServed = 0;
+    let listServed = 0;
+    const { calls } = renderView({
+      serveReads: true,
+      // Both reads are stale from the start, so a reconnect is exactly the
+      // moment TanStack would otherwise re-read them by default.
+      staleTime: 0,
+      unreadReply: () => {
+        unreadServed += 1;
+        return jsonResponse({
+          total_unread_notifications_count: unreadServed,
+          mention_unread_notifications_count: 0,
+        });
+      },
+      listReply: () => {
+        listServed += 1;
+        const title = listServed === 1 ? "Open story" : "Arrived story";
+        return jsonResponse(page([commentRow(title, "123e4567-e89b-12d3-a456-426614174021")]));
+      },
+    });
+    expect(await screen.findByText("Open story")).toBeInTheDocument();
+    expect(calls).toHaveLength(2);
+
+    onlineManager.setOnline(false);
+    onlineManager.setOnline(true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(calls).toHaveLength(2);
+    expect(screen.queryByText("Arrived story")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("inbox-tab-all")).getByText("1")).toBeInTheDocument();
+
+    // The next permitted action still lands both updates.
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText("Arrived story")).toBeInTheDocument();
+    await waitFor(() => expect(within(screen.getByTestId("inbox-tab-all")).getByText("2")).toBeInTheDocument());
+    expect(calls).toHaveLength(4);
   });
 
   it("reads nothing on its own while it sits open (NTF-028)", async () => {
