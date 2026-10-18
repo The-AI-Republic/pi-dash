@@ -6044,20 +6044,90 @@ export class WebNewDriver implements ParityDriver {
     return todo("kanbanBoardVisible");
   }
 
+  // --- Issues timeline (NEWFRONT-624, ISS-044–049). The header switcher
+  // --- marks the active layout with aria-pressed; the chart carries the
+  // --- header/prose titles and day-indexed cells the scenarios read.
+  // --- Drag, resize, add-block and quick-add stubs stay untouched: the
+  // --- sibling slices own those rows.
+
+  /** Ordered layout keys in the header switcher. */
+  private static readonly BOARD_ORDER: readonly BoardLayoutKey[] = [
+    "list",
+    "kanban",
+    "calendar",
+    "spreadsheet",
+    "gantt",
+  ];
+
+  /** Layout keys as the switcher's DOM markers spell them. */
+  private static readonly BOARD_DOM_KEYS: readonly string[] = [
+    "list",
+    "kanban",
+    "calendar",
+    "spreadsheet",
+    "gantt_chart",
+  ];
+
+  private boardSwitcherSegments(): Locator {
+    return this.page.getByTestId("layout-switcher-segmented").getByRole("button");
+  }
+
+  private ganttContainer(): Locator {
+    return this.page.locator("#gantt-container").first();
+  }
+
+  private ganttHeaderBand(): Locator {
+    return this.page.getByTestId("gantt-header").first();
+  }
+
   async ganttOpenTimeline(): Promise<void> {
-    return todo("ganttOpenTimeline");
+    const segments = this.boardSwitcherSegments();
+    await segments.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const gantt = this.page.locator('[data-layout="gantt_chart"]').first();
+    const candidates = [this.page.getByTestId("layout-switcher-dropdown").getByRole("button").first(), gantt];
+    for (const candidate of candidates) {
+      if (!(await candidate.isVisible().catch(() => false))) continue;
+      await candidate.click({ timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+      if (await this.isShown(this.page.locator('[role="menuitem"], [role="menuitemradio"]').first())) {
+        await this.page
+          .getByRole("menuitem", { name: "Timeline", exact: true })
+          .first()
+          .click({ timeout: WebNewDriver.WAIT_MS });
+      }
+      if (await this.ganttTimelineVisible()) break;
+    }
+    await this.page.getByTestId("gantt-container").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async ganttTimelineVisible(): Promise<boolean> {
-    return todo("ganttTimelineVisible");
+    const count = await this.page.locator("#gantt-container").count();
+    if (count === 0) return false;
+    return this.page.locator("#gantt-container").first().isVisible();
   }
 
   async boardActiveLayout(): Promise<BoardLayoutKey> {
-    return todo("boardActiveLayout");
+    const segments = this.boardSwitcherSegments();
+    const total = await segments.count();
+    for (let index = 0; index < total; index += 1) {
+      const pressed = await segments
+        .nth(index)
+        .getAttribute("aria-pressed")
+        .catch(() => null);
+      if (pressed !== "true") continue;
+      const key =
+        (await segments
+          .nth(index)
+          .getAttribute("data-layout")
+          .catch(() => null)) ?? "";
+      const found = WebNewDriver.BOARD_DOM_KEYS.indexOf(key);
+      return WebNewDriver.BOARD_ORDER[found] ?? "list";
+    }
+    return "list";
   }
 
   async boardReloadIssues(): Promise<void> {
-    return todo("boardReloadIssues");
+    await this.page.reload();
+    await this.boardSwitcherSegments().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async kanbanColumns(): Promise<KanbanColumn[]> {
@@ -6116,16 +6186,26 @@ export class WebNewDriver implements ParityDriver {
     return todo("kanbanOpenCardPeek");
   }
 
+  private issuePeekPanel(): Locator {
+    return this.page.getByTestId("issue-preview").first();
+  }
+
   async issuePeekVisible(): Promise<boolean> {
-    return todo("issuePeekVisible");
+    const panel = this.issuePeekPanel();
+    if ((await panel.count()) === 0) return false;
+    return panel.isVisible();
   }
 
   async issuePeekTitle(): Promise<string | null> {
-    return todo("issuePeekTitle");
+    if (!(await this.issuePeekVisible())) return null;
+    return this.issuePeekPanel().getByLabel("Work item title", { exact: true }).first().inputValue();
   }
 
   async issuePeekClose(): Promise<void> {
-    return todo("issuePeekClose");
+    await this.page.getByRole("button", { name: "Close preview", exact: true }).first().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await expect.poll(() => this.issuePeekVisible(), { timeout: WebNewDriver.WAIT_MS }).toBe(false);
   }
 
   async kanbanColumnHasQuickAdd(_columnName: string): Promise<boolean> {
@@ -6233,71 +6313,198 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async ganttHeader(): Promise<{ count: number | null; views: string[]; hasToday: boolean; hasFullscreen: boolean }> {
-    return todo("ganttHeader");
+    const band = this.ganttHeaderBand();
+    const text = ((await band.innerText().catch(() => null)) ?? "").trim();
+    const countMatch = /(\d+)\s+work items?/i.exec(text);
+    const views: string[] = [];
+    for (const view of ["Week", "Month", "Quarter"] as const) {
+      const entry = band.getByRole("button", { name: view, exact: true });
+      if ((await entry.count()) > 0 && (await entry.first().isVisible())) views.push(view);
+    }
+    const hasToday = (await this.page.getByTestId("gantt-today").count()) > 0;
+    const hasFullscreen = (await this.page.getByTestId("gantt-fullscreen").count()) > 0;
+    return { count: countMatch ? Number(countMatch[1]) : null, views, hasToday, hasFullscreen };
   }
 
   async ganttActiveZoom(): Promise<GanttZoom | "unknown"> {
-    return todo("ganttActiveZoom");
+    const fine = this.page.locator('[data-tier="fine"] [data-segment-key]');
+    if ((await fine.count()) === 0) return "unknown";
+    const first = (
+      (await fine
+        .first()
+        .innerText()
+        .catch(() => null)) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
+    if (/^\d+ - \d+/.test(first)) return "Month";
+    if (/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i.exec(first)) return "Quarter";
+    if (/^(Su|Mo|Tu|We|Th|Fr|Sa) \d+/i.test(first)) return "Week";
+    return "unknown";
   }
 
-  async ganttSetZoom(_view: GanttZoom): Promise<void> {
-    return todo("ganttSetZoom");
+  async ganttSetZoom(view: GanttZoom): Promise<void> {
+    const entry = this.ganttHeaderBand().getByRole("button", { name: view, exact: true }).first();
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.ganttActiveZoom(), { timeout: WebNewDriver.WAIT_MS }).toBe(view);
+    // The zoom switch re-centers on a deferred tick; settle the offset.
+    let last = await this.ganttScrollLeft();
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await this.page.waitForTimeout(250);
+      const now = await this.ganttScrollLeft();
+      if (now === last) return;
+      last = now;
+    }
   }
 
   async ganttDayWidth(): Promise<number> {
-    return todo("ganttDayWidth");
+    const zoom = await this.ganttActiveZoom();
+    if (zoom === "unknown") throw new Error("[parity] cannot measure day width for an unknown zoom.");
+    if (zoom === "Quarter") {
+      const month = this.page.locator('[data-tier="fine"] [data-segment-key]').first();
+      const box = await month.boundingBox();
+      if (!box) throw new Error("[parity] quarter cell has no box.");
+      const days = await month.evaluate((element) => {
+        const key = element.getAttribute("data-segment-key") as string;
+        const [year, month0] = key.split("-").slice(1).map(Number);
+        return new Date(Date.UTC(year, (month0 ?? 0) + 1, 0)).getUTCDate();
+      });
+      return box.width / days;
+    }
+    const fine = this.page.locator('[data-tier="fine"] [data-segment-key]');
+    if (zoom === "Week") {
+      const box = await fine.first().boundingBox();
+      if (!box) throw new Error("[parity] week cell has no box.");
+      return box.width;
+    }
+    // Month zoom draws weeks: divide by the days the cell actually spans.
+    const box = await fine.first().boundingBox();
+    if (!box) throw new Error("[parity] week cell has no box.");
+    const days = await fine.first().evaluate((element) => {
+      const label = (element.textContent as string).trim();
+      const [start, end] = label.split("-").map((part) => Number(part.trim()));
+      if (start === undefined || end === undefined || Number.isNaN(start) || Number.isNaN(end)) return 7;
+      return end >= start ? end - start + 1 : end + 31 - start;
+    });
+    return box.width / days;
   }
 
   async ganttWeekendTinted(): Promise<boolean> {
-    return todo("ganttWeekendTinted");
+    const columns = this.page.getByTestId("gantt-day-columns").locator("[data-day]");
+    const total = await columns.count();
+    if (total === 0) return false;
+    const weekend = await this.page.getByTestId("gantt-day-columns").locator('[data-weekend="true"]').count();
+    return weekend > 0 && weekend < total;
   }
 
   async ganttWeekRowStarts(): Promise<string[]> {
-    return todo("ganttWeekRowStarts");
+    if ((await this.ganttActiveZoom()) !== "Week") return [];
+    const cells = this.page.locator('[data-tier="fine"] [data-segment-key]');
+    const total = await cells.count();
+    const starts: string[] = [];
+    const labels = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+    for (let index = 0; index < total; index += 1) {
+      const key =
+        (await cells
+          .nth(index)
+          .getAttribute("data-segment-key")
+          .catch(() => null)) ?? "";
+      const iso = key.replace(/^d-/, "");
+      const day = new Date(`${iso}T00:00:00Z`).getUTCDay();
+      starts.push(labels[day] ?? "");
+    }
+    return starts;
   }
 
   async ganttClickToday(): Promise<void> {
-    return todo("ganttClickToday");
+    await this.page.getByTestId("gantt-today").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.ganttTodayVisible(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
 
   async ganttTodayVisible(): Promise<boolean> {
-    return todo("ganttTodayVisible");
+    const highlight = this.page.getByTestId("gantt-today-highlight").first();
+    if ((await highlight.count()) === 0) return false;
+    const box = await highlight.boundingBox();
+    if (!box) return false;
+    const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
+    return box.x < viewport.width && box.x + box.width > 0;
   }
 
   async ganttTodayHighlighted(): Promise<boolean> {
-    return todo("ganttTodayHighlighted");
+    const marked = this.page.locator('[data-tier="fine"] [data-today-segment="true"]');
+    return (await marked.count()) > 0;
   }
 
   async ganttToggleFullscreen(): Promise<void> {
-    return todo("ganttToggleFullscreen");
+    const before = await this.ganttFullscreenActive();
+    await this.page.getByTestId("gantt-fullscreen").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.ganttFullscreenActive(), { timeout: WebNewDriver.WAIT_MS }).not.toBe(before);
   }
 
   async ganttFullscreenActive(): Promise<boolean> {
-    return todo("ganttFullscreenActive");
+    return (await this.page.locator("#full-screen-portal #gantt-container").count()) > 0;
   }
 
   async ganttTimelineWidth(): Promise<number> {
-    return todo("ganttTimelineWidth");
+    const strip = this.page.locator('[data-testid="gantt-day-columns"]').first();
+    const box = await strip.boundingBox().catch(() => null);
+    return box === null ? 0 : Math.round(box.width);
   }
 
   async ganttScrollLeft(): Promise<number> {
-    return todo("ganttScrollLeft");
+    return this.ganttContainer().evaluate((element) => element.scrollLeft);
   }
 
-  async ganttScrollTo(_x: number): Promise<void> {
-    return todo("ganttScrollTo");
+  async ganttScrollTo(x: number): Promise<void> {
+    await this.ganttContainer().evaluate((element, target) => {
+      element.scrollLeft = target;
+    }, x);
+    await this.page.waitForTimeout(2_000);
+  }
+
+  private async ganttRowLink(issueName: string): Promise<Locator> {
+    const links = this.page.locator('#gantt-sidebar a[id^="issue-"]');
+    const total = await links.count();
+    for (let index = 0; index < total; index += 1) {
+      const text = (
+        (await links
+          .nth(index)
+          .innerText()
+          .catch(() => null)) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text.replace(/^[A-Z]+-\d+\s+/, "") === issueName) return links.nth(index);
+    }
+    throw new Error(`[parity] no timeline row titled ${JSON.stringify(issueName)}.`);
   }
 
   async ganttSidebarRows(): Promise<GanttSidebarRow[]> {
-    return todo("ganttSidebarRows");
+    const rows = this.page.getByTestId("gantt-sidebar-row");
+    const total = await rows.count();
+    const out: GanttSidebarRow[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const row = rows.nth(index);
+      const text = ((await row.innerText().catch(() => null)) ?? "").trim().replace(/\s+/g, " ");
+      const identifier = /^([A-Z]+-\d+)\s+/.exec(text)?.[1] ?? null;
+      const name = identifier === null ? text : text.replace(/^[A-Z]+-\d+\s+/, "").replace(/\s+\d+ days?$/, "");
+      const duration = row.getByTestId("gantt-row-duration");
+      const durationText = (await duration.count()) > 0 ? (await duration.innerText()).trim() || null : null;
+      out.push({ identifier, name, duration: durationText });
+    }
+    return out;
   }
 
-  async ganttOpenRowPeek(_issueName: string): Promise<void> {
-    return todo("ganttOpenRowPeek");
+  async ganttOpenRowPeek(issueName: string): Promise<void> {
+    const link = await this.ganttRowLink(issueName);
+    await link.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("issue-preview").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.issuePeekTitle(), { timeout: WebNewDriver.WAIT_MS }).toBe(issueName);
   }
 
   async ganttSidebarOrder(): Promise<string[]> {
-    return todo("ganttSidebarOrder");
+    const rows = await this.ganttSidebarRows();
+    return rows.map((row) => row.name);
   }
 
   async ganttDragRowBefore(_sourceName: string, _targetName: string): Promise<void> {
@@ -6308,8 +6515,20 @@ export class WebNewDriver implements ParityDriver {
     return todo("ganttAttemptRowBefore");
   }
 
-  async ganttBarExists(_issueName: string): Promise<boolean> {
-    return todo("ganttBarExists");
+  private async ganttIssueIdByName(issueName: string): Promise<string> {
+    const link = await this.ganttRowLink(issueName);
+    const id = (await link.getAttribute("id")) as string;
+    const match = /^issue-(.+)$/.exec(id);
+    if (!match?.[1]) throw new Error(`[parity] unexpected timeline row id ${JSON.stringify(id)}.`);
+    return match[1];
+  }
+
+  async ganttBarExists(issueName: string): Promise<boolean> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.page.locator(`button#gantt-block-${issueId}`).first();
+    if ((await bar.count()) === 0) return false;
+    const box = await bar.boundingBox();
+    return box !== null && box.width > 0;
   }
 
   async ganttDragBar(_issueName: string, _dayDelta: number): Promise<void> {
@@ -6377,23 +6596,64 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async ganttSidebarLoading(): Promise<boolean> {
-    return todo("ganttSidebarLoading");
+    return (await this.page.locator("#gantt-sidebar .animate-pulse").count()) > 0;
   }
 
   async ganttLoadMoreVisible(): Promise<boolean> {
-    return todo("ganttLoadMoreVisible");
+    const pulses = this.page.locator("#gantt-sidebar .animate-pulse");
+    if ((await pulses.count()) === 0) return false;
+    return pulses.last().isVisible();
   }
 
   async ganttLoadingObservedOnReload(): Promise<boolean> {
-    return todo("ganttLoadingObservedOnReload");
+    const pattern = "**/api/**/issues**";
+    await this.page.route(pattern, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.page.reload();
+      const deadline = Date.now() + 120_000;
+      for (;;) {
+        const loader = this.page.locator("div.animate-pulse").first();
+        if ((await loader.count()) > 0 && (await loader.isVisible().catch(() => false))) return true;
+        if (Date.now() > deadline) return false;
+        await this.page.waitForTimeout(250);
+      }
+    } finally {
+      await this.page.unroute(pattern);
+    }
   }
 
   async ganttEmptyVisible(): Promise<boolean> {
-    return todo("ganttEmptyVisible");
+    const heading = this.page.getByRole("heading", { name: "Start with your first work item." });
+    if ((await heading.count()) === 0) return false;
+    return heading.first().isVisible();
   }
 
   async ganttLoadMoreObservedOnScroll(): Promise<boolean> {
-    return todo("ganttLoadMoreObservedOnScroll");
+    const pattern = "**/api/**/issues**";
+    await this.page.route(pattern, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.page.reload();
+      await this.ganttOpenTimeline();
+      const deadline = Date.now() + 180_000;
+      for (;;) {
+        if (await this.ganttLoadMoreVisible().catch(() => false)) return true;
+        if (Date.now() > deadline) return false;
+        await this.ganttContainer()
+          .evaluate((element) => {
+            element.scrollTop = element.scrollHeight;
+          })
+          .catch(() => undefined);
+        await this.page.waitForTimeout(1_000);
+      }
+    } finally {
+      await this.page.unroute(pattern);
+    }
   }
 
   // --- Root document shell + not-found (NEWFRONT-173, rows SHELL-107/108;

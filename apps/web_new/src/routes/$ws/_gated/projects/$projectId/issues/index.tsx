@@ -17,12 +17,14 @@ import { invalidateWorkspace } from "../../../../../../core/query/optimistic.js"
 import { isProjectGateError } from "../../../../../../features/auth/index.js";
 import {
   DisplayControl,
+  GanttLayout,
   IssueList,
   IssuesLayoutRoot,
   ListSkeleton,
   issuesQueryOptions,
   parseIssueSearch,
   prefsQueryOptions,
+  useWeekStart,
   type LayoutKind,
 } from "../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
@@ -47,6 +49,33 @@ function ProjectIssuesNoMatchState(): React.ReactElement {
       <h2 className="text-h3 text-(--text)">No matching issues</h2>
       <p className="text-body text-(--text-muted)">No issues match the current filters.</p>
     </section>
+  );
+}
+
+/** The timeline reads the profile's week start; the root owns the prefs. */
+function GanttTimeline({
+  workspaceSlug,
+  projectId,
+  projectIdentifier,
+  issues,
+  prefs,
+}: {
+  workspaceSlug: string;
+  projectId: string;
+  projectIdentifier: string;
+  issues: Parameters<typeof GanttLayout>[0]["issues"];
+  prefs: Parameters<typeof GanttLayout>[0]["prefs"];
+}): React.ReactElement {
+  const weekStart = useWeekStart();
+  return (
+    <GanttLayout
+      workspaceSlug={workspaceSlug}
+      projectId={projectId}
+      projectIdentifier={projectIdentifier}
+      issues={issues}
+      prefs={prefs}
+      weekStart={weekStart}
+    />
   );
 }
 
@@ -134,7 +163,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
 
     // Layout slices extend the offered list with their renderer; the
     // Display control resolves the same active layout from it.
-    const offered: readonly LayoutKind[] = ["list"];
+    const offered: readonly LayoutKind[] = ["list", "gantt_chart"];
     const display = (
       <DisplayControl
         workspaceSlug={params.ws}
@@ -152,9 +181,23 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         totalCount={issues.total_count}
         resultCount={issues.results.length}
         offered={offered}
-        renderLayout={() => (
-          <IssueList issues={issues.results} projectIdentifier={project.identifier} layout={search.layout ?? "list"} />
-        )}
+        renderLayout={(layout, prefs) =>
+          layout === "gantt_chart" ? (
+            <GanttTimeline
+              workspaceSlug={params.ws}
+              projectId={params.projectId}
+              projectIdentifier={project.identifier}
+              issues={issues.results}
+              prefs={prefs}
+            />
+          ) : (
+            <IssueList
+              issues={issues.results}
+              projectIdentifier={project.identifier}
+              layout={search.layout ?? "list"}
+            />
+          )
+        }
         emptyState={<ProjectIssuesEmptyState />}
         noMatchState={<ProjectIssuesNoMatchState />}
         headerActions={display}
