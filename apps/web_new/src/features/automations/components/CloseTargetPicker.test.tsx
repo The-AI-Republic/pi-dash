@@ -36,7 +36,9 @@ describe("CloseTargetPicker", () => {
 
   it("stays disabled with a single cancelled state", () => {
     render(<CloseTargetPicker states={[A]} selected={A} onSelect={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "Dropped" })).toBeDisabled();
+    const trigger = screen.getByRole("button", { name: "Dropped" });
+    expect(trigger).toBeDisabled();
+    expect(trigger.textContent).toBe("Dropped");
   });
 
   it("lists every cancelled state once a second exists and reports the pick", async () => {

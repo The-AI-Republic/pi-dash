@@ -21,6 +21,7 @@ export {
   MAX_DELAY_MONTHS,
   MIN_DELAY_MONTHS,
   parseDelayInput,
+  rejectsFractionOnly,
 } from "./api/months.js";
 export {
   archiveTogglePatch,

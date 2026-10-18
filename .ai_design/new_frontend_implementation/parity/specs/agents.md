@@ -433,7 +433,10 @@ the oracle probes: the section heading "Automations", level-4 row
 headings, role=switch toggles, a delay trigger named by its row lead
 and reading "N month(s)", role=option presets, a dialog titled
 "Customize time range" with an "Enter Months" field, and the refusal
-heading "Oops! You are not authorized to view this page".
+heading "Oops! You are not authorized to view this page". The dialog
+turns off native form validation so zero and over-range whole counts
+still reach its handler and raise the range message, while a
+fractional count is refused silently and never forwarded.
 
 ## 9. Assistant landing, setup, composer gates (AGT-038–041, AGT-048, slice NEWFRONT-603)
 

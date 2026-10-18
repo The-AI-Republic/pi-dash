@@ -9,6 +9,7 @@
 // opens the dialog, which reports through the same callback.
 
 import * as React from "react";
+import { ChevronDown } from "lucide-react";
 
 import { DELAY_PRESETS, delayLabel } from "../api/months.js";
 
@@ -75,9 +76,7 @@ export function DelayPicker({
         className="text-body flex h-(--control-height) w-full cursor-pointer items-center justify-between gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-3) text-(--text) disabled:cursor-not-allowed disabled:opacity-50"
       >
         <span>{delayLabel(value)}</span>
-        <span aria-hidden="true" className="text-(--text-muted)">
-          ▾
-        </span>
+        <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-(--text-muted)" />
       </button>
       {open ? (
         <ul

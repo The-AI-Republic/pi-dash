@@ -21,6 +21,9 @@ describe("DelayPicker", () => {
     setup({ value: 3 });
     const trigger = screen.getByRole("button", { name: /^Delay,/ });
     expect(trigger).toHaveTextContent("3 months");
+    // The caret is a decorative icon, not text: anchor probes read the
+    // trigger's text as exactly the delay phrase.
+    expect(trigger.textContent).toBe("3 months");
     expect(trigger).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("listbox")).toBeNull();
   });

@@ -6,13 +6,23 @@
 // custom-month oracle: the field seeds at one month every time it opens,
 // submit refuses empty fields and out-of-range counts with one inline
 // message, and a valid month forwards to the row and closes the dialog.
-// Fractional input never reaches submit: the number field's native step
-// validation blocks it and leaves the dialog open untouched.
+// The form turns off native constraint validation so zero and
+// over-range counts reach the handler and show the message instead of a
+// browser tooltip. The input keeps its min/max/step attributes for
+// assistive tech, and a fractional count is refused silently, the way
+// the number field's own step validation would have swallowed the
+// submit.
 
 import { Button, Dialog, Input } from "@pidash/kit";
 import * as React from "react";
 
-import { DELAY_RANGE_MESSAGE, MAX_DELAY_MONTHS, MIN_DELAY_MONTHS, parseDelayInput } from "../api/months.js";
+import {
+  DELAY_RANGE_MESSAGE,
+  MAX_DELAY_MONTHS,
+  MIN_DELAY_MONTHS,
+  parseDelayInput,
+  rejectsFractionOnly,
+} from "../api/months.js";
 
 export const CUSTOM_MONTH_TITLE = "Customize time range";
 export const CUSTOM_MONTH_SEED = String(MIN_DELAY_MONTHS);
@@ -40,6 +50,9 @@ export function CustomMonthDialog({ open, onOpenChange, onSubmit }: CustomMonthD
     event.preventDefault();
     const months = parseDelayInput(raw);
     if (months === null) {
+      // A fractional count never submits and never explains itself; only
+      // empty or out-of-range whole counts raise the range message.
+      if (rejectsFractionOnly(raw)) return;
       setShowRangeError(true);
       return;
     }
@@ -53,7 +66,7 @@ export function CustomMonthDialog({ open, onOpenChange, onSubmit }: CustomMonthD
 
   return (
     <Dialog open={open} onOpenChange={(next) => onOpenChange(next)} title={CUSTOM_MONTH_TITLE}>
-      <form onSubmit={submit} noValidate={false}>
+      <form onSubmit={submit} noValidate>
         <Input
           label="Months"
           type="number"

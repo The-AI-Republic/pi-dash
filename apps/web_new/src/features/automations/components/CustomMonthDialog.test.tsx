@@ -62,6 +62,7 @@ describe("CustomMonthDialog", () => {
       await user.type(field, value);
       await user.click(within(dialog()).getByRole("button", { name: "Submit" }));
       expect(within(dialog()).getByPlaceholderText("Enter Months")).toHaveValue(Number(value));
+      expect(within(dialog()).getByText(DELAY_RANGE_MESSAGE)).toBeInTheDocument();
     }
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalled();
@@ -109,18 +110,18 @@ describe("CustomMonthDialog", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("lets native step validation stop a fractional value before submit", async () => {
+  it("refuses a fractional value silently without forwarding", async () => {
     const user = userEvent.setup();
     const { onSubmit, onOpenChange } = setup();
     const field = within(dialog()).getByPlaceholderText("Enter Months");
     await user.clear(field);
     await user.type(field, "2.5");
-    // jsdom does not run constraint validation; invoking submit directly
-    // stands in for the browser refusing the event. The handler must in
-    // any case never forward a fractional count — the parse keeps it out.
+    // A fractional count is refused the way the number field's step
+    // check would: silently, without a message, dialog left open.
     await user.click(within(dialog()).getByRole("button", { name: "Submit" }));
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalled();
     expect(within(dialog()).getByPlaceholderText("Enter Months")).toHaveValue(2.5);
+    expect(within(dialog()).queryByText(DELAY_RANGE_MESSAGE)).toBeNull();
   });
 });

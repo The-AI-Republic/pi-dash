@@ -9,6 +9,7 @@
 
 import type { State } from "@pidash/api-client";
 import { cn } from "@pidash/kit";
+import { ChevronDown } from "lucide-react";
 import * as React from "react";
 
 import { isStatePickerEnabled } from "../lib/rows.js";
@@ -63,9 +64,7 @@ export function CloseTargetPicker({ states, selected, onSelect }: CloseTargetPic
           style={{ backgroundColor: selected?.color ?? "var(--text-muted)" }}
         />
         <span className={cn(selected === null && "text-(--text-muted)")}>{selected?.name ?? STATE_FALLBACK_LABEL}</span>
-        <span aria-hidden="true" className="ml-auto text-(--text-muted)">
-          ▾
-        </span>
+        <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" className="ml-auto shrink-0 text-(--text-muted)" />
       </button>
       {open ? (
         <ul
