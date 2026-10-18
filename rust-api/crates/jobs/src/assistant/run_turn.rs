@@ -692,25 +692,33 @@ pub fn thread_lock_select() -> String {
 /// `error`-kind, `failed`-status message carrying `detail or code`. Seq is
 /// `COALESCE(MAX(seq), 0) + 1` on the thread (`events.py:78-80`), so the
 /// first row takes seq 1 — the same form the tools ports use.
+///
+/// `created_at` is `auto_now_add` (`models.py:138`), `NOT NULL` with no
+/// database default, so the insert must supply it: `$5` binds it as an
+/// explicit `now` (`events.create_message` stamps it Python-side), the same
+/// convention `loop_dispatch::message_insert_sql` and the `db` events port
+/// use. `completed_at` stays NULL, like the ORM row.
 pub fn error_message_insert() -> String {
     format!(
         "INSERT INTO {TABLE_MESSAGE} \
-         (id, thread_id, turn_id, seq, kind, display_content, payload, status) \
+         (id, thread_id, turn_id, seq, kind, display_content, payload, status, created_at) \
          VALUES ($1, $2, $3, \
          (SELECT COALESCE(MAX(seq), 0) + 1 FROM {TABLE_MESSAGE} WHERE thread_id = $2), \
-         '{KIND_ERROR}', $4, '{{}}', '{MSG_FAILED}')"
+         '{KIND_ERROR}', $4, '{{}}', '{MSG_FAILED}', $5)"
     )
 }
 
 /// `turn_failed` event row (`tasks.py:194-200`): kind, the error message id,
 /// and the turn/error payload. The event id is a `BigAutoField`, so the
-/// insert omits it.
+/// insert omits it. Like the message row, `created_at` is `auto_now_add`
+/// (`models.py:166`, `events.append_event`) with no database default, so `$5`
+/// binds it.
 pub fn turn_failed_event_insert() -> String {
     format!(
-        "INSERT INTO {TABLE_EVENT} (thread_id, turn_id, seq, kind, message_id, payload) \
+        "INSERT INTO {TABLE_EVENT} (thread_id, turn_id, seq, kind, message_id, payload, created_at) \
          VALUES ($1, $2, \
          (SELECT COALESCE(MAX(seq), 0) + 1 FROM {TABLE_EVENT} WHERE thread_id = $1), \
-         '{EVENT_TURN_FAILED}', $3, $4)"
+         '{EVENT_TURN_FAILED}', $3, $4, $5)"
     )
 }
 
@@ -1432,10 +1440,17 @@ mod tests {
             err.contains("COALESCE(MAX(seq), 0) + 1"),
             "seq alloc: {err}"
         );
+        // `created_at` is `auto_now_add` with no database default: the insert
+        // must carry the column or every row violates NOT NULL.
+        assert!(
+            err.contains("created_at"),
+            "message stamps created_at: {err}"
+        );
 
         let ev = turn_failed_event_insert();
         assert!(ev.contains("'turn_failed'"));
         assert!(ev.contains("COALESCE(MAX(seq), 0) + 1"), "seq alloc: {ev}");
+        assert!(ev.contains("created_at"), "event stamps created_at: {ev}");
 
         assert!(thread_lock_select().contains("FOR UPDATE"));
 
