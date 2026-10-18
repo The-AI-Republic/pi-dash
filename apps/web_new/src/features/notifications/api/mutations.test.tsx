@@ -14,7 +14,7 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { notificationKeys, notificationListQueryFromKey } from "./keys.js";
+import { notificationKeys } from "./keys.js";
 
 vi.mock("../../../shared/shell/index.js", () => ({
   notifySuccess: vi.fn(),
@@ -172,31 +172,6 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllMocks();
-});
-
-describe("notificationListQueryFromKey", () => {
-  it("rebuilds each stream query from its key", () => {
-    for (const query of [
-      { snoozed: false, archived: false },
-      { snoozed: false, archived: true },
-      { snoozed: true, archived: false },
-      { snoozed: false, archived: false, mentioned: true },
-      { snoozed: false, archived: false, read: false },
-      { snoozed: false, archived: false, type: "assigned,created" },
-    ]) {
-      expect(notificationListQueryFromKey(WS, notificationKeys.list(WS, query))).toEqual(query);
-    }
-  });
-
-  it("rejects keys that are not list keys of this workspace", () => {
-    expect(notificationListQueryFromKey(WS, notificationKeys.unread(WS))).toBeNull();
-    expect(
-      notificationListQueryFromKey("other", notificationKeys.list(WS, { snoozed: false, archived: false }))
-    ).toBeNull();
-    expect(
-      notificationListQueryFromKey(WS, [...notificationKeys.list(WS, { snoozed: false, archived: false }), true])
-    ).toBeNull();
-  });
 });
 
 describe("rowBelongsToStream", () => {

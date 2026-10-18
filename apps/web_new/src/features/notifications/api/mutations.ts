@@ -24,7 +24,8 @@ import {
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifySuccess } from "../../../shared/shell/index.js";
-import { notificationKeys, notificationListQueryFromKey } from "./keys.js";
+import { notificationKeys } from "./keys.js";
+import { notificationListQueryFromKey } from "./streamQuery.js";
 
 export const MARKED_READ_TITLE = "Notification marked as read";
 export const MARKED_UNREAD_TITLE = "Notification marked as unread";

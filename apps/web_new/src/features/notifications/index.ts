@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 // Public API of the notifications feature. Other features import only from here.
 
-export { notificationKeys, notificationListQueryFromKey } from "./api/keys.js";
+export { notificationKeys } from "./api/keys.js";
 export {
   applyRowToPage,
   MARKED_ARCHIVED_TITLE,
@@ -19,6 +19,7 @@ export {
   useToggleNotificationRead,
 } from "./api/mutations.js";
 export type { ArchiveToggle, ReadToggle, SnoozeWrite, StreamFlags } from "./api/mutations.js";
+export { notificationListQueryFromKey } from "./api/streamQuery.js";
 export {
   applyEmailPreferenceFlip,
   EMAIL_PREFS_FAILED_TITLE,
