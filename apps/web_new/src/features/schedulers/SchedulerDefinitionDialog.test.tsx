@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ApiError, type Scheduler } from "@pidash/api-client";
 import * as React from "react";
@@ -157,6 +157,24 @@ describe("SchedulerDefinitionDialog", () => {
       is_enabled: true,
     });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts an edited color in the create payload", async () => {
+    const user = userEvent.setup();
+    contracts.createScheduler.mockResolvedValue(row());
+    setup();
+    await user.type(screen.getByLabelText("Name"), "Weekly report");
+    await user.type(screen.getByLabelText("Base prompt"), "Review the week");
+    const color = screen.getByLabelText("Color");
+    fireEvent.change(color, { target: { value: "#112233" } });
+    expect(color).toHaveValue("#112233");
+    await user.click(screen.getByRole("button", { name: "Create scheduler" }));
+    await waitFor(() => expect(contracts.createScheduler).toHaveBeenCalled());
+    expect(contracts.createScheduler).toHaveBeenCalledWith(
+      expect.anything(),
+      SLUG,
+      expect.objectContaining({ color: "#112233" })
+    );
   });
 
   it("closes through cancel and the dialog close control", async () => {

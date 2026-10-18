@@ -175,6 +175,17 @@ describe("SchedulerCatalog", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
+  it("dismisses an idle delete dialog with Escape", async () => {
+    const user = userEvent.setup();
+    setup(ROLE_ADMIN, [row()]);
+    await screen.findByText("Weekly report");
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(contracts.deleteScheduler).not.toHaveBeenCalled();
+  });
+
   it("shows a loading placeholder", async () => {
     let resolve!: (value: Scheduler[]) => void;
     contracts.listSchedulers.mockReturnValueOnce(new Promise<Scheduler[]>((done) => (resolve = done)));
