@@ -133,14 +133,14 @@ beforeEach(() => {
 });
 
 describe("EntityListScreen", () => {
-  it("mounts the shared layout root with counts, list-only and the entity", () => {
+  it("mounts the shared layout root with counts, list-only and the entity", async () => {
     setup();
-    const root = screen.getByTestId("layout-root");
+    const root = await screen.findByTestId("layout-root");
     expect(root).toHaveAttribute("data-title", "Sprint 1");
     expect(root).toHaveAttribute("data-total", "7");
     expect(root).toHaveAttribute("data-results", "2");
     expect(root).toHaveAttribute("data-offered", "list");
-    expect(screen.getByTestId("list-layout")).toHaveTextContent("WEB");
+    expect(await screen.findByTestId("list-layout")).toHaveTextContent("WEB");
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-cycle", CYCLE);
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-compact", "true");
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-completed", "false");

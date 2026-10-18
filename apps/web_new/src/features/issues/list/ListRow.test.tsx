@@ -86,7 +86,7 @@ beforeEach(() => {
 afterEach(() => resetAppClient());
 
 describe("ListRow", () => {
-  it("renders a real browse anchor with the identifier and title", () => {
+  it("renders a real browse anchor with the identifier and title", async () => {
     render(<ListRow {...props()} />);
     const anchor = screen.getByLabelText("WEB-42");
     expect(anchor.tagName).toBe("A");
@@ -95,7 +95,7 @@ describe("ListRow", () => {
     expect(anchor.querySelector("p")).toHaveAttribute("title", "Fix login");
     expect(document.getElementById(rowLinkId(ISSUE))).toBe(anchor);
     expect(document.getElementById(rowBlockId(ISSUE))).toContainElement(anchor);
-    expect(screen.getByTestId("strip")).toBeInTheDocument();
+    expect(await screen.findByTestId("strip")).toBeInTheDocument();
   });
 
   it("opens peek on a plain click and keeps modified clicks as links", () => {

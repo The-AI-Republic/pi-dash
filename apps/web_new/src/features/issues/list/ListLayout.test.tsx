@@ -305,8 +305,20 @@ function renderLayout(overrides: Partial<ListLayoutProps> = {}, filters: Record<
   return { props, view, queryClient };
 }
 
+// jsdom reports zero element sizes, so the flat VirtualList would compute
+// an empty window. Give the scroll region and rows a height so rows mount.
+const realHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get(this: HTMLElement) {
+      if (this.getAttribute("role") === "region" || this.getAttribute("data-testid") === "list-scroll") return 400;
+      if (this.hasAttribute("data-index")) return 44;
+      return realHeight?.get?.call(this) ?? 0;
+    },
+  });
   createAppClient("https://api.test", (() => Promise.reject(new Error("unexpected network"))) as never);
   mocks.permissions = { canEdit: true };
   mocks.pages.mockReturnValue(pageState());
@@ -322,18 +334,20 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (realHeight) Object.defineProperty(HTMLElement.prototype, "offsetHeight", realHeight);
   resetAppClient();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe("ListLayout", () => {
-  it("renders the flat section, row, quick-add and link target", () => {
+  it("renders the flat section, row, quick-add and link target", async () => {
     renderLayout();
     expect(screen.getByText("All work items")).toBeInTheDocument();
     expect(screen.getByTestId("row-probe")).toHaveAttribute("data-href", "/acme/browse/WEB-42");
-    expect(screen.getByTestId("quick-add-probe")).toHaveAttribute("data-disabled", "false");
-    expect(screen.getByTestId("quick-add-probe")).toHaveAttribute("data-prefill", "{}");
+    const quickAdd = await screen.findByTestId("quick-add-probe");
+    expect(quickAdd).toHaveAttribute("data-disabled", "false");
+    expect(quickAdd).toHaveAttribute("data-prefill", "{}");
   });
 
   it("passes grouping, counts and prefill to headers and quick-add", () => {
@@ -392,7 +406,7 @@ describe("ListLayout", () => {
     renderLayout({ cycleId: CYCLE, moduleId: MODULE });
     fireEvent.click(screen.getByRole("button", { name: "Add to All work items" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Create work item" }));
-    await user.type(screen.getByRole("textbox", { name: "Title" }), "New item");
+    await user.type(await screen.findByRole("textbox", { name: "Title" }), "New item");
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(mocks.createMutation).toHaveBeenCalled());
     expect(mocks.createMutation).toHaveBeenCalledWith({
@@ -408,7 +422,7 @@ describe("ListLayout", () => {
     renderLayout({ moduleId: MODULE });
     fireEvent.click(screen.getByRole("button", { name: "Add to All work items" }));
     await user.click(screen.getByRole("menuitem", { name: "Add an existing work item" }));
-    expect(screen.getByTestId("add-existing-modal")).toHaveAttribute("data-module", MODULE);
+    expect(await screen.findByTestId("add-existing-modal")).toHaveAttribute("data-module", MODULE);
     await user.click(screen.getByRole("button", { name: "Attach one" }));
     await waitFor(() =>
       expect(mocks.addToModule).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, MODULE, ["one"])
@@ -428,7 +442,7 @@ describe("ListLayout", () => {
     expect(screen.queryByRole("menuitem")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Add to Sprint" }));
     expect(screen.getByRole("dialog", { name: "Create new work item" })).toBeInTheDocument();
-    await user.type(screen.getByRole("textbox", { name: "Title" }), "Bucket item");
+    await user.type(await screen.findByRole("textbox", { name: "Title" }), "Bucket item");
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(mocks.createMutation).toHaveBeenCalledWith({
@@ -444,7 +458,7 @@ describe("ListLayout", () => {
     renderLayout({ cycleId: CYCLE, prefs: prefs({ groupBy: "cycle" }) });
     fireEvent.click(screen.getByRole("button", { name: "Add to All work items" }));
     await user.click(await screen.findByRole("menuitem", { name: "Add an existing work item" }));
-    expect(screen.getByTestId("add-existing-modal")).toHaveAttribute("data-cycle", "true");
+    expect(await screen.findByTestId("add-existing-modal")).toHaveAttribute("data-cycle", "true");
     expect(screen.getByTestId("add-existing-modal")).toHaveAttribute("data-module", "");
   });
 
@@ -453,7 +467,7 @@ describe("ListLayout", () => {
     renderLayout({ moduleId: MODULE });
     fireEvent.click(screen.getByRole("button", { name: "Add to All work items" }));
     await user.click(await screen.findByRole("menuitem", { name: "Add an existing work item" }));
-    expect(screen.getByTestId("add-existing-modal")).toHaveAttribute("data-module", MODULE);
+    expect(await screen.findByTestId("add-existing-modal")).toHaveAttribute("data-module", MODULE);
   });
 
   it("reports attach failures without closing the modal", async () => {
@@ -481,7 +495,7 @@ describe("ListLayout", () => {
     expect(screen.queryByLabelText("Work item preview")).not.toBeInTheDocument();
     view.unmount();
     renderLayout({ peekKey: "WEB-42", onPeekChange });
-    expect(screen.getByLabelText("Work item preview")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onPeekChange).toHaveBeenCalledWith(null);
   });
@@ -490,7 +504,7 @@ describe("ListLayout", () => {
     const user = userEvent.setup();
     renderLayout();
     await user.click(screen.getByRole("button", { name: "Fix login" }));
-    expect(screen.getByLabelText("Work item preview")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Close preview" }));
     expect(screen.queryByLabelText("Work item preview")).not.toBeInTheDocument();
   });

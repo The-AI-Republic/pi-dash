@@ -11,10 +11,11 @@
 
 import type { IssueListItem, State } from "@pidash/api-client";
 import { cn } from "@pidash/kit";
-import { Link2, MessageSquare, Paperclip, Users } from "lucide-react";
+import { CalendarDays, Hash, Link2, MessageSquare, Paperclip, Users } from "lucide-react";
 import * as React from "react";
 
 import { DatePicker } from "../dropdowns/DatePicker.js";
+import { formatDay, formatMergedRange } from "../dropdowns/calendar.js";
 import { DateRangePicker } from "../dropdowns/DateRangePicker.js";
 import { LabelPicker } from "../labels/LabelPicker.js";
 import { isPropertyShown, type DisplayFeatureFlags } from "../display/matrix.js";
@@ -52,6 +53,12 @@ export interface InlinePropertyStripProps {
   moduleNames: ReadonlyMap<string, string>;
   /** Ids of cycles that are still open (read-only otherwise). */
   openCycleIds: ReadonlySet<string>;
+  /**
+   * Virtualized rows mount their pickers lazily: static triggers render at
+   * rest and the picker machinery mounts on first hover, focus or click.
+   * The visible strip is identical; this keeps 2,000-row scrolling cheap.
+   */
+  deferPickers?: boolean | undefined;
 }
 
 /** Whether a due date is due or past and the item is still open. */
@@ -97,8 +104,56 @@ function Identifier({
   return <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">{text}</span>;
 }
 
+/**
+ * Mounts a picker on first interaction when `defer` is set. The trigger is
+ * the picker's own trigger element, so the static chip and the interactive
+ * control are the same markup. Keyboard activation opens the popup and its
+ * initial focus (search field or list) takes over.
+ */
+function DeferredPicker({
+  defer,
+  disabled,
+  trigger,
+  children,
+}: {
+  defer: boolean;
+  disabled: boolean;
+  trigger: React.ReactElement<Record<string, unknown>>;
+  children: (open: boolean | undefined, onOpenChange: ((open: boolean) => void) | undefined) => React.ReactNode;
+}): React.ReactElement {
+  const [active, setActive] = React.useState(false);
+  const [open, setOpen] = React.useState(false);
+
+  if (!defer || active) return <>{children(defer ? open : undefined, setOpen)}</>;
+
+  function activate(nextOpen: boolean): void {
+    if (disabled) return;
+    setOpen(nextOpen);
+    setActive(true);
+  }
+
+  return React.cloneElement(trigger, {
+    onPointerEnter: () => {
+      if (!disabled) setActive(true);
+    },
+    onPointerDown: (event: React.PointerEvent) => {
+      if (event.pointerType === "touch") activate(true);
+    },
+    onClick: (event: React.MouseEvent) => {
+      event.preventDefault();
+      activate(true);
+    },
+    onKeyDown: (event: React.KeyboardEvent) => {
+      if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") {
+        event.preventDefault();
+        activate(true);
+      }
+    },
+  });
+}
+
 /** One inline property, or null when hidden/unavailable. */
-export function InlinePropertyStrip({
+function InlinePropertyStripImpl({
   workspaceSlug,
   projectId,
   projectIdentifier,
@@ -114,6 +169,7 @@ export function InlinePropertyStrip({
   cycleNames,
   moduleNames,
   openCycleIds,
+  deferPickers = false,
 }: InlinePropertyStripProps): React.ReactElement {
   const patch = useListIssuePatch(workspaceSlug, projectId, issue.id);
   const cycleMove = useListCycleMove(workspaceSlug, projectId, issue.id);
@@ -163,176 +219,297 @@ export function InlinePropertyStrip({
       {keys.map((key) => {
         if (key === "key") return <Identifier key={key} projectIdentifier={projectIdentifier} issue={issue} />;
         if (key === "state") {
+          const stateTrigger = (
+            <button type="button" disabled={disabled} className={chipClasses(true)}>
+              {StateIcon === null || state === undefined ? null : (
+                <StateIcon size={14} strokeWidth={1.5} style={{ color: state.color }} aria-hidden="true" />
+              )}
+              <span>{stateNames.get(issue.state_id ?? "") ?? "No state"}</span>
+            </button>
+          );
           return (
             <span
               key={key}
               className="inline-flex min-w-0 shrink-0"
               title={`State: ${stateNames.get(issue.state_id ?? "") ?? "None"}`}
             >
-              <StatePicker
-                workspaceSlug={workspaceSlug}
-                projectId={projectId}
-                value={issue.state_id}
-                onChange={(id) => patch.patchIssue({ state_id: id })}
-                disabled={disabled}
-                variant="ghost"
-                trigger={
-                  <button type="button" disabled={disabled} className={chipClasses(true)}>
-                    {StateIcon === null || state === undefined ? null : (
-                      <StateIcon size={14} strokeWidth={1.5} style={{ color: state.color }} aria-hidden="true" />
-                    )}
-                    <span>{stateNames.get(issue.state_id ?? "") ?? "No state"}</span>
-                  </button>
-                }
-              />
+              <DeferredPicker defer={deferPickers} disabled={disabled} trigger={stateTrigger}>
+                {(open, onOpenChange) => (
+                  <StatePicker
+                    workspaceSlug={workspaceSlug}
+                    projectId={projectId}
+                    value={issue.state_id}
+                    onChange={(id) => patch.patchIssue({ state_id: id })}
+                    disabled={disabled}
+                    variant="ghost"
+                    trigger={stateTrigger}
+                    open={open}
+                    onOpenChange={onOpenChange}
+                  />
+                )}
+              </DeferredPicker>
             </span>
           );
         }
         if (key === "priority") {
+          const priorityTrigger = <PriorityButton level={issue.priority} disabled={disabled} />;
           return (
             <span key={key} className="inline-flex shrink-0" title={`Priority: ${issue.priority}`}>
-              <PriorityPicker
-                value={issue.priority}
-                onChange={(priority) => patch.patchIssue({ priority })}
-                disabled={disabled}
-                trigger={<PriorityButton level={issue.priority} disabled={disabled} />}
-              />
+              <DeferredPicker defer={deferPickers} disabled={disabled} trigger={priorityTrigger}>
+                {(open, onOpenChange) => (
+                  <PriorityPicker
+                    value={issue.priority}
+                    onChange={(priority) => patch.patchIssue({ priority })}
+                    disabled={disabled}
+                    trigger={priorityTrigger}
+                    open={open}
+                    onOpenChange={onOpenChange}
+                  />
+                )}
+              </DeferredPicker>
             </span>
           );
         }
         if (mergedDates && key === "start_date") {
+          const datesTrigger = (
+            <button
+              type="button"
+              aria-label="Dates"
+              disabled={disabled}
+              data-testid="row-dates-trigger"
+              className={cn(
+                "text-caption inline-flex h-5 items-center gap-(--space-1) rounded-(--radius-control) px-(--space-1) hover:bg-(--subtle) disabled:cursor-not-allowed",
+                overdue ? "text-(--danger)" : "text-(--text-muted)"
+              )}
+            >
+              <CalendarDays size={14} strokeWidth={2} aria-hidden="true" />
+              <span className="truncate">{formatMergedRange(issue.start_date ?? "", issue.target_date ?? "")}</span>
+            </button>
+          );
           return (
             <span
               key="dates"
               data-overdue={overdue ? "true" : undefined}
               className={cn("shrink-0", overdue && "text-(--danger)")}
             >
-              <DateRangePicker
-                value={{ start: issue.start_date ?? null, end: issue.target_date ?? null }}
-                onChange={(range) => patch.patchIssue({ start_date: range.start, target_date: range.end })}
-                mode="merged"
-                label="Dates"
-                disabled={disabled}
-                clearable
-                testId="row-dates"
-              />
+              <DeferredPicker defer={deferPickers} disabled={disabled} trigger={datesTrigger}>
+                {(open, onOpenChange) => (
+                  <DateRangePicker
+                    value={{ start: issue.start_date ?? null, end: issue.target_date ?? null }}
+                    onChange={(range) => patch.patchIssue({ start_date: range.start, target_date: range.end })}
+                    mode="merged"
+                    label="Dates"
+                    disabled={disabled}
+                    clearable
+                    testId="row-dates"
+                    trigger={datesTrigger}
+                    open={open}
+                    onOpenChange={onOpenChange}
+                  />
+                )}
+              </DeferredPicker>
             </span>
           );
         }
         if (mergedDates && key === "due_date") return null;
         if (key === "start_date") {
+          const startTrigger = (
+            <button
+              type="button"
+              aria-label="Start date"
+              disabled={disabled}
+              className={chipClasses(issue.start_date !== null && issue.start_date !== undefined)}
+            >
+              <CalendarDays size={14} strokeWidth={2} aria-hidden="true" />
+              <span className="truncate">
+                {issue.start_date === null || issue.start_date === undefined
+                  ? "Start date"
+                  : formatDay(issue.start_date)}
+              </span>
+            </button>
+          );
           return (
             <span key={key} className="shrink-0">
-              <DatePicker
-                value={issue.start_date ?? null}
-                onChange={(start) => patch.patchIssue({ start_date: start })}
-                max={issue.target_date ?? null}
-                label="Start date"
-                placeholder="Start date"
-                disabled={disabled}
-                clearable
-                testId="row-start-date"
-              />
+              <DeferredPicker defer={deferPickers} disabled={disabled} trigger={startTrigger}>
+                {(open, onOpenChange) => (
+                  <DatePicker
+                    value={issue.start_date ?? null}
+                    onChange={(start) => patch.patchIssue({ start_date: start })}
+                    max={issue.target_date ?? null}
+                    label="Start date"
+                    placeholder="Start date"
+                    disabled={disabled}
+                    clearable
+                    testId="row-start-date"
+                    trigger={startTrigger}
+                    open={open}
+                    onOpenChange={onOpenChange}
+                  />
+                )}
+              </DeferredPicker>
             </span>
           );
         }
         if (key === "due_date") {
+          const dueTrigger = (
+            <button
+              type="button"
+              aria-label="Due date"
+              disabled={disabled}
+              className={cn(
+                chipClasses(issue.target_date !== null && issue.target_date !== undefined),
+                overdue && "text-(--danger)"
+              )}
+            >
+              <CalendarDays size={14} strokeWidth={2} aria-hidden="true" />
+              <span className="truncate">
+                {issue.target_date === null || issue.target_date === undefined
+                  ? "Due date"
+                  : formatDay(issue.target_date)}
+              </span>
+            </button>
+          );
           return (
             <span
               key={key}
               data-overdue={overdue ? "true" : undefined}
               className={cn("shrink-0", overdue && "text-(--danger)")}
             >
-              <DatePicker
-                value={issue.target_date ?? null}
-                onChange={(target) => patch.patchIssue({ target_date: target })}
-                min={issue.start_date ?? null}
-                label="Due date"
-                placeholder="Due date"
-                disabled={disabled}
-                clearable
-                testId="row-due-date"
-              />
+              <DeferredPicker defer={deferPickers} disabled={disabled} trigger={dueTrigger}>
+                {(open, onOpenChange) => (
+                  <DatePicker
+                    value={issue.target_date ?? null}
+                    onChange={(target) => patch.patchIssue({ target_date: target })}
+                    min={issue.start_date ?? null}
+                    label="Due date"
+                    placeholder="Due date"
+                    disabled={disabled}
+                    clearable
+                    testId="row-due-date"
+                    trigger={dueTrigger}
+                    open={open}
+                    onOpenChange={onOpenChange}
+                  />
+                )}
+              </DeferredPicker>
             </span>
           );
         }
         if (key === "assignee") {
+          const assigneeTrigger = (
+            <button
+              type="button"
+              aria-label={`Assignees: ${assigneeLabel}`}
+              disabled={disabled}
+              className={chipClasses(issue.assignee_ids.length > 0)}
+            >
+              <Users size={14} strokeWidth={1.5} aria-hidden="true" />
+              {issue.assignee_ids.length > 0 ? <span>{issue.assignee_ids.length}</span> : null}
+            </button>
+          );
           return (
             <span key={key} className="inline-flex shrink-0" title={assigneeLabel}>
-              <MemberPicker
-                workspaceSlug={workspaceSlug}
-                projectId={projectId}
-                multiple
-                value={issue.assignee_ids}
-                onChange={(ids) => patch.patchIssue({ assignee_ids: ids })}
-                disabled={disabled}
-                iconOnly
-                trigger={
-                  <button
-                    type="button"
-                    aria-label={`Assignees: ${assigneeLabel}`}
+              <DeferredPicker defer={deferPickers} disabled={disabled} trigger={assigneeTrigger}>
+                {(open, onOpenChange) => (
+                  <MemberPicker
+                    workspaceSlug={workspaceSlug}
+                    projectId={projectId}
+                    multiple
+                    value={issue.assignee_ids}
+                    onChange={(ids) => patch.patchIssue({ assignee_ids: ids })}
                     disabled={disabled}
-                    className={chipClasses(issue.assignee_ids.length > 0)}
-                  >
-                    <Users size={14} strokeWidth={1.5} aria-hidden="true" />
-                    {issue.assignee_ids.length > 0 ? <span>{issue.assignee_ids.length}</span> : null}
-                  </button>
-                }
-              />
+                    iconOnly
+                    trigger={assigneeTrigger}
+                    open={open}
+                    onOpenChange={onOpenChange}
+                  />
+                )}
+              </DeferredPicker>
             </span>
           );
         }
         if (key === "modules") {
+          const moduleTrigger = (
+            <button type="button" disabled={disabled} className={chipClasses(issue.module_ids.length > 0)}>
+              <span className="truncate">{moduleText}</span>
+            </button>
+          );
           return (
             <span key={key} className="inline-flex min-w-0 shrink-0" title={`Modules: ${moduleText}`}>
-              <ModulePicker
-                workspaceSlug={workspaceSlug}
-                projectId={projectId}
-                multiple
-                value={issue.module_ids}
-                onChange={(ids) => {
-                  const removed = issue.module_ids.filter((id) => !ids.includes(id));
-                  moduleWrite.writeModules(ids, removed);
-                }}
-                disabled={disabled}
-                trigger={
-                  <button type="button" disabled={disabled} className={chipClasses(issue.module_ids.length > 0)}>
-                    <span className="truncate">{moduleText}</span>
-                  </button>
-                }
-              />
+              <DeferredPicker defer={deferPickers} disabled={disabled} trigger={moduleTrigger}>
+                {(open, onOpenChange) => (
+                  <ModulePicker
+                    workspaceSlug={workspaceSlug}
+                    projectId={projectId}
+                    multiple
+                    value={issue.module_ids}
+                    onChange={(ids) => {
+                      const removed = issue.module_ids.filter((id) => !ids.includes(id));
+                      moduleWrite.writeModules(ids, removed);
+                    }}
+                    disabled={disabled}
+                    trigger={moduleTrigger}
+                    open={open}
+                    onOpenChange={onOpenChange}
+                  />
+                )}
+              </DeferredPicker>
             </span>
           );
         }
         if (key === "cycle") {
+          const cycleTrigger = (
+            <button type="button" disabled={disabled} className={chipClasses(issue.cycle_id !== null)}>
+              <span className="truncate">{cycleText}</span>
+            </button>
+          );
           return (
             <span key={key} className="inline-flex min-w-0 shrink-0" title={`Cycle: ${cycleText}`}>
-              <CyclePicker
-                workspaceSlug={workspaceSlug}
-                projectId={projectId}
-                value={issue.cycle_id}
-                onChange={(id) => cycleMove.moveToCycle(id, issue.cycle_id)}
-                disabled={disabled}
-                trigger={
-                  <button type="button" disabled={disabled} className={chipClasses(issue.cycle_id !== null)}>
-                    <span className="truncate">{cycleText}</span>
-                  </button>
-                }
-              />
+              <DeferredPicker defer={deferPickers} disabled={disabled} trigger={cycleTrigger}>
+                {(open, onOpenChange) => (
+                  <CyclePicker
+                    workspaceSlug={workspaceSlug}
+                    projectId={projectId}
+                    value={issue.cycle_id}
+                    onChange={(id) => cycleMove.moveToCycle(id, issue.cycle_id)}
+                    disabled={disabled}
+                    trigger={cycleTrigger}
+                    open={open}
+                    onOpenChange={onOpenChange}
+                  />
+                )}
+              </DeferredPicker>
             </span>
           );
         }
         if (key === "estimate") {
+          const estimateTrigger = (
+            <button
+              type="button"
+              aria-label="Estimate"
+              disabled={disabled}
+              className={chipClasses(issue.estimate_point !== null && issue.estimate_point !== undefined)}
+            >
+              <Hash size={14} strokeWidth={1.5} aria-hidden="true" />
+            </button>
+          );
           return (
             <span key={key} className="inline-flex shrink-0">
-              <EstimatePicker
-                workspaceSlug={workspaceSlug}
-                projectId={projectId}
-                value={typeof issue.estimate_point === "string" ? issue.estimate_point : null}
-                onChange={(id) => patch.patchIssue({ estimate_point: id })}
-                disabled={disabled}
-                iconOnly
-              />
+              <DeferredPicker defer={deferPickers} disabled={disabled} trigger={estimateTrigger}>
+                {(open, onOpenChange) => (
+                  <EstimatePicker
+                    workspaceSlug={workspaceSlug}
+                    projectId={projectId}
+                    value={typeof issue.estimate_point === "string" ? issue.estimate_point : null}
+                    onChange={(id) => patch.patchIssue({ estimate_point: id })}
+                    disabled={disabled}
+                    iconOnly
+                    trigger={estimateTrigger}
+                    open={open}
+                    onOpenChange={onOpenChange}
+                  />
+                )}
+              </DeferredPicker>
             </span>
           );
         }
@@ -369,18 +546,42 @@ export function InlinePropertyStrip({
         }
         return (
           <span key={key} className="inline-flex shrink-0">
-            <LabelPicker
-              workspaceSlug={workspaceSlug}
-              projectId={projectId}
-              value={issue.label_ids}
-              onChange={(ids) => patch.patchIssue({ label_ids: ids })}
+            <DeferredPicker
+              defer={deferPickers}
               disabled={disabled}
-              label={`Labels: ${labelText}`}
-            />
+              trigger={<LabelsTrigger label={`Labels: ${labelText}`} disabled={disabled} />}
+            >
+              {(open, onOpenChange) => (
+                <LabelPicker
+                  workspaceSlug={workspaceSlug}
+                  projectId={projectId}
+                  value={issue.label_ids}
+                  onChange={(ids) => patch.patchIssue({ label_ids: ids })}
+                  disabled={disabled}
+                  label={`Labels: ${labelText}`}
+                  open={open}
+                  onOpenChange={onOpenChange}
+                />
+              )}
+            </DeferredPicker>
           </span>
         );
       })}
     </div>
+  );
+}
+
+/** Label trigger named by the caller; the picker reuses this exact chip. */
+function LabelsTrigger({ label, disabled }: { label: string; disabled: boolean }): React.ReactElement {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      disabled={disabled}
+      className="text-caption inline-flex h-5 items-center rounded-(--radius-control) px-(--space-1) text-(--text-muted) hover:bg-(--subtle) disabled:cursor-not-allowed"
+    >
+      <span className="max-w-24 truncate">{label.replace(/^Labels: /, "")}</span>
+    </button>
   );
 }
 
@@ -431,3 +632,10 @@ function ReadOnlyCount({
     </span>
   );
 }
+
+/**
+ * Rows re-render while the virtualizer scrolls; memo keeps the strip's
+ * pickers and mutation hooks off the scroll path for rows that stay
+ * mounted (Quality gates: 2,000-row frame budget).
+ */
+export const InlinePropertyStrip = React.memo(InlinePropertyStripImpl);

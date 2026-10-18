@@ -165,6 +165,11 @@ export interface DatePickerProps {
   testId?: string | undefined;
   /** Explicit keyboard position inside a dialog's tab order. */
   tabIndex?: number | undefined;
+  /** Fully custom trigger; overrides the default value button. */
+  trigger?: React.ReactElement<Record<string, unknown>> | undefined;
+  /** Controlled popup state; omit for the picker's own state. */
+  open?: boolean | undefined;
+  onOpenChange?: ((open: boolean) => void) | undefined;
 }
 
 /** Single-date dropdown: trigger plus the portalled month calendar. */
@@ -180,8 +185,16 @@ export function DatePicker({
   clearable = true,
   testId = "date-picker",
   tabIndex,
+  trigger,
+  open: controlledOpen,
+  onOpenChange,
 }: DatePickerProps): React.ReactElement {
-  const [open, setOpen] = React.useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  function setOpen(next: boolean): void {
+    if (controlledOpen === undefined) setUncontrolledOpen(next);
+    onOpenChange?.(next);
+  }
   const normalizedStart = normalizeWeekStart(weekStart);
   const showClear = clearable && value !== null && !disabled;
 
@@ -195,20 +208,22 @@ export function DatePicker({
         open={open}
         onOpenChange={setOpen}
         trigger={
-          <button
-            type="button"
-            aria-label={label}
-            disabled={disabled}
-            data-testid={`${testId}-trigger`}
-            className={
-              value === null
-                ? "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                : "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent"
-            }
-          >
-            <CalendarDays size={14} strokeWidth={2} aria-hidden="true" className="shrink-0" />
-            {value === null ? placeholder : formatDay(value)}
-          </button>
+          trigger ?? (
+            <button
+              type="button"
+              aria-label={label}
+              disabled={disabled}
+              data-testid={`${testId}-trigger`}
+              className={
+                value === null
+                  ? "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                  : "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              }
+            >
+              <CalendarDays size={14} strokeWidth={2} aria-hidden="true" className="shrink-0" />
+              {value === null ? placeholder : formatDay(value)}
+            </button>
+          )
         }
       >
         <DateCalendar

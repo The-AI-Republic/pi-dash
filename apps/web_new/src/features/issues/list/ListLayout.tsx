@@ -10,20 +10,20 @@
 
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import type { IssueListItem } from "@pidash/api-client";
-import { Button, Dialog, Input, Skeleton } from "@pidash/kit";
+import { Skeleton, VirtualList } from "@pidash/kit";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { usePermissions } from "../../../core/session/index.js";
 import { projectDetailsQueryOptions, projectsQueryOptions } from "../../projects/index.js";
 import { isCollapsed, readCollapsedGroups, useToggleCollapsedGroup } from "./collapse.js";
-import { AddExistingModal } from "./AddExistingModal.js";
+
 import { creationDisabledForGroup, sectionPrefill } from "./grouping.js";
 import { GroupHeader } from "./GroupHeader.js";
-import { ListPeek } from "./ListPeek.js";
+
 import { ListRow } from "./ListRow.js";
 import { useListPages } from "./pages.js";
-import { QuickAdd } from "./QuickAdd.js";
+
 import { useListReferences } from "./reference.js";
 import { prefsQueryOptions } from "../prefs/prefsQuery.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
@@ -33,7 +33,17 @@ import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import type { RichExpression } from "../filters/rich/expression.js";
 import type { DisplayFeatureFlags } from "../display/matrix.js";
 import { useCreateWorkItem } from "../api/create.js";
-import { issuesQueryOptions } from "../api/queries.js";
+
+// Overlays load on first use: the list route itself must stay inside the
+// initial-JS budget (Quality gates).
+const LazyAddExistingModal = React.lazy(() =>
+  import("./AddExistingModal.js").then((module) => ({ default: module.AddExistingModal }))
+);
+const LazyListPeek = React.lazy(() => import("./ListPeek.js").then((module) => ({ default: module.ListPeek })));
+const LazyCreateDialog = React.lazy(() =>
+  import("./CreateDialog.js").then((module) => ({ default: module.CreateDialog }))
+);
+const LazyQuickAdd = React.lazy(() => import("./QuickAdd.js").then((module) => ({ default: module.QuickAdd })));
 
 /** Flat-list sentinel that loads the next page when scrolled into view. */
 function useSentinel(onIntersect: () => void, enabled: boolean): React.RefObject<HTMLDivElement | null> {
@@ -81,6 +91,34 @@ export interface ListLayoutProps {
   richFilters?: RichExpression | undefined;
 }
 
+/**
+ * Virtualized flat rows (ISS-010). The perf budget pins the issue list at
+ * 2,000 rows with every frame under 50 ms, so only the viewport window
+ * mounts; grouped sections stay unvirtualized because each bucket is
+ * paged to fifty. The kit's VirtualList owns the scroll region.
+ */
+function FlatRows({
+  rows,
+  renderRow,
+  rowHeight,
+}: {
+  rows: IssueListItem[];
+  renderRow: (issue: IssueListItem) => React.ReactNode;
+  rowHeight: number;
+}): React.ReactElement {
+  return (
+    <VirtualList
+      label="Issues"
+      items={rows}
+      estimateSize={rowHeight}
+      getKey={(issue) => issue.id}
+      overscan={4}
+      className="h-full"
+      renderRow={(issue) => renderRow(issue)}
+    />
+  );
+}
+
 /** Create-modal state owned by the layout. */
 interface CreateModalState {
   open: boolean;
@@ -122,7 +160,6 @@ export function ListLayout({
   const project = projects?.find((row) => row.id === projectId) ?? null;
   const projectDetails = details?.find((row) => row.id === projectId) ?? null;
   const estimateEnabled = projectDetails !== null && projectDetails.estimate !== null;
-  const { data: issueList } = useQuery(issuesQueryOptions(client, workspaceSlug, projectId, { layout: "list" }));
   const [uncontrolledPeekKey, setUncontrolledPeekKey] = React.useState<string | null>(null);
   const peekKey = controlledPeekKey === undefined ? uncontrolledPeekKey : controlledPeekKey;
   const [createState, setCreateState] = React.useState<CreateModalState | null>(null);
@@ -137,11 +174,7 @@ export function ListLayout({
 
   const allRows = pages.sections.flatMap((section) => section.rows);
   const peekIssue =
-    peekKey === null
-      ? null
-      : (allRows.find((row) => `${projectIdentifier}-${row.sequence_id}` === peekKey) ??
-        issueList?.results.find((row) => `${projectIdentifier}-${row.sequence_id}` === peekKey) ??
-        null);
+    peekKey === null ? null : (allRows.find((row) => `${projectIdentifier}-${row.sequence_id}` === peekKey) ?? null);
 
   function setPeek(key: string | null): void {
     if (controlledPeekKey === undefined) setUncontrolledPeekKey(key);
@@ -224,13 +257,53 @@ export function ListLayout({
 
   const sectionGroups = pages.sections;
 
+  function renderListRow(issue: IssueListItem): React.ReactElement {
+    return (
+      <ListRow
+        key={issue.id}
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        projectIdentifier={projectIdentifier}
+        issue={issue}
+        depth={1}
+        properties={prefs.properties}
+        flags={flags}
+        readOnly={readOnly}
+        states={refs.stateRows}
+        stateNames={refs.stateNames}
+        assigneeNames={refs.assigneeNames}
+        labelNames={refs.labelNames}
+        cycleNames={refs.cycleNames}
+        moduleNames={refs.moduleNames}
+        openCycleIds={refs.openCycleIds}
+        estimateEnabled={estimateEnabled}
+        highlightedId={null}
+        onOpenPeek={openPeek}
+        hrefFor={hrefFor}
+        compact={compact}
+        deferPickers={!pages.grouped}
+      />
+    );
+  }
+
   return (
-    <div className="relative flex h-full flex-col overflow-auto pb-16">
-      {peekIssue === null ? null : <ListPeek issueKey={peekKey ?? ""} title={peekIssue.name} onClose={closePeek} />}
+    <div
+      {...(pages.grouped ? { role: "region", "aria-label": "Issues" } : { "data-testid": "list-scroll" })}
+      className="relative flex h-full flex-col overflow-auto pb-16"
+    >
+      {peekIssue === null ? null : (
+        <React.Suspense fallback={null}>
+          <LazyListPeek issueKey={peekKey ?? ""} title={peekIssue.name} onClose={closePeek} />
+        </React.Suspense>
+      )}
       {sectionGroups.map((section) => {
         const sectionCollapsed = isCollapsed(collapsedState, "group_by", section.key);
         return (
-          <section key={section.key} data-drop-target-for-element="true">
+          <section
+            key={section.key}
+            data-drop-target-for-element="true"
+            className={pages.grouped ? undefined : "flex min-h-0 flex-1 flex-col"}
+          >
             <GroupHeader
               section={section}
               dimension={prefs.groupBy}
@@ -243,31 +316,13 @@ export function ListLayout({
             />
             {sectionCollapsed ? null : (
               <>
-                {section.rows.map((issue) => (
-                  <ListRow
-                    key={issue.id}
-                    workspaceSlug={workspaceSlug}
-                    projectId={projectId}
-                    projectIdentifier={projectIdentifier}
-                    issue={issue}
-                    depth={1}
-                    properties={prefs.properties}
-                    flags={flags}
-                    readOnly={readOnly}
-                    states={refs.stateRows}
-                    stateNames={refs.stateNames}
-                    assigneeNames={refs.assigneeNames}
-                    labelNames={refs.labelNames}
-                    cycleNames={refs.cycleNames}
-                    moduleNames={refs.moduleNames}
-                    openCycleIds={refs.openCycleIds}
-                    estimateEnabled={estimateEnabled}
-                    highlightedId={null}
-                    onOpenPeek={openPeek}
-                    hrefFor={hrefFor}
-                    compact={compact}
-                  />
-                ))}
+                {pages.grouped ? (
+                  section.rows.map((issue) => renderListRow(issue))
+                ) : (
+                  <div className="min-h-0 flex-1">
+                    <FlatRows rows={section.rows} renderRow={renderListRow} rowHeight={compact ? 32 : 44} />
+                  </div>
+                )}
                 {pages.grouped && pages.sectionMore(section) ? (
                   <button
                     type="button"
@@ -277,25 +332,27 @@ export function ListLayout({
                     Load more
                   </button>
                 ) : null}
-                <QuickAdd
-                  workspaceSlug={workspaceSlug}
-                  projectId={projectId}
-                  cycleId={cycleId}
-                  moduleId={moduleId}
-                  prefill={sectionPrefill(prefs.groupBy, section)}
-                  {...(pages.grouped ? { groupKey: section.key } : {})}
-                  defaultStateId={projectDetails?.default_state ?? null}
-                  disabled={quickAddDisabled}
-                  disabledReason={
-                    !permissions.canEdit
-                      ? "New work items are read-only for you"
-                      : completedCycle
-                        ? "This cycle is complete"
-                        : creationDisabledForGroup(prefs.groupBy)
-                          ? "Creation is off in this grouping"
-                          : undefined
-                  }
-                />
+                <React.Suspense fallback={null}>
+                  <LazyQuickAdd
+                    workspaceSlug={workspaceSlug}
+                    projectId={projectId}
+                    cycleId={cycleId}
+                    moduleId={moduleId}
+                    prefill={sectionPrefill(prefs.groupBy, section)}
+                    {...(pages.grouped ? { groupKey: section.key } : {})}
+                    defaultStateId={projectDetails?.default_state ?? null}
+                    disabled={quickAddDisabled}
+                    disabledReason={
+                      !permissions.canEdit
+                        ? "New work items are read-only for you"
+                        : completedCycle
+                          ? "This cycle is complete"
+                          : creationDisabledForGroup(prefs.groupBy)
+                            ? "Creation is off in this grouping"
+                            : undefined
+                    }
+                  />
+                </React.Suspense>
               </>
             )}
           </section>
@@ -309,75 +366,31 @@ export function ListLayout({
         </div>
       ) : null}
       {addExistingOpen ? (
-        <AddExistingModal
-          open
-          onOpenChange={(open) => {
-            if (!open) setAddExistingOpen(false);
-          }}
-          workspaceSlug={workspaceSlug}
-          projectId={projectId}
-          excludeCycleMembers={cycleId !== undefined}
-          {...(moduleId !== undefined ? { excludeModuleId: moduleId } : {})}
-          onAttach={(ids) => attachExisting(ids)}
-        />
+        <React.Suspense fallback={null}>
+          <LazyAddExistingModal
+            open
+            onOpenChange={(open) => {
+              if (!open) setAddExistingOpen(false);
+            }}
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            excludeCycleMembers={cycleId !== undefined}
+            {...(moduleId !== undefined ? { excludeModuleId: moduleId } : {})}
+            onAttach={(ids) => attachExisting(ids)}
+          />
+        </React.Suspense>
       ) : null}
       {createState === null ? null : (
-        <CreateDialog
-          open={createState.open}
-          onOpenChange={(open) => {
-            if (!open) setCreateState(null);
-          }}
-          onSave={(name) => void submitCreate(name, createState.prefill)}
-        />
+        <React.Suspense fallback={null}>
+          <LazyCreateDialog
+            open={createState.open}
+            onOpenChange={(open) => {
+              if (!open) setCreateState(null);
+            }}
+            onSave={(name) => void submitCreate(name, createState.prefill)}
+          />
+        </React.Suspense>
       )}
     </div>
-  );
-}
-
-/** Minimal create modal for the section "+" (title + prefilled payload). */
-function CreateDialog({
-  open,
-  onOpenChange,
-  onSave,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onSave: (name: string) => void;
-}): React.ReactElement {
-  const [title, setTitle] = React.useState("");
-  React.useEffect(() => {
-    if (open) setTitle("");
-  }, [open]);
-  return (
-    <Dialog
-      title="Create new work item"
-      open={open}
-      onOpenChange={(next) => onOpenChange(next)}
-      actions={
-        <>
-          <Button variant="secondary" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button
-            variant="primary"
-            onClick={() => {
-              const name = title.trim();
-              if (name !== "") onSave(name);
-            }}
-            disabled={title.trim() === ""}
-          >
-            Save
-          </Button>
-        </>
-      }
-    >
-      <Input
-        label="Title"
-        placeholder="Title"
-        value={title}
-        maxLength={255}
-        onChange={(event) => setTitle(event.target.value)}
-      />
-    </Dialog>
   );
 }

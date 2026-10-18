@@ -13,7 +13,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ApiError, createClient } from "@pidash/api-client";
 import type { IssueListItem, IssueListResponse, Project } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../../../../core/api/client.js";
 import {
@@ -446,7 +446,22 @@ function renderScreen(
   );
 }
 
+// jsdom reports zero element sizes; give the flat list's scroll region and
+// rows a height so the virtualized rows mount.
+const realHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+beforeEach(() => {
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get(this: HTMLElement) {
+      if (this.getAttribute("role") === "region" || this.getAttribute("data-testid") === "list-scroll") return 400;
+      if (this.hasAttribute("data-index")) return 44;
+      return realHeight?.get?.call(this) ?? 0;
+    },
+  });
+});
+
 afterEach(() => {
+  if (realHeight) Object.defineProperty(HTMLElement.prototype, "offsetHeight", realHeight);
   resetAppClient();
   clearCommands();
   vi.restoreAllMocks();
@@ -569,11 +584,11 @@ describe("project issues screen", () => {
     }
   });
 
-  it("passes the compact density through from the search param", () => {
+  it("passes the compact density through from the search param", async () => {
     const now = new Date().toISOString();
     renderScreen({ layout: "compact" }, 1, [issueRow({ created_at: now, updated_at: now })]);
 
-    const block = screen.getByTestId("list-row");
+    const block = await screen.findByTestId("list-row");
     expect(block).toHaveClass("h-8");
     expect(block).not.toHaveClass("h-11");
   });

@@ -34,6 +34,11 @@ export interface LabelPickerProps {
   disabled?: boolean | undefined;
   /** Trigger text before any label is chosen. */
   emptyText?: string | undefined;
+  /** Fully custom trigger; overrides the default value button. */
+  trigger?: React.ReactElement<Record<string, unknown>> | undefined;
+  /** Controlled popup state; omit for the picker's own state. */
+  open?: boolean | undefined;
+  onOpenChange?: ((open: boolean) => void) | undefined;
 }
 
 interface PickerOption {
@@ -59,8 +64,16 @@ export function LabelPicker({
   label = "Labels",
   disabled = false,
   emptyText = "Select labels",
+  trigger,
+  open: controlledOpen,
+  onOpenChange,
 }: LabelPickerProps): React.ReactElement {
-  const [open, setOpen] = React.useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  function setOpen(next: boolean): void {
+    if (controlledOpen === undefined) setUncontrolledOpen(next);
+    onOpenChange?.(next);
+  }
   const [query, setQuery] = React.useState("");
   const suppressClose = React.useRef(false);
   const labelsQuery = useLabels(workspaceSlug, projectId, open && !disabled);
@@ -127,7 +140,7 @@ export function LabelPicker({
     }
   }
 
-  function onOpenChange(next: boolean): void {
+  function handleOpenChange(next: boolean): void {
     if (!next && suppressClose.current) {
       suppressClose.current = false;
       return;
@@ -140,24 +153,26 @@ export function LabelPicker({
   return (
     <Popover
       trigger={
-        <button
-          type="button"
-          aria-label={label}
-          disabled={disabled}
-          tabIndex={-1}
-          data-testid="label-picker-trigger"
-          className="text-body inline-flex cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) py-(--space-2) text-(--text-muted) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {value.length === 0 && emptyText === "" ? null : (
-            <span className="min-w-0 flex-1 truncate text-left">
-              {value.length === 0 ? emptyText : `${value.length} selected`}
-            </span>
-          )}
-          <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" />
-        </button>
+        trigger ?? (
+          <button
+            type="button"
+            aria-label={label}
+            disabled={disabled}
+            tabIndex={-1}
+            data-testid="label-picker-trigger"
+            className="text-body inline-flex cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) py-(--space-2) text-(--text-muted) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {value.length === 0 && emptyText === "" ? null : (
+              <span className="min-w-0 flex-1 truncate text-left">
+                {value.length === 0 ? emptyText : `${value.length} selected`}
+              </span>
+            )}
+            <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" />
+          </button>
+        )
       }
       open={open}
-      onOpenChange={onOpenChange}
+      onOpenChange={handleOpenChange}
     >
       <div className="flex flex-col gap-(--space-3)">
         <Input

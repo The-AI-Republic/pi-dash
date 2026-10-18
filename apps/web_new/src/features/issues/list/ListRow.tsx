@@ -16,7 +16,47 @@ import { getAppClient } from "../../../core/api/client.js";
 import { subIssuesQueryOptions } from "../api/queries.js";
 import { isRowHighlighted, isTempRowId, rowDomId } from "../freshness/fresh.js";
 import type { DisplayFeatureFlags } from "../display/matrix.js";
-import { InlinePropertyStrip } from "./InlinePropertyStrip.js";
+// The strip brings the property pickers. Its chunk request starts after the
+// rows commit, so the list chunk stays cheap to evaluate and rows paint
+// before the picker code arrives (desktop warm-start budget). Suspending the
+// rows on the chunk instead delayed first paint.
+type StripComponent = typeof import("./InlinePropertyStrip.js").InlinePropertyStrip;
+let stripRequest: Promise<{ default: StripComponent }> | null = null;
+let LoadedStrip: StripComponent | null = null;
+
+function loadStrip(): Promise<{ default: StripComponent }> {
+  stripRequest ??= import("./InlinePropertyStrip.js").then((module) => {
+    LoadedStrip = module.InlinePropertyStrip;
+    return { default: module.InlinePropertyStrip };
+  });
+  return stripRequest;
+}
+
+/** Strip once its chunk has loaded; rows paint without waiting for it. */
+function DeferredStrip(props: React.ComponentProps<StripComponent>) {
+  // Lazy initializer so a component function is stored, not invoked.
+  const [Strip, setStrip] = React.useState<StripComponent | null>(() => LoadedStrip);
+  React.useEffect(() => {
+    if (Strip !== null) return;
+    let live = true;
+    const mount = (): void => {
+      void loadStrip().then((module) => {
+        if (live) setStrip(() => module.default);
+      });
+    };
+    // Mount after the first frame: the pickers are heavy, and mounting them
+    // in the commit that paints the rows pushes the first visible frame past
+    // the desktop warm-start budget. The strip is visible at rest either way.
+    const idle = typeof requestIdleCallback === "function" ? requestIdleCallback(mount, { timeout: 500 }) : null;
+    const timer = idle === null ? setTimeout(mount, 0) : null;
+    return () => {
+      live = false;
+      if (idle !== null) cancelIdleCallback(idle);
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [Strip]);
+  return Strip === null ? null : <Strip {...props} />;
+}
 
 /** Inline nesting stops at three levels; deeper children open peek. */
 export const MAX_INLINE_DEPTH = 3;
@@ -47,6 +87,8 @@ export interface ListRowProps {
   hrefFor: (issue: IssueListItem) => string;
   /** Row density from the layout search param (list vs compact). */
   compact?: boolean;
+  /** Mount the property pickers on first interaction (virtualized rows). */
+  deferPickers?: boolean;
 }
 
 export function issueKey(projectIdentifier: string, issue: Pick<IssueListItem, "sequence_id">): string {
@@ -131,7 +173,7 @@ function SubIssueExpander({
   );
 }
 
-export function ListRow(props: ListRowProps): React.ReactElement {
+function ListRowImpl(props: ListRowProps): React.ReactElement {
   const { issue, highlightedId, depth, projectIdentifier, onOpenPeek, hrefFor, compact = false } = props;
   const temp = isTempRowId(issue.id);
   const highlighted = isRowHighlighted(issue, highlightedId);
@@ -143,7 +185,7 @@ export function ListRow(props: ListRowProps): React.ReactElement {
   }
 
   return (
-    <div id={rowBlockId(issue.id)} data-temprow={temp ? "true" : undefined} className="flex flex-col">
+    <article id={rowBlockId(issue.id)} data-temprow={temp ? "true" : undefined} className="flex flex-col">
       <div
         data-testid="list-row"
         data-highlight={highlighted ? "true" : undefined}
@@ -182,7 +224,7 @@ export function ListRow(props: ListRowProps): React.ReactElement {
           </p>
         </a>
         {temp ? null : (
-          <InlinePropertyStrip
+          <DeferredStrip
             workspaceSlug={props.workspaceSlug}
             projectId={props.projectId}
             projectIdentifier={projectIdentifier}
@@ -198,9 +240,13 @@ export function ListRow(props: ListRowProps): React.ReactElement {
             moduleNames={props.moduleNames}
             openCycleIds={props.openCycleIds}
             estimateEnabled={props.estimateEnabled}
+            deferPickers={props.deferPickers ?? false}
           />
         )}
       </div>
-    </div>
+    </article>
   );
 }
+
+/** Stable props let mounted rows skip virtualizer-driven re-renders. */
+export const ListRow = React.memo(ListRowImpl);

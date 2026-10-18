@@ -15,9 +15,10 @@ import { projectsQueryOptions } from "../../projects/index.js";
 import { DisplayControl } from "../display/DisplayControl.js";
 import type { LayoutKind } from "../layouts/kinds.js";
 import { IssuesLayoutRoot } from "../layouts/IssuesLayoutRoot.js";
+import { ListSkeleton } from "../loaders/ListSkeleton.js";
 import { prefsQueryOptions } from "../prefs/prefsQuery.js";
 import { listPageQueryOptions } from "./pages.js";
-import { ListLayout } from "./ListLayout.js";
+const LazyListLayout = React.lazy(() => import("./ListLayout.js").then((module) => ({ default: module.ListLayout })));
 import type { IssuesEntity } from "../prefs/entities.js";
 
 export interface EntityListScreenProps {
@@ -95,20 +96,22 @@ export function EntityListScreen({
       resultCount={Array.isArray(firstPage.results) ? firstPage.results.length : firstPage.count}
       offered={offered}
       renderLayout={(_layout, prefs) => (
-        <ListLayout
-          workspaceSlug={workspaceSlug}
-          entity={entity}
-          projectId={projectId}
-          projectIdentifier={project.identifier}
-          prefs={prefs}
-          richFilters={richFilters}
-          cycleId={cycleId}
-          moduleId={moduleId}
-          completedCycle={completedCycle}
-          peekKey={peekKey}
-          onPeekChange={onPeekChange}
-          compact={compact}
-        />
+        <React.Suspense fallback={<ListSkeleton />}>
+          <LazyListLayout
+            workspaceSlug={workspaceSlug}
+            entity={entity}
+            projectId={projectId}
+            projectIdentifier={project.identifier}
+            prefs={prefs}
+            richFilters={richFilters}
+            cycleId={cycleId}
+            moduleId={moduleId}
+            completedCycle={completedCycle}
+            peekKey={peekKey}
+            onPeekChange={onPeekChange}
+            compact={compact}
+          />
+        </React.Suspense>
       )}
       emptyState={<EntityEmptyState title={title} />}
       noMatchState={<EntityEmptyState title={title} />}

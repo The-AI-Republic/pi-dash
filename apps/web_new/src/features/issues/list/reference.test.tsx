@@ -16,8 +16,8 @@ const mocks = vi.hoisted(() => ({
   me: vi.fn(),
 }));
 
-vi.mock("../../../shared/pickers/index.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../shared/pickers/index.js")>()),
+vi.mock("../../../shared/pickers/reference.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../shared/pickers/reference.js")>()),
   usePickerStates: mocks.states,
   usePickerProjectMembers: mocks.members,
   usePickerWorkspaceMembers: mocks.directory,
@@ -129,7 +129,7 @@ describe("useListReferences", () => {
     expect(result.current.labels.created_by).toBeUndefined();
   });
 
-  it("reports loading from states, projects and labels regardless of dimension", () => {
+  it("reports loading from states and the needed dimension", () => {
     mocks.states.mockReturnValue({ data: undefined, isPending: true });
     const { result } = renderHook(() =>
       useListReferences({ workspaceSlug: "acme", projectId: PROJECT, dimension: "state" })

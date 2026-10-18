@@ -11,16 +11,18 @@ import * as React from "react";
 
 import { useMe } from "../../../core/session/index.js";
 import { useLabels } from "../labels/api.js";
+// Direct module imports keep the picker UI components out of the list's
+// first-route chunk; only the reference reads and option shaping load here.
+import { selectCycleOptions } from "../../../shared/pickers/cycles.js";
+import { selectMemberOptions } from "../../../shared/pickers/members.js";
 import {
-  selectCycleOptions,
-  selectMemberOptions,
   usePickerCycles,
   usePickerModules,
   usePickerProjectMembers,
   usePickerProjects,
   usePickerStates,
   usePickerWorkspaceMembers,
-} from "../../../shared/pickers/index.js";
+} from "../../../shared/pickers/reference.js";
 
 /** Dimension → id-to-name map for section titles. */
 export type GroupLabels = Partial<Record<string, ReadonlyMap<string, string>>>;
@@ -64,10 +66,10 @@ export function useListReferences({ workspaceSlug, projectId, dimension }: ListR
   const states = usePickerStates(workspaceSlug, projectId, true);
   const members = usePickerProjectMembers(workspaceSlug, projectId, needs("assignees"));
   const directory = usePickerWorkspaceMembers(workspaceSlug, needs("assignees"));
-  const projects = usePickerProjects(workspaceSlug, true);
+  const projects = usePickerProjects(workspaceSlug, needs("project"));
   const cycles = usePickerCycles(workspaceSlug, projectId, needs("cycle"));
   const modules = usePickerModules(workspaceSlug, projectId, needs("module"));
-  const labels = useLabels(workspaceSlug, projectId, true);
+  const labels = useLabels(workspaceSlug, projectId, needs("labels"));
   const me = useMe();
 
   const stateRows = states.data ?? [];
