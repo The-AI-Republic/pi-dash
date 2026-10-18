@@ -20,7 +20,6 @@ import {
   DisplayControl,
   IssuesLayoutRoot,
   ListSkeleton,
-  issuesQueryOptions,
   parseIssueSearch,
   prefsQueryOptions,
   resolveActiveLayout,
