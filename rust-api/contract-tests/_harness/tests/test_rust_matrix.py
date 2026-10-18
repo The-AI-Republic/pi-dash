@@ -92,7 +92,8 @@ def test_check_passes_on_real_tree():
 
 def test_matrix_lists_every_http_suite():
     suites = rust_matrix.http_suites()
-    assert len(suites) == 33
+    unlisted = rust_matrix.on_disk_suite_dirs() - set(suites) - rust_matrix.TASK_ONLY_DIRS
+    assert unlisted == set()
     assert "web_edge" in suites and "ops" not in suites
 
 
