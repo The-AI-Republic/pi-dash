@@ -83,6 +83,15 @@ afterEach(() => {
 });
 
 describe("SectionEditor", () => {
+  it("edits on a plain labelled text surface without kit field scaffolding", () => {
+    renderEditor({ scope: "user" });
+    const surface = screen.getByLabelText("Prompt section text");
+    expect(surface.tagName).toBe("TEXTAREA");
+    expect(surface).toHaveAttribute("rows", "10");
+    expect(surface.className).toContain("resize-y");
+    expect(surface.className).toContain("disabled:opacity-50");
+  });
+
   it("seeds the workspace draft from the baseline with Save disarmed", () => {
     renderEditor({ scope: "workspace" });
     expect(screen.getByText("Workspace default")).toBeInTheDocument();

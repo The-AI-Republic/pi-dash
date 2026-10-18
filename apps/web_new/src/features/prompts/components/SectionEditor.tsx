@@ -6,9 +6,12 @@
 // compare shows the pristine default beside it, cancel discards, and the
 // revert affordance arms only with an override at the edited scope. Save
 // failures land inline with the server's detail; a refused revert lands
-// the generic message.
+// the generic message. The text surface is a plain textarea rather than
+// the kit's field component: the kit ships as one entry, so importing its
+// Input pulls the field scaffold into the shell's initial chunk and the
+// initial-JS gate overruns (see Notes on NEWFRONT-597).
 
-import { Button, Textarea } from "@pidash/kit";
+import { Button } from "@pidash/kit";
 import * as React from "react";
 
 import {
@@ -32,6 +35,11 @@ export interface SectionEditorProps {
   scope: PromptEditorScope;
   onClose: () => void;
 }
+
+// Mirrors the kit textarea's surface: the same control-height, focus,
+// disabled and resize treatment, spelled with the shared utility tokens.
+const DRAFT_EDITOR_CLASS =
+  "text-body min-h-20 w-full resize-y rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) py-(--space-3) text-(--text) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none disabled:cursor-not-allowed disabled:opacity-50";
 
 export function SectionEditor({ workspaceSlug, section, scope, onClose }: SectionEditorProps): React.ReactElement {
   const seed = editorSeedFor(section, scope);
@@ -76,11 +84,12 @@ export function SectionEditor({ workspaceSlug, section, scope, onClose }: Sectio
     <div className="flex flex-col gap-(--space-4)">
       <p className="text-meta text-(--text-muted)">{editorScopeLabel(scope)}</p>
       <div className={compareOpen ? "grid grid-cols-1 gap-(--space-4) lg:grid-cols-2" : undefined}>
-        <Textarea
-          label="Prompt section text"
+        <textarea
+          aria-label="Prompt section text"
           rows={10}
           value={draft}
           disabled={busy}
+          className={DRAFT_EDITOR_CLASS}
           onChange={(event) => setDraft(event.target.value)}
         />
         {compareOpen ? (
