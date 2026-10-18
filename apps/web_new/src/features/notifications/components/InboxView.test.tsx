@@ -865,6 +865,31 @@ describe("InboxView stream controls (NTF-013-017, NTF-028)", () => {
     await waitFor(() => expect(screen.getAllByTestId("inbox-card")[0]).toHaveAttribute("data-unread", "false"));
   });
 
+  it("clears the current tab badge once the bulk read's totals land (NTF-014)", async () => {
+    let unreadServed = 0;
+    renderView({
+      serveReads: true,
+      unreadReply: () => {
+        unreadServed += 1;
+        return jsonResponse(
+          unreadServed === 1 ? UNREAD : { total_unread_notifications_count: 0, mention_unread_notifications_count: 0 }
+        );
+      },
+      listReply: () => jsonResponse(page([commentRow("Bulk story", "f23e4567-e89b-12d3-a456-426614174015")])),
+      postReply: () => jsonResponse({ message: "Successful" }),
+    });
+    expect(await screen.findByTestId("inbox-card")).toHaveAttribute("data-unread", "true");
+    await waitFor(() => expect(within(screen.getByTestId("inbox-tab-all")).getByText("3")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Mark all as read" }));
+
+    await waitFor(() => expect(screen.getAllByTestId("inbox-card")[0]).toHaveAttribute("data-unread", "false"));
+    await waitFor(() => expect(within(screen.getByTestId("inbox-tab-all")).queryByText("3")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(within(screen.getByTestId("inbox-tab-mentions")).queryByText("1")).not.toBeInTheDocument()
+    );
+  });
+
   it("sends the current scope with mark-all-read", async () => {
     const posts: { url: string; body: string }[] = [];
     renderView({
