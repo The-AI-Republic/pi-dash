@@ -27,7 +27,6 @@ import {
   prefsQueryOptions,
   resolveActiveLayout,
   useWeekStart,
-  type DisplayPrefs,
   type LayoutKind,
 } from "../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
@@ -167,6 +166,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
     // Layout slices extend the offered list with their renderer; the
     // Display control resolves the same active layout from it.
     const offered: readonly LayoutKind[] = ["list", "gantt_chart", "spreadsheet"];
+    const weekStart = useWeekStart();
     const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at != null });
     const display = (
       <DisplayControl
@@ -222,6 +222,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
                   hideModule={!project.module_view}
                   hideEstimate={project.estimate === null}
                   richExpression={preferences.rich_filters}
+                  weekStart={weekStart}
                 />
               </React.Suspense>
             );

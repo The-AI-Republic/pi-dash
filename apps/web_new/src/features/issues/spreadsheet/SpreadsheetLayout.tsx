@@ -19,7 +19,6 @@ import { getAppClient } from "../../../core/api/client.js";
 import { PeekPanel } from "../../../shared/shell/index.js";
 import { useUpdateDisplayPrefs, type DisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../prefs/entities.js";
-import { useWeekStart } from "../dropdowns/weekStart.js";
 import { usePickerCycles } from "../../../shared/pickers/reference.js";
 import type { RichExpression } from "../filters/rich/expression.js";
 import { sheetSubIssuesQueryOptions } from "./subIssues.js";
@@ -69,6 +68,8 @@ export interface SpreadsheetLayoutProps {
   highlightedId?: string | null;
   /** Stored rich filters shared with the list layout. */
   richExpression?: RichExpression;
+  /** The profile's first day of week; the route owns the session read. */
+  weekStart: number;
 }
 
 export interface DisplayRow {
@@ -89,6 +90,7 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     hideEstimate,
     highlightedId = null,
     richExpression = {},
+    weekStart,
   } = props;
   const client = getAppClient();
   const query = useInfiniteQuery(
@@ -103,7 +105,6 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
   const [scrolled, setScrolled] = React.useState(false);
   const [scrollNode, setScrollNode] = React.useState<HTMLDivElement | null>(null);
   const [localSort, setLocalSort] = React.useState<SheetSortState | null>(readStoredSheetSort);
-  const weekStart = useWeekStart();
   const cycles = usePickerCycles(workspaceSlug, projectId, true);
   const fields = useSheetFieldUpdate(workspaceSlug, projectId);
   const cycleWrite = useSheetCycleUpdate(workspaceSlug, projectId);

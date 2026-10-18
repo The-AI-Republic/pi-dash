@@ -183,6 +183,7 @@ function renderSheet(
     hideModule?: boolean;
     hideEstimate?: boolean;
     highlightedId?: string | null;
+    weekStart?: number;
   } = {}
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -214,6 +215,7 @@ function renderSheet(
         hideModule={props.hideModule ?? false}
         hideEstimate={props.hideEstimate ?? false}
         highlightedId={props.highlightedId ?? null}
+        weekStart={props.weekStart ?? 0}
       />
     ),
   });

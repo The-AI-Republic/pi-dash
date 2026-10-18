@@ -23,6 +23,7 @@ import {
   type PrefsRecord,
 } from "../../../../../../features/issues/index.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
+import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { clearCommands, listCommands } from "../../../../../../shared/commands/index.js";
 import * as queryModule from "../../../../../../core/query/optimistic.js";
 import * as shellModule from "../../../../../../shared/shell/index.js";
@@ -319,7 +320,7 @@ function renderScreen(
     rich_filters: options.richFilters ?? {},
   };
   queryClient.setQueryData(
-    issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, search, prefs.rich_filters).queryKey,
+    issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, search, prefs.rich_filters, orderByOf(prefs)).queryKey,
     {
       grouped_by: null,
       sub_grouped_by: null,
