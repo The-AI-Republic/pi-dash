@@ -38,6 +38,9 @@ export default function IssueFilters({
   onViewUpdated,
   children,
 }: IssueFiltersProps): React.ReactElement {
+  // Stable identity: the builder resets its local copy whenever the record
+  // reference changes, so a fresh wrapper object per render would loop.
+  const viewProp = React.useMemo(() => (view === undefined ? undefined : { view, isDefault: false }), [view]);
   const parts = useRichFilterBuilder({
     workspaceSlug,
     projectId,
@@ -45,7 +48,7 @@ export default function IssueFilters({
     hideCycle,
     hideModule,
     viewsEnabled,
-    view: view === undefined ? undefined : { view, isDefault: false },
+    view: viewProp,
     onViewCreated,
     onViewUpdated,
   });

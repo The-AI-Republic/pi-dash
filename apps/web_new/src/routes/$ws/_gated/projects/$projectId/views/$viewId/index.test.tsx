@@ -7,7 +7,8 @@
 // query and the filter row, and the row's actions are wired to the record
 // rather than the personal preference store.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ApiError, createClient, type IssueListResponse, type Project } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -146,6 +147,7 @@ function renderScreen(role: number | null = 20): void {
     issueResponse()
   );
   queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, prefsSeed());
+  queryClient.setQueryData(sessionKeys.me, { id: USER });
   queryClient.setQueryData(sessionKeys.workspaces, [
     { id: USER, name: "Acme", slug: PARAMS.ws, logo_url: null, total_members: 1, role: role ?? 20 },
   ]);
@@ -200,14 +202,17 @@ describe("saved view screen", () => {
     renderScreen();
     expect(await screen.findByRole("heading", { name: "Unstarted work" })).toBeInTheDocument();
     expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
-    expect(screen.getByTestId("rich-condition")).toHaveTextContent("State group");
+    expect(screen.getByTestId("rich-condition")).toHaveTextContent("State Group");
   });
 
-  it("offers Save as and Update view for the owned, changed view", async () => {
+  it("offers Save as for the owned view and Update view once the row changes", async () => {
+    const user = userEvent.setup();
     renderScreen();
-    // The view's stored display snapshot lacks the row's display keys, so
-    // the live row differs and the owner may update it.
     expect(await screen.findByTestId("rich-save-view")).toHaveTextContent("Save as");
+    const pill = await screen.findByTestId("rich-condition");
+
+    await user.click(within(pill).getByRole("button", { name: /^is$/ }));
+    await user.click(await screen.findByRole("option", { name: "is not" }));
     expect(await screen.findByRole("button", { name: "Update view" })).toBeInTheDocument();
   });
 });

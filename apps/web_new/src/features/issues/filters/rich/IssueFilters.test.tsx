@@ -95,4 +95,65 @@ describe("IssueFilters", () => {
     expect(await screen.findByTestId("rich-clear-all")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByTestId("rich-save-view")).not.toBeInTheDocument());
   });
+
+  it("keeps a saved view's columns stable when the row re-renders", async () => {
+    const view = {
+      id: "323e4567-e89b-12d3-a456-426614174002",
+      workspace: USER,
+      project: PROJECT,
+      name: "Mine",
+      description: "",
+      query: {},
+      filters: {},
+      display_filters: { layout: "list" },
+      display_properties: {},
+      rich_filters: { priority__in: "urgent" },
+      access: 0,
+      sort_order: 1,
+      logo_props: {},
+      owned_by: USER,
+      is_locked: false,
+      archived_at: null,
+      is_favorite: false,
+      created_by: USER,
+      updated_by: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+    createAppClient("https://api.test", (() => {
+      throw new Error("a seeded view render reads nothing over the network");
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(sessionKeys.workspaces, [
+      { id: USER, name: "Acme", slug: "acme", logo_url: null, total_members: 1, role: 20 },
+    ]);
+    queryClient.setQueryData(sessionKeys.me, { id: USER });
+    const capture = vi.fn<(parts: RichFilterBuilderParts) => void>();
+    function Screen({ viewRecord }: { viewRecord: typeof view }): React.ReactElement {
+      return (
+        <QueryClientProvider client={queryClient}>
+          <IssuesLoaderProvider>
+            <IssueFilters
+              workspaceSlug="acme"
+              projectId={PROJECT}
+              hideCycle={true}
+              hideModule={true}
+              viewsEnabled={true}
+              view={viewRecord}
+              children={(parts) => {
+                capture(parts);
+                return <div data-testid="row-slot">{parts.row}</div>;
+              }}
+            />
+          </IssuesLoaderProvider>
+        </QueryClientProvider>
+      );
+    }
+    const { rerender } = render(<Screen viewRecord={view} />);
+    const before = capture.mock.calls.length;
+    rerender(<Screen viewRecord={view} />);
+    // A re-render with the same record must settle, not reset on every pass.
+    await waitFor(() => expect(capture.mock.calls.length).toBeGreaterThan(before));
+    expect(screen.getByTestId("row-slot")).toHaveTextContent("Urgent");
+  });
 });

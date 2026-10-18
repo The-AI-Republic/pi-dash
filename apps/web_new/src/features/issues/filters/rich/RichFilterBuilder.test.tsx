@@ -354,10 +354,15 @@ describe("view row wiring", () => {
         isDefault: false,
       }
     );
+    // The view's stored expression changes only when the row does: clear
+    // the condition, then the owned view reads as changed.
+    const pill = await screen.findByTestId("rich-condition");
+    await user.click(within(pill).getByRole("button", { name: /^is$/ }));
+    await user.click(await screen.findByRole("option", { name: "is not" }));
     await user.click(await screen.findByRole("button", { name: "Update view" }));
     await waitFor(() => expect(onViewUpdated).toHaveBeenCalledTimes(1));
     expect(patches).toHaveLength(1);
-    expect(patches[0]?.["rich_filters"]).toEqual({ priority__in: "none" });
+    expect(patches[0]?.["rich_filters"]).toEqual({ not: { priority__in: "urgent" } });
     expect(onViewUpdated.mock.calls[0]?.[0]).toMatchObject({ id: VIEW_RECORD.id });
   });
 
@@ -370,6 +375,9 @@ describe("view row wiring", () => {
         isDefault: false,
       }
     );
+    const pill = await screen.findByTestId("rich-condition");
+    await user.click(within(pill).getByRole("button", { name: /^is$/ }));
+    await user.click(await screen.findByRole("option", { name: "is not" }));
     await user.click(await screen.findByRole("button", { name: "Update view" }));
     await waitFor(() => expect(patches).toHaveLength(1));
   });
@@ -454,7 +462,7 @@ describe("temporary builder instances", () => {
     expect(screen.getByTestId("rich-condition")).toHaveTextContent("Urgent");
     // A second condition proves the in-memory list keeps accumulating.
     await user.click(screen.getByRole("button", { name: "Add filter" }));
-    await user.click(await screen.findByRole("option", { name: "State group" }));
+    await user.click(await screen.findByRole("option", { name: "State Group" }));
     expect(screen.getAllByTestId("rich-condition")).toHaveLength(2);
   });
 

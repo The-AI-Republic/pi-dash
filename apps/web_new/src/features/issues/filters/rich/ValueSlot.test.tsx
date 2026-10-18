@@ -763,10 +763,10 @@ describe("ValueSlot date editors", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
     const calendar = await screen.findByTestId("rich-date-calendar");
-    expect(within(calendar).getByRole("button", { name: "Thursday, February 5, 2026" })).toBeEnabled();
-    expect(within(calendar).getByRole("button", { name: "Wednesday, February 4, 2026" })).toBeDisabled();
-    expect(within(calendar).getByRole("button", { name: "Friday, February 20, 2026" })).toBeEnabled();
-    expect(within(calendar).getByRole("button", { name: "Saturday, February 21, 2026" })).toBeDisabled();
+    expect(within(calendar).getByRole("button", { name: "February 5, 2026" })).toBeEnabled();
+    expect(within(calendar).getByRole("button", { name: "February 4, 2026" })).toBeDisabled();
+    expect(within(calendar).getByRole("button", { name: "February 20, 2026" })).toBeEnabled();
+    expect(within(calendar).getByRole("button", { name: "February 21, 2026" })).toBeDisabled();
   });
 
   it("bounds the range calendar as well", async () => {
@@ -783,12 +783,11 @@ describe("ValueSlot date editors", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
     const calendar = await screen.findByTestId("rich-range-calendar");
-    expect(within(calendar).getByRole("button", { name: "Wednesday, February 4, 2026" })).toBeDisabled();
-    expect(within(calendar).getByRole("button", { name: "Saturday, February 21, 2026" })).toBeDisabled();
+    expect(within(calendar).getByRole("button", { name: "February 4, 2026" })).toBeDisabled();
+    expect(within(calendar).getByRole("button", { name: "February 21, 2026" })).toBeDisabled();
   });
 
   it("opens an incomplete range, warns, and commits only once both ends land", async () => {
-    const user = userEvent.setup();
     const onChange = vi.fn();
     render(
       wrap(
@@ -804,10 +803,7 @@ describe("ValueSlot date editors", () => {
     expect(screen.getByTestId("rich-value-trigger").parentElement).toHaveAttribute("data-incomplete", "false");
     fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
     const calendar = await screen.findByTestId("rich-range-calendar");
-    expect(within(calendar).getByRole("button", { name: "Tuesday, February 10, 2026" })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    );
+    expect(within(calendar).getByRole("button", { name: "February 10, 2026" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("keeps the first end in the slot and commits nothing", async () => {

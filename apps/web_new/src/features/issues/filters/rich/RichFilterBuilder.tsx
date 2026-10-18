@@ -20,7 +20,7 @@ import * as React from "react";
 
 import { useMe, usePermissions } from "../../../../core/session/index.js";
 import type { IssuesEntity } from "../../prefs/entities.js";
-import { parseDisplayPrefs, selectDisplayPrefs, useEntityPrefs } from "../../prefs/displayPrefs.js";
+import { selectDisplayPrefs, useEntityPrefs } from "../../prefs/displayPrefs.js";
 import {
   addCondition,
   hasRichConditions,
@@ -99,11 +99,13 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
     isView ? parseRichExpression(props.view?.view.rich_filters ?? {}) : []
   );
   const [viewRecord, setViewRecord] = React.useState<SavedView | null>(props.view?.view ?? null);
+  const viewSource = props.view?.view;
+  const viewDefault = props.view?.isDefault ?? false;
   React.useEffect(() => {
-    if (props.view === undefined) return;
-    setViewRecord(props.view.view);
-    setViewConditions(parseRichExpression(props.view.view.rich_filters));
-  }, [props.view]);
+    if (viewSource === undefined) return;
+    setViewRecord(viewSource);
+    setViewConditions(parseRichExpression(viewSource.rich_filters));
+  }, [viewSource]);
   const conditions = temporary ? local : isView ? viewConditions : stored;
   const [open, setOpen] = React.useState(true);
   const fields = React.useMemo(() => richFilterFields({ hideCycle, hideModule }), [hideCycle, hideModule]);
@@ -118,24 +120,19 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
       viewId: viewRecord.id,
       ownerId: viewRecord.owned_by,
       locked: viewRecord.is_locked,
-      isDefault: props.view?.isDefault ?? false,
+      isDefault: viewDefault,
       storedExpression: viewRecord.rich_filters,
       storedDisplayFilters: viewRecord.display_filters,
       storedDisplayProperties: viewRecord.display_properties,
     };
-  }, [props.view?.isDefault, viewRecord]);
+  }, [viewDefault, viewRecord]);
   const snapshot = React.useMemo<ViewSnapshot>(() => {
     if (viewRecord !== null) {
-      const display = parseDisplayPrefs(viewRecord.display_filters, viewRecord.display_properties);
+      // The row edits filters only; the view's display settings ride along
+      // exactly as stored, so an untouched view never reads as changed.
       return {
         expression: serializeRichExpression(rows),
-        displayFilters: {
-          ...viewRecord.display_filters,
-          layout: display.layout,
-          group_by: display.groupBy,
-          sub_group_by: display.subGroupBy,
-          order_by: display.orderBy,
-        },
+        displayFilters: viewRecord.display_filters,
         displayProperties: viewRecord.display_properties,
       };
     }
