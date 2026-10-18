@@ -3182,7 +3182,10 @@ async fn view_issues_list(
         .map_err(|_| Denial::ServerError)?;
 
     // Prefetches (`:192-209`): three separate `ANY($1)` queries over the
-    // page's issue ids.
+    // page's issue ids. Each carries `ORDER BY created_at DESC` so the id
+    // arrays match Django, whose `IssueAssignee`/`IssueLabel`/`ModuleIssue`
+    // set `Meta.ordering = ("-created_at",)` and whose prefetch SQL therefore
+    // orders newest-created first.
     let page_ids: Vec<uuid::Uuid> = page
         .iter()
         .filter_map(|row| {
@@ -3196,7 +3199,7 @@ async fn view_issues_list(
     let mut module_map: HashMap<String, Vec<String>> = HashMap::new();
     if !page_ids.is_empty() {
         let assignee_rows: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
-            "SELECT issue_id, assignee_id FROM issue_assignees WHERE issue_id = ANY($1) AND deleted_at IS NULL",
+            "SELECT issue_id, assignee_id FROM issue_assignees WHERE issue_id = ANY($1) AND deleted_at IS NULL ORDER BY created_at DESC",
         )
         .bind(&page_ids)
         .fetch_all(&pool)
@@ -3209,7 +3212,7 @@ async fn view_issues_list(
                 .push(assignee_id.to_string());
         }
         let label_rows: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
-            "SELECT issue_id, label_id FROM issue_labels WHERE issue_id = ANY($1) AND deleted_at IS NULL",
+            "SELECT issue_id, label_id FROM issue_labels WHERE issue_id = ANY($1) AND deleted_at IS NULL ORDER BY created_at DESC",
         )
         .bind(&page_ids)
         .fetch_all(&pool)
@@ -3222,7 +3225,7 @@ async fn view_issues_list(
                 .push(label_id.to_string());
         }
         let module_rows: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
-            "SELECT issue_id, module_id FROM module_issues WHERE issue_id = ANY($1) AND deleted_at IS NULL",
+            "SELECT issue_id, module_id FROM module_issues WHERE issue_id = ANY($1) AND deleted_at IS NULL ORDER BY created_at DESC",
         )
         .bind(&page_ids)
         .fetch_all(&pool)
