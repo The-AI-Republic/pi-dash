@@ -63,8 +63,8 @@
 //!   full-row `user.save()`. `save(update_fields=[...])` writes ONLY
 //!   those columns — verified in Django 4.2 `_save_table` source, which
 //!   filters `non_pks` by `update_fields` and never adds `auto_now` —
-//!   so (unlike the 421 generic PATCH, whose extra `updated_at = now()`
-//!   is contract-invisible) these saves omit `updated_at`.
+//!   so these saves omit `updated_at`, as does the generic PATCH (which
+//!   likewise writes only `is_uploaded`).
 //! * S3 presigning mirrors `S3Storage` (`settings/storage.py`) offline
 //!   (no network), following the merged D-21 `asset_generic` SigV4 shape:
 //!   MinIO user mode signs against `{scheme}://{Host}` (scheme from

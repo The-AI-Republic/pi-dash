@@ -1283,15 +1283,16 @@ async fn generic_patch(
     if pidash_jobs::v1_assets::tasks::storage_metadata_missing(&storage_metadata) {
         publish_metadata(pool, &asset_id).await;
     }
-    // `asset.save(update_fields=["is_uploaded"])` (plus the `auto_now`
-    // `updated_at` Django always writes).
-    if let Err(error) = sqlx::query(
-        r#"UPDATE "file_assets" SET "is_uploaded" = $1, "updated_at" = now() WHERE "id" = $2"#,
-    )
-    .bind(is_uploaded)
-    .bind(asset_id)
-    .execute(pool)
-    .await
+    // `asset.save(update_fields=["is_uploaded"])` (asset.py:617) writes
+    // ONLY that column: Django 4.2 `_save_table` filters `non_pks` by
+    // `update_fields` and never adds the `auto_now` `updated_at`, so the
+    // stored column is left untouched.
+    if let Err(error) =
+        sqlx::query(r#"UPDATE "file_assets" SET "is_uploaded" = $1 WHERE "id" = $2"#)
+            .bind(is_uploaded)
+            .bind(asset_id)
+            .execute(pool)
+            .await
     {
         return server_error(error);
     }
