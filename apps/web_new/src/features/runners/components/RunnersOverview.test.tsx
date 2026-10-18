@@ -20,7 +20,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 });
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
-  return { ...original, notifyError: (title: string) => notifyError(title) };
+  return { ...original, notifyError: (title: string, description?: string) => notifyError(title, description) };
 });
 
 import type { PodFilterState } from "../podFilter.js";
@@ -29,6 +29,7 @@ import {
   DELETE_RUNNER_FAILED,
   REVOKE_RUNNER_FAILED,
   RUNNERS_EMPTY_TEXT,
+  RUNNER_ACTION_FAILED_TITLE,
   RunnersOverview,
   runnerHeartbeat,
   runnerPlatform,
@@ -237,7 +238,7 @@ describe("RunnersOverview row actions", () => {
     });
     await userEvent.click(screen.getByRole("button", { name: "Delete" }));
     await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(DELETE_RUNNER_FAILED));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(RUNNER_ACTION_FAILED_TITLE, DELETE_RUNNER_FAILED));
     expect(screen.getByRole("dialog", { name: "Delete runner?" })).toBeInTheDocument();
     // The action recovers: the confirm is usable for a retry.
     await waitFor(() =>
@@ -253,7 +254,7 @@ describe("RunnersOverview row actions", () => {
     });
     await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
     await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Revoke" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(REVOKE_RUNNER_FAILED));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(RUNNER_ACTION_FAILED_TITLE, REVOKE_RUNNER_FAILED));
     expect(screen.getByRole("dialog", { name: "Revoke runner?" })).toBeInTheDocument();
   });
 

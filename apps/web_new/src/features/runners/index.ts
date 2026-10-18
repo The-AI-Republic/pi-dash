@@ -23,6 +23,7 @@ export {
   DELETE_RUNNER_FAILED,
   REVOKE_RUNNER_FAILED,
   RUNNERS_EMPTY_TEXT,
+  RUNNER_ACTION_FAILED_TITLE,
   runnerHeartbeat,
   runnerPlatform,
   runnerVersion,

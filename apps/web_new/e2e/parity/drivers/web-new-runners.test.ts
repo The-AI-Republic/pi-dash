@@ -312,6 +312,7 @@ describe("runnersModalCopy and runnersCancelModal", () => {
           count: vi.fn(async () => 1),
           isVisible: vi.fn(async () => true),
           innerText: vi.fn(async () => "Delete runner?"),
+          evaluate: vi.fn(async () => "Historic runs are preserved."),
         })
       ),
       locator: vi.fn(() => stubLocator({ innerText: vi.fn(async () => " Historic runs are preserved. ") })),

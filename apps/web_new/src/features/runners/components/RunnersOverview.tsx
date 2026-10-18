@@ -21,6 +21,7 @@ import { RunnerConfirmDialog } from "./RunnerConfirmDialog.js";
 import { RunnerStatusBadge } from "./RunnerStatusBadge.js";
 
 export const RUNNERS_EMPTY_TEXT = "No runners yet. Add a runner to give this scope its first one.";
+export const RUNNER_ACTION_FAILED_TITLE = "Error!";
 export const DELETE_RUNNER_FAILED = "Failed to delete runner";
 export const REVOKE_RUNNER_FAILED = "Failed to revoke runner";
 
@@ -76,7 +77,7 @@ export function RunnersOverview({ scope, filter, onDelete, onRevoke }: RunnersOv
       setPending(null);
     } catch {
       // The dialog stays up for a retry; the toast carries the reason.
-      notifyError(action.action === "delete" ? DELETE_RUNNER_FAILED : REVOKE_RUNNER_FAILED);
+      notifyError(RUNNER_ACTION_FAILED_TITLE, action.action === "delete" ? DELETE_RUNNER_FAILED : REVOKE_RUNNER_FAILED);
     } finally {
       setWorking(false);
     }

@@ -6,6 +6,8 @@
 // action throws until the matching area lands in apps/web_new. Area issues
 // fill these in method by method; the oracle driver stays untouched.
 import { expect, type Locator, type Page } from "@playwright/test";
+
+import { descriptionAfterHeading } from "./modal-copy.js";
 import type {
   AdminAbsenceFacts,
   AdminAccountFacts,
@@ -6769,13 +6771,10 @@ export class WebNewDriver implements ParityDriver {
     if ((await heading.count()) === 0) return null;
     if (!(await heading.isVisible())) return null;
     const title = (await heading.innerText()).trim();
-    // The consequence copy is the block right after the title.
-    const body = await dialog
-      .locator("h3 + div")
-      .first()
-      .innerText()
-      .then((text) => text.trim())
-      .catch(() => "");
+    // The consequence copy is the description directly under the heading.
+    // Read it from the heading element so the kit's heading level and
+    // wrapper nesting do not matter.
+    const body = await heading.evaluate(descriptionAfterHeading).catch(() => "");
     return { title, body };
   }
 
