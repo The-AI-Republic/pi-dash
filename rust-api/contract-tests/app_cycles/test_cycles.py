@@ -4,6 +4,7 @@ Every URL pattern in app/urls/cycle.py plus the workspace cycles endpoint in
 app/urls/workspace.py gets a shape assertion against the live backend.
 """
 
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -350,6 +351,58 @@ def test_cycle_issue_add_list_remove(admin):
 
     r = admin["client"].delete(urls["cycle_issue_detail"](pk, issue["id"]))
     assert r.status_code == 204, r.text[:500]
+
+
+def _bridge_row(tenant, issue_id):
+    """Read the live bridge row straight from Postgres (both backends share
+    the canonical schema)."""
+    with tenant["seed"].conn.cursor() as cur:
+        cur.execute(
+            "select cycle_id, created_at, updated_at from cycle_issues "
+            "where issue_id = %s and deleted_at is null",
+            (issue_id,),
+        )
+        return cur.fetchone()
+
+
+def test_cycle_issue_move_keeps_updated_at(admin):
+    """Moving an existing bridge to another cycle leaves updated_at alone.
+
+    Django's CycleIssueViewSet.create sets ``cycle_issue.cycle_id`` and calls
+    ``bulk_update(updated_records, ["cycle_id"], batch_size=100)``
+    (app/views/cycle/issue.py:262-279); bulk_update never runs pre_save, so
+    the ``auto_now`` updated_at is not advanced. The Rust move must touch
+    only cycle_id, exactly like the transfer move in the same slice.
+    """
+    urls = cycle_urls(admin)
+    issue = create_issue_for(admin, name="Move between cycles")
+    cycle_a = create_cycle_for(admin, name="Move source")
+    cycle_b = create_cycle_for(admin, name="Move target")
+
+    r = admin["client"].post(
+        urls["cycle_issues"](cycle_a["id"]), json={"issues": [issue["id"]]}
+    )
+    assert r.status_code == 201, r.text[:500]
+
+    before = _bridge_row(admin, issue["id"])
+    assert before is not None, "bridge not created"
+    assert str(before[0]) == cycle_a["id"], "bridge not in cycle A"
+
+    # The move must be observable as a distinct timestamp if updated_at were
+    # (wrongly) advanced, so leave a clear gap.
+    time.sleep(1.1)
+
+    r = admin["client"].post(
+        urls["cycle_issues"](cycle_b["id"]), json={"issues": [issue["id"]]}
+    )
+    assert r.status_code == 201, r.text[:500]
+
+    after = _bridge_row(admin, issue["id"])
+    assert after is not None, "bridge vanished"
+    assert str(after[0]) == cycle_b["id"], "bridge did not move to cycle B"
+    assert after[2] == before[2], (
+        "bulk_update(['cycle_id']) must not advance the bridge updated_at"
+    )
 
 
 def test_cycle_issue_create_requires_issues(admin):
