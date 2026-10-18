@@ -19,8 +19,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { IssuesLoaderProvider } from "../loaders/loaderContext.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
-import { buildDisplayRows, SpreadsheetLayout, useViewportWindow } from "./SpreadsheetLayout.js";
+import { buildDisplayRows, focusSheetCell, SpreadsheetLayout, useViewportWindow } from "./SpreadsheetLayout.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
+import { SHEET_COLUMNS } from "./model.js";
 
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
@@ -634,6 +635,54 @@ describe("SpreadsheetLayout", () => {
     first.focus();
   });
 
+  it("moves focus across the windowed slice, not only between rendered rows", async () => {
+    const rows = Array.from({ length: 30 }, (_, index) =>
+      issue(`123e4567-e89b-12d3-a456-${String(426614174000 + index)}`, `Row ${index}`, index + 1)
+    );
+    stub({ pages: [page(rows)] });
+    setViewport(800, 44);
+    renderSheet({
+      prefs: prefs({
+        properties: {
+          labels: false,
+          cycle: false,
+          modules: false,
+          estimate: false,
+          created_on: false,
+          updated_on: false,
+          link: false,
+          attachment_count: false,
+          sub_issue_count: false,
+          assignee: false,
+          start_date: false,
+          due_date: false,
+        },
+      }),
+    });
+    await screen.findByRole("table");
+    const firstId = `issue-${rows[0]!.id}`;
+    await waitFor(() => expect(document.getElementById(firstId)).not.toBeNull());
+    document.getElementById(firstId)!.focus();
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowRight" });
+    await waitFor(() => expect(document.activeElement?.id).toBe(`sheet-cell-${rows[0]!.id}-state`));
+    for (let row = 1; row <= 12; row += 1) {
+      fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+      await waitFor(() => expect(document.activeElement?.id).toBe(`sheet-cell-${rows[row]!.id}-state`));
+    }
+    for (let row = 11; row >= 0; row -= 1) {
+      fireEvent.keyDown(document.activeElement!, { key: "ArrowUp" });
+      await waitFor(() => expect(document.activeElement?.id).toBe(`sheet-cell-${rows[row]!.id}-state`));
+    }
+    const scroller = screen.getByTestId("spreadsheet-scroller");
+    scroller.scrollTop = 20 * 44;
+    fireEvent.scroll(scroller);
+    const lastRenderedId = `issue-${rows[24]!.id}`;
+    await waitFor(() => expect(document.getElementById(lastRenderedId)).not.toBeNull());
+    document.getElementById(lastRenderedId)!.focus();
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+    await waitFor(() => expect(document.activeElement?.id).toBe(`issue-${rows[25]!.id}`));
+  });
+
   it("keeps cells editable until the cycle list loads", async () => {
     stub({ cycles: "pending" });
     renderSheet();
@@ -801,5 +850,49 @@ describe("spreadsheet row helpers", () => {
     expect(screen.getByTestId("window").textContent).toBe(JSON.stringify({ start: 9, end: 16, atBottom: false }));
     unmount();
     vi.unstubAllGlobals();
+  });
+
+  it("reveals an off-window row by scrolling it into view without overshooting the end", () => {
+    const node = document.createElement("div");
+    Object.defineProperty(node, "clientHeight", { value: 100, configurable: true });
+    Object.defineProperty(node, "scrollTop", { value: 0, writable: true, configurable: true });
+    const api = { current: null as null | ReturnType<typeof useViewportWindow> };
+    function Probe(): React.ReactElement {
+      api.current = useViewportWindow(node, 44, 20, 1);
+      return <span data-testid="window">{api.current.start}</span>;
+    }
+    render(<Probe />);
+    act(() => api.current!.revealRow(0));
+    expect(node.scrollTop).toBe(0);
+    act(() => api.current!.revealRow(10));
+    expect(node.scrollTop).toBe(390);
+    act(() => api.current!.revealRow(19));
+    expect(node.scrollTop).toBe(780);
+  });
+
+  it("does nothing when revealing a row before the scroller mounts", () => {
+    const api = { current: null as null | ReturnType<typeof useViewportWindow> };
+    function Probe(): React.ReactElement {
+      api.current = useViewportWindow(null, 44, 20, 1);
+      return <span />;
+    }
+    render(<Probe />);
+    expect(() => api.current!.revealRow(4)).not.toThrow();
+  });
+
+  it("focuses a rendered cell and reports when the row or DOM node is unavailable", () => {
+    const rows = [
+      { issue: issue(ID1, "First", 1), depth: 0 },
+      { issue: issue(ID2, "Second", 2), depth: 0 },
+    ];
+    const container = document.createElement("div");
+    container.innerHTML = `<button id="issue-${ID1}"></button><button id="sheet-cell-${ID1}-state"></button>`;
+    document.body.append(container);
+    expect(focusSheetCell(document, rows, SHEET_COLUMNS, { row: 0, column: 0 })).toBe(true);
+    expect(document.activeElement?.id).toBe(`issue-${ID1}`);
+    expect(focusSheetCell(document, rows, SHEET_COLUMNS, { row: 0, column: 1 })).toBe(true);
+    expect(document.activeElement?.id).toBe(`sheet-cell-${ID1}-state`);
+    expect(focusSheetCell(document, rows, SHEET_COLUMNS, { row: 1, column: 1 })).toBe(false);
+    expect(focusSheetCell(document, rows, SHEET_COLUMNS, { row: 5, column: 1 })).toBe(false);
   });
 });

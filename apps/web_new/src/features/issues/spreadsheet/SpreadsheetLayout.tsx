@@ -71,7 +71,7 @@ export interface SpreadsheetLayoutProps {
   richExpression?: RichExpression;
 }
 
-interface DisplayRow {
+export interface DisplayRow {
   issue: IssueListItem;
   depth: number;
 }
@@ -140,6 +140,7 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
   );
   const viewport = useViewportWindow(scrollNode, ROW_HEIGHT, rows.length);
   const visibleRows = rows.slice(viewport.start, viewport.end);
+  const pendingFocus = React.useRef<{ row: number; column: number } | null>(null);
 
   React.useEffect(() => {
     if (viewport.atBottom && query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
@@ -187,14 +188,18 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     const rowIndex = Number(event.currentTarget.dataset["rowIndex"]);
     const columnIndex = Number(event.currentTarget.dataset["columnIndex"]);
     const next = moveSheetFocus({ row: rowIndex, column: columnIndex }, direction, rows.length, columns.length + 1);
-    // moveSheetFocus clamps inside the grid, so the target is always a real cell.
-    const targetRow = rows[next.row] as DisplayRow;
-    const id =
-      next.column === 0
-        ? sheetFirstCellId(targetRow.issue.id)
-        : `sheet-cell-${targetRow.issue.id}-${columns[next.column - 1]!.key}`;
-    document.getElementById(id)?.focus();
+    if (focusSheetCell(document, rows, columns, next)) return;
+    // The body is windowed, so a destination past the rendered slice has
+    // no DOM node yet. Reveal it, then focus once the window recomputes.
+    pendingFocus.current = { row: next.row, column: next.column };
+    viewport.revealRow(next.row);
   };
+
+  React.useEffect(() => {
+    const pending = pendingFocus.current;
+    if (pending === null) return;
+    if (focusSheetCell(document, rows, columns, pending)) pendingFocus.current = null;
+  }, [columns, rows, viewport.end, viewport.start]);
 
   const toggleExpanded = (row: DisplayRow): void => {
     if (row.depth >= 3) {
@@ -338,6 +343,27 @@ function arrowDirection(key: string): "up" | "down" | "left" | "right" | null {
   }
 }
 
+/**
+ * Focus one grid cell by coordinates. Returns false when the row is gone
+ * or the cell is outside the currently rendered window; the caller then
+ * reveals the row and retries after the next render.
+ */
+export function focusSheetCell(
+  root: Document,
+  rows: readonly DisplayRow[],
+  columns: readonly SheetColumn[],
+  cell: { row: number; column: number }
+): boolean {
+  const row = rows[cell.row];
+  if (row === undefined) return false;
+  const id =
+    cell.column === 0 ? sheetFirstCellId(row.issue.id) : `sheet-cell-${row.issue.id}-${columns[cell.column - 1]!.key}`;
+  const target = root.getElementById(id);
+  if (target === null) return false;
+  target.focus();
+  return true;
+}
+
 /** Depth-first display rows: roots plus expanded children to three levels. */
 export function buildDisplayRows(
   roots: readonly IssueListItem[],
@@ -365,7 +391,7 @@ export function useViewportWindow(
   rowHeight: number,
   rowCount: number,
   overscan = 4
-): { start: number; end: number; atBottom: boolean } {
+): { start: number; end: number; atBottom: boolean; revealRow: (row: number) => void } {
   const [scrollTop, setScrollTop] = React.useState(0);
   const [height, setHeight] = React.useState(0);
   React.useEffect(() => {
@@ -387,7 +413,19 @@ export function useViewportWindow(
   const start = Math.max(0, Math.min(rowCount, Math.floor(scrollTop / rowHeight) - overscan));
   const end = Math.max(start, Math.min(rowCount, start + visible + overscan * 2));
   const atBottom = height > 0 && scrollTop + height >= rowCount * rowHeight - rowHeight * 2;
-  return { start, end, atBottom };
+  const revealRow = (row: number): void => {
+    if (node === null) return;
+    const top = row * rowHeight;
+    const viewTop = node.scrollTop;
+    const viewBottom = viewTop + node.clientHeight;
+    if (top >= viewTop && top + rowHeight <= viewBottom) return;
+    const centered = Math.max(0, top - Math.floor(node.clientHeight / 2));
+    const maxTop = Math.max(0, rowCount * rowHeight - node.clientHeight);
+    const nextTop = Math.min(centered, maxTop);
+    node.scrollTop = nextTop;
+    setScrollTop(nextTop);
+  };
+  return { start, end, atBottom, revealRow };
 }
 
 function SpacerRow({ height, columnCount }: { height: number; columnCount: number }): React.ReactElement {
