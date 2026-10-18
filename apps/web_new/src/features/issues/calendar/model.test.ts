@@ -55,14 +55,23 @@ function row(overrides: Partial<IssueListItem>): IssueListItem {
 }
 
 describe("calendar model", () => {
-  it("builds a Sunday-first month grid with six full weeks", () => {
+  it("builds a Sunday-first month grid with the rows the month needs", () => {
     const weeks = monthWeeks(2026, 9, 0, true, NOW);
-    expect(weeks).toHaveLength(6);
+    expect(weeks).toHaveLength(5);
     expect(weeks[0]).toHaveLength(7);
     expect(weeks[0]?.[0]?.iso).toBe("2026-09-27");
     expect(weeks[0]?.[0]?.inMonth).toBe(false);
     expect(weeks[0]?.[4]?.iso).toBe("2026-10-01");
     expect(weeks[0]?.[4]?.inMonth).toBe(true);
+    expect(weeks[4]?.[6]?.iso).toBe("2026-10-31");
+    expect(weeks[4]?.[6]?.inMonth).toBe(true);
+  });
+
+  it("uses four rows for a month that fits them", () => {
+    const weeks = monthWeeks(2026, 1, 0, true, NOW);
+    expect(weeks).toHaveLength(4);
+    expect(weeks[0]?.[0]?.iso).toBe("2026-02-01");
+    expect(weeks[3]?.[6]?.iso).toBe("2026-02-28");
   });
 
   it("rotates the grid to a Monday week start", () => {
@@ -105,7 +114,7 @@ describe("calendar model", () => {
   it("derives the inclusive fetch window from the visible cells", () => {
     expect(rangeForCells(monthWeeks(2026, 9, 0, true, NOW))).toEqual({
       after: "2026-09-27",
-      before: "2026-11-07",
+      before: "2026-10-31",
     });
     expect(rangeForCells([weekRow(new Date(2026, 9, 15), 0, true, NOW)])).toEqual({
       after: "2026-10-11",

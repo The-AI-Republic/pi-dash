@@ -141,8 +141,11 @@ export function monthWeeks(
   const today = todayIso(now);
   const first = localDate(year, month0, 1);
   const gridStart = startOfWeek(first, weekStart);
+  const leading = (first.getDay() - normalizeStart(weekStart) + 7) % 7;
+  const daysInMonth = new Date(year, month0 + 1, 0).getDate();
+  const weekCount = Math.ceil((leading + daysInMonth) / 7);
   const weeks: CalendarWeek[] = [];
-  for (let week = 0; week < 6; week += 1) {
+  for (let week = 0; week < weekCount; week += 1) {
     const cells: CalendarCell[] = [];
     for (let offset = 0; offset < 7; offset += 1) {
       const date = addDays(gridStart, week * 7 + offset);

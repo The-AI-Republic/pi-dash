@@ -416,6 +416,22 @@ describe("CalendarLayout", () => {
     expect(state.reDate).toHaveBeenCalledTimes(1);
   });
 
+  it("cancels a drag on pointercancel without re-dating or leaving a target", async () => {
+    renderLayout();
+    const block = await screen.findByRole("link", { name: "WEB-42" });
+    stubDayRects([todayIso, nextIso, emptyIso]);
+    fireEvent(block, pointerEvent("pointerdown", 10, 10));
+    fireEvent(block, pointerEvent("pointermove", 30, 10));
+    const point = centerOf(emptyIso);
+    fireEvent(document, pointerEvent("pointermove", point.x, point.y));
+    expect(tile(emptyIso)).toHaveClass("ring-2");
+    fireEvent(document, pointerEvent("pointercancel", point.x, point.y));
+    expect(state.reDate).not.toHaveBeenCalled();
+    expect(tile(emptyIso)).not.toHaveClass("ring-2");
+    fireEvent(document, pointerEvent("pointerup", point.x, point.y));
+    expect(state.reDate).not.toHaveBeenCalled();
+  });
+
   it("sends a refused drop through the action hook", async () => {
     state.windowRows = [row({ target_date: emptyIso, start_date: nextIso })];
     renderLayout();

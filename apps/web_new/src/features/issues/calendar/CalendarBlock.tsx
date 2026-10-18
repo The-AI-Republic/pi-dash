@@ -170,6 +170,7 @@ export function CalendarBlock({
       ref={anchorRef}
       id={rowDomId(issue.id)}
       href={`/${projectIdentifier}/${issue.sequence_id}`}
+      draggable={false}
       aria-label={temp ? `${issue.name}, saving` : identifier}
       data-highlight={highlighted ? "true" : undefined}
       data-temprow={temp ? "true" : undefined}
@@ -185,6 +186,17 @@ export function CalendarBlock({
       }}
       onPointerCancel={() => {
         stopTracking();
+      }}
+      onDragStart={(event) => {
+        // A native link drag would swallow the pointerup that ends our
+        // drag, leaving the layout's drag state armed for a later click.
+        event.preventDefault();
+        stopTracking();
+        draggedRef.current = false;
+      }}
+      onDragEnd={() => {
+        stopTracking();
+        draggedRef.current = false;
       }}
       onClick={(event) => {
         event.preventDefault();
@@ -213,6 +225,17 @@ export function CalendarBlock({
       <button
         type="button"
         className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)"
+        onDragStart={(event) => {
+          // A native link drag would swallow the pointerup that ends our
+          // drag, leaving the layout's drag state armed for a later click.
+          event.preventDefault();
+          stopTracking();
+          draggedRef.current = false;
+        }}
+        onDragEnd={() => {
+          stopTracking();
+          draggedRef.current = false;
+        }}
         onClick={(event) => {
           event.stopPropagation();
         }}

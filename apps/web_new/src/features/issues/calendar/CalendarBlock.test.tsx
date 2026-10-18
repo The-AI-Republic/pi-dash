@@ -193,6 +193,24 @@ describe("CalendarBlock", () => {
     expect(handlers.onOpen).not.toHaveBeenCalled();
   });
 
+  it("cancels a native link drag and stops tracking it", () => {
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    const nativeDrag = new Event("dragstart", { bubbles: true, cancelable: true });
+    fireEvent(link, nativeDrag);
+    expect(nativeDrag.defaultPrevented).toBe(true);
+    fireEvent(document, pointerEvent("pointermove", 40, 10));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 40, 10));
+    expect(handlers.onDragStart).toHaveBeenCalledOnce();
+    fireEvent(link, new Event("dragend", { bubbles: true }));
+    fireEvent.click(link);
+    expect(handlers.onOpen).toHaveBeenCalledOnce();
+  });
+
   it("does not start a drag when the block is not draggable", () => {
     const handlers = renderBlock(row(), false, { draggable: false });
     const link = screen.getByRole("link", { name: "WEB-42" });
