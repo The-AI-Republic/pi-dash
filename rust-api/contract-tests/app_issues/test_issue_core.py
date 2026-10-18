@@ -344,3 +344,43 @@ def test_deleted_issues_list(clients, seed):
     resp = admin.get(f"{_base(ws, pid)}/deleted-issues/")
     assert resp.status_code == 200
     assert i5 in resp.json()
+
+
+def test_deleted_issues_list_order(clients, seed, db_conn):
+    """``deleted-issues`` is ordered by ``Issue.Meta.ordering``
+    (``-created_at``): the bare id array is newest-first."""
+    import uuid
+    from datetime import datetime, timedelta, timezone
+
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project2"]  # IS2 has no tombstoned seed rows
+    now = datetime.now(timezone.utc)
+    inserted = []
+    with db_conn.cursor() as cur:
+        for i in range(3):
+            iid = str(uuid.uuid4())
+            created = now + timedelta(hours=i + 1)
+            # Row 1 (i=1) is soft-deleted; the other two are archived.
+            cur.execute(
+                "INSERT INTO issues (created_at, updated_at, id, name,"
+                " description_json, description_html, priority, sequence_id,"
+                " sort_order, point, completed_at, is_draft, git_work_branch,"
+                " workpad, complexity_score, created_by_id, project_id,"
+                " state_id, workspace_id, archived_at, deleted_at)"
+                " VALUES (%s,%s,%s,%s,'{}','<p></p>','none',%s,65535,NULL,"
+                " NULL,false,'','',0,%s,%s,%s,%s,%s,%s)",
+                (created, created, iid, f"tombstone {i}", 100 + i,
+                 seed["admin"], seed["project2"], seed["state2_backlog"],
+                 seed["ws"],
+                 None if i == 1 else created.date(),
+                 created if i == 1 else None),
+            )
+            inserted.append(iid)
+    expected = list(reversed(inserted))  # newest-first
+    try:
+        resp = admin.get(f"{_base(ws, pid)}/deleted-issues/")
+        assert resp.status_code == 200
+        assert resp.json() == expected
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute("DELETE FROM issues WHERE id = ANY(%s::uuid[])", (inserted,))

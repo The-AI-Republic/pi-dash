@@ -2755,7 +2755,9 @@ pub async fn deleted_list(
         let (fragment, binds) = (extra, updated_gt.1);
         where_sql.push_str(&format!(" AND {}", binder.splice(&fragment, binds)));
     }
-    let sql = format!("SELECT issue.id::text AS id {where_sql}");
+    // `Issue.Meta.ordering = ("-created_at",)` — Django returns newest
+    // first; the bare id array must match byte for byte.
+    let sql = format!("SELECT issue.id::text AS id {where_sql} ORDER BY issue.created_at DESC");
     let query_bound = bind_all(&sql, binder.values())?;
     let rows = query_bound
         .fetch_all(&context.pool)
