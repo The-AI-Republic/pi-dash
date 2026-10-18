@@ -102,7 +102,9 @@ export interface IssueListQuery {
   filters?: Record<string, string | string[]>;
 }
 
-function listQueryParams(query: IssueListQuery): Record<string, string | number | boolean | undefined | null> {
+export function issueListQueryParams(
+  query: IssueListQuery
+): Record<string, string | number | boolean | undefined | null> {
   const params: Record<string, string | number | boolean | undefined | null> = {
     per_page: query.perPage,
     cursor: query.cursor,
@@ -123,7 +125,7 @@ export async function listIssues(
   query: IssueListQuery = {}
 ): Promise<IssueListResponse> {
   const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/issues/`, {
-    query: listQueryParams(query),
+    query: issueListQueryParams(query),
   });
   return client.parse(IssueListResponse, body, "GET issues");
 }
@@ -197,7 +199,7 @@ export async function listGroupedIssues(
   query: IssueListQuery & { groupBy: string }
 ): Promise<GroupedIssueListResponse> {
   const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/issues/`, {
-    query: listQueryParams(query),
+    query: issueListQueryParams(query),
   });
   return client.parse(GroupedIssueListResponse, body, "GET grouped issues");
 }
@@ -210,7 +212,7 @@ export async function listSubGroupedIssues(
   query: IssueListQuery & { groupBy: string; subGroupBy: string }
 ): Promise<SubGroupedIssueListResponse> {
   const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/issues/`, {
-    query: listQueryParams(query),
+    query: issueListQueryParams(query),
   });
   return client.parse(SubGroupedIssueListResponse, body, "GET sub-grouped issues");
 }
@@ -247,7 +249,7 @@ export async function listGlobalIssues(
   query: IssueListQuery = {}
 ): Promise<GlobalIssueListResponse> {
   const body = await client.getJson<unknown>(`/api/workspaces/${slug}/issues/`, {
-    query: listQueryParams(query),
+    query: issueListQueryParams(query),
   });
   return client.parse(GlobalIssueListResponse, body, "GET global issues");
 }
