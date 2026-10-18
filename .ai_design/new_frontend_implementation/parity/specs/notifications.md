@@ -232,8 +232,10 @@ subscription branch lacks the list's created/assigned exclusion, and the
 read flag it receives is never used. A subscribed-only scope therefore
 matches no branch, and a two-origin scope such as `assigned,created` matches
 none either, so both widen the read to every unread item in the workspace.
-Only a lone `assigned` or `created` narrows. The inbox flips only the cached
-pages it has in scope, so the widening becomes visible on the next read.
+Only a lone `assigned` or `created` stays within its origin instead of reading
+the whole workspace, and even then the missing exclusion can pull in items
+that qualify for the subscription too. The inbox flips only the cached pages
+it has in scope, so the widening becomes visible on the next read.
 
 Target: the bulk read honours the joined origin scope exactly like the list,
 including the list's subscription rule. Until the backend contract settles
@@ -486,7 +488,7 @@ slug; all per-item paths interpolate the notification id.
   next cursor for continuations). Envelope: result rows plus pagination info
   with the next-page flag and next cursor.
 - Unread totals: `GET
-  /api/workspaces/{workspaceSlug}/users/notifications/unread/`, no
+/api/workspaces/{workspaceSlug}/users/notifications/unread/`, no
   parameters. Response fields: overall unread count and mention unread count
   (`total_unread_notifications_count`,
   `mention_unread_notifications_count`).
@@ -497,7 +499,7 @@ slug; all per-item paths interpolate the notification id.
 - Snooze and unsnooze: `PATCH .../users/notifications/{id}/` with a partial
   body carrying the resume timestamp field (`snoozed_till`) set or cleared.
 - Bulk mark read: `POST
-  /api/workspaces/{workspaceSlug}/users/notifications/mark-all-read/` with a
+/api/workspaces/{workspaceSlug}/users/notifications/mark-all-read/` with a
   body mirroring the current list scope (origin, snoozed and archived
   flags). The origin value is the list's comma-joined vocabulary, including
   `subscribed` on its own. The endpoint currently recognizes a different
