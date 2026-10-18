@@ -788,7 +788,7 @@ fn icontains_param(term: &str) -> String {
 /// The `?search=` predicate over the annotated rows: one
 /// `UPPER(pages.name::text) LIKE UPPER($N)` per term, ANDed.
 /// Binds start at `first_bind` (after slug/user/project/page).
-fn search_sql(first_bind: u32, terms: &[String]) -> String {
+fn search_sql_on(column: &str, first_bind: u32, terms: &[String]) -> String {
     if terms.is_empty() {
         return String::new();
     }
@@ -798,12 +798,18 @@ fn search_sql(first_bind: u32, terms: &[String]) -> String {
             out.push_str(" AND ");
         }
         out.push_str(&format!(
-            "UPPER(pages.name::text) LIKE UPPER(${})",
+            "UPPER({column}) LIKE UPPER(${})",
             first_bind + index as u32
         ));
     }
     out.push(')');
     out
+}
+
+/// The `?search=` predicate over the annotated list/retrieve rows
+/// (`pages.name`); see [`search_sql_on`].
+fn search_sql(first_bind: u32, terms: &[String]) -> String {
+    search_sql_on("pages.name::text", first_bind, terms)
 }
 
 /// Fetch annotated page rows via `row_to_json` (the `app_modules` precedent):
@@ -3210,17 +3216,22 @@ async fn fetch_scoped_page(
 
 /// The create re-read (`base.py:149`: `self.get_queryset().get(pk=...)`):
 /// the full detail scope — top-level only (`:97`), owner-or-public (`:98`),
-/// the URL-project bridge (`:125`) — with the three annotations. A child
-/// page (or any row the queryset hides) misses here and answers 404 through
+/// the URL-project bridge (`:125`), plus the `filter_queryset` `?search=`
+/// name filter `get_queryset` carries (`base.py:88`) — with the three
+/// annotations. A child page (or any row the queryset hides, including one
+/// filtered out by `?search=`) misses here and answers 404 through
 /// `handle_exception`, exactly like Django.
+/// Binds: `$1` page, `$2` project, `$3` slug, `$4` user, then one bind per
+/// `?search=` term.
 async fn fetch_detail_row(
     pool: &PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
     page_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
+    search: &[String],
 ) -> Result<Option<DetailRow>, Denial> {
-    sqlx::query_as(&format!(
+    let sql = format!(
         r#"SELECT {SCOPED_PAGE_COLUMNS},
            EXISTS(SELECT 1 FROM user_favorites uf
                   WHERE uf.user_id = $4 AND uf.entity_type = 'page'
@@ -3238,15 +3249,21 @@ async fn fetch_detail_row(
            JOIN project_pages pp ON pp.page_id = p.id
                AND pp.project_id = $2 AND pp.deleted_at IS NULL
            WHERE p.id = $1 AND w.slug = $3 AND p.deleted_at IS NULL
-           AND p.parent_id IS NULL AND (p.owned_by_id = $4 OR p.access = 0)"#
-    ))
-    .bind(page_id)
-    .bind(project_id)
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+           AND p.parent_id IS NULL AND (p.owned_by_id = $4 OR p.access = 0){}"#,
+        search_sql_on("p.name::text", 5, search),
+    );
+    let mut query = sqlx::query_as::<_, DetailRow>(&sql)
+        .bind(page_id)
+        .bind(project_id)
+        .bind(slug)
+        .bind(user_id);
+    for term in search {
+        query = query.bind(icontains_param(term));
+    }
+    query
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// The actor's render zone (`TimezoneMixin.initial`, `app/views/base.py:44`):
@@ -3508,6 +3525,7 @@ fn rejection_response(rejection: WriteRejection) -> Response {
 pub async fn page_create(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
@@ -3711,9 +3729,11 @@ pub async fn page_create(
     )
     .await;
     // Re-read through the annotated queryset (`:149-150`); a miss (a child
-    // page, or any other row the queryset hides) 404s through
-    // `handle_exception`, exactly like the propagating `DoesNotExist`.
-    match fetch_detail_row(pool, &slug, &project_id, &page_id, &user_id).await {
+    // page, a row hidden by `?search=`, or any other row the queryset
+    // hides) 404s through `handle_exception`, exactly like the propagating
+    // `DoesNotExist`.
+    let search = search_terms(query.get("search").map(String::as_str));
+    match fetch_detail_row(pool, &slug, &project_id, &page_id, &user_id, &search).await {
         Ok(Some(row)) => json_response(StatusCode::CREATED, render_create_row(&row, &timezone)),
         Ok(None) => Denial::ObjectNotFound.into_response(),
         Err(denial) => denial.into_response(),

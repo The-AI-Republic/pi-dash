@@ -141,6 +141,36 @@ def test_create_requires_auth(anon_client, world):
     assert anon_client.post(page_url(world), json={"name": "Anon page"}).status_code in (401, 403)
 
 
+def test_create_search_match_returns_detail(user_client, world):
+    # `?search=` rides `self.get_queryset()` on the create re-read
+    # (`app/views/base.py:89` + `page/base.py:79`), so a matching term
+    # still answers 201 with the detail body.
+    response = user_client.post(
+        page_url(world), params={"search": "Created"}, json={"name": "Created page"}
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert set(body) == DETAIL_ROW_KEYS, f"create keys drifted: {sorted(body)}"
+    assert body["name"] == "Created page"
+
+
+def test_create_search_mismatch_404s_but_row_exists(user_client, world, db):
+    # A term that does not match the new name makes the annotated re-read
+    # miss: `.get()` raises DoesNotExist, which BaseViewSet.handle_exception
+    # maps to 404 — even though the row was written and page_transaction
+    # published (`page/base.py:144-149`).
+    name = f"Search mismatch {uuid.uuid4().hex[:8]}"
+    response = user_client.post(
+        page_url(world), params={"search": "zzz-no-match"}, json={"name": name}
+    )
+    assert response.status_code == 404
+    assert response.json() == {"error": "The required object does not exist."}
+    count = db.fetchval(
+        "SELECT count(*) FROM pages WHERE name=%s AND deleted_at IS NULL", (name,)
+    )
+    assert count == 1
+
+
 def test_retrieve_shape(user_client, world):
     response = user_client.get(page_url(world, world["page"]["id"]))
     assert response.status_code == 200
