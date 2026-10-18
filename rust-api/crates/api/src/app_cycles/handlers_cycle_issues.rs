@@ -1272,12 +1272,14 @@ async fn cycle_issue_create(
         created = rows;
     }
     // Moved bridges: `bulk_update(["cycle_id"], batch_size=100)` (`:279`).
-    // Like Django's `bulk_update`, `updated_at` (`auto_now`) advances too.
+    // `bulk_update(["cycle_id"])` builds its UPDATE from the listed fields
+    // only and never calls `save()`/`pre_save()`, so the `auto_now`
+    // `updated_at` is untouched — only `cycle_id` changes.
     let mut moved: Vec<(uuid::Uuid, uuid::Uuid)> = Vec::new();
     if !existing.is_empty() {
         let moved_ids: Vec<uuid::Uuid> = existing.iter().map(|(issue_id, _)| *issue_id).collect();
         sqlx::query(
-            r#"UPDATE cycle_issues SET cycle_id = $1, updated_at = now()
+            r#"UPDATE cycle_issues SET cycle_id = $1
                WHERE issue_id = ANY($2) AND cycle_id != $1 AND deleted_at IS NULL"#,
         )
         .bind(cycle_id)
