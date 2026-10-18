@@ -21,7 +21,7 @@ Counts (2026-10-17, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 521 OWNED, 7 MISSING (all listed below),
   9 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 87 tasks — 76 OWNED, 11 proxied by design, 0 MISSING;
+- Jobs: 87 tasks — 74 OWNED, 13 proxied by design, 0 MISSING;
   beat 28/28 OWNED (same task, same cadence on both sides).
 
 ## Routes
@@ -228,11 +228,14 @@ The row reclassified to OWNED (signature deleted).
 ```expected-jobs
 ```
 
-### Proxied by design (11 rows)
+### Proxied by design (13 rows)
 
 No fix issue: forwarding preserves Django's outcome on every row.
 
 - `celery.*` (9): Celery canvas builtins; no canvas usage in the codebase.
+- `django-drops-too` (2): called but unregistered in Django
+  (PDASHOSS01-292) — the Python worker drops them; forwarding drops
+  them identically.
 - `assistant.run_turn`: hybrid worker (PIDASHCONV-857). Published on
   every assistant message POST (`messages.py:103`), but the body runs
   the pydantic-ai agent loop and Rust has no live `TurnSeam`/agent
@@ -259,7 +262,9 @@ PROXIED :: celery.chunks :: celery-builtin; no canvas usage
 PROXIED :: celery.group :: celery-builtin; no canvas usage
 PROXIED :: celery.map :: celery-builtin; no canvas usage
 PROXIED :: celery.starmap :: celery-builtin; no canvas usage
+PROXIED :: pi_dash.bgtasks.analytic_plot_export.analytic_export_task :: django-drops-too (PDASHOSS01-292)
 PROXIED :: pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email :: dead (defined, never referenced)
+PROXIED :: pi_dash.bgtasks.export_task.issue_export_task :: django-drops-too (PDASHOSS01-292)
 ```
 
 ## Beat
