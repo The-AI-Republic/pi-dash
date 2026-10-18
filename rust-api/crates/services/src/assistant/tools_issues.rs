@@ -1410,19 +1410,27 @@ pub fn updated_summary(identifier: &str, changed: &[&str]) -> String {
 pub const RECORD_MESSAGE_SQL: &str =
     "SELECT assistant_thread.id FROM assistant_thread WHERE assistant_thread.id = $1 FOR UPDATE";
 
+/// `created_at` is `auto_now_add` (`models.py:138`), `NOT NULL` with no
+/// database default (`migrations/0001_initial.py`), so the insert must
+/// supply it — `$6` binds it as an explicit `now` (`events.create_message`
+/// stamps it Python-side), the same convention the PIDASHCONV-1137 fix
+/// (`jobs::assistant::run_turn::error_message_insert`) uses.
 pub const RECORD_MESSAGE_INSERT_SQL: &str =
-    "INSERT INTO assistant_message (id, thread_id, turn_id, seq, kind, display_content, payload, status) \
+    "INSERT INTO assistant_message (id, thread_id, turn_id, seq, kind, display_content, payload, status, created_at) \
      VALUES ($1, $2, $3, \
      (SELECT COALESCE(MAX(seq), 0) + 1 FROM assistant_message WHERE thread_id = $2), \
-     'tool_result', $4, $5, 'completed') RETURNING id, seq, created_at";
+     'tool_result', $4, $5, 'completed', $6) RETURNING id, seq, created_at";
 
 /// `AssistantEvent.id` is a `BigAutoField` (`models.py:154`) — the insert
 /// omits it, unlike the message insert (UUID PK with an ORM-side default).
+/// `created_at` is `auto_now_add` (`models.py:166`) with no database
+/// default, so `$5` binds it (`events.append_event`), mirroring the
+/// PIDASHCONV-1137 `turn_failed_event_insert` fix.
 pub const RECORD_EVENT_INSERT_SQL: &str =
-    "INSERT INTO assistant_event (thread_id, turn_id, seq, kind, message_id, payload) \
+    "INSERT INTO assistant_event (thread_id, turn_id, seq, kind, message_id, payload, created_at) \
      VALUES ($1, $2, \
      (SELECT COALESCE(MAX(seq), 0) + 1 FROM assistant_event WHERE thread_id = $1), \
-     'tool_result', $3, $4) RETURNING id, seq, created_at";
+     'tool_result', $3, $4, $5) RETURNING id, seq, created_at";
 
 /// `message_envelope` (`events.py:128-140`): `kind → role`,
 /// `display_content → content`. Nine parameters mirror the nine envelope
@@ -2442,6 +2450,23 @@ mod tests {
         assert!(RECORD_EVENT_INSERT_SQL.contains("COALESCE(MAX(seq), 0) + 1"));
         assert!(!RECORD_MESSAGE_INSERT_SQL.contains("MAX(seq), -1"));
         assert!(!RECORD_EVENT_INSERT_SQL.contains("MAX(seq), -1"));
+    }
+
+    #[test]
+    fn tool_result_inserts_stamp_created_at() {
+        // `created_at` is `auto_now_add` (`models.py:138,166`), `NOT NULL`
+        // with no database default, so both inserts must carry the column
+        // or every live row violates NOT NULL (PIDASHCONV-1137 class). The
+        // assertion targets the insert column list, not the trailing
+        // `RETURNING id, seq, created_at` (which is always present).
+        assert!(
+            RECORD_MESSAGE_INSERT_SQL.contains(", payload, status, created_at)"),
+            "message insert stamps created_at: {RECORD_MESSAGE_INSERT_SQL}"
+        );
+        assert!(
+            RECORD_EVENT_INSERT_SQL.contains(", message_id, payload, created_at)"),
+            "event insert stamps created_at: {RECORD_EVENT_INSERT_SQL}"
+        );
     }
 
     #[test]
