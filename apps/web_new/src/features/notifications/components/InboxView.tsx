@@ -94,14 +94,9 @@ export function InboxView({ workspaceSlug }: { workspaceSlug: string }): React.R
     setSelectedId(card.id);
     if (!card.unread || attemptedReads.current.has(card.id)) return;
     attemptedReads.current.add(card.id);
-    markRead.mutate(
-      { id: card.id, mentioned: card.mentioned },
-      {
-        onError: () => {
-          attemptedReads.current.delete(card.id);
-        },
-      }
-    );
+    void markRead.mutateAsync({ id: card.id, mentioned: card.mentioned }).catch(() => {
+      attemptedReads.current.delete(card.id);
+    });
   };
 
   return (

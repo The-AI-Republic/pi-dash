@@ -118,6 +118,7 @@ interface ViewOptions {
   nextPage?: NotificationListResponse | null;
   nextPageDelayMs?: number;
   failFirstRead?: boolean;
+  firstReadFailureDelayMs?: number;
   /**
    * When true the transport answers list/unread reads from the given
    * pages (nothing is seeded); otherwise the given data is seeded and
@@ -126,7 +127,11 @@ interface ViewOptions {
   serveReads?: boolean;
 }
 
-function renderView(options: ViewOptions = {}): { calls: string[]; unmount: () => void } {
+function renderView(options: ViewOptions = {}): {
+  calls: string[];
+  firstReadDidFail: () => boolean;
+  unmount: () => void;
+} {
   if (document.getElementById(FULL_SCREEN_PORTAL_ID) === null) {
     const portal = document.createElement("div");
     portal.id = FULL_SCREEN_PORTAL_ID;
@@ -141,10 +146,12 @@ function renderView(options: ViewOptions = {}): { calls: string[]; unmount: () =
     nextPage = null,
     nextPageDelayMs = 0,
     failFirstRead = false,
+    firstReadFailureDelayMs = 0,
     serveReads = false,
   } = options;
   const calls: string[] = [];
   let readWrites = 0;
+  let firstReadFailed = false;
   const json = (payload: unknown, url: string) => ({
     status: 200,
     url,
@@ -158,9 +165,14 @@ function renderView(options: ViewOptions = {}): { calls: string[]; unmount: () =
     if (init.method === "POST" && /\/users\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname)) {
       readWrites += 1;
       if (failFirstRead && readWrites === 1) {
+        if (firstReadFailureDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, firstReadFailureDelayMs));
+        }
+        firstReadFailed = true;
         return { ...json({ detail: "read failed" }, url), status: 500 };
       }
-      return json(row({ read_at: "2026-10-17T12:30:00Z" }), url);
+      const notificationId = new URL(url).pathname.split("/").at(-3) ?? row().id;
+      return json(row({ id: notificationId, read_at: "2026-10-17T12:30:00Z" }), url);
     }
     if (url.includes("/project-roles/")) return json({ [PROJECT_ID]: ROLE_ADMIN }, url);
     if (url.includes(`/projects/${PROJECT_ID}/issues/${ISSUE_ID}/`)) {
@@ -206,7 +218,7 @@ function renderView(options: ViewOptions = {}): { calls: string[]; unmount: () =
       <InboxView workspaceSlug="acme" />
     </QueryClientProvider>
   );
-  return { calls, unmount: rendered.unmount };
+  return { calls, firstReadDidFail: () => firstReadFailed, unmount: rendered.unmount };
 }
 
 function cardTitles(): string[] {
@@ -411,6 +423,28 @@ describe("InboxView", () => {
     await user.click(card);
     await waitFor(() => expect(card).toHaveAttribute("data-unread", "false"));
     expect(calls.filter((url) => /\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname))).toHaveLength(2);
+  });
+
+  it("allows an earlier failed read to retry after another card starts reading", async () => {
+    const user = userEvent.setup();
+    const second = row({ id: "823e4567-e89b-12d3-a456-426614174007" });
+    const { calls, firstReadDidFail } = renderView({
+      serveReads: true,
+      defaultPage: page([row(), second]),
+      failFirstRead: true,
+      firstReadFailureDelayMs: 50,
+    });
+    const [firstCard, secondCard] = await screen.findAllByTestId("inbox-card");
+    if (firstCard === undefined || secondCard === undefined) throw new Error("expected two notification cards");
+
+    await user.click(firstCard);
+    await user.click(secondCard);
+    await waitFor(() => expect(firstReadDidFail()).toBe(true));
+    await user.click(firstCard);
+
+    await waitFor(() =>
+      expect(calls.filter((url) => /\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname))).toHaveLength(3)
+    );
   });
 
   it("hides the badges while the totals are unknown", () => {
