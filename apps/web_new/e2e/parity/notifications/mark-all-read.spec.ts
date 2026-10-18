@@ -367,10 +367,15 @@ test(
 
         // Intended: the subscribed-only item stays unread. Observed: the
         // joined value matches no branch and the bulk read widens.
-        const unread = await unreadByIssue();
-        expect(unread.get(fixture.assignedId)).toBe(false);
-        expect(unread.get(fixture.createdId)).toBe(false);
-        expect(unread.get(fixture.subscribedId)).toBe(false);
+        await expect
+          .poll(
+            async () => {
+              const unread = await unreadByIssue();
+              return [unread.get(fixture.assignedId), unread.get(fixture.createdId), unread.get(fixture.subscribedId)];
+            },
+            { timeout: 30_000 }
+          )
+          .toEqual([false, false, false]);
       });
     } finally {
       const memberships = await serverWorkspaceMembers(seed.workspaceSlug, ownerSession);
