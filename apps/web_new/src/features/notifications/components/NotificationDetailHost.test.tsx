@@ -10,6 +10,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { ROLE_GUEST } from "../../../core/session/index.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/index.js";
 import type { NotificationCardData } from "../lib/card.js";
 import { NotificationDetailHost } from "./NotificationDetailHost.js";
@@ -162,6 +163,17 @@ describe("NotificationDetailHost", () => {
     await waitFor(() => expect(screen.getByTestId("issue-detail-root")).toHaveAttribute("data-editable", "false"));
     expect(screen.getByTestId("notifications-detail-pane")).toHaveAttribute("data-detail-variant", "triage");
     expect(screen.getByText("Triage work item")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["guest access", { [PROJECT]: ROLE_GUEST }],
+    ["missing project access", {}],
+  ])("keeps an ordinary peek read-only with %s", async (_label, roles) => {
+    createAppClient("https://api.test", (async (url: string) =>
+      url.includes("/project-roles/") ? response(url, roles) : response(url, issue())) as never);
+    renderHost(selection());
+    await waitFor(() => expect(screen.getByTestId("issue-detail-root")).toHaveAttribute("data-editable", "false"));
+    expect(screen.getByTestId("notifications-detail-pane")).toHaveAttribute("data-detail-variant", "peek");
   });
 
   it("keeps a useful read-only summary when the issue hydrate fails", async () => {
