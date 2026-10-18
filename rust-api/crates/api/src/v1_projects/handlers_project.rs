@@ -2788,17 +2788,21 @@ pub async fn create_project_inner(
         &pre.actor.id,
     )
     .await?;
-    if let Some(lead_id) = lead {
-        if lead_id != pre.actor.id {
-            add_project_admin(
-                &pre.pool,
-                &workspace_id,
-                &project_id,
-                &lead_id,
-                &pre.actor.id,
-            )
-            .await?;
-        }
+    // Ported Django bug (PB-2023, `views/project.py:230-238`): the guard
+    // compares `str(serializer.instance.project_lead)` — a `User` rendering
+    // `"<username> <email>"` (`db/models/user.py:139-140`) — against
+    // `str(request.user.id)`, a bare UUID. The two can never be equal, so the
+    // lead branch runs for *every* supplied lead, and it hands the `User`
+    // object to `ProjectMember(member_id=…)`, whose `UUIDField.to_python`
+    // raises `django.core.exceptions.ValidationError`. The view catches only
+    // DRF `ValidationError`, so that escapes to `handle_exception` → 400
+    // `{"error":"Please provide valid detail"}` — with no `ATOMIC_REQUESTS`,
+    // the project row, its pod and the creator membership are already
+    // committed, while the lead membership, the 8 `DEFAULT_STATES` and
+    // `model_activity` never happen. Ported verbatim: any validated
+    // `project_lead` (the creator included) ends the request here.
+    if lead.is_some() {
+        return Err(Denial::BadError("Please provide valid detail".to_owned()));
     }
     // The 8 `DEFAULT_STATES` (`views/project.py:240-254`): `bulk_create`
     // calls no `save()`, so every row keeps `slug ""`.

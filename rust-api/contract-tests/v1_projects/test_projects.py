@@ -114,6 +114,75 @@ def test_create_conflicts(seed):
     assert r.json() == {"identifier": ["This field is required."]}
 
 
+def _partial_create_rows(conn, workspace_id, identifier):
+    """Rows the project_lead create path leaves behind (PB-2023).
+
+    Returns (project_id, members, state_count, pod_name). ``members`` is a
+    sorted list of ``(member_id, role)``.
+    """
+    proj = db.fetch_one(
+        conn,
+        "SELECT id, project_lead_id FROM projects"
+        " WHERE identifier = %s AND workspace_id = %s AND deleted_at IS NULL",
+        (identifier, workspace_id),
+    )
+    assert proj is not None, "project row was not committed"
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT member_id, role FROM project_members WHERE project_id = %s",
+            (proj["id"],),
+        )
+        members = sorted((str(m), r) for m, r in cur.fetchall())
+        cur.execute(
+            "SELECT count(*) FROM states WHERE project_id = %s", (proj["id"],))
+        state_count = cur.fetchone()[0]
+    pod = db.fetch_one(
+        conn,
+        "SELECT name FROM pod WHERE project_id = %s AND deleted_at IS NULL",
+        (proj["id"],),
+    )
+    return proj, members, state_count, pod
+
+
+def test_create_with_project_lead_of_member(seed, conn):
+    """Ported Django quirk (PB-2023, views/project.py:230-238): a create that
+    names any workspace member as project_lead answers 400
+    {"error": "Please provide valid detail"} after committing the project row
+    plus the creator's membership — no lead membership, no states."""
+    tag = db.new_tag()
+    ident = f"L{tag.upper()}"[:12]
+    r = http.post(seed["keys"][KEY], base(seed) + "/",
+                  json={"name": f"CT Lead {tag}", "identifier": ident,
+                        "project_lead": seed["member"]["id"]}, expect=400)
+    assert r.status_code == 400
+    assert r.json() == {"error": "Please provide valid detail"}
+    proj, members, state_count, pod = _partial_create_rows(
+        conn, seed["ws_a"]["id"], ident)
+    assert str(proj["project_lead_id"]) == seed["member"]["id"]
+    assert members == [(seed["owner"]["id"], db.ADMIN)]
+    assert state_count == 0
+    # The post_save signal still ran before the raise.
+    assert pod == {"name": f"{ident}_pod_1"}
+
+
+def test_create_with_self_project_lead(seed, conn):
+    """Same quirk for the creator's own UUID: the guard compares a User
+    string against a UUID string, so the self case 400s too."""
+    tag = db.new_tag()
+    ident = f"S{tag.upper()}"[:12]
+    r = http.post(seed["keys"][KEY], base(seed) + "/",
+                  json={"name": f"CT Self {tag}", "identifier": ident,
+                        "project_lead": seed["owner"]["id"]}, expect=400)
+    assert r.status_code == 400
+    assert r.json() == {"error": "Please provide valid detail"}
+    proj, members, state_count, pod = _partial_create_rows(
+        conn, seed["ws_a"]["id"], ident)
+    assert str(proj["project_lead_id"]) == seed["owner"]["id"]
+    assert members == [(seed["owner"]["id"], db.ADMIN)]
+    assert state_count == 0
+    assert pod == {"name": f"{ident}_pod_1"}
+
+
 def test_detail_uuid_and_slug(seed):
     pid = seed["project"]["id"]
     by_uuid = http.get(seed["keys"][KEY], f"{base(seed)}/{pid}/").json()
