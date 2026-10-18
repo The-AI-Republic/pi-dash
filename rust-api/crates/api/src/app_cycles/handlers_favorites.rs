@@ -191,7 +191,16 @@ async fn favorite_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
 ) -> HandlerResult {
+    // Django's `<uuid:cycle_id>` never routes a non-canonical or garbage
+    // spelling: the resolver 404 comes before auth, so proxy for everyone
+    // rather than answering the view's 400 (member) / auth error (anon).
+    if !super::is_canonical_uuid(&cycle_raw) {
+        return Ok(super::proxy_segment(state, method, uri, headers).await);
+    }
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;

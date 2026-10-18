@@ -137,7 +137,10 @@ fn owned(
 /// JSON stays DRF-unmatched — its messages carry parser positions serde
 /// cannot reproduce — documented, never hit by the suite).
 #[allow(clippy::result_large_err)]
-async fn detail_body(state: &AppState, req: axum::extract::Request) -> Result<Value, Response> {
+pub(crate) async fn detail_body(
+    state: &AppState,
+    req: axum::extract::Request,
+) -> Result<Value, Response> {
     use axum::extract::FromRequest;
     let (parts, body) = req.into_parts();
     // Same default limit as axum's `Json` (2 MiB).
@@ -1950,7 +1953,7 @@ async fn cycle_partial_update(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    if !super::is_canonical_uuid(&pk) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2194,7 +2197,7 @@ async fn cycle_retrieve(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    if !super::is_canonical_uuid(&pk) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2240,7 +2243,7 @@ async fn cycle_destroy(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    if !super::is_canonical_uuid(&pk) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;

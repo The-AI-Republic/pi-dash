@@ -1454,8 +1454,8 @@ async fn archived_retrieve(
 ) -> Result<Response, Denial> {
     // Routing first (Django's `<uuid:pk>` 404 precedes auth).
     let pk = match pk_raw.parse::<uuid::Uuid>() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if super::is_canonical_uuid(&pk_raw) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
@@ -1631,8 +1631,8 @@ async fn archive_post(
 ) -> Result<Response, Denial> {
     // Routing first (Django's `<uuid:cycle_id>` 404 precedes auth).
     let cycle_id = match cycle_raw.parse::<uuid::Uuid>() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if super::is_canonical_uuid(&cycle_raw) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
@@ -1693,8 +1693,8 @@ async fn unarchive_delete(
 ) -> Result<Response, Denial> {
     // Routing first (Django's `<uuid:cycle_id>` 404 precedes auth).
     let cycle_id = match cycle_raw.parse::<uuid::Uuid>() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if super::is_canonical_uuid(&cycle_raw) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();

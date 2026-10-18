@@ -919,9 +919,19 @@ pub async fn transfer_issues(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    headers: HeaderMap,
-    body: Bytes,
+    req: axum::extract::Request,
 ) -> Response {
+    // Django's `<uuid:cycle_id>` never routes a non-canonical spelling;
+    // the resolver 404 precedes auth. Garbage keeps its ported JSON 404
+    // via `parse_id` below (out of scope here).
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return crate::edge::proxy(State(state), req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let body = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+        Ok(body) => body,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let actor = match actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
@@ -949,7 +959,7 @@ pub async fn transfer_issues(
     if let Err(denial) = check_gate(&gate, &slug, &membership) {
         return denial.into_response();
     }
-    let data = match parse_object_body(&headers, &body) {
+    let data = match parse_object_body(&parts.headers, &body) {
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };
@@ -2115,7 +2125,15 @@ pub async fn get_user_properties(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
 ) -> Response {
+    // Django's `<uuid:cycle_id>` never routes a non-canonical spelling;
+    // the resolver 404 precedes auth. Garbage keeps its ported JSON 404.
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return super::proxy_segment(state, method, uri, headers).await;
+    }
     let context =
         match user_properties_context(&state, slug, project_raw, cycle_raw, extension, "GET").await
         {
@@ -2207,9 +2225,18 @@ pub async fn patch_user_properties(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    headers: HeaderMap,
-    body: Bytes,
+    req: axum::extract::Request,
 ) -> Response {
+    // Django's `<uuid:cycle_id>` never routes a non-canonical spelling;
+    // the resolver 404 precedes auth. Garbage keeps its ported JSON 404.
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return crate::edge::proxy(State(state), req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let body = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+        Ok(body) => body,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let context =
         match user_properties_context(&state, slug, project_raw, cycle_raw, extension, "PATCH")
             .await
@@ -2233,7 +2260,7 @@ pub async fn patch_user_properties(
     let Some(mut row) = fetched else {
         return Denial::NotFound.into_response();
     };
-    let data = match parse_object_body(&headers, &body) {
+    let data = match parse_object_body(&parts.headers, &body) {
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };

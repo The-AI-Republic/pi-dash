@@ -430,8 +430,8 @@ async fn progress_get(
     // `<uuid:cycle_id>` never matches a non-UUID tail in Django: proxy
     // so the routing 404 comes from Django byte-for-byte.
     let cycle_id: uuid::Uuid = match cycle_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if super::is_canonical_uuid(&cycle_raw) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
