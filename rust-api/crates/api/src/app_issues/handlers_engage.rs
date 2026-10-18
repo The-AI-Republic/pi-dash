@@ -220,7 +220,7 @@ fn owned(
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
-enum Denial {
+pub(crate) enum Denial {
     /// 401, DRF `NotAuthenticated`.
     Unauthorized,
     /// 403, `@allow_permission` body.
@@ -1638,7 +1638,7 @@ async fn logo_or_cover_url(
 }
 
 /// Owned app `UserLiteSerializer` row (`user.py:141-153`).
-struct UserLiteOwned {
+pub(crate) struct UserLiteOwned {
     id: String,
     first_name: String,
     last_name: String,
@@ -1648,7 +1648,7 @@ struct UserLiteOwned {
     display_name: String,
 }
 
-fn user_lite_value(row: &UserLiteOwned) -> Result<Value, Denial> {
+pub(crate) fn user_lite_value(row: &UserLiteOwned) -> Result<Value, Denial> {
     use pidash_services::app_project::ser_shared::{user_lite_to_representation, UserLiteRow};
     let input = UserLiteRow {
         id: &row.id,
@@ -1666,7 +1666,7 @@ fn user_lite_value(row: &UserLiteOwned) -> Result<Value, Denial> {
 /// `actor_detail` leaf over a user id. The `users` table has no
 /// `deleted_at`, so the read is unguarded; a dangling FK is a 500 like
 /// Python's `DoesNotExist` into the fallback envelope.
-async fn fetch_user_lite(
+pub(crate) async fn fetch_user_lite(
     pool: &sqlx::PgPool,
     user_id: &uuid::Uuid,
 ) -> Result<UserLiteOwned, Denial> {
@@ -1695,7 +1695,7 @@ async fn fetch_user_lite(
 }
 
 /// Owned app `ProjectLiteSerializer` row (`project.py:120-133`).
-struct ProjectLiteOwned {
+pub(crate) struct ProjectLiteOwned {
     id: String,
     identifier: String,
     name: String,
@@ -1706,7 +1706,7 @@ struct ProjectLiteOwned {
     is_default: bool,
 }
 
-fn project_lite_value(row: &ProjectLiteOwned) -> Result<Value, Denial> {
+pub(crate) fn project_lite_value(row: &ProjectLiteOwned) -> Result<Value, Denial> {
     use pidash_services::app_project::ser_member::{
         project_lite_to_representation, ProjectLiteRow,
     };
@@ -1727,7 +1727,7 @@ fn project_lite_value(row: &ProjectLiteOwned) -> Result<Value, Denial> {
 /// `project_detail` leaf over a project id. Forward-FK traversal uses
 /// `_base_manager` (soft-deleted rows render), so the read is
 /// unguarded; only a truly absent row 500s.
-async fn fetch_project_lite(
+pub(crate) async fn fetch_project_lite(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
 ) -> Result<ProjectLiteOwned, Denial> {
@@ -1757,14 +1757,14 @@ async fn fetch_project_lite(
 }
 
 /// Owned app `WorkspaceLiteSerializer` row (`workspace.py:79-83`).
-struct WorkspaceLiteOwned {
+pub(crate) struct WorkspaceLiteOwned {
     name: String,
     slug: String,
     id: String,
     logo_url: Option<String>,
 }
 
-fn workspace_lite_value(row: &WorkspaceLiteOwned) -> Result<Value, Denial> {
+pub(crate) fn workspace_lite_value(row: &WorkspaceLiteOwned) -> Result<Value, Denial> {
     use pidash_services::app_project::ser_member::{
         workspace_lite_to_representation, WorkspaceLiteRow,
     };
@@ -1781,7 +1781,7 @@ fn workspace_lite_value(row: &WorkspaceLiteOwned) -> Result<Value, Denial> {
 /// `workspace_detail` leaf over a workspace id. Forward-FK traversal
 /// uses `_base_manager` (soft-deleted rows render), so the read is
 /// unguarded; only a truly absent row 500s.
-async fn fetch_workspace_lite(
+pub(crate) async fn fetch_workspace_lite(
     pool: &sqlx::PgPool,
     workspace_id: &uuid::Uuid,
 ) -> Result<WorkspaceLiteOwned, Denial> {

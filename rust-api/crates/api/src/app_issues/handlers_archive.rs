@@ -452,6 +452,7 @@ pub async fn archived_list(
         selects,
         fields,
         false,
+        None,
     )
     .await
 }
@@ -550,11 +551,12 @@ fn archive_filtered_set(
 // Archive retrieve (`archive.py:221-255`)
 // ---------------------------------------------------------------------------
 
-/// `GET .../issues/<pk>/archive/`: the 28-key detail. The `expand` param
-/// parses (comma-split, empties dropped) but only ever *adds* nested keys,
-/// so the base shape below is what every request renders; the nested
-/// expansion fleet is the documented gap. The reaction/link prefetches
-/// run no queries here: no detail field reads them.
+/// `GET .../issues/<pk>/archive/`: the 28-key detail. Django serializes
+/// through the same `IssueDetailSerializer(issue, expand=self.expand)`, so
+/// `?expand=` runs the shared `DynamicBaseSerializer` kernel — mapper names
+/// nest, declared names clobber, `issue_attachments` appends, and a mapped
+/// name that is not an `Issue` attribute (`sub_issues`, …) 500s. The
+/// reaction/link prefetches run no queries here: no detail field reads them.
 pub async fn archive_retrieve(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
@@ -568,12 +570,8 @@ pub async fn archive_retrieve(
         return Ok(crate::edge::proxy(State(state), req).await);
     };
     let context = archive_context(&state, &slug, &project_raw, extension).await?;
-    let _expand: Option<Vec<String>> = query_last(&query, "expand").map(|raw| {
-        raw.split(',')
-            .filter(|part| !part.is_empty())
-            .map(str::to_owned)
-            .collect()
-    });
+    let expands: Option<Vec<String>> =
+        super::expand::split_expand(query_last(&query, "expand").as_deref());
     let mut binder = Binder::new();
     let sql = archive_retrieve_sql(
         &mut binder,
@@ -589,8 +587,49 @@ pub async fn archive_retrieve(
     let owned = DetailOwned::fetch(&context.pool, &row).await?;
     let input = owned.view();
     let view = issue_detail_to_representation(&input);
-    let body = serde_json::to_string(&view).map_err(|_| Denial::ServerError)?;
-    Ok(json_response(body))
+    let value = serde_json::to_value(&view).map_err(|_| Denial::ServerError)?;
+    let Value::Object(mut body) = value else {
+        return Err(Denial::ServerError);
+    };
+    if let Some(expands) = expands {
+        let anchor = super::expand::ExpandAnchor {
+            issue_id,
+            workspace_id: anchor_uuid(&row, "workspace_id")?,
+            project_id: anchor_uuid(&row, "project_id")?,
+            created_by_id: anchor_opt_uuid(&row, "created_by_id")?,
+            updated_by_id: anchor_opt_uuid(&row, "updated_by_id")?,
+            state_id: anchor_opt_uuid(&row, "state_id")?,
+            parent_id: anchor_opt_uuid(&row, "parent_id")?,
+            estimate_point_id: anchor_opt_uuid(&row, "estimate_point_id")?,
+        };
+        super::expand::apply_dynamic_expand(
+            &context.pool,
+            &anchor,
+            &context.gate.timezone,
+            super::expand::DETAIL_EXPAND_FIELDS,
+            &expands,
+            &mut body,
+        )
+        .await?;
+    }
+    Ok(json_response(
+        serde_json::to_string(&Value::Object(body)).map_err(|_| Denial::ServerError)?,
+    ))
+}
+
+/// Read a required UUID column out of a `row_to_json` map.
+fn anchor_uuid(row: &Map<String, Value>, key: &str) -> Result<uuid::Uuid, Denial> {
+    json_str(row, key)
+        .and_then(|text| text.parse().ok())
+        .ok_or(Denial::ServerError)
+}
+
+/// Read a nullable UUID column out of a `row_to_json` map.
+fn anchor_opt_uuid(row: &Map<String, Value>, key: &str) -> Result<Option<uuid::Uuid>, Denial> {
+    match json_str(row, key) {
+        Some(text) => text.parse().map(Some).map_err(|_| Denial::ServerError),
+        None => Ok(None),
+    }
 }
 
 /// Read a nullable text column out of a `row_to_json` map.
