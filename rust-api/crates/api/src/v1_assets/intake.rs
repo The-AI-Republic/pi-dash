@@ -181,6 +181,8 @@ pub enum Denial {
     NotFoundDetail,
     /// 400, `{"Detail": ...}` (`ParseError`: per_page / cursor).
     BadDetail(String),
+    /// 400, `{"error":<message>}` (`KeyError` branch: unknown zone name).
+    BadError(String),
     /// 400, serializer `errors` dict.
     FieldErrors(Value),
     /// 400, `{"error": "Name is required"}`.
@@ -213,6 +215,10 @@ impl Denial {
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::BadError(message) => (
+                StatusCode::BAD_REQUEST,
+                format!("{{\"error\":{}}}", json_string(message)),
             ),
             Denial::FieldErrors(body) => (
                 StatusCode::BAD_REQUEST,
@@ -577,9 +583,15 @@ async fn require_project_member(
     }
 }
 
-/// The request's render zone (`TimezoneMixin`: the acting user's
-/// `user_timezone`, default `UTC`). A missing user row or an unparsable
-/// zone is the 500 Python's `activate` path becomes.
+/// The request's render zone (`TimezoneMixin.initial` runs after
+/// authentication and permissions and calls
+/// `zoneinfo.ZoneInfo(request.user.user_timezone)`). A missing user row
+/// or a NULL zone is the 500 Python's `DoesNotExist`/`TypeError` path
+/// becomes (NULL already 500s at decode); an unknown zone name 400s:
+/// `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`, which subclasses
+/// `KeyError` (`api/views/base.py:160-164`). An EMPTY zone 500s:
+/// `ZoneInfo('')` raises `ValueError` (not `KeyError`), which falls
+/// through to the generic 500 (`api/views/base.py:166-171`).
 async fn request_timezone(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Tz, Denial> {
     let zone: Option<String> =
         sqlx::query_scalar(r#"SELECT user_timezone FROM users WHERE id = $1"#)
@@ -587,8 +599,13 @@ async fn request_timezone(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Tz, Den
             .fetch_optional(pool)
             .await
             .map_err(|_| Denial::ServerError)?;
-    let zone = zone.ok_or(Denial::ServerError)?;
-    zone.parse::<Tz>().map_err(|_| Denial::ServerError)
+    match zone.as_deref() {
+        None => Err(Denial::ServerError),
+        Some("") => Err(Denial::ServerError),
+        Some(zone) => zone
+            .parse::<Tz>()
+            .map_err(|_| Denial::BadError("The required key does not exist.".to_owned())),
+    }
 }
 
 fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
