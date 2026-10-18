@@ -39,6 +39,10 @@ export interface IssueSearchQuery {
   /** Add-existing picker: root issues only. */
   subIssue?: boolean;
   issueId?: string;
+  /** Add-existing picker: exclude issues already attached to a cycle. */
+  cycle?: boolean;
+  /** Add-existing picker: exclude issues already in this module. */
+  module?: string;
 }
 
 export async function searchIssues(
@@ -56,6 +60,8 @@ export async function searchIssues(
       issue_relation: query.issueRelation === undefined ? undefined : String(query.issueRelation),
       sub_issue: query.subIssue === undefined ? undefined : String(query.subIssue),
       issue_id: query.issueId,
+      cycle: query.cycle === undefined ? undefined : String(query.cycle),
+      module: query.module,
     },
   });
   return client.parse(IssueSearchResults, body, `GET ${path}`);

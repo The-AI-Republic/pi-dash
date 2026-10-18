@@ -90,4 +90,76 @@ describe("temp rows", () => {
     expect(client.getQueryData([...PREFIX, "norows"])).toEqual({ total_count: 1 });
     expect(client.getQueryData([...PREFIX, "nototal"])).toEqual({ results: [] });
   });
+
+  it("inserts into the matching grouped bucket and totals", () => {
+    const client = new QueryClient();
+    const key = [...PREFIX, "grouped"];
+    client.setQueryData(key, {
+      results: {
+        todo: { results: [row("real-1", "Real")], total_results: 1 },
+        done: { results: [], total_results: 0 },
+      },
+      total_count: 1,
+    });
+    insertTempRow(client, [...PREFIX], tempIssueRow("temp-1", "Draft"), "todo");
+    const grouped = client.getQueryData(key) as {
+      results: Record<string, { results: IssueListItem[]; total_results: number }>;
+      total_count: number;
+    };
+    expect(grouped.results.todo?.results.map((entry) => entry.id)).toEqual(["temp-1", "real-1"]);
+    expect(grouped.results.todo?.total_results).toBe(2);
+    expect(grouped.results.done?.results).toEqual([]);
+    expect(grouped.total_count).toBe(2);
+  });
+
+  it("ignores grouped inserts without a bucket key, a missing bucket, or a duplicate", () => {
+    const client = new QueryClient();
+    const key = [...PREFIX, "grouped"];
+    client.setQueryData(key, {
+      results: { todo: { results: [row("real-1", "Real")], total_results: 1 } },
+      total_count: 1,
+    });
+    insertTempRow(client, [...PREFIX], tempIssueRow("temp-1", "Draft"));
+    insertTempRow(client, [...PREFIX], tempIssueRow("temp-2", "Draft"), "missing");
+    insertTempRow(client, [...PREFIX], row("temp-1", "Draft"), "todo");
+    const grouped = client.getQueryData(key) as {
+      results: Record<string, { results: IssueListItem[]; total_results: number }>;
+      total_count: number;
+    };
+    expect(grouped.results.todo?.results.map((entry) => entry.id)).toEqual(["temp-1", "real-1"]);
+    expect(grouped.total_count).toBe(2);
+  });
+
+  it("removes a temp row from whichever grouped bucket holds it", () => {
+    const client = new QueryClient();
+    const key = [...PREFIX, "grouped"];
+    client.setQueryData(key, {
+      results: {
+        todo: { results: [row("temp-1", "Draft")], total_results: 1 },
+        done: { results: [row("real-2", "Done")], total_results: 1 },
+      },
+      total_count: 2,
+    });
+    removeTempRow(client, [...PREFIX], "temp-1");
+    const grouped = client.getQueryData(key) as {
+      results: Record<string, { results: IssueListItem[]; total_results: number }>;
+      total_count: number;
+    };
+    expect(grouped.results.todo?.results).toEqual([]);
+    expect(grouped.results.todo?.total_results).toBe(0);
+    expect(grouped.results.done?.results.map((entry) => entry.id)).toEqual(["real-2"]);
+    expect(grouped.total_count).toBe(1);
+  });
+
+  it("leaves grouped caches alone when the temp id is absent", () => {
+    const client = new QueryClient();
+    const key = [...PREFIX, "grouped"];
+    const seeded = {
+      results: { todo: { results: [row("real-1", "Real")], total_results: 1 } },
+      total_count: 1,
+    };
+    client.setQueryData(key, seeded);
+    removeTempRow(client, [...PREFIX], "temp-gone");
+    expect(client.getQueryData(key)).toEqual(seeded);
+  });
 });

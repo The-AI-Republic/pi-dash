@@ -181,6 +181,24 @@ export async function setIssueModules(
   return client.parse(MembershipWriteResult, envelope.data, `POST issue ${issueId} modules`);
 }
 
+/**
+ * Bulk module attach for a group-header "add existing" (ISS-012): one
+ * call adds every selected issue to the module. Answers 201 {message}.
+ * The per-issue variant (setIssueModules) stays the property-strip
+ * writer; this is the module collection's own bulk bridge.
+ */
+export async function addIssuesToModule(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  moduleId: string,
+  issueIds: string[]
+): Promise<MembershipWriteResult> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/modules/${moduleId}/issues/`;
+  const envelope = await client.sendJson<unknown>("POST", path, { json: { issues: issueIds } });
+  return client.parse(MembershipWriteResult, envelope.data, `POST ${path}`);
+}
+
 export const SubscriptionStatus = z.object({
   subscribed: z.boolean(),
 });

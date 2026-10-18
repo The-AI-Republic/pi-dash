@@ -5,7 +5,7 @@
 // a stub transport. Live-server proof lives in contract/*.contract.test.ts.
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "./errors.js";
-import { createClient } from "./client.js";
+import { createClient, type ApiClient } from "./client.js";
 import { deactivateAccount, getInstanceConfig, signOut } from "./contracts/auth.js";
 import {
   approveDeviceCode,
@@ -101,7 +101,14 @@ import {
   updateQuickLink,
 } from "./contracts/home.js";
 import { listLabels, listMembers, listStates } from "./contracts/reference.js";
-import { getIssue, listIssues } from "./contracts/issues.js";
+import {
+  getIssue,
+  listCycleIssues,
+  listGroupedCycleIssues,
+  listGroupedModuleIssues,
+  listIssues,
+  listModuleIssues,
+} from "./contracts/issues.js";
 import {
   createIssue,
   getSubscriptionStatus,
@@ -185,7 +192,13 @@ import {
   updatePage,
 } from "./contracts/pages.js";
 import { listProjectEstimates, selectActiveEstimate } from "./contracts/estimates.js";
-import { addIssueToCycle, deleteIssue, removeIssueFromCycle, setIssueModules } from "./contracts/issue-actions.js";
+import {
+  addIssueToCycle,
+  addIssuesToModule,
+  deleteIssue,
+  removeIssueFromCycle,
+  setIssueModules,
+} from "./contracts/issue-actions.js";
 import {
   checkInstanceWorkspaceSlug,
   createInstanceWorkspace,
@@ -1290,6 +1303,75 @@ describe("issue contracts", () => {
     expect(parsed.results[0]?.sequence_id).toBe(42);
   });
 
+  it.each([
+    [
+      "cycle",
+      () => listCycleIssues as (...args: never[]) => Promise<{ results: unknown[]; total_count: number }>,
+      `/cycles/${UUID}/cycle-issues/`,
+    ],
+    [
+      "module",
+      () => listModuleIssues as (...args: never[]) => Promise<{ results: unknown[]; total_count: number }>,
+      `/modules/${UUID}/issues/`,
+    ],
+  ])("reads the %s list at its scoped path", async (_label, load, suffix) => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(envelope) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const read = load() as unknown as (
+      client: ApiClient,
+      slug: string,
+      projectId: string,
+      id: string,
+      query: { perPage: number; orderBy: string; cursor: string }
+    ) => Promise<{ results: unknown[]; total_count: number }>;
+    const parsed = await read(client, "acme", UUID2, UUID, { perPage: 100, orderBy: "sort_order", cursor: "100:1:0" });
+    expect(parsed.total_count).toBe(1);
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.pathname).toBe(`/api/workspaces/acme/projects/${UUID2}${suffix}`);
+    expect(url.searchParams.get("per_page")).toBe("100");
+    expect(url.searchParams.get("order_by")).toBe("sort_order");
+    expect(url.searchParams.get("cursor")).toBe("100:1:0");
+  });
+
+  it.each([
+    [
+      "cycle",
+      () => listGroupedCycleIssues as (...args: never[]) => Promise<{ results: Record<string, unknown> }>,
+      `/cycles/${UUID}/cycle-issues/`,
+    ],
+    [
+      "module",
+      () => listGroupedModuleIssues as (...args: never[]) => Promise<{ results: Record<string, unknown> }>,
+      `/modules/${UUID}/issues/`,
+    ],
+  ])("reads the grouped %s list with its server group key", async (_label, load, suffix) => {
+    const grouped = {
+      ...envelope,
+      grouped_by: "state_id",
+      results: { [UUID2]: { results: [{ ...issue, state__group: "started" }], total_results: 1 } },
+    };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(grouped) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const read = load() as unknown as (
+      client: ApiClient,
+      slug: string,
+      projectId: string,
+      id: string,
+      query: { groupBy: string; perPage: number; orderBy: string }
+    ) => Promise<{ results: Record<string, unknown> }>;
+    const parsed = await read(client, "acme", UUID2, UUID, {
+      groupBy: "state_id",
+      perPage: 50,
+      orderBy: "-created_at",
+    });
+    expect(parsed.results[UUID2]).toBeDefined();
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.pathname).toBe(`/api/workspaces/acme/projects/${UUID2}${suffix}`);
+    expect(url.searchParams.get("group_by")).toBe("state_id");
+    expect(url.searchParams.get("per_page")).toBe("50");
+    expect(url.searchParams.get("order_by")).toBe("-created_at");
+  });
+
   it("parses issue detail", async () => {
     const client = createClient({ baseUrl: "https://api.test", transport: json(issueDetail) });
     const parsed = await getIssue(client, "acme", UUID2, UUID);
@@ -1975,6 +2057,15 @@ describe("thin contextual palette contracts", () => {
     expect(urls.some((line) => line.startsWith("POST") && line.includes("/cycle-issues/"))).toBe(true);
     expect(urls.some((line) => line.startsWith("DELETE") && line.includes("/cycle-issues/"))).toBe(true);
     expect(urls.some((line) => line.startsWith("POST") && line.endsWith(`/issues/${UUID2}/modules/`))).toBe(true);
+  });
+
+  it("bulk-attaches issues to a module", async () => {
+    const { client, transport } = shellClient(() => ({ body: JSON.stringify({ message: "success" }) }));
+    const result = await addIssuesToModule(client, "acme", UUID2, UUID, [UUID2]);
+    expect(result).toEqual({ message: "success" });
+    const post = transport.calls.find((call) => call.init.method === "POST" && call.url.includes("/modules/"));
+    expect(post?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/modules/${UUID}/issues/`);
+    expect(post?.init.body).toBe(JSON.stringify({ issues: [UUID2] }));
   });
 
   it("lists cycles, modules and estimates for the pickers", async () => {

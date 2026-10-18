@@ -284,4 +284,45 @@ describe("useCreateWorkItem temp rows", () => {
     expect(h.cached().results.map((entry) => entry.id)).toEqual(["123e4567-e89b-12d3-a456-426614174000"]);
     expect(h.cached().total_count).toBe(1);
   });
+
+  it("posts group prefill fields and paints the matching grouped bucket", async () => {
+    const calls: Array<{ method: string; body: string }> = [];
+    const groupedKey = [...issueKeys.lists("acme", PROJECT_ID), "grouped"] as const;
+    createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
+      }
+      calls.push({ method: init.method ?? "GET", body: init.body ?? "" });
+      return { status: 201, url, headers: { get: () => null }, text: async () => JSON.stringify(createdRow()) };
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(groupedKey, {
+      results: { state: { results: [], total_results: 0 } },
+      total_count: 0,
+    });
+    let save: ((input: WorkItemCreateInput) => void) | null = null;
+    function Probe(): React.ReactElement {
+      const mutation = useCreateWorkItem("acme");
+      save = (input) => mutation.mutate(input);
+      return <p>{mutation.status}</p>;
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Probe />
+      </QueryClientProvider>
+    );
+    (save as ((input: WorkItemCreateInput) => void) | null)?.({
+      projectId: PROJECT_ID,
+      payload: { name: "Grouped create", state_id: PROJECT_ID, priority: "high", label_ids: ["label-1"] },
+      tempGroupKey: "state",
+    });
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalled());
+    const post = calls.find((call) => call.method === "POST");
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({
+      name: "Grouped create",
+      state_id: PROJECT_ID,
+      priority: "high",
+      label_ids: ["label-1"],
+    });
+  });
 });

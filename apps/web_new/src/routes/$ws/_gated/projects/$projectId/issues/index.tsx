@@ -10,7 +10,7 @@
 // out of the route chunk; context empty-state copy arrives with ISS-068.
 
 import { useSuspenseQuery } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Button } from "@pidash/kit";
 import * as React from "react";
 
@@ -32,10 +32,10 @@ import {
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import {
   ResolvedAnalyticsEntry,
-  ResolvedIssueList,
   loadIssueListLeaves,
   primeIssueListLeaves,
 } from "../../../../../../features/issues/components/lazyLeaves.js";
+import { loadListLayout, resolvedListLayout } from "../../../../../../features/issues/list/lazy.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
@@ -113,9 +113,10 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
           orderByOf(record)
         )
       );
-      // The list and analytics leaves ride their own chunk (Quality gates);
-      // await it with the data so the first commit is the screen itself.
-      await loadIssueListLeaves();
+      // The list and analytics leaves, and the list layout itself, ride
+      // their own chunks (Quality gates); await them with the data so the
+      // first commit is the screen itself.
+      await Promise.all([loadIssueListLeaves(), loadListLayout()]);
     } catch (error) {
       // Denial statuses belong to the project gate (AUTH-024): let them
       // through so the gate renders the denial screen instead of the load
@@ -150,6 +151,14 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
     const search = Route.useSearch();
     const context = Route.useRouteContext();
     const queryClient = context.queryClient;
+    const navigate = useNavigate();
+    const peekKey = search.peekIssueId ?? null;
+    const setPeekKey = (key: string | null): void => {
+      const next = { ...search };
+      if (key === null) delete next.peekIssueId;
+      else next.peekIssueId = key;
+      void navigate({ to: ".", search: next, replace: true } as never);
+    };
 
     const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, params.ws));
     const project = projects.find((entry) => entry.id === params.projectId) ?? null;
@@ -289,11 +298,19 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
               </React.Suspense>
             );
           }
+          const ResolvedListLayout = resolvedListLayout();
           return (
-            <ResolvedIssueList
-              issues={issues.results}
+            <ResolvedListLayout
+              workspaceSlug={params.ws}
+              entity={{ scope: "project", projectId: params.projectId }}
+              projectId={params.projectId}
               projectIdentifier={project.identifier}
-              layout={search.layout ?? "list"}
+              prefs={prefs}
+              richFilters={preferences.rich_filters}
+              canEdit={canEdit}
+              peekKey={peekKey}
+              onPeekChange={setPeekKey}
+              compact={search.layout === "compact"}
             />
           );
         }}

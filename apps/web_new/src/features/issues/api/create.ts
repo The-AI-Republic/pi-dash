@@ -27,6 +27,8 @@ const WORK_ITEM_CREATE_FAILED_BODY = "Nothing was created — check your connect
 export interface WorkItemCreateInput {
   projectId: string;
   payload: IssueCreateInput;
+  /** Grouped section bucket for the optimistic row (ISS-011). */
+  tempGroupKey?: string | undefined;
 }
 
 /** Post one work item, refreshing the workspace lists after. */
@@ -42,7 +44,8 @@ export function useCreateWorkItem(workspaceSlug: string) {
         tempIssueRow(tempId, input.payload.name, {
           startDate: input.payload.start_date ?? null,
           targetDate: input.payload.target_date ?? null,
-        })
+        }),
+        input.tempGroupKey
       );
       try {
         return await createIssue(getAppClient(), workspaceSlug, input.projectId, input.payload);

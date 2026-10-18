@@ -22,6 +22,7 @@ import {
   type IssueSearch,
   type PrefsRecord,
 } from "../../../../../../features/issues/index.js";
+import { listPageQueryOptions } from "../../../../../../features/issues/list/pages.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { clearCommands, listCommands } from "../../../../../../shared/commands/index.js";
@@ -70,9 +71,25 @@ describe("issues denial tolerance", () => {
   it("loads through when the issues and preferences reads succeed", async () => {
     const apiClient = failingClient(200);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {} as never).queryKey, {
-      grouped_by: null,
-    } as never);
+    queryClient.setQueryData(
+      listPageQueryOptions(apiClient, PARAMS.ws, {
+        entity: { scope: "project", projectId: PARAMS.projectId },
+        groupBy: null,
+        orderBy: "sort_order",
+      }).queryKey,
+      {
+        grouped_by: null,
+        sub_grouped_by: null,
+        total_count: 0,
+        next_cursor: "",
+        prev_cursor: "",
+        next_page_results: false,
+        prev_page_results: false,
+        count: 0,
+        total_results: 0,
+        results: [],
+      }
+    );
     queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, {
       display_filters: { layout: "list" },
       display_properties: {},
@@ -99,9 +116,25 @@ describe("issues denial tolerance", () => {
       }),
     });
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {} as never).queryKey, {
-      grouped_by: null,
-    } as never);
+    queryClient.setQueryData(
+      listPageQueryOptions(apiClient, PARAMS.ws, {
+        entity: { scope: "project", projectId: PARAMS.projectId },
+        groupBy: null,
+        orderBy: "sort_order",
+      }).queryKey,
+      {
+        grouped_by: null,
+        sub_grouped_by: null,
+        total_count: 0,
+        next_cursor: "",
+        prev_cursor: "",
+        next_page_results: false,
+        prev_page_results: false,
+        count: 0,
+        total_results: 0,
+        results: [],
+      }
+    );
     const beforeLoad = Route.options.beforeLoad;
     if (!beforeLoad) throw new Error("missing beforeLoad");
     await expect(
@@ -381,6 +414,27 @@ function renderScreen(
     );
   }
   queryClient.setQueryData(pickerCyclesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId).queryKey, []);
+  queryClient.setQueryData(
+    listPageQueryOptions(apiClient, PARAMS.ws, {
+      entity: ENTITY,
+      groupBy: null,
+      orderBy: orderByOf(prefs),
+      richFilters: prefs.rich_filters,
+    }).queryKey,
+    {
+      grouped_by: null,
+      sub_grouped_by: null,
+      total_count: totalCount,
+      next_cursor: "",
+      prev_cursor: "",
+      next_page_results: false,
+      prev_page_results: false,
+      count: rows.length,
+      total_results: totalCount,
+      results: rows,
+    } satisfies IssueListResponse
+  );
+
   const Component = Route.options.component;
   if (!Component) throw new Error("issues route has no component");
   render(
@@ -409,8 +463,9 @@ describe("project issues screen", () => {
     // its module resolves (NEWFRONT-669, size gate).
     const row = await screen.findByLabelText("WEB-42");
     expect(row).toHaveTextContent("Fix login");
-    expect(row).toHaveClass("h-11");
-    expect(row).not.toHaveClass("h-8");
+    const block = screen.getByTestId("list-row");
+    expect(block).toHaveClass("h-11");
+    expect(block).not.toHaveClass("h-8");
   });
 
   it("mounts the rich-filter entry in the desktop and mobile headers", async () => {
@@ -434,7 +489,14 @@ describe("project issues screen", () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     vi.spyOn(Route, "useRouteContext").mockReturnValue({ queryClient, apiClient } as never);
     queryClient.setQueryData(projectsQueryOptions(apiClient, PARAMS.ws).queryKey, [projectSeed()]);
-    queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {}, rich).queryKey, {
+    queryClient.setQueryData(
+      listPageQueryOptions(apiClient, PARAMS.ws, {
+        entity: { scope: "project", projectId: PARAMS.projectId },
+        groupBy: null,
+        orderBy: "sort_order",
+        richFilters: rich,
+      }).queryKey,
+      {
       grouped_by: null,
       sub_grouped_by: null,
       total_count: 1,
@@ -444,8 +506,9 @@ describe("project issues screen", () => {
       prev_page_results: false,
       count: 0,
       total_results: 1,
-      results: [],
-    } satisfies IssueListResponse);
+        results: [],
+      } satisfies IssueListResponse
+    );
     queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, {
       ...prefsSeed(),
       rich_filters: rich,
@@ -510,9 +573,9 @@ describe("project issues screen", () => {
     const now = new Date().toISOString();
     renderScreen({ layout: "compact" }, 1, [issueRow({ created_at: now, updated_at: now })]);
 
-    const row = screen.getByLabelText("WEB-42");
-    expect(row).toHaveClass("h-8");
-    expect(row).not.toHaveClass("h-11");
+    const block = screen.getByTestId("list-row");
+    expect(block).toHaveClass("h-8");
+    expect(block).not.toHaveClass("h-11");
   });
 
   it("offers the timeline in the layout switcher", () => {
