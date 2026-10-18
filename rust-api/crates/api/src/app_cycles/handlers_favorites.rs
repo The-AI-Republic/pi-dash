@@ -29,8 +29,9 @@
 //! * A duplicate favorite violates the partial unique constraint
 //!   (`favorite.py:39-44`) → `IntegrityError` → 400 "payload not valid".
 
+use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Router;
 use serde_json::Value;
 
@@ -39,8 +40,8 @@ use crate::app_issues::Denial;
 use crate::state::AppState;
 
 use super::handlers_cycle_issues::{
-    actor_user_id, check_gate, empty_response, fetch_allow_facts, parse_uuid_or_invalid, pool_of,
-    resolve_project_id, HandlerResult, INVALID_DETAIL_MSG,
+    actor_user_id, check_gate, decode_request_body, empty_response, fetch_allow_facts,
+    parse_uuid_or_invalid, pool_of, resolve_project_id, HandlerResult, INVALID_DETAIL_MSG,
 };
 
 /// Collection path in `app/urls/cycle.py:56-60` form.
@@ -116,15 +117,19 @@ async fn favorite_create(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    body: axum::Json<Value>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> HandlerResult {
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     let facts = fetch_allow_facts(&pool, &slug, &project_id, &user_id).await?;
     check_gate(gate_for_create(), &slug, &facts)?;
-    let entity_identifier = match body.0.as_object() {
-        Some(_) => parse_entity_identifier(body.0.get("cycle"))?,
+    // `request.data.get("cycle")` (`base.py:578`): decoded after the gate
+    // (DRF parses lazily), so body errors never preempt auth/gate.
+    let data = decode_request_body(&headers, &body)?;
+    let entity_identifier = match data.as_object() {
+        Some(_) => parse_entity_identifier(data.get("cycle"))?,
         // Non-object bodies cannot `.get` (AttributeError → 500).
         None => return Err(Denial::ServerError),
     };

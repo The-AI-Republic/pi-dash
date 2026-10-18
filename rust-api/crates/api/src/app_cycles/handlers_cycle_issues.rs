@@ -44,8 +44,9 @@
 
 use std::collections::HashMap;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::Router;
 use serde_json::{Map, Value};
@@ -57,6 +58,8 @@ use crate::app_issues::{
     page_denial, query_last, render_condition, shape_row, Binder, Denial, FilteredSet, QueryMap,
 };
 use crate::state::AppState;
+use crate::v1_cycles_modules::body as shared_body;
+use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
 use pidash_auth::permissions::allow::AllowFacts;
 
 /// `GET` + `POST` on the collection path; `DELETE` on the detail path.
@@ -126,6 +129,70 @@ pub(crate) fn empty_response(status: StatusCode) -> Response {
 #[cfg(test)]
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
+}
+
+/// The two cycle write handlers read `request.data` as a raw mapping
+/// (`request.data.get("cycle")` in `base.py:578`, `request.data.get(
+/// "issues", [])` in `issue.py:223`) rather than through a serializer, so
+/// no key is a DRF `ListField` (`getlist`) and no blank-input rule
+/// applies — every form key keeps its last value verbatim.
+const CYCLE_WRITE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
+    list_fields: &[],
+    skip_blank_fields: &[],
+};
+
+/// Decode a `POST` body the way DRF's default parsers do, after the
+/// request has passed auth and the role gate (DRF parses lazily, when the
+/// view first reads `request.data`, so body errors never preempt a 401 /
+/// 403). Shared by [`cycle_issue_create`] and
+/// `handlers_favorites::favorite_create`; the same pipeline
+/// `app_issues/handlers_core.rs` uses.
+///
+/// - Zero-length body (per the Content-Length header, `Request._load_stream`)
+///   is `{}` whatever the content type is.
+/// - The content type selects JSON / form / multipart in
+///   `select_parser` order; an unsupported or missing content type is the
+///   415 `{"detail": "Unsupported media type ..."}`.
+/// - JSON text decodes through the CPython-error layer
+///   (`json_cpython`), so a syntax error carries CPython's exact
+///   `{"detail": "JSON parse error - ..."}` text.
+/// - Form and multipart bodies become the `request.data` scalar map.
+/// - A non-object JSON body has no `.get` in the view (`AttributeError` →
+///   the generic 500).
+pub(crate) fn decode_request_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
+    let negotiated =
+        shared_body::negotiate_body(headers, body, &CYCLE_WRITE_BODY_SPEC).map_err(|error| {
+            match error {
+                shared_body::BodyError::UnsupportedMediaType(message) => {
+                    Denial::UnsupportedMediaType(message)
+                }
+                shared_body::BodyError::ParseDetail(message) => Denial::BadDetail(message),
+                shared_body::BodyError::ServerError => Denial::ServerError,
+            }
+        })?;
+    match negotiated {
+        shared_body::NegotiatedBody::Empty => Ok(Value::Object(Map::new())),
+        shared_body::NegotiatedBody::JsonText { text, .. } => {
+            match json_cpython::parse_request_data(text.as_bytes()) {
+                Ok(parsed) => {
+                    let value = json_cpython::to_serde_publish(&parsed);
+                    if value.is_object() {
+                        Ok(value)
+                    } else {
+                        // `None.get(...)` / `[1].get(...)` raise
+                        // `AttributeError` out of the view → generic 500.
+                        Err(Denial::ServerError)
+                    }
+                }
+                Err(JsonFail::Message(detail)) => Err(Denial::BadDetail(format!(
+                    "{}{detail}",
+                    json_cpython::JSON_PARSE_PREFIX
+                ))),
+                Err(JsonFail::Recursion) => Err(Denial::ServerError),
+            }
+        }
+        shared_body::NegotiatedBody::Form { map, .. } => Ok(Value::Object(map)),
+    }
 }
 
 /// `request.user` from the Django session (`app_issues` actor rule):
@@ -1089,16 +1156,19 @@ async fn cycle_issue_create(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    body: axum::Json<Value>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> HandlerResult {
     let (pool, user_id, project_id) =
         cycle_issue_context(&state, &slug, &project_raw, gate_for_create(), extension).await?;
     let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
-    // `request.data.get("issues", [])` (`:223`): a non-object body has no
-    // `.get` (AttributeError → 500); objects fall through to the
-    // truthiness check below.
-    let issues_value = match body.0.as_object() {
-        Some(_) => body.0.get("issues").cloned().unwrap_or(Value::Null),
+    // `request.data.get("issues", [])` (`:223`): decoded after the gate
+    // (DRF parses lazily), so body errors never preempt auth/gate. A
+    // non-object body has no `.get` (AttributeError → 500); objects fall
+    // through to the truthiness check below.
+    let data = decode_request_body(&headers, &body)?;
+    let issues_value = match data.as_object() {
+        Some(_) => data.get("issues").cloned().unwrap_or(Value::Null),
         None => return Err(Denial::ServerError),
     };
     let issue_strings = extract_issue_strings(&issues_value)?;
