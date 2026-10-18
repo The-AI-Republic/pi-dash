@@ -73,7 +73,7 @@ use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use sqlx::PgPool;
@@ -718,36 +718,47 @@ pub fn py_str(value: Option<&Value>) -> String {
 /// current_datetime_in_project_tz.date()` branch). A bad zone or an
 /// unparseable date raises in Python (`handle_exception` 500), so both
 /// are [`Denial::ServerError`] here, never a fallback.
+///
+/// The instant is anchored to local *midnight*'s offset
+/// (`local_tz.localize(midnight)`, pytz `is_dst=False`: a fold takes the
+/// standard (later) side, a gap the pre-transition offset — it never
+/// raises), and only then is `+1s` added on that fixed offset, exactly as
+/// Django's `localized_datetime += timedelta(seconds=1)` does. This is
+/// [`crate::v1_cycles_modules::cycle::project_midnight_utc`], the pytz
+/// fold/gap parity helper (BUG: the old `.single()` on 00:00:01 raised
+/// on any ambiguous/nonexistent local time → 500).
 pub fn convert_start_date(raw: &str, project_tz: &str) -> Result<DateTime<Utc>, Denial> {
     let tz: Tz = project_tz.parse().map_err(|_| Denial::ServerError)?;
     // `datetime.strptime(date, "%Y-%m-%d").date()` — CPython's strict
     // field grammar, not chrono's lax one (ValueError → 500 on any
     // mismatch: BUG-date-check-bad-format-500). See [`strptime_ymd`].
     let day = strptime_ymd(raw).ok_or(Denial::ServerError)?;
-    let naive = day.and_hms_opt(0, 0, 1).ok_or(Denial::ServerError)?;
-    let local = tz
-        .from_local_datetime(&naive)
-        .single()
-        .ok_or(Denial::ServerError)?;
+    // Anchored to local *midnight*'s pytz `is_dst=False` offset, then `+1s`.
+    let midnight_utc = crate::v1_cycles_modules::cycle::project_midnight_utc(&tz, &day)
+        .map_err(|_| Denial::ServerError)?;
     let now_utc = Utc::now();
-    if local.date_naive() == now_utc.with_timezone(&tz).date_naive() {
+    // `localized_datetime.date()` is the parsed day (the `+1s` never
+    // crosses midnight); Django compares it with `now` in the project
+    // zone.
+    if day == now_utc.with_timezone(&tz).date_naive() {
         return Ok(now_utc);
     }
-    Ok(local.with_timezone(&Utc))
+    Ok(midnight_utc + Duration::seconds(1))
 }
 
 /// `convert_to_utc(date, project_id)` (`timezone_converter.py:78-94`):
 /// the date at 23:59:00 project time, in UTC. Same error contract as
-/// [`convert_start_date`].
+/// [`convert_start_date`], and the same midnight anchoring: Django adds
+/// `+23:59` to the *midnight-localized* datetime on midnight's fixed
+/// offset, not to a separately localized 23:59 (BUG: localizing 23:59
+/// directly took 23:59's own offset, an hour off on mid-day transitions).
 pub fn convert_end_date(raw: &str, project_tz: &str) -> Result<DateTime<Utc>, Denial> {
     let tz: Tz = project_tz.parse().map_err(|_| Denial::ServerError)?;
     let day = strptime_ymd(raw).ok_or(Denial::ServerError)?;
-    let naive = day.and_hms_opt(23, 59, 0).ok_or(Denial::ServerError)?;
-    let local = tz
-        .from_local_datetime(&naive)
-        .single()
-        .ok_or(Denial::ServerError)?;
-    Ok(local.with_timezone(&Utc))
+    // Same midnight anchoring as the start; `+23:59` on midnight's offset.
+    let midnight_utc = crate::v1_cycles_modules::cycle::project_midnight_utc(&tz, &day)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(midnight_utc + Duration::hours(23) + Duration::minutes(59))
 }
 
 /// CPython `datetime.strptime(raw, "%Y-%m-%d")` for the date-check path.
@@ -2474,6 +2485,39 @@ mod tests {
             assert!(convert_start_date(raw, "UTC").is_ok(), "{raw:?} start ok");
             assert!(convert_end_date(raw, "UTC").is_ok(), "{raw:?} end ok");
         }
+    }
+
+    #[test]
+    fn convert_dates_pytz_dst_parity() {
+        // America/Santiago midnight DST transitions (PIDASHCONV-1191):
+        // the instant is anchored to midnight's pytz `is_dst=False`
+        // offset, then `+1s` / `+23:59` applied in UTC.
+        let tz = "America/Santiago";
+        // 2026-04-04 falls back at 24:00: midnight is still DST (-03:00),
+        // so the end is 2026-04-05T02:59:00Z, not 23:59's own standard
+        // offset (…T03:59:00Z).
+        assert_eq!(
+            convert_end_date("2026-04-04", tz).expect("end"),
+            Utc.with_ymd_and_hms(2026, 4, 5, 2, 59, 0).unwrap()
+        );
+        assert_eq!(
+            convert_start_date("2026-04-01", tz).expect("start"),
+            Utc.with_ymd_and_hms(2026, 4, 1, 3, 0, 1).unwrap()
+        );
+        // 2026-09-06 springs forward at 00:00: midnight is in the gap, so
+        // the pre-gap standard offset (-04:00) applies to both ends.
+        assert_eq!(
+            convert_start_date("2026-09-06", tz).expect("start"),
+            Utc.with_ymd_and_hms(2026, 9, 6, 4, 0, 1).unwrap()
+        );
+        assert_eq!(
+            convert_end_date("2026-09-06", tz).expect("end"),
+            Utc.with_ymd_and_hms(2026, 9, 7, 3, 59, 0).unwrap()
+        );
+        assert_eq!(
+            convert_end_date("2026-09-10", tz).expect("end"),
+            Utc.with_ymd_and_hms(2026, 9, 11, 2, 59, 0).unwrap()
+        );
     }
 
     #[test]
