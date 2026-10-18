@@ -22,6 +22,56 @@ def _upload(org, role="admin", **overrides):
     return r.json()
 
 
+def _updated_at(org, asset_id):
+    """Read the stored ``file_assets.updated_at`` (the column, not the wire)."""
+    return org.conn.execute(
+        "SELECT updated_at FROM file_assets WHERE id = %s", (asset_id,)
+    ).fetchone()[0]
+
+
+def _mark_uploaded(org, asset_id):
+    r = org.request(
+        "PATCH", f"{_base(org)}{asset_id}/", "admin", json={"is_uploaded": True}
+    )
+    assert r.status_code == 204, r.text[:500]
+
+
+def test_generic_patch_noop_leaves_updated_at(org):
+    """A bodyless ``PATCH {}`` writes only ``is_uploaded``, like Django.
+
+    ``asset.py:617`` calls ``asset.save(update_fields=["is_uploaded"])``;
+    Django 4.2 ``_save_table`` filters the columns to ``update_fields`` and
+    never adds the ``auto_now`` column, so the stored ``updated_at`` is
+    byte-identical before and after. The generic PATCH's extra
+    ``updated_at = now()`` on Rust moves it forward, and reads that render
+    the column (``FileAssetSerializer`` is ``fields="__all__"``) then
+    disagree between backends.
+    """
+    asset_id = _upload(org)["asset_id"]
+    _mark_uploaded(org, asset_id)
+    before = _updated_at(org, asset_id)
+    r = org.request("PATCH", f"{_base(org)}{asset_id}/", "admin", json={})
+    assert r.status_code == 204
+    assert r.text == ""
+    assert _updated_at(org, asset_id) == before
+
+
+def test_generic_patch_is_uploaded_leaves_updated_at(org):
+    """``PATCH {"is_uploaded": true}`` leaves ``updated_at`` untouched."""
+    asset_id = _upload(org)["asset_id"]
+    before = _updated_at(org, asset_id)
+    r = org.request(
+        "PATCH", f"{_base(org)}{asset_id}/", "admin", json={"is_uploaded": True}
+    )
+    assert r.status_code == 204
+    assert r.text == ""
+    row = org.conn.execute(
+        "SELECT is_uploaded, updated_at FROM file_assets WHERE id = %s", (asset_id,)
+    ).fetchone()
+    assert row[0] is True
+    assert row[1] == before
+
+
 def test_generic_upload_shape(org):
     body = _upload(org)
     assert set(body) == {"upload_data", "asset_id", "asset_url"}
