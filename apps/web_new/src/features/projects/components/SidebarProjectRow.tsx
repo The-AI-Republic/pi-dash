@@ -31,8 +31,8 @@ import {
   type QuickActionId,
 } from "../tabs.js";
 import { isSubnavEntryActive, resolveProjectRowHref, revealRow, selectSubnavEntries } from "../sidebar.js";
-import { LeaveProjectDialog } from "./LeaveProjectDialog.js";
-import { PublishProjectDialog } from "./PublishProjectDialog.js";
+import { LeaveProjectEntry } from "./LeaveProjectEntry.js";
+import { PublishProjectEntry } from "./PublishProjectEntry.js";
 
 /** Copy confirmation the parity driver reads (SHELL-050). */
 export const ROW_LINK_COPIED_TITLE = "Link copied";
@@ -280,8 +280,8 @@ export function SidebarProjectRow({
       {dropIndicator === "below" ? (
         <span data-testid="project-drop-indicator" className="absolute inset-x-2 bottom-0 h-0.5 bg-(--accent)" />
       ) : null}
-      <PublishProjectDialog projectName={project.name} open={publishOpen} onOpenChange={setPublishOpen} />
-      <LeaveProjectDialog
+      <PublishProjectEntry projectName={project.name} open={publishOpen} onOpenChange={setPublishOpen} />
+      <LeaveProjectEntry
         workspaceSlug={workspaceSlug}
         projectId={project.id}
         projectName={project.name}
