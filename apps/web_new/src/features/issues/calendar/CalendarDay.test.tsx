@@ -49,7 +49,6 @@ function row(overrides: Partial<IssueListItem> = {}): IssueListItem {
 function renderDay(overrides: Partial<React.ComponentProps<typeof CalendarDay>> = {}) {
   const handlers = {
     onSelect: vi.fn(),
-    onDrop: vi.fn(),
     onDragOver: vi.fn(),
     onOpen: vi.fn(),
     onEdit: vi.fn(),
@@ -180,12 +179,10 @@ describe("CalendarDay", () => {
     expect(handlers.onSelect).toHaveBeenCalledTimes(2);
   });
 
-  it("reports hover and release for drag targeting", () => {
+  it("reports hover for drag targeting", () => {
     const handlers = renderDay();
     const tile = tileFor(CELL.iso);
     fireEvent.pointerEnter(tile);
-    fireEvent.pointerUp(tile);
     expect(handlers.onDragOver).toHaveBeenCalledWith(CELL.iso);
-    expect(handlers.onDrop).toHaveBeenCalledWith(CELL.iso);
   });
 });

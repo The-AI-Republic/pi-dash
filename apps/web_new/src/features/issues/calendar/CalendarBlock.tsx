@@ -136,14 +136,11 @@ export function CalendarBlock({
    * tile, so element-local pointermove listeners would stop firing before
    * the movement threshold is crossed.
    */
-  function trackPointer(event: React.PointerEvent<HTMLElement>): void {
+  function trackPointer(): void {
     if (!draggable || typeof globalThis.document === "undefined") return;
-    const target = event.currentTarget;
-    try {
-      target.setPointerCapture?.(event.pointerId);
-    } catch {
-      // Pointer capture is best-effort; document listeners still work.
-    }
+    // Deliberately no pointer capture: capture keeps enter/up events on
+    // this block, so the destination tile never sees the release. The
+    // layout resolves the drop from the document instead.
     const onMove = (moveEvent: PointerEvent): void => {
       const press = pressRef.current;
       if (press === null) return;
@@ -181,7 +178,7 @@ export function CalendarBlock({
         if (!draggable) return;
         draggedRef.current = false;
         pressRef.current = { x: event.clientX, y: event.clientY };
-        trackPointer(event);
+        trackPointer();
       }}
       onPointerUp={() => {
         stopTracking();

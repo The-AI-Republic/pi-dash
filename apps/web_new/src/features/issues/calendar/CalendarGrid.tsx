@@ -31,7 +31,6 @@ export interface CalendarGridProps {
   dropTarget: string | null;
   dragging: boolean;
   onSelect: (day: string) => void;
-  onDrop: (day: string) => void;
   onDragOver: (day: string) => void;
   onOpen: (issue: IssueListItem) => void;
   onEdit: (issue: IssueListItem) => void;
@@ -59,7 +58,6 @@ function Day({ cell, props }: { cell: CalendarCell; props: CalendarGridProps }):
       selected={props.selectedDay === cell.iso}
       isDropTarget={props.dropTarget === cell.iso}
       onSelect={props.onSelect}
-      onDrop={props.onDrop}
       onDragOver={props.onDragOver}
       onOpen={props.onOpen}
       onEdit={props.onEdit}

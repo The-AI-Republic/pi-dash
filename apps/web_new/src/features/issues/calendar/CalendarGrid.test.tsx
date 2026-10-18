@@ -78,7 +78,6 @@ function renderGrid(overrides: Partial<React.ComponentProps<typeof CalendarGrid>
       dropTarget={null}
       dragging={false}
       onSelect={noop}
-      onDrop={noop}
       onDragOver={noop}
       onOpen={noop}
       onEdit={noop}

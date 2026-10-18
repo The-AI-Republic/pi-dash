@@ -34,7 +34,6 @@ export interface CalendarDayProps {
   selected: boolean;
   isDropTarget: boolean;
   onSelect: (day: string) => void;
-  onDrop: (day: string) => void;
   onDragOver: (day: string) => void;
   onOpen: (issue: IssueListItem) => void;
   onEdit: (issue: IssueListItem) => void;
@@ -73,7 +72,6 @@ export function CalendarDay({
   selected,
   isDropTarget,
   onSelect,
-  onDrop,
   onDragOver,
   onOpen,
   onEdit,
@@ -104,7 +102,6 @@ export function CalendarDay({
       className={`group relative flex h-full w-full flex-col border border-(--border) ${cell.weekend ? "bg-(--subtle)" : "bg-(--bg)"} ${cell.inMonth ? "" : "opacity-60"} ${isDropTarget ? "ring-2 ring-(--accent)" : ""}`}
       data-calendar-day={cell.iso}
       onPointerEnter={() => onDragOver(cell.iso)}
-      onPointerUp={() => onDrop(cell.iso)}
     >
       <div className={headerClass}>
         {cell.isToday ? (

@@ -57,6 +57,7 @@ import {
 } from "./query.js";
 import { useNarrowViewport, useTouchInput } from "./useMedia.js";
 import { addPendingRow, removePendingRow, type PendingRowsByDay } from "./pending.js";
+import { calendarDayAtPoint } from "./dropTarget.js";
 
 export const PEEK_QUERY_KEY = "peekIssueId";
 
@@ -115,6 +116,7 @@ export function CalendarLayout({
   const [highlightedId, setHighlightedId] = React.useState<string | null>(null);
   const [dropTarget, setDropTarget] = React.useState<string | null>(null);
   const [dragged, setDragged] = React.useState<IssueListItem | null>(null);
+  const dropTargetRef = React.useRef<string | null>(null);
   const [addExistingDay, setAddExistingDay] = React.useState<string | null>(null);
   const [extraByDay, setExtraByDay] = React.useState<Record<string, IssueListItem[]>>({});
   const [dayTotals, setDayTotals] = React.useState<Record<string, number>>({});
@@ -147,6 +149,36 @@ export function CalendarLayout({
   const create = useCalendarCreate(workspaceSlug, projectId, membership, entity);
   const attach = useCalendarAttach(workspaceSlug, projectId, membership, entity);
   const remove = useCalendarDelete(workspaceSlug, projectId, entity);
+
+  // Pointer capture on the block means the tile never sees the release;
+  // resolve the destination from the document so a real drag still drops.
+  React.useEffect(() => {
+    if (dragged === null || typeof globalThis.document === "undefined") return;
+    const doc = globalThis.document;
+    const onMove = (event: PointerEvent): void => {
+      const day = calendarDayAtPoint(doc, event.clientX, event.clientY);
+      if (day === null) return;
+      dropTargetRef.current = day;
+      setDropTarget(day);
+    };
+    const onUp = (event: PointerEvent): void => {
+      const day = calendarDayAtPoint(doc, event.clientX, event.clientY) ?? dropTargetRef.current;
+      handleDrop(day);
+    };
+    const onCancel = (): void => {
+      dropTargetRef.current = null;
+      setDragged(null);
+      setDropTarget(null);
+    };
+    doc.addEventListener("pointermove", onMove);
+    doc.addEventListener("pointerup", onUp);
+    doc.addEventListener("pointercancel", onCancel);
+    return () => {
+      doc.removeEventListener("pointermove", onMove);
+      doc.removeEventListener("pointerup", onUp);
+      doc.removeEventListener("pointercancel", onCancel);
+    };
+  });
   const rename = useUpdateIssue({
     workspaceSlug,
     projectId,
@@ -269,8 +301,17 @@ export function CalendarLayout({
       .finally(() => setLoadingDay(null));
   }
 
-  function handleDrop(day: string): void {
-    if (dragged === null) return;
+  function handleDrop(day: string | null): void {
+    if (dragged === null) {
+      setDropTarget(null);
+      return;
+    }
+    if (day === null) {
+      dropTargetRef.current = null;
+      setDragged(null);
+      setDropTarget(null);
+      return;
+    }
     const decision = decideDrop(dragged, day);
     if (decision.kind === "apply") {
       redate.reDate({ issue: dragged, destination: day });
@@ -279,6 +320,7 @@ export function CalendarLayout({
       redate.reDate({ issue: dragged, destination: day });
     }
     setDragged(null);
+    dropTargetRef.current = null;
     setDropTarget(null);
   }
 
@@ -325,9 +367,11 @@ export function CalendarLayout({
         dropTarget={dropTarget}
         dragging={dragged !== null}
         onSelect={setSelectedDay}
-        onDrop={handleDrop}
         onDragOver={(day) => {
-          if (dragged !== null) setDropTarget(day);
+          if (dragged !== null) {
+            dropTargetRef.current = day;
+            setDropTarget(day);
+          }
         }}
         onOpen={(issue) => {
           setPeek({ issue });

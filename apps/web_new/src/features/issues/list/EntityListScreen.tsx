@@ -24,6 +24,7 @@ import { resolvedListLayout } from "./lazy.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { pickerCyclesQueryOptions, pickerModulesQueryOptions } from "../../../shared/pickers/reference.js";
 import { isCompletedCycle } from "../../../shared/pickers/cycles.js";
+import { isCompletedModule } from "../../../shared/pickers/modules.js";
 
 export interface EntityListScreenProps {
   workspaceSlug: string;
@@ -83,6 +84,7 @@ export function EntityListScreen({
   const loadedModule = entity.scope === "module" ? modules?.find((row) => row.id === entity.moduleId) : undefined;
   const resolvedTitle = title ?? cycle?.name ?? loadedModule?.name ?? (entity.scope === "module" ? "Module" : "Cycle");
   const resolvedCompletedCycle = completedCycle ?? isCompletedCycle(cycle?.status);
+  const resolvedCompletedModule = completedModule ?? isCompletedModule(loadedModule?.status);
   // Stored rich filters scope the list in cycle/module context too.
   const { data: preferences } = useSuspenseQuery(prefsQueryOptions(client, workspaceSlug, entity));
   const richFilters = preferences.rich_filters;
@@ -112,10 +114,10 @@ export function EntityListScreen({
   const canEdit =
     canEditInProject({
       memberRole: project.member_role,
-      archived: project.archived_at != null,
+      archived: project.archived_at !== null,
     }) &&
     !resolvedCompletedCycle &&
-    !completedModule;
+    !resolvedCompletedModule;
   const offered: readonly LayoutKind[] = ["list", "calendar"];
   const display = (
     <DisplayControl
@@ -160,7 +162,7 @@ export function EntityListScreen({
             cycleId={cycleId}
             moduleId={moduleId}
             completedCycle={resolvedCompletedCycle}
-            completedModule={completedModule}
+            completedModule={resolvedCompletedModule}
             peekKey={peekKey}
             onPeekChange={onPeekChange}
             compact={compact}

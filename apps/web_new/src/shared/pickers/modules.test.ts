@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import { selectModuleOptions } from "./modules.js";
+import { isCompletedModule, selectModuleOptions } from "./modules.js";
 
 const ALPHA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const BETA = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -43,5 +43,18 @@ describe("selectModuleOptions", () => {
       allowClear: false,
     });
     expect(options.map((option) => option.name)).toEqual(["Alpha"]);
+  });
+});
+
+describe("isCompletedModule", () => {
+  it("matches completed modules case-insensitively", () => {
+    expect(isCompletedModule("completed")).toBe(true);
+    expect(isCompletedModule("COMPLETED")).toBe(true);
+  });
+
+  it("keeps every other module status editable", () => {
+    for (const status of ["backlog", "planned", "in-progress", "paused", "cancelled", undefined]) {
+      expect(isCompletedModule(status)).toBe(false);
+    }
   });
 });

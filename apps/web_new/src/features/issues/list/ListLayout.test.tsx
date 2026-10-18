@@ -449,6 +449,9 @@ describe("ListLayout", () => {
     const completed = renderLayout({ completedCycle: true });
     expect(screen.getByTestId("quick-add-probe")).toHaveAttribute("data-reason", "This cycle is complete");
     completed.view.unmount();
+    const completedModule = renderLayout({ completedModule: true });
+    expect(screen.getByTestId("quick-add-probe")).toHaveAttribute("data-reason", "This module is complete");
+    completedModule.view.unmount();
     renderLayout({ prefs: prefs({ groupBy: "created_by" }) });
     expect(screen.getByTestId("quick-add-probe")).toHaveAttribute("data-reason", "Creation is off in this grouping");
   });

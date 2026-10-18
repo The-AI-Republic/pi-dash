@@ -286,10 +286,10 @@ describe("EntityListScreen", () => {
     setup({
       entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
       moduleId: MODULE,
-      completedCycle: true,
+      completedModule: true,
     });
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-module", MODULE);
-    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-completed", "true");
+    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-module-completed", "true");
   });
 
   it("forwards a completed module context to the list", () => {
@@ -298,6 +298,30 @@ describe("EntityListScreen", () => {
       moduleId: MODULE,
       completedModule: true,
     });
+    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-module-completed", "true");
+  });
+
+  it("derives a completed module from its picker row", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient = queryClient;
+    queryClient.setQueryData(PROJECTS_KEY, [project()]);
+    queryClient.setQueryData(PREFS_KEY, { filters: {}, display_filters: {}, display_properties: {}, rich_filters: {} });
+    queryClient.setQueryData(PAGE_KEY, { total_count: 0, results: [], count: 0 });
+    queryClient.setQueryData(MODULES_KEY, [{ id: MODULE, name: "Auth", status: "completed" }]);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <EntityListScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          entity={{ scope: "module", projectId: PROJECT, moduleId: MODULE }}
+          moduleId={MODULE}
+          peekKey={null}
+          onPeekChange={vi.fn()}
+          compact={false}
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("calendar-entry")).toHaveAttribute("data-can-edit", "false");
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-module-completed", "true");
   });
 

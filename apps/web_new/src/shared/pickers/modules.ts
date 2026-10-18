@@ -23,6 +23,11 @@ export interface ModuleOptionsInput {
   allowClear?: boolean | undefined;
 }
 
+/** Completed modules render their issues read-only. */
+export function isCompletedModule(status: string | undefined): boolean {
+  return status !== undefined && status.toLowerCase() === "completed";
+}
+
 export function selectModuleOptions(input: ModuleOptionsInput): ModuleOption[] {
   const options = input.modules.map((module) => ({
     id: module.id,

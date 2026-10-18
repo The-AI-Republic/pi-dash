@@ -233,6 +233,31 @@ function pointerEvent(type: string, clientX: number, clientY: number): MouseEven
   return new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
 }
 
+/** jsdom has no layout; give each tile a distinct rect for hit testing. */
+function stubDayRects(days: readonly string[]): void {
+  days.forEach((iso, index) => {
+    const node = tile(iso);
+    if (node === null) return;
+    const left = index * 100;
+    node.getBoundingClientRect = () =>
+      ({ left, top: 0, right: left + 100, bottom: 100, width: 100, height: 100, x: left, y: 0 }) as DOMRect;
+  });
+}
+
+function centerOf(iso: string): { x: number; y: number } {
+  const rect = tile(iso).getBoundingClientRect();
+  return { x: rect.left + 50, y: rect.top + 50 };
+}
+
+/** Press a block, travel past the threshold, and release over `iso`. */
+function dragBlockTo(block: HTMLElement, iso: string): void {
+  fireEvent(block, pointerEvent("pointerdown", 10, 10));
+  fireEvent(block, pointerEvent("pointermove", 30, 10));
+  const point = centerOf(iso);
+  fireEvent(document, pointerEvent("pointermove", point.x, point.y));
+  fireEvent(document, pointerEvent("pointerup", point.x, point.y));
+}
+
 beforeEach(() => {
   state.narrow = false;
   state.touch = false;
@@ -357,10 +382,8 @@ describe("CalendarLayout", () => {
   it("re-dates on drop, highlights the block, and ignores a same-day drop", async () => {
     renderLayout();
     const block = await screen.findByRole("link", { name: "WEB-42" });
-    fireEvent(block, pointerEvent("pointerdown", 10, 10));
-    fireEvent(block, pointerEvent("pointermove", 30, 10));
-    fireEvent.pointerEnter(tile(nextIso));
-    fireEvent.pointerUp(tile(nextIso));
+    stubDayRects([todayIso, nextIso, emptyIso]);
+    dragBlockTo(block, nextIso);
     expect(state.reDate).toHaveBeenCalledWith({
       issue: expect.objectContaining({ id: ISSUE_ID, target_date: todayIso }),
       destination: nextIso,
@@ -368,24 +391,37 @@ describe("CalendarLayout", () => {
     await waitFor(() => expect(block).toHaveAttribute("data-highlight", "true"));
 
     state.reDate.mockReset();
-    fireEvent(block, pointerEvent("pointerdown", 10, 10));
-    fireEvent(block, pointerEvent("pointermove", 30, 10));
-    fireEvent.pointerEnter(tile(todayIso));
-    fireEvent.pointerUp(tile(todayIso));
+    dragBlockTo(block, todayIso);
     expect(state.reDate).not.toHaveBeenCalled();
 
+    const point = centerOf(emptyIso);
     fireEvent.pointerUp(tile(emptyIso));
+    fireEvent(document, pointerEvent("pointerup", point.x, point.y));
     expect(state.reDate).not.toHaveBeenCalled();
+  });
+
+  it("drops on a tile the pointer travels to and clears the stale drag", async () => {
+    renderLayout();
+    const block = await screen.findByRole("link", { name: "WEB-42" });
+    stubDayRects([todayIso, nextIso, emptyIso]);
+    dragBlockTo(block, emptyIso);
+    expect(state.reDate).toHaveBeenCalledTimes(1);
+    expect(state.reDate).toHaveBeenCalledWith({
+      issue: expect.objectContaining({ id: ISSUE_ID }),
+      destination: emptyIso,
+    });
+    expect(tile(emptyIso)).not.toHaveClass("ring-2");
+
+    fireEvent.click(tile(nextIso));
+    expect(state.reDate).toHaveBeenCalledTimes(1);
   });
 
   it("sends a refused drop through the action hook", async () => {
     state.windowRows = [row({ target_date: emptyIso, start_date: nextIso })];
     renderLayout();
     const block = await screen.findByRole("link", { name: "WEB-42" });
-    fireEvent(block, pointerEvent("pointerdown", 10, 10));
-    fireEvent(block, pointerEvent("pointermove", 30, 10));
-    fireEvent.pointerEnter(tile(todayIso));
-    fireEvent.pointerUp(tile(todayIso));
+    stubDayRects([todayIso, nextIso, emptyIso]);
+    dragBlockTo(block, todayIso);
     expect(state.reDate).toHaveBeenCalledWith({
       issue: expect.objectContaining({ id: ISSUE_ID, start_date: nextIso }),
       destination: todayIso,
@@ -516,8 +552,9 @@ describe("CalendarLayout", () => {
     expect(within(block).queryByRole("button", { name: "Quick actions" })).not.toBeInTheDocument();
     fireEvent(block, pointerEvent("pointerdown", 10, 10));
     fireEvent(block, pointerEvent("pointermove", 40, 40));
-    fireEvent.pointerEnter(tile(nextIso));
-    fireEvent.pointerUp(tile(nextIso));
+    const point = centerOf(nextIso);
+    fireEvent(document, pointerEvent("pointermove", point.x, point.y));
+    fireEvent(document, pointerEvent("pointerup", point.x, point.y));
     expect(state.reDate).not.toHaveBeenCalled();
   });
 
@@ -527,8 +564,9 @@ describe("CalendarLayout", () => {
     const block = await screen.findByRole("link", { name: "WEB-42" });
     fireEvent(block, pointerEvent("pointerdown", 10, 10));
     fireEvent(block, pointerEvent("pointermove", 40, 40));
-    fireEvent.pointerEnter(tile(nextIso));
-    fireEvent.pointerUp(tile(nextIso));
+    const point = centerOf(nextIso);
+    fireEvent(document, pointerEvent("pointermove", point.x, point.y));
+    fireEvent(document, pointerEvent("pointerup", point.x, point.y));
     expect(state.reDate).not.toHaveBeenCalled();
   });
 
