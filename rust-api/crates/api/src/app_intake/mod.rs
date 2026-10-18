@@ -595,13 +595,38 @@ pub async fn is_issue_creator(
     Ok(row.is_some())
 }
 
-/// Parse a UUID path segment: Django's `<uuid:>` converter 404s on
-/// garbage, so unparseable ids behave as missing rows
-/// (`ObjectDoesNotExist` branch).
+/// Whether a path segment is spelled the way Django's `UUIDConverter`
+/// routes it: lowercase hex, hyphenated, exactly 36 characters
+/// (`django/urls/converters.py`; the `v1_cli_auth` PIDASHCONV-1095,
+/// `license` PIDASHCONV-1132 and `v1_cycles_modules` PIDASHCONV-1193
+/// precedents). `Uuid::parse_str` also accepts uppercase, simple (32
+/// hex, no hyphens), braced and `urn:uuid:` spellings, so a bare
+/// `parse::<Uuid>()` cannot stand in for the converter.
+pub fn is_canonical_uuid(raw: &str) -> bool {
+    if raw.len() != 36 {
+        return false;
+    }
+    raw.bytes().enumerate().all(|(index, byte)| {
+        if index == 8 || index == 13 || index == 18 || index == 23 {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+        }
+    })
+}
+
+/// Parse a UUID path segment: Django's `<uuid:>` converter leaves every
+/// non-canonical spelling — uppercase, simple, braced, `urn:uuid:` and
+/// garbage alike — unmatched, so the route resolver answers
+/// `handler404` (`custom_404_view`) before auth runs. Mirror that with
+/// `Denial::PageNotFound` instead of the permissive `Uuid::parse_str`
+/// (PIDASHCONV-1095/1132/1193).
 #[allow(clippy::result_large_err)]
 pub fn parse_id(raw: &str) -> Result<Uuid, Response> {
-    raw.parse::<Uuid>()
-        .map_err(|_| Denial::NotFound.into_response())
+    match raw.parse::<Uuid>() {
+        Ok(id) if is_canonical_uuid(raw) => Ok(id),
+        _ => Err(Denial::PageNotFound.into_response()),
+    }
 }
 
 /// Convert a guards-layer denial into its wire response. Call sites only
