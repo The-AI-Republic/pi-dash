@@ -11,7 +11,7 @@
 // committed only as a complete pair (ISS-103).
 
 import { Avatar, Button, Combobox, Popover, type ComboboxOption } from "@pidash/kit";
-import { CalendarDays, ChevronDown } from "lucide-react";
+import { CalendarDays, ChevronDown, Package, Repeat } from "lucide-react";
 import * as React from "react";
 
 import { useMe } from "../../../../core/session/hooks.js";
@@ -19,9 +19,16 @@ import {
   PRIORITY_ICONS,
   StateGlyph,
   STATE_GROUP_ICONS,
+  selectCycleOptions,
   selectMemberOptions,
+  selectModuleOptions,
+  selectProjectMark,
+  selectProjectOptions,
   selectStateOptions,
+  usePickerCycles,
+  usePickerModules,
   usePickerProjectMembers,
+  usePickerProjects,
   usePickerStates,
   usePickerWorkspaceMembers,
   type StateGroup,
@@ -31,11 +38,7 @@ import { DateCalendar } from "../../dropdowns/DatePicker.js";
 import { DateRangeCalendar } from "../../dropdowns/DateRangePicker.js";
 import { useWeekStart } from "../../dropdowns/weekStart.js";
 import type { RangeValue } from "../../dropdowns/calendar.js";
-import {
-  isValueComplete,
-  type RichCondition,
-  type RichFilterField,
-} from "./expression.js";
+import { isValueComplete, type RichCondition, type RichFilterField } from "./expression.js";
 import { orderLabelOptions, orderMemberOptions, selectedIds } from "./filterValues.js";
 import {
   EMPTY_SLOT_LABEL,
@@ -64,13 +67,7 @@ function chosenLabel(values: readonly string[], labels: ReadonlyMap<string, stri
   return pickTriggerLabel(values.map((value) => labels.get(value) ?? value));
 }
 
-function PickSlot({
-  workspaceSlug,
-  projectId,
-  field,
-  condition,
-  onChange,
-}: ValueSlotProps): React.ReactElement {
+function PickSlot({ workspaceSlug, projectId, field, condition, onChange }: ValueSlotProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   const selected = selectedValues(condition.value);
   // A stored condition must resolve its names before the popup opens, so
@@ -80,6 +77,11 @@ function PickSlot({
   const members = usePickerProjectMembers(workspaceSlug, projectId, field.source === "members" && readValues);
   const directory = usePickerWorkspaceMembers(workspaceSlug, field.source === "members" && readValues);
   const labels = useLabels(workspaceSlug, projectId, field.source === "labels" && readValues);
+  // Project, cycle and module picks borrow the shared pickers' thin reads;
+  // all three stay lazy until opened or while resolving stored ids.
+  const projects = usePickerProjects(workspaceSlug, field.source === "projects" && readValues);
+  const cycles = usePickerCycles(workspaceSlug, projectId, field.source === "cycles" && readValues);
+  const modules = usePickerModules(workspaceSlug, projectId, field.source === "modules" && readValues);
   const me = useMe();
   const meId = me.data?.id ?? null;
 
@@ -113,14 +115,37 @@ function PickSlot({
     [field.source, labels.data, selected]
   );
 
+  // Server order with applied rows first for projects and modules; the
+  // cycle list drops completed cycles and the No-cycle clear row, which
+  // has no id to filter on.
+  const projectOptions = React.useMemo(
+    () =>
+      field.source === "projects" ? selectProjectOptions({ projects: projects.data ?? [], selectedIds: selected }) : [],
+    [field.source, projects.data, selected]
+  );
+  const cycleOptions = React.useMemo(
+    () => (field.source === "cycles" ? selectCycleOptions({ cycles: cycles.data ?? [], allowClear: false }) : []),
+    [cycles.data, field.source]
+  );
+  const moduleOptions = React.useMemo(
+    () =>
+      field.source === "modules"
+        ? selectModuleOptions({ modules: modules.data ?? [], selectedIds: selected, single: false })
+        : [],
+    [field.source, modules.data, selected]
+  );
+
   const labelsById = React.useMemo(() => {
     const map = new Map<string, string>();
     for (const state of stateOptions) map.set(state.id, state.name);
     for (const member of memberOptions) map.set(member.userId, member.label);
     for (const label of labelOptions) map.set(label.id, label.name);
+    for (const project of projectOptions) map.set(project.id, project.name);
+    for (const cycle of cycleOptions) map.set(cycle.id, cycle.name);
+    for (const module of moduleOptions) map.set(module.id, module.name);
     for (const option of field.staticValues ?? []) map.set(option.value, option.label);
     return map;
-  }, [field.staticValues, labelOptions, memberOptions, stateOptions]);
+  }, [cycleOptions, field.staticValues, labelOptions, memberOptions, moduleOptions, projectOptions, stateOptions]);
 
   const options: ComboboxOption[] = React.useMemo(() => {
     if (field.source === "states") {
@@ -159,6 +184,35 @@ function PickSlot({
         ),
       }));
     }
+    if (field.source === "projects") {
+      return projectOptions.map((project) => ({
+        id: project.id,
+        label: project.name,
+        searchText: project.searchText,
+        icon: (
+          <span
+            aria-hidden="true"
+            className="text-meta flex size-5 shrink-0 items-center justify-center rounded-(--radius-control) bg-(--subtle) font-medium text-(--text-muted)"
+          >
+            {selectProjectMark(project.logoProps, project.identifier)}
+          </span>
+        ),
+      }));
+    }
+    if (field.source === "cycles") {
+      return cycleOptions.map((cycle) => ({
+        id: cycle.id,
+        label: cycle.name,
+        icon: <Repeat size={14} strokeWidth={1.5} aria-hidden="true" />,
+      }));
+    }
+    if (field.source === "modules") {
+      return moduleOptions.map((module) => ({
+        id: module.id,
+        label: module.name,
+        icon: <Package size={14} strokeWidth={1.5} aria-hidden="true" />,
+      }));
+    }
     return (field.staticValues ?? []).map((option) => {
       const Icon =
         field.stem === "state_group"
@@ -172,7 +226,17 @@ function PickSlot({
         icon: Icon === undefined ? undefined : <Icon size={14} strokeWidth={1.5} aria-hidden="true" />,
       };
     });
-  }, [field.source, field.staticValues, field.stem, labelOptions, memberOptions, stateOptions]);
+  }, [
+    cycleOptions,
+    field.source,
+    field.staticValues,
+    field.stem,
+    labelOptions,
+    memberOptions,
+    moduleOptions,
+    projectOptions,
+    stateOptions,
+  ]);
 
   function togglePick(id: string): void {
     const next = selected.includes(id) ? selected.filter((entry) => entry !== id) : [...selected, id];
@@ -183,11 +247,17 @@ function PickSlot({
     open &&
     ((field.source === "states" && states.isPending) ||
       (field.source === "members" && (members.isPending || directory.isPending)) ||
-      (field.source === "labels" && labels.isPending));
+      (field.source === "labels" && labels.isPending) ||
+      (field.source === "projects" && projects.isPending) ||
+      (field.source === "cycles" && cycles.isPending) ||
+      (field.source === "modules" && modules.isPending));
   const failed =
     (field.source === "states" && states.isError) ||
     (field.source === "members" && (members.isError || directory.isError)) ||
-    (field.source === "labels" && labels.isError);
+    (field.source === "labels" && labels.isError) ||
+    (field.source === "projects" && projects.isError) ||
+    (field.source === "cycles" && cycles.isError) ||
+    (field.source === "modules" && modules.isError);
   const errorText = failed ? `Couldn't load ${field.label.toLowerCase()} values.` : undefined;
 
   return (

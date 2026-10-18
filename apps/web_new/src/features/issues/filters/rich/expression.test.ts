@@ -108,6 +108,42 @@ describe("parseRichExpression", () => {
     expect(parseRichExpression({ and: [{ not: "nope" }] })).toMatchObject([{ key: "and-0", property: "" }]);
   });
 
+  it("splits a stored CSV collection back into its picks", () => {
+    expect(parseRichExpression({ assignee_id__in: "a,b,c" })[0]?.value).toEqual(["a", "b", "c"]);
+    expect(parseRichExpression({ and: [{ label_id__in: "a, b" }, { priority__in: "urgent" }] })).toMatchObject([
+      { property: "label_id", value: ["a", "b"] },
+      { property: "priority", value: "urgent" },
+    ]);
+    expect(parseRichExpression({ not: { state_id__in: "a,b" } })[0]).toMatchObject({
+      negated: true,
+      value: ["a", "b"],
+    });
+  });
+
+  it("leaves a scalar, a date range and a single exact value alone", () => {
+    expect(parseRichExpression({ state_group__in: "started" })[0]?.value).toBe("started");
+    expect(parseRichExpression({ priority__in: "urgent" })[0]?.value).toBe("urgent");
+    expect(parseRichExpression({ start_date__range: "2026-01-01,2026-01-31" })[0]?.value).toBe("2026-01-01,2026-01-31");
+    expect(parseRichExpression({ assignee_id__exact: "a,b" })[0]?.value).toBe("a,b");
+    // A separator-only string has no entries to read back.
+    expect(parseRichExpression({ assignee_id__in: "," })[0]?.value).toBe(",");
+  });
+
+  it("round-trips a multi pick through serialize and parse", () => {
+    const condition: RichCondition = {
+      key: "a",
+      property: "assignee_id",
+      operator: "in",
+      negated: false,
+      value: ["a", "b", "c"],
+    };
+    const stored = serializeRichExpression([condition]);
+    expect(stored).toEqual({ assignee_id__in: "a,b,c" });
+    const parsed = parseRichExpression(stored);
+    expect(parsed[0]?.value).toEqual(["a", "b", "c"]);
+    expect(serializeRichExpression(parsed)).toEqual(stored);
+  });
+
   it("does not merge two operators on one leaf", () => {
     expect(parseRichExpression({ priority__in: "urgent", state__in: "todo" })).toMatchObject([{ property: "" }]);
   });

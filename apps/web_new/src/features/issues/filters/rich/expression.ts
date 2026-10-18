@@ -49,6 +49,23 @@ function singleLeaf(value: Record<string, unknown>): { field: string; operator: 
   return { field: key.slice(0, split), operator: key.slice(split + 2), value: leafValue };
 }
 
+/**
+ * Read one stored leaf value back into the editor's shape. Collection
+ * lookups persist as one comma-separated string (the FilterSet's widget
+ * reads CSV), so a multi pick reopens as its list of ids rather than as
+ * one id containing commas — otherwise the next edit serializes the
+ * joined string again as a single value and the pick loses every other
+ * member. A single value keeps its scalar form.
+ */
+export function parseLeafValue(operator: string, value: unknown): unknown {
+  if (operator !== "in" || typeof value !== "string" || !value.includes(",")) return value;
+  const entries = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+  return entries.length === 0 ? value : entries;
+}
+
 function parseLeaf(node: Record<string, unknown>, key: string): RichCondition[] {
   const leaf = singleLeaf(node);
   if (leaf === null) return [invalidCondition(key, node)];
@@ -58,7 +75,7 @@ function parseLeaf(node: Record<string, unknown>, key: string): RichCondition[] 
       property: leaf.field,
       operator: leaf.operator,
       negated: false,
-      value: leaf.value,
+      value: parseLeafValue(leaf.operator, leaf.value),
     },
   ];
 }
@@ -91,13 +108,21 @@ export function parseRichExpression(expression: unknown): RichCondition[] {
         property: leaf.field,
         operator: leaf.operator,
         negated: true,
-        value: leaf.value,
+        value: parseLeafValue(leaf.operator, leaf.value),
       },
     ];
   }
   const leaf = singleLeaf(expression);
   if (leaf === null) return [invalidCondition(conditionKey(), expression)];
-  return [{ key: "leaf-0", property: leaf.field, operator: leaf.operator, negated: false, value: leaf.value }];
+  return [
+    {
+      key: "leaf-0",
+      property: leaf.field,
+      operator: leaf.operator,
+      negated: false,
+      value: parseLeafValue(leaf.operator, leaf.value),
+    },
+  ];
 }
 
 /** Parse one `and` child, including the `not` wrapper. */
@@ -108,7 +133,15 @@ function parseExpressionChild(child: unknown, key: string): RichCondition[] {
     if (!isRecord(inner)) return [invalidCondition(key, child)];
     const leaf = singleLeaf(inner);
     if (leaf === null) return [invalidCondition(key, child)];
-    return [{ key, property: leaf.field, operator: leaf.operator, negated: true, value: leaf.value }];
+    return [
+      {
+        key,
+        property: leaf.field,
+        operator: leaf.operator,
+        negated: true,
+        value: parseLeafValue(leaf.operator, leaf.value),
+      },
+    ];
   }
   return parseLeaf(child, key);
 }
@@ -251,7 +284,7 @@ export interface RichFilterField {
   /** Static values for single/multi fields, when the field needs no read. */
   staticValues?: readonly { value: string; label: string }[];
   /** Where the value list comes from; absent means the static values. */
-  source?: "states" | "members" | "labels";
+  source?: "states" | "members" | "labels" | "projects" | "cycles" | "modules";
 }
 
 const DEFAULT_FIELDS: readonly RichFilterField[] = [
@@ -489,9 +522,9 @@ function catalogField(input: {
  */
 export function valueInputFields(): RichFilterField[] {
   return [
-    catalogField({ stem: "project_id", label: "Project", kind: "multi" }),
-    catalogField({ stem: "cycle_id", label: "Cycle", kind: "multi" }),
-    catalogField({ stem: "module_id", label: "Module", kind: "multi" }),
+    catalogField({ stem: "project_id", label: "Project", kind: "multi", source: "projects" }),
+    catalogField({ stem: "cycle_id", label: "Cycle", kind: "multi", source: "cycles" }),
+    catalogField({ stem: "module_id", label: "Module", kind: "multi", source: "modules" }),
     catalogField({ stem: "target_date", label: "Target date", kind: "date", operators: ["exact"] }),
     catalogField({ stem: "start_date", label: "Start date", kind: "date_range", operators: ["exact", "range"] }),
   ];

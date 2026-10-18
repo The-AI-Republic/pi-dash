@@ -19,6 +19,7 @@ import type { IssuesEntity, PrefsRecord } from "../../prefs/entities.js";
 import { prefsQueryOptions } from "../../prefs/prefsQuery.js";
 import { richFilterFields } from "./expression.js";
 import { sessionKeys } from "../../../../core/session/queries.js";
+import { authKeys } from "../../../auth/queries.js";
 import { useRichFilterBuilder, type RichFilterBuilderProps } from "./RichFilterBuilder.js";
 import { FieldConfigRegistry } from "./temporary.js";
 
@@ -309,7 +310,8 @@ describe("view row wiring", () => {
 
   function setupView(
     richFilters: Record<string, unknown>,
-    view?: RichFilterBuilderProps["view"]
+    view?: RichFilterBuilderProps["view"],
+    roles: { workspaceRole: number; projectRole: number | null } = { workspaceRole: 20, projectRole: 20 }
   ): { patches: Array<Record<string, unknown>>; onViewUpdated: ReturnType<typeof vi.fn> } {
     const patches: Array<Record<string, unknown>> = [];
     createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
@@ -332,8 +334,12 @@ describe("view row wiring", () => {
     queryClient.setQueryData(prefsQueryOptions({} as never, "acme", ENTITY).queryKey, record(richFilters));
     queryClient.setQueryData(sessionKeys.me, { id: VIEW_RECORD.owned_by });
     queryClient.setQueryData(sessionKeys.workspaces, [
-      { id: UUID, name: "Acme", slug: "acme", logo_url: null, total_members: 3, role: 20 },
+      { id: UUID, name: "Acme", slug: "acme", logo_url: null, total_members: 3, role: roles.workspaceRole },
     ]);
+    queryClient.setQueryData(
+      authKeys.projectRoles("acme"),
+      roles.projectRole === null ? {} : { [PROJECT]: roles.projectRole }
+    );
     const onViewUpdated = vi.fn();
     render(
       <QueryClientProvider client={queryClient}>
@@ -364,6 +370,39 @@ describe("view row wiring", () => {
     expect(patches).toHaveLength(1);
     expect(patches[0]?.["rich_filters"]).toEqual({ not: { priority__in: "urgent" } });
     expect(onViewUpdated.mock.calls[0]?.[0]).toMatchObject({ id: VIEW_RECORD.id });
+  });
+
+  it("hides the view actions from a workspace member who has not joined the project", async () => {
+    setupView(
+      { priority__in: "none" },
+      {
+        view: { ...VIEW_RECORD, rich_filters: { priority__in: "urgent" } } as never,
+        isDefault: false,
+      },
+      { workspaceRole: 15, projectRole: null }
+    );
+    expect(await screen.findByTestId("rich-condition")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save as" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
+  });
+
+  it("offers the view actions to a member of the project", async () => {
+    const user = userEvent.setup();
+    setupView(
+      { priority__in: "none" },
+      {
+        view: { ...VIEW_RECORD, rich_filters: { priority__in: "urgent" } } as never,
+        isDefault: false,
+      },
+      { workspaceRole: 15, projectRole: 15 }
+    );
+    expect(await screen.findByRole("button", { name: "Save as" })).toBeInTheDocument();
+    // An untouched view reads clean; an edit turns the update on.
+    expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
+    const pill = screen.getByTestId("rich-condition");
+    await user.click(within(pill).getByRole("button", { name: /^is$/ }));
+    await user.click(await screen.findByRole("option", { name: "is not" }));
+    expect(await screen.findByRole("button", { name: "Update view" })).toBeInTheDocument();
   });
 
   it("treats a view with no project as a workspace view", async () => {

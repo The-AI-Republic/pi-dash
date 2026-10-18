@@ -626,6 +626,98 @@ describe("ValueSlot member and label sources", () => {
   });
 });
 
+describe("ValueSlot project, cycle and module sources", () => {
+  const CYCLE = "c23e4567-e89b-12d3-a456-42661417400c";
+  const MODULE = "d23e4567-e89b-12d3-a456-42661417400d";
+
+  function projectRow(id: string, name: string, identifier: string) {
+    return {
+      id,
+      name,
+      identifier,
+      sort_order: null,
+      logo_props: { in_use: "emoji", emoji: { value: "🌱" } },
+      member_role: 15,
+      intake_count: 0,
+      archived_at: null,
+      workspace: PROJECT,
+      cycle_view: true,
+      issue_views_view: true,
+      module_view: true,
+      page_view: false,
+      inbox_view: false,
+      is_default: false,
+      guest_view_all_features: false,
+      project_lead: null,
+      network: 0,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      created_by: null,
+      updated_by: null,
+    };
+  }
+
+  const ROUTES: Record<string, unknown> = {
+    "/projects/": [projectRow(PROJECT, "Apollo", "APO")],
+    "/cycles/": [{ id: CYCLE, project_id: PROJECT, name: "Sprint 4", is_favorite: false, status: "ACTIVE" }],
+    "/modules/": [{ id: MODULE, project_id: PROJECT, name: "Billing", status: "planned", is_favorite: false }],
+  };
+
+  function route(url: string): unknown | null {
+    for (const [suffix, body] of Object.entries(ROUTES)) {
+      if (url.endsWith(suffix)) return body;
+    }
+    return null;
+  }
+
+  it.each([
+    ["project_id", PROJECT, "Apollo"],
+    ["cycle_id", CYCLE, "Sprint 4"],
+    ["module_id", MODULE, "Billing"],
+  ] as const)("lists %s options only once opened", async (stem, id, name) => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, stem)!}
+          condition={{ key: "a", property: stem, operator: "in", negated: false, value: null }}
+          onChange={onChange}
+        />,
+        route
+      )
+    );
+    // Lazy: nothing reads until the slot opens.
+    expect(screen.getByRole("button", { name: /^--$/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^--$/ }));
+    expect(await screen.findByRole("option", { name })).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name }));
+    expect(onChange).toHaveBeenCalledWith([id]);
+  });
+
+  it.each([
+    ["project_id", PROJECT, "Apollo"],
+    ["cycle_id", CYCLE, "Sprint 4"],
+    ["module_id", MODULE, "Billing"],
+  ] as const)("resolves a stored %s id to its name", async (stem, id, name) => {
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, stem)!}
+          condition={{ key: "a", property: stem, operator: "in", negated: false, value: [id] }}
+          onChange={() => {}}
+        />,
+        route
+      )
+    );
+    expect(await screen.findByRole("button", { name: new RegExp(name) })).toBeInTheDocument();
+  });
+});
+
 describe("ValueSlot failure and suspended rows", () => {
   it("reports a failed member read instead of an empty list", async () => {
     const user = userEvent.setup();

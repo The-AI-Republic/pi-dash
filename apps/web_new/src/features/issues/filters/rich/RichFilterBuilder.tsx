@@ -18,7 +18,9 @@ import { Button, IconButton, Tooltip } from "@pidash/kit";
 import { Filter, Plus } from "lucide-react";
 import * as React from "react";
 
+import { ROLE_MEMBER } from "../../../../core/session/index.js";
 import { useMe, usePermissions } from "../../../../core/session/index.js";
+import { useProjectRoles } from "../../../auth/index.js";
 import type { IssuesEntity } from "../../prefs/entities.js";
 import { selectDisplayPrefs, useEntityPrefs } from "../../prefs/displayPrefs.js";
 import {
@@ -84,6 +86,13 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
   const { conditions: stored } = useRichFilters(workspaceSlug, entity, !temporary && !isView);
   const { updateRichFilters, failureCount } = useUpdateRichFilters(workspaceSlug, entity, !isView);
   const permissions = usePermissions(workspaceSlug);
+  // View writes are a project power: the old row asks for ADMIN or MEMBER
+  // standing on this project, so a workspace member who has not joined it
+  // sees no Save view rather than a 403. Workspace admins keep their
+  // standing everywhere.
+  const projectRoles = useProjectRoles(workspaceSlug);
+  const projectRole = projectRoles.data?.[projectId];
+  const canWriteViews = permissions.isAdmin || (projectRole !== undefined && projectRole >= ROLE_MEMBER);
   const me = useMe();
   // A persisted instance is named after its entity; a temporary one gets
   // a client-only TEMP- id that dies with the mount.
@@ -277,7 +286,7 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
           projectId={projectId}
           snapshot={snapshot}
           context={viewContext}
-          canEdit={permissions.canEdit && !temporary}
+          canEdit={canWriteViews && !temporary}
           viewsEnabled={props.viewsEnabled ?? true}
           meId={me.data?.id ?? null}
           hasConditions={hasConditions}
