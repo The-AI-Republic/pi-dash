@@ -12,19 +12,26 @@ import type { Pod, Runner } from "@pidash/api-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const allowed = { value: true };
+const view = { projectId: "p-1" as string | undefined };
 const deleteMutate = vi.fn(async () => undefined);
 const revokeMutate = vi.fn(async () => undefined);
 const useRunners = vi.fn();
 
 vi.mock("./area.js", () => ({
   useRunnersArea: () => ({
-    scope: { workspaceSlug: "acme", projectId: "p-1" },
+    scope: { workspaceSlug: "acme", projectId: view.projectId },
     workspaceId: "ws-id",
     access: allowed.value ? "allowed" : "denied",
     allowed: allowed.value,
-    base: "/acme/projects/p-1/runners",
+    base: view.projectId === undefined ? "/acme/runners" : `/acme/projects/${view.projectId}/runners`,
     path: (child?: string) =>
-      child === undefined ? "/acme/projects/p-1/runners" : `/acme/projects/p-1/runners/${child}`,
+      view.projectId === undefined
+        ? child === undefined
+          ? "/acme/runners"
+          : `/acme/runners/${child}`
+        : child === undefined
+          ? `/acme/projects/${view.projectId}/runners`
+          : `/acme/projects/${view.projectId}/runners/${child}`,
   }),
 }));
 vi.mock("./api/queries.js", () => ({
@@ -49,6 +56,7 @@ function wrapper({ children }: { children: React.ReactNode }): React.ReactElemen
 
 beforeEach(() => {
   allowed.value = true;
+  view.projectId = "p-1";
   useRunners.mockReset();
   deleteMutate.mockClear();
   revokeMutate.mockClear();
@@ -64,6 +72,13 @@ describe("useRunnersOverview", () => {
     const { result } = renderHook(() => useRunnersOverview("acme"), { wrapper });
     expect(useRunners).toHaveBeenCalledWith("acme", "ws-id", "p-1", true);
     expect(result.current.runners).toEqual([]);
+  });
+
+  it("reads the workspace aggregate when the area has no project scope", () => {
+    view.projectId = undefined;
+    useRunners.mockReturnValue({ data: [] });
+    renderHook(() => useRunnersOverview("acme"), { wrapper });
+    expect(useRunners).toHaveBeenCalledWith("acme", "ws-id", null, true);
   });
 
   it("passes the denied state to the list read", () => {

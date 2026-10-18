@@ -1,10 +1,14 @@
+// @vitest-environment jsdom
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Runners reads (NEWFRONT-540, RUN-002/RUN-004). The list, the rail and the
 // pods share key builders; the list polls on the short cadence, pods slower,
 // and each scope narrows server-side.
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
 import type { ApiClient } from "@pidash/api-client";
+import { createElement, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { contractMocks } = vi.hoisted(() => ({ contractMocks: { listRunners: vi.fn(), listPods: vi.fn() } }));
@@ -14,9 +18,15 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
   return { ...original, ...contractMocks };
 });
 
-const { resetAppClient } = await import("../../../core/api/client.js");
-const { PODS_POLL_INTERVAL_MS, RUNNERS_POLL_INTERVAL_MS, runnersPodsQueryOptions, runnersQueryOptions } =
-  await import("./queries.js");
+const { createAppClient, resetAppClient } = await import("../../../core/api/client.js");
+const {
+  PODS_POLL_INTERVAL_MS,
+  RUNNERS_POLL_INTERVAL_MS,
+  runnersPodsQueryOptions,
+  runnersQueryOptions,
+  useRunners,
+  useRunnersPods,
+} = await import("./queries.js");
 const { runnersKeys } = await import("./keys.js");
 
 const client = {} as ApiClient;
@@ -74,5 +84,31 @@ describe("runnersPodsQueryOptions", () => {
 
   it("orders the list read before the pod read", () => {
     expect(RUNNERS_POLL_INTERVAL_MS).toBeLessThan(PODS_POLL_INTERVAL_MS);
+  });
+});
+
+describe("useRunners / useRunnersPods", () => {
+  it("mounts the list read and passes the enabled flag through", async () => {
+    contractMocks.listRunners.mockResolvedValue([]);
+    contractMocks.listPods.mockResolvedValue([]);
+    createAppClient("https://api.test", () => new Promise<never>(() => {}));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+
+    const workspaceList = renderHook(() => useRunners("acme", "ws-id", null), { wrapper });
+    await waitFor(() => expect(workspaceList.result.current.isSuccess).toBe(true));
+    expect(contractMocks.listRunners).toHaveBeenCalledWith(expect.anything(), "ws-id", {});
+
+    const projectList = renderHook(() => useRunners("acme", "ws-id", "p-1"), { wrapper });
+    await waitFor(() => expect(projectList.result.current.isSuccess).toBe(true));
+    expect(contractMocks.listRunners).toHaveBeenCalledWith(expect.anything(), "ws-id", { projectId: "p-1" });
+
+    const pods = renderHook(() => useRunnersPods("acme", "ws-id", null), { wrapper });
+    await waitFor(() => expect(pods.result.current.isSuccess).toBe(true));
+    expect(contractMocks.listPods).toHaveBeenCalledWith(expect.anything(), { workspaceId: "ws-id" });
+
+    const disabled = renderHook(() => useRunners("acme", "ws-id", null, false), { wrapper });
+    expect(disabled.result.current.fetchStatus).toBe("idle");
   });
 });

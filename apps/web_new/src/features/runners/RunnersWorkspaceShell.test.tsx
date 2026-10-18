@@ -36,12 +36,14 @@ function workspace(role: number): Workspace {
   return { id: "ws-id", name: "Acme", slug: "acme", logo_url: null, total_members: 2, role } as Workspace;
 }
 
-function renderShell(role: number | null): void {
+function renderShell(role: number | null, seedList = true): void {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
   if (role !== null) queryClient.setQueryData(sessionKeys.workspaces, [workspace(role)]);
-  queryClient.setQueryData(runnersKeys.list("acme", null), [
-    { id: "r-1", name: "alpha", status: "online", enrolled_at: null },
-  ]);
+  if (seedList) {
+    queryClient.setQueryData(runnersKeys.list("acme", null), [
+      { id: "r-1", name: "alpha", status: "online", enrolled_at: null },
+    ]);
+  }
   render(
     <QueryClientProvider client={queryClient}>
       <RunnersWorkspaceShell workspaceSlug="acme" workspaceId="ws-id">
@@ -73,6 +75,12 @@ describe("RunnersWorkspaceShell", () => {
     // the one inside the tab strip.
     const tabs = within(screen.getByTestId("runners-tabs"));
     expect(tabs.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("renders an empty rail while the runner list is still absent", () => {
+    renderShell(15, false);
+    expect(screen.getByText("AI Agents")).toBeInTheDocument();
+    expect(screen.getByText("No runners connected yet.")).toBeInTheDocument();
   });
 
   it("denies a guest inside the area", () => {

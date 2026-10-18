@@ -91,6 +91,19 @@ describe("useRunnerPodFilter", () => {
     expect(result.current.selectedPodId).toBeNull();
   });
 
+  it("falls back to no pods while the list is undefined mid-refetch", () => {
+    const { result, rerender } = renderHook(
+      (props: { pods: Pod[] | undefined; podsLoaded: boolean }) =>
+        useRunnerPodFilter({ runners: [runner("a", "p-1")], ...props }),
+      { initialProps: { pods: [pod("p-1")] as Pod[] | undefined, podsLoaded: true } }
+    );
+    act(() => result.current.toggle("p-1"));
+    rerender({ pods: undefined, podsLoaded: false });
+    expect(result.current.selectedPodId).toBeNull();
+    expect(result.current.selectedPod).toBeNull();
+    expect(result.current.runners.map((row) => row.id)).toEqual(["a"]);
+  });
+
   it("narrows to nothing mid-load when the pods are not there yet", () => {
     const { result } = renderHook(() => useRunnerPodFilter({ runners: undefined, pods: undefined, podsLoaded: false }));
     expect(result.current.runners).toEqual([]);
