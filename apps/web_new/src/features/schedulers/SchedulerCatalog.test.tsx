@@ -168,6 +168,8 @@ describe("SchedulerCatalog", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Deleting…" })).toBeDisabled());
     expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Close dialog" })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
     reject(new Error("Down"));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Could not delete scheduler", expect.any(String)));
     expect(screen.getByRole("dialog")).toBeInTheDocument();

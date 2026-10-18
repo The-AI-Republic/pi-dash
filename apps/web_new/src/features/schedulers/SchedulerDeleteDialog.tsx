@@ -25,7 +25,7 @@ export function SchedulerDeleteDialog({
     <Dialog
       open={scheduler !== null}
       onOpenChange={(next) => {
-        if (!next) onClose();
+        if (!next && !remove.isPending) onClose();
       }}
       nonDismissable={remove.isPending}
       title="Delete scheduler"
