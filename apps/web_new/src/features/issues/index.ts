@@ -204,3 +204,40 @@ export { useGanttViewport, clampScroll, FALLBACK_VIEWPORT_WIDTH } from "./gantt/
 export type { GanttViewport } from "./gantt/useGanttViewport.js";
 export { AnalyticsEntry, groupCounts } from "./analytics/AnalyticsEntry.js";
 export type { AnalyticsEntryProps } from "./analytics/AnalyticsEntry.js";
+export type { SpreadsheetLayoutProps } from "./spreadsheet/SpreadsheetLayout.js";
+export {
+  SHEET_COLUMNS,
+  SHEET_DEFAULT_ORDER,
+  SHEET_SORT_ASCENDING_LABEL,
+  SHEET_SORT_CLEAR_LABEL,
+  SHEET_SORT_DESCENDING_LABEL,
+  SHEET_SORT_STORAGE_KEY,
+  activeSheetSort,
+  isSheetColumnKey,
+  moveSheetFocus,
+  parseStoredSheetSort,
+  resolveSheetSort,
+  serializeSheetSort,
+  sheetCellId,
+  sheetFirstCellId,
+  sheetSortOrder,
+  sheetSortState,
+  visibleSheetColumns,
+} from "./spreadsheet/model.js";
+export type { SheetCell, SheetColumn, SheetSort, SheetSortDirection, SheetSortState } from "./spreadsheet/model.js";
+export {
+  SHEET_PAGE_SIZE,
+  flattenSheetPages,
+  sheetFailureDetail,
+  sheetIssuesQueryOptions,
+  sheetTempIssueRow,
+  sheetTotalCount,
+  useSheetCreateIssue,
+  useSheetCycleUpdate,
+  useSheetFieldUpdate,
+  useSheetModuleUpdate,
+  withSheetIssueFields,
+  withSheetPages,
+} from "./spreadsheet/data.js";
+export { isEditableColumn } from "./spreadsheet/cells.js";
+export { SHEET_SUB_ISSUE_LIMIT, sheetSubIssuesQueryOptions } from "./spreadsheet/subIssues.js";
