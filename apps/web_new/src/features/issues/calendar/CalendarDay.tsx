@@ -22,6 +22,7 @@ export interface CalendarDayProps {
   cell: CalendarCell;
   rows: IssueListItem[];
   totalRows: number;
+  workspaceSlug: string;
   projectIdentifier: string;
   stateColors: ReadonlyMap<string, string>;
   stateMeta: ReadonlyMap<string, { name: string; group: string }>;
@@ -61,6 +62,7 @@ export function CalendarDay({
   cell,
   rows,
   totalRows,
+  workspaceSlug,
   projectIdentifier,
   stateColors,
   stateMeta,
@@ -135,6 +137,7 @@ export function CalendarDay({
             <CalendarBlock
               key={issue.id}
               issue={issue}
+              workspaceSlug={workspaceSlug}
               projectIdentifier={projectIdentifier}
               stateColor={stateColorFor(issue, stateColors)}
               stateName={stateMetaFor(issue, stateMeta)?.name ?? null}

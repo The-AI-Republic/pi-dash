@@ -66,6 +66,7 @@ function renderGrid(overrides: Partial<React.ComponentProps<typeof CalendarGrid>
       totalsByDay={new Map([["2026-10-15", 1]])}
       extraRowsByDay={new Map()}
       loadingDay={null}
+      workspaceSlug="acme"
       projectIdentifier="WEB"
       stateColors={new Map()}
       stateMeta={new Map()}

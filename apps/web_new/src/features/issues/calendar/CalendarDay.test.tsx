@@ -63,6 +63,7 @@ function renderDay(overrides: Partial<React.ComponentProps<typeof CalendarDay>> 
       cell={CELL}
       rows={[]}
       totalRows={0}
+      workspaceSlug="acme"
       projectIdentifier="WEB"
       stateColors={new Map()}
       stateMeta={new Map()}

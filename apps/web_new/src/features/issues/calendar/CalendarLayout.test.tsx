@@ -465,6 +465,12 @@ describe("CalendarLayout", () => {
     expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
   });
 
+  it("deep-links blocks through the workspace browse route", async () => {
+    renderLayout();
+    const block = await screen.findByRole("link", { name: "WEB-42" });
+    expect(block).toHaveAttribute("href", "/acme/browse/WEB-42");
+  });
+
   it("forwards contextual cycle and module membership to calendar writes", async () => {
     renderLayout({ membership: { cycleId: "823e4567-e89b-12d3-a456-426614174007" } });
     await screen.findByRole("link", { name: "WEB-42" });

@@ -61,6 +61,7 @@ function renderBlock(
   render(
     <CalendarBlock
       issue={issue}
+      workspaceSlug="acme"
       projectIdentifier="WEB"
       stateColor="#00ff00"
       highlighted={highlighted}
@@ -88,6 +89,7 @@ describe("CalendarBlock", () => {
     const user = userEvent.setup();
     const link = screen.getByRole("link", { name: "WEB-42" });
     expect(link).toHaveAttribute("id", `issue-${ISSUE_ID}`);
+    expect(link).toHaveAttribute("href", "/acme/browse/WEB-42");
     expect(link).toHaveTextContent("WEB-42");
     expect(link).toHaveTextContent("Fix login");
     expect(link.querySelector("span[aria-hidden='true']")).toHaveStyle({ backgroundColor: "#00ff00" });

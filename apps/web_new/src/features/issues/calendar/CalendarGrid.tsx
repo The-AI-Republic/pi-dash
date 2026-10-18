@@ -19,6 +19,7 @@ export interface CalendarGridProps {
   totalsByDay: ReadonlyMap<string, number>;
   extraRowsByDay: ReadonlyMap<string, IssueListItem[]>;
   loadingDay: string | null;
+  workspaceSlug: string;
   projectIdentifier: string;
   stateColors: ReadonlyMap<string, string>;
   stateMeta: ReadonlyMap<string, { name: string; group: string }>;
@@ -47,6 +48,7 @@ function Day({ cell, props }: { cell: CalendarCell; props: CalendarGridProps }):
       cell={cell}
       rows={props.rowsByDay.get(cell.iso) ?? []}
       totalRows={props.totalsByDay.get(cell.iso) ?? props.rowsByDay.get(cell.iso)?.length ?? 0}
+      workspaceSlug={props.workspaceSlug}
       projectIdentifier={props.projectIdentifier}
       stateColors={props.stateColors}
       stateMeta={props.stateMeta}

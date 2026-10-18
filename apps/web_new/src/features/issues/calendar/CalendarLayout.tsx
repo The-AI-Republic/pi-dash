@@ -355,6 +355,7 @@ export function CalendarLayout({
         totalsByDay={totalsByDay}
         extraRowsByDay={extraRowsByDay}
         loadingDay={loadingDay}
+        workspaceSlug={workspaceSlug}
         projectIdentifier={projectIdentifier}
         stateColors={stateColors}
         stateMeta={stateMeta}

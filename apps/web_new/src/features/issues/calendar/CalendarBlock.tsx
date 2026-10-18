@@ -21,6 +21,7 @@ export const CALENDAR_DRAG_THRESHOLD_PX = 4;
 
 export interface CalendarBlockProps {
   issue: IssueListItem;
+  workspaceSlug: string;
   projectIdentifier: string;
   stateColor: string | null;
   stateName?: string | null;
@@ -74,6 +75,7 @@ export function blockIdentifier(projectIdentifier: string, issue: IssueListItem)
 
 export function CalendarBlock({
   issue,
+  workspaceSlug,
   projectIdentifier,
   stateColor,
   stateName = null,
@@ -169,7 +171,7 @@ export function CalendarBlock({
     <a
       ref={anchorRef}
       id={rowDomId(issue.id)}
-      href={`/${projectIdentifier}/${issue.sequence_id}`}
+      href={`/${workspaceSlug}/browse/${identifier}`}
       draggable={false}
       aria-label={temp ? `${issue.name}, saving` : identifier}
       data-highlight={highlighted ? "true" : undefined}
