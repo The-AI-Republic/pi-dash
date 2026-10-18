@@ -1972,6 +1972,12 @@ fn blank_json_reason(raw: &[u8]) -> Option<String> {
 /// is byte-exact (see [`blank_json_reason`]); anything else carries
 /// the parser reason after the same prefix (the analytics
 /// `json_parse_denial` precedent).
+///
+/// Out-of-range number literals never reach here: this crate parses with
+/// serde's `arbitrary_precision`, so `1e999` is accepted as raw text
+/// (Django's `json.load` makes it `inf`). Python number semantics are
+/// applied downstream where the value is consumed — `python_float` for
+/// `sort_order`, the JSONField check for a serializer field.
 fn json_parse_denial(raw: &[u8], error: &serde_json::Error) -> Denial {
     let reason = blank_json_reason(raw).unwrap_or_else(|| format!("JSON parse error - {error}"));
     Denial::Raw(
@@ -3663,6 +3669,8 @@ async fn validate_one_field(
         "description_text" => {
             if value.is_null() {
                 out.description_text = Some(None);
+            } else if json_has_nonfinite_float(value) {
+                return fail("Value must be valid JSON.".to_owned());
             } else {
                 out.description_text = Some(Some(value.clone()));
             }
@@ -3670,6 +3678,8 @@ async fn validate_one_field(
         "description_html" => {
             if value.is_null() {
                 out.description_html = Some(None);
+            } else if json_has_nonfinite_float(value) {
+                return fail("Value must be valid JSON.".to_owned());
             } else {
                 out.description_html = Some(Some(value.clone()));
             }
@@ -3693,6 +3703,8 @@ async fn validate_one_field(
         "icon_prop" => {
             if value.is_null() {
                 out.icon_prop = Some(None);
+            } else if json_has_nonfinite_float(value) {
+                return fail("Value must be valid JSON.".to_owned());
             } else {
                 out.icon_prop = Some(Some(value.clone()));
             }
@@ -3752,6 +3764,9 @@ async fn validate_one_field(
         "logo_props" => {
             if value.is_null() {
                 return fail("This field may not be null.".to_owned());
+            }
+            if json_has_nonfinite_float(value) {
+                return fail("Value must be valid JSON.".to_owned());
             }
             out.logo_props = Some(value.clone());
         }
@@ -6071,6 +6086,15 @@ async fn user_views_post(
         // (Python `float()` spellings), anything else raises → 500.
         Some(value) => python_float(value).ok_or(Denial::ServerError)?,
     };
+    // psycopg adapts these jsonb values with `json.dumps`, which emits the
+    // `Infinity` token for a non-finite float; Postgres rejects it → the
+    // `DataError` generic 500, before any write. (`float8` `sort_order`
+    // accepts `inf` above, like `float8` in Django — only jsonb is strict.)
+    for value in [&view_props, &default_props, &preferences] {
+        if json_has_nonfinite_float(value) {
+            return Err(Denial::ServerError);
+        }
+    }
     let now = utc_now_micros();
     sqlx::query(
         r#"UPDATE project_members SET view_props = $1, default_props = $2, preferences = $3,
@@ -6089,6 +6113,39 @@ async fn user_views_post(
     Ok(no_content())
 }
 
+/// Python `float(<json number literal>)` for a parsed JSON `Number`.
+/// serde's `as_f64` cannot help: this crate enables `arbitrary_precision`,
+/// where it returns `None` for every non-finite value. Finite literals keep
+/// their value; a **float** literal past `f64` range saturates to `+/-inf`
+/// (CPython `float()`), while an **integer** literal past `f64` range raises
+/// `OverflowError` (`None` here, the caller's 500). The literal text — its
+/// `./e/E` grammar — is what tells the two apart.
+fn python_number_f64(number: &serde_json::Number) -> Option<f64> {
+    let text = number.as_str();
+    let value: f64 = text.parse().ok()?;
+    if value.is_finite() || text.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+/// Whether any number in `value` is a **float** literal past `f64` range
+/// (`1e999` → `inf`, the JSON `json.load` produces). DRF's `JSONField`
+/// encodes input with `allow_nan=False`, so such a value is its
+/// `Value must be valid JSON.` field error; a direct model save instead
+/// reaches Postgres' jsonb `DataError` (the generic 500). A huge
+/// *integer* literal is not flagged — Python keeps it an `int` and jsonb
+/// stores the exact numeric.
+fn json_has_nonfinite_float(value: &Value) -> bool {
+    match value {
+        Value::Number(number) => python_number_f64(number).is_some_and(|float| !float.is_finite()),
+        Value::Array(items) => items.iter().any(json_has_nonfinite_float),
+        Value::Object(map) => map.values().any(json_has_nonfinite_float),
+        Value::Null | Value::Bool(_) | Value::String(_) => false,
+    }
+}
+
 /// Python `float(value)` for the `sort_order` write: bools → 1.0/0.0,
 /// numbers verbatim, strings stripped (exactly Rust `White_Space` —
 /// U+001C-U+001F raise) and parsed, everything else `None` (→ 500,
@@ -6103,7 +6160,7 @@ fn python_float(value: &Value) -> Option<f64> {
         Value::Null | Value::Array(_) | Value::Object(_) => None,
         Value::Bool(true) => Some(1.0),
         Value::Bool(false) => Some(0.0),
-        Value::Number(number) => number.as_f64(),
+        Value::Number(number) => python_number_f64(number),
         Value::String(text) => {
             let text = text.trim_matches(|ch: char| ch.is_whitespace());
             if text.is_empty() {
@@ -6864,6 +6921,47 @@ mod tests {
         assert_eq!(python_float(&json!("１_２")), Some(12.0));
         assert!(python_float(&json!("\u{1c}1.5")).is_none());
         assert_eq!(python_float(&json!("\u{85}1.5")), Some(1.5));
+    }
+
+    /// Out-of-range JSON *float* literals saturate to `+/-inf` (CPython
+    /// `float()`); out-of-range *integer* literals raise (`None`), like
+    /// `float(int)`'s `OverflowError`. `arbitrary_precision` keeps the
+    /// literal text so `1e999` parses at all (`Number::as_f64` is `None`).
+    #[test]
+    fn python_float_saturates_out_of_range_float_literals() {
+        let one_e_nine_nine_nine: Value = serde_json::from_str("1e999").unwrap();
+        assert!(python_float(&one_e_nine_nine_nine).unwrap().is_infinite());
+        assert!(python_float(&one_e_nine_nine_nine)
+            .unwrap()
+            .is_sign_positive());
+        let neg: Value = serde_json::from_str("-1e999").unwrap();
+        assert!(python_float(&neg).unwrap().is_infinite());
+        assert!(python_float(&neg).unwrap().is_sign_negative());
+        assert_eq!(
+            python_float(&serde_json::from_str::<Value>("1e-999").unwrap()),
+            Some(0.0)
+        );
+        // Integer literals past `f64` range are `None`, not `inf`.
+        let huge_int: Value = serde_json::from_str(&format!("1{}", "0".repeat(400))).unwrap();
+        assert!(python_float(&huge_int).is_none());
+        // A huge but finite integer literal still converts.
+        let big_int: Value = serde_json::from_str(&format!("1{}", "0".repeat(300))).unwrap();
+        assert_eq!(python_float(&big_int), Some(1e300));
+    }
+
+    /// `json_has_nonfinite_float` sees nested floats only; huge integer
+    /// literals stay JSON-clean (jsonb stores the exact numeric).
+    #[test]
+    fn json_nonfinite_float_detection() {
+        let inf: Value = serde_json::from_str(r#"{"x": 1e999}"#).unwrap();
+        assert!(json_has_nonfinite_float(&inf));
+        let nested: Value = serde_json::from_str(r#"{"a": [1, {"b": -1e999}]}"#).unwrap();
+        assert!(json_has_nonfinite_float(&nested));
+        let huge_int: Value =
+            serde_json::from_str(&format!("{{\"x\": 1{}}}", "0".repeat(400))).unwrap();
+        assert!(!json_has_nonfinite_float(&huge_int));
+        let plain: Value = serde_json::from_str(r#"{"x": "1e999", "y": 1.5}"#).unwrap();
+        assert!(!json_has_nonfinite_float(&plain));
     }
 
     #[test]
