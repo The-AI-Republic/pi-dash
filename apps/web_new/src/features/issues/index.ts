@@ -148,3 +148,24 @@ export type { DateRangeCalendarProps, DateRangeMode, DateRangePickerProps } from
 export { useWeekStart } from "./dropdowns/weekStart.js";
 export { ISSUE_DATES_FAILED_TITLE, useUpdateIssueDates, withIssueDates } from "./api/dates.js";
 export type { IssueDatesInput } from "./api/dates.js";
+export {
+  DISPLAY_SECTION_ORDER,
+  DISPLAY_SECTION_TITLES,
+  DISPLAY_SWITCH_LABELS,
+  EPIC_SUB_ISSUE_COUNT_LABEL,
+  GROUP_DIMENSION_LABELS,
+  GROUP_NONE_LABEL,
+  ORDER_OPTION_LABELS,
+  PROPERTY_PILL_LABELS,
+  groupDimensionLabel,
+  isPropertyShown,
+  layoutDisplayMatrix,
+  propertyPillLabel,
+  visibleGroupDimensions,
+  visiblePropertyKeys,
+} from "./display/matrix.js";
+export type { DisplayFeatureFlags, DisplaySection, DisplaySwitchKey, LayoutDisplayMatrix } from "./display/matrix.js";
+export { DisplayPanel } from "./display/DisplayPanel.js";
+export type { DisplayPanelProps, DisplayPanelState } from "./display/DisplayPanel.js";
+export { DisplayControl } from "./display/DisplayControl.js";
+export type { DisplayControlProps } from "./display/DisplayControl.js";

@@ -240,6 +240,16 @@ describe("project issues screen", () => {
     expect(row).not.toHaveClass("h-8");
   });
 
+  it("mounts the Display control in the desktop and mobile headers", () => {
+    renderScreen({}, 1, [issueRow()]);
+
+    const triggers = screen.getAllByTestId("display-options-trigger");
+    expect(triggers).toHaveLength(2);
+    for (const trigger of triggers) {
+      expect(trigger).toHaveAccessibleName("Display");
+    }
+  });
+
   it("passes the compact density through from the search param", () => {
     const now = new Date().toISOString();
     renderScreen({ layout: "compact" }, 1, [issueRow({ created_at: now, updated_at: now })]);

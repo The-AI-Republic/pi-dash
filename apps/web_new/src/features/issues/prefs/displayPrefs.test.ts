@@ -24,6 +24,7 @@ describe("parseDisplayPrefs", () => {
         sub_group_by: "priority",
         order_by: "-created_at",
         show_empty_groups: true,
+        sub_issue: true,
         calendar: { layout: "week", show_weekends: false },
       },
       { state: false, priority: true }
@@ -34,6 +35,7 @@ describe("parseDisplayPrefs", () => {
       subGroupBy: "priority",
       orderBy: "-created_at",
       showEmptyGroups: true,
+      showSubIssues: true,
       calendar: { mode: "week", showWeekends: false },
       properties: { state: false, priority: true },
     });
@@ -46,6 +48,7 @@ describe("parseDisplayPrefs", () => {
       subGroupBy: null,
       orderBy: "sort_order",
       showEmptyGroups: false,
+      showSubIssues: false,
       calendar: { mode: "month", showWeekends: true },
       properties: {},
     });
@@ -59,6 +62,7 @@ describe("parseDisplayPrefs", () => {
         sub_group_by: ["state"],
         order_by: "",
         show_empty_groups: "yes",
+        sub_issue: 1,
         calendar: "june",
       },
       { state: "no", priority: true }
@@ -68,6 +72,7 @@ describe("parseDisplayPrefs", () => {
     expect(prefs.subGroupBy).toBeNull();
     expect(prefs.orderBy).toBe("sort_order");
     expect(prefs.showEmptyGroups).toBe(false);
+    expect(prefs.showSubIssues).toBe(false);
     expect(prefs.calendar).toEqual({ mode: "month", showWeekends: true });
     expect(prefs.properties).toEqual({ priority: true });
   });
@@ -101,12 +106,22 @@ describe("buildPrefsPatch", () => {
         order_by: "sort_order",
         sub_group_by: null,
         show_empty_groups: false,
+        sub_issue: false,
         calendar: { layout: "month", show_weekends: true },
       },
       display_properties: {},
     });
     expect(patch.filters).toBeUndefined();
     expect(patch.rich_filters).toBeUndefined();
+  });
+
+  it("writes the sub-issue switch explicitly on every patch", () => {
+    const patch = buildPrefsPatch(record({ display_filters: { layout: "list", sub_issue: true } }), {
+      showEmptyGroups: true,
+    });
+    expect(patch.display_filters?.["sub_issue"]).toBe(true);
+    const flipped = buildPrefsPatch(record({ display_filters: { layout: "list" } }), { showSubIssues: true });
+    expect(flipped.display_filters?.["sub_issue"]).toBe(true);
   });
 
   it("keeps unknown stored keys riding along inside each object", () => {

@@ -21,4 +21,18 @@ describe("issue search", () => {
     expect(parseIssueSearch("list")).toEqual({});
     expect(parseIssueSearch(null)).toEqual({});
   });
+
+  it("drops display and filter keys: display state is never URL deep-linkable (ISS-106)", () => {
+    expect(
+      parseIssueSearch({
+        layout: "list",
+        group_by: "state",
+        sub_group_by: "priority",
+        order_by: "-created_at",
+        show_empty_groups: true,
+        sub_issue: true,
+        display_properties: { state: false },
+      })
+    ).toEqual({ layout: "list" });
+  });
 });
