@@ -7,12 +7,25 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { NotificationItem, NotificationListResponse } from "@pidash/api-client";
 import * as React from "react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
+  return { ...original, notifySuccess: vi.fn(), notifyError: vi.fn() };
+});
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { ROLE_ADMIN, ROLE_GUEST } from "../../../core/session/index.js";
 import { sessionKeys } from "../../../core/session/queries.js";
+import { notifySuccess } from "../../../shared/shell/index.js";
 import { notificationKeys } from "../api/keys.js";
+import {
+  MARKED_ARCHIVED_TITLE,
+  MARKED_READ_TITLE,
+  SNOOZED_TITLE,
+  UNARCHIVED_TITLE,
+  UNSNOOZED_TITLE,
+} from "../api/mutations.js";
 import { notificationTabQuery } from "../lib/stream.js";
 import { InboxView } from "./InboxView.js";
 
@@ -161,12 +174,13 @@ function renderView(options: ViewOptions = {}): { calls: string[] } {
 
 function cardTitles(): string[] {
   return screen
-    .getAllByTestId("inbox-card")
+    .queryAllByTestId("inbox-card")
     .map((card) => within(card).getByTestId("inbox-card-title").textContent ?? "");
 }
 
 beforeEach(() => {
   resetAppClient();
+  vi.clearAllMocks();
 });
 
 describe("InboxView", () => {
@@ -295,5 +309,222 @@ describe("InboxView", () => {
     expect(cardTitles()).toEqual(["Ship it"]);
     await waitFor(() => expect(document.title).toContain("acme"));
     expect(document.title).toContain("Inbox");
+  });
+});
+
+interface WriteScript {
+  /** Per-call bit: status for each per-item write, in call order. */
+  statuses?: number[];
+}
+
+/** Stub transport that answers the two entry reads plus per-item writes. */
+function renderWritable(options: {
+  rows: NotificationItem[];
+  unread?: { total_unread_notifications_count: number; mention_unread_notifications_count: number };
+  script?: WriteScript;
+}): { writes: Array<{ method: string; url: string; body: string }> } {
+  const unread = options.unread ?? UNREAD;
+  const server = new Map(options.rows.map((entry) => [entry.id, entry]));
+  const writes: Array<{ method: string; url: string; body: string }> = [];
+  const json = (url: string, payload: unknown) => ({
+    status: 200,
+    url,
+    headers: { get: () => null },
+    text: async () => JSON.stringify(payload),
+  });
+  createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+    if (url.endsWith("/auth/get-csrf-token/")) return json(url, { csrf_token: "csrf" });
+    const method = init.method ?? "GET";
+    if (url.includes("/users/notifications/unread/")) return json(url, unread);
+    if (url.includes("/users/notifications") && method === "GET") {
+      const body = url.includes("mentioned=true") ? page([]) : page([...server.values()]);
+      return json(url, body);
+    }
+    const item = [...server.values()].find((entry) => url.includes(entry.id));
+    if (item === undefined) throw new Error(`unexpected write ${url}`);
+    writes.push({ method, url, body: init.body ?? "{}" });
+    const status = options.script?.statuses?.[writes.length - 1] ?? 200;
+    if (status !== 200) {
+      return {
+        status,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ detail: "parity write failure" }),
+      };
+    }
+    let next: NotificationItem = item;
+    if (url.endsWith("/read/")) next = { ...item, read_at: method === "POST" ? "2026-10-17T10:00:00Z" : null };
+    else if (url.endsWith("/archive/")) {
+      next = { ...item, archived_at: method === "POST" ? "2026-10-17T10:00:00Z" : null };
+    } else {
+      next = { ...item, snoozed_till: (JSON.parse(init.body ?? "{}") as { snoozed_till: string | null }).snoozed_till };
+    }
+    server.set(item.id, next);
+    return json(url, next);
+  }) as never);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  queryClient.setQueryData(sessionKeys.workspaces, [workspaceEntry(ROLE_ADMIN)]);
+  queryClient.setQueryData(notificationKeys.unread("acme"), unread);
+  render(
+    <QueryClientProvider client={queryClient}>
+      <InboxView workspaceSlug="acme" />
+    </QueryClientProvider>
+  );
+  return { writes };
+}
+
+function firstCard(): HTMLElement {
+  const [card] = screen.getAllByTestId("inbox-card");
+  if (card === undefined) throw new Error("no card rendered");
+  return card;
+}
+
+function storyRow(title: string, overrides: Partial<NotificationItem> = {}): NotificationItem {
+  return row({
+    data: {
+      issue: { id: ISSUE_ID, name: title, identifier: "ENG", sequence_id: 12 },
+      issue_activity: { verb: "created", field: "comment", issue_comment: title },
+    },
+    ...overrides,
+  });
+}
+
+describe("InboxView card actions", () => {
+  it("marks a card read from its hover row and toasts", async () => {
+    const user = userEvent.setup();
+    const { writes } = renderWritable({ rows: [storyRow("Ship it")] });
+    await screen.findByText("Ship it");
+
+    await user.click(within(firstCard()).getByTestId("inbox-card-read-action"));
+
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(MARKED_READ_TITLE));
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.method).toBe("POST");
+    expect(writes[0]?.url).toContain("/read/");
+    await waitFor(() => expect(screen.getByTestId("inbox-card")).toHaveAttribute("data-unread", "false"));
+  });
+
+  it("leaves a card in place when its read write fails", async () => {
+    const user = userEvent.setup();
+    renderWritable({ rows: [storyRow("Ship it")], script: { statuses: [500] } });
+    await screen.findByText("Ship it");
+
+    await user.click(within(firstCard()).getByTestId("inbox-card-read-action"));
+
+    await waitFor(() => expect(within(firstCard()).getByTestId("inbox-card-read-action")).not.toBeDisabled());
+    expect(firstCard()).toHaveAttribute("data-unread", "true");
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("archives a card out of the default stream", async () => {
+    const user = userEvent.setup();
+    renderWritable({
+      rows: [storyRow("Ship it"), storyRow("Keep me", { id: "a23e4567-e89b-12d3-a456-426614174009" })],
+    });
+    await screen.findByText("Ship it");
+
+    const [ship] = screen.getAllByTestId("inbox-card");
+    await user.click(within(ship as HTMLElement).getByTestId("inbox-card-archive-action"));
+
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(MARKED_ARCHIVED_TITLE));
+    await waitFor(() => expect(cardTitles()).toEqual(["Keep me"]));
+  });
+
+  it("snoozes a card from the menu with the preset's delay", async () => {
+    const user = userEvent.setup();
+    const { writes } = renderWritable({ rows: [storyRow("Ship it")] });
+    await screen.findByText("Ship it");
+
+    await user.click(within(firstCard()).getByTestId("snooze-trigger"));
+    await user.click(await screen.findByTestId("snooze-option-day-1"));
+
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(SNOOZED_TITLE));
+    expect(writes[0]?.method).toBe("PATCH");
+    const sent = JSON.parse(writes[0]?.body ?? "{}") as { snoozed_till: string };
+    const delta = new Date(sent.snoozed_till).getTime() - Date.now();
+    expect(delta).toBeGreaterThan(24 * 60 * 60 * 1000 - 60_000);
+    expect(delta).toBeLessThan(24 * 60 * 60 * 1000 + 60_000);
+    await waitFor(() => expect(cardTitles()).toEqual([]));
+  });
+
+  it("keeps a card in place when its snooze write fails", async () => {
+    const user = userEvent.setup();
+    renderWritable({ rows: [storyRow("Ship it")], script: { statuses: [500] } });
+    await screen.findByText("Ship it");
+
+    await user.click(within(firstCard()).getByTestId("snooze-trigger"));
+    await user.click(await screen.findByTestId("snooze-option-day-3"));
+
+    await waitFor(() => expect(within(firstCard()).getByTestId("inbox-card-read-action")).not.toBeDisabled());
+    expect(cardTitles()).toEqual(["Ship it"]);
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("snoozes to the moment picked in the custom dialog", async () => {
+    const user = userEvent.setup();
+    const { writes } = renderWritable({ rows: [storyRow("Ship it")] });
+    await screen.findByText("Ship it");
+
+    await user.click(within(firstCard()).getByTestId("snooze-trigger"));
+    await user.click(await screen.findByTestId("snooze-option-custom"));
+    await screen.findByTestId("snooze-custom-dialog");
+    await user.click(screen.getByRole("button", { name: "Pick a date" }));
+    const target = new Date();
+    target.setDate(target.getDate() + 2);
+    await user.click(
+      await screen.findByRole("button", {
+        name: new RegExp(`^\\w+ ${target.getDate()}, ${target.getFullYear()}$`),
+      })
+    );
+    await user.click(screen.getByRole("button", { name: "Pick a time" }));
+    const panel = await screen.findByRole("listbox", { name: "Pick a time" });
+    await user.click(within(panel).getByRole("button", { name: /^AM$/ }));
+    await user.click(within(panel).getByRole("option", { name: "10:30" }));
+    await user.click(screen.getByRole("button", { name: "Submit" }));
+
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(SNOOZED_TITLE));
+    expect(writes[0]?.method).toBe("PATCH");
+    const sent = JSON.parse(writes[0]?.body ?? "{}") as { snoozed_till: string };
+    const expected = new Date(target.getFullYear(), target.getMonth(), target.getDate(), 10, 30);
+    expect(sent.snoozed_till).toBe(expected.toISOString());
+    await waitFor(() => expect(screen.queryByTestId("snooze-custom-dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(cardTitles()).toEqual([]));
+  });
+
+  it("unarchives a card from archived mode and toasts", async () => {
+    const user = userEvent.setup();
+    const archived = storyRow("Put away", {
+      id: "d23e4567-e89b-12d3-a456-426614174012",
+      archived_at: "2026-10-17T09:00:00Z",
+    });
+    renderWritable({ rows: [storyRow("Ship it"), archived] });
+    await screen.findByText("Ship it");
+
+    const putAway = screen.getByRole("article", { name: "Put away (unread)" });
+    await user.click(within(putAway).getByTestId("inbox-card-archive-action"));
+
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(UNARCHIVED_TITLE));
+    const [ship, returned] = screen.getAllByTestId("inbox-card");
+    expect(within(ship as HTMLElement).getByTestId("inbox-card-title")).toHaveTextContent("Ship it");
+    expect(within(returned as HTMLElement).queryByTestId("inbox-card-archive-action")).toHaveAttribute(
+      "aria-label",
+      "Archive"
+    );
+  });
+
+  it("removes an existing snooze from the menu", async () => {
+    const user = userEvent.setup();
+    const snoozed = storyRow("Nap time", {
+      id: "e23e4567-e89b-12d3-a456-426614174013",
+      snoozed_till: "2026-10-19T17:30:00Z",
+    });
+    const { writes } = renderWritable({ rows: [snoozed] });
+    await screen.findByText("Nap time");
+
+    await user.click(within(firstCard()).getByTestId("snooze-trigger"));
+    await user.click(await screen.findByTestId("snooze-option-unsnooze"));
+
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(UNSNOOZED_TITLE));
+    expect(JSON.parse(writes[0]?.body ?? "{}")).toEqual({ snoozed_till: null });
   });
 });
