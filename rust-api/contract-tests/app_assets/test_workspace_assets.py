@@ -8,6 +8,7 @@ and links the entity; ``GET`` redirects to a presigned download URL once
 
 import base64
 import json
+from urllib.parse import parse_qs, urlparse
 
 from . import seed_assets as seed_a
 
@@ -151,6 +152,28 @@ def test_get_after_upload_redirects(org):
     assert row["asset"] in location
     assert "response-content-disposition=attachment" in location
     assert "logo.png" in location
+
+
+def test_get_empty_name_bare_disposition(org):
+    # An empty-string name is a truthy-but-falsy value: Django's
+    # `_get_content_disposition` (storage.py:115-124) treats `""` as falsy
+    # and signs the redirect with a bare `attachment`, no `filename*` part.
+    # The stored state is reachable through the API — the empty name is
+    # accepted by POST — so Rust must serve the same signed redirect.
+    asset_id = org.request(
+        "POST", ws_base(org), "admin", json=ws_payload(org, name="")
+    ).json()["asset_id"]
+    r = org.request("PATCH", ws_detail(org, asset_id), "admin", json={})
+    assert r.status_code == 204, r.text
+    row = seed_a.fetch(org.conn, asset_id)
+    assert row["is_uploaded"] is True
+    assert row["attributes"]["name"] == ""
+
+    r = org.request("GET", ws_detail(org, asset_id), "admin")
+    assert r.status_code == 302, r.text
+    location = r.headers["location"]
+    disposition = parse_qs(urlparse(location).query)["response-content-disposition"][0]
+    assert disposition == "attachment"
 
 
 def test_get_unknown_asset_404(org):
