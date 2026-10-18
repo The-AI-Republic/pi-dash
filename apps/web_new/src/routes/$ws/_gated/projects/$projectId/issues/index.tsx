@@ -17,6 +17,7 @@ import * as React from "react";
 import { invalidateWorkspace } from "../../../../../../core/query/optimistic.js";
 import { isProjectGateError } from "../../../../../../features/auth/index.js";
 import {
+  CalendarEntry,
   DisplayControl,
   IssuesLayoutRoot,
   ListSkeleton,
@@ -233,7 +234,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
 
     // Layout slices extend the offered list with their renderer; the
     // Display control resolves the same active layout from it.
-    const offered: readonly LayoutKind[] = ["list", "gantt_chart", "spreadsheet"];
+    const offered: readonly LayoutKind[] = ["list", "gantt_chart", "spreadsheet", "calendar"];
     const weekStart = useWeekStart();
     const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at != null });
     const addWorkItem = canCreate ? (
@@ -306,6 +307,17 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
                   weekStart={weekStart}
                 />
               </React.Suspense>
+            );
+          }
+          if (active === "calendar") {
+            return (
+              <CalendarEntry
+                workspaceSlug={params.ws}
+                projectId={params.projectId}
+                projectIdentifier={project.identifier}
+                entity={{ scope: "project", projectId: params.projectId }}
+                canEdit={canEdit}
+              />
             );
           }
           const ResolvedListLayout = resolvedListLayout();

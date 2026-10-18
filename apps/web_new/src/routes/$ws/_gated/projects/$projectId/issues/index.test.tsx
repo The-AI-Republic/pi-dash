@@ -312,10 +312,10 @@ function issueRow(overrides: Partial<IssueListItem> = {}): IssueListItem {
   };
 }
 
-function prefsSeed(): PrefsRecord {
+function prefsSeed(layout = "list"): PrefsRecord {
   return {
     filters: {},
-    display_filters: { layout: "list", group_by: null, order_by: "sort_order" },
+    display_filters: { layout, group_by: null, order_by: "sort_order" },
     display_properties: {},
     rich_filters: {},
   };
@@ -815,5 +815,29 @@ describe("project issues screen", () => {
 
     expect(screen.getByRole("heading", { name: "No matching issues" })).toBeInTheDocument();
     expect(screen.getByText("No issues match the current filters.")).toBeInTheDocument();
+  });
+
+  it("mounts the calendar renderer for a stored calendar layout", async () => {
+    renderScreen({}, 1, [issueRow({ target_date: "2026-10-15" })], {
+      layout: "calendar",
+      group_by: null,
+      order_by: "sort_order",
+    });
+
+    expect(await screen.findByTestId("issues-calendar")).toBeInTheDocument();
+    expect(screen.queryByLabelText("WEB-42")).not.toBeInTheDocument();
+  });
+
+  it("renders an archived project's calendar without edit controls", async () => {
+    renderScreen(
+      {},
+      1,
+      [issueRow({ target_date: "2026-10-15" })],
+      { layout: "calendar", group_by: null, order_by: "sort_order" },
+      [{ ...projectSeed(), archived_at: "2026-10-01T00:00:00Z" }]
+    );
+
+    expect(await screen.findByTestId("issues-calendar")).toBeInTheDocument();
+    expect(screen.queryByText("Add work item")).not.toBeInTheDocument();
   });
 });
