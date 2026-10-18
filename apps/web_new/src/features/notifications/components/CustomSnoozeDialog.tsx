@@ -52,9 +52,17 @@ function Section({ heading, children }: { heading: string; children: React.React
   );
 }
 
-function DayTrigger({ day, onPick }: { day: string | null; onPick: (iso: string) => void }): React.ReactElement {
+function DayTrigger({
+  day,
+  min,
+  onPick,
+}: {
+  day: string | null;
+  /** Earliest offered day, taken from the dialog's clock. */
+  min: string;
+  onPick: (iso: string) => void;
+}): React.ReactElement {
   const [open, setOpen] = React.useState(false);
-  const min = earliestSnoozeDay(Date.now());
   return (
     <Popover
       open={open}
@@ -244,7 +252,11 @@ export function CustomSnoozeDialog({
     >
       <div data-testid="snooze-custom-dialog" className="flex flex-col gap-(--space-8)">
         <Section heading={DATE_SECTION_HEADING}>
-          <DayTrigger day={pick.day} onPick={(iso) => setPick((current) => ({ ...current, day: iso, slot: null }))} />
+          <DayTrigger
+            day={pick.day}
+            min={earliestSnoozeDay(nowMs)}
+            onPick={(iso) => setPick((current) => ({ ...current, day: iso, slot: null }))}
+          />
         </Section>
         <Section heading={TIME_SECTION_HEADING}>
           <TimeTrigger

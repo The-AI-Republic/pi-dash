@@ -23,6 +23,20 @@ import {
 
 const AFTERNOON = new Date(2026, 9, 17, 14, 10, 0, 0).getTime();
 
+/** Local ISO day `offset` days from the pinned clock. */
+function dayFrom(nowMs: number, offset: number): string {
+  const date = new Date(nowMs);
+  date.setDate(date.getDate() + offset);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+/** The calendar's assistive day name for a local ISO day. */
+function dayName(day: string): RegExp {
+  const [year, month, date] = day.split("-").map(Number) as [number, number, number];
+  const monthName = new Date(year, month - 1, date).toLocaleString("en-US", { month: "long" });
+  return new RegExp(`^${monthName} ${date}, ${year}$`);
+}
+
 function renderDialog(
   options: {
     open?: boolean;
@@ -49,9 +63,7 @@ function renderDialog(
 
 async function pickDay(user: ReturnType<typeof userEvent.setup>, day: string): Promise<void> {
   await user.click(screen.getByRole("button", { name: DATE_SECTION_HEADING }));
-  await user.click(
-    await screen.findByRole("button", { name: new RegExp(`^\\w+ ${Number(day.slice(-2))}, ${day.slice(0, 4)}$`) })
-  );
+  await user.click(await screen.findByRole("button", { name: dayName(day) }));
 }
 
 async function pickTime(user: ReturnType<typeof userEvent.setup>, meridiem: "AM" | "PM", slot: string): Promise<void> {
@@ -66,13 +78,14 @@ describe("CustomSnoozeDialog", () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();
     const onSubmit = (): Promise<unknown> => Promise.resolve();
+    const clock = AFTERNOON;
     const view = render(
-      <CustomSnoozeDialog open={false} onOpenChange={onOpenChange} onSubmit={onSubmit} now={() => AFTERNOON} />
+      <CustomSnoozeDialog open={false} onOpenChange={onOpenChange} onSubmit={onSubmit} now={() => clock} />
     );
-    view.rerender(<CustomSnoozeDialog open onOpenChange={onOpenChange} onSubmit={onSubmit} now={() => AFTERNOON} />);
+    view.rerender(<CustomSnoozeDialog open onOpenChange={onOpenChange} onSubmit={onSubmit} now={() => clock} />);
     await screen.findByTestId("snooze-custom-dialog");
     expect(screen.getByRole("button", { name: DATE_SECTION_HEADING })).toHaveTextContent("Choose a day");
-    await pickDay(user, "2026-10-19");
+    await pickDay(user, dayFrom(AFTERNOON, 2));
     await pickTime(user, "AM", "10:30");
     expect(screen.getByRole("button", { name: TIME_SECTION_HEADING })).toHaveTextContent("10:30 AM");
     await user.click(screen.getByRole("button", { name: TIME_SECTION_HEADING }));
@@ -103,7 +116,7 @@ describe("CustomSnoozeDialog", () => {
     const user = userEvent.setup();
     const { submitted, onOpenChange } = renderDialog();
     await screen.findByTestId("snooze-custom-dialog");
-    await pickDay(user, "2026-10-19");
+    await pickDay(user, dayFrom(AFTERNOON, 2));
     await user.click(screen.getByRole("button", { name: CUSTOM_SNOOZE_SUBMIT }));
     expect(screen.getByTestId("snooze-custom-dialog")).toBeInTheDocument();
     expect(submitted).toHaveLength(0);
@@ -114,7 +127,7 @@ describe("CustomSnoozeDialog", () => {
     const user = userEvent.setup();
     const { submitted, onOpenChange } = renderDialog();
     await screen.findByTestId("snooze-custom-dialog");
-    await pickDay(user, "2026-10-19");
+    await pickDay(user, dayFrom(AFTERNOON, 2));
     await pickTime(user, "AM", "10:30");
     await user.click(screen.getByRole("button", { name: CUSTOM_SNOOZE_SUBMIT }));
     await waitFor(() => expect(submitted).toHaveLength(1));
@@ -126,7 +139,7 @@ describe("CustomSnoozeDialog", () => {
     const user = userEvent.setup();
     renderDialog();
     await screen.findByTestId("snooze-custom-dialog");
-    await pickDay(user, "2026-10-19");
+    await pickDay(user, dayFrom(AFTERNOON, 2));
     await user.click(screen.getByRole("button", { name: TIME_SECTION_HEADING }));
     const panel = await screen.findByRole("listbox", { name: TIME_SECTION_HEADING });
     expect(within(panel).getAllByRole("option")).toHaveLength(24);
@@ -140,7 +153,7 @@ describe("CustomSnoozeDialog", () => {
     const user = userEvent.setup();
     renderDialog();
     await screen.findByTestId("snooze-custom-dialog");
-    await pickDay(user, "2026-10-17");
+    await pickDay(user, dayFrom(AFTERNOON, 0));
     await user.click(screen.getByRole("button", { name: TIME_SECTION_HEADING }));
     const panel = await screen.findByRole("listbox", { name: TIME_SECTION_HEADING });
     // 14:10 has passed every morning slot and the current afternoon one.
@@ -156,7 +169,7 @@ describe("CustomSnoozeDialog", () => {
     const lateEvening = new Date(2026, 9, 17, 23, 45, 0, 0).getTime();
     renderDialog({ nowMs: lateEvening });
     await screen.findByTestId("snooze-custom-dialog");
-    await pickDay(user, "2026-10-17");
+    await pickDay(user, dayFrom(lateEvening, 0));
     await user.click(screen.getByRole("button", { name: TIME_SECTION_HEADING }));
     const panel = await screen.findByRole("listbox", { name: TIME_SECTION_HEADING });
     await user.click(within(panel).getByRole("button", { name: /^AM$/ }));
@@ -169,7 +182,7 @@ describe("CustomSnoozeDialog", () => {
     const user = userEvent.setup();
     const { submitted } = renderDialog();
     await screen.findByTestId("snooze-custom-dialog");
-    await pickDay(user, "2026-10-19");
+    await pickDay(user, dayFrom(AFTERNOON, 2));
     await pickTime(user, "PM", "12:30");
     await user.click(screen.getByRole("button", { name: CUSTOM_SNOOZE_SUBMIT }));
     await waitFor(() => expect(submitted).toHaveLength(1));
@@ -180,7 +193,7 @@ describe("CustomSnoozeDialog", () => {
     const user = userEvent.setup();
     const { submitted } = renderDialog();
     await screen.findByTestId("snooze-custom-dialog");
-    await pickDay(user, "2026-10-19");
+    await pickDay(user, dayFrom(AFTERNOON, 2));
     await pickTime(user, "AM", "12:30");
     await user.click(screen.getByRole("button", { name: CUSTOM_SNOOZE_SUBMIT }));
     await waitFor(() => expect(submitted).toHaveLength(1));
@@ -194,7 +207,7 @@ describe("CustomSnoozeDialog", () => {
     });
     const { onOpenChange } = renderDialog({ onSubmit: failed });
     await screen.findByTestId("snooze-custom-dialog");
-    await pickDay(user, "2026-10-19");
+    await pickDay(user, dayFrom(AFTERNOON, 2));
     await pickTime(user, "AM", "10:30");
     await user.click(screen.getByRole("button", { name: CUSTOM_SNOOZE_SUBMIT }));
     await waitFor(() => expect(failed).toHaveBeenCalledTimes(1));
@@ -217,7 +230,7 @@ describe("CustomSnoozeDialog", () => {
       <CustomSnoozeDialog open onOpenChange={onOpenChange} onSubmit={() => Promise.resolve()} now={() => clock} />
     );
     await screen.findByTestId("snooze-custom-dialog");
-    await pickDay(user, "2026-10-17");
+    await pickDay(user, dayFrom(clock, 0));
     await pickTime(user, "AM", "09:30");
     expect(screen.getByRole("button", { name: TIME_SECTION_HEADING })).toHaveTextContent("09:30 AM");
     clock = new Date(2026, 9, 17, 10, 0, 0, 0).getTime();
@@ -232,7 +245,7 @@ describe("CustomSnoozeDialog", () => {
     const pendingWrite = vi.fn(() => new Promise<unknown>(() => {}));
     renderDialog({ onSubmit: pendingWrite });
     await screen.findByTestId("snooze-custom-dialog");
-    await pickDay(user, "2026-10-19");
+    await pickDay(user, dayFrom(AFTERNOON, 2));
     await pickTime(user, "AM", "10:30");
     await user.click(screen.getByRole("button", { name: CUSTOM_SNOOZE_SUBMIT }));
     await waitFor(() => expect(pendingWrite).toHaveBeenCalledTimes(1));
@@ -247,11 +260,11 @@ describe("CustomSnoozeDialog", () => {
     const user = userEvent.setup();
     const { submitted } = renderDialog();
     await screen.findByTestId("snooze-custom-dialog");
-    await pickDay(user, "2026-10-19");
+    await pickDay(user, dayFrom(AFTERNOON, 2));
     await pickTime(user, "AM", "10:30");
     // Switch to today, where 10:30 has passed: the slot clears and a
     // submit needs a new time.
-    await pickDay(user, "2026-10-17");
+    await pickDay(user, dayFrom(AFTERNOON, 0));
     await user.click(screen.getByRole("button", { name: CUSTOM_SNOOZE_SUBMIT }));
     expect(submitted).toHaveLength(0);
     expect(screen.getByTestId("snooze-missing-parts")).toBeInTheDocument();
