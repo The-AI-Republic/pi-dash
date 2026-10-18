@@ -16,12 +16,28 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { clearCommands } from "../../../shared/commands/index.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { issueKeys } from "../api/keys.js";
-import { GanttPeekPanel } from "./GanttPeekPanel.js";
+import { GanttPeekPanel, stateNameOf } from "./GanttPeekPanel.js";
 import type { GanttRow } from "./rows.js";
+import { ganttStatesKey } from "./useGanttData.js";
 
 const SLUG = "acme";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const ISSUE = "323e4567-e89b-12d3-a456-426614174002";
+const STATE = "423e4567-e89b-12d3-a456-426614174003";
+
+const STATES = [
+  {
+    id: STATE,
+    project_id: PROJECT,
+    workspace_id: "523e4567-e89b-12d3-a456-426614174004",
+    name: "In Progress",
+    color: "#2563eb",
+    group: "started" as const,
+    default: false,
+    description: "",
+    sequence: 2,
+  },
+];
 
 const ROW: GanttRow = {
   id: ISSUE,
@@ -79,7 +95,9 @@ interface Call {
   body: string;
 }
 
-function renderPanel(options: { detail?: Issue | null; hold?: boolean; seed?: boolean } = {}) {
+function renderPanel(
+  options: { detail?: Issue | null; hold?: boolean; seed?: boolean; states?: typeof STATES | false } = {}
+) {
   document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
   const calls: Call[] = [];
   let release: () => void = () => {};
@@ -118,6 +136,9 @@ function renderPanel(options: { detail?: Issue | null; hold?: boolean; seed?: bo
   }) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   if (options.seed !== false) queryClient.setQueryData(issueKeys.detail(SLUG, ISSUE), options.detail ?? issue());
+  if (options.states !== false) {
+    queryClient.setQueryData(ganttStatesKey(SLUG, PROJECT), options.states ?? STATES);
+  }
   const onClose = vi.fn();
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -145,12 +166,12 @@ describe("GanttPeekPanel", () => {
     renderPanel({
       seed: false,
       detail: issue({
-        state_id: "423e4567-e89b-12d3-a456-426614174003",
+        state_id: STATE,
         start_date: "2026-10-01",
         target_date: "2026-10-05",
       } as Partial<Issue>),
     });
-    expect(await screen.findByText("Assigned")).toBeInTheDocument();
+    expect(await screen.findByText("In Progress")).toBeInTheDocument();
     expect(screen.getByText("2026-10-01")).toBeInTheDocument();
     expect(screen.getByText("2026-10-05")).toBeInTheDocument();
   });
@@ -166,6 +187,21 @@ describe("GanttPeekPanel", () => {
     renderPanel({ detail: issue() });
     expect(await screen.findByText("No state")).toBeInTheDocument();
     expect(screen.getAllByText("Not set")).toHaveLength(2);
+  });
+
+  it("falls back to no state when the id is not in the project's states", async () => {
+    renderPanel({
+      detail: issue({ state_id: "623e4567-e89b-12d3-a456-426614174005" } as Partial<Issue>),
+    });
+    expect(await screen.findByText("No state")).toBeInTheDocument();
+  });
+
+  it("falls back to no state until the state list arrives", async () => {
+    renderPanel({
+      detail: issue({ state_id: STATE } as Partial<Issue>),
+      states: false,
+    });
+    expect(await screen.findByText("No state")).toBeInTheDocument();
   });
 
   it("persists a renamed title through the issue PATCH", async () => {
@@ -185,5 +221,16 @@ describe("GanttPeekPanel", () => {
     expect(h.onClose).toHaveBeenCalledTimes(1);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(h.onClose).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("stateNameOf", () => {
+  it("names a known state", () => {
+    expect(stateNameOf(STATES, STATE)).toBe("In Progress");
+  });
+
+  it("reads an unset state and an unknown id as no state", () => {
+    expect(stateNameOf(STATES, null)).toBe("No state");
+    expect(stateNameOf(STATES, "missing")).toBe("No state");
   });
 });

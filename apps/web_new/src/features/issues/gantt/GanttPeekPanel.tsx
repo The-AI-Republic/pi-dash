@@ -3,9 +3,11 @@
 // See the LICENSE file for details.
 // Timeline peek panel (parity/specs/issues.md §14, ISS-049/165). Reuses
 // the shell's shared panel: the eyebrow carries the short key, the title
-// stays editable through the issue PATCH, and the body shows the parent
-// context while the full peek composition lands with its own slice. The
-// detail query hydrates behind a skeleton so the panel never flashes.
+// stays editable through the issue PATCH, and the body names the issue's
+// state plus its dates while the full peek composition lands with its own
+// slice (ISS-165). The detail query hydrates behind a skeleton so the panel
+// never flashes; the state name resolves through the project's state list
+// the timeline already reads for bar tints.
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import * as React from "react";
@@ -17,12 +19,19 @@ import { PeekPanel } from "../../../shared/shell/index.js";
 import { useUpdateIssue } from "../api/mutations.js";
 import { issueDetailQueryOptions } from "../api/queries.js";
 import type { GanttRow } from "./rows.js";
+import { useGanttStates } from "./useGanttData.js";
 
 export interface GanttPeekPanelProps {
   workspaceSlug: string;
   projectId: string;
   row: GanttRow;
   onClose: () => void;
+}
+
+/** Name of the state a row belongs to; "No state" when unset or unknown. */
+export function stateNameOf(states: readonly { id: string; name: string }[], stateId: string | null): string {
+  if (stateId === null) return "No state";
+  return states.find((state) => state.id === stateId)?.name ?? "No state";
 }
 
 function PeekBody({
@@ -35,10 +44,11 @@ function PeekBody({
   issueId: string;
 }) {
   const { data } = useSuspenseQuery(issueDetailQueryOptions(getAppClient(), workspaceSlug, projectId, issueId));
+  const states = useGanttStates(workspaceSlug, projectId);
   return (
     <dl className="text-body grid grid-cols-[max-content_1fr] gap-(--space-2) text-(--text)">
       <dt className="text-(--text-muted)">State</dt>
-      <dd>{data.state_id === null ? "No state" : "Assigned"}</dd>
+      <dd>{stateNameOf(states, data.state_id)}</dd>
       <dt className="text-(--text-muted)">Start</dt>
       <dd>{data.start_date ?? "Not set"}</dd>
       <dt className="text-(--text-muted)">Target</dt>
