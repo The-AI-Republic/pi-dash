@@ -2471,10 +2471,10 @@ const SERIALIZER_FIELDS: &[&str] = &[
 /// and no explicit ordering (the model's `-created_at` default applies).
 /// `fields=` itself is discarded (`DynamicBaseSerializer` overwrites it
 /// with `expand`), and `expand` only ever *adds* nested keys, so the base
-/// shape below is what every `fields`-only request renders. Nested
-/// `expand` objects (the expansion mapper + `issue_attachments`) are a
-/// known residual gap: the contract suite never sends `expand` on this
-/// path, and the nested lite-serializer fleet is out of pilot scope.
+/// shape below is what every `fields`-only request renders. `?expand=`
+/// sends the rows through the shared [`expand`] kernel (expansion mapper +
+/// `issue_attachments` leg + `sub_issues` 500); only `?expand=issue_cycle`
+/// stays an unrendered residual gap (see `expand`'s residual-gap list).
 async fn serializer_list(
     context: &ListContext,
     query: &QueryMap,
@@ -2669,8 +2669,9 @@ fn permission_exists_fragment(binder: &mut Binder, gate: &Gate) -> String {
 ///   returns raw values; no `user_timezone_converter` runs here),
 /// - `fields=` is ignored by the serializer and `expand=` only appends
 ///   relation arrays, so with no `expand` the shape is [`DETAIL_FIELDS`].
-///   `expand=issue_relation|issue_related` is a known gap (recorded in the
-///   workpad; the contract suite never sends it).
+///   `expand=issue_relation|issue_related` appends the inline relation dicts
+///   ([`expand::append_detail_list_expand`]); every other name — including
+///   `sub_issues` — is silently ignored.
 pub async fn detail_list(
     State(state): State<AppState>,
     Path((slug, project_id)): Path<(String, String)>,

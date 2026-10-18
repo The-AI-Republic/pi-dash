@@ -391,7 +391,8 @@ async fn render_assignees(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial
     let rows = super::fetch_json_rows(
         pool,
         "SELECT u.id FROM issue_assignees ia JOIN users u ON u.id = ia.assignee_id \
-         WHERE ia.issue_id = $1 AND ia.deleted_at IS NULL",
+         WHERE ia.issue_id = $1 AND ia.deleted_at IS NULL \
+         ORDER BY u.created_at DESC",
         vec![uuid_value(issue_id)],
     )
     .await?;
@@ -410,7 +411,8 @@ async fn render_labels(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial> {
         pool,
         "SELECT l.parent_id, l.name, l.color, l.id, l.project_id, l.workspace_id, l.sort_order \
          FROM labels l JOIN issue_labels il ON il.label_id = l.id \
-         WHERE il.issue_id = $1 AND il.deleted_at IS NULL AND l.deleted_at IS NULL",
+         WHERE il.issue_id = $1 AND il.deleted_at IS NULL AND l.deleted_at IS NULL \
+         ORDER BY l.created_at DESC",
         vec![uuid_value(issue_id)],
     )
     .await?;
@@ -449,8 +451,10 @@ enum RelationSide {
 }
 
 /// `issue_relation` / `issue_related`: relation rows joined to the
-/// *counterpart* issue's lite columns. Django's related manager applies no
-/// `ORDER BY`, so neither does this query.
+/// *counterpart* issue's lite columns. Both are reverse FK managers over
+/// `IssueRelation` (`related_name` on each FK), so Django applies
+/// `IssueRelation.Meta.ordering` = `("-created_at",)` — hence
+/// `ORDER BY issue_relations.created_at DESC`.
 async fn render_relations(
     pool: &PgPool,
     issue_id: Uuid,
@@ -466,7 +470,8 @@ async fn render_relations(
         "SELECT o.id, o.project_id, o.sequence_id, o.name, r.relation_type, o.state_id, \
                 o.priority, r.created_by_id, r.created_at, r.updated_at, r.updated_by_id \
          FROM issue_relations r JOIN issues o ON o.id = {other_col} \
-         WHERE {side_col} = $1 AND r.deleted_at IS NULL"
+         WHERE {side_col} = $1 AND r.deleted_at IS NULL \
+         ORDER BY r.created_at DESC"
     );
     let rows = super::fetch_json_rows(pool, &sql, vec![uuid_value(issue_id)]).await?;
     use pidash_services::app_issues::{
@@ -548,7 +553,8 @@ async fn render_reactions(pool: &PgPool, issue_id: Uuid) -> Result<Value, Denial
         pool,
         "SELECT r.id, r.actor_id, r.issue_id, r.reaction, u.display_name AS display_name \
          FROM issue_reactions r JOIN users u ON u.id = r.actor_id \
-         WHERE r.issue_id = $1 AND r.deleted_at IS NULL",
+         WHERE r.issue_id = $1 AND r.deleted_at IS NULL \
+         ORDER BY r.created_at DESC",
         vec![uuid_value(issue_id)],
     )
     .await?;
@@ -710,7 +716,8 @@ async fn render_detail_list_relations(
         "SELECT o.id, o.project_id, o.sequence_id, o.name, r.relation_type, o.state_id, \
                 o.priority, o.created_by_id, o.created_at, o.updated_at, o.updated_by_id \
          FROM issue_relations r JOIN issues o ON o.id = {other_col} \
-         WHERE {side_col} = $1 AND r.deleted_at IS NULL"
+         WHERE {side_col} = $1 AND r.deleted_at IS NULL \
+         ORDER BY r.created_at DESC"
     );
     let rows = super::fetch_json_rows(pool, &sql, vec![uuid_value(issue_id)]).await?;
     let mut out = Vec::with_capacity(rows.len());

@@ -285,3 +285,142 @@ def test_unknown_expand_name_is_ignored(clients, seed):
         body = resp.json()
         row = _row_for(body, i1) if endpoint in ("flat", "detail_list") else body
         assert "unknown_xyz" not in row, endpoint
+
+
+# --- nested-array ordering --------------------------------------------------
+#
+# Every `expand` array is ordered by the serialized model's `Meta.ordering`
+# (`("-created_at",)`): the joined *target* for the M2M fleets (`Label` /
+# `User`) and the related model itself for the reverse-FK fleets
+# (`IssueReaction` / `IssueRelation`). The seed has one row of each, so
+# without a >=2-row pin a missing `ORDER BY` stays invisible (PIDASHCONV-1143
+# review). This test seeds a dedicated issue with distinct `created_at`
+# values whose *through/link* timestamps are deliberately reversed, so it
+# only passes when the ordering keys on the target model, not the link row.
+
+def test_nested_array_ordering_follows_model_meta(clients, seed, db_conn):
+    import uuid as _uuid
+    from datetime import datetime, timedelta, timezone
+
+    from app_issues.conftest import ISSUE_COLUMNS, USER_COLUMNS, _issue_row, _user_row
+
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project"]
+    ws_id = seed["ws"]
+    i2, i3, i4 = seed["issue2"], seed["issue3"], seed["issue4"]
+    T = datetime.now(timezone.utc)
+    oid = str(_uuid.uuid4())
+    la, lb = str(_uuid.uuid4()), str(_uuid.uuid4())
+    ua, ub = str(_uuid.uuid4()), str(_uuid.uuid4())
+    uname_a = "ordprobe_a_" + _uuid.uuid4().hex[:8]
+    uname_b = "ordprobe_b_" + _uuid.uuid4().hex[:8]
+    try:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO issues (%s) VALUES (%s)"
+                % (ISSUE_COLUMNS, ",".join(["%s"] * 19)),
+                _issue_row(oid, "ordering probe", "low", 900,
+                           seed["admin"], pid, seed["state_backlog"], ws_id),
+            )
+            # Labels: label.created_at new->old, issue_labels the reverse.
+            for lid, name, cts in ((la, "ORD_L_A", T - timedelta(hours=3)),
+                                   (lb, "ORD_L_B", T - timedelta(hours=2))):
+                cur.execute(
+                    "INSERT INTO labels (created_at, updated_at, id, name,"
+                    " description, created_by_id, project_id, updated_by_id,"
+                    " workspace_id, color, sort_order)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (cts, cts, lid, name, "", seed["admin"], pid, seed["admin"],
+                     ws_id, "#123456", 0.0),
+                )
+            for lid, lts in ((la, T - timedelta(minutes=1)),
+                             (lb, T - timedelta(minutes=2))):
+                cur.execute(
+                    "INSERT INTO issue_labels (created_at, updated_at, id,"
+                    " created_by_id, issue_id, label_id, project_id,"
+                    " updated_by_id, workspace_id)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (lts, lts, str(_uuid.uuid4()), seed["admin"], oid, lid,
+                     pid, seed["admin"], ws_id),
+                )
+            # Users: user.created_at new->old, issue_assignees the reverse.
+            for uid, uname, uts in ((ua, uname_a, T - timedelta(hours=3)),
+                                    (ub, uname_b, T - timedelta(hours=2))):
+                cur.execute(
+                    "INSERT INTO users (%s) VALUES (%s)"
+                    % (USER_COLUMNS, ",".join(["%s"] * 29)),
+                    _user_row(uid, uname, uname + "@example.com", uname),
+                )
+                cur.execute("UPDATE users SET created_at=%s WHERE id=%s", (uts, uid))
+            for uid, ats in ((ua, T - timedelta(minutes=10)),
+                             (ub, T - timedelta(minutes=20))):
+                cur.execute(
+                    "INSERT INTO issue_assignees (created_at, updated_at, id,"
+                    " assignee_id, created_by_id, issue_id, project_id,"
+                    " updated_by_id, workspace_id)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (ats, ats, str(_uuid.uuid4()), uid, seed["admin"], oid,
+                     pid, seed["admin"], ws_id),
+                )
+            # Reactions: created_at new->old.
+            for reaction, rts in (("ORD_R_A", T - timedelta(hours=3)),
+                                  ("ORD_R_B", T - timedelta(hours=2))):
+                cur.execute(
+                    "INSERT INTO issue_reactions (created_at, updated_at, id,"
+                    " reaction, actor_id, created_by_id, issue_id, project_id,"
+                    " updated_by_id, workspace_id)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (rts, rts, str(_uuid.uuid4()), reaction, seed["member"],
+                     seed["member"], oid, pid, seed["member"], ws_id),
+                )
+            # Relations: outgoing (issue=oid) and incoming (related_issue=oid),
+            # created_at newest-first only under `ORDER BY created_at DESC`.
+            for rel_issue, rel_related, rts in (
+                (oid, i2, T - timedelta(hours=4)),
+                (oid, i3, T - timedelta(hours=5)),
+                (i2, oid, T - timedelta(hours=7)),
+                (i4, oid, T - timedelta(hours=1)),
+            ):
+                cur.execute(
+                    "INSERT INTO issue_relations (created_at, updated_at, id,"
+                    " relation_type, created_by_id, issue_id, project_id,"
+                    " related_issue_id, updated_by_id, workspace_id)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (rts, rts, str(_uuid.uuid4()), "relates_to", seed["admin"],
+                     rel_issue, pid, rel_related, seed["admin"], ws_id),
+                )
+
+        base = _base(ws, pid)
+        detail = f"{base}/issues/{oid}/"
+
+        labels = _get(admin, detail, "labels").json()["labels"]
+        assert [row["name"] for row in labels] == ["ORD_L_B", "ORD_L_A"]
+
+        assignees = _get(admin, detail, "assignees").json()["assignees"]
+        assert [row["display_name"] for row in assignees] == [uname_b, uname_a]
+
+        reactions = _get(admin, detail, "issue_reactions").json()["issue_reactions"]
+        assert [row["reaction"] for row in reactions] == ["ORD_R_B", "ORD_R_A"]
+
+        relations = _get(admin, detail, "issue_relation").json()["issue_relation"]
+        assert [row["id"] for row in relations] == [i2, i3]
+
+        related = _get(admin, detail, "issue_related").json()["issue_related"]
+        assert [row["id"] for row in related] == [i4, i2]
+
+        # `issues-detail/`'s inline dicts share the same `-created_at` order.
+        body = _get(admin, f"{base}/issues-detail/", "issue_relation").json()
+        row = _row_for(body, oid)
+        assert [entry["id"] for entry in row["issue_relation"]] == [i2, i3]
+    finally:
+        with db_conn.cursor() as cur:
+            for table in ("issue_labels", "issue_assignees", "issue_reactions"):
+                cur.execute("DELETE FROM %s WHERE issue_id = %%s" % table, (oid,))
+            cur.execute(
+                "DELETE FROM issue_relations WHERE issue_id = %s"
+                " OR related_issue_id = %s",
+                (oid, oid),
+            )
+            cur.execute("DELETE FROM labels WHERE id IN (%s,%s)", (la, lb))
+            cur.execute("DELETE FROM users WHERE id IN (%s,%s)", (ua, ub))
+            cur.execute("DELETE FROM issues WHERE id = %s", (oid,))
