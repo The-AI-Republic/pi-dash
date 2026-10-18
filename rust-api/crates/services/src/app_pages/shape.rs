@@ -195,8 +195,8 @@ pub const PAGE_LABEL_ROW_COLUMNS: &[&str] = &["label_id", "page_id", "workspace_
 pub const BINARY_MAX_SIZE: usize = 10 * 1024 * 1024;
 
 /// `SUSPICIOUS_BINARY_PATTERNS` (`content_validator.py:19-26`), matched
-/// case-insensitively against the first 200 chars of the UTF-8-lossy
-/// decode (`:61-64`).
+/// case-insensitively against the first 200 chars of the UTF-8 decode with
+/// `errors="ignore"` (`:61-64`).
 pub const SUSPICIOUS_BINARY_PATTERNS: &[&str] = &[
     "<html",
     "<!doctype",
@@ -234,9 +234,15 @@ pub fn is_blank(value: &str) -> bool {
 /// Returns `Ok(())` for empty input (`:40-41`); otherwise enforces the
 /// 10MB ceiling (`:53-54`), the 4-byte format floor (`:57-58`), and the
 /// case-insensitive suspicious-pattern scan over the first 200 chars of
-/// the UTF-8-lossy decode (`:61-64`; `errors="ignore"` drops undecodable
-/// bytes, `from_utf8_lossy` replaces them — both only affect whether a
-/// suspicious ASCII pattern survives, and the patterns are pure ASCII).
+/// the UTF-8 decode (`:61-64`).
+///
+/// The decode uses `errors="ignore"`: undecodable bytes are *dropped*, not
+/// replaced. This matters — a byte made invalid does not break a pattern it
+/// sits inside (`b"<scr\xffipt"` decodes to `"<script"` and is rejected),
+/// and dropped bytes do not consume the 200-char window. `from_utf8_lossy`
+/// would instead insert U+FFFD, hiding such patterns and shifting the
+/// window; `[u8]::utf8_chunks` concatenating only the valid pieces matches
+/// CPython exactly.
 pub fn validate_binary_data(data: &[u8]) -> Result<(), &'static str> {
     if data.is_empty() {
         return Ok(());
@@ -247,7 +253,10 @@ pub fn validate_binary_data(data: &[u8]) -> Result<(), &'static str> {
     if data.len() < 4 {
         return Err(BINARY_TOO_SHORT_MESSAGE);
     }
-    let head: String = String::from_utf8_lossy(data)
+    let head: String = data
+        .utf8_chunks()
+        .map(|chunk| chunk.valid())
+        .collect::<String>()
         .chars()
         .take(200)
         .collect::<String>()
@@ -648,5 +657,43 @@ mod tests {
         );
         // str input falls through to the shared checks (content_validator.py:53-68).
         assert_eq!(validate_binary_text("YWI="), Err(BINARY_TOO_SHORT_MESSAGE));
+    }
+
+    // PIDASHCONV-1177: the decode is `errors="ignore"` (undecodable bytes
+    // dropped, not replaced with U+FFFD), so a suspicious ASCII pattern
+    // split by an invalid byte still matches, exactly like Django
+    // (content_validator.py:61-64).
+    #[test]
+    fn validator_split_pattern_vectors() {
+        for pattern in SUSPICIOUS_BINARY_PATTERNS {
+            let bytes = pattern.as_bytes();
+            let mid = bytes.len() / 2;
+            let mut payload = b"AB".to_vec();
+            payload.extend_from_slice(&bytes[..mid]);
+            payload.push(0xFF);
+            payload.extend_from_slice(&bytes[mid..]);
+            payload.extend_from_slice(b">x");
+            assert_eq!(
+                validate_binary_data(&payload),
+                Err(BINARY_SUSPICIOUS_MESSAGE),
+                "split pattern {pattern} must be rejected"
+            );
+        }
+        // The issue's exact vector: b"AB<scr\xffipt>alert(1)</scr\xffipt>".
+        assert_eq!(
+            validate_binary_data(b"AB<scr\xffipt>alert(1)</scr\xffipt>"),
+            Err(BINARY_SUSPICIOUS_MESSAGE)
+        );
+        // A genuine U+FFFD is valid UTF-8, so errors="ignore" keeps it: it
+        // breaks the pattern like any other non-matching char (the issue
+        // warns against lossy-then-strip-U+FFFD for exactly this reason).
+        assert_eq!(validate_binary_data(b"<scr\xef\xbf\xbdript>"), Ok(()));
+        // A dropped byte does not consume the 200-char window, so a pattern
+        // straddling the boundary survives (from_utf8_lossy's U+FFFD here
+        // would shift "<script" past char 200 and let it through).
+        let mut window = vec![b'a'; 193];
+        window.push(0xFF);
+        window.extend_from_slice(b"<script>");
+        assert_eq!(validate_binary_data(&window), Err(BINARY_SUSPICIOUS_MESSAGE));
     }
 }

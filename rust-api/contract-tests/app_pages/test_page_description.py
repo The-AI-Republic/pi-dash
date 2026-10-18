@@ -8,6 +8,8 @@ The GET response is a byte stream, not JSON — the suite pins the
 content-type, the attachment disposition and the exact bytes.
 """
 
+import base64
+
 import pytest
 
 from .conftest import page_url
@@ -127,3 +129,54 @@ def test_description_update_blank_binary_500_row_unchanged(user_client, world, s
         bytes(db.fetchval("SELECT description_binary FROM pages WHERE id=%s", (page["id"],)))
         == binary
     )
+
+
+# PIDASHCONV-1177: Django's validate_binary_data decodes with
+# ``errors="ignore"`` (undecodable bytes are *dropped*, not replaced), so a
+# suspicious ASCII pattern split by an invalid byte still matches and the
+# PATCH answers 400. The Rust port used ``String::from_utf8_lossy``, which
+# substitutes U+FFFD and let every split pattern through (200, bytes
+# stored). These vectors pin the Django behaviour on both backends.
+
+SUSPICIOUS_SPLIT_PATTERNS = [b"<html", b"<!doctype", b"<script", b"javascript:", b"data:", b"<iframe"]
+SUSPICIOUS_BINARY_ERROR = {
+    "description_binary": ["Invalid binary data: Binary data contains suspicious content patterns"]
+}
+
+
+def _split_pattern(pattern: bytes) -> bytes:
+    """``pattern`` with a 0xff (invalid UTF-8) byte inserted in the middle."""
+    mid = len(pattern) // 2
+    return b"AB" + pattern[:mid] + b"\xff" + pattern[mid:] + b">x"
+
+
+@pytest.mark.parametrize("pattern", SUSPICIOUS_SPLIT_PATTERNS)
+def test_description_update_binary_suspicious_pattern_split_by_invalid_byte(
+    user_client, world, seeder, db, pattern
+):
+    page = seeder.create_page(world["workspace"]["id"], world["owner"]["id"], name="Split pattern")
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], page["id"])
+    payload = _split_pattern(pattern)
+    response = user_client.patch(
+        _desc_url(world, page["id"]),
+        json={"description_binary": base64.b64encode(payload).decode()},
+    )
+    assert response.status_code == 400
+    assert response.json() == SUSPICIOUS_BINARY_ERROR
+    assert db.fetchval("SELECT description_binary FROM pages WHERE id=%s", (page["id"],)) is None
+
+
+def test_description_update_binary_suspicious_pattern_split_by_invalid_byte_issue_example(
+    user_client, world, seeder, db
+):
+    # base64 of b"AB<scr\xffipt>alert(1)</scr\xffipt>" — the exact vector from
+    # the issue.
+    page = seeder.create_page(world["workspace"]["id"], world["owner"]["id"], name="Issue example")
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], page["id"])
+    response = user_client.patch(
+        _desc_url(world, page["id"]),
+        json={"description_binary": "QUI8c2Ny/2lwdD5hbGVydCgxKTwvc2Ny/2lwdD4="},
+    )
+    assert response.status_code == 400
+    assert response.json() == SUSPICIOUS_BINARY_ERROR
+    assert db.fetchval("SELECT description_binary FROM pages WHERE id=%s", (page["id"],)) is None
