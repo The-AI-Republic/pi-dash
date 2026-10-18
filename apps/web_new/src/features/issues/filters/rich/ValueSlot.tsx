@@ -57,10 +57,13 @@ export function ValueSlot({
 }: ValueSlotProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   const selected = selectedValues(condition.value);
-  const states = usePickerStates(workspaceSlug, projectId, field.source === "states" && open);
-  const members = usePickerProjectMembers(workspaceSlug, projectId, field.source === "members" && open);
-  const directory = usePickerWorkspaceMembers(workspaceSlug, field.source === "members" && open);
-  const labels = useLabels(workspaceSlug, projectId, field.source === "labels" && open);
+  // A stored condition must resolve its names before the popup opens, so
+  // reads stay enabled while ids are selected as well as while open.
+  const readValues = open || selected.length > 0;
+  const states = usePickerStates(workspaceSlug, projectId, field.source === "states" && readValues);
+  const members = usePickerProjectMembers(workspaceSlug, projectId, field.source === "members" && readValues);
+  const directory = usePickerWorkspaceMembers(workspaceSlug, field.source === "members" && readValues);
+  const labels = useLabels(workspaceSlug, projectId, field.source === "labels" && readValues);
   const me = useMe();
   const meId = me.data?.id ?? null;
 

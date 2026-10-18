@@ -29,6 +29,38 @@ const PRIORITY = findField(FIELDS, "priority")!;
 const STATE = findField(FIELDS, "state_id")!;
 const PROJECT = "123e4567-e89b-12d3-a456-426614174000";
 const STATE_ID = "323e4567-e89b-12d3-a456-426614174002";
+const ME_ID = "11111111-1111-4111-8111-111111111111";
+const ME_ROW = {
+  id: ME_ID,
+  email: "parity@example.com",
+  username: "parity",
+  first_name: "Parity",
+  last_name: "User",
+  display_name: "Parity User",
+  avatar: "",
+  avatar_url: null,
+  cover_image: null,
+  cover_image_url: null,
+  date_joined: "2026-01-01T00:00:00.000Z",
+  user_timezone: "UTC",
+  is_active: true,
+  is_bot: false,
+  is_email_verified: true,
+  is_password_autoset: false,
+  last_login_medium: "password",
+  last_login_time: null,
+};
+const STATE_ROW = {
+  id: STATE_ID,
+  name: "Todo",
+  group: "unstarted" as const,
+  color: "#fff",
+  project_id: PROJECT,
+  workspace_id: PROJECT,
+  default: false,
+  description: "",
+  sequence: 1,
+};
 
 function condition(value: unknown = null): RichCondition {
   return { key: "a", property: "priority", operator: "in", negated: false, value };
@@ -40,19 +72,7 @@ function wrap(node: React.ReactElement, seedStates = false): React.ReactElement 
   }) as never);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   if (seedStates) {
-    client.setQueryData(pickerStatesQueryOptions({} as never, "acme", PROJECT).queryKey, [
-      {
-        id: STATE_ID,
-        name: "Todo",
-        group: "unstarted",
-        color: "#fff",
-        project_id: PROJECT,
-        workspace_id: PROJECT,
-        default: false,
-        description: "",
-        sequence: 1,
-      },
-    ]);
+    client.setQueryData(pickerStatesQueryOptions({} as never, "acme", PROJECT).queryKey, [STATE_ROW]);
   }
   return (
     <QueryClientProvider client={client}>
@@ -67,6 +87,134 @@ describe("selectedValues", () => {
     expect(selectedValues("a")).toEqual(["a"]);
     expect(selectedValues("")).toEqual([]);
     expect(selectedValues(null)).toEqual([]);
+  });
+});
+
+/** A client backed by routes, with no reference caches seeded. */
+function coldWrap(node: React.ReactElement, routes: (url: string) => unknown) {
+  createAppClient("https://api.test", (async (url: string) => {
+    if (url.endsWith("/auth/get-csrf-token/")) {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: async () => '{"csrf_token":"csrf"}',
+      };
+    }
+    const body = routes(url);
+    if (body === null) throw new Error(`unexpected url ${url}`);
+    return {
+      status: 200,
+      url,
+      headers: { get: () => "application/json" },
+      text: async () => JSON.stringify(body),
+    };
+  }) as never);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return (
+    <QueryClientProvider client={client}>
+      <React.Fragment>{node}</React.Fragment>
+    </QueryClientProvider>
+  );
+}
+
+describe("ValueSlot stored values without an open popup", () => {
+  it("resolves a persisted state name from a cold cache", async () => {
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={STATE}
+          condition={{ ...condition([STATE_ID]), property: "state_id" }}
+          onChange={() => {}}
+        />,
+        (url) => (url.endsWith("/states/") ? [STATE_ROW] : null)
+      )
+    );
+    expect(await screen.findByRole("button", { name: /Todo/ })).toBeInTheDocument();
+  });
+
+  it("resolves a persisted member name from a cold cache", async () => {
+    const ANA = "423e4567-e89b-12d3-a456-426614174003";
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, "assignee_id")!}
+          condition={{ key: "a", property: "assignee_id", operator: "in", negated: false, value: [ANA] }}
+          onChange={() => {}}
+        />,
+        (url) => {
+          if (url.endsWith("/api/users/me/")) return ME_ROW;
+          if (url.includes("/projects/") && url.endsWith("/members/")) {
+            return [
+              {
+                id: "723e4567-e89b-12d3-a456-426614174006",
+                role: 15,
+                member: ANA,
+                project: PROJECT,
+                original_role: 15,
+                created_at: "2026-01-01T00:00:00.000Z",
+              },
+            ];
+          }
+          if (url.endsWith("/members/")) {
+            return [
+              {
+                id: "823e4567-e89b-12d3-a456-426614174007",
+                member: {
+                  id: ANA,
+                  first_name: "Ana",
+                  last_name: "",
+                  avatar: "",
+                  avatar_url: null,
+                  display_name: "Ana",
+                  is_bot: false,
+                },
+                role: 15,
+                is_active: true,
+              },
+            ];
+          }
+          return null;
+        }
+      )
+    );
+    expect(await screen.findByRole("button", { name: /Ana/ })).toBeInTheDocument();
+  });
+
+  it("resolves a persisted label name from a cold cache", async () => {
+    const LABEL_ID = "b23e4567-e89b-12d3-a456-42661417400a";
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, "label_id")!}
+          condition={{ key: "a", property: "label_id", operator: "in", negated: false, value: [LABEL_ID] }}
+          onChange={() => {}}
+        />,
+        (url) =>
+          url.endsWith("/api/users/me/")
+            ? ME_ROW
+            : url.endsWith("/issue-labels/")
+              ? [
+                  {
+                    id: LABEL_ID,
+                    name: "Zeta",
+                    color: "#ff0000",
+                    project_id: PROJECT,
+                    workspace_id: PROJECT,
+                    parent: null,
+                    sort_order: 1,
+                  },
+                ]
+              : null
+      )
+    );
+    expect(await screen.findByRole("button", { name: /Zeta/ })).toBeInTheDocument();
   });
 });
 
@@ -373,5 +521,61 @@ describe("ValueSlot failure and suspended rows", () => {
     );
     await user.click(screen.getByRole("button", { name: /Select value/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load assignees values.");
+  });
+
+  it("renders a suspended member disabled and ignores a pick", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const ZOE = "523e4567-e89b-12d3-a456-426614174004";
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, "assignee_id")!}
+          condition={{ key: "a", property: "assignee_id", operator: "in", negated: false, value: null }}
+          onChange={onChange}
+        />,
+        (url) => {
+          if (url.endsWith("/api/users/me/")) return ME_ROW;
+          if (url.includes("/projects/") && url.endsWith("/members/")) {
+            return [
+              {
+                id: "923e4567-e89b-12d3-a456-426614174008",
+                role: 15,
+                member: ZOE,
+                project: PROJECT,
+                original_role: 15,
+                created_at: "2026-01-01T00:00:00.000Z",
+              },
+            ];
+          }
+          if (url.endsWith("/members/")) {
+            return [
+              {
+                id: "a23e4567-e89b-12d3-a456-426614174009",
+                member: {
+                  id: ZOE,
+                  first_name: "Zoe",
+                  last_name: "",
+                  avatar: "",
+                  avatar_url: null,
+                  display_name: "Zoe",
+                  is_bot: false,
+                },
+                role: 15,
+                is_active: false,
+              },
+            ];
+          }
+          return null;
+        }
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    const suspended = await screen.findByRole("option", { name: /Zoe/ });
+    expect(suspended).toBeDisabled();
+    await user.click(suspended);
+    expect(onChange).not.toHaveBeenCalled();
   });
 });
