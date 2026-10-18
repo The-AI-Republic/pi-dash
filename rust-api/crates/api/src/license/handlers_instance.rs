@@ -85,6 +85,7 @@ use super::form_body::{
 use super::handlers_base::{json_response, resolve_request_tz, HandlerError, CACHE_CONTROL_VALUE};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
 
 /// Register the owned D-01 instance routes. Unowned methods fall through
 /// to Django through the edge fallback (never a Rust 405).
@@ -1027,7 +1028,10 @@ async fn fetch_instance_by_id(
 /// Decode the PATCH body like DRF `_parse`: empty → `{}`; otherwise the
 /// content-type selects the parser in `select_parser` order (JSON, form,
 /// multipart — `form_body::select_body_kind`). JSON and multipart framing
-/// errors → 400 `detail`; unmatched types → 415.
+/// errors → 400 `detail`; unmatched types → 415. JSON bodies parse through
+/// the shared CPython layer (`json_cpython`, PIDASHCONV-1128), so malformed
+/// JSON, strict constants, int-limit and codec errors carry CPython's exact
+/// text; past the depth cap is Django's JSON 500.
 fn patch_body(
     headers: &HeaderMap,
     body: &[u8],
@@ -1043,13 +1047,14 @@ fn patch_body(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     match select_body_kind(content_type) {
-        Some(BodyKind::Json) => serde_json::from_slice(body)
-            .map(ParsedBody::json)
-            .map_err(|e| {
-                HandlerError::BadDetail(
-                    serde_json::json!({"detail": format!("JSON parse error - {e}")}).to_string(),
-                )
-            }),
+        Some(BodyKind::Json) => match json_cpython::parse_request_bytes(body) {
+            Ok(jval) => Ok(ParsedBody::json(json_cpython::to_serde_publish(&jval))),
+            Err(JsonFail::Message(detail)) => Err(HandlerError::BadDetail(
+                serde_json::json!({"detail": format!("{}{detail}", json_cpython::JSON_PARSE_PREFIX)})
+                    .to_string(),
+            )),
+            Err(JsonFail::Recursion) => Err(HandlerError::ServerError),
+        },
         Some(BodyKind::Form) => match parse_form_body(body) {
             Ok(pairs) => Ok(ParsedBody::form(pairs)),
             Err(_) => Err(HandlerError::ServerError),
