@@ -10,6 +10,26 @@ import { afterEach, expect } from "vitest";
 
 expect.extend(matchers);
 
+// jsdom lacks Range geometry: ProseMirror scrolls the selection into view
+// on every transaction, which reads rects off a Range. The stubs report
+// position zero, which is all the editor needs here.
+if (typeof globalThis.Range !== "undefined") {
+  const rangePrototype = globalThis.Range.prototype as Range & {
+    getClientRects?: () => DOMRectList;
+    getBoundingClientRect?: () => DOMRect;
+  };
+  if (rangePrototype.getClientRects === undefined) {
+    rangePrototype.getClientRects = function getClientRects(): DOMRectList {
+      return [] as unknown as DOMRectList;
+    };
+  }
+  if (rangePrototype.getBoundingClientRect === undefined) {
+    rangePrototype.getBoundingClientRect = function getBoundingClientRect(): DOMRect {
+      return new globalThis.DOMRect(0, 0, 0, 0);
+    };
+  }
+}
+
 afterEach(() => {
   // Node-env suites never mount; only jsdom suites have a DOM to clean.
   if (typeof globalThis.document !== "undefined") {
