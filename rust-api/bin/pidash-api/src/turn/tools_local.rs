@@ -865,12 +865,13 @@ pub async fn execute_get_issue<S: ToolStore>(
                 COMMENT_CAP,
             );
             detail_comment_row(
-                &comment_author(
+                comment_author(
                     &comment.speaker_type,
                     comment.actor_display_name.as_deref(),
                     comment.actor_email.as_deref(),
                     comment.actor_id.is_some(),
-                ),
+                )
+                .as_deref(),
                 &body,
                 body_truncated,
                 &pidash_api::runner_enroll::enroll::render_isoformat(comment.created_at),
