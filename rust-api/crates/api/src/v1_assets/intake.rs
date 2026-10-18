@@ -82,6 +82,7 @@ use pidash_types::{ProjectId, WorkspaceId};
 
 use super::permissions as v1_perm;
 use crate::assistant::events::py_dumps;
+use crate::license::form_body::{self, BodyFail, BodyKind};
 use crate::paginator::{
     apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor, Cursor,
 };
@@ -304,10 +305,15 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 // Shared request plumbing
 // ---------------------------------------------------------------------------
 
-/// Parse the request body (JSON only — the contract suite sends `json=`
-/// throughout): an empty body is `{}` whatever the content type claims;
-/// malformed JSON is DRF's `ParseError`; a non-empty non-JSON body is 415.
-fn parse_json_body(body: &[u8], headers: &HeaderMap) -> Result<Value, Denial> {
+/// Parse the request body the way DRF `_parse` selects a parser
+/// (`PIDASHCONV-1158`). An empty body is `{}` whatever the content type
+/// claims; otherwise the default parser order (`JSONParser`, `FormParser`,
+/// `MultiPartParser` — `select_body_kind`) picks the parser by media type.
+/// The JSON branch serves the exact `application/json` in any case plus the
+/// `*/*`, `application/*` and `*/json` wildcards (`_MediaType.match`);
+/// form/multipart bodies become a last-wins field map (`QueryDict`);
+/// anything else is 415. Malformed JSON keeps the existing `ParseError` 400.
+fn parse_json_body(body: &[u8], headers: &HeaderMap, memory_limit: i64) -> Result<Value, Denial> {
     // DRF's `_load_stream` leaves the stream `None` at content-length
     // zero and `_parse` returns the empty mapping without touching a
     // parser (`request.py`, DRF 3.15.2; same shape as the merged
@@ -319,18 +325,30 @@ fn parse_json_body(body: &[u8], headers: &HeaderMap) -> Result<Value, Denial> {
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let media = content_type.split(';').next().unwrap_or("").trim();
-    let is_json = media.eq_ignore_ascii_case("application/json");
-    if !is_json {
-        let raw = if content_type.is_empty() {
-            "text/plain"
-        } else {
-            content_type
-        };
-        return Err(Denial::UnsupportedMediaType(raw.to_owned()));
+    match form_body::select_body_kind(content_type) {
+        Some(BodyKind::Json) => serde_json::from_slice(body)
+            .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}"))),
+        // QueryDict semantics: last value wins (`parse_form_body`).
+        Some(BodyKind::Form) => match form_body::parse_form_body(body) {
+            Ok(pairs) => Ok(form_body::ParsedBody::form(pairs).value().clone()),
+            Err(_) => Err(Denial::ServerError),
+        },
+        Some(BodyKind::Multipart) => {
+            match form_body::parse_multipart_body(content_type, body, memory_limit) {
+                Ok(pairs) => Ok(form_body::ParsedBody::form(pairs).value().clone()),
+                Err(BodyFail::Parse(message)) => Err(Denial::BadDetail(message)),
+                Err(BodyFail::Fatal) | Err(BodyFail::TooMany) => Err(Denial::ServerError),
+            }
+        }
+        None => {
+            let raw = if content_type.is_empty() {
+                "text/plain"
+            } else {
+                content_type
+            };
+            Err(Denial::UnsupportedMediaType(raw.to_owned()))
+        }
     }
-    serde_json::from_slice(body)
-        .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}")))
 }
 
 /// Django `QueryDict.get`: the last value, or `None`. Axum's
@@ -10608,7 +10626,7 @@ async fn intake_create(
     body: Bytes,
 ) -> HandlerResult {
     let ctx = context(&state, &headers, &slug, &raw_project_id).await?;
-    let data = parse_json_body(&body, &headers)?;
+    let data = parse_json_body(&body, &headers, state.settings().file_size_limit)?;
     let Value::Object(data) = data else {
         // `.get` on a non-dict (`None`, list, scalar) is the 500
         // `AttributeError`.
@@ -10810,7 +10828,7 @@ async fn intake_update(
 
     // `request.data` is lazy — the first touch is the `pop` at `:344`,
     // AFTER every guard above, so malformed bodies lose to them.
-    let data = parse_json_body(&body, &headers)?;
+    let data = parse_json_body(&body, &headers, state.settings().file_size_limit)?;
     let Value::Object(mut data) = data else {
         // `.pop` on a non-dict (list → `TypeError`, else
         // `AttributeError`) is the 500.

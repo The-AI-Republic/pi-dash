@@ -129,6 +129,7 @@ use pidash_types::WorkspaceId;
 
 use super::permissions as v1_perm;
 use crate::assistant::common::py_repr;
+use crate::license::form_body::{self, BodyFail, BodyKind};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -1416,10 +1417,15 @@ fn sticky_count_sql(list_sql: &str) -> String {
 // Shared request plumbing
 // ---------------------------------------------------------------------------
 
-/// Parse the request body (JSON only — the contract suite sends `json=`
-/// throughout): an empty body is `{}` whatever the content type claims;
-/// malformed JSON is DRF's `ParseError`; a non-empty non-JSON body is 415.
-fn parse_json_body(body: &[u8], headers: &HeaderMap) -> Result<Value, Denial> {
+/// Parse the request body the way DRF `_parse` selects a parser
+/// (`PIDASHCONV-1158`). An empty body is `{}` whatever the content type
+/// claims; otherwise the default parser order (`JSONParser`, `FormParser`,
+/// `MultiPartParser` — `select_body_kind`) picks the parser by media type.
+/// The JSON branch serves the exact `application/json` in any case plus the
+/// `*/*`, `application/*` and `*/json` wildcards (`_MediaType.match`);
+/// form/multipart bodies become a last-wins field map (`QueryDict`);
+/// anything else is 415. Malformed JSON keeps the existing `ParseError` 400.
+fn parse_json_body(body: &[u8], headers: &HeaderMap, memory_limit: i64) -> Result<Value, Denial> {
     // DRF's `_load_stream` leaves the stream `None` at content-length
     // zero and `_parse` returns the empty mapping without touching a
     // parser (`request.py`, DRF 3.15.2; same shape as the merged
@@ -1431,18 +1437,30 @@ fn parse_json_body(body: &[u8], headers: &HeaderMap) -> Result<Value, Denial> {
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let media = content_type.split(';').next().unwrap_or("").trim();
-    let is_json = media.eq_ignore_ascii_case("application/json");
-    if !is_json {
-        let raw = if content_type.is_empty() {
-            "text/plain"
-        } else {
-            content_type
-        };
-        return Err(Denial::UnsupportedMediaType(raw.to_owned()));
+    match form_body::select_body_kind(content_type) {
+        Some(BodyKind::Json) => serde_json::from_slice(body)
+            .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}"))),
+        // QueryDict semantics: last value wins (`parse_form_body`).
+        Some(BodyKind::Form) => match form_body::parse_form_body(body) {
+            Ok(pairs) => Ok(form_body::ParsedBody::form(pairs).value().clone()),
+            Err(_) => Err(Denial::ServerError),
+        },
+        Some(BodyKind::Multipart) => {
+            match form_body::parse_multipart_body(content_type, body, memory_limit) {
+                Ok(pairs) => Ok(form_body::ParsedBody::form(pairs).value().clone()),
+                Err(BodyFail::Parse(message)) => Err(Denial::BadDetail(message)),
+                Err(BodyFail::Fatal) | Err(BodyFail::TooMany) => Err(Denial::ServerError),
+            }
+        }
+        None => {
+            let raw = if content_type.is_empty() {
+                "text/plain"
+            } else {
+                content_type
+            };
+            Err(Denial::UnsupportedMediaType(raw.to_owned()))
+        }
     }
-    serde_json::from_slice(body)
-        .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}")))
 }
 
 /// Django `QueryDict.get`: the last value, or `None`. Axum's
@@ -1578,7 +1596,7 @@ async fn create_inner(
         .await
         .map_err(|_| Denial::ServerError)?;
     let workspace_id = workspace_id.ok_or(Denial::WorkspaceMissing)?;
-    let parsed = parse_json_body(body, headers)?;
+    let parsed = parse_json_body(body, headers, state.settings().file_size_limit)?;
     let (write, html) = validated_write(&ctx.pool, &ctx.timezone, &parsed).await?;
     // `Sticky.save` (`models/sticky.py:38-53`): stripped text recomputed on
     // every save; `sort_order` is `MAX + 10000` whenever rows exist (an
@@ -1884,7 +1902,11 @@ async fn detail_inner(
             Ok(StatusCode::NO_CONTENT.into_response())
         }
         DetailAction::PartialUpdate => {
-            let parsed = parse_json_body(body.unwrap_or_default(), headers)?;
+            let parsed = parse_json_body(
+                body.unwrap_or_default(),
+                headers,
+                state.settings().file_size_limit,
+            )?;
             let (write, html) = validated_write(&ctx.pool, &ctx.timezone, &parsed).await?;
             // `save()` recomputes `description_stripped` on EVERY save;
             // `sort_order` is untouched on update.
@@ -2542,7 +2564,7 @@ mod tests {
             "application/json".parse().expect("content type"),
         );
         for headers in [HeaderMap::new(), json_headers] {
-            let parsed = parse_json_body(b"", &headers).expect("empty body");
+            let parsed = parse_json_body(b"", &headers, 5_242_880).expect("empty body");
             assert_eq!(parsed, Value::Object(Map::new()));
         }
         // A non-empty non-JSON body is 415 with the content type echoed.
@@ -2551,7 +2573,7 @@ mod tests {
             header::CONTENT_TYPE,
             "text/plain".parse().expect("content type"),
         );
-        let denial = parse_json_body(b"hello", &text_headers).expect_err("415");
+        let denial = parse_json_body(b"hello", &text_headers, 5_242_880).expect_err("415");
         let (status, body) = denial.status_and_body();
         assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(
@@ -2564,13 +2586,52 @@ mod tests {
             header::CONTENT_TYPE,
             "application/json".parse().expect("content type"),
         );
-        let denial = parse_json_body(b"{oops", &json_headers).expect_err("parse error");
+        let denial = parse_json_body(b"{oops", &json_headers, 5_242_880).expect_err("parse error");
         let (status, body) = denial.status_and_body();
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(
             body.starts_with(r#"{"detail":"JSON parse error - "#),
             "{body}"
         );
+    }
+
+    #[test]
+    fn form_and_wildcard_bodies_parse_like_drf() {
+        // Form and wildcard bodies parse the way DRF `_parse` selects a
+        // parser (PIDASHCONV-1158).
+        let mut form_headers = HeaderMap::new();
+        form_headers.insert(
+            header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded"
+                .parse()
+                .expect("content type"),
+        );
+        let parsed = parse_json_body(
+            b"name=note&name=other&description_html=<p>hi</p>",
+            &form_headers,
+            5_242_880,
+        )
+        .expect("form body");
+        assert_eq!(parsed["name"], Value::String("other".to_owned()));
+        assert_eq!(
+            parsed["description_html"],
+            Value::String("<p>hi</p>".to_owned())
+        );
+        // `_MediaType.match` honors the JSON wildcards (and case).
+        for content_type in ["*/json", "*/*", "application/*", "Application/JSON"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                content_type.parse().expect("content type"),
+            );
+            let parsed =
+                parse_json_body(br#"{"name":"n"}"#, &headers, 5_242_880).expect("json body");
+            assert_eq!(
+                parsed["name"],
+                Value::String("n".to_owned()),
+                "{content_type}"
+            );
+        }
     }
 
     #[test]
