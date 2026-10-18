@@ -51,6 +51,27 @@ describe("Dialog", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("uses the default body spacing below the title block", () => {
+    render(
+      <Dialog title="Confirm" open onOpenChange={() => undefined}>
+        <p>Body copy</p>
+      </Dialog>
+    );
+    const body = screen.getByText("Body copy");
+    expect(body.parentElement).toHaveClass("mt-(--space-8)");
+  });
+
+  it("accepts a body class override so the copy can sit tight below the title", () => {
+    render(
+      <Dialog title="Confirm" open onOpenChange={() => undefined} bodyClassName="mt-(--space-4)">
+        <p>Body copy</p>
+      </Dialog>
+    );
+    const body = screen.getByText("Body copy");
+    expect(body.parentElement).toHaveClass("mt-(--space-4)");
+    expect(body.parentElement).not.toHaveClass("mt-(--space-8)");
+  });
+
   it("ignores Escape but still closes from the close button when controlled", async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();

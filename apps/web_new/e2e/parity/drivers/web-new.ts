@@ -6,6 +6,8 @@
 // action throws until the matching area lands in apps/web_new. Area issues
 // fill these in method by method; the oracle driver stays untouched.
 import { expect, type Locator, type Page } from "@playwright/test";
+
+import { descriptionAfterHeading } from "./modal-copy.js";
 import type {
   AdminAbsenceFacts,
   AdminAccountFacts,
@@ -6561,77 +6563,288 @@ export class WebNewDriver implements ParityDriver {
       hasRecorder: present("clarity-tracking") || present("clarity.ms"),
     };
   }
-  // --- NEWFRONT-178 (runners overview + pods). Throwing stubs per the
-  // --- shared driver contract; the runners area fills these in when it
-  // --- lands in apps/web_new.
+  // --- Runners overview + pods (NEWFRONT-540 shell; pods land with
+  // --- NEWFRONT-542). One page serves the workspace route
+  // --- (/{ws}/runners) and the project twin
+  // --- (/{ws}/projects/{id}/runners): the project id in the route scopes
+  // --- the reads and rewrites every link base. The area shell renders the
+  // --- rail beside a content main that hosts the tab strip and the table.
+  // --- The methods below cover the shell rows (RUN-001/002/003/004/005,
+  // --- RUN-010/011); the pod methods stay stubs for the pods slice.
 
-  async runnersOpenOverview(
-    _workspaceSlug: string,
-    _projectId?: string,
-    _subpath?: "runs" | "approvals"
-  ): Promise<void> {
-    return todo("runnersOpenOverview");
+  /** The not-authorized heading the area shares with its dev-machines twin. */
+  private runnersDeniedHeading(): Locator {
+    return this.page.getByRole("heading", { name: "Oops! You are not authorized to view this page" });
+  }
+
+  /** Tab strip links: the content main is the innermost one, so the rail's
+   *  own Overview link never matches. */
+  private runnersTabLinks(): Locator {
+    return this.page.locator("main:not(:has(main))").getByRole("link", { name: /^(Overview|Runs|Approvals)$/ });
+  }
+
+  async runnersOpenOverview(workspaceSlug: string, projectId?: string, subpath?: "runs" | "approvals"): Promise<void> {
+    const base =
+      projectId === undefined ? `/${workspaceSlug}/runners` : `/${workspaceSlug}/projects/${projectId}/runners`;
+    const url = subpath === undefined ? base : `${base}/${subpath}`;
+    // Arm the list waiter before navigating; a denied viewer never fetches,
+    // so the gate heading is the alternate settle signal.
+    const listSettled = this.page
+      .waitForResponse(
+        (response) => response.url().includes("/api/runners/") && response.request().method() === "GET",
+        { timeout: WebNewDriver.WAIT_MS * 3 }
+      )
+      .then(() => true)
+      .catch(() => false);
+    await this.page.goto(url, { timeout: 60_000 });
+    await this.runnersTabLinks()
+      .first()
+      .or(this.runnersDeniedHeading())
+      .waitFor({ timeout: WebNewDriver.WAIT_MS * 3 });
+    if (await this.runnersDeniedVisible()) return;
+    if (!(await listSettled)) throw new Error("[parity] runners list fetch never settled.");
   }
 
   async runnersCurrentUrl(): Promise<string> {
-    return todo("runnersCurrentUrl");
+    return this.page.url();
   }
 
   async runnersTabs(): Promise<RunnersTab[]> {
-    return todo("runnersTabs");
+    const links = this.runnersTabLinks();
+    await links.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const out: RunnersTab[] = [];
+    for (const link of await links.all()) {
+      out.push({
+        label: (await link.innerText()).trim(),
+        href: await link.getAttribute("href"),
+        active: (await link.getAttribute("aria-current")) !== null,
+      });
+    }
+    return out;
   }
 
-  async runnersOpenTab(_label: string): Promise<void> {
-    return todo("runnersOpenTab");
+  async runnersOpenTab(label: string): Promise<void> {
+    const suffix =
+      label === "Overview" ? "/runners" : label === "Runs" ? "/runs" : label === "Approvals" ? "/approvals" : null;
+    if (suffix === null) throw new Error(`[parity] unknown runners tab ${JSON.stringify(label)}.`);
+    await this.runnersTabLinks()
+      .filter({ hasText: new RegExp(`^${label}$`) })
+      .click();
+    await this.page.waitForURL((url) => new RegExp(`${suffix}/?$`).test(url.pathname), {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    // Settle on the clicked tab being the only active marker.
+    await this.page.waitForFunction(
+      (want) => {
+        const links = [...document.querySelectorAll("main:not(:has(main)) a")].filter((node) =>
+          /^(Overview|Runs|Approvals)$/.test((node as HTMLElement).innerText.trim())
+        );
+        const active = links.filter((node) => node.getAttribute("aria-current") !== null);
+        return active.length === 1 && (active[0] as HTMLElement).innerText.trim() === want;
+      },
+      label,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+  }
+
+  private runnersTable(): Locator {
+    return this.page.getByRole("main").locator("table");
   }
 
   async runnersTableRows(): Promise<RunnersTableRow[]> {
-    return todo("runnersTableRows");
+    const table = this.runnersTable();
+    await table.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const out: RunnersTableRow[] = [];
+    for (const row of await table.locator("tbody tr").all()) {
+      const cells = row.locator("td");
+      if ((await cells.count()) < 7) continue; // the empty-state row
+      const text = await cells.allTextContents();
+      out.push({
+        name: (text[0] ?? "").trim(),
+        pod: (text[1] ?? "").trim(),
+        status: (text[2] ?? "").trim(),
+        osArch: (text[3] ?? "").trim(),
+        version: (text[4] ?? "").trim(),
+        heartbeat: (text[5] ?? "").trim(),
+      });
+    }
+    return out;
   }
 
   async runnersEmptyVisible(): Promise<boolean> {
-    return todo("runnersEmptyVisible");
+    const table = this.runnersTable();
+    await table.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await table.getByText("No runners yet.").count()) > 0;
   }
 
-  async runnersRowActions(_runnerName: string): Promise<RunnersRowActions> {
-    return todo("runnersRowActions");
+  /** One exact row by name (runner names share long prefixes). */
+  private async runnersRow(runnerName: string): Promise<Locator> {
+    const table = this.runnersTable();
+    await table.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const rows = table.locator("tbody tr");
+    for (let index = 0; index < (await rows.count()); index += 1) {
+      const row = rows.nth(index);
+      const first = row.locator("td").first();
+      if ((await first.count()) === 0) continue;
+      if ((await first.innerText()).trim() === runnerName) return row;
+    }
+    throw new Error(`[parity] runner row ${JSON.stringify(runnerName)} not found.`);
   }
 
-  async runnersOpenDetails(_runnerName: string): Promise<void> {
-    return todo("runnersOpenDetails");
+  private async runnersHasRow(runnerName: string): Promise<boolean> {
+    try {
+      await this.runnersRow(runnerName);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  async runnersDeleteRunner(_runnerName: string, _options?: { expectFailure?: boolean }): Promise<void> {
-    return todo("runnersDeleteRunner");
+  /** Named row the caller expects present: wait for a match, then resolve it. */
+  private async runnersWaitRow(runnerName: string): Promise<Locator> {
+    const table = this.runnersTable();
+    await table.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await table.locator("tbody tr", { hasText: runnerName }).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return this.runnersRow(runnerName);
   }
 
-  async runnersRevokeRunner(_runnerName: string, _options?: { expectFailure?: boolean }): Promise<void> {
-    return todo("runnersRevokeRunner");
+  private async runnersRowStatus(runnerName: string): Promise<string> {
+    const rows = await this.runnersTableRows();
+    return rows.find((row) => row.name === runnerName)?.status ?? "";
+  }
+
+  async runnersRowActions(runnerName: string): Promise<RunnersRowActions> {
+    const row = await this.runnersWaitRow(runnerName);
+    return {
+      hasDetails: (await row.getByRole("button", { name: "Details", exact: true }).count()) > 0,
+      hasRevoke: (await row.getByRole("button", { name: "Revoke", exact: true }).count()) > 0,
+      hasDelete: (await row.getByRole("button", { name: "Delete", exact: true }).count()) > 0,
+    };
+  }
+
+  async runnersOpenDetails(runnerName: string): Promise<void> {
+    const row = await this.runnersWaitRow(runnerName);
+    await row.getByRole("button", { name: "Details", exact: true }).click();
+    await this.page.waitForURL(/\/detail\//, { timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private runnersDialog(): Locator {
+    return this.page.getByRole("dialog");
+  }
+
+  /** The open confirmation with the given heading. */
+  private async runnersWaitForConfirm(title: string): Promise<Locator> {
+    const dialog = this.runnersDialog().filter({ has: this.page.getByRole("heading", { name: title, exact: true }) });
+    await dialog.getByRole("heading", { name: title, exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return dialog;
+  }
+
+  async runnersDeleteRunner(runnerName: string, options?: { expectFailure?: boolean }): Promise<void> {
+    const row = await this.runnersWaitRow(runnerName);
+    await row.getByRole("button", { name: "Delete", exact: true }).click();
+    const dialog = await this.runnersWaitForConfirm("Delete runner?");
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+    if (options?.expectFailure === true) {
+      await expect.poll(() => this.runnersLastToast(), { timeout: WebNewDriver.WAIT_MS }).not.toBeNull();
+      return;
+    }
+    await expect.poll(() => this.runnersHasRow(runnerName), { timeout: WebNewDriver.WAIT_MS }).toBe(false);
+  }
+
+  async runnersRevokeRunner(runnerName: string, options?: { expectFailure?: boolean }): Promise<void> {
+    const row = await this.runnersWaitRow(runnerName);
+    await row.getByRole("button", { name: "Revoke", exact: true }).click();
+    const dialog = await this.runnersWaitForConfirm("Revoke runner?");
+    await dialog.getByRole("button", { name: "Revoke", exact: true }).click();
+    if (options?.expectFailure === true) {
+      await expect.poll(() => this.runnersLastToast(), { timeout: WebNewDriver.WAIT_MS }).not.toBeNull();
+      return;
+    }
+    await expect.poll(() => this.runnersRowStatus(runnerName), { timeout: WebNewDriver.WAIT_MS }).toBe("revoked");
   }
 
   async runnersModalCopy(): Promise<{ title: string; body: string } | null> {
-    return todo("runnersModalCopy");
+    const dialogs = this.runnersDialog();
+    if ((await dialogs.count()) === 0) return null;
+    const dialog = dialogs.first();
+    const heading = dialog.getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    if (!(await heading.isVisible())) return null;
+    const title = (await heading.innerText()).trim();
+    // The consequence copy is the description directly under the heading.
+    // Read it from the heading element so the kit's heading level and
+    // wrapper nesting do not matter.
+    const body = await heading.evaluate(descriptionAfterHeading).catch(() => "");
+    return { title, body };
   }
 
   async runnersCancelModal(): Promise<void> {
-    return todo("runnersCancelModal");
+    await this.runnersDialog().first().getByRole("button", { name: "Cancel", exact: true }).click();
   }
 
-  async runnersStallMutations(_delayMs: number): Promise<void> {
-    return todo("runnersStallMutations");
+  async runnersStallMutations(delayMs: number): Promise<void> {
+    await this.page.route("**/api/runners/**", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.continue();
+        return;
+      }
+      // Hold the mutation so in-flight states stay observable; the polls
+      // pass straight through.
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await route.continue().catch(() => undefined);
+    });
   }
 
   async runnersFailNextMutation(): Promise<void> {
-    return todo("runnersFailNextMutation");
+    let failed = false;
+    await this.page.route("**/api/runners/**", async (route) => {
+      if (route.request().method() !== "GET" && !failed) {
+        failed = true;
+        await route.abort("failed");
+        return;
+      }
+      await route.continue().catch(() => undefined);
+    });
   }
 
   async runnersReleaseMutationShaping(): Promise<void> {
-    return todo("runnersReleaseMutationShaping");
+    await this.page.unroute("**/api/runners/**");
+  }
+
+  private runnersRailRoot(): Locator {
+    // The workspace shell already renders a `<main>` (AppShell) and the
+    // area nests its own content main, so a bare `main` resolves to two
+    // rows and `xpath=../aside` also picks up the workspace sidebar. Anchor
+    // on the area's named content main so the sibling is the runners rail.
+    return this.page.getByRole("main", { name: "Runners content" }).locator("xpath=../aside");
   }
 
   async runnersRail(): Promise<RunnersRail> {
-    return todo("runnersRail");
+    const rail = this.runnersRailRoot();
+    await rail.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const header = (await rail.locator("div").first().innerText()).trim();
+    const overview = rail.getByRole("link", { name: "Overview", exact: true });
+    const contacts: RunnersRailContact[] = [];
+    for (const link of await rail.getByRole("link").all()) {
+      const href = await link.getAttribute("href");
+      if (href === null || !href.includes("/chat/")) continue;
+      contacts.push({
+        name: (await link.innerText()).trim(),
+        href,
+        // The contact carries its glyph and a status dot.
+        hasDot: (await link.locator("svg").count()) >= 2,
+      });
+    }
+    return {
+      header,
+      overviewHref: (await overview.count()) > 0 ? await overview.first().getAttribute("href") : null,
+      contacts,
+      emptyVisible: (await rail.getByText("No runners connected").count()) > 0,
+    };
   }
+
+  // Pod tiles, the create/edit modals and the delete confirm land with
+  // NEWFRONT-542; they stay throwing stubs until that slice fills them in.
 
   async runnersPodTiles(): Promise<RunnersPodTile[]> {
     return todo("runnersPodTiles");
@@ -6721,35 +6934,88 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async runnersLastToast(): Promise<string | null> {
-    return todo("runnersLastToast");
+    const titles = this.page.getByText("Error!", { exact: true });
+    if ((await titles.count()) === 0) return null;
+    // Climb from the title to the toast root carrying its message.
+    const text = await titles.first().evaluate((element) => {
+      let node: HTMLElement | null = element instanceof HTMLElement ? element : element.parentElement;
+      while (node !== null && node !== document.body) {
+        const candidate = (node.innerText ?? "").trim();
+        if (candidate.length > "Error!".length + 8) return candidate;
+        node = node.parentElement;
+      }
+      return (element.textContent ?? "").trim();
+    });
+    return text.length > 0 ? text : null;
   }
 
   async runnersPageTitle(): Promise<string> {
-    return todo("runnersPageTitle");
+    return this.page.title();
   }
 
   async runnersSectionHeadings(): Promise<string[]> {
-    return todo("runnersSectionHeadings");
+    const main = this.page.getByRole("main");
+    const out: string[] = [];
+    for (const title of ["Add runner", "Pods", "Runners"]) {
+      if ((await main.getByText(title, { exact: true }).count()) > 0) out.push(title);
+    }
+    return out;
   }
 
   async runnersBreadcrumbLeaf(): Promise<string | null> {
-    return todo("runnersBreadcrumbLeaf");
+    // The project chrome's area link carries a trailing slash, which also
+    // separates it from the tab and rail links pointing at the same route.
+    const crumb = this.page.locator('a[href$="/runners/"]');
+    await crumb
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    if ((await crumb.count()) === 0) return null;
+    const text = ((await crumb.first().innerText()).trim().split("\n")[0] ?? "").trim();
+    return text === "" ? null : text;
   }
 
   async runnersDeniedVisible(): Promise<boolean> {
-    return todo("runnersDeniedVisible");
+    return (await this.runnersDeniedHeading().count()) > 0;
   }
 
   async runnersChromePresent(): Promise<boolean> {
-    return todo("runnersChromePresent");
+    if ((await this.page.getByRole("button", { name: "New work item" }).count()) > 0) return true;
+    return (await this.page.getByRole("complementary").count()) > 0;
   }
 
   async runnersFailPodsLoad(): Promise<void> {
-    return todo("runnersFailPodsLoad");
+    await this.page.route("**/api/runners/pods**", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: '{"error": "parity pods outage"}',
+        });
+      } else await route.continue();
+    });
   }
 
   async runnersReleasePodsFailure(): Promise<void> {
-    return todo("runnersReleasePodsFailure");
+    await this.page.unroute("**/api/runners/pods**");
+  }
+
+  async runnersWaitPodDeleteWorking(): Promise<void> {
+    const dialog = await this.runnersWaitForConfirm("Delete pod?");
+    const remove = dialog.getByRole("button", { name: "Delete", exact: true });
+    await expect.poll(() => remove.isDisabled(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
+  }
+
+  async runnersWaitRunnerDeleteWorking(): Promise<void> {
+    const dialog = await this.runnersWaitForConfirm("Delete runner?");
+    const remove = dialog.getByRole("button", { name: "Delete", exact: true });
+    await expect.poll(() => remove.isDisabled(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
+  }
+
+  async runnersWaitRunnerRevokeWorking(): Promise<void> {
+    const dialog = await this.runnersWaitForConfirm("Revoke runner?");
+    const revoke = dialog.getByRole("button", { name: "Revoke", exact: true });
+    await expect.poll(() => revoke.isDisabled(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
 
   // --- Desktop-only chat + agent runtime (NEWFRONT-182). Throwing stubs
@@ -9979,18 +10245,6 @@ export class WebNewDriver implements ParityDriver {
 
   async archivesDetailReactionControlEnabled(): Promise<boolean> {
     return todo("archivesDetailReactionControlEnabled");
-  }
-
-  async runnersWaitPodDeleteWorking(): Promise<void> {
-    return todo("runnersWaitPodDeleteWorking");
-  }
-
-  async runnersWaitRunnerDeleteWorking(): Promise<void> {
-    return todo("runnersWaitRunnerDeleteWorking");
-  }
-
-  async runnersWaitRunnerRevokeWorking(): Promise<void> {
-    return todo("runnersWaitRunnerRevokeWorking");
   }
 
   async intakeCreateDialogOpen(): Promise<boolean> {

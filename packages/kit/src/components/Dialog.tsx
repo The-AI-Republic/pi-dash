@@ -26,6 +26,8 @@ export interface DialogProps {
   /** When true, Escape and the backdrop no longer dismiss. */
   nonDismissable?: boolean | undefined;
   className?: string | undefined;
+  /** Body wrapper classes; the default spacing sits below the title block. */
+  bodyClassName?: string | undefined;
   children: React.ReactNode;
 }
 
@@ -39,6 +41,7 @@ export function Dialog({
   ignoreEscapeKey = false,
   nonDismissable = false,
   className,
+  bodyClassName = "mt-(--space-8)",
   children,
 }: DialogProps): React.ReactElement {
   const handleOpenChange = (next: boolean, details: { reason: string }): void => {
@@ -73,7 +76,7 @@ export function Dialog({
               />
             )}
           </div>
-          <div className="mt-(--space-8)">{children}</div>
+          <div className={bodyClassName}>{children}</div>
           {actions ? <div className="mt-(--space-12) flex justify-end gap-(--space-4)">{actions}</div> : null}
         </BaseDialog.Popup>
       </BaseDialog.Portal>
