@@ -279,10 +279,13 @@ fn parse_char_input(
     // DRF coerces int/float via str() but rejects bools: `isinstance(data,
     // bool) or not isinstance(data, (str, int, float))` fails 'invalid'.
     // serde_json booleans are distinct from numbers, so match arms stay
-    // exact (a JSON 1/0 is a number, never a bool).
+    // exact (a JSON 1/0 is a number, never a bool). Numbers coerce via
+    // `python_number_str` (CPython `str(float)`), so an out-of-range float
+    // literal is `inf` — not serde's normalized `1e+999` — matching
+    // json.load's `float` (PIDASHCONV-1146).
     let raw = match value {
         Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
+        Value::Number(n) => crate::v1_work_items::python_number_str(n),
         _ => return Err(vec![FieldInputError::InvalidType]),
     };
     // `trim_whitespace=True` (DRF default): Python `str.strip()` (no args),
