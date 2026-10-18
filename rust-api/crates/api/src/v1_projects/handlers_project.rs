@@ -50,7 +50,10 @@
 //! the serializer as the raw `QueryDict` storage (`{key: [values]}`) and
 //! always fails field validation with type errors — status and body match
 //! Django. Unsupported or missing content types 415. Multipart *file* parts
-//! are dropped (no project field is a file field).
+//! are dropped (no project field is a file field). The `model_activity`
+//! `requested_data` argument then project-form-last-wins scalarizes the form
+//! map (Django's `QueryDict` JSON rendering), while validation keeps the
+//! arrays.
 //!
 //! Fixture: `FX-H-PROJ`
 //! (`rust-api/fixtures/v1_projects/handlers/project.golden.json`).
@@ -1368,6 +1371,25 @@ fn parse_write_body(
         Ok(NegotiatedBody::JsonText { text, .. }) => Ok((parse_body(text.as_bytes())?, false)),
         Ok(NegotiatedBody::Form { map, .. }) => Ok((map, true)),
     }
+}
+
+/// The `model_activity.delay(...)` `requested_data` argument built from the
+/// negotiated write map (PIDASHCONV-1149).
+///
+/// Django passes `requested_data=request.data`, which is a `QueryDict` for a
+/// form body; Celery's JSON serializer renders that as one scalar per key
+/// (last value wins), while the negotiated map still holds the raw lists the
+/// serializer validated against. Form input therefore projects each project
+/// field to its final value here — after validation, which keeps the arrays.
+/// In place: the map can nest to the request cap and `Map::clone` recurses.
+fn activity_requested(mut map: serde_json::Map<String, Value>, from_form: bool) -> Value {
+    if from_form {
+        crate::v1_cycles_modules::body::project_list_scalars(
+            &mut map,
+            PROJECT_BODY_SPEC.list_fields,
+        );
+    }
+    Value::Object(map)
 }
 
 /// How a field failed coercion.
@@ -2706,7 +2728,7 @@ pub async fn create_project_inner(
     if !ws_exists {
         return Err(Denial::NotFoundError("Workspace does not exist".to_owned()));
     }
-    let (input, _from_form) = parse_write_body(headers, raw_body)?;
+    let (input, from_form) = parse_write_body(headers, raw_body)?;
     let data = coerce_write(&pre.pool, &input, false, false).await?;
     // `validate()` (`serializers/project.py:139-166`).
     let name = field_str(&data, "name");
@@ -2915,7 +2937,7 @@ pub async fn create_project_inner(
     let ann = detail_annotations(&row)?;
     // `model_activity.delay(...)` (`views/project.py:258-267`):
     // `requested_data` is the raw body, `current_instance` is null.
-    let requested = Value::Object(input);
+    let requested = activity_requested(input, from_form);
     let kwargs = pidash_services::v1_projects::tasks::create_kwargs(
         &project_id.to_string(),
         requested,
@@ -3232,7 +3254,7 @@ pub async fn patch_project_inner(
         .await?
         .ok_or(Denial::ServerError)?;
     let ann = detail_annotations(&row)?;
-    let requested = Value::Object(input);
+    let requested = activity_requested(input, from_form);
     let kwargs = pidash_services::v1_projects::tasks::update_kwargs(
         &project_id.to_string(),
         requested,
@@ -3772,6 +3794,34 @@ mod tests {
             parse_write_body(&headers, br#"{"name":"N","identifier":"I"}"#).expect("json");
         assert!(!from_form);
         assert_eq!(map.get("name"), Some(&Value::String("N".to_owned())));
+    }
+
+    #[test]
+    fn activity_requested_scalarizes_form_lists() {
+        // Form bodies validate as `{key: [values]}` but the enqueued
+        // `model_activity` payload renders Django's `json.dumps(QueryDict)`:
+        // last value wins per key (PIDASHCONV-1149).
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "intake_view".to_owned(),
+            Value::Array(vec![Value::String("1".to_owned())]),
+        );
+        map.insert(
+            "name".to_owned(),
+            Value::Array(vec![
+                Value::String("a".to_owned()),
+                Value::String("b".to_owned()),
+            ]),
+        );
+        assert_eq!(
+            activity_requested(map.clone(), true),
+            serde_json::json!({"intake_view": "1", "name": "b"})
+        );
+        // JSON input is passed through untouched (no scalarization).
+        assert_eq!(
+            activity_requested(map, false),
+            serde_json::json!({"intake_view": ["1"], "name": ["a", "b"]})
+        );
     }
 
     #[test]
