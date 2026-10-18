@@ -1,14 +1,25 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Notification contracts: the inbox list with its stream flags, the
-// per-item read/archive toggles, snooze, the bulk mark-all-read scope and
-// the email delivery preferences. The unread totals behind the shell badge
-// live here too (thin shell slice; full ownership in notifications area).
+// Notification contracts: the unread totals behind the shell badge, the
+// inbox list with its stream flags, and the per-item read/archive toggles
+// and snooze. The bulk mark-all-read write and the email delivery
+// preferences live in sibling modules and are re-exported here, so callers
+// keep one import while the eager shell loads only what it reads
+// (NEWFRONT-523: a route pulls only the endpoints it uses).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 import { UserLite } from "./users.js";
+
+export { markAllNotificationsRead, MarkAllReadResponse } from "./notification-bulk-read.js";
+export type { MarkAllReadScope } from "./notification-bulk-read.js";
+export {
+  NotificationPreferences,
+  getNotificationPreferences,
+  updateNotificationPreferences,
+} from "./notification-preferences.js";
+export type { NotificationPreferencePatch } from "./notification-preferences.js";
 
 export const UnreadNotifications = z.object({
   total_unread_notifications_count: z.number(),
@@ -196,91 +207,4 @@ export async function snoozeNotification(
   const path = `/api/workspaces/${slug}/users/notifications/${id}/`;
   const envelope = await client.sendJson<unknown>("PATCH", path, { json: { snoozed_till: snoozedTill } });
   return client.parse(NotificationItem, envelope.data, `PATCH ${path}`);
-}
-
-/**
- * Bulk mark-all-read scope: the current list filters as the view reads
- * them (origin scope, snoozed and archived flags). Unlike the list
- * query this travels as a JSON body of real booleans.
- */
-export interface MarkAllReadScope {
-  snoozed?: boolean;
-  archived?: boolean;
-  type?: string;
-}
-
-export const MarkAllReadResponse = z.object({
-  message: z.string(),
-});
-export type MarkAllReadResponse = z.infer<typeof MarkAllReadResponse>;
-
-/**
- * Mark every unread notification in scope as read. POST
- * .../users/notifications/mark-all-read/ answers a success message.
- */
-export async function markAllNotificationsRead(
-  client: ApiClient,
-  slug: string,
-  scope: MarkAllReadScope = {}
-): Promise<MarkAllReadResponse> {
-  const path = `/api/workspaces/${slug}/users/notifications/mark-all-read/`;
-  const envelope = await client.sendJson<unknown>("POST", path, {
-    json: {
-      ...(scope.snoozed === undefined ? {} : { snoozed: scope.snoozed }),
-      ...(scope.archived === undefined ? {} : { archived: scope.archived }),
-      ...(scope.type === undefined ? {} : { type: scope.type }),
-    },
-  });
-  return client.parse(MarkAllReadResponse, envelope.data, `POST ${path}`);
-}
-
-/**
- * Email delivery preferences. The five toggles map to the preference
- * topics: property changes, state changes, comments, mentions, and the
- * completed-only refinement under state changes. `workspace`/`project`
- * stay null for the per-user row the settings page edits.
- */
-export const NotificationPreferences = z.object({
-  id: uuid(),
-  user: uuid(),
-  workspace: nullableUuid(),
-  project: nullableUuid(),
-  property_change: z.boolean(),
-  state_change: z.boolean(),
-  comment: z.boolean(),
-  mention: z.boolean(),
-  issue_completed: z.boolean(),
-  created_at: dateTime(),
-  updated_at: dateTime(),
-  created_by: nullableUuid(),
-  updated_by: nullableUuid(),
-});
-export type NotificationPreferences = z.infer<typeof NotificationPreferences>;
-
-export interface NotificationPreferencePatch {
-  property_change?: boolean;
-  state_change?: boolean;
-  comment?: boolean;
-  mention?: boolean;
-  issue_completed?: boolean;
-}
-
-/** GET /api/users/me/notification-preferences/ loads the toggles. */
-export async function getNotificationPreferences(client: ApiClient): Promise<NotificationPreferences> {
-  const path = "/api/users/me/notification-preferences/";
-  const body = await client.getJson<unknown>(path);
-  return client.parse(NotificationPreferences, body, `GET ${path}`);
-}
-
-/**
- * PATCH the same path with the single changed key per toggle; answers
- * the full updated row.
- */
-export async function updateNotificationPreferences(
-  client: ApiClient,
-  patch: NotificationPreferencePatch
-): Promise<NotificationPreferences> {
-  const path = "/api/users/me/notification-preferences/";
-  const envelope = await client.sendJson<unknown>("PATCH", path, { json: patch });
-  return client.parse(NotificationPreferences, envelope.data, `PATCH ${path}`);
 }

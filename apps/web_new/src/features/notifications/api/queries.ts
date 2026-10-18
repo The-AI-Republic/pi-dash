@@ -36,6 +36,12 @@ export function unreadNotificationsQueryOptions(client: ApiClient, workspaceSlug
     queryFn: () => getUnreadNotifications(client, workspaceSlug),
     staleTime: LIST_STALE_TIME_MS,
     enabled: workspaceSlug.length > 0,
+    // NTF-028: badges move only on an explicit refresh, a tab/filter
+    // change or a remount — never because the window regained focus or
+    // the network came back after the totals went stale.
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }
 
@@ -56,6 +62,13 @@ export function notificationsListQueryOptions(client: ApiClient, workspaceSlug: 
       }),
     staleTime: LIST_STALE_TIME_MS,
     enabled: workspaceSlug.length > 0,
+    // NTF-028: no push, no focus polling and no reconnect re-read. A
+    // remount is one of the three triggers that may re-read, so a warm
+    // stream re-reads when the inbox is entered again instead of serving
+    // the previous visit's rows.
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }
 
@@ -83,6 +96,11 @@ export function notificationPagesQueryOptions(client: ApiClient, workspaceSlug: 
     getNextPageParam: nextNotificationCursor,
     staleTime: LIST_STALE_TIME_MS,
     enabled: workspaceSlug.length > 0,
+    // NTF-028: the cursor stream follows the same pull-only policy as the
+    // first-page read.
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }
 

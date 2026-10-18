@@ -14,11 +14,12 @@ export {
   SNOOZED_TITLE,
   UNARCHIVED_TITLE,
   UNSNOOZED_TITLE,
+  useMarkAllRead,
   useSnoozeNotification,
   useToggleNotificationArchive,
   useToggleNotificationRead,
 } from "./api/mutations.js";
-export type { ArchiveToggle, ReadToggle, SnoozeWrite, StreamFlags } from "./api/mutations.js";
+export type { ArchiveToggle, BulkReadInput, ReadToggle, SnoozeWrite, StreamFlags } from "./api/mutations.js";
 export { notificationListQueryFromKey } from "./api/streamQuery.js";
 export {
   applyEmailPreferenceFlip,
@@ -42,6 +43,30 @@ export {
   pendingFlipTopic,
 } from "./components/EmailPreferencesPage.js";
 export type { EmailPreferenceRow, PendingFlip } from "./components/EmailPreferencesPage.js";
+export { applyBulkRead, isRowInBulkReadScope, markPageRead } from "./lib/bulkRead.js";
+export type { CachedListPage } from "./lib/bulkRead.js";
+export { useBackgroundFetchGauge } from "./lib/useBackgroundFetch.js";
+export { useStreamReset } from "./lib/useStreamReset.js";
+export type { BackgroundFetchGauge } from "./lib/useBackgroundFetch.js";
+export { OriginChips } from "./components/OriginChips.js";
+export type { OriginChipsProps } from "./components/OriginChips.js";
+export { StreamControls } from "./components/StreamControls.js";
+export type { StreamControlsProps } from "./components/StreamControls.js";
+export {
+  DEFAULT_STREAM_MODES,
+  isHiddenByStreamMode,
+  isModeEnabled,
+  markAllReadScope,
+  notificationStreamQuery,
+  NOTIFICATION_MODES,
+  NOTIFICATION_MODE_LABELS,
+  NOTIFICATION_ORIGINS,
+  NOTIFICATION_ORIGIN_LABELS,
+  removeOrigin,
+  toggleMode,
+  toggleOrigin,
+} from "./lib/stream.js";
+export type { NotificationOrigin, OriginFilter, StreamMode, StreamModes } from "./lib/stream.js";
 export {
   NOTIFICATIONS_FIRST_CURSOR,
   NOTIFICATIONS_PAGE_SIZE,

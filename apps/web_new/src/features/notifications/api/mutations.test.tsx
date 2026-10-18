@@ -6,7 +6,9 @@
 // read and archive toggles hit the per-item paths, move every cached
 // stream and the unread totals, and toast only on success; snooze writes
 // the resume moment through the per-item update. A failed write restores
-// the exact caches it touched and stays silent.
+// the exact caches it touched and stays silent. The header's bulk
+// mark-all-read posts the current scope, reads every in-scope cached page
+// in one pass and refetches the unread totals (§7, NTF-014).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { NotificationItem, NotificationListResponse, TransportResponse } from "@pidash/api-client";
@@ -32,14 +34,15 @@ import {
   applyRowToPage,
   mergeWrittenRow,
   rowBelongsToStream,
-  streamPages,
   writeRowToStream,
   type StreamData,
   useSnoozeNotification,
   useToggleNotificationArchive,
+  useMarkAllRead,
   useToggleNotificationRead,
   type StreamFlags,
 } from "./mutations.js";
+import { streamPages } from "../lib/streamData.js";
 
 const WS = "acme";
 const ID = "523e4567-e89b-12d3-a456-426614174004";
@@ -656,5 +659,97 @@ describe("useSnoozeNotification", () => {
     );
     expect(snoozed?.results[0]?.snoozed_till).toBe("2026-10-19T17:30:00.000Z");
     expect(snoozed?.results[0]?.is_mentioned_notification).toBe(false);
+  });
+});
+
+const UNREAD = { total_unread_notifications_count: 2, mention_unread_notifications_count: 1 };
+
+interface BulkReadCall {
+  url: string;
+  method: string;
+  body: string;
+}
+
+/** Transport for the bulk read: one write path, one unread totals read. */
+function bulkReadHarness(handler: (call: BulkReadCall) => TransportResponse) {
+  const calls: BulkReadCall[] = [];
+  createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+    if (url.endsWith("/auth/get-csrf-token/")) {
+      return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
+    }
+    const call = { url, method: init.method ?? "GET", body: init.body ?? "" };
+    calls.push(call);
+    return handler(call);
+  }) as never);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  const wrapperFn = wrapper(client);
+  return { calls, client, wrapper: wrapperFn };
+}
+
+function bulkReadOk(url: string, body: unknown): TransportResponse {
+  return jsonResponse(url, 200, body);
+}
+
+describe("useMarkAllRead (NTF-014)", () => {
+  it("posts the scope and flips every in-scope page read", async () => {
+    const {
+      calls,
+      client,
+      wrapper: wrap,
+    } = bulkReadHarness((call) =>
+      call.url.includes("unread/") ? bulkReadOk(call.url, UNREAD) : bulkReadOk(call.url, { message: "Successful" })
+    );
+    const inScope = notificationKeys.list(WS, { snoozed: false, archived: false });
+    const unreadOnly = notificationKeys.list(WS, { snoozed: false, archived: false, read: false });
+    const other = notificationKeys.list(WS, { type: "assigned", snoozed: false, archived: false });
+    client.setQueryData(inScope, page([row()]));
+    client.setQueryData(unreadOnly, page([row()]));
+    client.setQueryData(other, page([row()]));
+    client.setQueryData(notificationKeys.unread(WS), UNREAD);
+    const { result } = renderHook(() => useMarkAllRead(), { wrapper: wrap });
+
+    await result.current.mutateAsync({ workspaceSlug: WS, scope: { snoozed: false, archived: false } });
+
+    const post = calls.find((call) => call.method === "POST");
+    expect(post?.url).toContain(`/api/workspaces/${WS}/users/notifications/mark-all-read/`);
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({ snoozed: false, archived: false });
+    expect(client.getQueryData<NotificationListResponse>(inScope)?.results[0]?.read_at).not.toBeNull();
+    expect(client.getQueryData<NotificationListResponse>(unreadOnly)?.results[0]?.read_at).not.toBeNull();
+    expect(client.getQueryData<NotificationListResponse>(other)?.results[0]?.read_at).toBeNull();
+    await waitFor(() => expect(client.getQueryState(notificationKeys.unread(WS))?.isInvalidated).toBe(true));
+  });
+
+  it("narrows the cache pass to the posted origin, snoozed and archived scope", async () => {
+    const { client, wrapper: wrap } = bulkReadHarness((call) => bulkReadOk(call.url, { message: "ok" }));
+    const assignedSnoozed = notificationKeys.list(WS, { type: "assigned", snoozed: true, archived: false });
+    const assignedDefault = notificationKeys.list(WS, { type: "assigned", snoozed: false, archived: false });
+    client.setQueryData(assignedSnoozed, page([row()]));
+    client.setQueryData(assignedDefault, page([row()]));
+    const { result } = renderHook(() => useMarkAllRead(), { wrapper: wrap });
+
+    await result.current.mutateAsync({
+      workspaceSlug: WS,
+      scope: { type: "assigned", snoozed: true, archived: false },
+    });
+
+    expect(client.getQueryData<NotificationListResponse>(assignedSnoozed)?.results[0]?.read_at).not.toBeNull();
+    expect(client.getQueryData<NotificationListResponse>(assignedDefault)?.results[0]?.read_at).toBeNull();
+  });
+
+  it("leaves the cache untouched when the write fails", async () => {
+    const { client, wrapper: wrap } = bulkReadHarness((call) =>
+      call.url.includes("mark-all-read/")
+        ? jsonResponse(call.url, 500, { detail: "parity bulk failure" })
+        : bulkReadOk(call.url, UNREAD)
+    );
+    const key = notificationKeys.list(WS, { snoozed: false, archived: false });
+    client.setQueryData(key, page([row()]));
+    const { result } = renderHook(() => useMarkAllRead(), { wrapper: wrap });
+
+    await expect(
+      result.current.mutateAsync({ workspaceSlug: WS, scope: { snoozed: false, archived: false } })
+    ).rejects.toThrow();
+
+    expect(client.getQueryData<NotificationListResponse>(key)?.results[0]?.read_at).toBeNull();
   });
 });
