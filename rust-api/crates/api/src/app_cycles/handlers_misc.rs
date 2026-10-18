@@ -385,12 +385,14 @@ pub async fn load_project_tenant(
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(project_id, workspace_id, timezone, estimate_id)| Tenant {
-        workspace_id,
-        project_id,
-        timezone,
-        estimate_id,
-    }))
+    Ok(
+        row.map(|(project_id, workspace_id, timezone, estimate_id)| Tenant {
+            workspace_id,
+            project_id,
+            timezone,
+            estimate_id,
+        }),
+    )
 }
 
 /// Membership facts for the guards layer, resolved with the same row
@@ -728,19 +730,11 @@ pub async fn date_check(
         Ok(exclude) => exclude,
         Err(denial) => return denial.into_response(),
     };
-    let overlap = match overlap_exists(
-        pool,
-        &slug,
-        &project_id,
-        &start_date,
-        &end_date,
-        exclude,
-    )
-    .await
-    {
-        Ok(overlap) => overlap,
-        Err(denial) => return denial.into_response(),
-    };
+    let overlap =
+        match overlap_exists(pool, &slug, &project_id, &start_date, &end_date, exclude).await {
+            Ok(overlap) => overlap,
+            Err(denial) => return denial.into_response(),
+        };
     if overlap {
         raw_json_response(DATE_CHECK_CONFLICT_BODY.to_owned())
     } else {
@@ -1062,6 +1056,7 @@ pub struct OldCycleCounts {
 }
 
 /// The `transfer_cycle_issues` sequence after the endpoint guards.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_transfer(
     state: &AppState,
     pool: &PgPool,
@@ -1111,8 +1106,7 @@ pub async fn run_transfer(
     if use_estimates {
         assignee_estimates =
             assignee_estimate_distribution(pool, slug, project_id, cycle_id).await?;
-        label_estimates =
-            label_estimate_distribution(pool, slug, project_id, cycle_id).await?;
+        label_estimates = label_estimate_distribution(pool, slug, project_id, cycle_id).await?;
         points_chart = burndown_points_value(
             pool,
             slug,
