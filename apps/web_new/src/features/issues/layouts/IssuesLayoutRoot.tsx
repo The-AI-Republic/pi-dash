@@ -38,6 +38,11 @@ export interface IssuesLayoutRootProps {
   resultCount: number;
   /** Registered layouts; archived contexts pass list only. */
   offered: readonly LayoutKind[];
+  /**
+   * Display settings the root renders from. A saved view passes its own
+   * stored record; every other list reads the entity's user-properties.
+   */
+  display?: DisplayPrefs | undefined;
   renderLayout: LayoutRenderer;
   /** Zero-total empty state (context copy arrives with ISS-068). */
   emptyState: React.ReactNode;
@@ -72,6 +77,7 @@ function IssuesLayoutRootInner({
   totalCount,
   resultCount,
   offered,
+  display,
   renderLayout,
   emptyState,
   noMatchState,
@@ -82,7 +88,7 @@ function IssuesLayoutRootInner({
   analyticsControl,
 }: IssuesLayoutRootProps): React.ReactElement {
   const { data: record } = useSuspenseQuery(prefsQueryOptions(getAppClient(), workspaceSlug, entity));
-  const prefs = selectDisplayPrefs(record);
+  const prefs = display ?? selectDisplayPrefs(record);
   const active = resolveActiveLayout(prefs.layout, offered);
   const { updateDisplayPrefs } = useUpdateDisplayPrefs(workspaceSlug, entity);
   const { isMutationLoading } = useIssuesLoader();

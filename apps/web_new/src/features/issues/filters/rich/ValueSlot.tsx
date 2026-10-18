@@ -67,8 +67,18 @@ function chosenLabel(values: readonly string[], labels: ReadonlyMap<string, stri
   return pickTriggerLabel(values.map((value) => labels.get(value) ?? value));
 }
 
-function PickSlot({ workspaceSlug, projectId, field, condition, onChange }: ValueSlotProps): React.ReactElement {
-  const [open, setOpen] = React.useState(false);
+function PickSlot({
+  workspaceSlug,
+  projectId,
+  field,
+  condition,
+  onChange,
+  autoOpen,
+}: ValueSlotProps & { autoOpen: boolean }): React.ReactElement {
+  // A freshly added field opens its list by itself so the first pick is one
+  // click away (ISS-100/ISS-101); a slot that already holds values stays
+  // closed until its trigger is used.
+  const [open, setOpen] = React.useState(autoOpen);
   const selected = selectedValues(condition.value);
   // A stored condition must resolve its names before the popup opens, so
   // reads stay enabled while ids are selected as well as while open.
@@ -403,6 +413,6 @@ export function ValueSlot(props: ValueSlotProps): React.ReactElement {
     case "range":
       return <RangeSlot field={field} value={condition.value} onChange={onChange} autoOpen={autoOpen} />;
     default:
-      return <PickSlot {...props} />;
+      return <PickSlot {...props} autoOpen={autoOpen} />;
   }
 }

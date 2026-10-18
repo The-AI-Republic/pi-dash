@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { issueKeys } from "../api/keys.js";
+import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { IssuesLayoutRoot } from "./IssuesLayoutRoot.js";
 import { LAYOUT_ORDER, type LayoutKind } from "./kinds.js";
@@ -51,6 +52,7 @@ function renderRoot(
     stub?: StubOptions;
     seed?: Record<string, unknown> | null;
     offered?: readonly LayoutKind[];
+    display?: DisplayPrefs;
     totalCount?: number;
     resultCount?: number;
     slots?: {
@@ -113,6 +115,7 @@ function renderRoot(
           totalCount={options.totalCount ?? 3}
           resultCount={options.resultCount ?? 3}
           offered={options.offered ?? LAYOUT_ORDER}
+          display={options.display}
           renderLayout={(layout, prefs) => {
             rendered.push({ layout, orderBy: prefs.orderBy });
             return <p>{`layout:${layout}`}</p>;
@@ -165,6 +168,24 @@ describe("IssuesLayoutRoot", () => {
     expect(await screen.findByText("layout:list")).toBeInTheDocument();
     expect(h.segment("List layout")).toHaveAttribute("data-active", "true");
     expect(within(screen.getByTestId("layout-switcher-segmented")).getAllByRole("button")).toHaveLength(1);
+  });
+
+  it("renders a supplied display (a saved view's record) over the personal one", async () => {
+    const h = renderRoot({
+      display: {
+        layout: "calendar",
+        groupBy: null,
+        subGroupBy: null,
+        orderBy: "-updated_at",
+        showEmptyGroups: true,
+        showSubIssues: true,
+        calendar: { mode: "month", showWeekends: true },
+        properties: {},
+      },
+    });
+    expect(await screen.findByText("layout:calendar")).toBeInTheDocument();
+    expect(h.segment("Calendar layout")).toHaveAttribute("data-active", "true");
+    expect(h.rendered[h.rendered.length - 1]).toEqual({ layout: "calendar", orderBy: "-updated_at" });
   });
 
   it("persists a header switch and re-renders the new layout", async () => {

@@ -39,7 +39,7 @@ function viewRecord() {
     description: "",
     query: {},
     filters: {},
-    display_filters: { layout: "list" },
+    display_filters: { layout: "list" } as Record<string, unknown>,
     display_properties: {},
     rich_filters: EXPRESSION,
     access: 0,
@@ -86,24 +86,53 @@ function projectSeed(): Project {
 function prefsSeed(): PrefsRecord {
   return {
     filters: {},
-    display_filters: { layout: "list", group_by: null, order_by: "sort_order" },
+    display_filters: { layout: "kanban", group_by: null, order_by: "-created_at" },
     display_properties: {},
     rich_filters: {},
   };
 }
 
-function issueResponse(): IssueListResponse {
+function issueResponse(rows = 0): IssueListResponse {
+  const results: IssueListResponse["results"] =
+    rows === 0
+      ? []
+      : [
+          {
+            id: "423e4567-e89b-12d3-a456-426614174003",
+            name: "Draft onboarding",
+            state_id: null,
+            sort_order: 1,
+            completed_at: null,
+            priority: "none",
+            sequence_id: 1,
+            project_id: PARAMS.projectId,
+            parent_id: null,
+            cycle_id: null,
+            module_ids: [],
+            label_ids: [],
+            assignee_ids: [],
+            sub_issues_count: null,
+            attachment_count: null,
+            link_count: null,
+            created_at: "2026-01-02T00:00:00Z",
+            updated_at: "2026-01-03T00:00:00Z",
+            created_by: null,
+            updated_by: null,
+            is_draft: false,
+            archived_at: null,
+          },
+        ];
   return {
     grouped_by: null,
     sub_grouped_by: null,
-    total_count: 0,
+    total_count: rows,
     next_cursor: "",
     prev_cursor: "",
     next_page_results: false,
     prev_page_results: false,
-    count: 0,
-    total_results: 0,
-    results: [],
+    count: rows,
+    total_results: rows,
+    results,
   };
 }
 
@@ -129,7 +158,7 @@ async function load(apiClient: ReturnType<typeof failingClient>): Promise<{ ok: 
   );
 }
 
-function renderScreen(role: number | null = 20): void {
+function renderScreen(role: number | null = 20, view: ReturnType<typeof viewRecord> = viewRecord(), rows = 0): void {
   vi.spyOn(Route, "useParams").mockReturnValue(PARAMS);
   vi.spyOn(Route, "useSearch").mockReturnValue({});
   const apiClient = createAppClient("https://api.test", (() => {
@@ -139,13 +168,22 @@ function renderScreen(role: number | null = 20): void {
   vi.spyOn(Route, "useRouteContext").mockReturnValue({ queryClient, apiClient } as never);
   queryClient.setQueryData(
     projectViewQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, PARAMS.viewId).queryKey,
-    viewRecord()
+    view
   );
   queryClient.setQueryData(projectsQueryOptions(apiClient, PARAMS.ws).queryKey, [projectSeed()]);
   queryClient.setQueryData(
-    issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {}, EXPRESSION).queryKey,
-    issueResponse()
+    issuesQueryOptions(
+      apiClient,
+      PARAMS.ws,
+      PARAMS.projectId,
+      {},
+      EXPRESSION,
+      typeof view.display_filters["order_by"] === "string" ? view.display_filters["order_by"] : "sort_order"
+    ).queryKey,
+    issueResponse(rows)
   );
+  // Display writes still target the personal record; the render itself
+  // uses the view's stored settings.
   queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, prefsSeed());
   queryClient.setQueryData(sessionKeys.me, { id: USER });
   queryClient.setQueryData(sessionKeys.workspaces, [
@@ -169,7 +207,7 @@ afterEach(() => {
 });
 
 describe("saved view load", () => {
-  it("loads through when the view, list and preferences reads succeed", async () => {
+  it("loads through when the view and list reads succeed", async () => {
     const apiClient = failingClient(200);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     queryClient.setQueryData(
@@ -179,7 +217,6 @@ describe("saved view load", () => {
     queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {}, EXPRESSION).queryKey, {
       grouped_by: null,
     } as never);
-    queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, {} as never);
     const beforeLoad = Route.options.beforeLoad;
     if (!beforeLoad) throw new Error("missing beforeLoad");
     await expect(
@@ -194,6 +231,35 @@ describe("saved view load", () => {
   it("throws anything else to the load error", async () => {
     const outcome = await load(failingClient(500));
     expect("thrown" in outcome && outcome.thrown).toBeInstanceOf(ApiError);
+  });
+
+  it("asks for the list in the view's stored order, not the personal one", async () => {
+    const seen: string[] = [];
+    const apiClient = createAppClient("https://api.test", (async (url: string) => {
+      seen.push(url);
+      if (url.endsWith(`/views/${PARAMS.viewId}/`)) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: async () =>
+            JSON.stringify({ ...viewRecord(), display_filters: { layout: "list", order_by: "-updated_at" } }),
+        };
+      }
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(issueResponse()),
+      };
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    await beforeLoad({ context: { queryClient, apiClient }, params: PARAMS, search: {} } as never);
+    expect(seen.some((url) => url.includes("issues/?") && url.includes("order_by=-updated_at"))).toBe(true);
+    // The saved view never reads the personal preference record.
+    expect(seen.some((url) => url.includes("user-properties"))).toBe(false);
   });
 });
 
@@ -214,5 +280,20 @@ describe("saved view screen", () => {
     await user.click(within(pill).getByRole("button", { name: /^is$/ }));
     await user.click(await screen.findByRole("option", { name: "is not" }));
     expect(await screen.findByRole("button", { name: "Update view" })).toBeInTheDocument();
+  });
+
+  it("opens in the layout the view stored and offers the timeline in the switcher", async () => {
+    renderScreen(
+      20,
+      {
+        ...viewRecord(),
+        display_filters: { layout: "gantt_chart", order_by: "sort_order" } as Record<string, unknown>,
+      },
+      1
+    );
+    const switcher = await screen.findByTestId("layout-switcher-segmented");
+    expect(switcher.querySelector('[data-layout="gantt_chart"]')).not.toBeNull();
+    expect(await screen.findByTestId("gantt-layout")).toBeInTheDocument();
+    expect(screen.queryByLabelText("WEB-1")).toBeNull();
   });
 });

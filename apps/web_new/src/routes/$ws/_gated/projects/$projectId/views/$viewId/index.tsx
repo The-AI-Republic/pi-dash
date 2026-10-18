@@ -4,9 +4,10 @@
 // Saved project view (parity/specs/issues.md §21, ISS-104). This is the
 // minimal issues-owned list a saved view opens into: it reads the view
 // record, applies its stored expression to the project list, renders the
-// same layout root as the issues screen and hands the record to the
-// filter row so Save as and Update view act on it. The views area owns
-// the full views surface and replaces this host when it lands.
+// layouts the issues screen offers (driven by the view's own stored display
+// settings, not the personal ones) and hands the record to the filter row
+// so Save as and Update view act on it. The views area owns the full views
+// surface and replaces this host when it lands.
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
@@ -22,10 +23,12 @@ import {
   ListSkeleton,
   issuesQueryOptions,
   parseIssueSearch,
-  prefsQueryOptions,
+  parseDisplayPrefs,
   type LayoutKind,
 } from "../../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
+import { GanttTimeline } from "../../../../../../../features/issues/gantt/GanttTimeline.js";
+import { orderByFromDisplayFilters } from "../../../../../../../features/issues/prefs/prefsQuery.js";
 import { projectViewQueryOptions } from "../../../../../../../features/issues/filters/rich/savedViewQuery.js";
 import { viewExpression } from "../../../../../../../features/issues/filters/rich/views.js";
 import { projectsQueryOptions } from "../../../../../../../features/projects/index.js";
@@ -57,14 +60,18 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
       const view = await context.queryClient.ensureQueryData(
         projectViewQueryOptions(context.apiClient, params.ws, params.projectId, params.viewId)
       );
-      await Promise.all([
-        context.queryClient.ensureQueryData(
-          issuesQueryOptions(context.apiClient, params.ws, params.projectId, search, viewExpression(view))
-        ),
-        context.queryClient.ensureQueryData(
-          prefsQueryOptions(context.apiClient, params.ws, { scope: "project", projectId: params.projectId })
-        ),
-      ]);
+      // The view carries its own order, so the list query never reads the
+      // personal preferences for this screen.
+      await context.queryClient.ensureQueryData(
+        issuesQueryOptions(
+          context.apiClient,
+          params.ws,
+          params.projectId,
+          search,
+          viewExpression(view),
+          orderByFromDisplayFilters(view.display_filters)
+        )
+      );
     } catch (error) {
       if (!isProjectGateError(error)) throw error;
     }
@@ -99,8 +106,18 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
     const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, params.ws));
     const project = projects.find((entry) => entry.id === params.projectId) ?? null;
     const { data: issues } = useSuspenseQuery(
-      issuesQueryOptions(context.apiClient, params.ws, params.projectId, search, viewExpression(view))
+      issuesQueryOptions(
+        context.apiClient,
+        params.ws,
+        params.projectId,
+        search,
+        viewExpression(view),
+        orderByFromDisplayFilters(view.display_filters)
+      )
     );
+    // The layout root renders from these stored settings rather than the
+    // personal record, so the view opens in the layout it was saved with.
+    const viewDisplay = parseDisplayPrefs(view.display_filters, view.display_properties);
 
     if (project === null) {
       return (
@@ -111,8 +128,8 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
       );
     }
 
-    const offered: readonly LayoutKind[] = ["list"];
-    const display = (
+    const offered: readonly LayoutKind[] = ["list", "gantt_chart"];
+    const displayControl = (
       <DisplayControl
         workspaceSlug={params.ws}
         entity={{ scope: "project", projectId: params.projectId }}
@@ -138,13 +155,29 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
         totalCount={issues.total_count}
         resultCount={issues.results.length}
         offered={offered}
-        renderLayout={() => (
-          <IssueList issues={issues.results} projectIdentifier={project.identifier} layout={search.layout ?? "list"} />
-        )}
+        display={viewDisplay}
+        renderLayout={(layout, prefs) =>
+          layout === "gantt_chart" ? (
+            <GanttTimeline
+              workspaceSlug={params.ws}
+              projectId={params.projectId}
+              projectIdentifier={project.identifier}
+              issues={issues.results}
+              totalCount={issues.total_count}
+              prefs={prefs}
+            />
+          ) : (
+            <IssueList
+              issues={issues.results}
+              projectIdentifier={project.identifier}
+              layout={search.layout ?? "list"}
+            />
+          )
+        }
         emptyState={<ViewIssuesEmptyState />}
         noMatchState={<ViewIssuesNoMatchState />}
-        headerActions={display}
-        displayControl={display}
+        headerActions={displayControl}
+        displayControl={displayControl}
         filterControl={richFilter?.control}
         filterRow={richFilter?.row}
         analyticsControl={analytics}

@@ -14,6 +14,7 @@ vi.mock("../../../../shared/shell/index.js", () => ({
 }));
 
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
+import { pickerStatesQueryOptions } from "../../../../shared/pickers/index.js";
 import { IssuesLoaderProvider } from "../../loaders/loaderContext.js";
 import type { IssuesEntity, PrefsRecord } from "../../prefs/entities.js";
 import { prefsQueryOptions } from "../../prefs/prefsQuery.js";
@@ -116,7 +117,7 @@ function setup(richFilters: Record<string, unknown>, options: { hold?: boolean; 
       </IssuesLoaderProvider>
     </QueryClientProvider>
   );
-  return { patches, release, hold: options.hold === true };
+  return { patches, release, hold: options.hold === true, queryClient };
 }
 
 afterEach(() => {
@@ -159,6 +160,30 @@ describe("rich filter builder empty state", () => {
     expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
     expect(screen.getByTestId("rich-condition")).toHaveTextContent("Priority");
     expect(patches).toHaveLength(0);
+  });
+
+  it("opens the list of a newly added pick field without another click", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = setup({});
+    queryClient.setQueryData(pickerStatesQueryOptions({} as never, "acme", PROJECT).queryKey, [
+      {
+        id: "323e4567-e89b-12d3-a456-426614174002",
+        name: "Todo",
+        group: "unstarted",
+        color: "#fff",
+        project_id: PROJECT,
+        workspace_id: PROJECT,
+        default: false,
+        description: "",
+        sequence: 1,
+      },
+    ]);
+    await user.click(screen.getByTestId("rich-filter-add"));
+    await user.click(await screen.findByRole("option", { name: "State" }));
+
+    // The empty slot is the first place to type or pick, so it lists by itself.
+    const list = await screen.findByRole("listbox", { name: "State values" });
+    expect(within(list).getByRole("option", { name: "Todo" })).toBeInTheDocument();
   });
 });
 

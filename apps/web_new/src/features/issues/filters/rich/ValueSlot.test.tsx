@@ -221,6 +221,43 @@ describe("ValueSlot stored values without an open popup", () => {
 });
 
 describe("ValueSlot", () => {
+  it("opens a pick slot that holds no value and commits the first pick from it", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={STATE}
+          condition={{ key: "a", property: "state_id", operator: "in", negated: false, value: null }}
+          onChange={onChange}
+        />,
+        true
+      )
+    );
+    // No trigger click: an empty slot already shows its list.
+    const list = await screen.findByRole("listbox", { name: "State values" });
+    await user.click(within(list).getByRole("option", { name: "Todo" }));
+    expect(onChange).toHaveBeenCalledWith([STATE_ID]);
+  });
+
+  it("keeps a pick slot with a stored value closed until its trigger is used", () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={PRIORITY}
+          condition={condition(["urgent"])}
+          onChange={() => {}}
+        />
+      )
+    );
+    expect(screen.getByRole("button", { name: /Urgent/ })).toBeInTheDocument();
+    expect(screen.queryByRole("listbox", { name: "Priority values" })).not.toBeInTheDocument();
+  });
+
   it("shows the placeholder and picks a static multi value", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
@@ -490,7 +527,6 @@ describe("ValueSlot member and label sources", () => {
         />
       )
     );
-    await user.click(screen.getByRole("button", { name: /^--$/ }));
     const list = await screen.findByRole("listbox", { name: "Assignees values" });
     expect(
       within(list)
@@ -549,7 +585,6 @@ describe("ValueSlot member and label sources", () => {
   });
 
   it("renders a member avatar image when the directory has one", async () => {
-    const user = userEvent.setup();
     const AVATAR = "https://cdn.test/ana.png";
     render(
       coldWrap(
@@ -596,13 +631,11 @@ describe("ValueSlot member and label sources", () => {
         }
       )
     );
-    await user.click(screen.getByRole("button", { name: "--" }));
     const option = await screen.findByRole("option", { name: /Ana/ });
     expect(option.querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
   });
 
   it("shows the loading row while the member directory resolves", async () => {
-    const user = userEvent.setup();
     createAppClient("https://api.test", (async (url: string) => {
       if (url.endsWith("/auth/get-csrf-token/")) {
         return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
@@ -621,7 +654,6 @@ describe("ValueSlot member and label sources", () => {
         />
       </QueryClientProvider>
     );
-    await user.click(screen.getByRole("button", { name: /^--$/ }));
     expect((await screen.findAllByText("Loading values")).length).toBeGreaterThan(0);
   });
 });
@@ -689,9 +721,8 @@ describe("ValueSlot project, cycle and module sources", () => {
         route
       )
     );
-    // Lazy: nothing reads until the slot opens.
+    // Lazy: the empty slot opens by itself and only then reads.
     expect(screen.getByRole("button", { name: /^--$/ })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /^--$/ }));
     expect(await screen.findByRole("option", { name })).toBeInTheDocument();
     await user.click(screen.getByRole("option", { name }));
     expect(onChange).toHaveBeenCalledWith([id]);
@@ -720,7 +751,6 @@ describe("ValueSlot project, cycle and module sources", () => {
 
 describe("ValueSlot failure and suspended rows", () => {
   it("reports a failed member read instead of an empty list", async () => {
-    const user = userEvent.setup();
     createAppClient("https://api.test", (async (url: string) => {
       if (url.endsWith("/auth/get-csrf-token/")) {
         return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
@@ -739,7 +769,6 @@ describe("ValueSlot failure and suspended rows", () => {
         />
       </QueryClientProvider>
     );
-    await user.click(screen.getByRole("button", { name: /^--$/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load assignees values.");
   });
 
@@ -792,7 +821,6 @@ describe("ValueSlot failure and suspended rows", () => {
         }
       )
     );
-    await user.click(screen.getByRole("button", { name: /^--$/ }));
     const suspended = await screen.findByRole("option", { name: /Zoe/ });
     expect(suspended).toBeDisabled();
     await user.click(suspended);

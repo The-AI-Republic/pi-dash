@@ -11,7 +11,6 @@
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import type { IssueListItem } from "@pidash/api-client";
 import { Button } from "@pidash/kit";
 import * as React from "react";
 
@@ -26,25 +25,16 @@ import {
   parseIssueSearch,
   AnalyticsEntry,
   prefsQueryOptions,
-  useWeekStart,
-  type DisplayPrefs,
   type LayoutKind,
 } from "../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
+import { GanttTimeline } from "../../../../../../features/issues/gantt/GanttTimeline.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 
 const LazyIssueFilters = React.lazy(() => import("../../../../../../features/issues/filters/rich/IssueFilters.js"));
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
 import { notifyError } from "../../../../../../shared/shell/index.js";
-
-// The timeline pulls in the chart math, header, sidebar and full-screen
-// portal: a heavy leaf that only the stored `gantt_chart` layout requests.
-const LazyGanttLayout = React.lazy(() =>
-  import("../../../../../../features/issues/gantt/GanttLayout.js").then((module) => ({
-    default: module.GanttLayout,
-  }))
-);
 
 function ProjectIssuesEmptyState(): React.ReactElement {
   return (
@@ -61,38 +51,6 @@ function ProjectIssuesNoMatchState(): React.ReactElement {
       <h2 className="text-h3 text-(--text)">No matching issues</h2>
       <p className="text-body text-(--text-muted)">No issues match the current filters.</p>
     </section>
-  );
-}
-
-/** The timeline reads the profile's week start; the root owns the prefs. */
-function GanttTimeline({
-  workspaceSlug,
-  projectId,
-  projectIdentifier,
-  issues,
-  totalCount,
-  prefs,
-}: {
-  workspaceSlug: string;
-  projectId: string;
-  projectIdentifier: string;
-  issues: readonly IssueListItem[];
-  totalCount: number;
-  prefs: DisplayPrefs;
-}): React.ReactElement {
-  const weekStart = useWeekStart();
-  return (
-    <React.Suspense fallback={<ListSkeleton />}>
-      <LazyGanttLayout
-        workspaceSlug={workspaceSlug}
-        projectId={projectId}
-        projectIdentifier={projectIdentifier}
-        issues={issues}
-        totalCount={totalCount}
-        prefs={prefs}
-        weekStart={weekStart}
-      />
-    </React.Suspense>
   );
 }
 

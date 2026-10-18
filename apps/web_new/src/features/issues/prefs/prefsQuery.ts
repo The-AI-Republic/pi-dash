@@ -22,13 +22,19 @@ import { issueKeys } from "../api/keys.js";
 import type { IssuesEntity, PrefsRecord } from "./entities.js";
 
 /**
- * The stored sort order of one record (ISS-002). Manual by default; the
- * issues list sends it as `order_by` so the timeline shows the same order
- * the Display panel names.
+ * The sort order inside one display_filters object (ISS-002). Manual by
+ * default; the issues list sends it as `order_by` so the timeline shows
+ * the same order the Display panel names. Saved views read their own
+ * stored filters, entity lists their user-properties record.
  */
-export function orderByOf(record: PrefsRecord): string {
-  const value = record.display_filters["order_by"];
+export function orderByFromDisplayFilters(displayFilters: Record<string, unknown>): string {
+  const value = displayFilters["order_by"];
   return typeof value === "string" && value.length > 0 ? value : "sort_order";
+}
+
+/** The stored sort order of one user-properties record (ISS-002). */
+export function orderByOf(record: PrefsRecord): string {
+  return orderByFromDisplayFilters(record.display_filters);
 }
 
 /** Key parts beneath `issueKeys.prefs` for one entity. */
