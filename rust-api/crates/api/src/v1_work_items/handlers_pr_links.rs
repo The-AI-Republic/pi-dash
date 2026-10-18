@@ -202,6 +202,9 @@ impl From<crate::v1_projects::handlers_project::Denial> for Denial {
             D::NotFound => Denial::NotFound,
             D::ProjectNotFound => Denial::ProjectNotFound,
             D::BadDetail(message) => Denial::BadDetail(message),
+            // Unreachable from the reused calls (pure auth + lookup, no
+            // `request.data` read), so no 415 can surface here.
+            D::UnsupportedMediaType(_) => Denial::ServerError,
             D::BadError(message) => Denial::BadError(message),
             D::FieldErrors(_) => Denial::ServerError,
             D::NotFoundError(message) => Denial::NotFoundError(message),
