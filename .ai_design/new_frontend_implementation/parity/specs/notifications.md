@@ -486,7 +486,7 @@ slug; all per-item paths interpolate the notification id.
   next cursor for continuations). Envelope: result rows plus pagination info
   with the next-page flag and next cursor.
 - Unread totals: `GET
-/api/workspaces/{workspaceSlug}/users/notifications/unread/`, no
+  /api/workspaces/{workspaceSlug}/users/notifications/unread/`, no
   parameters. Response fields: overall unread count and mention unread count
   (`total_unread_notifications_count`,
   `mention_unread_notifications_count`).
@@ -497,7 +497,7 @@ slug; all per-item paths interpolate the notification id.
 - Snooze and unsnooze: `PATCH .../users/notifications/{id}/` with a partial
   body carrying the resume timestamp field (`snoozed_till`) set or cleared.
 - Bulk mark read: `POST
-/api/workspaces/{workspaceSlug}/users/notifications/mark-all-read/` with a
+  /api/workspaces/{workspaceSlug}/users/notifications/mark-all-read/` with a
   body mirroring the current list scope (origin, snoozed and archived
   flags). The origin value is the list's comma-joined vocabulary, including
   `subscribed` on its own. The endpoint currently recognizes a different

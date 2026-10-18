@@ -357,12 +357,7 @@ test(
         expect(joined.type).toBe("assigned,created");
         await driver.notificationsCloseMenus();
         await expect
-          .poll(
-            async () => (await driver.notificationsCards()).map((card) => card.title).then((titles) => titles.sort()),
-            {
-              timeout: 30_000,
-            }
-          )
+          .poll(async () => (await driver.notificationsCards()).map((card) => card.title).sort(), { timeout: 30_000 })
           .toEqual([names.assigned, names.created].sort());
 
         const held = await driver.notificationsMarkAllReadHeld(2_000);
