@@ -300,6 +300,120 @@ def test_activity_chain_fans_out_to_sink(db_conn, broker_url, webhook_sink):
     assert chained[0]["event_type"] == "issue"
 
 
+def _soft_delete_row(conn, table, row_id):
+    """Stamp ``deleted_at`` on one seeded row.
+
+    Every read below goes through ``Model.objects`` (the inherited
+    ``SoftDeletionManager``, ``pi_dash/db/mixins.py:65``), so a stamped
+    row is invisible to the Django tasks. These tests are the oracle-side
+    half of the soft-delete regression pins; the replay suite carries the
+    matching Rust-side cases (``*_soft_deleted_*`` in
+    ``test_rust_replay.py``).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE {table} SET deleted_at = now() WHERE id = %s",
+            (str(row_id),),
+        )
+
+
+def test_webhook_send_skips_soft_deleted_webhook(db_conn, broker_url, webhook_sink):
+    """Send task, Django side: a soft-deleted webhook is swallowed.
+
+    ``Webhook.objects.get(id=..., workspace__slug=...)`` hides the row, so
+    the task returns before POSTing or logging — no sink receipt, no
+    ``webhook_logs`` row.
+    """
+    hook = _seed_workspace_with_hook(db_conn, webhook_sink)
+    _soft_delete_row(db_conn, "webhooks", hook["id"])
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = broker_probe.queue_depth()
+    celery_wire.publish(
+        f"{M}.webhook_task.webhook_send_task",
+        kwargs={
+            "webhook_id": str(hook["id"]),
+            "slug": hook["workspace_slug"],
+            "event": "issue",
+            "event_data": {"id": "contract-dead-hook"},
+            "action": "POST",
+            "current_site": "example.com",
+            "activity": None,
+        },
+    )
+    broker_probe.wait_for_queue_drain(
+        baseline=baseline, what="send task consumed for a soft-deleted webhook"
+    )
+    assert webhook_sink.snapshot() == [], "send POSTed to a soft-deleted webhook"
+    assert _log_diff_rows(db_conn, before) == [], "send logged a soft-deleted webhook"
+
+
+def test_activity_skips_soft_deleted_webhook(db_conn, broker_url, webhook_sink):
+    """Fan-out, Django side: soft-deleted webhooks get no send job."""
+    chain = seed_helpers.issue_chain(db_conn, "chaindeadhook")
+    owner, workspace, issue = chain["owner"], chain["workspace"], chain["issue"]
+    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    hook = seed_helpers.webhook(db_conn, workspace["id"], url, issue=True)
+    _soft_delete_row(db_conn, "webhooks", hook["id"])
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = broker_probe.queue_depth()
+    celery_wire.publish(
+        f"{M}.webhook_task.webhook_activity",
+        kwargs={
+            "event": "issue",
+            "verb": "created",
+            "field": None,
+            "old_value": None,
+            "new_value": None,
+            "actor_id": str(owner["id"]),
+            "slug": workspace["slug"],
+            "current_site": "example.com",
+            "event_id": str(issue["id"]),
+            "old_identifier": None,
+            "new_identifier": None,
+        },
+    )
+    broker_probe.wait_for_queue_drain(
+        baseline=baseline, what="fan-out consumed with only a soft-deleted hook"
+    )
+    assert webhook_sink.snapshot() == [], "fan-out notified a soft-deleted webhook"
+    assert _log_diff_rows(db_conn, before) == [], "fan-out logged a deleted hook"
+
+
+def test_activity_swallows_soft_deleted_issue(db_conn, broker_url, webhook_sink):
+    """Fan-out, Django side: a soft-deleted event model is swallowed."""
+    chain = seed_helpers.issue_chain(db_conn, "chaindeadissue")
+    owner, workspace, issue = chain["owner"], chain["workspace"], chain["issue"]
+    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    seed_helpers.webhook(db_conn, workspace["id"], url, issue=True)
+    _soft_delete_row(db_conn, "issues", issue["id"])
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = broker_probe.queue_depth()
+    celery_wire.publish(
+        f"{M}.webhook_task.webhook_activity",
+        kwargs={
+            "event": "issue",
+            "verb": "created",
+            "field": None,
+            "old_value": None,
+            "new_value": None,
+            "actor_id": str(owner["id"]),
+            "slug": workspace["slug"],
+            "current_site": "example.com",
+            "event_id": str(issue["id"]),
+            "old_identifier": None,
+            "new_identifier": None,
+        },
+    )
+    broker_probe.wait_for_queue_drain(
+        baseline=baseline, what="fan-out consumed for a soft-deleted issue"
+    )
+    assert webhook_sink.snapshot() == [], "fan-out notified a soft-deleted issue"
+    assert _log_diff_rows(db_conn, before) == [], "fan-out logged a deleted issue"
+
+
 def test_deactivation_email_delivers(db_conn, broker_url, smtp_sink):
     owner = seed_helpers.user(db_conn, "contract-deact-owner")
     receiver = seed_helpers.user(db_conn, "contract-deact-receiver")

@@ -80,6 +80,13 @@ redelivery, chain, midpoint, signature, exhaustion and mail cases.
 The ``webhook_sink`` / ``smtp_sink`` fixtures serve both suites from
 their session defaults — no replay-job env needed.
 
+soft-delete note: these webhook reads go through ``Model.objects`` (the
+inherited ``SoftDeletionManager``, ``pi_dash/db/mixins.py:65``), so a
+soft-deleted webhook / issue is invisible to the Django tasks. The
+oracle suite does not seed deleted rows, so the ``*_soft_deleted_*``
+tests below are the regression pins: a deleted webhook gets no send job
+and no POST, and a deleted event model swallows the fan-out.
+
 Beat note: D-08 owns no beat entries (``test_no_beat_entries_owned`` —
 cleanup owns the webhook-log delete; the daily
 ``check-every-day-to-archive-and-close`` entry names
@@ -327,6 +334,133 @@ def test_rust_webhook_activity_executes_locally(db_conn, broker_url, webhook_sin
     )
     assert row["event_type"] == "issue"
     assert str(row["response_status"]) == "200"
+
+
+def _soft_delete(conn, table, row_id):
+    """Mark one seeded row soft-deleted (``deleted_at = now()``)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE {table} SET deleted_at = now() WHERE id = %s",
+            (str(row_id),),
+        )
+
+
+def test_rust_webhook_send_skips_soft_deleted_webhook(
+    db_conn, broker_url, webhook_sink
+):
+    """Send task, Rust side: a soft-deleted webhook is swallowed.
+
+    Django reads ``Webhook.objects.get(id=..., workspace__slug=...)``
+    through the inherited ``SoftDeletionManager`` (``pi_dash/db/mixins.py:65``),
+    so a soft-deleted row is invisible: the task returns before POSTing
+    or logging. The Rust fetch must scope ``deleted_at IS NULL`` the same
+    way — the job settles, no POST reaches the sink, and no
+    ``webhook_logs`` row appears. (The oracle suite does not seed deleted
+    rows, so this replay case is the regression pin.)
+    """
+    hook = _seed_sink_hook(db_conn)
+    _soft_delete(db_conn, "webhooks", hook["id"])
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    celery_id = rust_queue.publish(
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-dead-hook")
+    )
+    rust_queue.wait_for_settled(
+        celery_id, what=f"{WEBHOOK_SEND} settled for a soft-deleted webhook"
+    )
+    # Settlement deletes the row only after the handler returns, so any
+    # (incorrect) POST would already be recorded in the sink.
+    assert webhook_sink.snapshot() == [], "send POSTed to a soft-deleted webhook"
+    assert _log_diff_rows(db_conn, before) == [], "send logged a soft-deleted webhook"
+
+
+def test_rust_fanout_skips_soft_deleted_webhook(db_conn, broker_url, webhook_sink):
+    """Fan-out, Rust side: soft-deleted webhooks get no send job.
+
+    ``webhook_activity`` selects
+    ``Webhook.objects.filter(workspace__slug=..., is_active=True)`` — the
+    soft-deleting manager hides deleted hooks, so they never receive a
+    send. Seed one live issue plus a single soft-deleted hook: the Rust
+    worker renders the issue, finds no active hook, and enqueues nothing.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rustreplaydeadhook")
+    owner, workspace, issue = chain["owner"], chain["workspace"], chain["issue"]
+    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    hook = seed_helpers.webhook(db_conn, workspace["id"], url, issue=True)
+    _soft_delete(db_conn, "webhooks", hook["id"])
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = rust_queue.queue_depth()
+    celery_id = rust_queue.publish(
+        WEBHOOK_ACTIVITY,
+        kwargs={
+            "event": "issue",
+            "verb": "created",
+            "field": None,
+            "old_value": None,
+            "new_value": None,
+            "actor_id": str(owner["id"]),
+            "slug": workspace["slug"],
+            "current_site": "example.com",
+            "event_id": str(issue["id"]),
+            "old_identifier": None,
+            "new_identifier": None,
+        },
+    )
+    rust_queue.wait_for_settled(
+        celery_id, what=f"{WEBHOOK_ACTIVITY} settled with only a deleted hook"
+    )
+    # Any send the fan-out enqueued is claimed before the activity row
+    # settles, so draining back to the pre-publish depth proves none (and
+    # no POST/log) followed.
+    rust_queue.wait_for_queue_drain(
+        baseline=baseline, what="soft-deleted hook fan-out drained"
+    )
+    assert webhook_sink.snapshot() == [], "fan-out notified a soft-deleted webhook"
+    assert _log_diff_rows(db_conn, before) == [], "fan-out logged a deleted hook"
+
+
+def test_rust_fanout_swallows_soft_deleted_issue(db_conn, broker_url, webhook_sink):
+    """Fan-out, Rust side: a soft-deleted event model is swallowed.
+
+    ``get_model_data`` reads via ``Model.objects.get(pk=...)``, so a
+    soft-deleted issue raises ``ObjectDoesNotExist``; the task's broad
+    ``except`` returns silently and no webhook is notified. Seed a live
+    hook plus a soft-deleted issue: the Rust worker must also find no
+    issue (``deleted_at IS NULL``) and enqueue nothing.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rustreplaydeadissue")
+    owner, workspace, issue = chain["owner"], chain["workspace"], chain["issue"]
+    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    seed_helpers.webhook(db_conn, workspace["id"], url, issue=True)
+    _soft_delete(db_conn, "issues", issue["id"])
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = rust_queue.queue_depth()
+    celery_id = rust_queue.publish(
+        WEBHOOK_ACTIVITY,
+        kwargs={
+            "event": "issue",
+            "verb": "created",
+            "field": None,
+            "old_value": None,
+            "new_value": None,
+            "actor_id": str(owner["id"]),
+            "slug": workspace["slug"],
+            "current_site": "example.com",
+            "event_id": str(issue["id"]),
+            "old_identifier": None,
+            "new_identifier": None,
+        },
+    )
+    rust_queue.wait_for_settled(
+        celery_id, what=f"{WEBHOOK_ACTIVITY} settled for a deleted issue"
+    )
+    rust_queue.wait_for_queue_drain(
+        baseline=baseline, what="soft-deleted issue fan-out drained"
+    )
+    assert webhook_sink.snapshot() == [], "fan-out notified a soft-deleted issue"
+    assert _log_diff_rows(db_conn, before) == [], "fan-out logged a deleted issue"
 
 
 def test_rust_deactivation_email_executes_locally(db_conn, broker_url, smtp_sink):

@@ -941,11 +941,12 @@ async fn fetch_fanout_webhooks(
     let sql = match flag {
         Some(column) => format!(
             "SELECT w.id FROM webhooks w JOIN workspaces ws ON ws.id = w.workspace_id \
-             WHERE ws.slug = $1 AND w.is_active = true AND w.{column} = true \
+             WHERE ws.slug = $1 AND w.is_active = true AND w.deleted_at IS NULL \
+             AND w.{column} = true \
              ORDER BY w.created_at DESC"
         ),
         None => "SELECT w.id FROM webhooks w JOIN workspaces ws ON ws.id = w.workspace_id \
-             WHERE ws.slug = $1 AND w.is_active = true \
+             WHERE ws.slug = $1 AND w.is_active = true AND w.deleted_at IS NULL \
              ORDER BY w.created_at DESC"
             .to_owned(),
     };

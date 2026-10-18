@@ -35,13 +35,23 @@
 //!   its labels/assignees render as bare id-string lists while the
 //!   top-level issue expands them to objects.
 //!
-//!Fetch note: every model here reads through the default `objects`
-//!manager — `Issue.objects` is unfiltered (the filtered one is the
-//!separate `issue_objects` manager) — so the fetch is a plain
-//!`SELECT … WHERE id` with no soft-delete guard. A garbage id raises
-//!Django's `ValidationError` ("not a valid UUID"), which the fan-out's
-//!broad `except` logs and swallows like any non-`DoesNotExist` error;
-//![`ModelDataError::InvalidId`] carries that path.
+//!Fetch note (soft-delete scope): every `Model.objects.get(pk=…)` here
+//!reads through the inherited `SoftDeletionManager`
+//!(`pi_dash/db/mixins.py:65`), so the fetch adds `deleted_at IS NULL`.
+//!That covers projects, issues, cycles, modules, the `cycle_issues`/
+//!`module_issues` link rows, `issue_comments`, `intake_issues`, and the
+//!`issue_labels`/`issue_assignees` through rows (whose reverse-FK manager
+//!is derived from `IssueLabel`/`IssueAssignee._default_manager` —
+//!`SoftDeletionManager`). Two families stay UNguarded, matching Python:
+//!forward-FK dereferences (`instance.state`, `instance.issue`,
+//!`obj.workspace`, `obj.project`, `obj.avatar_asset`) go through
+//!`_base_manager` (a plain `Manager`), and M2M targets
+//!(`module.members.all()` → `User`) use the target's unfiltered
+//!`UserManager`. The nested `intake_issue.issue_detail` is such a forward
+//!FK (`source="issue"`), so its issue read is unscoped. A garbage id
+//!raises Django's `ValidationError` ("not a valid UUID"), which the
+//!fan-out's broad `except` logs and swallows like any non-`DoesNotExist`
+//!error; [`ModelDataError::InvalidId`] carries that path.
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{Map, Value};
@@ -399,7 +409,7 @@ async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sq
          agent_test_default_interval_seconds, agent_ticking_enabled, default_agent_executor, \
          created_by_id, updated_by_id, workspace_id, default_assignee_id, project_lead_id, \
          estimate_id, default_state_id \
-         FROM projects WHERE id = $1",
+         FROM projects WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -616,19 +626,30 @@ pub struct IssueRow {
     pub assigned_pod_id: Option<Uuid>,
 }
 
-async fn fetch_issue(pool: &PgPool, id: Uuid) -> Result<Option<IssueRow>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
+async fn fetch_issue(
+    pool: &PgPool,
+    id: Uuid,
+    soft_scope: bool,
+) -> Result<Option<IssueRow>, sqlx::Error> {
+    // `true` mirrors a `Model.objects.get(pk=)` read (the `SoftDeletionManager`
+    // adds `deleted_at IS NULL`); `false` mirrors a forward-FK dereference
+    // (`instance.issue`), which goes through `_base_manager` and is unscoped.
+    let guard = if soft_scope {
+        " AND deleted_at IS NULL"
+    } else {
+        ""
+    };
+    let sql = format!(
         "SELECT id, state_id, description_json, created_at, updated_at, deleted_at, point, \
          name, description_html, description_stripped, description_binary, priority, \
          complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, \
          archived_at, is_draft, external_source, external_id, git_work_branch, created_via, \
          agent_executor, created_by_id, updated_by_id, project_id, workspace_id, parent_id, \
          estimate_point_id, type_id, assigned_pod_id \
-         FROM issues WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+         FROM issues WHERE id = $1{guard}"
+    );
+    let row: Option<sqlx::postgres::PgRow> =
+        sqlx::query(&sql).bind(id).fetch_optional(pool).await?;
     Ok(row.map(|row| IssueRow {
         id: row.get("id"),
         state_id: row.try_get("state_id").unwrap_or(None),
@@ -722,7 +743,7 @@ async fn fetch_issue_labels(
     let rows = sqlx::query(
         "SELECT l.id, l.name, l.color FROM labels l \
          JOIN issue_labels il ON il.label_id = l.id \
-         WHERE il.issue_id = $1 ORDER BY il.created_at DESC",
+         WHERE il.issue_id = $1 AND il.deleted_at IS NULL ORDER BY il.created_at DESC",
     )
     .bind(issue_id)
     .fetch_all(pool)
@@ -744,7 +765,7 @@ async fn fetch_issue_assignees(pool: &PgPool, issue_id: Uuid) -> Result<Vec<User
         "SELECT u.id, u.first_name, u.last_name, u.email, u.avatar, u.avatar_asset_id, \
          u.display_name FROM users u \
          JOIN issue_assignees ia ON ia.assignee_id = u.id \
-         WHERE ia.issue_id = $1 ORDER BY ia.created_at DESC",
+         WHERE ia.issue_id = $1 AND ia.deleted_at IS NULL ORDER BY ia.created_at DESC",
     )
     .bind(issue_id)
     .fetch_all(pool)
@@ -884,7 +905,7 @@ async fn fetch_cycle(pool: &PgPool, id: Uuid) -> Result<Option<CycleRow>, sqlx::
          end_date, view_props, sort_order, external_source, external_id, progress_snapshot, \
          archived_at, logo_props, timezone, version, created_by_id, updated_by_id, \
          project_id, workspace_id, owned_by_id \
-         FROM cycles WHERE id = $1",
+         FROM cycles WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -992,7 +1013,7 @@ async fn fetch_module(pool: &PgPool, id: Uuid) -> Result<Option<ModuleRow>, sqlx
          description_html, start_date, target_date, status, view_props, sort_order, \
          external_source, external_id, archived_at, logo_props, created_by_id, updated_by_id, \
          project_id, workspace_id, lead_id \
-         FROM modules WHERE id = $1",
+         FROM modules WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -1118,7 +1139,8 @@ async fn fetch_link(
 ) -> Result<Option<LinkRow>, sqlx::Error> {
     let sql = format!(
         "SELECT id, created_at, updated_at, deleted_at, created_by_id, updated_by_id, \
-         project_id, workspace_id, {first_col}, {second_col} FROM {table} WHERE id = $1"
+         project_id, workspace_id, {first_col}, {second_col} FROM {table} \
+         WHERE id = $1 AND deleted_at IS NULL"
     );
     let row: Option<sqlx::postgres::PgRow> =
         sqlx::query(&sql).bind(id).fetch_optional(pool).await?;
@@ -1200,7 +1222,7 @@ async fn fetch_issue_comment(
          access, external_source, external_id, speaker_type, speaker_label, \
          speaker_agent_run_id, edited_at, created_by_id, updated_by_id, project_id, \
          workspace_id, description_id, issue_id, actor_id, parent_id \
-         FROM issue_comments WHERE id = $1",
+         FROM issue_comments WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -1350,7 +1372,7 @@ async fn fetch_intake_issue(
         "SELECT id, intake_id, issue_id, created_at, updated_at, deleted_at, status, \
          snoozed_till, source, source_email, external_source, external_id, extra, \
          created_by_id, updated_by_id, project_id, workspace_id, duplicate_to_id \
-         FROM intake_issues WHERE id = $1",
+         FROM intake_issues WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -1533,7 +1555,7 @@ pub async fn get_model_data(
             Ok(Value::Object(render_project(&row, url.as_deref())))
         }
         "issue" => {
-            let row = fetch_issue(pool, id)
+            let row = fetch_issue(pool, id, true)
                 .await
                 .map_err(map_store)?
                 .ok_or_else(missing)?;
@@ -1593,7 +1615,7 @@ pub async fn get_model_data(
                 .await
                 .map_err(map_store)?
                 .ok_or_else(missing)?;
-            let issue = fetch_issue(pool, row.issue_id)
+            let issue = fetch_issue(pool, row.issue_id, false)
                 .await
                 .map_err(map_store)?
                 .ok_or_else(missing)?;

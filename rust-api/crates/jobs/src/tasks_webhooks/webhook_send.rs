@@ -744,7 +744,7 @@ async fn fetch_webhook(
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         "SELECT w.id, w.workspace_id, w.url, w.secret_key, w.created_by_id \
          FROM webhooks w JOIN workspaces ws ON ws.id = w.workspace_id \
-         WHERE w.id = $1 AND ws.slug = $2",
+         WHERE w.id = $1 AND ws.slug = $2 AND w.deleted_at IS NULL",
     )
     .bind(webhook_id)
     .bind(slug)
@@ -1038,12 +1038,17 @@ pub async fn run_webhook_send(
                     delay_secs: celery_backoff_delay_secs(attempts),
                 },
                 AfterFailure::Deactivate => {
-                    // BUG-4: filtered update, `updated_at` untouched.
-                    if let Err(error) =
-                        sqlx::query("UPDATE webhooks SET is_active = false WHERE id = $1")
-                            .bind(webhook.id)
-                            .execute(pool)
-                            .await
+                    // BUG-4: `Webhook.objects.filter(pk=...).update(...)` —
+                    // the manager adds `deleted_at IS NULL` and the
+                    // queryset update bypasses `save()`, so `updated_at`
+                    // is untouched.
+                    if let Err(error) = sqlx::query(
+                        "UPDATE webhooks SET is_active = false \
+                         WHERE id = $1 AND deleted_at IS NULL",
+                    )
+                    .bind(webhook.id)
+                    .execute(pool)
+                    .await
                     {
                         return SendOutcome::Fail {
                             error: error.to_string(),
@@ -1115,12 +1120,14 @@ pub async fn run_deactivation_email(pool: &sqlx::PgPool, call: &DeactivationEmai
             .unwrap_or(None);
     let receiver_email: Option<String> =
         receiver.and_then(|row| row.try_get("email").unwrap_or(None));
-    let webhook: Option<sqlx::postgres::PgRow> =
-        sqlx::query("SELECT id, url, workspace_id FROM webhooks WHERE id = $1")
-            .bind(webhook_id)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
+    let webhook: Option<sqlx::postgres::PgRow> = sqlx::query(
+        "SELECT id, url, workspace_id FROM webhooks \
+             WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(webhook_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
     let (Some(receiver_email), Some(webhook)) = (receiver_email, webhook) else {
         tracing::error!(
             target: "pi_dash.exception",
