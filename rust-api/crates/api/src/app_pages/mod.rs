@@ -1753,16 +1753,16 @@ pub async fn unarchive_page(
         let Some((parent_archived,)) = parent else {
             return Denial::ObjectNotFound.into_response();
         };
+        // `save(update_fields=["parent"])` restricts the UPDATE to the
+        // listed column, so Django persists ONLY `parent_id`: the
+        // in-memory `updated_at` (auto_now) and `updated_by` (
+        // `BaseModel.save`) are set on the instance but never written.
         if parent_archived.is_some()
-            && sqlx::query(
-                r#"UPDATE pages SET parent_id = NULL, updated_at = now(), updated_by_id = $1
-                   WHERE id = $2"#,
-            )
-            .bind(gate.user_id)
-            .bind(page_id)
-            .execute(pool)
-            .await
-            .is_err()
+            && sqlx::query(r#"UPDATE pages SET parent_id = NULL WHERE id = $1"#)
+                .bind(page_id)
+                .execute(pool)
+                .await
+                .is_err()
         {
             return Denial::ServerError.into_response();
         }

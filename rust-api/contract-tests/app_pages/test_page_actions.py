@@ -112,6 +112,54 @@ def test_unarchive_detaches_archived_parent(user_client, world, seeder, db):
     )
 
 
+def test_unarchive_detach_writes_parent_only(world, seeder, settings, db):
+    # Django's detach is ``page.parent = None; page.save(update_fields=["parent"])``
+    # (base.py:360-362). ``update_fields`` restricts the UPDATE to that one
+    # column, so neither ``updated_at`` (auto_now) nor ``updated_by``
+    # (``BaseModel.save``) is persisted: only ``parent_id`` changes. Rust used
+    # to stamp ``updated_at = now()`` and ``updated_by_id = requester`` on the
+    # same UPDATE (PIDASHCONV-1169).
+    parent = seeder.create_page(
+        world["workspace"]["id"], world["owner"]["id"], name="Parent", archived=True
+    )
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], parent["id"])
+    child = seeder.create_page(
+        world["workspace"]["id"],
+        world["owner"]["id"],
+        name="Child",
+        parent_id=parent["id"],
+        archived=True,
+    )
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], child["id"])
+    # Pin an audit identity distinct from the requester so a stray stamp is
+    # unmistakable: ``previous`` owns the child's last touch.
+    previous = seeder.create_user()
+    db.execute(
+        "UPDATE pages SET updated_at='2021-02-03 04:05:06+00', updated_by_id=%s WHERE id=%s",
+        (previous["id"], child["id"]),
+    )
+    before = db.fetchone(
+        "SELECT parent_id, updated_at, updated_by_id FROM pages WHERE id=%s", (child["id"],)
+    )
+
+    # The requester is a *different* eligible user (an ADMIN non-owner), so a
+    # Rust stamp would set updated_by_id to this admin, not to ``previous``.
+    admin = seeder.create_user()
+    seeder.create_project_member(
+        world["workspace"]["id"], world["project"]["id"], admin["id"], role=20
+    )
+    with api_client(settings.base_url) as client:
+        login_session(client, email=admin["email"], password=admin["password"])
+        assert client.delete(f"{page_url(world, child['id'])}archive/").status_code == 204
+
+    after = db.fetchone(
+        "SELECT parent_id, updated_at, updated_by_id FROM pages WHERE id=%s", (child["id"],)
+    )
+    assert after["parent_id"] is None  # detached: only parent_id changed
+    assert after["updated_at"] == before["updated_at"]
+    assert str(after["updated_by_id"]) == str(before["updated_by_id"]) == previous["id"]
+
+
 def test_unarchive_finds_soft_deleted_archived_parent(user_client, world, seeder, db):
     # `page.parent` is an unscoped FK fetch (`_base_manager`): a soft-deleted
     # parent is FOUND and only its `archived_at` decides the detach
