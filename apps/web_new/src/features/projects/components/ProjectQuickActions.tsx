@@ -11,8 +11,8 @@ import * as React from "react";
 
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { selectCopyPath, selectQuickActions, type QuickActionId } from "../tabs.js";
-import { LeaveProjectDialog } from "./LeaveProjectDialog.js";
-import { PublishProjectDialog } from "./PublishProjectDialog.js";
+import { LeaveProjectEntry } from "./LeaveProjectEntry.js";
+import { PublishProjectEntry } from "./PublishProjectEntry.js";
 
 const COPIED_TITLE = "Copied the project link";
 const COPIED_BODY = "Paste it anywhere to share this tab.";
@@ -75,8 +75,8 @@ export function ProjectQuickActions({
           onSelect: () => runAction(entry.id),
         }))}
       />
-      <PublishProjectDialog projectName={projectName} open={publishOpen} onOpenChange={setPublishOpen} />
-      <LeaveProjectDialog
+      <PublishProjectEntry projectName={projectName} open={publishOpen} onOpenChange={setPublishOpen} />
+      <LeaveProjectEntry
         workspaceSlug={workspaceSlug}
         projectId={projectId}
         projectName={projectName}
