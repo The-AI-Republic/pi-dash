@@ -108,7 +108,7 @@ describe("rich filter builder empty state", () => {
       within(list)
         .getAllByRole("option")
         .map((row) => row.textContent)
-    ).toEqual(["State", "State group", "Priority"]);
+    ).toEqual(["State", "State Group", "Priority", "Assignees", "Created by", "Mentions", "Label"]);
   });
 
   it("adds a draft condition without patching an unchanged expression", async () => {
@@ -154,9 +154,9 @@ describe("rich filter builder populated state", () => {
     const user = userEvent.setup();
     const { patches } = setup({ priority__in: "none" });
     await user.click(screen.getByRole("button", { name: "Add filter" }));
-    await user.click(await screen.findByRole("option", { name: "State group" }));
+    await user.click(await screen.findByRole("option", { name: "State Group" }));
     expect(screen.getAllByTestId("rich-condition")).toHaveLength(2);
-    expect(screen.getByTestId("rich-filter-row")).toHaveTextContent("State group");
+    expect(screen.getByTestId("rich-filter-row")).toHaveTextContent("State Group");
     // Nothing to persist yet: the new condition has no value.
     expect(patches).toHaveLength(0);
 
@@ -174,14 +174,14 @@ describe("rich filter builder populated state", () => {
     const { patches } = setup({ priority__in: "none" });
     const pill = screen.getByTestId("rich-condition");
     await user.click(within(pill).getByRole("button", { name: /Priority/ }));
-    await user.click(await screen.findByRole("option", { name: "State group" }));
-    expect(within(pill).getByRole("button", { name: /State group/ })).toBeInTheDocument();
+    await user.click(await screen.findByRole("option", { name: "State Group" }));
+    expect(within(pill).getByRole("button", { name: /State Group/ })).toBeInTheDocument();
     expect(within(pill).getByRole("button", { name: /Select value/ })).toBeInTheDocument();
     // The reset value makes the stored condition incomplete, so the old
     // filter leaves the record and the new one waits for a value.
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0]).toEqual({ rich_filters: {} });
-    expect(screen.getByTestId("rich-condition")).toHaveTextContent("State group");
+    expect(screen.getByTestId("rich-condition")).toHaveTextContent("State Group");
   });
 
   it("stores a negated operator as a not wrapper", async () => {
@@ -203,7 +203,17 @@ describe("rich filter builder populated state", () => {
 
   it("marks used fields out of the add picker and shows exhaustion", async () => {
     const user = userEvent.setup();
-    setup({ and: [{ state_id__in: [UUID] }, { state_group__in: "started" }, { priority__in: "none" }] });
+    setup({
+      and: [
+        { state_id__in: [UUID] },
+        { state_group__in: "started" },
+        { priority__in: "none" },
+        { assignee_id__in: [UUID] },
+        { created_by_id__in: [UUID] },
+        { mention_id__in: [UUID] },
+        { label_id__in: [UUID] },
+      ],
+    });
     await user.click(screen.getByRole("button", { name: "Add filter" }));
     const exhausted = await screen.findByRole("option", { name: "All filters applied" });
     expect(exhausted).toBeDisabled();
@@ -213,7 +223,7 @@ describe("rich filter builder populated state", () => {
     const user = userEvent.setup();
     const { patches, release, hold } = setup({ priority__in: "none" }, { hold: true });
     await user.click(screen.getByRole("button", { name: "Add filter" }));
-    await user.click(await screen.findByRole("option", { name: "State group" }));
+    await user.click(await screen.findByRole("option", { name: "State Group" }));
     const second = screen.getAllByTestId("rich-condition")[1]!;
     await user.click(within(second).getByRole("button", { name: /Select value/ }));
     await user.click(await screen.findByRole("option", { name: "Started" }));
