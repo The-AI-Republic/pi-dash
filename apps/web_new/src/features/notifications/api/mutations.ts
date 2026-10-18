@@ -1,21 +1,27 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Card writes (written from parity/specs/notifications.md §9, NTF-018-021).
+// Notification writes (written from parity/specs/notifications.md §7 and
+// §9, NTF-014 and NTF-018-021).
 // Each toggle moves the card and the totals at once, then waits for the
 // server's echo. A failure restores every touched cache and stays silent —
 // no success toast, no changed state — while a success reports through a
 // toast. Stream membership follows the write: a card leaves a stream whose
 // flags exclude its new state and joins the matching one. Toggling a
-// failed write again therefore retries cleanly.
-import { useMutation, useQueryClient, type InfiniteData, type QueryClient, type QueryKey } from "@tanstack/react-query";
+// failed write again therefore retries cleanly. The header's bulk
+// mark-all-read shares the module: it posts the current scope, flips every
+// cached page in that scope to read at once, and refetches the unread
+// totals so the tab badges land on the server totals.
+import { useMutation, useQueryClient, type QueryClient, type QueryKey } from "@tanstack/react-query";
 import {
   archiveNotification,
+  markAllNotificationsRead,
   markNotificationRead,
   markNotificationUnread,
   snoozeNotification,
   unarchiveNotification,
   type ApiClient,
+  type MarkAllReadScope,
   type NotificationItem,
   type NotificationListQuery,
   type NotificationListResponse,
@@ -24,6 +30,8 @@ import {
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifySuccess } from "../../../shared/shell/index.js";
+import { applyBulkRead } from "../lib/bulkRead.js";
+import { isStreamPage, streamPages, type StreamData } from "../lib/streamData.js";
 import { notificationKeys } from "./keys.js";
 import { notificationListQueryFromKey } from "./streamQuery.js";
 
@@ -68,18 +76,7 @@ function withStreamFlags(row: NotificationItem, flags: StreamFlags): Notificatio
 type StreamPage = NotificationListResponse | undefined;
 
 /** A cached stream: either the first page alone or the cursor pages. */
-export type StreamData = NotificationListResponse | InfiniteData<NotificationListResponse, string>;
-
-function isPage(value: unknown): value is NotificationListResponse {
-  return typeof value === "object" && value !== null && Array.isArray((value as { results?: unknown }).results);
-}
-
-/** Every page a cached stream holds, oldest page last. */
-export function streamPages(data: StreamData | undefined): NotificationListResponse[] {
-  if (data === undefined) return [];
-  if (isPage(data)) return [data];
-  return data.pages;
-}
+export type { StreamData };
 
 /**
  * Write a row into a cached stream. The card keeps its place on whichever
@@ -94,7 +91,7 @@ export function writeRowToStream(
   row: NotificationItem
 ): StreamData | undefined {
   if (data === undefined) return undefined;
-  if (isPage(data)) return applyRowToPage(data, query, row) ?? data;
+  if (isStreamPage(data)) return applyRowToPage(data, query, row) ?? data;
   const listedOn = data.pages.findIndex((page) => page.results.some((entry) => entry.id === row.id));
   const target = listedOn === -1 ? 0 : listedOn;
   return {
@@ -325,6 +322,40 @@ export function useSnoozeNotification(workspaceSlug: string) {
       await settleWrite(client, workspaceSlug, written, snapshots, write.flags);
       notifySuccess(written.snoozed_till === null ? UNSNOOZED_TITLE : SNOOZED_TITLE);
       return written;
+    },
+  });
+}
+
+/** One bulk mark-all-read: the current list scope, as the target stream's query. */
+export interface BulkReadInput {
+  workspaceSlug: string;
+  scope: MarkAllReadScope;
+}
+
+/**
+ * Bulk mark every notification in the current scope read. The cache pass
+ * finds each in-scope page through the same stream decoder the card writes
+ * use, so there is no second registry of stream state; the unread totals
+ * refetch because the write changed more rows than any cached page holds.
+ * A failure leaves the cache untouched, so a retry resends the same scope.
+ */
+export function useMarkAllRead() {
+  const client = useQueryClient();
+  return useMutation<void, Error, BulkReadInput>({
+    mutationFn: async ({ workspaceSlug, scope }) => {
+      await markAllNotificationsRead(getAppClient(), workspaceSlug, scope);
+    },
+    onSuccess: async (_result, { workspaceSlug, scope }) => {
+      const entries = client
+        .getQueriesData<StreamData>({ queryKey: notificationKeys.lists(workspaceSlug) })
+        .flatMap(([key, page]) => {
+          const query = notificationListQueryFromKey(workspaceSlug, key);
+          return page === undefined || query === null ? [] : [{ key, query, page }];
+        });
+      for (const [key, page] of applyBulkRead(entries, scope)) {
+        client.setQueryData(key, page);
+      }
+      await client.invalidateQueries({ queryKey: notificationKeys.unread(workspaceSlug) });
     },
   });
 }

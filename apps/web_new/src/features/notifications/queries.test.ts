@@ -11,7 +11,7 @@ import {
   notificationsListQueryOptions,
   unreadNotificationsQueryOptions,
 } from "./api/queries.js";
-import { notificationTabQuery } from "./lib/stream.js";
+import { notificationStreamQuery, notificationTabQuery } from "./lib/stream.js";
 
 describe("unread notifications query", () => {
   it("keys the count by workspace", () => {
@@ -146,6 +146,46 @@ describe("notifications list query", () => {
   it("keeps the cursor stream disabled without a workspace", () => {
     const fakeClient = { getJson: vi.fn(), parse: vi.fn() } as never;
     expect(notificationPagesQueryOptions(fakeClient, "", notificationTabQuery("all")).enabled).toBe(false);
+  });
+
+  it("re-reads on remount but never on focus or reconnect (NTF-028)", () => {
+    const fakeClient = {
+      getJson: () => Promise.resolve({}),
+      parse: (_schema: unknown, data: unknown) => data,
+    } as never;
+    const query = notificationTabQuery("all");
+    const list = notificationsListQueryOptions(fakeClient, "acme", query);
+    const pages = notificationPagesQueryOptions(fakeClient, "acme", query);
+    const unread = unreadNotificationsQueryOptions(fakeClient, "acme");
+    expect(list.refetchOnMount).toBe("always");
+    expect(list.refetchOnWindowFocus).toBe(false);
+    expect(list.refetchOnReconnect).toBe(false);
+    expect(pages.refetchOnWindowFocus).toBe(false);
+    expect(pages.refetchOnReconnect).toBe(false);
+    expect(unread.refetchOnMount).toBe("always");
+    expect(unread.refetchOnWindowFocus).toBe(false);
+    expect(unread.refetchOnReconnect).toBe(false);
+  });
+
+  it("sends the selected origins and the unread flag with the list query", async () => {
+    const getJson = vi.fn(async () => ({ results: [] }));
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = notificationsListQueryOptions(
+      fakeClient,
+      "acme",
+      notificationStreamQuery("all", ["assigned", "created"], { unreadOnly: true, archived: false, snoozed: false })
+    );
+    await options.queryFn?.({} as never);
+    expect(getJson).toHaveBeenCalledWith("/api/workspaces/acme/users/notifications", {
+      query: {
+        type: "assigned,created",
+        snoozed: "false",
+        archived: "false",
+        read: "false",
+        per_page: NOTIFICATIONS_PAGE_SIZE,
+        cursor: NOTIFICATIONS_FIRST_CURSOR,
+      },
+    });
   });
 });
 

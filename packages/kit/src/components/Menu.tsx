@@ -15,6 +15,12 @@ export interface MenuAction {
   /** React key when sibling labels repeat (project names can collide). */
   itemKey?: string;
   /**
+   * Leave the menu open after a select. Multi-select menus (a filter row
+   * that toggles a checkmark) set false so several rows can be changed in
+   * one visit; the default closes on select.
+   */
+  closeOnClick?: boolean;
+  /**
    * Rich row body replacing the plain label (the workspace switcher
    * renders logo, role and member counts here). The item keeps its
    * menuitem role and arrow-key behavior; the accessible name derives
@@ -88,6 +94,7 @@ export function Menu({ trigger, items, open, onOpenChange }: MenuProps): React.R
                 <BaseMenu.Item
                   key={entry.itemKey ?? entry.label}
                   disabled={entry.disabled ?? false}
+                  closeOnClick={entry.closeOnClick ?? true}
                   onClick={entry.onSelect}
                   className={cn(itemClasses)}
                 >

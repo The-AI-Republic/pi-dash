@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { NotificationItem, NotificationListResponse } from "@pidash/api-client";
 import * as React from "react";
@@ -125,6 +125,12 @@ interface ViewOptions {
    * unseeded reads hang.
    */
   serveReads?: boolean;
+  /** Answer one list read from the request's own parameters. */
+  listReply?: (params: URLSearchParams) => Promise<Response> | Response;
+  /** Answer one unread-totals read. */
+  unreadReply?: () => Promise<Response> | Response;
+  /** Answer a write (mark-all-read) with a JSON body. */
+  postReply?: (url: string, body: string) => Promise<Response> | Response;
 }
 
 function renderView(options: ViewOptions = {}): {
@@ -148,6 +154,9 @@ function renderView(options: ViewOptions = {}): {
     failFirstRead = false,
     firstReadFailureDelayMs = 0,
     serveReads = false,
+    listReply,
+    unreadReply,
+    postReply,
   } = options;
   const calls: string[] = [];
   let readWrites = 0;
@@ -158,11 +167,18 @@ function renderView(options: ViewOptions = {}): {
     headers: { get: () => null },
     text: async () => JSON.stringify(payload),
   });
-  createAppClient("https://api.test", (async (url: string, init: { method?: string }) => {
+  createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     calls.push(url);
-    if (!serveReads) return new Promise<never>(() => {});
+    const method = init.method ?? "GET";
     if (url.endsWith("/auth/get-csrf-token/")) return json({ csrf_token: "csrf" }, url);
-    if (init.method === "POST" && /\/users\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname)) {
+    if (method !== "GET") {
+      if (postReply === undefined) {
+        return { status: 404, url, headers: { get: () => null }, text: async () => "{}" };
+      }
+      return postReply(url, String(init.body ?? ""));
+    }
+    if (!serveReads && listReply === undefined && unreadReply === undefined) return new Promise<never>(() => {});
+    if (method === "POST" && /\/users\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname)) {
       readWrites += 1;
       if (failFirstRead && readWrites === 1) {
         if (firstReadFailureDelayMs > 0) {
@@ -178,8 +194,12 @@ function renderView(options: ViewOptions = {}): {
     if (url.includes(`/projects/${PROJECT_ID}/issues/${ISSUE_ID}/`)) {
       return { ...json({ detail: "not hydrated in this integration fixture" }, url), status: 404 };
     }
-    if (url.includes("/users/notifications/unread/")) return json(unread ?? UNREAD, url);
+    if (url.includes("/users/notifications/unread/")) {
+      if (unreadReply !== undefined) return unreadReply();
+      return json(unread ?? UNREAD, url);
+    }
     if (url.includes("/users/notifications")) {
+      if (listReply !== undefined) return listReply(new URL(url).searchParams);
       const cursor = new URL(url).searchParams.get("cursor");
       if (cursor !== "300:0:0" && nextPage !== null) {
         if (nextPageDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, nextPageDelayMs));
@@ -693,5 +713,252 @@ describe("InboxView card actions", () => {
 
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(UNSNOOZED_TITLE));
     expect(JSON.parse(writes[0]?.body ?? "{}")).toEqual({ snoozed_till: null });
+  });
+});
+
+function commentRow(name: string, id: string): NotificationItem {
+  return row({
+    id,
+    data: {
+      issue: { id: ISSUE_ID, name, identifier: "ENG", sequence_id: 21 },
+      issue_activity: { verb: "created", field: "comment", issue_comment: name },
+    },
+  });
+}
+
+function jsonResponse(payload: unknown, url = "https://api.test/list"): Response {
+  return {
+    status: 200,
+    url,
+    headers: { get: () => null },
+    text: async () => JSON.stringify(payload),
+  } as unknown as Response;
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve = (_value: T): void => {};
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+/**
+ * User events for the Base UI menus: the popup lives in a portal, so the
+ * next pointer-down sits outside it and its dismiss layer closes the menu
+ * mid-gesture. Disabling the pointer-events and hover checks keeps the
+ * gesture intact; the component tests already cover the real mouse path.
+ */
+function menuUser(): ReturnType<typeof userEvent.setup> {
+  return userEvent.setup({ pointerEventsCheck: 0 });
+}
+
+async function openMenu(user: ReturnType<typeof userEvent.setup>, name: string): Promise<void> {
+  screen.getByRole("button", { name, hidden: true }).focus();
+  await user.keyboard("{ArrowDown}");
+  await screen.findByRole("menu", { name });
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name, hidden: true }).getAttribute("aria-expanded")).not.toBe("false")
+  );
+}
+
+async function toggleOrigin(user: ReturnType<typeof userEvent.setup>, origin: string): Promise<void> {
+  await openMenu(user, "Filter by origin");
+  await user.click(await screen.findByTestId(`inbox-filter-origin-${origin}`));
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByTestId("inbox-filter-origin-assigned")).not.toBeInTheDocument());
+}
+
+async function toggleMode(user: ReturnType<typeof userEvent.setup>, mode: string): Promise<void> {
+  await openMenu(user, "More options");
+  await user.click(await screen.findByTestId(`inbox-mode-${mode}`));
+  await waitFor(() => expect(screen.queryByTestId(`inbox-mode-${mode}`)).not.toBeInTheDocument());
+}
+
+function listCalls(calls: string[]): URLSearchParams[] {
+  return calls.filter((url) => url.includes("/users/notifications?")).map((url) => new URL(url).searchParams);
+}
+
+describe("InboxView stream controls (NTF-013-017, NTF-028)", () => {
+  it("refreshes the current stream once, with progress, and ignores repeat presses", async () => {
+    const gate = deferred<Response>();
+    let served = 0;
+    const { calls } = renderView({
+      unread: UNREAD,
+      serveReads: true,
+      listReply: () => {
+        served += 1;
+        if (served === 1) {
+          return Promise.resolve(jsonResponse(page([commentRow("Old story", "d23e4567-e89b-12d3-a456-426614174012")])));
+        }
+        if (served === 2) return gate.promise;
+        return Promise.resolve(jsonResponse(page([])));
+      },
+    });
+    expect(await screen.findByText("Old story")).toBeInTheDocument();
+
+    const refresh = screen.getByRole("button", { name: "Refresh" });
+    fireEvent.click(refresh);
+    fireEvent.click(refresh);
+    fireEvent.click(refresh);
+    await waitFor(() => expect(screen.getByTestId("inbox-refresh-progress")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeDisabled();
+    expect(listCalls(calls)).toHaveLength(2);
+    expect(listCalls(calls)[1]?.get("cursor")).toBe("300:0:0");
+
+    gate.resolve(jsonResponse(page([commentRow("Fresh story", "e23e4567-e89b-12d3-a456-426614174013")])));
+    expect(await screen.findByText("Fresh story")).toBeInTheDocument();
+    expect(screen.queryByText("Old story")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("inbox-refresh-progress")).not.toBeInTheDocument());
+    expect(listCalls(calls)).toHaveLength(2);
+  });
+
+  it("ignores a refresh press while the first fetch is still running", async () => {
+    const gate = deferred<Response>();
+    const { calls } = renderView({ listReply: () => gate.promise });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(listCalls(calls)).toHaveLength(1);
+    gate.resolve(jsonResponse(page([])));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled());
+  });
+
+  it("marks the current scope read with progress and ignores a repeat press", async () => {
+    const gate = deferred<Response>();
+    const posts: { url: string; body: string }[] = [];
+    renderView({
+      unread: UNREAD,
+      defaultPage: page([commentRow("Bulk story", "f23e4567-e89b-12d3-a456-426614174014")]),
+      postReply: (url, body) => {
+        posts.push({ url, body });
+        return gate.promise;
+      },
+    });
+    expect(screen.getAllByTestId("inbox-card")[0]).toHaveAttribute("data-unread", "true");
+    const button = screen.getByRole("button", { name: "Mark all as read" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]?.url).toContain("/users/notifications/mark-all-read/");
+    expect(JSON.parse(posts[0]!.body)).toEqual({ snoozed: false, archived: false });
+    expect(screen.getByTestId("inbox-mark-all-read-progress")).toBeInTheDocument();
+    expect(button).toBeDisabled();
+
+    gate.resolve(jsonResponse({ message: "Successful" }));
+    await waitFor(() => expect(screen.getAllByTestId("inbox-card")[0]).toHaveAttribute("data-unread", "false"));
+  });
+
+  it("sends the current scope with mark-all-read", async () => {
+    const posts: { url: string; body: string }[] = [];
+    renderView({
+      unread: UNREAD,
+      defaultPage: page([]),
+      postReply: (url, body) => {
+        posts.push({ url, body });
+        return jsonResponse({ message: "Successful" });
+      },
+    });
+    const user = menuUser();
+    await toggleOrigin(user, "assigned");
+    await toggleMode(user, "archived");
+    fireEvent.click(screen.getByRole("button", { name: "Mark all as read" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.parse(posts[0]!.body)).toEqual({ type: "assigned", snoozed: false, archived: true });
+  });
+
+  it("applies one origin as a chip and restarts the stream from the first page", async () => {
+    const { calls } = renderView({ unread: UNREAD, defaultPage: page([]), serveReads: true });
+    await waitFor(() => expect(listCalls(calls)).toHaveLength(1));
+    const user = menuUser();
+    await toggleOrigin(user, "assigned");
+    await waitFor(() => expect(listCalls(calls)).toHaveLength(2));
+    const query = listCalls(calls)[1]!;
+    expect(query.get("type")).toBe("assigned");
+    expect(query.get("cursor")).toBe("300:0:0");
+    expect(query.get("read")).toBeNull();
+    expect(screen.getAllByTestId("inbox-origin-chip").map((chip) => chip.getAttribute("data-origin"))).toEqual([
+      "assigned",
+    ]);
+  });
+
+  it("joins a second origin in canonical order and removes it from its chip", async () => {
+    const { calls } = renderView({ unread: UNREAD, defaultPage: page([]), serveReads: true });
+    await waitFor(() => expect(listCalls(calls)).toHaveLength(1));
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await toggleOrigin(user, "created");
+    await waitFor(() => expect(listCalls(calls)[1]?.get("type")).toBe("created"));
+    await toggleOrigin(user, "assigned");
+    await waitFor(() => expect(listCalls(calls)[2]?.get("type")).toBe("assigned,created"));
+    expect(listCalls(calls)[2]?.get("cursor")).toBe("300:0:0");
+    fireEvent.click(screen.getByTestId("inbox-origin-chip-remove-assigned"));
+    await waitFor(() => expect(listCalls(calls)[3]?.get("type")).toBe("created"));
+    expect(screen.getAllByTestId("inbox-origin-chip").map((chip) => chip.getAttribute("data-origin"))).toEqual([
+      "created",
+    ]);
+  });
+
+  it("clears every origin from the chip row", async () => {
+    const { calls } = renderView({ unread: UNREAD, defaultPage: page([]), serveReads: true });
+    await waitFor(() => expect(listCalls(calls)).toHaveLength(1));
+    const user = menuUser();
+    await toggleOrigin(user, "assigned");
+    await waitFor(() => expect(listCalls(calls)).toHaveLength(2));
+    await toggleOrigin(user, "created");
+    await waitFor(() => expect(listCalls(calls)).toHaveLength(3));
+    await user.click(screen.getByTestId("inbox-origin-clear-all"));
+    await waitFor(() => expect(listCalls(calls)).toHaveLength(4));
+    expect(listCalls(calls)[3]?.get("type")).toBeNull();
+    expect(screen.queryByTestId("inbox-origin-chips")).not.toBeInTheDocument();
+  });
+
+  it("sends read=false in unread-only mode and returns to the full stream", async () => {
+    const { calls } = renderView({ unread: UNREAD, defaultPage: page([]), serveReads: true });
+    await waitFor(() => expect(listCalls(calls)).toHaveLength(1));
+    const user = menuUser();
+    await toggleMode(user, "unread");
+    await waitFor(() => expect(listCalls(calls)[1]?.get("read")).toBe("false"));
+    expect(listCalls(calls)[1]?.get("snoozed")).toBe("false");
+    expect(listCalls(calls)[1]?.get("archived")).toBe("false");
+    expect(listCalls(calls)[1]?.get("cursor")).toBe("300:0:0");
+    await toggleMode(user, "unread");
+    await waitFor(() => expect(listCalls(calls)).toHaveLength(3));
+    expect(listCalls(calls)[2]?.get("read")).toBeNull();
+  });
+
+  it("switches archived and snoozed modes so they exclude each other", async () => {
+    const { calls } = renderView({ unread: UNREAD, defaultPage: page([]), serveReads: true });
+    await waitFor(() => expect(listCalls(calls)).toHaveLength(1));
+    const user = menuUser();
+    await toggleMode(user, "archived");
+    await waitFor(() => expect(listCalls(calls)[1]?.get("archived")).toBe("true"));
+    expect(listCalls(calls)[1]?.get("snoozed")).toBe("false");
+    await toggleMode(user, "snoozed");
+    await waitFor(() => expect(listCalls(calls)[2]?.get("snoozed")).toBe("true"));
+    expect(listCalls(calls)[2]?.get("archived")).toBe("false");
+    expect(listCalls(calls)[2]?.get("cursor")).toBe("300:0:0");
+  });
+
+  it("keeps future-snoozed rows out of the default stream (NTF-017)", () => {
+    const future = row({
+      id: "123e4567-e89b-12d3-a456-426614174099",
+      snoozed_till: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+      data: {
+        issue: { id: ISSUE_ID, name: "Snoozed story", identifier: "ENG", sequence_id: 22 },
+        issue_activity: { verb: "created", field: "comment", issue_comment: "later" },
+      },
+    });
+    renderView({ unread: UNREAD, defaultPage: page([row(), future]) });
+    expect(cardTitles()).toEqual(["Ship it"]);
+  });
+
+  it("reads nothing on its own while it sits open (NTF-028)", async () => {
+    const { calls } = renderView({ unread: UNREAD, defaultPage: page([]), serveReads: true });
+    await waitFor(() => expect(calls).toHaveLength(2));
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(120_000);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(calls).toHaveLength(2);
   });
 });

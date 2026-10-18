@@ -83,6 +83,28 @@ describe("Menu", () => {
     expect(onSelect).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the menu open after a select when the row opts out of closing", () => {
+    // Multi-select menus (the inbox origin filter) toggle several rows in
+    // one visit; those rows set closeOnClick false.
+    const onSelect = vi.fn();
+    render(
+      <Menu
+        trigger={<Button>Filter</Button>}
+        items={[
+          { label: "Assigned", itemKey: "assigned", closeOnClick: false, onSelect },
+          { label: "Created", itemKey: "created", onSelect },
+        ]}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Filter" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Assigned" }));
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("menu", { name: "Filter" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Created" }));
+    expect(onSelect).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
   it("renders custom entries as direct popup children with no menuitem wrapper", () => {
     const onSelect = vi.fn();
     render(
