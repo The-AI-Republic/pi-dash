@@ -11,6 +11,7 @@ import {
   addIssueToCycle,
   createIssue,
   deleteIssue,
+  isApiError,
   setIssueModules,
   updateIssue,
   type IssueListItem,
@@ -35,6 +36,8 @@ export const CALENDAR_ATTACH_FAILED_TITLE = "Couldn't add the work item to this 
 export const CALENDAR_ATTACH_SUCCESS_TITLE = "Work items added";
 /** Failure copy when a block's delete action fails. */
 export const CALENDAR_DELETE_FAILED_TITLE = "Couldn't delete the work item";
+/** Failure copy when the server refuses a delete on permissions. */
+export const CALENDAR_DELETE_FORBIDDEN_DETAIL = "Only the creator or a project admin can delete this work item.";
 /** Success copy when a block's delete action lands. */
 export const CALENDAR_DELETE_SUCCESS_TITLE = "Work item deleted";
 
@@ -158,8 +161,13 @@ export function useCalendarDelete(workspaceSlug: string, projectId: string) {
     onSuccess: () => {
       notifySuccess(CALENDAR_DELETE_SUCCESS_TITLE);
     },
-    onError: () => {
-      notifyError(CALENDAR_DELETE_FAILED_TITLE, "Nothing was deleted — check your permissions and try again.");
+    onError: (error: Error) => {
+      notifyError(
+        CALENDAR_DELETE_FAILED_TITLE,
+        isApiError(error) && error.status === 403
+          ? CALENDAR_DELETE_FORBIDDEN_DETAIL
+          : "Nothing was deleted — check your connection and try again."
+      );
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug, projectId) });

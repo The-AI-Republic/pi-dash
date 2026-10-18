@@ -14,6 +14,7 @@ import {
   CALENDAR_ATTACH_FAILED_TITLE,
   CALENDAR_ATTACH_SUCCESS_TITLE,
   CALENDAR_DELETE_FAILED_TITLE,
+  CALENDAR_DELETE_FORBIDDEN_DETAIL,
   CALENDAR_DELETE_SUCCESS_TITLE,
   REDATE_FAILED_TITLE,
   REDATE_SUCCESS_TITLE,
@@ -258,5 +259,14 @@ describe("calendar actions", () => {
     });
     failedResult.current.mutate(ISSUE_ID);
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(CALENDAR_DELETE_FAILED_TITLE, expect.any(String)));
+  });
+
+  it("explains a forbidden delete instead of a generic failure", async () => {
+    const { queryClient } = harness(403);
+    const { result } = renderHook(() => useCalendarDelete("acme", PROJECT_ID), { wrapper: wrapper(queryClient) });
+    result.current.mutate(ISSUE_ID);
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(CALENDAR_DELETE_FAILED_TITLE, CALENDAR_DELETE_FORBIDDEN_DETAIL)
+    );
   });
 });
