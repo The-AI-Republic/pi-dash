@@ -6397,21 +6397,27 @@ export class WebNewDriver implements ParityDriver {
     return weekend > 0 && weekend < total;
   }
 
+  /**
+   * The weekday each rendered week row starts on, in strip order. Week
+   * zoom lays out one column per day, so the row starts are the day cells
+   * flagged as a week boundary (their weekday is the profile's start of
+   * week); interior rows therefore share one label and the cut edge rows
+   * may differ.
+   */
   async ganttWeekRowStarts(): Promise<string[]> {
     if ((await this.ganttActiveZoom()) !== "Week") return [];
-    const cells = this.page.locator('[data-tier="fine"] [data-segment-key]');
+    const cells = this.page.locator('[data-testid="gantt-day-columns"] [data-day][data-week-start="true"]');
     const total = await cells.count();
     const starts: string[] = [];
     const labels = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
     for (let index = 0; index < total; index += 1) {
-      const key =
+      const iso =
         (await cells
           .nth(index)
-          .getAttribute("data-segment-key")
+          .getAttribute("data-day")
           .catch(() => null)) ?? "";
-      const iso = key.replace(/^d-/, "");
-      const day = new Date(`${iso}T00:00:00Z`).getUTCDay();
-      starts.push(labels[day] ?? "");
+      const parsed = new Date(`${iso}T00:00:00Z`).getUTCDay();
+      starts.push(iso === "" || Number.isNaN(parsed) ? "" : (labels[parsed] ?? ""));
     }
     return starts;
   }

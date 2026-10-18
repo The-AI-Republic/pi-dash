@@ -76,7 +76,9 @@ function prefs(overrides: Partial<DisplayPrefs> = {}): DisplayPrefs {
   };
 }
 
-function renderLayout(options: { orderBy?: string; narrow?: boolean } = {}) {
+function renderLayout(
+  options: { orderBy?: string; narrow?: boolean; totalCount?: number; issues?: IssueListItem[] } = {}
+) {
   document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
   vi.stubGlobal("matchMedia", () => ({
     matches: options.narrow ?? false,
@@ -108,7 +110,8 @@ function renderLayout(options: { orderBy?: string; narrow?: boolean } = {}) {
           workspaceSlug={SLUG}
           projectId={PROJECT}
           projectIdentifier="WEB"
-          issues={ISSUES}
+          issues={options.issues ?? ISSUES}
+          totalCount={options.totalCount ?? (options.issues ?? ISSUES).length}
           prefs={prefs({ orderBy: options.orderBy ?? "sort_order" })}
           weekStart={0}
         />
@@ -124,13 +127,12 @@ afterEach(() => {
 });
 
 describe("orderedRows", () => {
-  it("keeps the server order for every preference but a reverse manual sort", () => {
-    const rows = orderedRows(ISSUES, prefs({ orderBy: "sort_order" }), "WEB");
-    expect(rows.map((row) => row.name)).toEqual(["First", "Second", "Third"]);
-    const reversed = orderedRows(ISSUES, prefs({ orderBy: "-sort_order" }), "WEB");
-    expect(reversed.map((row) => row.name)).toEqual(["Third", "Second", "First"]);
-    const created = orderedRows(ISSUES, prefs({ orderBy: "-created_at" }), "WEB");
-    expect(created.map((row) => row.name)).toEqual(["First", "Second", "Third"]);
+  it("keeps the server order for every preference", () => {
+    // The server answers `order_by`; a local reverse would double it.
+    for (const orderBy of ["sort_order", "-sort_order", "-created_at", "start_date"]) {
+      const rows = orderedRows(ISSUES, prefs({ orderBy }), "WEB");
+      expect(rows.map((row) => row.name)).toEqual(["First", "Second", "Third"]);
+    }
   });
 });
 
@@ -153,11 +155,45 @@ describe("GanttLayout", () => {
     expect(screen.getByTestId("gantt-count")).toHaveTextContent("3 work items");
   });
 
-  it("renders rows in reverse manual order", () => {
+  it("keeps the server order under a reverse manual sort", () => {
+    // `order_by=-sort_order` already arrives descending; the layout must
+    // not flip it back (ISS-044/045).
     renderLayout({ orderBy: "-sort_order" });
     const names = screen.getAllByTestId("gantt-sidebar-row").map((row) => row.textContent);
-    expect(names[0]).toContain("Third");
-    expect(names[2]).toContain("First");
+    expect(names[0]).toContain("First");
+    expect(names[2]).toContain("Third");
+  });
+
+  it("shows the server total, not the loaded page, in the header (ISS-044)", () => {
+    // The list query is one page; the header count is the issue total.
+    renderLayout({ totalCount: 240 });
+    expect(screen.getByTestId("gantt-count")).toHaveTextContent("240 work items");
+    expect(screen.getAllByTestId("gantt-sidebar-row")).toHaveLength(3);
+  });
+
+  it("never reports fewer rows than it renders", () => {
+    renderLayout({ totalCount: 1 });
+    expect(screen.getByTestId("gantt-count")).toHaveTextContent("3 work items");
+  });
+
+  it("renders rows in the order the server sent them", () => {
+    // Manual order is the server's `order_by=sort_order` order; the layout
+    // must not re-sort or reverse it (ISS-044/045).
+    const ranks = [
+      issue({ id: "423e4567-e89b-12d3-a456-426614174020", name: "Rank 30", sequence_id: 30, sort_order: 30 }),
+      issue({ id: "423e4567-e89b-12d3-a456-426614174021", name: "Rank 10", sequence_id: 10, sort_order: 10 }),
+    ];
+    renderLayout({ issues: ranks });
+    const names = screen.getAllByTestId("gantt-sidebar-row").map((row) => row.textContent);
+    expect(names[0]).toContain("Rank 30");
+    expect(names[1]).toContain("Rank 10");
+  });
+
+  it("starts every sidebar link at the workspace browse route", () => {
+    renderLayout();
+    for (const link of screen.getAllByRole("link")) {
+      expect(link).toHaveAttribute("href", expect.stringMatching(/^\/acme\/browse\/WEB-\d+$/));
+    }
   });
 
   it("opens the shared peek for a clicked row and closes it", () => {

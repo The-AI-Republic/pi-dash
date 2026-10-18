@@ -21,6 +21,16 @@ import {
 import { issueKeys } from "../api/keys.js";
 import type { IssuesEntity, PrefsRecord } from "./entities.js";
 
+/**
+ * The stored sort order of one record (ISS-002). Manual by default; the
+ * issues list sends it as `order_by` so the timeline shows the same order
+ * the Display panel names.
+ */
+export function orderByOf(record: PrefsRecord): string {
+  const value = record.display_filters["order_by"];
+  return typeof value === "string" && value.length > 0 ? value : "sort_order";
+}
+
 /** Key parts beneath `issueKeys.prefs` for one entity. */
 export function entityPrefsKeyPart(entity: IssuesEntity): string[] {
   switch (entity.scope) {

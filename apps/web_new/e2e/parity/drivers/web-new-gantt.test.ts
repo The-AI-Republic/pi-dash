@@ -519,62 +519,84 @@ describe("ganttWeekendTinted", () => {
 });
 
 describe("ganttWeekRowStarts", () => {
-  it("maps day keys to weekday labels", async () => {
-    const keys = ["d-2026-10-18", "d-2026-10-19", "d-scratch"];
+  const WEEK_CELLS = '[data-testid="gantt-day-columns"] [data-day][data-week-start="true"]';
+  const FINE_CELLS = '[data-tier="fine"] [data-segment-key]';
+
+  it("labels each week-start day cell with its weekday", async () => {
+    const days = ["2026-10-18", "2026-10-24", "scratch"];
     const page = pageOf({
-      locator: (selector: string) =>
-        selector === '[data-tier="fine"] [data-segment-key]'
-          ? locator({ count: async () => 1, first: () => locator({ innerText: async () => "Su 18" }) })
-          : selector === '[data-tier="fine"] [data-segment-key]'
-            ? locator()
-            : locator({
-                count: async () => keys.length,
-                nth: (index: number) => locator({ getAttribute: async () => keys[index]! }),
-              }),
-    });
-    void page;
-    const pageWithZoom = pageOf({
       locator: (selector: string) => {
-        if (selector === '[data-tier="fine"] [data-segment-key]') {
+        if (selector === FINE_CELLS) {
           return locator({
-            count: async () => keys.length,
+            count: async () => 1,
             first: () => locator({ innerText: async () => "Su 18" }),
-            nth: (index: number) => locator({ getAttribute: async () => keys[index]! }),
+          });
+        }
+        if (selector === WEEK_CELLS) {
+          return locator({
+            count: async () => days.length,
+            nth: (index: number) => locator({ getAttribute: async () => days[index]! }),
           });
         }
         return locator();
       },
     });
-    const starts = await new WebNewDriver(pageWithZoom).ganttWeekRowStarts();
-    expect(starts.slice(0, 2)).toEqual(["Su", "Mo"]);
-    expect(starts[2]).toBe("");
+    const starts = await new WebNewDriver(page).ganttWeekRowStarts();
+    // 2026-10-18 is a Sunday, 2026-10-24 a Saturday; the junk value reads
+    // as an empty label instead of throwing.
+    expect(starts).toEqual(["Su", "Sa", ""]);
+  });
+
+  it("reads week-start day cells, not every day of the week zoom", async () => {
+    const queried: string[] = [];
+    const page = pageOf({
+      locator: (selector: string) => {
+        queried.push(selector);
+        if (selector === FINE_CELLS) {
+          return locator({ count: async () => 1, first: () => locator({ innerText: async () => "We 21" }) });
+        }
+        if (selector === WEEK_CELLS) {
+          return locator({
+            count: async () => 1,
+            nth: () => locator({ getAttribute: async () => "2026-10-21" }),
+          });
+        }
+        return locator();
+      },
+    });
+    await expect(new WebNewDriver(page).ganttWeekRowStarts()).resolves.toEqual(["We"]);
+    expect(queried).toContain(WEEK_CELLS);
   });
 
   it("returns nothing outside Week zoom", async () => {
     const page = pageOf({
       locator: (selector: string) =>
-        selector === '[data-tier="fine"] [data-segment-key]'
+        selector === FINE_CELLS
           ? locator({ count: async () => 1, first: () => locator({ innerText: async () => "Oct" }) })
           : locator(),
     });
     await expect(new WebNewDriver(page).ganttWeekRowStarts()).resolves.toEqual([]);
   });
 
-  it("treats an unreadable key as an empty label", async () => {
+  it("treats an unreadable day as an empty label", async () => {
     const page = pageOf({
-      locator: (selector: string) =>
-        selector === '[data-tier="fine"] [data-segment-key]'
-          ? locator({
-              count: async () => 1,
-              first: () => locator({ innerText: async () => "Su 18" }),
-              nth: () =>
-                locator({
-                  getAttribute: async () => {
-                    throw new Error("detached");
-                  },
-                }),
-            })
-          : locator(),
+      locator: (selector: string) => {
+        if (selector === FINE_CELLS) {
+          return locator({ count: async () => 1, first: () => locator({ innerText: async () => "Su 18" }) });
+        }
+        if (selector === WEEK_CELLS) {
+          return locator({
+            count: async () => 1,
+            nth: () =>
+              locator({
+                getAttribute: async () => {
+                  throw new Error("detached");
+                },
+              }),
+          });
+        }
+        return locator();
+      },
     });
     await expect(new WebNewDriver(page).ganttWeekRowStarts()).resolves.toEqual([""]);
   });
@@ -1132,9 +1154,7 @@ describe("gantt driver reads behind absent markers", () => {
 
 describe("gantt driver route delays", () => {
   /** Capture the installed route handler once the method has awaited it. */
-  async function installedHandler(
-    method: (driver: WebNewDriver) => Promise<boolean>
-  ): Promise<{
+  async function installedHandler(method: (driver: WebNewDriver) => Promise<boolean>): Promise<{
     handler: () => (route: { continue: () => Promise<void> }) => Promise<void>;
     pending: Promise<boolean>;
   }> {

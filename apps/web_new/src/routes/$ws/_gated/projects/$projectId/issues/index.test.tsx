@@ -114,6 +114,55 @@ describe("issues denial tolerance", () => {
 });
 
 describe("issues route loader", () => {
+  it("prefetches the issue list in the stored order at 100 a page", async () => {
+    const seen: string[] = [];
+    const apiClient = createAppClient("https://api.test", (async (url: string) => {
+      seen.push(url);
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () =>
+          JSON.stringify(
+            url.includes("user-properties")
+              ? {
+                  ...prefsSeed(),
+                  id: ISSUE_UUID,
+                  workspace: ISSUE_UUID,
+                  user: ISSUE_UUID,
+                  project: PARAMS.projectId,
+                  preferences: {},
+                  sort_order: 1,
+                  display_filters: { layout: "list", order_by: "-created_at" },
+                  created_by: null,
+                  updated_by: null,
+                  created_at: "2024-01-02T03:04:05Z",
+                  updated_at: "2024-02-03T04:05:06Z",
+                }
+              : {
+                  grouped_by: null,
+                  sub_grouped_by: null,
+                  total_count: 0,
+                  next_cursor: "",
+                  prev_cursor: "",
+                  next_page_results: false,
+                  prev_page_results: false,
+                  count: 0,
+                  total_results: 0,
+                  results: [],
+                }
+          ),
+      };
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    await beforeLoad({ context: { queryClient, apiClient }, params: PARAMS, search: {} } as never);
+    expect(seen).toContain(
+      `https://api.test/api/workspaces/${PARAMS.ws}/projects/${PARAMS.projectId}/issues/?per_page=100&order_by=-created_at`
+    );
+  });
+
   it("prefetches the workspace project list", async () => {
     const apiClient = createAppClient("https://api.test", (async (url: string) => ({
       status: 200,
@@ -345,15 +394,18 @@ describe("project issues screen", () => {
     expect(switcher.querySelector('[data-layout="gantt_chart"]')).not.toBeNull();
   });
 
-  it("renders the timeline when it is the stored layout", () => {
+  it("renders the timeline when it is the stored layout", async () => {
     renderScreen({}, 1, [issueRow()], {
       layout: "gantt_chart",
       group_by: null,
       order_by: "sort_order",
     });
 
-    expect(screen.getByTestId("gantt-layout")).toBeInTheDocument();
+    // The timeline is a lazy leaf; the route chunk shows the list skeleton
+    // until its module resolves.
+    expect(await screen.findByTestId("gantt-layout")).toBeInTheDocument();
     expect(screen.getAllByTestId("gantt-sidebar-row")).toHaveLength(1);
+    expect(screen.getByTestId("gantt-count")).toHaveTextContent("1 work item");
     expect(screen.queryByLabelText("WEB-42")).toBeNull();
   });
 

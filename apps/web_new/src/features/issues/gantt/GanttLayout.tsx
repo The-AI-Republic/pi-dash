@@ -23,6 +23,8 @@ export interface GanttLayoutProps {
   projectId: string;
   projectIdentifier: string;
   issues: readonly IssueListItem[];
+  /** Server total across all pages; the header's live count (ISS-044). */
+  totalCount: number;
   prefs: DisplayPrefs;
   /** Profile's first day of the week (ISS-045). */
   weekStart: number;
@@ -42,18 +44,18 @@ export function barColorsFor(
 }
 
 /**
- * Rows in the preference's order. The list arrives already sorted by the
- * server (manual order by default); only a reverse `-sort_order` needs a
- * local pass, and every other order is left as the server sent it.
+ * Rows in the preference's order. The list query sends the stored
+ * `order_by` to the server, so the response already arrives in the order
+ * the timeline should draw (manual rank for `sort_order`, newest/oldest
+ * for the date sorts): building the rows must not re-sort or reverse them
+ * (ISS-044/045, ISS-050).
  */
 export function orderedRows(
   issues: readonly IssueListItem[],
-  prefs: Pick<DisplayPrefs, "orderBy">,
+  _prefs: Pick<DisplayPrefs, "orderBy">,
   projectIdentifier: string
 ): GanttRow[] {
-  const rows = buildRows(issues, projectIdentifier);
-  if (prefs.orderBy !== "-sort_order") return rows;
-  return [...rows].reverse();
+  return buildRows(issues, projectIdentifier);
 }
 
 export function GanttLayout({
@@ -61,6 +63,7 @@ export function GanttLayout({
   projectId,
   projectIdentifier,
   issues,
+  totalCount,
   prefs,
   weekStart,
 }: GanttLayoutProps): React.ReactElement {
@@ -73,6 +76,8 @@ export function GanttLayout({
     <div data-testid="gantt-layout" className="flex h-full min-h-0 flex-col">
       <GanttChart
         rows={rows}
+        workspaceSlug={workspaceSlug}
+        totalCount={totalCount}
         weekStart={weekStart}
         barColors={barColors}
         peekedId={peek?.row.id ?? null}

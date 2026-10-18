@@ -44,7 +44,15 @@ function renderSidebar(props: Partial<React.ComponentProps<typeof GanttSidebar>>
   const onOpenRow = vi.fn();
   const onHover = vi.fn();
   const view = render(
-    <GanttSidebar rows={ROWS} peekedId={null} hoveredId={null} onHover={onHover} onOpenRow={onOpenRow} {...props} />
+    <GanttSidebar
+      rows={ROWS}
+      workspaceSlug="acme"
+      peekedId={null}
+      hoveredId={null}
+      onHover={onHover}
+      onOpenRow={onOpenRow}
+      {...props}
+    />
   );
   return { onOpenRow, onHover, ...view };
 }
@@ -65,11 +73,20 @@ describe("GanttSidebar", () => {
     expect(durations[0]).toHaveTextContent("3 days");
   });
 
-  it("carries the issue id on the link and a browse href", () => {
+  it("carries the issue id on the link and an absolute workspace browse href", () => {
     renderSidebar();
     const link = screen.getByRole("link", { name: "Second" });
     expect(link).toHaveAttribute("id", "issue-row-2");
-    expect(link).toHaveAttribute("href", "browse/WEB-2");
+    // Absolute so Cmd/middle-click and copy-link land on the browse route
+    // instead of resolving under the issues path (ISS-049).
+    expect(link).toHaveAttribute("href", "/acme/browse/WEB-2");
+    expect(link.getAttribute("href")?.startsWith("browse/")).toBe(false);
+  });
+
+  it("uses the workspace slug it is given for every row", () => {
+    renderSidebar({ workspaceSlug: "other-space" });
+    expect(screen.getByRole("link", { name: "First" })).toHaveAttribute("href", "/other-space/browse/WEB-1");
+    expect(screen.getByRole("link", { name: "Third" })).toHaveAttribute("href", "/other-space/browse/WEB-3");
   });
 
   it("marks archived rows", () => {

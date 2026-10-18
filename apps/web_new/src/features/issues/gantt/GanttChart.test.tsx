@@ -102,7 +102,16 @@ function dayColumns(): HTMLElement[] {
 
 function renderChart(props: Partial<React.ComponentProps<typeof GanttChart>> = {}) {
   const onOpenRow = vi.fn();
-  const view = render(<GanttChart rows={ROWS} weekStart={0} onOpenRow={onOpenRow} {...props} />);
+  const view = render(
+    <GanttChart
+      rows={ROWS}
+      workspaceSlug="acme"
+      totalCount={ROWS.length}
+      weekStart={0}
+      onOpenRow={onOpenRow}
+      {...props}
+    />
+  );
   return { onOpenRow, ...view };
 }
 
@@ -359,6 +368,38 @@ describe("GanttChart scroll arrows", () => {
 });
 
 describe("GanttChart fullscreen (ISS-047)", () => {
+  it("keeps zoom, range and scroll when moving in and out of fullscreen", async () => {
+    renderChart();
+    await waitFor(() => expect(host().scrollLeft).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: "Quarter" }));
+    const quarterRange = initialRange("quarter", TODAY, 0);
+    expect(dayColumns()).toHaveLength(quarterRange.dayCount);
+    await waitFor(() =>
+      expect(host().scrollLeft).toBe(
+        centeredScroll(TODAY, quarterRange, "quarter", Math.max(0, HOST_WIDTH - SIDEBAR_WIDTH))
+      )
+    );
+    const quarterScroll = host().scrollLeft;
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand timeline" }));
+    // The portal hosts the same viewport: still Quarter, same range, same
+    // offset (the pre-fix code remounted to Week and re-centered).
+    expect(screen.getByRole("button", { name: "Quarter" })).toHaveAttribute("aria-pressed", "true");
+    expect(dayColumns()).toHaveLength(quarterRange.dayCount);
+    expect(dayColumns()[0]?.dataset["day"]).toBe(quarterRange.startIso);
+    await waitFor(() => expect(host().scrollLeft).toBe(quarterScroll));
+    expect(screen.getByTestId("gantt-range")).toHaveTextContent(
+      `${quarterRange.startIso} + ${quarterRange.dayCount} days`
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Exit full screen" }));
+    expect(screen.getByRole("button", { name: "Quarter" })).toHaveAttribute("aria-pressed", "true");
+    expect(dayColumns()[0]?.dataset["day"]).toBe(quarterRange.startIso);
+    expect(screen.getByTestId("gantt-range")).toHaveTextContent(
+      `${quarterRange.startIso} + ${quarterRange.dayCount} days`
+    );
+  });
+
   it("moves the chart into the full-screen portal and back", () => {
     renderChart();
     const portal = document.getElementById(FULL_SCREEN_PORTAL_ID)!;
@@ -375,8 +416,14 @@ describe("GanttChart fullscreen (ISS-047)", () => {
 });
 
 describe("GanttChart loading and empty states", () => {
+  it("counts the server total when it exceeds the loaded rows (ISS-044)", () => {
+    renderChart({ rows: ROWS.slice(0, 2), totalCount: 240 });
+    expect(screen.getByTestId("gantt-count")).toHaveTextContent("240 work items");
+    expect(screen.getAllByTestId("gantt-sidebar-row")).toHaveLength(2);
+  });
+
   it("draws skeleton placeholders while no rows exist", () => {
-    renderChart({ rows: [] });
+    renderChart({ rows: [], totalCount: 0 });
     expect(screen.getByTestId("gantt-sidebar-skeleton")).toBeInTheDocument();
     expect(screen.getByTestId("gantt-strip-skeleton")).toBeInTheDocument();
     expect(screen.queryByTestId("gantt-sidebar")).toBeNull();

@@ -10,8 +10,8 @@ import type { IssueSearch } from "../filters/search.js";
 
 export const issueKeys = {
   all: (workspaceSlug: string) => [...workspaceScope(workspaceSlug), "issues"] as const,
-  list: (workspaceSlug: string, projectId: string, search: IssueSearch) =>
-    [...issueKeys.all(workspaceSlug), "list", projectId, search] as const,
+  list: (workspaceSlug: string, projectId: string, search: IssueSearch, orderBy: string = "sort_order") =>
+    [...issueKeys.all(workspaceSlug), "list", projectId, search, orderBy] as const,
   detail: (workspaceSlug: string, issueId: string) => [...issueKeys.all(workspaceSlug), "detail", issueId] as const,
   browse: (workspaceSlug: string, issueKey: string) => [...issueKeys.all(workspaceSlug), "browse", issueKey] as const,
   /** Description version history of one work item (ISS-147). */

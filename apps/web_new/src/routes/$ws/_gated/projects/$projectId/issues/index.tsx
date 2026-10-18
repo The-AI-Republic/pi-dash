@@ -3,13 +3,15 @@
 // See the LICENSE file for details.
 // Project issues (parity/specs/issues.md §1 and §9, ISS-001–006 and
 // ISS-075–081/ISS-106). Thin: the single search param validated by zod,
-// a loader that prefetches issues plus display preferences in parallel
-// with the code split, and the per-entity layout root with the Display
-// control in both headers. Layout slices extend the offered list with
-// their renderer; context empty-state copy arrives with ISS-068.
+// a loader that prefetches display preferences and then the issue list in
+// the user's stored order, and the per-entity layout root with the
+// Display control in both headers. Layout slices extend the offered list
+// with their renderer; the timeline is a lazy leaf so its chart code stays
+// out of the route chunk; context empty-state copy arrives with ISS-068.
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
+import type { IssueListItem } from "@pidash/api-client";
 import { Button } from "@pidash/kit";
 import * as React from "react";
 
@@ -17,7 +19,6 @@ import { invalidateWorkspace } from "../../../../../../core/query/optimistic.js"
 import { isProjectGateError } from "../../../../../../features/auth/index.js";
 import {
   DisplayControl,
-  GanttLayout,
   IssueList,
   IssuesLayoutRoot,
   ListSkeleton,
@@ -25,14 +26,24 @@ import {
   parseIssueSearch,
   prefsQueryOptions,
   useWeekStart,
+  type DisplayPrefs,
   type LayoutKind,
 } from "../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
+import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 
 const LazyIssueFilters = React.lazy(() => import("../../../../../../features/issues/filters/rich/IssueFilters.js"));
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
 import { notifyError } from "../../../../../../shared/shell/index.js";
+
+// The timeline pulls in the chart math, header, sidebar and full-screen
+// portal: a heavy leaf that only the stored `gantt_chart` layout requests.
+const LazyGanttLayout = React.lazy(() =>
+  import("../../../../../../features/issues/gantt/GanttLayout.js").then((module) => ({
+    default: module.GanttLayout,
+  }))
+);
 
 function ProjectIssuesEmptyState(): React.ReactElement {
   return (
@@ -58,24 +69,29 @@ function GanttTimeline({
   projectId,
   projectIdentifier,
   issues,
+  totalCount,
   prefs,
 }: {
   workspaceSlug: string;
   projectId: string;
   projectIdentifier: string;
-  issues: Parameters<typeof GanttLayout>[0]["issues"];
-  prefs: Parameters<typeof GanttLayout>[0]["prefs"];
+  issues: readonly IssueListItem[];
+  totalCount: number;
+  prefs: DisplayPrefs;
 }): React.ReactElement {
   const weekStart = useWeekStart();
   return (
-    <GanttLayout
-      workspaceSlug={workspaceSlug}
-      projectId={projectId}
-      projectIdentifier={projectIdentifier}
-      issues={issues}
-      prefs={prefs}
-      weekStart={weekStart}
-    />
+    <React.Suspense fallback={<ListSkeleton />}>
+      <LazyGanttLayout
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        projectIdentifier={projectIdentifier}
+        issues={issues}
+        totalCount={totalCount}
+        prefs={prefs}
+        weekStart={weekStart}
+      />
+    </React.Suspense>
   );
 }
 
@@ -83,12 +99,21 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
   beforeLoad: async ({ context, params, search }) => {
     try {
-      await Promise.all([
-        context.queryClient.ensureQueryData(issuesQueryOptions(context.apiClient, params.ws, params.projectId, search)),
-        context.queryClient.ensureQueryData(
-          prefsQueryOptions(context.apiClient, params.ws, { scope: "project", projectId: params.projectId })
-        ),
-      ]);
+      // Preferences first: the stored order is part of the list query, so
+      // the timeline and the list both ask for the order the user chose.
+      const record = await context.queryClient.ensureQueryData(
+        prefsQueryOptions(context.apiClient, params.ws, { scope: "project", projectId: params.projectId })
+      );
+      await context.queryClient.ensureQueryData(
+        issuesQueryOptions(
+          context.apiClient,
+          params.ws,
+          params.projectId,
+          search,
+          record.rich_filters,
+          orderByOf(record)
+        )
+      );
     } catch (error) {
       // Denial statuses belong to the project gate (AUTH-024): let them
       // through so the gate renders the denial screen instead of the load
@@ -131,7 +156,15 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
       prefsQueryOptions(context.apiClient, params.ws, { scope: "project", projectId: params.projectId })
     );
     const { data: issues } = useSuspenseQuery(
-      issuesQueryOptions(context.apiClient, params.ws, params.projectId, search, preferences.rich_filters)
+      issuesQueryOptions(
+        context.apiClient,
+        params.ws,
+        params.projectId,
+        search,
+        preferences.rich_filters,
+        orderByOf(preferences)
+      )
+    );
     );
 
     React.useEffect(
@@ -188,6 +221,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
               projectId={params.projectId}
               projectIdentifier={project.identifier}
               issues={issues.results}
+              totalCount={issues.total_count}
               prefs={prefs}
             />
           ) : (

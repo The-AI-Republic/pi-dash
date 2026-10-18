@@ -20,22 +20,35 @@ import { richFiltersParam, withRichFilters } from "../filters/rich/query.js";
 import type { IssueSearch } from "../filters/search.js";
 import { issueKeys } from "./keys.js";
 
+/** Rows per request for the flat issue list (parity/specs/issues.md §6). */
+export const ISSUES_PAGE_SIZE = 100;
+/** Sort used until the user picks another order (ISS-002). */
+export const DEFAULT_ISSUE_ORDER = "sort_order";
+
+/**
+ * The project's flat issue list. Order is the user's stored display
+ * preference (manual by default) and rides in the key: the timeline renders
+ * rows in server order, so a missing `order_by` would quietly sort them by
+ * creation instead (ISS-044/045, ISS-050). Rich filters (ISS-095–099) ride
+ * in the key as their serialized form.
+ */
 export function issuesQueryOptions(
   client: ApiClient,
   workspaceSlug: string,
   projectId: string,
   search: IssueSearch,
-  richExpression: RichExpression = {}
+  richExpression: RichExpression = {},
+  orderBy: string = DEFAULT_ISSUE_ORDER
 ) {
   const filters = richFiltersParam(richExpression);
   return queryOptions({
-    queryKey: [...issueKeys.list(workspaceSlug, projectId, search), filters],
+    queryKey: [...issueKeys.list(workspaceSlug, projectId, search, orderBy), filters],
     queryFn: () =>
       listIssues(
         client,
         workspaceSlug,
         projectId,
-        withRichFilters({ perPage: 50, orderBy: "-created_at" }, richExpression)
+        withRichFilters({ perPage: ISSUES_PAGE_SIZE, orderBy }, richExpression)
       ),
     staleTime: LIST_STALE_TIME_MS,
   });

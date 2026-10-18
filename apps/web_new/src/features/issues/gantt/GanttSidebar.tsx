@@ -5,7 +5,9 @@
 // beside the chart: one link per row with the short key ahead of the name
 // and, for fully dated rows, a trailing day count. Rows scroll together
 // with the chart's vertical axis, are windowed to the visible slice, and
-// mark the hovered and peeked row. Clicking opens the row's issue.
+// mark the hovered and peeked row. The href is absolute (workspace browse
+// route) so Cmd/middle-click and copy-link land on the work item; a plain
+// click opens the row through the layout instead.
 
 import { cn } from "@pidash/kit";
 import * as React from "react";
@@ -14,6 +16,8 @@ import { ROW_HEIGHT, durationLabel, type GanttRow } from "./rows.js";
 
 export interface GanttSidebarProps {
   rows: readonly GanttRow[];
+  /** Workspace slug for the absolute browse hrefs (ISS-049). */
+  workspaceSlug: string;
   /** Id of the row whose peek is open, for the selected outline. */
   peekedId: string | null;
   /** Hovered row id (the chart mirrors it on its lane). */
@@ -29,13 +33,21 @@ export interface GanttSidebarProps {
 
 interface SidebarRowProps {
   row: GanttRow;
+  workspaceSlug: string;
   peeked: boolean;
   hovered: boolean;
   onHover: (id: string | null) => void;
   onOpenRow: (row: GanttRow) => void;
 }
 
-export function SidebarRowItem({ row, peeked, hovered, onHover, onOpenRow }: SidebarRowProps): React.ReactElement {
+export function SidebarRowItem({
+  row,
+  workspaceSlug,
+  peeked,
+  hovered,
+  onHover,
+  onOpenRow,
+}: SidebarRowProps): React.ReactElement {
   const duration = durationLabel(row);
   return (
     <div
@@ -52,7 +64,7 @@ export function SidebarRowItem({ row, peeked, hovered, onHover, onOpenRow }: Sid
     >
       <a
         id={`issue-${row.id}`}
-        href={`browse/${row.identifier}`}
+        href={`/${workspaceSlug}/browse/${row.identifier}`}
         aria-label={row.name}
         data-archived={row.archived ? "true" : undefined}
         data-peeked={peeked ? "true" : undefined}
@@ -82,6 +94,7 @@ export function SidebarRowItem({ row, peeked, hovered, onHover, onOpenRow }: Sid
 
 export function GanttSidebar({
   rows,
+  workspaceSlug,
   peekedId,
   hoveredId,
   onHover,
@@ -98,6 +111,7 @@ export function GanttSidebar({
         <SidebarRowItem
           key={row.id}
           row={row}
+          workspaceSlug={workspaceSlug}
           peeked={row.id === peekedId}
           hovered={row.id === hoveredId}
           onHover={onHover}

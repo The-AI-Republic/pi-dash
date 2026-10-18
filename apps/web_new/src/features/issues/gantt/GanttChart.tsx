@@ -36,7 +36,7 @@ import {
   type GanttZoom,
 } from "./scale.js";
 import { useMeasuredSize } from "./useMeasuredSize.js";
-import { FALLBACK_VIEWPORT_WIDTH, useGanttViewport } from "./useGanttViewport.js";
+import { FALLBACK_VIEWPORT_WIDTH, useGanttViewport, type GanttViewport } from "./useGanttViewport.js";
 
 /** Width of the sticky sidebar column. */
 export const SIDEBAR_WIDTH = 288;
@@ -47,6 +47,10 @@ const EXTEND_COOLDOWN_MS = 350;
 
 export interface GanttChartProps {
   rows: readonly GanttRow[];
+  /** Workspace slug for the sidebar's browse links. */
+  workspaceSlug: string;
+  /** Server total across all pages (live header count, ISS-044). */
+  totalCount: number;
   /** Profile's first day of the week, Sunday-first. */
   weekStart: number;
   /** Bar color per row id; rows without an entry use the accent. */
@@ -57,8 +61,12 @@ export interface GanttChartProps {
   loadingMore?: boolean;
 }
 
-interface StageProps extends GanttChartProps {
-  /** Why the stage is mounted (drives the page background tone). */
+interface SurfaceProps extends GanttChartProps {
+  todayIso: string;
+  viewport: GanttViewport;
+  hoveredId: string | null;
+  onHover: (id: string | null) => void;
+  /** Why the surface is mounted (drives the page background tone). */
   fullscreen: boolean;
   onToggleFullscreen: () => void;
 }
@@ -117,6 +125,7 @@ function DayTintLayer({
         <div
           key={day.iso}
           data-day={day.iso}
+          data-week-start={day.startsWeek ? "true" : undefined}
           data-weekend={day.weekend ? "true" : undefined}
           style={{ width }}
           className={cn(
@@ -225,19 +234,22 @@ function GanttLanes({
   );
 }
 
-function GanttStage({
+function GanttSurface({
   rows,
+  workspaceSlug,
+  totalCount,
   weekStart,
   barColors,
   peekedId = null,
   onOpenRow,
   loadingMore = false,
+  todayIso,
+  viewport,
+  hoveredId,
+  onHover: setHoveredId,
   fullscreen,
   onToggleFullscreen,
-}: StageProps): React.ReactElement {
-  const todayIso = React.useMemo(() => todayIsoDay(), []);
-  const viewport = useGanttViewport(todayIso, weekStart);
-  const [hoveredId, setHoveredId] = React.useState<string | null>(null);
+}: SurfaceProps): React.ReactElement {
   const [viewportWidth, setViewportWidth] = React.useState(FALLBACK_VIEWPORT_WIDTH);
   const [viewportHeight, setViewportHeight] = React.useState(640);
   const [scrollTop, setScrollTop] = React.useState(0);
@@ -315,7 +327,7 @@ function GanttStage({
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col", fullscreen && "h-full bg-(--bg)")}>
       <GanttHeader
-        rowCount={rows.length}
+        rowCount={Math.max(totalCount, rows.length)}
         zoom={zoom}
         onZoom={setZoom}
         onToday={centerToday}
@@ -352,6 +364,7 @@ function GanttStage({
             ) : (
               <GanttSidebar
                 rows={rows}
+                workspaceSlug={workspaceSlug}
                 peekedId={peekedId}
                 hoveredId={hoveredId}
                 onHover={setHoveredId}
@@ -422,13 +435,28 @@ function GanttStage({
 }
 
 export function GanttChart(props: GanttChartProps): React.ReactElement {
+  const { weekStart } = props;
   const [fullscreen, setFullscreen] = React.useState(false);
+  const [hoveredId, setHoveredId] = React.useState<string | null>(null);
+  // Zoom and range stay above the fullscreen branch: moving the chart into
+  // the portal re-parents the surface, and a viewport owned by the surface
+  // would remount to Week/initial range on every expand (ISS-047).
+  const todayIso = React.useMemo(() => todayIsoDay(), []);
+  const viewport = useGanttViewport(todayIso, weekStart);
   const toggle = React.useCallback(() => setFullscreen((open) => !open), []);
-  if (!fullscreen) return <GanttStage {...props} fullscreen={false} onToggleFullscreen={toggle} />;
+  const shared = {
+    ...props,
+    todayIso,
+    viewport,
+    hoveredId,
+    onHover: setHoveredId,
+    onToggleFullscreen: toggle,
+  };
+  if (!fullscreen) return <GanttSurface {...shared} fullscreen={false} />;
   return (
     <OverlayPortal rootId={FULL_SCREEN_PORTAL_ID}>
       <div data-testid="gantt-fullscreen-root" className="fixed inset-0 z-40 flex flex-col bg-(--bg)">
-        <GanttStage {...props} fullscreen onToggleFullscreen={toggle} />
+        <GanttSurface {...shared} fullscreen />
       </div>
     </OverlayPortal>
   );
