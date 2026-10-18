@@ -708,17 +708,15 @@ fn python_int_size(value: Option<&Value>, default: i64) -> SizeOutcome {
 }
 
 /// Coerce an open string column the way `objects.create` stores it:
-/// strings as-is, numbers/bools via `str()`, missing/null as SQL NULL.
-/// Containers have no psycopg2 adaptation (`ProgrammingError` → the
-/// generic 500), so they convert-error here.
-fn optional_text(value: Option<&Value>) -> Result<Option<String>, ()> {
+/// strings as-is, everything else via `str()` (`CharField.to_python`
+/// returns `str(value)` for any non-string, non-None value, so arrays
+/// and objects render CPython-style through `python_str`), missing/null
+/// as SQL NULL.
+fn optional_text(value: Option<&Value>) -> Option<String> {
     match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(s)) => Ok(Some(s.clone())),
-        Some(Value::Bool(_)) | Some(Value::Number(_)) => {
-            Ok(Some(python_str(value.expect("matched"))))
-        }
-        Some(Value::Array(_)) | Some(Value::Object(_)) => Err(()),
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(other) => Some(python_str(other)),
     }
 }
 
@@ -1151,14 +1149,8 @@ async fn generic_post(
         ProjectOutcome::Bind(id) => Some(id),
         ProjectOutcome::Invalid => return Denial::InvalidDetail.into_response(),
     };
-    let external_id = match optional_text(data.get("external_id")) {
-        Ok(value) => value,
-        Err(()) => return server_error("external_id has no adapter"),
-    };
-    let external_source = match optional_text(data.get("external_source")) {
-        Ok(value) => value,
-        Err(()) => return server_error("external_source has no adapter"),
-    };
+    let external_id = optional_text(data.get("external_id"));
+    let external_source = optional_text(data.get("external_source"));
     let attributes = serde_json::json!({
         "name": data.get("name").cloned().unwrap_or(Value::Null),
         "type": mime,

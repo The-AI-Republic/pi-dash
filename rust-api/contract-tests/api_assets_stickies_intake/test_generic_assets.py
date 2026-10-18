@@ -10,6 +10,8 @@ installed runners consume, so it is pinned exactly.
 
 import uuid
 
+import pytest
+
 
 def _base(org):
     return f"/api/v1/workspaces/{org.workspace['slug']}/assets/"
@@ -184,3 +186,59 @@ def test_generic_download_anonymous_401(org):
     asset_id = _upload(org)["asset_id"]
     r = org.request("GET", f"{_base(org)}{asset_id}/", None)
     assert r.status_code == 401
+
+
+def _post_generic(org, role="admin", **overrides):
+    payload = {"name": "x.pdf", "type": "application/pdf", "size": 100, **overrides}
+    return org.request("POST", _base(org), role, json=payload)
+
+
+def _stored_external(org, asset_id):
+    return org.conn.execute(
+        "SELECT external_id, external_source FROM file_assets WHERE id = %s",
+        (asset_id,),
+    ).fetchone()
+
+
+@pytest.mark.parametrize(
+    ("external_id", "spelling"),
+    [([1], "[1]"), ({"a": 1}, "{'a': 1}")],
+)
+def test_generic_upload_container_external_id(org, external_id, spelling):
+    """Django `CharField.to_python` str()ifies a container external_id.
+
+    A JSON array/object is stored as its CPython `str()` spelling and the
+    POST succeeds; the dedupe on a repeat POST finds the row and 409s.
+    """
+    r = _post_generic(org, external_id=external_id, external_source="s")
+    assert r.status_code == 200, r.text[:500]
+    body = r.json()
+    assert set(body) == {"upload_data", "asset_id", "asset_url"}
+    external_id_col, external_source_col = _stored_external(org, body["asset_id"])
+    assert external_id_col == spelling
+    assert external_source_col == "s"
+    repeat = _post_generic(org, external_id=external_id, external_source="s")
+    assert repeat.status_code == 409, repeat.text[:500]
+    repeat_body = repeat.json()
+    assert repeat_body["message"] == "Asset with same external id and source already exists"
+    assert repeat_body["asset_id"] == body["asset_id"]
+
+
+@pytest.mark.parametrize(
+    ("external_source", "spelling"),
+    [([1], "[1]"), ({"a": 1}, "{'a': 1}")],
+)
+def test_generic_upload_container_external_source(org, external_source, spelling):
+    """The same `str()` coercion applies to a container external_source."""
+    r = _post_generic(org, external_id="fixed-ext", external_source=external_source)
+    assert r.status_code == 200, r.text[:500]
+    body = r.json()
+    assert set(body) == {"upload_data", "asset_id", "asset_url"}
+    external_id_col, external_source_col = _stored_external(org, body["asset_id"])
+    assert external_id_col == "fixed-ext"
+    assert external_source_col == spelling
+    repeat = _post_generic(org, external_id="fixed-ext", external_source=external_source)
+    assert repeat.status_code == 409, repeat.text[:500]
+    repeat_body = repeat.json()
+    assert repeat_body["message"] == "Asset with same external id and source already exists"
+    assert repeat_body["asset_id"] == body["asset_id"]
