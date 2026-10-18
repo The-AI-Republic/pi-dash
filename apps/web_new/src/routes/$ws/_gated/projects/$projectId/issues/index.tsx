@@ -165,7 +165,6 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         orderByOf(preferences)
       )
     );
-    );
 
     React.useEffect(
       () =>
