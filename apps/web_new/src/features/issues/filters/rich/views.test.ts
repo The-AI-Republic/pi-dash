@@ -14,9 +14,11 @@ import {
   offersUpdateView,
   stableJson,
   viewContextFromRecord,
+  viewDisplaySnapshot,
   type ViewContext,
   type ViewSnapshot,
 } from "./views.js";
+import { parseDisplayPrefs } from "../../prefs/displayPrefs.js";
 
 const VIEW_ID = "123e4567-e89b-12d3-a456-426614174000";
 const OWNER = "223e4567-e89b-12d3-a456-426614174001";
@@ -184,5 +186,47 @@ describe("entityViewContext", () => {
       storedDisplayFilters: {},
       storedDisplayProperties: {},
     });
+  });
+});
+
+describe("viewDisplaySnapshot", () => {
+  it("overwrites the stored display keys while keeping unknown ones", () => {
+    const view = {
+      display_filters: {
+        layout: "list",
+        group_by: "state",
+        order_by: "sort_order",
+        calendar: { layout: "week" },
+        custom_key: "kept",
+      },
+      display_properties: { priority: true, custom: false },
+    };
+    const snapshot = viewDisplaySnapshot(view, {
+      layout: "gantt_chart",
+      groupBy: null,
+      subGroupBy: null,
+      orderBy: "-created_at",
+      showEmptyGroups: true,
+      showSubIssues: false,
+      calendar: { mode: "month", showWeekends: false },
+      properties: { priority: false },
+    });
+    expect(snapshot.displayFilters).toEqual({
+      layout: "gantt_chart",
+      group_by: null,
+      sub_group_by: null,
+      order_by: "-created_at",
+      show_empty_groups: true,
+      sub_issue: false,
+      calendar: { layout: "month", show_weekends: false },
+      custom_key: "kept",
+    });
+    expect(snapshot.displayProperties).toEqual({ priority: false, custom: false });
+  });
+
+  it("round-trips: the snapshot parses back to the settings it stored", () => {
+    const prefs = parseDisplayPrefs({ layout: "gantt_chart", order_by: "-updated_at" }, { priority: false });
+    const snapshot = viewDisplaySnapshot({ display_filters: {}, display_properties: {} }, prefs);
+    expect(parseDisplayPrefs(snapshot.displayFilters, snapshot.displayProperties)).toEqual(prefs);
   });
 });

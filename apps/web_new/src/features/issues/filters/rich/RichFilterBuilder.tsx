@@ -22,7 +22,7 @@ import { ROLE_MEMBER } from "../../../../core/session/index.js";
 import { useMe, usePermissions } from "../../../../core/session/index.js";
 import { useProjectRoles } from "../../../auth/index.js";
 import type { IssuesEntity } from "../../prefs/entities.js";
-import { selectDisplayPrefs, useEntityPrefs } from "../../prefs/displayPrefs.js";
+import { selectDisplayPrefs, useEntityPrefs, type DisplayPrefs } from "../../prefs/displayPrefs.js";
 import {
   addCondition,
   hasRichConditions,
@@ -42,7 +42,7 @@ import { temporaryInstanceId, useTemporaryFieldConfigs, type FieldConfigRegistry
 import { useRichFilters, useUpdateRichFilters } from "./useRichFilters.js";
 import { ViewActions } from "./ViewActions.js";
 import type { ViewContext, ViewSnapshot } from "./views.js";
-import { entityViewContext } from "./views.js";
+import { entityViewContext, viewDisplaySnapshot } from "./views.js";
 
 export interface RichFilterBuilderProps {
   workspaceSlug: string;
@@ -57,6 +57,8 @@ export interface RichFilterBuilderProps {
   temporaryRegistry?: FieldConfigRegistry | undefined;
   /** Saved-view record the row edits; absent on bare entity lists. */
   view?: { view: SavedView; isDefault: boolean } | undefined;
+  /** Display settings the saved view currently shows (local edits included). */
+  viewDisplay?: DisplayPrefs | undefined;
   /** Project view saving waits for the project's views feature. */
   viewsEnabled?: boolean | undefined;
   /** Fired after a view create/update so the host can adopt the record. */
@@ -137,12 +139,15 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
   }, [viewDefault, viewRecord]);
   const snapshot = React.useMemo<ViewSnapshot>(() => {
     if (viewRecord !== null) {
-      // The row edits filters only; the view's display settings ride along
-      // exactly as stored, so an untouched view never reads as changed.
+      // Filters come from the row and display settings from the view's
+      // live display state, so an untouched view never reads as changed
+      // and a layout or display switch makes Update view available.
+      const display = props.viewDisplay;
       return {
         expression: serializeRichExpression(rows),
-        displayFilters: viewRecord.display_filters,
-        displayProperties: viewRecord.display_properties,
+        ...(display === undefined
+          ? { displayFilters: viewRecord.display_filters, displayProperties: viewRecord.display_properties }
+          : viewDisplaySnapshot(viewRecord, display)),
       };
     }
     const record = entityPrefs.data;
@@ -161,7 +166,7 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
       },
       displayProperties: record.display_properties,
     };
-  }, [entityPrefs.data, rows, viewRecord]);
+  }, [entityPrefs.data, props.viewDisplay, rows, viewRecord]);
 
   const serverFingerprint = React.useMemo(
     () => JSON.stringify(conditions.map((row) => [row.key, row.property, row.operator, row.negated, row.value])),

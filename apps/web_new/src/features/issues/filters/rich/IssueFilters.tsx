@@ -12,6 +12,7 @@
 import * as React from "react";
 import type { SavedView } from "@pidash/api-client";
 
+import type { DisplayPrefs } from "../../prefs/displayPrefs.js";
 import { useRichFilterBuilder, type RichFilterBuilderParts } from "./RichFilterBuilder.js";
 
 export interface IssueFiltersProps {
@@ -22,6 +23,8 @@ export interface IssueFiltersProps {
   viewsEnabled?: boolean | undefined;
   /** Saved-view record when the list renders that view (ISS-104). */
   view?: SavedView | undefined;
+  /** Live display settings of that view (layout/display switches included). */
+  viewDisplay?: DisplayPrefs | undefined;
   onViewCreated?: ((view: SavedView) => void) | undefined;
   onViewUpdated?: ((view: SavedView) => void) | undefined;
   children: (parts: RichFilterBuilderParts) => React.ReactNode;
@@ -34,6 +37,7 @@ export default function IssueFilters({
   hideModule,
   viewsEnabled,
   view,
+  viewDisplay,
   onViewCreated,
   onViewUpdated,
   children,
@@ -49,6 +53,7 @@ export default function IssueFilters({
     hideModule,
     viewsEnabled,
     view: viewProp,
+    viewDisplay,
     onViewCreated,
     onViewUpdated,
   });

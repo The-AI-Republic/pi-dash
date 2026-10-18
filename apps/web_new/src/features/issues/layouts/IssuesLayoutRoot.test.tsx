@@ -53,6 +53,7 @@ function renderRoot(
     seed?: Record<string, unknown> | null;
     offered?: readonly LayoutKind[];
     display?: DisplayPrefs;
+    onDisplayChange?: (next: LayoutKind) => void;
     totalCount?: number;
     resultCount?: number;
     slots?: {
@@ -116,6 +117,7 @@ function renderRoot(
           resultCount={options.resultCount ?? 3}
           offered={options.offered ?? LAYOUT_ORDER}
           display={options.display}
+          onDisplayChange={options.onDisplayChange}
           renderLayout={(layout, prefs) => {
             rendered.push({ layout, orderBy: prefs.orderBy });
             return <p>{`layout:${layout}`}</p>;
@@ -197,6 +199,29 @@ describe("IssuesLayoutRoot", () => {
     expect(patch?.url).toContain(`/api/workspaces/acme/projects/${UUID2}/user-properties/`);
     expect(JSON.parse(patch?.body ?? "{}").display_filters.layout).toBe("calendar");
     expect(h.segment("Calendar layout")).toHaveAttribute("data-active", "true");
+  });
+
+  it("hands a header switch to a supplied callback instead of writing preferences", async () => {
+    const switches: LayoutKind[] = [];
+    const h = renderRoot({
+      display: {
+        layout: "list",
+        groupBy: null,
+        subGroupBy: null,
+        orderBy: "sort_order",
+        showEmptyGroups: true,
+        showSubIssues: true,
+        calendar: { mode: "month", showWeekends: true },
+        properties: {},
+      },
+      onDisplayChange: (next) => switches.push(next),
+    });
+    expect(await screen.findByText("layout:list")).toBeInTheDocument();
+    fireEvent.click(h.segment("Calendar layout"));
+    expect(switches).toEqual(["calendar"]);
+    expect(h.calls.some((call) => call.method === "PATCH")).toBe(false);
+    // The root keeps rendering the supplied settings until its host updates them.
+    expect(screen.getByText("layout:list")).toBeInTheDocument();
   });
 
   it("persists a mobile menu switch", async () => {

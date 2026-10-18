@@ -24,6 +24,7 @@ import {
   issuesQueryOptions,
   parseIssueSearch,
   parseDisplayPrefs,
+  mergeDisplayPrefs,
   type LayoutKind,
 } from "../../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
@@ -105,6 +106,17 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
     );
     const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, params.ws));
     const project = projects.find((entry) => entry.id === params.projectId) ?? null;
+    // The layout root renders from these settings rather than the personal
+    // record, so the view opens in the layout it was saved with. Display
+    // switches edit this copy; Update view persists it.
+    const storedDisplay = React.useMemo(
+      () => parseDisplayPrefs(view.display_filters, view.display_properties),
+      [view.display_filters, view.display_properties]
+    );
+    const [viewDisplay, setViewDisplay] = React.useState(storedDisplay);
+    React.useEffect(() => {
+      setViewDisplay(storedDisplay);
+    }, [storedDisplay]);
     const { data: issues } = useSuspenseQuery(
       issuesQueryOptions(
         context.apiClient,
@@ -112,12 +124,9 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
         params.projectId,
         search,
         viewExpression(view),
-        orderByFromDisplayFilters(view.display_filters)
+        viewDisplay.orderBy
       )
     );
-    // The layout root renders from these stored settings rather than the
-    // personal record, so the view opens in the layout it was saved with.
-    const viewDisplay = parseDisplayPrefs(view.display_filters, view.display_properties);
 
     if (project === null) {
       return (
@@ -136,6 +145,8 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
         offered={offered}
         hideCycle={!project.cycle_view}
         hideModule={!project.module_view}
+        display={viewDisplay}
+        onDisplayChange={setViewDisplay}
       />
     );
     const analytics = (
@@ -156,6 +167,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
         resultCount={issues.results.length}
         offered={offered}
         display={viewDisplay}
+        onDisplayChange={(layout) => setViewDisplay((current) => mergeDisplayPrefs(current, { layout }))}
         renderLayout={(layout, prefs) =>
           layout === "gantt_chart" ? (
             <GanttTimeline
@@ -192,6 +204,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
           hideModule={!project.module_view}
           viewsEnabled={project.issue_views_view}
           view={view}
+          viewDisplay={viewDisplay}
           onViewUpdated={(stored) => {
             context.queryClient.setQueryData(
               projectViewQueryOptions(context.apiClient, params.ws, params.projectId, params.viewId).queryKey,

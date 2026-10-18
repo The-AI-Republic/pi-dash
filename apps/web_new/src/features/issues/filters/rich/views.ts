@@ -11,6 +11,7 @@
 
 import type { SavedView, SavedViewCreate, SavedViewPatch } from "@pidash/api-client";
 import { issueKeys } from "../../api/keys.js";
+import type { DisplayPrefs } from "../../prefs/displayPrefs.js";
 import type { RichExpression } from "./expression.js";
 
 /** The row's view context: which record it edits, if any. */
@@ -162,4 +163,34 @@ export const savedViewKeys = {
  */
 export function viewExpression(view: SavedView): RichExpression {
   return view.rich_filters;
+}
+
+/**
+ * The display keys a saved view would store for these settings: the view's
+ * stored objects with the displayed keys overwritten. Reading a view back
+ * through `parseDisplayPrefs` returns the same values, so an untouched view
+ * never reads as dirty and a switch back to the stored layout clears the
+ * change.
+ */
+export function viewDisplaySnapshot(
+  view: Pick<SavedView, "display_filters" | "display_properties">,
+  prefs: DisplayPrefs
+): Pick<ViewSnapshot, "displayFilters" | "displayProperties"> {
+  const storedCalendar =
+    typeof view.display_filters["calendar"] === "object" && view.display_filters["calendar"] !== null
+      ? (view.display_filters["calendar"] as Record<string, unknown>)
+      : {};
+  return {
+    displayFilters: {
+      ...view.display_filters,
+      layout: prefs.layout,
+      group_by: prefs.groupBy,
+      sub_group_by: prefs.subGroupBy,
+      order_by: prefs.orderBy,
+      show_empty_groups: prefs.showEmptyGroups,
+      sub_issue: prefs.showSubIssues,
+      calendar: { ...storedCalendar, layout: prefs.calendar.mode, show_weekends: prefs.calendar.showWeekends },
+    },
+    displayProperties: { ...view.display_properties, ...prefs.properties },
+  };
 }

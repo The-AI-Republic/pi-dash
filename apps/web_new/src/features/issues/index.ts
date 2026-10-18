@@ -23,6 +23,7 @@ export type { IssuesEntity, PrefsRecord } from "./prefs/entities.js";
 export { entityPrefsKeyPart, prefsQueryOptions, readEntityPrefs } from "./prefs/prefsQuery.js";
 export {
   buildPrefsPatch,
+  mergeDisplayPrefs,
   parseDisplayPrefs,
   selectDisplayPrefs,
   useEntityPrefs,

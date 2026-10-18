@@ -7,6 +7,9 @@
 // record and refetches the entity lists under the mutation loader. The
 // control never reads or writes the URL — display state is personal, not
 // deep-linkable — and resolves the same active layout the root renders.
+// A saved view passes its own stored display and an `onChange` callback, so
+// the row edits the view's settings locally (Update view persists them)
+// instead of hidden personal preferences.
 // The panel rides React.lazy so the route chunk carries only the trigger.
 
 import { Button, Popover } from "@pidash/kit";
@@ -14,7 +17,8 @@ import { SlidersHorizontal } from "lucide-react";
 import * as React from "react";
 
 import { resolveActiveLayout, type LayoutKind } from "../layouts/kinds.js";
-import { selectDisplayPrefs, useEntityPrefs, useUpdateDisplayPrefs } from "../prefs/displayPrefs.js";
+import type { DisplayPrefs } from "../prefs/displayPrefs.js";
+import { mergeDisplayPrefs, selectDisplayPrefs, useEntityPrefs, useUpdateDisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 
 const LazyDisplayPanel = React.lazy(() =>
@@ -29,6 +33,63 @@ export interface DisplayControlProps {
   /** Cycle/module controls hide while their project features are off. */
   hideCycle: boolean;
   hideModule: boolean;
+  /** Saved view: render and edit these settings instead of the personal record. */
+  display?: DisplayPrefs | undefined;
+  /** Saved view: called with the complete next settings instead of a preference write. */
+  onDisplayChange?: ((next: DisplayPrefs) => void) | undefined;
+}
+
+interface LiveDisplayPanelProps {
+  prefs: DisplayPrefs;
+  offered: readonly LayoutKind[];
+  hideCycle: boolean;
+  hideModule: boolean;
+  entity: IssuesEntity;
+  onDisplayChange: ((next: DisplayPrefs) => void) | undefined;
+  updateDisplayPrefs: ReturnType<typeof useUpdateDisplayPrefs>["updateDisplayPrefs"];
+}
+
+function LiveDisplayPanel({
+  prefs,
+  offered,
+  hideCycle,
+  hideModule,
+  entity,
+  onDisplayChange,
+  updateDisplayPrefs,
+}: LiveDisplayPanelProps): React.ReactElement {
+  const write = (partial: Partial<DisplayPrefs>): void => {
+    if (onDisplayChange !== undefined) onDisplayChange(mergeDisplayPrefs(prefs, partial));
+    else updateDisplayPrefs(partial);
+  };
+  const active = resolveActiveLayout(prefs.layout, offered);
+  return (
+    <React.Suspense
+      fallback={<p className="text-body px-(--space-2) py-(--space-4) text-(--text-muted)">Loading display options…</p>}
+    >
+      <LazyDisplayPanel
+        layout={active}
+        state={{
+          groupBy: prefs.groupBy,
+          subGroupBy: prefs.subGroupBy,
+          orderBy: prefs.orderBy,
+          showEmptyGroups: prefs.showEmptyGroups,
+          showSubIssues: prefs.showSubIssues,
+          properties: prefs.properties,
+        }}
+        hideCycle={hideCycle}
+        hideModule={hideModule}
+        isEpic={entity.scope === "epics"}
+        onGroupBy={(dimension) => write({ groupBy: dimension })}
+        onSubGroupBy={(dimension) => write({ subGroupBy: dimension })}
+        onOrderBy={(order) => write({ orderBy: order })}
+        onToggleSwitch={(key, next) =>
+          key === "sub_issue" ? write({ showSubIssues: next }) : write({ showEmptyGroups: next })
+        }
+        onToggleProperty={(key, shown) => write({ properties: { ...prefs.properties, [key]: shown } })}
+      />
+    </React.Suspense>
+  );
 }
 
 export function DisplayControl({
@@ -37,11 +98,13 @@ export function DisplayControl({
   offered,
   hideCycle,
   hideModule,
+  display,
+  onDisplayChange,
 }: DisplayControlProps): React.ReactElement {
-  const { data: record } = useEntityPrefs(workspaceSlug, entity);
+  const isLocal = display !== undefined;
+  const { data: record } = useEntityPrefs(workspaceSlug, entity, !isLocal);
   const { updateDisplayPrefs } = useUpdateDisplayPrefs(workspaceSlug, entity);
-  const prefs = record ? selectDisplayPrefs(record) : null;
-  const active = prefs ? resolveActiveLayout(prefs.layout, offered) : null;
+  const prefs = display ?? (record ? selectDisplayPrefs(record) : null);
   return (
     <Popover
       trigger={
@@ -52,36 +115,16 @@ export function DisplayControl({
       }
       className="max-h-[24rem] w-80 overflow-y-auto"
     >
-      {prefs && active ? (
-        <React.Suspense
-          fallback={
-            <p className="text-body px-(--space-2) py-(--space-4) text-(--text-muted)">Loading display options…</p>
-          }
-        >
-          <LazyDisplayPanel
-            layout={active}
-            state={{
-              groupBy: prefs.groupBy,
-              subGroupBy: prefs.subGroupBy,
-              orderBy: prefs.orderBy,
-              showEmptyGroups: prefs.showEmptyGroups,
-              showSubIssues: prefs.showSubIssues,
-              properties: prefs.properties,
-            }}
-            hideCycle={hideCycle}
-            hideModule={hideModule}
-            isEpic={entity.scope === "epics"}
-            onGroupBy={(dimension) => updateDisplayPrefs({ groupBy: dimension })}
-            onSubGroupBy={(dimension) => updateDisplayPrefs({ subGroupBy: dimension })}
-            onOrderBy={(order) => updateDisplayPrefs({ orderBy: order })}
-            onToggleSwitch={(key, next) =>
-              key === "sub_issue"
-                ? updateDisplayPrefs({ showSubIssues: next })
-                : updateDisplayPrefs({ showEmptyGroups: next })
-            }
-            onToggleProperty={(key, shown) => updateDisplayPrefs({ properties: { ...prefs.properties, [key]: shown } })}
-          />
-        </React.Suspense>
+      {prefs ? (
+        <LiveDisplayPanel
+          prefs={prefs}
+          offered={offered}
+          hideCycle={hideCycle}
+          hideModule={hideModule}
+          entity={entity}
+          onDisplayChange={onDisplayChange}
+          updateDisplayPrefs={updateDisplayPrefs}
+        />
       ) : (
         <p className="text-body px-(--space-2) py-(--space-4) text-(--text-muted)">Loading display options…</p>
       )}

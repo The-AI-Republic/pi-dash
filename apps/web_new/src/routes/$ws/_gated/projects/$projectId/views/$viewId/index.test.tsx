@@ -7,7 +7,7 @@
 // query and the filter row, and the row's actions are wired to the record
 // rather than the personal preference store.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ApiError, createClient, type IssueListResponse, type Project } from "@pidash/api-client";
 import * as React from "react";
@@ -158,12 +158,21 @@ async function load(apiClient: ReturnType<typeof failingClient>): Promise<{ ok: 
   );
 }
 
-function renderScreen(role: number | null = 20, view: ReturnType<typeof viewRecord> = viewRecord(), rows = 0): void {
+function renderScreen(
+  role: number | null = 20,
+  view: ReturnType<typeof viewRecord> = viewRecord(),
+  rows = 0,
+  transport?: (url: string, init: { method?: string; body?: string }) => Promise<unknown>
+): void {
   vi.spyOn(Route, "useParams").mockReturnValue(PARAMS);
   vi.spyOn(Route, "useSearch").mockReturnValue({});
-  const apiClient = createAppClient("https://api.test", (() => {
-    throw new Error("unexpected network fetch in a seeded render");
-  }) as never);
+  const apiClient = createAppClient(
+    "https://api.test",
+    (transport ??
+      (() => {
+        throw new Error("unexpected network fetch in a seeded render");
+      })) as never
+  );
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.spyOn(Route, "useRouteContext").mockReturnValue({ queryClient, apiClient } as never);
   queryClient.setQueryData(
@@ -295,5 +304,34 @@ describe("saved view screen", () => {
     expect(switcher.querySelector('[data-layout="gantt_chart"]')).not.toBeNull();
     expect(await screen.findByTestId("gantt-layout")).toBeInTheDocument();
     expect(screen.queryByLabelText("WEB-1")).toBeNull();
+  });
+
+  it("turns a layout switch in the header into an Update view carrying the view's settings", async () => {
+    const user = userEvent.setup();
+    const patches: Array<Record<string, unknown>> = [];
+    renderScreen(20, viewRecord(), 1, async (url, init) => {
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
+      }
+      if (init.method !== "PATCH") {
+        return { status: 200, url, headers: { get: () => null }, text: async () => JSON.stringify(issueResponse(1)) };
+      }
+      const body = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
+      patches.push(body);
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ ...viewRecord(), ...body }),
+      };
+    });
+    const switcher = await screen.findByTestId("layout-switcher-segmented");
+    const timeline = within(switcher).getByRole("button", { name: /timeline|gantt/i });
+    await user.click(timeline);
+    expect(await screen.findByTestId("gantt-layout")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Update view" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]?.["display_filters"]).toMatchObject({ layout: "gantt_chart" });
+    expect(Object.keys(patches[0] ?? {}).sort()).toEqual(["display_filters", "display_properties", "rich_filters"]);
   });
 });

@@ -107,6 +107,11 @@ function mergeCalendar(
   return { ...current, ...partial };
 }
 
+/** One display settings object with a partial change applied. */
+export function mergeDisplayPrefs(current: DisplayPrefs, partial: Partial<DisplayPrefs>): DisplayPrefs {
+  return { ...current, ...partial, calendar: mergeCalendar(current.calendar, partial.calendar) };
+}
+
 /**
  * Complete display_filters/display_properties objects for a partial
  * update. Unknown stored keys ride along untouched inside each object;
@@ -115,7 +120,7 @@ function mergeCalendar(
  */
 export function buildPrefsPatch(record: PrefsRecord, partial: Partial<DisplayPrefs>): PrefsPatch {
   const current = selectDisplayPrefs(record);
-  const next: DisplayPrefs = { ...current, ...partial, calendar: mergeCalendar(current.calendar, partial.calendar) };
+  const next = mergeDisplayPrefs(current, partial);
   const storedCalendar =
     typeof record.display_filters["calendar"] === "object" && record.display_filters["calendar"] !== null
       ? (record.display_filters["calendar"] as Record<string, unknown>)
