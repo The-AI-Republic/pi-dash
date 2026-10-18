@@ -182,6 +182,11 @@ export function CalendarLayout({
     for (const state of statesQuery.data ?? []) colors.set(state.id, state.color);
     return colors;
   }, [statesQuery.data]);
+  const stateMeta = React.useMemo(() => {
+    const meta = new Map<string, { name: string; group: string }>();
+    for (const state of statesQuery.data ?? []) meta.set(state.id, { name: state.name, group: state.group });
+    return meta;
+  }, [statesQuery.data]);
 
   React.useEffect(() => {
     if (!calendarQuery.isFetching) {
@@ -307,6 +312,7 @@ export function CalendarLayout({
         loadingDay={loadingDay}
         projectIdentifier={projectIdentifier}
         stateColors={stateColors}
+        stateMeta={stateMeta}
         highlightedId={highlightedId}
         narrow={narrow && touch}
         canEdit={canEdit}

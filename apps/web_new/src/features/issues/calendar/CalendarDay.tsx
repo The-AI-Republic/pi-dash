@@ -24,6 +24,7 @@ export interface CalendarDayProps {
   totalRows: number;
   projectIdentifier: string;
   stateColors: ReadonlyMap<string, string>;
+  stateMeta: ReadonlyMap<string, { name: string; group: string }>;
   highlightedId: string | null;
   narrow: boolean;
   canEdit: boolean;
@@ -50,12 +51,20 @@ function stateColorFor(issue: IssueListItem, colors: ReadonlyMap<string, string>
   return issue.state_id === null ? null : (colors.get(issue.state_id) ?? null);
 }
 
+function stateMetaFor(
+  issue: IssueListItem,
+  meta: ReadonlyMap<string, { name: string; group: string }>
+): { name: string; group: string } | null {
+  return issue.state_id === null ? null : (meta.get(issue.state_id) ?? null);
+}
+
 export function CalendarDay({
   cell,
   rows,
   totalRows,
   projectIdentifier,
   stateColors,
+  stateMeta,
   highlightedId,
   narrow,
   canEdit,
@@ -80,7 +89,7 @@ export function CalendarDay({
   const [title, setTitle] = React.useState("");
   const allRows = [...rows, ...extraRows.filter((extra) => !rows.some((row) => row.id === extra.id))];
   const hasMore = totalRows > allRows.length;
-  const headerClass = `hidden flex-shrink-0 justify-end ${cell.inMonth ? "font-medium" : "text-(--text-muted)"}`;
+  const headerClass = `hidden flex-shrink-0 justify-end md:flex ${cell.inMonth ? "font-medium" : "text-(--text-muted)"}`;
 
   function submit(): void {
     const name = title.trim();
@@ -131,6 +140,8 @@ export function CalendarDay({
               issue={issue}
               projectIdentifier={projectIdentifier}
               stateColor={stateColorFor(issue, stateColors)}
+              stateName={stateMetaFor(issue, stateMeta)?.name ?? null}
+              stateGroup={stateMetaFor(issue, stateMeta)?.group ?? null}
               highlighted={issue.id === highlightedId}
               onOpen={onOpen}
               onEdit={onEdit}

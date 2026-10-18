@@ -66,6 +66,7 @@ function renderDay(overrides: Partial<React.ComponentProps<typeof CalendarDay>> 
       totalRows={0}
       projectIdentifier="WEB"
       stateColors={new Map()}
+      stateMeta={new Map()}
       highlightedId={null}
       narrow={false}
       canEdit
@@ -93,6 +94,13 @@ describe("CalendarDay", () => {
     expect(tile).toHaveClass("bg-(--subtle)");
     expect(tile.querySelector("span.rounded-full")).not.toBeNull();
     expect(screen.getByRole("link", { name: "WEB-42" })).toBeInTheDocument();
+  });
+
+  it("shows the desktop day number and today badge on wide layouts", () => {
+    renderDay({ cell: { ...CELL, isToday: true } });
+    const header = tileFor(CELL.iso).firstElementChild as HTMLElement;
+    expect(header).toHaveClass("md:flex");
+    expect(header.querySelector("span.rounded-full")?.textContent).toBe("15");
   });
 
   it("marks adjacent-month filler and drop targets", () => {

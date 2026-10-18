@@ -68,6 +68,7 @@ function renderGrid(overrides: Partial<React.ComponentProps<typeof CalendarGrid>
       loadingDay={null}
       projectIdentifier="WEB"
       stateColors={new Map()}
+      stateMeta={new Map()}
       highlightedId={null}
       narrow={false}
       canEdit
@@ -106,6 +107,15 @@ describe("CalendarGrid", () => {
     });
     expect(screen.queryByText("Sat")).not.toBeInTheDocument();
     expect(document.querySelectorAll("[data-calendar-day]")).toHaveLength(5);
+  });
+
+  it("labels a five-column Sunday-start row Mon through Fri", () => {
+    renderGrid({
+      weeks: [week([12, 13, 14, 15, 16])],
+      weekdayLabels: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    });
+    const labels = [...document.querySelectorAll("div.sticky .flex.h-11 > div")].map((node) => node.textContent);
+    expect(labels).toEqual(["Mon", "Tue", "Wed", "Thu", "Fri"]);
   });
 
   it("merges extra rows and reports the loading day", () => {

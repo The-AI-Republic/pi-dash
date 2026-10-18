@@ -10,7 +10,7 @@ import * as React from "react";
 
 import { CalendarDay } from "./CalendarDay.js";
 import { scrollContainerTowardPointer } from "./autoScroll.js";
-import type { CalendarCell, CalendarWeek } from "./model.js";
+import { weekdayLabelsForWeek, type CalendarCell, type CalendarWeek } from "./model.js";
 
 export interface CalendarGridProps {
   weeks: readonly CalendarWeek[];
@@ -21,6 +21,7 @@ export interface CalendarGridProps {
   loadingDay: string | null;
   projectIdentifier: string;
   stateColors: ReadonlyMap<string, string>;
+  stateMeta: ReadonlyMap<string, { name: string; group: string }>;
   highlightedId: string | null;
   narrow: boolean;
   canEdit: boolean;
@@ -49,6 +50,7 @@ function Day({ cell, props }: { cell: CalendarCell; props: CalendarGridProps }):
       totalRows={props.totalsByDay.get(cell.iso) ?? props.rowsByDay.get(cell.iso)?.length ?? 0}
       projectIdentifier={props.projectIdentifier}
       stateColors={props.stateColors}
+      stateMeta={props.stateMeta}
       highlightedId={props.highlightedId}
       narrow={props.narrow}
       canEdit={props.canEdit}
@@ -73,7 +75,9 @@ function Day({ cell, props }: { cell: CalendarCell; props: CalendarGridProps }):
 }
 
 export function CalendarGrid(props: CalendarGridProps): React.ReactElement {
-  const columns = props.weeks[0]?.length ?? 7;
+  const firstWeek = props.weeks[0] ?? [];
+  const columns = firstWeek.length || 7;
+  const labels = firstWeek.length === 0 ? props.weekdayLabels : weekdayLabelsForWeek(firstWeek);
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
 
   function handlePointerMove(event: React.PointerEvent<HTMLDivElement>): void {
@@ -87,7 +91,7 @@ export function CalendarGrid(props: CalendarGridProps): React.ReactElement {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="sticky top-0 z-10 bg-(--bg)">
         <div className="flex h-11 border-b border-(--border)">
-          {props.weekdayLabels.slice(0, columns).map((label) => (
+          {labels.map((label) => (
             <div
               key={label}
               className="text-caption flex h-11 min-w-0 flex-1 items-center px-(--space-2) font-medium text-(--text-muted)"

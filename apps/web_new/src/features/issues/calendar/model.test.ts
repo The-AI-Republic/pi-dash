@@ -21,6 +21,7 @@ import {
   weekRow,
   weekTitle,
   weekdayLabels,
+  weekdayLabelsForWeek,
 } from "./model.js";
 
 const NOW = new Date(2026, 9, 15, 12, 0, 0);
@@ -74,6 +75,12 @@ describe("calendar model", () => {
     const weeks = monthWeeks(2026, 9, 0, false, NOW);
     expect(weeks[0]).toHaveLength(5);
     expect(weeks[0]?.some((cell) => cell.weekend)).toBe(false);
+    expect(weekdayLabelsForWeek(weeks[0] ?? [])).toEqual(["Mon", "Tue", "Wed", "Thu", "Fri"]);
+  });
+
+  it("derives weekday labels from visible cells on a Monday-start week", () => {
+    const week = weekRow(new Date(2026, 9, 15), 1, false, NOW);
+    expect(weekdayLabelsForWeek(week)).toEqual(["Mon", "Tue", "Wed", "Thu", "Fri"]);
   });
 
   it("badges today and marks weekend cells", () => {

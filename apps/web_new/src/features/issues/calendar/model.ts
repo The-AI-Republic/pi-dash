@@ -75,6 +75,19 @@ export function weekdayLabels(weekStart: number): string[] {
   return Array.from({ length: 7 }, (_, offset) => WEEKDAY_LABELS[(start + offset) % 7] as string);
 }
 
+/**
+ * Labels for the cells a row actually renders. A five-column row that
+ * starts on Sunday hides Saturday, so slicing a seven-label header would
+ * pair Monday's tile with a Sunday label.
+ */
+export function weekdayLabelsForWeek(week: readonly CalendarCell[]): string[] {
+  return week.map((cell) => {
+    const parts = cell.iso.split("-").map(Number);
+    const date = new Date(parts[0] ?? 0, (parts[1] ?? 1) - 1, parts[2] ?? 1);
+    return WEEKDAY_LABELS[date.getDay()] ?? "";
+  });
+}
+
 /** Clamp an unknown week start onto Sunday-first 0-6. */
 export function normalizeStart(weekStart: number): number {
   if (!Number.isInteger(weekStart) || weekStart < 0 || weekStart > 6) return 0;

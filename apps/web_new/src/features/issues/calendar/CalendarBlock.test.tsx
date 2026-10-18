@@ -12,6 +12,8 @@ import {
   CALENDAR_DRAG_THRESHOLD_PX,
   CalendarBlock,
   blockIdentifier,
+  previewDateLine,
+  stateGroupIcon,
 } from "./CalendarBlock.js";
 
 const ISSUE_ID = "323e4567-e89b-12d3-a456-426614174002";
@@ -106,6 +108,32 @@ describe("CalendarBlock", () => {
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
+  it("shows state, priority and dates in the hover preview", () => {
+    vi.useFakeTimers();
+    renderBlock(row({ priority: "high", start_date: "2026-10-01", target_date: "2026-10-20" }), false, {
+      stateName: "In progress",
+      stateGroup: "started",
+    });
+    fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    const card = screen.getByRole("tooltip");
+    expect(card).toHaveTextContent("In progress");
+    expect(card).toHaveTextContent("high");
+    expect(card).toHaveTextContent("2026-10-01 → 2026-10-20");
+  });
+
+  it("describes partial and absent date lines", () => {
+    expect(previewDateLine(row({ start_date: "2026-10-01", target_date: null }))).toBe("Starts 2026-10-01");
+    expect(previewDateLine(row({ start_date: null, target_date: "2026-10-20" }))).toBe("Due 2026-10-20");
+    expect(previewDateLine(row({ start_date: null, target_date: null }))).toBeNull();
+  });
+
+  it("maps every state group to an icon", () => {
+    for (const group of ["backlog", "unstarted", "started", "review", "test", "completed", "cancelled", null]) {
+      expect(stateGroupIcon(group)).not.toBeNull();
+    }
+  });
+
   it("opens Edit and Delete from the hover quick actions", async () => {
     const handlers = renderBlock();
     fireEvent.click(screen.getByRole("button", { name: "Quick actions" }));
@@ -126,6 +154,21 @@ describe("CalendarBlock", () => {
     fireEvent(link, pointerEvent("pointerdown", 10, 10));
     fireEvent(link, pointerEvent("pointermove", 10 + CALENDAR_DRAG_THRESHOLD_PX, 10));
     expect(handlers.onDragStart).toHaveBeenCalledWith(issue, expect.anything());
+  });
+
+  it("keeps tracking a drag after the pointer leaves the block", () => {
+    const handlers = renderBlock();
+    fireEvent(screen.getByRole("link", { name: "WEB-42" }), pointerEvent("pointerdown", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 10 + CALENDAR_DRAG_THRESHOLD_PX, 10));
+    expect(handlers.onDragStart).toHaveBeenCalledWith(expect.objectContaining({ id: ISSUE_ID }), expect.anything());
+  });
+
+  it("stops document tracking after pointer release", () => {
+    const handlers = renderBlock();
+    fireEvent(screen.getByRole("link", { name: "WEB-42" }), pointerEvent("pointerdown", 10, 10));
+    fireEvent(document, pointerEvent("pointerup", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 80, 80));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
   });
 
   it("does not start a drag for a click without movement", () => {

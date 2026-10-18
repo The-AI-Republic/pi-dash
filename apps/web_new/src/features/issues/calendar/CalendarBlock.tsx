@@ -9,7 +9,7 @@
 
 import { Menu } from "@pidash/kit";
 import type { IssueListItem } from "@pidash/api-client";
-import { Ellipsis } from "lucide-react";
+import { CheckCircle2, Circle, CircleDot, Ellipsis, Eye, LoaderCircle, XCircle } from "lucide-react";
 import * as React from "react";
 
 import { isTempRowId, rowDomId } from "../freshness/fresh.js";
@@ -23,6 +23,8 @@ export interface CalendarBlockProps {
   issue: IssueListItem;
   projectIdentifier: string;
   stateColor: string | null;
+  stateName?: string | null;
+  stateGroup?: string | null;
   highlighted: boolean;
   onOpen: (issue: IssueListItem) => void;
   onEdit: (issue: IssueListItem) => void;
@@ -34,6 +36,37 @@ export interface CalendarBlockProps {
   quickActions: boolean;
 }
 
+/** Small icon matching a workflow state's group in the hover card. */
+export function stateGroupIcon(group: string | null | undefined): React.ReactElement {
+  switch (group) {
+    case "backlog":
+      return <Circle size={12} strokeWidth={2} aria-hidden="true" />;
+    case "unstarted":
+      return <CircleDot size={12} strokeWidth={2} aria-hidden="true" />;
+    case "started":
+      return <LoaderCircle size={12} strokeWidth={2} aria-hidden="true" />;
+    case "review":
+    case "test":
+      return <Eye size={12} strokeWidth={2} aria-hidden="true" />;
+    case "completed":
+      return <CheckCircle2 size={12} strokeWidth={2} aria-hidden="true" />;
+    case "cancelled":
+      return <XCircle size={12} strokeWidth={2} aria-hidden="true" />;
+    default:
+      return <Circle size={12} strokeWidth={2} aria-hidden="true" />;
+  }
+}
+
+/** Compact "start → due" line; either end may be absent. */
+export function previewDateLine(issue: Pick<IssueListItem, "start_date" | "target_date">): string | null {
+  const start = issue.start_date ?? null;
+  const due = issue.target_date ?? null;
+  if (start === null && due === null) return null;
+  if (start !== null && due !== null) return `${start} → ${due}`;
+  if (start !== null) return `Starts ${start}`;
+  return `Due ${due}`;
+}
+
 /** Project-scoped identifier, e.g. WEB-42. */
 export function blockIdentifier(projectIdentifier: string, issue: IssueListItem): string {
   return `${projectIdentifier}-${issue.sequence_id}`;
@@ -43,6 +76,8 @@ export function CalendarBlock({
   issue,
   projectIdentifier,
   stateColor,
+  stateName = null,
+  stateGroup = null,
   highlighted,
   onOpen,
   onEdit,
@@ -57,6 +92,7 @@ export function CalendarBlock({
   const hoverTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const anchorRef = React.useRef<HTMLAnchorElement | null>(null);
   const pressRef = React.useRef<{ x: number; y: number } | null>(null);
+  const dragListenersRef = React.useRef<(() => void) | null>(null);
   const draggedRef = React.useRef(false);
   const identifier = blockIdentifier(projectIdentifier, issue);
 
@@ -80,7 +116,57 @@ export function CalendarBlock({
     }
   };
 
-  React.useEffect(() => clearHoverTimer, []);
+  React.useEffect(
+    () => () => {
+      clearHoverTimer();
+      dragListenersRef.current?.();
+    },
+    []
+  );
+
+  function stopTracking(): void {
+    pressRef.current = null;
+    dragListenersRef.current?.();
+    dragListenersRef.current = null;
+  }
+
+  /**
+   * Once a press starts, watch the whole document rather than just the
+   * block. A real drag leaves the block on its way to the destination
+   * tile, so element-local pointermove listeners would stop firing before
+   * the movement threshold is crossed.
+   */
+  function trackPointer(event: React.PointerEvent<HTMLElement>): void {
+    if (!draggable || typeof globalThis.document === "undefined") return;
+    const target = event.currentTarget;
+    try {
+      target.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture is best-effort; document listeners still work.
+    }
+    const onMove = (moveEvent: PointerEvent): void => {
+      const press = pressRef.current;
+      if (press === null) return;
+      const dx = moveEvent.clientX - press.x;
+      const dy = moveEvent.clientY - press.y;
+      if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+      if (Math.hypot(dx, dy) < CALENDAR_DRAG_THRESHOLD_PX) return;
+      pressRef.current = null;
+      draggedRef.current = true;
+      dragListenersRef.current?.();
+      dragListenersRef.current = null;
+      onDragStart(issue, moveEvent as unknown as React.PointerEvent<HTMLElement>);
+    };
+    const onEnd = (): void => stopTracking();
+    globalThis.document.addEventListener("pointermove", onMove);
+    globalThis.document.addEventListener("pointerup", onEnd);
+    globalThis.document.addEventListener("pointercancel", onEnd);
+    dragListenersRef.current = () => {
+      globalThis.document.removeEventListener("pointermove", onMove);
+      globalThis.document.removeEventListener("pointerup", onEnd);
+      globalThis.document.removeEventListener("pointercancel", onEnd);
+    };
+  }
 
   return (
     <a
@@ -95,23 +181,13 @@ export function CalendarBlock({
         if (!draggable) return;
         draggedRef.current = false;
         pressRef.current = { x: event.clientX, y: event.clientY };
-      }}
-      onPointerMove={(event) => {
-        const press = pressRef.current;
-        if (press === null || !draggable) return;
-        const dx = event.clientX - press.x;
-        const dy = event.clientY - press.y;
-        if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
-        if (Math.hypot(dx, dy) < CALENDAR_DRAG_THRESHOLD_PX) return;
-        pressRef.current = null;
-        draggedRef.current = true;
-        onDragStart(issue, event);
+        trackPointer(event);
       }}
       onPointerUp={() => {
-        pressRef.current = null;
+        stopTracking();
       }}
       onPointerCancel={() => {
-        pressRef.current = null;
+        stopTracking();
       }}
       onClick={(event) => {
         event.preventDefault();
@@ -175,8 +251,26 @@ export function CalendarBlock({
           role="tooltip"
           data-placement={placement}
         >
-          <p className="text-caption font-[family-name:var(--font-mono)] text-(--text-muted)">{identifier}</p>
+          <div className="flex items-center justify-between gap-(--space-2)">
+            <p className="text-caption font-[family-name:var(--font-mono)] text-(--text-muted)">{identifier}</p>
+            {issue.priority === "none" ? null : (
+              <span className="text-caption rounded-full bg-(--subtle) px-(--space-2) text-(--text-muted)">
+                {issue.priority}
+              </span>
+            )}
+          </div>
+          {stateName === null ? null : (
+            <p className="text-caption flex items-center gap-(--space-1) text-(--text-muted)">
+              <span className="shrink-0" style={stateColor === null ? undefined : { color: stateColor }}>
+                {stateGroupIcon(stateGroup)}
+              </span>
+              <span className="truncate">{stateName}</span>
+            </p>
+          )}
           <p className="text-body font-medium text-(--text)">{issue.name}</p>
+          {previewDateLine(issue) === null ? null : (
+            <p className="text-caption text-(--text-muted)">{previewDateLine(issue)}</p>
+          )}
         </div>
       ) : null}
       {temp ? (
