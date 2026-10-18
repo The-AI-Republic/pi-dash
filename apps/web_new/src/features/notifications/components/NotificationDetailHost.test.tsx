@@ -188,6 +188,15 @@ describe("NotificationDetailHost", () => {
     expect(screen.getByTestId("notifications-detail-summary")).toHaveTextContent("Ada Lovelace commented: detail note");
   });
 
+  it("renders the actor avatar when the notification carries one", async () => {
+    createAppClient("https://api.test", (async (url: string) =>
+      url.includes("/project-roles/") ? response(url, { [PROJECT]: 20 }) : response(url, issue())) as never);
+    renderHost(selection({ actorAvatarUrl: "https://cdn.test/ada.png" }));
+    const pane = screen.getByTestId("notifications-detail-pane");
+    const avatar = await within(pane).findByRole("img", { name: "Ada Lovelace" });
+    expect(avatar.querySelector("img")).toHaveAttribute("src", "https://cdn.test/ada.png");
+  });
+
   it("keeps a useful read-only summary when the issue hydrate fails", async () => {
     createAppClient("https://api.test", (async (url: string) =>
       url.includes("/project-roles/") ? response(url, {}) : response(url, { detail: "not found" }, 404)) as never);
