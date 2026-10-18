@@ -166,6 +166,13 @@ describe("ListRow", () => {
     expect(onOpenPeek).toHaveBeenCalledWith("WEB-42");
   });
 
+  it("hides the expander when the display toggle is off", () => {
+    queryMock.useQuery.mockReturnValue({ data: { sub_issues: [] }, isFetching: false });
+    render(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }), showSubIssues: false })} />);
+    expect(screen.queryByRole("button", { name: /sub-work items/ })).not.toBeInTheDocument();
+    expect(queryMock.useQuery.mock.calls[0]?.[0]).toMatchObject({ enabled: false });
+  });
+
   it("exposes the deterministic key and row ids", () => {
     expect(issueKey("WEB", { sequence_id: 7 })).toBe("WEB-7");
     expect(rowLinkId("issue-1")).toBe("issue-issue-1");

@@ -74,6 +74,31 @@ export function creationDisabledForGroup(dimension: string | null): boolean {
   return dimension === "created_by";
 }
 
+/** Inputs behind the inline quick-add gate (ISS-011). */
+export interface QuickAddGateInput {
+  canEdit: boolean;
+  completedCycle: boolean;
+  /** The entity's view opts into inline creation. */
+  enableQuickAdd: boolean;
+  /** Edition workflow rule reason; OSS never supplies one. */
+  workflowBlockedReason?: string | undefined;
+  groupBy: string | null;
+}
+
+/**
+ * Why inline quick-add is unavailable, or undefined when it is offered.
+ * Permission and completed-cycle reasons win over edition and grouping
+ * rules so the reader sees the most fundamental constraint first.
+ */
+export function quickAddDisabledReason(input: QuickAddGateInput): string | undefined {
+  if (!input.canEdit) return "New work items are read-only for you";
+  if (input.completedCycle) return "This cycle is complete";
+  if (!input.enableQuickAdd) return "Quick add is off in this view";
+  if (input.workflowBlockedReason !== undefined) return input.workflowBlockedReason;
+  if (creationDisabledForGroup(input.groupBy)) return "Creation is off in this grouping";
+  return undefined;
+}
+
 function isNoneKey(key: string): boolean {
   return key === NONE_GROUP_KEY;
 }

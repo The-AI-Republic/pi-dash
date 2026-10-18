@@ -62,20 +62,31 @@ vi.mock("../layouts/IssuesLayoutRoot.js", () => ({
   ),
 }));
 
-vi.mock("./ListLayout.js", () => ({
-  ListLayout: (props: Record<string, unknown>) => (
-    <div
-      data-testid="list-layout"
-      data-cycle={String(props.cycleId ?? "")}
-      data-module={String(props.moduleId ?? "")}
-      data-completed={String(props.completedCycle ?? false)}
-      data-compact={String(props.compact ?? false)}
-      data-project={String(props.projectId)}
-    >
-      {props.projectIdentifier as string}
-    </div>
-  ),
-}));
+const layout = vi.hoisted(() => ({ resolved: true }));
+
+vi.mock("./lazy.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./lazy.js")>();
+  return {
+    ...actual,
+    resolvedListLayout: () => {
+      if (!layout.resolved) return actual.resolvedListLayout();
+      return function ResolvedListLayout(props: Record<string, unknown>) {
+        return (
+          <div
+            data-testid="list-layout"
+            data-cycle={String(props.cycleId ?? "")}
+            data-module={String(props.moduleId ?? "")}
+            data-completed={String(props.completedCycle ?? false)}
+            data-compact={String(props.compact ?? false)}
+            data-project={String(props.projectId)}
+          >
+            {props.projectIdentifier as string}
+          </div>
+        );
+      };
+    },
+  };
+});
 
 import { EntityListScreen, type EntityListScreenProps } from "./EntityListScreen.js";
 import type { IssuesEntity } from "../prefs/entities.js";

@@ -41,14 +41,22 @@ vi.mock("../dropdowns/DateRangePicker.js", () => ({
     onChange: (value: { start: string | null; end: string | null }) => void;
     disabled?: boolean;
   }) => (
-    <button
-      type="button"
-      data-testid="row-dates"
-      disabled={props.disabled}
-      onClick={() => props.onChange({ start: "2026-10-01", end: "2026-10-20" })}
-    >
-      {props.value.start}–{props.value.end}
-    </button>
+    <div>
+      <button
+        type="button"
+        data-testid="row-dates"
+        disabled={props.disabled}
+        onClick={() => props.onChange({ start: "2026-10-01", end: "2026-10-20" })}
+      >
+        {props.value.start}–{props.value.end}
+      </button>
+      <button
+        type="button"
+        aria-label="Clear Dates"
+        disabled={props.disabled}
+        onClick={() => props.onChange({ start: null, end: null })}
+      />
+    </div>
   ),
 }));
 
@@ -121,6 +129,7 @@ import {
   INLINE_PROPERTY_ORDER,
   InlinePropertyStrip,
   isOverdue,
+  todayIsoInZone,
   type InlinePropertyStripProps,
 } from "./InlinePropertyStrip.js";
 
@@ -213,6 +222,14 @@ describe("isOverdue", () => {
   });
 });
 
+describe("todayIsoInZone", () => {
+  it("uses the project day instead of the UTC day", () => {
+    const evening = new Date("2026-10-19T02:00:00Z");
+    expect(todayIsoInZone(evening, "UTC")).toBe("2026-10-19");
+    expect(todayIsoInZone(evening, "America/Los_Angeles")).toBe("2026-10-18");
+  });
+});
+
 describe("InlinePropertyStrip", () => {
   it("renders display-enabled properties in the spec order", () => {
     render(<InlinePropertyStrip {...props()} />);
@@ -222,6 +239,25 @@ describe("InlinePropertyStrip", () => {
     expect(screen.getByRole("button", { name: "Priority: high" })).toBeInTheDocument();
     expect(screen.getByTestId("state-picker")).toBeInTheDocument();
     expect(INLINE_PROPERTY_ORDER.slice(0, 3)).toEqual(["key", "state", "priority"]);
+  });
+
+  it("flags a due-today item using the project timezone on a US-Pacific evening", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-19T02:00:00Z"));
+    try {
+      render(
+        <InlinePropertyStrip
+          {...props({
+            issue: issue({ target_date: "2026-10-18" }),
+            properties: { start_date: false },
+            timeZone: "America/Los_Angeles",
+          })}
+        />
+      );
+      expect(screen.getByTestId("date-Due date").parentElement).toHaveAttribute("data-overdue", "true");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("drops hidden properties, cycle/module feature flags and an absent estimate", () => {
@@ -260,6 +296,14 @@ describe("InlinePropertyStrip", () => {
     );
     expect(screen.getByTestId("date-Start date")).toHaveAttribute("data-max", "2026-10-20");
     expect(screen.queryByTestId("date-Due date")).not.toBeInTheDocument();
+  });
+
+  it("clears both ends of the merged date range", () => {
+    render(
+      <InlinePropertyStrip {...props({ issue: issue({ start_date: "2026-10-01", target_date: "2026-10-20" }) })} />
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Clear Dates" }));
+    expect(mocks.patch).toHaveBeenCalledWith({ start_date: null, target_date: null });
   });
 
   it("renders separate start and due pickers with reciprocal bounds", () => {

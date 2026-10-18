@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   FLAT_GROUP_TITLE,
   creationDisabledForGroup,
+  quickAddDisabledReason,
   defaultGroupTitle,
   flatSection,
   groupTitle,
@@ -112,6 +113,18 @@ describe("group titles and ordering", () => {
     expect(creationDisabledForGroup("created_by")).toBe(true);
     expect(creationDisabledForGroup("state")).toBe(false);
     expect(creationDisabledForGroup(null)).toBe(false);
+  });
+
+  it("gates quick-add on permission, cycle state, the view flag, workflow and grouping", () => {
+    const base = { canEdit: true, completedCycle: false, enableQuickAdd: true, groupBy: null };
+    expect(quickAddDisabledReason(base)).toBeUndefined();
+    expect(quickAddDisabledReason({ ...base, canEdit: false })).toBe("New work items are read-only for you");
+    expect(quickAddDisabledReason({ ...base, completedCycle: true })).toBe("This cycle is complete");
+    expect(quickAddDisabledReason({ ...base, enableQuickAdd: false })).toBe("Quick add is off in this view");
+    expect(quickAddDisabledReason({ ...base, workflowBlockedReason: "Workflow blocks this state" })).toBe(
+      "Workflow blocks this state"
+    );
+    expect(quickAddDisabledReason({ ...base, groupBy: "created_by" })).toBe("Creation is off in this grouping");
   });
 });
 

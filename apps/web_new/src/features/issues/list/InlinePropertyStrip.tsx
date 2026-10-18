@@ -59,6 +59,8 @@ export interface InlinePropertyStripProps {
    * The visible strip is identical; this keeps 2,000-row scrolling cheap.
    */
   deferPickers?: boolean | undefined;
+  /** Project timezone for "today"; absent falls back to the viewer's zone. */
+  timeZone?: string | null | undefined;
 }
 
 /** Whether a due date is due or past and the item is still open. */
@@ -72,8 +74,16 @@ export function isOverdue(
   return issue.target_date !== null && issue.target_date !== undefined && issue.target_date <= today;
 }
 
-function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+/** An ISO day rendered in the given zone, or the viewer's zone when absent. */
+export function todayIsoInZone(now: Date = new Date(), timeZone?: string | null): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    ...(timeZone === null || timeZone === undefined || timeZone === "" ? {} : { timeZone }),
+  }).formatToParts(now);
+  const pick = (type: Intl.DateTimeFormatPartTypes): string => parts.find((part) => part.type === type)?.value ?? "";
+  return `${pick("year")}-${pick("month")}-${pick("day")}`;
 }
 
 /** Properties in the strip's render order; the display set filters this. */
@@ -170,6 +180,7 @@ function InlinePropertyStripImpl({
   moduleNames,
   openCycleIds,
   deferPickers = false,
+  timeZone = null,
 }: InlinePropertyStripProps): React.ReactElement {
   const patch = useListIssuePatch(workspaceSlug, projectId, issue.id);
   const cycleMove = useListCycleMove(workspaceSlug, projectId, issue.id);
@@ -205,7 +216,7 @@ function InlinePropertyStripImpl({
       ? "Modules"
       : issue.module_ids.map((id) => moduleNames.get(id) ?? "Module").join(", ");
   const cycleText = issue.cycle_id === null ? "Cycle" : (cycleNames.get(issue.cycle_id) ?? "Cycle");
-  const overdue = isOverdue(issue, todayIso(), stateGroup);
+  const overdue = isOverdue(issue, todayIsoInZone(new Date(), timeZone), stateGroup);
   const mergedDates =
     issue.start_date !== null &&
     issue.start_date !== undefined &&

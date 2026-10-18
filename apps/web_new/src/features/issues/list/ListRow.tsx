@@ -89,6 +89,10 @@ export interface ListRowProps {
   compact?: boolean;
   /** Mount the property pickers on first interaction (virtualized rows). */
   deferPickers?: boolean;
+  /** Show the sub-work-item expander (Display → Show sub-work items). */
+  showSubIssues?: boolean;
+  /** Project timezone for the overdue due-date check. */
+  timeZone?: string | null;
 }
 
 export function issueKey(projectIdentifier: string, issue: Pick<IssueListItem, "sequence_id">): string {
@@ -113,6 +117,7 @@ function SubIssueExpander({
   depth,
   projectIdentifier,
   onOpenPeek,
+  showSubIssues,
   renderChild,
 }: {
   workspaceSlug: string;
@@ -121,17 +126,21 @@ function SubIssueExpander({
   depth: number;
   projectIdentifier: string;
   onOpenPeek: (issueKey: string) => void;
+  showSubIssues: boolean;
   renderChild: (child: IssueListItem, depth: number) => React.ReactNode;
-}): React.ReactElement {
+}): React.ReactElement | null {
   const [expanded, setExpanded] = React.useState(false);
   const atCap = depth >= MAX_INLINE_DEPTH;
   const canExpand = (issue.sub_issues_count ?? 0) > 0 && !issue.is_epic;
   const query = useQuery({
     ...subIssuesQueryOptions(getAppClient(), workspaceSlug, projectId, issue.id),
-    enabled: expanded && !atCap && canExpand,
+    // Hiding the expander must also stop any in-flight child read, so the
+    // display flag gates the query and the render together.
+    enabled: showSubIssues && expanded && !atCap && canExpand,
   });
 
-  if (!canExpand) return <span className="grid size-4 shrink-0" aria-hidden="true" />;
+  // Both a hidden toggle and a leaf keep the same gutter, so titles align.
+  if (!showSubIssues || !canExpand) return <span className="grid size-4 shrink-0" aria-hidden="true" />;
   if (atCap) {
     return (
       <span className="grid size-4 shrink-0 place-items-center">
@@ -174,7 +183,17 @@ function SubIssueExpander({
 }
 
 function ListRowImpl(props: ListRowProps): React.ReactElement {
-  const { issue, highlightedId, depth, projectIdentifier, onOpenPeek, hrefFor, compact = false } = props;
+  const {
+    issue,
+    highlightedId,
+    depth,
+    projectIdentifier,
+    onOpenPeek,
+    hrefFor,
+    compact = false,
+    showSubIssues = true,
+    timeZone = null,
+  } = props;
   const temp = isTempRowId(issue.id);
   const highlighted = isRowHighlighted(issue, highlightedId);
   const key = issueKey(projectIdentifier, issue);
@@ -202,6 +221,7 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
           depth={depth}
           projectIdentifier={projectIdentifier}
           onOpenPeek={onOpenPeek}
+          showSubIssues={showSubIssues}
           renderChild={renderChild}
         />
         <a
@@ -241,6 +261,7 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
             openCycleIds={props.openCycleIds}
             estimateEnabled={props.estimateEnabled}
             deferPickers={props.deferPickers ?? false}
+            timeZone={timeZone}
           />
         )}
       </div>

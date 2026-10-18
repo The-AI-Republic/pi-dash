@@ -18,7 +18,7 @@ import { usePermissions } from "../../../core/session/index.js";
 import { projectDetailsQueryOptions, projectsQueryOptions } from "../../projects/index.js";
 import { isCollapsed, readCollapsedGroups, useToggleCollapsedGroup } from "./collapse.js";
 
-import { creationDisabledForGroup, sectionPrefill } from "./grouping.js";
+import { creationDisabledForGroup, quickAddDisabledReason, sectionPrefill } from "./grouping.js";
 import { GroupHeader } from "./GroupHeader.js";
 
 import { ListRow } from "./ListRow.js";
@@ -89,6 +89,13 @@ export interface ListLayoutProps {
   compact?: boolean | undefined;
   /** Stored rich filters scoping every page (ISS-095–099). */
   richFilters?: RichExpression | undefined;
+  /** Whether this view offers inline quick-add (ISS-011). */
+  enableQuickAdd?: boolean | undefined;
+  /**
+   * Reason edition workflow rules block creation. OSS never supplies one;
+   * the cloud workflow layer injects its reason here.
+   */
+  creationBlockedReason?: string | undefined;
 }
 
 /**
@@ -101,10 +108,12 @@ function FlatRows({
   rows,
   renderRow,
   rowHeight,
+  footer,
 }: {
   rows: IssueListItem[];
   renderRow: (issue: IssueListItem) => React.ReactNode;
   rowHeight: number;
+  footer?: React.ReactNode;
 }): React.ReactElement {
   return (
     <VirtualList
@@ -115,6 +124,7 @@ function FlatRows({
       overscan={4}
       className="h-full"
       renderRow={(issue) => renderRow(issue)}
+      footer={footer}
     />
   );
 }
@@ -138,6 +148,8 @@ export function ListLayout({
   onPeekChange,
   compact = false,
   richFilters = {},
+  enableQuickAdd = true,
+  creationBlockedReason,
 }: ListLayoutProps): React.ReactElement {
   const client = getAppClient();
   const permissions = usePermissions(workspaceSlug);
@@ -189,7 +201,14 @@ export function ListLayout({
     setPeek(null);
   }
 
-  const quickAddDisabled = !permissions.canEdit || completedCycle || creationDisabledForGroup(prefs.groupBy);
+  const quickAddReason = quickAddDisabledReason({
+    canEdit: permissions.canEdit,
+    completedCycle,
+    enableQuickAdd,
+    workflowBlockedReason: creationBlockedReason,
+    groupBy: prefs.groupBy,
+  });
+  const quickAddDisabled = quickAddReason !== undefined;
   const canAdd = permissions.canEdit && !completedCycle && !creationDisabledForGroup(prefs.groupBy);
   const menu = cycleId !== undefined || moduleId !== undefined;
 
@@ -282,6 +301,8 @@ export function ListLayout({
         hrefFor={hrefFor}
         compact={compact}
         deferPickers={!pages.grouped}
+        showSubIssues={prefs.showSubIssues}
+        timeZone={projectDetails?.timezone ?? null}
       />
     );
   }
@@ -302,7 +323,7 @@ export function ListLayout({
           <section
             key={section.key}
             data-drop-target-for-element="true"
-            className={pages.grouped ? undefined : "flex min-h-0 flex-1 flex-col"}
+            className={pages.grouped ? undefined : "flex h-full min-h-0 flex-col overflow-hidden"}
           >
             <GroupHeader
               section={section}
@@ -319,9 +340,24 @@ export function ListLayout({
                 {pages.grouped ? (
                   section.rows.map((issue) => renderListRow(issue))
                 ) : (
-                  <div className="min-h-0 flex-1">
-                    <FlatRows rows={section.rows} renderRow={renderListRow} rowHeight={compact ? 32 : 44} />
-                  </div>
+                  <FlatRows
+                    rows={section.rows}
+                    renderRow={renderListRow}
+                    rowHeight={compact ? 32 : 44}
+                    footer={
+                      pages.hasMore ? (
+                        <div
+                          ref={sentinelRef}
+                          data-testid="list-sentinel"
+                          className="flex flex-col gap-(--space-2) p-(--space-3)"
+                        >
+                          {Array.from({ length: 3 }, (_, index) => (
+                            <Skeleton key={index} height="32px" />
+                          ))}
+                        </div>
+                      ) : null
+                    }
+                  />
                 )}
                 {pages.grouped && pages.sectionMore(section) ? (
                   <button
@@ -342,15 +378,7 @@ export function ListLayout({
                     {...(pages.grouped ? { groupKey: section.key } : {})}
                     defaultStateId={projectDetails?.default_state ?? null}
                     disabled={quickAddDisabled}
-                    disabledReason={
-                      !permissions.canEdit
-                        ? "New work items are read-only for you"
-                        : completedCycle
-                          ? "This cycle is complete"
-                          : creationDisabledForGroup(prefs.groupBy)
-                            ? "Creation is off in this grouping"
-                            : undefined
-                    }
+                    disabledReason={quickAddReason}
                   />
                 </React.Suspense>
               </>
@@ -358,13 +386,6 @@ export function ListLayout({
           </section>
         );
       })}
-      {!pages.grouped && pages.hasMore ? (
-        <div ref={sentinelRef} data-testid="list-sentinel" className="flex flex-col gap-(--space-2) p-(--space-3)">
-          {Array.from({ length: 3 }, (_, index) => (
-            <Skeleton key={index} height="32px" />
-          ))}
-        </div>
-      ) : null}
       {addExistingOpen ? (
         <React.Suspense fallback={null}>
           <LazyAddExistingModal

@@ -38,8 +38,6 @@ import { loadListLayout, resolvedListLayout } from "../../../../../../features/i
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
-const LazyIssueFilters = React.lazy(() => import("../../../../../../features/issues/filters/rich/IssueFilters.js"));
-
 // The timeline boundary (and the chart code behind it) only matters when
 // the timeline layout is chosen, so the route chunk carries neither
 // (Quality gates, NEWFRONT-677): the skeleton shows while its chunk lands.
@@ -49,6 +47,10 @@ const LazyGanttTimeline = React.lazy(() =>
   }))
 );
 
+// Start the filter chunk with the layout chunk, so the first render does not
+// suspend and mount the layout twice.
+import { LazyIssueFilters, preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
+preloadIssueFilters();
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
 import { notifyError } from "../../../../../../shared/shell/index.js";

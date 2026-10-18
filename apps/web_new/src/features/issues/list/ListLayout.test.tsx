@@ -509,10 +509,28 @@ describe("ListLayout", () => {
     expect(screen.queryByLabelText("Work item preview")).not.toBeInTheDocument();
   });
 
-  it("passes compact density through and renders the flat sentinel", () => {
+  it("passes compact density through and keeps the flat sentinel inside the scroll region", () => {
     mocks.pages.mockReturnValue(pageState({ hasMore: true }));
     renderLayout({ compact: true });
     expect(screen.getByTestId("row-probe")).toHaveAttribute("data-compact", "true");
-    expect(screen.getByTestId("list-sentinel")).toBeInTheDocument();
+    const scroll = screen.getByTestId("list-scroll");
+    const sentinel = screen.getByTestId("list-sentinel");
+    expect(scroll).toContainElement(sentinel);
+    expect(screen.getByRole("region", { name: "Issues" })).toContainElement(sentinel);
+  });
+
+  it("disables quick-add when the view flag is off or workflow blocks creation", async () => {
+    const first = renderLayout({ enableQuickAdd: false });
+    expect(await screen.findByTestId("quick-add-probe")).toHaveAttribute("data-disabled", "true");
+    expect(screen.getByTestId("quick-add-probe")).toHaveAttribute("data-reason", "Quick add is off in this view");
+    first.view.unmount();
+    renderLayout({ creationBlockedReason: "Workflow blocks this state" });
+    expect(await screen.findByTestId("quick-add-probe")).toHaveAttribute("data-disabled", "true");
+    expect(screen.getByTestId("quick-add-probe")).toHaveAttribute("data-reason", "Workflow blocks this state");
+  });
+
+  it("keeps quick-add enabled for an ordinary project view", async () => {
+    renderLayout();
+    expect(await screen.findByTestId("quick-add-probe")).toHaveAttribute("data-disabled", "false");
   });
 });

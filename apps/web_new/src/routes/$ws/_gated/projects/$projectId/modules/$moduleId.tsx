@@ -13,6 +13,7 @@ import * as React from "react";
 import { getAppClient } from "../../../../../../core/api/client.js";
 import { ListSkeleton, parseIssueSearch, prefsQueryOptions } from "../../../../../../features/issues/index.js";
 import { EntityListScreen } from "../../../../../../features/issues/list/EntityListScreen.js";
+import { loadListLayout } from "../../../../../../features/issues/list/lazy.js";
 import { listPageQueryOptions } from "../../../../../../features/issues/list/pages.js";
 import { pickerModulesQueryOptions } from "../../../../../../shared/pickers/index.js";
 
@@ -21,6 +22,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$m
   beforeLoad: async ({ context, params }) => {
     const entity = { scope: "module", projectId: params.projectId, moduleId: params.moduleId } as const;
     await Promise.all([
+      loadListLayout(),
       context.queryClient.ensureQueryData(
         listPageQueryOptions(context.apiClient, params.ws, { entity, groupBy: null, orderBy: "sort_order" })
       ),

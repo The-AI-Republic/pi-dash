@@ -51,6 +51,7 @@ function setup() {
       getKey={(item) => item}
       renderRow={(item) => <div>{item}</div>}
       className="h-56"
+      footer={<div data-testid="footer">More rows</div>}
     />
   );
 }
@@ -74,5 +75,16 @@ describe("VirtualList", () => {
     fireEvent.scroll(region);
     expect(await screen.findByText("Issue 501")).toBeInTheDocument();
     expect(screen.queryByText("Issue 1")).not.toBeInTheDocument();
+  });
+
+  it("keeps the footer inside the scroll region after the virtual rows", async () => {
+    setup();
+    const region = screen.getByRole("region", { name: "Issues" });
+    const footer = screen.getByTestId("footer");
+    expect(region).toContainElement(footer);
+    expect(footer).toHaveTextContent("More rows");
+    await screen.findByText("Issue 1");
+    const lastRow = screen.getByText("Issue 1").closest("[data-index]")?.parentElement;
+    expect(lastRow?.nextElementSibling).toBe(footer);
   });
 });
