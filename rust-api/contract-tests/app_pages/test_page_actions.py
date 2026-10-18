@@ -238,6 +238,36 @@ def test_access_denied_for_non_owner(member_client, world):
     }
 
 
+def test_access_null_owner_is_400_invalid_payload(user_client, world, db):
+    # PIDASHCONV-1173. The owner's {"access": null} passes the owner guard
+    # (`page.access != None` is true, but `owned_by == user`), then
+    # `page.access = None` runs `PositiveSmallIntegerField.get_prep_value`,
+    # which returns None without calling `int()`, so the UPDATE writes NULL
+    # into the NOT NULL `access` column. `IntegrityError` reaches
+    # `BaseViewSet.handle_exception`, which answers 400 invalid-payload — the
+    # same mechanism as the create-path precedent PB-0482. No row is written.
+    response = user_client.post(
+        f"{page_url(world, world['page']['id'])}access/", json={"access": None}
+    )
+    assert response.status_code == 400
+    assert response.json() == {"error": "The payload is not valid"}
+    assert db.fetchval("SELECT access FROM pages WHERE id=%s", (world["page"]["id"],)) == 0
+
+
+def test_access_null_non_owner_is_400_owner_body(member_client, world, db):
+    # PIDASHCONV-1173. A non-owner's {"access": null} is caught by the owner
+    # guard (`page.access != None`) before any write, answering the owner body
+    # on both backends.
+    response = member_client.post(
+        f"{page_url(world, world['page']['id'])}access/", json={"access": None}
+    )
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "Access cannot be updated since this page is owned by someone else"
+    }
+    assert db.fetchval("SELECT access FROM pages WHERE id=%s", (world["page"]["id"],)) == 0
+
+
 def test_access_requires_auth(anon_client, world):
     assert anon_client.post(f"{page_url(world, world['page']['id'])}access/").status_code in (401, 403)
 

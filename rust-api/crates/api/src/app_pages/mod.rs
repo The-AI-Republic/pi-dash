@@ -1647,37 +1647,62 @@ pub fn access_int(value: &Value) -> Option<i32> {
     value.as_bool().map(i32::from)
 }
 
+/// The assignment-domain cohort of the `access` request value: the column
+/// write, the JSON-null `IntegrityError`, or a prep/column rejection.
+pub enum AccessAssign {
+    /// The value `page.access = access` writes.
+    Value(i32),
+    /// JSON `null`: `PositiveSmallIntegerField.get_prep_value(None)` returns
+    /// `None` (the prep short-circuits before `int()`), so `save()` issues an
+    /// UPDATE that writes NULL into the NOT NULL `access` column
+    /// (`db/models/page.py:37`, no `null=True`) and `IntegrityError` reaches
+    /// `BaseViewSet.handle_exception`, which answers 400 invalid-payload
+    /// (`app/views/base.py:120-124`; same mechanism as the create-path
+    /// precedent PB-0482). No row is written.
+    NullIntegrity,
+    /// Anything else `int()` rejects (lists, dicts, `"abc"`, `"1.5"`,
+    /// out-of-range integers) fails at prep or at the SMALLINT column,
+    /// surfacing as 500.
+    Rejected,
+}
+
 /// The assignment-domain coercion for the `access` request value
 /// (`base.py:272,287`): `page.access = access` runs the
 /// `PositiveSmallIntegerField` prep, i.e. `int(value)`, and `save()`
 /// skips validators — so non-integral floats truncate toward zero
-/// (`1.5` stores `1`), numeric strings parse (`"1"` stores `1`), and
-/// anything `int()` rejects (null, lists, dicts, `"abc"`, `"1.5"`,
-/// out-of-range integers) fails at prep or at the SMALLINT column, both
-/// surfacing as 500. `None` (absent key) defaults to `0`. A `None` return
-/// is the 500 branch; out-of-`i16` integers stay `i32` here so the
-/// database itself rejects them exactly like Django's column does.
-pub fn access_assign(raw: Option<&Value>) -> Option<i32> {
+/// (`1.5` stores `1`) and numeric strings parse (`"1"` stores `1`).
+/// `None` (absent key) defaults to `0`. JSON `null` is its own arm:
+/// Python's prep returns `None` for it without calling `int()`, so the
+/// write hits the NOT NULL column and answers 400, not 500. Everything
+/// else `int()` rejects surfaces as 500. Out-of-`i16` integers stay `i32`
+/// here so the database itself rejects them exactly like Django's column.
+pub fn access_assign(raw: Option<&Value>) -> AccessAssign {
     let value = match raw {
-        None => return Some(0),
+        None => return AccessAssign::Value(0),
         Some(value) => value,
     };
-    if let Some(int) = value.as_i64() {
-        return i32::try_from(int).ok();
+    if value.is_null() {
+        return AccessAssign::NullIntegrity;
     }
-    if let Some(float) = value.as_f64() {
+    let coerced = if let Some(int) = value.as_i64() {
+        i32::try_from(int).ok()
+    } else if let Some(float) = value.as_f64() {
         if float >= f64::from(i32::MIN) && float <= f64::from(i32::MAX) {
-            return Some(float as i32);
+            Some(float as i32)
+        } else {
+            None
         }
-        return None;
+    } else if let Some(boolean) = value.as_bool() {
+        Some(i32::from(boolean))
+    } else if let Some(text) = value.as_str() {
+        access_int_str(text)
+    } else {
+        None
+    };
+    match coerced {
+        Some(value) => AccessAssign::Value(value),
+        None => AccessAssign::Rejected,
     }
-    if let Some(boolean) = value.as_bool() {
-        return Some(i32::from(boolean));
-    }
-    if let Some(text) = value.as_str() {
-        return access_int_str(text);
-    }
-    None
 }
 
 /// `int(text, 10)` for the assignment path above (ASCII-digit subset —
@@ -2115,12 +2140,18 @@ pub async fn access_page(
     // Assignment (`:272,287`): `request.data.get("access", 0)` then
     // `page.access = access` runs the field prep (`int(value)`, verified
     // against `PositiveSmallIntegerField.get_prep_value`: `1.5` → `1`,
-    // `"1"` → `1`). Anything `int()` rejects fails at prep or at the
-    // SMALLINT column — both 500 here. The value binds as `i32` so an
+    // `"1"` → `1`). JSON `null` is not an `int()` input: the prep returns
+    // `None` and the UPDATE hits the NOT NULL column → `IntegrityError` →
+    // 400 invalid-payload. Anything else `int()` rejects fails at prep or
+    // at the SMALLINT column — both 500. The value binds as `i32` so an
     // out-of-range integer is rejected by the column itself, exactly
     // like Django's save.
-    let Some(effective) = access_assign(raw) else {
-        return Denial::ServerError.into_response();
+    let effective = match access_assign(raw) {
+        AccessAssign::Value(value) => value,
+        AccessAssign::NullIntegrity => {
+            return Denial::BadError("The payload is not valid".to_owned()).into_response();
+        }
+        AccessAssign::Rejected => return Denial::ServerError.into_response(),
     };
     if sqlx::query(
         r#"UPDATE pages SET access = $1, description_stripped = $2,
@@ -5048,7 +5079,12 @@ mod tests {
     /// fails at the column).
     #[test]
     fn access_assign_matches_py_int() {
-        let assign = |v: Option<serde_json::Value>| access_assign(v.as_ref());
+        // Fold the three-way outcome back to the pre-null shape for the
+        // `int()`-coercion cases; JSON null is asserted on its own below.
+        let assign = |v: Option<serde_json::Value>| match access_assign(v.as_ref()) {
+            AccessAssign::Value(value) => Some(value),
+            AccessAssign::NullIntegrity | AccessAssign::Rejected => None,
+        };
         assert_eq!(assign(None), Some(0));
         assert_eq!(assign(Some(serde_json::json!(1))), Some(1));
         assert_eq!(assign(Some(serde_json::json!(1.0))), Some(1));
@@ -5067,10 +5103,18 @@ mod tests {
         assert_eq!(assign(Some(serde_json::json!(""))), None);
         assert_eq!(assign(Some(serde_json::json!("0x1"))), None);
         assert_eq!(assign(Some(serde_json::json!("1__0"))), None);
-        assert_eq!(assign(Some(serde_json::json!(null))), None);
         assert_eq!(assign(Some(serde_json::json!([1]))), None);
         assert_eq!(assign(Some(serde_json::json!({"a": 1}))), None);
         assert_eq!(assign(Some(serde_json::json!(1e30))), None);
+        // JSON null is not an `int()` rejection: Python's prep returns `None`
+        // without calling `int()`, so it is the 400 IntegrityError arm, never
+        // the 500 rejection (PIDASHCONV-1173).
+        let null = serde_json::json!(null);
+        assert!(matches!(
+            access_assign(Some(&null)),
+            AccessAssign::NullIntegrity
+        ));
+        assert!(assign(Some(serde_json::json!(null))).is_none());
     }
 
     /// The unarchive detach predicate (F30-08 `:360-362`): only a page
