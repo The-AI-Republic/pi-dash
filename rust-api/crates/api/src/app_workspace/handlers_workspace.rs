@@ -1168,12 +1168,26 @@ pub(crate) fn py_num_str(number: &serde_json::Number) -> String {
     if let Some(uint) = number.as_u64() {
         return uint.to_string();
     }
-    // Arbitrary-precision floats echo their input text; re-render
-    // Python-style from the value instead.
-    let Some(float) = number.as_f64() else {
-        return number.to_string();
-    };
-    py_float_str(float)
+    // Beyond i64/u64. A digit-only literal is a Python `int`, and
+    // `str()` echoes its exact digits, however many. Float-syntax
+    // tokens (`.`, `e`, `E`) render through the `repr` path below.
+    let token = number.to_string();
+    let is_float = token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E'));
+    match number.as_f64() {
+        Some(float) if is_float => py_float_str(float),
+        // `as_f64` drops non-finite overflow spellings; a float-syntax
+        // token past f64 range is ±inf for Python, a bigint keeps its
+        // digits.
+        Some(_) => token,
+        None if is_float => {
+            if token.starts_with('-') {
+                "-inf".to_owned()
+            } else {
+                "inf".to_owned()
+            }
+        }
+        None => token,
+    }
 }
 
 pub(crate) fn py_float_str(float: f64) -> String {
@@ -5216,6 +5230,17 @@ mod tests {
         assert_eq!(py_str(&serde_json::json!({"a": 1})), "{'a': 1}");
         assert_eq!(py_repr(&str_value("it's")), "\"it's\"");
         assert_eq!(py_repr(&str_value("a\nb")), "'a\\nb'");
+    }
+
+    #[test]
+    fn number_strings_echo_big_integers_exactly() {
+        // Beyond i64/u64 a digit-only token is a Python `int`, rendered
+        // by `str()` exactly; a float-syntax token past f64 range is
+        // `inf` (PIDASHCONV-1134).
+        let big: Value = serde_json::from_str("1267650600228229401496703205376").unwrap();
+        assert_eq!(py_str(&big), "1267650600228229401496703205376");
+        let overflow: Value = serde_json::from_str("1e999").unwrap();
+        assert_eq!(py_str(&overflow), "inf");
     }
 
     #[test]

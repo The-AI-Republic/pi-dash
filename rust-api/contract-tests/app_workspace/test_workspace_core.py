@@ -365,6 +365,56 @@ def test_delete_workspace_anon(anon_api, space):
     assert res.status_code == 401
 
 
+# --- huge-int number coercion (PIDASHCONV-1134) ---
+
+# DRF `CharField.to_internal_value` runs Python `str(data)` on a number
+# (`fields.py:759-766`), so a JSON integer past i64/u64 renders by
+# Python's unbounded `int.__str__`: its exact decimal digits, however
+# many. The workspace kernel rendered the same token through `f64`
+# (`py_num_str`), which rounds to shortest-round-trip scientific
+# notation. 2**100 has 31 decimal digits, past i64 and u64.
+
+HUGE_INT = 1267650600228229401496703205376
+HUGE_TEXT = "1267650600228229401496703205376"
+
+
+def test_patch_workspace_huge_int_name(user_api, world, space):
+    # (a) The lossy value was both stored and echoed.
+    res = user_api.patch(f"/api/workspaces/{space['slug']}/", json={"name": HUGE_INT})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["name"] == HUGE_TEXT
+    with world["db"].connect() as conn:
+        row = conn.execute(
+            "select name from workspaces where id = %s;", (space["id"],)
+        ).fetchone()
+    assert row[0] == HUGE_TEXT
+
+
+def test_create_workspace_huge_int_company_role(user_api, world):
+    # (b) `company_role` is stringified by `py_str` onto the member row.
+    res = user_api.post(
+        "/api/workspaces/",
+        json={"name": "x", "slug": "q23-bigint", "company_role": HUGE_INT},
+    )
+    assert res.status_code == 201, res.text
+    workspace_id = res.json()["id"]
+    with world["db"].connect() as conn:
+        row = conn.execute(
+            "select company_role from workspace_members"
+            " where workspace_id = %s and member_id = %s;",
+            (workspace_id, world["user"]["id"]),
+        ).fetchone()
+    assert row[0] == HUGE_TEXT
+
+
+def test_patch_workspace_huge_int_timezone_message(user_api, space):
+    # (c) The `ChoiceField` miss spells `str(int)` exactly.
+    res = user_api.patch(f"/api/workspaces/{space['slug']}/", json={"timezone": HUGE_INT})
+    assert res.status_code == 400, res.text
+    assert res.json() == {"timezone": [f'"{HUGE_TEXT}" is not a valid choice.']}
+
+
 # --- members ---
 
 
