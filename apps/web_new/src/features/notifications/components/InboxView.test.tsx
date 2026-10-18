@@ -256,6 +256,9 @@ describe("InboxView", () => {
     expect(screen.getByRole("region", { name: "Notifications" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Details" })).toBeInTheDocument();
     expect(screen.getByTestId("inbox-detail-host")).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("inbox-detail-pane")).getByTestId("notifications-detail-placeholder")
+    ).toBeInTheDocument();
     await waitFor(() => expect(document.title).toContain("Acme"));
     expect(document.title).toContain("Inbox");
 
@@ -395,10 +398,17 @@ describe("InboxView", () => {
     await waitFor(() =>
       expect(screen.getByTestId("notifications-detail-pane")).toHaveAttribute("data-detail-variant", "peek")
     );
+    const pane = screen.getByTestId("inbox-detail-pane");
+    expect(within(pane).getByTestId("notifications-detail-summary")).toHaveTextContent(
+      "Ada Lovelace commented: looks good"
+    );
+    expect(within(pane).getByText("ENG-12")).toBeInTheDocument();
+    expect(within(pane).getByText("Ship it")).toBeInTheDocument();
+    expect(within(pane).getByTestId("notifications-detail-close")).toBeInTheDocument();
     expect(screen.getByTestId("inbox-list-pane")).toHaveClass("hidden", "md:flex");
     expect(first.calls.filter((url) => /\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname))).toHaveLength(1);
 
-    await user.click(screen.getByRole("button", { name: "Close preview" }));
+    await user.click(within(pane).getByTestId("notifications-detail-close"));
     expect(screen.getByTestId("notifications-detail-placeholder")).toBeInTheDocument();
     await user.click(card);
     await waitFor(() =>

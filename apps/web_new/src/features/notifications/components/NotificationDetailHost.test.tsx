@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Issue, TransportResponse } from "@pidash/api-client";
 import * as React from "react";
@@ -11,7 +11,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { ROLE_GUEST } from "../../../core/session/index.js";
-import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/index.js";
 import type { NotificationCardData } from "../lib/card.js";
 import { NotificationDetailHost } from "./NotificationDetailHost.js";
 
@@ -95,9 +94,6 @@ function response(url: string, body: unknown, status = 200): TransportResponse {
 }
 
 function renderHost(value: NotificationCardData | null, onClose = vi.fn()) {
-  const portal = document.createElement("div");
-  portal.id = FULL_SCREEN_PORTAL_ID;
-  document.body.appendChild(portal);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return {
     ...render(
@@ -124,7 +120,7 @@ describe("NotificationDetailHost", () => {
     expect(transport).not.toHaveBeenCalled();
   });
 
-  it("shows access and issue loading, then the editable peek and clears it on close", async () => {
+  it("shows access and issue loading, then the editable peek inside the pane and closes from it", async () => {
     const user = userEvent.setup();
     let releaseAccess!: () => void;
     let releaseIssue!: () => void;
@@ -149,10 +145,19 @@ describe("NotificationDetailHost", () => {
     await waitFor(() => expect(screen.getByTestId("notifications-detail-loading")).toBeInTheDocument());
     releaseIssue();
     await waitFor(() => expect(screen.getByTestId("issue-detail-root")).toHaveAttribute("data-editable", "true"));
-    expect(screen.getByTestId("notifications-detail-pane")).toHaveAttribute("data-detail-variant", "peek");
-    expect(screen.getByTestId("issue-preview")).toBeInTheDocument();
-    expect(screen.getByText("ENG-12")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Close preview" }));
+
+    const pane = screen.getByTestId("notifications-detail-pane");
+    expect(pane).toHaveAttribute("data-detail-variant", "peek");
+    expect(within(pane).getByTestId("notifications-detail-summary")).toHaveTextContent(
+      "Ada Lovelace commented: detail note"
+    );
+    expect(within(pane).getByTestId("notifications-detail-actor")).toHaveTextContent("Ada Lovelace");
+    expect(within(pane).getByText("ENG-12")).toBeInTheDocument();
+    expect(within(pane).getByTestId("issue-detail-root")).toHaveTextContent("Ship it");
+    expect(within(pane).getByText("Work item preview")).toBeInTheDocument();
+    expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
+
+    await user.click(within(pane).getByTestId("notifications-detail-close"));
     expect(onClose).toHaveBeenCalledOnce();
   });
 
@@ -161,8 +166,14 @@ describe("NotificationDetailHost", () => {
       url.includes("/project-roles/") ? response(url, { [PROJECT]: 20 }) : response(url, issue())) as never);
     renderHost(selection({ triage: true }));
     await waitFor(() => expect(screen.getByTestId("issue-detail-root")).toHaveAttribute("data-editable", "false"));
-    expect(screen.getByTestId("notifications-detail-pane")).toHaveAttribute("data-detail-variant", "triage");
-    expect(screen.getByText("Triage work item")).toBeInTheDocument();
+    const pane = screen.getByTestId("notifications-detail-pane");
+    expect(pane).toHaveAttribute("data-detail-variant", "triage");
+    expect(within(pane).getByText("Triage work item")).toBeInTheDocument();
+    expect(within(pane).getByTestId("notifications-detail-summary")).toHaveTextContent(
+      "Ada Lovelace commented: detail note"
+    );
+    expect(within(pane).getByTestId("notifications-detail-close")).toBeInTheDocument();
+    expect(within(pane).getByTestId("issue-detail-root")).toBeInTheDocument();
   });
 
   it.each([
@@ -174,14 +185,22 @@ describe("NotificationDetailHost", () => {
     renderHost(selection());
     await waitFor(() => expect(screen.getByTestId("issue-detail-root")).toHaveAttribute("data-editable", "false"));
     expect(screen.getByTestId("notifications-detail-pane")).toHaveAttribute("data-detail-variant", "peek");
+    expect(screen.getByTestId("notifications-detail-summary")).toHaveTextContent("Ada Lovelace commented: detail note");
   });
 
   it("keeps a useful read-only summary when the issue hydrate fails", async () => {
     createAppClient("https://api.test", (async (url: string) =>
       url.includes("/project-roles/") ? response(url, {}) : response(url, { detail: "not found" }, 404)) as never);
     renderHost(selection());
-    await waitFor(() => expect(screen.getByText("Ada Lovelace commented: detail note")).toBeInTheDocument());
-    expect(screen.getByText("Ship it")).toBeInTheDocument();
+    const pane = screen.getByTestId("notifications-detail-pane");
+    await waitFor(() =>
+      expect(within(pane).getByTestId("notifications-detail-summary")).toHaveTextContent(
+        "Ada Lovelace commented: detail note"
+      )
+    );
+    expect(within(pane).getByText("Ship it")).toBeInTheDocument();
+    expect(within(pane).getByText("The work item details could not be loaded.")).toBeInTheDocument();
+    expect(within(pane).getByTestId("notifications-detail-close")).toBeInTheDocument();
     expect(screen.queryByTestId("issue-detail-root")).not.toBeInTheDocument();
   });
 });

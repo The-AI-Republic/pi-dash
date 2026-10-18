@@ -2,19 +2,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Thin notification-to-issue preview seam (parity/specs/notifications.md
-// §5 and §12, NTF-007-009). Notifications own selection and the state
+// §5, §6 and §12, NTF-007-009). Notifications own selection and the state
 // switch; access and issue data/content stay behind their public features.
+// The preview renders inline in the inbox detail pane — never through the
+// shared portal overlay — so the pane carries the selected content, the
+// notification's own change and the close control (NTF-008, NTF-009).
 import { useQuery } from "@tanstack/react-query";
 import { FileSearch, X } from "lucide-react";
 import * as React from "react";
 
-import { IconButton, Spinner } from "@pidash/kit";
+import { Avatar, IconButton, Spinner } from "@pidash/kit";
 import { getAppClient } from "../../../core/api/client.js";
 import { ROLE_MEMBER } from "../../../core/session/index.js";
-import { PeekPanel } from "../../../shared/shell/index.js";
 import { projectRolesQueryOptions } from "../../auth/index.js";
 import { IssueDetailRoot, issueDetailQueryOptions } from "../../issues/index.js";
 import type { NotificationCardData } from "../lib/card.js";
+import { formatNotificationAge } from "../lib/relativeAge.js";
 
 export interface NotificationDetailHostProps {
   workspaceSlug: string;
@@ -68,38 +71,20 @@ export function NotificationDetailHost({
 
   const role = access.data?.[selection.projectId] ?? null;
   const variant = selection.triage ? "triage" : "peek";
-  const content =
-    issue.data === undefined ? (
-      <div className="p-(--space-8)">
-        <p className="text-emphasis text-(--text)">{selection.title}</p>
-        <p className="text-body text-(--text-muted)">{selection.summary}</p>
-      </div>
-    ) : (
-      <IssueDetailRoot
-        workspaceSlug={workspaceSlug}
-        projectId={selection.projectId}
-        issue={issue.data}
-        editable={!selection.triage && role !== null && role >= ROLE_MEMBER}
-        topSlot={<span className="text-meta text-(--text-muted)">{selection.reference}</span>}
-      />
-    );
-
-  if (!selection.triage) {
-    return (
-      <div data-testid="notifications-detail-pane" data-detail-variant={variant} className="h-full">
-        <PeekPanel eyebrow={selection.reference} title={selection.title} titleLabel="Work item title" onClose={onClose}>
-          {content}
-        </PeekPanel>
-      </div>
-    );
-  }
+  const editable = !selection.triage && role !== null && role >= ROLE_MEMBER;
 
   return (
-    <div data-testid="notifications-detail-pane" data-detail-variant={variant} className="h-full overflow-y-auto">
-      <header className="sticky top-0 z-10 flex items-center justify-between gap-(--space-3) border-b border-(--border) bg-(--surface) px-(--space-4) py-(--space-3)">
+    <div
+      data-testid="notifications-detail-pane"
+      data-detail-variant={variant}
+      className="flex h-full min-h-0 flex-col overflow-y-auto"
+    >
+      <header className="sticky top-0 z-10 flex items-center justify-between gap-(--space-3) border-b border-(--border) bg-(--surface) px-(--space-5) py-(--space-3)">
         <div className="min-w-0">
           <p className="text-meta font-medium text-(--text)">{selection.reference}</p>
-          <p className="text-caption text-(--text-muted)">Triage work item</p>
+          <p className="text-caption text-(--text-muted)">
+            {selection.triage ? "Triage work item" : "Work item preview"}
+          </p>
         </div>
         <IconButton
           label="Close notification details"
@@ -110,7 +95,43 @@ export function NotificationDetailHost({
           <X size={16} strokeWidth={1.5} aria-hidden="true" />
         </IconButton>
       </header>
-      {content}
+
+      <section
+        data-testid="notifications-detail-change"
+        aria-label="Notification change"
+        className="flex gap-(--space-3) border-b border-(--border) px-(--space-5) py-(--space-4)"
+      >
+        <Avatar
+          name={selection.actorName}
+          {...(selection.actorAvatarUrl === null ? {} : { src: selection.actorAvatarUrl })}
+          size="small"
+        />
+        <div className="min-w-0 flex-1">
+          <p data-testid="notifications-detail-summary" className="text-body text-(--text)">
+            {selection.summary}
+          </p>
+          <p className="text-caption text-(--text-muted)">
+            <span data-testid="notifications-detail-actor">{selection.actorName}</span>
+            {" · "}
+            <time dateTime={selection.createdAt}>{formatNotificationAge(selection.createdAt)}</time>
+          </p>
+        </div>
+      </section>
+
+      {issue.data === undefined ? (
+        <div className="p-(--space-5)">
+          <p className="text-emphasis text-(--text)">{selection.title}</p>
+          <p className="text-body text-(--text-muted)">The work item details could not be loaded.</p>
+        </div>
+      ) : (
+        <IssueDetailRoot
+          workspaceSlug={workspaceSlug}
+          projectId={selection.projectId}
+          issue={issue.data}
+          editable={editable}
+          topSlot={<span className="text-meta text-(--text-muted)">{selection.reference}</span>}
+        />
+      )}
     </div>
   );
 }
