@@ -236,9 +236,9 @@ describe("DisplayPanel", () => {
     await user.click(within(section("order")).getByRole("button", { name: "Last updated" }));
     expect(calls.onOrderBy).toHaveBeenCalledWith("-updated_at");
     await user.click(within(section("options")).getByRole("button", { name: "Show empty groups" }));
-    expect(calls.onToggleSwitch).toHaveBeenCalledWith("show_empty_groups");
+    expect(calls.onToggleSwitch).toHaveBeenCalledWith("show_empty_groups", false);
     await user.click(within(section("options")).getByRole("button", { name: "Show sub-work items" }));
-    expect(calls.onToggleSwitch).toHaveBeenCalledWith("sub_issue");
+    expect(calls.onToggleSwitch).toHaveBeenCalledWith("sub_issue", true);
     await user.click(within(section("properties")).getByRole("button", { name: "Assignee" }));
     expect(calls.onToggleProperty).toHaveBeenCalledWith("assignee", false);
     await user.click(within(section("properties")).getByRole("button", { name: "State" }));

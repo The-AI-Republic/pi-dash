@@ -46,7 +46,8 @@ export interface DisplayPanelProps {
   onGroupBy: (dimension: string | null) => void;
   onSubGroupBy: (dimension: string | null) => void;
   onOrderBy: (order: string) => void;
-  onToggleSwitch: (key: DisplaySwitchKey) => void;
+  /** Switch toggle with the next state; the panel owns the absent-key read. */
+  onToggleSwitch: (key: DisplaySwitchKey, on: boolean) => void;
   /** Pill toggle with the next visibility; the panel owns the absent-key read. */
   onToggleProperty: (key: string, shown: boolean) => void;
 }
@@ -115,13 +116,13 @@ function SwitchOption({
 }: {
   switchKey: DisplaySwitchKey;
   on: boolean;
-  onToggle: (key: DisplaySwitchKey) => void;
+  onToggle: (key: DisplaySwitchKey, on: boolean) => void;
 }): React.ReactElement {
   return (
     <button
       type="button"
       aria-pressed={on}
-      onClick={() => onToggle(switchKey)}
+      onClick={() => onToggle(switchKey, !on)}
       className="flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-3) py-(--space-2) hover:bg-(--subtle)"
     >
       <span

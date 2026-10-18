@@ -16,7 +16,6 @@ import * as React from "react";
 import { resolveActiveLayout, type LayoutKind } from "../layouts/kinds.js";
 import { selectDisplayPrefs, useEntityPrefs, useUpdateDisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../prefs/entities.js";
-import type { DisplaySwitchKey } from "./matrix.js";
 
 const LazyDisplayPanel = React.lazy(() =>
   import("./DisplayPanel.js").then((module) => ({ default: module.DisplayPanel }))
@@ -43,11 +42,6 @@ export function DisplayControl({
   const { updateDisplayPrefs } = useUpdateDisplayPrefs(workspaceSlug, entity);
   const prefs = record ? selectDisplayPrefs(record) : null;
   const active = prefs ? resolveActiveLayout(prefs.layout, offered) : null;
-  const toggleSwitch = (key: DisplaySwitchKey): void => {
-    if (!prefs) return;
-    if (key === "sub_issue") updateDisplayPrefs({ showSubIssues: !prefs.showSubIssues });
-    else updateDisplayPrefs({ showEmptyGroups: !prefs.showEmptyGroups });
-  };
   return (
     <Popover
       trigger={
@@ -80,7 +74,11 @@ export function DisplayControl({
             onGroupBy={(dimension) => updateDisplayPrefs({ groupBy: dimension })}
             onSubGroupBy={(dimension) => updateDisplayPrefs({ subGroupBy: dimension })}
             onOrderBy={(order) => updateDisplayPrefs({ orderBy: order })}
-            onToggleSwitch={toggleSwitch}
+            onToggleSwitch={(key, next) =>
+              key === "sub_issue"
+                ? updateDisplayPrefs({ showSubIssues: next })
+                : updateDisplayPrefs({ showEmptyGroups: next })
+            }
             onToggleProperty={(key, shown) => updateDisplayPrefs({ properties: { ...prefs.properties, [key]: shown } })}
           />
         </React.Suspense>
