@@ -4,6 +4,7 @@
 // Project reference-data contracts: states, labels, members.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
+import { isApiError } from "../errors.js";
 import { dateTime, nullableUuid, uuid } from "./fields.js";
 
 export const STATE_GROUPS = [
@@ -141,4 +142,32 @@ export type ProjectMemberList = z.infer<typeof ProjectMemberList>;
 export async function listMembers(client: ApiClient, slug: string, projectId: string): Promise<ProjectMemberList> {
   const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/members/`);
   return client.parse(ProjectMemberList, body, "GET members");
+}
+
+/**
+ * The caller's own membership row in one project
+ * (GET .../project-members/me/). Read inline: the notification detail
+ * pane asks for it per selection, so it must fetch no matter what else
+ * the workspace already warmed. A caller who holds no active membership
+ * gets a 404, which this reports as null.
+ */
+export const OwnProjectMembership = z.object({
+  id: uuid(),
+  role: z.number(),
+});
+export type OwnProjectMembership = z.infer<typeof OwnProjectMembership>;
+
+export async function getMyProjectMembership(
+  client: ApiClient,
+  slug: string,
+  projectId: string
+): Promise<OwnProjectMembership | null> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/project-members/me/`;
+  try {
+    const body = await client.getJson<unknown>(path);
+    return client.parse(OwnProjectMembership, body, `GET ${path}`);
+  } catch (error) {
+    if (isApiError(error) && error.status === 404) return null;
+    throw error;
+  }
 }

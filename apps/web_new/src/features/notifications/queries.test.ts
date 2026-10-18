@@ -6,6 +6,8 @@ import { notificationKeys } from "./api/keys.js";
 import {
   NOTIFICATIONS_FIRST_CURSOR,
   NOTIFICATIONS_PAGE_SIZE,
+  nextNotificationCursor,
+  notificationPagesQueryOptions,
   notificationsListQueryOptions,
   unreadNotificationsQueryOptions,
 } from "./api/queries.js";
@@ -124,4 +126,40 @@ describe("notifications list query", () => {
     } as never;
     expect(notificationsListQueryOptions(fakeClient, "", notificationTabQuery("all")).enabled).toBe(false);
   });
+
+  it("pages from the initial cursor through each opaque continuation", async () => {
+    const first = { ...pageEnvelope(), next_page_results: true, next_cursor: "300:300:1" };
+    const second = { ...pageEnvelope(), next_page_results: false, next_cursor: "" };
+    const getJson = vi.fn(async (_path: string, options: { query: { cursor: string } }) =>
+      options.query.cursor === NOTIFICATIONS_FIRST_CURSOR ? first : second
+    );
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = notificationPagesQueryOptions(fakeClient, "acme", notificationTabQuery("all"));
+    expect(options.queryKey).toEqual([...notificationKeys.list("acme", notificationTabQuery("all")), "pages"]);
+    await expect(options.queryFn?.({ pageParam: NOTIFICATIONS_FIRST_CURSOR } as never)).resolves.toEqual(first);
+    await expect(options.queryFn?.({ pageParam: first.next_cursor } as never)).resolves.toEqual(second);
+    expect(nextNotificationCursor(first)).toBe("300:300:1");
+    expect(nextNotificationCursor(second)).toBeUndefined();
+    expect(nextNotificationCursor({ ...second, next_page_results: true })).toBeUndefined();
+  });
+
+  it("keeps the cursor stream disabled without a workspace", () => {
+    const fakeClient = { getJson: vi.fn(), parse: vi.fn() } as never;
+    expect(notificationPagesQueryOptions(fakeClient, "", notificationTabQuery("all")).enabled).toBe(false);
+  });
 });
+
+function pageEnvelope() {
+  return {
+    grouped_by: null,
+    sub_grouped_by: null,
+    total_count: 0,
+    next_cursor: "",
+    prev_cursor: "",
+    next_page_results: false,
+    prev_page_results: false,
+    count: 0,
+    total_results: 0,
+    results: [],
+  };
+}

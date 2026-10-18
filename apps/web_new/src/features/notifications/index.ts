@@ -45,13 +45,26 @@ export type { EmailPreferenceRow, PendingFlip } from "./components/EmailPreferen
 export {
   NOTIFICATIONS_FIRST_CURSOR,
   NOTIFICATIONS_PAGE_SIZE,
+  nextNotificationCursor,
+  notificationPagesQueryOptions,
   notificationsListQueryOptions,
+  useNotificationPages,
   unreadNotificationsQueryOptions,
   useNotificationsList,
   useUnreadNotifications,
 } from "./api/queries.js";
+export {
+  applyReadToNotificationCache,
+  applyReadToTotals,
+  applySuccessfulRead,
+  useMarkNotificationRead,
+} from "./api/read.js";
+export type { MarkNotificationReadInput } from "./api/read.js";
 export { InboxShell } from "./components/InboxShell.js";
 export { InboxView } from "./components/InboxView.js";
+export { NotificationDetailHost } from "./components/NotificationDetailHost.js";
+export type { NotificationDetailHostProps } from "./components/NotificationDetailHost.js";
+export { NotificationEmptyState, NotificationListSkeleton, NotificationNextPage } from "./components/ListStates.js";
 export { CUSTOM_SNOOZE_ENTRY, REMOVE_SNOOZE_ENTRY, SnoozeMenu } from "./components/SnoozeMenu.js";
 export type { SnoozeMenuProps } from "./components/SnoozeMenu.js";
 export {

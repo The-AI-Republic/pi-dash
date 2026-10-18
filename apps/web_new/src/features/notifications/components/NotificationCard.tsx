@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // One inbox card (written from parity/specs/notifications.md §4, §9,
-// NTF-005, NTF-006, NTF-022, NTF-023). Four elements in server order —
-// the actor, the change summary, the item reference with its title, and
-// the age — plus the unread marker. A snoozed card shows its scheduled
-// resume moment where the age would be. The action row (read, archive,
-// snooze) is revealed by hovering this card only, reserves its space at
-// rest so nothing shifts, and every action stops its click from
-// selecting the card. Selection itself belongs to the detail slice.
+// NTF-005, NTF-006, NTF-022, NTF-023, NTF-007). Four elements in server
+// order — the actor, the change summary, the item reference with its
+// title, and the age — plus the unread marker. A snoozed card shows its
+// scheduled resume moment where the age would be. The action row (read,
+// archive, snooze) is revealed by hovering this card only, reserves its
+// space at rest so nothing shifts, and every action stops its click from
+// selecting the card. Selection is a native button covering the card body;
+// the actions sit beside it rather than inside it.
 import { Avatar } from "@pidash/kit";
 import { Archive, ArchiveRestore, Mail, MailOpen } from "lucide-react";
 import * as React from "react";
@@ -35,6 +36,10 @@ export interface NotificationCardActions {
 
 export interface NotificationCardProps {
   card: NotificationCardData;
+  /** Whether this card is the open detail selection. */
+  selected?: boolean;
+  /** Open this card's detail. */
+  onSelect?: () => void;
   /** When present the card renders its hover action row. */
   actions?: NotificationCardActions | undefined;
 }
@@ -116,48 +121,64 @@ function CardTime({ card }: { card: NotificationCardData }): React.ReactElement 
   );
 }
 
-export function NotificationCard({ card, actions }: NotificationCardProps): React.ReactElement {
+export function NotificationCard({
+  card,
+  selected = false,
+  onSelect,
+  actions,
+}: NotificationCardProps): React.ReactElement {
   return (
-    <article
+    <div
+      role="article"
       data-testid="inbox-card"
       data-unread={card.unread ? "true" : "false"}
+      data-selected={selected ? "true" : "false"}
       aria-label={`${card.title} (${card.unread ? "unread" : "read"})`}
       className={
-        card.unread
+        selected || card.unread
           ? "group flex gap-(--space-3) bg-(--accent-subtle) px-(--space-4) py-(--space-3)"
           : "group flex gap-(--space-3) px-(--space-4) py-(--space-3)"
       }
     >
-      {card.unread ? (
-        <span
-          data-testid="inbox-card-unread-dot"
-          aria-hidden="true"
-          className="mt-1 size-2 shrink-0 rounded-full bg-(--accent)"
+      <button
+        type="button"
+        data-testid="inbox-card-select"
+        aria-pressed={selected}
+        aria-label={`Open ${card.reference}`}
+        onClick={onSelect}
+        className="flex min-w-0 flex-1 cursor-pointer gap-(--space-3) text-left"
+      >
+        {card.unread ? (
+          <span
+            data-testid="inbox-card-unread-dot"
+            aria-hidden="true"
+            className="mt-1 size-2 shrink-0 rounded-full bg-(--accent)"
+          />
+        ) : null}
+        <Avatar
+          name={card.actorName}
+          {...(card.actorAvatarUrl === null ? {} : { src: card.actorAvatarUrl })}
+          size="small"
         />
-      ) : null}
-      <Avatar
-        name={card.actorName}
-        {...(card.actorAvatarUrl === null ? {} : { src: card.actorAvatarUrl })}
-        size="small"
-      />
-      <div className="min-w-0 flex-1">
-        <p data-testid="inbox-card-summary" className="text-body text-(--text)">
-          {card.summary}
-        </p>
-        <p className="text-caption text-(--text-muted)">
-          <span data-testid="inbox-card-reference" className="font-[family-name:var(--font-mono)]">
-            {card.reference}
-          </span>
-          {" · "}
-          <span data-testid="inbox-card-title">{card.title}</span>
-        </p>
-        <p className="text-caption text-(--text-muted)">
-          <span data-testid="inbox-card-actor">{card.actorName}</span>
-          {" · "}
-          <CardTime card={card} />
-        </p>
-      </div>
+        <div className="min-w-0 flex-1">
+          <p data-testid="inbox-card-summary" className="text-body text-(--text)">
+            {card.summary}
+          </p>
+          <p className="text-caption text-(--text-muted)">
+            <span data-testid="inbox-card-reference" className="font-[family-name:var(--font-mono)]">
+              {card.reference}
+            </span>
+            {" · "}
+            <span data-testid="inbox-card-title">{card.title}</span>
+          </p>
+          <p className="text-caption text-(--text-muted)">
+            <span data-testid="inbox-card-actor">{card.actorName}</span>
+            {" · "}
+            <CardTime card={card} />
+          </p>
+        </div>
+      </button>
       {actions === undefined ? null : <ActionRow card={card} actions={actions} />}
-    </article>
+    </div>
   );
 }

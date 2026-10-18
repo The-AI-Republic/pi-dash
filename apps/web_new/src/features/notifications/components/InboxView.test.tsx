@@ -17,7 +17,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { ROLE_ADMIN, ROLE_GUEST } from "../../../core/session/index.js";
 import { sessionKeys } from "../../../core/session/queries.js";
-import { notifySuccess } from "../../../shared/shell/index.js";
+import { FULL_SCREEN_PORTAL_ID, notifySuccess } from "../../../shared/shell/index.js";
 import { notificationKeys } from "../api/keys.js";
 import {
   MARKED_ARCHIVED_TITLE,
@@ -115,6 +115,10 @@ interface ViewOptions {
   unread?: typeof UNREAD | null;
   defaultPage?: NotificationListResponse | null;
   mentionsPage?: NotificationListResponse | null;
+  nextPage?: NotificationListResponse | null;
+  nextPageDelayMs?: number;
+  failFirstRead?: boolean;
+  firstReadFailureDelayMs?: number;
   /**
    * When true the transport answers list/unread reads from the given
    * pages (nothing is seeded); otherwise the given data is seeded and
@@ -123,27 +127,64 @@ interface ViewOptions {
   serveReads?: boolean;
 }
 
-function renderView(options: ViewOptions = {}): { calls: string[] } {
+function renderView(options: ViewOptions = {}): {
+  calls: string[];
+  firstReadDidFail: () => boolean;
+  unmount: () => void;
+} {
+  if (document.getElementById(FULL_SCREEN_PORTAL_ID) === null) {
+    const portal = document.createElement("div");
+    portal.id = FULL_SCREEN_PORTAL_ID;
+    document.body.appendChild(portal);
+  }
   const {
     role = ROLE_ADMIN,
     seedWorkspace = true,
     unread = UNREAD,
     defaultPage = null,
     mentionsPage = null,
+    nextPage = null,
+    nextPageDelayMs = 0,
+    failFirstRead = false,
+    firstReadFailureDelayMs = 0,
     serveReads = false,
   } = options;
   const calls: string[] = [];
+  let readWrites = 0;
+  let firstReadFailed = false;
   const json = (payload: unknown, url: string) => ({
     status: 200,
     url,
     headers: { get: () => null },
     text: async () => JSON.stringify(payload),
   });
-  createAppClient("https://api.test", (async (url: string) => {
+  createAppClient("https://api.test", (async (url: string, init: { method?: string }) => {
     calls.push(url);
     if (!serveReads) return new Promise<never>(() => {});
+    if (url.endsWith("/auth/get-csrf-token/")) return json({ csrf_token: "csrf" }, url);
+    if (init.method === "POST" && /\/users\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname)) {
+      readWrites += 1;
+      if (failFirstRead && readWrites === 1) {
+        if (firstReadFailureDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, firstReadFailureDelayMs));
+        }
+        firstReadFailed = true;
+        return { ...json({ detail: "read failed" }, url), status: 500 };
+      }
+      const notificationId = new URL(url).pathname.split("/").at(-3) ?? row().id;
+      return json(row({ id: notificationId, read_at: "2026-10-17T12:30:00Z" }), url);
+    }
+    if (url.includes("/project-roles/")) return json({ [PROJECT_ID]: ROLE_ADMIN }, url);
+    if (url.includes(`/projects/${PROJECT_ID}/issues/${ISSUE_ID}/`)) {
+      return { ...json({ detail: "not hydrated in this integration fixture" }, url), status: 404 };
+    }
     if (url.includes("/users/notifications/unread/")) return json(unread ?? UNREAD, url);
     if (url.includes("/users/notifications")) {
+      const cursor = new URL(url).searchParams.get("cursor");
+      if (cursor !== "300:0:0" && nextPage !== null) {
+        if (nextPageDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, nextPageDelayMs));
+        return json(nextPage, url);
+      }
       const body = url.includes("mentioned=true") ? (mentionsPage ?? page([])) : (defaultPage ?? page([]));
       return json(body, url);
     }
@@ -159,17 +200,25 @@ function renderView(options: ViewOptions = {}): { calls: string[] } {
     }
     if (defaultPage !== null) {
       queryClient.setQueryData(notificationKeys.list("acme", notificationTabQuery("all")), defaultPage);
+      queryClient.setQueryData(notificationKeys.pages("acme", notificationTabQuery("all")), {
+        pages: [defaultPage],
+        pageParams: ["300:0:0"],
+      });
     }
     if (mentionsPage !== null) {
       queryClient.setQueryData(notificationKeys.list("acme", notificationTabQuery("mentions")), mentionsPage);
+      queryClient.setQueryData(notificationKeys.pages("acme", notificationTabQuery("mentions")), {
+        pages: [mentionsPage],
+        pageParams: ["300:0:0"],
+      });
     }
   }
-  render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <InboxView workspaceSlug="acme" />
     </QueryClientProvider>
   );
-  return { calls };
+  return { calls, firstReadDidFail: () => firstReadFailed, unmount: rendered.unmount };
 }
 
 function cardTitles(): string[] {
@@ -207,6 +256,9 @@ describe("InboxView", () => {
     expect(screen.getByRole("region", { name: "Notifications" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Details" })).toBeInTheDocument();
     expect(screen.getByTestId("inbox-detail-host")).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("inbox-detail-pane")).getByTestId("notifications-detail-placeholder")
+    ).toBeInTheDocument();
     await waitFor(() => expect(document.title).toContain("Acme"));
     expect(document.title).toContain("Inbox");
 
@@ -259,6 +311,7 @@ describe("InboxView", () => {
     expect(params[0]?.get("per_page")).toBe("300");
     expect(params[0]?.get("cursor")).toBe("300:0:0");
     expect(params[1]?.get("mentioned")).toBe("true");
+    expect(screen.getByTestId("notifications-detail-placeholder")).toBeInTheDocument();
   });
 
   it("talks only to the list and unread endpoints on entry (NTF-030)", async () => {
@@ -279,16 +332,130 @@ describe("InboxView", () => {
     expect(cardTitles()).toEqual(["Ship it"]);
   });
 
-  it("shows no cards while the list loads", () => {
+  it("shows skeleton rows while the first page loads", () => {
     renderView({ unread: UNREAD });
     expect(screen.getByRole("region", { name: "Notifications" })).toBeInTheDocument();
     expect(screen.queryByTestId("inbox-card")).not.toBeInTheDocument();
+    expect(screen.getByTestId("notifications-skeleton")).toHaveAccessibleName("Loading notifications");
     expect(within(screen.getByTestId("inbox-tab-all")).getByText("3")).toBeInTheDocument();
   });
 
-  it("shows no cards when the stream is empty", () => {
+  it("shows the full-stream empty illustration when the stream is empty", () => {
     renderView({ defaultPage: page([]), unread: UNREAD });
     expect(screen.queryByTestId("inbox-card")).not.toBeInTheDocument();
+    expect(screen.getByTestId("notifications-empty-state")).toHaveAttribute("data-empty-tab", "all");
+    expect(screen.getByText("Nothing has arrived")).toBeInTheDocument();
+    expect(screen.queryByTestId("notifications-skeleton")).not.toBeInTheDocument();
+  });
+
+  it("shows a distinct mentions empty state after switching tabs", async () => {
+    const user = userEvent.setup();
+    renderView({ serveReads: true, defaultPage: page([]), mentionsPage: page([]) });
+    await screen.findByText("Nothing has arrived");
+    await user.click(screen.getByTestId("inbox-tab-mentions"));
+    expect(await screen.findByText("No mentions waiting")).toBeInTheDocument();
+    expect(screen.getByTestId("notifications-empty-state")).toHaveAttribute("data-empty-tab", "mentions");
+  });
+
+  it("loads and appends an older page through the explicit busy control", async () => {
+    const user = userEvent.setup();
+    const first = page([
+      row({
+        data: {
+          issue: { id: ISSUE_ID, name: "Newest story", identifier: "ENG", sequence_id: 12 },
+          issue_activity: { verb: "created", field: "comment", issue_comment: "new" },
+        },
+      }),
+    ]);
+    first.next_page_results = true;
+    first.next_cursor = "300:300:1";
+    const older = page([
+      row({
+        id: "823e4567-e89b-12d3-a456-426614174007",
+        data: {
+          issue: { id: ISSUE_ID, name: "Older story", identifier: "ENG", sequence_id: 11 },
+          issue_activity: { verb: "created", field: "comment", issue_comment: "old" },
+        },
+      }),
+    ]);
+    renderView({ serveReads: true, defaultPage: first, nextPage: older, nextPageDelayMs: 50 });
+    expect(await screen.findByText("Newest story")).toBeInTheDocument();
+    const control = screen.getByTestId("notifications-next-page");
+    await user.click(control);
+    expect(control).toHaveTextContent("Loading older notifications");
+    expect(await screen.findByText("Older story")).toBeInTheDocument();
+    expect(cardTitles()).toEqual(["Newest story", "Older story"]);
+    expect(screen.queryByTestId("notifications-next-page")).not.toBeInTheDocument();
+  });
+
+  it("selects locally, marks an unread card once, closes, and remounts unselected", async () => {
+    const user = userEvent.setup();
+    const first = renderView({ serveReads: true, defaultPage: page([row()]) });
+    const card = await screen.findByTestId("inbox-card");
+    const openButton = within(card).getByTestId("inbox-card-select");
+    expect(screen.getByTestId("notifications-detail-placeholder")).toBeInTheDocument();
+    await user.click(openButton);
+    await waitFor(() => expect(card).toHaveAttribute("data-unread", "false"));
+    await waitFor(() =>
+      expect(screen.getByTestId("notifications-detail-pane")).toHaveAttribute("data-detail-variant", "peek")
+    );
+    const pane = screen.getByTestId("inbox-detail-pane");
+    expect(within(pane).getByTestId("notifications-detail-summary")).toHaveTextContent(
+      "Ada Lovelace commented: looks good"
+    );
+    expect(within(pane).getByText("ENG-12")).toBeInTheDocument();
+    expect(within(pane).getByText("Ship it")).toBeInTheDocument();
+    expect(within(pane).getByTestId("notifications-detail-close")).toBeInTheDocument();
+    expect(screen.getByTestId("inbox-list-pane")).toHaveClass("hidden", "md:flex");
+    expect(first.calls.filter((url) => /\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname))).toHaveLength(1);
+
+    await user.click(within(pane).getByTestId("notifications-detail-close"));
+    expect(screen.getByTestId("notifications-detail-placeholder")).toBeInTheDocument();
+    await user.click(openButton);
+    await waitFor(() =>
+      expect(first.calls.filter((url) => /\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname))).toHaveLength(1)
+    );
+    expect(window.location.search).toBe("");
+
+    first.unmount();
+    renderView({ serveReads: true, defaultPage: page([row({ read_at: "2026-10-17T12:30:00Z" })]) });
+    expect(await screen.findByTestId("inbox-card")).toBeInTheDocument();
+    expect(screen.getByTestId("notifications-detail-placeholder")).toBeInTheDocument();
+  });
+
+  it("allows a failed first-open read to retry", async () => {
+    const user = userEvent.setup();
+    const { calls } = renderView({ serveReads: true, defaultPage: page([row()]), failFirstRead: true });
+    const card = await screen.findByTestId("inbox-card");
+    await user.click(within(card).getByTestId("inbox-card-select"));
+    await waitFor(() =>
+      expect(calls.filter((url) => /\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname))).toHaveLength(1)
+    );
+    await user.click(within(card).getByTestId("inbox-card-select"));
+    await waitFor(() => expect(card).toHaveAttribute("data-unread", "false"));
+    expect(calls.filter((url) => /\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname))).toHaveLength(2);
+  });
+
+  it("allows an earlier failed read to retry after another card starts reading", async () => {
+    const user = userEvent.setup();
+    const second = row({ id: "823e4567-e89b-12d3-a456-426614174007" });
+    const { calls, firstReadDidFail } = renderView({
+      serveReads: true,
+      defaultPage: page([row(), second]),
+      failFirstRead: true,
+      firstReadFailureDelayMs: 50,
+    });
+    const [firstCard, secondCard] = await screen.findAllByTestId("inbox-card");
+    if (firstCard === undefined || secondCard === undefined) throw new Error("expected two notification cards");
+
+    await user.click(within(firstCard).getByTestId("inbox-card-select"));
+    await user.click(within(secondCard).getByTestId("inbox-card-select"));
+    await waitFor(() => expect(firstReadDidFail()).toBe(true));
+    await user.click(within(firstCard).getByTestId("inbox-card-select"));
+
+    await waitFor(() =>
+      expect(calls.filter((url) => /\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname))).toHaveLength(3)
+    );
   });
 
   it("hides the badges while the totals are unknown", () => {

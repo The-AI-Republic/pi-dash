@@ -272,6 +272,8 @@ describe("resolveNotificationCard", () => {
   it("resolves a comment row to its card", () => {
     expect(resolveNotificationCard(row())).toEqual({
       id: ROW_ID,
+      issueId: ISSUE_ID,
+      projectId: PROJECT_ID,
       actorName: ACTOR,
       actorAvatarUrl: "https://cdn.test/ada.png",
       summary: "Ada Lovelace commented: looks good",
@@ -279,6 +281,8 @@ describe("resolveNotificationCard", () => {
       title: "Ship it",
       createdAt: "2026-10-16T12:00:00Z",
       unread: true,
+      mentioned: false,
+      triage: false,
       archivedAt: null,
       snoozedTill: null,
       streamFlags: {
@@ -306,6 +310,7 @@ describe("resolveNotificationCard", () => {
       is_intake_issue: false,
       is_mentioned_notification: true,
     });
+    expect(card?.mentioned).toBe(true);
   });
 
   it("marks cards with a read timestamp as read", () => {
@@ -318,7 +323,17 @@ describe("resolveNotificationCard", () => {
     ["null flag", null, "Ada Lovelace commented: looks good"],
     ["absent flag", undefined, "Ada Lovelace commented: looks good"],
   ])("summarizes %s", (_label, flag, expected) => {
-    expect(resolveNotificationCard(row({ is_mentioned_notification: flag }))?.summary).toBe(expected);
+    const card = resolveNotificationCard(row({ is_mentioned_notification: flag }));
+    expect(card?.summary).toBe(expected);
+    expect(card?.mentioned).toBe(flag === true);
+  });
+
+  it.each([
+    ["inbox row", { is_inbox_issue: true }, true],
+    ["intake row", { is_intake_issue: true }, true],
+    ["ordinary row", { is_inbox_issue: false, is_intake_issue: false }, false],
+  ])("classifies an %s for the detail host", (_label, overrides, expected) => {
+    expect(resolveNotificationCard(row(overrides))?.triage).toBe(expected);
   });
 
   it("strips markup from description excerpts", () => {
@@ -360,6 +375,14 @@ describe("resolveNotificationCard", () => {
     ["non-object payload", {}, "oops"],
     ["missing item", {}, { issue_activity: { verb: "created", field: "comment" } }],
     ["non-object item", {}, { issue: "ENG-12", issue_activity: { verb: "created", field: "comment" } }],
+    [
+      "item without an id",
+      {},
+      {
+        issue: { name: "Ship it", identifier: "ENG", sequence_id: 12 },
+        issue_activity: { verb: "created", field: "comment" },
+      },
+    ],
     [
       "unnamed item",
       {},

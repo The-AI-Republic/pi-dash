@@ -25,6 +25,12 @@ describe("notificationListQueryFromKey", () => {
     }
   });
 
+  it("rebuilds the cursor stream's query from its pages key", () => {
+    expect(
+      notificationListQueryFromKey(WS, notificationKeys.pages(WS, { snoozed: false, archived: false, type: "comment" }))
+    ).toEqual({ snoozed: false, archived: false, type: "comment" });
+  });
+
   it("rejects keys that are not list keys of this workspace", () => {
     expect(notificationListQueryFromKey(WS, notificationKeys.unread(WS))).toBeNull();
     expect(

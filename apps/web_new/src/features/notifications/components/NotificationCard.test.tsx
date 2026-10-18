@@ -14,6 +14,8 @@ import { NotificationCard, type NotificationCardActions } from "./NotificationCa
 function card(overrides: Partial<NotificationCardData> = {}): NotificationCardData {
   return {
     id: "523e4567-e89b-12d3-a456-426614174004",
+    issueId: "123e4567-e89b-12d3-a456-426614174000",
+    projectId: "223e4567-e89b-12d3-a456-426614174001",
     actorName: "Ada Lovelace",
     actorAvatarUrl: "https://cdn.test/ada.png",
     summary: "Ada Lovelace commented: looks good",
@@ -21,6 +23,8 @@ function card(overrides: Partial<NotificationCardData> = {}): NotificationCardDa
     title: "Ship it",
     createdAt: new Date(Date.now() - 30_000).toISOString(),
     unread: true,
+    mentioned: false,
+    triage: false,
     archivedAt: null,
     snoozedTill: null,
     streamFlags: { is_inbox_issue: true, is_intake_issue: false, is_mentioned_notification: false },
@@ -62,6 +66,25 @@ describe("NotificationCard", () => {
   it("shows the avatar image when one is set", () => {
     const { container } = render(<NotificationCard card={card()} />);
     expect(container.querySelector('img[src="https://cdn.test/ada.png"]')).toBeInTheDocument();
+  });
+
+  it("selects through its native button and reports the selected state", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(<NotificationCard card={card()} selected onSelect={onSelect} />);
+    const wrapper = screen.getByTestId("inbox-card");
+    expect(wrapper).toHaveAttribute("data-selected", "true");
+    const button = screen.getByTestId("inbox-card-select");
+    expect(button).toHaveAttribute("aria-pressed", "true");
+    await user.click(button);
+    expect(onSelect).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the selection button and the action row as sibling controls", () => {
+    render(<NotificationCard card={card()} actions={cardActions()} />);
+    const row = screen.getByTestId("inbox-card-actions");
+    expect(row).not.toContainElement(screen.getByTestId("inbox-card-select"));
+    expect(screen.getByTestId("inbox-card-select")).toHaveAttribute("aria-pressed", "false");
   });
 
   it("keeps the action row hidden at rest and reveals it on this card's hover only", () => {
