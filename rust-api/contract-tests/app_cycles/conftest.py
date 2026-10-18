@@ -79,7 +79,10 @@ def _build_tenant(seed: Seed, *, role: int = ADMIN) -> dict:
     user = seed.user(email=f"{tag}@contract.test")
     ws = seed.workspace(user["id"], slug=tag)
     seed.member(ws["id"], user["id"], role=role)
-    project_id = seed.project(ws["id"])
+    # A deterministic UPPER identifier so the identifier-form project_id
+    # routes (`_rewrite_project_kwarg`) are exercised, not just the UUID.
+    identifier = f"CT1186{uuid.uuid4().hex[:6].upper()}"
+    project_id = seed.project(ws["id"], identifier=identifier)
     seed.project_member(project_id, ws["id"], user["id"], role=role)
     state_id = seed.state(project_id, ws["id"])
     cycle = _create_cycle(
@@ -87,7 +90,8 @@ def _build_tenant(seed: Seed, *, role: int = ADMIN) -> dict:
         owner_id=user["id"],
     )
     return {
-        "user": user, "workspace": ws, "project": {"id": project_id},
+        "user": user, "workspace": ws,
+        "project": {"id": project_id, "identifier": identifier},
         "state": {"id": state_id}, "cycle": cycle, "role": role,
         "seq": [5000], "seed": seed,
         "client": _client_for(seed, user),
@@ -105,14 +109,17 @@ def create_issue_for(tenant: dict, name: str = "Contract issue") -> dict:
     )
 
 
-def create_cycle_for(tenant: dict, name: str = "Disposable") -> dict:
-    """Seed a spare cycle in the tenant's project straight into Postgres."""
+def create_cycle_for(tenant: dict, name: str = "Disposable", **kw) -> dict:
+    """Seed a spare cycle in the tenant's project straight into Postgres.
+
+    Extra keyword args (``start_date`` / ``end_date`` / ``archived_at``)
+    pass through to the row factory.
+    """
     return _create_cycle(
         tenant["seed"], workspace_id=tenant["workspace"]["id"],
         project_id=tenant["project"]["id"], owner_id=tenant["user"]["id"],
-        name=name,
+        name=name, **kw,
     )
-
 
 @pytest.fixture()
 def make_tenant():

@@ -125,6 +125,10 @@ pub const CYCLE_NOT_FOUND_BODY: &str = r#"{"error":"Cycle not found"}"#;
 /// ORM `ValidationError` 400 (`app/views/base.py:126-130`): a non-UUID
 /// `project_id` reaches the view through the `<str:>` converter.
 pub const VALIDATION_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
+/// `Project.resolve` miss on a non-UUID identifier
+/// (`db/models/project.py:213-217`) — `_rewrite_project_kwarg`'s
+/// `Http404("Project not found")`.
+pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s generic 500 branch.
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
@@ -134,6 +138,7 @@ pub enum Denial {
     Forbidden,
     NotFound,
     BadValidation,
+    ProjectNotFound,
     ServerError,
 }
 
@@ -144,6 +149,7 @@ impl Denial {
             Denial::Forbidden => (StatusCode::FORBIDDEN, FORBIDDEN_BODY.to_owned()),
             Denial::NotFound => (StatusCode::NOT_FOUND, CYCLE_NOT_FOUND_BODY.to_owned()),
             Denial::BadValidation => (StatusCode::BAD_REQUEST, VALIDATION_BODY.to_owned()),
+            Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -196,6 +202,45 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Denial> {
         .pools()
         .map(|pools| pools.primary())
         .ok_or(Denial::ServerError)
+}
+
+/// Python `str.strip()` membership (`db/models/project.py:210`): Rust
+/// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
+/// `str.strip` against `char::is_whitespace` over all code points —
+/// those four are the only differences).
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
+/// Normalize a non-UUID identifier for the equality lookup
+/// (`db/models/project.py:210`): `str(value).strip().upper()`.
+fn normalize_resolve_identifier(raw: &str) -> String {
+    raw.trim_matches(is_py_strip_ws).to_uppercase()
+}
+
+/// `_rewrite_project_kwarg` (`app/views/base.py:49-80`): authenticated
+/// callers only (anonymous already 401'd); UUIDs pass through unchecked;
+/// other identifiers resolve `UPPER(identifier)` in the workspace, else
+/// `Http404("Project not found")` (`db/models/project.py:192-219`).
+async fn resolve_project_id(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    raw: &str,
+) -> Result<uuid::Uuid, Denial> {
+    if let Ok(id) = raw.parse::<uuid::Uuid>() {
+        return Ok(id);
+    }
+    let upper = normalize_resolve_identifier(raw);
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
+           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
+    )
+    .bind(slug)
+    .bind(upper)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
 }
 
 /// Membership facts for the GUEST progress gate, resolved with the same
@@ -391,9 +436,10 @@ async fn progress_get(
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
     let user_id = resolved.id;
-    // `<str:project_id>` reaches the view; the ORM UUID validation
-    // raises `ValidationError` -> 400 (`app/views/base.py:126-130`).
-    let project_id: uuid::Uuid = project_raw.parse().map_err(|_| Denial::BadValidation)?;
+    // `_rewrite_project_kwarg` resolves a non-UUID project_id before the
+    // permission gate (`app/views/base.py:202-204`): a matching identifier
+    // becomes the project UUID, a miss is a 404 (`Project not found`).
+    let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     let (workspace_role, project_role) = membership(&pool, &slug, &project_id, &user_id).await?;
     let row = gate_for("GET", PROGRESS_PATH).expect("progress route must have a gate");
     let facts = gate_facts(&slug, workspace_role, project_role, user_id);
