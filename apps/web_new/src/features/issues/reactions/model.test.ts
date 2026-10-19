@@ -22,20 +22,23 @@ const ADA = "523e4567-e89b-12d3-a456-426614174004";
 const BOB = "623e4567-e89b-12d3-a456-426614174005";
 
 describe("reaction keys", () => {
-  it("encodes an emoji as its hexadecimal code points", () => {
-    expect(emojiToReaction("👍")).toBe("1f44d");
-    expect(emojiToReaction("❤️")).toBe("2764-fe0f");
+  it("encodes an emoji as its decimal code points, the stored contract", () => {
+    expect(emojiToReaction("👍")).toBe("128077");
+    expect(emojiToReaction("🎉")).toBe("127881");
+    expect(emojiToReaction("❤️")).toBe("10084-65039");
     expect(emojiToReaction("")).toBe("");
   });
 
-  it("decodes a key back to the character", () => {
-    expect(reactionToEmoji("1f44d")).toBe("👍");
-    expect(reactionToEmoji("2764-fe0f")).toBe("❤️");
+  it("decodes a stored decimal key back to the character", () => {
+    expect(reactionToEmoji("128077")).toBe("👍");
+    expect(reactionToEmoji("10084-65039")).toBe("❤️");
   });
 
   it("shows an unknown key verbatim rather than throwing", () => {
     expect(reactionToEmoji("thumbsup")).toBe("thumbsup");
-    expect(reactionToEmoji("110000")).toBe("110000");
+    expect(reactionToEmoji("1114112")).toBe("1114112");
+    expect(reactionToEmoji("128077-x")).toBe("128077-x");
+    expect(reactionToEmoji("-1")).toBe("-1");
     expect(reactionToEmoji("")).toBe("");
   });
 
@@ -47,16 +50,16 @@ describe("reaction keys", () => {
 describe("reaction rows", () => {
   it("reads the reactor name from the issue row projection", () => {
     const rows = issueReactionRows([
-      { id: "r1", actor: ADA, reaction: "1f44d", actor_detail: { display_name: "Ada L" } },
-      { id: "r2", actor: BOB, reaction: "1f44d", actor_detail: null },
+      { id: "r1", actor: ADA, reaction: "128077", actor_detail: { display_name: "Ada L" } },
+      { id: "r2", actor: BOB, reaction: "128077", actor_detail: null },
     ]);
     expect(rows.map((row) => row.displayName)).toEqual(["Ada L", "Unknown member"]);
   });
 
   it("reads the comment row name and replaces a blank one", () => {
     const rows = commentReactionRows([
-      { id: "r1", actor: ADA, reaction: "1f44d", display_name: " Ada L " },
-      { id: "r2", actor: BOB, reaction: "1f44d", display_name: "   " },
+      { id: "r1", actor: ADA, reaction: "128077", display_name: " Ada L " },
+      { id: "r2", actor: BOB, reaction: "128077", display_name: "   " },
     ]);
     expect(rows.map((row) => row.displayName)).toEqual(["Ada L", "Unknown member"]);
   });
@@ -64,9 +67,9 @@ describe("reaction rows", () => {
 
 describe("chip grouping", () => {
   const rows = [
-    { id: "r1", actor: ADA, reaction: "1f44d", displayName: "Ada L" },
-    { id: "r2", actor: BOB, reaction: "1f44d", displayName: "Bob B" },
-    { id: "r3", actor: BOB, reaction: "1f389", displayName: "Bob B" },
+    { id: "r1", actor: ADA, reaction: "128077", displayName: "Ada L" },
+    { id: "r2", actor: BOB, reaction: "128077", displayName: "Bob B" },
+    { id: "r3", actor: BOB, reaction: "127881", displayName: "Bob B" },
   ];
 
   it("groups by key in first-seen order with a count and names", () => {
@@ -84,9 +87,9 @@ describe("chip grouping", () => {
   });
 
   it("knows whether the viewer already picked a key", () => {
-    expect(viewerHasReaction(rows, ADA, "1f44d")).toBe(true);
-    expect(viewerHasReaction(rows, ADA, "1f389")).toBe(false);
-    expect(viewerHasReaction(rows, null, "1f44d")).toBe(false);
+    expect(viewerHasReaction(rows, ADA, "128077")).toBe(true);
+    expect(viewerHasReaction(rows, ADA, "127881")).toBe(false);
+    expect(viewerHasReaction(rows, null, "128077")).toBe(false);
   });
 });
 

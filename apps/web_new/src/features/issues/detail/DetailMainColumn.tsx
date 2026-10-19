@@ -88,7 +88,7 @@ export function DetailMainColumn({
       <div className="flex items-start justify-between gap-(--space-4)">
         <div className="flex min-w-0 flex-1 flex-wrap items-start gap-(--space-4)">
           {belowDescription}
-          <IssueReactions workspaceSlug={workspaceSlug} projectId={projectId} issueId={issue.id} disabled={readOnly} />
+          <IssueReactions workspaceSlug={workspaceSlug} projectId={projectId} issueId={issue.id} disabled={archived} />
         </div>
         {editable ? (
           <DescriptionHistory

@@ -17,7 +17,7 @@ export interface ReactionBarProps {
   chips: readonly ReactionChip[];
   /** Chosen emoji or chip activates a toggle. */
   onToggle: (code: string, action: "add" | "remove") => void;
-  /** Archived or otherwise frozen surfaces drop both chips and the button. */
+  /** Frozen surfaces keep the chips but drop the add button and both toggles. */
   disabled?: boolean;
   className?: string;
   /** Accessible name for the add trigger. */
@@ -45,7 +45,9 @@ export function ReactionBar({
             type="button"
             aria-label={`${chip.emoji} reaction, ${chip.count}`}
             aria-pressed={chip.reacted}
+            aria-disabled={disabled || undefined}
             onClick={() => {
+              if (disabled) return;
               onToggle(chip.code, reactionAction(chip));
             }}
             className={cn(

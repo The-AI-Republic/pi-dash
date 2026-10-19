@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Issue reaction row (ISS-204): server chips, the viewer highlight, the
-// add picker and withdrawal, and the archived surface that drops it.
+// add picker and withdrawal, and the archived surface that keeps the
+// chips while dropping the add control and every toggle.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -57,7 +58,7 @@ function reaction(overrides: Partial<IssueReaction> = {}): IssueReaction {
       is_bot: false,
     },
     issue: ISSUE,
-    reaction: "1f44d",
+    reaction: "128077",
     project: PROJECT,
     workspace: "423e4567-e89b-12d3-a456-426614174003",
     created_at: "2026-10-16T10:00:00Z",
@@ -114,11 +115,22 @@ afterEach(() => {
 });
 
 describe("IssueReactions", () => {
-  it("renders nothing on an archived issue and reads no reactions", () => {
-    const calls = stubTransport(() => ({ status: 200, body: [] }));
+  it("keeps the chips but drops the add control on an archived issue", async () => {
+    const calls = stubTransport(() => ({ status: 200, body: [reaction()] }));
     renderRow({ disabled: true });
-    expect(screen.queryByRole("region", { name: ISSUE_REACTIONS_LABEL })).not.toBeInTheDocument();
-    expect(calls.filter((call) => call.url.includes("/reactions/"))).toEqual([]);
+    expect(screen.getByRole("region", { name: ISSUE_REACTIONS_LABEL })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "👍 reaction, 1" })).toHaveAttribute("aria-disabled", "true");
+    expect(screen.queryByRole("button", { name: EMOJI_PICKER_LABEL })).not.toBeInTheDocument();
+    expect(calls.some((call) => call.url.includes("/reactions/"))).toBe(true);
+  });
+
+  it("does not toggle a chip on an archived issue", async () => {
+    const user = userEvent.setup();
+    const calls = stubTransport(() => ({ status: 200, body: [reaction()] }));
+    vi.mocked(notifySuccess).mockClear();
+    renderRow({ disabled: true });
+    await user.click(await screen.findByRole("button", { name: "👍 reaction, 1" }));
+    expect(calls.some((call) => call.method === "DELETE" || call.method === "POST")).toBe(false);
   });
 
   it("shows the server chips with the viewer's own highlighted", async () => {
@@ -144,7 +156,7 @@ describe("IssueReactions", () => {
   it("posts the picked emoji against the issue and notices it", async () => {
     const user = userEvent.setup();
     const calls = stubTransport((call) =>
-      call.method === "POST" ? { status: 201, body: reaction({ reaction: "1f440" }) } : { status: 200, body: [] }
+      call.method === "POST" ? { status: 201, body: reaction({ reaction: "128064" }) } : { status: 200, body: [] }
     );
     renderRow();
     await user.click(screen.getByRole("button", { name: EMOJI_PICKER_LABEL }));
@@ -152,7 +164,7 @@ describe("IssueReactions", () => {
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(REACTION_CREATED_TITLE));
     const post = calls.find((call) => call.method === "POST");
     expect(post?.url).toContain(`/issues/${ISSUE}/reactions/`);
-    expect(post?.body).toBe(JSON.stringify({ reaction: "1f440" }));
+    expect(post?.body).toBe(JSON.stringify({ reaction: "128064" }));
   });
 
   it("withdraws the viewer's reaction from a highlighted chip", async () => {
@@ -164,7 +176,7 @@ describe("IssueReactions", () => {
     await user.click(await screen.findByRole("button", { name: "👍 reaction, 1" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(REACTION_REMOVED_TITLE));
     const del = calls.find((call) => call.method === "DELETE");
-    expect(del?.url).toContain(`/issues/${ISSUE}/reactions/1f44d/`);
+    expect(del?.url).toContain(`/issues/${ISSUE}/reactions/128077/`);
   });
 
   it("adds from a chip someone else picked instead of withdrawing", async () => {

@@ -14,12 +14,12 @@ import { REACTED_CHIP_CLASS, ReactionBar } from "./ReactionBar.js";
 import type { ReactionChip } from "./model.js";
 
 function chip(overrides: Partial<ReactionChip> = {}): ReactionChip {
-  return { code: "1f44d", emoji: "👍", count: 2, names: ["Ada L", "Bob B"], reacted: false, ...overrides };
+  return { code: "128077", emoji: "👍", count: 2, names: ["Ada L", "Bob B"], reacted: false, ...overrides };
 }
 
 describe("ReactionBar", () => {
   it("shows one chip per emoji with its count", () => {
-    render(<ReactionBar chips={[chip(), chip({ code: "1f389", emoji: "🎉", count: 1 })]} onToggle={vi.fn()} />);
+    render(<ReactionBar chips={[chip(), chip({ code: "127881", emoji: "🎉", count: 1 })]} onToggle={vi.fn()} />);
     expect(screen.getByRole("button", { name: "👍 reaction, 2" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "🎉 reaction, 1" })).toBeInTheDocument();
   });
@@ -43,14 +43,14 @@ describe("ReactionBar", () => {
     const onToggle = vi.fn();
     render(
       <ReactionBar
-        chips={[chip(), chip({ code: "1f389", emoji: "🎉", count: 1, reacted: true })]}
+        chips={[chip(), chip({ code: "127881", emoji: "🎉", count: 1, reacted: true })]}
         onToggle={onToggle}
       />
     );
     await user.click(screen.getByRole("button", { name: "👍 reaction, 2" }));
     await user.click(screen.getByRole("button", { name: "🎉 reaction, 1" }));
-    expect(onToggle).toHaveBeenNthCalledWith(1, "1f44d", "add");
-    expect(onToggle).toHaveBeenNthCalledWith(2, "1f389", "remove");
+    expect(onToggle).toHaveBeenNthCalledWith(1, "128077", "add");
+    expect(onToggle).toHaveBeenNthCalledWith(2, "127881", "remove");
   });
 
   it("keeps the add button beside the chips and hands back a picked emoji", async () => {
@@ -60,13 +60,18 @@ describe("ReactionBar", () => {
     await user.click(screen.getByRole("button", { name: EMOJI_PICKER_LABEL }));
     await user.click(await screen.findByRole("option", { name: "👀" }));
     // The picker hands back the character; the wire key is its code points.
-    expect(onToggle).toHaveBeenCalledWith("1f440", "add");
+    expect(onToggle).toHaveBeenCalledWith("128064", "add");
   });
 
-  it("drops both the chips' toggle and the add button when disabled", () => {
-    render(<ReactionBar chips={[chip()]} onToggle={vi.fn()} disabled />);
+  it("keeps the chips visible but inert, and drops the add button, when disabled", async () => {
+    const user = userEvent.setup();
+    const onToggle = vi.fn();
+    render(<ReactionBar chips={[chip()]} onToggle={onToggle} disabled />);
     expect(screen.queryByRole("button", { name: EMOJI_PICKER_LABEL })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "👍 reaction, 2" })).toBeInTheDocument();
+    const frozen = screen.getByRole("button", { name: "👍 reaction, 2" });
+    expect(frozen).toHaveAttribute("aria-disabled", "true");
+    await user.click(frozen);
+    expect(onToggle).not.toHaveBeenCalled();
   });
 
   it("takes a custom label and class for the row", () => {

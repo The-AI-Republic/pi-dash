@@ -10,6 +10,8 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { EMOJI_PICKER_LABEL } from "../reactions/EmojiPicker.js";
+import { ISSUE_REACTIONS_LABEL } from "../reactions/IssueReactions.js";
 import { DESCRIPTION_LABEL } from "./IssueDescriptionField.js";
 import { TITLE_LABEL } from "./IssueTitleField.js";
 import { DetailMainColumn } from "./DetailMainColumn.js";
@@ -214,6 +216,24 @@ describe("DetailMainColumn", () => {
     expect(screen.queryByRole("textbox", { name: TITLE_LABEL })).not.toBeInTheDocument();
     expect(descriptionView()).toHaveTextContent("Current words");
     expect(screen.queryByRole("button", { name: /Edited by/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps the reaction row available to a guest who cannot edit", () => {
+    renderColumn({ editable: false });
+    expect(screen.getByRole("region", { name: ISSUE_REACTIONS_LABEL })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: EMOJI_PICKER_LABEL })).toBeEnabled();
+  });
+
+  it("keeps the reaction row available on a synced issue", () => {
+    renderColumn({ issue: issueFixture({ is_synced: true }) });
+    expect(screen.getByRole("region", { name: ISSUE_REACTIONS_LABEL })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: EMOJI_PICKER_LABEL })).toBeEnabled();
+  });
+
+  it("leaves the reaction row on an archived issue without the add control", () => {
+    renderColumn({ issue: issueFixture({ archived_at: "2024-03-04T00:00:00Z" }) });
+    expect(screen.getByRole("region", { name: ISSUE_REACTIONS_LABEL })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: EMOJI_PICKER_LABEL })).not.toBeInTheDocument();
   });
 
   it("reads only for synced and archived issues, with restore hidden", async () => {

@@ -54,7 +54,7 @@ function issueReaction(overrides: Partial<IssueReaction> = {}): IssueReaction {
       is_bot: false,
     },
     issue: ISSUE,
-    reaction: "1f44d",
+    reaction: "128077",
     project: PROJECT,
     workspace: "423e4567-e89b-12d3-a456-426614174003",
     created_at: "2026-10-16T10:00:00Z",
@@ -71,7 +71,7 @@ function commentReaction(overrides: Partial<CommentReaction> = {}): CommentReact
     id: "723e4567-e89b-12d3-a456-426614174007",
     actor: ADA,
     comment: COMMENT,
-    reaction: "1f389",
+    reaction: "127881",
     display_name: "Ada L",
     project: PROJECT,
     workspace: "423e4567-e89b-12d3-a456-426614174003",
@@ -173,10 +173,10 @@ describe("useToggleIssueReaction", () => {
     const { queryClient, wrapper } = harness();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(() => useToggleIssueReaction(SCOPE), { wrapper });
-    await result.current.mutateAsync({ code: "1f44d", action: "add" });
+    await result.current.mutateAsync({ code: "128077", action: "add" });
     const post = calls.find((call) => call.method === "POST");
     expect(post?.url).toContain(`/issues/${ISSUE}/reactions/`);
-    expect(post?.body).toBe(JSON.stringify({ reaction: "1f44d" }));
+    expect(post?.body).toBe(JSON.stringify({ reaction: "128077" }));
     expect(notifySuccess).toHaveBeenCalledWith(REACTION_CREATED_TITLE);
     await waitFor(() =>
       expect(invalidate).toHaveBeenCalledWith({ queryKey: issueKeys.reactions(SLUG, PROJECT, ISSUE) })
@@ -187,9 +187,9 @@ describe("useToggleIssueReaction", () => {
     const { calls } = stubClient(() => ({ status: 204, body: "" }));
     const { wrapper } = harness();
     const { result } = renderHook(() => useToggleIssueReaction(SCOPE), { wrapper });
-    await result.current.mutateAsync({ code: "1f44d", action: "remove" });
+    await result.current.mutateAsync({ code: "128077", action: "remove" });
     const del = calls.find((call) => call.method === "DELETE");
-    expect(del?.url).toContain(`/issues/${ISSUE}/reactions/${encodeURIComponent("1f44d")}/`);
+    expect(del?.url).toContain(`/issues/${ISSUE}/reactions/${encodeURIComponent("128077")}/`);
     expect(notifySuccess).toHaveBeenCalledWith(REACTION_REMOVED_TITLE);
   });
 
@@ -197,7 +197,7 @@ describe("useToggleIssueReaction", () => {
     stubClient(() => ({ status: 403, body: { error: "Not allowed." } }));
     const { wrapper } = harness();
     const { result } = renderHook(() => useToggleIssueReaction(SCOPE), { wrapper });
-    await result.current.mutateAsync({ code: "1f44d", action: "add" }).catch(() => undefined);
+    await result.current.mutateAsync({ code: "128077", action: "add" }).catch(() => undefined);
     expect(notifyError).toHaveBeenCalledWith(REACTION_CREATE_FAILED_TITLE, "Not allowed.");
   });
 
@@ -205,7 +205,7 @@ describe("useToggleIssueReaction", () => {
     stubClient(() => ({ status: 500, body: { error: "server fell over" } }));
     const { wrapper } = harness();
     const { result } = renderHook(() => useToggleIssueReaction(SCOPE), { wrapper });
-    await result.current.mutateAsync({ code: "1f44d", action: "remove" }).catch(() => undefined);
+    await result.current.mutateAsync({ code: "128077", action: "remove" }).catch(() => undefined);
     expect(notifyError).toHaveBeenCalledWith(REACTION_REMOVE_FAILED_TITLE, "server fell over");
   });
 });
@@ -218,11 +218,11 @@ describe("useToggleCommentReaction", () => {
     const { queryClient, wrapper } = harness();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(() => useToggleCommentReaction(SCOPE, COMMENT), { wrapper });
-    await result.current.mutateAsync({ code: "1f389", action: "add" });
-    await result.current.mutateAsync({ code: "1f389", action: "remove" });
+    await result.current.mutateAsync({ code: "127881", action: "add" });
+    await result.current.mutateAsync({ code: "127881", action: "remove" });
     expect(calls.filter((call) => call.method === "POST")[0]?.url).toContain(`/comments/${COMMENT}/reactions/`);
     expect(calls.find((call) => call.method === "DELETE")?.url).toContain(
-      `/comments/${COMMENT}/reactions/${encodeURIComponent("1f389")}/`
+      `/comments/${COMMENT}/reactions/${encodeURIComponent("127881")}/`
     );
     expect(notifySuccess).toHaveBeenNthCalledWith(1, REACTION_CREATED_TITLE);
     expect(notifySuccess).toHaveBeenNthCalledWith(2, REACTION_REMOVED_TITLE);

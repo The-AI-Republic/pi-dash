@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Reaction rules (parity/specs/issues.md §16, ISS-203/204). The API keys
-// a reaction by its decimal code points joined with "-" ("1f44d-1f3fd");
+// a reaction by its decimal code points joined with "-" ("128077-127995");
 // the UI shows the character. These helpers convert both ways, group the
 // flat server rows into one chip per emoji, and decide the toggle the
 // next click performs.
@@ -27,22 +27,21 @@ export const REACTION_CHOICES: readonly string[] = [
   "🫡",
 ];
 
-/** The API key for one emoji character ("👍" -> "1f44d"). */
+/** The API key for one emoji ("👍" -> "128077"). */
 export function emojiToReaction(emoji: string): string {
   return Array.from(emoji)
     .map((character) => character.codePointAt(0))
     .filter((point): point is number => point !== undefined)
-    .map((point) => point.toString(16))
+    .map((point) => String(point))
     .join("-");
 }
 
 /** The character for one API key; an unknown key shows the key itself. */
 export function reactionToEmoji(reaction: string): string {
-  const points = reaction
-    .split("-")
-    .map((part) => Number.parseInt(part, 16))
-    .filter((point) => Number.isInteger(point) && point >= 0);
-  if (points.length === 0 || points.some((point) => point > 0x10ffff)) return reaction;
+  const parts = reaction.split("-");
+  if (parts.some((part) => !/^\d+$/.test(part))) return reaction;
+  const points = parts.map((part) => Number(part));
+  if (points.some((point) => point > 0x10ffff)) return reaction;
   return String.fromCodePoint(...points);
 }
 

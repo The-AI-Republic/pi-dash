@@ -49,7 +49,7 @@ function reaction(overrides: Partial<CommentReaction> = {}): CommentReaction {
     id: "723e4567-e89b-12d3-a456-426614174007",
     actor: ADA,
     comment: COMMENT,
-    reaction: "1f44d",
+    reaction: "128077",
     display_name: "Ada L",
     project: PROJECT,
     workspace: "423e4567-e89b-12d3-a456-426614174003",
@@ -212,7 +212,7 @@ describe("CommentReactions footer", () => {
     await user.click(await screen.findByRole("button", { name: "👍 reaction, 1" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(REACTION_REMOVED_TITLE));
     const del = calls.find((call) => call.method === "DELETE");
-    expect(del?.url).toContain(`/comments/${COMMENT}/reactions/1f44d/`);
+    expect(del?.url).toContain(`/comments/${COMMENT}/reactions/128077/`);
   });
 
   it("adds the viewer's reaction from someone else's chip", async () => {
@@ -242,14 +242,14 @@ describe("CommentReactions footer", () => {
 describe("CommentReactionPicker", () => {
   it("posts the picked emoji against the comment", async () => {
     const user = userEvent.setup();
-    const calls = stubTransport(() => ({ status: 201, body: reaction({ reaction: "1f389" }) }));
+    const calls = stubTransport(() => ({ status: 201, body: reaction({ reaction: "127881" }) }));
     wrap(<CommentReactionPicker workspaceSlug={SLUG} projectId={PROJECT} issueId={ISSUE} commentId={COMMENT} />);
     await user.click(screen.getByRole("button", { name: EMOJI_PICKER_LABEL }));
     await user.click(await screen.findByRole("option", { name: "🎉" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(REACTION_CREATED_TITLE));
     const post = calls.find((call) => call.method === "POST");
     expect(post?.url).toContain(`/comments/${COMMENT}/reactions/`);
-    expect(post?.body).toBe(JSON.stringify({ reaction: "1f389" }));
+    expect(post?.body).toBe(JSON.stringify({ reaction: "127881" }));
   });
 
   it("reports a refused add and re-enables the trigger", async () => {
