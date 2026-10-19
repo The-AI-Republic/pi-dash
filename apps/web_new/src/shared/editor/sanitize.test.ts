@@ -4,7 +4,13 @@
 // See the LICENSE file for details.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { isStoredHtmlEmpty, isStoredHtmlEmptyIgnoring, sanitizeHtml, storedTextContent } from "./sanitize.js";
+import {
+  hasStoredDescriptionContent,
+  isStoredHtmlEmpty,
+  isStoredHtmlEmptyIgnoring,
+  sanitizeHtml,
+  storedTextContent,
+} from "./sanitize.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -83,5 +89,29 @@ describe("isStoredHtmlEmptyIgnoring", () => {
   it("reports empty where no DOM parser exists", () => {
     vi.stubGlobal("DOMParser", undefined);
     expect(isStoredHtmlEmptyIgnoring('<p><img src="/a.png"></p>', ["img"])).toBe(true);
+  });
+});
+
+describe("hasStoredDescriptionContent", () => {
+  it("counts words", () => {
+    expect(hasStoredDescriptionContent("<p>Words</p>")).toBe(true);
+  });
+
+  it("counts an image or a mention with no words (ISS-127)", () => {
+    expect(hasStoredDescriptionContent('<p><img src="/a.png"></p>')).toBe(true);
+    expect(hasStoredDescriptionContent('<p><mention-component id="u-1"></mention-component></p>')).toBe(true);
+    expect(hasStoredDescriptionContent('<p><image-component src="/a.png"></image-component></p>')).toBe(true);
+  });
+
+  it("treats the editor's empty paragraph and blank markup as nothing", () => {
+    expect(hasStoredDescriptionContent("")).toBe(false);
+    expect(hasStoredDescriptionContent("<p></p>")).toBe(false);
+    expect(hasStoredDescriptionContent("<p>   </p>")).toBe(false);
+    expect(hasStoredDescriptionContent("<p><span> </span></p>")).toBe(false);
+  });
+
+  it("reports no content where no DOM parser exists", () => {
+    vi.stubGlobal("DOMParser", undefined);
+    expect(hasStoredDescriptionContent('<p><img src="/a.png"></p>')).toBe(false);
   });
 });

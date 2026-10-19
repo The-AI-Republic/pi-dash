@@ -176,7 +176,7 @@ export function withStoredDescription(form: CreateFormState, storedHtml: string 
 /**
  * The PATCH an edit sends (ISS-126): only fields whose value changed.
  * Identity and project never ride along — the caller already knows the
- * address — and the description travels whenever its text changed,
+ * address — and the description travels whenever its content changed,
  * including when it was cleared.
  */
 export function buildEditPayload(form: CreateFormState, baseline: EditBaseline): IssuePatch {
@@ -197,8 +197,11 @@ export function buildEditPayload(form: CreateFormState, baseline: EditBaseline):
   if (form.targetDate !== before.targetDate) patch.target_date = form.targetDate;
   if (form.estimatePoint !== before.estimatePoint) patch.estimate_point = form.estimatePoint;
   if (form.parentId !== before.parentId) patch.parent_id = form.parentId;
+  // The branch is write-only (no read returns it), so the form holds the
+  // only copy; an emptied field is a real change and must reach the
+  // server rather than silently keeping the old branch (ISS-128).
   const branch = form.gitWorkBranch.trim();
-  if (branch !== "" && branch !== before.gitWorkBranch) patch.git_work_branch = branch;
+  if (branch !== before.gitWorkBranch) patch.git_work_branch = branch;
   // The execution target is written through the same patch: the pod pin
   // and the executor override travel as a pair (ISS-218).
   if (form.execution === null) {

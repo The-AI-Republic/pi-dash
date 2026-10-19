@@ -10,7 +10,7 @@
 
 import type { DraftIssueCreateInput, IssueCreateInput } from "@pidash/api-client";
 
-import { isStoredHtmlEmpty, storedTextContent } from "../../../shared/editor/index.js";
+import { hasStoredDescriptionContent, storedTextContent } from "../../../shared/editor/index.js";
 import { executionTargetPatch, type ExecutionSelection } from "../../../shared/pickers/index.js";
 import { TITLE_MAX_LENGTH, type CreateProjectOption } from "./createProjects.js";
 
@@ -130,13 +130,13 @@ export function descriptionText(descriptionHtml: string): string {
 }
 
 /**
- * The stored description, or an empty string when it holds no visible
- * content. The editor emits an empty paragraph on mount, which is not
- * something the user typed and must not count as work or travel in the
- * create payload.
+ * The stored description, or an empty string when it holds no content.
+ * Text, images and mentions all count (the shared rule, ISS-127). The
+ * editor emits an empty paragraph on mount, which is not something the
+ * user typed and must not count as work or travel in the create payload.
  */
 export function visibleDescriptionHtml(descriptionHtml: string): string {
-  return isStoredHtmlEmpty(descriptionHtml) ? "" : descriptionHtml;
+  return hasStoredDescriptionContent(descriptionHtml) ? descriptionHtml : "";
 }
 
 /** Whether the assistant may name this work item from its description (ISS-118). */
@@ -219,7 +219,7 @@ export function buildDraftInput(form: CreateFormState): DraftIssueCreateInput {
  */
 export function hasDraftWorthKeeping(form: CreateFormState): boolean {
   if (normalizeTitle(form.name) !== "") return true;
-  if (!isStoredHtmlEmpty(form.descriptionHtml)) return true;
+  if (hasStoredDescriptionContent(form.descriptionHtml)) return true;
   if (form.stateId !== null) return true;
   if (form.priority !== "none") return true;
   if (form.assigneeIds.length > 0) return true;

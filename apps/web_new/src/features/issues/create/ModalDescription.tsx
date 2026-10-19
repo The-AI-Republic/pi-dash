@@ -16,9 +16,8 @@ import { Sparkle } from "lucide-react";
 import * as React from "react";
 
 import {
+  hasStoredDescriptionContent,
   IssueDescriptionEditor,
-  MENTION_CONTENT_TAGS,
-  isStoredHtmlEmptyIgnoring,
   type RichTextEditorHandle,
 } from "../../../shared/editor/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
@@ -48,7 +47,7 @@ export const UPLOAD_FAILED_BODY = "Check your connection and try again.";
 
 /** Stored description content including images and mentions. */
 export function hasDescriptionContent(html: string): boolean {
-  return !isStoredHtmlEmptyIgnoring(html, MENTION_CONTENT_TAGS);
+  return hasStoredDescriptionContent(html);
 }
 
 export interface ModalDescriptionProps {

@@ -177,11 +177,35 @@ describe("buildEditPayload", () => {
     });
   });
 
-  it("never sends an empty branch, so clearing cannot unset one", () => {
+  it("sends an emptied branch so a saved one can be cleared (ISS-128)", () => {
     const form = formFromRow(row(), PROJECT);
     const baseline = { ...baselineFor(form), form: { ...baselineFor(form).form, gitWorkBranch: "old/branch" } };
     form.gitWorkBranch = "   ";
-    expect(buildEditPayload(form, baseline)).toEqual({});
+    expect(buildEditPayload(form, baseline)).toEqual({ git_work_branch: "" });
+  });
+
+  it("keeps an untouched empty branch out of the patch", () => {
+    const form = formFromRow(row(), PROJECT);
+    expect(buildEditPayload(form, baselineFor(form))).toEqual({});
+  });
+
+  it("sends a description made only of an image or a mention (ISS-127)", () => {
+    for (const body of [
+      '<p><img src="https://s3.test/a.png"></p>',
+      '<p><mention-component id="u-1"></mention-component></p>',
+    ]) {
+      const form = formFromRow(row({ description_html: "" }), PROJECT);
+      const baseline = baselineFor(form);
+      form.descriptionHtml = body;
+      expect(buildEditPayload(form, baseline)).toEqual({ description_html: body });
+    }
+  });
+
+  it("sends an emptied description rather than dropping the change", () => {
+    const form = formFromRow(row(), PROJECT);
+    const baseline = baselineFor(form);
+    form.descriptionHtml = "<p></p>";
+    expect(buildEditPayload(form, baseline)).toEqual({ description_html: "" });
   });
 
   it("pairs the execution target columns on a change and clears both", () => {

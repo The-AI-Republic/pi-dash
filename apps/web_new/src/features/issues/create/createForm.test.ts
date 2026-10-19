@@ -124,6 +124,23 @@ describe("buildCreatePayload", () => {
     });
   });
 
+  it("drops the editor's mount-time empty paragraph", () => {
+    expect(buildCreatePayload(form({ name: "Fresh", descriptionHtml: "<p></p>" }))).toEqual({ name: "Fresh" });
+  });
+
+  it("keeps a description made only of an image or a mention (ISS-127)", () => {
+    const image = '<p><img src="https://s3.test/a.png"></p>';
+    const mention = '<p><mention-component id="u-1"></mention-component></p>';
+    expect(buildCreatePayload(form({ name: "Shot", descriptionHtml: image }))).toEqual({
+      name: "Shot",
+      description_html: image,
+    });
+    expect(buildCreatePayload(form({ name: "Ping", descriptionHtml: mention }))).toEqual({
+      name: "Ping",
+      description_html: mention,
+    });
+  });
+
   it("carries every field the user set", () => {
     const payload = buildCreatePayload(
       form({
@@ -196,6 +213,11 @@ describe("buildDraftInput", () => {
     expect(draft.description_html).toBe("<p>Half-written</p>");
   });
 
+  it("keeps an image-only body in the draft", () => {
+    const image = '<p><img src="https://s3.test/a.png"></p>';
+    expect(buildDraftInput(form({ name: "", descriptionHtml: image })).description_html).toBe(image);
+  });
+
   it("trims a real title and carries the set fields", () => {
     const draft = buildDraftInput(
       form({
@@ -231,6 +253,14 @@ describe("buildDraftInput", () => {
 describe("hasDraftWorthKeeping", () => {
   it("ignores the project and an empty description", () => {
     expect(hasDraftWorthKeeping(form({ projectId: PROJECT, descriptionHtml: "<p> </p>" }))).toBe(false);
+    expect(hasDraftWorthKeeping(form({ projectId: PROJECT, descriptionHtml: "<p></p>" }))).toBe(false);
+  });
+
+  it("counts an image-only or mention-only description", () => {
+    expect(hasDraftWorthKeeping(form({ descriptionHtml: '<p><img src="x"></p>' }))).toBe(true);
+    expect(
+      hasDraftWorthKeeping(form({ descriptionHtml: '<p><mention-component id="u-1"></mention-component></p>' }))
+    ).toBe(true);
   });
 
   const dirty: Array<[string, Partial<CreateFormState>]> = [

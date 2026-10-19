@@ -66,7 +66,11 @@ vi.mock("../../../shared/editor/index.js", async (importOriginal) => {
     React.useEffect(() => {
       onReady?.({
         insertImage: (src: string) => {
-          setValue((current) => `${current}<img src="${src}">`);
+          // The real editor reports the inserted image through onChange;
+          // the stand-in does the same so a payload round-trip is real.
+          const html = `<img src="${src}">`;
+          setValue((current) => `${current}${html}`);
+          onChange(html);
         },
         insertMention: (target: { id: string; name: string }) => {
           setValue((current) => `${current}@${target.name}`);
@@ -1313,6 +1317,26 @@ describe("WorkItemCreateDialog discard guard (ISS-120)", () => {
   });
 });
 
+describe("WorkItemCreateDialog description content (ISS-127)", () => {
+  it("posts an image-only description uploaded into an empty body", async () => {
+    const user = userEvent.setup();
+    const upload = vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, status: 200 } as Response);
+    const h = setup();
+    await user.type(titleField(), "Shot");
+    fireEvent.change(screen.getByLabelText("Attach an image to the description"), {
+      target: { files: [new File(["b"], "shot.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(screen.getByLabelText("Attach an image to the description")).not.toBeDisabled());
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({
+      name: "Shot",
+      description_html: expect.stringContaining("<img"),
+    });
+    upload.mockRestore();
+  });
+});
+
 describe("WorkItemCreateDialog duplicate seam (ISS-121)", () => {
   it("shows no duplicate surface in this build", async () => {
     const user = userEvent.setup();
@@ -1666,6 +1690,26 @@ describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
     save();
     await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
     expect(patches(h.calls)).toEqual([]);
+  });
+
+  it("sends an image uploaded into an empty description", async () => {
+    const upload = vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, status: 200 } as Response);
+    const { props } = editProps({ description_html: "" });
+    const h = setup({ issueDetail: detailRow("") }, props);
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue(""));
+    fireEvent.change(screen.getByLabelText("Attach an image to the description"), {
+      target: { files: [new File(["b"], "shot.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(screen.getByLabelText("Attach an image to the description")).not.toBeDisabled());
+    save();
+    // The upload's completion PATCH carries no body; wait for the issue PATCH.
+    const issuePatch = () => h.calls.find((call) => call.method === "PATCH" && /\/issues\/[^/]+\/$/.test(call.url));
+    await waitFor(() => expect(issuePatch()).toBeDefined());
+    // A picture-only body is a real description; it must not be dropped
+    // before the PATCH (ISS-127).
+    expect(issuePatch()?.body).toEqual({ description_html: expect.stringContaining("<img") });
+    upload.mockRestore();
   });
 
   it("reconciles a swapped cycle and added module after the write", async () => {

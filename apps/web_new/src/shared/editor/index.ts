@@ -11,4 +11,10 @@ export type { MentionQuery, MentionTarget } from "./mention.js";
 export type { RichTextEditorHandle, RichTextEditorProps } from "./RichTextEditor.js";
 export { RichTextView } from "./RichTextView.js";
 export type { RichTextViewProps } from "./RichTextView.js";
-export { isStoredHtmlEmpty, isStoredHtmlEmptyIgnoring, sanitizeHtml, storedTextContent } from "./sanitize.js";
+export {
+  hasStoredDescriptionContent,
+  isStoredHtmlEmpty,
+  isStoredHtmlEmptyIgnoring,
+  sanitizeHtml,
+  storedTextContent,
+} from "./sanitize.js";
