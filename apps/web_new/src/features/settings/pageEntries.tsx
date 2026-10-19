@@ -12,6 +12,9 @@
 
 import * as React from "react";
 
+import { AssistantSettingsTab } from "../profile-assistant/index.js";
+import { IntegrationsSettingsTab } from "../profile-integrations/index.js";
+import { UpkeepSettingsTab } from "../profile-upkeep/index.js";
 import { useSessionExpiredRedirect } from "../../shared/shell/expiredRedirect.js";
 import { ApiTokensTab } from "./components/ApiTokensTab.js";
 import { GeneralSettingsTab } from "./components/GeneralSettingsTab.js";
@@ -30,6 +33,9 @@ export function registerBuiltInSettingsTabs(): () => void {
   // content stays in the workspace-settings chunk.
   const unregisterApiTokens = registerProfileSettingsPage("api-tokens", () => <ApiTokensTab />);
   const unregisterActivity = registerProfileSettingsPage("activity", () => <OwnActivityTab />);
+  const unregisterAssistant = registerProfileSettingsPage("ai-assistant", () => <AssistantSettingsTab />);
+  const unregisterUpkeep = registerProfileSettingsPage("auto-project-management", () => <UpkeepSettingsTab />);
+  const unregisterIntegrations = registerProfileSettingsPage("integrations", () => <IntegrationsSettingsTab />);
   return () => {
     unregisterGeneral();
     unregisterPreferences();
@@ -37,6 +43,9 @@ export function registerBuiltInSettingsTabs(): () => void {
     unregisterNotifications();
     unregisterApiTokens();
     unregisterActivity();
+    unregisterAssistant();
+    unregisterUpkeep();
+    unregisterIntegrations();
   };
 }
 
