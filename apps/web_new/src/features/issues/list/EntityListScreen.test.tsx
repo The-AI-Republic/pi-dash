@@ -133,8 +133,6 @@ function project(overrides: Record<string, unknown> = {}) {
     identifier: "WEB",
     cycle_view: true,
     module_view: true,
-    member_role: 20,
-    archived_at: null,
     ...overrides,
   };
 }
