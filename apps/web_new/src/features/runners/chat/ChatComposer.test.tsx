@@ -311,4 +311,16 @@ describe("ChatComposer", () => {
     fireEvent.pointerLeave(screen.getByRole("button", { name: "Release to transcribe" }));
     expect(handle.stop).not.toHaveBeenCalled();
   });
+
+  it("appends a transcript to the draft with dictation spacing", () => {
+    const onDraftChange = vi.fn();
+    dictation.useDictation.mockReturnValue({ status: "idle", supported: true, elapsedSeconds: 0 });
+    setup({ dictationAvailable: true, draft: "draft", onDraftChange });
+    const { onResult } = (dictation.useDictation.mock.calls.at(-1)?.[0] ?? {}) as {
+      onResult?: (text: string) => void;
+    };
+    expect(onResult).toBeTypeOf("function");
+    onResult?.("spoken words");
+    expect(onDraftChange).toHaveBeenCalledWith("draft spoken words");
+  });
 });

@@ -288,4 +288,44 @@ describe("createCloudChatTransport resilience", () => {
     });
     stream.mockRestore();
   });
+
+  it("sends, cancels and closes through the session's own verbs", async () => {
+    const calls: Array<{ method: string; path: string; json?: unknown }> = [];
+    const rows = {
+      sendJson: async (method: string, path: string, init: { json?: unknown }) => {
+        calls.push({ method, path, json: init.json });
+        return { data: {} };
+      },
+      parse: (_schema: unknown, _body: unknown, label: string) => ({ label }),
+    } as unknown as ApiClient;
+    const transport = createCloudChatTransport({ getClient: () => rows });
+    await expect(transport.sendChatMessage("s-20", "hello")).resolves.toEqual({
+      label: "POST /api/runners/chat/sessions/s-20/messages/",
+    });
+    await transport.cancelChat("s-20", "user_switched_model");
+    await transport.closeChat("s-20");
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/api/runners/chat/sessions/s-20/messages/",
+        json: { content: "hello", content_parts: [] },
+      },
+      { method: "POST", path: "/api/runners/chat/sessions/s-20/cancel/", json: { reason: "user_switched_model" } },
+      { method: "POST", path: "/api/runners/chat/sessions/s-20/close/", json: {} },
+    ]);
+  });
+
+  it("defaults a cancel with no reason to the user's own marker", async () => {
+    const calls: unknown[] = [];
+    const rows = {
+      sendJson: async (_method: string, _path: string, init: { json?: unknown }) => {
+        calls.push(init.json);
+        return { data: {} };
+      },
+      parse: () => ({ ok: true }),
+    } as unknown as ApiClient;
+    const transport = createCloudChatTransport({ getClient: () => rows });
+    await transport.cancelChat("s-21");
+    expect(calls).toEqual([{ reason: "user_cancelled" }]);
+  });
 });
