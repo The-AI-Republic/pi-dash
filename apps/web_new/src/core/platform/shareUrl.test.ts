@@ -62,8 +62,29 @@ describe("hosted-origin resolution", () => {
     expect(desktopShareUrl("/acme/browse/ACME-1/")).toBe("https://app.example.test/acme/browse/ACME-1/");
   });
 
-  it("keeps the page origin on the web platform", () => {
+  it("keeps the page origin on the web platform", async () => {
     expect(webShareUrl("/acme/browse/ACME-1/")).toBe(`${globalThis.location.origin}/acme/browse/ACME-1/`);
+    const { platform: webPlatform } = await import("./web.js");
+    expect(webPlatform.shareableUrl("/acme/browse/ACME-1/")).toBe(`${globalThis.location.origin}/acme/browse/ACME-1/`);
+  });
+
+  it("treats a blank configured base as absent", () => {
+    expect(parseHostedOrigin("")).toBeUndefined();
+    expect(parseHostedOrigin("   ")).toBeUndefined();
+  });
+
+  it("reports no page origin when the location has no usable origin", () => {
+    const original = globalThis.window;
+    try {
+      vi.stubGlobal("window", { location: { origin: "" } });
+      expect(pageOrigin()).toBeUndefined();
+      vi.stubGlobal("window", { location: {} });
+      expect(pageOrigin()).toBeUndefined();
+      vi.stubGlobal("window", { location: { origin: "null" } });
+      expect(pageOrigin()).toBeUndefined();
+    } finally {
+      vi.stubGlobal("window", original);
+    }
   });
 
   it("parses only absolute http(s) addresses", () => {

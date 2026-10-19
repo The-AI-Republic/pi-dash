@@ -176,6 +176,33 @@ describe("desktop fetch transport", () => {
     expect((failure as Error).message).toContain("dns lookup failed");
   });
 
+  it("invents an AbortError when the signal carries no reason", async () => {
+    installBridge(async () => {
+      throw new Error("API request canceled");
+    });
+    const signal = {
+      aborted: true,
+      reason: undefined,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    };
+    const failure = await tauri.platform
+      .fetch(`${NATIVE_ORIGIN}/api/v1/x/`, { signal: signal as unknown as AbortSignal })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(DOMException);
+    expect((failure as DOMException).name).toBe("AbortError");
+  });
+
+  it("names an untyped file as octet-stream in the multipart body", async () => {
+    const invoke = vi.fn(async (_command: string, _args?: unknown) => nativeResponse(200, "{}"));
+    installBridge(invoke);
+    const form = new FormData();
+    form.append("file", new Blob(["raw"]), "blob.bin");
+    await tauri.platform.fetch(`${NATIVE_ORIGIN}/api/upload/`, { method: "POST", body: form });
+    const body = new TextDecoder().decode(frameBody(invoke.mock.calls[0]?.[1] as Uint8Array));
+    expect(body).toContain("Content-Type: application/octet-stream");
+  });
+
   it("cancels the native request when the caller aborts", async () => {
     const commands: string[] = [];
     let rejectRequest: ((error: Error) => void) | undefined;
@@ -203,6 +230,104 @@ describe("desktop fetch transport", () => {
       tauri.platform.fetch(`${NATIVE_ORIGIN}/api/v1/x/`, { signal: controller.signal })
     ).rejects.toMatchObject({ name: "AbortError" });
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the page transport when the address cannot be parsed", async () => {
+    const nativeInvoke = vi.fn(async () => nativeResponse(200, "{}"));
+    const browserFetch = vi.fn(async () => new Response("browser"));
+    installBridge(nativeInvoke);
+    vi.stubGlobal("fetch", browserFetch);
+    vi.stubGlobal("location", { href: "http://[invalid" });
+    try {
+      const response = await tauri.platform.fetch("/api/v1/x/");
+      expect(await response.text()).toBe("browser");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(browserFetch).toHaveBeenCalledTimes(1);
+    expect(nativeInvoke).not.toHaveBeenCalled();
+  });
+
+  it("keeps the caller's abort reason instead of inventing a DOMException", async () => {
+    installBridge(async () => {
+      throw new Error("API request canceled");
+    });
+    const controller = new AbortController();
+    const reason = new Error("user navigated away");
+    const pending = tauri.platform.fetch(`${NATIVE_ORIGIN}/api/v1/x/`, { signal: controller.signal });
+    controller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+  });
+
+  it("stringifies a native rejection that is not an Error", async () => {
+    installBridge(async () => {
+      throw "socket closed";
+    });
+    const failure = await tauri.platform.fetch(`${NATIVE_ORIGIN}/api/v1/x/`).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(TypeError);
+    expect((failure as Error).message).toContain("socket closed");
+  });
+
+  it("writes form fields and files into the multipart body", async () => {
+    const invoke = vi.fn(async (_command: string, _args?: unknown) => nativeResponse(200, "{}"));
+    installBridge(invoke);
+    const form = new FormData();
+    form.append("scope", "workspace");
+    form.append("file", new Blob(["audio"], { type: "audio/webm" }), "dictation.webm");
+    await tauri.platform.fetch(`${NATIVE_ORIGIN}/api/upload/`, { method: "POST", body: form });
+    const frame = invoke.mock.calls[0]?.[1] as Uint8Array;
+    const body = new TextDecoder().decode(frameBody(frame));
+    expect(body).toContain('name="scope"');
+    expect(body).toContain("\r\n\r\nworkspace\r\n");
+    expect(body).toContain('filename="dictation.webm"');
+    expect(body).toContain("Content-Type: audio/webm");
+  });
+
+  it("falls back to a random boundary where the crypto uuid is missing", async () => {
+    vi.stubGlobal("crypto", {});
+    const invoke = vi.fn(async (_command: string, _args?: unknown) => nativeResponse(200, "{}"));
+    installBridge(invoke);
+    try {
+      const form = new FormData();
+      form.append("scope", "workspace");
+      await tauri.platform.fetch(`${NATIVE_ORIGIN}/api/upload/`, { method: "POST", body: form });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const frame = invoke.mock.calls[0]?.[1] as Uint8Array;
+    const headers = frameHead(frame)["headers"] as Array<[string, string]>;
+    const contentType = headers.find(([name]) => name.toLowerCase() === "content-type")?.[1] ?? "";
+    expect(contentType).toMatch(/^multipart\/form-data; boundary=----pidash[0-9a-z]+$/);
+    expect(new TextDecoder().decode(frameBody(frame))).toContain('name="scope"');
+  });
+
+  it("keeps a caller's explicit type and derives the type for plain bodies", async () => {
+    const invoke = vi.fn(async (_command: string, _args?: unknown) => nativeResponse(204, ""));
+    installBridge(invoke);
+    await tauri.platform.fetch(`${NATIVE_ORIGIN}/api/v1/a/`, {
+      method: "POST",
+      headers: { "content-type": "application/x-custom" },
+      body: "first",
+    });
+    await tauri.platform.fetch(`${NATIVE_ORIGIN}/api/v1/b/`, { method: "POST", body: "second" });
+    const explicit = frameHead(invoke.mock.calls[0]?.[1] as Uint8Array)["headers"] as Array<[string, string]>;
+    const derived = frameHead(invoke.mock.calls[1]?.[1] as Uint8Array)["headers"] as Array<[string, string]>;
+    expect(explicit).toContainEqual(["content-type", "application/x-custom"]);
+    expect(derived).toContainEqual(["content-type", "text/plain;charset=UTF-8"]);
+    expect(new TextDecoder().decode(frameBody(invoke.mock.calls[1]?.[1] as Uint8Array))).toBe("second");
+  });
+
+  it("takes the method, body and signal from a Request input", async () => {
+    const invoke = vi.fn(async (_command: string, _args?: unknown) => nativeResponse(204, ""));
+    installBridge(invoke);
+    const request = new Request(`${NATIVE_ORIGIN}/api/v1/x/`, {
+      method: "PUT",
+      body: "payload",
+    });
+    await tauri.platform.fetch(request);
+    const frame = invoke.mock.calls[0]?.[1] as Uint8Array;
+    expect(frameHead(frame)).toMatchObject({ url: `${NATIVE_ORIGIN}/api/v1/x/`, method: "PUT", hasBody: true });
+    expect(new TextDecoder().decode(frameBody(frame))).toBe("payload");
   });
 });
 
@@ -284,6 +409,39 @@ describe("desktop event stream", () => {
     stream.close();
   });
 
+  it("closes for good when a head arrives without a header list", async () => {
+    const requests: StreamArgs[] = [];
+    installBridge(async (command, args) => {
+      if (command === "desktop_api_stream") requests.push(args as StreamArgs);
+      return undefined;
+    });
+    const stream = tauri.platform.stream(`${NATIVE_ORIGIN}/api/v1/events/`);
+    const pending = stream.messages()[Symbol.asyncIterator]().next();
+    await Promise.resolve();
+    requests[0]!.channel.push({ type: "head", status: 200 });
+    await expect(pending).resolves.toMatchObject({ done: true });
+    expect(stream.error?.message).toContain("200");
+  });
+
+  it("stays closed after a fatal answer even if a body end follows", async () => {
+    vi.useFakeTimers();
+    const requests: StreamArgs[] = [];
+    installBridge(async (command, args) => {
+      if (command === "desktop_api_stream") requests.push(args as StreamArgs);
+      return undefined;
+    });
+    const stream = tauri.platform.stream(`${NATIVE_ORIGIN}/api/v1/events/`);
+    const pending = stream.messages()[Symbol.asyncIterator]().next();
+    await Promise.resolve();
+    const channel = requests[0]!.channel;
+    channel.push({ type: "head", status: 500, headers: [["content-type", "text/event-stream"]] });
+    channel.push({ type: "end" });
+    await expect(pending).resolves.toMatchObject({ done: true });
+    await vi.advanceTimersByTimeAsync(tauri.STREAM_RECONNECT_MS);
+    expect(requests).toHaveLength(1);
+    expect(stream.error?.message).toContain("500");
+  });
+
   it("cancels the open request when the caller closes or aborts", async () => {
     const commands: string[] = [];
     installBridge(async (command) => {
@@ -297,6 +455,166 @@ describe("desktop event stream", () => {
     stream.close();
     controller.abort();
     expect(commands.filter((name) => name === "desktop_api_cancel")).toHaveLength(1);
+  });
+
+  it("accepts a head without a status or content type as an event stream", async () => {
+    const requests: StreamArgs[] = [];
+    installBridge(async (command, args) => {
+      if (command === "desktop_api_stream") requests.push(args as StreamArgs);
+      return undefined;
+    });
+    const stream = tauri.platform.stream(`${NATIVE_ORIGIN}/api/v1/events/`);
+    const iterator = stream.messages()[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    await Promise.resolve();
+    requests[0]!.channel.push({ type: "head", headers: [["Content-Type", "text/event-stream"]] } as never);
+    requests[0]!.channel.push({ type: "data", text: "data: hello\n\n" });
+    await expect(pending).resolves.toMatchObject({ value: { event: "message", data: "hello" } });
+    stream.close();
+  });
+
+  it("parses comments, valueless fields, multiple data lines and a server retry gap", async () => {
+    vi.useFakeTimers();
+    const requests: StreamArgs[] = [];
+    installBridge(async (command, args) => {
+      if (command === "desktop_api_stream") requests.push(args as StreamArgs);
+      return undefined;
+    });
+    const stream = tauri.platform.stream(`${NATIVE_ORIGIN}/api/v1/events/`);
+    const iterator = stream.messages()[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    await Promise.resolve();
+    const first = requests[0]!;
+    first.channel.push({ type: "head", status: 200, headers: [["content-type", "text/event-stream"]] });
+    first.channel.push({
+      type: "data",
+      text: ": keepalive\r\nretry: 50\r\nevent: update\r\ndata: one\r\ndata:two\r\n\r\n",
+    });
+    await expect(pending).resolves.toEqual({ done: false, value: { event: "update", data: "one\ntwo" } });
+    first.channel.push({ type: "end" });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(requests).toHaveLength(2);
+    stream.close();
+  });
+
+  it("drops a byte-order mark and waits for a split carriage return", async () => {
+    const requests: StreamArgs[] = [];
+    installBridge(async (command, args) => {
+      if (command === "desktop_api_stream") requests.push(args as StreamArgs);
+      return undefined;
+    });
+    const stream = tauri.platform.stream(`${NATIVE_ORIGIN}/api/v1/events/`);
+    const iterator = stream.messages()[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    await Promise.resolve();
+    const channel = requests[0]!.channel;
+    channel.push({ type: "head", status: 200, headers: [["content-type", "text/event-stream"]] });
+    channel.push({ type: "data", text: "\ufeffdata: split\r" });
+    channel.push({ type: "data", text: "\n\r\n" });
+    await expect(pending).resolves.toMatchObject({ value: { data: "split" } });
+    stream.close();
+  });
+
+  it("waits for a read that starts after the stream is closed", async () => {
+    installBridge(async () => undefined);
+    const stream = tauri.platform.stream(`${NATIVE_ORIGIN}/api/v1/events/`);
+    stream.close();
+    await expect(stream.messages()[Symbol.asyncIterator]().next()).resolves.toMatchObject({ done: true });
+  });
+
+  it("accepts an event-stream content type with a charset", async () => {
+    const requests: StreamArgs[] = [];
+    installBridge(async (command, args) => {
+      if (command === "desktop_api_stream") requests.push(args as StreamArgs);
+      return undefined;
+    });
+    const stream = tauri.platform.stream(`${NATIVE_ORIGIN}/api/v1/events/`);
+    const pending = stream.messages()[Symbol.asyncIterator]().next();
+    await Promise.resolve();
+    requests[0]!.channel.push({
+      type: "head",
+      status: 200,
+      headers: [
+        ["cache-control", "no-cache"],
+        ["content-type", "text/event-stream; charset=utf-8"],
+      ],
+    });
+    requests[0]!.channel.push({ type: "data", text: "data: hello\n\n" });
+    await expect(pending).resolves.toMatchObject({ value: { data: "hello" } });
+    stream.close();
+  });
+
+  it("treats a data event without text as a blank chunk and a valueless field as an event", async () => {
+    const requests: StreamArgs[] = [];
+    installBridge(async (command, args) => {
+      if (command === "desktop_api_stream") requests.push(args as StreamArgs);
+      return undefined;
+    });
+    const stream = tauri.platform.stream(`${NATIVE_ORIGIN}/api/v1/events/`);
+    const pending = stream.messages()[Symbol.asyncIterator]().next();
+    await Promise.resolve();
+    const channel = requests[0]!.channel;
+    channel.push({ type: "head", status: 200, headers: [["content-type", "text/event-stream"]] });
+    channel.push({ type: "data" });
+    channel.push({ type: "data", text: "event\ndata: value\n\n" } as never);
+    await expect(pending).resolves.toMatchObject({ value: { data: "value" } });
+    stream.close();
+  });
+
+  it("ignores events that arrive after the stream was closed", async () => {
+    const requests: StreamArgs[] = [];
+    installBridge(async (command, args) => {
+      if (command === "desktop_api_stream") requests.push(args as StreamArgs);
+      return undefined;
+    });
+    const stream = tauri.platform.stream(`${NATIVE_ORIGIN}/api/v1/events/`);
+    const iterator = stream.messages()[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    await Promise.resolve();
+    stream.close();
+    const channel = requests[0]!.channel;
+    channel.push({ type: "head", status: 500 });
+    channel.push({ type: "data", text: "data: late\n\n" });
+    await expect(pending).resolves.toMatchObject({ done: true });
+    expect(stream.error).toBeUndefined();
+  });
+
+  it("never reconnects once closed", async () => {
+    vi.useFakeTimers();
+    const requests: StreamArgs[] = [];
+    installBridge(async (command, args) => {
+      if (command === "desktop_api_stream") requests.push(args as StreamArgs);
+      return undefined;
+    });
+    const stream = tauri.platform.stream(`${NATIVE_ORIGIN}/api/v1/events/`);
+    void stream.messages()[Symbol.asyncIterator]().next();
+    await Promise.resolve();
+    stream.close();
+    await vi.advanceTimersByTimeAsync(tauri.STREAM_RECONNECT_MS);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("ignores a failed stream invoke that started before the close", async () => {
+    vi.useFakeTimers();
+    let rejectStream: ((error: Error) => void) | undefined;
+    const requests: StreamArgs[] = [];
+    installBridge(async (command, args) => {
+      if (command === "desktop_api_stream") {
+        requests.push(args as StreamArgs);
+        return new Promise((_resolve, reject) => {
+          rejectStream = reject;
+        });
+      }
+      return undefined;
+    });
+    const stream = tauri.platform.stream(`${NATIVE_ORIGIN}/api/v1/events/`);
+    void stream.messages()[Symbol.asyncIterator]().next();
+    await Promise.resolve();
+    stream.close();
+    rejectStream?.(new Error("API stream failed"));
+    await vi.advanceTimersByTimeAsync(tauri.STREAM_RECONNECT_MS);
+    expect(requests).toHaveLength(1);
+    expect(stream.error).toBeUndefined();
   });
 });
 
@@ -361,6 +679,34 @@ describe("desktop CLI tool bindings", () => {
   it("does not subscribe on a shell without the event bus", () => {
     installBridge(async () => undefined);
     expect(() => tauri.platform.cliSetup!.onInstallLog(() => undefined)()).not.toThrow();
+  });
+
+  it("stops the installer log right away when the shell answers late", async () => {
+    let release: (() => void) | undefined;
+    let handler: Listener | undefined;
+    const win = globalThis.window as unknown as Record<string, unknown>;
+    win["__PIDASH_NATIVE_HTTP__"] = NATIVE_ORIGIN;
+    win["__TAURI__"] = {
+      core: { invoke: async () => undefined, Channel: FakeChannel },
+      event: {
+        listen: async (event: string, next: Listener) => {
+          handler = next;
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return () => undefined;
+        },
+      },
+    };
+    const lines: string[] = [];
+    const stop = tauri.platform.cliSetup!.onInstallLog((progress) => lines.push(progress.line));
+    stop();
+    release?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    handler?.({ payload: { line: "late" } });
+    expect(lines).toEqual([]);
+    expect(handler).toBeDefined();
   });
 
   it("ignores a listen helper outside the event bus", async () => {

@@ -84,8 +84,8 @@ function stubClients(): void {
   } as unknown as ApiClient;
 }
 
-function renderPanel(): void {
-  render(
+function renderPanel(): { unmount: () => void } {
+  return render(
     <>
       <ToastHost manager={getToastManager()} />
       <CliSetupPanel workspaceSlug="acme" />
@@ -185,6 +185,40 @@ describe("CliSetupPanel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("The probe was refused.");
     expect(screen.getByTestId("cli-setup-status")).toHaveTextContent("Not checked yet.");
     expect(screen.getByRole("button", { name: "Set up the tool" })).toBeEnabled();
+  });
+
+  it("drops a probe answer that lands after the panel unmounts", async () => {
+    stubClients();
+    let resolveDetect: ((status: typeof PRESENT) => void) | undefined;
+    let rejectDetect: ((failure: Error) => void) | undefined;
+    const detect = vi
+      .fn<() => Promise<typeof PRESENT>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<typeof PRESENT>((resolve) => {
+            resolveDetect = resolve;
+          })
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<typeof PRESENT>((_resolve, reject) => {
+            rejectDetect = reject;
+          })
+      );
+    const { cli } = installCli({ detect: detect as unknown as CliSetupApi["detect"] });
+    platformHarness.current = { cliSetup: cli };
+    const first = renderPanel();
+    first.unmount();
+    await act(async () => {
+      resolveDetect?.(PRESENT);
+    });
+    const second = renderPanel();
+    second.unmount();
+    await act(async () => {
+      rejectDetect?.(new Error("late failure"));
+    });
+    expect(detect).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("uses a general message for a rejected non-Error probe", async () => {

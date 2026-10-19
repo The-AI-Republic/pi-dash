@@ -442,7 +442,7 @@ function desktopStream(url: string, init: StreamInit = {}): EventStream {
   }
 
   function reconnect(): void {
-    if (closed || fatal !== undefined) return;
+    // Both callers guard with current(), which is false once closed.
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined;
       connect();

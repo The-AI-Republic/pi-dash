@@ -22,6 +22,15 @@ describe("platform selection", () => {
     expect(desktopPlatform).not.toBe(webPlatform);
   });
 
+  it("falls back to the local API origin without a page origin", () => {
+    vi.stubGlobal("window", undefined);
+    try {
+      expect(webPlatform.apiOrigin).toBe("http://localhost:8000");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("exposes no desktop capabilities on the web platform", () => {
     expect(webPlatform.window).toBeUndefined();
     expect(webPlatform.menu).toBeUndefined();
@@ -69,6 +78,38 @@ describe("web platform fallbacks without a browser", () => {
     expect(await webPlatform.storage.get("key")).toBe("value");
     await webPlatform.storage.remove("key");
     expect(await webPlatform.storage.get("key")).toBeNull();
+  });
+
+  it("closes the browser stream more than once safely", () => {
+    vi.stubGlobal("fetch", () => new Promise<Response>(() => undefined));
+    try {
+      const stream = webPlatform.stream("https://example.test/api/events/");
+      expect(() => {
+        stream.close();
+        stream.close();
+      }).not.toThrow();
+      expect(stream.error).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("falls back to the local API origin when the location is missing", () => {
+    vi.stubGlobal("window", {});
+    try {
+      expect(webPlatform.apiOrigin).toBe("http://localhost:8000");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("falls back to the local API origin when the page origin is blank", () => {
+    vi.stubGlobal("window", { location: { origin: "" } });
+    try {
+      expect(webPlatform.apiOrigin).toBe("http://localhost:8000");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("returns a no-op unsubscribe for focus tracking", () => {
