@@ -13,11 +13,13 @@ import type {
   AgentHostCheck,
   AgentRuntimeApi,
   EventStream,
+  PendingUpdate,
   Platform,
   SessionTeardownApi,
   StreamInit,
   StreamMessage,
   TitleBarApi,
+  UpdaterApi,
   Unsubscribe,
 } from "./types.js";
 
@@ -27,9 +29,13 @@ interface TauriInvokeCore {
   Channel: new <T>() => { onmessage: ((message: T) => void) | null };
 }
 
+interface TauriEventApi {
+  listen<T>(event: string, handler: (event: { payload: T }) => void): Promise<Unsubscribe>;
+}
+
 interface TauriWindow {
   __PIDASH_NATIVE_HTTP__?: unknown;
-  __TAURI__?: { core?: TauriInvokeCore };
+  __TAURI__?: { core?: TauriInvokeCore; event?: TauriEventApi };
 }
 
 function tauriWindow(): (Window & TauriWindow) | undefined {
@@ -378,6 +384,62 @@ const desktopSessionTeardown: SessionTeardownApi = {
   },
 };
 
+/** Emitted by the shell when an update is found or re-announced (updates.rs). */
+export const UPDATE_AVAILABLE_EVENT = "updater://available";
+
+interface NativePendingUpdate {
+  version?: unknown;
+  currentVersion?: unknown;
+  installing?: unknown;
+}
+
+/**
+ * Map the shell's pending-update payload. A malformed announcement is
+ * treated as no update, so the control never names a release it cannot
+ * install.
+ */
+export function toPendingUpdate(raw: unknown): PendingUpdate | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const payload = raw as NativePendingUpdate;
+  if (typeof payload.version !== "string" || payload.version.length === 0) return null;
+  if (typeof payload.currentVersion !== "string" || payload.currentVersion.length === 0) return null;
+  return {
+    version: payload.version,
+    currentVersion: payload.currentVersion,
+    installing: payload.installing === true,
+  };
+}
+
+const desktopUpdater: UpdaterApi = {
+  pending: async () => toPendingUpdate(await invokeNative<NativePendingUpdate | null>("desktop_pending_update")),
+  install: async () => {
+    await invokeNative("desktop_install_update");
+  },
+  onAvailable: (callback) => {
+    const events = tauriWindow()?.__TAURI__?.event;
+    if (!events) return () => undefined;
+    let active = true;
+    let unlisten: Unsubscribe | undefined;
+    events
+      .listen<NativePendingUpdate | null>(UPDATE_AVAILABLE_EVENT, (event) => {
+        const update = toPendingUpdate(event.payload);
+        if (active && update) callback(update);
+      })
+      .then(
+        (stop) => {
+          if (active) unlisten = stop;
+          else stop();
+        },
+        () => undefined
+      );
+    return () => {
+      active = false;
+      unlisten?.();
+      unlisten = undefined;
+    };
+  },
+};
+
 export const platform: Platform = {
   kind: "desktop",
   fetch: (input, init) => desktopFetch(input, init),
@@ -401,5 +463,6 @@ export const platform: Platform = {
   onFocusChange: trackFocus,
   window: desktopWindow,
   agentRuntime: desktopAgentRuntime,
+  updates: desktopUpdater,
   sessionTeardown: desktopSessionTeardown,
 };

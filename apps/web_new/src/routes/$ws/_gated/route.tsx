@@ -120,6 +120,11 @@ const LazyUpdatesDialog = React.lazy(() =>
 const LazyRuntimeSupervisor = React.lazy(() =>
   import("../../../features/runners/index.js").then((module) => ({ default: module.RuntimeSupervisor }))
 );
+// The desktop update control rides a lazy chunk (DESK-018, size gate): it
+// does nothing on web builds, so the web initial chain never carries it.
+const LazyUpdateControl = React.lazy(() =>
+  import("../../../features/updater/index.js").then((module) => ({ default: module.DesktopUpdateControl }))
+);
 
 export const Route = createFileRoute("/$ws/_gated")({
   beforeLoad: async ({ context, location }) => {
@@ -444,6 +449,14 @@ function WorkspaceShell({
               // Favorites are admin and member only; guests never see
               // the section (SHELL-056).
               canEdit ? <SidebarFavoritesGroup workspaceSlug={workspaceSlug} /> : undefined
+            }
+            // The desktop updater fills the shell's sidebar slot
+            // (SHELL-102); it renders nothing on web and with nothing
+            // waiting (DESK-018).
+            updateControl={
+              <React.Suspense fallback={null}>
+                <LazyUpdateControl />
+              </React.Suspense>
             }
             onNavigateHref={handleNavigateHref}
             {...switcherShortcuts}
