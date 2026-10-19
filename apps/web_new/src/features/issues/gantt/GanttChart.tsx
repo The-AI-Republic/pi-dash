@@ -19,6 +19,7 @@ import { FULL_SCREEN_PORTAL_ID, OverlayPortal } from "../../../shared/shell/inde
 import { formatDay, todayIsoDay } from "../dropdowns/calendar.js";
 import {
   addBlockDate,
+  DRAG_THRESHOLD_PX,
   movedDates,
   plantedDates as plantedDatesFor,
   resizedDates,
@@ -181,7 +182,7 @@ function Bar({
   openable,
   onOpen,
   onBeginDrag,
-  suppressClick,
+  consumeGestureClick,
   range,
   zoom,
 }: {
@@ -195,7 +196,7 @@ function Bar({
   onOpen: () => void;
   onBeginDrag: (event: React.MouseEvent, side: "move" | "left" | "right") => void;
   /** True for the click that ends a bar gesture, which must not open (ISS-051–053). */
-  suppressClick: () => boolean;
+  consumeGestureClick: () => boolean;
   range: Parameters<typeof dayColumns>[0];
   zoom: GanttZoom;
 }): React.ReactElement {
@@ -233,8 +234,9 @@ function Bar({
       }}
       onClick={() => {
         // A handle press or a move still dispatches a click after mouseup;
-        // it belongs to the gesture, not to the row (ISS-051–053).
-        if (suppressClick()) return;
+        // it belongs to the gesture, not to the row (ISS-051–053). Only the
+        // gesture's own click is consumed, so a plain click still opens.
+        if (consumeGestureClick()) return;
         if (drag === null && openable) onOpen();
       }}
       onKeyDown={(event) => {
@@ -378,14 +380,18 @@ function GanttLanes({
   const visible = rows.slice(windowStart, windowEnd);
   const [drag, setDrag] = React.useState<BarDrag | null>(null);
   const suppressed = React.useRef(false);
-  const suppressClick = React.useCallback(() => suppressed.current, []);
+  const consumeGestureClick = React.useCallback(() => {
+    const wasSuppressed = suppressed.current;
+    suppressed.current = false;
+    return wasSuppressed;
+  }, []);
   const dayWidth = DAY_WIDTHS[zoom];
 
   const beginDrag = (event: React.MouseEvent, row: GanttRow, side: "move" | "left" | "right") => {
     if (!canEdit || row.unconfirmed || event.button !== 0) return;
-    // The browser fires a click after mouseup even if the pointer moved;
-    // mark the upcoming click as part of this gesture (ISS-051–053).
-    suppressed.current = true;
+    // A press on a resize handle is always a gesture, even without travel.
+    // A body press is only a gesture once it moves past the click threshold.
+    suppressed.current = side !== "move";
     event.preventDefault();
     event.stopPropagation();
     const origin = { startDate: row.startIso, targetDate: row.targetIso };
@@ -395,6 +401,7 @@ function GanttLanes({
   React.useEffect(() => {
     if (drag === null) return;
     const onMove = (event: MouseEvent) => {
+      if (Math.abs(event.clientX - drag.startX) >= DRAG_THRESHOLD_PX) suppressed.current = true;
       const delta = snappedDayDelta(event.clientX - drag.startX, dayWidth);
       if (drag.side === "move") {
         const dates = movedDates(drag.origin, delta);
@@ -410,11 +417,6 @@ function GanttLanes({
     const onUp = () => {
       const current = drag;
       setDrag(null);
-      // The click that ends the gesture dispatches before the next task;
-      // clear the guard after it so the following plain click opens.
-      globalThis.setTimeout(() => {
-        suppressed.current = false;
-      }, 0);
       const changed =
         current.write.startDate !== current.origin.startDate || current.write.targetDate !== current.origin.targetDate;
       if (changed)
@@ -423,7 +425,6 @@ function GanttLanes({
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setDrag(null);
-        suppressed.current = false;
       }
     };
     globalThis.addEventListener("mousemove", onMove);
@@ -483,7 +484,7 @@ function GanttLanes({
                 openable={!row.unconfirmed}
                 onOpen={() => onOpenRow(row)}
                 onBeginDrag={(event, side) => beginDrag(event, row, side)}
-                suppressClick={suppressClick}
+                consumeGestureClick={consumeGestureClick}
                 range={range}
                 zoom={zoom}
               />

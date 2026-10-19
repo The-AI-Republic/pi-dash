@@ -249,9 +249,7 @@ describe("useCreateWorkItem temp rows", () => {
     await waitFor(() => expect(h.cached()?.results).toHaveLength(1));
     h.save({
       projectId: PROJECT_ID,
-      name: "Fresh report",
-      startDate: "2026-10-18",
-      targetDate: "2026-10-19",
+      payload: { name: "Fresh report", start_date: "2026-10-18", target_date: "2026-10-19" },
     });
     await waitFor(() => expect(h.cached().results).toHaveLength(2));
     // The optimistic row carries the seeded dates, so its bar can draw
@@ -272,7 +270,7 @@ describe("useCreateWorkItem temp rows", () => {
   it("leaves the dates out of the body when the caller did not seed them", async () => {
     const h = renderTempHandle(201);
     await waitFor(() => expect(h.cached()?.results).toHaveLength(1));
-    h.save({ projectId: PROJECT_ID, name: "Fresh report" });
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
     await waitFor(() => expect(h.calls.some((call) => call.method === "POST")).toBe(true));
     const post = h.calls.find((call) => call.method === "POST");
     expect(JSON.parse(post?.body ?? "{}")).toEqual({ name: "Fresh report" });
