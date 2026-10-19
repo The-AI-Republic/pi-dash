@@ -212,9 +212,18 @@ const RUNS_LIST_SQL: &str = r#"SELECT "r"."id", "r"."scheduler_binding_id", "r".
 /// `_issues_by_run`: the comments the runs posted
 /// (`speaker_agent_run_id`), scoped to projects the caller is an active
 /// member of. Base-manager soft-delete scope on `issue_comments` only; the
-/// issue/project/membership spans are plain joins. No `ORDER BY`
-/// (Django's `.distinct()` without ordering).
-const ISSUES_BY_RUN_SQL: &str = r#"SELECT DISTINCT "c"."speaker_agent_run_id", "c"."issue_id", "i"."name", "i"."sequence_id", "pr"."identifier" FROM "issue_comments" "c" JOIN "issues" "i" ON "i"."id" = "c"."issue_id" JOIN "projects" "pr" ON "pr"."id" = "i"."project_id" JOIN "project_members" "pm" ON "pm"."project_id" = "pr"."id" AND "pm"."member_id" = $2 AND "pm"."is_active" WHERE "c"."speaker_agent_run_id" = ANY($1) AND "c"."deleted_at" IS NULL"#;
+/// issue/project/membership spans are plain joins.
+///
+/// `IssueComment.Meta.ordering = ("-created_at",)` still applies to the
+/// `.distinct()` queryset, and Django's `SQLCompiler.get_extra_select`
+/// appends the ordering column to the `SELECT DISTINCT` list when it is
+/// not already selected. The SQL therefore selects `created_at` and
+/// `ORDER BY created_at DESC`, so each comment is its own row and a run
+/// that commented N times on one issue lists it N times, newest comment
+/// first (PIDASHCONV-1204). The extra `created_at` column is unmapped:
+/// `IssueTouchRow` ignores it and the rendered entry stays
+/// `{"id", "identifier", "name"}`.
+const ISSUES_BY_RUN_SQL: &str = r#"SELECT DISTINCT "c"."speaker_agent_run_id", "c"."issue_id", "i"."name", "i"."sequence_id", "pr"."identifier", "c"."created_at" FROM "issue_comments" "c" JOIN "issues" "i" ON "i"."id" = "c"."issue_id" JOIN "projects" "pr" ON "pr"."id" = "i"."project_id" JOIN "project_members" "pm" ON "pm"."project_id" = "pr"."id" AND "pm"."member_id" = $2 AND "pm"."is_active" WHERE "c"."speaker_agent_run_id" = ANY($1) AND "c"."deleted_at" IS NULL ORDER BY "c"."created_at" DESC"#;
 
 // ---------------------------------------------------------------------------
 // Renders (`Meta.fields` order, DRF value rules)

@@ -105,3 +105,31 @@ def test_nonmember_denied(seed):
 def test_outsider_denied(seed):
     r = http.get(seed["keys"]["outsider"], url(seed), expect=403)
     assert r.json() == FORBIDDEN_BODY
+
+
+def test_issues_list_one_entry_per_comment_newest_first(repeat_seed):
+    # PIDASHCONV-1204: a run that commented twice on one issue lists that
+    # issue once per comment, newest comment first (Django's ``.distinct()``
+    # carries ``IssueComment.Meta.ordering`` = ``-created_at``, and the
+    # ordering column joins the ``SELECT DISTINCT`` list). Three comments on
+    # I1 (t0), I2 (t1), I1 (t2) yield ``[I1, I2, I1]`` in that order.
+    seed = repeat_seed
+    r = http.get(seed["keys"][KEY], url(seed))
+    rows = {row["id"]: row for row in r.json()["results"]}
+    touched = rows[str(seed["run"]["id"])]["issues"]
+    identifier = seed["project"]["identifier"]
+    assert [issue["id"] for issue in touched] == [
+        str(seed["issue_1"]["id"]),
+        str(seed["issue_2"]["id"]),
+        str(seed["issue_1"]["id"]),
+    ]
+    assert [issue["identifier"] for issue in touched] == [
+        f"{identifier}-21",
+        f"{identifier}-22",
+        f"{identifier}-21",
+    ]
+    assert [issue["name"] for issue in touched] == [
+        "Repeated issue",
+        "Once issue",
+        "Repeated issue",
+    ]
