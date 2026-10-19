@@ -42,6 +42,7 @@
 //! - the manager's triage exclusion keeps NULL-state rows (Django
 //!   negates null-safely: `NOT (group = 'triage' AND group IS NOT NULL)`).
 
+pub mod expand;
 pub mod handlers_archive;
 pub mod handlers_core;
 pub mod handlers_engage;
@@ -1594,6 +1595,29 @@ pub fn shape_row(
     out
 }
 
+/// [`shape_row`]'s values as an insertion-ordered map (same trick as
+/// [`serializer_row_map`]): the fragments are parsed back so the base keys
+/// stay byte-identical while `?expand=` appends relation arrays.
+fn shape_row_map(
+    row: &Map<String, Value>,
+    fields: &[String],
+    timezone: &Tz,
+    shift: bool,
+) -> Result<Map<String, Value>, Denial> {
+    let mut map = Map::new();
+    for field in fields {
+        let fragment = shape_value(
+            field,
+            row.get(field).unwrap_or(&Value::Null),
+            timezone,
+            shift,
+        );
+        let value = serde_json::from_str(&fragment).map_err(|_| Denial::ServerError)?;
+        map.insert(field.clone(), value);
+    }
+    Ok(map)
+}
+
 fn shape_value(field: &str, value: &Value, timezone: &Tz, shift: bool) -> String {
     match field {
         "created_at" | "updated_at" if shift => shift_datetime(value, timezone),
@@ -1956,7 +1980,7 @@ pub async fn list_issues(
     let selects = annotation_selects(true, None, false, true, false);
     let fields = on_results_fields(None, None);
     flat_paginated_response(
-        &context, &filtered, &key_expr, direction, per_page, cursor, selects, fields, false,
+        &context, &filtered, &key_expr, direction, per_page, cursor, selects, fields, false, None,
     )
     .await
 }
@@ -1976,6 +2000,7 @@ async fn flat_paginated_response(
     selects: String,
     fields: Vec<String>,
     shift: bool,
+    expands: Option<&[String]>,
 ) -> HandlerResult {
     use crate::paginator::{
         apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor,
@@ -2001,10 +2026,25 @@ async fn flat_paginated_response(
     };
     let next = next_cursor(limit, window.page, has_more);
     let prev = prev_cursor(limit, window.page);
-    let shaped: Vec<String> = page
-        .iter()
-        .map(|row| shape_row(row, &fields, &context.gate.timezone, shift))
-        .collect();
+    let shaped: Vec<String> = match expands {
+        None => page
+            .iter()
+            .map(|row| shape_row(row, &fields, &context.gate.timezone, shift))
+            .collect::<Vec<_>>(),
+        Some(names) => {
+            let mut out = Vec::with_capacity(page.len());
+            for row in &page {
+                let mut body = shape_row_map(row, &fields, &context.gate.timezone, shift)?;
+                let issue_id = expand::row_uuid(row, "id")?.ok_or(Denial::ServerError)?;
+                expand::append_detail_list_expand(&context.pool, issue_id, names, &mut body)
+                    .await?;
+                out.push(
+                    serde_json::to_string(&Value::Object(body)).map_err(|_| Denial::ServerError)?,
+                );
+            }
+            out
+        }
+    };
     Ok(json_response(envelope(
         None,
         None,
@@ -2431,10 +2471,10 @@ const SERIALIZER_FIELDS: &[&str] = &[
 /// and no explicit ordering (the model's `-created_at` default applies).
 /// `fields=` itself is discarded (`DynamicBaseSerializer` overwrites it
 /// with `expand`), and `expand` only ever *adds* nested keys, so the base
-/// shape below is what every `fields`-only request renders. Nested
-/// `expand` objects (the expansion mapper + `issue_attachments`) are a
-/// known residual gap: the contract suite never sends `expand` on this
-/// path, and the nested lite-serializer fleet is out of pilot scope.
+/// shape below is what every `fields`-only request renders. `?expand=`
+/// sends the rows through the shared [`expand`] kernel (expansion mapper +
+/// `issue_attachments` leg + `sub_issues` 500); only `?expand=issue_cycle`
+/// stays an unrendered residual gap (see `expand`'s residual-gap list).
 async fn serializer_list(
     context: &ListContext,
     query: &QueryMap,
@@ -2459,7 +2499,7 @@ async fn serializer_list(
     // `is_synced`: empty `external_source` short-circuits false before any
     // query; otherwise either sync table holds a live row (both use
     // soft-deletion managers, so deleted rows do not count).
-    let selects = r#"issue.id, issue.name, issue.state_id, issue.sort_order,
+    let selects = r#"issue.id, issue.workspace_id, issue.name, issue.state_id, issue.sort_order,
         issue.completed_at, issue.estimate_point_id AS estimate_point, issue.priority,
         issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id,
         issue.project_id, issue.parent_id, issue.assigned_pod_id, issue.agent_executor,
@@ -2480,10 +2520,33 @@ async fn serializer_list(
         .iter()
         .map(|name| (*name).to_owned())
         .collect();
-    let shaped: Vec<String> = rows
-        .iter()
-        .map(|row| serializer_shape_row(row, &fields, &context.gate.timezone))
-        .collect();
+    let expands = context.params.expand.clone();
+    let mut shaped = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let mut body = serializer_row_map(row, &fields, &context.gate.timezone)?;
+        if let Some(names) = expands.as_deref() {
+            let anchor = expand::ExpandAnchor {
+                issue_id: expand::row_uuid(row, "id")?.ok_or(Denial::ServerError)?,
+                workspace_id: expand::row_uuid(row, "workspace_id")?.ok_or(Denial::ServerError)?,
+                project_id: expand::row_uuid(row, "project_id")?.ok_or(Denial::ServerError)?,
+                created_by_id: expand::row_uuid(row, "created_by")?,
+                updated_by_id: expand::row_uuid(row, "updated_by")?,
+                state_id: expand::row_uuid(row, "state_id")?,
+                parent_id: expand::row_uuid(row, "parent_id")?,
+                estimate_point_id: expand::row_uuid(row, "estimate_point")?,
+            };
+            expand::apply_dynamic_expand(
+                &context.pool,
+                &anchor,
+                &context.gate.timezone,
+                expand::FLAT_EXPAND_FIELDS,
+                names,
+                &mut body,
+            )
+            .await?;
+        }
+        shaped.push(serde_json::to_string(&Value::Object(body)).map_err(|_| Denial::ServerError)?);
+    }
     Ok(json_response(format!("[{}]", shaped.join(","))))
 }
 
@@ -2491,33 +2554,39 @@ async fn serializer_list(
 /// every DRF `DateTimeField` shifted into the actor's zone
 /// (`enforce_timezone` against the activated tz, `Z`-normalized like the
 /// flat `.values()` converter path).
-fn serializer_shape_row(row: &Map<String, Value>, fields: &[String], timezone: &Tz) -> String {
-    let mut out = String::from("{");
-    for (index, field) in fields.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
+/// One `IssueSerializer` field rendered as a JSON fragment.
+fn serializer_shape_value(field: &str, value: &Value, timezone: &Tz) -> String {
+    match field {
+        "created_at" | "updated_at" | "completed_at" | "archived_at" => {
+            shift_datetime(value, timezone)
         }
-        out.push('"');
-        out.push_str(field);
-        out.push_str("\":");
-        let value = row.get(field).unwrap_or(&Value::Null);
-        let rendered = match field.as_str() {
-            "created_at" | "updated_at" | "completed_at" | "archived_at" => {
-                shift_datetime(value, timezone)
+        "sort_order" => match value {
+            Value::Number(number) => {
+                let float = number.as_f64().unwrap_or(f64::NAN);
+                crate::paginator::py_float_str(float)
             }
-            "sort_order" => match value {
-                Value::Number(number) => {
-                    let float = number.as_f64().unwrap_or(f64::NAN);
-                    crate::paginator::py_float_str(float)
-                }
-                _ => serde_json::to_string(value).unwrap_or("null".to_owned()),
-            },
             _ => serde_json::to_string(value).unwrap_or("null".to_owned()),
-        };
-        out.push_str(&rendered);
+        },
+        _ => serde_json::to_string(value).unwrap_or("null".to_owned()),
     }
-    out.push('}');
-    out
+}
+
+/// The same row as an insertion-ordered map: each fragment is parsed back to
+/// its value, so the base keys stay byte-identical while `?expand=` can
+/// append or clobber keys in DRF's positions.
+fn serializer_row_map(
+    row: &Map<String, Value>,
+    fields: &[String],
+    timezone: &Tz,
+) -> Result<Map<String, Value>, Denial> {
+    let mut map = Map::new();
+    for field in fields {
+        let fragment =
+            serializer_shape_value(field, row.get(field).unwrap_or(&Value::Null), timezone);
+        let value = serde_json::from_str(&fragment).map_err(|_| Denial::ServerError)?;
+        map.insert(field.clone(), value);
+    }
+    Ok(map)
 }
 
 /// `ORDER BY` for the unpaginated flat endpoint: the rewritten branches
@@ -2600,8 +2669,9 @@ fn permission_exists_fragment(binder: &mut Binder, gate: &Gate) -> String {
 ///   returns raw values; no `user_timezone_converter` runs here),
 /// - `fields=` is ignored by the serializer and `expand=` only appends
 ///   relation arrays, so with no `expand` the shape is [`DETAIL_FIELDS`].
-///   `expand=issue_relation|issue_related` is a known gap (recorded in the
-///   workpad; the contract suite never sends it).
+///   `expand=issue_relation|issue_related` appends the inline relation dicts
+///   ([`expand::append_detail_list_expand`]); every other name — including
+///   `sub_issues` — is silently ignored.
 pub async fn detail_list(
     State(state): State<AppState>,
     Path((slug, project_id)): Path<(String, String)>,
@@ -2641,7 +2711,16 @@ pub async fn detail_list(
         .map(|name| (*name).to_owned())
         .collect();
     flat_paginated_response(
-        &context, &filtered, &key_expr, direction, per_page, cursor, selects, fields, false,
+        &context,
+        &filtered,
+        &key_expr,
+        direction,
+        per_page,
+        cursor,
+        selects,
+        fields,
+        false,
+        context.params.expand.as_deref(),
     )
     .await
 }

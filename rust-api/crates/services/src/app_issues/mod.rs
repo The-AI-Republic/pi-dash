@@ -43,6 +43,7 @@ pub mod serializers_assoc;
 pub mod serializers_create;
 pub mod serializers_detail;
 pub mod serializers_engage;
+pub mod serializers_expand;
 pub mod serializers_label;
 pub mod serializers_links;
 pub mod serializers_refs;
@@ -118,6 +119,12 @@ pub use serializers_engage::{
     IssueSubscriberRow, IssueSubscriberView, APP_ISSUE_FLAT_FIELDS, GITHUB_COMMENT_SYNC_PROBE_SQL,
     GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_COMMENT_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
     ISSUE_ACTIVITY_ALL_FIELDS, ISSUE_REACTION_LITE_FIELDS, ISSUE_SUBSCRIBER_ALL_FIELDS,
+};
+pub use serializers_expand::{
+    intake_issue_lite_to_representation, issue_relation_expand_to_representation,
+    related_issue_expand_to_representation, IntakeIssueLiteRow, IntakeIssueLiteView,
+    IssueRelationExpandRow, IssueRelationExpandView, RelatedIssueExpandView,
+    INTAKE_ISSUE_LITE_FIELDS, ISSUE_RELATION_FIELDS, RELATED_ISSUE_FIELDS,
 };
 pub use serializers_label::{
     app_label_to_representation, validate_label_name, AppLabelRow, AppLabelView, APP_LABEL_FIELDS,

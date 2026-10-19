@@ -4742,20 +4742,19 @@ async fn fetch_blocker_summary(
     Ok(relations_summary(&blocked_by, &blocking, open.is_some()))
 }
 
-/// Render one `IssueDetailSerializer(...).data` body: the 35-key retrieve
-/// form, or the 34-key `current_instance` form without `is_subscribed`
-/// (the PATCH queryset never annotates it, so DRF `SkipField`s the key).
-/// `is_intake` is absent on both (neither queryset annotates it).
-/// `current_instance` is `json.dumps` spaced (it is a dump of the dict,
-/// not the response body), with the same key order.
-async fn render_detail_body(
+/// Render one `IssueDetailSerializer(...).data` body as an insertion-ordered
+/// map: the 35-key retrieve form, or the 34-key `current_instance` form
+/// without `is_subscribed` (the PATCH queryset never annotates it, so DRF
+/// `SkipField`s the key). `is_intake` is absent on both (neither queryset
+/// annotates it). The map form lets a caller append `?expand=` keys in the
+/// same positions DRF's `to_representation` would.
+async fn render_detail_map(
     pool: &sqlx::PgPool,
     row: &CoreIssueRow,
     timezone: &Tz,
     with_subscribed: bool,
     touch_prefetches: bool,
-    spaced: bool,
-) -> Result<String, Denial> {
+) -> Result<Map<String, Value>, Denial> {
     if touch_prefetches {
         touch_detail_prefetches(pool, &row.save.id).await?;
     }
@@ -4926,29 +4925,35 @@ async fn render_detail_body(
         blockers: &blockers,
     };
     let view = issue_detail_to_representation(&detail);
-    let mut body = if spaced {
-        to_spaced_json(&view)?
-    } else {
-        serde_json::to_string(&view).map_err(|_| Denial::ServerError)?
+    let value = serde_json::to_value(&view).map_err(|_| Denial::ServerError)?;
+    let Value::Object(mut body) = value else {
+        return Err(Denial::ServerError);
     };
     if !with_subscribed {
-        // Drop the `is_subscribed` pair (it sits between
-        // `description_html` and `agent_ticker`). The needle's unescaped
-        // quotes cannot match inside any string value, so this excises
-        // exactly the key DRF `SkipField`s.
-        let needles = if spaced {
-            [", \"is_subscribed\": true", ", \"is_subscribed\": false"]
-        } else {
-            [",\"is_subscribed\":true", ",\"is_subscribed\":false"]
-        };
-        for needle in needles {
-            if let Some(start) = body.find(needle) {
-                body.replace_range(start..start + needle.len(), "");
-                break;
-            }
-        }
+        // The PATCH queryset never annotates `is_subscribed`, so DRF
+        // `SkipField`s the key before any expansion.
+        body.remove("is_subscribed");
     }
     Ok(body)
+}
+
+/// Render one `IssueDetailSerializer(...).data` body as compact (or, when
+/// `spaced`, `json.dumps`-spaced) JSON text.
+async fn render_detail_body(
+    pool: &sqlx::PgPool,
+    row: &CoreIssueRow,
+    timezone: &Tz,
+    with_subscribed: bool,
+    touch_prefetches: bool,
+    spaced: bool,
+) -> Result<String, Denial> {
+    let body = render_detail_map(pool, row, timezone, with_subscribed, touch_prefetches).await?;
+    let value = Value::Object(body);
+    if spaced {
+        to_spaced_json(&value)
+    } else {
+        serde_json::to_string(&value).map_err(|_| Denial::ServerError)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6292,24 +6297,42 @@ pub async fn retrieve_issue(
         return Ok(not_found_detail(GUEST_VIEW_BODY, StatusCode::FORBIDDEN));
     }
     enqueue_recent_visited(&pool, &slug, &pk.to_string(), &user_id, &tenant.project_id).await;
-    // `Issue.sub_issues` does not exist, so the `IssueLiteSerializer`
-    // expansion raises `AttributeError` → the generic 500 (the visit
-    // enqueue above already fired). Ported as the bug it is.
-    let expand = parts
-        .uri
-        .query()
-        .and_then(|query| {
-            query.split('&').find_map(|pair| {
-                let (key, value) = pair.split_once('=')?;
-                (key == "expand").then_some(value)
-            })
-        })
-        .unwrap_or("");
-    if expand.split(',').any(|name| name == "sub_issues") {
-        return Err(Denial::ServerError);
+    // `?expand=` runs `DynamicBaseSerializer.to_representation`: mapper names
+    // nest, declared names clobber, `issue_attachments` appends, and a mapped
+    // name that is not an `Issue` attribute (`sub_issues`, `user`, …) raises
+    // `AttributeError` → the generic 500 (the visit enqueue above already
+    // fired). Ported as the shared kernel, bugs included.
+    let expand_raw = parts.uri.query().and_then(|query| {
+        query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .filter_map(|(key, value)| (key == "expand").then_some(value))
+            .next_back()
+    });
+    let mut body = render_detail_map(&pool, &looked_up, &tenant.timezone, true, true).await?;
+    if let Some(expands) = super::expand::split_expand(expand_raw) {
+        let anchor = super::expand::ExpandAnchor {
+            issue_id: looked_up.save.id,
+            workspace_id: looked_up.save.workspace_id,
+            project_id: looked_up.save.project_id,
+            created_by_id: looked_up.save.created_by_id,
+            updated_by_id: looked_up.save.updated_by_id,
+            state_id: looked_up.save.state_id,
+            parent_id: looked_up.save.parent_id,
+            estimate_point_id: looked_up.save.estimate_point_id,
+        };
+        super::expand::apply_dynamic_expand(
+            &pool,
+            &anchor,
+            &tenant.timezone,
+            super::expand::DETAIL_EXPAND_FIELDS,
+            &expands,
+            &mut body,
+        )
+        .await?;
     }
     Ok(json_response(
-        render_detail_body(&pool, &looked_up, &tenant.timezone, true, true, false).await?,
+        serde_json::to_string(&Value::Object(body)).map_err(|_| Denial::ServerError)?,
     ))
 }
 
