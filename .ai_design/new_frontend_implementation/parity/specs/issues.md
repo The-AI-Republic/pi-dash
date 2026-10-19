@@ -1516,6 +1516,17 @@ five-row cap with its expand control, checkbox-versus-radio choice,
 and the applied count inside that dropdown; the row stays not-started
 until the slice lands and turns built with it.
 
+Implementation note (NEWFRONT-629): the slice built the chrome as the
+shared section control under the issues filters and adopted it in the
+two surfaces that exist today — the condition-row builder's rich value
+lists and the display dropdown. The sub-issue widget does not exist in
+the new frontend yet; its filter dropdown adopts the same control when
+that widget is built (NEWFRONT-647), which is the only outstanding
+place ISS-094 renders. ISS-093 is registered the same way: the
+personal work-items catalogue offers the `subscriber_id` dimension,
+and the my-work-items page that renders the catalogue belongs to the
+profile pages (NEWFRONT-573).
+
 ISS-165 carries the same StrictMode note (nested peek unreachable on
 the dev stack) and is covered by the main#533 target below.
 

@@ -404,6 +404,19 @@ describe("field catalogue", () => {
   it("returns null for an unknown stem", () => {
     expect(findField(richFilterFields(), "missing")).toBeNull();
   });
+
+  it("offers the subscriber dimension only on the personal work-items surface", () => {
+    expect(findField(richFilterFields(), "subscriber_id")).toBeNull();
+    expect(findField(richFilterFields({ surface: "project" }), "subscriber_id")).toBeNull();
+    expect(findField(richFilterFields({ surface: "my_issues" }), "subscriber_id")).toMatchObject({
+      label: "Subscriber",
+      kind: "multi",
+      source: "members",
+      surface: "my_issues",
+    });
+    const personal = richFilterFields({ surface: "my_issues" });
+    expect(new Set(personal.map((field) => field.stem)).size).toBe(personal.length);
+  });
 });
 
 describe("operators", () => {
