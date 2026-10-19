@@ -27,7 +27,7 @@ import {
 const TERMS_HREF = "https://airepublic.com/terms";
 const PRIVACY_HREF = "https://airepublic.com/privacy";
 const HOME_HREF = "/home";
-const RESUME_FAILURE = "We couldn't sign you in automatically. Continue below to try again.";
+const RESUME_FAILURE = "That attempt did not complete automatically. Start again below.";
 
 /** This tab's session storage, or null where the runtime exposes none. */
 function tabStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> | null {
@@ -96,10 +96,10 @@ export function CloudLoginCard({ apiBase }: CloudLoginCardProps = {}): React.Rea
     <main className="flex min-h-screen items-center justify-center bg-(--bg) p-(--space-8)">
       <div className="flex w-full max-w-4xl flex-col-reverse items-center gap-(--space-8) lg:flex-row lg:justify-center lg:gap-(--space-12)">
         <section className="flex w-full max-w-lg flex-col gap-(--space-3)">
-          <p className="text-meta font-semibold text-(--accent)">Pi Dash: Your AI Workers Management Platform</p>
-          <h1 className="text-h2 text-(--text)">Manage Your Own AI Like A Boss</h1>
+          <p className="text-meta font-semibold text-(--accent)">AI Republic cloud workspace</p>
+          <h1 className="text-h2 text-(--text)">Put your AI agents to work</h1>
           <a href={HOME_HREF} className="text-body w-fit text-(--text-muted) underline">
-            Explore Pi Dash
+            Back to the product overview
           </a>
         </section>
         <section
@@ -107,8 +107,8 @@ export function CloudLoginCard({ apiBase }: CloudLoginCardProps = {}): React.Rea
           className="flex w-full max-w-md flex-col items-center gap-(--space-6) rounded-(--radius-card) border border-(--border) bg-(--bg) p-(--space-8)"
         >
           <div className="flex flex-col items-center gap-(--space-2) text-center">
-            <h2 className="text-h2 text-(--text)">Sign in to Pi Dash</h2>
-            <p className="text-body text-(--text-muted)">Continue with your AI Republic account.</p>
+            <h2 className="text-h2 text-(--text)">Sign in to your workspace</h2>
+            <p className="text-body text-(--text-muted)">Use your AI Republic account to continue.</p>
             {visit.error === null ? null : (
               <p role="alert" className="text-body text-(--danger)">
                 {RESUME_FAILURE}
@@ -117,17 +117,17 @@ export function CloudLoginCard({ apiBase }: CloudLoginCardProps = {}): React.Rea
           </div>
           <a href={CLOUD_SIGN_IN_HREF} onClick={startManualSignIn} className="w-full">
             <Button variant="primary" size="large" className="w-full">
-              Continue with AI Republic
+              Sign in with AI Republic
             </Button>
           </a>
           <p className="text-meta text-center text-(--text-muted)">
-            By signing in, you agree to our{" "}
+            Signing in means you accept our{" "}
             <a href={TERMS_HREF} target="_blank" rel="noopener noreferrer" className="underline">
-              Terms
+              terms of service
             </a>{" "}
             and{" "}
             <a href={PRIVACY_HREF} target="_blank" rel="noopener noreferrer" className="underline">
-              Privacy Policy
+              privacy policy
             </a>
             .
           </p>

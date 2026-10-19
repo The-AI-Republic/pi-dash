@@ -65,20 +65,23 @@ describe("CloudLoginCard", () => {
   it("offers one continue action, the account line, legal links and the home link", () => {
     render(<CloudLoginCard />);
 
-    expect(screen.getByRole("heading", { name: "Sign in to Pi Dash" })).toBeVisible();
-    expect(screen.getByText("Continue with your AI Republic account.")).toBeVisible();
-    expect(screen.getByRole("link", { name: /continue with ai republic/i })).toHaveAttribute(
+    expect(screen.getByRole("heading", { name: "Sign in to your workspace" })).toBeVisible();
+    expect(screen.getByText("Use your AI Republic account to continue.")).toBeVisible();
+    expect(screen.getByRole("link", { name: /sign in with ai republic/i })).toHaveAttribute(
       "href",
       "/api/auth/sign-in/"
     );
-    expect(screen.getByRole("button", { name: /continue with ai republic/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: /sign in with ai republic/i })).toBeVisible();
     expect(screen.getAllByRole("button")).toHaveLength(1);
-    expect(screen.getByRole("link", { name: "Terms" })).toHaveAttribute("href", "https://airepublic.com/terms");
-    expect(screen.getByRole("link", { name: "Privacy Policy" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /terms of service/i })).toHaveAttribute(
+      "href",
+      "https://airepublic.com/terms"
+    );
+    expect(screen.getByRole("link", { name: /privacy policy/i })).toHaveAttribute(
       "href",
       "https://airepublic.com/privacy"
     );
-    expect(screen.getAllByRole("link", { name: "Explore Pi Dash" })[0]).toHaveAttribute("href", "/home");
+    expect(screen.getAllByRole("link", { name: /product overview/i })[0]).toHaveAttribute("href", "/home");
     expect(screen.queryByRole("alert")).toBeNull();
     expect(location.replace).not.toHaveBeenCalled();
     expect(location.assign).not.toHaveBeenCalled();
@@ -88,7 +91,7 @@ describe("CloudLoginCard", () => {
     const user = userEvent.setup();
     render(<CloudLoginCard />);
 
-    await user.click(screen.getByRole("button", { name: /continue with ai republic/i }));
+    await user.click(screen.getByRole("button", { name: /sign in with ai republic/i }));
 
     expect(location.assign).toHaveBeenCalledTimes(1);
     const url = navigatedUrl(location.assign);
@@ -105,7 +108,7 @@ describe("CloudLoginCard", () => {
     const url = navigatedUrl(location.replace);
     expect(url.pathname).toBe("/api/auth/sign-in/");
     expect(url.searchParams.get("return_to")).toBe("/docs");
-    expect(screen.queryByRole("heading", { name: "Sign in to Pi Dash" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Sign in to your workspace" })).toBeNull();
     expect(location.assign).not.toHaveBeenCalled();
   });
 
@@ -113,7 +116,7 @@ describe("CloudLoginCard", () => {
     location.search = "?next_path=%2Fdocs&error=oidc_down&sso=failed";
     render(<CloudLoginCard />);
 
-    expect(screen.getByRole("button", { name: /continue with ai republic/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: /sign in with ai republic/i })).toBeVisible();
     expect(screen.getByRole("alert")).toHaveTextContent(/automatically/i);
     expect(location.replace).not.toHaveBeenCalled();
     expect(location.assign).not.toHaveBeenCalled();
@@ -124,7 +127,7 @@ describe("CloudLoginCard", () => {
     storage.entries.set(EXPLICIT_LOGOUT_KEY, "1");
     render(<CloudLoginCard />);
 
-    expect(screen.getByRole("heading", { name: "Sign in to Pi Dash" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Sign in to your workspace" })).toBeVisible();
     expect(location.replace).not.toHaveBeenCalled();
   });
 
@@ -134,7 +137,7 @@ describe("CloudLoginCard", () => {
     const user = userEvent.setup();
     render(<CloudLoginCard />);
 
-    await user.click(screen.getByRole("button", { name: /continue with ai republic/i }));
+    await user.click(screen.getByRole("button", { name: /sign in with ai republic/i }));
 
     const url = navigatedUrl(location.assign);
     expect(url.searchParams.get("return_to")).toBe("/docs");
@@ -151,7 +154,7 @@ describe("CloudLoginCard", () => {
     ]) {
       location.search = `?next_path=${encodeURIComponent(unsafe)}`;
       const { unmount } = render(<CloudLoginCard />);
-      expect(screen.getByRole("button", { name: /continue with ai republic/i })).toBeVisible();
+      expect(screen.getByRole("button", { name: /sign in with ai republic/i })).toBeVisible();
       expect(location.replace).not.toHaveBeenCalled();
       unmount();
     }
@@ -159,7 +162,7 @@ describe("CloudLoginCard", () => {
 
   it("keeps the card on a bare visit", () => {
     render(<CloudLoginCard />);
-    expect(screen.getByRole("heading", { name: "Sign in to Pi Dash" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Sign in to your workspace" })).toBeVisible();
     expect(location.replace).not.toHaveBeenCalled();
   });
 

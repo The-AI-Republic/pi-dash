@@ -21725,22 +21725,24 @@ export class WebNewDriver implements ParityDriver {
   private cloudSignInSeen: string[] = [];
 
   private cloudLoginCard(): Locator {
-    return this.page.getByRole("heading", { name: "Sign in to Pi Dash" }).locator("xpath=ancestor::section[1]");
+    // The screen labels its card region; the driver keys off that label
+    // rather than any heading text so copy changes never break parity.
+    return this.page.locator('section[aria-label="Cloud sign-in"]');
   }
 
   async cloudLoginCardFacts(): Promise<CloudLoginCardFacts> {
     const card = this.cloudLoginCard();
     await card.waitFor({ timeout: 60_000 });
     const alert = card.getByRole("alert");
-    const terms = card.getByRole("link", { name: "Terms" });
-    const privacy = card.getByRole("link", { name: "Privacy Policy" });
+    const terms = card.locator('a[href="https://airepublic.com/terms"]');
+    const privacy = card.locator('a[href="https://airepublic.com/privacy"]');
     const home = this.page.locator('a[href="/home"]').first();
     const norm = (value: string | null): string => (value ?? "").replace(/\s+/g, " ").trim();
     return {
       heading: norm(await card.getByRole("heading").first().innerText()),
       accountLine: norm(await card.locator("p").first().innerText()),
       continueActions: await card.getByRole("button").count(),
-      continueHref: (await card.getByRole("link", { name: /continue with/i }).getAttribute("href")) ?? "",
+      continueHref: (await card.locator('a[href="/api/auth/sign-in/"]').getAttribute("href")) ?? "",
       termsHref: ((await terms.count()) > 0 ? await terms.first().getAttribute("href") : null) ?? null,
       privacyHref: ((await privacy.count()) > 0 ? await privacy.first().getAttribute("href") : null) ?? null,
       homeHref: ((await home.count()) > 0 ? await home.getAttribute("href") : null) ?? null,
@@ -21780,7 +21782,7 @@ export class WebNewDriver implements ParityDriver {
   async cloudClickLoginContinue(): Promise<void> {
     const card = this.cloudLoginCard();
     await card.waitFor({ timeout: 60_000 });
-    await card.getByRole("button", { name: /continue with/i }).click();
+    await card.getByRole("button").first().click();
   }
 
   async cloudExplicitLogoutMarker(): Promise<boolean> {
