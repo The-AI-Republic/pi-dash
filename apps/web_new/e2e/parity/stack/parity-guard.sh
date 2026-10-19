@@ -85,6 +85,40 @@ if foreign_dirs:
         3,
     )
 
+def port_state(number):
+    """Return "busy" for a listener, "free" for a bindable port, else None.
+
+    A connection probe reports a listener that is already bound, while a
+    bind probe on macOS treats a wildcard + SO_REUSEADDR bind next to a
+    loopback listener as free (darwin lets it coexist but not actually
+    accept). When nothing answers a connection, fall back to a bind
+    without SO_REUSEADDR so TIME_WAIT leftovers still read as usable,
+    and to a reuse bind for IPv4-only wildcard conflicts.
+    """
+    for family, address in ((socket.AF_INET, ("127.0.0.1", number)), (socket.AF_INET6, ("::1", number))):
+        conn = socket.socket(family, socket.SOCK_STREAM)
+        conn.settimeout(1.0)
+        try:
+            conn.connect(address)
+            return "busy"
+        except OSError:
+            pass
+        finally:
+            conn.close()
+    for reuse in (False, True):
+        sock = socket.socket()
+        try:
+            if reuse:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("0.0.0.0", number))
+            return "free"
+        except OSError:
+            pass
+        finally:
+            sock.close()
+    return None
+
+
 busy = []
 for port in want:
     if port in own_ports:
@@ -94,22 +128,17 @@ for port in want:
     except ValueError:
         busy.append(port)
         continue
-    # SO_REUSEADDR like docker itself: a leftover TIME_WAIT from a just
-    # closed connection must not read as busy. Three attempts five seconds
-    # apart absorb a teardown that is still releasing its ports.
+    # Three attempts five seconds apart absorb a teardown that is still
+    # releasing its ports.
     ok = False
     for _ in range(3):
-        sock = socket.socket()
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("0.0.0.0", number))
+        state = port_state(number)
+        if state == "free":
             ok = True
-        except OSError:
-            time.sleep(5)
-        finally:
-            sock.close()
-        if ok:
             break
+        if state == "busy":
+            break
+        time.sleep(5)
     if not ok:
         busy.append(port)
 if busy:

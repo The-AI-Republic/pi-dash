@@ -5,7 +5,29 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPreference, preferenceStorage, removePreference, storePreference } from "./preferenceStorage.js";
 
+interface MutableStorage {
+  getItem: (key: string) => string | null;
+  setItem: (key: string, value: string) => void;
+  removeItem: (key: string) => void;
+}
+
+/** A writable profile stand-in; Node 26's Storage is not jsdom's prototype. */
+function fakeStorage(overrides: Partial<MutableStorage> = {}): MutableStorage {
+  const entries = new Map<string, string>();
+  return {
+    getItem: (key) => entries.get(key) ?? null,
+    setItem: (key, value) => {
+      entries.set(key, value);
+    },
+    removeItem: (key) => {
+      entries.delete(key);
+    },
+    ...overrides,
+  };
+}
+
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
   globalThis.localStorage.clear();
 });
@@ -19,9 +41,14 @@ describe("preferenceStorage", () => {
   });
 
   it("falls back to memory when the profile refuses writes", () => {
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("denied");
-    });
+    vi.stubGlobal(
+      "localStorage",
+      fakeStorage({
+        setItem: () => {
+          throw new Error("denied");
+        },
+      })
+    );
     const storage = preferenceStorage();
     expect(storage).not.toBe(globalThis.localStorage);
     storage.setItem("density", "icons");
@@ -32,9 +59,14 @@ describe("preferenceStorage", () => {
   });
 
   it("shares one memory fallback across calls", () => {
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("denied");
-    });
+    vi.stubGlobal(
+      "localStorage",
+      fakeStorage({
+        setItem: () => {
+          throw new Error("denied");
+        },
+      })
+    );
     const first = preferenceStorage();
     const second = preferenceStorage();
     expect(second).toBe(first);
@@ -66,16 +98,26 @@ describe("loadPreference", () => {
   });
 
   it("falls back when storage throws", () => {
-    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
-      throw new Error("denied");
-    });
+    vi.stubGlobal(
+      "localStorage",
+      fakeStorage({
+        getItem: () => {
+          throw new Error("denied");
+        },
+      })
+    );
     expect(loadPreference("pref:read", { density: "labeled" }, isRecord)).toEqual({ density: "labeled" });
   });
 
   it("round-trips through the memory fallback when the profile refuses writes", () => {
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("denied");
-    });
+    vi.stubGlobal(
+      "localStorage",
+      fakeStorage({
+        setItem: () => {
+          throw new Error("denied");
+        },
+      })
+    );
     storePreference("pref:memory", { density: "icons" });
     expect(loadPreference("pref:memory", {}, isRecord)).toEqual({ density: "icons" });
   });
@@ -102,10 +144,15 @@ describe("removePreference", () => {
     // Let the writability probe pass, then fail the real removal: the
     // first removeItem call is the probe's cleanup, the second is ours.
     let calls = 0;
-    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
-      calls += 1;
-      if (calls > 1) throw new Error("denied");
-    });
+    vi.stubGlobal(
+      "localStorage",
+      fakeStorage({
+        removeItem: () => {
+          calls += 1;
+          if (calls > 1) throw new Error("denied");
+        },
+      })
+    );
     expect(() => removePreference("pref:drop")).not.toThrow();
     expect(calls).toBe(2);
   });
