@@ -19,6 +19,7 @@ import { issueKeys } from "../api/keys.js";
 import { entityListsKeyPart } from "../prefs/entities.js";
 import { CalendarReloadBar } from "../loaders/skeletons.js";
 import { AddExistingModal } from "../list/AddExistingModal.js";
+import { CALENDAR_ADD_EXISTING_ITEM, CALENDAR_ADD_ITEM, CALENDAR_TITLE_PLACEHOLDER } from "./CalendarDay.js";
 import { selectDisplayPrefs, useEntityPrefs, useUpdateDisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { useWeekStart } from "../dropdowns/weekStart.js";
@@ -31,7 +32,7 @@ import {
   useRedateIssue,
   type CalendarMembershipContext,
 } from "./actions.js";
-import { createTempId } from "../freshness/fresh.js";
+import { createTempId, isTempRowId } from "../freshness/fresh.js";
 import { tempIssueRow } from "../freshness/tempRows.js";
 import {
   decideDrop,
@@ -324,6 +325,14 @@ export function CalendarLayout({
     setDropTarget(null);
   }
 
+  function quickAdd(day: string, name: string): void {
+    const tempId = createTempId();
+    setPendingByDay((current) =>
+      addPendingRow(current, day, { ...tempIssueRow(tempId, name), target_date: day, project_id: projectId })
+    );
+    create.mutate({ name, day }, { onSettled: () => setPendingByDay((current) => removePendingRow(current, tempId)) });
+  }
+
   function closePeek(): void {
     setPeek(null);
     if (typeof globalThis.window === "undefined") return;
@@ -392,16 +401,7 @@ export function CalendarLayout({
           event.preventDefault();
           setDragged(issue);
         }}
-        onQuickAdd={(day, name) => {
-          const tempId = createTempId();
-          setPendingByDay((current) =>
-            addPendingRow(current, day, { ...tempIssueRow(tempId, name), target_date: day, project_id: projectId })
-          );
-          create.mutate(
-            { name, day },
-            { onSettled: () => setPendingByDay((current) => removePendingRow(current, tempId)) }
-          );
-        }}
+        onQuickAdd={quickAdd}
         onAddExisting={setAddExistingDay}
         onLoadMore={loadMore}
       />
@@ -409,7 +409,14 @@ export function CalendarLayout({
         <MobileDayDetail
           day={selectedDay}
           rows={[...rowsForDay(grouped, selectedDay), ...(extraByDay[selectedDay] ?? [])]}
+          totalRows={totalsByDay.get(selectedDay) ?? 0}
           projectIdentifier={projectIdentifier}
+          canEdit={canEdit}
+          canAddExisting={canAddExisting}
+          loadingMore={loadingDay === selectedDay}
+          onAddExisting={setAddExistingDay}
+          onQuickAdd={quickAdd}
+          onLoadMore={loadMore}
         />
       ) : null}
       <AddExistingModal
@@ -470,12 +477,38 @@ export function CalendarLayout({
 function MobileDayDetail({
   day,
   rows,
+  totalRows,
   projectIdentifier,
+  canEdit,
+  canAddExisting,
+  loadingMore,
+  onAddExisting,
+  onQuickAdd,
+  onLoadMore,
 }: {
   day: string;
   rows: readonly IssueListItem[];
+  totalRows: number;
   projectIdentifier: string;
+  canEdit: boolean;
+  canAddExisting: boolean;
+  loadingMore: boolean;
+  onAddExisting: (day: string) => void;
+  onQuickAdd: (day: string, title: string) => void;
+  onLoadMore: (day: string) => void;
 }): React.ReactElement {
+  const [title, setTitle] = React.useState("");
+  const [adding, setAdding] = React.useState(false);
+  const hasMore = totalRows > rows.length;
+
+  function submit(): void {
+    const name = title.trim();
+    if (name === "") return;
+    onQuickAdd(day, name);
+    setTitle("");
+    setAdding(false);
+  }
+
   return (
     <section
       aria-label={`Issues on ${day}`}
@@ -484,19 +517,71 @@ function MobileDayDetail({
       {rows.length === 0 ? (
         <p className="text-body text-(--text-muted)">No work items on this day.</p>
       ) : (
-        rows.map((issue) => (
-          <div key={issue.id} className="flex items-center gap-(--space-2)">
+        rows.map((issue) => {
+          const temp = isTempRowId(issue.id);
+          return (
+            <div key={issue.id} className="relative flex items-center gap-(--space-2)">
+              <span className="text-caption font-[family-name:var(--font-mono)] text-(--text-muted)">
+                {temp ? "…" : `${projectIdentifier}-${issue.sequence_id}`}
+              </span>
+              <div className="text-body min-w-0 truncate text-(--text)">{issue.name}</div>
+              {temp ? (
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 animate-pulse bg-(--subtle)/60"
+                />
+              ) : null}
+            </div>
+          );
+        })
+      )}
+      {hasMore ? (
+        <button
+          type="button"
+          className="text-caption self-start text-(--text-muted) hover:text-(--text)"
+          disabled={loadingMore}
+          onClick={() => onLoadMore(day)}
+        >
+          Load more
+        </button>
+      ) : null}
+      {canEdit ? (
+        <div className="flex flex-col gap-(--space-1)">
+          <button
+            type="button"
+            className="text-caption flex items-center gap-(--space-1) text-(--text-muted)"
+            onClick={() => setAdding((open) => !open)}
+          >
+            {CALENDAR_ADD_ITEM}
+          </button>
+          {canAddExisting ? (
             <button
               type="button"
-              disabled
-              className="text-caption font-[family-name:var(--font-mono)] text-(--text-muted)"
+              className="text-caption flex items-center gap-(--space-1) text-(--text-muted)"
+              onClick={() => onAddExisting(day)}
             >
-              {projectIdentifier}-{issue.sequence_id}
+              {CALENDAR_ADD_EXISTING_ITEM}
             </button>
-            <div className="text-body min-w-0 truncate text-(--text)">{issue.name}</div>
-          </div>
-        ))
-      )}
+          ) : null}
+          {adding ? (
+            <input
+              autoFocus
+              value={title}
+              placeholder={CALENDAR_TITLE_PLACEHOLDER}
+              aria-label="Work item title"
+              className="text-caption w-full rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-1) py-(--space-1) text-(--text) outline-none focus:border-(--accent)"
+              onChange={(event) => setTitle(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") submit();
+                if (event.key === "Escape") {
+                  setAdding(false);
+                  setTitle("");
+                }
+              }}
+            />
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }

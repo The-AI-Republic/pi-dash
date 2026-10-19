@@ -131,6 +131,8 @@ function project(overrides: Record<string, unknown> = {}) {
     id: PROJECT,
     name: "Website",
     identifier: "WEB",
+    member_role: 20,
+    archived_at: null,
     cycle_view: true,
     module_view: true,
     ...overrides,

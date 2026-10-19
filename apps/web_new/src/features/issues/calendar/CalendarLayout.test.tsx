@@ -623,6 +623,38 @@ describe("CalendarLayout", () => {
     expect(screen.getByText("No work items on this day.")).toBeInTheDocument();
   });
 
+  it("quick-adds from the compact day detail without rendering blocks", async () => {
+    state.narrow = true;
+    state.touch = true;
+    renderLayout();
+    const user = userEvent.setup();
+    const face = tile(todayIso).querySelector("div.mx-auto.cursor-pointer") as HTMLElement;
+    await user.click(face);
+    const detail = screen.getByRole("region", { name: `Issues on ${todayIso}` });
+    await user.click(within(detail).getByRole("button", { name: CALENDAR_ADD_ITEM }));
+    const field = within(detail).getByPlaceholderText(CALENDAR_TITLE_PLACEHOLDER);
+    await user.type(field, "Mobile thing");
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(state.create).toHaveBeenCalledWith(
+      { name: "Mobile thing", day: todayIso },
+      expect.objectContaining({ onSettled: expect.any(Function) })
+    );
+    expect(screen.queryByRole("link", { name: "WEB-42" })).not.toBeInTheDocument();
+  });
+
+  it("pages the compact day detail with Load more", async () => {
+    state.narrow = true;
+    state.touch = true;
+    state.windowRows = [row({ target_date: todayIso })];
+    renderLayout();
+    const user = userEvent.setup();
+    const face = tile(todayIso).querySelector("div.mx-auto.cursor-pointer") as HTMLElement;
+    await user.click(face);
+    const detail = screen.getByRole("region", { name: `Issues on ${todayIso}` });
+    await user.click(within(detail).getByRole("button", { name: "Load more" }));
+    expect(await within(detail).findByText("Extra item")).toBeInTheDocument();
+  });
+
   it("keeps blocks on a narrow pointer layout", async () => {
     state.narrow = true;
     state.touch = false;

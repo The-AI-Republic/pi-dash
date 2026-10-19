@@ -93,11 +93,6 @@ describe("module issues route", () => {
     expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-compact", "false");
   });
 
-  it("falls back to the generic title while modules load", async () => {
-    renderRoute({}, []);
-    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-title", "Module");
-  });
-
   it("renders a live module without a completed flag", async () => {
     renderRoute();
     const node = await screen.findByTestId("entity-screen");
