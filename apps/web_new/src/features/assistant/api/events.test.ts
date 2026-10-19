@@ -40,6 +40,7 @@ function feedOf(messages: StreamMessage[]): EventStream & { closed: boolean } {
     close() {
       closed = true;
     },
+    error: undefined,
   };
 }
 
@@ -121,6 +122,7 @@ describe("subscribeAssistantEvents", () => {
         throw new Error("socket closed");
       },
       close: vi.fn(),
+      error: undefined,
     };
     subscribeAssistantEvents(
       "acme",
@@ -155,6 +157,7 @@ describe("subscribeAssistantEvents", () => {
         yield { event: "chat.event", data: payload(1, "turn_started", { turn_id: TURN }) };
       },
       close: vi.fn(() => release?.()),
+      error: undefined,
     };
     const subscription = subscribeAssistantEvents(
       "acme",
@@ -181,6 +184,7 @@ describe("subscribeAssistantEvents", () => {
         throw new Error("aborted");
       },
       close: vi.fn(() => release?.()),
+      error: undefined,
     };
     const subscription = subscribeAssistantEvents(
       "acme",
