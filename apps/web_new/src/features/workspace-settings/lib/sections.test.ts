@@ -10,7 +10,8 @@ import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, selectPermissions } from "../../..
 import {
   canOpenWorkspaceSettingsSection,
   findWorkspaceSettingsSection,
-  isWorkspaceSettingsPath,
+  isWorkspaceSettingsRouteId,
+  WORKSPACE_SETTINGS_ROUTE_ID,
   resolveWorkspaceSettingsSection,
   visibleWorkspaceSettingsGroups,
   WORKSPACE_SETTINGS_GROUPS,
@@ -56,13 +57,20 @@ describe("workspaceSettingsHref", () => {
   });
 });
 
-describe("isWorkspaceSettingsPath", () => {
-  it("accepts only the settings subtree of a workspace", () => {
-    expect(isWorkspaceSettingsPath("/acme/settings")).toBe(true);
-    expect(isWorkspaceSettingsPath("/acme/settings/members/")).toBe(true);
-    expect(isWorkspaceSettingsPath("/acme/projects/settings")).toBe(false);
-    expect(isWorkspaceSettingsPath("/acme")).toBe(false);
-    expect(isWorkspaceSettingsPath("/")).toBe(false);
+describe("isWorkspaceSettingsRouteId", () => {
+  it("accepts the settings layout and everything beneath it", () => {
+    expect(isWorkspaceSettingsRouteId(WORKSPACE_SETTINGS_ROUTE_ID)).toBe(true);
+    expect(isWorkspaceSettingsRouteId(`${WORKSPACE_SETTINGS_ROUTE_ID}/`)).toBe(true);
+    expect(isWorkspaceSettingsRouteId(`${WORKSPACE_SETTINGS_ROUTE_ID}/members/`)).toBe(true);
+    expect(isWorkspaceSettingsRouteId(`${WORKSPACE_SETTINGS_ROUTE_ID}/webhooks/$webhookId`)).toBe(true);
+    expect(isWorkspaceSettingsRouteId(`${WORKSPACE_SETTINGS_ROUTE_ID}/$`)).toBe(true);
+  });
+
+  it("rejects the gated parent and sibling settings areas", () => {
+    expect(isWorkspaceSettingsRouteId("/$ws/_gated")).toBe(false);
+    expect(isWorkspaceSettingsRouteId("/$ws/_gated/settings/projects/$projectId/labels")).toBe(false);
+    expect(isWorkspaceSettingsRouteId("/$ws/_gated/settings/_workspace-other")).toBe(false);
+    expect(isWorkspaceSettingsRouteId("/$ws/_gated/projects/$projectId/issues")).toBe(false);
   });
 });
 

@@ -44,7 +44,7 @@ export function SettingsMobileNav({
   }, [open]);
 
   return (
-    <div ref={rootRef} className="relative flex shrink-0 flex-col border-b border-(--border)">
+    <div ref={rootRef} className="relative flex shrink-0 flex-col border-b border-(--border) md:hidden">
       <div className="flex items-center gap-(--space-2) px-(--space-3) py-(--space-2)">
         <button
           ref={triggerRef}

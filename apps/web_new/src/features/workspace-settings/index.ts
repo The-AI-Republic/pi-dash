@@ -57,7 +57,8 @@ export type {
 export {
   canOpenWorkspaceSettingsSection,
   findWorkspaceSettingsSection,
-  isWorkspaceSettingsPath,
+  isWorkspaceSettingsRouteId,
+  WORKSPACE_SETTINGS_ROUTE_ID,
   resolveWorkspaceSettingsSection,
   visibleWorkspaceSettingsGroups,
   WORKSPACE_SETTINGS_GROUPS,

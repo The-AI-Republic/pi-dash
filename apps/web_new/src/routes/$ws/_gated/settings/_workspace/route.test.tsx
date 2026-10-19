@@ -118,12 +118,33 @@ describe("workspace settings layout", () => {
   });
 
   it("treats an unknown section name as refused instead of a dead frame", async () => {
-    const { router } = renderLayout({ role: ROLE_ADMIN }, "/acme/settings/projects/p1/", {
+    const { router } = renderLayout({ role: ROLE_ADMIN }, "/acme/settings/nope/", {
       leafPath: "$",
       component: () => null,
     });
     expect(await screen.findByTestId("workspace-settings-not-authorized")).toBeInTheDocument();
-    expect(router.state.location.pathname).toBe("/acme/settings/projects/p1/");
+    expect(router.state.location.pathname).toBe("/acme/settings/nope/");
+  });
+
+  it("leaves the project-settings tabs to their own slice instead of denying them", async () => {
+    const { router } = renderLayout({ role: ROLE_ADMIN }, "/acme/settings/projects/p1/labels/", {
+      leafPath: "$",
+      component: () => <p>labels body</p>,
+    });
+    expect(await screen.findByText("labels body")).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/acme/settings/projects/p1/labels/");
+    expect(screen.queryByTestId("workspace-settings-not-authorized")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-settings-shell")).not.toBeInTheDocument();
+    expect(document.title).not.toContain("General settings");
+  });
+
+  it("shows the ordinary not-found page for a generic project-settings address", async () => {
+    renderLayout({ role: ROLE_ADMIN }, "/acme/settings/projects/", {
+      leafPath: "$",
+      component: () => null,
+    });
+    expect(await screen.findByText("That page does not exist")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-settings-not-authorized")).not.toBeInTheDocument();
   });
 
   it("enters the webhook detail frame with its own title", async () => {

@@ -16,7 +16,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../../../core/api/client.js";
 import { usePermissions, useWorkspace } from "../../../../../core/session/index.js";
-import { resolveFileUrl } from "../../../../../shared/shell/index.js";
+import { NotFoundPage, resolveFileUrl } from "../../../../../shared/shell/index.js";
 import {
   decideWorkspaceSettingsGate,
   resolveWorkspaceSettingsIdentity,
@@ -25,6 +25,18 @@ import {
   SettingsShell,
 } from "../../../../../features/workspace-settings/index.js";
 import { workspaceQueryOptions } from "./workspaceQuery.js";
+
+/** Whether the address belongs to the project-settings area. */
+function isProjectSettingsPath(pathname: string): boolean {
+  const [head, settings, first] = pathname.split("/").filter(Boolean);
+  return head !== undefined && settings === "settings" && first === "projects";
+}
+
+/** Whether a project-settings address names one of the area's tab routes. */
+function hasProjectSettingsTab(pathname: string): boolean {
+  const segments = pathname.split("/").filter(Boolean);
+  return segments.length >= 4;
+}
 
 export const Route = createFileRoute("/$ws/_gated/settings/_workspace")({
   component: WorkspaceSettingsLayout,
@@ -55,6 +67,13 @@ function WorkspaceSettingsLayout(): React.ReactElement {
   // the whole window here; the `_gated` layout yields its ordinary
   // workspace chrome to the shell (WSET-001/002).
   if (permissions.isLoading) return <React.Fragment />;
+  // `settings/projects/...` is the project-settings area (its own shell,
+  // its own slice): its tab routes keep the frame and mount below, and
+  // its generic addresses get the ordinary not-found page rather than a
+  // workspace-settings denial.
+  if (isProjectSettingsPath(pathname)) {
+    return hasProjectSettingsTab(pathname) ? <Outlet /> : <NotFoundPage />;
+  }
   if (gate === null || gate.status === "denied") return <SettingsNotAuthorized workspaceSlug={ws} />;
 
   const identity = resolveWorkspaceSettingsIdentity({

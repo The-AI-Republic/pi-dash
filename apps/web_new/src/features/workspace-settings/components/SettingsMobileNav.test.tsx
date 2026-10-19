@@ -33,6 +33,12 @@ describe("SettingsMobileNav", () => {
     expect(screen.queryByTestId("workspace-settings-drawer")).not.toBeInTheDocument();
   });
 
+  it("hides the whole bar on wide viewports where the sidebar takes over", () => {
+    renderNav();
+    const trigger = screen.getByRole("button", { name: "Open settings navigation" });
+    expect(trigger.closest("div.relative")).toHaveClass("md:hidden");
+  });
+
   it("opens the drawer with the role-filtered entries and closes it again", () => {
     renderNav(ROLE_MEMBER);
     const trigger = screen.getByRole("button", { name: "Open settings navigation" });
