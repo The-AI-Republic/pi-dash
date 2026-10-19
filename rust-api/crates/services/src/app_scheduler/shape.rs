@@ -542,12 +542,7 @@ pub(crate) fn parse_iso_parts(raw: &str) -> Result<(NaiveDateTime, Option<i64>),
             // path panic-free if that ever drifts.
             let naive = NaiveDate::from_ymd_opt(date.year, date.month, date.day)
                 .and_then(|d| {
-                    d.and_hms_micro_opt(
-                        time.hour,
-                        time.minute,
-                        time.second,
-                        time.microsecond,
-                    )
+                    d.and_hms_micro_opt(time.hour, time.minute, time.second, time.microsecond)
                 })
                 .ok_or_else(|| format!("Invalid isoformat string: {}", py_repr_str(&replaced)))?;
             Ok((naive, offset_us))
