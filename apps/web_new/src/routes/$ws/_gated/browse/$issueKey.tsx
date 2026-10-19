@@ -22,6 +22,7 @@ import {
   DetailMissingState,
   DetailSkeleton,
   IssueDetailRoot,
+  IssuePropertiesSidebar,
   SubIssuesWidget,
   issueDetailQueryOptions,
   issueKeys,
@@ -247,6 +248,14 @@ function BrowseIssueDetail({
               published={project?.anchor != null}
             />
           </div>
+        }
+        sidebar={
+          <IssuePropertiesSidebar
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            issue={issue}
+            editable={editable}
+          />
         }
       />
       {palette.deleteDialog}
