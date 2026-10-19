@@ -938,6 +938,12 @@ describe("WorkItemCreateDialog assistant titles (ISS-118)", () => {
 });
 
 describe("WorkItemCreateDialog Create more (ISS-119)", () => {
+  it("names the switch once for assistive tech", async () => {
+    setup();
+    expect(screen.getAllByRole("switch", { name: "Create more" })).toHaveLength(1);
+    expect(screen.getByText("Create more")).toHaveAttribute("aria-hidden", "true");
+  });
+
   it("keeps the dialog open, clears the form, keeps the project and refocuses", async () => {
     const user = userEvent.setup();
     const h = setup({}, { initialProjectId: PROJECT_BEACON });

@@ -112,7 +112,9 @@ describe("useCreateWorkItem", () => {
   it("posts the title and announces the new row", async () => {
     const h = renderHandle(201);
     h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(WORK_ITEM_CREATED_TITLE, expect.any(String)));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(WORK_ITEM_CREATED_TITLE));
+    // The oracle create-modal scenario keys on this exact sentence.
+    expect(WORK_ITEM_CREATED_TITLE).toBe("Work item created successfully");
     const post = h.calls.find((call) => call.method === "POST");
     expect(post?.url).toBe(`https://api.test/api/workspaces/acme/projects/${PROJECT_ID}/issues/`);
     expect(JSON.parse(post?.body ?? "{}")).toEqual({ name: "Fresh report" });
@@ -230,7 +232,7 @@ describe("useCreateWorkItem temp rows", () => {
     expect(h.cached().results[0]?.name).toBe("Fresh report");
     expect(h.cached().total_count).toBe(2);
     holdPost.release();
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(WORK_ITEM_CREATED_TITLE, expect.any(String)));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(WORK_ITEM_CREATED_TITLE));
     // The confirm invalidates the workspace lists, so the refetch carries
     // the server row instead of the temp one.
     await waitFor(() => expect(h.cached().results.some((entry) => entry.id.startsWith("temp-"))).toBe(false));

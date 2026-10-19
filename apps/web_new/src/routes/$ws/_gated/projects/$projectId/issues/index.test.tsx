@@ -568,6 +568,26 @@ describe("project issues screen", () => {
     expect(await screen.findByPlaceholderText("Title")).toBeInTheDocument();
   });
 
+  it("keeps the creation entries out of reach for a guest on every project", () => {
+    renderScreen({}, 1, [issueRow()], { role: 20, project: { member_role: 5 } });
+    expect(screen.queryByRole("button", { name: "Add work item" })).not.toBeInTheDocument();
+    expect(listCommands().find((entry) => entry.id === "issues.create-work-item")).toBeUndefined();
+  });
+
+  it("offers the creation entries when one project grants create rights", () => {
+    const other = projectSeed();
+    renderScreen({}, 1, [issueRow()], {
+      role: 20,
+      project: { member_role: 5 },
+      projects: [
+        { ...projectSeed(), member_role: 5 },
+        { ...other, id: ISSUE_UUID, name: "Blog", identifier: "BLOG", member_role: 15 },
+      ],
+    });
+    expect(screen.getByRole("button", { name: "Add work item" })).toBeInTheDocument();
+    expect(listCommands().find((entry) => entry.id === "issues.create-work-item")).toBeDefined();
+  });
+
   it("registers a refresh command that invalidates the workspace", async () => {
     const invalidate = vi.spyOn(queryModule, "invalidateWorkspace").mockResolvedValue({} as never);
     renderScreen({}, 1, [issueRow()]);

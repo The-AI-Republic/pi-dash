@@ -582,7 +582,9 @@ export function WorkItemCreateDialog({
           </div>
           <div className="flex items-center gap-(--space-2)">
             <Switch label="Create more" checked={createMore} onCheckedChange={setCreateMore} />
-            <span className="text-body text-(--text)">Create more</span>
+            <span aria-hidden="true" className="text-body text-(--text)">
+              Create more
+            </span>
           </div>
         </form>
       </Dialog>

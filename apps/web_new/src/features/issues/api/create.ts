@@ -18,8 +18,7 @@ import { insertTempRow, removeTempRow, tempIssueRow } from "../freshness/tempRow
 import { issueKeys } from "./keys.js";
 
 /** Success title after a work item lands. */
-export const WORK_ITEM_CREATED_TITLE = "Work item created";
-const WORK_ITEM_CREATED_BODY = "It is at the top of the project's list.";
+export const WORK_ITEM_CREATED_TITLE = "Work item created successfully";
 /** Failure title when the work item does not land. */
 export const WORK_ITEM_CREATE_FAILED_TITLE = "Couldn't create the work item";
 const WORK_ITEM_CREATE_FAILED_BODY = "Nothing was created — check your connection and try again.";
@@ -46,7 +45,7 @@ export function useCreateWorkItem(workspaceSlug: string) {
       }
     },
     onSuccess: () => {
-      notifySuccess(WORK_ITEM_CREATED_TITLE, WORK_ITEM_CREATED_BODY);
+      notifySuccess(WORK_ITEM_CREATED_TITLE);
     },
     onError: () => {
       notifyError(WORK_ITEM_CREATE_FAILED_TITLE, WORK_ITEM_CREATE_FAILED_BODY);
