@@ -632,7 +632,10 @@ describe("project issues screen", () => {
 
     expect(await screen.findByRole("table")).toBeInTheDocument();
     expect(screen.getByText("Work items")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add work item" })).toBeEnabled();
+    // The sheet carries its own quick-add row; the header entry sits beside it.
+    expect(screen.getAllByRole("button", { name: "Add work item" }).some((entry) => !entry.hasAttribute("disabled"))).toBe(
+      true
+    );
   });
 
   it("hides the spreadsheet estimate column when the project has no estimate system", async () => {
