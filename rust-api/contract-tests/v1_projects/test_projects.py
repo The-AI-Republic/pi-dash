@@ -7,6 +7,8 @@ plus identifier-slug routing, one denied case and one tenant-isolation case.
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from _harness import db, http  # noqa: E402
@@ -410,3 +412,52 @@ def test_expand_null_fk_renders_empty_object(seed, conn):
     row = next(p for p in body["results"] if p["id"] == pid)
     for expand in expands:
         assert row[expand] == {}
+
+
+# --- Unknown workspace slug vs project-ref rewrite order (PIDASHCONV-1147) ---
+# Django's `_rewrite_project_kwarg` (api/views/base.py:51-98) runs in
+# `BaseAPIView.initial` *before* `check_permissions`, so a non-UUID project
+# ref under an unknown workspace slug resolves through
+# `Project.resolve(workspace_slug, raw)` (db/models/project.py:192-219) and
+# 404s `{"detail":"Project not found"}`. A UUID-form ref passes through
+# unverified, so it reaches the permission gate and 403s.
+
+PROJECT_NOT_FOUND = {"detail": "Project not found"}
+PERMISSION_DENIED = {
+    "detail": "You do not have permission to perform this action."
+}
+
+
+def unknown_base(seed):
+    return f"/api/v1/workspaces/ct-unknown-{seed['tag']}/projects"
+
+
+@pytest.mark.parametrize("ref", ["ENG", "not-a-project"])
+def test_unknown_workspace_non_uuid_ref_404(seed, ref):
+    key = seed["keys"][KEY]
+    b = f"{unknown_base(seed)}/{ref}"
+    responses = (
+        http.get(key, b + "/", expect=404),
+        http.patch(key, b + "/", json={"description": "x"}, expect=404),
+        http.delete(key, b + "/", expect=404),
+        http.post(key, b + "/archive/", expect=404),
+        http.delete(key, b + "/archive/", expect=404),
+        http.get(key, b + "/summary/", expect=404),
+    )
+    for r in responses:
+        assert r.json() == PROJECT_NOT_FOUND
+
+
+def test_unknown_workspace_uuid_ref_403(seed):
+    key = seed["keys"][KEY]
+    b = f"{unknown_base(seed)}/{seed['project']['id']}"
+    responses = (
+        http.get(key, b + "/", expect=403),
+        http.patch(key, b + "/", json={"description": "x"}, expect=403),
+        http.delete(key, b + "/", expect=403),
+        http.post(key, b + "/archive/", expect=403),
+        http.delete(key, b + "/archive/", expect=403),
+        http.get(key, b + "/summary/", expect=403),
+    )
+    for r in responses:
+        assert r.json() == PERMISSION_DENIED
