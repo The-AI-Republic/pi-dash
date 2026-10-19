@@ -25,6 +25,7 @@ REFUSALS = ("prod", "production", "staging", "main", "shared")
 SEED_EMAIL = "contract.tester@example.com"
 SEED_SECONDARY_EMAIL = "contract.probe@example.com"
 SEED_AUTOSET_EMAIL = "contract.autoset@example.com"
+SEED_MEMBERSHIP_EMAIL = "contract.membership@example.com"
 SEED_PASSWORD = os.environ.get("PIDASH_CONTRACT_PASSWORD", "Contract123!")
 SEED_WORKSPACE_SLUG = "contract-acme"
 SEED_DEV_WORKSPACE_SLUG = "contract-dev"
@@ -258,6 +259,39 @@ def seed():
         defaults={"role": 20, "is_active": True},
     )
     note("project-member", f"{project.identifier}/{probe.email}", probe_project_created)
+
+    # Membership fixture: the project-settings member-write suite adds this
+    # workspace member to the seeded project, re-roles and removes them. The
+    # project membership is always deactivated on re-seed so the add path is
+    # fresh and this user never joins the roster other suites assert on.
+    membership_user, membership_created = User.objects.get_or_create(
+        email=SEED_MEMBERSHIP_EMAIL,
+        defaults={
+            "username": "contract.membership",
+            "first_name": "Contract",
+            "last_name": "Membership",
+            "is_active": True,
+        },
+    )
+    if membership_created or not membership_user.check_password(SEED_PASSWORD):
+        membership_user.password = make_password(SEED_PASSWORD)
+        membership_user.is_active = True
+        membership_user.save()
+    note("user", membership_user.email, membership_created)
+
+    _, membership_ws_created = WorkspaceMember.objects.update_or_create(
+        workspace=workspace,
+        member=membership_user,
+        defaults={"role": 15, "is_active": True},
+    )
+    note("workspace-member", f"{workspace.slug}/{membership_user.email}", membership_ws_created)
+
+    ProjectMember.objects.filter(
+        workspace=workspace,
+        project=project,
+        member=membership_user,
+    ).update(is_active=False)
+    note("project-member", f"{project.identifier}/{membership_user.email}", False)
 
     # Passwordless-style user: the set-password contract test signs in as
     # this user with the known seed password, then sets a fresh one — which
