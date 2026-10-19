@@ -21,7 +21,7 @@
 //!
 //! * Routes use `<uuid:pk>` / `<uuid:entity_id>` converters, so a
 //!   non-UUID segment never reaches the view: the resolver 404s with
-//!   `{"error":"Page not found."}` (global `handler404`,
+//!   `{"error": "Page not found."}` (global `handler404`,
 //!   `pi_dash/urls.py:15`). Bad-UUID params answer that body here.
 //! * `.get()` misses raise `DoesNotExist`, which the view's own
 //!   `handle_exception` (`views/base.py:149-186`, reached through DRF
@@ -151,8 +151,9 @@ const ALLOWED_TYPES: &[&str] = &[
 ];
 
 /// Resolver 404 for non-UUID `<uuid:pk>` / `<uuid:entity_id>` segments
-/// (global `handler404`, `pi_dash/urls.py:15`).
-const PAGE_NOT_FOUND_BODY: &str = r#"{"error":"Page not found."}"#;
+/// (global `handler404`, `pi_dash/urls.py:15`). `JsonResponse` bytes,
+/// i.e. `json.dumps` defaults with the space after the colon.
+const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 // ---------------------------------------------------------------------------
 // Small responders

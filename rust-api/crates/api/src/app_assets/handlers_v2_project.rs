@@ -17,7 +17,7 @@
 //! Django-idiom notes (translate, don't redesign):
 //!
 //! * `<uuid:>` path segments never reach the view as garbage: the resolver
-//!   404s with `{"error":"Page not found."}` (global `handler404`,
+//!   404s with `{"error": "Page not found."}` (global `handler404`,
 //!   `pi_dash/urls.py:15`) — before authentication. UUID params parse
 //!   first here for the same reason; `<str:project_id>` resolves later via
 //!   [`resolve_project_id`] (authenticated callers only).
@@ -119,8 +119,9 @@ const ALLOWED_TYPES: &[&str] = &[
 ];
 
 /// Resolver 404 for non-UUID `<uuid:>` segments (global `handler404`,
-/// `pi_dash/urls.py:15`).
-const PAGE_NOT_FOUND_BODY: &str = r#"{"error":"Page not found."}"#;
+/// `pi_dash/urls.py:15`). `JsonResponse` bytes, i.e. `json.dumps`
+/// defaults with the space after the colon.
+const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// `BaseAPIView.handle_exception`: `ObjectDoesNotExist` branch
 /// (`app/views/base.py:232-236`).
 const DOES_NOT_EXIST_BODY: &str = r#"{"error":"The required object does not exist."}"#;

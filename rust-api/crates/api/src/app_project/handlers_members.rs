@@ -31,7 +31,7 @@
 //! granularity (Porting guide cutover row): owned methods serve from Rust,
 //! every other method on those paths proxies to Django through
 //! [`crate::edge::proxy`], as do `<uuid:>` path params Django's resolver
-//! would never route (its `{"error":"Page not found."}` 404 is preserved
+//! would never route (its `{"error": "Page not found."}` 404 is preserved
 //! byte for byte via [`proxy_through`]).
 //!
 //! Request order mirrors DRF `initial()`: session authN (401), the
@@ -218,7 +218,9 @@ pub fn routes() -> Router<AppState> {
 pub const MEMBER_NOT_FOUND_BODY: &str = r#"{"error":"Project member not found"}"#;
 /// Resolver 404 (`app/views/error_404.py`): served by Django via
 /// [`proxy_through`] for `<uuid:>` params it would never route.
-pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error":"Page not found."}"#;
+/// `custom_404_view` is a plain `JsonResponse`, so its bytes are
+/// `json.dumps` defaults with the space after the colon.
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 // ---------------------------------------------------------------------------
 // Failure type

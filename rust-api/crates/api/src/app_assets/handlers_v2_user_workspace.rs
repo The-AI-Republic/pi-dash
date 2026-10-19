@@ -21,7 +21,7 @@
 //! Django-idiom notes (translate, don't redesign):
 //!
 //! * Routes use `<uuid:asset_id>` converters, so a non-UUID segment never
-//!   reaches the view: the resolver 404s with `{"error":"Page not found."}`
+//!   reaches the view: the resolver 404s with `{"error": "Page not found."}`
 //!   (global `handler404`, `pi_dash/urls.py:15`). Bad-UUID params answer
 //!   that body here, before auth (resolution precedes `initial()`).
 //! * `.get()` misses raise `DoesNotExist`, which the base `handle_exception`
@@ -162,8 +162,9 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 /// from the unguarded `int(size)`, and any DB error).
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// Resolver 404 for non-UUID `<uuid:asset_id>` segments (global
-/// `handler404`, `pi_dash/urls.py:15`).
-pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error":"Page not found."}"#;
+/// `handler404`, `pi_dash/urls.py:15`). `JsonResponse` bytes, i.e.
+/// `json.dumps` defaults with the space after the colon.
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// `handle_exception`'s `IntegrityError` branch
 /// (`app/views/base.py:120-124`).
 pub const PAYLOAD_NOT_VALID_BODY: &str = r#"{"error":"The payload is not valid"}"#;
@@ -2099,7 +2100,7 @@ mod tests {
             SERVER_ERROR_BODY,
             r#"{"error":"Something went wrong please try again later"}"#
         );
-        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error":"Page not found."}"#);
+        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error": "Page not found."}"#);
         assert_eq!(
             PAYLOAD_NOT_VALID_BODY,
             r#"{"error":"The payload is not valid"}"#
