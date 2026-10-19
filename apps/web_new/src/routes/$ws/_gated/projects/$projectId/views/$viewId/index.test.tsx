@@ -291,6 +291,25 @@ describe("saved view screen", () => {
     expect(await screen.findByRole("button", { name: "Update view" })).toBeInTheDocument();
   });
 
+  it("reads a default view record as untouched: no Update view on mount", async () => {
+    renderScreen(20, {
+      ...viewRecord(),
+      // The server's IssueView defaults, as a view nobody edited stores them.
+      display_filters: {
+        group_by: null,
+        order_by: "-created_at",
+        type: null,
+        sub_issue: true,
+        show_empty_groups: true,
+        layout: "list",
+        calendar_date_range: "",
+      },
+      display_properties: { priority: true, state: true, key: true },
+    });
+    expect(await screen.findByTestId("rich-save-view")).toHaveTextContent("Save as");
+    expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
+  });
+
   it("opens in the layout the view stored and offers the timeline in the switcher", async () => {
     renderScreen(
       20,
