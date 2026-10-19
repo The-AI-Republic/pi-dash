@@ -4,16 +4,18 @@
 // Public API of the assistant feature (NEWFRONT-603). Other features and
 // routes import only from here.
 
-export { assistantKeys } from "./api/keys.js";
+export { assistantKeys, transcriptKey } from "./api/keys.js";
 export {
   START_FAILED_FALLBACK,
   startFailureDetail,
   useDeliverFirstMessage,
   useStartConversation,
 } from "./api/mutations.js";
+export { SEND_FAILED_FALLBACK, sendFailureLine, useSendMessage, useStopTurn } from "./api/threadMutations.js";
 export {
   assistantConfigQueryOptions,
   assistantThreadsQueryOptions,
+  assistantTranscriptQueryOptions,
   useAssistantConfig,
   useAssistantThreads,
 } from "./api/queries.js";
@@ -28,6 +30,8 @@ export type { ConversationGateProps } from "./components/ConversationGate.js";
 export { ConversationRail } from "./components/ConversationRail.js";
 export type { ConversationRailProps } from "./components/ConversationRail.js";
 export { SetupCard } from "./components/SetupCard.js";
+export { ThreadView } from "./components/ThreadView.js";
+export type { ThreadViewProps } from "./components/ThreadView.js";
 export type { SetupCardProps } from "./components/SetupCard.js";
 export {
   API_KEY_REMINDER,
@@ -57,3 +61,7 @@ export type { LaneState } from "./lib/lane.js";
 export { conversationLabel, visibleConversations } from "./lib/labels.js";
 export { assistantLandingHref, assistantThreadHref, readPendingMessage } from "./lib/navigation.js";
 export type { PendingMessageState } from "./lib/navigation.js";
+export { ASSISTANT_EVENT_NAME, readAssistantEvents, subscribeAssistantEvents } from "./api/events.js";
+export type { AssistantEventHandlers, AssistantStreamSubscription } from "./api/events.js";
+export { EMPTY_TRANSCRIPT, applyAssistantEvent, mergeTranscript, replySettled, transcriptRows } from "./lib/turn.js";
+export type { TranscriptState } from "./lib/turn.js";

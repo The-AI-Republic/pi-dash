@@ -11,4 +11,11 @@ export const assistantKeys = {
   all: (workspaceSlug: string) => [...workspaceScope(workspaceSlug), "assistant"] as const,
   threads: (workspaceSlug: string) => [...assistantKeys.all(workspaceSlug), "threads"] as const,
   config: (workspaceSlug: string) => [...assistantKeys.all(workspaceSlug), "config"] as const,
+  /** One conversation subtree (transcript, live state). */
+  thread: (workspaceSlug: string, threadId: string) =>
+    [...assistantKeys.all(workspaceSlug), "thread", threadId] as const,
 };
+
+/** One conversation's stored transcript page. */
+export const transcriptKey = (workspaceSlug: string, threadId: string) =>
+  [...assistantKeys.thread(workspaceSlug, threadId), "messages"] as const;

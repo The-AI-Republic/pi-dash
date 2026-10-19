@@ -67,7 +67,6 @@ function renderGate(
     config?: LlmConfig;
     state?: unknown;
     threadId?: string;
-    hasTranscript?: boolean;
     /** Leave the config read pending forever (the cold-open paint). */
     pendingConfig?: boolean;
     /** Skip the seeded config so the read has to resolve on its own. */
@@ -98,12 +97,7 @@ function renderGate(
     getParentRoute: () => rootRoute,
     path: "/$ws",
     component: () => (
-      <ConversationGate
-        workspaceSlug="acme"
-        threadId={options.threadId ?? THREAD_ID}
-        state={options.state}
-        {...(options.hasTranscript === true ? { hasTranscript: true, transcript: <p>transcript</p> } : {})}
-      />
+      <ConversationGate workspaceSlug="acme" threadId={options.threadId ?? THREAD_ID} state={options.state} />
     ),
   });
   const router = createRouter({
@@ -160,10 +154,10 @@ describe("ConversationGate", () => {
     expect(screen.queryByTestId("assistant-composer-reason")).not.toBeInTheDocument();
   });
 
-  it("lets the thread-view slice render its transcript instead of the empty hint", async () => {
-    renderGate({ config: KEYED, hasTranscript: true });
-    expect(await screen.findByText("transcript")).toBeInTheDocument();
-    expect(screen.queryByTestId("assistant-empty-hint")).not.toBeInTheDocument();
+  it("hands the body to the thread view, which owns the empty hint", async () => {
+    renderGate({ config: KEYED });
+    expect(await screen.findByTestId("assistant-thread-body")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message the assistant" })).toBeEnabled();
   });
 
   it("delivers the handed-off first message once and clears the state", async () => {

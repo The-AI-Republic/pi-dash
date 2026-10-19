@@ -75,6 +75,28 @@ describe("Composer", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it("swaps send for stop while a turn runs and never submits", () => {
+    const onStop = vi.fn();
+    const { onSubmit } = renderComposer({ draft: "hello", running: true, onStop });
+    const box = screen.getByRole("textbox", { name: "Message the assistant" });
+    expect(box).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Send message" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Stop response" }));
+    expect(onStop).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(box, { key: "Enter" });
+    fireEvent.submit(box.closest("form") as HTMLFormElement);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("locks the box and shows the posting state while a send is in flight", () => {
+    const { onSubmit } = renderComposer({ draft: "hello", posting: true });
+    const box = screen.getByRole("textbox", { name: "Message the assistant" });
+    expect(box).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("applies the bordered variant only when docked", () => {
     render(<Composer draft="" onDraftChange={() => {}} onSubmit={() => {}} bordered={false} className="probe" />);
     const form = screen.getByTestId("assistant-composer");
