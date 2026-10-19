@@ -3358,6 +3358,26 @@ describe("instance bootstrap contracts", () => {
     expect((error as ApiError).code).toBe("contract");
   });
 
+  it("treats a bootstrap with no setup flag as a malformed running answer", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ config: BOOTSTRAP_CONFIG }),
+    });
+    const error = await getInstanceBootstrapForStartup(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("reads a positive setup flag from the bare envelope", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ is_setup_done: true }),
+    });
+    const error = await getInstanceBootstrapForStartup(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
   it("patches the name and telemetry flag together", async () => {
     const transport = csrfThen((url) => {
       expect(url.endsWith("/api/instances/")).toBe(true);

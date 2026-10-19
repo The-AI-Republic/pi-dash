@@ -21,11 +21,7 @@ import { markInstanceBootScheme } from "./theme.js";
 
 /** The administrator entry subtree, including setup and sign-in. */
 export function isAdminEntryPath(pathname: string): boolean {
-  return pathname === "/god-mode" || pathname === "/god-mode/" || pathname.startsWith("/god-mode/");
-}
-
-function currentPathname(): string {
-  return typeof globalThis.window === "undefined" ? "" : globalThis.window.location.pathname;
+  return pathname === "/god-mode" || pathname.startsWith("/god-mode/");
 }
 
 export interface InstanceAppGateProps {
@@ -56,7 +52,7 @@ export function InstanceAppGate({ children }: InstanceAppGateProps): React.React
     data: bootstrap.data,
   });
   if (branch === "loading") return <BootLoader />;
-  if (branch !== "ready" && !isAdminEntryPath(currentPathname())) {
+  if (branch !== "ready" && !isAdminEntryPath(globalThis.window.location.pathname)) {
     return branch === "maintenance" ? <MaintenanceScreen /> : <NotReadyScreen />;
   }
   return <>{children}</>;

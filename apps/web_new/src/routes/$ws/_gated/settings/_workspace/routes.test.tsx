@@ -55,6 +55,7 @@ function LeaveProbe({ onLeaveWorkspace }: WorkspaceSettingsPageProps): React.Rea
 const SECTIONS: Array<[WorkspaceSettingsSectionKey, string, RouteComponent]> = [
   ["members", "members", MembersRoute.options.component as RouteComponent],
   ["exports", "exports", ExportsRoute.options.component as RouteComponent],
+  ["integrations", "integrations", IntegrationsRoute.options.component as RouteComponent],
 ];
 
 // The roster chunk registers its body when the route loads it; the test

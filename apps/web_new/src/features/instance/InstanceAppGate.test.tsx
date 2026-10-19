@@ -9,7 +9,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
-import { InstanceAppGate } from "./InstanceAppGate.js";
+import { InstanceAppGate, isAdminEntryPath } from "./InstanceAppGate.js";
 import { instanceAppKeys } from "./queries.js";
 
 function envelope(setupDone: boolean): InstanceBootstrap {
@@ -81,6 +81,14 @@ afterEach(() => {
 });
 
 describe("InstanceAppGate", () => {
+  it("treats the console subtree as the administrator entry, and nothing else", () => {
+    expect(isAdminEntryPath("/god-mode")).toBe(true);
+    expect(isAdminEntryPath("/god-mode/")).toBe(true);
+    expect(isAdminEntryPath("/god-mode/workspace/create/")).toBe(true);
+    expect(isAdminEntryPath("/acme/settings/members/")).toBe(false);
+    expect(isAdminEntryPath("/god-modeish")).toBe(false);
+  });
+
   it("shows a full-screen loader until the read settles", async () => {
     let release: (() => void) | undefined;
     renderGate(
