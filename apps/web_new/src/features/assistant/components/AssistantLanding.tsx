@@ -38,7 +38,7 @@ export function AssistantLanding({ workspaceSlug }: AssistantLandingProps): Reac
   const [draft, setDraft] = React.useState("");
 
   const onStart = (message: string): void => {
-    if (start.isPending) return;
+    // The composer locks while starting, so no guard is needed here.
     start.mutate(
       { workspaceSlug },
       {

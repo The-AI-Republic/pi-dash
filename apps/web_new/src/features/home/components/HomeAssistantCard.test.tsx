@@ -77,6 +77,7 @@ interface CreateCall {
 const calls: CreateCall[] = [];
 let threadCreateStatus = 201;
 let threadCreateBody: unknown = makeThread({ id: "44444444-4444-4444-8444-444444444444" });
+let threadCreateGate: Promise<unknown> | null = null;
 
 function renderCard(options: {
   role?: number;
@@ -92,11 +93,12 @@ function renderCard(options: {
   createAppClient("https://api.test", (async (url: string, init: { method?: string }) => {
     calls.push({ url, method: init.method ?? "GET" });
     if (url.endsWith("/ai-assistant/threads/") && init.method === "POST") {
+      const body = threadCreateGate === null ? threadCreateBody : await threadCreateGate;
       return {
         status: threadCreateStatus,
         url,
         headers: { get: () => "application/json" },
-        text: async () => JSON.stringify(threadCreateBody),
+        text: async () => JSON.stringify(body),
       };
     }
     return { status: 500, url, headers: { get: () => null }, text: async () => JSON.stringify({ error: "boom" }) };
@@ -148,6 +150,7 @@ afterEach(() => {
   notified.success.mockReset();
   threadCreateStatus = 201;
   threadCreateBody = makeThread({ id: "44444444-4444-4444-8444-444444444444" });
+  threadCreateGate = null;
   resetAppClient();
 });
 
@@ -248,6 +251,29 @@ describe("HomeAssistantCard", () => {
     // The card hands the draft to the new conversation and leaves the page.
     expect(await screen.findByTestId("conversation")).toBeInTheDocument();
     expect(routerRef?.state.location.pathname).toBe("/acme/assistant/44444444-4444-4444-8444-444444444444");
+  });
+
+  it("waits for both reads before rendering and absorbs an Enter while starting", async () => {
+    // The threads read resolved but the config read has not: the card stays
+    // absent instead of painting a half-known setup state.
+    renderCard({ threads: [THREAD_1] });
+    expect(screen.queryByRole("region", { name: "Assistant" })).not.toBeInTheDocument();
+
+    let release!: (body: unknown) => void;
+    threadCreateGate = new Promise<unknown>((resolve) => {
+      release = resolve;
+    });
+    renderCard({ threads: [], config: CONFIGURED });
+    const input = await screen.findByRole("textbox", { name: "Ask the assistant" });
+    fireEvent.change(input, { target: { value: "first" } });
+    expect(screen.getByRole("button", { name: "Ask" })).toBeEnabled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    // The Ask button is disabled while starting, but the single-line input
+    // still takes keys; a second Enter must be absorbed, not start again.
+    fireEvent.change(input, { target: { value: "second" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    release(makeThread({ id: "44444444-4444-4444-8444-444444444444" }));
+    await waitFor(() => expect(calls.filter((call) => call.method === "POST")).toHaveLength(1));
   });
 
   it("asks on Enter but never on a modifier chord", async () => {

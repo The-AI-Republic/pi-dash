@@ -67,6 +67,10 @@ function renderGate(
     state?: unknown;
     threadId?: string;
     hasTranscript?: boolean;
+    /** Leave the config read pending forever (the cold-open paint). */
+    pendingConfig?: boolean;
+    /** Skip the seeded config so the read has to resolve on its own. */
+    seedConfig?: boolean;
   } = {}
 ) {
   createAppClient("https://api.test", (async (url: string, init: { method?: string }) => {
@@ -79,10 +83,15 @@ function renderGate(
         text: async () => JSON.stringify(sendBody),
       };
     }
+    if (url.endsWith("/ai-assistant/config/") && options.pendingConfig === true) {
+      return new Promise<never>(() => {});
+    }
     return { status: 500, url, headers: { get: () => null }, text: async () => JSON.stringify({ error: "boom" }) };
   }) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  queryClient.setQueryData(assistantKeys.config("acme"), options.config ?? KEYED);
+  if (options.seedConfig !== false) {
+    queryClient.setQueryData(assistantKeys.config("acme"), options.config ?? KEYED);
+  }
   const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()();
   const wsRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -122,6 +131,12 @@ function resetHarness(): void {
 }
 
 describe("ConversationGate", () => {
+  it("marks the thread unsettled until the config read resolves", async () => {
+    renderGate({ seedConfig: false, pendingConfig: true });
+    expect(await screen.findByTestId("assistant-thread")).toHaveAttribute("data-settled", "false");
+    expect(screen.queryByTestId("assistant-setup-card")).not.toBeInTheDocument();
+  });
+
   it("shows the setup card and the locked composer without a key", async () => {
     renderGate({ config: KEYLESS });
     expect(await screen.findByTestId("assistant-setup-card")).toBeInTheDocument();
