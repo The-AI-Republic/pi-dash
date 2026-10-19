@@ -7,7 +7,7 @@
 // the detail header counts.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Copy, Ellipsis, Pencil, Trash2, Unlink } from "lucide-react";
+import { Copy, Ellipsis, Trash2, Unlink } from "lucide-react";
 import * as React from "react";
 
 import { IconButton, Menu } from "@pidash/kit";
@@ -26,14 +26,18 @@ export interface RelationRowProps {
   canEdit: boolean;
   onOpen: (row: RelatedIssue) => void;
   onRemove: (row: RelatedIssue) => void;
-  onEdit: (row: RelatedIssue) => void;
   onDelete: (row: RelatedIssue) => void;
 }
 
-/** Copy one work item's browse URL for the clipboard. */
+/** Resolve a site-relative address against the current origin. */
+export function absoluteUrl(href: string): string {
+  return new URL(href, window.location.origin).toString();
+}
+
+/** Copy one work item's absolute browse URL for the clipboard. */
 export async function copyWorkItemUrl(href: string): Promise<void> {
   try {
-    await navigator.clipboard.writeText(href);
+    await navigator.clipboard.writeText(absoluteUrl(href));
     notifySuccess("Link copied");
   } catch (error) {
     notifyError("Couldn't copy the link", (error as Error).message);
@@ -47,7 +51,6 @@ export function RelationRow({
   canEdit,
   onOpen,
   onRemove,
-  onEdit,
   onDelete,
 }: RelationRowProps): React.ReactElement {
   const queryClient = useQueryClient();
@@ -114,9 +117,6 @@ export function RelationRow({
           </IconButton>
         }
         items={[
-          ...(canEdit
-            ? [{ label: "Edit", icon: <Pencil size={14} aria-hidden="true" />, onSelect: () => onEdit(row) }]
-            : []),
           {
             label: "Copy link",
             icon: <Copy size={14} aria-hidden="true" />,

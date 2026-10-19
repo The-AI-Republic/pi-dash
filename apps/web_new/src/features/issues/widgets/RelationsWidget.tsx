@@ -12,7 +12,7 @@ import * as React from "react";
 
 import { Link } from "@tanstack/react-router";
 import { Menu } from "@pidash/kit";
-import { deleteIssue, type RelatedIssue } from "@pidash/api-client";
+import { deleteEpic, deleteIssue, type RelatedIssue } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError, notifySuccess, PeekPanel } from "../../../shared/shell/index.js";
@@ -65,8 +65,17 @@ export function RelationsWidget({
   const [collapsed, setCollapsed] = React.useState<ReadonlySet<RelationKind>>(() => new Set());
   const [peek, setPeek] = React.useState<{ row: RelatedIssue; identifier: string } | null>(null);
 
+  // The slim relation row carries no epic flag; the detail read decides
+  // which collection the destroy belongs to (ISS-182).
   const destroy = useMutation({
-    mutationFn: (row: RelatedIssue) => deleteIssue(getAppClient(), workspaceSlug, row.project_id, row.id),
+    mutationFn: async (row: RelatedIssue) => {
+      const client = getAppClient();
+      const detail = await queryClient.fetchQuery(
+        issueDetailQueryOptions(client, workspaceSlug, row.project_id, row.id)
+      );
+      if (detail.is_epic === true) await deleteEpic(client, workspaceSlug, row.project_id, row.id);
+      else await deleteIssue(client, workspaceSlug, row.project_id, row.id);
+    },
     onSuccess: () => notifySuccess("Work item deleted"),
     onError: (error: Error) => notifyError("Couldn't delete the work item", error.message),
     onSettled: () =>
@@ -117,10 +126,6 @@ export function RelationsWidget({
     detach.mutate({ kind, relatedIssue: row.id });
   }
 
-  function edit(row: RelatedIssue): void {
-    open(row);
-  }
-
   function confirmDelete(): void {
     if (pendingDelete === null) return;
     destroy.mutate(pendingDelete);
@@ -150,50 +155,45 @@ export function RelationsWidget({
         }
       >
         <div className="flex flex-col gap-(--space-2) p-(--space-1)">
-          {groups.length === 0 ? (
-            <p className="text-body px-(--space-2) py-(--space-3) text-(--text-muted)">No relations yet.</p>
-          ) : (
-            groups.map(({ spec, rows }) => {
-              const groupOpen = !collapsed.has(spec.kind);
-              const GroupIcon = spec.icon;
-              return (
-                <div key={spec.kind} data-testid={`relation-group-${spec.kind}`}>
-                  <button
-                    type="button"
-                    aria-expanded={groupOpen}
-                    onClick={() => toggleGroup(spec.kind)}
-                    className={`flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-left ${HEADER_TONE[spec.tone]}`}
-                  >
-                    {groupOpen ? (
-                      <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
-                    ) : (
-                      <ChevronRight size={12} strokeWidth={2} aria-hidden="true" />
-                    )}
-                    <GroupIcon size={14} strokeWidth={1.5} aria-hidden="true" />
-                    <span className="text-caption font-medium">{spec.label}</span>
-                    <span className="text-meta">{rows.length}</span>
-                  </button>
+          {groups.map(({ spec, rows }) => {
+            const groupOpen = !collapsed.has(spec.kind);
+            const GroupIcon = spec.icon;
+            return (
+              <div key={spec.kind} data-testid={`relation-group-${spec.kind}`}>
+                <button
+                  type="button"
+                  aria-expanded={groupOpen}
+                  onClick={() => toggleGroup(spec.kind)}
+                  className={`flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-left ${HEADER_TONE[spec.tone]}`}
+                >
                   {groupOpen ? (
-                    <div className="flex flex-col">
-                      {rows.map((row) => (
-                        <RelationRow
-                          key={`${spec.kind}-${row.id}`}
-                          workspaceSlug={workspaceSlug}
-                          projectIdentifier={identifierOf(row)}
-                          row={row}
-                          canEdit={canEdit}
-                          onOpen={open}
-                          onRemove={(target) => removeRelation(target, spec.kind)}
-                          onEdit={edit}
-                          onDelete={setPendingDelete}
-                        />
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })
-          )}
+                    <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
+                  ) : (
+                    <ChevronRight size={12} strokeWidth={2} aria-hidden="true" />
+                  )}
+                  <GroupIcon size={14} strokeWidth={1.5} aria-hidden="true" />
+                  <span className="text-caption font-medium">{spec.label}</span>
+                  <span className="text-meta">{rows.length}</span>
+                </button>
+                {groupOpen ? (
+                  <div className="flex flex-col">
+                    {rows.map((row) => (
+                      <RelationRow
+                        key={`${spec.kind}-${row.id}`}
+                        workspaceSlug={workspaceSlug}
+                        projectIdentifier={identifierOf(row)}
+                        row={row}
+                        canEdit={canEdit}
+                        onOpen={open}
+                        onRemove={(target) => removeRelation(target, spec.kind)}
+                        onDelete={setPendingDelete}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       </WidgetSection>
       {canEdit && addKind !== null ? (

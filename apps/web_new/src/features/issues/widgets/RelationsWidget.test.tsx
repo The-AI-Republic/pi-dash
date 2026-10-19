@@ -189,13 +189,14 @@ describe("relations widget", () => {
     expect(calls.filter((call) => call.url.includes("/remove-relation/"))).toHaveLength(1);
   });
 
-  it("offers edit, copy and delete with a confirm dialog for editors", async () => {
+  it("offers copy, remove and delete with a confirm dialog for editors", async () => {
     const user = userEvent.setup();
     renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] } });
     await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
-    expect(await screen.findByRole("menuitem", { name: "Edit" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Copy link" })).toBeInTheDocument();
+    expect(await screen.findByRole("menuitem", { name: "Copy link" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Remove relation" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Edit" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("menuitem", { name: "Delete" }));
     const dialog = await screen.findByRole("dialog", { name: /Delete work item/i });
     expect(within(dialog).getByText(/Peer work item/)).toBeInTheDocument();
@@ -277,18 +278,27 @@ describe("relations widget", () => {
     expect(screen.queryByRole("dialog", { name: /Delete work item/i })).not.toBeInTheDocument();
   });
 
-  it("opens the peek panel from the row's Edit entry", async () => {
-    const user = userEvent.setup();
-    renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] } });
-    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
-    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
-    expect(await screen.findByTestId("issue-preview")).toBeInTheDocument();
+  it("offers the add entry without an empty-state line to an editor with no relations", async () => {
+    renderWidget({ relations: emptyRelations() });
+    expect(await screen.findByRole("button", { name: "Add relation" })).toBeInTheDocument();
+    expect(screen.queryByText("No relations yet.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Peer work item")).not.toBeInTheDocument();
   });
 
-  it("offers the empty state to an editor with no relations", async () => {
-    renderWidget({ relations: emptyRelations() });
-    expect(await screen.findByText("No relations yet.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add relation" })).toBeInTheDocument();
+  it("destroys an epic through the epic collection", async () => {
+    const user = userEvent.setup();
+    const { calls } = renderWidget({
+      relations: { ...emptyRelations(), blocked_by: [relatedRow()] },
+      peerIsEpic: true,
+    });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog", { name: /Delete work item/i });
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Work item deleted"));
+    const destroy = calls.find((call) => call.method === "DELETE");
+    expect(destroy?.url).toContain(`/epics/${PEER}/`);
+    expect(destroy?.url).not.toContain(`/issues/${PEER}/`);
   });
 
   it("reports a failed add and keeps the dialog open", async () => {

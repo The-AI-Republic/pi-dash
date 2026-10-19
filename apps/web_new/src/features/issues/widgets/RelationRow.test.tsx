@@ -25,7 +25,6 @@ function renderRow(canEdit = true, options: Parameters<typeof stubTransport>[0] 
   const handlers = {
     onOpen: vi.fn(),
     onRemove: vi.fn(),
-    onEdit: vi.fn(),
     onDelete: vi.fn(),
   };
   render(
@@ -82,11 +81,10 @@ describe("relation row", () => {
 
   it("fires the row menu callbacks for editors", async () => {
     const user = userEvent.setup();
-    const { onRemove, onEdit, onDelete } = renderRow();
+    const { onRemove, onDelete } = renderRow();
     await user.click(screen.getByRole("button", { name: "Actions for Peer work item" }));
-    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
-    expect(onEdit).toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Actions for Peer work item" }));
+    expect(await screen.findByRole("menuitem", { name: "Copy link" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Edit" })).not.toBeInTheDocument();
     await user.click(await screen.findByRole("menuitem", { name: "Remove relation" }));
     expect(onRemove).toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Actions for Peer work item" }));
@@ -98,7 +96,7 @@ describe("relation row", () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     await copyWorkItemUrl("/acme/browse/WEB-42");
-    expect(writeText).toHaveBeenCalledWith("/acme/browse/WEB-42");
+    expect(writeText).toHaveBeenCalledWith(new URL("/acme/browse/WEB-42", window.location.origin).toString());
     expect(notifySuccess).toHaveBeenCalledWith("Link copied");
   });
 
@@ -118,7 +116,9 @@ describe("relation row", () => {
     renderRow(false);
     await user.click(screen.getByRole("button", { name: "Actions for Peer work item" }));
     await user.click(await screen.findByRole("menuitem", { name: "Copy link" }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(`/${WS}/browse/WEB-42`));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(new URL(`/${WS}/browse/WEB-42`, window.location.origin).toString())
+    );
   });
 });
 

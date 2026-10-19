@@ -22,15 +22,12 @@ import {
   type IssueLinkInput,
   type IssueLinkList,
   type IssueRelations,
-  type IssueSearchHit,
-  type IssueSearchResults,
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS } from "../../../core/query/client.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { issueKeys } from "../api/keys.js";
-import { relationRows } from "./relationsModel.js";
 import type { RelationKind } from "./relationsModel.js";
 
 /** Relations of one issue, grouped by direction. */
@@ -218,20 +215,8 @@ export function linkFailureDetail(error: Error): string {
   return error.message;
 }
 
-/** Rows from one kind in the relation read; empty before it loads. */
-export function rowsOfKind(relations: IssueRelations | undefined, kind: RelationKind) {
-  return relationRows(relations, kind);
-}
-
 /** Link rows newest first even if the server ever reorders. */
 export function newestLinks(links: IssueLinkList | undefined): IssueLink[] {
   if (links === undefined) return [];
   return [...links].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
 }
-
-/** Picker rows carry no epic flag; the browse route covers both kinds. */
-export function candidateKey(row: IssueSearchHit): string {
-  return `${row.project__identifier}-${row.sequence_id}`;
-}
-
-export type { IssueSearchHit, IssueSearchResults };

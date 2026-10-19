@@ -126,70 +126,66 @@ export function LinksWidget({
         add={canEdit ? <WidgetAddButton label="Add link" onClick={openAdd} /> : undefined}
       >
         <div className="flex flex-col gap-(--space-1) p-(--space-1)">
-          {rows.length === 0 ? (
-            <p className="text-body px-(--space-2) py-(--space-3) text-(--text-muted)">No links yet.</p>
-          ) : (
-            rows.map((link) => {
-              const icon = faviconUrl(link.url);
-              return (
-                <div
-                  key={link.id}
-                  data-testid={`link-row-${link.id}`}
-                  className="flex min-h-10 items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--subtle) px-(--space-3) py-(--space-1)"
+          {rows.map((link) => {
+            const icon = faviconUrl(link.url);
+            return (
+              <div
+                key={link.id}
+                data-testid={`link-row-${link.id}`}
+                className="flex min-h-10 items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--subtle) px-(--space-3) py-(--space-1)"
+              >
+                <a
+                  href={link.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex min-w-0 flex-1 items-center gap-(--space-2)"
                 >
-                  <a
-                    href={link.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex min-w-0 flex-1 items-center gap-(--space-2)"
-                  >
-                    {icon === null ? (
-                      <Globe size={14} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-(--text-muted)" />
-                    ) : (
-                      <img src={icon} alt="" aria-hidden="true" className="size-4 shrink-0" />
-                    )}
-                    <span className="text-body min-w-0 flex-1 truncate text-(--text)">{linkTitle(link)}</span>
-                    <ExternalLink
-                      size={12}
-                      strokeWidth={1.5}
-                      aria-hidden="true"
-                      className="shrink-0 text-(--text-muted)"
-                    />
-                  </a>
-                  <span className="text-meta shrink-0 text-(--text-muted)">{attribution(link)}</span>
-                  <IconButton
-                    label={`Copy link ${linkTitle(link)}`}
-                    size="small"
-                    variant="ghost"
-                    onClick={() => void copy(link.url)}
-                  >
-                    <Copy size={14} strokeWidth={1.5} aria-hidden="true" />
-                  </IconButton>
-                  {canEdit ? (
-                    <Menu
-                      trigger={
-                        <IconButton label={`Link actions for ${linkTitle(link)}`} size="small" variant="ghost">
-                          <Ellipsis size={14} strokeWidth={1.5} aria-hidden="true" />
-                        </IconButton>
-                      }
-                      items={[
-                        {
-                          label: "Edit",
-                          icon: <Pencil size={14} aria-hidden="true" />,
-                          onSelect: () => openEdit(link),
-                        },
-                        {
-                          label: "Delete",
-                          icon: <Trash2 size={14} aria-hidden="true" />,
-                          onSelect: () => remove.mutate(link.id),
-                        },
-                      ]}
-                    />
-                  ) : null}
-                </div>
-              );
-            })
-          )}
+                  {icon === null ? (
+                    <Globe size={14} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-(--text-muted)" />
+                  ) : (
+                    <img src={icon} alt="" aria-hidden="true" className="size-4 shrink-0" />
+                  )}
+                  <span className="text-body min-w-0 flex-1 truncate text-(--text)">{linkTitle(link)}</span>
+                  <ExternalLink
+                    size={12}
+                    strokeWidth={1.5}
+                    aria-hidden="true"
+                    className="shrink-0 text-(--text-muted)"
+                  />
+                </a>
+                <span className="text-meta shrink-0 text-(--text-muted)">{attribution(link)}</span>
+                <IconButton
+                  label={`Copy link ${linkTitle(link)}`}
+                  size="small"
+                  variant="ghost"
+                  onClick={() => void copy(link.url)}
+                >
+                  <Copy size={14} strokeWidth={1.5} aria-hidden="true" />
+                </IconButton>
+                {canEdit ? (
+                  <Menu
+                    trigger={
+                      <IconButton label={`Link actions for ${linkTitle(link)}`} size="small" variant="ghost">
+                        <Ellipsis size={14} strokeWidth={1.5} aria-hidden="true" />
+                      </IconButton>
+                    }
+                    items={[
+                      {
+                        label: "Edit",
+                        icon: <Pencil size={14} aria-hidden="true" />,
+                        onSelect: () => openEdit(link),
+                      },
+                      {
+                        label: "Delete",
+                        icon: <Trash2 size={14} aria-hidden="true" />,
+                        onSelect: () => remove.mutate(link.id),
+                      },
+                    ]}
+                  />
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       </WidgetSection>
       {canEdit ? (

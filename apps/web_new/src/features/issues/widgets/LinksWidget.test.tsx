@@ -241,6 +241,12 @@ describe("links widget", () => {
     await waitFor(() => expect(view.container).toBeEmptyDOMElement());
   });
 
+  it("keeps the add entry without an empty-state line for an editor with no links", async () => {
+    renderWidget({ links: [] });
+    expect(await screen.findByRole("button", { name: "Add link" })).toBeInTheDocument();
+    expect(screen.queryByText("No links yet.")).not.toBeInTheDocument();
+  });
+
   it("toggles the section disclosure and remembers it", async () => {
     const user = userEvent.setup();
     const { view } = renderWidget({ links: [linkRow()] });

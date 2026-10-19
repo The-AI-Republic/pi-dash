@@ -3,8 +3,8 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import type { IssueLink, IssueSearchHit } from "@pidash/api-client";
-import { candidateKey, linkFailureDetail, newestLinks, normalizeLinkUrl, withoutRelationRow } from "./api.js";
+import type { IssueLink } from "@pidash/api-client";
+import { linkFailureDetail, newestLinks, normalizeLinkUrl, withoutRelationRow } from "./api.js";
 import { emptyRelations, linkRow, relatedRow } from "./widgetTestUtils.js";
 
 describe("widget write helpers", () => {
@@ -43,11 +43,6 @@ describe("widget write helpers", () => {
 
   it("surfaces the error message as the failure detail", () => {
     expect(linkFailureDetail(new Error("duplicate URL"))).toBe("duplicate URL");
-  });
-
-  it("builds a picker key from the project identifier and sequence", () => {
-    const hit = { project__identifier: "WEB", sequence_id: 9 } as IssueSearchHit;
-    expect(candidateKey(hit)).toBe("WEB-9");
   });
 
   it("exports the link shape the row reads", () => {
