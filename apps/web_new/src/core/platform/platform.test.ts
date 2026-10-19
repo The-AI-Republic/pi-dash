@@ -114,6 +114,13 @@ describe("external open address guard", () => {
     expect(open).not.toHaveBeenCalled();
   });
 
+  it("opens a web address in a new window on the web platform", async () => {
+    const open = vi.fn();
+    vi.stubGlobal("window", { open });
+    await webPlatform.openExternal("https://app.example.test/board");
+    expect(open).toHaveBeenCalledWith("https://app.example.test/board", "_blank", "noopener");
+  });
+
   it("refuses a non-web address on the desktop platform before invoking native code", async () => {
     const invoke = vi.fn();
     vi.stubGlobal("window", {
