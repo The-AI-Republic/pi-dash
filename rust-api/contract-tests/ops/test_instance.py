@@ -617,11 +617,30 @@ def test_register_create_fallback_update_and_traces(scratch_pair):
 def test_register_stub_tag_matches_live_oracle(scratch_pair):
     django_db, rust_db = scratch_pair
     oracle = run_django(django_db, "register_instance", "sig-live")
-    assert oracle.stdout == b"Instance registered\n", (
-        oracle.stdout
-    )  # live GitHub reached
-    live_tag = instance_row(django_db)["latest_version"]
-    with FixedResponseStub(body=json.dumps({"tag_name": live_tag}).encode()) as stub:
+    assert oracle.returncode == 0, oracle.stderr
+    # The oracle's latest-release probe URL is hard-coded to api.github.com
+    # (register_instance.py:43) with no URL or env seam, so the harness
+    # cannot point it at a stub. On a runner that cannot reach the API (the
+    # shared CI IP is rate-limited) the command prints one extra line and
+    # falls back to the current version. That line is environment-dependent,
+    # so drop it before the byte comparison; every other line still has to
+    # match exactly. The dead-probe line is pinned byte-exactly on its own by
+    # test_register_create_fallback_update_and_traces.
+    oracle_stdout = oracle.stdout.replace(
+        b"Error checking for latest version\n", b"", 1
+    )
+    assert oracle_stdout == b"Instance registered\n", oracle.stdout
+    reached_live = oracle.stdout == b"Instance registered\n"
+    oracle_row = instance_row(django_db)
+    # When the oracle reached GitHub the stub serves exactly the tag it saw,
+    # so both rows agree on latest_version. When it fell back, serve a tag
+    # that differs from the current version instead, so the row assertion
+    # below still fails if Rust silently fell back rather than parsing
+    # tag_name out of the stubbed response.
+    stub_tag = (
+        oracle_row["latest_version"] if reached_live else "pidash-v0.0.0-contract-stub"
+    )
+    with FixedResponseStub(body=json.dumps({"tag_name": stub_tag}).encode()) as stub:
         assert stub.requests == []
         rust = run_rust(
             rust_db,
@@ -631,8 +650,12 @@ def test_register_stub_tag_matches_live_oracle(scratch_pair):
             cwd=API_ROOT,
         )
     assert rust.returncode == 0, rust.stderr
-    assert rust.stdout == b"Instance registered\n"
-    assert instance_row(rust_db)["latest_version"] == live_tag
+    assert rust.stdout == oracle_stdout == b"Instance registered\n"
+    rust_row = instance_row(rust_db)
+    assert rust_row["latest_version"] == stub_tag
+    assert rust_row["current_version"] == oracle_row["current_version"]
+    if not reached_live:
+        assert stub_tag != rust_row["current_version"]  # parse, not the fallback
     assert len(stub.requests) == 1
     assert stub.requests[0]["method"] == "GET"
     headers = {key.lower(): value for key, value in stub.requests[0]["headers"].items()}
