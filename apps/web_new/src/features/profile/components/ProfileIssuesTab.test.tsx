@@ -7,7 +7,7 @@
 // layout and display menus persist to browser-local storage, a selected
 // row opens the peek host, and an empty page keeps its empty state.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -31,6 +31,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { profileDisplayKey } from "../lib/preferences.js";
+import { profileIssuesQueryOptions } from "../api/queries.js";
 import { ProfileIssuesTab } from "./ProfileIssuesTab.js";
 
 function memoryStorage(): Storage {
@@ -239,11 +240,42 @@ describe("ProfileIssuesTab", () => {
     expect(document.querySelector("[data-profile-row]")?.textContent).not.toContain("PP-7");
   });
 
+  it("drops the peek eyebrow when the project identifier is unknown", async () => {
+    vi.mocked(listProjects).mockResolvedValue([]);
+    renderTab();
+    await screen.findByTestId("profile-list");
+    await userEvent.click(screen.getByRole("button", { name: /Prof persist urgent/ }));
+    const peek = await screen.findByTestId("issue-preview");
+    expect(within(peek).queryByText("PP-7")).toBeNull();
+    expect(within(peek).getByDisplayValue("Prof persist urgent")).toBeInTheDocument();
+  });
+
+  it("closes a peek whose row left the page under it", async () => {
+    const client = renderTab();
+    await screen.findByTestId("profile-list");
+    await userEvent.click(screen.getByRole("button", { name: /Prof persist urgent/ }));
+    expect(await screen.findByTestId("issue-preview")).toBeInTheDocument();
+    act(() => {
+      client.setQueryData(
+        profileIssuesQueryOptions({} as never, "acme", "u-1", "assigned", "sort_order").queryKey,
+        response([])
+      );
+    });
+    await waitFor(() => expect(screen.queryByTestId("issue-preview")).toBeNull());
+  });
+
   it("names the count in singular and plural", async () => {
     renderTab();
     await screen.findByTestId("profile-list");
     expect(screen.getByText("2 work items")).toBeInTheDocument();
     expect(screen.queryByText("Loading work items…")).toBeNull();
+  });
+
+  it("names a single work item in the singular", async () => {
+    vi.mocked(listUserProfileIssues).mockResolvedValue(response([issue("i-only", "Only row")]));
+    renderTab();
+    await screen.findByTestId("profile-list");
+    expect(screen.getByText("1 work item")).toBeInTheDocument();
   });
 
   it("shows the loading line while the page is in flight", async () => {

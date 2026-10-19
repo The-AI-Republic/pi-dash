@@ -166,6 +166,49 @@ describe("ProfileActivityTab", () => {
     await waitFor(() => expect(screen.getAllByRole("listitem")).toHaveLength(2));
   });
 
+  it("returns to idle when the next page read fails", async () => {
+    vi.mocked(getUserProfileActivity).mockRejectedValue(new Error("down"));
+    render(
+      wrap(
+        <ProfileActivityTab
+          workspaceSlug="acme"
+          userId="u-1"
+          currentUserId={null}
+          initialPage={page([row("a-1", "Prof one")], "next-1")}
+        />
+      )
+    );
+    await userEvent.click(screen.getByTestId("profile-activity-load-more"));
+    await waitFor(() => expect(screen.getByTestId("profile-activity-load-more")).toHaveTextContent("Load more"));
+    await waitFor(() => expect(getUserProfileActivity).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("profile-activity-load-more")).toBeEnabled();
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+  });
+
+  it("keeps the control on the following cursor when a page brings more", async () => {
+    vi.mocked(getUserProfileActivity).mockResolvedValue(page([row("a-2", "Prof two")], "next-2"));
+    render(
+      wrap(
+        <ProfileActivityTab
+          workspaceSlug="acme"
+          userId="u-1"
+          currentUserId={null}
+          initialPage={page([row("a-1", "Prof one")], "next-1")}
+        />
+      )
+    );
+    await userEvent.click(screen.getByTestId("profile-activity-load-more"));
+    await waitFor(() => expect(screen.getAllByRole("listitem")).toHaveLength(2));
+    expect(screen.getByTestId("profile-activity-load-more")).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("profile-activity-load-more"));
+    await waitFor(() =>
+      expect(getUserProfileActivity).toHaveBeenLastCalledWith(expect.anything(), "acme", "u-1", {
+        perPage: PROFILE_ACTIVITY_PAGE_SIZE,
+        cursor: "next-2",
+      })
+    );
+  });
+
   it("renders no rows and no control for a quiet member, keeping the download slot", () => {
     render(
       wrap(

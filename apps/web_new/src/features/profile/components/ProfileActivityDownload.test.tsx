@@ -15,7 +15,14 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   return { ...original, notifyError: vi.fn() };
 });
 
+vi.mock("../api/export.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../api/export.js")>();
+  return { ...original, downloadProfileActivity: vi.fn(async () => undefined) };
+});
+
 import { notifyError } from "../../../shared/shell/index.js";
+import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { downloadProfileActivity } from "../api/export.js";
 import {
   PROFILE_DOWNLOAD_IDLE_LABEL,
   PROFILE_DOWNLOAD_WORKING_LABEL,
@@ -65,5 +72,16 @@ describe("ProfileActivityDownload", () => {
     await waitFor(() =>
       expect(notifyError).toHaveBeenCalledWith("Could not download activity", "Try again in a moment.")
     );
+  });
+
+  it("runs the live export when the caller injects no runner", async () => {
+    const client = createAppClient("https://api.test", () => new Promise<never>(() => {}));
+    render(<ProfileActivityDownload workspaceSlug="acme" userId="u-1" />);
+    await userEvent.click(screen.getByTestId("profile-activity-download"));
+    await waitFor(() => expect(downloadProfileActivity).toHaveBeenCalledWith(client, "acme", "u-1"));
+    await waitFor(() =>
+      expect(screen.getByTestId("profile-activity-download")).toHaveTextContent(PROFILE_DOWNLOAD_IDLE_LABEL)
+    );
+    resetAppClient();
   });
 });

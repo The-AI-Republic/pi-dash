@@ -46,6 +46,7 @@ import { sessionKeys } from "../../../../../core/session/index.js";
 import { projectsQueryOptions } from "../../../../../features/projects/index.js";
 import { profileKeys } from "../../../../../features/profile/api/keys.js";
 import {
+  profileActivityQueryOptions,
   profileSegregationQueryOptions,
   profileStatsQueryOptions,
 } from "../../../../../features/profile/api/queries.js";
@@ -121,6 +122,13 @@ function seed(role: number, meId = "u-9") {
   };
 }
 
+/** Role present, member identity still in flight. */
+function roleWithoutMember(queryClient: QueryClient): void {
+  queryClient.setQueryData(sessionKeys.workspaces, [
+    { id: "w-1", name: "Acme", slug: "acme", logo_url: null, total_members: 3, role: 15 },
+  ]);
+}
+
 beforeEach(() => {
   vi.mocked(getUserProfileSegregation).mockResolvedValue(segregation);
   vi.mocked(getUserProfileStats).mockResolvedValue(stats);
@@ -143,6 +151,40 @@ describe("profile layout route", () => {
     expect(getUserProfileSegregation).toHaveBeenCalledWith({}, "acme", "u-1");
     expect(getUserProfileStats).toHaveBeenCalledWith({}, "acme", "u-1");
     expect(queryClient.getQueryData(profileKeys.segregation("acme", "u-1"))).toEqual(segregation);
+  });
+
+  it("warms both reads and mounts the frame for the member", async () => {
+    const loader = LayoutRoute.options.loader as unknown as (input: unknown) => Promise<unknown>;
+    const queryClient = new QueryClient();
+    await loader({ context: { queryClient, apiClient: {} }, params: { ws: "acme", userId: "u-1" } });
+    expect(queryClient.getQueryData(profileKeys.stats("acme", "u-1"))).toEqual(stats);
+    renderProfileRoute({
+      component: LayoutRoute.options.component as never,
+      leafPath: "/",
+      seed: (client) => {
+        seed(15)(client);
+        client.setQueryData(profileKeys.segregation("acme", "u-1"), segregation);
+        client.setQueryData(profileKeys.stats("acme", "u-1"), stats);
+        client.setQueryData(profileKeys.activity("acme", "u-1", 10), activityPage());
+        client.setQueryData(projectsQueryOptions({} as never, "acme").queryKey, []);
+      },
+    });
+    expect(await screen.findByTestId("profile-page")).toBeInTheDocument();
+  });
+
+  it("mounts the frame while the project list is still in flight", async () => {
+    renderProfileRoute({
+      component: LayoutRoute.options.component as never,
+      leafPath: "/",
+      seed: (client) => {
+        seed(15)(client);
+        client.setQueryData(profileKeys.segregation("acme", "u-1"), segregation);
+        client.setQueryData(profileKeys.stats("acme", "u-1"), stats);
+        client.setQueryData(profileKeys.activity("acme", "u-1", 10), activityPage());
+      },
+    });
+    expect(await screen.findByTestId("profile-page")).toBeInTheDocument();
+    expect(screen.getByTestId("profile-sidebar")).toBeInTheDocument();
   });
 });
 
@@ -238,5 +280,55 @@ describe("profile tab body", () => {
     expect(screen.queryByTestId("profile-access-denied")).toBeNull();
     expect(screen.queryByTestId("profile-issues-tab")).toBeNull();
     expect(screen.queryByTestId("profile-activity")).toBeNull();
+  });
+
+  it("renders the activity tab for a session whose member read has not landed", async () => {
+    renderProfileRoute({
+      component: TabRoute.options.component as never,
+      leafPath: "$tabId",
+      initialPath: "/acme/profile/u-1/activity",
+      seed: roleWithoutMember,
+    });
+    expect(await screen.findByTestId("profile-activity")).toBeInTheDocument();
+  });
+
+  it("hands the activity tab its first page while it is still loading", async () => {
+    vi.mocked(getUserProfileActivity).mockReturnValue(new Promise(() => undefined));
+    mountTab("activity", 15);
+    expect(await screen.findByTestId("profile-activity")).toBeInTheDocument();
+    expect(screen.queryByTestId("profile-activity-load-more")).toBeNull();
+  });
+
+  it("hands the activity tab the warmed first page instead of refetching it", async () => {
+    renderProfileRoute({
+      component: TabRoute.options.component as never,
+      leafPath: "$tabId",
+      initialPath: "/acme/profile/u-1/activity",
+      seed: (client) => {
+        memberSeed(client);
+        client.setQueryData(profileActivityQueryOptions({} as never, "acme", "u-1", 100).queryKey, activityPage());
+      },
+    });
+    expect(await screen.findByTestId("profile-activity")).toBeInTheDocument();
+    expect(getUserProfileActivity).not.toHaveBeenCalled();
+  });
+
+  it("renders the summary for a session whose member read has not landed", async () => {
+    renderProfileRoute({ component: SummaryRoute.options.component as never, leafPath: "/", seed: roleWithoutMember });
+    expect(await screen.findByTestId("profile-count-cards")).toBeInTheDocument();
+  });
+
+  it("renders the summary once the overview reads land", async () => {
+    renderProfileRoute({
+      component: SummaryRoute.options.component as never,
+      leafPath: "/",
+      seed: (queryClient) => {
+        seed(15)(queryClient);
+        queryClient.setQueryData(profileStatsQueryOptions({} as never, "acme", "u-1").queryKey, stats);
+        queryClient.setQueryData(profileActivityQueryOptions({} as never, "acme", "u-1", 10).queryKey, activityPage());
+      },
+    });
+    expect(await screen.findByTestId("profile-count-cards")).toBeInTheDocument();
+    expect(screen.getByTestId("profile-count-cards")).toHaveTextContent("1");
   });
 });

@@ -181,6 +181,17 @@ describe("ProfileOverview", () => {
     expect(bar.style.width).toBe("0%");
   });
 
+  it("keeps the state bar empty when every series count is zero", () => {
+    renderOverview({
+      stats: stats({
+        assigned_issues: 0,
+        state_distribution: [{ state_group: "canceled", state_count: 0 } as never],
+        priority_distribution: [],
+      }),
+    });
+    expect((document.querySelector("[data-profile-state-slice]") as HTMLElement).style.width).toBe("0%");
+  });
+
   it("lists recent activity with browse links and names the actor", () => {
     renderOverview();
     const list = screen.getByTestId("profile-overview-activity");

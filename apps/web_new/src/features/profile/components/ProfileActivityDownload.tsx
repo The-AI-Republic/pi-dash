@@ -31,7 +31,6 @@ export function ProfileActivityDownload({
 }: ProfileActivityDownloadProps): React.ReactElement {
   const [downloading, setDownloading] = React.useState(false);
   const start = async (): Promise<void> => {
-    if (downloading) return;
     setDownloading(true);
     try {
       await (run ?? (() => downloadProfileActivity(getAppClient(), workspaceSlug, userId)))();

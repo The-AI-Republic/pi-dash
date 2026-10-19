@@ -11,7 +11,7 @@
 
 import type { IssueListItem } from "@pidash/api-client";
 
-import type { ProfileStateGroup } from "./stats.js";
+import { PROFILE_STATE_GROUPS, type ProfileStateGroup } from "./stats.js";
 
 /** Grouping dimensions the profile display menu offers. */
 export type ProfileGroupDimension = "priority" | "state" | "assignees";
@@ -119,8 +119,7 @@ export function groupIssueRows(
 
 function stateRank(key: string, stateGroups: ReadonlyMap<string, ProfileStateGroup>): number {
   const group = stateGroups.get(key) ?? "backlog";
-  const index = (Object.keys(STATE_GROUP_TITLES) as ProfileStateGroup[]).indexOf(group);
-  return index < 0 ? 0 : index;
+  return PROFILE_STATE_GROUPS.indexOf(group);
 }
 
 function compareGroupKeys(
@@ -133,7 +132,7 @@ function compareGroupKeys(
     return PRIORITY_ORDER.indexOf(left as PriorityRank) - PRIORITY_ORDER.indexOf(right as PriorityRank);
   }
   if (dimension === "state") return stateRank(left, stateGroups) - stateRank(right, stateGroups);
-  if (left === "unassigned") return -1;
-  if (right === "unassigned") return 1;
-  return left.localeCompare(right);
+  // Assignee groups: "Unassigned" first, the rest by name.
+  const unassignedRank = (key: string): number => (key === "unassigned" ? 0 : 1);
+  return unassignedRank(left) - unassignedRank(right) || left.localeCompare(right);
 }

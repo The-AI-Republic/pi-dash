@@ -21,11 +21,7 @@ import { ProfileAccessDenied } from "../../../../../features/profile/components/
 import { ProfileActivityDownload } from "../../../../../features/profile/components/ProfileActivityDownload.js";
 import { ProfileActivityTab } from "../../../../../features/profile/components/ProfileActivityList.js";
 import { ProfileIssuesTab } from "../../../../../features/profile/components/ProfileIssuesTab.js";
-import {
-  PROFILE_DENIED_TABS,
-  profileTabBySegment,
-  type ProfileTabKey,
-} from "../../../../../features/profile/lib/tabs.js";
+import { PROFILE_DENIED_TABS, profileTabBySegment } from "../../../../../features/profile/lib/tabs.js";
 
 import type { UserActivityPage } from "@pidash/api-client";
 
@@ -49,31 +45,24 @@ const ISSUE_TITLES: Record<"assigned" | "created" | "subscribed", string> = {
   subscribed: "Subscribed",
 };
 
-function isDeniedTab(tab: ProfileTabKey | null): boolean {
-  return tab !== null && PROFILE_DENIED_TABS.includes(tab);
-}
-
 function ProfileTabComponent(): React.ReactElement | null {
   const { ws, userId, tabId } = Route.useParams();
   const permissions = usePermissions(ws);
   const me = useMe();
   const tab = profileTabBySegment(tabId);
   if (tab === null) return null;
-  if (isDeniedTab(tab.key) && !permissions.canEdit) return <ProfileAccessDenied />;
+  if (PROFILE_DENIED_TABS.includes(tab.key) && !permissions.canEdit) return <ProfileAccessDenied />;
   if (tab.key === "assigned" || tab.key === "created" || tab.key === "subscribed") {
     return <ProfileIssuesTab workspaceSlug={ws} userId={userId} ownership={tab.key} title={ISSUE_TITLES[tab.key]} />;
   }
-  if (tab.key === "activity") {
-    return (
-      <ActivityScreen
-        workspaceSlug={ws}
-        userId={userId}
-        currentUserId={me.data?.id ?? null}
-        canDownload={permissions.canEdit}
-      />
-    );
-  }
-  return null;
+  return (
+    <ActivityScreen
+      workspaceSlug={ws}
+      userId={userId}
+      currentUserId={me.data?.id ?? null}
+      canDownload={permissions.canEdit}
+    />
+  );
 }
 
 function ActivityScreen({

@@ -112,4 +112,23 @@ describe("groupIssueRows", () => {
     const groups = groupIssueRows([issue({ id: "i-1", assignee_ids: ["u-a", "u-b"] })], "assignees");
     expect(groups.map((group) => group.id)).toEqual(["u-a", "u-b"]);
   });
+
+  it("appends a second row to the bucket an earlier row opened", () => {
+    const rows = [issue({ id: "i-1", assignee_ids: ["u-a"] }), issue({ id: "i-2", assignee_ids: ["u-a"] })];
+    const groups = groupIssueRows(rows, "assignees");
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.rows.map((row) => row.id)).toEqual(["i-1", "i-2"]);
+  });
+
+  it("keeps unassigned ahead of a named assignee", () => {
+    const rows = [issue({ id: "i-b", assignee_ids: ["u-b"] }), issue({ id: "i-none", assignee_ids: [] })];
+    const groups = groupIssueRows(rows, "assignees");
+    expect(groups.map((group) => group.title)).toEqual(["Unassigned", "u-b"]);
+    expect(groupIssueRows([...rows].reverse(), "assignees").map((group) => group.title)).toEqual(["Unassigned", "u-b"]);
+  });
+
+  it("orders two named assignees alphabetically", () => {
+    const rows = [issue({ id: "i-b", assignee_ids: ["u-b"] }), issue({ id: "i-a", assignee_ids: ["u-a"] })];
+    expect(groupIssueRows(rows, "assignees").map((group) => group.title)).toEqual(["u-a", "u-b"]);
+  });
 });

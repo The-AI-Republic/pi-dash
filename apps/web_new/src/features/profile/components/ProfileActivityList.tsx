@@ -103,16 +103,18 @@ export function ProfileActivityTab({
 
   const rows = React.useMemo(() => appendActivityPage(first.data?.results ?? [], extra), [first.data, extra]);
 
-  const loadMore = async (): Promise<void> => {
-    if (cursor === null || loading) return;
+  const loadMore = async (from: string): Promise<void> => {
     setLoading(true);
     try {
       const page = await getUserProfileActivity(client, workspaceSlug, userId, {
         perPage: PROFILE_ACTIVITY_PAGE_SIZE,
-        cursor,
+        cursor: from,
       });
       setExtra((current) => appendActivityPage(current, page.results));
       setCursor(page.next_page_results ? page.next_cursor : null);
+    } catch {
+      // A failed page read leaves the rows and cursor untouched so the
+      // control stays available for a retry.
     } finally {
       setLoading(false);
     }
@@ -140,7 +142,7 @@ export function ProfileActivityTab({
             data-testid="profile-activity-load-more"
             disabled={loading}
             onClick={() => {
-              void loadMore();
+              void loadMore(cursor);
             }}
           >
             {loading ? "Loading…" : "Load more"}
