@@ -165,7 +165,7 @@ describe("CommentComposer", () => {
     fireEvent.input(box, { target: { value: "imon" } });
     const composing = new KeyboardEvent("keydown", { key: "Enter", bubbles: true });
     Object.defineProperty(composing, "isComposing", { value: true });
-    fireEvent.keyDown(box, composing);
+    fireEvent(box, composing);
     expect(onCreate).not.toHaveBeenCalled();
   });
 
