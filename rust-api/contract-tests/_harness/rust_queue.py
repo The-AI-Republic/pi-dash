@@ -14,12 +14,13 @@ The Rust worker (``rust-api/crates/jobs/src/worker.rs:run_worker``)
 claims rows from the Postgres queue ``rust_job_queue``
 (``status='queued' AND visible_at <= now() ORDER BY visible_at, id
 LIMIT 1 FOR UPDATE SKIP LOCKED``) and routes by registered task name:
-a locally-registered name runs its handler, anything else forwards to
-the Python plane over AMQP. This module is the executable Rust-side
-replay form: it seeds ``rust_job_queue`` rows carrying the exact Celery
-v2 payloads (``task``, ``args`` JSON array, ``kwargs`` JSON object) and
-waits on the same Postgres table, so the identical DB before/after
-assertions run with the Django worker stopped.
+a locally-registered name runs its handler; an unregistered name is
+parked ``failed`` with ``unknown task <name>`` (the AMQP/Celery hand-off
+and its forward path were removed in PIDASHCONV-1108). This module is the
+executable Rust-side replay form: it seeds ``rust_job_queue`` rows
+carrying the exact Celery v2 payloads (``task``, ``args`` JSON array,
+``kwargs`` JSON object) and waits on the same Postgres table, so the
+identical DB before/after assertions run with the Django worker stopped.
 
 Payload mapping (mirrors ``queue::NewJob`` / ``enqueue_sql``):
 
@@ -54,6 +55,47 @@ from .db import connect, wait_for_condition
 
 
 QUEUE_TABLE = "rust_job_queue"
+
+
+# Exact DDL mirror of `crates/jobs/src/queue.rs::ensure_schema_sql` and
+# `ensure_claim_index_sql`. The Postgres queue is Rust-owned: the API
+# (`serve`) and the worker create it at boot, never a Django migration.
+# Suites that drive the built binary directly without booting a server
+# (ops/, ops-instance) must ensure the table before a command enqueues
+# into it — the same "no server, so ensure it here" the Rust `serve` boot
+# path relies on. Keep these strings byte-identical to queue.rs.
+QUEUE_TABLE_DDL = (
+    "CREATE TABLE IF NOT EXISTS rust_job_queue ("
+    "id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,"
+    "celery_id TEXT NOT NULL UNIQUE,"
+    "task TEXT NOT NULL,"
+    "args JSONB NOT NULL DEFAULT '[]',"
+    "kwargs JSONB NOT NULL DEFAULT '{}',"
+    "queue TEXT NOT NULL DEFAULT 'celery',"
+    "status TEXT NOT NULL DEFAULT 'queued',"
+    "attempts INTEGER NOT NULL DEFAULT 0,"
+    "max_retries INTEGER NOT NULL DEFAULT 3,"
+    "visible_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+    "claimed_at TIMESTAMPTZ,"
+    "claimed_by TEXT,"
+    "created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+    "last_error TEXT"
+    ")"
+)
+QUEUE_CLAIM_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_idx "
+    "ON rust_job_queue (status, visible_at, id)"
+)
+
+
+def ensure_schema(database_url: str | None = None) -> None:
+    """Create the queue table if absent (idempotent).
+
+    For binary-driven suites (no API/worker boot ran `ensure_schema`).
+    """
+    with connect(database_url) as conn, conn.cursor() as cur:
+        cur.execute(QUEUE_TABLE_DDL)
+        cur.execute(QUEUE_CLAIM_INDEX_DDL)
 
 
 def publish(

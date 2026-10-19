@@ -1,33 +1,25 @@
 """tasks_mail oracle vs the Rust worker (PIDASHCONV-820/834/865).
 
-The Django oracle (``test_mail_tasks.py``) proves what the Python plane does
-with mail Celery traffic. This suite proves the Rust worker's side of the
-hybrid-worker contract for the same tasks:
+Every mail task name in this module is Rust-owned (PIDASHCONV-1103/1104
+ported the last of them off the Python hand-off; PIDASHCONV-1108 removed
+the hand-off entirely): the jobs settle in ``rust_job_queue``, no message
+for the task lands on the AMQP broker, and the task-specific local effect
+holds. This suite proves the Rust worker executes them locally:
 
 - ``notifications`` (PIDASHCONV-834), ``stack_email_notification`` and
   ``send_email_notification`` (PIDASHCONV-865), and the four auth mail
-  tasks (PIDASHCONV-1103) execute LOCALLY: the jobs settle in
-  ``rust_job_queue``, no message for the task lands on the AMQP broker,
-  the stack marks ``processed_at`` and fans its sends out into the Rust
-  queue, and the sends (and the auth mails) deliver into the SMTP sink
-  (the sends mark ``sent_at``). The five membership mail tasks
-  (PIDASHCONV-1104) execute locally too; their pins live in
-  ``test_rust_replay_user_project.py``.
-- Every other mail task name still publishes but has no local handler, so
-  the worker forwards it to the Python plane: the job settles (the forward
-  is the terminal effect) and exactly one message for the task lands on
-  the broker while no local rows change.
+  tasks (PIDASHCONV-1103): the stack marks ``processed_at`` and fans its
+  sends out into the Rust queue, and the sends (and the auth mails)
+  deliver into the SMTP sink (the sends mark ``sent_at``).
+- The five membership mail tasks (PIDASHCONV-1104) execute locally too;
+  their pins live in ``test_rust_replay_user_project.py``.
 
 The broker pins are per-task (``headers["task"]``), never global depth:
-the worker's scheduler loop forwards its own unregistered beat entries
-over the same broker (when D3 landed, ``cloud_agent.scan_queued_runs``
-fired every 10s; since PIDASHCONV-832 the only Python-owned beat task
-is ``delete_old_s3_link`` on daily crontabs), so background traffic can
-land mid-suite and a global flat/+1 pin is inherently racy
-(PIDASHCONV-865 D3). Only messages carrying our task name count;
-background beat traffic is republished back untouched (the ticker-suite
-drains-and-filters precedent, plus restore so later tests still observe
-it).
+the Django plane's own beat traffic can land on the shared broker, so a
+global flat/+1 pin is inherently racy (PIDASHCONV-865 D3). Only messages
+carrying our task name count; background beat traffic is republished back
+untouched (the ticker-suite drains-and-filters precedent, plus restore so
+later tests still observe it).
 
 The broker/redis/database are shared across tests in this module, but every
 payload carries unique ids (fresh projects/issues/receivers per test), so
@@ -61,17 +53,17 @@ def _send_kwargs(receiver_id, issue_id):
 def _drain_matching(task_name):
     """Drain the broker once; return the messages for ``task_name``.
 
-    Settle strictly follows the AMQP publish in the worker's forward path
-    (``worker.rs`` acks the row only after the publish succeeds), so one
-    drain after ``wait_for_settled`` observes exactly what our job sent —
-    no polling. Non-matching messages (background beat traffic — see the
-    module docstring) are republished back with payload and headers
-    intact, so later tests still observe them. Republishing, not
-    ``message.requeue()``: a requeued message is redelivered immediately,
-    which would loop the sweep on the first non-match (probed against
-    RabbitMQ 3.13; the same trap ``collect_matching`` lays — unused
-    here for that reason and because it polls until a match, which an
-    absence pin never finds).
+    The Rust worker never publishes, so an absence pin is the norm here;
+    this drain is called *after* the job settles to prove the locally
+    owned task sent nothing to the Python plane (PIDASHCONV-1108 removed
+    the hand-off). Non-matching messages (the Django plane's own beat
+    traffic — see the module docstring) are republished back with payload
+    and headers intact, so later tests still observe them. Republishing,
+    not ``message.requeue()``: a requeued message is redelivered
+    immediately, which would loop the sweep on the first non-match
+    (probed against RabbitMQ 3.13; the same trap ``collect_matching``
+    lays — unused here for that reason and because it polls until a
+    match, which an absence pin never finds).
     """
     from kombu import Connection
 
@@ -98,23 +90,6 @@ def _drain_matching(task_name):
         finally:
             queue_obj.close()
     return matched
-
-
-def _publish_and_observe_forward(task, kwargs):
-    """Publish one Rust-queue job and prove it forwards to Python.
-
-    Returns the job's celery id once the row settles; the caller asserts
-    the absence of local rows. Exactly one message for the task must land
-    on the broker — a per-task pin, not a global depth delta (see the
-    module docstring).
-    """
-    celery_id = rust_queue.publish(task, [], kwargs)
-    rust_queue.wait_for_settled(celery_id, what=f"forwarded mail task settled ({task})")
-    arrived = _drain_matching(task)
-    assert len(arrived) == 1, (
-        f"{task} did not forward exactly one message ({len(arrived)} arrived)"
-    )
-    return celery_id
 
 
 def _publish_and_observe_local(task, kwargs, args=None):
@@ -400,29 +375,6 @@ def test_rust_auth_mail_executes_locally(smtp_sink, db_conn, task_name, args, su
     for marker in markers:
         assert marker in raw, f"{task_name} body misses {marker!r}"
     assert _diff(before, snapshot(db_conn, ["users", "email_notification_logs"])) == {}
-
-
-# Every mail task name that is still Python-owned: published, forwarded,
-# settled, exactly one broker message for the task, no local rows.
-# `notifications` (PIDASHCONV-834), `send`/`stack_email_notification`
-# (PIDASHCONV-865) and the four auth mail tasks (PIDASHCONV-1103)
-# execute locally and are pinned above instead.
-MAIL_TASKS = [
-    "pi_dash.bgtasks.auth_task.send_email_verification",
-    "pi_dash.bgtasks.auth_task.send_forgot_password",
-    "pi_dash.bgtasks.auth_task.send_magic_sign_in",
-    "pi_dash.bgtasks.auth_task.send_password_changed",
-    "pi_dash.bgtasks.membership_task.send_invitation_email",
-    "pi_dash.bgtasks.membership_task.send_organization_invitation",
-    "pi_dash.bgtasks.membership_task.send_project_invitation",
-    "pi_dash.bgtasks.membership_task.send_workspace_invitation",
-]
-
-
-@pytest.mark.parametrize("task_name", MAIL_TASKS)
-def test_rust_mail_task_forwards_to_python(task_name):
-    """Mail tasks without a local handler forward to the Python plane."""
-    _publish_and_observe_forward(task_name, {})
 
 
 def test_rust_notifications_executes_locally(db_conn):
