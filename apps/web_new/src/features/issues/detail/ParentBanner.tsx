@@ -77,9 +77,10 @@ export function ParentBanner({
       : `${project.data.identifier}-${parent.data.sequence_id}`;
   const href = identifier === null ? null : `/${workspaceSlug}/browse/${identifier}`;
   const rows = siblingRows(siblings.data?.sub_issues, issue.id);
+  const projectIdentifier = project.data?.identifier ?? null;
 
   const items: MenuEntry[] = [];
-  if (siblings.isPending) {
+  if (siblings.isPending || projectIdentifier === null) {
     items.push({
       custom: true,
       entryKey: "loading",
@@ -101,7 +102,7 @@ export function ParentBanner({
     });
   } else {
     for (const row of rows) {
-      const rowHref = `/${workspaceSlug}/browse/${project.data?.identifier ?? ""}-${row.sequence_id}`;
+      const rowHref = `/${workspaceSlug}/browse/${projectIdentifier}-${row.sequence_id}`;
       items.push({
         custom: true,
         entryKey: row.id,

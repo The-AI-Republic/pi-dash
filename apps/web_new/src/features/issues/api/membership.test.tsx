@@ -100,6 +100,10 @@ function setup(options: StubOptions = {}, currentCycleId: string | null = CYCLE)
   const { calls } = stubClient(options);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(detailKey, detail({ cycle_id: currentCycleId, module_ids: [MODULE_A] }));
+  queryClient.setQueryData([...issueKeys.all(SLUG), "list", "grouped"], {
+    count: 1,
+    results: [detail({ cycle_id: currentCycleId, module_ids: [MODULE_A] }), { id: "other" }],
+  });
   queryClient.setQueryData(listKey, {
     count: 1,
     results: [detail({ cycle_id: currentCycleId, module_ids: [MODULE_A] }), { id: "other" }],
@@ -181,6 +185,19 @@ describe("useIssueCycleWrite", () => {
     handleRef.cycle!.updateCycle(null);
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(CYCLE_UPDATE_FAILED_TITLE, CYCLE_REMOVE_FAILED_BODY));
     expect(queryClient.getQueryData(detailKey)).toMatchObject({ cycle_id: CYCLE });
+  });
+
+  it("patches row lists cached under the workspace scope, not only detail and envelopes", async () => {
+    const { queryClient } = setup();
+    const rowsKey = [...issueKeys.all(SLUG), "list", "rows"] as const;
+    queryClient.setQueryData(rowsKey, [detail({ cycle_id: CYCLE, module_ids: [MODULE_A] }), { id: "other" }]);
+    handleRef.cycle!.updateCycle(OTHER_CYCLE);
+    await waitFor(() =>
+      expect(queryClient.getQueryData(rowsKey)).toEqual([
+        expect.objectContaining({ id: ISSUE, cycle_id: OTHER_CYCLE }),
+        { id: "other" },
+      ])
+    );
   });
 
   it("re-reads the cycle list after the bridge settles", async () => {

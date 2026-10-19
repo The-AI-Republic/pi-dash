@@ -169,6 +169,8 @@ interface Options {
   siblings?: SubIssue[];
   siblingsStatus?: number;
   holdSiblings?: boolean;
+  projectStatus?: number;
+  holdProject?: boolean;
 }
 
 function harness(options: Options = {}) {
@@ -183,6 +185,12 @@ function harness(options: Options = {}) {
       })
     : null;
   let releaseSiblings: (() => void) | null = null;
+  let releaseProject: (() => void) | null = null;
+  const projectGate = options.holdProject
+    ? new Promise<void>((resolve) => {
+        releaseProject = resolve;
+      })
+    : null;
   const siblingsGate = options.holdSiblings
     ? new Promise<void>((resolve) => {
         releaseSiblings = resolve;
@@ -244,11 +252,14 @@ function harness(options: Options = {}) {
       };
     }
     if (url.endsWith(`/projects/${PROJECT}/`)) {
+      if (projectGate !== null) await projectGate;
+      if (projectGate !== null) await projectGate;
+      const status = options.projectStatus ?? 200;
       return {
-        status: 200,
+        status,
         url,
         headers: { get: () => null },
-        text: async () => JSON.stringify(project(PROJECT, "WEB")),
+        text: async () => (status === 200 ? JSON.stringify(project(PROJECT, "WEB")) : "{}"),
       };
     }
     if (url.includes(`/projects/${OTHER_PROJECT}/states/`)) {
@@ -276,6 +287,7 @@ function harness(options: Options = {}) {
     reads,
     releasePatch: () => releasePatch?.(),
     releaseSiblings: () => releaseSiblings?.(),
+    releaseProject: () => releaseProject?.(),
   };
 }
 
@@ -338,6 +350,29 @@ describe("ParentBanner", () => {
     expect(item).toHaveAttribute("href", `/acme/browse/WEB-8`);
     expect(screen.queryByRole("menuitem", { name: /Child item/ })).not.toBeInTheDocument();
     expect(reads.some((url) => url.includes("/sub-issues/"))).toBe(true);
+  });
+
+  it("holds the sibling links until the parent's project identifier is known", async () => {
+    const { client, queryClient, releaseProject } = harness({ holdProject: true });
+    renderBanner(client, queryClient);
+    const banner = await screen.findByTestId("parent-banner");
+    fireEvent.click(within(banner).getByRole("button", { name: "Parent options" }));
+    expect(await screen.findByText(SIBLINGS_LOADING_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /Sibling item/ })).not.toBeInTheDocument();
+    releaseProject();
+    const link = await within(banner).findByRole("link");
+    await waitFor(() => expect(link).toHaveTextContent("WEB-12"));
+    expect(await screen.findByRole("menuitem", { name: /Sibling item/ })).toHaveAttribute("href", `/acme/browse/WEB-8`);
+  });
+
+  it("closes the sibling menu after following a sibling link", async () => {
+    const { client, queryClient } = harness();
+    renderBanner(client, queryClient);
+    await within(await screen.findByTestId("parent-banner")).findByRole("link");
+    fireEvent.click(screen.getByRole("button", { name: "Parent options" }));
+    const item = await screen.findByRole("menuitem", { name: /Sibling item/ });
+    fireEvent.click(item);
+    await waitFor(() => expect(screen.queryByRole("menuitem", { name: /Sibling item/ })).not.toBeInTheDocument());
   });
 
   it("holds the menu with a loading note while the siblings read is pending", async () => {
