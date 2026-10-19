@@ -20,7 +20,6 @@ import {
   DisplayControl,
   IssuesLayoutRoot,
   ListSkeleton,
-  WorkItemCreateDialog,
   issuesQueryOptions,
   parseIssueSearch,
   prefsQueryOptions,
@@ -57,6 +56,15 @@ primeIssueListLeaves();
 const LazySpreadsheetLayout = React.lazy(() =>
   import("../../../../../../features/issues/spreadsheet/SpreadsheetLayout.js").then((module) => ({
     default: module.SpreadsheetLayout,
+  }))
+);
+
+// The create dialog carries the property strip and every picker. It opens
+// from the header button or the shell's `ni`, so load it on first use and
+// keep it out of the route's initial chain (ISS-117).
+const LazyWorkItemCreateDialog = React.lazy(() =>
+  import("../../../../../../features/issues/components/WorkItemCreateDialog.js").then((module) => ({
+    default: module.WorkItemCreateDialog,
   }))
 );
 
@@ -294,13 +302,15 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
       />
     );
     const createDialog = createOpen ? (
-      <WorkItemCreateDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        workspaceSlug={params.ws}
-        projects={creatable}
-        initialProjectId={params.projectId}
-      />
+      <React.Suspense fallback={null}>
+        <LazyWorkItemCreateDialog
+          open={createOpen}
+          onOpenChange={setCreateOpen}
+          workspaceSlug={params.ws}
+          projects={creatable}
+          initialProjectId={params.projectId}
+        />
+      </React.Suspense>
     ) : null;
     return (
       <>
