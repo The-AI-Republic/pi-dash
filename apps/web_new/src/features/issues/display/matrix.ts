@@ -43,6 +43,7 @@ export const GROUP_DIMENSION_LABELS: Record<string, string> = {
   labels: "Labels",
   assignees: "Assignees",
   created_by: "Created by",
+  team_project: "Team project",
 };
 
 /** Label for the ungrouped choice. */
@@ -100,6 +101,7 @@ const LIST_GROUP: readonly (string | null)[] = [
   "labels",
   "assignees",
   "created_by",
+  "team_project",
   null,
 ];
 

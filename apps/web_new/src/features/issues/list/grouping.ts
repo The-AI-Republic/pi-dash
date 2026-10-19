@@ -33,6 +33,7 @@ const GROUP_KEY_BY_DIMENSION: Record<string, string> = {
   cycle: "cycle_id",
   module: "issue_module__module_id",
   project: "project_id",
+  team_project: "project_id",
   created_by: "created_by",
   "state_detail.group": "state__group",
 };
@@ -158,10 +159,16 @@ export function normalizeGroupedRow(row: GroupedIssueRow, dimension: string | nu
     (row.issue_module__module_id === null || row.issue_module__module_id === undefined
       ? []
       : [row.issue_module__module_id]);
-  // `dimension` is part of the contract the caller passes in; the join
-  // keys are already dimension-specific, so no extra branch depends on it.
-  void dimension;
-  return { ...row, label_ids: labelIds, assignee_ids: assigneeIds, module_ids: moduleIds };
+  // A team-project bucket carries the plain `project_id`; fold it into the
+  // same shape so the strip and row keys read it like any other list row.
+  const projectId = dimension === "team_project" && row.project_id !== undefined ? row.project_id : undefined;
+  return {
+    ...row,
+    label_ids: labelIds,
+    assignee_ids: assigneeIds,
+    module_ids: moduleIds,
+    ...(projectId === undefined ? {} : { project_id: projectId }),
+  };
 }
 
 /** One flat section holding every row. */

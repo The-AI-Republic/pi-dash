@@ -7,7 +7,7 @@
 // route uses, so grouping, creation and the inline strip behave the same
 // in every issues-bearing context.
 
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
@@ -21,13 +21,15 @@ import { listPageQueryOptions } from "./pages.js";
 import { resolvedListLayout } from "./lazy.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { canEditInProject } from "../../../shared/shell/contextual/index.js";
+import { pickerCyclesQueryOptions, pickerModulesQueryOptions } from "../../../shared/pickers/reference.js";
+import { isCompletedCycle } from "../../../shared/pickers/cycles.js";
 
 export interface EntityListScreenProps {
   workspaceSlug: string;
   projectId: string;
   entity: IssuesEntity;
-  /** Page title, e.g. the cycle or module name. */
-  title: string;
+  /** Page title when the host already knows it; cycle/module resolve it here. */
+  title?: string | undefined;
   cycleId?: string | undefined;
   moduleId?: string | undefined;
   /** Completed cycles render read-only. */
@@ -62,6 +64,21 @@ export function EntityListScreen({
   const client = getAppClient();
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(client, workspaceSlug));
   const project = projects.find((row) => row.id === projectId) ?? null;
+  // Titles live with the layout's own chunk instead of the route: the
+  // route graph is eager and the picker reference barst pulls cycle,
+  // module, pod and estimate contracts into the initial bundle (NEWFRONT-619).
+  const { data: cycles } = useQuery({
+    ...pickerCyclesQueryOptions(client, workspaceSlug, projectId),
+    enabled: entity.scope === "cycle",
+  });
+  const { data: modules } = useQuery({
+    ...pickerModulesQueryOptions(client, workspaceSlug, projectId),
+    enabled: entity.scope === "module",
+  });
+  const cycle = entity.scope === "cycle" ? cycles?.find((row) => row.id === entity.cycleId) : undefined;
+  const loadedModule = entity.scope === "module" ? modules?.find((row) => row.id === entity.moduleId) : undefined;
+  const resolvedTitle = title ?? cycle?.name ?? loadedModule?.name ?? (entity.scope === "module" ? "Module" : "Cycle");
+  const resolvedCompletedCycle = completedCycle ?? isCompletedCycle(cycle?.status);
   // Stored rich filters scope the list in cycle/module context too.
   const { data: preferences } = useSuspenseQuery(prefsQueryOptions(client, workspaceSlug, entity));
   const richFilters = preferences.rich_filters;
@@ -103,7 +120,7 @@ export function EntityListScreen({
     <IssuesLayoutRoot
       workspaceSlug={workspaceSlug}
       entity={entity}
-      title={title}
+      title={resolvedTitle}
       totalCount={firstPage.total_count}
       resultCount={Array.isArray(firstPage.results) ? firstPage.results.length : firstPage.count}
       offered={offered}
@@ -118,14 +135,14 @@ export function EntityListScreen({
           richFilters={richFilters}
           cycleId={cycleId}
           moduleId={moduleId}
-          completedCycle={completedCycle}
+          completedCycle={resolvedCompletedCycle}
           peekKey={peekKey}
           onPeekChange={onPeekChange}
           compact={compact}
         />
       )}
-      emptyState={<EntityEmptyState title={title} />}
-      noMatchState={<EntityEmptyState title={title} />}
+      emptyState={<EntityEmptyState title={resolvedTitle} />}
+      noMatchState={<EntityEmptyState title={resolvedTitle} />}
       headerActions={display}
       displayControl={display}
     />

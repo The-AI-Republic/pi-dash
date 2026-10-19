@@ -57,6 +57,7 @@ describe("serverGroupBy", () => {
     ["cycle", "cycle_id"],
     ["module", "issue_module__module_id"],
     ["project", "project_id"],
+    ["team_project", "project_id"],
     ["created_by", "created_by"],
     ["state_detail.group", "state__group"],
   ])("maps %s to %s", (dimension, expected) => {
@@ -65,7 +66,12 @@ describe("serverGroupBy", () => {
 
   it("returns null for flat and unknown dimensions", () => {
     expect(serverGroupBy(null)).toBeNull();
-    expect(serverGroupBy("team_project")).toBeNull();
+    expect(serverGroupBy("target_date")).toBeNull();
+  });
+
+  it("folds a team-project bucket's plain project id into the row shape", () => {
+    const grouped = normalizeGroupedRow({ ...row("one"), project_id: "project-one" }, "team_project");
+    expect(grouped.project_id).toBe("project-one");
   });
 });
 

@@ -66,7 +66,7 @@ export function useListReferences({ workspaceSlug, projectId, dimension }: ListR
   const states = usePickerStates(workspaceSlug, projectId, true);
   const members = usePickerProjectMembers(workspaceSlug, projectId, needs("assignees"));
   const directory = usePickerWorkspaceMembers(workspaceSlug, needs("assignees"));
-  const projects = usePickerProjects(workspaceSlug, needs("project"));
+  const projects = usePickerProjects(workspaceSlug, needs("project") || needs("team_project"));
   const cycles = usePickerCycles(workspaceSlug, projectId, needs("cycle"));
   const modules = usePickerModules(workspaceSlug, projectId, needs("module"));
   const labels = useLabels(workspaceSlug, projectId, needs("labels"));
@@ -109,6 +109,7 @@ export function useListReferences({ workspaceSlug, projectId, dimension }: ListR
     cycle: cycleNames,
     module: moduleNames,
     project: projectNames,
+    team_project: projectNames,
   };
   if (dimension === "created_by") {
     const creators = new Map<string, string>();
@@ -135,7 +136,7 @@ export function useListReferences({ workspaceSlug, projectId, dimension }: ListR
     projects: projectRows,
     isLoading:
       states.isPending ||
-      projects.isPending ||
+      (needs("project") || needs("team_project") ? projects.isPending : false) ||
       labels.isPending ||
       (needs("assignees") && (members.isPending || directory.isPending)) ||
       (needs("cycle") && cycles.isPending) ||

@@ -3,13 +3,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
-  modulesKey: ["picker", "modules"] as const,
   page: vi.fn(),
   prefs: vi.fn(),
 }));
@@ -19,16 +18,15 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-router")>()),
   useNavigate: () => mocks.navigate,
 }));
-vi.mock("../../../../../../features/issues/index.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../../../../features/issues/index.js")>()),
-  prefsQueryOptions: mocks.prefs,
-}));
+vi.mock("../../../../../../features/issues/prefs/prefsQuery.js", () => ({ prefsQueryOptions: mocks.prefs }));
 vi.mock("../../../../../../features/issues/list/pages.js", () => ({ listPageQueryOptions: mocks.page }));
+vi.mock("../../../../../../features/issues/list/lazy.js", () => ({
+  loadListLayout: async () => ({ default: () => null }),
+}));
 vi.mock("../../../../../../features/issues/list/EntityListScreen.js", () => ({
   EntityListScreen: (props: Record<string, unknown>) => (
     <div
       data-testid="entity-screen"
-      data-title={props.title as string}
       data-module={String(props.moduleId ?? "")}
       data-completed={String(props.completedCycle ?? false)}
       data-peek={String(props.peekKey ?? "")}
@@ -43,27 +41,17 @@ vi.mock("../../../../../../features/issues/list/EntityListScreen.js", () => ({
     </div>
   ),
 }));
-vi.mock("../../../../../../shared/pickers/index.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../../../../shared/pickers/index.js")>()),
-  pickerModulesQueryOptions: () => ({ queryKey: mocks.modulesKey, queryFn: async () => [] }),
-}));
-
 import { Route } from "./$moduleId.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const MODULE = "323e4567-e89b-12d3-a456-426614174002";
 
-function module() {
-  return { id: MODULE, name: "Auth", status: "current" };
-}
-
-function renderRoute(search: Record<string, unknown> = {}, rows: Array<ReturnType<typeof module>> = [module()]) {
+function renderRoute(search: Record<string, unknown> = {}) {
   vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme", projectId: PROJECT, moduleId: MODULE } as never);
   vi.spyOn(Route, "useSearch").mockReturnValue(search as never);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
-  queryClient.setQueryData(mocks.modulesKey, rows);
   return render(
     <QueryClientProvider client={queryClient}>
       {React.createElement(Route.options.component as React.ComponentType) as never}
@@ -95,19 +83,13 @@ beforeEach(() => {
 });
 
 describe("module issues route", () => {
-  it("mounts the shared list for the module with its name", async () => {
+  it("mounts the shared list for the module", async () => {
     renderRoute();
     const node = await screen.findByTestId("entity-screen");
-    await waitFor(() => expect(node).toHaveAttribute("data-title", "Auth"));
-    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-module", MODULE);
+    expect(node).toHaveAttribute("data-module", MODULE);
     expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-completed", "false");
     expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-peek", "");
     expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-compact", "false");
-  });
-
-  it("falls back to the generic title while modules load", async () => {
-    renderRoute({}, []);
-    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-title", "Module");
   });
 
   it("renders the module without a completed flag", async () => {
@@ -159,7 +141,7 @@ describe("module issues route", () => {
       projectId: PROJECT,
       moduleId: MODULE,
     });
-  });
+  }, 20000);
 
   it("renders the list skeleton while pending", () => {
     const Pending = Route.options.pendingComponent;

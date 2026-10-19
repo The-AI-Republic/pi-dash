@@ -9,7 +9,7 @@
 // lands this mount names the project and the server's total, plus the
 // per-group counts once the full list is loaded.
 
-import { Button } from "@pidash/kit";
+import { Button, Dialog } from "@pidash/kit";
 import { ChartColumn } from "lucide-react";
 import * as React from "react";
 
@@ -17,12 +17,6 @@ import { usePermissions } from "../../../core/session/index.js";
 import { ROLE_ADMIN, ROLE_MEMBER } from "../../../core/session/permissions.js";
 import { useProjectRoles } from "../../auth/index.js";
 import { usePickerStates } from "../../../shared/pickers/index.js";
-
-// The dialog body is only needed after the header button is pressed. Keep
-// its kit dialog code out of the route's initial closure.
-const LazyAnalyticsDialog = React.lazy(() =>
-  import("./AnalyticsDialog.js").then((module) => ({ default: module.AnalyticsDialog }))
-);
 
 export interface AnalyticsEntryProps {
   workspaceSlug: string;
@@ -89,16 +83,30 @@ export function AnalyticsEntry({
         <ChartColumn size={14} strokeWidth={2} aria-hidden="true" />
         <span>Analytics</span>
       </Button>
-      <React.Suspense fallback={null}>
-        <LazyAnalyticsDialog
-          open={open}
-          onOpenChange={setOpen}
-          isEpics={isEpics}
-          projectName={projectName}
-          total={total}
-          groups={groups}
-        />
-      </React.Suspense>
+      <Dialog
+        open={open}
+        onOpenChange={setOpen}
+        title={isEpics ? "Epic analytics" : "Work items analytics"}
+        description={`Work items in ${projectName}`}
+      >
+        <div className="flex flex-col gap-(--space-3)" data-testid="issues-analytics-body">
+          <p className="text-body text-(--text)">
+            Total Work items <span data-testid="analytics-total">{total}</span>
+          </p>
+          {groups.length > 0 ? (
+            <dl className="flex flex-col gap-(--space-1)">
+              {groups.map((row) => (
+                <div key={row.label} className="flex items-center justify-between gap-(--space-4)">
+                  <dt className="text-body text-(--text-muted)">{row.label}</dt>
+                  <dd className="text-body text-(--text)">{row.count}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : (
+            <p className="text-body text-(--text-muted)">No grouped counts to show yet.</p>
+          )}
+        </div>
+      </Dialog>
     </>
   );
 }

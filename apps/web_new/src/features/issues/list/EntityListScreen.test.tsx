@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   projects: vi.fn(),
   listPage: vi.fn(),
   prefs: vi.fn(),
+  pickerCycles: vi.fn(),
+  pickerModules: vi.fn(),
 }));
 
 vi.mock("@tanstack/react-query", async (importOriginal) => ({
@@ -19,12 +21,22 @@ vi.mock("@tanstack/react-query", async (importOriginal) => ({
     const client = (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient;
     return { data: client?.getQueryData(options.queryKey as never) };
   },
+  useQuery: (options: { queryKey: readonly unknown[]; enabled?: boolean }) => {
+    const client = (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient;
+    return {
+      data: options.enabled === false ? undefined : client?.getQueryData(options.queryKey as never),
+    };
+  },
 }));
 
 vi.mock("../../../core/api/client.js", () => ({ getAppClient: () => ({ stub: true }) }));
 vi.mock("../../projects/index.js", () => ({ projectsQueryOptions: mocks.projects }));
 vi.mock("./pages.js", () => ({ listPageQueryOptions: mocks.listPage }));
 vi.mock("../prefs/prefsQuery.js", () => ({ prefsQueryOptions: mocks.prefs }));
+vi.mock("../../../shared/pickers/reference.js", () => ({
+  pickerCyclesQueryOptions: mocks.pickerCycles,
+  pickerModulesQueryOptions: mocks.pickerModules,
+}));
 
 vi.mock("../display/DisplayControl.js", () => ({
   DisplayControl: (props: { hideCycle: boolean; hideModule: boolean; offered: readonly string[] }) => (
@@ -98,6 +110,8 @@ const MODULE = "423e4567-e89b-12d3-a456-426614174003";
 const PROJECTS_KEY = ["projects"] as const;
 const PAGE_KEY = ["page"] as const;
 const PREFS_KEY = ["prefs"] as const;
+const CYCLES_KEY = ["picker", "cycles"] as const;
+const MODULES_KEY = ["picker", "modules"] as const;
 
 function project(overrides: Record<string, unknown> = {}) {
   return {
@@ -123,6 +137,8 @@ function setup(overrides: Partial<EntityListScreenProps> = {}, projects: Array<R
     rich_filters: { priority__in: "urgent" },
   });
   queryClient.setQueryData(PAGE_KEY, { total_count: 7, results: [{ id: "one" }, { id: "two" }], count: 2 });
+  queryClient.setQueryData(CYCLES_KEY, [{ id: CYCLE, name: "Sprint 1", status: "ACTIVE" }]);
+  queryClient.setQueryData(MODULES_KEY, [{ id: MODULE, name: "Auth", status: "ACTIVE" }]);
   const props: EntityListScreenProps = {
     workspaceSlug: "acme",
     projectId: PROJECT,
@@ -149,6 +165,8 @@ beforeEach(() => {
   mocks.projects.mockReturnValue({ queryKey: PROJECTS_KEY, queryFn: vi.fn() });
   mocks.listPage.mockReturnValue({ queryKey: PAGE_KEY, queryFn: vi.fn() });
   mocks.prefs.mockReturnValue({ queryKey: PREFS_KEY, queryFn: vi.fn() });
+  mocks.pickerCycles.mockReturnValue({ queryKey: CYCLES_KEY, queryFn: vi.fn() });
+  mocks.pickerModules.mockReturnValue({ queryKey: MODULES_KEY, queryFn: vi.fn() });
 });
 
 describe("EntityListScreen", () => {
@@ -164,6 +182,48 @@ describe("EntityListScreen", () => {
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-compact", "true");
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-completed", "false");
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-can-edit", "true");
+  });
+
+  it("resolves the cycle title and completed state from the picker reference", () => {
+    setup({
+      entity: { scope: "cycle", projectId: PROJECT, cycleId: CYCLE },
+      cycleId: CYCLE,
+      title: undefined,
+    });
+    expect(screen.getByTestId("layout-root")).toHaveAttribute("data-title", "Sprint 1");
+    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-completed", "false");
+  });
+
+  it("resolves the module title from the picker reference", () => {
+    setup({
+      entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
+      moduleId: MODULE,
+      title: undefined,
+    });
+    expect(screen.getByTestId("layout-root")).toHaveAttribute("data-title", "Auth");
+  });
+
+  it("falls back to the generic title when the entity row is absent", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient = queryClient;
+    queryClient.setQueryData(PROJECTS_KEY, [project()]);
+    queryClient.setQueryData(PREFS_KEY, { filters: {}, display_filters: {}, display_properties: {}, rich_filters: {} });
+    queryClient.setQueryData(PAGE_KEY, { total_count: 0, results: [], count: 0 });
+    queryClient.setQueryData(CYCLES_KEY, []);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <EntityListScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          entity={{ scope: "cycle", projectId: PROJECT, cycleId: CYCLE }}
+          cycleId={CYCLE}
+          peekKey={null}
+          onPeekChange={vi.fn()}
+          compact={false}
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("layout-root")).toHaveAttribute("data-title", "Cycle");
   });
 
   it("reads the flat first page for the entity", () => {

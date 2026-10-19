@@ -97,7 +97,15 @@ describe("useListReferences", () => {
       cycle: result.current.cycleNames,
       module: result.current.moduleNames,
       project: result.current.projectNames,
+      team_project: result.current.projectNames,
     });
+  });
+
+  it("labels team-project buckets from the project reference", () => {
+    const { result } = renderHook(() =>
+      useListReferences({ workspaceSlug: "acme", projectId: PROJECT, dimension: "team_project" })
+    );
+    expect(result.current.labels.team_project?.get(PROJECT)).toBe("Website");
   });
 
   it("keeps only open cycles in the read-only set", () => {

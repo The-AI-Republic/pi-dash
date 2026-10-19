@@ -6,14 +6,15 @@
 // the shared list layout so module-context grouping and group-header
 // create/attach work there too.
 
-import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
-import { getAppClient } from "../../../../../../core/api/client.js";
-import { ListSkeleton, parseIssueSearch, prefsQueryOptions } from "../../../../../../features/issues/index.js";
-import { loadListLayout } from "../../../../../../features/issues/list/lazy.js";
-import { pickerModulesQueryOptions } from "../../../../../../shared/pickers/index.js";
+// Direct module imports: this route definition is eager, and the feature
+// barrel would pull the analytics entry and picker barst into the initial
+// bundle (NEWFRONT-619, size gate).
+import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
+import { ListSkeleton } from "../../../../../../features/issues/loaders/ListSkeleton.js";
+import { prefsQueryOptions } from "../../../../../../features/issues/prefs/prefsQuery.js";
 
 // The list host and its paging module are part of the list layout chunk;
 // importing them statically would pull them into the entry chunk through
@@ -27,6 +28,7 @@ const LazyEntityListScreen = React.lazy(() =>
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$moduleId")({
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
   beforeLoad: async ({ context, params }) => {
+    const { loadListLayout } = await import("../../../../../../features/issues/list/lazy.js");
     const { listPageQueryOptions } = await import("../../../../../../features/issues/list/pages.js");
     const { selectDisplayPrefs } = await import("../../../../../../features/issues/prefs/displayPrefs.js");
     const entity = { scope: "module", projectId: params.projectId, moduleId: params.moduleId } as const;
@@ -51,8 +53,6 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$m
     const params = Route.useParams();
     const search = Route.useSearch();
     const navigate = useNavigate();
-    const { data: modules } = useQuery(pickerModulesQueryOptions(getAppClient(), params.ws, params.projectId));
-    const module = modules?.find((row) => row.id === params.moduleId) ?? null;
     const entity = { scope: "module", projectId: params.projectId, moduleId: params.moduleId } as const;
     return (
       <React.Suspense fallback={<ListSkeleton />}>
@@ -60,7 +60,6 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$m
           workspaceSlug={params.ws}
           entity={entity}
           projectId={params.projectId}
-          title={module?.name ?? "Module"}
           moduleId={params.moduleId}
           peekKey={search.peekIssueId ?? null}
           onPeekChange={(key) => {
