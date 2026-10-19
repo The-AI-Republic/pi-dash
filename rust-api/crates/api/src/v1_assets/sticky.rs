@@ -2864,14 +2864,8 @@ mod tests {
             "description".to_owned(),
             vec![JSON_INVALID_MESSAGE.to_owned()],
         )];
-        assert_eq!(
-            field_errors(&form_body(&[("description", "foo")])),
-            invalid
-        );
-        assert_eq!(
-            field_errors(&form_body(&[("description", "")])),
-            invalid
-        );
+        assert_eq!(field_errors(&form_body(&[("description", "foo")])), invalid);
+        assert_eq!(field_errors(&form_body(&[("description", "")])), invalid);
         assert_eq!(
             field_errors(&form_body(&[("logo_props", "foo")])),
             vec![(
@@ -2879,8 +2873,7 @@ mod tests {
                 vec![JSON_INVALID_MESSAGE.to_owned()]
             )]
         );
-        let validation =
-            validate_sticky_input(&form_body(&[("description", "{\"a\":1}")]), &utc());
+        let validation = validate_sticky_input(&form_body(&[("description", "{\"a\":1}")]), &utc());
         assert!(validation.errors.is_empty(), "{:?}", validation.errors);
         assert_eq!(
             validation.write.description,
@@ -2890,20 +2883,14 @@ mod tests {
         // message, any other value passes through.
         assert_eq!(
             field_errors(&json_body(&[("description", Value::Null)])),
-            vec![(
-                "description".to_owned(),
-                vec![MAY_NOT_BE_NULL.to_owned()]
-            )]
+            vec![("description".to_owned(), vec![MAY_NOT_BE_NULL.to_owned()])]
         );
         let validation = validate_sticky_input(
             &json_body(&[("description", serde_json::json!("foo"))]),
             &utc(),
         );
         assert!(validation.errors.is_empty(), "{:?}", validation.errors);
-        assert_eq!(
-            validation.write.description,
-            Some(serde_json::json!("foo"))
-        );
+        assert_eq!(validation.write.description, Some(serde_json::json!("foo")));
     }
 
     #[test]
@@ -2975,8 +2962,10 @@ mod tests {
         assert_eq!(validation.pending[0].display, upper);
         // Small ints take the `int` form and queue a lookup for the
         // derived UUID.
-        let validation =
-            validate_sticky_input(&json_body(&[("created_by", serde_json::json!(123))]), &utc());
+        let validation = validate_sticky_input(
+            &json_body(&[("created_by", serde_json::json!(123))]),
+            &utc(),
+        );
         assert!(validation.errors.is_empty());
         assert_eq!(validation.pending[0].uuid, Uuid::from_u128(123));
         assert_eq!(validation.pending[0].display, "123");
@@ -3068,8 +3057,10 @@ mod tests {
             "2026-01-02T05:04:05+0200",
             "2026-01-02T05:04:05+02:00",
         ] {
-            let validation =
-                validate_sticky_input(&json_body(&[("deleted_at", serde_json::json!(raw))]), &utc());
+            let validation = validate_sticky_input(
+                &json_body(&[("deleted_at", serde_json::json!(raw))]),
+                &utc(),
+            );
             assert!(
                 validation.errors.is_empty(),
                 "{raw}: {:?}",
