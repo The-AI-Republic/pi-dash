@@ -28,7 +28,8 @@ import {
 } from "../../../../features/issues/index.js";
 import { projectDetailsQueryOptions, ProjectTabStrip } from "../../../../features/projects/index.js";
 import { canEditInProject, useWorkItemPaletteContext } from "../../../../shared/shell/contextual/index.js";
-import { CopyWorkItemLinkButton, useDocumentHead } from "../../../../shared/shell/index.js";
+import { CopyWorkItemLinkButton } from "../../../../shared/shell/CopyWorkItemLinkButton.js";
+import { useDocumentHead } from "../../../../shared/shell/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/browse/$issueKey")({
   loader: async ({ context, params }) => {

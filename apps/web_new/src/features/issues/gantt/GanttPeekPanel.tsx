@@ -15,7 +15,8 @@ import * as React from "react";
 import { Skeleton } from "@pidash/kit";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { CopyWorkItemLinkButton, PeekPanel } from "../../../shared/shell/index.js";
+import { CopyWorkItemLinkButton } from "../../../shared/shell/CopyWorkItemLinkButton.js";
+import { PeekPanel } from "../../../shared/shell/index.js";
 import { useUpdateIssue } from "../api/mutations.js";
 import { issueDetailQueryOptions } from "../api/queries.js";
 import type { GanttRow } from "./rows.js";

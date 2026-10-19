@@ -9,6 +9,7 @@
 // denied clipboard — surfaces as the failure toast instead of a bad link.
 
 import { platform } from "../../core/platform/index.js";
+import { notifyError, notifySuccess } from "./toaster.js";
 
 export interface CopyLinkMessages {
   /** Toast title when the write lands. */
@@ -60,6 +61,11 @@ export async function copyLinkWithToast(
     notify.error(messages.failed, messages.failedBody ?? (error instanceof Error ? error.message : undefined));
     return false;
   }
+}
+
+/** Copy a shareable address, reporting through the app toasts. */
+export async function copyWorkItemLink(path: string, messages: CopyLinkMessages): Promise<boolean> {
+  return copyLinkWithToast(path, messages, { success: notifySuccess, error: notifyError });
 }
 
 /** The canonical detail address for a work item inside a workspace. */

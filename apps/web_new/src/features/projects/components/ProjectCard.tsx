@@ -17,7 +17,7 @@ import { Check, Ellipsis, Lock, Settings, Star } from "lucide-react";
 import * as React from "react";
 
 import { platform } from "../../../core/platform/index.js";
-import { copyLinkWithToast, notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { copyWorkItemLink } from "../../../shared/shell/shareLink.js";
 import { isProjectAdmin, isProjectAuthorized } from "../tabs.js";
 import { projectIssuesPath, projectSettingsPath, selectCardMenuEntries } from "./cardMenu.js";
 import { JoinProjectDialog } from "./JoinProjectDialog.js";
@@ -31,6 +31,12 @@ const COPIED_TITLE = "Copied the project link";
 const COPIED_BODY = "Paste it anywhere to share this project.";
 const COPY_FAILED_TITLE = "Couldn't copy the link";
 const COPY_FAILED_BODY = "The clipboard refused the write — copy the address manually.";
+const COPY_LINK_MESSAGES = {
+  copied: COPIED_TITLE,
+  copiedBody: COPIED_BODY,
+  failed: COPY_FAILED_TITLE,
+  failedBody: COPY_FAILED_BODY,
+} as const;
 
 const UNKNOWN_MEMBER_NAME = "Project member";
 
@@ -144,11 +150,7 @@ export function ProjectCard({
   const showStar = !archived && canStar && onToggleFavorite !== undefined;
 
   async function copyLink(): Promise<void> {
-    await copyLinkWithToast(
-      issuesPath,
-      { copied: COPIED_TITLE, copiedBody: COPIED_BODY, failed: COPY_FAILED_TITLE, failedBody: COPY_FAILED_BODY },
-      { success: notifySuccess, error: notifyError }
-    );
+    await copyWorkItemLink(issuesPath, COPY_LINK_MESSAGES);
   }
 
   const archiveAction = onArchive === undefined ? null : () => onArchive(project);

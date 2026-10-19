@@ -14,7 +14,7 @@ import * as React from "react";
 import { Avatar, IconButton, Spinner } from "@pidash/kit";
 import { getAppClient } from "../../../core/api/client.js";
 import { ROLE_MEMBER } from "../../../core/session/index.js";
-import { CopyWorkItemLinkButton } from "../../../shared/shell/index.js";
+import { CopyWorkItemLinkButton } from "../../../shared/shell/CopyWorkItemLinkButton.js";
 import { projectMembershipQueryOptions } from "../../auth/index.js";
 import { IssueDetailRoot, TriageDetailRoot, issueDetailQueryOptions } from "../../issues/index.js";
 import type { NotificationCardData } from "../lib/card.js";
