@@ -24,6 +24,19 @@ import {
 } from "./contracts/auth-entry.js";
 import { getMe, getMeSettings } from "./contracts/users.js";
 import { markOnboarded, updateMe } from "./contracts/user-writes.js";
+import {
+  exportUserProfileActivity,
+  getUserProfileActivity,
+  getUserProfileSegregation,
+  getUserProfileStats,
+  listGroupedUserProfileIssues,
+  listMyActivities,
+  listUserProfileIssues,
+} from "./contracts/profile-activity.js";
+import { changeEmail, changePassword, generateEmailChangeCode } from "./contracts/account-settings.js";
+import { createApiToken, deleteApiToken, getApiToken, listApiTokens } from "./contracts/api-tokens.js";
+import { getUpkeepSettings, setUpkeepEnabled, setUpkeepJobEnabled } from "./contracts/upkeep.js";
+import { getGithubAppStatus, refreshGithubAppInstallation, startGithubAppInstall } from "./contracts/integrations.js";
 import { getMyWorkspaceMembership, listWorkspaces } from "./contracts/workspaces.js";
 import {
   checkWorkspaceSlug,
@@ -6649,5 +6662,500 @@ describe("local chat shapes", () => {
 
   it("keeps the three-way local decision", () => {
     expect(LocalChatDecision.parse("accept_for_session")).toBe("accept_for_session");
+  });
+});
+
+describe("profile area contracts", () => {
+  const activity = {
+    id: UUID,
+    issue: UUID2,
+    project: UUID,
+    workspace: UUID2,
+    actor: UUID,
+    actor_detail: {
+      id: UUID,
+      first_name: "Ada",
+      last_name: "Lovelace",
+      avatar: "",
+      avatar_url: null,
+      display_name: "ada",
+      is_bot: false,
+    },
+    verb: "updated",
+    field: "state",
+    old_value: "Backlog",
+    new_value: "Started",
+    comment: "",
+    attachments: [],
+    issue_comment: null,
+    old_identifier: null,
+    new_identifier: null,
+    epoch: 1.5,
+    source_data: null,
+    created_at: "2026-10-17T04:00:09Z",
+    updated_at: "2026-10-17T04:00:09Z",
+    created_by: "audit-1",
+    updated_by: null,
+    deleted_at: null,
+  };
+
+  const activityPage = {
+    grouped_by: null,
+    sub_grouped_by: null,
+    total_count: 1,
+    next_cursor: "100:0:0",
+    prev_cursor: "100:0:0",
+    next_page_results: false,
+    prev_page_results: false,
+    count: 1,
+    total_pages: 1,
+    total_results: 1,
+    extra_stats: null,
+    results: [activity],
+  };
+
+  function csrfAware(handler: (call: RecordedCall) => ReturnType<typeof fakeResponse>) {
+    return recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : handler(call)
+    );
+  }
+
+  it("parses the segregation read and asks for the viewed member", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({
+        body: JSON.stringify({
+          user_data: {
+            email: "ada@example.com",
+            first_name: "Ada",
+            last_name: "Lovelace",
+            display_name: "ada",
+            avatar_url: null,
+            cover_image_url: null,
+            date_joined: "2024-01-02T03:04:05Z",
+            user_timezone: "UTC",
+          },
+          project_data: [
+            {
+              id: UUID,
+              logo_props: {},
+              created_issues: 2,
+              assigned_issues: 3,
+              completed_issues: 1,
+              pending_issues: 2,
+            },
+          ],
+        }),
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await getUserProfileSegregation(client, "acme", UUID2);
+    expect(result.user_data.display_name).toBe("ada");
+    expect(result.project_data[0]?.assigned_issues).toBe(3);
+    expect(transport.calls[0]?.url).toBe(`https://api.test/api/workspaces/acme/user-profile/${UUID2}/`);
+  });
+
+  it("parses the stats read, including empty distributions and cycles", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({
+        body: JSON.stringify({
+          state_distribution: [{ state_group: "started", state_count: 2 }],
+          priority_distribution: [{ priority: "high", priority_count: 1, priority_order: 1 }],
+          created_issues: 4,
+          assigned_issues: 2,
+          completed_issues: 1,
+          pending_issues: 1,
+          subscribed_issues: 0,
+          present_cycles: [],
+          upcoming_cycles: [],
+        }),
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const stats = await getUserProfileStats(client, "acme", UUID2);
+    expect(stats.assigned_issues).toBe(2);
+    expect(stats.state_distribution[0]?.state_group).toBe("started");
+    expect(stats.present_cycles).toEqual([]);
+    expect(transport.calls[0]?.url).toBe(`https://api.test/api/workspaces/acme/user-stats/${UUID2}/`);
+  });
+
+  it("sends the tab's ownership selector on the profile issue list", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({
+        body: JSON.stringify({
+          grouped_by: null,
+          sub_grouped_by: null,
+          total_count: 0,
+          next_cursor: "100:0:0",
+          prev_cursor: "100:0:0",
+          next_page_results: false,
+          prev_page_results: false,
+          count: 0,
+          total_results: 0,
+          results: [],
+        }),
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const page = await listUserProfileIssues(client, "acme", UUID2, {
+      ownership: "subscribed",
+      perPage: 100,
+      filters: { state: ["started", "backlog"] },
+    });
+    expect(page.results).toEqual([]);
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.pathname).toBe(`/api/workspaces/acme/user-issues/${UUID2}/`);
+    expect(url.searchParams.get("subscriber")).toBe(UUID2);
+    expect(url.searchParams.get("per_page")).toBe("100");
+    expect(url.searchParams.get("state")).toBe("started,backlog");
+  });
+
+  it("omits the ownership selector without a tab and uses the default tab otherwise", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({
+        body: JSON.stringify({
+          grouped_by: null,
+          sub_grouped_by: null,
+          total_count: 0,
+          next_cursor: "100:0:0",
+          prev_cursor: "100:0:0",
+          next_page_results: false,
+          prev_page_results: false,
+          count: 0,
+          total_results: 0,
+          results: [],
+        }),
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await listUserProfileIssues(client, "acme", UUID2);
+    await listUserProfileIssues(client, "acme", UUID2, { ownership: "assigned" });
+    await listUserProfileIssues(client, "acme", UUID2, { ownership: "created" });
+    const [plain, assigned, created] = transport.calls.map((call) => new URL(call.url));
+    expect(plain?.searchParams.has("assignees")).toBe(false);
+    expect(assigned?.searchParams.get("assignees")).toBe(UUID2);
+    expect(created?.searchParams.get("created_by")).toBe(UUID2);
+  });
+
+  it("parses a grouped profile issue read", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({
+        body: JSON.stringify({
+          grouped_by: "state_group",
+          sub_grouped_by: null,
+          total_count: 1,
+          next_cursor: "100:0:0",
+          prev_cursor: "100:0:0",
+          next_page_results: false,
+          prev_page_results: false,
+          count: 1,
+          total_results: 1,
+          results: { started: { results: [], total_results: 1 } },
+        }),
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const grouped = await listGroupedUserProfileIssues(client, "acme", UUID2, {
+      ownership: "assigned",
+      groupBy: "state_group",
+    });
+    expect(grouped.results["started"]?.total_results).toBe(1);
+    const url = new URL(transport.calls[0]?.url ?? "");
+    expect(url.searchParams.get("group_by")).toBe("state_group");
+    expect(url.searchParams.get("assignees")).toBe(UUID2);
+  });
+
+  it("parses the paged activity feed and own history", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(activityPage) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const feed = await getUserProfileActivity(client, "acme", UUID2, { perPage: 100, cursor: "100:1:2" });
+    expect(feed.results[0]?.verb).toBe("updated");
+    const mine = await listMyActivities(client, { perPage: 10 });
+    expect(mine.total_results).toBe(1);
+    const [feedUrl, mineUrl] = transport.calls.map((call) => new URL(call.url));
+    expect(feedUrl?.pathname).toBe(`/api/workspaces/acme/user-activity/${UUID2}/`);
+    expect(feedUrl?.searchParams.get("cursor")).toBe("100:1:2");
+    expect(mineUrl?.pathname).toBe("/api/users/me/activities/");
+  });
+
+  it("posts the local date and reads the CSV export headers", async () => {
+    const transport = csrfAware((call) =>
+      call.url.endsWith("/export/")
+        ? fakeResponse({
+            body: '"Actor name","Issue ID"\n"Ada","CT-1"\n',
+            headers: {
+              "content-type": "text/csv",
+              "content-disposition": 'attachment; filename="workspace-user-activity.csv"',
+            },
+          })
+        : fakeResponse({ body: JSON.stringify(activityPage) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const exportResult = await exportUserProfileActivity(client, "acme", UUID2, "2026-10-17");
+    expect(exportResult.csv).toContain("CT-1");
+    expect(exportResult.filename).toBe("workspace-user-activity.csv");
+    const post = transport.calls.find((call) => call.init.method === "POST");
+    expect(post?.url).toBe(`https://api.test/api/workspaces/acme/user-activity/${UUID2}/export/`);
+    expect(post?.init.body).toBe(JSON.stringify({ date: "2026-10-17" }));
+  });
+
+  it("falls back to the documented export filename without a disposition", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: csrfAware(() => fakeResponse({ body: "", headers: { "content-type": "text/csv" } })),
+    });
+    const exportResult = await exportUserProfileActivity(client, "acme", UUID2, "2026-10-17");
+    expect(exportResult.filename).toBe("workspace-user-activity.csv");
+    expect(exportResult.csv).toBe("");
+  });
+
+  it("generates an email code, changes the email and clears the CSRF cache", async () => {
+    const me = {
+      id: UUID,
+      email: "new@example.com",
+      username: "ada",
+      first_name: "Ada",
+      last_name: "Lovelace",
+      display_name: "ada",
+      avatar: "",
+      avatar_url: null,
+      cover_image: null,
+      cover_image_url: null,
+      date_joined: "2024-01-02T03:04:05Z",
+      user_timezone: "UTC",
+      is_active: true,
+      is_bot: false,
+      is_email_verified: false,
+      is_password_autoset: false,
+      last_login_medium: "email",
+      last_login_time: null,
+    };
+    const transport = csrfAware((call) =>
+      fakeResponse({
+        body: JSON.stringify(call.init.method === "PATCH" ? me : { message: "Verification code sent to email" }),
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const sent = await generateEmailChangeCode(client, "new@example.com");
+    expect(sent.message).toContain("Verification");
+    const updated = await changeEmail(client, "new@example.com", "123456");
+    expect(updated.email).toBe("new@example.com");
+    const patch = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patch?.init.body).toBe(JSON.stringify({ email: "new@example.com", code: "123456" }));
+    // The email change ends the session, so the next unsafe call must
+    // fetch a fresh forgery token rather than reuse the stale one.
+    await changePassword(client, { newPassword: "New123!xyz" });
+    const fetched = transport.calls.filter((call) => call.url.endsWith("/auth/get-csrf-token/"));
+    expect(fetched.length).toBe(2);
+  });
+
+  it("changes the password with and without the current secret", async () => {
+    const transport = csrfAware(() =>
+      fakeResponse({ body: JSON.stringify({ message: "Password updated successfully" }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const result = await changePassword(client, { oldPassword: "Old123!xyz", newPassword: "New123!xyz" });
+    expect(result.message).toContain("updated");
+    await changePassword(client, { newPassword: "New123!xyz" });
+    const posts = transport.calls.filter((call) => call.url.endsWith("/auth/change-password/"));
+    expect(posts[0]?.init.body).toBe(JSON.stringify({ old_password: "Old123!xyz", new_password: "New123!xyz" }));
+    expect(JSON.parse(posts[1]?.init.body ?? "{}")).toEqual({ new_password: "New123!xyz" });
+  });
+
+  it("round-trips the API token lifecycle, keeping the secret create-only", async () => {
+    const row = {
+      id: UUID,
+      label: "CI",
+      description: "Pipelines",
+      is_active: true,
+      last_used: null,
+      user: UUID2,
+      user_type: 0,
+      workspace: null,
+      expired_at: null,
+      is_service: false,
+      allowed_rate_limit: "60/min",
+      created_at: "2026-10-17T04:00:09Z",
+      updated_at: "2026-10-17T04:00:09Z",
+      created_by: UUID2,
+      updated_by: null,
+      deleted_at: null,
+    };
+    const transport = csrfAware((call) => {
+      if (call.init.method === "POST")
+        return fakeResponse({ status: 201, body: JSON.stringify({ ...row, token: "pdk_secret" }) });
+      if (call.init.method === "DELETE") return fakeResponse({ status: 204 });
+      if (/\/api\/users\/api-tokens\/[^/]+\/$/.test(new URL(call.url).pathname)) {
+        return fakeResponse({ body: JSON.stringify(row) });
+      }
+      return fakeResponse({ body: JSON.stringify([row]) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const list = await listApiTokens(client);
+    expect(list[0]?.label).toBe("CI");
+    const created = await createApiToken(client, { label: "CI", description: "Pipelines", expiredAt: null });
+    expect(created.token).toBe("pdk_secret");
+    const one = await getApiToken(client, UUID);
+    expect(one).not.toHaveProperty("token");
+    await expect(deleteApiToken(client, UUID)).resolves.toBeUndefined();
+    const post = transport.calls.find((call) => call.init.method === "POST");
+    expect(post?.init.body).toBe(JSON.stringify({ label: "CI", description: "Pipelines", expired_at: null }));
+    expect(transport.calls.some((call) => call.init.method === "DELETE" && call.url.endsWith(`/${UUID}/`))).toBe(true);
+  });
+
+  it("sends a dated token expiry when one is given", async () => {
+    const transport = csrfAware(() =>
+      fakeResponse({
+        status: 201,
+        body: JSON.stringify({
+          id: UUID,
+          label: "CI",
+          description: "",
+          is_active: true,
+          last_used: null,
+          user: UUID2,
+          user_type: 0,
+          workspace: null,
+          expired_at: "2027-01-01T00:00:00Z",
+          created_at: "2026-10-17T04:00:09Z",
+          updated_at: "2026-10-17T04:00:09Z",
+          created_by: UUID2,
+          updated_by: null,
+          deleted_at: null,
+          token: "pdk_secret",
+        }),
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const created = await createApiToken(client, { label: "CI", expiredAt: "2027-01-01T00:00:00Z" });
+    expect(created.expired_at).toBe("2027-01-01T00:00:00Z");
+    const post = transport.calls.find((call) => call.init.method === "POST");
+    expect(JSON.parse(post?.init.body ?? "{}").expired_at).toBe("2027-01-01T00:00:00Z");
+  });
+
+  it("reads and toggles the upkeep master and one job", async () => {
+    const payload = {
+      enabled: true,
+      jobs: [{ slug: "triage", name: "Triage", description: "Sort intake", interval_label: "hourly", enabled: true }],
+    };
+    const transport = csrfAware(() => fakeResponse({ body: JSON.stringify(payload) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const settings = await getUpkeepSettings(client);
+    expect(settings.jobs[0]?.interval_label).toBe("hourly");
+    await setUpkeepEnabled(client, false);
+    await setUpkeepJobEnabled(client, "triage", false);
+    const [master, job] = transport.calls.filter((call) => call.init.method === "PATCH");
+    expect(master?.url).toBe("https://api.test/api/users/me/auto-pm/");
+    expect(master?.init.body).toBe(JSON.stringify({ enabled: false }));
+    expect(job?.url).toBe("https://api.test/api/users/me/auto-pm/jobs/triage/");
+  });
+
+  it("reads the GitHub App status and starts an install for a workspace", async () => {
+    const state = {
+      configured: true,
+      app_slug: "pi-dash",
+      workspaces: [
+        {
+          id: UUID,
+          slug: "acme",
+          name: "Acme",
+          github_app: {
+            connected: true,
+            installation_id: 42,
+            account_login: "acme",
+            account_type: "Organization",
+            repository_selection: "selected",
+            repository_count: 3,
+            permissions: { issues: "write" },
+            events: ["issues"],
+            installed_at: "2026-01-01T00:00:00Z",
+            suspended_at: null,
+            verified_at: "2026-01-02T00:00:00Z",
+            last_checked_at: "2026-01-02T00:00:00Z",
+            last_check_error: "",
+          },
+        },
+        { id: UUID2, slug: "beta", name: "Beta", github_app: { connected: false } },
+      ],
+    };
+    const transport = csrfAware((call) =>
+      call.init.method === "POST"
+        ? fakeResponse({
+            status: 201,
+            body: JSON.stringify({
+              state: "state-token",
+              expires_at: "2026-10-17T04:15:00Z",
+              install_url: "https://github.com/apps/pi-dash/installations/new?state=state-token",
+            }),
+          })
+        : fakeResponse({ body: JSON.stringify(state) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const status = await getGithubAppStatus(client);
+    expect(status.workspaces[1]?.github_app.connected).toBe(false);
+    const started = await startGithubAppInstall(client, "acme");
+    expect(started.state).toBe("state-token");
+    const post = transport.calls.find((call) => call.init.method === "POST");
+    expect(post?.init.body).toBe(JSON.stringify({ workspace_slug: "acme" }));
+  });
+
+  it("refreshes an installation and parses the verified row", async () => {
+    const transport = csrfAware(() =>
+      fakeResponse({
+        body: JSON.stringify({
+          connected: true,
+          installation_id: 42,
+          account_login: "acme",
+          account_type: "Organization",
+          repository_selection: "all",
+          repository_count: 9,
+          permissions: {},
+          events: [],
+          installed_at: null,
+          suspended_at: null,
+          verified_at: "2026-10-17T04:00:00Z",
+          last_checked_at: "2026-10-17T04:00:00Z",
+          last_check_error: "",
+        }),
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const refreshed = await refreshGithubAppInstallation(client, "acme");
+    expect(refreshed.repository_count).toBe(9);
+    const post = transport.calls.find((call) => call.init.method === "POST");
+    expect(post?.url).toBe("https://api.test/api/users/me/integrations/github/app/refresh/");
+  });
+
+  it("includes the display name and timezone when patching the user", async () => {
+    const transport = csrfAware(() =>
+      fakeResponse({
+        body: JSON.stringify({
+          id: UUID,
+          email: "ada@example.com",
+          username: "ada",
+          first_name: "Ada",
+          last_name: "Lovelace",
+          display_name: "ada-l",
+          avatar: "",
+          user_timezone: "Europe/Paris",
+        }),
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateMe(client, {
+      first_name: "Ada",
+      last_name: "Lovelace",
+      display_name: "ada-l",
+      user_timezone: "Europe/Paris",
+    });
+    expect(updated.display_name).toBe("ada-l");
+    const patch = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(JSON.parse(patch?.init.body ?? "{}")).toEqual({
+      first_name: "Ada",
+      last_name: "Lovelace",
+      display_name: "ada-l",
+      user_timezone: "Europe/Paris",
+    });
   });
 });

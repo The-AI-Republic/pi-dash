@@ -13,7 +13,9 @@ import { uuid } from "./fields.js";
 export interface MePatch {
   first_name?: string;
   last_name?: string;
+  display_name?: string;
   avatar?: string;
+  user_timezone?: string;
 }
 
 /**
@@ -34,9 +36,12 @@ export const MeUpdate = z.object({
 export type MeUpdate = z.infer<typeof MeUpdate>;
 
 /**
- * PATCH /api/users/me/ writes the display name and avatar. The avatar is
- * the `avatar` text field (a URL sticks and reads back through
+ * PATCH /api/users/me/ writes the names, avatar and timezone. The avatar
+ * is the `avatar` text field (a URL sticks and reads back through
  * `avatar_url`); an `avatar_url` key is silently ignored by the server.
+ * The timezone write lives here too, so the account form and the locale
+ * selector share one call path; `updateMyTimezone` in locale.ts keeps its
+ * narrower projection for callers that only read the zone back.
  */
 export async function updateMe(client: ApiClient, input: MePatch): Promise<MeUpdate> {
   const envelope = await client.sendJson<unknown>("PATCH", "/api/users/me/", { json: input });

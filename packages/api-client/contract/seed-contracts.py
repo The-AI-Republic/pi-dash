@@ -329,6 +329,12 @@ def seed():
                 "updated_by": user,
             },
         )
+        # BaseModel.save() clears audit fields when no request user is in
+        # scope, so a get_or_create default does not survive the insert.
+        # Repair the creator explicitly: the profile reads count it.
+        if issue.created_by_id != user.id:
+            Issue.objects.filter(pk=issue.pk).update(created_by_id=user.id)
+            issue.refresh_from_db(fields=["created_by"])
         issues.append(issue)
         note("issue", issue.name, issue_created)
 
@@ -429,6 +435,52 @@ def seed():
             defaults={"actor": user, "created_by": user, "updated_by": user},
         )
         note("issue-activity", f"{first_issue.name}/{verb}/{field or '-'}", activity_created)
+
+    # Profile area (NEWFRONT-570): the segregation/stats reads count the
+    # seed user's assigned, created and subscribed work, and the profile
+    # issue tabs filter by those three dimensions. One assignment and one
+    # subscription on the seeded issue keep every count non-zero; the
+    # second issue is created by the seed user already. Both rows are
+    # repaired (not just created) because they are soft-deleted by other
+    # probe flows.
+    from pi_dash.db.models import IssueAssignee, IssueSubscriber  # noqa: E402
+
+    _, assignee_created = IssueAssignee.all_objects.update_or_create(
+        issue=first_issue,
+        assignee=user,
+        deleted_at__isnull=True,
+        defaults={"project": project, "workspace": workspace, "deleted_at": None},
+    )
+    note("issue-assignee", f"{first_issue.name}/{user.email}", assignee_created)
+    _, subscriber_created = IssueSubscriber.all_objects.update_or_create(
+        issue=first_issue,
+        subscriber=user,
+        deleted_at__isnull=True,
+        defaults={"project": project, "workspace": workspace, "deleted_at": None},
+    )
+    note("issue-subscriber", f"{first_issue.name}/{user.email}", subscriber_created)
+
+    # Upkeep (NEWFRONT-570): the auto-pm contract suite toggles one job
+    # and the master pause. The instance catalog needs at least one enabled
+    # job; a fixed slug keeps re-seeds idempotent.
+    from pi_dash.db.models import LoopJob  # noqa: E402
+
+    upkeep_job, upkeep_created = LoopJob.objects.get_or_create(
+        slug="contract-upkeep",
+        defaults={
+            "name": "Contract upkeep",
+            "public_name": "Contract upkeep",
+            "public_description": "Seeded upkeep job for contract tests.",
+            "prompt": "contract seed",
+            "min_role": 15,
+            "enabled": True,
+            "is_builtin": False,
+            "dtstart": timezone.now(),
+            "rrule": "FREQ=DAILY",
+            "tzid": "UTC",
+        },
+    )
+    note("upkeep-job", upkeep_job.slug, upkeep_created)
 
     if label.pk and first_issue.pk:
         from pi_dash.db.models import IssueLabel  # noqa: E402
