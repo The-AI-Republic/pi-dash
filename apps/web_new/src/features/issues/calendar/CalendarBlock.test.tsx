@@ -98,6 +98,13 @@ describe("CalendarBlock", () => {
     expect(handlers.onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: ISSUE_ID }));
   });
 
+  it("opens peek when the identifier itself is clicked", async () => {
+    const handlers = renderBlock();
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("calendar-block-identifier"));
+    expect(handlers.onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: ISSUE_ID }));
+  });
+
   it("reveals the preview after the hover delay and closes on leave", () => {
     vi.useFakeTimers();
     renderBlock();
@@ -122,6 +129,15 @@ describe("CalendarBlock", () => {
     expect(card).toHaveTextContent("In progress");
     expect(card).toHaveTextContent("high");
     expect(card).toHaveTextContent("2026-10-01 → 2026-10-20");
+  });
+
+  it("marks the hover-preview priority with its level glyph", () => {
+    vi.useFakeTimers();
+    renderBlock(row({ priority: "high" }));
+    fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    const priority = screen.getByTestId("calendar-block-priority");
+    expect(priority.querySelector("svg.lucide-chevron-up")).not.toBeNull();
   });
 
   it("describes partial and absent date lines", () => {

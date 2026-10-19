@@ -13,6 +13,7 @@ import { CheckCircle2, Circle, CircleDot, Ellipsis, Eye, LoaderCircle, XCircle }
 import * as React from "react";
 
 import { isTempRowId, rowDomId } from "../freshness/fresh.js";
+import { PRIORITY_ICONS } from "../../../shared/pickers/priorities.js";
 import { previewPlacement, previewPlacementClasses, type PreviewPlacement } from "./placement.js";
 
 export const CALENDAR_BLOCK_PREVIEW_DELAY_MS = 100;
@@ -97,6 +98,7 @@ export function CalendarBlock({
   const dragListenersRef = React.useRef<(() => void) | null>(null);
   const draggedRef = React.useRef(false);
   const identifier = blockIdentifier(projectIdentifier, issue);
+  const PriorityIcon = PRIORITY_ICONS[issue.priority];
 
   function openPreview(): void {
     const anchor = anchorRef.current;
@@ -224,26 +226,12 @@ export function CalendarBlock({
         className="h-3 w-1 shrink-0 rounded-full bg-(--text-muted)"
         style={stateColor === null ? undefined : { backgroundColor: stateColor }}
       />
-      <button
-        type="button"
+      <span
         className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)"
-        onDragStart={(event) => {
-          // A native link drag would swallow the pointerup that ends our
-          // drag, leaving the layout's drag state armed for a later click.
-          event.preventDefault();
-          stopTracking();
-          draggedRef.current = false;
-        }}
-        onDragEnd={() => {
-          stopTracking();
-          draggedRef.current = false;
-        }}
-        onClick={(event) => {
-          event.stopPropagation();
-        }}
+        data-testid="calendar-block-identifier"
       >
         {temp ? "…" : identifier}
-      </button>
+      </span>
       <div className="min-w-0 flex-1 truncate text-13 text-[13px] text-(--text)">{issue.name}</div>
       {quickActions ? (
         <div
@@ -276,7 +264,11 @@ export function CalendarBlock({
           <div className="flex items-center justify-between gap-(--space-2)">
             <p className="text-caption font-[family-name:var(--font-mono)] text-(--text-muted)">{identifier}</p>
             {issue.priority === "none" ? null : (
-              <span className="text-caption rounded-full bg-(--subtle) px-(--space-2) text-(--text-muted)">
+              <span
+                className="text-caption inline-flex items-center gap-(--space-1) rounded-full bg-(--subtle) px-(--space-2) text-(--text-muted)"
+                data-testid="calendar-block-priority"
+              >
+                <PriorityIcon size={12} strokeWidth={2} aria-hidden="true" />
                 {issue.priority}
               </span>
             )}
