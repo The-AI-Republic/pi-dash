@@ -71,7 +71,9 @@ export function AutomationsSettings({
   const admin =
     roles.isSuccess &&
     membership.isSuccess &&
-    (isProjectAdmin(roles.data?.[projectId] ?? null) || (membership.data?.role ?? 0) >= ROLE_ADMIN);
+    // isSuccess guarantees the role map; only a missing project key needs a
+    // fallback here.
+    (isProjectAdmin(roles.data[projectId] ?? null) || (membership.data?.role ?? 0) >= ROLE_ADMIN);
   // Rows write whole-field automation values: the close toggle needs the
   // cancelled-state list to name its target, and switching on needs the
   // stored row. Until both the project collection and the state list have

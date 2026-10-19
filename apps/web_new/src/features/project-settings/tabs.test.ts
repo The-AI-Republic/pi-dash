@@ -179,6 +179,7 @@ describe("addresses", () => {
   });
 
   it("find a visible tab for the role", () => {
+    expect(findVisibleTab("nope" as never, ROLE_ADMIN)).toBeUndefined();
     expect(findVisibleTab("states", ROLE_MEMBER)?.label).toBe("States");
     expect(findVisibleTab("states", ROLE_GUEST)).toBeUndefined();
     expect(findVisibleTab("github", ROLE_MEMBER)).toBeUndefined();

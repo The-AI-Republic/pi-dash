@@ -191,6 +191,14 @@ describe("ProjectSettingsShell", () => {
     expect(screen.getByRole("main", { name: "Settings content" })).toHaveTextContent("tab body");
   });
 
+  it("treats a missing membership row as no workspace standing", () => {
+    seed({ role: ROLE_MEMBER });
+    harness.membership = { status: "success", data: null, isPending: false };
+    renderShell();
+    expect(screen.getByText("Member")).toBeInTheDocument();
+    expect(screen.queryByTestId("project-settings-tab-schedulers")).not.toBeInTheDocument();
+  });
+
   it("treats a role map that omits the project as unresolved", () => {
     seed();
     harness.roles = { status: "success", data: {}, isPending: false, isSuccess: true, isError: false };
