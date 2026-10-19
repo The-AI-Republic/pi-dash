@@ -275,9 +275,30 @@ describe("DetailMainColumn", () => {
     });
   }, 30_000);
 
-  it("renders the header and below-description slots", () => {
-    renderColumn({ topSlot: <p>header slot</p>, belowDescription: <p>widget slot</p> });
+  it("renders the header and activity slots", () => {
+    renderColumn({ topSlot: <p>header slot</p>, activity: <p>activity slot</p> });
     expect(screen.getByText("header slot")).toBeInTheDocument();
-    expect(screen.getByText("widget slot")).toBeInTheDocument();
+    expect(screen.getByText("activity slot")).toBeInTheDocument();
+  });
+
+  it("keeps the reaction row on the description-meta row beside the history line", async () => {
+    renderColumn({ activity: <p>activity slot</p> });
+    const reactions = screen.getByRole("region", { name: ISSUE_REACTIONS_LABEL });
+    const history = await screen.findByRole("button", { name: /Edited by/ });
+    const meta = reactions.closest('[data-slot="description-meta"]');
+    expect(meta).not.toBeNull();
+    expect(meta).toContainElement(history);
+    const activity = screen.getByText("activity slot");
+    expect(meta).not.toContainElement(activity);
+    expect(meta?.compareDocumentPosition(activity) ?? 0).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("keeps the reaction row on the meta row for a guest with no history line", () => {
+    renderColumn({ editable: false, activity: <p>activity slot</p> });
+    const reactions = screen.getByRole("region", { name: ISSUE_REACTIONS_LABEL });
+    const meta = reactions.closest('[data-slot="description-meta"]');
+    expect(meta).not.toBeNull();
+    expect(meta).not.toContainElement(screen.getByText("activity slot"));
+    expect(screen.queryByRole("button", { name: /Edited by/ })).not.toBeInTheDocument();
   });
 });

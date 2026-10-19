@@ -240,6 +240,13 @@ describe("useToggleCommentReaction", () => {
   });
 });
 
+describe("reaction failure notices", () => {
+  it("matches the old app's copy for both directions", () => {
+    expect(REACTION_CREATE_FAILED_TITLE).toBe("Reaction creation failed");
+    expect(REACTION_REMOVE_FAILED_TITLE).toBe("Reaction remove failed");
+  });
+});
+
 describe("reactionFailureDetail", () => {
   it("falls back when the error carries no message", () => {
     expect(reactionFailureDetail(new Error(""))).toBe(REACTION_FAILURE_FALLBACK);

@@ -134,7 +134,7 @@ afterEach(() => {
 describe("IssueDetailRoot", () => {
   it("lays the main column beside the sidebar with its slots", () => {
     stubViewport(false);
-    renderRoot({ topSlot: <p>header slot</p>, belowDescription: <p>widget slot</p> });
+    renderRoot({ topSlot: <p>header slot</p>, activity: <p>widget slot</p> });
     expect(screen.getByRole("textbox", { name: TITLE_LABEL })).toHaveValue("Fix login");
     expect(screen.getByRole("complementary", { name: "Properties" })).toHaveTextContent("sidebar rows");
     expect(screen.getByText("header slot")).toBeInTheDocument();

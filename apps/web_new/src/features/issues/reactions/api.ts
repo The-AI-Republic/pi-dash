@@ -26,8 +26,8 @@ import { commentReactionRows, issueReactionRows } from "./model.js";
 /** Notices the oracle scenarios assert after each toggle. */
 export const REACTION_CREATED_TITLE = "Reaction created successfully";
 export const REACTION_REMOVED_TITLE = "Reaction removed successfully";
-export const REACTION_CREATE_FAILED_TITLE = "Couldn't add the reaction";
-export const REACTION_REMOVE_FAILED_TITLE = "Couldn't remove the reaction";
+export const REACTION_CREATE_FAILED_TITLE = "Reaction creation failed";
+export const REACTION_REMOVE_FAILED_TITLE = "Reaction remove failed";
 export const REACTION_FAILURE_FALLBACK = "Check your connection and try again.";
 
 export function reactionFailureDetail(error: unknown): string {

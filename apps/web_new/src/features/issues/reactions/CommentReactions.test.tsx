@@ -228,7 +228,7 @@ describe("CommentReactions footer", () => {
     expect(calls.some((call) => call.method === "POST")).toBe(true);
   });
 
-  it("reports a refused toggle", async () => {
+  it("reports a refused toggle with the old app's copy", async () => {
     const user = userEvent.setup();
     stubTransport((call) =>
       call.method === "DELETE" ? { status: 500, body: { error: "no" } } : { status: 200, body: [reaction()] }
@@ -236,6 +236,7 @@ describe("CommentReactions footer", () => {
     renderFooter();
     await user.click(await screen.findByRole("button", { name: "👍 reaction, 1" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(REACTION_REMOVE_FAILED_TITLE, "no"));
+    expect(REACTION_REMOVE_FAILED_TITLE).toBe("Reaction remove failed");
   });
 });
 
@@ -259,6 +260,7 @@ describe("CommentReactionPicker", () => {
     await user.click(screen.getByRole("button", { name: EMOJI_PICKER_LABEL }));
     await user.click(await screen.findByRole("option", { name: "👍" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(REACTION_CREATE_FAILED_TITLE, "Not allowed."));
+    expect(REACTION_CREATE_FAILED_TITLE).toBe("Reaction creation failed");
     await waitFor(() => expect(screen.getByRole("button", { name: EMOJI_PICKER_LABEL })).toBeEnabled());
   });
 });

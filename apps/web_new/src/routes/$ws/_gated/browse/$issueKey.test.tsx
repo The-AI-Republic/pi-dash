@@ -427,6 +427,17 @@ describe("browse route", () => {
     expect(screen.queryByRole("radiogroup", { name: "Comment visibility" })).not.toBeInTheDocument();
   });
 
+  it("keeps the issue reaction row on the description-meta row above the activity block", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    const reactions = await screen.findByRole("region", { name: "Reactions on this work item" });
+    const meta = reactions.closest('[data-slot="description-meta"]');
+    expect(meta).not.toBeNull();
+    const activity = await screen.findByRole("heading", { name: "Activity" });
+    expect(meta).not.toContainElement(activity);
+    expect(meta?.compareDocumentPosition(activity) ?? 0).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(meta).toContainElement(await screen.findByRole("button", { name: /Edited by/ }));
+  });
+
   it("shows the comment access switch on a published project", async () => {
     renderBrowse(true, undefined, { details: "member", me: true, published: true });
     expect(await screen.findByRole("radiogroup", { name: "Comment visibility" })).toBeInTheDocument();

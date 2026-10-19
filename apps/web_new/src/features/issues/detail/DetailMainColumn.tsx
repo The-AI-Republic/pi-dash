@@ -6,9 +6,10 @@
 // indicator beside it, and the restore handshake between the version
 // history and the description field: a restore shows the version at
 // once and clears once the server confirms it (or immediately, back to
-// the server value, when the write is refused). The under-description row
-// carries the issue reaction cluster (ISS-204) beside the history line;
-// the header row (NEWFRONT-644) plugs into its own slot.
+// the server value, when the write is refused). The description-meta row
+// carries the issue reaction cluster (ISS-204) beside the history line,
+// with the activity block (ISS-194–204) in its own slot below; the header
+// row (NEWFRONT-644) plugs into its own slot.
 
 import type { Issue } from "@pidash/api-client";
 import * as React from "react";
@@ -29,8 +30,8 @@ export interface DetailMainColumnProps {
   editable: boolean;
   /** Header row, left of the save indicator (identifier/type). */
   topSlot?: React.ReactNode;
-  /** Row under the description, left of the history line. */
-  belowDescription?: React.ReactNode;
+  /** Block under the description-meta row, above the sidebar break (the activity feed). */
+  activity?: React.ReactNode;
 }
 
 export function DetailMainColumn({
@@ -39,7 +40,7 @@ export function DetailMainColumn({
   issue,
   editable,
   topSlot,
-  belowDescription,
+  activity,
 }: DetailMainColumnProps): React.ReactElement {
   const pipeline = useSavePipeline();
   const titleUpdate = useUpdateIssue({
@@ -85,9 +86,8 @@ export function DetailMainColumn({
         onSave={(html: string) => descriptionUpdate.mutateAsync({ description_html: html })}
         restored={restored}
       />
-      <div className="flex items-start justify-between gap-(--space-4)">
-        <div className="flex min-w-0 flex-1 flex-wrap items-start gap-(--space-4)">
-          {belowDescription}
+      <div data-slot="description-meta" className="flex flex-wrap items-center justify-between gap-(--space-4)">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-(--space-4)">
           <IssueReactions workspaceSlug={workspaceSlug} projectId={projectId} issueId={issue.id} disabled={archived} />
         </div>
         {editable ? (
@@ -114,6 +114,7 @@ export function DetailMainColumn({
           />
         ) : null}
       </div>
+      {activity === undefined ? null : <div className="min-w-0">{activity}</div>}
     </div>
   );
 }
