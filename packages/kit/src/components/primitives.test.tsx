@@ -71,4 +71,14 @@ describe("Avatar", () => {
     render(<Avatar name="Ada Lovelace" src="https://example.test/ada.png" />);
     expect(screen.getByRole("img", { name: "Ada Lovelace" }).querySelector("img")).not.toBeNull();
   });
+
+  it("draws the caller's single initial when one is given", () => {
+    render(<Avatar name="Ada Lovelace" initial="a" />);
+    expect(screen.getByRole("img", { name: "Ada Lovelace" })).toHaveTextContent(/^A$/);
+  });
+
+  it("keeps derived initials for a blank single initial", () => {
+    render(<Avatar name="Ada Lovelace" initial="  " />);
+    expect(screen.getByRole("img", { name: "Ada Lovelace" })).toHaveTextContent("AL");
+  });
 });

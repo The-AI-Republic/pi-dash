@@ -9,6 +9,8 @@ export type AvatarSize = "small" | "medium" | "large";
 export interface AvatarProps {
   /** Person the avatar represents; used for initials and naming. */
   name: string;
+  /** Glyph shown instead of derived initials; the name still labels it. */
+  initial?: string;
   src?: string;
   size?: AvatarSize;
   className?: string;
@@ -26,7 +28,12 @@ function initials(name: string): string {
   return `${words[0]![0]!}${words[words.length - 1]![0]!}`.toUpperCase();
 }
 
-export function Avatar({ name, src, size = "medium", className }: AvatarProps): React.ReactElement {
+function glyph(name: string, initial: string | undefined): string {
+  const letter = initial?.trim().charAt(0).toUpperCase();
+  return letter === undefined || letter === "" ? initials(name) : letter;
+}
+
+export function Avatar({ name, initial, src, size = "medium", className }: AvatarProps): React.ReactElement {
   const [broken, setBroken] = React.useState(false);
   const showImage = src && !broken;
   return (
@@ -50,7 +57,7 @@ export function Avatar({ name, src, size = "medium", className }: AvatarProps): 
           }}
         />
       ) : (
-        <span aria-hidden="true">{initials(name)}</span>
+        <span aria-hidden="true">{glyph(name, initial)}</span>
       )}
     </span>
   );

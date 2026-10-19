@@ -113,6 +113,7 @@ const ROWS = [
 
 interface StubOptions {
   roster?: unknown[];
+  invitations?: unknown[];
   rosterStatus?: number;
   invitationsStatus?: number;
   hangRoster?: boolean;
@@ -144,7 +145,7 @@ function stubTransport(options: StubOptions = {}) {
     if (url.endsWith(`/api/workspaces/${SLUG}/invitations/`)) {
       if (options.hangInvitations) return new Promise<never>(() => undefined);
       const status = options.invitationsStatus ?? 200;
-      return json(status, status === 200 ? [] : { error: "boom" });
+      return json(status, status === 200 ? (options.invitations ?? []) : { error: "boom" });
     }
     throw new Error(`unexpected request ${url}`);
   };
@@ -313,6 +314,41 @@ describe("MembersPage roster", () => {
     expect(screen.queryByTestId("members-no-match")).not.toBeInTheDocument();
     expect(emails()).toHaveLength(4);
   });
+
+  it("keeps a member search alive when a pending invitation matches it", async () => {
+    setup({
+      invitations: [
+        {
+          id: "423e4567-e89b-12d3-a456-426614174001",
+          workspace: {
+            id: "523e4567-e89b-12d3-a456-426614174001",
+            name: "Acme",
+            slug: SLUG,
+            logo_url: null,
+          },
+          email: "invited-person@example.com",
+          accepted: false,
+          token: "tok",
+          message: null,
+          responded_at: null,
+          role: 15,
+          invite_link: "https://example.test/invite",
+          created_by: null,
+          updated_by: null,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+    await waitFor(() => expect(emails()).toHaveLength(4));
+    fireEvent.change(screen.getByPlaceholderText("Search..."), { target: { value: "invited-person" } });
+    expect(emails()).toEqual([]);
+    expect(screen.queryByTestId("members-no-match")).not.toBeInTheDocument();
+    expect(screen.getByTestId("members-count")).toHaveTextContent("4");
+
+    fireEvent.change(screen.getByPlaceholderText("Search..."), { target: { value: "zzz-nobody" } });
+    expect(screen.getByTestId("members-no-match")).toHaveTextContent(MEMBERS_NO_MATCH_TEXT);
+  });
 });
 
 describe("MembersPage row identity", () => {
@@ -332,6 +368,7 @@ describe("MembersPage row identity", () => {
       `/${SLUG}/profile/${MENTION_ID}/`
     );
     expect(row.querySelector('[data-avatar-kind="initial"]')).not.toBeNull();
+    expect(within(row).getByRole("img", { name: "Parity Mention" })).toHaveTextContent(/^P$/);
   });
 
   it("uses the photo when the member set one", async () => {

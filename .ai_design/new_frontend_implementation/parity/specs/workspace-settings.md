@@ -96,9 +96,7 @@ read, §44). No other API traffic belongs to the shell.
 
 Each settings page titles the browser tab with the workspace name
 followed by the section name: `{workspace} - General settings`,
-`{workspace} - Members`, `{workspace} - Billing & Plans`, `{workspace}
-
-- Exports`, `{workspace} - Webhooks`, `{workspace} - Integrations`.
+`{workspace} - Members`, `{workspace} - Billing & Plans`, `{workspace} - Exports`, `{workspace} - Webhooks`, `{workspace} - Integrations`.
 The webhook detail page uses `{workspace} - Webhook`. Navigating
 between sections updates the title; refused sections leave it empty.
 Oracle: `shell-general.spec.ts`.

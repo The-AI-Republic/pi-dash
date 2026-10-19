@@ -21,6 +21,7 @@ import { MembersTable } from "./MembersTable.js";
 import {
   applyRosterFilters,
   EMPTY_ROSTER_FILTERS,
+  hasMatchingInvitation,
   rosterCount,
   type RosterFilters,
   type RosterRoleFilter,
@@ -46,8 +47,12 @@ export function MembersPage({ workspaceSlug }: MembersPageProps): React.ReactEle
   const failed = members.isError || invitations.isError;
 
   const allMembers = members.data ?? [];
+  const allInvitations = invitations.data ?? [];
   const visible = React.useMemo(() => applyRosterFilters(allMembers, filters), [allMembers, filters]);
-  const noMatch = !loading && !failed && visible.length === 0;
+  // §9: the note waits until the search excludes every member *and* every
+  // invitation. The role filter narrows members only, so it never decides
+  // whether an invitation still matches.
+  const noMatch = !loading && !failed && visible.length === 0 && !hasMatchingInvitation(allInvitations, filters.search);
 
   const search = (value: string): void => {
     setFilters((current) => ({ ...current, search: value }));

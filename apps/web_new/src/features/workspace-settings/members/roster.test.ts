@@ -4,16 +4,19 @@
 // Pure roster rules (parity/specs/workspace-settings.md §7–§9, WSET-008/011).
 import { describe, expect, it } from "vitest";
 
-import type { WorkspaceRosterMember } from "@pidash/api-client";
+import type { WorkspaceInvitation, WorkspaceRosterMember } from "@pidash/api-client";
 
 import {
   applyRosterFilters,
   authMediumLabel,
   columnOrderLabels,
   EMPTY_ROSTER_FILTERS,
+  hasMatchingInvitation,
+  invitationMatchesSearch,
   memberMatchesSearch,
   roleLabel,
   rosterCount,
+  rosterAvatarInitial,
   rosterFullName,
   rosterIdentityName,
   ROSTER_COLUMNS,
@@ -204,6 +207,23 @@ describe("roster labels", () => {
     expect(rosterIdentityName(member({ display: "", email: "", first: "Solo", last: "" }).member)).toBe("Solo");
     expect(rosterFullName(member({ first: "", last: "" }).member)).toBe("Ada Lovelace");
     expect(rosterFullName(member({ first: "Only" }).member)).toBe("Only Lovelace");
+  });
+
+  it("takes the avatar's single initial from the email, then the display name, then the first name", () => {
+    expect(rosterAvatarInitial(member({}).member)).toBe("A");
+    expect(rosterAvatarInitial(member({ email: "zed@example.com" }).member)).toBe("Z");
+    expect(rosterAvatarInitial(member({ display: "", email: "" }).member)).toBe("A");
+    expect(rosterAvatarInitial(member({ display: "", email: "", first: "" }).member)).toBe("?");
+  });
+
+  it("searches pending invitations by email only and ignores the role filter", () => {
+    const invitation = { email: "Pending.Person@Example.com" } as WorkspaceInvitation;
+    expect(invitationMatchesSearch(invitation, "")).toBe(true);
+    expect(invitationMatchesSearch(invitation, "  pending.person ")).toBe(true);
+    expect(invitationMatchesSearch(invitation, "PENDING@")).toBe(false);
+    expect(hasMatchingInvitation([invitation], "example")).toBe(true);
+    expect(hasMatchingInvitation([invitation], "zzz")).toBe(false);
+    expect(hasMatchingInvitation([], "")).toBe(false);
   });
 
   it("toggles role filters and empties back to no filter", () => {

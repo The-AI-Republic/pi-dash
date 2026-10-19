@@ -14,7 +14,14 @@ import * as React from "react";
 
 import type { WorkspaceRosterMember } from "@pidash/api-client";
 
-import { authMediumLabel, isSuspended, roleLabel, rosterFullName, rosterIdentityName } from "./roster.js";
+import {
+  authMediumLabel,
+  isSuspended,
+  roleLabel,
+  rosterAvatarInitial,
+  rosterFullName,
+  rosterIdentityName,
+} from "./roster.js";
 
 export interface MemberRowProps {
   workspaceSlug: string;
@@ -35,6 +42,7 @@ export function formatJoiningDate(iso: string): string {
 export function MemberRow({ workspaceSlug, row, avatarUrl }: MemberRowProps): React.ReactElement {
   const suspended = isSuspended(row);
   const name = rosterIdentityName(row.member);
+  const initial = rosterAvatarInitial(row.member);
   const profileHref = `/${workspaceSlug}/profile/${row.member.id}/`;
   const auth = suspended ? null : authMediumLabel(row.member.last_login_medium);
   const joined = suspended ? "" : formatJoiningDate(row.created_at);
@@ -63,11 +71,11 @@ export function MemberRow({ workspaceSlug, row, avatarUrl }: MemberRowProps): Re
             >
               {avatarUrl === null ? (
                 <span data-avatar-kind="initial" className="inline-flex">
-                  <Avatar name={name} size="medium" />
+                  <Avatar name={name} initial={initial} size="medium" />
                 </span>
               ) : (
                 <span data-avatar-kind="image" className="inline-flex">
-                  <Avatar name={name} src={avatarUrl} size="medium" />
+                  <Avatar name={name} initial={initial} src={avatarUrl} size="medium" />
                 </span>
               )}
             </a>
