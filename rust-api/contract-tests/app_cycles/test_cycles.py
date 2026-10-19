@@ -4,6 +4,7 @@ Every URL pattern in app/urls/cycle.py plus the workspace cycles endpoint in
 app/urls/workspace.py gets a shape assertion against the live backend.
 """
 
+import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -519,3 +520,107 @@ def test_archive_active_cycle_rejected(admin):
     r = admin["client"].post(urls["archive"](r.json()["id"]))
     assert r.status_code == 400, r.text[:500]
     assert r.json() == {"error": "Only completed cycles can be archived"}
+
+
+# -- create with a writable deleted_at (soft-delete on create) ---------------
+#
+# ``CycleWriteSerializer`` writes ``deleted_at`` (it is not in
+# ``read_only_fields``, app/serializers/cycle.py:38-43), so a POST carrying a
+# valid ``deleted_at`` stores the row already soft-deleted. Django's create
+# (app/views/cycle/base.py:270-329) then re-reads through the live
+# ``SoftDeletionManager`` queryset, gets ``None``, and
+# ``user_timezone_converter(None, ...)`` (utils/timezone_converter.py:17-39)
+# does ``list(None)`` -> TypeError -> generic 500, before ``model_activity``
+# is enqueued. Rust parsed the value but the create INSERT bound ``deleted_at``
+# as a hard-coded NULL, so the row went in live, the re-read found it, and the
+# handler answered 201 and enqueued ``model_activity``.
+
+MODEL_ACTIVITY_TASK = "pi_dash.bgtasks.webhook_task.model_activity"
+
+
+def _celery_depth():
+    """Django lane: depth of the ``celery`` list on the AMQP redis broker.
+
+    ``None`` when ``AMQP_URL`` is not a redis URL (nothing observable), the
+    same guard ``auth_oauth/test_github_side_effects.py`` uses.
+    """
+    url = os.environ.get("AMQP_URL") or os.environ.get("CELERY_BROKER_URL")
+    if not url or not url.startswith("redis"):
+        return None
+    import redis
+
+    return redis.Redis.from_url(url).llen("celery")
+
+
+def _rust_queue_count(conn):
+    """Rust lane: rows in ``rust_job_queue`` for the given Celery task.
+
+    The table is created by the Rust server's boot (``queue::ensure_schema``),
+    so on a Django-only database it is absent and counts as 0.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.rust_job_queue')")
+        if cur.fetchone()[0] is None:
+            return 0
+        cur.execute(
+            "SELECT count(*) FROM rust_job_queue WHERE task = %s",
+            (MODEL_ACTIVITY_TASK,),
+        )
+        return cur.fetchone()[0]
+
+
+def _rust_queue_rows_for_model(conn, model_id):
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.rust_job_queue')")
+        if cur.fetchone()[0] is None:
+            return 0
+        cur.execute(
+            "SELECT count(*) FROM rust_job_queue"
+            " WHERE task = %s AND kwargs->>'model_id' = %s",
+            (MODEL_ACTIVITY_TASK, model_id),
+        )
+        return cur.fetchone()[0]
+
+
+def test_cycle_create_with_deleted_at_500s_and_no_enqueue(admin):
+    urls = cycle_urls(admin)
+    conn = admin["seed"].conn
+    name = f"Q64-{uuid.uuid4().hex[:8]}"
+    before_celery = _celery_depth()
+    before_rust = _rust_queue_count(conn)
+
+    r = admin["client"].post(
+        urls["cycles"],
+        json={"name": name, "deleted_at": "2026-01-01T00:00:00Z"},
+    )
+    # Django: the soft-deleted row makes the live re-read return None and
+    # user_timezone_converter blows up -> generic 500.
+    assert r.status_code == 500, r.text[:500]
+    assert r.json() == GENERIC_500
+
+    # The row is persisted -- already soft-deleted -- in the base table
+    # (read the table directly: the live cycle view hides it).
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, deleted_at FROM cycles"
+            " WHERE project_id = %s AND name = %s",
+            (admin["project"]["id"], name),
+        )
+        rows = cur.fetchall()
+    assert len(rows) == 1, f"expected exactly the soft-deleted row, got {rows}"
+    row_id, deleted_at = rows[0]
+    assert deleted_at is not None, "the created row must be stored soft-deleted"
+
+    # No side effect on either lane: model_activity must not be enqueued.
+    assert _rust_queue_rows_for_model(conn, str(row_id)) == 0, (
+        "model_activity must not be enqueued for a soft-deleted create"
+    )
+    after_rust = _rust_queue_count(conn)
+    assert after_rust == before_rust, (
+        f"rust_job_queue grew: {before_rust} -> {after_rust}"
+    )
+    if before_celery is not None:
+        after_celery = _celery_depth()
+        assert after_celery == before_celery, (
+            f"celery broker depth changed: {before_celery} -> {after_celery}"
+        )

@@ -1912,7 +1912,7 @@ async fn cycle_create(
     .bind(write.progress_snapshot.clone().unwrap_or(Value::Object(Map::new())))
     .bind(None::<chrono::DateTime<chrono::Utc>>)
     .bind(write.logo_props.clone().unwrap_or(Value::Object(Map::new())))
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
+    .bind(write.deleted_at)
     .bind(write.timezone_name.clone().unwrap_or_else(|| "UTC".to_owned()))
     .bind(write.version.unwrap_or(1))
     .execute(&pool)
