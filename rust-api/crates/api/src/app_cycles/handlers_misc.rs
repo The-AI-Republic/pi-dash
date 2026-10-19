@@ -1319,7 +1319,8 @@ const AVATAR_URL_CASE: &str = "CASE WHEN u.avatar_asset_id IS NOT NULL THEN CONC
 /// The triage predicate is `IS DISTINCT FROM` so issues with no state
 /// survive, matching `.exclude(state__group="triage")` (Django emits
 /// `NOT (states.group = 'triage' AND states.group IS NOT NULL)`).
-const TRANSFER_SCOPE_JOIN: &str = "JOIN projects p ON p.id = i.project_id AND p.archived_at IS NULL \
+const TRANSFER_SCOPE_JOIN: &str =
+    "JOIN projects p ON p.id = i.project_id AND p.archived_at IS NULL \
      LEFT JOIN states s ON s.id = i.state_id";
 const TRANSFER_SCOPE_WHERE: &str = "i.deleted_at IS NULL AND i.archived_at IS NULL \
      AND i.is_draft = FALSE AND s.\"group\" IS DISTINCT FROM 'triage'";
