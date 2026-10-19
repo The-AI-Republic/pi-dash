@@ -116,6 +116,12 @@ describe("identity", () => {
     expect(screen.getByTestId("run-scheduler-link")).toHaveAttribute("href", "/acme/projects/p-1/schedulers/b-1");
     expect(screen.getByTestId("run-scheduler-link")).toHaveTextContent("Nightly");
   });
+
+  it("links the scheduler without a detail name", () => {
+    renderDetail({ schedulerHref: () => "/acme/projects/p-1/schedulers/b-1" });
+    expect(screen.getByTestId("run-scheduler-link")).toHaveAttribute("href", "/acme/projects/p-1/schedulers/b-1");
+    expect(screen.getByTestId("run-scheduler-link")).toHaveTextContent("");
+  });
 });
 
 describe("failure and result", () => {
@@ -258,6 +264,12 @@ describe("events", () => {
     render(<RunDetail state="loaded" run={run()} cancelling={false} onCancel={vi.fn()} schedulerHref={() => null} />);
     expect(screen.getByText("Events (0)")).toBeInTheDocument();
   });
+
+  it("handles a run whose events field is absent", () => {
+    renderDetail({ run: run({ events: undefined as unknown as RunEvent[] }) });
+    expect(screen.getByText("Events (0)")).toBeInTheDocument();
+    expect(screen.queryByTestId("run-event-row")).toBeNull();
+  });
 });
 
 describe("cancellation", () => {
@@ -306,6 +318,16 @@ describe("cancellation", () => {
     await userEvent.click(within(dialog).getByTestId("run-cancel-confirm"));
     expect(onCancel).not.toHaveBeenCalled();
     expect(within(dialog).queryByRole("button", { name: "Close dialog" })).toBeNull();
+  });
+
+  it("keeps the dialog open from its cancel control while submitting", async () => {
+    renderDetail({ cancelling: true });
+    await userEvent.click(screen.getByTestId("run-cancel"));
+    const dialog = screen.getByRole("dialog");
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+    expect(cancel).toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(cancel);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
   it("hides cancel for terminal runs", () => {
