@@ -71,6 +71,11 @@ export interface FilterSectionProps {
    * title, count and collapse but has nothing to search or cap.
    */
   children?: React.ReactNode | undefined;
+  /**
+   * Content that renders below the (capped) rows inside the same body, such
+   * as the custom row and calendar of a date section. It is not searched.
+   */
+  footer?: React.ReactNode | undefined;
 }
 
 function matches(option: FilterSectionOption, query: string): boolean {
@@ -151,6 +156,7 @@ export function FilterSection({
   className,
   groupLabel,
   children,
+  footer,
 }: FilterSectionProps): React.ReactElement {
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(true);
   const open = controlledOpen ?? uncontrolledOpen;
@@ -239,6 +245,7 @@ export function FilterSection({
                   ) : null}
                 </>
               )}
+              {footer === undefined ? null : <div className="mt-(--space-1) border-t border-(--border)">{footer}</div>}
             </>
           )}
         </div>

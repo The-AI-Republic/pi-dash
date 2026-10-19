@@ -78,6 +78,34 @@ describe("date conditions travel as legacy list parameters", () => {
     ).toEqual({ filters: '{"start_date__range":"2026-02-01,2026-02-10"}', start_date: "1_months;after;fromnow" });
   });
 
+  it("forwards one open custom bound as the bare date entry with nothing left in JSON", () => {
+    expect(withRichFilters({ perPage: 10 }, { start_date__exact: "2026-02-10;after" })).toEqual({
+      perPage: 10,
+      filters: { start_date: "2026-02-10;after" },
+    });
+    expect(withRichFilters({}, { target_date__exact: "2026-02-10;before" })).toEqual({
+      filters: { target_date: "2026-02-10;before" },
+    });
+  });
+
+  it("combines a preset with an open custom bound on the bare parameter only", () => {
+    expect(
+      withRichFilters(
+        {},
+        { and: [{ priority__in: "urgent" }, { start_date__exact: ["1_weeks;after;fromnow", "2026-02-10;after"] }] }
+      ).filters
+    ).toEqual({ filters: '{"priority__in":"urgent"}', start_date: "1_weeks;after;fromnow,2026-02-10;after" });
+    expect(
+      splitDateConditions({ and: [{ start_date__exact: ["2_months;after;fromnow", "2026-02-20;before"] }] }).dates
+    ).toEqual({ start_date: ["2_months;after;fromnow", "2026-02-20;before"] });
+  });
+
+  it("leaves a backward relative window in the JSON tree, where its direction survives", () => {
+    expect(withRichFilters({}, { and: [{ target_date__exact: "1_weeks;before;fromnow" }] })).toEqual({
+      filters: { filters: '{"target_date__exact":"1_weeks;before;fromnow"}' },
+    });
+  });
+
   it("collapses a single remaining child and drops an emptied tree", () => {
     expect(
       splitDateConditions({ and: [{ priority__in: "urgent" }, { start_date__exact: "1_weeks;after;fromnow" }] })

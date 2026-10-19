@@ -18,11 +18,34 @@
 
 import type { IssueListQuery } from "@pidash/api-client";
 
-import { customRange, dateValueParts, isDatePreset } from "./legacyDimensions.js";
+import { customDateMode, customRange, dateValueParts } from "./legacyDimensions.js";
 import type { RichExpression } from "./expression.js";
 
 /** Date fields forwarded as bare list parameters rather than JSON leaves. */
 export const LEGACY_DATE_FIELDS = ["start_date", "target_date"] as const;
+
+/** A relative window's direction in the legacy date grammar, if it has one. */
+function presetDirection(entry: string): "after" | "before" | null {
+  const [, direction] = entry.split(";");
+  return direction === "after" || direction === "before" ? direction : null;
+}
+
+/**
+ * The entries of a date value the bare parameter can carry truthfully.
+ * Every one of them is a positive bound there (`after` reads `gte`,
+ * `before` reads `lte`), so a relative window stored as "before" — the
+ * negated direction the old list offered — is never forwarded. A custom
+ * entry carries a direction only in the After and Before modes; an exact
+ * day or a two-end range stays a JSON leaf, where the filter set reads it
+ * exactly.
+ */
+function forwardableDateEntries(value: unknown): string[] {
+  const mode = customDateMode(value);
+  const parts = dateValueParts(value);
+  const open = mode === "after" || mode === "before" ? parts.custom : [];
+  const presets = parts.presets.filter((entry) => presetDirection(entry) === "after");
+  return [...presets, ...open];
+}
 
 /** Stringify an expression for the list's `filters` parameter. */
 export function richFiltersParam(expression: RichExpression): string | null {
@@ -36,13 +59,22 @@ function isLegacyDateKey(key: string): boolean {
 }
 
 /**
- * The JSON leaf a mixed date value keeps after its presets leave: the custom
- * days, as an exact day or a two-end range. Both ends present is a range,
- * one end is that day, and no end leaves nothing behind.
+ * The JSON leaf a date value keeps when part of it leaves for the bare
+ * parameters. A complete custom pair stays a `__range`; one exact day stays
+ * a `__exact`; nothing custom leaves nothing behind. One-sided custom
+ * bounds never reach this point: they travel with the bare parameter, which
+ * is the only place the endpoint reads a direction from.
  */
 function customDateLeaf(stem: string, value: unknown): RichExpression | null {
+  const mode = customDateMode(value);
+  // An open bound has no exact/range equivalent: it travels as its bare
+  // entry, so nothing of it stays behind.
+  if (mode === "after" || mode === "before") return null;
   const { start, end } = customRange(value);
-  if (start !== null && end !== null) return { [`${stem}__range`]: `${start},${end}` };
+  if (mode === "range") {
+    if (start !== null && end !== null) return { [`${stem}__range`]: `${start},${end}` };
+    return null;
+  }
   const day = start ?? end;
   return day === null ? null : { [`${stem}__exact`]: day };
 }
@@ -51,7 +83,9 @@ function customDateLeaf(stem: string, value: unknown): RichExpression | null {
  * Remove date leaves from a stored tree, collecting their values. A tree
  * left with no conditions reads as empty; an `and` with one remaining
  * child collapses to that child so the payload stays in the shape the
- * builder writes.
+ * builder writes. A leaf moves out of the tree only when it holds a
+ * positive relative window or an open custom bound; a custom day or pair
+ * stays in the tree beside whatever the parameter carries (ISS-092).
  */
 export function splitDateConditions(expression: RichExpression): {
   expression: RichExpression;
@@ -70,15 +104,15 @@ export function splitDateConditions(expression: RichExpression): {
     // A negated date leaf is not rewritten: the bare parameters only express
     // positive bounds, so the tree keeps the negation it was given.
     if ("not" in record) return record;
-    const entries = Object.entries(record);
-    if (entries.length !== 1) return node;
-    const [key, value] = entries[0]!;
+    const leaves = Object.entries(record);
+    if (leaves.length !== 1) return node;
+    const [key, value] = leaves[0]!;
     if (!isLegacyDateKey(key)) return node;
     const stem = key.split("__")[0]!;
-    const presets = dateValueParts(value).presets.filter((entry) => isDatePreset(entry));
-    if (presets.length === 0) return node;
+    const forwarded = forwardableDateEntries(value);
+    if (forwarded.length === 0) return node;
     const bucket = (dates[stem] ??= []);
-    for (const preset of presets) if (!bucket.includes(preset)) bucket.push(preset);
+    for (const entry of forwarded) if (!bucket.includes(entry)) bucket.push(entry);
     return customDateLeaf(stem, value);
   };
   const pruned = prune(expression);

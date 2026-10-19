@@ -23,8 +23,8 @@ import {
   STATE_GROUP_ICONS,
   selectMemberOptions,
   selectModuleOptions,
-  selectProjectMark,
   selectProjectOptions,
+  ProjectMark,
   selectStateOptions,
   usePickerCycles,
   usePickerModules,
@@ -43,7 +43,8 @@ import type { RichCondition, RichFilterField } from "./expression.js";
 import {
   DATE_PRESETS,
   clearCustomDate,
-  composeDateValue,
+  composeCustomDate,
+  customDateMode,
   customDays,
   customRange,
   dateEntries,
@@ -52,6 +53,7 @@ import {
   hasCustomDate,
   cycleLifecycle,
   toggleDatePreset,
+  type CustomDateMode,
   type CycleLifecycle,
 } from "./legacyDimensions.js";
 import {
@@ -106,73 +108,85 @@ function CycleLifecycleGlyph({ lifecycle }: { lifecycle: CycleLifecycle }): Reac
   );
 }
 
-/** One row of a date dimension's preset list. */
-function PresetRow({
-  checked,
-  label,
-  onToggle,
-}: {
-  checked: boolean;
-  label: string;
-  onToggle: () => void;
-}): React.ReactElement {
-  return (
-    <button
-      type="button"
-      role="checkbox"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={onToggle}
-      className="flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-3) py-(--space-2) text-left hover:bg-(--subtle)"
-    >
-      <span
-        aria-hidden="true"
-        className={`grid size-3.5 shrink-0 place-items-center rounded border ${
-          checked ? "border-(--accent) bg-(--accent) text-(--on-accent)" : "border-(--border)"
-        }`}
-      >
-        {checked ? <Check size={10} strokeWidth={3} /> : null}
-      </span>
-      <span className="text-body truncate text-(--text)">{label}</span>
-    </button>
-  );
-}
+/**
+ * The custom calendar's shape: one day, one open bound, or a pair of ends.
+ * The paired form belongs to the two-end editor (the between lookup); the
+ * one-day editor offers the other three.
+ */
+const CUSTOM_MODES: readonly { mode: CustomDateMode; label: string }[] = [
+  { mode: "exact", label: "On" },
+  { mode: "after", label: "After" },
+  { mode: "before", label: "Before" },
+  { mode: "range", label: "Range" },
+];
+const ONE_DAY_CUSTOM_MODES = CUSTOM_MODES.filter((option) => option.mode !== "range");
 
 /**
- * The relative windows a date dimension offers above its calendar
- * (ISS-092). A preset toggles on and off without touching the custom day;
- * a preset alone completes the condition, and the calendar below still
- * takes a custom day when the user wants one. Ticking Custom while no
- * custom day is stored opens the calendar for the first day; unticking it
- * clears only the custom half and leaves the presets.
+ * The custom row and its shape control (ISS-092). The old custom dialog
+ * asked for one day, a day after, a day before, or a pair of ends; the
+ * new value list keeps that choice beside the calendar instead of behind
+ * a second dialog. Ticking Custom while nothing custom is stored opens the
+ * calendar for the first day; unticking it clears only the custom half and
+ * leaves the relative windows.
  */
-function PresetList({
+function CustomDateFooter({
+  mode,
+  modes,
+  onModeChange,
   value,
   onChange,
   onCustom,
+  children,
 }: {
+  mode: CustomDateMode;
+  modes: readonly { mode: CustomDateMode; label: string }[];
+  onModeChange: (mode: CustomDateMode) => void;
   value: unknown;
   onChange: (value: unknown) => void;
   onCustom: () => void;
+  children: React.ReactNode;
 }): React.ReactElement {
   const custom = hasCustomDate(value);
   return (
-    <div className="flex w-56 flex-col gap-(--space-1) border-b border-(--border) p-(--space-2) pb-(--space-3)">
-      <span className="text-caption px-(--space-3) text-(--text-muted)">Relative</span>
-      {DATE_PRESETS.map((preset) => (
-        <PresetRow
-          key={preset.value}
-          label={preset.label}
-          checked={dateValueParts(value).presets.includes(preset.value)}
-          onToggle={() => onChange(toggleDatePreset(value, preset.value))}
-        />
-      ))}
-      <span className="text-caption px-(--space-3) pt-(--space-1) text-(--text-muted)">Custom</span>
-      <PresetRow
-        label="Custom"
-        checked={custom}
-        onToggle={() => (custom ? onChange(clearCustomDate(value)) : onCustom())}
-      />
+    <div className="flex flex-col gap-(--space-2) p-(--space-2)">
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={custom}
+        aria-label="Custom"
+        onClick={() => (custom ? onChange(clearCustomDate(value)) : onCustom())}
+        className="flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-3) py-(--space-2) text-left hover:bg-(--subtle)"
+      >
+        <span
+          aria-hidden="true"
+          className={`grid size-3.5 shrink-0 place-items-center rounded border ${
+            custom ? "border-(--accent) bg-(--accent) text-(--on-accent)" : "border-(--border)"
+          }`}
+        >
+          {custom ? <Check size={10} strokeWidth={3} /> : null}
+        </span>
+        <span className="text-body truncate text-(--text)">Custom</span>
+      </button>
+      <div role="radiogroup" aria-label="Custom date mode" className="flex items-center gap-(--space-1) px-(--space-3)">
+        {modes.map((option) => (
+          <button
+            key={option.mode}
+            type="button"
+            role="radio"
+            aria-checked={mode === option.mode}
+            aria-label={option.label}
+            onClick={() => onModeChange(option.mode)}
+            className={`text-caption rounded-(--radius-control) border px-(--space-2) py-(--space-1) ${
+              mode === option.mode
+                ? "border-(--accent) bg-(--accent) text-(--on-accent)"
+                : "border-(--border) text-(--text-muted)"
+            }`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+      {children}
     </div>
   );
 }
@@ -331,14 +345,7 @@ function PickSlot({
         id: project.id,
         label: project.name,
         searchText: project.searchText,
-        icon: (
-          <span
-            aria-hidden="true"
-            className="text-meta flex size-5 shrink-0 items-center justify-center rounded-(--radius-control) bg-(--subtle) font-medium text-(--text-muted)"
-          >
-            {selectProjectMark(project.logoProps, project.identifier)}
-          </span>
-        ),
+        icon: <ProjectMark logoProps={project.logoProps} identifier={project.identifier} size={20} />,
       }));
     }
     if (field.source === "cycles") {
@@ -460,8 +467,12 @@ function CalendarTrigger({
 }
 
 /**
- * One day or one relative window; a picked day is final (no clear
- * control). Presets lead the popup and keep the custom day untouched.
+ * One day or one relative window (ISS-092). The list opens with the four
+ * relative windows in the shared section chrome and, below them, the
+ * custom row and calendar: On stores the picked day exactly, After stores
+ * it as the open lower bound, and Before as the open upper bound; the
+ * paired form lives under the between lookup. Relative windows and the
+ * custom half combine, and each toggle leaves the other half as it was.
  */
 function DateSlot({
   field,
@@ -475,50 +486,81 @@ function DateSlot({
   autoOpen: boolean;
 }): React.ReactElement {
   const [open, setOpen] = React.useState(autoOpen);
+  const [mode, setMode] = React.useState<CustomDateMode>(() => {
+    const stored = customDateMode(value);
+    // The paired form belongs to the between lookup; a stored pair read
+    // here still opens on its first day under the one-day modes.
+    return stored === "range" ? "exact" : (stored ?? "exact");
+  });
   const customRef = React.useRef<HTMLDivElement>(null);
   const weekStart = useWeekStart();
   const presets = dateValueParts(value).presets;
   const days = customDays(value);
   const label = dateValueLabel(value) ?? EMPTY_SLOT_LABEL;
+  const focusCalendar = (): void => {
+    setOpen(true);
+    // The calendar sits below the rows; bring the first day into view and
+    // focus it once the popup has mounted.
+    window.requestAnimationFrame(() => {
+      customRef.current?.querySelector<HTMLButtonElement>("[data-day]")?.focus();
+    });
+  };
   return (
     <Popover
       open={open}
       onOpenChange={setOpen}
       trigger={<CalendarTrigger label={label} empty={dateEntries(value).length === 0} />}
     >
-      <PresetList
-        value={value}
-        onChange={onChange}
-        onCustom={() => {
-          setOpen(true);
-          // The calendar sits below the presets; bring the first day into
-          // view and focus it once the popup has mounted.
-          window.requestAnimationFrame(() => {
-            customRef.current?.querySelector<HTMLButtonElement>("[data-day]")?.focus();
-          });
-        }}
+      <FilterSection
+        title={field.label}
+        kind="multi"
+        applied={[...presets, ...(hasCustomDate(value) ? ["custom"] : [])]}
+        options={DATE_PRESETS.map((preset) => ({ id: preset.value, label: preset.label }))}
+        onToggle={(id) => onChange(toggleDatePreset(value, id))}
+        testId={`rich-section-${field.stem}`}
+        className="w-64"
+        footer={
+          <CustomDateFooter
+            mode={mode}
+            modes={ONE_DAY_CUSTOM_MODES}
+            onModeChange={(next) => {
+              setMode(next);
+              const day = days[0] ?? null;
+              if (day !== null) onChange(composeCustomDate(presets, next, day, null));
+              focusCalendar();
+            }}
+            value={value}
+            onChange={onChange}
+            onCustom={focusCalendar}
+          >
+            <div ref={customRef}>
+              <DateCalendar
+                value={days[0] ?? null}
+                min={field.min ?? null}
+                max={field.max ?? null}
+                weekStart={weekStart}
+                testId="rich-date-calendar"
+                onSelect={(iso) => {
+                  onChange(composeCustomDate(presets, mode, iso, null));
+                  setOpen(false);
+                }}
+              />
+            </div>
+          </CustomDateFooter>
+        }
       />
-      <div ref={customRef}>
-        <DateCalendar
-          value={days[0] ?? null}
-          min={field.min ?? null}
-          max={field.max ?? null}
-          weekStart={weekStart}
-          testId="rich-date-calendar"
-          onSelect={(iso) => {
-            onChange(composeDateValue(presets, [iso]));
-            setOpen(false);
-          }}
-        />
-      </div>
     </Popover>
   );
 }
 
 /**
- * Two bounded ends. The pending half lives here so the host only ever
- * receives a complete pair; while one end is set the calendar stays open,
- * warns, and the next click fills the other end.
+ * Two bounded ends under the between lookup (ISS-092). The same shared
+ * section leads with the relative windows; below them the custom row and
+ * a two-end calendar commit a pair, while After and Before store one open
+ * bound the same way the one-day calendar does. The pending first end
+ * lives here so the host only ever receives a complete pair; while one end
+ * is set the calendar stays open, warns, and the next click fills the
+ * other end.
  */
 function RangeSlot({
   field,
@@ -532,6 +574,10 @@ function RangeSlot({
   autoOpen: boolean;
 }): React.ReactElement {
   const [open, setOpen] = React.useState(autoOpen);
+  const [mode, setMode] = React.useState<CustomDateMode>(() => {
+    const stored = customDateMode(value);
+    return stored === "exact" ? "range" : (stored ?? "range");
+  });
   const customRef = React.useRef<HTMLDivElement>(null);
   const weekStart = useWeekStart();
   const [pending, setPending] = React.useState<RangeValue | null>(null);
@@ -544,6 +590,12 @@ function RangeSlot({
     pending === null && presets.length > 0 && ends.start === null && ends.end === null
       ? (dateValueLabel(value) ?? EMPTY_SLOT_LABEL)
       : rangeLabel(ends);
+  const focusCalendar = (): void => {
+    setOpen(true);
+    window.requestAnimationFrame(() => {
+      customRef.current?.querySelector<HTMLButtonElement>("[data-day]")?.focus();
+    });
+  };
   return (
     <Popover
       open={open}
@@ -554,36 +606,66 @@ function RangeSlot({
         </span>
       }
     >
-      <PresetList
-        value={value}
-        onChange={onChange}
-        onCustom={() => {
-          setOpen(true);
-          window.requestAnimationFrame(() => {
-            customRef.current?.querySelector<HTMLButtonElement>("[data-day]")?.focus();
-          });
-        }}
-      />
-      <div ref={customRef}>
-        <DateRangeCalendar
-          value={ends}
-          min={field.min ?? null}
-          max={field.max ?? null}
-          weekStart={weekStart}
-          testId="rich-range-calendar"
-          onChange={(next) => {
-            const complete = next.start !== null && next.end !== null;
-            if (complete) {
+      <FilterSection
+        title={field.label}
+        kind="multi"
+        applied={[...presets, ...(hasCustomDate(value) ? ["custom"] : [])]}
+        options={DATE_PRESETS.map((preset) => ({ id: preset.value, label: preset.label }))}
+        onToggle={(id) => onChange(toggleDatePreset(value, id))}
+        testId={`rich-section-${field.stem}`}
+        className="w-64"
+        footer={
+          <CustomDateFooter
+            mode={mode}
+            modes={CUSTOM_MODES}
+            onModeChange={(next) => {
+              setMode(next);
               setPending(null);
-              onChange(composeDateValue(presets, [next.start!, next.end!]));
-              setOpen(false);
-              return;
-            }
-            setPending(next);
-            setOpen(true);
-          }}
-        />
-      </div>
+              const day = ends.start ?? ends.end;
+              if (day !== null) onChange(composeCustomDate(presets, next, day, null));
+              focusCalendar();
+            }}
+            value={value}
+            onChange={onChange}
+            onCustom={focusCalendar}
+          >
+            <div ref={customRef}>
+              {mode === "range" ? (
+                <DateRangeCalendar
+                  value={ends}
+                  min={field.min ?? null}
+                  max={field.max ?? null}
+                  weekStart={weekStart}
+                  testId="rich-range-calendar"
+                  onChange={(next) => {
+                    const complete = next.start !== null && next.end !== null;
+                    if (complete) {
+                      setPending(null);
+                      onChange(composeCustomDate(presets, "range", next.start, next.end));
+                      setOpen(false);
+                      return;
+                    }
+                    setPending(next);
+                    setOpen(true);
+                  }}
+                />
+              ) : (
+                <DateCalendar
+                  value={ends.start ?? ends.end ?? null}
+                  min={field.min ?? null}
+                  max={field.max ?? null}
+                  weekStart={weekStart}
+                  testId="rich-date-calendar"
+                  onSelect={(iso) => {
+                    onChange(composeCustomDate(presets, mode, iso, null));
+                    setOpen(false);
+                  }}
+                />
+              )}
+            </div>
+          </CustomDateFooter>
+        }
+      />
     </Popover>
   );
 }

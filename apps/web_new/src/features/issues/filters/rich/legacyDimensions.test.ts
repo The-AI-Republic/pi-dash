@@ -6,8 +6,12 @@ import { describe, expect, it } from "vitest";
 import {
   DATE_PRESETS,
   clearCustomDate,
+  composeCustomDate,
+  customDateEntries,
+  customDateMode,
   customRange,
   customEndEntry,
+  dateEntries,
   customStartEntry,
   cycleLifecycle,
   dateValueLabel,
@@ -110,11 +114,62 @@ describe("date presets", () => {
   it("labels presets by name and the custom half as a range", () => {
     expect(dateValueLabel(null)).toBeNull();
     expect(dateValueLabel("1_weeks;after;fromnow")).toBe("1 week from now");
-    expect(dateValueLabel("2026-01-01;after")).toBe("2026-01-01");
-    expect(dateValueLabel("2026-01-31;before")).toBe("2026-01-31");
+    expect(dateValueLabel("2026-01-01")).toBe("2026-01-01");
+    expect(dateValueLabel("2026-01-01;after")).toBe("After 2026-01-01");
+    expect(dateValueLabel("2026-01-31;before")).toBe("Before 2026-01-31");
     expect(dateValueLabel(["1_weeks;after;fromnow", "2026-01-01;after", "2026-01-31;before"])).toBe(
       "1 week from now, 2026-01-01 → 2026-01-31"
     );
+    expect(dateValueLabel(["1_weeks;after;fromnow", "2026-01-01;after"])).toBe("1 week from now, After 2026-01-01");
     expect(dateValueLabel(["unknown_token"])).toBe("unknown_token");
+  });
+});
+
+describe("custom date shapes", () => {
+  it.each([
+    [null, null],
+    ["1_weeks;after;fromnow", null],
+    ["2026-02-10", "exact"],
+    ["2026-02-10;after", "after"],
+    ["2026-02-10;before", "before"],
+    ["2026-02-01,2026-02-10", "range"],
+    [["1_weeks;after;fromnow", "2026-02-10;before"], "before"],
+  ] as const)("reads %j as the %s mode", (value, mode) => {
+    expect(customDateMode(value)).toBe(mode);
+  });
+
+  it("lists only the custom entries, directions included", () => {
+    expect(customDateEntries(["1_weeks;after;fromnow", "2026-02-10;after"])).toEqual(["2026-02-10;after"]);
+    expect(customDateEntries("2026-02-01,2026-02-10")).toEqual(["2026-02-01", "2026-02-10"]);
+    expect(customDateEntries(null)).toEqual([]);
+  });
+
+  it.each([
+    ["exact", "2026-02-10", null, "2026-02-10"],
+    ["after", "2026-02-10", null, "2026-02-10;after"],
+    ["before", "2026-02-10", null, "2026-02-10;before"],
+    ["range", "2026-02-01", "2026-02-10", "2026-02-01,2026-02-10"],
+  ] as const)("composes a %s custom half", (mode, start, end, expected) => {
+    const composed = composeCustomDate([], mode, start, end);
+    expect(dateEntries(composed)).toEqual(expected.split(","));
+    expect(customDateMode(composed)).toBe(mode);
+  });
+
+  it("keeps the relative windows ahead of the custom half and drops an empty end", () => {
+    expect(dateEntries(composeCustomDate(["1_weeks;after;fromnow"], "range", "2026-02-01", null))).toEqual([
+      "1_weeks;after;fromnow",
+      "2026-02-01",
+    ]);
+    expect(dateEntries(composeCustomDate(["2_months;after;fromnow"], "after", "2026-02-10", null))).toEqual([
+      "2_months;after;fromnow",
+      "2026-02-10;after",
+    ]);
+    expect(composeCustomDate([], "before", null, null)).toBeNull();
+  });
+
+  it("labels each open direction and the pair by its ends", () => {
+    expect(dateValueLabel(["2026-02-10"])).toBe("2026-02-10");
+    expect(dateValueLabel(["2026-02-10;after"])).toBe("After 2026-02-10");
+    expect(dateValueLabel("2026-02-01,2026-02-10")).toBe("2026-02-01 → 2026-02-10");
   });
 });

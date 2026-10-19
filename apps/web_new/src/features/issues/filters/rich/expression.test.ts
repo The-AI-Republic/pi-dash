@@ -315,8 +315,21 @@ describe("condition operations", () => {
 });
 
 describe("field catalogue", () => {
-  it("offers the core fields plus the value-input fields this slice edits", () => {
+  it("offers the project issues dimensions, with Projects held to cross-project surfaces", () => {
     expect(richFilterFields().map((field) => field.stem)).toEqual([
+      "state_id",
+      "state_group",
+      "priority",
+      "assignee_id",
+      "created_by_id",
+      "mention_id",
+      "label_id",
+      "cycle_id",
+      "module_id",
+      "target_date",
+      "start_date",
+    ]);
+    expect(richFilterFields({ surface: "my_issues" }).map((field) => field.stem)).toEqual([
       "state_id",
       "state_group",
       "priority",
@@ -329,6 +342,7 @@ describe("field catalogue", () => {
       "module_id",
       "target_date",
       "start_date",
+      "subscriber_id",
     ]);
   });
 
@@ -350,7 +364,6 @@ describe("field catalogue", () => {
       "created_by_id",
       "mention_id",
       "label_id",
-      "project_id",
       "cycle_id",
       "module_id",
     ]) {
@@ -358,6 +371,7 @@ describe("field catalogue", () => {
     }
     expect(findField(richFilterFields(), "target_date")?.kind).toBe("date");
     expect(findField(richFilterFields(), "start_date")?.kind).toBe("date_range");
+    expect(findField(richFilterFields({ surface: "my_issues" }), "project_id")?.kind).toBe("multi");
   });
 
   it("carries optional bounds for the date kinds", () => {
@@ -412,7 +426,7 @@ describe("field catalogue", () => {
       label: "Subscriber",
       kind: "multi",
       source: "members",
-      surface: "my_issues",
+      surfaces: ["my_issues"],
     });
     const personal = richFilterFields({ surface: "my_issues" });
     expect(new Set(personal.map((field) => field.stem)).size).toBe(personal.length);
@@ -436,17 +450,20 @@ describe("operators", () => {
     const target = findField(richFilterFields(), "target_date")!;
     expect(target.defaultOperator).toBe("exact");
     expect(target.operators).toEqual(["exact", "range"]);
-    expect(operatorOptions(target).map((option) => option.label)).toEqual(["is", "between"]);
+    expect(operatorOptions(target).map((option) => option.label)).toEqual(["is", "is not", "between", "not between"]);
   });
 
-  it("keeps both date fields positive-only so the bare date parameters stay truthful", () => {
+  it("keeps the negated date lookups the JSON filter set accepts", () => {
     const start = findField(richFilterFields(), "start_date")!;
     const target = findField(richFilterFields(), "target_date")!;
-    expect(operatorOptions(start).map((option) => option.label)).toEqual(["is", "between"]);
-    expect(operatorOptions(start).every((option) => !option.negated)).toBe(true);
-    expect(operatorOptions(target).every((option) => !option.negated)).toBe(true);
-    expect(start.allowNegative).toBe(false);
-    expect(target.allowNegative).toBe(false);
+    expect(operatorOptions(start).sort((left, right) => left.label.localeCompare(right.label))).toEqual([
+      { base: "range", negated: false, label: "between" },
+      { base: "exact", negated: false, label: "is" },
+      { base: "exact", negated: true, label: "is not" },
+      { base: "range", negated: true, label: "not between" },
+    ]);
+    expect(start.allowNegative).toBe(true);
+    expect(target.allowNegative).toBe(true);
   });
 
   it("locks a field that declares no negated form", () => {

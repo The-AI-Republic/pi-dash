@@ -62,6 +62,9 @@ export function isDatePreset(entry: string): boolean {
   return PRESET_VALUES.has(entry);
 }
 
+/** Which shape the custom half of a date value holds. */
+export type CustomDateMode = "exact" | "after" | "before" | "range";
+
 /** A custom day's lower bound. */
 export function customStartEntry(day: string): string {
   return `${day};after`;
@@ -104,6 +107,27 @@ export function dateValueParts(value: unknown): { presets: string[]; custom: str
   return parts;
 }
 
+/**
+ * The shape of a stored custom half: one exact day, one open bound in a
+ * direction, or two ends. Nothing custom reads as null. The old custom
+ * dialog offered After, Before and Range, so a stored value tells the
+ * editor which mode to reopen in.
+ */
+export function customDateMode(value: unknown): CustomDateMode | null {
+  const entries = dateValueParts(value).custom;
+  if (entries.length === 0) return null;
+  if (entries.length > 1) return "range";
+  const [, direction] = entries[0]!.split(";");
+  if (direction === "after") return "after";
+  if (direction === "before") return "before";
+  return "exact";
+}
+
+/** The custom entries a date value stores, directions included. */
+export function customDateEntries(value: unknown): string[] {
+  return dateValueParts(value).custom;
+}
+
 /** Whether a custom day is set (used to tick the Custom row). */
 export function hasCustomDate(value: unknown): boolean {
   return customDays(value).length > 0;
@@ -136,12 +160,28 @@ export function customDays(value: unknown): string[] {
 }
 
 /**
- * Rebuild a date value from its two halves. One entry stores as a scalar
- * (the shape the list contract has always used for a single day or one
- * preset), several as their list.
+ * Rebuild a date value from its presets and one custom mode. After and
+ * Before keep one directioned day in the list endpoint's legacy date
+ * grammar, so they can travel as its bare parameter; Range keeps two plain
+ * days for the JSON range leaf; an exact day carries no direction.
  */
-export function composeDateValue(presets: readonly string[], days: readonly string[]): unknown {
-  return joinDateValue([...presets, ...days]);
+export function composeCustomDate(
+  presets: readonly string[],
+  mode: CustomDateMode,
+  start: string | null,
+  end: string | null
+): unknown {
+  const custom =
+    mode === "range"
+      ? // A pair under the between lookup is two plain days: `__range`
+        // already means both ends, so no direction is stored.
+        [start, end]
+      : mode === "after"
+        ? [start === null ? null : customStartEntry(start)]
+        : mode === "before"
+          ? [start === null ? null : customEndEntry(start)]
+          : [start];
+  return joinDateValue([...presets, ...custom.filter((entry): entry is string => entry !== null)]);
 }
 
 /** Both custom ends, read back for the calendar. */
@@ -176,7 +216,10 @@ export function dateValueLabel(value: unknown): string | null {
     (preset) => DATE_PRESETS.find((candidate) => candidate.value === preset)?.label ?? preset
   );
   const range = customRange(value);
-  if (range.start !== null && range.end !== null) labels.push(`${range.start} → ${range.end}`);
+  const mode = customDateMode(value);
+  if (mode === "range" && range.start !== null && range.end !== null) labels.push(`${range.start} → ${range.end}`);
+  else if (mode === "after" && range.start !== null) labels.push(`After ${range.start}`);
+  else if (mode === "before" && range.end !== null) labels.push(`Before ${range.end}`);
   else if (range.start !== null) labels.push(range.start);
   else if (range.end !== null) labels.push(range.end);
   for (const entry of dateEntries(value)) {

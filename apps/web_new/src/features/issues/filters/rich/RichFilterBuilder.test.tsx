@@ -160,7 +160,6 @@ describe("rich filter builder empty state", () => {
       "Created by",
       "Mentions",
       "Label",
-      "Project",
       "Cycle",
       "Module",
       "Target date",
@@ -501,6 +500,7 @@ describe("view row wiring", () => {
     // The day becomes the range's first end; the half-built pair is not
     // stored, and the pair editor reopens for the missing end.
     await waitFor(() => expect(patches).toEqual([{ rich_filters: {} }]));
+    // The between lookup opens its two-end editor with the day as the first end.
     const calendar = await screen.findByTestId("rich-range-calendar");
     expect(screen.getByTestId("rich-value-trigger").parentElement).toHaveAttribute("data-incomplete", "true");
     await user.click(within(calendar).getByRole("button", { name: "February 12, 2026" }));

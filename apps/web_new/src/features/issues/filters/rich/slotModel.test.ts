@@ -41,7 +41,7 @@ describe("slotSource", () => {
     expect(slotSource(field("label_id"))).toBe("labels");
     expect(slotSource(field("cycle_id"))).toBe("cycles");
     expect(slotSource(field("module_id"))).toBe("modules");
-    expect(slotSource(field("project_id"))).toBe("projects");
+    expect(slotSource(findField(richFilterFields({ surface: "my_issues" }), "project_id")!)).toBe("projects");
   });
 
   it("leaves fixed-level fields static", () => {

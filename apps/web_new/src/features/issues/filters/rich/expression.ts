@@ -206,8 +206,10 @@ function payloadValue(value: unknown): unknown {
 let collectionStems: ReadonlySet<string> | null = null;
 
 function collectionField(stem: string): boolean {
+  // Every surface's dimensions count: a record written on one surface may
+  // be read on another, and the collection lookup is shared.
   collectionStems ??= new Set(
-    richFilterFields()
+    withValueInputFields(DEFAULT_FIELDS, "my_issues")
       .filter((field) => field.kind === "multi" || field.kind === "single")
       .map((field) => field.stem)
   );
@@ -340,11 +342,12 @@ export interface RichFilterField {
   /** Where the value list comes from; absent means the static values. */
   source?: "states" | "members" | "labels" | "projects" | "cycles" | "modules";
   /**
-   * The surface this dimension belongs to. Absent means every project
-   * issues surface; `my_issues` marks fields the personal work-items page
-   * adds on top of the standard set (ISS-093).
+   * Surfaces this dimension belongs to. Absent means every project issues
+   * surface; `my_issues` marks fields only the personal work-items page
+   * offers (ISS-093), and `project` marks fields every surface but it
+   * offers (ISS-091: project is a cross-project dimension).
    */
-  surface?: "my_issues";
+  surfaces?: readonly RichFilterSurface[];
 }
 
 const DEFAULT_FIELDS: readonly RichFilterField[] = [
@@ -429,14 +432,20 @@ const DEFAULT_FIELDS: readonly RichFilterField[] = [
   },
 ];
 
-/** Drop the dimensions a project with those features switched off must not offer. */
+/**
+ * Drop the dimensions a surface must not offer: cycle and module when the
+ * project has those features switched off, and any dimension whose entry
+ * names other surfaces only.
+ */
 export function hideRichFilterFields(
   fields: readonly RichFilterField[],
-  input: { hideCycle?: boolean; hideModule?: boolean }
+  input: { hideCycle?: boolean; hideModule?: boolean; surface?: RichFilterSurface }
 ): RichFilterField[] {
+  const surface = input.surface ?? "project";
   return fields.filter((field) => {
     if (field.stem === "cycle_id" && (input.hideCycle ?? false)) return false;
     if (field.stem === "module_id" && (input.hideModule ?? false)) return false;
+    if (field.surfaces !== undefined && !field.surfaces.includes(surface)) return false;
     return true;
   });
 }
@@ -454,7 +463,7 @@ export function richFilterFields(input?: {
 }): RichFilterField[] {
   const surface = input?.surface ?? "project";
   const fields = withValueInputFields(DEFAULT_FIELDS, surface);
-  return hideRichFilterFields(fields, input ?? {});
+  return hideRichFilterFields(fields, { ...input, surface });
 }
 
 /** Find a field by its stored stem. */
@@ -608,39 +617,41 @@ function catalogField(input: {
  * one bounded date (target date, no clear control, offered as both a single
  * day and a two-end range like the old filter) and a bounded date range
  * (start date, which also offers the plain is lookup the oracle drives).
- * Both date fields are positive-only at the operator menu: the list
- * endpoint's bare date parameters resolve relative windows but have no
- * negated form, so a negated date would read as its opposite (ISS-092).
+ * Both date fields keep the negated pairs the list endpoint's filter set
+ * accepts for `__exact` / `__range` leaves (ISS-092); a relative preset
+ * that is stored under a negation stays in the JSON tree rather than being
+ * turned into a positive bare-bound parameter.
+ * Projects is a cross-project dimension: the old project filter never
+ * offers it on an issues list inside one project, and the gating scenario
+ * pins its absence there (ISS-091).
  * Stems are the filter set's field names; entity-backed fields resolve
  * their labels from the shared pickers, so reads stay lazy on open.
  */
 export function valueInputFields(surface: RichFilterSurface = "project"): RichFilterField[] {
   const fields = [
-    catalogField({ stem: "project_id", label: "Project", kind: "multi", source: "projects" }),
+    {
+      ...catalogField({ stem: "project_id", label: "Project", kind: "multi", source: "projects" }),
+      surfaces: ["my_issues"] as const,
+    },
     catalogField({ stem: "cycle_id", label: "Cycle", kind: "multi", source: "cycles" }),
     catalogField({ stem: "module_id", label: "Module", kind: "multi", source: "modules" }),
-    // Date conditions travel to the list endpoint as the presets' bare date
-    // parameters, which only express positive bounds (ISS-092), so both date
-    // fields offer the plain forms and keep their operator control locked.
     catalogField({
       stem: "target_date",
       label: "Target date",
       kind: "date",
       operators: ["exact", "range"],
-      allowNegative: false,
     }),
     catalogField({
       stem: "start_date",
       label: "Start date",
       kind: "date_range",
       operators: ["exact", "range"],
-      allowNegative: false,
     }),
   ];
   if (surface === "my_issues") {
     fields.push({
       ...catalogField({ stem: "subscriber_id", label: "Subscriber", kind: "multi", source: "members" }),
-      surface: "my_issues",
+      surfaces: ["my_issues"] as const,
     });
   }
   return fields;
