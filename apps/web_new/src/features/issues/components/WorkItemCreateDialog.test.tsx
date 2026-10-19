@@ -71,6 +71,9 @@ vi.mock("../../../shared/editor/index.js", async (importOriginal) => {
         insertMention: (target: { id: string; name: string }) => {
           setValue((current) => `${current}@${target.name}`);
         },
+        insertHtml: (html: string) => {
+          setValue((current) => `${current}${html}`);
+        },
         textBeforeCaret: () => valueRef.current,
       });
     }, [onReady]);

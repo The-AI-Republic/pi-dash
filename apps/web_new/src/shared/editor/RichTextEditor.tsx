@@ -27,6 +27,8 @@ export interface RichTextEditorHandle {
   insertImage: (src: string) => void;
   /** Insert a person mention at the caret (ISS-127). */
   insertMention: (target: { id: string; name: string }) => void;
+  /** Insert stored HTML at the caret, keeping surrounding text (ISS-127). */
+  insertHtml: (html: string) => void;
   /** Text between the paragraph start and the caret, for @-queries. */
   textBeforeCaret: () => string;
 }
@@ -58,6 +60,7 @@ export interface RichTextEditorProps {
 interface TiptapChain {
   focus: () => TiptapChain;
   setImage: (options: { src: string }) => { run: () => void };
+  deleteRange: (range: { from: number; to: number }) => TiptapChain;
   insertContent: (value: EditorContent) => { run: () => void };
 }
 
@@ -65,7 +68,11 @@ interface TiptapChain {
 type EditorContent = { type: string; attrs: Record<string, string> } | string;
 
 interface EditorSelectionLike {
+  /** Document position of the caret. */
+  from: number;
   $from: {
+    /** Document position where the caret's text block starts. */
+    start: () => number;
     parentOffset: number;
     parent: { textBetween: (from: number, to: number, block?: string, leaf?: string) => string };
   };
@@ -81,14 +88,32 @@ function insertImage(editor: EditorLike, src: string): void {
 }
 
 function insertMention(editor: EditorLike, target: { id: string; name: string }): void {
-  editor
-    .chain()
-    .focus()
-    .insertContent({
-      type: "mention",
-      attrs: { id: target.id, entity_identifier: target.id, entity_name: "user_mention" },
-    })
-    .run();
+  const mention = {
+    type: "mention",
+    attrs: { id: target.id, entity_identifier: target.id, entity_name: "user_mention" },
+  };
+  const range = queryRange(editor);
+  // Picking a person replaces the typed `@ad`, as the old editor's
+  // command did; inserting alone would store both the query and the node.
+  if (range === null) {
+    editor.chain().focus().insertContent(mention).run();
+    return;
+  }
+  editor.chain().focus().deleteRange(range).insertContent(mention).run();
+}
+
+/** Document range of the live @-query, including the @ (ISS-127). */
+function queryRange(editor: EditorLike): { from: number; to: number } | null {
+  const selection = editor.state.selection.$from;
+  const query = mentionQueryAt(textBeforeCaret(editor));
+  if (query === null) return null;
+  const start = selection.start();
+  return { from: start + selection.parentOffset - query.text.length - 1, to: start + selection.parentOffset };
+}
+
+function insertHtml(editor: EditorLike, html: string): void {
+  if (html === "") return;
+  editor.chain().focus().insertContent(html).run();
 }
 
 /** The @-query under the caret, or null (ISS-127). */
@@ -106,6 +131,7 @@ function toHandle(editor: EditorLike): RichTextEditorHandle {
   return {
     insertImage: (src: string) => insertImage(editor, src),
     insertMention: (target: { id: string; name: string }) => insertMention(editor, target),
+    insertHtml: (html: string) => insertHtml(editor, html),
     textBeforeCaret: () => textBeforeCaret(editor),
   };
 }

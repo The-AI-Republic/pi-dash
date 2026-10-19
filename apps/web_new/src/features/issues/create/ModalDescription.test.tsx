@@ -39,16 +39,25 @@ interface EditorProbe {
 
 const probes: EditorProbe[] = [];
 
+/** What the panel asked of the live handle, recorded per call. */
+const handleCalls: Array<{ kind: "image" | "mention" | "html"; value: unknown }> = [];
+
+/** False mounts the stand-in without announcing a handle. */
+let announceHandle = true;
+
 vi.mock("../../../shared/editor/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/editor/index.js")>();
   function StandInEditor(props: EditorProbe) {
     probes.push(props);
     React.useEffect(() => {
-      props.onReady?.({
-        insertImage: vi.fn(),
-        insertMention: vi.fn(),
-        textBeforeCaret: () => "",
-      });
+      if (announceHandle) {
+        props.onReady?.({
+          insertImage: (src: string) => handleCalls.push({ kind: "image", value: src }),
+          insertMention: (target) => handleCalls.push({ kind: "mention", value: target }),
+          insertHtml: (html: string) => handleCalls.push({ kind: "html", value: html }),
+          textBeforeCaret: () => "",
+        });
+      }
     }, [props]);
     return (
       <textarea
@@ -175,6 +184,8 @@ function lastProbe(): EditorProbe {
 
 beforeEach(() => {
   probes.length = 0;
+  handleCalls.length = 0;
+  announceHandle = true;
   vi.clearAllMocks();
   globalThis.fetch = vi.fn(async () => new Response(null, { status: 204 })) as never;
 });
@@ -253,7 +264,10 @@ describe("ModalDescription assistant (ISS-127)", () => {
     const prompt = await screen.findByLabelText("Ask the assistant");
     await user.type(prompt, "Make it shorter");
     await user.click(screen.getByRole("button", { name: "Insert" }));
-    await waitFor(() => expect(h.onChange).toHaveBeenCalledWith("<p>start</p><p>assistant words</p>"));
+    // The reply goes through the editor handle so it lands where the
+    // caret is; concatenating onto `value` would always append it.
+    await waitFor(() => expect(handleCalls).toEqual([{ kind: "html", value: "<p>assistant words</p>" }]));
+    expect(h.onChange).not.toHaveBeenCalled();
     expect(notifySuccess).toHaveBeenCalledWith("Inserted", expect.any(String));
     const call = h.calls.find((entry) => entry.url.includes("/ai-assistant/"));
     expect(call?.body).toEqual({ task: "Make it shorter" });
@@ -265,7 +279,8 @@ describe("ModalDescription assistant (ISS-127)", () => {
     await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
     await user.type(await screen.findByLabelText("Ask the assistant"), "go");
     await user.click(screen.getByRole("button", { name: "Insert" }));
-    await waitFor(() => expect(h.onChange).toHaveBeenCalledWith("<p>assistant words</p>"));
+    await waitFor(() => expect(handleCalls).toEqual([{ kind: "html", value: "<p>assistant words</p>" }]));
+    expect(h.onChange).not.toHaveBeenCalled();
   });
 
   it("keeps Insert disabled without a prompt and on an empty answer", async () => {
@@ -287,6 +302,17 @@ describe("ModalDescription assistant (ISS-127)", () => {
     await user.click(screen.getByRole("button", { name: "Insert" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalled());
     expect(h.onChange).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the form value when no editor handle exists yet", async () => {
+    announceHandle = false;
+    const user = userEvent.setup();
+    const h = setup();
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    await user.type(await screen.findByLabelText("Ask the assistant"), "go");
+    await user.click(screen.getByRole("button", { name: "Insert" }));
+    await waitFor(() => expect(h.onChange).toHaveBeenCalledWith("<p>start</p><p>assistant words</p>"));
+    expect(handleCalls).toEqual([]);
   });
 });
 
@@ -355,6 +381,7 @@ describe("ModalDescription mentions (ISS-127)", () => {
     const option = await screen.findByRole("button", { name: "Ada" });
     expect(h.calls.some((entry) => entry.url.includes("/entity-search/"))).toBe(true);
     await user.click(option);
+    expect(handleCalls).toEqual([{ kind: "mention", value: { id: "u-1", name: "Ada" } }]);
     expect(screen.queryByRole("button", { name: "Ada" })).not.toBeInTheDocument();
   });
 

@@ -2,12 +2,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { CommentRichTextEditor, RichTextEditor } from "./RichTextEditor.js";
+import { CommentRichTextEditor, IssueDescriptionEditor, RichTextEditor } from "./RichTextEditor.js";
 
 // The editor arrives through a dynamic import (tipTap, its extensions).
 // A full-suite run can keep that import in flight for seconds, so the
@@ -149,6 +149,71 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     handles[handles.length - 1]?.insertImage("https://cdn.test/shot.png");
     await vi.waitFor(() => expect(document.querySelector("img")).not.toBeNull());
     expect(document.querySelector("img")?.getAttribute("src")).toBe("https://cdn.test/shot.png");
+  });
+
+  it("replaces the typed @query when a person is picked", async () => {
+    const user = userEvent.setup();
+    const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <IssueDescriptionEditor
+          initialHtml="<p></p>"
+          label="Description"
+          onChange={() => {}}
+          onReady={(ready) => {
+            handles.push(ready);
+          }}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("Description");
+    editable.focus();
+    await user.keyboard("Hello @ad");
+    const handle = handles[handles.length - 1];
+    if (handle === undefined) throw new Error("the editor announced no handle");
+    expect(handle.textBeforeCaret()).toContain("@ad");
+    handle.insertMention({ id: "u-1", name: "Ada" });
+    await vi.waitFor(() => expect(editable.querySelector("mention-component")).not.toBeNull());
+    // The pick consumes the query text, so only the mention remains.
+    expect(editable.innerHTML).not.toContain("@ad");
+    expect(editable.textContent).toBe("Hello ");
+    expect(editable.querySelector("mention-component")?.getAttribute("id")).toBe("u-1");
+  });
+
+  it("inserts HTML where the caret is, not at the end", async () => {
+    const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <IssueDescriptionEditor
+          initialHtml="<p>alpha omega</p>"
+          label="Description"
+          onChange={() => {}}
+          onReady={(ready) => {
+            handles.push(ready);
+          }}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("Description");
+    const text = editable.querySelector("p")?.firstChild;
+    if (text === null || text === undefined) throw new Error("the paragraph has no text node");
+    // jsdom has no layout or native caret movement; put the DOM caret
+    // after "alpha" and let ProseMirror read it as its selection.
+    const caret = document.createRange();
+    caret.setStart(text, "alpha".length);
+    caret.collapse(true);
+    editable.focus();
+    const selection = document.getSelection();
+    if (selection === null) throw new Error("jsdom exposes no selection");
+    selection.removeAllRanges();
+    selection.addRange(caret);
+    fireEvent(document, new Event("selectionchange"));
+    const handle = handles[handles.length - 1];
+    if (handle === undefined) throw new Error("the editor announced no handle");
+    expect(handle.textBeforeCaret()).toBe("alpha");
+    handle.insertHtml("<strong>assistant</strong>");
+    await vi.waitFor(() => expect(editable.querySelector("strong")).not.toBeNull());
+    expect(editable.textContent).toBe("alphaassistant omega");
   });
 
   it("mounts without a ready handler", async () => {

@@ -163,10 +163,17 @@ export function ModalDescription({
         notifyError(DESCRIBE_FAILED_TITLE, DESCRIBE_FAILED_BODY);
         return;
       }
-      onChange(value.trim() === "" ? html : `${value}${html}`);
+      const handle = handleRef.current;
+      if (handle !== null) {
+        // The old editor inserts at `selection.anchor`; appending would
+        // always land the answer at the end of the body (ISS-127).
+        handle.insertHtml(html);
+      } else {
+        onChange(value.trim() === "" ? html : `${value}${html}`);
+        setRemount((currentKey) => currentKey + 1);
+      }
       setAiOpen(false);
       setAiPrompt("");
-      setRemount((currentKey) => currentKey + 1);
       notifySuccess("Inserted", "The assistant's answer is in the description.");
     } catch (error) {
       const rateLimited = isRateLimited(error);
