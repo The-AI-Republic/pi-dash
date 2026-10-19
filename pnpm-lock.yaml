@@ -897,6 +897,9 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
     devDependencies:
+      '@vitest/coverage-v8':
+        specifier: ^3.2.0
+        version: 3.2.7(vitest@3.2.7(@types/debug@4.1.12)(@types/node@22.12.0)(happy-dom@20.0.2)(jiti@2.7.0)(jsdom@26.1.0)(lightningcss@1.32.0)(msw@2.15.0(@types/node@22.12.0)(typescript@5.8.3))(terser@5.43.1)(yaml@2.8.3))
       tsdown:
         specifier: 'catalog:'
         version: 0.16.0(typescript@5.8.3)(unrun@0.2.34)
@@ -1253,6 +1256,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.0
         version: 19.3.0(@types/react@19.3.0)
+      '@vitest/coverage-v8':
+        specifier: ^3.2.0
+        version: 3.2.7(vitest@3.2.7(@types/debug@4.1.12)(@types/node@22.12.0)(happy-dom@20.0.2)(jiti@2.7.0)(jsdom@26.1.0)(lightningcss@1.32.0)(msw@2.15.0(@types/node@22.12.0)(typescript@5.8.3))(terser@5.43.1)(yaml@2.8.3))
       jsdom:
         specifier: ^26.1.0
         version: 26.1.0
@@ -1917,11 +1923,6 @@ packages:
 
   '@babel/parser@7.28.5':
     resolution: {integrity: sha512-KKBU1VGYR7ORr3At5HAtUQ+TV3SzRCXmA/8OdDZiLDBIZxVyzXuztPjfLd3BV1PRAQGCMWWSHYhL0F8d5uHBDQ==}
-    engines: {node: '>=6.0.0'}
-    hasBin: true
-
-  '@babel/parser@7.29.3':
-    resolution: {integrity: sha512-b3ctpQwp+PROvU/cttc4OYl4MzfJUWy6FZg+PMXfzmt/+39iHVF0sDfqay8TQM3JA2EUOyKcFZt75jWriQijsA==}
     engines: {node: '>=6.0.0'}
     hasBin: true
 
@@ -10408,7 +10409,7 @@ snapshots:
 
   '@babel/code-frame@7.27.1':
     dependencies:
-      '@babel/helper-validator-identifier': 7.28.5
+      '@babel/helper-validator-identifier': 7.29.7
       js-tokens: 4.0.0
       picocolors: 1.1.1
 
@@ -10457,10 +10458,10 @@ snapshots:
       '@babel/helper-compilation-targets': 7.28.6
       '@babel/helper-module-transforms': 7.28.6(@babel/core@7.29.0)
       '@babel/helpers': 7.26.10
-      '@babel/parser': 7.29.3
+      '@babel/parser': 7.29.9
       '@babel/template': 7.28.6
       '@babel/traverse': 7.29.0
-      '@babel/types': 7.29.0
+      '@babel/types': 7.29.8
       '@jridgewell/remapping': 2.3.5
       convert-source-map: 2.0.0
       debug: 4.4.3
@@ -10591,7 +10592,7 @@ snapshots:
     dependencies:
       '@babel/core': 7.28.4
       '@babel/helper-module-imports': 7.27.1
-      '@babel/helper-validator-identifier': 7.28.5
+      '@babel/helper-validator-identifier': 7.29.7
       '@babel/traverse': 7.29.8
     transitivePeerDependencies:
       - supports-color
@@ -10656,10 +10657,6 @@ snapshots:
   '@babel/parser@7.28.5':
     dependencies:
       '@babel/types': 7.28.5
-
-  '@babel/parser@7.29.3':
-    dependencies:
-      '@babel/types': 7.29.8
 
   '@babel/parser@7.29.9':
     dependencies:
@@ -13677,8 +13674,8 @@ snapshots:
 
   '@types/babel__core@7.20.5':
     dependencies:
-      '@babel/parser': 7.29.3
-      '@babel/types': 7.29.0
+      '@babel/parser': 7.29.9
+      '@babel/types': 7.29.8
       '@types/babel__generator': 7.27.0
       '@types/babel__template': 7.4.4
       '@types/babel__traverse': 7.28.0

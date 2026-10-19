@@ -11,5 +11,11 @@ export default defineConfig({
     // the broker for activity tasks), so the 5s default flakes under
     // parallel load. Unit tests stay milliseconds-fast either way.
     testTimeout: 30_000,
+    coverage: {
+      provider: "v8",
+      reporter: ["text-summary", "json-summary", "lcov"],
+      reportsDirectory: "coverage",
+      include: ["src/**"],
+    },
   },
 });

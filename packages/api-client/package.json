@@ -14,12 +14,14 @@
     "build": "tsdown src/index.ts --dts --format esm",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --deny-warnings",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^3.2.0",
     "tsdown": "catalog:",
     "typescript": "catalog:",
     "vitest": "^3.2.0"

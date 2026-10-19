@@ -163,4 +163,23 @@ describe("check-similarity own-code exclusion", () => {
       expect(entry.reason).not.toContain("\n");
     }
   });
+
+  it("ignores generated coverage/ output in the new trees", () => {
+    // lcov's HTML report repeats old-tree class names and CSS; the check must
+    // not scan it, while a source file with the same block still fails.
+    const root = makeRepo({
+      "apps/web/core/components/core/activity.tsx": planeBlock,
+      "apps/web_new/coverage/lcov-report/activity.ts": planeBlock,
+      "apps/web_new/src/features/activity/summary.ts": planeBlock,
+    });
+
+    const { offenders, scanned } = runSimilarityCheck({
+      root,
+      oldTrees: ["apps/web"],
+      newTrees: ["apps/web_new"],
+    });
+
+    expect(scanned).toBe(2);
+    expect(offenders.map((o) => o.newFile)).toEqual(["apps/web_new/src/features/activity/summary.ts"]);
+  });
 });

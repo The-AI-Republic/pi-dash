@@ -40,6 +40,7 @@ export default defineConfig({
       "src/**/*.test.ts",
       "src/**/*.test.tsx",
       "checks/check-similarity.test.mjs",
+      "checks/check-headers.test.mjs",
       "checks/check-oracle-build.test.mjs",
       "checks/check-boundaries.test.mjs",
       "e2e/parity/helpers/parity-env.test.ts",
@@ -65,5 +66,11 @@ export default defineConfig({
       "e2e/parity/drivers/web-cycles-favorite.test.ts",
       "e2e/perf/mocks.test.ts",
     ],
+    coverage: {
+      provider: "v8",
+      reporter: ["text-summary", "json-summary", "lcov"],
+      reportsDirectory: "coverage",
+      include: ["src/**"],
+    },
   },
 });

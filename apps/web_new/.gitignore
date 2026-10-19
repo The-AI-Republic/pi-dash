@@ -6,3 +6,4 @@ e2e/parity/.seed*.json
 e2e/parity/stack/.cloud-staging/
 test-results/
 dist/
+/coverage/
