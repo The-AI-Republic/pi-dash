@@ -674,6 +674,8 @@ interface ReceiptCardOptions {
   submitFails?: boolean;
   previewError?: string | null;
   previewResult?: string | null;
+  /** Expanded, but the template block has not rendered yet. */
+  hiddenTemplate?: boolean;
 }
 
 interface ReceiptCardDouble {
@@ -726,7 +728,12 @@ function receiptCard(options: ReceiptCardOptions): ReceiptCardDouble {
   addTestId(`receipt-preview-${options.kind}-result`, options.previewResult);
   const card = new FakeLocator({
     attributes: { id: `prompt-receipt-${options.kind}` },
-    testIdLocator: (testId) => testIds.get(testId) ?? absent(),
+    testIdLocator: (testId) => {
+      if (options.hiddenTemplate === true && testId === `receipt-template-${options.kind}`) {
+        return new FakeLocator({ visible: false });
+      }
+      return testIds.get(testId) ?? absent();
+    },
     locator: (selector) => {
       if (selector === "ol > li") return new FakeLocator({ items });
       if (selector === "form") {
@@ -856,6 +863,13 @@ describe("WebNewDriver receipt composition", () => {
     ).resolves.toBe("auto");
     await expect(
       new WebNewDriver(receiptPage({ cards: [withoutVariant] }).page).promptsReceiptAutomatic("review")
+    ).resolves.toBeNull();
+  });
+
+  it("reports an expanded card whose template has not rendered yet as null", async () => {
+    const pending = receiptCard({ kind: "review", expanded: true, template: "assembled", hiddenTemplate: true });
+    await expect(
+      new WebNewDriver(receiptPage({ cards: [pending] }).page).promptsReceiptTemplate("review")
     ).resolves.toBeNull();
   });
 });

@@ -8446,42 +8446,42 @@ export class WebNewDriver implements ParityDriver {
       const kind = await this.promptsReceiptKind(root);
       if (kind === "") continue;
       const countBadge = (
-        (await root
+        await root
           .getByTestId("receipt-count")
           .innerText()
-          .catch(() => "")) ?? ""
+          .catch(() => "")
       ).trim();
       const items = root.locator("ol > li");
       const sections: PromptReceiptCard["sections"] = [];
       for (let itemIndex = 0; itemIndex < (await items.count()); itemIndex++) {
         const item = items.nth(itemIndex);
         const num = (
-          (await item
+          await item
             .locator("span")
             .first()
             .innerText()
-            .catch(() => "")) ?? ""
+            .catch(() => "")
         ).trim();
         const title = (
-          (await item
+          await item
             .locator("span > span")
             .first()
             .innerText()
-            .catch(() => "")) ?? ""
+            .catch(() => "")
         ).trim();
         const key = (
-          (await item
+          await item
             .locator("span > span")
             .nth(1)
             .innerText()
-            .catch(() => "")) ?? ""
+            .catch(() => "")
         ).trim();
         const sourceBadge = (
-          (await item
+          await item
             .locator("span")
             .last()
             .innerText()
-            .catch(() => "")) ?? ""
+            .catch(() => "")
         ).trim();
         sections.push({ num, title, key, sourceBadge });
       }
@@ -8496,7 +8496,7 @@ export class WebNewDriver implements ParityDriver {
     for (let index = 0; index < (await links.count()); index++) {
       const link = links.nth(index);
       const href = (await link.getAttribute("href").catch(() => null)) ?? "";
-      const lines = ((await link.innerText().catch(() => "")) ?? "")
+      const lines = (await link.innerText().catch(() => ""))
         .split("\n")
         .map((line) => line.trim())
         .filter((line) => line.length > 0);
@@ -8526,14 +8526,14 @@ export class WebNewDriver implements ParityDriver {
     if (!(await this.promptsReceiptExpanded(kind))) return null;
     const block = this.promptsReceiptCard(kind).getByTestId(`receipt-template-${kind}`);
     if (!(await this.isShown(block))) return null;
-    return this.promptsTrimmed((await block.innerText().catch(() => "")) ?? "");
+    return this.promptsTrimmed(await block.innerText().catch(() => ""));
   }
 
   async promptsReceiptAutomatic(kind: string): Promise<string | null> {
     if (!(await this.promptsReceiptExpanded(kind))) return null;
     const block = this.promptsReceiptCard(kind).getByTestId(`receipt-automatic-${kind}`);
     if (!(await this.isShown(block))) return null;
-    return this.promptsTrimmed((await block.innerText().catch(() => "")) ?? "");
+    return this.promptsTrimmed(await block.innerText().catch(() => ""));
   }
 
   async promptsSavedPreviewVisible(kind: string): Promise<boolean> {
@@ -8557,12 +8557,10 @@ export class WebNewDriver implements ParityDriver {
   private async promptsPreviewOutcome(root: Locator, prefix: string) {
     const errorBox = root.getByTestId(`${prefix}-error`);
     const errorShown = await this.isShown(errorBox);
-    const error = errorShown ? ((await errorBox.innerText().catch(() => "")) ?? "").trim() || null : null;
+    const error = errorShown ? (await errorBox.innerText().catch(() => "")).trim() || null : null;
     const resultBox = root.getByTestId(`${prefix}-result`);
     const resultShown = await this.isShown(resultBox);
-    const prompt = resultShown
-      ? this.promptsTrimmed((await resultBox.innerText().catch(() => "")) ?? "") || null
-      : null;
+    const prompt = resultShown ? this.promptsTrimmed(await resultBox.innerText().catch(() => "")) || null : null;
     return { prompt, error };
   }
 
