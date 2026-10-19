@@ -2953,6 +2953,10 @@ pub async fn partial_update(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: axum::body::Bytes,
 ) -> Response {
+    let pk = match parse_id(&pk_raw) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
     let actor = match actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
@@ -2971,10 +2975,6 @@ pub async fn partial_update(
     let tenant = match resolve_tenant(pool, &slug, &project_id_raw).await {
         Ok(tenant) => tenant,
         Err(denial) => return denial.into_response(),
-    };
-    let pk = match parse_id(&pk_raw) {
-        Ok(id) => id,
-        Err(response) => return response,
     };
 
     // `skip_activity` pop + description-update probe (`:330-331`).
@@ -3287,6 +3287,10 @@ pub async fn retrieve(
     Path((slug, project_id_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
+    let pk = match parse_id(&pk_raw) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
     let actor = match actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
@@ -3298,10 +3302,6 @@ pub async fn retrieve(
     let tenant = match resolve_tenant(pool, &slug, &project_id_raw).await {
         Ok(tenant) => tenant,
         Err(denial) => return denial.into_response(),
-    };
-    let pk = match parse_id(&pk_raw) {
-        Ok(id) => id,
-        Err(response) => return response,
     };
     // `Intake.objects.filter(...).first()` then `.get(intake_id=intake_id.id)`
     // — a missing intake dereferences `None.id` → 500.
@@ -3358,6 +3358,10 @@ pub async fn destroy(
     Path((slug, project_id_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
+    let pk = match parse_id(&pk_raw) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
     let actor = match actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
@@ -3369,10 +3373,6 @@ pub async fn destroy(
     let tenant = match resolve_tenant(pool, &slug, &project_id_raw).await {
         Ok(tenant) => tenant,
         Err(denial) => return denial.into_response(),
-    };
-    let pk = match parse_id(&pk_raw) {
-        Ok(id) => id,
-        Err(response) => return response,
     };
     let intake_id = match intake_id_for(pool, &slug, &tenant.project_id).await {
         Ok(intake_id) => intake_id,

@@ -72,8 +72,8 @@ use uuid::Uuid;
 use pidash_services::app_intake::permissions as guards;
 
 use super::{
-    actor, enqueue_soft_delete, guard_denial, load_membership, parse_body, pool_of,
-    raw_json_response, Denial,
+    actor, enqueue_soft_delete, guard_denial, is_canonical_uuid, load_membership, parse_body,
+    pool_of, raw_json_response, Denial,
 };
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
@@ -120,12 +120,17 @@ pub async fn intake_tenant(pool: &PgPool, slug: &str, project_raw: &str) -> Resu
 }
 
 /// Parse a UUID path segment: Django's `<uuid:>` converter leaves the
-/// route unmatched, so unparseable ids answer the `handler404` body
-/// (`custom_404_view`, prod).
+/// route unmatched, so every non-canonical spelling — uppercase, simple
+/// (32 hex), braced, `urn:uuid:` and garbage — answers the `handler404`
+/// body before auth (`custom_404_view`, prod). `Uuid::parse_str` is
+/// permissive, so gate on the canonical spelling first (PIDASHCONV-1132
+/// / 1193).
 #[allow(clippy::result_large_err)]
 pub fn parse_pk(raw: &str) -> Result<Uuid, Response> {
-    raw.parse::<Uuid>()
-        .map_err(|_| Denial::PageNotFound.into_response())
+    match raw.parse::<Uuid>() {
+        Ok(id) if is_canonical_uuid(raw) => Ok(id),
+        _ => Err(Denial::PageNotFound.into_response()),
+    }
 }
 
 /// Serializer field errors: DRF's `{field: [messages]}` mapping plus the
@@ -948,6 +953,10 @@ pub async fn retrieve(
     Path((slug, project_id_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
+    let pk = match parse_pk(&pk_raw) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
     let actor = match actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
@@ -959,10 +968,6 @@ pub async fn retrieve(
     let project_id = match intake_tenant(pool, &slug, &project_id_raw).await {
         Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
-    };
-    let pk = match parse_pk(&pk_raw) {
-        Ok(id) => id,
-        Err(response) => return response,
     };
     let found = match fetch_intake(pool, &slug, &project_id, Some(pk), false).await {
         Ok(found) => found,
@@ -990,6 +995,10 @@ pub async fn partial_update(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: axum::body::Bytes,
 ) -> Response {
+    let pk = match parse_pk(&pk_raw) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
     let actor = match actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
@@ -1001,10 +1010,6 @@ pub async fn partial_update(
     let project_id = match intake_tenant(pool, &slug, &project_id_raw).await {
         Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
-    };
-    let pk = match parse_pk(&pk_raw) {
-        Ok(id) => id,
-        Err(response) => return response,
     };
     // `get_object` runs before the body parses: a miss 404s even with a
     // malformed payload.
@@ -1101,6 +1106,10 @@ pub async fn destroy(
     Path((slug, project_id_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
+    let pk = match parse_pk(&pk_raw) {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
     let actor = match actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
@@ -1112,10 +1121,6 @@ pub async fn destroy(
     let project_id = match intake_tenant(pool, &slug, &project_id_raw).await {
         Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
-    };
-    let pk = match parse_pk(&pk_raw) {
-        Ok(id) => id,
-        Err(response) => return response,
     };
     let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
         Ok(membership) => membership,

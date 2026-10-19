@@ -154,6 +154,12 @@ async fn versions_context(
     work_item_id_raw: String,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Result<VersionsContext, Response> {
+    // Django resolves `<uuid:work_item_id>` before the view runs, so a
+    // non-canonical spelling is a resolver 404 ahead of auth/tenant.
+    let work_item_id = match parse_id(&work_item_id_raw) {
+        Ok(id) => id,
+        Err(response) => return Err(response),
+    };
     let actor = match actor(state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return Err(denial.into_response()),
@@ -165,10 +171,6 @@ async fn versions_context(
     let tenant = match resolve_tenant(&pool, &slug, &project_id_raw).await {
         Ok(tenant) => tenant,
         Err(denial) => return Err(denial.into_response()),
-    };
-    let work_item_id = match parse_id(&work_item_id_raw) {
-        Ok(id) => id,
-        Err(response) => return Err(response),
     };
     // `Project.objects.get(pk=project_id)` — a miss is 404.
     let view_all = match guest_view_all(&pool, &tenant.project_id).await {
@@ -225,12 +227,14 @@ pub async fn detail(
     Path((slug, project_id, work_item_id, pk_raw)): Path<(String, String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let context = match versions_context(&state, slug, project_id, work_item_id, extension).await {
-        Ok(context) => context,
-        Err(response) => return response,
-    };
+    // `<uuid:pk>` resolves before the view; gate it ahead of the context
+    // (and thus auth), like the work_item_id segment.
     let pk = match parse_id(&pk_raw) {
         Ok(id) => id,
+        Err(response) => return response,
+    };
+    let context = match versions_context(&state, slug, project_id, work_item_id, extension).await {
+        Ok(context) => context,
         Err(response) => return response,
     };
     let found: Option<sqlx::postgres::PgRow> = match sqlx::query(
