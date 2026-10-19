@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 
 const { contractMocks } = vi.hoisted(() => ({
-  contractMocks: { upsertPromptSection: vi.fn(), revertPromptSection: vi.fn() },
+  contractMocks: { upsertPromptSection: vi.fn(), revertPromptSection: vi.fn(), previewPrompt: vi.fn() },
 }));
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
@@ -31,6 +31,7 @@ import {
   SECTION_REVERTED_TITLE,
   saveFailureDetail,
   saveFailureMessage,
+  usePreviewPrompt,
   useRevertPromptSection,
   useUpsertPromptSection,
   WORKSPACE_SAVED_TITLE,
@@ -166,5 +167,51 @@ describe("useRevertPromptSection", () => {
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(notifySuccess).toHaveBeenCalledWith(SECTION_REVERTED_TITLE, expect.stringContaining("Your override"));
+  });
+});
+
+describe("usePreviewPrompt", () => {
+  it("posts the kind and target through the contract without invalidating reads", async () => {
+    contractMocks.previewPrompt.mockResolvedValue({ kind: "coding-task", prompt: "rendered" });
+    const queryClient = freshClient();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => usePreviewPrompt(SLUG), { wrapper: wrapper(queryClient) });
+    await act(async () => {
+      result.current.mutate({ kind: "coding-task", input: { issue_id: "issue-1" } });
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({ kind: "coding-task", prompt: "rendered" });
+    expect(contractMocks.previewPrompt).toHaveBeenCalledWith(expect.anything(), SLUG, "coding-task", {
+      issue_id: "issue-1",
+    });
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("carries the draft fields alongside the install target", async () => {
+    contractMocks.previewPrompt.mockResolvedValue({ kind: "scheduler", prompt: "draft" });
+    const { result } = renderHook(() => usePreviewPrompt(SLUG), { wrapper: wrapper(freshClient()) });
+    await act(async () => {
+      result.current.mutate({
+        kind: "scheduler",
+        input: { binding_id: "binding-1", scope: "user", section_key: "brief", body: "draft body" },
+      });
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(contractMocks.previewPrompt).toHaveBeenCalledWith(expect.anything(), SLUG, "scheduler", {
+      binding_id: "binding-1",
+      scope: "user",
+      section_key: "brief",
+      body: "draft body",
+    });
+  });
+
+  it("surfaces the failure to the caller for the inline message", async () => {
+    contractMocks.previewPrompt.mockRejectedValue(new Error("parity preview failure"));
+    const { result } = renderHook(() => usePreviewPrompt(SLUG), { wrapper: wrapper(freshClient()) });
+    await act(async () => {
+      result.current.mutate({ kind: "review", input: { issue_id: "issue-1" } });
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.error?.message).toBe("parity preview failure");
   });
 });

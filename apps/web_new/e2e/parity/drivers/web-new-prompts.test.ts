@@ -24,6 +24,7 @@ interface FakeLocatorOptions {
   locator?: (selector: string) => FakeLocator;
   role?: (role: string, options?: { name?: string | RegExp; exact?: boolean; level?: number }) => FakeLocator;
   textLocator?: (text: string | RegExp, options?: { exact?: boolean }) => FakeLocator;
+  testIdLocator?: (testId: string) => FakeLocator;
   filtered?: FakeLocator;
 }
 
@@ -59,6 +60,16 @@ class FakeLocator {
     return this.options.attributes?.href?.replace(/^#prompt-section-/, "") ?? null;
   }
 
+  /** The receipt kind this link anchors, from its href. */
+  receiptKey(): string | null {
+    return this.options.attributes?.href?.replace(/^#prompt-receipt-/, "") ?? null;
+  }
+
+  /** The element's rendered id, e.g. `prompt-receipt-review`. */
+  idValue(): string | null {
+    return this.options.attributes?.id ?? null;
+  }
+
   inputValue(): Promise<string> {
     return Promise.resolve(this.value);
   }
@@ -69,6 +80,10 @@ class FakeLocator {
 
   first(): FakeLocator {
     return this.options.items?.[0] ?? this;
+  }
+
+  last(): FakeLocator {
+    return this.options.items?.at(-1) ?? this;
   }
 
   nth(index: number): FakeLocator {
@@ -85,6 +100,10 @@ class FakeLocator {
 
   getByText(text: string | RegExp, options?: { exact?: boolean }): FakeLocator {
     return this.options.textLocator?.(text, options) ?? absent();
+  }
+
+  getByTestId(testId: string): FakeLocator {
+    return this.options.testIdLocator?.(testId) ?? absent();
   }
 
   filter(_options: unknown): FakeLocator {
@@ -621,6 +640,302 @@ describe("WebNewDriver prompt read fallbacks", () => {
       defaultBody: "",
       error: null,
       ...(failure === "rejected" ? { saveEnabled: false } : {}),
+    });
+  });
+});
+
+// --- Receipt composition and previews (NEWFRONT-599, AGT-028–031) ---
+
+interface ReceiptCardOptions {
+  kind: string;
+  count?: string;
+  expanded?: boolean;
+  template?: string | null;
+  automatic?: string | null;
+  items?: { num: string; title: string; key: string; badge: string }[];
+  previewHeading?: boolean;
+  previewEnabled?: boolean;
+  previewError?: string | null;
+  previewResult?: string | null;
+}
+
+interface ReceiptCardDouble {
+  card: FakeLocator;
+  header: FakeLocator;
+}
+
+/** A receipt card double addressable by its `id="prompt-receipt-<kind>"`. */
+function receiptCard(options: ReceiptCardOptions): ReceiptCardDouble {
+  const header = new FakeLocator({
+    attributes: { "aria-expanded": options.expanded === true ? "true" : "false" },
+    text: options.expanded === true ? "Hide" : "Show",
+  });
+  const items = (options.items ?? []).map(
+    (item) =>
+      new FakeLocator({
+        locator: (selector) => {
+          if (selector === "span") {
+            return new FakeLocator({
+              items: [
+                new FakeLocator({ text: item.num }),
+                new FakeLocator({ text: item.badge }),
+                new FakeLocator({ text: item.badge }),
+              ],
+            });
+          }
+          if (selector === "span > span") {
+            return new FakeLocator({
+              items: [new FakeLocator({ text: item.title }), new FakeLocator({ text: item.key })],
+            });
+          }
+          return new FakeLocator({ text: item.badge });
+        },
+      })
+  );
+  const textbox = new FakeLocator();
+  const submit = new FakeLocator({ enabled: options.previewEnabled ?? false });
+  const testIds = new Map<string, FakeLocator>();
+  const addTestId = (id: string, text: string | null | undefined) => {
+    if (text !== null && text !== undefined) testIds.set(id, new FakeLocator({ text }));
+  };
+  addTestId("receipt-count", options.count);
+  addTestId(`receipt-template-${options.kind}`, options.template);
+  addTestId(`receipt-automatic-${options.kind}`, options.automatic);
+  addTestId(`receipt-preview-${options.kind}-error`, options.previewError);
+  addTestId(`receipt-preview-${options.kind}-result`, options.previewResult);
+  const card = new FakeLocator({
+    attributes: { id: `prompt-receipt-${options.kind}` },
+    testIdLocator: (testId) => testIds.get(testId) ?? absent(),
+    locator: (selector) => (selector === "ol > li" ? new FakeLocator({ items }) : absent()),
+    role: (role, roleOptions) => {
+      if (role === "button" && roleOptions?.name instanceof RegExp) return header;
+      if (role === "button" && roleOptions?.name === "Preview") return submit;
+      if (role === "heading" && roleOptions?.name === "Preview") {
+        return new FakeLocator({ visible: options.previewHeading ?? false });
+      }
+      if (role === "textbox") return textbox;
+      return absent();
+    },
+  });
+  return { card, header };
+}
+
+function receiptPage(options: { cards: ReceiptCardDouble[]; links?: FakeLocator[]; hash?: string }): {
+  page: Page;
+  nav: FakeLocator;
+} {
+  const doubles = options.cards;
+  const byId = new Map(doubles.map((double) => [double.card.idValue(), double.card]));
+  const nav = new FakeLocator({
+    role: (role) => (role === "link" ? new FakeLocator({ items: options.links ?? [] }) : absent()),
+    locator: (selector) => {
+      const kind = selector.match(/^a\[href="#prompt-receipt-(.*)"\]$/)?.[1];
+      return (
+        (kind !== undefined ? (options.links ?? []).find((link) => link.receiptKey() === kind) : undefined) ?? absent()
+      );
+    },
+  });
+  const page = {
+    evaluate: vi.fn(async (_callback: unknown) => options.hash ?? "#prompt-receipt-review"),
+    getByRole: vi.fn((role: string, roleOptions?: { name?: string | RegExp }) =>
+      role === "navigation" && roleOptions?.name === "Prompt receipt" ? nav : absent()
+    ),
+    locator: vi.fn((selector: string) => {
+      if (selector === 'article[id^="prompt-receipt-"]') {
+        return new FakeLocator({ items: doubles.map((double) => double.card) });
+      }
+      const kind = selector.match(/^article\[id="prompt-receipt-(.*)"\]$/)?.[1];
+      return (kind !== undefined ? byId.get(`prompt-receipt-${kind}`) : undefined) ?? absent();
+    }),
+  };
+  return { page: page as unknown as Page, nav };
+}
+
+function receiptLink(kind: string, count: string): FakeLocator {
+  return new FakeLocator({ attributes: { href: `#prompt-receipt-${kind}` }, text: `${kind}\n${count}\n` });
+}
+
+describe("WebNewDriver receipt composition", () => {
+  it("reads each card's kind, rendered count and numbered composition", async () => {
+    const coding = receiptCard({
+      kind: "coding-task",
+      count: "2 sections",
+      items: [
+        { num: "01", title: "Intro", key: "intro", badge: "Pi Dash default" },
+        { num: "02", title: "Autonomy", key: "autonomy", badge: "Your override" },
+      ],
+    });
+    const unrelated = { card: new FakeLocator({ attributes: { id: "unrelated" } }), header: new FakeLocator() };
+    const { page } = receiptPage({ cards: [coding, unrelated] });
+
+    await expect(new WebNewDriver(page).promptsReceiptCards()).resolves.toEqual([
+      {
+        kind: "coding-task",
+        countBadge: "2 sections",
+        sections: [
+          { num: "01", title: "Intro", key: "intro", sourceBadge: "Pi Dash default" },
+          { num: "02", title: "Autonomy", key: "autonomy", sourceBadge: "Your override" },
+        ],
+      },
+    ]);
+  });
+
+  it("trims copy-pasted counts and drops unrelated roots", async () => {
+    const review = receiptCard({ kind: "review", count: " 1 section\n" });
+    const { page } = receiptPage({ cards: [review] });
+    const cards = await new WebNewDriver(page).promptsReceiptCards();
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ kind: "review", countBadge: "1 section", sections: [] });
+  });
+
+  it("reads the receipt nav and follows an anchor", async () => {
+    const link = receiptLink("review", "1 section");
+    const review = receiptCard({ kind: "review", count: "1 section" });
+    const { page } = receiptPage({ cards: [review], links: [link], hash: "#prompt-receipt-review" });
+    const driver = new WebNewDriver(page);
+
+    await expect(driver.promptsReceiptNav()).resolves.toEqual([{ kind: "review", count: "1 section" }]);
+    await expect(driver.promptsReceiptNavJump("review")).resolves.toBe("#prompt-receipt-review");
+    expect(link.click).toHaveBeenCalledTimes(1);
+    expect(review.card.waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 30_000 });
+  });
+
+  it("toggles expansion and reads only a shown template", async () => {
+    const open = receiptCard({ kind: "review", expanded: true, template: "assembled\n\n" });
+    const openDriver = new WebNewDriver(receiptPage({ cards: [open] }).page);
+    await expect(openDriver.promptsReceiptExpanded("review")).resolves.toBe(true);
+    await expect(openDriver.promptsReceiptTemplate("review")).resolves.toBe("assembled");
+    await openDriver.promptsReceiptToggle("review");
+    expect(open.header.click).toHaveBeenCalledTimes(1);
+
+    const collapsed = receiptCard({ kind: "review", expanded: false, template: "assembled" });
+    const collapsedDriver = new WebNewDriver(receiptPage({ cards: [collapsed] }).page);
+    await expect(collapsedDriver.promptsReceiptExpanded("review")).resolves.toBe(false);
+    await expect(collapsedDriver.promptsReceiptTemplate("review")).resolves.toBeNull();
+    await expect(collapsedDriver.promptsReceiptAutomatic("review")).resolves.toBeNull();
+  });
+
+  it("reads the automatic-run variant only when present", async () => {
+    const withVariant = receiptCard({ kind: "review", expanded: true, template: "personal", automatic: "auto\n" });
+    const withoutVariant = receiptCard({ kind: "review", expanded: true, template: "personal" });
+    await expect(
+      new WebNewDriver(receiptPage({ cards: [withVariant] }).page).promptsReceiptAutomatic("review")
+    ).resolves.toBe("auto");
+    await expect(
+      new WebNewDriver(receiptPage({ cards: [withoutVariant] }).page).promptsReceiptAutomatic("review")
+    ).resolves.toBeNull();
+  });
+});
+
+describe("WebNewDriver saved preview", () => {
+  it("reports the admin form's presence and disabled empty submit", async () => {
+    const admin = receiptCard({ kind: "coding-task", expanded: true, template: "t", previewHeading: true });
+    const member = receiptCard({ kind: "coding-task", expanded: true, template: "t" });
+    await expect(
+      new WebNewDriver(receiptPage({ cards: [admin] }).page).promptsSavedPreviewVisible("coding-task")
+    ).resolves.toBe(true);
+    await expect(
+      new WebNewDriver(receiptPage({ cards: [admin] }).page).promptsSavedPreviewSubmitEnabled("coding-task")
+    ).resolves.toBe(false);
+    await expect(
+      new WebNewDriver(receiptPage({ cards: [member] }).page).promptsSavedPreviewVisible("coding-task")
+    ).resolves.toBe(false);
+  });
+
+  it("fills the scheduler target, submits, and reads the rendered prompt", async () => {
+    const card = receiptCard({ kind: "scheduler", expanded: true, previewResult: "rendered prompt\n" });
+    const driver = new WebNewDriver(receiptPage({ cards: [card] }).page);
+    await driver.promptsSavedPreviewSubmit("scheduler", "binding-1");
+    await expect(driver.promptsSavedPreviewResult("scheduler")).resolves.toEqual({
+      prompt: "rendered prompt",
+      error: null,
+    });
+  });
+
+  it("reads the inline error and reports no prompt", async () => {
+    const card = receiptCard({ kind: "review", expanded: true, previewError: "Target not found.\n" });
+    const driver = new WebNewDriver(receiptPage({ cards: [card] }).page);
+    await expect(driver.promptsSavedPreviewResult("review")).resolves.toEqual({
+      prompt: null,
+      error: "Target not found.",
+    });
+  });
+});
+
+describe("WebNewDriver draft preview", () => {
+  function editorPage(options: {
+    switches?: string[];
+    submitEnabled?: boolean;
+    prompt?: string | null;
+    error?: string | null;
+  }) {
+    const textbox = new FakeLocator();
+    const submit = new FakeLocator({ enabled: options.submitEnabled ?? false });
+    const testIds = new Map<string, FakeLocator>();
+    for (const kind of options.switches ?? []) {
+      testIds.set(`draft-preview-kind-${kind}`, new FakeLocator());
+    }
+    if (options.prompt !== null && options.prompt !== undefined) {
+      testIds.set("draft-preview-result", new FakeLocator({ text: options.prompt }));
+    }
+    if (options.error !== null && options.error !== undefined) {
+      testIds.set("draft-preview-error", new FakeLocator({ text: options.error }));
+    }
+    const textarea = new FakeLocator();
+    const root = new FakeLocator({
+      locator: (selector) => (selector === "textarea" ? textarea : absent()),
+      testIdLocator: (testId) => testIds.get(testId) ?? absent(),
+      role: (role, roleOptions) => {
+        if (role === "textbox") return textbox;
+        if (role === "button" && roleOptions?.name === "Preview draft") return submit;
+        return absent();
+      },
+    });
+    const page = {
+      locator: vi.fn((selector: string) =>
+        selector === 'article[id^="prompt-section-"]' && options.switches !== undefined
+          ? new FakeLocator({ items: [root] })
+          : absent()
+      ),
+    };
+    return { page: page as unknown as Page, root, textbox, submit };
+  }
+
+  it("reports no switcher for a single-kind section", async () => {
+    const fixture = editorPage({ switches: [] });
+    await expect(new WebNewDriver(fixture.page).promptsDraftPreviewKinds()).resolves.toEqual([]);
+  });
+
+  it("reads and selects the multi-kind switcher labels", async () => {
+    const fixture = editorPage({ switches: ["coding-task", "review"] });
+    const driver = new WebNewDriver(fixture.page);
+    await expect(driver.promptsDraftPreviewKinds()).resolves.toEqual(["coding-task", "review"]);
+    await driver.promptsDraftPreviewSelectKind("review");
+    expect(fixture.root.getByTestId("draft-preview-kind-review").click).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports the submit's enabled state and posts the target", async () => {
+    const fixture = editorPage({ switches: [], submitEnabled: true });
+    const driver = new WebNewDriver(fixture.page);
+    await expect(driver.promptsDraftPreviewSubmitEnabled()).resolves.toBe(true);
+    await driver.promptsDraftPreviewSubmit("issue-1");
+    expect(fixture.textbox.fill).toHaveBeenCalledWith("issue-1");
+    expect(fixture.submit.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the rendered draft prompt", async () => {
+    const fixture = editorPage({ switches: [], prompt: "draft rendered\n" });
+    await expect(new WebNewDriver(fixture.page).promptsDraftPreviewResult()).resolves.toEqual({
+      prompt: "draft rendered",
+      error: null,
+    });
+  });
+
+  it("reads an inline draft failure with no prompt", async () => {
+    const fixture = editorPage({ switches: [], error: "Draft render failed.\n" });
+    await expect(new WebNewDriver(fixture.page).promptsDraftPreviewResult()).resolves.toEqual({
+      prompt: null,
+      error: "Draft render failed.",
     });
   });
 });

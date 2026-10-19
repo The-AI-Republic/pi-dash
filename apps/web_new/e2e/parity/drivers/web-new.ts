@@ -8127,6 +8127,18 @@ export class WebNewDriver implements ParityDriver {
     return this.page.getByRole("navigation", { name: "Prompt receipt", exact: true });
   }
 
+  private promptsKindLabel(kind: string): string {
+    if (kind === "coding-task") return "Coding task";
+    if (kind === "review") return "Review";
+    return "Scheduler";
+  }
+
+  private promptsKindSlug(label: string): string {
+    if (label === "Coding task") return "coding-task";
+    if (label === "Review") return "review";
+    return "scheduler";
+  }
+
   private promptsCards(): Locator {
     return this.page.locator('article[id^="prompt-section-"]');
   }
@@ -8410,54 +8422,193 @@ export class WebNewDriver implements ParityDriver {
       .click();
     await heading.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
-  // Receipt composition and preview methods below belong to NEWFRONT-599.
+  // Receipt composition and previews (NEWFRONT-599, AGT-028–031). The
+  // receipt cards are articles anchored `#prompt-receipt-<kind>`; the
+  // assembled templates and preview outcomes carry stable test ids so the
+  // reads never depend on paint order.
+  private promptsReceiptCardsLocator(): Locator {
+    return this.page.locator('article[id^="prompt-receipt-"]');
+  }
+
+  private promptsReceiptCard(kind: string): Locator {
+    return this.page.locator(`article[id="prompt-receipt-${kind}"]`);
+  }
+
+  private promptsReceiptHeader(kind: string): Locator {
+    return this.promptsReceiptCard(kind).getByRole("button", { name: /^(Coding task|Review|Scheduler)$/ });
+  }
+
+  private async promptsReceiptKind(root: Locator): Promise<string> {
+    const id = await root.getAttribute("id").catch(() => null);
+    if (id === null || !id.startsWith("prompt-receipt-")) return "";
+    return id.slice("prompt-receipt-".length);
+  }
+
+  /** Template text as the oracle reads it: trailing blank lines dropped. */
+  private promptsTrimmed(template: string): string {
+    return template.replace(/\s+$/, "");
+  }
+
   async promptsReceiptCards(): Promise<PromptReceiptCard[]> {
-    return todo("promptsReceiptCards");
+    const roots = this.promptsReceiptCardsLocator();
+    const cards: PromptReceiptCard[] = [];
+    for (let index = 0; index < (await roots.count()); index++) {
+      const root = roots.nth(index);
+      const kind = await this.promptsReceiptKind(root);
+      if (kind === "") continue;
+      const countBadge = (
+        (await root
+          .getByTestId("receipt-count")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const items = root.locator("ol > li");
+      const sections: PromptReceiptCard["sections"] = [];
+      for (let itemIndex = 0; itemIndex < (await items.count()); itemIndex++) {
+        const item = items.nth(itemIndex);
+        const num = (
+          (await item
+            .locator("span")
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+        const title = (
+          (await item
+            .locator("span > span")
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+        const key = (
+          (await item
+            .locator("span > span")
+            .nth(1)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+        const sourceBadge = (
+          (await item
+            .locator("span")
+            .last()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+        sections.push({ num, title, key, sourceBadge });
+      }
+      cards.push({ kind, countBadge, sections });
+    }
+    return cards;
   }
+
   async promptsReceiptNav(): Promise<{ kind: string; count: string }[]> {
-    return todo("promptsReceiptNav");
+    const links = this.promptsReceiptNavigation().getByRole("link");
+    const entries: { kind: string; count: string }[] = [];
+    for (let index = 0; index < (await links.count()); index++) {
+      const link = links.nth(index);
+      const href = (await link.getAttribute("href").catch(() => null)) ?? "";
+      const lines = ((await link.innerText().catch(() => "")) ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      entries.push({ kind: href.replace(/^#prompt-receipt-/, ""), count: lines[1] ?? "" });
+    }
+    return entries;
   }
-  async promptsReceiptNavJump(_kind: string): Promise<string> {
-    return todo("promptsReceiptNavJump");
+
+  async promptsReceiptNavJump(kind: string): Promise<string> {
+    await this.promptsReceiptNavigation().locator(`a[href="#prompt-receipt-${kind}"]`).click();
+    await this.promptsReceiptCard(kind).waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return this.page.evaluate(() => window.location.hash);
   }
-  async promptsReceiptToggle(_kind: string): Promise<void> {
-    return todo("promptsReceiptToggle");
+
+  async promptsReceiptToggle(kind: string): Promise<void> {
+    await this.promptsReceiptHeader(kind).click();
   }
-  async promptsReceiptExpanded(_kind: string): Promise<boolean> {
-    return todo("promptsReceiptExpanded");
+
+  async promptsReceiptExpanded(kind: string): Promise<boolean> {
+    const expanded = await this.promptsReceiptHeader(kind)
+      .getAttribute("aria-expanded")
+      .catch(() => null);
+    return expanded === "true";
   }
-  async promptsReceiptTemplate(_kind: string): Promise<string | null> {
-    return todo("promptsReceiptTemplate");
+
+  async promptsReceiptTemplate(kind: string): Promise<string | null> {
+    if (!(await this.promptsReceiptExpanded(kind))) return null;
+    const block = this.promptsReceiptCard(kind).getByTestId(`receipt-template-${kind}`);
+    if (!(await this.isShown(block))) return null;
+    return this.promptsTrimmed((await block.innerText().catch(() => "")) ?? "");
   }
-  async promptsReceiptAutomatic(_kind: string): Promise<string | null> {
-    return todo("promptsReceiptAutomatic");
+
+  async promptsReceiptAutomatic(kind: string): Promise<string | null> {
+    if (!(await this.promptsReceiptExpanded(kind))) return null;
+    const block = this.promptsReceiptCard(kind).getByTestId(`receipt-automatic-${kind}`);
+    if (!(await this.isShown(block))) return null;
+    return this.promptsTrimmed((await block.innerText().catch(() => "")) ?? "");
   }
-  async promptsSavedPreviewVisible(_kind: string): Promise<boolean> {
-    return todo("promptsSavedPreviewVisible");
+
+  async promptsSavedPreviewVisible(kind: string): Promise<boolean> {
+    return this.isShown(this.promptsReceiptCard(kind).getByRole("heading", { name: "Preview", exact: true }));
   }
-  async promptsSavedPreviewSubmitEnabled(_kind: string): Promise<boolean> {
-    return todo("promptsSavedPreviewSubmitEnabled");
+
+  async promptsSavedPreviewSubmitEnabled(kind: string): Promise<boolean> {
+    return this.promptsReceiptCard(kind)
+      .getByRole("button", { name: "Preview", exact: true })
+      .isEnabled()
+      .catch(() => false);
   }
-  async promptsSavedPreviewSubmit(_kind: string, _target: string): Promise<void> {
-    return todo("promptsSavedPreviewSubmit");
+
+  async promptsSavedPreviewSubmit(kind: string, target: string): Promise<void> {
+    const card = this.promptsReceiptCard(kind);
+    await card.getByRole("textbox").fill(target);
+    await card.getByRole("button", { name: "Preview", exact: true }).click();
   }
-  async promptsSavedPreviewResult(_kind: string): Promise<{ prompt: string | null; error: string | null }> {
-    return todo("promptsSavedPreviewResult");
+
+  private async promptsPreviewOutcome(root: Locator, prefix: string) {
+    const errorBox = root.getByTestId(`${prefix}-error`);
+    const errorShown = await this.isShown(errorBox);
+    const error = errorShown ? ((await errorBox.innerText().catch(() => "")) ?? "").trim() || null : null;
+    const resultBox = root.getByTestId(`${prefix}-result`);
+    const resultShown = await this.isShown(resultBox);
+    const prompt = resultShown
+      ? this.promptsTrimmed((await resultBox.innerText().catch(() => "")) ?? "") || null
+      : null;
+    return { prompt, error };
   }
+
+  async promptsSavedPreviewResult(kind: string): Promise<{ prompt: string | null; error: string | null }> {
+    return this.promptsPreviewOutcome(this.promptsReceiptCard(kind), `receipt-preview-${kind}`);
+  }
+
   async promptsDraftPreviewKinds(): Promise<string[]> {
-    return todo("promptsDraftPreviewKinds");
+    const root = this.promptsOpenEditorRoot().first();
+    const kinds: string[] = [];
+    for (const kind of ["coding-task", "review", "scheduler"] as const) {
+      if (await this.isShown(root.getByTestId(`draft-preview-kind-${kind}`))) kinds.push(kind);
+    }
+    return kinds;
   }
-  async promptsDraftPreviewSelectKind(_kind: string): Promise<void> {
-    return todo("promptsDraftPreviewSelectKind");
+
+  async promptsDraftPreviewSelectKind(kind: string): Promise<void> {
+    await this.promptsOpenEditorRoot().first().getByTestId(`draft-preview-kind-${kind}`).click();
   }
+
   async promptsDraftPreviewSubmitEnabled(): Promise<boolean> {
-    return todo("promptsDraftPreviewSubmitEnabled");
+    return this.promptsOpenEditorRoot()
+      .first()
+      .getByRole("button", { name: "Preview draft", exact: true })
+      .isEnabled()
+      .catch(() => false);
   }
-  async promptsDraftPreviewSubmit(_target: string): Promise<void> {
-    return todo("promptsDraftPreviewSubmit");
+
+  async promptsDraftPreviewSubmit(target: string): Promise<void> {
+    const root = this.promptsOpenEditorRoot().first();
+    await root.getByRole("textbox").fill(target);
+    await root.getByRole("button", { name: "Preview draft", exact: true }).click();
   }
+
   async promptsDraftPreviewResult(): Promise<{ prompt: string | null; error: string | null }> {
-    return todo("promptsDraftPreviewResult");
+    return this.promptsPreviewOutcome(this.promptsOpenEditorRoot().first(), "draft-preview");
   }
   async automationsOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
     return todo("automationsOpen");

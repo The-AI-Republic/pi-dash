@@ -1,12 +1,14 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Section editor (parity/specs/agents.md §6, AGT-024-027). The draft
-// seeds from the scope's current body; Save arms only on a dirty draft,
-// compare shows the pristine default beside it, cancel discards, and the
-// revert affordance arms only with an override at the edited scope. Save
-// failures land inline with the server's detail; a refused revert lands
-// the generic message. The text surface is a plain textarea rather than
+// Section editor (parity/specs/agents.md §6-7, AGT-024-027, AGT-031).
+// The draft seeds from the scope's current body; Save arms only on a
+// dirty draft, compare shows the pristine default beside it, cancel
+// discards, and the revert affordance arms only with an override at the
+// edited scope. The draft-preview panel renders the in-progress edit
+// against a real issue or install, offering a kind switcher only when
+// the section spans several kinds. Save failures land inline with the
+// server's detail; a refused revert lands the generic message. The text surface is a plain textarea rather than
 // the kit's field component: the kit ships as one entry, so importing its
 // Input pulls the field scaffold into the shell's initial chunk and the
 // initial-JS gate overruns (see Notes on NEWFRONT-597).
@@ -23,10 +25,14 @@ import {
 import {
   editorScopeLabel,
   editorSeedFor,
+  PROMPT_KIND_LABELS,
   revertArmedFor,
   type MergedPromptSection,
   type PromptEditorScope,
+  type PromptKind,
 } from "../lib/sections.js";
+import { draftPreviewKinds, initialDraftKind } from "../lib/receipt.js";
+import { PreviewPanel } from "./PreviewPanel.js";
 import { RevertDialog } from "./RevertDialog.js";
 
 export interface SectionEditorProps {
@@ -49,6 +55,8 @@ export function SectionEditor({ workspaceSlug, section, scope, onClose }: Sectio
   const [compareOpen, setCompareOpen] = React.useState(false);
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const previewKinds = draftPreviewKinds(section.kinds);
+  const [previewKind, setPreviewKind] = React.useState<PromptKind>(() => initialDraftKind(section.kinds));
   const upsert = useUpsertPromptSection(workspaceSlug);
   const revert = useRevertPromptSection(workspaceSlug);
   const busy = upsert.isPending || revert.isPending;
@@ -121,6 +129,38 @@ export function SectionEditor({ workspaceSlug, section, scope, onClose }: Sectio
             Revert to default
           </Button>
         ) : null}
+      </div>
+      <div className="flex flex-col gap-(--space-3) rounded-(--radius-control) border border-(--border) p-(--space-4)">
+        <div className="flex flex-wrap items-center justify-between gap-(--space-2)">
+          <p className="text-meta text-(--text-muted)">Draft preview</p>
+          {previewKinds.length > 1 ? (
+            <div className="flex gap-(--space-1)">
+              {previewKinds.map((kind) => (
+                <button
+                  key={kind}
+                  type="button"
+                  aria-pressed={kind === previewKind}
+                  data-testid={`draft-preview-kind-${kind}`}
+                  onClick={() => setPreviewKind(kind)}
+                  className={`text-meta rounded-(--radius-control) px-(--space-2) py-(--space-1) ${
+                    kind === previewKind
+                      ? "bg-(--accent) text-(--accent-contrast)"
+                      : "bg-(--subtle) text-(--text-muted) hover:text-(--text)"
+                  }`}
+                >
+                  {PROMPT_KIND_LABELS[kind]}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <PreviewPanel
+          workspaceSlug={workspaceSlug}
+          kind={previewKind}
+          submitLabel="Preview draft"
+          draft={{ scope, sectionKey: section.key, body: draft }}
+          testIdPrefix="draft-preview"
+        />
       </div>
       <RevertDialog
         scope={scope}

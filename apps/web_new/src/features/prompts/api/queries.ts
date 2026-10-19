@@ -8,7 +8,7 @@
 // browser cards and reports the page-level load state.
 
 import { useQueries, queryOptions } from "@tanstack/react-query";
-import { listPromptSections, type ApiClient } from "@pidash/api-client";
+import { getCompiledPrompt, listPromptSections, type ApiClient, type CompiledPrompt } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
@@ -19,7 +19,7 @@ import {
   type PromptKind,
   type PromptKindSections,
 } from "../lib/sections.js";
-import { promptSectionKeys, type PromptSectionScope } from "./keys.js";
+import { promptReceiptKeys, promptSectionKeys, type PromptSectionScope } from "./keys.js";
 
 export function promptSectionsQueryOptions(
   client: ApiClient,
@@ -33,6 +33,15 @@ export function promptSectionsQueryOptions(
       const data = await listPromptSections(client, workspaceSlug, { kind, scope });
       return { kind, sections: data.sections };
     },
+    staleTime: LIST_STALE_TIME_MS,
+  });
+}
+
+/** The assembled template for one kind, at the viewer's own scope. */
+export function compiledPromptQueryOptions(client: ApiClient, workspaceSlug: string, kind: PromptKind) {
+  return queryOptions({
+    queryKey: promptReceiptKeys.compiled(workspaceSlug, kind),
+    queryFn: () => getCompiledPrompt(client, workspaceSlug, kind, { scope: "user" }),
     staleTime: LIST_STALE_TIME_MS,
   });
 }
@@ -91,6 +100,57 @@ export function usePromptSectionLists(workspaceSlug: string, baselineEnabled: bo
     baselineLoaded,
     refetchMember: () => {
       for (const query of member) void query.refetch();
+    },
+  };
+}
+
+/** One receipt: the kind's resolved sections plus its assembled template. */
+export interface PromptReceiptEntry {
+  kind: PromptKind;
+  sections: PromptKindSections;
+  compiled: CompiledPrompt;
+}
+
+export interface PromptReceipts {
+  /** Ready receipts in page order; kinds still resolving are absent. */
+  entries: PromptReceiptEntry[];
+  /** A compiled read or section list is still resolving. */
+  pending: boolean;
+  /** Any receipt read failed: the page banners instead of rendering. */
+  failed: boolean;
+  /** Re-run every receipt read (the error banner's retry). */
+  refetch: () => void;
+}
+
+/**
+ * Load the receipt view: for each kind the viewer's resolved sections and
+ * the compiled assembled template (which carries the automatic-run variant
+ * when overrides exist). Both reads always fire; unlike the sections
+ * baseline there is no admin-only half.
+ */
+export function usePromptReceipts(workspaceSlug: string): PromptReceipts {
+  const client = getAppClient();
+  const compiled = useQueries({
+    queries: PROMPT_KINDS.map((kind) => compiledPromptQueryOptions(client, workspaceSlug, kind)),
+  });
+  const sections = useQueries({
+    queries: PROMPT_KINDS.map((kind) => promptSectionsQueryOptions(client, workspaceSlug, kind, "user")),
+  });
+  const queries = [...compiled, ...sections];
+  const entries: PromptReceiptEntry[] = [];
+  PROMPT_KINDS.forEach((kind, index) => {
+    const template = compiled[index]?.data;
+    const resolved = sections[index]?.data;
+    if (template !== undefined && resolved !== undefined) {
+      entries.push({ kind, sections: resolved, compiled: template });
+    }
+  });
+  return {
+    entries,
+    pending: queries.some((query) => query.isPending),
+    failed: queries.some((query) => query.isError),
+    refetch: () => {
+      for (const query of queries) void query.refetch();
     },
   };
 }
