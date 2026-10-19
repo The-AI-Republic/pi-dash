@@ -40,6 +40,7 @@ export default defineConfig({
       "e2e/parity/drivers/web-toast.test.ts",
       "e2e/parity/drivers/web-new-gantt.test.ts",
       "e2e/parity/drivers/web-new-comments.test.ts",
+      "e2e/parity/drivers/web-new-webhooks.test.ts",
       "e2e/parity/drivers/web-new-notifications-prefs.test.ts",
       "e2e/parity/drivers/web-new-prompts.test.ts",
       "e2e/parity/drivers/web-new-runners.test.ts",
