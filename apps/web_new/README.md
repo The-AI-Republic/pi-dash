@@ -76,6 +76,38 @@ pnpm --filter web_new check   # oxlint + boundaries + headers + dep allowlist
 pnpm --filter web_new size    # size-limit budgets (Quality gates)
 ```
 
+### Coverage of changed lines
+
+Every slice records coverage for the lines it changed. The three new
+packages carry a `test:coverage` script that runs their normal suite with
+the v8 provider, so no extra setup is needed:
+
+```sh
+pnpm --filter web_new test:coverage
+pnpm --filter @pidash/kit test:coverage
+pnpm --filter @pidash/api-client test:coverage
+```
+
+To report only the area a slice touched, narrow the include glob; the
+override replaces the package default. Pass it with a single `--filter`
+argument that pnpm forwards to vitest (a `--` separator would make vitest
+read it as a test-name filter, and the report would stay package-wide):
+
+```sh
+pnpm --filter web_new test:coverage --coverage.include='src/features/<area>/**'
+```
+
+The suite still runs in full; only the reported files narrow. Check
+`coverage/coverage-summary.json` lists just the area's files.
+
+The summary prints to the terminal (`text-summary`); `coverage/` also gets
+`json-summary` and `lcov` for other tools. `coverage/` is gitignored in
+each package, and the plain `test` scripts never collect coverage.
+
+The coverage providers stay in step with vitest: `@vitest/coverage-v8`
+must match the vitest major/minor each package resolves (3.2.x today).
+Bump both together and regenerate `pnpm-lock.yaml` with `pnpm install`.
+
 Budgets: initial JS ≤ 150 KB gzip, initial CSS ≤ 30 KB gzip.
 Raising a budget needs a `process:` comment on NEWFRONT-1 and a human
 decision — never raise one in the same PR that exceeds it.
