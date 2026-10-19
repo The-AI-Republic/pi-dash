@@ -174,10 +174,13 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     expect(handle.textBeforeCaret()).toContain("@ad");
     handle.insertMention({ id: "u-1", name: "Ada" });
     await vi.waitFor(() => expect(editable.querySelector("mention-component")).not.toBeNull());
-    // The pick consumes the query text, so only the mention remains.
+    // The pick consumes the query text, so only the mention remains, and
+    // the editing surface shows the person's name rather than an empty
+    // element (ISS-127).
     expect(editable.innerHTML).not.toContain("@ad");
-    expect(editable.textContent).toBe("Hello ");
+    expect(editable.textContent).toBe("Hello @Ada");
     expect(editable.querySelector("mention-component")?.getAttribute("id")).toBe("u-1");
+    expect(editable.querySelector(".mention-chip")?.textContent).toBe("@Ada");
   });
 
   it("inserts HTML where the caret is, not at the end", async () => {
@@ -247,7 +250,7 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     expect(handle.textBeforeCaret()).toBe("Thanks");
     handle.insertMention({ id: "u-2", name: "Grace" });
     await vi.waitFor(() => expect(editable.querySelector("mention-component")).not.toBeNull());
-    expect(editable.textContent).toBe("Thanks");
+    expect(editable.textContent).toBe("Thanks@Grace");
     expect(editable.querySelector("mention-component")?.getAttribute("entity_identifier")).toBe("u-2");
   });
 

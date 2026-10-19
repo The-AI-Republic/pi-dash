@@ -10,7 +10,7 @@
 // The compatibility fixtures (compat.test.ts) load this same set, so
 // what the tests pin is exactly what the editor runs.
 
-import { MENTION_ENTITY, MENTION_TAG } from "./mention.js";
+import { MENTION_ENTITY, MENTION_TAG, mentionLabel } from "./mention.js";
 
 /** Description editing: paragraphs, headings, lists, code, links. */
 export async function loadDescriptionExtensions() {
@@ -49,6 +49,7 @@ export async function loadIssueDescriptionExtensions() {
         id: { default: null },
         entity_identifier: { default: null },
         entity_name: { default: MENTION_ENTITY },
+        "data-name": { default: null },
       };
     },
     parseHTML() {
@@ -57,12 +58,47 @@ export async function loadIssueDescriptionExtensions() {
     renderHTML({ HTMLAttributes }) {
       return [MENTION_TAG, mergeAttributes(HTMLAttributes)];
     },
+    addNodeView() {
+      // An atom node's inside never renders by itself, so the editable
+      // surface shows the same chip the read surface does: the stored
+      // element stays empty (as every client stores it) and the name is
+      // painted by this view, never serialized (ISS-127).
+      return ({ node }) => {
+        const attrs = node.attrs as {
+          "data-name"?: string | null;
+          entity_identifier?: string | null;
+          id?: string | null;
+        };
+        const dom = document.createElement(MENTION_TAG);
+        dom.setAttribute("contenteditable", "false");
+        for (const [name, value] of Object.entries(attrs)) {
+          if (typeof value === "string" && value !== "") dom.setAttribute(name, value);
+        }
+        const chip = document.createElement("span");
+        chip.className = "mention-chip";
+        chip.textContent = mentionLabel(attrs["data-name"], attrs.entity_identifier ?? attrs.id);
+        dom.append(chip);
+        return { dom };
+      };
+    },
     renderText({ node }) {
-      const attrs = node.attrs as { entity_identifier?: string | null; id?: string | null };
-      return `@${attrs.entity_identifier ?? attrs.id ?? ""}`;
+      const attrs = node.attrs as {
+        "data-name"?: string | null;
+        entity_identifier?: string | null;
+        id?: string | null;
+      };
+      return mentionLabel(attrs["data-name"], attrs.entity_identifier ?? attrs.id);
     },
   });
-  return [...base, Image.configure({ inline: false, allowBase64: false }), MentionNode];
+  // Stored bodies written by earlier clients hold images as an
+  // `image-component` element; the editor reads both spellings so an
+  // old body opens with its pictures (ISS-127).
+  const DescriptionImage = Image.extend({
+    parseHTML() {
+      return [{ tag: "img" }, { tag: "image-component" }];
+    },
+  }).configure({ inline: false, allowBase64: false });
+  return [...base, DescriptionImage, MentionNode];
 }
 
 /** Comment editing: the description set plus inline images (ISS-197). */

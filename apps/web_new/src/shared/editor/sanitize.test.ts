@@ -8,7 +8,11 @@ import {
   hasStoredDescriptionContent,
   isStoredHtmlEmpty,
   isStoredHtmlEmptyIgnoring,
+  mentionDisplayName,
+  renderableHtml,
   sanitizeHtml,
+  STORED_CONTENT_TAGS,
+  storedMentionOf,
   storedTextContent,
 } from "./sanitize.js";
 
@@ -33,6 +37,118 @@ describe("sanitizeHtml", () => {
 
   it("passes empty input through untouched", () => {
     expect(sanitizeHtml("")).toBe("");
+  });
+
+  it("keeps the editor's stored mention and image elements (ISS-127)", () => {
+    const clean = sanitizeHtml(
+      '<p>hi <mention-component id="u-1" entity_identifier="u-1" entity_name="user_mention" data-name="Ada"></mention-component></p>' +
+        '<p><image-component src="https://cdn.test/a.png" alt="shot"></image-component></p>'
+    );
+    expect(clean).toContain("<mention-component");
+    expect(clean).toContain('entity_identifier="u-1"');
+    expect(clean).toContain('data-name="Ada"');
+    expect(clean).toContain("<image-component");
+    expect(clean).toContain('src="https://cdn.test/a.png"');
+  });
+
+  it("keeps the contract's shared content elements", () => {
+    expect(STORED_CONTENT_TAGS).toContain("mention-component");
+    expect(STORED_CONTENT_TAGS).toContain("image-component");
+    const clean = sanitizeHtml('<label for="x">a</label><input type="checkbox" checked="checked">');
+    expect(clean).toContain("<label");
+    expect(clean).toContain("<input");
+  });
+
+  it("still strips scripts and handlers from stored content elements", () => {
+    const clean = sanitizeHtml(
+      '<mention-component id="u-1" onclick="steal()"></mention-component><image-component src="javascript:alert(1)" onerror="x()"></image-component>'
+    );
+    expect(clean).not.toContain("onclick");
+    expect(clean).not.toContain("onerror");
+    expect(clean).not.toContain("javascript:");
+  });
+});
+
+describe("storedMentionOf", () => {
+  function element(html: string): Element {
+    const document = new DOMParser().parseFromString(html, "text/html");
+    const found = document.body.firstElementChild;
+    if (found === null) throw new Error("no element");
+    return found;
+  }
+
+  it("reads the identity and stored name", () => {
+    expect(
+      storedMentionOf(
+        element(
+          '<mention-component id="u-1" entity_identifier="e-1" entity_name="user_mention" data-name="Ada"></mention-component>'
+        )
+      )
+    ).toEqual({ id: "u-1", entityIdentifier: "e-1", entityName: "user_mention", name: "Ada" });
+  });
+
+  it("falls back to the id and the user entity on older bodies", () => {
+    expect(storedMentionOf(element('<mention-component id="u-2"></mention-component>'))).toEqual({
+      id: "u-2",
+      entityIdentifier: "u-2",
+      entityName: "user_mention",
+      name: null,
+    });
+  });
+
+  it("rejects a mention with no identity", () => {
+    expect(storedMentionOf(element("<mention-component></mention-component>"))).toBeNull();
+  });
+});
+
+describe("mentionDisplayName", () => {
+  it("prefers the stored name and falls back to the identifier", () => {
+    expect(mentionDisplayName({ id: "u-1", entityIdentifier: "u-1", entityName: "user_mention", name: "Ada" })).toBe(
+      "Ada"
+    );
+    expect(mentionDisplayName({ id: "u-1", entityIdentifier: "u-1", entityName: "user_mention", name: "  " })).toBe(
+      "u-1"
+    );
+  });
+});
+
+describe("renderableHtml", () => {
+  it("paints a stored mention as a chip naming the person", () => {
+    const html = renderableHtml(
+      '<p>hi <mention-component id="u-1" entity_identifier="u-1" entity_name="user_mention" data-name="Ada"></mention-component></p>'
+    );
+    expect(html).toContain('class="mention-chip"');
+    expect(html).toContain("@Ada");
+    expect(html).not.toContain("mention-component");
+  });
+
+  it("falls back to the identifier when the body holds no name", () => {
+    expect(renderableHtml('<p><mention-component id="u-9"></mention-component></p>')).toContain("@u-9");
+  });
+
+  it("drops a mention with no identity rather than leaving a gap", () => {
+    expect(renderableHtml("<p>a<mention-component></mention-component>b</p>")).toBe("<p>ab</p>");
+  });
+
+  it("turns a stored image component into an image", () => {
+    const html = renderableHtml('<image-component src="https://cdn.test/a.png" alt="shot"></image-component>');
+    expect(html).toContain('<img src="https://cdn.test/a.png" alt="shot">');
+    expect(html).not.toContain("image-component");
+  });
+
+  it("drops an image component with no source", () => {
+    expect(renderableHtml("<p>a<image-component></image-component></p>")).toBe("<p>a</p>");
+  });
+
+  it("keeps ordinary markup and still sanitizes", () => {
+    const html = renderableHtml("<p>ok <strong>x</strong></p><script>alert(1)</script>");
+    expect(html).toContain("<strong>x</strong>");
+    expect(html).not.toContain("<script>");
+  });
+
+  it("returns the sanitized markup where no DOM parser exists", () => {
+    vi.stubGlobal("DOMParser", undefined);
+    expect(renderableHtml("<p>hi</p>")).toBe("<p>hi</p>");
   });
 });
 

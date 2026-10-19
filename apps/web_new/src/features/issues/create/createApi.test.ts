@@ -191,6 +191,8 @@ const NO_MEMBERSHIP: EditMembership = {
   addedCycleId: null,
   addedModuleIds: [],
   removedModuleIds: [],
+  cycleId: null,
+  moduleIds: [],
 };
 
 interface Recorded {
@@ -272,7 +274,14 @@ describe("applyEditMembership", () => {
       client,
       "acme",
       { kind: "draft", draftId: "d-1" },
-      { removedCycleId: CYCLE_A, addedCycleId: CYCLE_B, addedModuleIds: ["m-1"], removedModuleIds: ["m-2"] }
+      {
+        removedCycleId: CYCLE_A,
+        addedCycleId: CYCLE_B,
+        addedModuleIds: ["m-1"],
+        removedModuleIds: ["m-2"],
+        cycleId: CYCLE_B,
+        moduleIds: ["m-1"],
+      }
     );
     expect(calls).toEqual([]);
   });
@@ -284,6 +293,8 @@ describe("applyEditMembership", () => {
       addedCycleId: CYCLE_B,
       addedModuleIds: ["m-1"],
       removedModuleIds: ["m-2"],
+      cycleId: CYCLE_B,
+      moduleIds: ["m-1"],
     });
     expect(calls).toHaveLength(3);
     expect(calls[0]?.method).toBe("DELETE");
@@ -322,6 +333,8 @@ describe("applyEditMembership", () => {
         addedCycleId: CYCLE_B,
         addedModuleIds: [],
         removedModuleIds: [],
+        cycleId: CYCLE_B,
+        moduleIds: [],
       })
     ).rejects.toThrow("bridge gone");
     expect(calls).toEqual(["delete"]);
@@ -351,17 +364,51 @@ describe("writeIssueEdit", () => {
     expect(calls.map((call) => call.method)).toEqual(["POST"]);
   });
 
-  it("PATCHes a draft through its own contract and never its bridges", async () => {
+  it("PATCHes a draft's fields, cycle, modules and estimate, and never its bridges", async () => {
     const { calls, client } = recorder();
     await writeIssueEdit(client, "acme", {
       target: { kind: "draft", draftId: "d-1" },
-      patch: { name: "Draft renamed", git_work_branch: "team/x" },
-      membership: { ...NO_MEMBERSHIP, addedCycleId: CYCLE_B },
+      patch: { name: "Draft renamed", estimate_point: "e-2", git_work_branch: "team/x" },
+      membership: {
+        ...NO_MEMBERSHIP,
+        removedCycleId: CYCLE_A,
+        addedCycleId: CYCLE_B,
+        addedModuleIds: ["m-1"],
+        removedModuleIds: ["m-2"],
+        cycleId: CYCLE_B,
+        moduleIds: ["m-1", "m-3"],
+      },
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.method).toBe("PATCH");
     expect(calls[0]?.path).toContain("/draft-issues/d-1/");
-    expect(calls[0]?.body).toEqual({ name: "Draft renamed" });
+    expect(calls[0]?.body).toEqual({
+      name: "Draft renamed",
+      estimate_point: "e-2",
+      cycle_id: CYCLE_B,
+      module_ids: ["m-1", "m-3"],
+    });
+  });
+
+  it("clears a draft's cycle without touching its modules", async () => {
+    const { calls, client } = recorder();
+    await writeIssueEdit(client, "acme", {
+      target: { kind: "draft", draftId: "d-1" },
+      patch: {},
+      membership: { ...NO_MEMBERSHIP, removedCycleId: CYCLE_A, cycleId: null },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.body).toEqual({ cycle_id: null });
+  });
+
+  it("sends no draft write when only unmapped fields changed", async () => {
+    const { calls, client } = recorder();
+    await writeIssueEdit(client, "acme", {
+      target: { kind: "draft", draftId: "d-1" },
+      patch: { git_work_branch: "" },
+      membership: NO_MEMBERSHIP,
+    });
+    expect(calls).toEqual([]);
   });
 
   it("skips a draft write with no fields", async () => {
@@ -391,6 +438,7 @@ describe("draftInputFromPatch", () => {
         git_work_branch: "team/x",
         assigned_pod_id: "pod",
         agent_executor: "local_runner",
+        estimate_point: "e-1",
       })
     ).toEqual({
       name: "n",
@@ -402,6 +450,7 @@ describe("draftInputFromPatch", () => {
       label_ids: ["l"],
       start_date: "2026-01-01",
       target_date: null,
+      estimate_point: "e-1",
     });
   });
 

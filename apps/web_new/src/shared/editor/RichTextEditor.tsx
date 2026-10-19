@@ -90,7 +90,7 @@ function insertImage(editor: EditorLike, src: string): void {
 function insertMention(editor: EditorLike, target: { id: string; name: string }): void {
   const mention = {
     type: "mention",
-    attrs: { id: target.id, entity_identifier: target.id, entity_name: "user_mention" },
+    attrs: { id: target.id, entity_identifier: target.id, entity_name: "user_mention", "data-name": target.name },
   };
   const range = queryRange(editor);
   // Picking a person replaces the typed `@ad`, as the old editor's

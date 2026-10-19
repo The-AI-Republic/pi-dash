@@ -9,7 +9,14 @@
 
 import { describe, expect, it } from "vitest";
 
-import { MENTION_CONTENT_TAGS, MENTION_ENTITY, MENTION_TAG, mentionAttributes, mentionQueryAt } from "./mention.js";
+import {
+  MENTION_CONTENT_TAGS,
+  MENTION_ENTITY,
+  MENTION_TAG,
+  mentionAttributes,
+  mentionLabel,
+  mentionQueryAt,
+} from "./mention.js";
 
 describe("mentionAttributes", () => {
   it("keeps the entity kind stable for other clients", () => {
@@ -18,7 +25,17 @@ describe("mentionAttributes", () => {
       id: "u-1",
       entity_identifier: "u-1",
       entity_name: "user_mention",
+      "data-name": "Ada",
     });
+  });
+});
+
+describe("mentionLabel", () => {
+  it("shows the stored name, else the identifier", () => {
+    expect(mentionLabel("Ada", "u-1")).toBe("@Ada");
+    expect(mentionLabel(null, "u-1")).toBe("@u-1");
+    expect(mentionLabel("  ", "u-1")).toBe("@u-1");
+    expect(mentionLabel(undefined, undefined)).toBe("@");
   });
 });
 

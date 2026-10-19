@@ -106,6 +106,10 @@ export interface EditMembership {
   addedModuleIds: string[];
   /** Module ids to detach. */
   removedModuleIds: string[];
+  /** The form's complete cycle, for the draft contract (null clears). */
+  cycleId: string | null;
+  /** The form's complete module set, for the draft contract. */
+  moduleIds: string[];
 }
 
 export function editMembership(form: CreateFormState, baseline: EditBaseline): EditMembership {
@@ -116,7 +120,21 @@ export function editMembership(form: CreateFormState, baseline: EditBaseline): E
     addedCycleId: cycleChanged ? form.cycleId : null,
     addedModuleIds: form.moduleIds.filter((id) => !before.moduleIds.includes(id)),
     removedModuleIds: before.moduleIds.filter((id) => !form.moduleIds.includes(id)),
+    cycleId: form.cycleId,
+    moduleIds: [...form.moduleIds],
   };
+}
+
+/** A draft's complete cycle, when the form moved it. */
+export function changedCycleId(membership: EditMembership): string | null | undefined {
+  if (membership.removedCycleId === null && membership.addedCycleId === null) return undefined;
+  return membership.addedCycleId;
+}
+
+/** A draft's complete module set, when any module moved. */
+export function changedModuleIds(membership: EditMembership): string[] | undefined {
+  if (membership.addedModuleIds.length === 0 && membership.removedModuleIds.length === 0) return undefined;
+  return [...membership.moduleIds];
 }
 
 export function hasEditMembership(membership: EditMembership): boolean {

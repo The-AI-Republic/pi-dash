@@ -24,7 +24,18 @@ export function mentionAttributes(target: MentionTarget): Record<string, string>
     id: target.id,
     entity_identifier: target.id,
     entity_name: MENTION_ENTITY,
+    // The display name rides along so read surfaces can show the
+    // person without a member lookup (ISS-127); older bodies carry no
+    // name and fall back to the identifier.
+    "data-name": target.name,
   };
+}
+
+/** The text a stored mention shows: its stored name, else its identifier. */
+export function mentionLabel(name: string | null | undefined, identifier: string | null | undefined): string {
+  const stored = name?.trim() ?? "";
+  if (stored !== "") return `@${stored}`;
+  return `@${identifier ?? ""}`;
 }
 
 /** The open @-query before the caret, or null when none is active. */

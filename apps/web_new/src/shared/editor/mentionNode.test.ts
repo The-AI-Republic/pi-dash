@@ -47,15 +47,43 @@ describe("MentionNode", () => {
     expect(rendered).toEqual([MENTION_TAG, attributes]);
   });
 
+  it("paints the person's name in a chip on the editing surface", async () => {
+    const node = await loadMentionNode();
+    const view = node.config.addNodeView?.call({ options: {}, editor: {} } as never);
+    if (typeof view !== "function") throw new Error("the mention node has no view");
+    const rendered = view({
+      node: { attrs: mentionAttributes({ id: "u-1", name: "Ada" }) },
+      editor: {},
+      getPos: () => 0,
+      view: {},
+    } as never) as unknown as { dom: HTMLElement };
+    expect(rendered.dom.tagName.toLowerCase()).toBe(MENTION_TAG);
+    expect(rendered.dom.textContent).toBe("@Ada");
+    expect(rendered.dom.getAttribute("entity_identifier")).toBe("u-1");
+  });
+
+  it("falls back to the identifier in the chip on older bodies", async () => {
+    const node = await loadMentionNode();
+    const view = node.config.addNodeView?.call({ options: {}, editor: {} } as never);
+    if (typeof view !== "function") throw new Error("the mention node has no view");
+    const rendered = view({
+      node: { attrs: mentionAttributes({ id: "u-2", name: "" }) },
+      editor: {},
+      getPos: () => 0,
+      view: {},
+    } as never) as unknown as { dom: HTMLElement };
+    expect(rendered.dom.textContent).toBe("@u-2");
+  });
+
   it("renders a readable @identifier as its text", async () => {
     const node = await loadMentionNode();
     const text = node.config.renderText?.call(
       {} as never,
       {
-        node: { attrs: { entity_identifier: "u-1" } },
+        node: { attrs: { entity_identifier: "u-1", "data-name": "Ada" } },
       } as never
     );
-    expect(text).toBe("@u-1");
+    expect(text).toBe("@Ada");
   });
 
   it("falls back to the plain id when the identifier is missing", async () => {

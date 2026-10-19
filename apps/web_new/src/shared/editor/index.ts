@@ -15,6 +15,11 @@ export {
   hasStoredDescriptionContent,
   isStoredHtmlEmpty,
   isStoredHtmlEmptyIgnoring,
+  mentionDisplayName,
+  renderableHtml,
   sanitizeHtml,
+  STORED_CONTENT_TAGS,
+  storedMentionOf,
   storedTextContent,
 } from "./sanitize.js";
+export type { StoredMention } from "./sanitize.js";

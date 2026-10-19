@@ -37,7 +37,7 @@ import {
 import { getAppClient } from "../../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../../core/query/client.js";
 import { TITLE_GENERATION_TIMEOUT_MS, type CreateMembership } from "./createForm.js";
-import type { EditMembership } from "./editForm.js";
+import { changedCycleId, changedModuleIds, type EditMembership } from "./editForm.js";
 
 /** Toast copy after an inline draft save. */
 export const DRAFT_SAVED_INLINE_TITLE = "Draft saved";
@@ -221,7 +221,8 @@ export async function applyEditMembership(
   target: EditTarget,
   membership: EditMembership
 ): Promise<void> {
-  // Drafts carry no bridges: their memberships promote with them.
+  // Drafts carry their memberships on the draft itself (see
+  // writeIssueEdit); no bridge call exists for them.
   if (target.kind === "draft") return;
   const { projectId, issueId } = target;
   if (membership.removedCycleId !== null) {
@@ -242,10 +243,12 @@ export async function applyEditMembership(
 export async function writeIssueEdit(client: ApiClient, workspaceSlug: string, input: EditWriteInput): Promise<void> {
   const { target } = input;
   if (target.kind === "draft") {
-    // The draft contract carries the description but not the cycle or
-    // module picks: those belong to the project the draft promotes into.
-    if (Object.keys(input.patch).length > 0) {
-      await updateDraftIssue(client, workspaceSlug, target.draftId, draftInputFromPatch(input.patch));
+    // A draft stores cycle, module and estimate picks on itself; the
+    // update serializer replaces both sets, so the complete values ride
+    // along with the changed fields (ISS-124/ISS-126).
+    const draft = draftInputFromPatch(input.patch, input.membership);
+    if (Object.keys(draft).length > 0) {
+      await updateDraftIssue(client, workspaceSlug, target.draftId, draft);
     }
     return;
   }
@@ -265,7 +268,7 @@ export function useWriteIssueEdit(workspaceSlug: string) {
  * The draft contract's slice of an issue patch: drafts hold the fields
  * the detail form shows, not the bridges, branch or execution target.
  */
-export function draftInputFromPatch(patch: IssuePatch): DraftIssueCreateInput {
+export function draftInputFromPatch(patch: IssuePatch, membership?: EditMembership | undefined): DraftIssueCreateInput {
   const draft: DraftIssueCreateInput = {};
   if (patch.name !== undefined) draft.name = patch.name;
   if (patch.description_html !== undefined) draft.description_html = patch.description_html;
@@ -276,6 +279,13 @@ export function draftInputFromPatch(patch: IssuePatch): DraftIssueCreateInput {
   if (patch.label_ids !== undefined) draft.label_ids = patch.label_ids;
   if (patch.start_date !== undefined) draft.start_date = patch.start_date;
   if (patch.target_date !== undefined) draft.target_date = patch.target_date;
+  if (patch.estimate_point !== undefined) draft.estimate_point = patch.estimate_point;
+  if (membership !== undefined) {
+    const cycleId = changedCycleId(membership);
+    if (cycleId !== undefined) draft.cycle_id = cycleId;
+    const moduleIds = changedModuleIds(membership);
+    if (moduleIds !== undefined) draft.module_ids = moduleIds;
+  }
   return draft;
 }
 

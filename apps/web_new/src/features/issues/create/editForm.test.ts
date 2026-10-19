@@ -16,6 +16,8 @@ import {
   baselineFor,
   buildEditPayload,
   buildPublishInput,
+  changedCycleId,
+  changedModuleIds,
   editableFromDraft,
   editableFromIssue,
   editMembership,
@@ -242,8 +244,12 @@ describe("membership diffing", () => {
       addedCycleId: null,
       addedModuleIds: [],
       removedModuleIds: [],
+      cycleId: CYCLE,
+      moduleIds: [MODULE_A],
     });
     expect(hasEditMembership(membership)).toBe(false);
+    expect(changedCycleId(membership)).toBeUndefined();
+    expect(changedModuleIds(membership)).toBeUndefined();
   });
 
   it("swaps one cycle for another and diffs modules by id", () => {
@@ -256,7 +262,13 @@ describe("membership diffing", () => {
       addedCycleId: OTHER_CYCLE,
       addedModuleIds: ["m-new"],
       removedModuleIds: [MODULE_A],
+      cycleId: OTHER_CYCLE,
+      moduleIds: [MODULE_B, "m-new"],
     });
+    const membership = editMembership(form, baseline);
+    // A draft stores the complete set, not the diff (ISS-124/ISS-126).
+    expect(changedCycleId(membership)).toBe(OTHER_CYCLE);
+    expect(changedModuleIds(membership)).toEqual([MODULE_B, "m-new"]);
   });
 
   it("clears a cycle without adding one", () => {
@@ -268,7 +280,10 @@ describe("membership diffing", () => {
       addedCycleId: null,
       addedModuleIds: [],
       removedModuleIds: [],
+      cycleId: null,
+      moduleIds: [MODULE_A],
     });
+    expect(changedCycleId(editMembership(form, baseline))).toBeNull();
     expect(hasEditMembership(editMembership(form, baseline))).toBe(true);
   });
 

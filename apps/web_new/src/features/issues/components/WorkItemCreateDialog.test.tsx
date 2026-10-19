@@ -1803,6 +1803,38 @@ describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
     expect(h.calls.some((call) => call.url.includes("/draft-issues/draft-1/"))).toBe(true);
     expect(h.calls.some((call) => call.url.includes("/cycle-issues/"))).toBe(false);
   });
+
+  it("sends a draft's cycle and module changes on the draft itself (ISS-124/126)", async () => {
+    const user = userEvent.setup();
+    const h = setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      {
+        edit: {
+          kind: "draft",
+          id: "draft-1",
+          projectId: PROJECT_ATLAS,
+          snapshot: editRow({ name: "Draft title", cycle_id: PARENT_ID, module_ids: [] }),
+          onChanged: vi.fn(),
+        },
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Draft title"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sprint 4" })).toBeInTheDocument());
+    // Clear the cycle and add a module: the draft serializer replaces
+    // both sets, so the PATCH carries the complete values.
+    await user.click(screen.getByRole("button", { name: "Sprint 4" }));
+    await user.click(await screen.findByRole("option", { name: "No cycle" }));
+    await user.click(screen.getByRole("button", { name: "Modules" }));
+    await user.click((await screen.findAllByRole("option", { name: "Checkout" }))[0]!);
+    save();
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    const draftPatch = h.calls.find((call) => call.method === "PATCH" && call.url.includes("/draft-issues/draft-1/"));
+    expect(draftPatch?.body).toMatchObject({ cycle_id: null });
+    expect((draftPatch?.body as { module_ids?: string[] } | undefined)?.module_ids).toHaveLength(1);
+    // Drafts never touch bridge endpoints.
+    expect(h.calls.some((call) => call.url.includes("/cycle-issues/"))).toBe(false);
+    expect(h.calls.some((call) => call.url.includes(`/issues/${EDIT_ID}/modules/`))).toBe(false);
+  });
 });
 
 describe("WorkItemCreateDialog context prefill (ISS-124)", () => {
