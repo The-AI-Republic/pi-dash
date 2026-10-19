@@ -195,3 +195,78 @@ export {
 } from "./webhooks/api.js";
 export type { UpdateWebhookVariables } from "./webhooks/api.js";
 export type { WorkspaceWebhookDetailStatus, WorkspaceWebhookReadState } from "./lib/webhookRoute.js";
+export {
+  GITLAB_PROVIDER_KEY,
+  GITLAB_PROVIDER_NAME,
+  GITHUB_PROVIDER_NAME,
+  accountIdentity,
+  canDisconnectGithub,
+  canSubmitToken,
+  gitProviderAccountsQueryOptions,
+  githubIdentity,
+  githubIntegrationQueryOptions,
+  integrationsKeys,
+  selectActiveGitlabAccount,
+  useConnectGithub,
+  useDisconnectGithub,
+  useDisconnectGitlab,
+  useRegisterGitlab,
+} from "./integrations/integrationQueries.js";
+export type { RegisterGitlabInput } from "./integrations/integrationQueries.js";
+export {
+  GITHUB_CONNECTED_BADGE,
+  GITHUB_CONNECTED_HINT,
+  GITHUB_CONNECTED_NOTICE,
+  GITHUB_CONNECTED_NOTICE_BODY,
+  GITHUB_CONNECTED_STATUS_PREFIX,
+  GITHUB_CONNECT_FAILED_BODY,
+  GITHUB_CONNECT_FAILED_NOTICE,
+  GITHUB_DISCONNECTED_NOTICE,
+  GITHUB_DISCONNECTED_NOTICE_BODY,
+  GITHUB_DISCONNECT_FAILED_BODY,
+  GITHUB_DISCONNECT_FAILED_NOTICE,
+  GITHUB_EXPLAINER,
+  GITHUB_HELP_HREF,
+  GITHUB_HELP_LABEL,
+  GITHUB_LOADING_STATUS,
+  GITHUB_READ_FAILED_STATUS,
+  GITHUB_RETRY_LABEL,
+  GITHUB_TOKEN_LABEL,
+  GITHUB_TOKEN_PLACEHOLDER,
+  GithubCard,
+} from "./integrations/GithubCard.js";
+export type { GithubCardProps } from "./integrations/GithubCard.js";
+export {
+  GITLAB_CONNECTED_BADGE,
+  GITLAB_CONNECTED_HINT,
+  GITLAB_CONNECTED_NOTICE,
+  GITLAB_CONNECTED_NOTICE_BODY,
+  GITLAB_CONNECTED_STATUS_PREFIX,
+  GITLAB_CONNECT_FAILED_BODY,
+  GITLAB_CONNECT_FAILED_NOTICE,
+  GITLAB_DISCONNECTED_NOTICE,
+  GITLAB_DISCONNECTED_NOTICE_BODY,
+  GITLAB_DISCONNECT_FAILED_BODY,
+  GITLAB_DISCONNECT_FAILED_NOTICE,
+  GITLAB_EXPLAINER,
+  GITLAB_HOST_LABEL,
+  GITLAB_HOST_PLACEHOLDER,
+  GITLAB_LOADING_STATUS,
+  GITLAB_READ_FAILED_STATUS,
+  GITLAB_RETRY_LABEL,
+  GITLAB_TOKEN_HINT,
+  GITLAB_TOKEN_LABEL,
+  GITLAB_TOKEN_PLACEHOLDER,
+  GitlabCard,
+  gitlabConnectedStatus,
+} from "./integrations/GitlabCard.js";
+export type { GitlabCardProps } from "./integrations/GitlabCard.js";
+export {
+  INTEGRATIONS_BANNER,
+  INTEGRATIONS_HEADING,
+  IntegrationsPage,
+  IntegrationsScreen,
+} from "./integrations/IntegrationsPage.js";
+export type { IntegrationsPageProps } from "./integrations/IntegrationsPage.js";
+export { ProviderCard } from "./integrations/ProviderCard.js";
+export type { ProviderCardProps } from "./integrations/ProviderCard.js";

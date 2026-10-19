@@ -158,6 +158,12 @@ export function settingsTransport(options: {
         updated_at: "2024-02-03T04:05:06Z",
       });
     }
+    if (url.endsWith("/integrations/github/")) {
+      return ok(url, { connected: false });
+    }
+    if (url.endsWith("/integrations/git/accounts/")) {
+      return ok(url, { accounts: [] });
+    }
     return { status: 404, url, headers: { get: () => null }, text: async () => "{}" };
   };
 }
