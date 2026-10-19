@@ -819,9 +819,7 @@ describe("project issues screen", () => {
 
   it("mounts the calendar renderer for a stored calendar layout", async () => {
     renderScreen({}, 1, [issueRow({ target_date: "2026-10-15" })], {
-      layout: "calendar",
-      group_by: null,
-      order_by: "sort_order",
+      displayFilters: { layout: "calendar", group_by: null, order_by: "sort_order" },
     });
 
     expect(await screen.findByTestId("issues-calendar")).toBeInTheDocument();
@@ -829,13 +827,10 @@ describe("project issues screen", () => {
   });
 
   it("renders an archived project's calendar without edit controls", async () => {
-    renderScreen(
-      {},
-      1,
-      [issueRow({ target_date: "2026-10-15" })],
-      { layout: "calendar", group_by: null, order_by: "sort_order" },
-      [{ ...projectSeed(), archived_at: "2026-10-01T00:00:00Z" }]
-    );
+    renderScreen({}, 1, [issueRow({ target_date: "2026-10-15" })], {
+      displayFilters: { layout: "calendar", group_by: null, order_by: "sort_order" },
+      projects: [{ ...projectSeed(), archived_at: "2026-10-01T00:00:00Z" }],
+    });
 
     expect(await screen.findByTestId("issues-calendar")).toBeInTheDocument();
     expect(screen.queryByText("Add work item")).not.toBeInTheDocument();
