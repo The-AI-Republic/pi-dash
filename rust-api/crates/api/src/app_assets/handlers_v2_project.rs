@@ -1458,18 +1458,22 @@ async fn post_bulk_asset(
     no_content()
 }
 
-/// Workspace id for bulk scoping (the slug already passed the gate; a
-/// missing row here is unreachable through Django, hence the 500).
+/// Workspace id for bulk scoping. Django reaches the branch updates through
+/// an unscoped `workspace__slug` join (`v2.py:645` plus the `assets.update`
+/// calls at `:658-686`) — a cross-relation lookup does not apply the
+/// workspace soft-delete manager — so this lookup is unscoped too: a
+/// soft-deleted workspace still resolves (PIDASHCONV-1154). The slug already
+/// passed the gate, which joins workspaces by slug unscoped, so the missing
+/// row this maps to a 500 stays unreachable through Django.
 // `Response` is axum's handle type, so boxing it buys no runtime win;
 // the crate-wide `Result<_, Response>` helper shape stays as-is.
 #[allow(clippy::result_large_err)]
 async fn workspace_id_of(pool: &sqlx::PgPool, slug: &str) -> Result<Uuid, Response> {
-    let row: Option<(Uuid,)> =
-        sqlx::query_as(r#"SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
+    let row: Option<(Uuid,)> = sqlx::query_as(r#"SELECT id FROM workspaces WHERE slug = $1"#)
+        .bind(slug)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| server_error())?;
     row.map(|(id,)| id).ok_or_else(server_error)
 }
 

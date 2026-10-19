@@ -228,3 +228,55 @@ def test_bulk_roles(org):
         json={"asset_ids": [first]},
     )
     assert r.status_code == 401
+
+
+def test_bulk_links_on_soft_deleted_workspace(org):
+    """PIDASHCONV-1154: the bulk path never scopes the joined workspaces
+    row by ``deleted_at`` — a ``workspace__slug`` cross-relation lookup
+    does not apply the workspace soft-delete manager, and neither does the
+    permission probe. So a bulk link on a soft-deleted workspace (rows
+    survive, memberships still active) applies and answers 204 in Django.
+    Rust's ``workspace_id_of`` added ``AND deleted_at IS NULL`` and 500'd
+    before resolving the id, so this pins the Django behavior."""
+    asset_id = org.request(
+        "POST", proj_base(org), "admin", json=proj_payload(name="sd.png")
+    ).json()["asset_id"]
+    seed_a.mark_uploaded(org.conn, asset_id)
+    # A real issue row: ``issue_id`` is a FK, so a bogus entity id would
+    # trip an ``IntegrityError`` that Django swallows (204, nothing
+    # written) — masking the behavior this test pins.
+    state_id = str(uuid.uuid4())
+    org.conn.execute(
+        """INSERT INTO states (id, workspace_id, project_id, name, description,
+            color, slug, sequence, "group", is_triage, "default", created_at,
+            updated_at)
+           VALUES (%s,%s,%s,'Backlog','','#ff0000','',65535,'backlog',false,
+            false,now(),now())""",
+        (state_id, org.workspace["id"], org.project["id"]),
+    )
+    entity_id = str(uuid.uuid4())
+    org.conn.execute(
+        """INSERT INTO issues (id, name, description_json, priority, sequence_id,
+            project_id, workspace_id, state_id, description_html, sort_order,
+            is_draft, git_work_branch, workpad, complexity_score, created_at,
+            updated_at, created_by_id)
+           VALUES (%s,'SD issue','{}','none',1,%s,%s,%s,'<p></p>',65535,false,
+            '','',0,now(),now(),%s)""",
+        (entity_id, org.project["id"], org.workspace["id"], state_id,
+         org.admin["id"]),
+    )
+    org.conn.execute(
+        "UPDATE workspaces SET deleted_at = now() WHERE id = %s",
+        (org.workspace["id"],),
+    )
+    r = org.request(
+        "POST", bulk_path(org, entity_id), "member",
+        json={"asset_ids": [asset_id]},
+    )
+    assert r.status_code == 204, r.text
+    row = org.conn.execute(
+        "SELECT issue_id, project_id FROM file_assets WHERE id = %s",
+        (asset_id,),
+    ).fetchone()
+    assert str(row[0]) == entity_id
+    assert str(row[1]) == org.project["id"]
