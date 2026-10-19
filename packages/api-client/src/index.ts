@@ -4,12 +4,14 @@
 // @pidash/api-client: fetch client, endpoint contracts, contract-test harness.
 export {
   SignedUserAsset,
+  USER_ASSET_TYPES,
   deleteLegacyWorkspaceFileAsset,
   deleteWorkspaceLogoAsset,
+  uploadUserAsset,
   uploadUserAvatar,
   uploadWorkspaceLogo,
 } from "./contracts/assets.js";
-export type { ByteUpload, ByteUploadResponse } from "./contracts/assets.js";
+export type { ByteUpload, ByteUploadResponse, UserAssetType } from "./contracts/assets.js";
 export { ApiError, isApiError, isRetryable } from "./errors.js";
 export type { ApiErrorCode, ApiErrorFields, ApiErrorInit } from "./errors.js";
 export { ApiClient, createClient, CSRF_ENDPOINT, CSRF_HEADER } from "./client.js";
@@ -686,13 +688,48 @@ export {
 } from "./contracts/pages.js";
 export type { PagePatch } from "./contracts/pages.js";
 export {
+  ESTIMATE_TYPES,
   ESTIMATE_SYSTEM_TIME,
   Estimate,
   EstimateList,
   EstimatePoint,
+  createEstimate,
+  deleteEstimate,
   listProjectEstimates,
   selectActiveEstimate,
 } from "./contracts/estimates.js";
+export type { EstimateCreateInput, EstimatePointInput } from "./contracts/estimates.js";
+export {
+  REPOSITORY_CLONE_AUTH_MODES,
+  REPOSITORY_PROVIDERS,
+  BoundRepository,
+  ProjectRepositoryBinding,
+  ProjectRepositoryBound,
+  ProjectRepositoryStatus,
+  ProjectRepositoryUnbound,
+  bindProjectRepository,
+  getProjectRepository,
+  setProjectRepositorySync,
+  unbindProjectRepository,
+} from "./contracts/project-repository.js";
+export type { RepositoryBindInput } from "./contracts/project-repository.js";
+export {
+  DEPLOY_BOARD_LAYOUTS,
+  DeployBoardProject,
+  DeployBoardViewProps,
+  DeployBoardWorkspace,
+  ProjectDeployBoard,
+  ProjectDeployBoardEmpty,
+  ProjectDeployBoardStatus,
+  createProjectDeployBoard,
+  deleteProjectDeployBoard,
+  getProjectDeployBoard,
+  updateProjectDeployBoard,
+} from "./contracts/project-deploy-boards.js";
+export type {
+  ProjectDeployBoardCreateInput,
+  ProjectDeployBoardUpdateInput,
+} from "./contracts/project-deploy-boards.js";
 export {
   AdminWorkspace,
   AdminWorkspaceListResponse,

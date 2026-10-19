@@ -1906,12 +1906,19 @@ describe("thin contextual palette contracts", () => {
     const estimates = [
       {
         id: UUID,
+        workspace: UUID2,
+        project: UUID2,
         name: "Fibonacci",
+        description: "",
         type: "points",
         last_used: true,
+        created_at: "2026-10-15T00:00:00Z",
+        updated_at: "2026-10-15T00:00:00Z",
+        created_by: null,
+        updated_by: null,
         points: [
-          { id: UUID2, key: 1, value: "1" },
-          { id: UUID, key: 2, value: "2" },
+          { id: UUID2, key: 1, value: "1", description: "" },
+          { id: UUID, key: 2, value: "2", description: "" },
         ],
       },
     ];
