@@ -340,15 +340,44 @@ export class WebNewDriver implements ParityDriver {
     return this.page.locator('section[aria-label="Sign in"], section[aria-label="Sign up"]').first();
   }
 
+  /**
+   * The card in a step a scenario can drive. While the instance config is
+   * in flight the card paints a loading skeleton under the same
+   * aria-label, with no form and no submit; a click aimed at it waits for
+   * a button that only appears later, so every settle waits for a painted
+   * control as well as the section.
+   */
+  private paintedCard() {
+    return this.page
+      .locator('section[aria-label="Sign in"], section[aria-label="Sign up"]')
+      .filter({ hasNotText: /Loading (sign-in|sign-up) options/ })
+      .first();
+  }
+
   /** Settle on the card in any step (or the no-methods notice), reloading once on a blank paint. */
   private async waitForCard(): Promise<void> {
-    const card = this.cardSection();
+    const card = this.paintedCard();
     try {
       await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
     } catch {
       await this.page.reload();
       await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
     }
+  }
+
+  /** The card's own "Could not load sign-in" state, told apart from a painted form. */
+  private async instanceConfigFailed(): Promise<boolean> {
+    const notice = this.page.getByText(/Could not load sign-in\.|Could not load sign-up\./);
+    return (await notice.count()) > 0;
+  }
+
+  /** Press the failure card's own retry and wait for the form to replace it. */
+  private async retryInstanceConfig(timeoutMs: number): Promise<void> {
+    const retry = this.page
+      .locator('section[aria-label="Sign in"], section[aria-label="Sign up"]')
+      .getByRole("button", { name: "Try again" });
+    await retry.click({ timeout: Math.min(timeoutMs, WebNewDriver.WAIT_MS) });
+    await this.paintedCard().waitFor({ timeout: timeoutMs });
   }
 
   /** True once the password or code step shows (the email check round-tripped). */
@@ -385,28 +414,30 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async signInWithPassword(email: string, password: string): Promise<void> {
-    // Shared-stack flake cover: a swallowed submit or a throttled minute
-    // fails one pass, so the whole flow retries with quiet backoff. Each
-    // pass is capped by what is left of the test's own budget: a loaded
-    // stack can otherwise spend six minutes inside one pass and burn the
-    // timeout before a retry ever runs, which reads as an app failure.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const budget = Math.min(150_000, this.remainingTestMs() - 20_000);
-      if (budget < 40_000) break;
+    // Shared-stack flake cover: a swallowed submit fails one pass, so the
+    // flow retries with a short backoff. Each pass is capped by what is
+    // left of the test's own budget, so a slow pass cannot burn the
+    // timeout before a retry runs.
+    const failures: string[] = [];
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const budget = Math.min(110_000, this.remainingTestMs() - 40_000);
+      if (budget < 35_000) break;
       try {
         await this.signInAttempt(email, password, budget);
         return;
-      } catch {
-        if (attempt === 2) break;
+      } catch (error) {
+        failures.push(error instanceof Error ? error.message : String(error));
+        if (attempt === 3) break;
         await this.page.waitForTimeout(8_000);
       }
     }
-    const lastChance = Math.min(90_000, this.remainingTestMs() - 10_000);
-    if (lastChance < 15_000) throw new Error("[parity] sign-in had no test budget left.");
+    const lastChance = Math.min(70_000, this.remainingTestMs() - 15_000);
+    if (lastChance < 20_000) throw new Error("[parity] sign-in had no test budget left.");
     try {
       await this.signInAttempt(email, password, lastChance);
-    } catch {
-      throw new Error("[parity] sign-in never left the card.");
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error));
+      throw new Error(`[parity] sign-in never left the card: ${failures.join(" | ")}`);
     }
   }
 
@@ -424,12 +455,26 @@ export class WebNewDriver implements ParityDriver {
     const page = this.page;
     const deadline = Date.now() + budgetMs;
     const left = (cap: number): number => Math.max(5_000, Math.min(cap, deadline - Date.now()));
+    // One stage that does not paint inside this cap is a stalled pass, not
+    // a slow one: it fails there so the caller's retry starts from a clean
+    // card, instead of the pass spending everything left on one wait.
+    const stage = 45_000;
+    const at = async <T>(name: string, run: () => Promise<T>): Promise<T> => {
+      try {
+        return await run();
+      } catch (error) {
+        const detail = (error instanceof Error ? error.message : String(error)).split("\n")[0];
+        throw new Error(`${name}: ${detail ?? "no detail"}`);
+      }
+    };
     // Stay on the entry when already there: callers stage return paths and
     // prefill in the entry query, and a fresh navigation would wipe them.
     if (new URL(page.url()).pathname !== "/") await page.goto("/");
     // Settle for either entry state: a retry after a partial pass lands
     // already signed in (the session cookie survived), so the card never
     // renders; signed-in visitors are redirected away from / by the guard.
+    // The painted card, not the loading skeleton, is the signal: the
+    // skeleton shares the section's aria-label and carries no form.
     const settleBy = Date.now() + left(60_000);
     let settled: "signed-in" | "card" | null = null;
     while (Date.now() < settleBy) {
@@ -437,7 +482,7 @@ export class WebNewDriver implements ParityDriver {
         settled = "signed-in";
         break;
       }
-      if ((await this.cardSection().count()) > 0) {
+      if ((await this.paintedCard().count()) > 0) {
         settled = "card";
         break;
       }
@@ -448,12 +493,19 @@ export class WebNewDriver implements ParityDriver {
       // A cold or heavily loaded dev server can spend the whole settle
       // window compiling the entry without painting the card. Treat it as
       // a slow paint, not a failed card: one bounded wait, then give up.
-      await this.cardSection().waitFor({ timeout: left(WebNewDriver.WAIT_MS) });
+      await at("entry card", () => this.paintedCard().waitFor({ timeout: left(stage) }));
     }
-    await this.submitAuthEmail(email, left(190_000));
+    if (await this.instanceConfigFailed()) {
+      // The config fetch failed once; its card offers only a retry, and a
+      // pass that leaves it there would sit out its whole budget. Entries
+      // travel and data settles, so one bounded retry is the recovery.
+      await at("entry retry", () => this.retryInstanceConfig(left(stage)));
+      if (await this.instanceConfigFailed()) throw new Error("entry card: instance config stayed failed");
+    }
+    await at("email step", () => this.submitAuthEmail(email, left(stage)));
     const passwordField = page.getByPlaceholder("Enter password");
-    await passwordField.waitFor({ timeout: left(WebNewDriver.WAIT_MS) });
-    await passwordField.fill(password);
+    await at("password step", () => passwordField.waitFor({ timeout: left(stage) }));
+    await at("password fill", () => passwordField.fill(password, { timeout: left(stage) }));
     const passwordForm = page.locator("form", { has: passwordField });
     // Success navigates away (location.assign to the landing); the card
     // leaving is only half the story — on a slow API the mutation can
@@ -466,23 +518,27 @@ export class WebNewDriver implements ParityDriver {
     await page.evaluate(() => {
       (globalThis as { __paritySignInMark?: boolean }).__paritySignInMark = true;
     });
-    await Promise.all([
-      this.cardSection().waitFor({ state: "detached", timeout: left(90_000) }),
-      this.cardSubmit(passwordForm).click(),
-    ]);
-    const assigned = Date.now() + left(90_000);
+    await at("password submit", () =>
+      Promise.all([
+        this.cardSection().waitFor({ state: "detached", timeout: left(stage) }),
+        this.cardSubmit(passwordForm).click({ timeout: left(stage) }),
+      ])
+    );
+    const assigned = Date.now() + left(60_000);
     for (;;) {
       if (new URL(page.url()).pathname !== "/") return;
       const marked = await page
         .evaluate(() => (globalThis as { __paritySignInMark?: boolean }).__paritySignInMark === true)
         .catch(() => false);
       if (!marked) break;
-      if (Date.now() > assigned) throw new Error("[parity] sign-in submit never navigated.");
+      if (Date.now() > assigned) throw new Error("navigation: sign-in submit never navigated");
       await page.waitForTimeout(1_000);
     }
-    await page.waitForFunction(() => new URL(globalThis.location.href).pathname !== "/", null, {
-      timeout: left(60_000),
-    });
+    await at("landing", () =>
+      page.waitForFunction(() => new URL(globalThis.location.href).pathname !== "/", null, {
+        timeout: left(60_000),
+      })
+    );
   }
 
   async openProjectIssues(workspaceSlug: string, projectId: string): Promise<void> {
@@ -888,14 +944,18 @@ export class WebNewDriver implements ParityDriver {
     const field = this.authEmailField();
     const form = this.page.locator("form", { has: field });
     // A saturated throttle minute answers the check with a rate-limit
-    // banner instead of advancing; wait out the window and resubmit.
+    // banner instead of advancing; the bucket refills on the minute, so a
+    // short wait past the boundary and a resubmit are enough — a full
+    // 60s sleep would eat most of this pass's budget.
     for (let attempt = 1; ; attempt += 1) {
-      await field.fill(email);
-      await this.cardSubmit(form).click();
+      await field.fill(email, { timeout: Math.max(5_000, Math.min(WebNewDriver.WAIT_MS, deadline - Date.now())) });
+      await this.cardSubmit(form).click({
+        timeout: Math.max(5_000, Math.min(WebNewDriver.WAIT_MS, deadline - Date.now())),
+      });
       if (await this.nextAuthStepShown(Math.max(5_000, Math.min(30_000, deadline - Date.now())))) return;
       const banner = await this.authBanner();
-      if (banner !== null && /rate limit/i.test(banner) && attempt < 3 && deadline - Date.now() > 70_000) {
-        await this.page.waitForTimeout(65_000);
+      if (banner !== null && /rate limit/i.test(banner) && attempt < 3 && deadline - Date.now() > 30_000) {
+        await this.page.waitForTimeout(15_000);
         continue;
       }
       if (await this.nextAuthStepShown(Math.max(5_000, Math.min(60_000, deadline - Date.now())))) return;
