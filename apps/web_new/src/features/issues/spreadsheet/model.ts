@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Spreadsheet column model (parity/specs/issues.md §3, ISS-015/016/018).
-// Pure helpers: the fixed column order, display-property and project
-// feature gating, sort menu metadata, and the persisted local sort key
-// the header marker reads. The table renders what these functions
-// select; cells own their own writers.
+// Pure helpers plus the persisted sort pair: the fixed column order,
+// display-property and project feature gating, sort menu metadata, and
+// the guarded read/write of the local sort key the header marker uses.
+// The table renders what these functions select; cells own their own
+// writers.
 
 import { isPropertyShown, visiblePropertyKeys, type DisplayFeatureFlags } from "../display/matrix.js";
 import type { IssueListItem } from "@pidash/api-client";
@@ -217,6 +218,39 @@ export function parseStoredSheetSort(raw: string | null): SheetSortState | null 
 /** Serialize the local sort pair for storage. */
 export function serializeSheetSort(state: SheetSortState | null): string {
   return state === null ? "" : JSON.stringify(state);
+}
+
+/**
+ * Browser profile storage, or null when the host has none. Test runners
+ * and the desktop shell can reach this module without a DOM storage
+ * backend, and some Node versions expose a `localStorage` global that
+ * throws until a file backend is configured, so the lookup is guarded
+ * rather than assumed.
+ */
+function sheetSortStorage(): Storage | null {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The remembered header sort, or null when absent or unreadable. */
+export function readStoredSheetSort(): SheetSortState | null {
+  try {
+    return parseStoredSheetSort(sheetSortStorage()?.getItem(SHEET_SORT_STORAGE_KEY) ?? null);
+  } catch {
+    return null;
+  }
+}
+
+/** Remember the header sort; a missing or unwritable store is ignored. */
+export function writeStoredSheetSort(state: SheetSortState | null): void {
+  try {
+    sheetSortStorage()?.setItem(SHEET_SORT_STORAGE_KEY, serializeSheetSort(state));
+  } catch {
+    // Persistence is best-effort: the in-memory pair still drives the grid.
+  }
 }
 
 /** Cell grid coordinates used by keyboard navigation (ISS-020). */

@@ -26,17 +26,16 @@ import { sheetSubIssuesQueryOptions } from "./subIssues.js";
 import {
   isSheetRowReadOnly,
   moveSheetFocus,
-  parseStoredSheetSort,
+  readStoredSheetSort,
   resolveSheetSort,
   SHEET_DEFAULT_ORDER,
   SHEET_SORT_ASCENDING_LABEL,
   SHEET_SORT_CLEAR_LABEL,
   SHEET_SORT_DESCENDING_LABEL,
-  SHEET_SORT_STORAGE_KEY,
-  serializeSheetSort,
   sheetFirstCellId,
   sheetSortOrder,
   visibleSheetColumns,
+  writeStoredSheetSort,
   type SheetColumn,
   type SheetSortState,
   type SheetSortDirection,
@@ -246,7 +245,7 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
                   onSort={(direction) => {
                     const orderBy = sheetSortOrder(column, direction);
                     const next = { column: column.key, direction, orderBy };
-                    storeSheetSort(next);
+                    writeStoredSheetSort(next);
                     setLocalSort(next);
                     // Re-picking the server's current order only refreshes
                     // the local pair (which distinguishes created-on
@@ -255,7 +254,7 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
                     if (prefs.orderBy !== orderBy) updateDisplayPrefs({ orderBy });
                   }}
                   onClear={() => {
-                    storeSheetSort(null);
+                    writeStoredSheetSort(null);
                     setLocalSort(null);
                     updateDisplayPrefs({ orderBy: SHEET_DEFAULT_ORDER });
                   }}
@@ -442,14 +441,6 @@ function SpacerRow({ height, columnCount }: { height: number; columnCount: numbe
       <td colSpan={columnCount} style={{ height: `${height}px`, padding: 0, border: 0 }} />
     </tr>
   );
-}
-
-function readStoredSheetSort(): SheetSortState | null {
-  return parseStoredSheetSort(window.localStorage.getItem(SHEET_SORT_STORAGE_KEY));
-}
-
-function storeSheetSort(state: SheetSortState | null): void {
-  window.localStorage.setItem(SHEET_SORT_STORAGE_KEY, serializeSheetSort(state));
 }
 
 function SheetHeaderCell({
