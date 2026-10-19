@@ -8,7 +8,13 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { clearCommands, listCommands } from "../../../shared/commands/index.js";
+import { FULL_RUN_TEST_TIMEOUT_MS } from "../../../testing/testBudget.js";
 import { CREATE_WORK_ITEM_COMMAND_ID, WorkItemCreateEntry } from "./WorkItemCreateEntry.js";
+
+// Opening the dialog suspends on a lazy chunk, so the first paint pays for
+// the module import. Wait with the suite's measured load allowance instead
+// of a fixed few-second budget, which the global testTimeout does not relax.
+const DIALOG_WAIT = { timeout: FULL_RUN_TEST_TIMEOUT_MS };
 
 const PROJECTS = [
   { id: "p1", name: "Atlas", identifier: "ATL", memberRole: 15, archived: false },
@@ -76,7 +82,7 @@ describe("WorkItemCreateEntry", () => {
     await act(async () => {
       await command()?.run();
     });
-    expect(await screen.findByRole("dialog", { name: "Create new work item" }, { timeout: 5000 })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Create new work item" }, DIALOG_WAIT)).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Title")).toBeInTheDocument();
   });
 
@@ -85,7 +91,7 @@ describe("WorkItemCreateEntry", () => {
     await act(async () => {
       await command()?.run();
     });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Beacon" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Beacon" })).toBeInTheDocument(), DIALOG_WAIT);
   });
 
   it("registers nothing for a guest", () => {
@@ -140,11 +146,14 @@ describe("WorkItemCreateEntry", () => {
     await act(async () => {
       await command()?.run();
     });
-    fireEvent.click(await screen.findByRole("button", { name: "Close dialog" }));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Create new work item" })).not.toBeInTheDocument());
+    fireEvent.click(await screen.findByRole("button", { name: "Close dialog" }, DIALOG_WAIT));
+    await waitFor(
+      () => expect(screen.queryByRole("dialog", { name: "Create new work item" })).not.toBeInTheDocument(),
+      DIALOG_WAIT
+    );
     await act(async () => {
       await command()?.run();
     });
-    expect(await screen.findByRole("dialog", { name: "Create new work item" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Create new work item" }, DIALOG_WAIT)).toBeInTheDocument();
   });
 });
