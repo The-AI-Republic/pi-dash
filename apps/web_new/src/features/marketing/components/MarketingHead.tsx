@@ -8,7 +8,8 @@
 // owns only the generic title/robots rule, so the tag table lives here in
 // the lazy marketing chunk.
 import { useDocumentHead, type HeadTag } from "../../../shared/shell/index.js";
-import { metaFor, PUBLIC_SITE_ORIGIN, type MarketingPageMeta } from "../content.js";
+import { bakedPublicSiteOrigin } from "../../../core/platform/publicSiteOrigin.js";
+import { metaFor, type MarketingPageMeta } from "../content.js";
 
 /** Social preview image served from the app's public directory. */
 export const SOCIAL_PREVIEW_PATH = "/social-card.svg";
@@ -19,7 +20,7 @@ export interface MarketingHeadProps {
   path: string;
 }
 
-export function canonicalUrl(path: string, origin: string = PUBLIC_SITE_ORIGIN): string {
+export function canonicalUrl(path: string, origin: string = bakedPublicSiteOrigin()): string {
   return `${origin.replace(/\/+$/, "")}${path}`;
 }
 

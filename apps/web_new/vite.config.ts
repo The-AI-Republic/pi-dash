@@ -9,6 +9,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig, type ProxyOptions } from "vite";
 
 import { hostedBaseUrlFromEnv } from "./src/core/platform/hostedBaseUrl.js";
+import { publicSiteOriginFromEnv } from "./src/core/platform/publicSiteOrigin.js";
 
 const target = process.env.PIDASH_TARGET === "desktop" ? "desktop" : "web";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -23,6 +24,10 @@ const webBaseUrl = hostedBaseUrlFromEnv(process.env);
 // API origin baked into the client. Empty (the default) keeps calls on the
 // serving origin and makes the add-runner command fall back to it too.
 const apiBaseUrl = process.env.VITE_API_BASE_URL ?? "";
+// Origin for crawlable marketing metadata (CLOUD-005). The prerender step
+// reads the same variable, so a deployment's canonical/og:url/sitemap all
+// name one address before and after hydration.
+const publicSiteOrigin = publicSiteOriginFromEnv(process.env);
 
 // Static SPA only (D9). One bundle per target; the desktop bundle is loaded
 // by the Tauri shell. No file swapping: platform differences live behind
@@ -61,6 +66,7 @@ export default defineConfig(({ mode }) => {
       __PIDASH_TARGET__: JSON.stringify(buildTarget),
       __PIDASH_WEB_BASE_URL__: JSON.stringify(webBaseUrl),
       __PIDASH_API_BASE_URL__: JSON.stringify(apiBaseUrl),
+      __PIDASH_PUBLIC_SITE_ORIGIN__: JSON.stringify(publicSiteOrigin),
     },
     outDir: `dist/${buildTarget}`,
     resolve: {

@@ -123,6 +123,7 @@ describe("entry guard", () => {
 
   afterEach(() => {
     delete edition.routes;
+    platformHarness.kind = "web";
   });
 
   function stubContext(values: Record<string, unknown>, search: Record<string, unknown> = {}) {
@@ -162,6 +163,12 @@ describe("entry guard", () => {
   it("forwards a signed-out visitor to the marketing home on the cloud root (CLOUD-001)", async () => {
     edition.routes = [{ path: "/", scope: "top-level" }];
     await expect(landingOf(stubContext({ me: new Error("signed out") }))).resolves.toBe("/home");
+  });
+
+  it("keeps the desktop entry card on the cloud root (DESK-011)", async () => {
+    edition.routes = [{ path: "/", scope: "top-level" }];
+    platformHarness.kind = "desktop";
+    await expect(Route.options.beforeLoad?.(stubContext({ me: new Error("signed out") }))).resolves.toEqual({});
   });
 
   it("carries a deep target to the login page as next_path (CLOUD-001)", async () => {

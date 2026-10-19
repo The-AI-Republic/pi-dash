@@ -78,7 +78,9 @@ export const Route = createFileRoute("/")({
     // the marketing surface, carrying a safe deep target to the login
     // page's own `next_path`. Signed-in handling stays with the auth
     // wrappers below, and the OSS edition keeps the entry card in place.
-    if (me === null && isEditionRootEnabled(edition)) {
+    // The marketing surface is a web address: a desktop build shares the
+    // edition module but opens on its own landing screen (DESK-011).
+    if (me === null && platform.kind === "web" && isEditionRootEnabled(edition)) {
       throw redirect({ href: signedOutRootTarget(search.next) });
     }
     const decision = decidePageGate({

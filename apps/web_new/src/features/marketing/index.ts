@@ -20,4 +20,9 @@ export {
   marketingTags,
 } from "./components/MarketingHead.js";
 export type { MarketingHeadProps } from "./components/MarketingHead.js";
-export { MARKETING_META, PUBLIC_SITE_ORIGIN, metaFor, type MarketingPageMeta } from "./content.js";
+export { MARKETING_META, metaFor, type MarketingPageMeta } from "./content.js";
+export {
+  DEFAULT_PUBLIC_SITE_ORIGIN,
+  bakedPublicSiteOrigin,
+  publicSiteOriginFromEnv,
+} from "../../core/platform/publicSiteOrigin.js";

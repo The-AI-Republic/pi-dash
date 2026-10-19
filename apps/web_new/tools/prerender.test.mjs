@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PRERENDER_ENTRY } from "./prerender.test-paths.mjs";
+import { publicSiteOriginFromEnv } from "../src/core/platform/publicSiteOrigin.ts";
 
 import {
   fileForPath,
@@ -17,6 +18,7 @@ import {
   injectMarkup,
   robotsTxt,
   shouldPrerender,
+  siteOriginFromEnv,
   sitemapXml,
   isEntryPoint,
   main,
@@ -39,6 +41,23 @@ const PAGE = {
   canonical: "https://site.test/home",
   meta: { title: "Home & co", description: 'A "quoted" <description>' },
 };
+
+describe("siteOriginFromEnv", () => {
+  it("defaults to the hosted address, takes a deployment origin and drops trailing slashes", () => {
+    expect(siteOriginFromEnv({})).toBe("https://pidash.airepublic.com");
+    expect(siteOriginFromEnv({ PIDASH_PUBLIC_SITE_ORIGIN: "" })).toBe("https://pidash.airepublic.com");
+    expect(siteOriginFromEnv({ PIDASH_PUBLIC_SITE_ORIGIN: "https://example.org//" })).toBe("https://example.org");
+    expect(siteOriginFromEnv({ PIDASH_PUBLIC_SITE_ORIGIN: "  https://example.org/  " })).toBe("https://example.org");
+  });
+
+  it("matches the rule the bundle bakes, so served and hydrated metadata agree", () => {
+    for (const value of [undefined, "", "   ", "https://example.org", "https://example.org//", " https://x.test/ "]) {
+      expect(siteOriginFromEnv({ PIDASH_PUBLIC_SITE_ORIGIN: value })).toBe(
+        publicSiteOriginFromEnv({ PIDASH_PUBLIC_SITE_ORIGIN: value })
+      );
+    }
+  });
+});
 
 describe("shouldPrerender", () => {
   it("writes the surface only when the edition claims the public root", () => {

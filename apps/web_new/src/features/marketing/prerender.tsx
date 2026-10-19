@@ -12,7 +12,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MarketingFrame } from "./components/MarketingFrame.js";
 import { MarketingHome } from "./components/MarketingHome.js";
 import { MarketingIntro } from "./components/MarketingIntro.js";
-import { metaFor, PUBLIC_SITE_ORIGIN, type MarketingPageMeta } from "./content.js";
+import { bakedPublicSiteOrigin } from "../../core/platform/publicSiteOrigin.js";
+import { metaFor, type MarketingPageMeta } from "./content.js";
 
 export interface PrerenderedPage {
   path: string;
@@ -32,13 +33,13 @@ function PageBody({ path }: { path: string }): React.ReactElement {
   throw new Error(`No prerender body for ${path}`);
 }
 
-export function canonicalFor(path: string, origin: string = PUBLIC_SITE_ORIGIN): string {
+export function canonicalFor(path: string, origin: string = bakedPublicSiteOrigin()): string {
   // The signed-out root is a forward to the marketing home; its canonical
   // address is the home page (CLOUD-005 root scenario).
   return `${origin.replace(/\/+$/, "")}${path === "/" ? "/home" : path}`;
 }
 
-export function renderMarketingPage(path: string, origin: string = PUBLIC_SITE_ORIGIN): PrerenderedPage {
+export function renderMarketingPage(path: string, origin: string = bakedPublicSiteOrigin()): PrerenderedPage {
   const meta = path === "/" ? metaFor("/home") : metaFor(path);
   return {
     path,
@@ -52,6 +53,6 @@ export function renderMarketingPage(path: string, origin: string = PUBLIC_SITE_O
   };
 }
 
-export function renderAllMarketingPages(origin: string = PUBLIC_SITE_ORIGIN): PrerenderedPage[] {
+export function renderAllMarketingPages(origin: string = bakedPublicSiteOrigin()): PrerenderedPage[] {
   return PRERENDER_PATHS.map((path) => renderMarketingPage(path, origin));
 }

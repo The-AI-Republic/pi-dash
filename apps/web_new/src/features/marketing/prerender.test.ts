@@ -4,9 +4,13 @@
 // Prerender entry (CLOUD-005): each public page renders to a complete
 // document body with one top-level heading, and the root canonicalizes to
 // the marketing home.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { canonicalFor, PRERENDER_PATHS, renderAllMarketingPages, renderMarketingPage } from "./prerender.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 function headings(html: string): number {
   return (html.match(/<h1[\s>]/g) ?? []).length;
@@ -31,6 +35,12 @@ describe("prerender", () => {
     expect(canonicalFor("/")).toBe("https://pidash.airepublic.com/home");
     expect(canonicalFor("/home", "https://site.test/")).toBe("https://site.test/home");
     expect(renderMarketingPage("/").canonical).toBe("https://pidash.airepublic.com/home");
+  });
+
+  it("canonicalizes with the origin the build baked in", () => {
+    vi.stubGlobal("__PIDASH_PUBLIC_SITE_ORIGIN__", "https://example.org/");
+    expect(canonicalFor("/home")).toBe("https://example.org/home");
+    expect(renderMarketingPage("/docs").canonical).toBe("https://example.org/docs");
   });
 
   it("renders the home sections in order", () => {

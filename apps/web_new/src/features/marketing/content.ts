@@ -16,9 +16,6 @@ export const PRIVACY_URL = "https://airepublic.com/privacy";
 /** Where sign-in lives for cloud builds. */
 export const SIGN_IN_PATH = "/login";
 
-/** Sitemap/robots origin until the deploy bakes its own (CLOUD-005). */
-export const PUBLIC_SITE_ORIGIN = "https://pidash.airepublic.com";
-
 export interface MarketingLink {
   label: string;
   href: string;

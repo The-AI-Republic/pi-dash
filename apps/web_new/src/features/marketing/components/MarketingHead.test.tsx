@@ -6,7 +6,7 @@
 // canonical, description and social preview data.
 import { render } from "@testing-library/react";
 import * as React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MARKETING_META } from "../content.js";
 import {
@@ -19,6 +19,7 @@ import {
 
 afterEach(() => {
   document.head.innerHTML = "";
+  vi.unstubAllGlobals();
 });
 
 function meta(selector: string): string | null {
@@ -56,6 +57,13 @@ describe("MarketingHead", () => {
     expect(byKey("og:title")).toBe(meta.title);
     expect(byKey("description")).toBe(meta.description);
     expect(tags.filter((tag) => tag.attributes["rel"] === "canonical")).toHaveLength(1);
+  });
+
+  it("keeps the origin the build baked in after hydration (CLOUD-005)", () => {
+    vi.stubGlobal("__PIDASH_PUBLIC_SITE_ORIGIN__", "https://example.org");
+    render(<MarketingHead path="/pricing" />);
+    expect(document.querySelector('link[rel="canonical"]')?.getAttribute("href")).toBe("https://example.org/pricing");
+    expect(meta('meta[property="og:url"]')).toBe("https://example.org/pricing");
   });
 
   it("strips a trailing slash from the origin when building the canonical address", () => {

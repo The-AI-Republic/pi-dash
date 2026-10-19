@@ -26,7 +26,23 @@ export function outputDirFrom(env) {
 }
 
 const distDir = outputDirFrom(process.env);
-const origin = (process.env.PIDASH_PUBLIC_SITE_ORIGIN ?? "https://pidash.airepublic.com").replace(/\/+$/, "");
+
+/**
+ * Site origin for canonical addresses, the sitemap and robots.txt. Mirrors
+ * `publicSiteOriginFromEnv` in src/core/platform/publicSiteOrigin.ts,
+ * which bakes the same variable into the bundle: one env value must name
+ * one origin in the served document and after hydration. Blank counts as
+ * absent; trailing slashes are dropped.
+ */
+export const DEFAULT_SITE_ORIGIN = "https://pidash.airepublic.com";
+
+export function siteOriginFromEnv(env) {
+  const configured = env.PIDASH_PUBLIC_SITE_ORIGIN;
+  const value = typeof configured === "string" ? configured.trim() : "";
+  return (value === "" ? DEFAULT_SITE_ORIGIN : value).replace(/\/+$/, "");
+}
+
+const origin = siteOriginFromEnv(process.env);
 
 /**
  * Whether this build writes the public marketing documents. The surface is
