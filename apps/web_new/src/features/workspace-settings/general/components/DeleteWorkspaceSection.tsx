@@ -38,6 +38,9 @@ export function DeleteWorkspaceSection({
   const [typedName, setTypedName] = React.useState("");
   const [typedPhrase, setTypedPhrase] = React.useState("");
   const removal = useDeleteWorkspace(workspaceSlug);
+  // A ref, not isPending: two submits in one frame both read the old
+  // render's state and would fire the DELETE twice.
+  const inFlight = React.useRef(false);
   const canConfirm = canConfirmWorkspaceDelete({ workspaceName, typedName, typedPhrase });
 
   const reset = (): void => {
@@ -50,12 +53,16 @@ export function DeleteWorkspaceSection({
   };
 
   const confirm = (): void => {
-    if (!canConfirm || removal.isPending) return;
+    if (!canConfirm || inFlight.current) return;
+    inFlight.current = true;
     removal.mutate(undefined, {
       onSuccess: () => {
         setOpen(false);
         reset();
         onNavigate(destination);
+      },
+      onSettled: () => {
+        inFlight.current = false;
       },
     });
   };
@@ -76,9 +83,9 @@ export function DeleteWorkspaceSection({
       </section>
       <Dialog
         open={open}
-        onOpenChange={(next) => {
-          if (next) setOpen(true);
-          else close();
+        // Controlled: the dialog only reports a dismissal, never a re-open.
+        onOpenChange={() => {
+          close();
         }}
         title={DELETE_DIALOG_TITLE}
         actions={

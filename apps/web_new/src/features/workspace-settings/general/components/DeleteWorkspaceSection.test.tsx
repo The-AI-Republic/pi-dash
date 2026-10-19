@@ -6,7 +6,7 @@
 // gate, cancel/dismiss resetting without a write, the working state, the
 // landing navigation on success and the kept dialog on failure.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { TransportResponse } from "@pidash/api-client";
 import * as React from "react";
@@ -153,6 +153,45 @@ describe("DeleteWorkspaceSection", () => {
       expect(onNavigate).toHaveBeenCalledWith("/beta/");
     });
     expect(deletes).toEqual(["https://api.test/api/workspaces/acme/"]);
+  });
+
+  it("deletes from the dialog form's submit as well as the Confirm button", async () => {
+    const { deletes } = stubApi();
+    const { onNavigate } = renderSection();
+    await openDialog();
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/Type the workspace name/), "Acme Name");
+    await user.type(screen.getByLabelText(/For final confirmation/), "delete my workspace");
+    const form = screen.getByLabelText(/Type the workspace name/).closest("form");
+    if (form === null) throw new Error("missing delete form");
+    fireEvent.submit(form);
+    await waitFor(() => {
+      expect(onNavigate).toHaveBeenCalledWith("/beta/");
+    });
+    expect(deletes).toEqual(["https://api.test/api/workspaces/acme/"]);
+  });
+
+  it("ignores a confirm while the delete is already in flight", async () => {
+    let release: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { deletes } = stubApi({ hold });
+    renderSection();
+    await openDialog();
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/Type the workspace name/), "Acme Name");
+    await user.type(screen.getByLabelText(/For final confirmation/), "delete my workspace");
+    const form = screen.getByLabelText(/Type the workspace name/).closest("form");
+    if (form === null) throw new Error("missing delete form");
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    await waitFor(() => {
+      expect(deletes).toHaveLength(1);
+    });
+    release();
+    fireEvent.submit(form);
+    expect(deletes).toHaveLength(1);
   });
 
   it("keeps the dialog and its input when the delete fails", async () => {

@@ -49,6 +49,18 @@ function element(overrides: LocatorStub = {}): LocatorStub {
   return self;
 }
 
+/** A locator whose `first`/`filter`/`nth` still answer with its overrides. */
+function chain(overrides: LocatorStub = {}): LocatorStub {
+  const self: LocatorStub = {
+    ...element(overrides),
+    ...overrides,
+    first: () => self,
+    filter: () => self,
+    nth: () => self,
+  };
+  return self;
+}
+
 function stubPage(overrides: Record<string, unknown> = {}): Page {
   const page = {
     goto: vi.fn(async () => undefined),
@@ -443,5 +455,164 @@ describe("rulesEnsureSignedIn", () => {
     await driver.rulesEnsureSignedIn("ann@example.com", "secret", "acme");
     expect(page.goto).toHaveBeenCalledWith("/acme/", { timeout: 60_000 });
     expect(page.waitForLoadState).toHaveBeenCalledWith("domcontentloaded");
+  });
+});
+
+describe("logo probes", () => {
+  it("reports an image and reads its source", async () => {
+    const page = stubPage({
+      locator: () => chain({ getAttribute: async () => "/api/assets/v2/static/a1/" }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsLogoState()).resolves.toBe("image");
+    await expect(driver.wsSettingsLogoSrc()).resolves.toBe("/api/assets/v2/static/a1/");
+  });
+
+  it("waits for the avatar block before reporting the fallback", async () => {
+    const waitFor = vi.fn(async () => undefined);
+    const absent = chain({ count: async () => 0 });
+    const page = stubPage({
+      locator: () => absent,
+      getByTestId: () => chain({ count: async () => 1, waitFor }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsLogoState()).resolves.toBe("fallback");
+    expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 15_000 });
+    await expect(driver.wsSettingsLogoSrc()).resolves.toBeNull();
+  });
+
+  it("refuses to open the dialog when no action is offered", async () => {
+    const page = stubPage({ getByRole: () => element({ count: async () => 0 }) });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsLogoAction()).resolves.toBe("none");
+    await expect(driver.wsSettingsOpenLogoDialog()).rejects.toThrow("no logo action is offered");
+  });
+
+  it("opens the dialog from either action label", async () => {
+    const click = vi.fn(async () => undefined);
+    const labels: string[] = [];
+    const page = stubPage({
+      getByRole: (_role: string, options: { name: string }) => {
+        labels.push(options.name);
+        return element({ count: async () => (options.name === "Edit logo" ? 1 : 0), click });
+      },
+      locator: () => element({ waitFor: async () => undefined }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsOpenLogoDialog();
+    expect(labels).toContain("Edit logo");
+    expect(click).toHaveBeenCalled();
+  });
+});
+
+describe("page probes", () => {
+  it("reports a hidden name error and a hidden delete section", async () => {
+    const page = stubPage({
+      locator: () =>
+        element({
+          isVisible: async () => false,
+          innerText: async () => {
+            throw new Error("detached");
+          },
+        }),
+      getByText: () => element({ isVisible: async () => false }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsNameError()).resolves.toBeNull();
+    await expect(driver.wsSettingsDeleteSectionVisible()).resolves.toBe(false);
+
+    await expect(driver.wsSettingsSaveLabel()).resolves.toBeNull();
+  });
+
+  it("reports a closed logo dialog and a closed delete dialog", async () => {
+    const invisible = chain({ isVisible: async () => false });
+    const driver = new WebNewDriver(stubPage({ locator: () => invisible }));
+    await expect(driver.wsSettingsLogoDialogVisible()).resolves.toBe(false);
+    await expect(driver.wsSettingsDeleteDialogVisible()).resolves.toBe(false);
+  });
+
+  it("refuses the copy probe off a workspace address", async () => {
+    const driver = new WebNewDriver(stubPage({ url: () => "http://localhost:3000/" }));
+    await expect(driver.wsSettingsCopyUrl()).rejects.toThrow("not on a workspace address");
+  });
+
+  it("reads the save label and the timezone label, trimming whitespace", async () => {
+    const page = stubPage({
+      getByRole: () => element({ count: async () => 1, innerText: async () => " Updating " }),
+      locator: (_selector: string, options?: { hasText?: string }) =>
+        options?.hasText === "Workspace Timezone"
+          ? element({ locator: () => element({ innerText: async () => "  Auckland,  Wellington " }) })
+          : element({ innerText: async () => "GMT+13" }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsSaveLabel()).resolves.toBe("Updating");
+    await expect(driver.wsSettingsTimezoneLabel()).resolves.toBe("Auckland, Wellington");
+  });
+
+  it("returns the visible size options and drops blank ones", async () => {
+    const texts = ["Just myself", "2-10", "  "];
+    const options = {
+      ...element(),
+      count: async () => texts.length,
+      nth: (i: number) => element({ innerText: async () => texts[i] as string }),
+    };
+    const page = stubPage({
+      getByRole: () => element({ click: async () => undefined }),
+      locator: (selector: string) =>
+        selector === "[role='option']" ? options : element({ click: async () => undefined }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsSizeOptions()).resolves.toEqual(["Just myself", "2-10"]);
+  });
+});
+
+describe("remaining probe branches", () => {
+  it("answers null when the save control paints no text", async () => {
+    const driver = new WebNewDriver(
+      stubPage({ getByRole: () => element({ count: async () => 1, innerText: async () => "  " }) })
+    );
+    await expect(driver.wsSettingsSaveLabel()).resolves.toBeNull();
+  });
+
+  it("treats a delete marker that detaches mid-probe as not shown", async () => {
+    const page = stubPage({
+      getByText: () =>
+        element({
+          isVisible: async () => {
+            throw new Error("detached");
+          },
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsDeleteSectionVisible()).resolves.toBe(false);
+  });
+
+  it("closes the size picker on the name field and filters blank labels", async () => {
+    const close = vi.fn(async () => undefined);
+    const texts = ["  ", "201-500"];
+    const options = {
+      ...element(),
+      count: async () => texts.length,
+      nth: (index: number) => element({ innerText: async () => texts[index] as string }),
+    };
+    const page = stubPage({
+      getByRole: () => element({ click: async () => undefined }),
+      locator: (selector: string) => (selector === "[role='option']" ? options : element({ click: close })),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsSizeOptions()).resolves.toEqual(["201-500"]);
+    expect(close).toHaveBeenCalledWith({ timeout: 15_000, trial: true });
+  });
+});
+
+describe("delete marker and blank name error", () => {
+  it("answers false before the delete marker paints", async () => {
+    const driver = new WebNewDriver(stubPage({ getByText: () => element({ count: async () => 0 }) }));
+    await expect(driver.wsSettingsDeleteSectionVisible()).resolves.toBe(false);
+  });
+
+  it("treats a visible but blank name error as absent", async () => {
+    const driver = new WebNewDriver(stubPage({ locator: () => element({ innerText: async () => "  " }) }));
+    await expect(driver.wsSettingsNameError()).resolves.toBeNull();
   });
 });

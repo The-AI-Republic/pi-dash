@@ -1078,13 +1078,17 @@ export class WebNewDriver implements ParityDriver {
     for (let i = 0; i < total; i++) {
       const card = cards.nth(i);
       if (!(await card.isVisible().catch(() => false))) continue;
-      const text = ((await card.innerText().catch(() => "")) ?? "").trim();
+      // A card mid-dismiss reads as blank, and a detached one throws:
+      // both mean "not currently showing".
+      const text = (await card.innerText().catch(() => "")).trim();
       if (text === "") continue;
       const lines = text
         .split("\n")
         .map((line) => line.trim())
         .filter((line) => line.length > 0);
-      return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
+      // A card always paints a title, so the first line exists.
+      const title = lines[0] as string;
+      return { title, message: lines.slice(1).join(" ") };
     }
     return null;
   }
@@ -17440,7 +17444,7 @@ export class WebNewDriver implements ParityDriver {
     const error = this.page.locator("#name-error").first();
     if ((await error.count()) === 0) return null;
     if (!(await error.isVisible().catch(() => false))) return null;
-    return ((await error.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim() || null;
+    return (await error.innerText().catch(() => "")).replace(/\s+/g, " ").trim() || null;
   }
   /** Organization-size control: the button showing the current label. */
   private wsSettingsSizeButton() {
@@ -17469,10 +17473,10 @@ export class WebNewDriver implements ParityDriver {
     for (let i = 0; i < total; i++) {
       labels.push(
         (
-          (await options
+          await options
             .nth(i)
             .innerText()
-            .catch(() => "")) ?? ""
+            .catch(() => "")
         )
           .replace(/\s+/g, " ")
           .trim()
@@ -17481,11 +17485,10 @@ export class WebNewDriver implements ParityDriver {
     // Close on the name field: the new picker reopens immediately after
     // Escape too (NEWFRONT-420 target), but an outside click keeps the
     // probe independent of that fix.
-    await this.page
-      .locator("#name")
-      .first()
-      .click({ timeout: 15_000 })
-      .catch(() => undefined);
+    // A page whose name field is missing already has its picker closed.
+    if ((await this.page.locator("#name").count()) > 0) {
+      await this.page.locator("#name").first().click({ timeout: 15_000, trial: true });
+    }
     return labels.filter((label) => label.length > 0);
   }
   async wsSettingsSelectSize(label: string): Promise<void> {
@@ -17498,9 +17501,9 @@ export class WebNewDriver implements ParityDriver {
   }
   async wsSettingsTimezoneLabel(): Promise<string> {
     return (
-      (await this.wsSettingsTimezoneButton()
+      await this.wsSettingsTimezoneButton()
         .innerText({ timeout: 15_000 })
-        .catch(() => "")) ?? ""
+        .catch(() => "")
     )
       .replace(/\s+/g, " ")
       .trim();
@@ -17525,9 +17528,9 @@ export class WebNewDriver implements ParityDriver {
     if ((await this.wsSettingsSaveButton().count()) === 0) return null;
     return (
       (
-        (await this.wsSettingsSaveButton()
+        await this.wsSettingsSaveButton()
           .innerText()
-          .catch(() => "")) ?? ""
+          .catch(() => "")
       )
         .replace(/\s+/g, " ")
         .trim() || null
@@ -17587,7 +17590,12 @@ export class WebNewDriver implements ParityDriver {
     return this.page.locator("img[alt='Workspace Logo']").first();
   }
   async wsSettingsLogoState(): Promise<"fallback" | "image"> {
-    return (await this.wsSettingsLogoImg().count()) > 0 ? "image" : "fallback";
+    if ((await this.wsSettingsLogoImg().count()) > 0) return "image";
+    // No image yet: wait for the avatar block so a page still painting
+    // the skeleton is not mistaken for a rendered fallback.
+    const block = this.page.getByTestId("workspace-general-logo").first();
+    if ((await block.count()) > 0) await block.waitFor({ state: "visible", timeout: 15_000 });
+    return "fallback";
   }
   async wsSettingsLogoSrc(): Promise<string | null> {
     if ((await this.wsSettingsLogoImg().count()) === 0) return null;
@@ -17601,15 +17609,12 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsOpenLogoDialog(): Promise<void> {
     const action = await this.wsSettingsLogoAction();
     if (action === "none") throw new Error("[parity] no logo action is offered.");
-    await this.page
-      .getByRole("button", { name: action === "upload" ? "Upload logo" : "Edit logo", exact: true })
-      .click({ timeout: 15_000 });
+    const label = action === "upload" ? "Upload logo" : "Edit logo";
+    await this.page.getByRole("button", { name: label, exact: true }).click({ timeout: 15_000 });
     await this.page.locator("input[type='file']").first().waitFor({ state: "attached", timeout: 15_000 });
   }
   async wsSettingsLogoDialogVisible(): Promise<boolean> {
-    const input = this.page.locator("input[type='file']").first();
-    if ((await input.count()) === 0) return false;
-    return input.isVisible().catch(() => false);
+    return this.page.locator("input[type='file']").first().isVisible();
   }
   async wsSettingsUploadLogo(filePath: string): Promise<void> {
     await this.page.locator("input[type='file']").first().setInputFiles(filePath, { timeout: 15_000 });
@@ -17653,8 +17658,7 @@ export class WebNewDriver implements ParityDriver {
   }
   /** Workspace slug from the current settings address. */
   private async wsSettingsSlugFromPath(): Promise<string> {
-    const segments = new URL(this.page.url()).pathname.split("/").filter(Boolean);
-    const slug = segments[0];
+    const slug = /^\/([^/]+)\//.exec(new URL(this.page.url()).pathname)?.[1];
     if (slug === undefined) throw new Error("[parity] not on a workspace address.");
     return slug;
   }
@@ -17681,16 +17685,17 @@ export class WebNewDriver implements ParityDriver {
     await this.page.locator("#workspaceName").first().waitFor({ state: "visible", timeout: 15_000 });
   }
   async wsSettingsDeleteDialogVisible(): Promise<boolean> {
-    const input = this.page.locator("#workspaceName").first();
-    if ((await input.count()) === 0) return false;
-    return input.isVisible().catch(() => false);
+    return this.page.locator("#workspaceName").first().isVisible();
   }
   async wsSettingsDeleteDialogText(): Promise<string> {
+    // The dialog nests the copy and both fields in one form; its text is
+    // the dialog's own content. An absent form only happens when the
+    // dialog never opened, and then there is nothing to report.
     const form = this.page
       .locator("form")
       .filter({ has: this.page.locator("#workspaceName") })
       .first();
-    return ((await form.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return (await form.innerText()).replace(/\s+/g, " ").trim();
   }
   async wsSettingsFillDeleteName(name: string): Promise<void> {
     await this.page.locator("#workspaceName").first().fill(name, { timeout: 15_000 });

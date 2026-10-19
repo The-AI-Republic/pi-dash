@@ -53,7 +53,11 @@ export function WorkspaceLogoDialog({
     if (typeof URL.createObjectURL !== "function") return null;
     return URL.createObjectURL(file);
   }, [file]);
-  const working = upload.isPending || remove.isPending;
+  const uploading = upload.isPending;
+  const removing = remove.isPending;
+  // One write at a time: two clicks in the same frame both read the last
+  // render's pending flags, so a ref closes the gap.
+  const inFlight = React.useRef(false);
 
   React.useEffect(
     () => () => {
@@ -80,24 +84,32 @@ export function WorkspaceLogoDialog({
   };
 
   const submit = (): void => {
-    if (file === null || working) return;
+    if (file === null || inFlight.current) return;
+    inFlight.current = true;
     upload.mutate(
       { workspaceId, file },
       {
         onSuccess: () => {
           close();
         },
+        onSettled: () => {
+          inFlight.current = false;
+        },
       }
     );
   };
 
   const removeLogo = (): void => {
-    if (logoUrl === null || working) return;
+    if (logoUrl === null || inFlight.current) return;
+    inFlight.current = true;
     remove.mutate(
       { workspaceId, logoUrl, legacy: isLegacyLogoValue(logoUrl) },
       {
         onSuccess: () => {
           close();
+        },
+        onSettled: () => {
+          inFlight.current = false;
         },
       }
     );
@@ -108,11 +120,8 @@ export function WorkspaceLogoDialog({
   return (
     <Dialog
       open={open}
-      onOpenChange={(next) => {
-        if (next) {
-          onOpenChange(true);
-          return;
-        }
+      // Controlled: the dialog only reports a dismissal, never a re-open.
+      onOpenChange={() => {
         close();
       }}
       title={LOGO_DIALOG_TITLE}
@@ -120,18 +129,23 @@ export function WorkspaceLogoDialog({
         <div className="flex w-full items-center justify-between gap-(--space-4)">
           <Button
             variant="danger"
-            loading={remove.isPending}
-            disabled={logoUrl === null || working}
+            loading={removing}
+            disabled={logoUrl === null || uploading || removing}
             onClick={removeLogo}
           >
-            {remove.isPending ? "Removing" : "Remove"}
+            {removing ? "Removing" : "Remove"}
           </Button>
           <div className="flex items-center gap-(--space-2)">
             <Button variant="secondary" onClick={close}>
               Cancel
             </Button>
-            <Button variant="primary" loading={upload.isPending} disabled={file === null || working} onClick={submit}>
-              {upload.isPending ? "Uploading" : "Upload & Save"}
+            <Button
+              variant="primary"
+              loading={uploading}
+              disabled={file === null || uploading || removing}
+              onClick={submit}
+            >
+              {uploading ? "Uploading" : "Upload & Save"}
             </Button>
           </div>
         </div>

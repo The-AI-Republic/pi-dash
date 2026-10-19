@@ -160,6 +160,10 @@ describe("logo value shapes", () => {
     expect(assetKeyFromUrl("/api/assets/v2/static/a1")).toBe("a1");
     expect(assetKeyFromUrl("a1")).toBe("a1");
   });
+
+  it("answers an empty key for a value that is only slashes", () => {
+    expect(assetKeyFromUrl("///")).toBe("");
+  });
 });
 
 describe("canConfirmWorkspaceDelete", () => {

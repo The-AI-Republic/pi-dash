@@ -224,6 +224,14 @@ describe("WorkspaceDetailsForm", () => {
     expect(screen.getByRole("button", { name: "500+" })).toBeInTheDocument();
   });
 
+  it("shows the timezone placeholder when the stored row carries no zone", async () => {
+    stubApi();
+    renderForm({ stored: { name: "Acme", organizationSize: null, timezone: "" } });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Select a timezone/ })).toBeInTheDocument();
+    });
+  });
+
   it("dims the form for members with disabled fields and no save", () => {
     stubApi();
     renderForm({ canManage: false });

@@ -139,8 +139,7 @@ export function isLegacyLogoValue(value: string | null | undefined): boolean {
 /** The trailing path segment of a stored asset URL, ignoring a trailing slash. */
 export function assetKeyFromUrl(value: string): string {
   const trimmed = value.replace(/\/+$/, "");
-  const segments = trimmed.split("/");
-  return segments[segments.length - 1] ?? trimmed;
+  return trimmed.slice(trimmed.lastIndexOf("/") + 1);
 }
 
 /** The fixed phrase the delete dialog requires beside the workspace name. */
