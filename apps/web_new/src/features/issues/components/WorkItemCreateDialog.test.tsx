@@ -17,8 +17,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateAssistantTitle } from "@pidash/api-client";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { edition } from "../../../core/edition/index.js";
 import { pickerKeys } from "../../../shared/pickers/reference.js";
 import { withTimeout } from "../create/createApi.js";
+import { ISSUE_DEDUPE_FLAG } from "../create/dedupe.js";
 import { loadWorkItemDraft } from "../lib/createDraft.js";
 import { WorkItemCreateDialog, type WorkItemCreateProject } from "./WorkItemCreateDialog.js";
 
@@ -27,11 +29,26 @@ import { WorkItemCreateDialog, type WorkItemCreateProject } from "./WorkItemCrea
 // same change callback; the sanitizer helpers stay real.
 vi.mock("../../../shared/editor/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/editor/index.js")>();
-  function StandInEditor({ onChange, label }: { onChange: (html: string) => void; label: string }) {
+  // Mirrors the real editor: the starting HTML is read once, at mount,
+  // so a caller that wants a cleared surface must remount this.
+  function StandInEditor({
+    onChange,
+    label,
+    initialHtml,
+  }: {
+    onChange: (html: string) => void;
+    label: string;
+    initialHtml: string;
+  }) {
+    const [value, setValue] = React.useState(() => initialHtml.replace(/^<p>/, "").replace(/<\/p>$/, ""));
     return (
       <textarea
         aria-label={label}
-        onChange={(event) => onChange(event.target.value === "" ? "" : `<p>${event.target.value}</p>`)}
+        value={value}
+        onChange={(event) => {
+          setValue(event.target.value);
+          onChange(event.target.value === "" ? "" : `<p>${event.target.value}</p>`);
+        }}
       />
     );
   }
@@ -173,6 +190,7 @@ interface StubOptions {
   assistant?: { model_name: string; has_api_key: boolean };
   generate?: { status: number; body: unknown; delayMs?: number };
   draftStatus?: number;
+  membershipStatus?: number;
   projects?: Record<string, Record<string, unknown>>;
   role?: number;
   estimateSystem?: boolean;
@@ -466,6 +484,14 @@ function stubTransport(options: StubOptions = {}) {
       const name = (body as { name?: string } | undefined)?.name ?? "Created";
       return json(status, status === 201 ? createdRow(projectMatch?.[1] ?? PROJECT_ATLAS, name) : {});
     }
+    if (url.includes("/cycle-issues/") && method === "POST") {
+      const status = options.membershipStatus ?? 201;
+      return json(status, status === 201 ? { message: "ok" } : {});
+    }
+    if (/\/issues\/[^/]+\/modules\/$/.test(url) && method === "POST") {
+      const status = options.membershipStatus ?? 201;
+      return json(status, status === 201 ? { message: "ok" } : {});
+    }
     return json(200, {});
   }) as never);
   return { calls, sent };
@@ -544,6 +570,20 @@ describe("WorkItemCreateDialog core form", () => {
     }
     expect(screen.getByRole("button", { name: "Add parent" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add parent" })).toBeInTheDocument();
+  });
+
+  it("leaves focus in the description while the user types there", async () => {
+    const user = userEvent.setup();
+    setup();
+    await waitFor(() => expect(titleField()).toHaveFocus());
+    await user.type(titleField(), "Has a title");
+    const description = await screen.findByRole("textbox", { name: "Description" });
+    await user.click(description);
+    await user.keyboard("abc");
+    expect(description).toHaveValue("abc");
+    expect(description).toHaveFocus();
+    expect(titleField()).toHaveValue("Has a title");
+    expect(titleField()).not.toHaveFocus();
   });
 
   it("offers only create-permission projects and pre-selects the requested one", async () => {
@@ -798,6 +838,39 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
       assigned_pod_id: PARENT_ID,
       agent_executor: "local_runner",
     });
+    // The create endpoint takes no cycle or module: both attach after
+    // the row exists, through their bridge writes (ISS-117).
+    expect(posts(h.sent)[0]).not.toHaveProperty("cycle_id");
+    expect(posts(h.sent)[0]).not.toHaveProperty("module_ids");
+    await waitFor(() =>
+      expect(h.calls.some((call) => call.url.endsWith(`/cycles/${PARENT_ID}/cycle-issues/`))).toBe(true)
+    );
+    await waitFor(() => expect(h.calls.some((call) => call.url.endsWith(`/issues/${CREATED_ID}/modules/`))).toBe(true));
+    const cycleCall = h.calls.find((call) => call.url.endsWith(`/cycles/${PARENT_ID}/cycle-issues/`));
+    expect(cycleCall?.body).toEqual({ issues: [CREATED_ID] });
+    const moduleCall = h.calls.find((call) => call.url.endsWith(`/issues/${CREATED_ID}/modules/`));
+    expect(moduleCall?.body).toEqual({ modules: [PARENT_ID] });
+  });
+
+  it("keeps the created row and says so when the cycle attach fails", async () => {
+    const user = userEvent.setup();
+    const h = setup({
+      membershipStatus: 500,
+      projects: {
+        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true }),
+        [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
+      },
+    });
+    await waitFor(() => expect(screen.getByText("Cycle")).toBeInTheDocument());
+    await user.type(titleField(), "Placed later");
+    await user.click(screen.getByRole("button", { name: "No cycle" }));
+    await user.click(await screen.findByRole("option", { name: "Sprint 4" }));
+    save();
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith("Work item created, but not placed", expect.any(String))
+    );
+    expect(posts(h.sent)).toHaveLength(1);
+    expect(h.onCreated).toHaveBeenCalledWith(CREATED_ID);
   });
 });
 
@@ -876,6 +949,22 @@ describe("WorkItemCreateDialog Create more (ISS-119)", () => {
     expect(h.onOpenChange).not.toHaveBeenCalled();
     expect(screen.getByText("Beacon")).toBeInTheDocument();
     await waitFor(() => expect(titleField()).toHaveFocus());
+    await user.type(titleField(), "Second item");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(2));
+    expect(posts(h.sent)[1]).toEqual({ name: "Second item" });
+  });
+
+  it("clears the description editor between items", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    await user.click(screen.getByRole("switch", { name: "Create more" }));
+    await user.type(titleField(), "First item");
+    await typeDescription(user, "Words for the first");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    const description = await screen.findByRole("textbox", { name: "Description" });
+    await waitFor(() => expect(description).toHaveValue(""));
     await user.type(titleField(), "Second item");
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(2));
@@ -979,6 +1068,18 @@ describe("WorkItemCreateDialog duplicate seam (ISS-121)", () => {
     expect(screen.queryByRole("complementary", { name: "Possible duplicates" })).not.toBeInTheDocument();
     expect(h.calls.some((call) => call.url.includes("duplicate"))).toBe(false);
   });
+
+  it("surfaces the panel when the edition flag turns the seam on", async () => {
+    edition.flags[ISSUE_DEDUPE_FLAG] = true;
+    const user = userEvent.setup();
+    const h = setup();
+    await user.type(titleField(), "Parent work");
+    const count = await screen.findByRole("button", { name: "1 possible duplicate" }, { timeout: 4000 });
+    await user.click(count);
+    expect(screen.getByRole("complementary", { name: "Possible duplicates" })).toBeInTheDocument();
+    expect(h.calls.some((call) => call.url.includes("/search-issues/"))).toBe(true);
+    delete edition.flags[ISSUE_DEDUPE_FLAG];
+  });
 });
 
 describe("WorkItemCreateDialog parent picker (ISS-122)", () => {
@@ -1058,6 +1159,7 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     const user = userEvent.setup();
     const h = setup();
     await user.type(titleField(), "Stays");
+    await typeDescription(user, "Old project words");
     await user.click(screen.getByRole("button", { name: "Select state" }));
     await user.click(await screen.findByRole("option", { name: "Todo" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Todo" })).toBeInTheDocument());
@@ -1069,10 +1171,15 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     await user.click(await screen.findByRole("option", { name: "Beacon" }));
     await waitFor(() => expect(screen.getByText("Beacon")).toBeInTheDocument());
     expect(titleField()).toHaveValue("Stays");
+    // The editor reads its content once at mount, so the reset must give
+    // it a fresh surface (ISS-123).
+    const description = await screen.findByRole("textbox", { name: "Description" });
+    await waitFor(() => expect(description).toHaveValue(""));
     expect(screen.getByRole("button", { name: "Select state" })).toBeInTheDocument();
     expect(loadWorkItemDraft(SLUG)?.projectId).toBe(PROJECT_BEACON);
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toEqual({ name: "Stays" });
     expect(h.calls.some((call) => call.url.endsWith(`/projects/${PROJECT_BEACON}/issues/`))).toBe(true);
   });
 });

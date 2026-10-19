@@ -13,7 +13,7 @@ export type {
   SidebarItem,
   SlotComponents,
 } from "./types.js";
-export { APP_RAIL_FLAG, SIDEBAR_TOGGLE_FLAG } from "./types.js";
+export { APP_RAIL_FLAG, ISSUE_DEDUPE_FLAG, SIDEBAR_TOGGLE_FLAG } from "./types.js";
 export { isAppRailEnabled, isSidebarToggleEnabled } from "./flags.js";
 export { APPS_CATALOG_ROUTE_PATH, isEditionRouteEnabled, resolveEditionSidebarHref } from "./routes.js";
 export { edition } from "@pidash/edition";

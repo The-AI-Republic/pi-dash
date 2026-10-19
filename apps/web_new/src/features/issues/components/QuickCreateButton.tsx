@@ -19,20 +19,14 @@ const LazyWorkItemCreateDialog = React.lazy(() =>
 
 export interface QuickCreateButtonProps {
   workspaceSlug: string;
-  /** Joined projects the dialog can file under; empty disables. */
+  /** Joined projects the dialog can file under, each carrying its own
+   * project membership role; empty disables. */
   projects: WorkItemCreateProject[];
   /** Workspace admin/member standing; guests read false. */
   canCreate: boolean;
-  /** The caller's workspace role, carried onto the dialog's project rows. */
-  memberRole: number | null;
 }
 
-export function QuickCreateButton({
-  workspaceSlug,
-  projects,
-  canCreate,
-  memberRole,
-}: QuickCreateButtonProps): React.ReactElement {
+export function QuickCreateButton({ workspaceSlug, projects, canCreate }: QuickCreateButtonProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   return (
     <>
@@ -52,7 +46,7 @@ export function QuickCreateButton({
             open={open}
             onOpenChange={setOpen}
             workspaceSlug={workspaceSlug}
-            projects={projects.map((project) => ({ ...project, memberRole }))}
+            projects={projects}
             canCreate={canCreate}
           />
         </React.Suspense>

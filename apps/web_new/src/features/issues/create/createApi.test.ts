@@ -8,6 +8,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  applyCreateMembership,
   PARENT_SEARCH_DEBOUNCE_MS,
   TitleTimeoutError,
   hitIdentifier,
@@ -103,5 +104,62 @@ describe("parent search", () => {
     const rows = [hit("a"), hit("b")];
     expect(selectParentCandidates(rows, "a").map((row) => row.id)).toEqual(["b"]);
     expect(selectParentCandidates(rows, null)).toHaveLength(2);
+  });
+});
+
+describe("applyCreateMembership", () => {
+  function stubClient() {
+    const posts: Array<{ path: string; json: unknown }> = [];
+    const client = {
+      sendJson: vi.fn(async (method: string, path: string, options: { json: unknown }) => {
+        posts.push({ path, json: options.json });
+        return { data: { message: "ok" } };
+      }),
+      parse: (_schema: unknown, payload: unknown) => payload,
+    };
+    return { client, posts };
+  }
+
+  it("attaches the cycle first, then the modules", async () => {
+    const { client, posts } = stubClient();
+    await applyCreateMembership(client as never, "acme", {
+      projectId: "p",
+      issueId: "issue",
+      cycleId: "cycle",
+      moduleIds: ["m1", "m2"],
+    });
+    expect(posts).toEqual([
+      { path: "/api/workspaces/acme/projects/p/cycles/cycle/cycle-issues/", json: { issues: ["issue"] } },
+      { path: "/api/workspaces/acme/projects/p/issues/issue/modules/", json: { modules: ["m1", "m2"] } },
+    ]);
+  });
+
+  it("makes no calls for an item with neither", async () => {
+    const { client, posts } = stubClient();
+    await applyCreateMembership(client as never, "acme", {
+      projectId: "p",
+      issueId: "issue",
+      cycleId: null,
+      moduleIds: [],
+    });
+    expect(posts).toEqual([]);
+  });
+
+  it("stops when the cycle attach fails, leaving modules for a retry", async () => {
+    const client = {
+      sendJson: vi.fn(async () => {
+        throw new Error("cycle down");
+      }),
+      parse: (_schema: unknown, payload: unknown) => payload,
+    };
+    await expect(
+      applyCreateMembership(client as never, "acme", {
+        projectId: "p",
+        issueId: "issue",
+        cycleId: "cycle",
+        moduleIds: ["m1"],
+      })
+    ).rejects.toThrow("cycle down");
+    expect(client.sendJson).toHaveBeenCalledTimes(1);
   });
 });

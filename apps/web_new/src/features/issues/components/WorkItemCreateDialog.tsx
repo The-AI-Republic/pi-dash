@@ -46,7 +46,10 @@ import {
   TITLE_GENERATION_FAILED_TITLE,
   TITLE_GENERATION_TIMED_OUT_BODY,
   TitleTimeoutError,
+  MEMBERSHIP_FAILED_BODY,
+  MEMBERSHIP_FAILED_TITLE,
   useGenerateTitle,
+  useApplyCreateMembership,
   useSaveDraft,
 } from "../create/createApi.js";
 import {
@@ -56,6 +59,8 @@ import {
   descriptionText,
   emptyCreateForm,
   hasDraftWorthKeeping,
+  hasMembership,
+  membershipForForm,
   normalizeTitle,
   resetForCreateMore,
   resolveProjectId,
@@ -136,6 +141,7 @@ export function WorkItemCreateDialog({
   onCreated,
 }: WorkItemCreateDialogProps): React.ReactElement | null {
   const create = useCreateWorkItem(workspaceSlug);
+  const attachMembership = useApplyCreateMembership(workspaceSlug);
   const generateTitle = useGenerateTitle(workspaceSlug);
   const saveDraft = useSaveDraft(workspaceSlug);
   const assistant = useAssistantConfig(workspaceSlug, open);
@@ -151,6 +157,13 @@ export function WorkItemCreateDialog({
   const [discardOpen, setDiscardOpen] = React.useState(false);
   const [draftError, setDraftError] = React.useState<string | null>(null);
   const [generating, setGenerating] = React.useState(false);
+  // Bumped whenever the description must start over: a different
+  // project, Create more. The editor reads its content once at mount,
+  // so the key is what actually clears it.
+  const [editorGeneration, setEditorGeneration] = React.useState(0);
+  // Bumped on the open transition and after Create more; the title
+  // takes focus exactly then, never on an ordinary keystroke.
+  const [focusRequest, setFocusRequest] = React.useState(0);
   // Mirrors the open prop locally. When the parent ignores onOpenChange
   // the dialog still unmounts its body, so reopening works from here too.
   const titleRef = React.useRef<HTMLInputElement>(null);
@@ -186,6 +199,8 @@ export function WorkItemCreateDialog({
     setParentHit(null);
     setDiscardOpen(false);
     setDraftError(null);
+    setEditorGeneration((current) => current + 1);
+    setFocusRequest((current) => current + 1);
   }, [open, visitKey, workspaceSlug, initialProjectId, creatable]);
 
   // The title owns initial focus. Base UI moves focus into the dialog on
@@ -197,14 +212,7 @@ export function WorkItemCreateDialog({
     titleRef.current?.focus();
     const frame = globalThis.setTimeout(() => titleRef.current?.focus(), 0);
     return () => globalThis.clearTimeout(frame);
-  }, [open]);
-
-  // Create-more and the first open share the same rule: the next title
-  // starts focused once the reset render is committed.
-  React.useEffect(() => {
-    if (!open) return;
-    titleRef.current?.focus();
-  });
+  }, [open, focusRequest]);
 
   const configured = isAssistantConfigured(assistant.data);
   const canGenerate = canGenerateTitle({
@@ -247,6 +255,7 @@ export function WorkItemCreateDialog({
     setForm(freshForm(workspaceSlug, projectId, form.name));
     setFieldError(null);
     setParentHit(null);
+    setEditorGeneration((current) => current + 1);
     storeWorkItemDraft(workspaceSlug, { title: form.name, projectId });
   }
 
@@ -323,6 +332,17 @@ export function WorkItemCreateDialog({
         onSuccess: (created) => {
           clearWorkItemDraft(workspaceSlug);
           onCreated?.(created.id);
+          const membership = membershipForForm(form);
+          if (hasMembership(membership)) {
+            attachMembership.mutate(
+              { projectId, issueId: created.id, ...membership },
+              {
+                onError: () => {
+                  notifyError(MEMBERSHIP_FAILED_TITLE, MEMBERSHIP_FAILED_BODY);
+                },
+              }
+            );
+          }
           if (!createMore) {
             finishClose();
             return;
@@ -332,6 +352,8 @@ export function WorkItemCreateDialog({
           setForm(resetForCreateMore(form));
           setFieldError(null);
           setParentHit(null);
+          setEditorGeneration((current) => current + 1);
+          setFocusRequest((current) => current + 1);
         },
       }
     );
@@ -437,6 +459,7 @@ export function WorkItemCreateDialog({
             <div className="rounded-(--radius-control) border border-(--border) bg-(--bg) p-(--space-2)">
               <React.Suspense fallback={<div aria-hidden="true" className="min-h-24" />}>
                 <RichTextEditor
+                  key={`${projectId}:${editorGeneration}`}
                   initialHtml={form.descriptionHtml}
                   onChange={(html) => patch({ descriptionHtml: html })}
                   placeholder="Add a description…"

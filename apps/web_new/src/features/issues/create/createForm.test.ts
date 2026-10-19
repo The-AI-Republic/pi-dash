@@ -11,7 +11,9 @@ import {
   descriptionText,
   emptyCreateForm,
   hasDraftWorthKeeping,
+  hasMembership,
   isTitleAcceptable,
+  membershipForForm,
   normalizeTitle,
   resetForCreateMore,
   resolveProjectId,
@@ -159,6 +161,28 @@ describe("buildCreatePayload", () => {
 
   it("leaves the priority out when it is none", () => {
     expect(buildCreatePayload(form({ name: "Plain", priority: "none" }))).toEqual({ name: "Plain" });
+  });
+
+  it("never puts cycle or module on the create body; they attach after", () => {
+    const payload = buildCreatePayload(form({ name: "Scheduled", cycleId: "cycle", moduleIds: ["module"] }));
+    expect(payload).not.toHaveProperty("cycle_id");
+    expect(payload).not.toHaveProperty("module_ids");
+  });
+});
+
+describe("create membership", () => {
+  it("copies the cycle and modules the form holds", () => {
+    const source = form({ cycleId: "cycle", moduleIds: ["a", "b"] });
+    const membership = membershipForForm(source);
+    expect(membership).toEqual({ cycleId: "cycle", moduleIds: ["a", "b"] });
+    membership.moduleIds.push("c");
+    expect(source.moduleIds).toEqual(["a", "b"]);
+  });
+
+  it("is empty for a plain form", () => {
+    expect(hasMembership(membershipForForm(form()))).toBe(false);
+    expect(hasMembership({ cycleId: "cycle", moduleIds: [] })).toBe(true);
+    expect(hasMembership({ cycleId: null, moduleIds: ["module"] })).toBe(true);
   });
 });
 

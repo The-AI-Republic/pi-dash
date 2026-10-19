@@ -9,15 +9,16 @@ import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { selectCreatableProjects } from "../create/createForm.js";
 import { QuickCreateButton } from "./QuickCreateButton.js";
 
-const PROJECTS = [{ id: "p1", name: "Atlas" }];
+const PROJECTS = [
+  { id: "p1", name: "Atlas", identifier: "ATL", memberRole: 15, archived: false },
+  { id: "p2", name: "Guestland", identifier: "GST", memberRole: 5, archived: false },
+  { id: "p3", name: "Old Atlas", identifier: "OLD", memberRole: 20, archived: true },
+];
 
-function setup(
-  projects: Array<{ id: string; name: string }> = PROJECTS,
-  canCreate = true,
-  memberRole: number | null = 15
-) {
+function setup(projects: typeof PROJECTS = PROJECTS, canCreate = true) {
   createAppClient("https://api.test", (async (url: string) => ({
     status: 200,
     url,
@@ -27,7 +28,7 @@ function setup(
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
-      <QuickCreateButton workspaceSlug="acme" projects={projects} canCreate={canCreate} memberRole={memberRole} />
+      <QuickCreateButton workspaceSlug="acme" projects={projects} canCreate={canCreate} />
     </QueryClientProvider>
   );
 }
@@ -55,5 +56,11 @@ describe("QuickCreateButton", () => {
   it("stays disabled with zero joined projects", () => {
     setup([], true);
     expect(screen.getByRole("button", { name: "New work item" })).toBeDisabled();
+  });
+
+  it("carries each project's own membership into the dialog's create list", () => {
+    // A workspace admin who is only a guest on a project must not be able
+    // to file there (ISS-117), so the rows carry their own roles.
+    expect(selectCreatableProjects(PROJECTS).map((project) => project.id)).toEqual(["p1"]);
   });
 });

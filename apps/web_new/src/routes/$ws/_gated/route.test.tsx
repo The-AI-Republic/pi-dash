@@ -287,6 +287,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 
 import { createAppClient } from "../../../core/api/index.js";
 import { edition } from "../../../core/edition/index.js";
+import { selectCreatableProjects } from "../../../features/issues/create/createForm.js";
 import { platform } from "../../../core/platform/index.js";
 import { DOCS_URL, useRailState, useShellChrome, useShortcutsDialog } from "../../../shared/shell/index.js";
 import { Route } from "./route.js";
@@ -1222,12 +1223,62 @@ describe("gated layout shell wiring", () => {
     renderShell();
     const quickActions = harness.sidebar?.quickActions as React.ReactElement<{
       workspaceSlug: string;
-      projects: Array<{ id: string; name: string }>;
+      projects: Array<{ id: string; name: string; memberRole: number | null; archived: boolean }>;
       canCreate: boolean;
     }>;
     expect(quickActions.props.workspaceSlug).toBe("acme");
-    expect(quickActions.props.projects).toEqual([{ id: "p1", name: "Atlas" }]);
+    expect(quickActions.props.projects).toEqual([{ id: "p1", name: "Atlas", memberRole: 20, archived: false }]);
     expect(quickActions.props.canCreate).toBe(true);
+  });
+
+  it("carries each project's own role into the quick-create list", () => {
+    // The workspace admin is only a guest on the second project, which
+    // must not appear as creatable (ISS-117/ISS-123).
+    stubShellQueries(
+      undefined,
+      { data: undefined },
+      {
+        data: [
+          {
+            id: "p1",
+            name: "Atlas",
+            identifier: "ATL",
+            sort_order: 10000,
+            member_role: 20,
+            intake_count: 0,
+            archived_at: null,
+            ...harness.projectViews,
+          },
+          {
+            id: "p2",
+            name: "Guestland",
+            identifier: "GST",
+            sort_order: 20000,
+            member_role: 5,
+            intake_count: 0,
+            archived_at: null,
+            ...harness.projectViews,
+          },
+        ],
+        status: "success",
+      }
+    );
+    harness.role = 20;
+    renderShell();
+    const quickActions = harness.sidebar?.quickActions as React.ReactElement<{
+      projects: Array<{ id: string; memberRole: number | null }>;
+    }>;
+    expect(quickActions.props.projects).toEqual([
+      expect.objectContaining({ id: "p1", memberRole: 20 }),
+      expect.objectContaining({ id: "p2", memberRole: 5 }),
+    ]);
+    const creatable = quickActions.props.projects.map((project) => ({
+      ...project,
+      name: project.id,
+      identifier: project.id.slice(0, 3),
+      archived: false,
+    }));
+    expect(selectCreatableProjects(creatable).map((project) => project.id)).toEqual(["p1"]);
   });
 
   it("passes the projects group slot its collection and handlers (SHELL-048)", () => {

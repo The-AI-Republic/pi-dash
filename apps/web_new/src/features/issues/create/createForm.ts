@@ -165,6 +165,24 @@ export function buildCreatePayload(form: CreateFormState): IssueCreateInput {
   return payload;
 }
 
+/**
+ * Membership the item needs after it exists (ISS-117). The create
+ * endpoint does not take a cycle or module, so the submit attaches them
+ * through the bridge writes once the server answers with the row id.
+ */
+export interface CreateMembership {
+  cycleId: string | null;
+  moduleIds: string[];
+}
+
+export function membershipForForm(form: CreateFormState): CreateMembership {
+  return { cycleId: form.cycleId, moduleIds: [...form.moduleIds] };
+}
+
+export function hasMembership(membership: CreateMembership): boolean {
+  return membership.cycleId !== null || membership.moduleIds.length > 0;
+}
+
 /** Draft input for the guard's Save-to-drafts action (ISS-120). */
 export function buildDraftInput(form: CreateFormState): DraftIssueCreateInput {
   const trimmed = normalizeTitle(form.name);

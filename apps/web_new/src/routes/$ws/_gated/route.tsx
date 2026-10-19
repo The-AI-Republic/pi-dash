@@ -461,9 +461,13 @@ function WorkspaceShell({
             quickActions={
               <QuickCreateButton
                 workspaceSlug={workspaceSlug}
-                projects={joinedProjects.map((project) => ({ id: project.id, name: project.name }))}
+                projects={joinedProjects.map((project) => ({
+                  id: project.id,
+                  name: project.name,
+                  memberRole: project.member_role,
+                  archived: project.archived_at !== null,
+                }))}
                 canCreate={canEdit}
-                memberRole={role}
               />
             }
             projectsGroup={

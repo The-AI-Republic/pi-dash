@@ -9,9 +9,11 @@
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
+  addIssueToCycle,
   createDraftIssue,
   generateAssistantTitle,
   searchIssues,
+  setIssueModules,
   type ApiClient,
   type DraftIssue,
   type DraftIssueCreateInput,
@@ -21,26 +23,21 @@ import {
 
 import { getAppClient } from "../../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../../core/query/client.js";
-import { TITLE_GENERATION_TIMEOUT_MS } from "./createForm.js";
+import { TITLE_GENERATION_TIMEOUT_MS, type CreateMembership } from "./createForm.js";
 
 /** Toast copy after an inline draft save. */
 export const DRAFT_SAVED_INLINE_TITLE = "Draft saved";
 /** Toast copy when an inline draft save fails. */
 export const DRAFT_SAVE_FAILED_INLINE_TITLE = "Couldn't save the draft";
-/** Toast copy after the discard guard keeps a draft. */
-export const DRAFT_SAVED_TITLE = "Draft saved";
-export const DRAFT_SAVED_BODY = "Find it in your drafts when you're ready to finish it.";
-/** Toast copy when the draft write fails. */
-export const DRAFT_SAVE_FAILED_TITLE = "Couldn't save the draft";
-export const DRAFT_SAVE_FAILED_BODY = "The form is still open — check your connection and try again.";
+/** Toast when a created item could not be attached to its cycle or modules. */
+export const MEMBERSHIP_FAILED_TITLE = "Work item created, but not placed";
+export const MEMBERSHIP_FAILED_BODY = "Add it to its cycle or modules from the item when you're ready.";
 /** Toast copy when the assistant cannot name the work item. */
 export const TITLE_GENERATION_FAILED_TITLE = "Couldn't generate a title";
 export const TITLE_EMPTY_DESCRIPTION_BODY = "Add a description first so the assistant has something to name it from.";
 export const TITLE_GENERATION_FAILED_BODY = "Enter a title yourself, or try again in a moment.";
 export const TITLE_GENERATION_TIMED_OUT_BODY = "The assistant took too long. Enter a title yourself or try again.";
 export const TITLE_GENERATION_EMPTY_BODY = "The assistant returned no title. Enter one yourself or try again.";
-/** Toast when a form submitted an empty title without an assistant. */
-export const SELECT_PROJECT_BODY = "Pick the project this work item belongs to.";
 
 /** Parent-search debounce, from the row (ISS-122). */
 export const PARENT_SEARCH_DEBOUNCE_MS = 500;
@@ -127,8 +124,32 @@ export function useParentSearch(workspaceSlug: string, projectId: string, text: 
   });
 }
 
-/** The row shape the parent picker renders once a parent is chosen. */
-export type ParentCandidate = IssueSearchHit;
+/** One created item plus the membership the dialog must attach. */
+export interface CreateMembershipInput extends CreateMembership {
+  projectId: string;
+  issueId: string;
+}
+
+/** Attach a newly created row to its cycle, then its modules (ISS-117).
+ * The bridge writes run one after the other so they cannot race. */
+export async function applyCreateMembership(
+  client: ApiClient,
+  workspaceSlug: string,
+  input: CreateMembershipInput
+): Promise<void> {
+  if (input.cycleId !== null) {
+    await addIssueToCycle(client, workspaceSlug, input.projectId, input.cycleId, input.issueId);
+  }
+  if (input.moduleIds.length > 0) {
+    await setIssueModules(client, workspaceSlug, input.projectId, input.issueId, { modules: input.moduleIds });
+  }
+}
+
+export function useApplyCreateMembership(workspaceSlug: string) {
+  return useMutation<void, Error, CreateMembershipInput>({
+    mutationFn: (input) => applyCreateMembership(getAppClient(), workspaceSlug, input),
+  });
+}
 
 /** Identifier text for one search hit: short code plus sequence. */
 export function hitIdentifier(hit: IssueSearchHit): string {

@@ -7,11 +7,17 @@
 // mount. A cloud build replaces the hook behind the edition flag and
 // supplies the debounced search; the dialog consumes only this shape.
 
-import type { IssueSearchHit } from "@pidash/api-client";
+import { useQuery } from "@tanstack/react-query";
+import { searchIssues, type IssueSearchHit, type IssueSearchResults } from "@pidash/api-client";
 import * as React from "react";
 
+import { getAppClient } from "../../../core/api/client.js";
+import { ISSUE_DEDUPE_FLAG } from "../../../core/edition/index.js";
+import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../../core/query/client.js";
+import { useDebouncedValue } from "../../../shared/commands/index.js";
+
 /** Edition flag a cloud build sets to turn duplicate matching on. */
-export const ISSUE_DEDUPE_FLAG = "issue-dedupe";
+export { ISSUE_DEDUPE_FLAG };
 /** Idle pause before a title keystroke burst searches for duplicates. */
 export const DEDUPE_DEBOUNCE_MS = 500;
 
@@ -23,7 +29,7 @@ export interface DuplicateMatches {
   isEnabled: boolean;
 }
 
-const NO_MATCHES: DuplicateMatches = { matches: [], isLoading: false, isEnabled: false };
+export const NO_MATCHES: DuplicateMatches = { matches: [], isLoading: false, isEnabled: false };
 
 export interface DuplicateSearchInput {
   workspaceSlug: string;
@@ -32,35 +38,114 @@ export interface DuplicateSearchInput {
   enabled: boolean;
 }
 
-/**
- * Matching work items for a typed title. This build has no server-side
- * duplicate read, so it never matches and never enables the surface.
- */
-export function useDuplicateMatches(_input: DuplicateSearchInput): DuplicateMatches {
-  return NO_MATCHES;
+/** Cache key prefix for the dialog's duplicate search. */
+export function duplicateSearchKey(workspaceSlug: string, projectId: string, title: string) {
+  return [...workspaceScope(workspaceSlug), "issues", "create", "duplicates", projectId, title] as const;
 }
 
 /**
- * The side-by-side panel the cloud seam feeds (ISS-121). An empty result
- * renders nothing, so the community build shows no trace of the feature.
+ * The edition's duplicate read: a search for the typed title scoped to
+ * the item's project. The old app's similar-issue panel searched the
+ * same endpoint the parent picker uses, so a passing title is a query,
+ * not a special server call.
+ */
+export function useDuplicateSearch(workspaceSlug: string, projectId: string, title: string, enabled: boolean) {
+  return useQuery({
+    queryKey: duplicateSearchKey(workspaceSlug, projectId, title),
+    queryFn: (): Promise<IssueSearchResults> =>
+      searchIssues(getAppClient(), workspaceSlug, projectId, { search: title }),
+    staleTime: REFERENCE_STALE_TIME_MS,
+    enabled: enabled && projectId !== "",
+  });
+}
+
+/** Matches of the same title exactly, in the project the form targets. */
+export function selectDuplicateMatches(
+  hits: readonly IssueSearchHit[],
+  title: string,
+  projectId: string
+): IssueSearchHit[] {
+  const wanted = title.trim().toLowerCase();
+  if (wanted === "") return [];
+  return hits.filter((hit) => hit.project_id === projectId && hit.name.trim().toLowerCase() === wanted);
+}
+
+/**
+ * Matching work items for a typed title. With the flag off (every OSS
+ * build) the hook short-circuits: no read, no matches, surface off. With
+ * it on, the title debounces, the query runs, and the count button and
+ * panel mount from the result (ISS-121, §23).
+ */
+export function useDuplicateMatches(input: DuplicateSearchInput): DuplicateMatches {
+  const active = input.enabled && shouldSearchDuplicates(input.title, input.enabled);
+  const term = useDebouncedValue(active ? input.title.trim() : "", DEDUPE_DEBOUNCE_MS);
+  const pending = active && isDebouncing(input.title.trim(), term);
+  const enabled = active && !pending;
+  const query = useDuplicateSearch(input.workspaceSlug, input.projectId, term, enabled);
+  if (!active) return NO_MATCHES;
+  // While the next term is still settling the previous result is stale;
+  // hide it rather than showing duplicates for words no longer typed.
+  const matches = pending ? [] : selectDuplicateMatches(query.data ?? [], term, input.projectId);
+  return {
+    matches,
+    isLoading: pending || query.isFetching,
+    isEnabled: enabled && matches.length > 0,
+  };
+}
+
+/** True while the typed term has not settled into the debounced one. */
+export function isDebouncing(term: string, debounced: string): boolean {
+  return term !== debounced;
+}
+
+/**
+ * The count button and side-by-side panel the cloud seam feeds (ISS-121).
+ * An empty result renders nothing, so the community build shows no trace
+ * of the feature; matches collapse behind a count until asked for.
  */
 export function DuplicatePanel({ matches }: { matches: readonly IssueSearchHit[] }): React.ReactElement | null {
+  const [open, setOpen] = React.useState(false);
   if (matches.length === 0) return null;
   return React.createElement(
-    "aside",
-    { "aria-label": "Possible duplicates", className: "flex flex-col gap-(--space-1)" },
+    "div",
+    { className: "flex flex-col items-start gap-(--space-2)" },
     React.createElement(
-      "p",
-      { className: "text-meta text-(--text-muted)" },
+      "button",
+      {
+        type: "button",
+        "aria-expanded": open ? "true" : "false",
+        onClick: () => setOpen((current) => !current),
+        className:
+          "inline-flex h-(--control-height-sm) items-center rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-3) text-meta text-(--text) hover:bg-(--subtle) focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-(--focus-ring-color) focus-visible:outline-offset-1",
+      },
       `${matches.length} possible duplicate${matches.length === 1 ? "" : "s"}`
     ),
-    React.createElement(
-      "ul",
-      { className: "flex flex-col gap-(--space-1)" },
-      matches.map((match) =>
-        React.createElement("li", { key: match.id, className: "text-body text-(--text)" }, match.name)
-      )
-    )
+    open
+      ? React.createElement(
+          "aside",
+          { "aria-label": "Possible duplicates", className: "flex flex-col gap-(--space-1)" },
+          React.createElement(
+            "ul",
+            { className: "flex flex-col gap-(--space-1)" },
+            matches.map((match) =>
+              React.createElement(
+                "li",
+                { key: match.id, className: "text-body" },
+                React.createElement(
+                  "a",
+                  {
+                    href: `/${match.workspace__slug}/browse/${match.project__identifier}-${match.sequence_id}`,
+                    target: "_blank",
+                    rel: "noreferrer",
+                    className: "text-(--text) underline-offset-2 hover:underline",
+                  },
+                  match.name
+                )
+              )
+            )
+          )
+        )
+      : null
   );
 }
 
