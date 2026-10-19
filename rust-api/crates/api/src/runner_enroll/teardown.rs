@@ -2985,8 +2985,7 @@ mod tests {
             "pod lazy load must not filter tombstones"
         );
         assert!(
-            normalize_sql(&pod_lazy_sql())
-                .contains(r#"FROM "pod" WHERE "pod"."id" = $1 LIMIT 1"#),
+            normalize_sql(&pod_lazy_sql()).contains(r#"FROM "pod" WHERE "pod"."id" = $1 LIMIT 1"#),
             "pod lazy load shape"
         );
         assert!(
