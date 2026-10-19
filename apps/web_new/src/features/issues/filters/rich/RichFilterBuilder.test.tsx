@@ -321,7 +321,7 @@ describe("view row wiring", () => {
     view?: RichFilterBuilderProps["view"];
     onViewUpdated?: (view: import("@pidash/api-client").SavedView) => void;
   }): React.ReactElement {
-    const { row } = useRichFilterBuilder({
+    const { control, row } = useRichFilterBuilder({
       workspaceSlug: "acme",
       projectId: PROJECT,
       entity: ENTITY,
@@ -330,7 +330,12 @@ describe("view row wiring", () => {
       view: props.view,
       onViewUpdated: props.onViewUpdated,
     });
-    return <div>{row}</div>;
+    return (
+      <div>
+        <div data-testid="control-slot">{control}</div>
+        {row}
+      </div>
+    );
   }
 
   function setupView(
@@ -395,6 +400,63 @@ describe("view row wiring", () => {
     expect(patches).toHaveLength(1);
     expect(patches[0]?.["rich_filters"]).toEqual({ not: { priority__in: "urgent" } });
     expect(onViewUpdated.mock.calls[0]?.[0]).toMatchObject({ id: VIEW_RECORD.id });
+  });
+
+  it("keeps Update view reachable after Clear all empties a saved view", async () => {
+    const user = userEvent.setup();
+    const { patches, onViewUpdated } = setupView(
+      { priority__in: "none" },
+      {
+        view: { ...VIEW_RECORD, rich_filters: { priority__in: "urgent" } } as never,
+        isDefault: false,
+      }
+    );
+    await user.click(await screen.findByTestId("rich-clear-all"));
+    // The row stays for the unsaved, empty expression; the only remaining
+    // action is the one that persists it.
+    expect(screen.queryByTestId("rich-condition")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("rich-save-view")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("rich-clear-all")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Update view" }));
+    await waitFor(() => expect(onViewUpdated).toHaveBeenCalledTimes(1));
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.["rich_filters"]).toEqual({});
+    // The stored view now carries the empty expression, so it reads clean.
+    await waitFor(() => expect(screen.getByTestId("rich-filter-add")).toBeInTheDocument());
+  });
+
+  it("switches a start date from one day to a between range, carrying the day as the first end", async () => {
+    const user = userEvent.setup();
+    const { patches } = setup({ start_date__exact: "2026-02-10" });
+    const pill = screen.getByTestId("rich-condition");
+    await user.click(within(pill).getByRole("button", { name: /^is$/ }));
+    await user.click(await screen.findByRole("option", { name: "between" }));
+
+    // The day becomes the range's first end; the half-built pair is not
+    // stored, and the pair editor reopens for the missing end.
+    await waitFor(() => expect(patches).toEqual([{ rich_filters: {} }]));
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    expect(screen.getByTestId("rich-value-trigger").parentElement).toHaveAttribute("data-incomplete", "true");
+    await user.click(within(calendar).getByRole("button", { name: "February 12, 2026" }));
+    await waitFor(() => expect(patches).toHaveLength(2));
+    expect(patches[1]).toEqual({ rich_filters: { start_date__range: "2026-02-10,2026-02-12" } });
+  });
+
+  it("switches a between range back to one day, keeping its first end", async () => {
+    const user = userEvent.setup();
+    const { patches } = setup({ start_date__range: "2026-02-10,2026-02-12" });
+    const pill = screen.getByTestId("rich-condition");
+    await user.click(within(pill).getByRole("button", { name: /^between$/ }));
+    await user.click(await screen.findByRole("option", { name: "is" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]).toEqual({ rich_filters: { start_date__exact: "2026-02-10" } });
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10");
+  });
+
+  it("keeps an empty saved view on its Add control when it matches the record", () => {
+    setupView({ priority__in: "none" }, { view: { ...VIEW_RECORD, rich_filters: {} } as never, isDefault: false });
+    expect(screen.getByTestId("rich-filter-add")).toBeInTheDocument();
+    expect(screen.queryByTestId("rich-filter-row")).not.toBeInTheDocument();
   });
 
   it("hides the view actions from a workspace member who has not joined the project", async () => {

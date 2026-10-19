@@ -171,7 +171,25 @@ describe("ViewActions", () => {
   it("keeps only the row actions when there is nothing to clear", () => {
     renderActions((props) => ({ ...props, hasConditions: false }));
     expect(screen.queryByTestId("rich-clear-all")).not.toBeInTheDocument();
-    expect(screen.getByTestId("rich-save-view")).toBeInTheDocument();
+    // There is no expression to save, so neither Save entry offers.
+    expect(screen.queryByTestId("rich-save-view")).not.toBeInTheDocument();
+  });
+
+  it("offers only Update view once a saved view is cleared", async () => {
+    const user = userEvent.setup();
+    const { calls, onClearAll } = renderActions((props) => ({
+      ...props,
+      context: savedContext(),
+      // The live row is now empty; the view still stores the expression.
+      snapshot: { ...SNAPSHOT, expression: {} },
+      hasConditions: false,
+    }));
+    expect(screen.queryByTestId("rich-clear-all")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("rich-save-view")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Update view" }));
+    await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
+    expect(calls.find((call) => call.method === "PATCH")?.body).toMatchObject({ rich_filters: {} });
+    expect(onClearAll).not.toHaveBeenCalled();
   });
 
   it("creates a project view from the dialog", async () => {

@@ -199,6 +199,16 @@ export function serializeRichExpression(conditions: readonly RichCondition[]): R
   };
 }
 
+/**
+ * A stored expression in the shape this builder writes. The server and the
+ * old app can hold a one-leaf `and` that means the same thing as the bare
+ * leaf, so comparisons read both through the parser and serializer rather
+ * than comparing raw trees.
+ */
+export function normalizeRichExpression(expression: unknown): RichExpression {
+  return serializeRichExpression(parseRichExpression(expression));
+}
+
 /** Whether a condition has a property, operator and a usable value. */
 export function isConditionComplete(condition: RichCondition): boolean {
   if (condition.property === "" || condition.operator === "") return false;
@@ -467,6 +477,17 @@ export function isValueComplete(kind: RichFilterKind, value: unknown): boolean {
   if (kind === "multi") return Array.isArray(value) && value.length > 0;
   if (kind === "date") return typeof value === "string" && value.length > 0;
   return value !== null && value !== undefined && value !== "";
+}
+
+/**
+ * Completeness for one operator's value shape. A date field's `exact`
+ * lookup holds one day while its `range` lookup holds both ends, so the
+ * kind alone cannot decide whether the editor is finished.
+ */
+export function isValueCompleteForOperator(field: RichFilterField, operator: string, value: unknown): boolean {
+  if (operator === "range") return isValueComplete("date_range", value);
+  if (operator === "exact" && field.kind === "date_range") return isValueComplete("date", value);
+  return isValueComplete(field.kind, value);
 }
 
 /** Human label for one stored value, or null when the entity no longer resolves. */

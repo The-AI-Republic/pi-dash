@@ -11,8 +11,8 @@
 
 import type { SavedView, SavedViewCreate, SavedViewPatch } from "@pidash/api-client";
 import { issueKeys } from "../../api/keys.js";
-import type { DisplayPrefs } from "../../prefs/displayPrefs.js";
-import type { RichExpression } from "./expression.js";
+import { parseDisplayPrefs, type DisplayPrefs } from "../../prefs/displayPrefs.js";
+import { normalizeRichExpression, type RichExpression } from "./expression.js";
 
 /** The row's view context: which record it edits, if any. */
 export interface ViewContext {
@@ -127,7 +127,9 @@ export function viewContextFromRecord(
     locked: view.is_locked,
     isDefault: options.isDefault,
     viewScope: view.project === null ? "workspace" : "project",
-    storedExpression: view.rich_filters,
+    // One-leaf `and` wrappers and CSV multi values mean what the builder
+    // writes, so the stored side is normalized before comparing.
+    storedExpression: normalizeRichExpression(view.rich_filters),
     storedDisplayFilters: view.display_filters,
     storedDisplayProperties: view.display_properties,
   };
@@ -166,31 +168,47 @@ export function viewExpression(view: SavedView): RichExpression {
 }
 
 /**
- * The display keys a saved view would store for these settings: the view's
- * stored objects with the displayed keys overwritten. Reading a view back
- * through `parseDisplayPrefs` returns the same values, so an untouched view
- * never reads as dirty and a switch back to the stored layout clears the
- * change.
+ * The display keys a saved view would store for these settings. Only keys
+ * the record already carries, or whose value actually differs from what
+ * the record parses back to, are written: the stored object is patched in
+ * place, so a view nobody touched snapshots back to exactly what it
+ * stores and never reads as changed. A key the record lacks is written
+ * only when the row showed something other than the record's default.
  */
 export function viewDisplaySnapshot(
   view: Pick<SavedView, "display_filters" | "display_properties">,
   prefs: DisplayPrefs
 ): Pick<ViewSnapshot, "displayFilters" | "displayProperties"> {
+  const stored = parseDisplayPrefs(view.display_filters, view.display_properties);
+  const filters: Record<string, unknown> = { ...view.display_filters };
+  const properties: Record<string, unknown> = { ...view.display_properties };
+  function put(target: Record<string, unknown>, key: string, next: unknown, current: unknown): void {
+    if (key in target || stableJson(next) !== stableJson(current)) target[key] = next;
+  }
+  put(filters, "layout", prefs.layout, stored.layout);
+  put(filters, "group_by", prefs.groupBy, stored.groupBy);
+  put(filters, "sub_group_by", prefs.subGroupBy, stored.subGroupBy);
+  put(filters, "order_by", prefs.orderBy, stored.orderBy);
+  put(filters, "show_empty_groups", prefs.showEmptyGroups, stored.showEmptyGroups);
+  put(filters, "sub_issue", prefs.showSubIssues, stored.showSubIssues);
   const storedCalendar =
     typeof view.display_filters["calendar"] === "object" && view.display_filters["calendar"] !== null
       ? (view.display_filters["calendar"] as Record<string, unknown>)
       : {};
-  return {
-    displayFilters: {
-      ...view.display_filters,
-      layout: prefs.layout,
-      group_by: prefs.groupBy,
-      sub_group_by: prefs.subGroupBy,
-      order_by: prefs.orderBy,
-      show_empty_groups: prefs.showEmptyGroups,
-      sub_issue: prefs.showSubIssues,
-      calendar: { ...storedCalendar, layout: prefs.calendar.mode, show_weekends: prefs.calendar.showWeekends },
-    },
-    displayProperties: { ...view.display_properties, ...prefs.properties },
-  };
+  // A calendar object carries two independent keys; write each only when
+  // the record has it or the switch moved away from its parsed default.
+  if (
+    "calendar" in filters ||
+    prefs.calendar.mode !== stored.calendar.mode ||
+    prefs.calendar.showWeekends !== stored.calendar.showWeekends
+  ) {
+    const calendar: Record<string, unknown> = { ...storedCalendar };
+    put(calendar, "layout", prefs.calendar.mode, stored.calendar.mode);
+    put(calendar, "show_weekends", prefs.calendar.showWeekends, stored.calendar.showWeekends);
+    filters["calendar"] = calendar;
+  }
+  for (const [key, value] of Object.entries(prefs.properties)) {
+    put(properties, key, value, stored.properties[key]);
+  }
+  return { displayFilters: filters, displayProperties: properties };
 }

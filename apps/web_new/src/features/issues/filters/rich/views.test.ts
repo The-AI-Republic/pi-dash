@@ -155,6 +155,14 @@ describe("isViewDirty", () => {
 });
 
 describe("viewContextFromRecord", () => {
+  it("normalizes a one-leaf and wrapper so it never reads as a change", () => {
+    const context = viewContextFromRecord(record({ rich_filters: { and: [{ priority__in: "urgent" }] } }), OWNER, {
+      isDefault: false,
+    });
+    expect(context.storedExpression).toEqual({ priority__in: "urgent" });
+    expect(isViewDirty(context, SNAPSHOT)).toBe(false);
+  });
+
   it("derives the project scope and copies the stored keys", () => {
     const context = saved();
     expect(context).toMatchObject({
@@ -211,22 +219,96 @@ describe("viewDisplaySnapshot", () => {
       calendar: { mode: "month", showWeekends: false },
       properties: { priority: false },
     });
+    // Keys the record stores are patched; absent keys appear only when the
+    // row moved away from the record's parsed default.
     expect(snapshot.displayFilters).toEqual({
       layout: "gantt_chart",
       group_by: null,
-      sub_group_by: null,
       order_by: "-created_at",
       show_empty_groups: true,
-      sub_issue: false,
       calendar: { layout: "month", show_weekends: false },
       custom_key: "kept",
     });
     expect(snapshot.displayProperties).toEqual({ priority: false, custom: false });
   });
 
+  it("leaves an untouched record's display objects exactly as stored", () => {
+    const display_filters = {
+      layout: "list",
+      group_by: null,
+      order_by: "-created_at",
+      sub_issue: true,
+      show_empty_groups: true,
+      calendar_date_range: "",
+    };
+    const display_properties = { priority: true, state: true };
+    const snapshot = viewDisplaySnapshot(
+      { display_filters, display_properties },
+      parseDisplayPrefs(display_filters, display_properties)
+    );
+    expect(snapshot.displayFilters).toEqual(display_filters);
+    expect(snapshot.displayProperties).toEqual(display_properties);
+  });
+
+  it("adds only the absent keys a switch actually changes", () => {
+    const display_filters = { layout: "list", group_by: null, order_by: "-created_at" };
+    const display_properties = { priority: true };
+    const prefs = { ...parseDisplayPrefs(display_filters, display_properties), layout: "gantt_chart" as const };
+    const snapshot = viewDisplaySnapshot({ display_filters, display_properties }, prefs);
+    expect(snapshot.displayFilters).toEqual({ ...display_filters, layout: "gantt_chart" });
+    expect(snapshot.displayProperties).toEqual(display_properties);
+  });
+
+  it("writes only the calendar key that moved when the record stores none", () => {
+    const display_filters = { layout: "list" };
+    const prefs = {
+      ...parseDisplayPrefs(display_filters, {}),
+      calendar: { mode: "week" as const, showWeekends: true },
+    };
+    const snapshot = viewDisplaySnapshot({ display_filters, display_properties: {} }, prefs);
+    expect(snapshot.displayFilters).toEqual({ layout: "list", calendar: { layout: "week" } });
+  });
+
+  it("keeps a stored calendar's other key untouched", () => {
+    const display_filters = { layout: "list", calendar: { layout: "month", show_weekends: false } };
+    const prefs = {
+      ...parseDisplayPrefs(display_filters, {}),
+      calendar: { mode: "week" as const, showWeekends: false },
+    };
+    const snapshot = viewDisplaySnapshot({ display_filters, display_properties: {} }, prefs);
+    expect(snapshot.displayFilters["calendar"]).toEqual({ layout: "week", show_weekends: false });
+  });
+
   it("round-trips: the snapshot parses back to the settings it stored", () => {
     const prefs = parseDisplayPrefs({ layout: "gantt_chart", order_by: "-updated_at" }, { priority: false });
     const snapshot = viewDisplaySnapshot({ display_filters: {}, display_properties: {} }, prefs);
     expect(parseDisplayPrefs(snapshot.displayFilters, snapshot.displayProperties)).toEqual(prefs);
+  });
+});
+
+describe("a default view record", () => {
+  it("reads clean against its own snapshot", () => {
+    // The server's IssueView defaults: the view has never been edited.
+    const display_filters = {
+      group_by: null,
+      order_by: "-created_at",
+      type: null,
+      sub_issue: true,
+      show_empty_groups: true,
+      layout: "list",
+      calendar_date_range: "",
+    };
+    const display_properties = { priority: true, state: true };
+    const context = viewContextFromRecord(
+      record({ display_filters, display_properties, rich_filters: { priority__in: "urgent" } }),
+      OWNER,
+      { isDefault: false }
+    );
+    const prefs = parseDisplayPrefs(display_filters, display_properties);
+    const snapshot: ViewSnapshot = {
+      expression: { priority__in: "urgent" },
+      ...viewDisplaySnapshot({ display_filters, display_properties }, prefs),
+    };
+    expect(offersUpdateView(context, snapshot, OWNER)).toBe(false);
   });
 });

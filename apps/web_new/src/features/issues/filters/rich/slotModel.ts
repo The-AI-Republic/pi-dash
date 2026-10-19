@@ -33,16 +33,69 @@ export function slotSource(field: RichFilterField): SlotSource {
   return SOURCES[field.stem] ?? "static";
 }
 
-/** The editor for a field: date kinds get calendars, static ones a list. */
-export function slotEditor(field: RichFilterField): SlotEditor {
+/**
+ * The editor for a field at one operator: date kinds get calendars and
+ * static fields a list. A date with an `exact` lookup edits a single day
+ * and its `range` lookup edits two ends, so one field can offer both
+ * forms the way the old filter set does. Every other lookup uses the
+ * kind's own editor.
+ */
+export function slotEditor(field: RichFilterField, operator: string): SlotEditor {
+  if (operator === "exact" && (field.kind === "date" || field.kind === "date_range")) return "date";
+  if (operator === "range") return "range";
   if (field.kind === "date") return "date";
   if (field.kind === "date_range") return "range";
   return slotSource(field) === "static" ? "choice" : "pick";
 }
 
 /** The slot opens by itself whenever it holds no complete value. */
-export function opensWhenIncomplete(field: RichFilterField, value: unknown, complete: boolean): boolean {
-  return slotEditor(field) !== "choice" && !complete;
+export function opensWhenIncomplete(
+  field: RichFilterField,
+  operator: string,
+  value: unknown,
+  complete: boolean
+): boolean {
+  return slotEditor(field, operator) !== "choice" && !complete;
+}
+
+/** Both ends of a range for either an array or the stored `"start,end"` string. */
+export function rangeEndsFromString(value: unknown): { start: string | null; end: string | null } {
+  if (typeof value === "string") {
+    const [start, end] = value.split(",").map((entry) => entry.trim());
+    return {
+      start: start === undefined || start === "" ? null : start,
+      end: end === undefined || end === "" ? null : end,
+    };
+  }
+  return rangeEnds(value);
+}
+
+/**
+ * The value shape one operator expects. Switching `exact` to `range`
+ * keeps a stored day as the first end so the pair starts from what the
+ * user already picked; switching `range` back to `exact` keeps the first
+ * end. Incompatible shapes drop to no value rather than store a pair
+ * under a single-day lookup.
+ */
+export function valueForOperator(previousOperator: string, nextOperator: string, value: unknown): unknown {
+  const previous = slotEditorKind(previousOperator);
+  const next = slotEditorKind(nextOperator);
+  if (previous === next) return value;
+  if (next === "date") {
+    if (previous === "range") return rangeEndsFromString(value).start;
+    return typeof value === "string" && value.length > 0 ? value : null;
+  }
+  if (next === "range") {
+    if (previous === "date") return typeof value === "string" && value.length > 0 ? [value, null] : null;
+    return rangeEnds(value).start === null && rangeEnds(value).end === null ? null : value;
+  }
+  return value;
+}
+
+function slotEditorKind(operator: string): "date" | "range" | "other" {
+  if (operator === "exact") return "date";
+  if (operator === "range") return "range";
+  return "other";
 }
 
 /** Selected values as strings; a lone stored value reads as one pick. */
@@ -76,10 +129,14 @@ export function rangeLabel(ends: { start: string | null; end: string | null }): 
 }
 
 /** A range holding exactly one end is incomplete: warned and reopened. */
-export function isRangeIncomplete(field: RichFilterField, value: unknown): boolean {
-  if (field.kind !== "date_range") return false;
-  const ends = rangeEnds(value);
-  return (ends.start === null) !== (ends.end === null);
+export function isRangeIncomplete(value: unknown): boolean {
+  const ends =
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as { start?: string | null; end?: string | null })
+      : rangeEndsFromString(value);
+  const start = ends.start ?? null;
+  const end = ends.end ?? null;
+  return (start === null) !== (end === null);
 }
 
 /** Add or remove one pick; a single field keeps at most one. */

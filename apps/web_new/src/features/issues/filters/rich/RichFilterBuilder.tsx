@@ -27,6 +27,7 @@ import {
   addCondition,
   hasRichConditions,
   isConditionComplete,
+  normalizeRichExpression,
   parseRichExpression,
   removeCondition,
   richFilterFields,
@@ -42,7 +43,7 @@ import { temporaryInstanceId, useTemporaryFieldConfigs, type FieldConfigRegistry
 import { useRichFilters, useUpdateRichFilters } from "./useRichFilters.js";
 import { ViewActions } from "./ViewActions.js";
 import type { ViewContext, ViewSnapshot } from "./views.js";
-import { entityViewContext, viewDisplaySnapshot } from "./views.js";
+import { entityViewContext, isViewDirty, viewDisplaySnapshot } from "./views.js";
 
 export interface RichFilterBuilderProps {
   workspaceSlug: string;
@@ -132,7 +133,7 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
       ownerId: viewRecord.owned_by,
       locked: viewRecord.is_locked,
       isDefault: viewDefault,
-      storedExpression: viewRecord.rich_filters,
+      storedExpression: normalizeRichExpression(viewRecord.rich_filters),
       storedDisplayFilters: viewRecord.display_filters,
       storedDisplayProperties: viewRecord.display_properties,
     };
@@ -198,6 +199,13 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
   useTemporaryFieldConfigs(temporary ? rows : [], props.temporaryRegistry);
   const used = React.useMemo(() => usedProperties(rows), [rows]);
   const hasConditions = hasRichConditions(rows);
+  // A saved view whose row no longer matches the record still needs its
+  // right side: Clear all empties the expression, and the only way that
+  // empty expression reaches the record is through this row's Update view.
+  // So the row (and its actions) outlives an empty condition list whenever
+  // the view carries unsaved changes.
+  const viewDirty = viewRecord !== null && isViewDirty(viewContext, snapshot);
+  const showRowActions = hasConditions || viewDirty;
 
   function commit(next: readonly RichCondition[]): void {
     setDraft(next);
@@ -216,7 +224,7 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
     if (nextExpression !== current) updateRichFilters(next);
   }
 
-  const control = hasConditions ? (
+  const control = showRowActions ? (
     <Tooltip content={open ? "Hide filters" : "Show filters"}>
       <IconButton
         label="Filters"
@@ -251,7 +259,7 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
   );
 
   const row =
-    hasConditions && open ? (
+    showRowActions && open ? (
       <div
         data-testid="rich-filter-row"
         className="flex flex-wrap items-center gap-(--space-2) border-b border-(--border) px-(--space-4) py-(--space-2)"

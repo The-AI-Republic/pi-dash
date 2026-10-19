@@ -92,7 +92,9 @@ export function ViewActions({
   const [saving, setSaving] = React.useState(false);
   const [updating, setUpdating] = React.useState(false);
 
-  const saveOffered = canEdit && viewsEnabled && (offersSaveView(context) || offersSaveAs(context));
+  // Saving needs an expression to save; an emptied saved view still offers
+  // Update view, which is how the cleared expression reaches its record.
+  const saveOffered = canEdit && viewsEnabled && hasConditions && (offersSaveView(context) || offersSaveAs(context));
   const updateOffered = canEdit && viewsEnabled && offersUpdateView(context, snapshot, viewerId);
   // offersUpdateView only offers a view record, so the id is present whenever
   // the control renders.

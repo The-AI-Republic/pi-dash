@@ -427,6 +427,76 @@ describe("ValueSlot", () => {
   });
 });
 
+const SINGLE_FIELD = {
+  stem: "custom",
+  label: "Custom",
+  kind: "single" as const,
+  defaultOperator: "exact",
+  defaultNegated: false,
+  operators: ["exact"],
+  allowNegative: true,
+  staticValues: [
+    { value: "one", label: "One" },
+    { value: "two", label: "Two" },
+  ],
+};
+
+describe("ValueSlot single select", () => {
+  it("replaces the value on a new pick instead of adding a second", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={SINGLE_FIELD}
+          condition={{ key: "a", property: "custom", operator: "exact", negated: false, value: "one" }}
+          onChange={onChange}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /One/ }));
+    await user.click(await screen.findByRole("option", { name: "Two" }));
+    expect(onChange).toHaveBeenLastCalledWith("two");
+  });
+
+  it("clears when the current value is picked again", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={SINGLE_FIELD}
+          condition={{ key: "a", property: "custom", operator: "exact", negated: false, value: "one" }}
+          onChange={onChange}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /One/ }));
+    await user.click(await screen.findByRole("option", { name: /One/ }));
+    expect(onChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("shows one name rather than a list plus overflow", () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={SINGLE_FIELD}
+          condition={{ key: "a", property: "custom", operator: "exact", negated: false, value: "one" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    expect(screen.getByRole("button", { name: /One/ })).toBeInTheDocument();
+    expect(screen.queryByText(/more/)).not.toBeInTheDocument();
+  });
+});
+
 describe("ValueSlot member and label sources", () => {
   const MEMBER_PROJECT = "123e4567-e89b-12d3-a456-426614174000";
   const ANA = "423e4567-e89b-12d3-a456-426614174003";
@@ -1004,6 +1074,71 @@ describe("ValueSlot date editors", () => {
     );
     expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10 → 2026-02-12");
     expect(screen.getByRole("button", { name: /2026-02-10/ })).toHaveAttribute("data-empty", "false");
+  });
+
+  it("edits one day for a start date under its exact lookup", async () => {
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition("2026-02-10"), property: "start_date", operator: "exact" }}
+          onChange={onChange}
+        />
+      )
+    );
+    expect(screen.getByRole("button", { name: /2026-02-10/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
+    // The one-day editor opens a single calendar, not the range grid.
+    const calendar = await screen.findByTestId("rich-date-calendar");
+    expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument();
+    await userEvent.setup().click(within(calendar).getByRole("button", { name: "February 12, 2026" }));
+    expect(onChange).toHaveBeenCalledWith("2026-02-12");
+  });
+
+  it("opens the single-day calendar by itself for an empty exact start date", async () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(null), property: "start_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    expect(await screen.findByTestId("rich-date-calendar")).toBeInTheDocument();
+  });
+
+  it("renders a stored scalar start date under exact", () => {
+    const [stored] = parseRichExpression({ start_date__exact: "2026-02-10" });
+    render(
+      wrap(<ValueSlot workspaceSlug="acme" projectId={PROJECT} field={START} condition={stored!} onChange={() => {}} />)
+    );
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10");
+    expect(screen.getByTestId("rich-value-trigger").parentElement).not.toHaveAttribute("data-incomplete", "true");
+    expect(screen.queryByTestId("rich-date-calendar")).not.toBeInTheDocument();
+  });
+
+  it("bounds the single-day calendar for an exact start date", async () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={{ ...START, min: "2026-02-05", max: "2026-02-20" }}
+          condition={{ ...condition("2026-02-10"), property: "start_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
+    const calendar = await screen.findByTestId("rich-date-calendar");
+    expect(within(calendar).getByRole("button", { name: "February 4, 2026" })).toBeDisabled();
+    expect(within(calendar).getByRole("button", { name: "February 21, 2026" })).toBeDisabled();
   });
 
   it("renders both ends of a range read back from its stored string", () => {

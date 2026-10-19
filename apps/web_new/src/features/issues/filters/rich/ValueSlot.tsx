@@ -38,17 +38,20 @@ import { DateCalendar } from "../../dropdowns/DatePicker.js";
 import { DateRangeCalendar } from "../../dropdowns/DateRangePicker.js";
 import { useWeekStart } from "../../dropdowns/weekStart.js";
 import type { RangeValue } from "../../dropdowns/calendar.js";
-import { isValueComplete, type RichCondition, type RichFilterField } from "./expression.js";
+import type { RichCondition, RichFilterField } from "./expression.js";
 import { orderLabelOptions, orderMemberOptions, selectedIds } from "./filterValues.js";
 import {
   EMPTY_SLOT_LABEL,
+  isRangeIncomplete,
   opensWhenIncomplete,
   pickTriggerLabel,
-  rangeEnds,
+  rangeEndsFromString,
   rangeLabel,
   rangeValue,
   slotEditor,
+  togglePick as togglePickValue,
 } from "./slotModel.js";
+import { isValueCompleteForOperator } from "./expression.js";
 
 export interface ValueSlotProps {
   workspaceSlug: string;
@@ -248,9 +251,11 @@ function PickSlot({
     stateOptions,
   ]);
 
+  // One toggle for both forms: a multi field adds and removes picks, a
+  // single field replaces its value and clears when the current one is
+  // re-picked (ISS-100).
   function togglePick(id: string): void {
-    const next = selected.includes(id) ? selected.filter((entry) => entry !== id) : [...selected, id];
-    onChange(next.length === 0 ? null : next);
+    onChange(togglePickValue(field, condition.value, id));
   }
 
   const loading =
@@ -279,8 +284,8 @@ function PickSlot({
         </Button>
       }
       options={options}
-      value={selected}
-      multiple
+      value={field.kind === "single" ? (selected[0] ?? null) : selected}
+      multiple={field.kind !== "single"}
       onSelect={togglePick}
       listLabel={`${field.label} values`}
       searchLabel={`Search ${field.label.toLowerCase()} values`}
@@ -367,8 +372,8 @@ function RangeSlot({
   const [open, setOpen] = React.useState(autoOpen);
   const weekStart = useWeekStart();
   const [pending, setPending] = React.useState<RangeValue | null>(null);
-  const ends: RangeValue = pending ?? rangeEnds(value);
-  const incomplete = (ends.start === null) !== (ends.end === null);
+  const ends: RangeValue = pending ?? rangeEndsFromString(value);
+  const incomplete = isRangeIncomplete(ends);
   const label = rangeLabel(ends);
   return (
     <Popover
@@ -402,12 +407,12 @@ function RangeSlot({
   );
 }
 
-/** The kind-specific editor for one condition's value. */
+/** The operator- and kind-specific editor for one condition's value. */
 export function ValueSlot(props: ValueSlotProps): React.ReactElement {
   const { field, condition, onChange } = props;
-  const complete = isValueComplete(field.kind, condition.value);
-  const autoOpen = opensWhenIncomplete(field, condition.value, complete);
-  switch (slotEditor(field)) {
+  const complete = isValueCompleteForOperator(field, condition.operator, condition.value);
+  const autoOpen = opensWhenIncomplete(field, condition.operator, condition.value, complete);
+  switch (slotEditor(field, condition.operator)) {
     case "date":
       return <DateSlot field={field} value={condition.value} onChange={onChange} autoOpen={autoOpen} />;
     case "range":

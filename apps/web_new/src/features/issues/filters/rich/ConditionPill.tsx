@@ -25,6 +25,7 @@ import {
   type RichFilterField,
 } from "./expression.js";
 import { FieldPicker } from "./FieldPicker.js";
+import { valueForOperator } from "./slotModel.js";
 import { ValueSlot } from "./ValueSlot.js";
 
 export interface ConditionPillProps {
@@ -83,7 +84,14 @@ export function ConditionPill({
   const locked = isOperatorLocked(resolved);
 
   function changeOperator(option: OperatorOption): void {
-    onChange({ ...condition, operator: option.base, negated: option.negated });
+    onChange({
+      ...condition,
+      operator: option.base,
+      negated: option.negated,
+      // A one-day lookup and a two-end lookup do not share a value shape;
+      // keep what carries over and drop what cannot.
+      value: valueForOperator(condition.operator, option.base, condition.value),
+    });
   }
 
   const operatorComboboxOptions: ComboboxOption[] = operatorChoices.map((option) => ({

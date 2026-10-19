@@ -12,6 +12,8 @@ import {
   isOperatorLocked,
   isUnresolvableCondition,
   isValueComplete,
+  isValueCompleteForOperator,
+  normalizeRichExpression,
   operatorLabel,
   operatorOptions,
   parseRichExpression,
@@ -63,6 +65,16 @@ describe("parseRichExpression", () => {
     expect(parseRichExpression({ priority__in: "urgent" })).toEqual([
       { key: "leaf-0", property: "priority", operator: "in", negated: false, value: "urgent" },
     ]);
+  });
+
+  it("normalizes a stored expression to the shape the builder writes", () => {
+    expect(normalizeRichExpression({ and: [{ priority__in: "urgent" }] })).toEqual({ priority__in: "urgent" });
+    expect(normalizeRichExpression({ state_id__in: "a,b" })).toEqual({ state_id__in: "a,b" });
+    expect(normalizeRichExpression({ start_date__range: "2026-01-01,2026-01-31" })).toEqual({
+      start_date__range: "2026-01-01,2026-01-31",
+    });
+    expect(normalizeRichExpression({ or: [] })).toEqual({});
+    expect(normalizeRichExpression({})).toEqual({});
   });
 
   it("keeps keys stable across parses of the same expression", () => {
@@ -394,6 +406,27 @@ describe("value completeness and labels", () => {
     expect(isValueComplete("date_range", ["2026-01-01"])).toBe(false);
     expect(isValueComplete("date_range", ["2026-01-01", "2026-01-02"])).toBe(true);
     expect(isValueComplete("date_range", ["", "2026-01-02"])).toBe(false);
+  });
+
+  it("judges a date field by its operator's value shape", () => {
+    const start = findField(richFilterFields(), "start_date")!;
+    const target = findField(richFilterFields(), "target_date")!;
+    expect(isValueCompleteForOperator(start, "exact", "2026-01-01")).toBe(true);
+    expect(isValueCompleteForOperator(start, "exact", null)).toBe(false);
+    expect(isValueCompleteForOperator(start, "exact", ["2026-01-01", "2026-01-02"])).toBe(false);
+    expect(isValueCompleteForOperator(start, "range", ["2026-01-01", "2026-01-02"])).toBe(true);
+    expect(isValueCompleteForOperator(start, "range", "2026-01-01,2026-01-02")).toBe(false);
+    expect(isValueCompleteForOperator(start, "range", ["2026-01-01"])).toBe(false);
+    expect(isValueCompleteForOperator(target, "exact", "2026-01-01")).toBe(true);
+    expect(isValueCompleteForOperator(target, "range", ["2026-01-01", "2026-01-02"])).toBe(true);
+  });
+
+  it("falls back to the kind for lookups that do not change the shape", () => {
+    const priority = findField(richFilterFields(), "priority")!;
+    const start = findField(richFilterFields(), "start_date")!;
+    expect(isValueCompleteForOperator(priority, "in", ["urgent"])).toBe(true);
+    expect(isValueCompleteForOperator(priority, "in", [])).toBe(false);
+    expect(isValueCompleteForOperator(start, "in", ["2026-01-01", "2026-01-02"])).toBe(true);
   });
 
   it("requires one or more values for multi and a value for date/single", () => {

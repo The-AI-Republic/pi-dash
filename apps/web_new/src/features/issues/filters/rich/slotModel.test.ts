@@ -11,11 +11,13 @@ import {
   pickTriggerLabel,
   rangeEnds,
   rangeLabel,
+  rangeEndsFromString,
   rangeValue,
   selectedIds,
   slotEditor,
   slotSource,
   togglePick,
+  valueForOperator,
 } from "./slotModel.js";
 
 const FIELDS = richFilterFields();
@@ -50,24 +52,43 @@ describe("slotSource", () => {
 
 describe("slotEditor", () => {
   it("picks calendars for date kinds and lists for static ones", () => {
-    expect(slotEditor(field("target_date"))).toBe("date");
-    expect(slotEditor(field("start_date"))).toBe("range");
-    expect(slotEditor(field("priority"))).toBe("choice");
-    expect(slotEditor(field("assignee_id"))).toBe("pick");
-    expect(slotEditor(field("state_id"))).toBe("pick");
+    expect(slotEditor(field("target_date"), "exact")).toBe("date");
+    expect(slotEditor(field("start_date"), "range")).toBe("range");
+    expect(slotEditor(field("priority"), "in")).toBe("choice");
+    expect(slotEditor(field("assignee_id"), "in")).toBe("pick");
+    expect(slotEditor(field("state_id"), "in")).toBe("pick");
+  });
+
+  it("edits a start date as one day under its exact lookup and a pair under range", () => {
+    expect(slotEditor(field("start_date"), "exact")).toBe("date");
+    expect(slotEditor(field("start_date"), "range")).toBe("range");
+    // A date-only field keeps its single-day editor under every lookup.
+    expect(slotEditor(field("target_date"), "range")).toBe("range");
+  });
+
+  it("falls back to the kind's editor for any other lookup", () => {
+    expect(slotEditor(field("start_date"), "in")).toBe("range");
+    expect(slotEditor(field("target_date"), "in")).toBe("date");
   });
 });
 
 describe("opensWhenIncomplete", () => {
   it("never auto-opens a static choice list", () => {
-    expect(opensWhenIncomplete(field("priority"), null, false)).toBe(false);
+    expect(opensWhenIncomplete(field("priority"), "in", null, false)).toBe(false);
   });
 
   it("opens when a pick or a calendar holds no complete value", () => {
-    expect(opensWhenIncomplete(field("state_id"), null, false)).toBe(true);
-    expect(opensWhenIncomplete(field("state_id"), "todo", true)).toBe(false);
-    expect(opensWhenIncomplete(field("target_date"), null, false)).toBe(true);
-    expect(opensWhenIncomplete(field("target_date"), "2026-01-02", true)).toBe(false);
+    expect(opensWhenIncomplete(field("state_id"), "in", null, false)).toBe(true);
+    expect(opensWhenIncomplete(field("state_id"), "in", "todo", true)).toBe(false);
+    expect(opensWhenIncomplete(field("target_date"), "exact", null, false)).toBe(true);
+    expect(opensWhenIncomplete(field("target_date"), "exact", "2026-01-02", true)).toBe(false);
+  });
+
+  it("judges a start date by its lookup: a day under exact, a pair under range", () => {
+    expect(opensWhenIncomplete(field("start_date"), "exact", null, false)).toBe(true);
+    expect(opensWhenIncomplete(field("start_date"), "exact", "2026-01-02", true)).toBe(false);
+    expect(opensWhenIncomplete(field("start_date"), "range", ["2026-01-02", null], false)).toBe(true);
+    expect(opensWhenIncomplete(field("start_date"), "range", ["2026-01-02", "2026-01-03"], true)).toBe(false);
   });
 });
 
@@ -95,12 +116,49 @@ describe("range helpers", () => {
     expect(rangeValue(null, null)).toBeNull();
   });
 
-  it("marks a half-filled range incomplete and only for range kinds", () => {
-    expect(isRangeIncomplete(field("start_date"), ["2026-01-01", null])).toBe(true);
-    expect(isRangeIncomplete(field("start_date"), [null, "2026-01-01"])).toBe(true);
-    expect(isRangeIncomplete(field("start_date"), ["a", "b"])).toBe(false);
-    expect(isRangeIncomplete(field("start_date"), null)).toBe(false);
-    expect(isRangeIncomplete(field("target_date"), ["2026-01-01", null])).toBe(false);
+  it("marks a half-filled range incomplete", () => {
+    expect(isRangeIncomplete(["2026-01-01", null])).toBe(true);
+    expect(isRangeIncomplete([null, "2026-01-01"])).toBe(true);
+    expect(isRangeIncomplete(["a", "b"])).toBe(false);
+    expect(isRangeIncomplete(null)).toBe(false);
+    expect(isRangeIncomplete("2026-01-01,2026-01-05")).toBe(false);
+    expect(isRangeIncomplete("2026-01-01,")).toBe(true);
+    expect(isRangeIncomplete({ start: "2026-01-01", end: null })).toBe(true);
+    expect(isRangeIncomplete({ start: null, end: null })).toBe(false);
+  });
+
+  it("reads a stored range string back into its two ends", () => {
+    expect(rangeEndsFromString("2026-01-01,2026-01-05")).toEqual({ start: "2026-01-01", end: "2026-01-05" });
+    expect(rangeEndsFromString("2026-01-01,")).toEqual({ start: "2026-01-01", end: null });
+    expect(rangeEndsFromString("2026-01-01")).toEqual({ start: "2026-01-01", end: null });
+    expect(rangeEndsFromString(["2026-01-01", null])).toEqual({ start: "2026-01-01", end: null });
+    expect(rangeEndsFromString(null)).toEqual({ start: null, end: null });
+  });
+});
+
+describe("valueForOperator", () => {
+  it("keeps the value when both lookups share a shape", () => {
+    expect(valueForOperator("in", "in", ["a"])).toEqual(["a"]);
+    expect(valueForOperator("exact", "exact", "2026-01-01")).toBe("2026-01-01");
+    expect(valueForOperator("range", "range", ["2026-01-01", "2026-01-02"])).toEqual(["2026-01-01", "2026-01-02"]);
+  });
+
+  it("carries a day into the first end when narrowing or widening", () => {
+    expect(valueForOperator("exact", "range", "2026-01-01")).toEqual(["2026-01-01", null]);
+    expect(valueForOperator("range", "exact", ["2026-01-01", "2026-01-05"])).toBe("2026-01-01");
+    expect(valueForOperator("range", "exact", "2026-01-01,2026-01-05")).toBe("2026-01-01");
+    expect(valueForOperator("exact", "range", null)).toBeNull();
+    expect(valueForOperator("range", "exact", null)).toBeNull();
+  });
+
+  it("leaves a non-date lookup's value alone", () => {
+    expect(valueForOperator("in", "exact", "a")).toBe("a");
+    expect(valueForOperator("exact", "in", ["a"])).toEqual(["a"]);
+  });
+
+  it("drops a value that cannot become a range", () => {
+    expect(valueForOperator("in", "range", null)).toBeNull();
+    expect(valueForOperator("in", "range", ["a", "b"])).toEqual(["a", "b"]);
   });
 });
 
