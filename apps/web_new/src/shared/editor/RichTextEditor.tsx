@@ -54,6 +54,12 @@ async function loadEditor(): Promise<{ default: React.ComponentType<RichTextEdit
         extensions,
         content: initialHtml,
         editable,
+        // Create the editor in the mount effect, never during render.
+        // Without this the manager builds one instance for the first
+        // paint and then replaces it a tick later, swapping the editable
+        // node out from under a just-typed caret (and any element
+        // handle taken between the two commits).
+        immediatelyRender: false,
         autofocus: autoFocus ? "end" : false,
         editorProps: {
           attributes: { "aria-label": label, class: "rich-text-content min-h-24 outline-none" },

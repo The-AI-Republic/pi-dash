@@ -241,8 +241,11 @@ describe("DetailMainColumn", () => {
     const { patches } = renderColumn();
     await user.click(screen.getByRole("button", { name: "Edit description" }));
     const editable = await screen.findByLabelText(DESCRIPTION_LABEL);
-    editable.focus();
+    // The field autofocuses once the lazy editor mounts; typing before
+    // that move lands can have the focus change swallow keystrokes.
+    await waitFor(() => expect(editable).toHaveFocus());
     await user.keyboard(" more");
+    expect(editable).toHaveTextContent("Current words more");
     fireEvent.blur(editable);
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0]?.url).toContain(`/issues/${ISSUE}/`);

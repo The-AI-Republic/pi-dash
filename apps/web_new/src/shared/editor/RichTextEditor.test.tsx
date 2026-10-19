@@ -9,6 +9,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import { RichTextEditor } from "./RichTextEditor.js";
 
+// The editor arrives through a dynamic import (tipTap, its extensions).
+// A full-suite run can keep that import in flight for seconds, so the
+// content and surface waits get an explicit budget; the default 1 s
+// find budget is what made the fallback test racy under load.
+const LOAD_TIMEOUT = { timeout: 10_000 };
+
 function renderEditor(props: Partial<React.ComponentProps<typeof RichTextEditor>> = {}) {
   const onChange = vi.fn();
   render(
@@ -20,7 +26,7 @@ function renderEditor(props: Partial<React.ComponentProps<typeof RichTextEditor>
 }
 
 async function editorSurface(label: string): Promise<HTMLElement> {
-  const editable = await screen.findByLabelText(label);
+  const editable = await screen.findByLabelText(label, undefined, LOAD_TIMEOUT);
   expect(editable).toHaveAttribute("contenteditable", "true");
   return editable;
 }
@@ -32,7 +38,28 @@ describe("RichTextEditor", () => {
         <RichTextEditor initialHtml="<p>Stored words</p>" label="Body" onChange={() => {}} />
       </React.Suspense>
     );
-    expect(await screen.findByText("Stored words")).toBeInTheDocument();
+    expect(await screen.findByText("Stored words", undefined, LOAD_TIMEOUT)).toBeInTheDocument();
+  });
+
+  it("keeps the editing surface mounted once the loaded content appears", async () => {
+    // The lazy chunk resolves, then the editor instance settles. A frame
+    // that paints content from one instance and swaps in another would
+    // replace the editable node and drop a caret (or element handle)
+    // taken on the first commit; the surface must be final once visible.
+    renderEditor({ initialHtml: "<p>steady words</p>" });
+    const [painted] = await screen.findAllByText("steady words", undefined, LOAD_TIMEOUT);
+    // The editor manager schedules its one-tick reconciliation with a
+    // 1 ms timer; these later timers run after it, so by the first the
+    // instance has settled whether or not the machine is busy.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const editable = screen.getByLabelText("Body");
+    expect(editable).toHaveTextContent("steady words");
+    // The painted paragraph is the one still on screen, not a discarded
+    // first instance replaced by the settled one.
+    expect(painted?.isConnected).toBe(true);
+    expect(editable).toContainElement(painted ?? null);
   });
 
   it("opens with the stored HTML and reports edits back as HTML", async () => {
@@ -76,7 +103,7 @@ describe("RichTextEditor", () => {
 
   it("renders read-only when editing is off", async () => {
     renderEditor({ initialHtml: "<p>locked</p>", editable: false });
-    const editable = await screen.findByLabelText("Body");
+    const editable = await screen.findByLabelText("Body", undefined, LOAD_TIMEOUT);
     expect(editable).toHaveAttribute("contenteditable", "false");
     expect(editable).toHaveTextContent("locked");
   });

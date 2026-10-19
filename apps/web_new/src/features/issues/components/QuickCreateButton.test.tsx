@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { selectCreatableProjects } from "../create/createForm.js";
@@ -17,6 +17,15 @@ const PROJECTS = [
   { id: "p2", name: "Guestland", identifier: "GST", memberRole: 5, archived: false },
   { id: "p3", name: "Old Atlas", identifier: "OLD", memberRole: 20, archived: true },
 ];
+
+// The first click pulls the dialog chunk (form primitives, mutation
+// wiring). Under a full-suite run that import can take seconds, past
+// the 1 s default find budget; give the lazy mount room without
+// loosening what is asserted. The find budget also needs a test
+// timeout above it to take effect, since vitest stops a test at 5 s by
+// default; the chunk is awaited explicitly where it is pending.
+const OPEN_TIMEOUT = { timeout: 10_000 };
+const OPEN_TEST_TIMEOUT = 30_000;
 
 function setup(projects: typeof PROJECTS = PROJECTS, canCreate = true) {
   createAppClient("https://api.test", (async (url: string) => ({
@@ -38,15 +47,22 @@ afterEach(() => {
 });
 
 describe("QuickCreateButton", () => {
-  it("opens the creation dialog for eligible members", async () => {
-    const user = userEvent.setup();
-    setup();
-    const entry = screen.getByRole("button", { name: "New work item" });
-    expect(entry).toBeEnabled();
-    await user.click(entry);
-    // The dialog rides a lazy chunk, so the first open spans a module load.
-    expect(await screen.findByRole("dialog", { name: "Create new work item" }, { timeout: 5000 })).toBeInTheDocument();
-  });
+  it(
+    "opens the creation dialog for eligible members",
+    async () => {
+      const user = userEvent.setup();
+      setup();
+      const entry = screen.getByRole("button", { name: "New work item" });
+      expect(entry).toBeEnabled();
+      await user.click(entry);
+      // The dialog rides a lazy chunk, so the first open spans a module
+      // load; wait for that import and give the find a budget above the
+      // default one.
+      await vi.dynamicImportSettled();
+      expect(await screen.findByRole("dialog", { name: "Create new work item" }, OPEN_TIMEOUT)).toBeInTheDocument();
+    },
+    OPEN_TEST_TIMEOUT
+  );
 
   it("stays disabled for guests", () => {
     setup(PROJECTS, false);
