@@ -51,6 +51,8 @@ export interface AppShellProps {
   slideOver?: React.ReactNode;
   /** Workspace-scoped global dialogs, available on every workspace page. */
   dialogs?: React.ReactNode;
+  /** False on screens that pin their key handling (PSET-062). */
+  suppressPageShortcuts?: boolean;
   children: React.ReactNode;
 }
 
@@ -63,9 +65,10 @@ export function AppShell({
   rail,
   slideOver,
   dialogs,
+  suppressPageShortcuts = false,
   children,
 }: AppShellProps): React.ReactElement {
-  useGlobalShortcuts();
+  useGlobalShortcuts({ pageShortcuts: !suppressPageShortcuts });
   const paletteOpen = useCommandPalette((state) => state.open);
   const [paletteMounted, setPaletteMounted] = React.useState(paletteOpen);
   useSessionExpiredRedirect();

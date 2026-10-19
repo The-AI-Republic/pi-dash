@@ -14,6 +14,7 @@ import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { ROLE_ADMIN } from "../../../core/session/permissions.js";
 import { useProjectRoles, useWorkspaceMembership } from "../../auth/index.js";
 import { isProjectAdmin, projectDetailsQueryOptions } from "../../projects/index.js";
 import { notifyError } from "../../../shared/shell/index.js";
@@ -65,7 +66,14 @@ export function AutomationsSettings({
   // workspace. A failed read therefore refuses the page rather than
   // handing out enabled controls; a known member or guest who also failed
   // the membership read stays refused.
-  const admin = roles.isSuccess && membership.isSuccess && isProjectAdmin(roles.data?.[projectId] ?? null);
+  // A workspace admin holds project-admin standing where the project row
+  // says member or guest, exactly like the old page's permission store.
+  const admin =
+    roles.isSuccess &&
+    membership.isSuccess &&
+    // isSuccess guarantees the role map; only a missing project key needs a
+    // fallback here.
+    (isProjectAdmin(roles.data[projectId] ?? null) || (membership.data?.role ?? 0) >= ROLE_ADMIN);
   // Rows write whole-field automation values: the close toggle needs the
   // cancelled-state list to name its target, and switching on needs the
   // stored row. Until both the project collection and the state list have

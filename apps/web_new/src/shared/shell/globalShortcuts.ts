@@ -37,8 +37,13 @@ function fireCommand(
   }
 }
 
-/** Attaches the shell's global keydown handling. Mounted once by AppShell. */
-export function useGlobalShortcuts(): void {
+/**
+ * Attaches the shell's global keydown handling. Mounted once by AppShell.
+ * `pageShortcuts: false` keeps the palette chord but drops every page
+ * chord and two-key sequence, for screens that pin their key handling
+ * (PSET-062).
+ */
+export function useGlobalShortcuts({ pageShortcuts = true }: { pageShortcuts?: boolean } = {}): void {
   const togglePalette = useCommandPalette((state) => state.togglePalette);
   const openPalette = useCommandPalette((state) => state.openPalette);
   const openPage = useCommandPalette((state) => state.openPage);
@@ -64,6 +69,7 @@ export function useGlobalShortcuts(): void {
         togglePalette();
         return;
       }
+      if (!pageShortcuts) return;
       if (isTypingTarget(event.target)) return;
       const bare = !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
       if (bare && event.key.length === 1) {
@@ -108,5 +114,5 @@ export function useGlobalShortcuts(): void {
       globalThis.window.removeEventListener("keydown", onKeyDown);
       clearWindow();
     };
-  }, [togglePalette, openPalette, openPage]);
+  }, [togglePalette, openPalette, openPage, pageShortcuts]);
 }

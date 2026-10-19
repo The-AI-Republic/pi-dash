@@ -117,13 +117,14 @@ interface StubOptions {
   states?: State[];
   status?: number;
   roles?: Record<string, number>;
-  memberRole?: number;
+  memberRole?: number | null;
   patchStatus?: number;
   hangProjects?: boolean;
   hangStates?: boolean;
   statesStatus?: number;
   rolesStatus?: number;
   membershipStatus?: number;
+  membershipBody?: Record<string, unknown>;
 }
 
 interface Call {
@@ -151,7 +152,26 @@ function stubTransport(options: StubOptions = {}) {
     }
     if (url.includes("/workspace-members/me/")) {
       if (options.membershipStatus !== undefined) return json(options.membershipStatus, {});
-      return json(200, { role: options.memberRole ?? 20 });
+      if (options.membershipBody !== undefined) return json(200, options.membershipBody);
+      return json(200, {
+        id: "423e4567-e89b-12d3-a456-426614174003",
+        workspace: WORKSPACE,
+        member: "523e4567-e89b-12d3-a456-426614174004",
+        role: options.memberRole === undefined ? 20 : options.memberRole,
+        company_role: null,
+        view_props: {},
+        default_props: {},
+        issue_props: {},
+        is_active: true,
+        getting_started_checklist: {},
+        tips: {},
+        explored_features: {},
+        draft_issue_count: 0,
+        created_by: null,
+        updated_by: null,
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      });
     }
     if (url.endsWith(`/api/workspaces/${SLUG}/projects/details/`)) {
       if (options.hangProjects) return new Promise<never>(() => undefined);
@@ -225,6 +245,39 @@ describe("AutomationsSettings gate", () => {
 
   it("refuses a guest with the not-authorized view", async () => {
     setup({ roles: { [PROJECT]: 5 }, memberRole: 5 });
+    expect(
+      await screen.findByRole("heading", { name: "Oops! You are not authorized to view this page" })
+    ).toBeInTheDocument();
+  });
+
+  it("admits a workspace admin whose project role is only guest", async () => {
+    setup({ roles: { [PROJECT]: 5 }, memberRole: 20, states: [stateRow(DROPPED, "Dropped", "cancelled")] });
+    expect(await screen.findByRole("heading", { level: 4, name: ARCHIVE_ROW_TITLE })).toBeInTheDocument();
+    expect(screen.queryByTestId("automations-not-authorized")).not.toBeInTheDocument();
+  });
+
+  it("does not lift a plain member when the role map omits the project", async () => {
+    setup({ roles: {}, memberRole: 15, states: [stateRow(DROPPED, "Dropped", "cancelled")] });
+    expect(
+      await screen.findByRole("heading", { name: "Oops! You are not authorized to view this page" })
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a project admin when no workspace membership row resolves", async () => {
+    setup({ roles: { [PROJECT]: 20 }, membershipBody: {}, states: [stateRow(DROPPED, "Dropped", "cancelled")] });
+    expect(await screen.findByRole("heading", { level: 4, name: ARCHIVE_ROW_TITLE })).toBeInTheDocument();
+    expect(screen.queryByTestId("automations-not-authorized")).not.toBeInTheDocument();
+  });
+
+  it("refuses a project member when no workspace membership row resolves", async () => {
+    setup({ roles: { [PROJECT]: 15 }, membershipBody: {}, states: [stateRow(DROPPED, "Dropped", "cancelled")] });
+    expect(
+      await screen.findByRole("heading", { name: "Oops! You are not authorized to view this page" })
+    ).toBeInTheDocument();
+  });
+
+  it("refuses a member whose membership row carries no role", async () => {
+    setup({ roles: { [PROJECT]: 15 }, memberRole: null });
     expect(
       await screen.findByRole("heading", { name: "Oops! You are not authorized to view this page" })
     ).toBeInTheDocument();

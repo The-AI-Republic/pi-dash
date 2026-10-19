@@ -34,6 +34,7 @@ const harness = vi.hoisted(() => ({
   projectViews: { cycle_view: true, module_view: true, issue_views_view: true, page_view: true, inbox_view: true },
   fetched: [] as string[],
   navigated: [] as unknown[],
+  suppressPageShortcuts: undefined as boolean | undefined,
   topBar: null as null | {
     workspaceSlug: string;
     section: string;
@@ -226,8 +227,10 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       children?: React.ReactNode;
       searchScope: { workspaceSlug: string; projectId: string | null };
       onSelectSearchResult: (hit: SearchResultHit) => void;
+      suppressPageShortcuts?: boolean;
     }) => {
       harness.commands = [...(props.commands ?? [])];
+      harness.suppressPageShortcuts = props.suppressPageShortcuts;
       harness.searchScope = props.searchScope;
       harness.onSelectSearchResult = props.onSelectSearchResult;
       harness.rail = props.rail;
@@ -308,7 +311,7 @@ import { edition } from "../../../core/edition/index.js";
 import { selectCreatableProjects } from "../../../features/issues/create/createForm.js";
 import { platform } from "../../../core/platform/index.js";
 import { DOCS_URL, useRailState, useShellChrome, useShortcutsDialog } from "../../../shared/shell/index.js";
-import { Route } from "./route.js";
+import { isSettingsPagePath, Route } from "./route.js";
 
 function PageProbe({ page, query }: { page: PalettePage; query: string }) {
   const state = page.usePageState(query);
@@ -325,6 +328,19 @@ function PageProbe({ page, query }: { page: PalettePage; query: string }) {
     </ul>
   );
 }
+
+describe("isSettingsPagePath", () => {
+  it("recognizes project settings addresses and nothing else", () => {
+    expect(isSettingsPagePath("/acme/settings/projects")).toBe(true);
+    expect(isSettingsPagePath("/acme/settings/projects/")).toBe(true);
+    expect(isSettingsPagePath("/acme/settings/projects/p1")).toBe(true);
+    expect(isSettingsPagePath("/acme/settings/projects/p1/features/cycles/")).toBe(true);
+    expect(isSettingsPagePath("/acme/settings/profile")).toBe(false);
+    expect(isSettingsPagePath("/acme/projects/p1/issues")).toBe(false);
+    expect(isSettingsPagePath("/acme/projects/p1/settings")).toBe(false);
+    expect(isSettingsPagePath("/")).toBe(false);
+  });
+});
 
 describe("gated layout guard", () => {
   const me = { is_password_autoset: false };
@@ -519,15 +535,16 @@ describe("gated layout shell wiring", () => {
   function stubShellQueries(
     unread: unknown = undefined,
     sidebarPrefs: unknown = { data: undefined },
-    projectsResult: unknown = null
+    projectsResult: unknown = null,
+    meResult: { data: unknown } = {
+      data: { id: "u1", display_name: "Ada", email: "ada@example.com", avatar_url: null },
+    }
   ): void {
     const suspenseQuery = vi.mocked(useSuspenseQuery) as unknown as {
       mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => { data: unknown }) => void;
     };
     suspenseQuery.mockImplementation((options) => {
-      if (options.queryKey[1] === "me") {
-        return { data: { id: "u1", display_name: "Ada", email: "ada@example.com", avatar_url: null } };
-      }
+      if (options.queryKey[1] === "me") return meResult;
       if (options.queryKey[1] === "workspaces") {
         return {
           data: [{ id: "w1", slug: "acme", name: "Acme", role: harness.role, total_members: 3, logo_url: null }],
@@ -667,6 +684,7 @@ describe("gated layout shell wiring", () => {
     harness.createEntry = null;
     harness.updatesDialog = null;
     harness.rail = undefined;
+    harness.suppressPageShortcuts = undefined;
     harness.routerState = {
       matches: [{ params: {}, routeId: "/$ws/_gated" }],
       location: { pathname: "/acme/projects/p1/issues" },
@@ -716,6 +734,32 @@ describe("gated layout shell wiring", () => {
     vi.restoreAllMocks();
     resetChrome();
   });
+
+  it("suppresses page shortcuts on settings addresses only", () => {
+    renderShell();
+    expect(harness.suppressPageShortcuts).toBe(false);
+  });
+
+  it("pins key handling off under the project settings area", () => {
+    harness.routerState = {
+      matches: [{ params: {}, routeId: "/$ws/_gated" }],
+      location: { pathname: "/acme/settings/projects/p1/states/" },
+    };
+    renderShell();
+    expect(harness.suppressPageShortcuts).toBe(true);
+  });
+
+  it.each(["/acme/settings/projects", "/acme/settings/projects/p1"])(
+    "pins key handling off on the no-slash settings address %s",
+    (pathname) => {
+      harness.routerState = {
+        matches: [{ params: {}, routeId: "/$ws/_gated" }],
+        location: { pathname },
+      };
+      renderShell();
+      expect(harness.suppressPageShortcuts).toBe(true);
+    }
+  );
 
   it("registers the shell sign-out command naming the signed-in user", () => {
     renderShell();
@@ -993,6 +1037,14 @@ describe("gated layout shell wiring", () => {
     await user.click(screen.getByRole("button", { name: "Sign out Ada" }));
     await waitFor(() => expect(harness.settled).toBe(true));
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("labels the account by email when the profile carries no display name", () => {
+    stubShellQueries(undefined, { data: undefined }, null, {
+      data: { id: "u1", display_name: "", email: "ada@example.com", avatar_url: null },
+    });
+    renderShell();
+    expect(screen.getByRole("button", { name: "Sign out ada@example.com" })).toBeInTheDocument();
   });
 
   it("passes the workspace scope to the shell and the top bar", () => {

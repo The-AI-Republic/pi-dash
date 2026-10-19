@@ -245,3 +245,31 @@ describe("useGlobalShortcuts", () => {
     }
   });
 });
+
+describe("useGlobalShortcuts page shortcuts", () => {
+  function PageProbe() {
+    useGlobalShortcuts({ pageShortcuts: false });
+    return <div />;
+  }
+
+  it("keeps the palette chord but drops chords, sequences and handled keys", () => {
+    const run = vi.fn();
+    const unregister = registerCommands([
+      { id: "shell.toggle-sidebar", title: "Toggle app sidebar", shortcut: "mod+b", run },
+      { id: "shell.go-home", title: "Go to home", sequence: "gh", run },
+    ]);
+    try {
+      render(<PageProbe />);
+      expect(press(window, { key: "b", metaKey: true })).toBe(false);
+      expect(press(window, { key: "g" })).toBe(false);
+      expect(press(window, { key: "h" })).toBe(false);
+      // Shift-modified keys take the same early exit.
+      expect(press(window, { key: "B", metaKey: true, shiftKey: true })).toBe(false);
+      expect(run).not.toHaveBeenCalled();
+      expect(press(window, { key: "k", metaKey: true })).toBe(true);
+      expect(useCommandPalette.getState().open).toBe(true);
+    } finally {
+      unregister();
+    }
+  });
+});

@@ -16209,79 +16209,279 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Project-settings shell oracle (NEWFRONT-388, PSET-001/002/003/004/062/063).
-  // --- Throwing stubs per the shared driver contract; the new app implements
-  // --- them later.
-  async settingsShellOpen(_workspaceSlug: string, _projectId: string, _tabHref: string): Promise<void> {
-    return todo("settingsShellOpen");
+  // --- The surface is the settings rail plus the per-tab gate; the driver
+  // --- reads through it only, so tab bodies landing later never change a
+  // --- shell assertion.
+
+  private settingsLinks(): Locator {
+    return this.page.locator('a[href*="/settings/projects/"]');
   }
+
+  private async settingsVisibleLinkLabels(): Promise<string[]> {
+    return this.settingsLinks().evaluateAll((links) =>
+      links
+        .filter((node) => {
+          const rect = (node as HTMLElement).getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        })
+        .map((node) => ((node as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim())
+        .filter((text) => text.length > 0)
+    );
+  }
+
+  /** Settled settings state: denied, restriction, guidance, shell, or null while loading. */
+  private async settingsState(): Promise<string | null> {
+    return this.page.evaluate(() => {
+      const visible = (node: Element | null): boolean => {
+        if (node === null) return false;
+        const rect = (node as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const denial = document.querySelector('[data-testid="project-settings-denied"]');
+      if (visible(denial)) return "denied";
+      const restriction = document.querySelector('[data-testid="project-settings-restriction"]');
+      if (visible(restriction)) return "restriction";
+      const guidance = document.querySelector('[data-testid="project-settings-guidance"]');
+      if (visible(guidance)) return "guidance";
+      const links = Array.from(document.querySelectorAll('a[href*="/settings/projects/"]'));
+      if (links.some(visible)) return "shell";
+      return null;
+    });
+  }
+
+  private async settingsWaitSettled(timeoutMs: number): Promise<void> {
+    // The rail paints beside the gate, so a gated tab can read "shell"
+    // for a beat before flipping to "denied": the state must rest before
+    // it counts as settled.
+    const deadline = Date.now() + timeoutMs;
+    let state: string | null = null;
+    let restSince = Date.now();
+    for (;;) {
+      const next = await this.settingsState();
+      if (next !== state) {
+        state = next;
+        restSince = Date.now();
+      } else if (state !== null && Date.now() - restSince >= 2000) {
+        return;
+      }
+      if (Date.now() >= deadline) throw new Error("[parity] settings shell never settled.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async settingsShellOpen(workspaceSlug: string, projectId: string, tabHref: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}${tabHref}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.settingsWaitSettled(60_000);
+  }
+
   async settingsShellGroups(): Promise<string[]> {
-    return todo("settingsShellGroups");
+    // Group captions are anchor-free divs; keep only the four registry
+    // labels so body copy never leaks into the list.
+    const known = new Set(["General", "Features", "Work structure", "Execution"]);
+    const labels = await this.page.evaluate(() => {
+      const out: string[] = [];
+      document.querySelectorAll("div").forEach((div) => {
+        if (div.querySelector("a") !== null) return;
+        const rect = div.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        out.push((div.textContent ?? "").replace(/\s+/g, " ").trim());
+      });
+      return out;
+    });
+    return [...new Set(labels.filter((label) => known.has(label)))];
   }
+
   async settingsShellItems(): Promise<string[]> {
-    return todo("settingsShellItems");
+    return this.settingsVisibleLinkLabels();
   }
+
   async settingsShellActiveItem(): Promise<string | null> {
-    return todo("settingsShellActiveItem");
+    const labels = await this.settingsLinks().evaluateAll((links) =>
+      links
+        .filter((node) => {
+          const rect = (node as HTMLElement).getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return false;
+          return ((node as HTMLElement).getAttribute("class") ?? "").includes("bg-layer-transparent-selected");
+        })
+        .map((node) => ((node as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim())
+    );
+    return labels[0] ?? null;
   }
+
   async settingsShellPath(): Promise<string> {
-    return todo("settingsShellPath");
+    // The app serves settings with and without a trailing slash; the
+    // slash is incidental, so reads drop it.
+    const path = new URL(this.page.url()).pathname;
+    return path.length > 1 ? path.replace(/\/$/, "") : path;
   }
+
   async settingsShellDrawerTriggerVisible(): Promise<boolean> {
-    return todo("settingsShellDrawerTriggerVisible");
+    await this.page.setViewportSize({ width: 390, height: 844 });
+    const trigger = this.page.locator('[class*="md:hidden"]').getByRole("button").first();
+    try {
+      await trigger.waitFor({ timeout: 15_000 });
+    } catch {
+      return false;
+    }
+    return trigger.isVisible();
   }
+
   async settingsShellOpenDrawer(): Promise<void> {
-    return todo("settingsShellOpenDrawer");
+    await this.page.setViewportSize({ width: 390, height: 844 });
+    const before = await this.settingsVisibleLinkLabels();
+    await this.page.locator('[class*="md:hidden"]').getByRole("button").first().click({ timeout: 15_000 });
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const labels = await this.settingsVisibleLinkLabels();
+      if (labels.length > before.length) return;
+      if (Date.now() >= deadline) throw new Error("[parity] settings drawer never opened.");
+      await this.page.waitForTimeout(300);
+    }
   }
+
   async settingsShellDrawerItems(): Promise<string[]> {
-    return todo("settingsShellDrawerItems");
+    return this.settingsVisibleLinkLabels();
   }
+
   async settingsShellWideViewport(): Promise<void> {
-    return todo("settingsShellWideViewport");
+    await this.page.setViewportSize({ width: 1280, height: 800 });
   }
+
   async settingsShellDeniedVisible(): Promise<boolean> {
-    return todo("settingsShellDeniedVisible");
+    return (await this.settingsState()) === "denied";
   }
+
   async settingsShellRestrictionVisible(): Promise<boolean> {
-    return todo("settingsShellRestrictionVisible");
+    return (await this.settingsState()) === "restriction";
   }
+
   async settingsShellRestrictionText(): Promise<string | null> {
-    return todo("settingsShellRestrictionText");
+    const text = await this.page.evaluate(() => (document.body.innerText ?? "").replace(/\s+/g, " ").trim());
+    return text.length > 0 ? text.slice(0, 500) : null;
   }
+
   async settingsShellJoinVisible(): Promise<boolean> {
-    return todo("settingsShellJoinVisible");
+    const join = this.page.getByRole("button", { name: "Join project" });
+    try {
+      await join.first().waitFor({ timeout: 10_000 });
+    } catch {
+      return false;
+    }
+    return join.first().isVisible();
   }
+
   async settingsShellJoin(): Promise<void> {
-    return todo("settingsShellJoin");
+    await this.page.getByRole("button", { name: "Join project" }).first().click({ timeout: 15_000 });
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      if ((await this.settingsState()) === "shell") return;
+      if (Date.now() >= deadline) throw new Error("[parity] settings shell never settled after join.");
+      await this.page.waitForTimeout(500);
+    }
   }
+
   async settingsShellNoProjectsVisible(): Promise<boolean> {
-    return todo("settingsShellNoProjectsVisible");
+    return (await this.settingsState()) === "guidance";
   }
+
   async settingsShellGeneralFormVisible(): Promise<boolean> {
-    return todo("settingsShellGeneralFormVisible");
+    const boxes = this.page.getByRole("textbox");
+    try {
+      await boxes.first().waitFor({ timeout: 15_000 });
+    } catch {
+      return false;
+    }
+    return (await boxes.count()) > 0;
   }
-  async settingsShellFillGeneralName(_name: string): Promise<void> {
-    return todo("settingsShellFillGeneralName");
+
+  async settingsShellFillGeneralName(name: string): Promise<void> {
+    await this.page.getByRole("textbox").first().fill(name);
   }
-  async settingsShellFollowItem(_label: string): Promise<void> {
-    return todo("settingsShellFollowItem");
+
+  async settingsShellFollowItem(label: string): Promise<void> {
+    const from = new URL(this.page.url()).pathname;
+    const found = await this.page.evaluate((want) => {
+      const match = Array.from(document.querySelectorAll('a[href*="/settings/projects/"]')).find((node) => {
+        const rect = (node as HTMLElement).getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return false;
+        return ((node as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim() === want;
+      });
+      if (match === undefined) return false;
+      (match as HTMLElement).click();
+      return true;
+    }, label);
+    if (!found) throw new Error(`[parity] no visible settings item labelled ${label}.`);
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const now = new URL(this.page.url()).pathname;
+      if (now !== from && (await this.settingsState()) !== null) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] following settings item ${label} never settled.`);
+      await this.page.waitForTimeout(500);
+    }
   }
-  async settingsShellPressKeys(_keys: string[]): Promise<{ dialogSeen: boolean; path: string }> {
-    return todo("settingsShellPressKeys");
+
+  async settingsShellPressKeys(keys: string[]): Promise<{ dialogSeen: boolean; path: string }> {
+    let dialogSeen = false;
+    const handler = (): void => {
+      dialogSeen = true;
+    };
+    this.page.on("dialog", handler);
+    try {
+      for (const key of keys) await this.page.keyboard.press(key);
+      await this.page.waitForTimeout(500);
+    } finally {
+      this.page.off("dialog", handler);
+    }
+    return { dialogSeen, path: new URL(this.page.url()).pathname };
   }
+
   async settingsShellBulkExportImportVisible(): Promise<boolean> {
-    return todo("settingsShellBulkExportImportVisible");
+    const buttons = this.page.getByRole("button", { name: /bulk|export|import/i });
+    const count = await buttons.count();
+    for (let index = 0; index < count; index++) {
+      if (await buttons.nth(index).isVisible()) return true;
+    }
+    return false;
   }
+
   async settingsShellEditionGateVisible(): Promise<boolean> {
-    return todo("settingsShellEditionGateVisible");
+    const text = await this.page.evaluate(() => (document.body.innerText ?? "").replace(/\s+/g, " ").trim());
+    return /upgrade to|cloud only|enterprise plan|contact sales|self-hosted only/i.test(text);
   }
-  async settingsShellCountSockets(_tabHrefs: string[], _workspaceSlug: string, _projectId: string): Promise<number> {
-    return todo("settingsShellCountSockets");
+
+  async settingsShellCountSockets(tabHrefs: string[], workspaceSlug: string, projectId: string): Promise<number> {
+    let count = 0;
+    const handler = (): void => {
+      count += 1;
+    };
+    this.page.on("websocket", handler);
+    try {
+      for (const href of tabHrefs) {
+        await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}${href}`);
+        await this.page.waitForLoadState("domcontentloaded");
+        await this.settingsWaitSettled(60_000);
+      }
+    } finally {
+      this.page.off("websocket", handler);
+    }
+    return count;
   }
-  async settingsProjectsOpen(_workspaceSlug: string): Promise<void> {
-    return todo("settingsProjectsOpen");
+
+  async settingsProjectsOpen(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.settingsWaitSettled(60_000);
   }
+
   async settingsShellOpenGuidanceCreate(): Promise<void> {
-    return todo("settingsShellOpenGuidanceCreate");
+    await this.page.getByRole("button", { name: "Start your first project" }).first().click({ timeout: 15_000 });
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      if (await this.isCreateProjectDialogVisible()) return;
+      if (Date.now() >= deadline) throw new Error("[parity] project creation never opened from guidance.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   // --- Project-settings feature flags oracle (NEWFRONT-393, PSET-043..047,
