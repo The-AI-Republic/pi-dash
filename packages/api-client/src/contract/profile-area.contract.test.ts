@@ -138,13 +138,17 @@ describe.skipIf(!contractEnabled)("profile area contract", () => {
   it("refreshes the upkeep payload when the master pause flips", async () => {
     const { client } = await seededUser();
     const before = await getUpkeepSettings(client);
-    expect(before.jobs.some((job) => job.slug === "contract-upkeep")).toBe(true);
+    const jobBefore = before.jobs.find((job) => job.slug === "contract-upkeep");
+    expect(jobBefore).toBeDefined();
+    expect(jobBefore?.enabled).toBe(true);
     try {
       const paused = await setUpkeepEnabled(client, false);
       expect(paused.enabled).toBe(false);
+      expect(paused.jobs.find((job) => job.slug === "contract-upkeep")?.enabled).toBe(true);
     } finally {
       const restored = await setUpkeepEnabled(client, before.enabled);
       expect(restored.enabled).toBe(before.enabled);
+      expect(restored.jobs.find((job) => job.slug === "contract-upkeep")?.enabled).toBe(true);
     }
   });
 
