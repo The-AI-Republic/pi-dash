@@ -2,9 +2,11 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Section routes (WSET-001/036): every address mounts a thin outlet that
-// asks the page registry for its own section body and hands it the
-// workspace slug; the webhook detail address also hands over the id.
+// Section routes (WSET-001/019/022/036): the unclaimed addresses mount a
+// thin outlet that asks the page registry for their section body; the
+// webhooks half (NEWFRONT-541) mounts its own list and detail pages in the
+// same shell, with the workspace slug and the webhook id, and the billing
+// half (NEWFRONT-546) likewise mounts its own page.
 import { act, cleanup, render, screen } from "@testing-library/react";
 import * as React from "react";
 import type { RouteComponent } from "@tanstack/react-router";
@@ -12,7 +14,6 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   registerWorkspaceSettingsPage,
-  registerWorkspaceWebhookDetailPage,
   resetWorkspaceSettingsPages,
   type WorkspaceSettingsSectionKey,
 } from "../../../../../features/workspace-settings/index.js";
@@ -36,7 +37,6 @@ const SECTIONS: Array<[WorkspaceSettingsSectionKey, string, RouteComponent]> = [
   ["general", "/", GeneralRoute.options.component as RouteComponent],
   ["members", "members", MembersRoute.options.component as RouteComponent],
   ["exports", "exports", ExportsRoute.options.component as RouteComponent],
-  ["webhooks", "webhooks", WebhooksRoute.options.component as RouteComponent],
   ["integrations", "integrations", IntegrationsRoute.options.component as RouteComponent],
 ];
 
@@ -104,21 +104,53 @@ describe("workspace settings section routes", () => {
     expect(screen.queryByRole("heading", { name: "All plans" })).not.toBeInTheDocument();
   });
 
-  it("renders the registered webhook detail body with its id", async () => {
+  it("mounts the webhooks list page for its own address", async () => {
+    renderSettingsRoute({
+      layoutComponent: LayoutComponent,
+      component: WebhooksRoute.options.component as RouteComponent,
+      leafPath: "webhooks",
+      transport: settingsTransport({ role: 20 }),
+    });
+    expect(await screen.findByTestId("workspace-settings-shell")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Webhooks", level: 2 })).toBeInTheDocument();
+    // The frame's stub answers 404 for the list: the page owns that state
+    // and still renders its heading and Add control.
+    expect(await screen.findByRole("button", { name: "Add webhook" })).toBeInTheDocument();
+  });
+
+  it("mounts the webhook detail page for its id", async () => {
     const id = "223e4567-e89b-12d3-a456-426614174001";
     renderSettingsRoute({
       layoutComponent: LayoutComponent,
       component: WebhookDetailRoute.options.component as RouteComponent,
       leafPath: "webhooks/$webhookId",
       initialPath: `/acme/settings/webhooks/${id}`,
-      transport: settingsTransport({ role: 20 }),
+      transport: async (url, init) => {
+        if (url.endsWith(`/webhooks/${id}/`)) {
+          return {
+            status: 200,
+            url,
+            headers: { get: () => null },
+            text: async () =>
+              JSON.stringify({
+                id,
+                url: "https://example.com/post",
+                is_active: true,
+                created_at: "2026-01-01T00:00:00Z",
+                updated_at: "2026-01-01T00:00:00Z",
+                project: true,
+                issue: true,
+                cycle: true,
+                module: true,
+                issue_comment: true,
+              }),
+          };
+        }
+        return settingsTransport({ role: 20 })(url, init);
+      },
     });
-    await act(async () => {
-      registerWorkspaceWebhookDetailPage(({ workspaceSlug, webhookId }) => (
-        <p>{`${workspaceSlug} detail ${webhookId}`}</p>
-      ));
-    });
-    expect(await screen.findByText(`acme detail ${id}`)).toBeInTheDocument();
+    expect(await screen.findByText("Webhook details")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("https://example.com/post")).toBeInTheDocument();
   });
 
   it("explains an unknown webhook id instead of spinning", async () => {

@@ -5,6 +5,8 @@
 // the oracle driver so scenarios compile against either target, but every
 // action throws until the matching area lands in apps/web_new. Area issues
 // fill these in method by method; the oracle driver stays untouched.
+import { readFileSync } from "node:fs";
+
 import { expect, type Locator, type Page, type Route } from "@playwright/test";
 
 import { descriptionAfterHeading } from "./modal-copy.js";
@@ -264,6 +266,10 @@ export function billingPageSettled(root: { querySelector: (selector: string) => 
     root.querySelector('[data-testid="workspace-settings-not-authorized"]') !== null
   );
 }
+
+/** Step markers and notices the workspace-settings webhook slices render. */
+const WEBHOOK_DETAIL_HEADING = "Webhook details";
+const WEBHOOKS_LOAD_FAILED = "Couldn't load the webhooks.";
 
 function todo(target: string): never {
   throw new Error(`[parity] drivers/web_new has no ${target} yet; the area that owns it has not landed.`);
@@ -2343,7 +2349,37 @@ export class WebNewDriver implements ParityDriver {
     return todo("copyIssueLink");
   }
   async lastToast(): Promise<string | null> {
-    return todo("lastToast");
+    const toasts = this.page.locator(
+      'xpath=//*[@aria-label="Notifications"]//*[@role="dialog" or @role="alertdialog"]'
+    );
+    if ((await toasts.count()) > 0) {
+      const text = (
+        (await toasts
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") return text;
+    }
+    const status = this.page.getByRole("status");
+    if ((await status.count()) > 0) {
+      const text = (
+        (await status
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") return text;
+    }
+    const alert = this.page.getByRole("alert");
+    if ((await alert.count()) === 0) return null;
+    const text = (
+      (await alert
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return text === "" ? null : text;
   }
   async readClipboard(): Promise<string> {
     return this.page.evaluate(() => navigator.clipboard.readText());
@@ -16851,17 +16887,38 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async wsSettingsOpenWebhookDetail(
-    _workspaceSlug: string,
-    _webhookId: string,
+    workspaceSlug: string,
+    webhookId: string,
     _cookies?: ParityBrowserCookie[]
   ): Promise<void> {
-    return todo("wsSettingsOpenWebhookDetail");
+    await this.page.goto(this.webhookDetailUrl(workspaceSlug, webhookId));
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page
+      .getByText(WEBHOOK_DETAIL_HEADING, { exact: true })
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    await this.page
+      .getByTestId("workspace-settings-not-authorized")
+      .first()
+      .waitFor({ timeout: 1_000 })
+      .catch(() => undefined);
+    await this.page
+      .getByTestId("workspace-settings-webhook-missing")
+      .first()
+      .waitFor({ timeout: 1_000 })
+      .catch(() => undefined);
   }
-
   async wsSettingsWebhookDetailState(): Promise<"form" | "denied" | "loading"> {
-    return todo("wsSettingsWebhookDetailState");
+    if ((await this.page.getByTestId("workspace-settings-not-authorized").count()) > 0) return "denied";
+    if (
+      (await this.page.getByText(WEBHOOK_DETAIL_HEADING, { exact: true }).count()) > 0 ||
+      (await this.page.getByText(WEBHOOKS_LOAD_FAILED, { exact: true }).count()) > 0
+    ) {
+      return "form";
+    }
+    return "loading";
   }
-
   async wsSettingsDesktopOnlyCount(): Promise<number> {
     return todo("wsSettingsDesktopOnlyCount");
   }
@@ -17471,174 +17528,600 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsGitlabDisconnect(): Promise<void> {
     return todo("wsSettingsGitlabDisconnect");
   }
-  async wsSettingsOpenWebhooks(_workspaceSlug: string): Promise<void> {
-    return todo("wsSettingsOpenWebhooks");
+  // --- Workspace webhooks (NEWFRONT-541, WSET-019-024/041). The list, its
+  // --- creation dialog and one-time reveal, the detail form, regeneration
+  // --- and the danger zone. Selectors are the ones this app renders: the
+  // --- heading's Add control, the step markers inside the dialogs, the
+  // --- labelled switch and secret controls.
+
+  private webhooksListUrl(workspaceSlug: string): string {
+    return `/${workspaceSlug}/settings/webhooks`;
   }
+
+  private webhookDetailUrl(workspaceSlug: string, webhookId: string): string {
+    return `/${workspaceSlug}/settings/webhooks/${webhookId}`;
+  }
+
+  /** The webhook dialog (create form, reveal step or delete), outside toasts. */
+  private webhookDialog(): Locator {
+    return this.page.locator('xpath=//*[@role="dialog" and not(ancestor::*[@aria-label="Notifications"])]').last();
+  }
+
+  /** The webhook dialog currently showing the step marker. */
+  private webhookDialogOn(step: "Create webhook" | "Key created" | "Delete webhook"): Locator {
+    return this.page
+      .locator('xpath=//*[@role="dialog" and not(ancestor::*[@aria-label="Notifications"])]', {
+        has: this.page.getByText(step, { exact: true }),
+      })
+      .last();
+  }
+
+  /** The detail form when the page is in its form state, else the dialog form. */
+  private webhookForm(): Locator {
+    return this.page.locator("form").first();
+  }
+
+  private webhooksAddButton(): Locator {
+    return this.page.getByRole("button", { name: "Add webhook", exact: true }).first();
+  }
+
+  /** A list row link, matched by the target URL it shows. */
+  private webhookRowLink(url: string): Locator {
+    return this.page.getByRole("link", { name: url, exact: true });
+  }
+
+  async wsSettingsOpenWebhooks(workspaceSlug: string): Promise<void> {
+    await this.page.goto(this.webhooksListUrl(workspaceSlug));
+    await this.page.waitForLoadState("domcontentloaded");
+    await Promise.race([
+      this.webhooksAddButton()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+      this.page
+        .getByTestId("workspace-settings-not-authorized")
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+    ]);
+  }
+
   async wsSettingsWebhooksNotAuthorized(): Promise<boolean> {
-    return todo("wsSettingsWebhooksNotAuthorized");
+    return (await this.page.getByTestId("workspace-settings-not-authorized").count()) > 0;
   }
+
   async wsSettingsWebhooksHeadingVisible(): Promise<boolean> {
-    return todo("wsSettingsWebhooksHeadingVisible");
+    return (await this.page.getByRole("heading", { name: "Webhooks", level: 2 }).count()) > 0;
   }
+
   async wsSettingsWebhooksAddVisible(): Promise<boolean> {
-    return todo("wsSettingsWebhooksAddVisible");
+    return (await this.webhooksAddButton().count()) > 0;
   }
+
   async wsSettingsWebhooksEmptyVisible(): Promise<boolean> {
-    return todo("wsSettingsWebhooksEmptyVisible");
+    return (await this.page.getByText("No Webhook added yet", { exact: true }).count()) > 0;
   }
+
   async wsSettingsWebhooksLoaderVisible(): Promise<boolean> {
-    return todo("wsSettingsWebhooksLoaderVisible");
+    return (await this.page.getByRole("status", { name: "Loading webhooks" }).count()) > 0;
   }
-  async wsSettingsWebhooksDelayListFetch(_ms: number): Promise<void> {
-    return todo("wsSettingsWebhooksDelayListFetch");
+
+  async wsSettingsWebhooksDelayListFetch(ms: number): Promise<void> {
+    await this.page.route("**/api/workspaces/*/webhooks/", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    });
   }
+
   async wsSettingsWebhooksRowUrls(): Promise<string[]> {
-    return todo("wsSettingsWebhooksRowUrls");
+    // Only detail addresses count; the sidebar's list entry has no id.
+    const links = this.page.locator('a[href*="/settings/webhooks/"]');
+    const count = await links.count();
+    const urls: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const href =
+        (await links
+          .nth(index)
+          .getAttribute("href")
+          .catch(() => null)) ?? "";
+      if (!/\/settings\/webhooks\/[^/]+\/?$/.test(href)) continue;
+      const text = (
+        (await links
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") urls.push(text);
+    }
+    return urls;
   }
-  async wsSettingsWebhooksOpenRow(_url: string): Promise<void> {
-    return todo("wsSettingsWebhooksOpenRow");
+
+  async wsSettingsWebhooksOpenRow(url: string): Promise<void> {
+    await this.webhookRowLink(url).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByText(WEBHOOK_DETAIL_HEADING, { exact: true }).first().waitFor({
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
-  async wsSettingsWebhooksRowActiveOn(_url: string): Promise<boolean> {
-    return todo("wsSettingsWebhooksRowActiveOn");
+
+  private webhookRowSwitch(url: string): Locator {
+    return this.webhookRowLink(url).first().getByRole("switch");
   }
-  async wsSettingsWebhooksRowToggleActive(_url: string): Promise<void> {
-    return todo("wsSettingsWebhooksRowToggleActive");
+
+  async wsSettingsWebhooksRowActiveOn(url: string): Promise<boolean> {
+    const control = this.webhookRowSwitch(url);
+    if ((await control.count()) === 0) return false;
+    return control.first().isChecked();
   }
+
+  async wsSettingsWebhooksRowToggleActive(url: string): Promise<void> {
+    const wrote = this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/webhooks\/[^/]+\/$/.test(response.url()) &&
+          response.request().method() === "PATCH",
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.webhookRowSwitch(url).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await wrote;
+  }
+
   async wsSettingsWebhooksAddClick(): Promise<void> {
-    return todo("wsSettingsWebhooksAddClick");
+    await this.webhooksAddButton().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByText("Create webhook", { exact: true }).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsWebhooksEmptyAddClick(): Promise<void> {
-    return todo("wsSettingsWebhooksEmptyAddClick");
+    await this.page.getByRole("button", { name: "Add webhook", exact: true }).last().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.page.getByText("Create webhook", { exact: true }).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsWebhookDialogOpen(): Promise<boolean> {
-    return todo("wsSettingsWebhookDialogOpen");
+    return (await this.webhookDialog().count()) > 0;
   }
+
   async wsSettingsWebhookDialogTitle(): Promise<string | null> {
-    return todo("wsSettingsWebhookDialogTitle");
+    if ((await this.webhookDialogOn("Create webhook").count()) === 0) return null;
+    return "Create webhook";
   }
-  async wsSettingsWebhookUrlFill(_url: string): Promise<void> {
-    return todo("wsSettingsWebhookUrlFill");
+
+  async wsSettingsWebhookUrlFill(url: string): Promise<void> {
+    await this.webhookForm().getByLabel("Target URL").fill(url, { timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsWebhookUrlValue(): Promise<string> {
-    return todo("wsSettingsWebhookUrlValue");
+    return this.webhookForm().getByLabel("Target URL").inputValue({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsWebhookUrlError(): Promise<string | null> {
-    return todo("wsSettingsWebhookUrlError");
+    const error = this.webhookForm().getByText("URL is required", { exact: true });
+    return (await error.count()) === 0 ? null : "URL is required";
   }
+
   async wsSettingsWebhookEventMode(): Promise<"all" | "individual" | null> {
-    return todo("wsSettingsWebhookEventMode");
+    const form = this.webhookForm();
+    const all = form.locator("input#all");
+    const individual = form.locator("input#individual");
+    if ((await all.count()) === 0 || (await individual.count()) === 0) return null;
+    if (await individual.first().isChecked()) return "individual";
+    if (await all.first().isChecked()) return "all";
+    return null;
   }
-  async wsSettingsWebhookPickEventMode(_mode: "all" | "individual"): Promise<void> {
-    return todo("wsSettingsWebhookPickEventMode");
+
+  async wsSettingsWebhookPickEventMode(mode: "all" | "individual"): Promise<void> {
+    const label = mode === "all" ? "Send me everything" : "Select individual events";
+    await this.webhookForm().getByText(label, { exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsWebhookIndividualOptions(): Promise<{ label: string; checked: boolean }[]> {
-    return todo("wsSettingsWebhookIndividualOptions");
+    const form = this.webhookForm();
+    const options: { label: string; checked: boolean }[] = [];
+    for (const key of ["project", "cycle", "issue", "module", "issue_comment"]) {
+      const box = form.locator(`input#${key}`);
+      if ((await box.count()) === 0) continue;
+      const label = form.locator(`label[for="${key}"]`);
+      const text =
+        (await label.count()) === 0
+          ? key
+          : (
+              (await label
+                .first()
+                .innerText()
+                .catch(() => "")) ?? ""
+            )
+              .replace(/\s+/g, " ")
+              .trim() || key;
+      options.push({ label: text, checked: await box.first().isChecked() });
+    }
+    return options;
   }
-  async wsSettingsWebhookToggleIndividual(_label: string): Promise<void> {
-    return todo("wsSettingsWebhookToggleIndividual");
+
+  async wsSettingsWebhookToggleIndividual(label: string): Promise<void> {
+    await this.webhookForm().getByText(label, { exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  private webhookCreateButton(): Locator {
+    return this.webhookDialogOn("Create webhook").getByRole("button", { name: "Create", exact: true });
+  }
+
   async wsSettingsWebhookSubmit(): Promise<void> {
-    return todo("wsSettingsWebhookSubmit");
+    await this.webhookCreateButton().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settleWebhookSubmit();
   }
+
+  /** Settles on the create answer, the inline URL error, or the reveal step. */
+  private async settleWebhookSubmit(): Promise<void> {
+    await Promise.race([
+      this.page
+        .waitForResponse(
+          (response) =>
+            /\/api\/workspaces\/[^/]+\/webhooks\/$/.test(response.url()) && response.request().method() === "POST",
+          { timeout: WebNewDriver.WAIT_MS }
+        )
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+      this.webhookForm()
+        .getByText("URL is required", { exact: true })
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+      this.page
+        .getByText("Key created", { exact: true })
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+    ]);
+  }
+
   async wsSettingsWebhookSubmitAndCaptureDownload(): Promise<LocalFileDownload> {
-    return todo("wsSettingsWebhookSubmitAndCaptureDownload");
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: WebNewDriver.WAIT_MS }),
+      this.webhookCreateButton().click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    await this.page.getByText("Key created", { exact: true }).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const path = await download.path();
+    if (!path) throw new Error("[parity] webhook backup download landed without a path.");
+    return { fileName: download.suggestedFilename(), content: readFileSync(path, "utf8") };
   }
+
   async wsSettingsWebhookCancel(): Promise<void> {
-    return todo("wsSettingsWebhookCancel");
+    await this.webhookDialogOn("Create webhook")
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsWebhookPressEscape(): Promise<void> {
-    return todo("wsSettingsWebhookPressEscape");
+    await this.page.keyboard.press("Escape");
   }
+
   async wsSettingsWebhookRevealVisible(): Promise<boolean> {
-    return todo("wsSettingsWebhookRevealVisible");
+    return (await this.page.getByText("Key created", { exact: true }).count()) > 0;
   }
+
   async wsSettingsWebhookRevealText(): Promise<string | null> {
-    return todo("wsSettingsWebhookRevealText");
+    const dialog = this.webhookDialogOn("Key created");
+    if ((await dialog.count()) === 0) return null;
+    const paragraph = dialog.locator("p").first();
+    if ((await paragraph.count()) === 0) return null;
+    const text = (
+      (await paragraph
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text === "" ? null : text;
   }
+
+  /** The in-clear key paragraph; the masked state renders no such node. */
+  private webhookSecretValueNode(): Locator {
+    return this.page.locator("[data-secret-value]").first();
+  }
+
   async wsSettingsWebhookSecretShown(): Promise<boolean> {
-    return todo("wsSettingsWebhookSecretShown");
+    return (await this.webhookSecretValueNode().count()) > 0;
   }
+
   async wsSettingsWebhookSecretValue(): Promise<string | null> {
-    return todo("wsSettingsWebhookSecretValue");
+    const key = this.webhookSecretValueNode();
+    if ((await key.count()) === 0) return null;
+    const text = ((await key.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? null : text;
   }
+
+  private webhookSecretViewButton(): Locator {
+    return this.page.getByRole("button", { name: /^(Show|Hide) secret key$/ }).first();
+  }
+
+  private webhookSecretCopyButton(): Locator {
+    return this.page.getByRole("button", { name: "Copy secret key", exact: true }).first();
+  }
+
   async wsSettingsWebhookSecretActionsVisible(): Promise<boolean> {
-    return todo("wsSettingsWebhookSecretActionsVisible");
+    return (await this.webhookSecretViewButton().count()) > 0 && (await this.webhookSecretCopyButton().count()) > 0;
   }
+
   async wsSettingsWebhookSecretToggleView(): Promise<void> {
-    return todo("wsSettingsWebhookSecretToggleView");
+    await this.webhookSecretViewButton().click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsWebhookSecretCopy(): Promise<void> {
-    return todo("wsSettingsWebhookSecretCopy");
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.webhookSecretCopyButton().click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsWebhookRevealClose(): Promise<void> {
-    return todo("wsSettingsWebhookRevealClose");
+    await this.webhookDialogOn("Key created")
+      .getByRole("button", { name: "Close", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByText("Key created", { exact: true })
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
+
   async wsSettingsWebhookDetailNotAuthorized(): Promise<boolean> {
-    return todo("wsSettingsWebhookDetailNotAuthorized");
+    return (await this.wsSettingsWebhookDetailDenialKind()) !== null;
   }
+
   async wsSettingsWebhookDetailDenialKind(): Promise<"view" | "paragraph" | null> {
-    return todo("wsSettingsWebhookDetailDenialKind");
+    if ((await this.page.getByTestId("workspace-settings-not-authorized").count()) > 0) return "view";
+    if ((await this.page.getByText("You are not authorized to access this page.", { exact: true }).count()) > 0) {
+      return "paragraph";
+    }
+    return null;
   }
+
   async wsSettingsWebhookDetailLoaderVisible(): Promise<boolean> {
-    return todo("wsSettingsWebhookDetailLoaderVisible");
+    if ((await this.page.getByText(WEBHOOK_DETAIL_HEADING, { exact: true }).count()) > 0) return false;
+    if (await this.wsSettingsWebhookDetailNotAuthorized()) return false;
+    return (await this.page.getByRole("status", { name: "Loading webhook details" }).count()) > 0;
   }
-  async wsSettingsWebhookDetailDelayFetch(_ms: number): Promise<void> {
-    return todo("wsSettingsWebhookDetailDelayFetch");
+
+  async wsSettingsWebhookDetailDelayFetch(ms: number): Promise<void> {
+    await this.page.route("**/api/workspaces/*/webhooks/*/", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    });
   }
+
+  private webhookDetailSwitch(): Locator {
+    return this.webhookForm().getByRole("switch").first();
+  }
+
   async wsSettingsWebhookDetailActiveOn(): Promise<boolean> {
-    return todo("wsSettingsWebhookDetailActiveOn");
+    const control = this.webhookDetailSwitch();
+    if ((await control.count()) === 0) return false;
+    return control.first().isChecked();
   }
+
   async wsSettingsWebhookDetailToggleActive(): Promise<void> {
-    return todo("wsSettingsWebhookDetailToggleActive");
+    await this.webhookDetailSwitch().first().click({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  private webhookUpdateButton(): Locator {
+    return this.webhookForm()
+      .getByRole("button", { name: /^(Update|Updating)$/ })
+      .first();
+  }
+
   async wsSettingsWebhookDetailUpdate(): Promise<void> {
-    return todo("wsSettingsWebhookDetailUpdate");
+    await this.webhookUpdateButton().click({ timeout: WebNewDriver.WAIT_MS });
+    await Promise.race([
+      this.page
+        .waitForResponse(
+          (response) =>
+            /\/api\/workspaces\/[^/]+\/webhooks\/[^/]+\/$/.test(response.url()) &&
+            response.request().method() === "PATCH",
+          { timeout: WebNewDriver.WAIT_MS }
+        )
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+      this.webhookForm()
+        .getByText("URL is required", { exact: true })
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .then(
+          () => undefined,
+          () => undefined
+        ),
+    ]);
   }
+
   async wsSettingsWebhookDetailUpdateLabel(): Promise<string | null> {
-    return todo("wsSettingsWebhookDetailUpdateLabel");
+    const control = this.webhookUpdateButton();
+    if ((await control.count()) === 0) return null;
+    const text = (
+      (await control
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text === "" ? null : text;
   }
-  async wsSettingsWebhookDetailDelayUpdate(_ms: number): Promise<void> {
-    return todo("wsSettingsWebhookDetailDelayUpdate");
+
+  async wsSettingsWebhookDetailDelayUpdate(ms: number): Promise<void> {
+    await this.page.route("**/api/workspaces/*/webhooks/*/", async (route) => {
+      if (route.request().method() !== "PATCH") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    });
   }
+
   async wsSettingsWebhookSecretBlockVisible(): Promise<boolean> {
-    return todo("wsSettingsWebhookSecretBlockVisible");
+    return (await this.page.getByText("Secret key", { exact: true }).count()) > 0;
   }
+
+  private webhookRegenerateButton(): Locator {
+    return this.page.getByRole("button", { name: /Re-generat/ }).first();
+  }
+
   async wsSettingsWebhookRegenerate(): Promise<void> {
-    return todo("wsSettingsWebhookRegenerate");
+    const settled = this.page
+      .waitForResponse(
+        (response) => response.url().includes("/regenerate/") && response.request().method() === "POST",
+        {
+          timeout: WebNewDriver.WAIT_MS,
+        }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.webhookRegenerateButton().click({ timeout: WebNewDriver.WAIT_MS });
+    await settled;
   }
+
   async wsSettingsWebhookRegenerateLabel(): Promise<string | null> {
-    return todo("wsSettingsWebhookRegenerateLabel");
+    const control = this.webhookRegenerateButton();
+    if ((await control.count()) === 0) return null;
+    const text = (
+      (await control
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text === "" ? null : text;
   }
-  async wsSettingsWebhookDelayRegenerate(_ms: number): Promise<void> {
-    return todo("wsSettingsWebhookDelayRegenerate");
+
+  async wsSettingsWebhookDelayRegenerate(ms: number): Promise<void> {
+    await this.page.route("**/regenerate/", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    });
   }
+
   async wsSettingsWebhookRegenerateAndCaptureDownload(): Promise<LocalFileDownload | null> {
-    return todo("wsSettingsWebhookRegenerateAndCaptureDownload");
+    let download: import("@playwright/test").Download | null = null;
+    const waiter = this.page.waitForEvent("download", { timeout: 10_000 }).then(
+      (caught) => {
+        download = caught;
+      },
+      () => undefined
+    );
+    await this.wsSettingsWebhookRegenerate();
+    await waiter;
+    if (download === null) return null;
+    const path = await (download as import("@playwright/test").Download).path();
+    if (!path) throw new Error("[parity] regenerate backup download landed without a path.");
+    return {
+      fileName: (download as import("@playwright/test").Download).suggestedFilename(),
+      content: readFileSync(path, "utf8"),
+    };
   }
+
   async wsSettingsWebhookDeleteSectionVisible(): Promise<boolean> {
-    return todo("wsSettingsWebhookDeleteSectionVisible");
+    return (await this.page.getByRole("button", { name: "Danger zone", exact: true }).count()) > 0;
   }
+
   async wsSettingsWebhookDeleteSectionExpand(): Promise<void> {
-    return todo("wsSettingsWebhookDeleteSectionExpand");
+    await this.page.getByRole("button", { name: "Danger zone", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("button", { name: "Delete webhook", exact: true }).first().waitFor({
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
+
   async wsSettingsWebhookDeletePanelVisible(): Promise<boolean> {
-    return todo("wsSettingsWebhookDeletePanelVisible");
+    return (
+      (await this.page.getByRole("button", { name: "Delete webhook", exact: true }).count()) > 0 &&
+      (await this.page.getByText("Once a webhook is deleted", { exact: false }).count()) > 0
+    );
   }
+
   async wsSettingsWebhookDeleteOpen(): Promise<void> {
-    return todo("wsSettingsWebhookDeleteOpen");
+    await this.page.getByRole("button", { name: "Delete webhook", exact: true }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.webhookDialogOn("Delete webhook").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsWebhookDeleteDialogOpen(): Promise<boolean> {
-    return todo("wsSettingsWebhookDeleteDialogOpen");
+    return (await this.webhookDialogOn("Delete webhook").count()) > 0;
   }
+
   async wsSettingsWebhookDeleteDialogText(): Promise<string | null> {
-    return todo("wsSettingsWebhookDeleteDialogText");
+    const dialog = this.webhookDialogOn("Delete webhook");
+    if ((await dialog.count()) === 0) return null;
+    const body = dialog.locator("p").first();
+    if ((await body.count()) === 0) return null;
+    const text = ((await body.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? null : text;
   }
+
   async wsSettingsWebhookDeleteConfirm(): Promise<void> {
-    return todo("wsSettingsWebhookDeleteConfirm");
+    const gone = this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/webhooks\/[^/]+\/$/.test(response.url()) &&
+          response.request().method() === "DELETE",
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.webhookDialogOn("Delete webhook")
+      .getByRole("button", { name: "Delete", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await gone;
+    // Settle on the outcome: the list's Add control (success) or a toast.
+    const add = this.webhooksAddButton();
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    while (Date.now() < deadline) {
+      if ((await add.count()) > 0) break;
+      if ((await this.lastToast()) !== null) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
   }
+
   async wsSettingsWebhookDeleteCancel(): Promise<void> {
-    return todo("wsSettingsWebhookDeleteCancel");
+    await this.webhookDialogOn("Delete webhook")
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.webhookDialogOn("Delete webhook")
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
+
   // --- Profile-settings assistant/upkeep/integrations stubs (NEWFRONT-428,
   // --- PROF-021..025, PROF-027, PROF-028). The area gate implements these
   // --- against apps/web_new; until then every method throws todo().
