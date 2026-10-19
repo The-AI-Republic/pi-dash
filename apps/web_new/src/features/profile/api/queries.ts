@@ -6,7 +6,7 @@
 // ownership-selected issue list, and the paged activity feed. Export is a
 // write, so it lives in ./export.ts.
 
-import { queryOptions } from "@tanstack/react-query";
+import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import {
   getUserProfileActivity,
   getUserProfileSegregation,
@@ -19,7 +19,7 @@ import {
 import { LIST_STALE_TIME_MS, REFERENCE_STALE_TIME_MS } from "../../../core/query/client.js";
 import { profileKeys } from "./keys.js";
 
-/** Rows fetched per issue-tab page; the profile tabs read one page. */
+/** Rows fetched per issue-tab page; the tab follows cursors past this. */
 export const PROFILE_ISSUES_PAGE_SIZE = 100;
 
 /** Activity rows per page in the full activity tab (§3). */
@@ -46,7 +46,11 @@ export function profileStatsQueryOptions(client: ApiClient, workspaceSlug: strin
   });
 }
 
-/** One ownership-selected issue tab. */
+/**
+ * One ownership-selected issue tab. The tab reads the first page and every
+ * later page through the server cursor, so a member with more rows than
+ * one page still sees the whole set.
+ */
 export function profileIssuesQueryOptions(
   client: ApiClient,
   workspaceSlug: string,
@@ -54,14 +58,17 @@ export function profileIssuesQueryOptions(
   ownership: ProfileOwnership,
   orderBy: string
 ) {
-  return queryOptions({
-    queryKey: [...profileKeys.issues(workspaceSlug, userId, ownership), orderBy],
-    queryFn: () =>
+  return infiniteQueryOptions({
+    queryKey: [...profileKeys.issues(workspaceSlug, userId, ownership), orderBy, "pages"],
+    queryFn: ({ pageParam }) =>
       listUserProfileIssues(client, workspaceSlug, userId, {
         ownership,
         perPage: PROFILE_ISSUES_PAGE_SIZE,
         orderBy,
+        ...(pageParam === "" ? {} : { cursor: pageParam }),
       }),
+    initialPageParam: "",
+    getNextPageParam: (last) => (last.next_page_results ? last.next_cursor : undefined),
     staleTime: LIST_STALE_TIME_MS,
   });
 }

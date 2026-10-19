@@ -126,7 +126,7 @@ describe("ProfileSidebarFrame", () => {
     expect(document.querySelector('[data-profile-project-counts="p-1"]')).toBeNull();
   });
 
-  it("falls back to the project id when the workspace row is missing", () => {
+  it("shows a neutral placeholder when the workspace row is missing", () => {
     render(
       <ProfileSidebarFrame
         segregation={segregation()}
@@ -137,7 +137,9 @@ describe("ProfileSidebarFrame", () => {
         narrow={false}
       />
     );
-    expect(screen.getByText("p-1")).toBeInTheDocument();
+    expect(screen.getAllByText("Unavailable project")).toHaveLength(2);
+    expect(screen.queryByText("p-1")).toBeNull();
+    expect(screen.queryByText("p-2")).toBeNull();
   });
 
   it("offers the edit pencil only on your own profile, linking to the settings general tab", () => {

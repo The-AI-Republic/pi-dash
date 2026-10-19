@@ -2,16 +2,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Assigned / Created / Subscribed tab (parity/specs/profile.md §2,
-// PROF-006). The tab reads one ownership-selected page, renders it in the
+// PROF-006). The tab follows the ownership read page by page, renders the
 // stored layout (list by default, board one switch away) and lets the
-// display menu change grouping, empty groups and visible columns.
-// Choices live in browser-local storage scoped to the workspace and the
-// viewed member, so a reload restores them. Selecting a row mounts the
-// shared peek panel host with the row's title and its full-view link; the
-// issues area owns the peek content behind this seam (§13).
+// display menu change grouping, empty groups, sub-work items and visible
+// columns. Choices live in browser-local storage scoped to the workspace
+// and the viewed member, so a reload restores them. Grouping reads the
+// projects' state vocabulary so state groups carry their real names;
+// selecting a row mounts the shared peek host with the row's title and
+// its full-view link — the issues area owns the peek content behind this
+// seam (§13).
 
-import { useQuery } from "@tanstack/react-query";
-import type { IssueListItem, ProfileOwnership } from "@pidash/api-client";
+import { useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
+import type { IssueListItem, ProfileOwnership, State } from "@pidash/api-client";
 import { Button, Popover } from "@pidash/kit";
 import { ChevronDown, SlidersHorizontal } from "lucide-react";
 import * as React from "react";
@@ -22,10 +24,11 @@ import {
   GROUP_NONE_LABEL,
   LAYOUT_LABELS,
   LayoutIcon,
-  layoutDisplayMatrix,
   resolveActiveLayout,
   rowDomId,
+  type DisplaySwitchKey,
 } from "../../issues/index.js";
+import { projectStatesQueryOptions } from "../../home/index.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { CrossAppLink } from "../../../shared/coexistence/CrossAppLink.js";
 import { PeekPanel } from "../../../shared/shell/PeekPanel.js";
@@ -36,7 +39,14 @@ import {
   type ProfileDisplayState,
   type ProfileTabLayout,
 } from "../lib/preferences.js";
-import { PROFILE_GROUP_LABELS, groupIssueRows, priorityLabel, type ProfileGroupDimension } from "../lib/issueRows.js";
+import {
+  PROFILE_GROUP_LABELS,
+  groupIssueRows,
+  isProfileStateGroup,
+  priorityLabel,
+  type ProfileGroupDimension,
+  type ProfileStateLookup,
+} from "../lib/issueRows.js";
 
 export interface ProfileIssuesTabProps {
   workspaceSlug: string;
@@ -50,6 +60,27 @@ const OFFERED: readonly ProfileTabLayout[] = PROFILE_TAB_LAYOUTS;
 /** Grouping dimensions this tab offers, with the ungrouped choice first. */
 const GROUP_CHOICES: readonly (ProfileGroupDimension | null)[] = [null, "priority", "state", "assignees"];
 
+/** Switches the profile record carries. */
+const SWITCH_KEYS: readonly DisplaySwitchKey[] = ["show_empty_groups", "sub_issue"];
+
+/** Columns the profile rows can show, in render order. */
+const PROPERTY_KEYS: readonly { key: string; label: string }[] = [
+  { key: "key", label: "ID" },
+  { key: "priority", label: "Priority" },
+  { key: "state", label: "State" },
+  { key: "assignee", label: "Assignee" },
+  { key: "start_date", label: "Start date" },
+  { key: "due_date", label: "Due date" },
+];
+
+function switchValue(state: ProfileDisplayState, key: DisplaySwitchKey): boolean {
+  return key === "show_empty_groups" ? state.showEmptyGroups : state.showSubIssues;
+}
+
+function switchPatch(key: DisplaySwitchKey, enabled: boolean): Partial<ProfileDisplayState> {
+  return key === "show_empty_groups" ? { showEmptyGroups: enabled } : { showSubIssues: enabled };
+}
+
 function DisplayMenu({
   state,
   onChange,
@@ -57,7 +88,6 @@ function DisplayMenu({
   state: ProfileDisplayState;
   onChange: (patch: Partial<ProfileDisplayState>) => void;
 }): React.ReactElement {
-  const switches = layoutDisplayMatrix(state.layout).switches;
   return (
     <Popover
       trigger={
@@ -103,15 +133,16 @@ function DisplayMenu({
         <section aria-label="Options">
           <p className="text-caption mb-(--space-1) font-medium text-(--text-muted)">Options</p>
           <div className="flex flex-col">
-            {switches.map((key) => {
-              const on = key === "show_empty_groups" ? state.showEmptyGroups : false;
+            {SWITCH_KEYS.map((key) => {
+              const on = switchValue(state, key);
               return (
                 <button
                   key={key}
                   type="button"
                   aria-pressed={on}
+                  data-display-switch={key}
                   onClick={() => {
-                    onChange({ showEmptyGroups: !on });
+                    onChange(switchPatch(key, !on));
                   }}
                   className="text-body flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-left text-(--text) hover:bg-(--subtle)"
                 >
@@ -124,6 +155,32 @@ function DisplayMenu({
                     {on ? "✓" : null}
                   </span>
                   {DISPLAY_SWITCH_LABELS[key]}
+                </button>
+              );
+            })}
+          </div>
+        </section>
+        <section aria-label="Columns">
+          <p className="text-caption mb-(--space-1) font-medium text-(--text-muted)">Display Properties</p>
+          <div className="flex flex-wrap gap-(--space-1)">
+            {PROPERTY_KEYS.map(({ key, label }) => {
+              const visible = state.properties[key] !== false;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  aria-pressed={visible}
+                  data-display-property={key}
+                  onClick={() => {
+                    onChange({ properties: { ...state.properties, [key]: !visible } });
+                  }}
+                  className={`text-caption rounded-(--radius-full) border px-(--space-2) py-(--space-1) ${
+                    visible
+                      ? "border-(--accent) bg-(--accent-subtle) text-(--text)"
+                      : "border-(--border) text-(--text-muted)"
+                  }`}
+                >
+                  {label}
                 </button>
               );
             })}
@@ -179,34 +236,53 @@ function rowKey(identifier: string, issue: IssueListItem): string {
   return identifier === "" ? String(issue.sequence_id) : `${identifier}-${issue.sequence_id}`;
 }
 
-function RowButton({
-  issue,
-  identifier,
-  onSelect,
-}: {
-  issue: IssueListItem;
-  identifier: string;
-  onSelect: () => void;
-}): React.ReactElement {
+function isGroupDimension(value: string | null): value is ProfileGroupDimension {
+  return value === "priority" || value === "state" || value === "assignees";
+}
+
+interface RowContext {
+  identifier: (issue: IssueListItem) => string;
+  stateName: (issue: IssueListItem) => string;
+  show: (key: string) => boolean;
+  onSelect: (issue: IssueListItem) => void;
+}
+
+function RowButton({ issue, context }: { issue: IssueListItem; context: RowContext }): React.ReactElement {
   return (
     <button
       type="button"
       id={rowDomId(issue.id)}
       data-profile-row={issue.id}
-      onClick={onSelect}
+      onClick={() => {
+        context.onSelect(issue);
+      }}
       className="flex w-full items-center gap-(--space-3) border-b border-(--border) px-(--space-4) py-(--space-2) text-left hover:bg-(--subtle)"
     >
-      <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">
-        {rowKey(identifier, issue)}
-      </span>
+      {context.show("key") ? (
+        <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">
+          {rowKey(context.identifier(issue), issue)}
+        </span>
+      ) : null}
       <span className="text-body min-w-0 flex-1 truncate text-(--text)">{issue.name}</span>
-      <span className="text-caption shrink-0 text-(--text-muted)">{priorityLabel(issue.priority)}</span>
+      {context.show("state") ? (
+        <span className="text-caption shrink-0 text-(--text-muted)">{context.stateName(issue)}</span>
+      ) : null}
+      {context.show("priority") ? (
+        <span className="text-caption shrink-0 text-(--text-muted)">{priorityLabel(issue.priority)}</span>
+      ) : null}
+      {context.show("assignee") ? (
+        <span className="text-caption shrink-0 text-(--text-muted)">
+          {issue.assignee_ids.length === 0 ? "Unassigned" : `${String(issue.assignee_ids.length)} assigned`}
+        </span>
+      ) : null}
+      {context.show("start_date") ? (
+        <span className="text-caption shrink-0 text-(--text-muted)">{issue.start_date ?? "—"}</span>
+      ) : null}
+      {context.show("due_date") ? (
+        <span className="text-caption shrink-0 text-(--text-muted)">{issue.target_date ?? "—"}</span>
+      ) : null}
     </button>
   );
-}
-
-function isGroupDimension(value: string | null): value is ProfileGroupDimension {
-  return value === "priority" || value === "state" || value === "assignees";
 }
 
 function IssuesEmpty({ showEmptyGroups }: { showEmptyGroups: boolean }): React.ReactElement {
@@ -224,17 +300,17 @@ function ListBody({
   rows,
   groupBy,
   showEmptyGroups,
-  identifier,
-  onSelect,
+  context,
+  stateLookup,
 }: {
   rows: readonly IssueListItem[];
   groupBy: string | null;
   showEmptyGroups: boolean;
-  identifier: (issue: IssueListItem) => string;
-  onSelect: (issue: IssueListItem) => void;
+  context: RowContext;
+  stateLookup: ProfileStateLookup;
 }): React.ReactElement {
   const dimension = isGroupDimension(groupBy) ? groupBy : null;
-  const groups = groupIssueRows(rows, dimension);
+  const groups = groupIssueRows(rows, dimension, stateLookup, { showEmptyGroups });
   if (groups.length === 0) return <IssuesEmpty showEmptyGroups={showEmptyGroups} />;
   return (
     <div data-testid="profile-list" className="flex flex-col">
@@ -244,14 +320,7 @@ function ListBody({
             {group.title}
           </h3>
           {group.rows.map((issue) => (
-            <RowButton
-              key={`${group.id}-${issue.id}`}
-              issue={issue}
-              identifier={identifier(issue)}
-              onSelect={() => {
-                onSelect(issue);
-              }}
-            />
+            <RowButton key={`${group.id}-${issue.id}`} issue={issue} context={context} />
           ))}
         </section>
       ))}
@@ -262,16 +331,16 @@ function ListBody({
 function BoardBody({
   rows,
   groupBy,
-  identifier,
-  onSelect,
+  context,
+  stateLookup,
 }: {
   rows: readonly IssueListItem[];
   groupBy: string | null;
-  identifier: (issue: IssueListItem) => string;
-  onSelect: (issue: IssueListItem) => void;
+  context: RowContext;
+  stateLookup: ProfileStateLookup;
 }): React.ReactElement {
   const dimension = isGroupDimension(groupBy) ? groupBy : "priority";
-  const groups = groupIssueRows(rows, dimension);
+  const groups = groupIssueRows(rows, dimension, stateLookup, { showEmptyGroups: false });
   if (groups.length === 0) return <IssuesEmpty showEmptyGroups={false} />;
   return (
     <div data-testid="profile-board" className="flex gap-(--space-3) overflow-x-auto p-(--space-3)">
@@ -293,12 +362,12 @@ function BoardBody({
               id={rowDomId(issue.id)}
               data-profile-board-card={issue.id}
               onClick={() => {
-                onSelect(issue);
+                context.onSelect(issue);
               }}
               className="text-body flex flex-col gap-(--space-1) rounded-(--radius-panel) border border-(--border) bg-(--surface) p-(--space-2) text-left text-(--text)"
             >
               <span className="text-caption font-[family-name:var(--font-mono)] text-(--text-muted)">
-                {rowKey(identifier(issue), issue)}
+                {rowKey(context.identifier(issue), issue)}
               </span>
               {issue.name}
             </button>
@@ -337,6 +406,27 @@ function ProfilePeek({
   );
 }
 
+/** The projects' states, flattened into one id → state lookup. */
+function useStateLookup(workspaceSlug: string, projectIds: readonly string[]): ProfileStateLookup {
+  const client = getAppClient();
+  const queries = useQueries({
+    queries: projectIds.map((projectId) => projectStatesQueryOptions(client, workspaceSlug, projectId)),
+  });
+  return React.useMemo(() => {
+    const states = new Map<string, State>();
+    for (const query of queries) {
+      for (const state of query.data ?? []) states.set(state.id, state);
+    }
+    return {
+      group: (id) => {
+        const group = states.get(id)?.group;
+        return group !== undefined && isProfileStateGroup(group) ? group : undefined;
+      },
+      name: (id) => states.get(id)?.name,
+    };
+  }, [queries]);
+}
+
 export function ProfileIssuesTab({
   workspaceSlug,
   userId,
@@ -347,7 +437,7 @@ export function ProfileIssuesTab({
   const [display, updateDisplay] = useProfileDisplay(workspaceSlug, userId);
   const active = resolveActiveLayout(display.layout, OFFERED) as ProfileTabLayout;
   const projects = useQuery(projectsQueryOptions(client, workspaceSlug));
-  const issues = useQuery(profileIssuesQueryOptions(client, workspaceSlug, userId, ownership, display.orderBy));
+  const issues = useInfiniteQuery(profileIssuesQueryOptions(client, workspaceSlug, userId, ownership, display.orderBy));
   const [peekId, setPeekId] = React.useState<string | null>(null);
   const identifiers = React.useMemo(
     () => new Map((projects.data ?? []).map((project) => [project.id, project.identifier])),
@@ -357,8 +447,24 @@ export function ProfileIssuesTab({
     (issue: IssueListItem) => identifiers.get(issue.project_id) ?? "",
     [identifiers]
   );
-  const rows = issues.data?.results ?? [];
+  const rows = React.useMemo(() => issues.data?.pages.flatMap((page) => page.results) ?? [], [issues.data]);
+  const projectIds = React.useMemo(() => [...new Set(rows.map((row) => row.project_id))].sort(), [rows]);
+  const stateLookup = useStateLookup(workspaceSlug, projectIds);
+  const stateName = React.useCallback(
+    (issue: IssueListItem) => (issue.state_id === null ? "" : (stateLookup.name(issue.state_id) ?? "")),
+    [stateLookup]
+  );
+  const total = issues.data?.pages[0]?.total_count ?? 0;
   const peeked = peekId === null ? null : (rows.find((row) => row.id === peekId) ?? null);
+  const show = React.useCallback((key: string) => display.properties[key] !== false, [display.properties]);
+  const context: RowContext = {
+    identifier,
+    stateName,
+    show,
+    onSelect: (issue) => {
+      setPeekId(issue.id);
+    },
+  };
   const switchLayout = (layout: ProfileTabLayout): void => {
     updateDisplay({ layout });
   };
@@ -367,7 +473,7 @@ export function ProfileIssuesTab({
       <div className="hidden shrink-0 items-center gap-(--space-3) border-b border-(--border) px-(--space-4) py-(--space-2) md:flex">
         <h2 className="text-h3 text-(--text)">{title}</h2>
         <span className="text-body text-(--text-muted)">
-          {issues.data?.total_count ?? 0} work item{(issues.data?.total_count ?? 0) === 1 ? "" : "s"}
+          {total} work item{total === 1 ? "" : "s"}
         </span>
         <div className="ml-auto flex items-center gap-(--space-2)">
           <DisplayMenu state={display} onChange={updateDisplay} />
@@ -384,25 +490,31 @@ export function ProfileIssuesTab({
         {issues.isPending ? (
           <p className="text-body p-(--space-6) text-(--text-muted)">Loading work items…</p>
         ) : active === "kanban" ? (
-          <BoardBody
-            rows={rows}
-            groupBy={display.groupBy}
-            identifier={identifier}
-            onSelect={(issue) => {
-              setPeekId(issue.id);
-            }}
-          />
+          <BoardBody rows={rows} groupBy={display.groupBy} context={context} stateLookup={stateLookup} />
         ) : (
           <ListBody
             rows={rows}
             groupBy={display.groupBy}
             showEmptyGroups={display.showEmptyGroups}
-            identifier={identifier}
-            onSelect={(issue) => {
-              setPeekId(issue.id);
-            }}
+            context={context}
+            stateLookup={stateLookup}
           />
         )}
+        {issues.hasNextPage ? (
+          <div className="flex justify-center p-(--space-3)">
+            <Button
+              variant="secondary"
+              size="small"
+              data-testid="profile-issues-load-more"
+              disabled={issues.isFetchingNextPage}
+              onClick={() => {
+                void issues.fetchNextPage();
+              }}
+            >
+              {issues.isFetchingNextPage ? "Loading…" : "Load more"}
+            </Button>
+          </div>
+        ) : null}
       </div>
       {peeked === null ? null : (
         <ProfilePeek

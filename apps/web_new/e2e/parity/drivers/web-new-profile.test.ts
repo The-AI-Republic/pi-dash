@@ -322,3 +322,196 @@ describe("profileAccessDenied / profileTabRendersNothing", () => {
     expect(await driver.profileTabRendersNothing()).toBe(true);
   });
 });
+
+describe("shared peek methods on the profile list", () => {
+  it("reads the peek title from the labelled field and closes by its accessible control", async () => {
+    const field = locator({ inputValue: async () => "Prof peek row" });
+    const close = vi.fn(async () => undefined);
+    const preview = locator({ getByLabel: () => field });
+    const page = pageOf({
+      getByTestId: () => preview,
+      getByRole: () => locator({ first: () => locator({ click: close }) }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.peekOpen()).toBe(true);
+    expect(await driver.peekTitle()).toBe("Prof peek row");
+    await driver.closePeek();
+    expect(close).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+  });
+
+  it("answers a missing peek field as no title", async () => {
+    const page = pageOf({
+      getByTestId: () => locator({ getByLabel: () => locator({ count: async () => 0 }) }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.peekTitle()).toBeNull();
+  });
+
+  it("clicks the row that names the work item in either list", async () => {
+    const click = vi.fn(async () => undefined);
+    const filters: unknown[] = [];
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="issue-list"] a[id^="issue-"], [data-testid="profile-list"] button[data-profile-row]'
+          ? locator({
+              filter: (options?: unknown) => {
+                filters.push(options);
+                return locator({ first: () => locator({ click }) });
+              },
+            })
+          : locator(),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.clickListRow("Prof persist urgent");
+    expect(filters).toEqual([{ hasText: "Prof persist urgent" }]);
+    expect(click).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+  });
+});
+
+describe("shared display methods on the profile tab", () => {
+  function displayPage(overrides: { pressed?: string | null; closeFails?: boolean } = {}) {
+    const click = vi.fn(async () => undefined);
+    const radioClick = vi.fn(async () => undefined);
+    const escape = vi.fn(async () => undefined);
+    let panelWaits = 0;
+    const button = locator({
+      click,
+      getAttribute: async () => overrides.pressed ?? "false",
+      waitFor: async () => undefined,
+    });
+    const panel = locator({
+      getByRole: (role: string) => (role === "radio" ? locator({ click: radioClick }) : button),
+      waitFor: async (options?: unknown) => {
+        panelWaits += 1;
+        if (overrides.closeFails === true && panelWaits === 1) throw new Error("still open");
+        return options;
+      },
+    });
+    const trigger = locator({ click, waitFor: async () => undefined });
+    const page = pageOf({
+      getByTestId: (id: string) => (id === "profile-display-panel" ? panel : trigger),
+      keyboard: { press: escape },
+    });
+    return { driver: new WebNewDriver(page), click, radioClick, escape };
+  }
+
+  it("opens the visible trigger and waits for the panel", async () => {
+    const { driver, click } = displayPage();
+    await driver.openDisplayOptions();
+    expect(click).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+  });
+
+  it("closes on Escape and falls back to the trigger when the panel stays open", async () => {
+    const { driver, click, escape } = displayPage({ closeFails: true });
+    await driver.closeDisplayOptions();
+    expect(escape).toHaveBeenCalledWith("Escape");
+    expect(click).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+  });
+
+  it("stops after Escape when the panel closes", async () => {
+    const { driver, click, escape } = displayPage();
+    await driver.closeDisplayOptions();
+    expect(escape).toHaveBeenCalledWith("Escape");
+    expect(click).not.toHaveBeenCalled();
+  });
+
+  it("chooses a group-by radio", async () => {
+    const { driver, radioClick } = displayPage();
+    await driver.setDisplayGroupBy("Priority");
+    expect(radioClick).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+  });
+
+  it("toggles an option only when it is not already in the wanted state", async () => {
+    const offPage = displayPage({ pressed: "false" });
+    await offPage.driver.setDisplayExtraOption("Show empty groups", true);
+    expect(offPage.click).toHaveBeenCalledTimes(1);
+    const onPage = displayPage({ pressed: "true" });
+    await onPage.driver.setDisplayExtraOption("Show empty groups", true);
+    expect(onPage.click).not.toHaveBeenCalled();
+    expect(await onPage.driver.isDisplayOptionChecked("Show empty groups")).toBe(true);
+  });
+});
+
+describe("shared layout methods on the profile tab", () => {
+  it("reads the live layout from the trigger's label", async () => {
+    const trigger = locator({ getAttribute: async () => "Issue layout, current Board" });
+    const page = pageOf({ getByRole: () => locator({ filter: () => locator({ first: () => trigger }) }) });
+    const driver = new WebNewDriver(page);
+    expect(await driver.layoutsActiveLayout()).toBe("kanban");
+  });
+
+  it("rejects a layout label it does not know", async () => {
+    const trigger = locator({ getAttribute: async () => "Issue layout, current Gantt" });
+    const page = pageOf({ getByRole: () => locator({ filter: () => locator({ first: () => trigger }) }) });
+    const driver = new WebNewDriver(page);
+    await expect(driver.layoutsActiveLayout()).rejects.toThrow("unrecognised layout trigger label");
+  });
+
+  it("switches through the menu choice and waits for the requested surface", async () => {
+    const triggerClick = vi.fn(async () => undefined);
+    const choiceClick = vi.fn(async () => undefined);
+    const page = pageOf({
+      getByRole: () => locator({ filter: () => locator({ first: () => locator({ click: triggerClick }) }) }),
+      locator: (selector: string) =>
+        selector === '[data-profile-layout-choice="list"]' ? locator({ click: choiceClick }) : locator(),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.layoutsSwitchTo("list");
+    expect(triggerClick).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+    expect(choiceClick).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+  });
+
+  it("reloads and waits for the tab's surface", async () => {
+    const reload = vi.fn(async () => undefined);
+    const page = pageOf({ reload, getByTestId: () => locator({ waitFor: async () => undefined }) });
+    const driver = new WebNewDriver(page);
+    await driver.layoutsReloadIssues();
+    expect(reload).toHaveBeenCalledWith({ waitUntil: "domcontentloaded" });
+  });
+
+  it("reads the list and board surfaces", async () => {
+    const page = pageOf({ getByTestId: () => locator({ count: async () => 1, isVisible: async () => true }) });
+    const driver = new WebNewDriver(page);
+    expect(await driver.layoutsListVisible()).toBe(true);
+    expect(await driver.layoutsKanbanVisible()).toBe(true);
+    expect(await driver.layoutsMobileDisplayVisible()).toBe(true);
+  });
+
+  it("reads the list's group titles, dropping blank ones", async () => {
+    const groupNodes = [
+      locator({ getAttribute: async () => "Urgent" }),
+      locator({ getAttribute: async () => "Low" }),
+      locator({ getAttribute: async () => " " }),
+    ];
+    const groups = locator({
+      count: async () => groupNodes.length,
+      nth: (index: number) => groupNodes[index] ?? groupNodes[0],
+    });
+    const page = pageOf({ locator: () => groups });
+    const driver = new WebNewDriver(page);
+    expect(await driver.layoutsListGroups()).toEqual(["Urgent", "Low"]);
+  });
+
+  it("reads a group's row names from the name column", async () => {
+    const row = locator({
+      locator: (selector: string) =>
+        selector === "span"
+          ? locator({
+              nth: (index: number) =>
+                locator({ innerText: async () => (index === 1 ? " Prof row " : index === 2 ? "  " : "PP-7") }),
+            })
+          : locator(),
+    });
+    const rows = locator({ count: async () => 1, nth: () => row });
+    const group = locator({ locator: (selector: string) => (selector === "[data-profile-row]" ? rows : locator()) });
+    const page = pageOf({ locator: () => locator({ first: () => group }) });
+    const driver = new WebNewDriver(page);
+    expect(await driver.layoutsListGroupIssueNames("Urgent")).toEqual(["Prof row"]);
+  });
+
+  it("reads the current address", async () => {
+    const page = pageOf({ url: () => "https://app.test/acme/profile/u-1/" });
+    const driver = new WebNewDriver(page);
+    expect(await driver.layoutsCurrentUrl()).toBe("https://app.test/acme/profile/u-1/");
+  });
+});

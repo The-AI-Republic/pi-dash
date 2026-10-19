@@ -590,9 +590,14 @@ test(
     await test.step("cover art, initial fallback, join date and live clock render", async () => {
       await driver.profileOpen(world.workspaceSlug, member.userId, browserSessionCookies(world.owner));
       expect(await driver.profileSidebarVisible()).toBe(true);
-      // Current behavior: the cover banner still renders (its removal is
-      // the main#523/main#574 target recorded as a Gap in row PROF-008).
-      expect(await driver.profileSidebarCoverVisible()).toBe(true);
+      if (driver.target === "web_new") {
+        // Target per main#523/main#574 (PROF-008): the panel has no cover.
+        expect(await driver.profileSidebarCoverVisible()).toBe(false);
+      } else {
+        // Current behavior: the cover banner still renders (its removal is
+        // the main#523/main#574 target recorded as a Gap in row PROF-008).
+        expect(await driver.profileSidebarCoverVisible()).toBe(true);
+      }
       expect(await driver.profileSidebarAvatar()).toEqual({ kind: "initial", initial: "O" });
 
       const server = await serverProfileSegregation(world.owner, world.workspaceSlug, member.userId);
@@ -638,20 +643,27 @@ test(
       if (rendered.kind === "image") expect(rendered.src).toContain(avatar.assetId);
     });
 
-    await test.step("only your own profile offers the edit pencil, opening the settings dialog", async () => {
+    await test.step("only your own profile offers the edit pencil, opening the settings general tab", async () => {
       await driver.profileOpen(world.workspaceSlug, member.userId, browserSessionCookies(world.owner));
       expect(await driver.profileSidebarEditPencilVisible()).toBe(false);
 
       await driver.profileOpen(world.workspaceSlug, world.owner.userId, browserSessionCookies(world.owner));
       expect(await driver.profileSidebarEditPencilVisible()).toBe(true);
       await driver.profileSidebarClickEditPencil();
-      // Current behavior: the pencil opens the settings dialog on its
-      // general tab (navigation to /settings/profile/general is the
-      // main#573 target recorded as a Gap in row PROF-008).
-      expect(await driver.profileSettingsActiveTab()).toBe("Profile");
-      const url = await driver.layoutsCurrentUrl();
-      expect(url).toContain(`/profile/${world.owner.userId}`);
-      expect(url).not.toContain("/settings/");
+      if (driver.target === "web_new") {
+        // Target per main#573 (PROF-008): the pencil navigates to the
+        // settings general tab instead of opening a dialog.
+        await expect.poll(() => driver.layoutsCurrentUrl(), { timeout: 30_000 }).toContain("/settings/profile/general");
+        expect(await driver.profileSettingsActiveTab()).toBe("Profile");
+      } else {
+        // Current behavior: the pencil opens the settings dialog on its
+        // general tab (navigation to /settings/profile/general is the
+        // main#573 target recorded as a Gap in row PROF-008).
+        expect(await driver.profileSettingsActiveTab()).toBe("Profile");
+        const url = await driver.layoutsCurrentUrl();
+        expect(url).toContain(`/profile/${world.owner.userId}`);
+        expect(url).not.toContain("/settings/");
+      }
     });
   }
 );

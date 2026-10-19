@@ -21,16 +21,12 @@ import { ProfileOverview } from "../../../../../features/profile/components/Prof
 
 export const Route = createFileRoute("/$ws/_gated/profile/$userId/")({
   loader: async ({ context, params }) => {
-    await Promise.all([
-      context.queryClient
-        .ensureQueryData(profileStatsQueryOptions(context.apiClient, params.ws, params.userId))
-        .catch(() => undefined),
-      context.queryClient
-        .ensureQueryData(
-          profileActivityQueryOptions(context.apiClient, params.ws, params.userId, PROFILE_OVERVIEW_ACTIVITY_SIZE)
-        )
-        .catch(() => undefined),
-    ]);
+    // Both reads render behind placeholders, so neither may hold the
+    // route: a slow request leaves the frame, cards and skeletons up.
+    void context.queryClient.prefetchQuery(profileStatsQueryOptions(context.apiClient, params.ws, params.userId));
+    void context.queryClient.prefetchQuery(
+      profileActivityQueryOptions(context.apiClient, params.ws, params.userId, PROFILE_OVERVIEW_ACTIVITY_SIZE)
+    );
   },
   component: ProfileSummaryComponent,
 });

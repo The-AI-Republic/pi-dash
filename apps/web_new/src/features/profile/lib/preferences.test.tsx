@@ -59,6 +59,7 @@ describe("profile display storage", () => {
       groupBy: null,
       orderBy: "sort_order",
       showEmptyGroups: false,
+      showSubIssues: false,
       properties: {},
     });
   });
@@ -88,6 +89,7 @@ describe("profile display storage", () => {
       groupBy: null,
       orderBy: "priority",
       showEmptyGroups: false,
+      showSubIssues: false,
       properties: {},
     });
   });
@@ -100,6 +102,15 @@ describe("profile display storage", () => {
     const read = readProfileDisplay("acme", "u-1");
     expect(read.showEmptyGroups).toBe(true);
     expect(read.properties).toEqual({ name: true, priority: false });
+  });
+
+  it("stores and reads the sub-work-items choice on its own", () => {
+    expect(readProfileDisplay("acme", "u-1").showSubIssues).toBe(false);
+    const next = writeProfileDisplay("acme", "u-1", { showSubIssues: true });
+    expect(next).toMatchObject({ showSubIssues: true, showEmptyGroups: false });
+    expect(readProfileDisplay("acme", "u-1").showSubIssues).toBe(true);
+    localStorage.setItem(profileDisplayKey("acme", "u-1"), JSON.stringify({ showSubIssues: "yes" }));
+    expect(readProfileDisplay("acme", "u-1").showSubIssues).toBe(false);
   });
 
   it("falls back on unreadable JSON and non-object payloads", () => {
@@ -120,6 +131,7 @@ describe("profile display storage", () => {
       calendar: { mode: "month", showWeekends: true },
       properties: {},
     });
+    expect(toDisplayPrefs({ ...DEFAULT_PROFILE_DISPLAY, showSubIssues: true }).showSubIssues).toBe(true);
   });
 });
 

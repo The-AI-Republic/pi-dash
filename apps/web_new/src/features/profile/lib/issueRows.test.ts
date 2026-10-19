@@ -7,15 +7,23 @@ import { describe, expect, it } from "vitest";
 import type { IssueListItem } from "@pidash/api-client";
 
 import {
+  EMPTY_STATE_LOOKUP,
   PRIORITY_ORDER,
   PROFILE_GROUP_LABELS,
+  STATE_GROUP_TITLES,
   UNGROUPED_TITLE,
   groupIssueRows,
   issueAssigneeIds,
   issueStateGroup,
+  isProfileStateGroup,
   priorityLabel,
+  type ProfileStateLookup,
 } from "./issueRows.js";
 import type { ProfileStateGroup } from "./stats.js";
+
+function lookup(groups: ReadonlyMap<string, ProfileStateGroup>): ProfileStateLookup {
+  return { group: (id) => groups.get(id), name: () => undefined };
+}
 
 function issue(overrides: Partial<IssueListItem> = {}): IssueListItem {
   return {
@@ -56,10 +64,25 @@ describe("issue row vocabulary", () => {
 
   it("reads an issue's state group, defaulting to backlog", () => {
     const groups = new Map<string, ProfileStateGroup>([["s-1", "started"]]);
-    expect(issueStateGroup(issue({ state_id: "s-1" }), groups)).toBe("started");
-    expect(issueStateGroup(issue({ state_id: "s-9" }), groups)).toBe("backlog");
-    expect(issueStateGroup(issue({ state_id: null }), groups)).toBe("backlog");
+    expect(issueStateGroup(issue({ state_id: "s-1" }), lookup(groups))).toBe("started");
+    expect(issueStateGroup(issue({ state_id: "s-9" }), lookup(groups))).toBe("backlog");
+    expect(issueStateGroup(issue({ state_id: null }), lookup(groups))).toBe("backlog");
     expect(issueAssigneeIds(issue({ assignee_ids: ["u-1"] }))).toEqual(["u-1"]);
+  });
+
+  it("recognises the seven profile state groups and nothing else", () => {
+    expect(isProfileStateGroup("started")).toBe(true);
+    expect(isProfileStateGroup("cancelled")).toBe(true);
+    expect(isProfileStateGroup("in_progress")).toBe(false);
+    expect(Object.values(STATE_GROUP_TITLES)).toEqual([
+      "Backlog",
+      "Unstarted",
+      "Started",
+      "Review",
+      "Test",
+      "Completed",
+      "Canceled",
+    ]);
   });
 });
 
@@ -93,8 +116,37 @@ describe("groupIssueRows", () => {
       issue({ id: "i-start", state_id: "s-start" }),
       issue({ id: "i-backlog", state_id: null }),
     ];
-    const groups = groupIssueRows(rows, "state", stateGroups);
+    const groups = groupIssueRows(rows, "state", lookup(stateGroups));
     expect(groups.map((group) => group.title)).toEqual(["Backlog", "Started", "Review"]);
+  });
+
+  it("zero-fills the seven state groups in the server's order when asked", () => {
+    const groups = groupIssueRows(
+      [issue({ id: "i-1", state_id: "s-review" })],
+      "state",
+      lookup(new Map([["s-review", "review"]])),
+      { showEmptyGroups: true }
+    );
+    expect(groups.map((group) => group.id)).toEqual([
+      "backlog",
+      "unstarted",
+      "started",
+      "review",
+      "test",
+      "completed",
+      "cancelled",
+    ]);
+    expect(groups.map((group) => group.rows.length)).toEqual([0, 0, 0, 1, 0, 0, 0]);
+    expect(groupIssueRows([], "state", EMPTY_STATE_LOOKUP, { showEmptyGroups: true })).toHaveLength(7);
+  });
+
+  it("reads an unknown state id as a state group key and ranks it last", () => {
+    const groups = groupIssueRows(
+      [issue({ id: "i-unknown", state_id: "s-unknown" }), issue({ id: "i-done", state_id: "s-done" })],
+      "state",
+      { group: (id) => (id === "s-done" ? "completed" : undefined), name: () => undefined }
+    );
+    expect(groups.map((group) => group.title)).toEqual(["Backlog", "Completed"]);
   });
 
   it("groups assignees with unassigned first and an unassigned title", () => {
@@ -103,7 +155,7 @@ describe("groupIssueRows", () => {
       issue({ id: "i-a", assignee_ids: ["u-a"] }),
       issue({ id: "i-none", assignee_ids: [] }),
     ];
-    const groups = groupIssueRows(rows, "assignees", new Map(), new Map([["u-b", "Bea"]]));
+    const groups = groupIssueRows(rows, "assignees", EMPTY_STATE_LOOKUP, { memberNames: new Map([["u-b", "Bea"]]) });
     expect(groups.map((group) => group.title)).toEqual(["Unassigned", "u-a", "Bea"]);
     expect(groups[0]?.rows.map((row) => row.id)).toEqual(["i-none"]);
   });

@@ -30,6 +30,9 @@ import {
 
 export const PROFILE_SETTINGS_GENERAL_HREF = "/settings/profile/general";
 
+/** Row label for a project the workspace collection no longer carries. */
+export const UNNAMED_PROJECT = "Unavailable project";
+
 /** How often the clock re-reads the wall time. */
 export const PROFILE_CLOCK_TICK_MS = 60_000;
 
@@ -119,7 +122,11 @@ export interface ProfileSidebarProps {
   workspaceSlug: string;
   /** Viewed member is the signed-in member. */
   isOwn: boolean;
-  /** Project names by id; projects missing a workspace row fall back to their id. */
+  /**
+   * Project names by id. The profile frame resolves the collection before
+   * it mounts, so every row names its project; a row whose project left
+   * the workspace shows a neutral placeholder instead of a raw id.
+   */
   projects: readonly ProfileProjectName[];
   /** API base for relative avatar paths. */
   apiBaseUrl: string;
@@ -202,7 +209,7 @@ function ProfileIdentity({
         <p className="text-caption px-(--space-3) py-(--space-2) font-medium text-(--text-muted)">Projects</p>
         <ul aria-label="Profile projects" className="flex flex-col">
           {segregation.project_data.map((project) => (
-            <ProjectRow key={project.id} project={project} name={names.get(project.id) ?? project.id} />
+            <ProjectRow key={project.id} project={project} name={names.get(project.id) ?? UNNAMED_PROJECT} />
           ))}
         </ul>
       </div>

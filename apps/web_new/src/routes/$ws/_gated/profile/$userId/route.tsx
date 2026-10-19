@@ -3,11 +3,13 @@
 // See the LICENSE file for details.
 // Profile page frame (parity/specs/profile.md §1 and §4, PROF-001/
 // PROF-002/PROF-008). The layout reads the member's identity/per-project
-// segregation once and hands it to the frame and every tab; it also warms
-// the stats read the summary needs. Role comes from the session
-// permission hook, never from an ad-hoc role read.
+// segregation and the workspace project names once and hands them to the
+// frame and every tab. The summary's reads are warmed without blocking:
+// the route component does not mount until its loader settles, so a
+// pending stats request must never gate the frame or its placeholders.
+// Role comes from the session permission hook, never from an ad-hoc read.
 
-import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
+import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
@@ -22,14 +24,15 @@ import { projectsQueryOptions } from "../../../../../features/projects/index.js"
 
 export const Route = createFileRoute("/$ws/_gated/profile/$userId")({
   loader: async ({ context, params }) => {
-    await context.queryClient.ensureQueryData(
-      profileSegregationQueryOptions(context.apiClient, params.ws, params.userId)
-    );
-    // The summary's cards are the first screen; warm them with the frame
-    // so the tab does not flash placeholders on arrival.
-    await context.queryClient
-      .ensureQueryData(profileStatsQueryOptions(context.apiClient, params.ws, params.userId))
-      .catch(() => undefined);
+    await Promise.all([
+      context.queryClient.ensureQueryData(profileSegregationQueryOptions(context.apiClient, params.ws, params.userId)),
+      // Sidebar project rows carry names, so the frame waits for the
+      // collection instead of painting ids first.
+      context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws)).catch(() => undefined),
+    ]);
+    // Warm the summary so its cards usually arrive with the frame; a slow
+    // or failed read leaves the overview on its placeholders.
+    void context.queryClient.prefetchQuery(profileStatsQueryOptions(context.apiClient, params.ws, params.userId));
   },
   component: ProfileLayoutComponent,
 });
@@ -40,7 +43,7 @@ function ProfileLayoutComponent(): React.ReactElement {
   const permissions = usePermissions(ws);
   const me = useMe();
   const { data: segregation } = useSuspenseQuery(profileSegregationQueryOptions(client, ws, userId));
-  const projects = useQuery(projectsQueryOptions(client, ws));
+  const { data: projects } = useSuspenseQuery(projectsQueryOptions(client, ws));
   const isOwn = me.data?.id === userId;
   return (
     <ProfileFrame
@@ -49,7 +52,7 @@ function ProfileLayoutComponent(): React.ReactElement {
       segregation={segregation}
       permissions={permissions}
       isOwn={isOwn}
-      projects={(projects.data ?? []).map((project) => ({ id: project.id, name: project.name }))}
+      projects={projects.map((project) => ({ id: project.id, name: project.name }))}
       apiBaseUrl={client.baseUrl}
     />
   );

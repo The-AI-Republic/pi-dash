@@ -2894,22 +2894,36 @@ export class WebNewDriver implements ParityDriver {
     return todo("openPeek");
   }
   async peekOpen(): Promise<boolean> {
-    return todo("peekOpen");
+    // The peek hosts mount only while a selection is open; the profile
+    // slice renders its preview through the shared panel shell.
+    return this.isShown(this.page.getByTestId("issue-preview"));
   }
   async peekTitle(): Promise<string | null> {
-    return todo("peekTitle");
+    const field = this.page.getByTestId("issue-preview").getByLabel("Work item title");
+    if (!(await this.isShown(field))) return null;
+    return await field.first().inputValue();
   }
   async peekIdentifier(): Promise<string | null> {
     return todo("peekIdentifier");
   }
   async closePeek(): Promise<void> {
-    return todo("closePeek");
+    // The panel shell decorates its close control by accessible name, so
+    // the read does not depend on an icon font or glyph.
+    await this.page.getByRole("button", { name: "Close preview" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("issue-preview").waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
   async peekCloseVisible(): Promise<boolean> {
     return todo("peekCloseVisible");
   }
-  async clickListRow(_name: string): Promise<void> {
-    return todo("clickListRow");
+  async clickListRow(name: string): Promise<void> {
+    // Any visible row that names the work item: the issues list rows are
+    // links, the profile list rows are buttons.
+    const row = this.page
+      .locator('[data-testid="issue-list"] a[id^="issue-"], [data-testid="profile-list"] button[data-profile-row]')
+      .filter({ hasText: name })
+      .first();
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await row.click({ timeout: WebNewDriver.WAIT_MS });
   }
   async setPeekMode(_mode: string): Promise<void> {
     return todo("setPeekMode");
@@ -5075,7 +5089,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async profileSettingsActiveTab(): Promise<string | null> {
-    return todo("profileSettingsActiveTab");
+    // The settings shell marks its live tab by accessible state, so the
+    // read follows the route rather than comparing paint tones.
+    const active = this.page.getByTestId("profile-settings-sidebar").locator('a[aria-current="page"]').first();
+    if (!(await this.isShown(active))) return null;
+    return (await active.innerText()).trim();
   }
 
   async isSidebarPeekVisible(): Promise<boolean> {
@@ -5099,31 +5117,58 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async openDisplayOptions(): Promise<void> {
-    return todo("openDisplayOptions");
+    // The visible profile tab's trigger; the narrow header carries its own.
+    await this.profileDisplayTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.profileDisplayPanel().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async closeDisplayOptions(): Promise<void> {
-    return todo("closeDisplayOptions");
+    await this.page.keyboard.press("Escape");
+    await this.profileDisplayPanel()
+      .waitFor({ state: "hidden", timeout: 10_000 })
+      .catch(async () => {
+        // Focus can sit outside the popover, so fall back to the trigger.
+        await this.profileDisplayTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+        await this.profileDisplayPanel().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+      });
+  }
+
+  private profileDisplayTrigger(): Locator {
+    return this.page.getByTestId("profile-display-trigger").filter({ visible: true }).first();
+  }
+
+  private profileDisplayPanel(): Locator {
+    return this.page.getByTestId("profile-display-panel");
+  }
+
+  private profileDisplayOption(option: string): Locator {
+    return this.profileDisplayPanel().getByRole("button", { name: option, exact: true });
   }
 
   async displayPanelText(): Promise<string> {
     return todo("displayPanelText");
   }
 
-  async setDisplayGroupBy(_option: string): Promise<void> {
-    return todo("setDisplayGroupBy");
+  async setDisplayGroupBy(option: string): Promise<void> {
+    const choice = this.profileDisplayPanel().getByRole("radio", { name: option, exact: true });
+    await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await choice.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async setDisplayOrderBy(_option: string): Promise<void> {
     return todo("setDisplayOrderBy");
   }
 
-  async setDisplayExtraOption(_option: string, _enabled: boolean): Promise<void> {
-    return todo("setDisplayExtraOption");
+  async setDisplayExtraOption(option: string, enabled: boolean): Promise<void> {
+    const target = this.profileDisplayOption(option);
+    await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if ((await this.isDisplayOptionChecked(option)) !== enabled) {
+      await target.click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
 
-  async isDisplayOptionChecked(_option: string): Promise<boolean> {
-    return todo("isDisplayOptionChecked");
+  async isDisplayOptionChecked(option: string): Promise<boolean> {
+    return (await this.profileDisplayOption(option).getAttribute("aria-pressed")) === "true";
   }
 
   async toggleDisplayProperty(_option: string): Promise<void> {
@@ -6321,19 +6366,39 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsActiveLayout(): Promise<LayoutsLayoutKey> {
-    return todo("layoutsActiveLayout");
+    // The profile tab's switcher trigger names the live layout.
+    const trigger = this.page
+      .getByRole("button", { name: /^Issue layout, current / })
+      .filter({ visible: true })
+      .first();
+    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const label = (await trigger.getAttribute("aria-label")) ?? "";
+    const key = WebNewDriver.PROFILE_LAYOUT_LABELS.find((entry) => label.endsWith(entry.label))?.key;
+    if (key === undefined) throw new Error(`[parity] unrecognised layout trigger label "${label}".`);
+    return key;
   }
 
-  async layoutsSwitchTo(_layout: LayoutsLayoutKey): Promise<void> {
-    return todo("layoutsSwitchTo");
+  async layoutsSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
+    const trigger = this.page
+      .getByRole("button", { name: /^Issue layout, current / })
+      .filter({ visible: true })
+      .first();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.locator(`[data-profile-layout-choice="${layout}"]`).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.layoutsWaitForProfileLayout(layout);
   }
 
   async layoutsReloadIssues(): Promise<void> {
-    return todo("layoutsReloadIssues");
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    await this.page.getByTestId("profile-issues-tab").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .locator('[data-testid="profile-list"], [data-testid="profile-board"]')
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsListVisible(): Promise<boolean> {
-    return todo("layoutsListVisible");
+    return this.isShown(this.page.getByTestId("profile-list"));
   }
 
   async layoutsCalendarVisible(): Promise<boolean> {
@@ -6345,7 +6410,18 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsKanbanVisible(): Promise<boolean> {
-    return todo("layoutsKanbanVisible");
+    return this.isShown(this.page.getByTestId("profile-board"));
+  }
+
+  /** Profile layout names as the switcher trigger reads them. */
+  private static readonly PROFILE_LAYOUT_LABELS: ReadonlyArray<{ key: LayoutsLayoutKey; label: string }> = [
+    { key: "list", label: "List" },
+    { key: "kanban", label: "Board" },
+  ];
+
+  private async layoutsWaitForProfileLayout(layout: LayoutsLayoutKey): Promise<void> {
+    const target = layout === "kanban" ? this.page.getByTestId("profile-board") : this.page.getByTestId("profile-list");
+    await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsGanttVisible(): Promise<boolean> {
@@ -6353,7 +6429,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsListGroups(): Promise<string[]> {
-    return todo("layoutsListGroups");
+    const groups = this.page.locator('[data-testid="profile-list"] [data-profile-group]');
+    const count = await groups.count();
+    const titles: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      titles.push(((await groups.nth(index).getAttribute("data-profile-group")) ?? "").trim());
+    }
+    return titles.filter((title) => title.length > 0);
   }
 
   async layoutsListGroupExpanded(_title: string): Promise<boolean> {
@@ -6364,8 +6446,17 @@ export class WebNewDriver implements ParityDriver {
     return todo("layoutsListToggleGroup");
   }
 
-  async layoutsListGroupIssueNames(_title: string): Promise<string[]> {
-    return todo("layoutsListGroupIssueNames");
+  async layoutsListGroupIssueNames(title: string): Promise<string[]> {
+    const group = this.page.locator(`[data-testid="profile-list"] [data-profile-group="${title}"]`).first();
+    await group.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const rows = group.locator("[data-profile-row]");
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const name = (await rows.nth(index).locator("span").nth(1).innerText()).trim();
+      if (name !== "") names.push(name);
+    }
+    return names;
   }
 
   async layoutsListGroupHasLoadMore(_title: string): Promise<boolean> {
@@ -6924,7 +7015,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsMobileDisplayVisible(): Promise<boolean> {
-    return todo("layoutsMobileDisplayVisible");
+    return this.isShown(this.page.getByTestId("profile-display-trigger").filter({ visible: true }).first());
   }
 
   async layoutsMobileAnalyticsVisible(): Promise<boolean> {

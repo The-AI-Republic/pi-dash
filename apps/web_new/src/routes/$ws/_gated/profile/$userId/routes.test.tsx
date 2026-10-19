@@ -8,7 +8,7 @@
 // the three issue tabs, leaves the activity feed open without its
 // download, and renders nothing for an unknown tab id.
 import { QueryClient } from "@tanstack/react-query";
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -143,7 +143,7 @@ afterEach(() => {
 });
 
 describe("profile layout route", () => {
-  it("warms the segregation and stats reads and tolerates a failed stats call", async () => {
+  it("warms the segregation and stats reads without holding the frame on stats", async () => {
     const loader = LayoutRoute.options.loader as unknown as (input: unknown) => Promise<unknown>;
     const queryClient = new QueryClient();
     vi.mocked(getUserProfileStats).mockRejectedValue(new Error("stats down"));
@@ -153,11 +153,21 @@ describe("profile layout route", () => {
     expect(queryClient.getQueryData(profileKeys.segregation("acme", "u-1"))).toEqual(segregation);
   });
 
-  it("warms both reads and mounts the frame for the member", async () => {
+  it("prefetches stats without awaiting the read", async () => {
+    vi.mocked(getUserProfileStats).mockReturnValue(new Promise(() => undefined) as never);
+    const loader = LayoutRoute.options.loader as unknown as (input: unknown) => Promise<unknown>;
+    const queryClient = new QueryClient();
+    const started = Date.now();
+    await loader({ context: { queryClient, apiClient: {} }, params: { ws: "acme", userId: "u-1" } });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(getUserProfileStats).toHaveBeenCalledWith({}, "acme", "u-1");
+  });
+
+  it("warms the reads and mounts the frame for the member", async () => {
     const loader = LayoutRoute.options.loader as unknown as (input: unknown) => Promise<unknown>;
     const queryClient = new QueryClient();
     await loader({ context: { queryClient, apiClient: {} }, params: { ws: "acme", userId: "u-1" } });
-    expect(queryClient.getQueryData(profileKeys.stats("acme", "u-1"))).toEqual(stats);
+    await waitFor(() => expect(queryClient.getQueryData(profileKeys.stats("acme", "u-1"))).toEqual(stats));
     renderProfileRoute({
       component: LayoutRoute.options.component as never,
       leafPath: "/",
@@ -172,7 +182,24 @@ describe("profile layout route", () => {
     expect(await screen.findByTestId("profile-page")).toBeInTheDocument();
   });
 
-  it("mounts the frame while the project list is still in flight", async () => {
+  it("mounts the frame while the stats read is still in flight", async () => {
+    vi.mocked(getUserProfileStats).mockReturnValue(new Promise(() => undefined) as never);
+    renderProfileRoute({
+      component: LayoutRoute.options.component as never,
+      leafPath: "/",
+      seed: (client) => {
+        seed(15)(client);
+        client.setQueryData(profileKeys.segregation("acme", "u-1"), segregation);
+        client.setQueryData(profileKeys.activity("acme", "u-1", 10), activityPage());
+        client.setQueryData(projectsQueryOptions({} as never, "acme").queryKey, []);
+      },
+    });
+    expect(await screen.findByTestId("profile-page")).toBeInTheDocument();
+    expect(screen.getByTestId("profile-sidebar")).toBeInTheDocument();
+  });
+
+  it("waits for the project list so the sidebar reads names, not ids", async () => {
+    vi.mocked(listProjects).mockReturnValue(new Promise(() => undefined) as never);
     renderProfileRoute({
       component: LayoutRoute.options.component as never,
       leafPath: "/",
@@ -183,8 +210,11 @@ describe("profile layout route", () => {
         client.setQueryData(profileKeys.activity("acme", "u-1", 10), activityPage());
       },
     });
-    expect(await screen.findByTestId("profile-page")).toBeInTheDocument();
-    expect(screen.getByTestId("profile-sidebar")).toBeInTheDocument();
+    expect(screen.queryByTestId("profile-page")).toBeNull();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(screen.queryByTestId("profile-page")).toBeNull();
   });
 });
 
@@ -195,7 +225,7 @@ describe("profile summary route", () => {
     await loader({ context: { queryClient, apiClient: {} }, params: { ws: "acme", userId: "u-1" } });
     expect(getUserProfileStats).toHaveBeenCalled();
     expect(getUserProfileActivity).toHaveBeenCalledWith({}, "acme", "u-1", { perPage: 10 });
-    expect(queryClient.getQueryData(profileKeys.stats("acme", "u-1"))).toEqual(stats);
+    await waitFor(() => expect(queryClient.getQueryData(profileKeys.stats("acme", "u-1"))).toEqual(stats));
   });
 
   it("renders the count cards and the tab strip", async () => {

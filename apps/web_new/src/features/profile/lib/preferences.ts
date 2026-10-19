@@ -24,6 +24,7 @@ export interface ProfileDisplayState {
   groupBy: string | null;
   orderBy: string;
   showEmptyGroups: boolean;
+  showSubIssues: boolean;
   properties: Record<string, boolean>;
 }
 
@@ -33,6 +34,7 @@ export const DEFAULT_PROFILE_DISPLAY: ProfileDisplayState = {
   groupBy: null,
   orderBy: "sort_order",
   showEmptyGroups: false,
+  showSubIssues: false,
   properties: {},
 };
 
@@ -64,6 +66,8 @@ export function readProfileDisplay(workspaceSlug: string, userId: string): Profi
     orderBy: typeof stored.orderBy === "string" ? stored.orderBy : DEFAULT_PROFILE_DISPLAY.orderBy,
     showEmptyGroups:
       typeof stored.showEmptyGroups === "boolean" ? stored.showEmptyGroups : DEFAULT_PROFILE_DISPLAY.showEmptyGroups,
+    showSubIssues:
+      typeof stored.showSubIssues === "boolean" ? stored.showSubIssues : DEFAULT_PROFILE_DISPLAY.showSubIssues,
     properties: isPropertyMap(stored.properties) ? stored.properties : {},
   };
 }
@@ -109,7 +113,7 @@ export function toDisplayPrefs(state: ProfileDisplayState): DisplayPrefs {
     subGroupBy: null,
     orderBy: state.orderBy,
     showEmptyGroups: state.showEmptyGroups,
-    showSubIssues: false,
+    showSubIssues: state.showSubIssues,
     calendar: PROFILE_CALENDAR,
     properties: state.properties,
   };

@@ -57,14 +57,28 @@ describe("profile query options", () => {
 
   it("reads one ownership-selected page with the chosen order", async () => {
     const options = profileIssuesQueryOptions(client, "acme", "u-1", "created", "priority");
-    expect(options.queryKey.slice(0, -1)).toEqual(profileKeys.issues("acme", "u-1", "created"));
-    expect(options.queryKey[options.queryKey.length - 1]).toBe("priority");
-    await options.queryFn?.({} as never);
+    expect(options.queryKey).toEqual([...profileKeys.issues("acme", "u-1", "created"), "priority", "pages"]);
+    expect(options.initialPageParam).toBe("");
+    await options.queryFn?.({ pageParam: "" } as never);
     expect(listUserProfileIssues).toHaveBeenCalledWith(client, "acme", "u-1", {
       ownership: "created",
       perPage: 100,
       orderBy: "priority",
     });
+    await options.queryFn?.({ pageParam: "c-2" } as never);
+    expect(listUserProfileIssues).toHaveBeenLastCalledWith(client, "acme", "u-1", {
+      ownership: "created",
+      perPage: 100,
+      orderBy: "priority",
+      cursor: "c-2",
+    });
+  });
+
+  it("follows the server cursor only while another page exists", () => {
+    const options = profileIssuesQueryOptions(client, "acme", "u-1", "assigned", "sort_order");
+    const getNext = options.getNextPageParam as unknown as (page: unknown) => unknown;
+    expect(getNext({ next_page_results: true, next_cursor: "c-3" })).toBe("c-3");
+    expect(getNext({ next_page_results: false, next_cursor: "c-3" })).toBeUndefined();
   });
 
   it("reads the first activity page at the requested size", async () => {

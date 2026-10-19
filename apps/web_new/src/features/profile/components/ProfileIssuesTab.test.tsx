@@ -13,11 +13,11 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { IssueListItem } from "@pidash/api-client";
-import { listUserProfileIssues, listProjects } from "@pidash/api-client";
+import { listStates, listUserProfileIssues, listProjects } from "@pidash/api-client";
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
   const original = await importOriginal<typeof import("@pidash/api-client")>();
-  return { ...original, listUserProfileIssues: vi.fn(), listProjects: vi.fn() };
+  return { ...original, listStates: vi.fn(), listUserProfileIssues: vi.fn(), listProjects: vi.fn() };
 });
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
@@ -115,6 +115,10 @@ beforeEach(() => {
   createAppClient("https://api.test", () => new Promise<never>(() => {}));
   vi.mocked(listProjects).mockResolvedValue([
     { id: "p-1", name: "Prof Proj", identifier: "PP", workspace: "w-1" } as never,
+  ]);
+  vi.mocked(listStates).mockResolvedValue([
+    { id: "s-backlog", name: "Backlog", group: "backlog", color: "#000000", project_id: "p-1" } as never,
+    { id: "s-working", name: "In progress", group: "started", color: "#000000", project_id: "p-1" } as never,
   ]);
   vi.mocked(listUserProfileIssues).mockResolvedValue(
     response([issue("i-urgent", "Prof persist urgent", { priority: "urgent" }), issue("i-low", "Prof persist low")])
@@ -256,10 +260,10 @@ describe("ProfileIssuesTab", () => {
     await userEvent.click(screen.getByRole("button", { name: /Prof persist urgent/ }));
     expect(await screen.findByTestId("issue-preview")).toBeInTheDocument();
     act(() => {
-      client.setQueryData(
-        profileIssuesQueryOptions({} as never, "acme", "u-1", "assigned", "sort_order").queryKey,
-        response([])
-      );
+      client.setQueryData(profileIssuesQueryOptions({} as never, "acme", "u-1", "assigned", "sort_order").queryKey, {
+        pages: [response([])],
+        pageParams: [""],
+      });
     });
     await waitFor(() => expect(screen.queryByTestId("issue-preview")).toBeNull());
   });
@@ -282,5 +286,100 @@ describe("ProfileIssuesTab", () => {
     vi.mocked(listUserProfileIssues).mockReturnValue(new Promise(() => undefined) as never);
     renderTab();
     expect(await screen.findByText("Loading work items…")).toBeInTheDocument();
+  });
+
+  it("follows the cursor to a second page and appends its rows", async () => {
+    vi.mocked(listUserProfileIssues)
+      .mockResolvedValueOnce({
+        ...response([issue("i-urgent", "Prof first page")]),
+        next_cursor: "c-2",
+        next_page_results: true,
+      })
+      .mockResolvedValueOnce(response([issue("i-low", "Prof second page")]));
+    renderTab();
+    await screen.findByTestId("profile-list");
+    expect(listUserProfileIssues).toHaveBeenCalledWith(
+      expect.anything(),
+      "acme",
+      "u-1",
+      expect.objectContaining({ orderBy: "sort_order", perPage: 100 })
+    );
+    expect(listUserProfileIssues).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByTestId("profile-issues-load-more"));
+    await waitFor(() =>
+      expect(
+        [...document.querySelectorAll("[data-profile-row]")].map((row) => row.getAttribute("data-profile-row"))
+      ).toEqual(["i-urgent", "i-low"])
+    );
+    expect(listUserProfileIssues).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "acme",
+      "u-1",
+      expect.objectContaining({ cursor: "c-2" })
+    );
+    expect(screen.queryByTestId("profile-issues-load-more")).toBeNull();
+  });
+
+  it("disables load more while the next page is in flight", async () => {
+    vi.mocked(listUserProfileIssues)
+      .mockResolvedValueOnce({
+        ...response([issue("i-urgent", "Prof first page")]),
+        next_cursor: "c-2",
+        next_page_results: true,
+      })
+      .mockReturnValueOnce(new Promise(() => undefined) as never);
+    renderTab();
+    await screen.findByTestId("profile-list");
+    await userEvent.click(screen.getByTestId("profile-issues-load-more"));
+    expect(await screen.findByRole("button", { name: "Loading…" })).toBeDisabled();
+  });
+
+  it("groups by state group with the project state names and zero-filled groups", async () => {
+    localStorage.setItem(profileDisplayKey("acme", "u-1"), JSON.stringify({ groupBy: "state", showEmptyGroups: true }));
+    vi.mocked(listUserProfileIssues).mockResolvedValue(
+      response([
+        issue("i-urgent", "Prof working row", { state_id: "s-working" }),
+        issue("i-low", "Prof backlog row", { state_id: "s-backlog" }),
+      ])
+    );
+    renderTab();
+    await screen.findByTestId("profile-list");
+    await waitFor(() =>
+      expect(
+        [...document.querySelectorAll("[data-profile-group]")].map((group) => group.getAttribute("data-profile-group"))
+      ).toEqual(["Backlog", "Unstarted", "Started", "Review", "Test", "Completed", "Canceled"])
+    );
+    expect(listStates).toHaveBeenCalledWith(expect.anything(), "acme", "p-1");
+    expect(screen.getByText("In progress")).toBeInTheDocument();
+  });
+
+  it("toggles sub-work items without touching the empty-group switch", async () => {
+    renderTab();
+    await screen.findByTestId("profile-list");
+    await userEvent.click(screen.getAllByTestId("profile-display-trigger")[0]!);
+    const subWork = await screen.findByRole("button", { name: "Show sub-work items" });
+    expect(subWork).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(subWork);
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem(profileDisplayKey("acme", "u-1")) ?? "null")).toMatchObject({
+        showSubIssues: true,
+        showEmptyGroups: false,
+      })
+    );
+    expect(screen.getByRole("button", { name: "Show empty groups" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("hides and restores a column from the display properties", async () => {
+    renderTab();
+    await screen.findByTestId("profile-list");
+    expect(document.querySelector("[data-profile-row]")?.textContent).toContain("Urgent");
+    await userEvent.click(screen.getAllByTestId("profile-display-trigger")[0]!);
+    await userEvent.click(await screen.findByRole("button", { name: "Priority" }));
+    await waitFor(() => expect(document.querySelector("[data-profile-row]")?.textContent).not.toContain("Urgent"));
+    expect(JSON.parse(localStorage.getItem(profileDisplayKey("acme", "u-1")) ?? "null")).toMatchObject({
+      properties: { priority: false },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Priority" }));
+    await waitFor(() => expect(document.querySelector("[data-profile-row]")?.textContent).toContain("Urgent"));
   });
 });
