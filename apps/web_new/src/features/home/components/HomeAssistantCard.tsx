@@ -41,6 +41,20 @@ export function recentConversations(threads: readonly AssistantThread[] | undefi
   return (threads ?? []).filter((thread) => !thread.is_archived).slice(0, ASSISTANT_CARD_RECENT_LIMIT);
 }
 
+export type CardAskOutcome = "blank" | "busy" | "keyless" | "start";
+
+/**
+ * What pressing Ask does for a draft (AGT-048): a blank draft does nothing, a
+ * create already in flight absorbs repeats, a keyless member gets the
+ * reminder instead of a start, and everything else starts a conversation.
+ * The caller renders the notice or fires the start; this only decides.
+ */
+export function cardAskOutcome(content: string, configured: boolean, starting: boolean): CardAskOutcome {
+  if (content.trim() === "") return "blank";
+  if (starting) return "busy";
+  return configured ? "start" : "keyless";
+}
+
 export interface HomeAssistantCardProps {
   workspaceSlug: string;
 }
@@ -61,8 +75,9 @@ export function HomeAssistantCard({ workspaceSlug }: HomeAssistantCardProps): Re
 
   const ask = (): void => {
     const content = draft.trim();
-    if (content === "" || start.isPending) return;
-    if (!configured) {
+    const outcome = cardAskOutcome(content, configured, start.isPending);
+    if (outcome === "blank" || outcome === "busy") return;
+    if (outcome === "keyless") {
       notifyError(API_KEY_REQUIRED_TITLE, API_KEY_REMINDER);
       return;
     }
@@ -113,7 +128,9 @@ export function HomeAssistantCard({ workspaceSlug }: HomeAssistantCardProps): Re
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
+            // The single-line entry submits on unmodified Enter only; a chord
+            // (Control/Command/Alt) never asks (AGT-049 intended).
+            if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
               event.preventDefault();
               ask();
             }

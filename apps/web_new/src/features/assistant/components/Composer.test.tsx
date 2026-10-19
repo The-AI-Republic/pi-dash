@@ -38,6 +38,15 @@ describe("Composer", () => {
     expect(blankSubmit).not.toHaveBeenCalled();
   });
 
+  it("submits on Shift+Enter's newline but never on a modifier chord", () => {
+    const { onSubmit } = renderComposer({ draft: "chord" });
+    const box = screen.getByRole("textbox", { name: "Message the assistant" });
+    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(box, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(box, { key: "Enter", altKey: true });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("submits from the send button", () => {
     const { onSubmit } = renderComposer({ draft: "ship it" });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));

@@ -47,9 +47,6 @@ export function useStartConversation() {
   });
 }
 
-/** Notice framing for a first message that could not be delivered. */
-export const HANDOFF_FAILED_TITLE = "Could not send your message";
-
 /** Deliver the landing/card handoff once per thread; the thread slice streams the answer. */
 export function useDeliverFirstMessage() {
   const queryClient = useQueryClient();

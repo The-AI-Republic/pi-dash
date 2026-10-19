@@ -22,7 +22,7 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/index.js";
 import { assistantKeys } from "../../assistant/index.js";
 import { sessionKeys, setSessionClient } from "../../../core/session/queries.js";
-import { HomeAssistantCard, recentConversations } from "./HomeAssistantCard.js";
+import { cardAskOutcome, HomeAssistantCard, recentConversations } from "./HomeAssistantCard.js";
 
 const notified = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn() }));
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
@@ -160,6 +160,15 @@ describe("recentConversations", () => {
   });
 });
 
+describe("cardAskOutcome", () => {
+  it("decides blank, busy, keyless and start", () => {
+    expect(cardAskOutcome("   ", true, false)).toBe("blank");
+    expect(cardAskOutcome("hello", true, true)).toBe("busy");
+    expect(cardAskOutcome("hello", false, false)).toBe("keyless");
+    expect(cardAskOutcome("  hello ", true, false)).toBe("start");
+  });
+});
+
 describe("HomeAssistantCard", () => {
   it("offers the entry, the pinned chips and up to five recents for members", async () => {
     const threads = Array.from({ length: 6 }, (_, index) =>
@@ -239,6 +248,17 @@ describe("HomeAssistantCard", () => {
     // The card hands the draft to the new conversation and leaves the page.
     expect(await screen.findByTestId("conversation")).toBeInTheDocument();
     expect(routerRef?.state.location.pathname).toBe("/acme/assistant/44444444-4444-4444-8444-444444444444");
+  });
+
+  it("asks on Enter but never on a modifier chord", async () => {
+    renderCard({ threads: [], config: CONFIGURED });
+    const input = await screen.findByRole("textbox", { name: "Ask the assistant" });
+    fireEvent.change(input, { target: { value: "chord" } });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(input, { key: "Enter", metaKey: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+    expect(routerRef?.state.location.pathname).toBe("/acme");
   });
 
   it("shows the start failure detail in the notice", async () => {

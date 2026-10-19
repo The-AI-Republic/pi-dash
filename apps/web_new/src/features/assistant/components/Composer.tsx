@@ -77,9 +77,10 @@ export function Composer({
           disabled={locked}
           onChange={(event) => onDraftChange(event.target.value)}
           onKeyDown={(event) => {
-            // Unmodified Enter submits; Shift+Enter keeps the newline the
-            // browser inserts natively.
-            if (event.key === "Enter" && !event.shiftKey) {
+            // Only an unmodified Enter submits: Shift+Enter keeps the newline
+            // the browser inserts natively, and every other modifier is left
+            // to the browser so a chord never fires a send (AGT-049 intended).
+            if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
               event.preventDefault();
               if (canSend) onSubmit(draft.trim());
             }

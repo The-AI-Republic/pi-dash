@@ -108,6 +108,16 @@ describe("useStartConversation", () => {
     expect(queryClient.getQueryData(assistantKeys.threads("acme"))).toEqual([THREAD, { ...THREAD, id: "older" }]);
   });
 
+  it("does not list the created conversation twice when it is already cached", async () => {
+    stubClient({ threads: [], created: THREAD });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(assistantKeys.threads("acme"), [{ ...THREAD, id: "older" }, THREAD]);
+    const { result } = renderStart(queryClient);
+    result.current.mutate({ workspaceSlug: "acme" });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(queryClient.getQueryData(assistantKeys.threads("acme"))).toEqual([THREAD, { ...THREAD, id: "older" }]);
+  });
+
   it("starts from an uncached list", async () => {
     stubClient({ threads: [], created: THREAD });
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

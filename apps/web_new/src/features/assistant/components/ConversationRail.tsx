@@ -14,7 +14,7 @@ import * as React from "react";
 import { useAssistantThreads } from "../api/queries.js";
 import { CONVERSATION_RAIL_TITLE, NEW_CONVERSATION_LABEL, NO_CONVERSATIONS } from "../lib/copy.js";
 import { conversationLabel, visibleConversations } from "../lib/labels.js";
-import { assistantLandingHref, assistantThreadHref } from "../lib/navigation.js";
+import { assistantThreadHref } from "../lib/navigation.js";
 
 export interface ConversationRailProps {
   workspaceSlug: string;
@@ -64,9 +64,4 @@ export function ConversationRail({ workspaceSlug }: ConversationRailProps): Reac
       </nav>
     </aside>
   );
-}
-
-/** The landing address the rail's new-chat action points at. */
-export function railLandingHref(workspaceSlug: string): string {
-  return assistantLandingHref(workspaceSlug);
 }
