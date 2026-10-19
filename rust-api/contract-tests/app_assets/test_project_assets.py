@@ -71,6 +71,37 @@ def test_post_invalid_entity_type(org):
     assert r.json() == {"error": "Invalid entity type.", "status": False}
 
 
+def test_post_bad_size_and_bad_entity_type_500(org):
+    # Ported bug: Django evaluates ``size = int(...)`` (v2.py:516) BEFORE the
+    # entity-type 400 (:521-525), so a non-numeric ``size`` raises ValueError
+    # and answers the generic 500 whatever the other fields hold.
+    r = org.request(
+        "POST", proj_base(org), "admin",
+        json=proj_payload(size="abc", entity_type="BOGUS"),
+    )
+    assert r.status_code == 500
+    assert r.json() == {"error": "Something went wrong please try again later"}
+
+
+def test_post_bad_size_and_bad_mime_500(org):
+    # Same flipped order: ``int()`` (:516) runs before the file-type 400
+    # (:535-541), so a bad ``size`` + a bad ``type`` still 500s.
+    r = org.request(
+        "POST", proj_base(org), "admin",
+        json=proj_payload(size="abc", entity_type="ISSUE_DESCRIPTION", type="nope"),
+    )
+    assert r.status_code == 500
+    assert r.json() == {"error": "Something went wrong please try again later"}
+
+
+def test_post_bad_size_only_500(org):
+    # A non-numeric ``size`` with otherwise valid fields raises ``int()``
+    # and answers the generic 500 (v2.py:516).
+    r = org.request("POST", proj_base(org), "admin", json=proj_payload(size="abc"))
+    assert r.status_code == 500
+    assert r.json() == {"error": "Something went wrong please try again later"}
+
+
 def test_post_roles(org):
     denied = {"error": "You don't have the required permissions."}
     # Guests of the project may mint uploads …
