@@ -126,6 +126,8 @@ export interface ListPages {
   loadMoreSection: (section: IssueGroupSection) => void;
   /** Whether a specific section still has unseen rows (grouped). */
   sectionMore: (section: IssueGroupSection) => boolean;
+  /** Whether that section's next page is still in flight (grouped). */
+  sectionFetching: (section: IssueGroupSection) => boolean;
 }
 
 function totalOf(page: IssueListResponse | GroupedIssueListResponse): number {
@@ -270,6 +272,12 @@ export function useListPages(
 
   const isPending = grouped ? firstGroupedQuery.isPending : (flatQueries[0]?.isPending ?? true);
   const isFetching = flatQueries.some((query) => query.isFetching) || sectionQueries.some((query) => query.isFetching);
+  const sectionFetching = React.useCallback(
+    (section: IssueGroupSection): boolean =>
+      grouped &&
+      sectionEntries.some((entry, index) => entry.key === section.key && (sectionQueries[index]?.isFetching ?? false)),
+    [grouped, sectionEntries, sectionQueries]
+  );
 
   return {
     sections,
@@ -281,5 +289,6 @@ export function useListPages(
     loadMore,
     loadMoreSection,
     sectionMore: (section) => sectionHasMore(section),
+    sectionFetching,
   };
 }

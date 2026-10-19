@@ -188,6 +188,7 @@ function pageState(overrides: Record<string, unknown> = {}) {
     loadMore: vi.fn(),
     loadMoreSection: vi.fn(),
     sectionMore: () => false,
+    sectionFetching: () => false,
     ...overrides,
   };
 }
@@ -400,6 +401,31 @@ describe("ListLayout", () => {
     expect(screen.queryByTestId("quick-add-probe")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("list-group-header"));
     expect(mocks.toggle).toHaveBeenCalledWith("group_by", "all");
+  });
+
+  it("shows skeleton rows while a grouped section pages and the button again when idle", () => {
+    mocks.pages.mockReturnValue(
+      pageState({
+        grouped: true,
+        sections: [{ key: "all", title: "All work items", rows: [row()], total: 51, value: null }],
+        sectionMore: () => true,
+        sectionFetching: () => true,
+      })
+    );
+    const loading = renderLayout();
+    expect(screen.getByTestId("section-loading")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    loading.view.unmount();
+    mocks.pages.mockReturnValue(
+      pageState({
+        grouped: true,
+        sections: [{ key: "all", title: "All work items", rows: [row()], total: 51, value: null }],
+        sectionMore: () => true,
+      })
+    );
+    renderLayout();
+    expect(screen.queryByTestId("section-loading")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
   });
 
   it("renders the loading skeleton while pages resolve", () => {

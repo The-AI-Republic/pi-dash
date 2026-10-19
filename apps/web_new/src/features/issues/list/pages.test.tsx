@@ -169,12 +169,12 @@ function wrapper(client: QueryClient) {
   };
 }
 
-function hookClient(handler: (url: URL) => Record<string, unknown>): QueryClient {
+function hookClient(handler: (url: URL) => Record<string, unknown> | Promise<Record<string, unknown>>): QueryClient {
   createAppClient("https://api.test", (async (url: string) => ({
     status: 200,
     url,
     headers: { get: () => "application/json" },
-    text: async () => JSON.stringify(handler(new URL(url))),
+    text: async () => JSON.stringify(await handler(new URL(url))),
   })) as never);
   return new QueryClient({ defaultOptions: { queries: { retry: false } } });
 }
@@ -239,6 +239,29 @@ describe("useListPages", () => {
     );
     expect(result.current.sections.find((section) => section.key === "done")?.rows).toHaveLength(1);
     expect(result.current.hasMore).toBe(false);
+  });
+
+  it("reports the section whose next page is in flight", async () => {
+    let release: ((value: Record<string, unknown>) => void) | undefined;
+    const client = hookClient((url) => {
+      if (url.searchParams.get("cursor") === "50:0:0") {
+        return new Promise<Record<string, unknown>>((resolve) => {
+          release = resolve;
+        }) as never;
+      }
+      return groupedEnvelope({ todo: { rows: [row("todo-1", 1)], total: 51 } });
+    });
+    const { result } = renderHook(
+      () =>
+        useListPages("acme", { scope: "project", projectId: PROJECT }, "state", "sort_order", new Map(), true, true),
+      { wrapper: wrapper(client) }
+    );
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    const todo = result.current.sections[0] as IssueGroupSection;
+    act(() => result.current.loadMoreSection(todo));
+    await waitFor(() => expect(result.current.sectionFetching(todo)).toBe(true));
+    release?.(groupedEnvelope({ todo: { rows: [row("todo-2", 2)], total: 51 } }));
+    await waitFor(() => expect(result.current.sectionFetching(todo)).toBe(false));
   });
 
   it("drops duplicate section cursors", async () => {

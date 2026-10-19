@@ -367,7 +367,13 @@ export function ListLayout({
                     }
                   />
                 )}
-                {pages.grouped && pages.sectionMore(section) ? (
+                {pages.grouped && pages.sectionFetching(section) ? (
+                  <div data-testid="section-loading" className="flex flex-col gap-(--space-2) p-(--space-3)">
+                    {Array.from({ length: 3 }, (_, index) => (
+                      <Skeleton key={index} height="32px" />
+                    ))}
+                  </div>
+                ) : pages.grouped && pages.sectionMore(section) ? (
                   <button
                     type="button"
                     onClick={() => pages.loadMoreSection(section)}
