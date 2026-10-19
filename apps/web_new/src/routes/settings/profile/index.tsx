@@ -6,7 +6,7 @@
 
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { DEFAULT_PROFILE_SETTINGS_TAB, profileSettingsHref } from "../../../features/settings/lib/tabs.js";
+import { DEFAULT_PROFILE_SETTINGS_TAB, profileSettingsHref } from "../../../features/settings/lib/tabNavigation.js";
 
 /** The default tab's address, carrying the query string verbatim. */
 export function defaultTabHref(search: string): string {

@@ -31,8 +31,7 @@ import { Route as AuthDeviceRouteImport } from './routes/auth/device'
 import { Route as GodModeIndexRouteImport } from './routes/god-mode/index'
 import { Route as GodModeSplatRouteImport } from './routes/god-mode/$'
 import { Route as GodModeDashboardRouteRouteImport } from './routes/god-mode/_dashboard/route'
-import { Route as ProfileIndexRouteImport } from './routes/profile/index'
-import { Route as ProfileTabRouteImport } from './routes/profile/$tab'
+import { Route as ProfileSplatRouteImport } from './routes/profile/$'
 import { Route as SettingsIndexRouteImport } from './routes/settings/index'
 import { Route as SettingsProfileRouteRouteImport } from './routes/settings/profile/route'
 import { Route as WsGatedIndexRouteImport } from './routes/$ws/_gated/index'
@@ -79,8 +78,7 @@ import { Route as WsGatedRunnersChatRunnerIdRouteImport } from './routes/$ws/_ga
 import { Route as WsGatedRunnersDetailRunnerIdRouteImport } from './routes/$ws/_gated/runners/detail/$runnerId'
 import { Route as WsGatedSettingsWorkspaceIndexRouteImport } from './routes/$ws/_gated/settings/_workspace/index'
 import { Route as WsGatedSettingsWorkspaceSplatRouteImport } from './routes/$ws/_gated/settings/_workspace/$'
-import { Route as WsGatedSettingsAccountIndexRouteImport } from './routes/$ws/_gated/settings/account/index'
-import { Route as WsGatedSettingsAccountTabRouteImport } from './routes/$ws/_gated/settings/account/$tab'
+import { Route as WsGatedSettingsAccountSplatRouteImport } from './routes/$ws/_gated/settings/account/$'
 import { Route as WsGatedProjectsProjectIdCyclesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/cycles/index'
 import { Route as WsGatedProjectsProjectIdIntakeIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/intake/index'
 import { Route as WsGatedProjectsProjectIdIssuesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/issues/index'
@@ -212,14 +210,9 @@ const GodModeDashboardRouteRoute = GodModeDashboardRouteRouteImport.update({
   id: '/_dashboard',
   getParentRoute: () => GodModeRouteRoute,
 } as any)
-const ProfileIndexRoute = ProfileIndexRouteImport.update({
-  id: '/profile/',
-  path: '/profile/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfileTabRoute = ProfileTabRouteImport.update({
-  id: '/profile/$tab',
-  path: '/profile/$tab',
+const ProfileSplatRoute = ProfileSplatRouteImport.update({
+  id: '/profile/$',
+  path: '/profile/$',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SettingsIndexRoute = SettingsIndexRouteImport.update({
@@ -478,16 +471,10 @@ const WsGatedSettingsWorkspaceSplatRoute =
     path: '/$',
     getParentRoute: () => WsGatedSettingsWorkspaceRouteRoute,
   } as any)
-const WsGatedSettingsAccountIndexRoute =
-  WsGatedSettingsAccountIndexRouteImport.update({
-    id: '/settings/account/',
-    path: '/settings/account/',
-    getParentRoute: () => WsGatedRouteRoute,
-  } as any)
-const WsGatedSettingsAccountTabRoute =
-  WsGatedSettingsAccountTabRouteImport.update({
-    id: '/settings/account/$tab',
-    path: '/settings/account/$tab',
+const WsGatedSettingsAccountSplatRoute =
+  WsGatedSettingsAccountSplatRouteImport.update({
+    id: '/settings/account/$',
+    path: '/settings/account/$',
     getParentRoute: () => WsGatedRouteRoute,
   } as any)
 const WsGatedProjectsProjectIdCyclesIndexRoute =
@@ -644,9 +631,8 @@ export interface FileRoutesByFullPath {
   '/accounts/sign-up': typeof AccountsSignUpRoute
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
-  '/profile/$tab': typeof ProfileTabRoute
+  '/profile/$': typeof ProfileSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
-  '/profile/': typeof ProfileIndexRoute
   '/settings/': typeof SettingsIndexRoute
   '/$ws/ai-dev-machines': typeof WsGatedAiDevMachinesRouteRouteWithChildren
   '/$ws/assistant': typeof WsGatedAssistantRouteRouteWithChildren
@@ -689,11 +675,10 @@ export interface FileRoutesByFullPath {
   '/$ws/runners/chat/$runnerId': typeof WsGatedRunnersChatRunnerIdRoute
   '/$ws/runners/detail/$runnerId': typeof WsGatedRunnersDetailRunnerIdRoute
   '/$ws/settings/$': typeof WsGatedSettingsWorkspaceSplatRoute
-  '/$ws/settings/account/$tab': typeof WsGatedSettingsAccountTabRoute
+  '/$ws/settings/account/$': typeof WsGatedSettingsAccountSplatRoute
   '/$ws/projects/$projectId/': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/projects/archives/': typeof WsGatedProjectsArchivesIndexRoute
   '/$ws/settings/': typeof WsGatedSettingsWorkspaceIndexRoute
-  '/$ws/settings/account/': typeof WsGatedSettingsAccountIndexRoute
   '/$ws/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   '/$ws/projects/$projectId/runners/approvals': typeof WsGatedProjectsProjectIdRunnersApprovalsRoute
   '/$ws/projects/$projectId/runners/runs': typeof WsGatedProjectsProjectIdRunnersRunsRoute
@@ -737,8 +722,7 @@ export interface FileRoutesByTo {
   '/accounts/sign-up': typeof AccountsSignUpRoute
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
-  '/profile/$tab': typeof ProfileTabRoute
-  '/profile': typeof ProfileIndexRoute
+  '/profile/$': typeof ProfileSplatRoute
   '/settings': typeof SettingsIndexRoute
   '/god-mode/ai': typeof GodModeDashboardAiRoute
   '/god-mode/email': typeof GodModeDashboardEmailRoute
@@ -772,11 +756,10 @@ export interface FileRoutesByTo {
   '/$ws/runners/chat/$runnerId': typeof WsGatedRunnersChatRunnerIdRoute
   '/$ws/runners/detail/$runnerId': typeof WsGatedRunnersDetailRunnerIdRoute
   '/$ws/settings/$': typeof WsGatedSettingsWorkspaceSplatRoute
-  '/$ws/settings/account/$tab': typeof WsGatedSettingsAccountTabRoute
+  '/$ws/settings/account/$': typeof WsGatedSettingsAccountSplatRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/projects/archives': typeof WsGatedProjectsArchivesIndexRoute
   '/$ws/settings': typeof WsGatedSettingsWorkspaceIndexRoute
-  '/$ws/settings/account': typeof WsGatedSettingsAccountIndexRoute
   '/$ws/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   '/$ws/projects/$projectId/runners/approvals': typeof WsGatedProjectsProjectIdRunnersApprovalsRoute
   '/$ws/projects/$projectId/runners/runs': typeof WsGatedProjectsProjectIdRunnersRunsRoute
@@ -824,9 +807,8 @@ export interface FileRoutesById {
   '/accounts/sign-up': typeof AccountsSignUpRoute
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
-  '/profile/$tab': typeof ProfileTabRoute
+  '/profile/$': typeof ProfileSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
-  '/profile/': typeof ProfileIndexRoute
   '/settings/': typeof SettingsIndexRoute
   '/$ws/_gated/ai-dev-machines': typeof WsGatedAiDevMachinesRouteRouteWithChildren
   '/$ws/_gated/assistant': typeof WsGatedAssistantRouteRouteWithChildren
@@ -869,11 +851,10 @@ export interface FileRoutesById {
   '/$ws/_gated/runners/chat/$runnerId': typeof WsGatedRunnersChatRunnerIdRoute
   '/$ws/_gated/runners/detail/$runnerId': typeof WsGatedRunnersDetailRunnerIdRoute
   '/$ws/_gated/settings/_workspace/$': typeof WsGatedSettingsWorkspaceSplatRoute
-  '/$ws/_gated/settings/account/$tab': typeof WsGatedSettingsAccountTabRoute
+  '/$ws/_gated/settings/account/$': typeof WsGatedSettingsAccountSplatRoute
   '/$ws/_gated/projects/$projectId/': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/_gated/projects/archives/': typeof WsGatedProjectsArchivesIndexRoute
   '/$ws/_gated/settings/_workspace/': typeof WsGatedSettingsWorkspaceIndexRoute
-  '/$ws/_gated/settings/account/': typeof WsGatedSettingsAccountIndexRoute
   '/$ws/_gated/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   '/$ws/_gated/projects/$projectId/runners/approvals': typeof WsGatedProjectsProjectIdRunnersApprovalsRoute
   '/$ws/_gated/projects/$projectId/runners/runs': typeof WsGatedProjectsProjectIdRunnersRunsRoute
@@ -920,9 +901,8 @@ export interface FileRouteTypes {
     | '/accounts/sign-up'
     | '/auth/device'
     | '/god-mode/$'
-    | '/profile/$tab'
+    | '/profile/$'
     | '/god-mode/'
-    | '/profile/'
     | '/settings/'
     | '/$ws/ai-dev-machines'
     | '/$ws/assistant'
@@ -965,11 +945,10 @@ export interface FileRouteTypes {
     | '/$ws/runners/chat/$runnerId'
     | '/$ws/runners/detail/$runnerId'
     | '/$ws/settings/$'
-    | '/$ws/settings/account/$tab'
+    | '/$ws/settings/account/$'
     | '/$ws/projects/$projectId/'
     | '/$ws/projects/archives/'
     | '/$ws/settings/'
-    | '/$ws/settings/account/'
     | '/$ws/projects/$projectId/issues/$issueId'
     | '/$ws/projects/$projectId/runners/approvals'
     | '/$ws/projects/$projectId/runners/runs'
@@ -1013,8 +992,7 @@ export interface FileRouteTypes {
     | '/accounts/sign-up'
     | '/auth/device'
     | '/god-mode/$'
-    | '/profile/$tab'
-    | '/profile'
+    | '/profile/$'
     | '/settings'
     | '/god-mode/ai'
     | '/god-mode/email'
@@ -1048,11 +1026,10 @@ export interface FileRouteTypes {
     | '/$ws/runners/chat/$runnerId'
     | '/$ws/runners/detail/$runnerId'
     | '/$ws/settings/$'
-    | '/$ws/settings/account/$tab'
+    | '/$ws/settings/account/$'
     | '/$ws/projects/$projectId'
     | '/$ws/projects/archives'
     | '/$ws/settings'
-    | '/$ws/settings/account'
     | '/$ws/projects/$projectId/issues/$issueId'
     | '/$ws/projects/$projectId/runners/approvals'
     | '/$ws/projects/$projectId/runners/runs'
@@ -1099,9 +1076,8 @@ export interface FileRouteTypes {
     | '/accounts/sign-up'
     | '/auth/device'
     | '/god-mode/$'
-    | '/profile/$tab'
+    | '/profile/$'
     | '/god-mode/'
-    | '/profile/'
     | '/settings/'
     | '/$ws/_gated/ai-dev-machines'
     | '/$ws/_gated/assistant'
@@ -1144,11 +1120,10 @@ export interface FileRouteTypes {
     | '/$ws/_gated/runners/chat/$runnerId'
     | '/$ws/_gated/runners/detail/$runnerId'
     | '/$ws/_gated/settings/_workspace/$'
-    | '/$ws/_gated/settings/account/$tab'
+    | '/$ws/_gated/settings/account/$'
     | '/$ws/_gated/projects/$projectId/'
     | '/$ws/_gated/projects/archives/'
     | '/$ws/_gated/settings/_workspace/'
-    | '/$ws/_gated/settings/account/'
     | '/$ws/_gated/projects/$projectId/issues/$issueId'
     | '/$ws/_gated/projects/$projectId/runners/approvals'
     | '/$ws/_gated/projects/$projectId/runners/runs'
@@ -1192,8 +1167,7 @@ export interface RootRouteChildren {
   AccountsSetPasswordRoute: typeof AccountsSetPasswordRoute
   AccountsSignUpRoute: typeof AccountsSignUpRoute
   AuthDeviceRoute: typeof AuthDeviceRoute
-  ProfileTabRoute: typeof ProfileTabRoute
-  ProfileIndexRoute: typeof ProfileIndexRoute
+  ProfileSplatRoute: typeof ProfileSplatRoute
   SettingsIndexRoute: typeof SettingsIndexRoute
 }
 
@@ -1353,18 +1327,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GodModeDashboardRouteRouteImport
       parentRoute: typeof GodModeRouteRoute
     }
-    '/profile/': {
-      id: '/profile/'
-      path: '/profile'
-      fullPath: '/profile/'
-      preLoaderRoute: typeof ProfileIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile/$tab': {
-      id: '/profile/$tab'
-      path: '/profile/$tab'
-      fullPath: '/profile/$tab'
-      preLoaderRoute: typeof ProfileTabRouteImport
+    '/profile/$': {
+      id: '/profile/$'
+      path: '/profile/$'
+      fullPath: '/profile/$'
+      preLoaderRoute: typeof ProfileSplatRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/settings/': {
@@ -1689,18 +1656,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedSettingsWorkspaceSplatRouteImport
       parentRoute: typeof WsGatedSettingsWorkspaceRouteRoute
     }
-    '/$ws/_gated/settings/account/': {
-      id: '/$ws/_gated/settings/account/'
-      path: '/settings/account'
-      fullPath: '/$ws/settings/account/'
-      preLoaderRoute: typeof WsGatedSettingsAccountIndexRouteImport
-      parentRoute: typeof WsGatedRouteRoute
-    }
-    '/$ws/_gated/settings/account/$tab': {
-      id: '/$ws/_gated/settings/account/$tab'
-      path: '/settings/account/$tab'
-      fullPath: '/$ws/settings/account/$tab'
-      preLoaderRoute: typeof WsGatedSettingsAccountTabRouteImport
+    '/$ws/_gated/settings/account/$': {
+      id: '/$ws/_gated/settings/account/$'
+      path: '/settings/account/$'
+      fullPath: '/$ws/settings/account/$'
+      preLoaderRoute: typeof WsGatedSettingsAccountSplatRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
     '/$ws/_gated/projects/$projectId/cycles/': {
@@ -2028,9 +1988,8 @@ interface WsGatedRouteRouteChildren {
   WsGatedProjectsIndexRoute: typeof WsGatedProjectsIndexRoute
   WsGatedPromptsIndexRoute: typeof WsGatedPromptsIndexRoute
   WsGatedSchedulersIndexRoute: typeof WsGatedSchedulersIndexRoute
-  WsGatedSettingsAccountTabRoute: typeof WsGatedSettingsAccountTabRoute
+  WsGatedSettingsAccountSplatRoute: typeof WsGatedSettingsAccountSplatRoute
   WsGatedProjectsArchivesIndexRoute: typeof WsGatedProjectsArchivesIndexRoute
-  WsGatedSettingsAccountIndexRoute: typeof WsGatedSettingsAccountIndexRoute
   WsGatedSettingsProjectsProjectIdAutomationsRoute: typeof WsGatedSettingsProjectsProjectIdAutomationsRoute
   WsGatedSettingsProjectsProjectIdLabelsRoute: typeof WsGatedSettingsProjectsProjectIdLabelsRoute
 }
@@ -2052,9 +2011,8 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedProjectsIndexRoute: WsGatedProjectsIndexRoute,
   WsGatedPromptsIndexRoute: WsGatedPromptsIndexRoute,
   WsGatedSchedulersIndexRoute: WsGatedSchedulersIndexRoute,
-  WsGatedSettingsAccountTabRoute: WsGatedSettingsAccountTabRoute,
+  WsGatedSettingsAccountSplatRoute: WsGatedSettingsAccountSplatRoute,
   WsGatedProjectsArchivesIndexRoute: WsGatedProjectsArchivesIndexRoute,
-  WsGatedSettingsAccountIndexRoute: WsGatedSettingsAccountIndexRoute,
   WsGatedSettingsProjectsProjectIdAutomationsRoute:
     WsGatedSettingsProjectsProjectIdAutomationsRoute,
   WsGatedSettingsProjectsProjectIdLabelsRoute:
@@ -2198,8 +2156,7 @@ const rootRouteChildren: RootRouteChildren = {
   AccountsSetPasswordRoute: AccountsSetPasswordRoute,
   AccountsSignUpRoute: AccountsSignUpRoute,
   AuthDeviceRoute: AuthDeviceRoute,
-  ProfileTabRoute: ProfileTabRoute,
-  ProfileIndexRoute: ProfileIndexRoute,
+  ProfileSplatRoute: ProfileSplatRoute,
   SettingsIndexRoute: SettingsIndexRoute,
 }
 export const routeTree = rootRouteImport

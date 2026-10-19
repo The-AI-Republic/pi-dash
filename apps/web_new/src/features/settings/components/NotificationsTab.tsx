@@ -10,7 +10,9 @@ import { Skeleton } from "@pidash/kit";
 import * as React from "react";
 
 const LazyEmailPreferencesPage = React.lazy(() =>
-  import("../../notifications/index.js").then((module) => ({ default: module.EmailPreferencesPage }))
+  import("../../notifications/components/EmailPreferencesPage.js").then((module) => ({
+    default: module.EmailPreferencesPage,
+  }))
 );
 
 export function NotificationsTab(): React.ReactElement {

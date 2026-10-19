@@ -14,7 +14,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { resetProfileSettingsPages } from "../../../features/settings/lib/registry.js";
 import { resetProfileRouteHarness, renderProfileSettingsRoute } from "../-routeHarness.js";
 import { createAppClient } from "../../../core/api/client.js";
-import { loadProfileSettingsLayout, Route, tabFromPathname } from "./route.js";
+import { loadProfileSettingsLayout } from "../../../features/settings/loadProfileSettings.js";
+import { Route, tabFromPathname } from "./route.js";
 
 const Layout = Route.options.component;
 if (Layout === undefined) throw new Error("missing settings layout component");
@@ -157,7 +158,7 @@ describe("profile settings layout", () => {
     });
     await expect(
       loadProfileSettingsLayout({ queryClient, apiClient, href: "/settings/profile/general/" })
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ workspaces: [] });
   });
 
   it("gates the layout for visitors before warming the list", async () => {

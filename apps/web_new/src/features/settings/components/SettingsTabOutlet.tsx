@@ -9,7 +9,7 @@ import { Skeleton } from "@pidash/kit";
 import * as React from "react";
 
 import { useProfileSettingsPage } from "../lib/registry.js";
-import type { ProfileSettingsTabId } from "../lib/tabs.js";
+import type { ProfileSettingsTabId } from "../lib/tabNavigation.js";
 
 export interface SettingsTabOutletProps {
   tab: ProfileSettingsTabId;

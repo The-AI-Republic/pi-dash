@@ -10,7 +10,7 @@ import { createFileRoute, redirect } from "@tanstack/react-router";
 import * as React from "react";
 
 import { SettingsTabOutlet } from "../../../features/settings/components/SettingsTabOutlet.js";
-import { DEFAULT_PROFILE_SETTINGS_TAB, resolveProfileSettingsTab } from "../../../features/settings/lib/tabs.js";
+import { DEFAULT_PROFILE_SETTINGS_TAB, resolveProfileSettingsTab } from "../../../features/settings/lib/tabNavigation.js";
 import { defaultTabHref } from "./index.js";
 
 /**

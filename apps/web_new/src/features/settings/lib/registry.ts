@@ -10,7 +10,7 @@
 
 import * as React from "react";
 
-import { isProfileSettingsTab, type ProfileSettingsTabId } from "./tabs.js";
+import { isProfileSettingsTab, type ProfileSettingsTabId } from "./tabNavigation.js";
 
 export type ProfileSettingsPageComponent = () => React.ReactNode;
 

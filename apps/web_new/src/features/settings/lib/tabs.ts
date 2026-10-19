@@ -1,26 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Profile-settings tab registry (parity/specs/profile.md §5, PROF-009/010).
-// Every tab owns one address under /settings/profile/<tab>; the shell
-// renders the grouped navigation from this list and sibling slices mount
-// their body through lib/registry.ts. Unknown ids resolve to null so the
-// route can fall back to the default tab instead of stranding the page
-// (the target for NEWFRONT-430).
+// Profile-settings sidebar model (parity/specs/profile.md §5, PROF-010).
+// Groups the tab ids from tabNavigation.ts under the headings and sidebar
+// labels the shell renders. Only the shell needs this table; route guards
+// import tabNavigation.ts directly.
 
-/** The tab every settings entry starts on. */
-export const DEFAULT_PROFILE_SETTINGS_TAB = "general" as const;
-
-export type ProfileSettingsTabId =
-  | "general"
-  | "preferences"
-  | "ai-assistant"
-  | "auto-project-management"
-  | "notifications"
-  | "security"
-  | "activity"
-  | "integrations"
-  | "api-tokens";
+import { PROFILE_SETTINGS_TAB_IDS, type ProfileSettingsTabId } from "./tabNavigation.js";
 
 export type ProfileSettingsGroupId = "personal" | "developer";
 
@@ -42,35 +28,27 @@ export const PROFILE_SETTINGS_GROUPS: readonly ProfileSettingsGroup[] = [
   { id: "developer", label: "Developer" },
 ];
 
-/** Tabs in display order within their group. */
-export const PROFILE_SETTINGS_TABS: readonly ProfileSettingsTab[] = [
-  { id: "general", label: "Profile", group: "personal" },
-  { id: "preferences", label: "Preferences", group: "personal" },
-  { id: "ai-assistant", label: "AI Assistant", group: "personal" },
-  { id: "auto-project-management", label: "Auto Project Management", group: "personal" },
-  { id: "notifications", label: "Notifications", group: "personal" },
-  { id: "security", label: "Security", group: "personal" },
-  { id: "activity", label: "Activity", group: "personal" },
-  { id: "integrations", label: "Integrations", group: "developer" },
-  { id: "api-tokens", label: "Personal Access Tokens", group: "developer" },
-];
+/** Sidebar label for each tab id, parallel to PROFILE_SETTINGS_TAB_IDS. */
+const TAB_LABELS: Readonly<Record<ProfileSettingsTabId, string>> = {
+  general: "Profile",
+  preferences: "Preferences",
+  "ai-assistant": "AI Assistant",
+  "auto-project-management": "Auto Project Management",
+  notifications: "Notifications",
+  security: "Security",
+  activity: "Activity",
+  integrations: "Integrations",
+  "api-tokens": "Personal Access Tokens",
+};
 
-const TAB_IDS = new Set<string>(PROFILE_SETTINGS_TABS.map((tab) => tab.id));
+const DEVELOPER_TABS: ReadonlySet<ProfileSettingsTabId> = new Set(["integrations", "api-tokens"]);
 
-/** True for one of the nine registered tab ids. */
-export function isProfileSettingsTab(value: string): value is ProfileSettingsTabId {
-  return TAB_IDS.has(value);
-}
-
-/**
- * Resolve a raw address segment to a tab id. A trailing slash is
- * tolerated (in-app links carry one); anything unregistered yields null.
- */
-export function resolveProfileSettingsTab(raw: string | undefined): ProfileSettingsTabId | null {
-  if (raw === undefined) return null;
-  const trimmed = raw.endsWith("/") ? raw.slice(0, -1) : raw;
-  return isProfileSettingsTab(trimmed) ? trimmed : null;
-}
+/** Tabs in display order with their group. */
+export const PROFILE_SETTINGS_TABS: readonly ProfileSettingsTab[] = PROFILE_SETTINGS_TAB_IDS.map((id) => ({
+  id,
+  label: TAB_LABELS[id],
+  group: DEVELOPER_TABS.has(id) ? "developer" : "personal",
+}));
 
 /** The tab entry for an id. */
 export function findProfileSettingsTab(id: ProfileSettingsTabId): ProfileSettingsTab {
@@ -88,21 +66,7 @@ export function profileSettingsGroups(): Array<ProfileSettingsGroup & { tabs: Pr
   }));
 }
 
-/** The normalized query string without its leading `?`. */
-export function queryWithoutMark(search: string): string {
-  return search.startsWith("?") ? search.slice(1) : search;
-}
-
-/**
- * Tab address. In-app links carry a trailing slash, matching the old
- * app's link landings; a query string is preserved verbatim.
- */
-export function profileSettingsHref(tab: ProfileSettingsTabId, search?: string): string {
-  const query = queryWithoutMark(search ?? "");
-  return `/settings/profile/${tab}/${query === "" ? "" : `?${query}`}`;
-}
-
-/** The document title for a tab. */
+/** The document title for a tab: the sidebar label plus the page name. */
 export function profileSettingsTitle(tab: ProfileSettingsTabId): string {
   return `${findProfileSettingsTab(tab).label} · Profile settings`;
 }

@@ -3,21 +3,19 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
+import { PROFILE_SETTINGS_TABS, profileSettingsGroups, profileSettingsTitle, findProfileSettingsTab } from "./tabs.js";
 import {
   DEFAULT_PROFILE_SETTINGS_TAB,
-  findProfileSettingsTab,
   isProfileSettingsTab,
-  profileSettingsGroups,
   profileSettingsHref,
-  profileSettingsTitle,
-  PROFILE_SETTINGS_TABS,
+  PROFILE_SETTINGS_TAB_IDS,
   queryWithoutMark,
   resolveProfileSettingsTab,
-} from "./tabs.js";
+} from "./tabNavigation.js";
 
-describe("profile settings tabs", () => {
-  it("registers the nine tab ids with their grouped labels in order", () => {
-    expect(PROFILE_SETTINGS_TABS.map((tab) => tab.id)).toEqual([
+describe("profile settings addresses", () => {
+  it("lists the nine tab ids in display order", () => {
+    expect(PROFILE_SETTINGS_TAB_IDS).toEqual([
       "general",
       "preferences",
       "ai-assistant",
@@ -28,11 +26,7 @@ describe("profile settings tabs", () => {
       "integrations",
       "api-tokens",
     ]);
-    expect(profileSettingsGroups().map((group) => group.label)).toEqual(["Your Profile", "Developer"]);
-    expect(profileSettingsGroups().map((group) => group.tabs.map((tab) => tab.label))).toEqual([
-      ["Profile", "Preferences", "AI Assistant", "Auto Project Management", "Notifications", "Security", "Activity"],
-      ["Integrations", "Personal Access Tokens"],
-    ]);
+    expect(DEFAULT_PROFILE_SETTINGS_TAB).toBe("general");
   });
 
   it("recognizes only registered ids", () => {
@@ -45,7 +39,6 @@ describe("profile settings tabs", () => {
     expect(resolveProfileSettingsTab("api-tokens/")).toBe("api-tokens");
     expect(resolveProfileSettingsTab("bogus")).toBeNull();
     expect(resolveProfileSettingsTab(undefined)).toBeNull();
-    expect(DEFAULT_PROFILE_SETTINGS_TAB).toBe("general");
   });
 
   it("builds tab links with a trailing slash and keeps a query verbatim", () => {
@@ -55,6 +48,17 @@ describe("profile settings tabs", () => {
     expect(profileSettingsHref("security", "?")).toBe("/settings/profile/security/");
     expect(queryWithoutMark("?a=1")).toBe("a=1");
     expect(queryWithoutMark("a=1")).toBe("a=1");
+  });
+});
+
+describe("profile settings sidebar model", () => {
+  it("groups every id under its label", () => {
+    expect(PROFILE_SETTINGS_TABS.map((tab) => tab.id)).toEqual([...PROFILE_SETTINGS_TAB_IDS]);
+    expect(profileSettingsGroups().map((group) => group.label)).toEqual(["Your Profile", "Developer"]);
+    expect(profileSettingsGroups().map((group) => group.tabs.map((tab) => tab.label))).toEqual([
+      ["Profile", "Preferences", "AI Assistant", "Auto Project Management", "Notifications", "Security", "Activity"],
+      ["Integrations", "Personal Access Tokens"],
+    ]);
   });
 
   it("finds a tab by id and titles the document", () => {

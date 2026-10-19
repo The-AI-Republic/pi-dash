@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { registerProfileSettingsPage, resetProfileSettingsPages } from "../../../features/settings/lib/registry.js";
 import { renderProfileSettingsRoute, resetProfileRouteHarness } from "../-routeHarness.js";
-import { Route as IndexRoute, defaultTabHref } from "./index.js";
+import { defaultTabHref, Route as IndexRoute } from "./index.js";
 import { Route as TabRoute, unknownTabHref } from "./$tab.js";
 
 afterEach(() => {

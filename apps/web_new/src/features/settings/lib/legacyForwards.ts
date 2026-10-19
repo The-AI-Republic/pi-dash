@@ -12,7 +12,7 @@ import {
   isProfileSettingsTab,
   queryWithoutMark,
   type ProfileSettingsTabId,
-} from "./tabs.js";
+} from "./tabNavigation.js";
 
 /** The forward target, split so routes can hand it to the router. */
 export interface LegacyForward {

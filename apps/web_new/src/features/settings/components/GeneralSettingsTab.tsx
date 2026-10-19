@@ -12,7 +12,8 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { useInstanceConfig, useMe } from "../../../core/session/index.js";
-import { notifyError, resolveFileUrl } from "../../../shared/shell/index.js";
+import { resolveFileUrl } from "../../../shared/shell/index.js";
+import { notifyError } from "../../../shared/shell/toaster.js";
 import { useDeactivateAccount } from "../../auth/index.js";
 import {
   useRemoveAvatar,

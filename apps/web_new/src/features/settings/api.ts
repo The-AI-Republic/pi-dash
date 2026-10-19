@@ -22,7 +22,7 @@ import {
 
 import { getAppClient } from "../../core/api/client.js";
 import { sessionKeys } from "../../core/session/index.js";
-import { notifyError, notifySuccess } from "../../shared/shell/index.js";
+import { notifyError, notifySuccess } from "../../shared/shell/toaster.js";
 import type { AvatarRemoval } from "./lib/avatar.js";
 import { describeEmailSendFailure, emailVerifyMessage } from "./lib/email.js";
 import { describePasswordFailure } from "./lib/password.js";

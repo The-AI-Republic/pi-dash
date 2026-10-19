@@ -4,14 +4,12 @@
 // See the LICENSE file for details.
 // Legacy settings addresses (parity/specs/profile.md §5, PROF-026):
 // every family's route forwards to its tab address, keeping the query.
-import { isRedirect } from "@tanstack/react-router";
+import { isNotFound, isRedirect } from "@tanstack/react-router";
 import { describe, expect, it } from "vitest";
 
-import { Route as AccountIndex } from "../$ws/_gated/settings/account/index.js";
-import { Route as AccountTab } from "../$ws/_gated/settings/account/$tab.js";
+import { Route as Account } from "../$ws/_gated/settings/account/$.js";
 import { Route as ApiTokens } from "../$ws/_gated/settings/api-tokens.js";
-import { Route as ProfileIndex } from "../profile/index.js";
-import { Route as ProfileTab } from "../profile/$tab.js";
+import { Route as Profile } from "../profile/$.js";
 import { Route as SettingsIndex } from "./index.js";
 
 interface Redirected {
@@ -45,12 +43,12 @@ describe("legacy settings forwards", () => {
   it("takes bare profile and account addresses to the general tab", () => {
     expect(
       forwardOf(() =>
-        ProfileIndex.options.beforeLoad?.({ location: { pathname: "/profile/", searchStr: "?a=1" } } as never)
+        Profile.options.beforeLoad?.({ location: { pathname: "/profile/", searchStr: "?a=1" } } as never)
       )
     ).toBe("/settings/profile/general/?a=1");
     expect(
       forwardOf(() =>
-        AccountIndex.options.beforeLoad?.({ location: { pathname: "/acme/settings/account/", searchStr: "" } } as never)
+        Account.options.beforeLoad?.({ location: { pathname: "/acme/settings/account/", searchStr: "" } } as never)
       )
     ).toBe("/settings/profile/general/");
   });
@@ -58,12 +56,12 @@ describe("legacy settings forwards", () => {
   it("maps legacy tab segments to the matching tab", () => {
     expect(
       forwardOf(() =>
-        ProfileTab.options.beforeLoad?.({ location: { pathname: "/profile/security/", searchStr: "" } } as never)
+        Profile.options.beforeLoad?.({ location: { pathname: "/profile/security/", searchStr: "" } } as never)
       )
     ).toBe("/settings/profile/security/");
     expect(
       forwardOf(() =>
-        AccountTab.options.beforeLoad?.({
+        Account.options.beforeLoad?.({
           location: { pathname: "/acme/settings/account/notifications/", searchStr: "?x=1" },
         } as never)
       )
@@ -73,11 +71,20 @@ describe("legacy settings forwards", () => {
   it("defaults an unknown legacy tab to the general tab", () => {
     expect(
       forwardOf(() =>
-        AccountTab.options.beforeLoad?.({
+        Account.options.beforeLoad?.({
           location: { pathname: "/acme/settings/account/bogus/", searchStr: "" },
         } as never)
       )
     ).toBe("/settings/profile/general/");
+  });
+
+  it("answers a deeper address with the not-found page", () => {
+    const error = thrown(() =>
+      Profile.options.beforeLoad?.({
+        location: { pathname: "/profile/security/extra", searchStr: "" },
+      } as never)
+    );
+    expect(isNotFound(error)).toBe(true);
   });
 
   it("maps the workspace tokens address to the tokens tab with its query", () => {

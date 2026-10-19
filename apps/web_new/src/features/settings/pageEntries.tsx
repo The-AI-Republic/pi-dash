@@ -3,9 +3,9 @@
 // See the LICENSE file for details.
 // Registration side of the profile-settings seam (parity/specs/profile.md
 // §5). Every tab the product owns outside a sibling feature registers
-// here: the shell imports this module once so the general and security
-// bodies are present on direct visits; sibling slices register their own
-// tabs from their lazy route modules.
+// here: the shell imports this module so the general and security bodies
+// are present on a direct visit; sibling slices register their own tabs
+// from their lazy route modules.
 
 import * as React from "react";
 

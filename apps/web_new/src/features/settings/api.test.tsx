@@ -15,8 +15,8 @@ const { notifySuccess, notifyError } = vi.hoisted(() => ({
   notifyError: vi.fn(),
 }));
 
-vi.mock("../../shared/shell/index.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../shared/shell/index.js")>();
+vi.mock("../../shared/shell/toaster.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../shared/shell/toaster.js")>();
   return { ...original, notifySuccess, notifyError };
 });
 

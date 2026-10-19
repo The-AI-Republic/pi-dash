@@ -6,18 +6,18 @@
 // grouped tab lists and the workspace shortcuts; the tab body renders in
 // the content pane. Tab switches are link navigations to the tab
 // addresses; there is no dialog variant anywhere (the main#573 target).
+// Importing the built-in registrations here keeps the general, security
+// and notifications bodies in this shell's (lazy) route chunk rather
+// than the entry bundle, so a direct tab visit always finds its body.
 
 import { ArrowLeft } from "lucide-react";
 import * as React from "react";
 
-import { useDocumentHead } from "../../../shared/shell/index.js";
+import { useDocumentHead } from "../../../shared/shell/document.js";
+import "../pageEntries.js";
 import type { Workspace } from "@pidash/api-client";
-import {
-  profileSettingsGroups,
-  profileSettingsHref,
-  profileSettingsTitle,
-  type ProfileSettingsTabId,
-} from "../lib/tabs.js";
+import { profileSettingsHref, type ProfileSettingsTabId } from "../lib/tabNavigation.js";
+import { profileSettingsGroups, profileSettingsTitle } from "../lib/tabs.js";
 
 export interface ProfileSettingsShellProps {
   activeTab: ProfileSettingsTabId;
@@ -30,6 +30,7 @@ export interface ProfileSettingsShellProps {
 }
 
 export const BACK_HOME_LABEL = "Back to home";
+
 export const SETTINGS_TITLE = "Profile settings";
 
 export function ProfileSettingsShell({
