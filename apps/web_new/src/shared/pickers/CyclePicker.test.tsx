@@ -63,6 +63,17 @@ describe("CyclePicker", () => {
     expect(calls.some((url) => url.endsWith("/cycles/"))).toBe(true);
   });
 
+  it("preloads the list so a set cycle names itself before the popup opens", async () => {
+    const { queryClient, calls } = harness(CYCLES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <CyclePicker workspaceSlug="acme" projectId={PROJECT} value={CURRENT} preload onChange={() => undefined} />
+      </QueryClientProvider>
+    );
+    expect(calls.some((url) => url.endsWith("/cycles/"))).toBe(true);
+    expect(await screen.findByRole("button", { name: "Current" })).toBeInTheDocument();
+  });
+
   it("searches with its own empty message, picks and clears", async () => {
     const user = userEvent.setup();
     const { queryClient } = harness(CYCLES);

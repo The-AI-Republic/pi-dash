@@ -174,6 +174,17 @@ describe("EstimatePicker", () => {
     expect(screen.getByRole("button", { name: "Pick one" })).toBeInTheDocument();
   });
 
+  it("preloads the list so a set point names itself before the popup opens", async () => {
+    const { queryClient, calls } = harness(POINTS_SYSTEM);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <EstimatePicker workspaceSlug="acme" projectId={PROJECT} value={POINT_3} preload onChange={() => {}} />
+      </QueryClientProvider>
+    );
+    expect(calls.some((url) => url.endsWith("/estimates/"))).toBe(true);
+    expect(await screen.findByRole("button", { name: "3" })).toBeInTheDocument();
+  });
+
   it("supports icon-only and custom triggers", () => {
     const { queryClient } = harness(POINTS_SYSTEM);
     const { rerender } = render(
