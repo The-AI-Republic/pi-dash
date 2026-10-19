@@ -20,6 +20,7 @@ import { selectDisplayPrefs } from "../prefs/displayPrefs.js";
 import { listPageQueryOptions } from "./pages.js";
 import { resolvedListLayout } from "./lazy.js";
 import type { IssuesEntity } from "../prefs/entities.js";
+import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 
 export interface EntityListScreenProps {
   workspaceSlug: string;
@@ -87,6 +88,7 @@ export function EntityListScreen({
   // The cycle/module routes await the chunk in `beforeLoad`; render the
   // resolved component directly so the layout mounts once (NEWFRONT-619).
   const ListLayout = resolvedListLayout();
+  const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at != null });
   const offered: readonly LayoutKind[] = ["list"];
   const display = (
     <DisplayControl
@@ -112,6 +114,7 @@ export function EntityListScreen({
           projectId={projectId}
           projectIdentifier={project.identifier}
           prefs={prefs}
+          canEdit={canEdit}
           richFilters={richFilters}
           cycleId={cycleId}
           moduleId={moduleId}

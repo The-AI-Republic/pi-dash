@@ -82,6 +82,15 @@ const LazyWorkItemCreateDialog = React.lazy(() =>
   }))
 );
 
+// The timeline is only rendered when the stored layout selects it. Its
+// boundary module would otherwise join the route's initial closure even
+// though the list first paint never mounts it (Quality gates).
+const LazyGanttTimeline = React.lazy(() =>
+  import("../../../../../../features/issues/gantt/GanttTimeline.js").then((module) => ({
+    default: module.GanttTimeline,
+  }))
+);
+
 function ProjectIssuesEmptyState(): React.ReactElement {
   return (
     <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
@@ -317,8 +326,8 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
               projectId={params.projectId}
               projectIdentifier={project.identifier}
               prefs={prefs}
-              richFilters={preferences.rich_filters}
               canEdit={canEdit}
+              richFilters={preferences.rich_filters}
               peekKey={peekKey}
               onPeekChange={setPeekKey}
               compact={search.layout === "compact"}

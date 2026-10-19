@@ -92,6 +92,12 @@ export interface ListLayoutProps {
   /** Whether this view offers inline quick-add (ISS-011). */
   enableQuickAdd?: boolean | undefined;
   /**
+   * Project-aware edit permission from the host route. Archived projects
+   * and project guests are read-only even when the workspace role allows
+   * edits; absent falls back to the workspace role alone.
+   */
+  canEdit?: boolean | undefined;
+  /**
    * Reason edition workflow rules block creation. OSS never supplies one;
    * the cloud workflow layer injects its reason here.
    */
@@ -149,6 +155,7 @@ export function ListLayout({
   compact = false,
   richFilters = {},
   enableQuickAdd = true,
+  canEdit,
   creationBlockedReason,
 }: ListLayoutProps): React.ReactElement {
   const client = getAppClient();
@@ -183,7 +190,8 @@ export function ListLayout({
   const [addExistingOpen, setAddExistingOpen] = React.useState(false);
   const create = useCreateWorkItem(workspaceSlug);
 
-  const readOnly = !permissions.canEdit || completedCycle;
+  const editAllowed = permissions.canEdit && (canEdit ?? true);
+  const readOnly = !editAllowed || completedCycle;
   const flags: DisplayFeatureFlags = {
     hideCycle: !project?.cycle_view,
     hideModule: !project?.module_view,
@@ -210,14 +218,14 @@ export function ListLayout({
   }
 
   const quickAddReason = quickAddDisabledReason({
-    canEdit: permissions.canEdit,
+    canEdit: editAllowed,
     completedCycle,
     enableQuickAdd,
     workflowBlockedReason: creationBlockedReason,
     groupBy: prefs.groupBy,
   });
   const quickAddDisabled = quickAddReason !== undefined;
-  const canAdd = permissions.canEdit && !completedCycle && !creationDisabledForGroup(prefs.groupBy);
+  const canAdd = editAllowed && !completedCycle && !creationDisabledForGroup(prefs.groupBy);
   const menu = cycleId !== undefined || moduleId !== undefined;
 
   function openCreate(prefill: Record<string, string | string[]>): void {

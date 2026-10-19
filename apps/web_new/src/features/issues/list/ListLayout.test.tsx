@@ -404,6 +404,15 @@ describe("ListLayout", () => {
     expect(screen.getByTestId("quick-add-probe")).toHaveAttribute("data-reason", "Creation is off in this grouping");
   });
 
+  it("honors the host route's project-aware edit gate", () => {
+    renderLayout({ canEdit: false });
+    expect(screen.getByTestId("quick-add-probe")).toHaveAttribute(
+      "data-reason",
+      "New work items are read-only for you"
+    );
+    expect(screen.queryByRole("button", { name: "Add to All work items" })).not.toBeInTheDocument();
+  });
+
   it("opens the create dialog and submits prefilled fields", async () => {
     const user = userEvent.setup();
     renderLayout({ cycleId: CYCLE, moduleId: MODULE });

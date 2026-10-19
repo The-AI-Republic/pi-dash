@@ -779,6 +779,15 @@ describe("project issues screen", () => {
     expect(await screen.findByRole("button", { name: "Add work item" })).toBeDisabled();
   });
 
+  it("renders the list read-only for an archived project", async () => {
+    renderScreen({}, 1, [issueRow()], {
+      project: { archived_at: "2026-01-01T00:00:00Z", member_role: 20 },
+    });
+    expect(await screen.findByTestId("quick-add-disabled")).toHaveTextContent("New work items are read-only for you");
+    expect(screen.queryByRole("button", { name: "New work item" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add to All work items" })).not.toBeInTheDocument();
+  });
+
   it("renders the interim empty state when the project has no issues", () => {
     renderScreen({}, 0, []);
 

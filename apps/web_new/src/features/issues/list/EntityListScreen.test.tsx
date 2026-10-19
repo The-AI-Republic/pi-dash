@@ -79,6 +79,7 @@ vi.mock("./lazy.js", async (importOriginal) => {
             data-completed={String(props.completedCycle ?? false)}
             data-compact={String(props.compact ?? false)}
             data-project={String(props.projectId)}
+            data-can-edit={String(props.canEdit ?? "unset")}
           >
             {props.projectIdentifier as string}
           </div>
@@ -103,6 +104,8 @@ function project(overrides: Record<string, unknown> = {}) {
     id: PROJECT,
     name: "Website",
     identifier: "WEB",
+    member_role: 20,
+    archived_at: null,
     cycle_view: true,
     module_view: true,
     ...overrides,
@@ -160,6 +163,7 @@ describe("EntityListScreen", () => {
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-cycle", CYCLE);
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-compact", "true");
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-completed", "false");
+    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-can-edit", "true");
   });
 
   it("reads the flat first page for the entity", () => {
@@ -191,6 +195,11 @@ describe("EntityListScreen", () => {
     });
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-module", MODULE);
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-completed", "true");
+  });
+
+  it("passes project standing rather than the workspace role alone", () => {
+    setup({}, [project({ archived_at: "2026-01-01T00:00:00Z", member_role: 20 })]);
+    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-can-edit", "false");
   });
 
   it("falls back to a count envelope when results are not an array", () => {
