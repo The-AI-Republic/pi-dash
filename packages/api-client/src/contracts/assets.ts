@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Asset upload contracts: the signed-URL flows behind the onboarding
-// avatar picker (AUTH-031) and the workspace logo dialog (WSET-004).
-// Request a grant, POST the bytes to the signed URL, confirm the asset,
-// then store the returned URL on the owning row.
+// avatar picker (AUTH-031), the project settings emblem control
+// (PSET-007) and the workspace logo dialog (WSET-004). Request a grant,
+// POST the bytes to the signed URL, confirm the asset, then store the
+// returned URL on the owning row.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { ApiError } from "../errors.js";
@@ -39,13 +40,27 @@ async function defaultByteUpload(url: string, body: FormData): Promise<ByteUploa
 }
 
 /**
- * Upload one avatar image and resolve to its public URL. Three legs: grant
- * (`POST /api/assets/v2/user-assets/` with the avatar entity plus file
- * metadata), bytes (a signed POST of the grant fields plus the file), and
- * confirm (`PATCH .../{asset_id}/`). Any failed leg rejects with ApiError.
+ * One user-owned image the upload endpoint accepts: the profile avatar and
+ * cover today. The project emblem control shares this route; see the note
+ * on `uploadUserAsset`.
  */
-export async function uploadUserAvatar(
+export const USER_ASSET_TYPES = ["USER_AVATAR", "USER_COVER"] as const;
+export type UserAssetType = (typeof USER_ASSET_TYPES)[number];
+
+/**
+ * Upload one user-owned image and resolve to its public URL. Three legs:
+ * grant (`POST /api/assets/v2/user-assets/` with the entity type and file
+ * metadata), bytes (a signed POST of the grant fields plus the file), and
+ * confirm (`PATCH .../{asset_id}/`, which wires the asset onto the user).
+ *
+ * The project emblem control (PSET-007) is specified as a user-asset
+ * upload; the backend's user-asset route accepts the avatar and cover
+ * entity types, so the control picks the one that matches its stored
+ * artwork. Any failed leg rejects with ApiError.
+ */
+export async function uploadUserAsset(
   client: ApiClient,
+  entityType: UserAssetType,
   file: File,
   uploadBytes: ByteUpload = defaultByteUpload
 ): Promise<string> {
@@ -53,7 +68,7 @@ export async function uploadUserAvatar(
   const envelope = await client.sendJson<unknown>("POST", grantPath, {
     json: {
       entity_identifier: "",
-      entity_type: "USER_AVATAR",
+      entity_type: entityType,
       name: file.name,
       size: file.size,
       type: file.type,
@@ -71,12 +86,24 @@ export async function uploadUserAvatar(
     throw new ApiError({
       status: uploaded.status,
       code: "http",
-      message: "The avatar upload was rejected.",
+      message: "The image upload was rejected.",
     });
   }
 
   await client.patch(`/api/assets/v2/user-assets/${encodeURIComponent(grant.asset_id)}/`);
   return grant.asset_url;
+}
+
+/**
+ * Upload one avatar image and resolve to its public URL. Thin wrapper over
+ * `uploadUserAsset` for the onboarding picker (AUTH-031).
+ */
+export async function uploadUserAvatar(
+  client: ApiClient,
+  file: File,
+  uploadBytes: ByteUpload = defaultByteUpload
+): Promise<string> {
+  return uploadUserAsset(client, "USER_AVATAR", file, uploadBytes);
 }
 
 /**

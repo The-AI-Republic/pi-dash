@@ -121,10 +121,17 @@ function stubClient(stateGroup = "started", cycleStatus = "ACTIVE") {
       body = [
         {
           id: ESTIMATE,
+          workspace: PROJECT,
+          project: PROJECT,
           name: "Points",
+          description: "",
           type: "points",
           last_used: true,
-          points: [{ id: ESTIMATE, key: 1, value: "3" }],
+          points: [{ id: ESTIMATE, key: 1, value: "3", description: "" }],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+          created_by: null,
+          updated_by: null,
         },
       ];
     } else if (url.includes("/workspace-members/me/")) body = { id: MEMBER, role: 20 };

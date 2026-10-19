@@ -1906,12 +1906,19 @@ describe("thin contextual palette contracts", () => {
     const estimates = [
       {
         id: UUID,
+        workspace: UUID2,
+        project: UUID2,
         name: "Fibonacci",
+        description: "",
         type: "points",
         last_used: true,
+        created_at: "2026-10-15T00:00:00Z",
+        updated_at: "2026-10-15T00:00:00Z",
+        created_by: null,
+        updated_by: null,
         points: [
-          { id: UUID2, key: 1, value: "1" },
-          { id: UUID, key: 2, value: "2" },
+          { id: UUID2, key: 1, value: "1", description: "" },
+          { id: UUID, key: 2, value: "2", description: "" },
         ],
       },
     ];
@@ -2234,6 +2241,22 @@ describe("project lifecycle contracts", () => {
     expect(updated.default_state).toBe(UUID);
     const patchCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
     expect(patchCall?.init.body).toBe(JSON.stringify({ archive_in: 1, close_in: 2, default_state: UUID }));
+  });
+
+  it("patches the active-estimate reference the enable switch owns", async () => {
+    const transport = stubbedApi(() => ({ status: 200, body: { ...details, estimate: UUID } }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const enabled = await updateProject(client, "acme", UUID2, { estimate: UUID });
+    expect(enabled.estimate).toBe(UUID);
+    const enableCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(enableCall?.init.body).toBe(JSON.stringify({ estimate: UUID }));
+
+    const clearTransport = stubbedApi(() => ({ status: 200, body: { ...details, estimate: null } }));
+    const clearClient = createClient({ baseUrl: "https://api.test", transport: clearTransport });
+    const cleared = await updateProject(clearClient, "acme", UUID2, { estimate: null });
+    expect(cleared.estimate).toBeNull();
+    const clearCall = clearTransport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(clearCall?.init.body).toBe(JSON.stringify({ estimate: null }));
   });
 
   it("checks identifier availability and parses matches", async () => {

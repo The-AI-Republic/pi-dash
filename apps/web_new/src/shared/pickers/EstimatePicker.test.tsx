@@ -11,33 +11,43 @@ import { createAppClient, resetAppClient } from "../../core/api/client.js";
 import { EstimatePicker } from "./EstimatePicker.js";
 
 const PROJECT = "22222222-2222-4222-8222-222222222222";
+const WORKSPACE = "33333333-3333-4333-8333-333333333333";
+
+function system(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "11111111-1111-4111-8111-111111111111",
+    workspace: WORKSPACE,
+    project: PROJECT,
+    name: "Points",
+    description: "",
+    type: "points",
+    last_used: true,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    created_by: null,
+    updated_by: null,
+    ...overrides,
+  };
+}
+
+function point(id: string, key: number, value: string) {
+  return { id, key, value, description: "" };
+}
 const POINT_1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const POINT_3 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 const POINTS_SYSTEM = [
-  {
-    id: "11111111-1111-4111-8111-111111111111",
-    name: "Points",
-    type: "points",
-    last_used: true,
-    points: [
-      { id: POINT_1, key: 1, value: "1" },
-      { id: POINT_3, key: 2, value: "3" },
-    ],
-  },
+  system({
+    points: [point(POINT_1, 1, "1"), point(POINT_3, 2, "3")],
+  }),
 ];
 
 const TIME_SYSTEM = [
-  {
-    id: "11111111-1111-4111-8111-111111111111",
+  system({
     name: "Time",
     type: "time",
-    last_used: true,
-    points: [
-      { id: POINT_1, key: 1, value: "30" },
-      { id: POINT_3, key: 2, value: "90" },
-    ],
-  },
+    points: [point(POINT_1, 1, "30"), point(POINT_3, 2, "90")],
+  }),
 ];
 
 const INACTIVE_SYSTEM = [{ ...POINTS_SYSTEM[0], last_used: false }];
