@@ -14,6 +14,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { platform } from "../../../core/platform/index.js";
+import { isWebAddress } from "../../../core/platform/urls.js";
 import { bakedWebBaseUrl, fallbackToPlainNavigation, resolveBrowserAppUrl } from "../desktop.js";
 import { authStepInputProps } from "../focus.js";
 
@@ -24,7 +25,7 @@ export function DesktopUnavailableCard(): React.ReactElement {
     try {
       await platform.openExternal(browserUrl);
     } catch {
-      fallbackToPlainNavigation(browserUrl);
+      if (isWebAddress(browserUrl)) fallbackToPlainNavigation(browserUrl);
     }
   }
 

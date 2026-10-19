@@ -19,7 +19,7 @@ export interface DesktopEntrySearch {
 export function parseDesktopEntrySearch(search: Record<string, unknown>): DesktopEntrySearch {
   const error = asString(search["error"]);
   const errorDescription = asString(search["error_description"]);
-  const nextPath = safeNextPath(search["next_path"]);
+  const nextPath = safeNextPath(search["next_path"]) ?? safeNextPath(search["next"]);
   return {
     ...(error === undefined ? {} : { error }),
     ...(errorDescription === undefined ? {} : { errorDescription }),

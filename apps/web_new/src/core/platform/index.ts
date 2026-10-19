@@ -26,4 +26,5 @@ export type {
 } from "./types.js";
 export { platform } from "@pidash/platform-target";
 export { toApiTransport } from "./transport.js";
+export { isWebAddress } from "./urls.js";
 export { createIndexedDbStore, createLocalStorageStore, createMemoryStore, createPersistentStore } from "./storage.js";

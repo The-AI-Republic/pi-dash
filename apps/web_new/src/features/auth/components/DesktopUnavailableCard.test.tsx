@@ -84,6 +84,19 @@ describe("DesktopUnavailableCard", () => {
     await waitFor(() => expect(vi.mocked(fallbackToPlainNavigation)).toHaveBeenCalledWith("https://api.example.test"));
   });
 
+  it("does not navigate when the resolved destination is not a web address", async () => {
+    const opened: string[] = [];
+    harness.openExternal = async () => {
+      opened.push("attempted");
+      throw new Error("no bridge");
+    };
+    renderCard("not-a-url");
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Continue in the browser" }));
+    await waitFor(() => expect(opened).toEqual(["attempted"]));
+    expect(vi.mocked(fallbackToPlainNavigation)).not.toHaveBeenCalled();
+  });
+
   it("hides the action without any destination", () => {
     renderCard("");
     expect(screen.queryByRole("button", { name: "Continue in the browser" })).not.toBeInTheDocument();

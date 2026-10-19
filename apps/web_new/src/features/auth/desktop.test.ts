@@ -18,7 +18,7 @@ describe("desktop entry search", () => {
       parseDesktopEntrySearch({
         error: "access_denied",
         error_description: "The provider refused.",
-        next_path: "/acme",
+        next: "/acme",
       })
     ).toEqual({ error: "access_denied", errorDescription: "The provider refused.", nextPath: "/acme" });
   });
@@ -26,6 +26,12 @@ describe("desktop entry search", () => {
   it("drops invalid params instead of throwing", () => {
     expect(parseDesktopEntrySearch({ error: "", error_description: 7, next_path: "https://evil.test/x" })).toEqual({});
     expect(parseDesktopEntrySearch({})).toEqual({});
+  });
+
+  it("prefers next_path over the next alias", () => {
+    expect(parseDesktopEntrySearch({ next_path: "/canonical", next: "/alias" })).toEqual({
+      nextPath: "/canonical",
+    });
   });
 });
 

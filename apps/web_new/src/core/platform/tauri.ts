@@ -8,10 +8,12 @@
 // build-time alias; the no-Tauri bundle check proves it.
 
 import { createPersistentStore } from "./storage.js";
+import { isWebAddress } from "./urls.js";
 import type {
   AgentEngineProfile,
   AgentHostCheck,
   AgentRuntimeApi,
+  DeepLinkApi,
   EventStream,
   PendingUpdate,
   Platform,
@@ -440,11 +442,49 @@ const desktopUpdater: UpdaterApi = {
   },
 };
 
+/** Event the desktop deep-link plugin emits when the OS hands it a URL. */
+const DEEP_LINK_EVENT = "deep-link://new-url";
+
+function deepLinkUrls(payload: unknown): string[] {
+  if (typeof payload === "string") return payload.length > 0 ? [payload] : [];
+  if (!Array.isArray(payload)) return [];
+  return payload.filter((url): url is string => typeof url === "string" && url.length > 0);
+}
+
+const desktopDeepLinks: DeepLinkApi = {
+  onOpenUrl(callback: (url: string) => void): Unsubscribe {
+    const events = tauriWindow()?.__TAURI__?.event;
+    if (!events) return () => undefined;
+
+    let active = true;
+    let unlisten: Unsubscribe | undefined;
+    void events
+      .listen<unknown>(DEEP_LINK_EVENT, (event) => {
+        if (!active) return;
+        for (const url of deepLinkUrls(event.payload)) callback(url);
+      })
+      .then((stop) => {
+        if (active) unlisten = stop;
+        else stop();
+      })
+      .catch(() => undefined);
+
+    return () => {
+      active = false;
+      unlisten?.();
+      unlisten = undefined;
+    };
+  },
+};
+
 export const platform: Platform = {
   kind: "desktop",
   fetch: (input, init) => desktopFetch(input, init),
   stream: (url, init) => desktopStream(url, init),
   openExternal: (url) => {
+    if (!isWebAddress(url)) {
+      return Promise.reject(new Error("refusing to open a non-web address"));
+    }
     const core = nativeApiOrigin()?.core;
     // No native bridge: reject so the caller falls back to plain
     // navigation (AUTH-023) instead of a popup neither the shell nor
@@ -462,6 +502,7 @@ export const platform: Platform = {
   storage: createPersistentStore("pidash.desktop"),
   onFocusChange: trackFocus,
   window: desktopWindow,
+  deepLinks: desktopDeepLinks,
   agentRuntime: desktopAgentRuntime,
   updates: desktopUpdater,
   sessionTeardown: desktopSessionTeardown,
