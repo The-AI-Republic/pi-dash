@@ -54,6 +54,15 @@ export function useNewChat({
   const queryClient = useQueryClient();
   const [creating, setCreating] = React.useState(false);
   const inFlightRef = React.useRef(false);
+  const liveRunnerRef = React.useRef(runnerId);
+  liveRunnerRef.current = runnerId;
+
+  // A different contact starts with a clean slate: a create still running
+  // for the contact the viewer left can no longer report its state here.
+  React.useEffect(() => {
+    inFlightRef.current = false;
+    setCreating(false);
+  }, [runnerId]);
 
   const start = React.useCallback(async (): Promise<void> => {
     if (busy || inFlightRef.current) return;
@@ -61,6 +70,10 @@ export function useNewChat({
     setCreating(true);
     try {
       const created = await createChatSession(getAppClient(), { workspace: workspaceId, runner: runnerId });
+      // The viewer moved to another contact while the create was in
+      // flight: the session belongs to the contact no longer on screen,
+      // so it must not be published, selected or remembered here.
+      if (liveRunnerRef.current !== runnerId) return;
       onCreated(created);
       queryClient.setQueryData<ChatSession[]>(chatKeys.sessions(workspaceSlug, runnerId), (current) => {
         const existing = current ?? [];
@@ -68,10 +81,13 @@ export function useNewChat({
       });
       onSelect(created.id);
     } catch (error) {
+      if (liveRunnerRef.current !== runnerId) return;
       notifyError(NEW_CHAT_FAILED_TITLE, chatFailureReason(error));
     } finally {
-      inFlightRef.current = false;
-      setCreating(false);
+      if (liveRunnerRef.current === runnerId) {
+        inFlightRef.current = false;
+        setCreating(false);
+      }
     }
   }, [busy, onCreated, onSelect, queryClient, runnerId, workspaceId, workspaceSlug]);
 

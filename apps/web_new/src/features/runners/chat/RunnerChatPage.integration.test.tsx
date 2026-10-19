@@ -145,4 +145,39 @@ describe("RunnerChatPage integration", () => {
     await waitFor(() => expect(contracts.listChatMessages).toHaveBeenLastCalledWith(expect.anything(), "closed"));
     expect(screen.getByTestId("runner-chat-block-reason")).toHaveTextContent("Session closed");
   });
+
+  it("drops a New chat create that resolves after switching contacts", async () => {
+    contracts.listChatSessions.mockResolvedValue([
+      makeSession({ id: "open-1", last_message_at: "2026-10-18T11:00:00Z" }),
+    ]);
+    const pending = deferred<ChatSession>();
+    contracts.createChatSession.mockReturnValue(pending.promise);
+    const client = testClient();
+    const onSelectSession = vi.fn();
+    const page = (runnerId: string) => (
+      <Shell client={client}>
+        <RunnerChatPage
+          workspaceSlug="acme"
+          runnerId={runnerId}
+          requestedSessionId={null}
+          onSelectSession={onSelectSession}
+        />
+      </Shell>
+    );
+    const view = render(page("r-1"));
+    await waitFor(() => expect(contracts.warmChatSession).toHaveBeenCalledWith(expect.anything(), "open-1"));
+
+    await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+    expect(contracts.createChatSession).toHaveBeenCalledWith(expect.anything(), { workspace: "ws-id", runner: "r-1" });
+
+    view.rerender(page("r-2"));
+    await act(async () => {
+      pending.resolve(makeSession({ id: "fresh", runner: "r-1", last_message_at: null }));
+    });
+
+    await waitFor(() => expect(contracts.listChatMessages).toHaveBeenLastCalledWith(expect.anything(), "open-1"));
+    expect(onSelectSession).not.toHaveBeenCalled();
+    expect(contracts.listChatMessages.mock.calls.some((call) => call[1] === "fresh")).toBe(false);
+    expect(screen.getByRole("button", { name: "New chat" })).toBeEnabled();
+  });
 });

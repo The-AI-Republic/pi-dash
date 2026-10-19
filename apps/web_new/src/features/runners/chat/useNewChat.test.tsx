@@ -48,6 +48,16 @@ function props(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function deferred<T>() {
+  let resolve: (value: T) => void = () => undefined;
+  let reject: (reason: unknown) => void = () => undefined;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("chatFailureReason", () => {
   it("prefers the transport's message and falls back to the generic line", () => {
     expect(chatFailureReason(new Error("Runner is not reachable"))).toBe("Runner is not reachable");
@@ -117,6 +127,55 @@ describe("useNewChat", () => {
       await result.current.start();
     });
     expect(contracts.createChatSession).not.toHaveBeenCalled();
+  });
+
+  it("drops a create that resolves after the viewer switched contacts", async () => {
+    const pending = deferred<ReturnType<typeof makeSession>>();
+    contracts.createChatSession.mockReturnValue(pending.promise);
+    const client = testClient();
+    client.setQueryData(chatKeys.sessions("acme", "r-1"), [makeSession({ id: "old" })]);
+    const first = props();
+    const { result, rerender } = renderHook((input: ReturnType<typeof props>) => useNewChat(input), {
+      wrapper: wrapper(client),
+      initialProps: first,
+    });
+    act(() => {
+      void result.current.start();
+    });
+    await waitFor(() => expect(result.current.busy).toBe(true));
+
+    const second = props({ runnerId: "r-2" });
+    rerender(second);
+    expect(result.current.busy).toBe(false);
+
+    await act(async () => {
+      pending.resolve(makeSession({ id: "fresh", runner: "r-1" }));
+    });
+
+    expect(first.onCreated).not.toHaveBeenCalled();
+    expect(first.onSelect).not.toHaveBeenCalled();
+    expect(client.getQueryData(chatKeys.sessions("acme", "r-1"))).toEqual([expect.objectContaining({ id: "old" })]);
+    expect(toasts.notifyError).not.toHaveBeenCalled();
+  });
+
+  it("stays quiet when a failed create belongs to the contact left behind", async () => {
+    const pending = deferred<ReturnType<typeof makeSession>>();
+    contracts.createChatSession.mockReturnValue(pending.promise);
+    const first = props();
+    const { result, rerender } = renderHook((input: ReturnType<typeof props>) => useNewChat(input), {
+      wrapper: wrapper(testClient()),
+      initialProps: first,
+    });
+    act(() => {
+      void result.current.start();
+    });
+    await waitFor(() => expect(result.current.busy).toBe(true));
+    rerender(props({ runnerId: "r-2" }));
+
+    await act(async () => {
+      pending.reject(new ApiError({ status: 500, code: "http", message: "runner gone" }));
+    });
+    expect(toasts.notifyError).not.toHaveBeenCalled();
   });
 
   it("toasts the server's reason and keeps history unchanged on failure", async () => {
