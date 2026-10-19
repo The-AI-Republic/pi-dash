@@ -387,3 +387,59 @@ def test_global_tenant_isolation(api, seed, tenant_a, tenant_b, auth_b):
     r = api.get(_global_url(tenant_a), headers=auth_b)
     assert r.status_code == 403, r.text
     assert r.json() == {"error": "You don't have the required permissions."}
+
+
+def test_view_issues_datetimes_render_utc_z(api, seed, db, secret):
+    """PIDASHCONV-1198: ``ViewIssueListSerializer.to_representation`` returns
+    the model's raw ``datetime`` objects (view.py:24-53), not DRF
+    ``DateTimeField``s, so DRF's ``JSONEncoder`` renders them as UTC with a
+    trailing ``Z`` no matter what zone the actor is in. The Rust port must not
+    shift these into the actor's ``user_timezone``.
+    """
+    user = seed.user(user_timezone="America/Los_Angeles")
+    ws = seed.workspace(user["id"])
+    seed.member(ws["id"], user["id"], role=20)
+    project_id = seed.project(ws["id"])
+    seed.project_member(project_id, ws["id"], user["id"], role=20)
+    issue_id = seed.issue(
+        ws["id"], project_id, name="TZ issue",
+        completed_at=datetime(2026, 10, 17, 12, 34, 56, 789012, tzinfo=timezone.utc),
+    )
+    headers = session_headers(seed, user, user["password"], secret)
+    r = api.get(
+        f"/api/workspaces/{ws['slug']}/issues/", headers=headers
+    )
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    entry = next((e for e in results if e["id"] == issue_id), None)
+    assert entry is not None, results
+
+    # Django's encoder is ``value.isoformat()`` with a trailing ``+00:00``
+    # rewritten to ``Z`` (rest_framework.utils.encoders.JSONEncoder).
+    def drf(dt):
+        if dt is None:
+            return None
+        text = dt.astimezone(timezone.utc).isoformat()
+        return text[:-6] + "Z" if text.endswith("+00:00") else text
+
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT created_at, updated_at, completed_at, archived_at "
+            "FROM issues WHERE id = %s",
+            (issue_id,),
+        )
+        created_at, updated_at, completed_at, archived_at = cur.fetchone()
+
+    assert entry["completed_at"] == "2026-10-17T12:34:56.789012Z", entry["completed_at"]
+    for field, db_value in (
+        ("created_at", created_at),
+        ("updated_at", updated_at),
+        ("completed_at", completed_at),
+    ):
+        expected = drf(db_value)
+        assert entry[field] == expected, (field, entry[field], expected)
+        assert entry[field].endswith("Z"), (field, entry[field])
+    # ``IssueManager`` excludes rows with ``archived_at IS NOT NULL``
+    # (db/models/issue.py:95-104), so a listed row always has a null
+    # ``archived_at`` — the other three fields carry the zone coverage.
+    assert drf(archived_at) is None and entry["archived_at"] is None, entry["archived_at"]
