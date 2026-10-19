@@ -103,6 +103,13 @@ describe("CalendarDay", () => {
     expect(header.querySelector("span.rounded-full")?.textContent).toBe("15");
   });
 
+  it("badges today on the compact day face", () => {
+    renderDay({ cell: { ...CELL, isToday: true } });
+    const face = tileFor(CELL.iso).querySelector("div[role='button']") as HTMLElement;
+    expect(face).toHaveAttribute("data-today", "true");
+    expect(face.querySelector("span.rounded-full")?.textContent).toBe("15");
+  });
+
   it("marks adjacent-month filler and drop targets", () => {
     renderDay({ cell: { ...CELL, inMonth: false, isToday: false }, isDropTarget: true });
     const tile = tileFor(CELL.iso);

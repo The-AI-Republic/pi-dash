@@ -113,10 +113,11 @@ export function CalendarDay({
         )}
       </div>
       <div
-        className="text-meta mx-auto cursor-pointer py-(--space-1) font-medium text-(--text) md:hidden"
+        className="text-meta mx-auto flex size-6 cursor-pointer items-center justify-center rounded-full font-medium md:hidden"
         role="button"
         tabIndex={0}
         aria-pressed={selected}
+        data-today={cell.isToday ? "true" : undefined}
         onClick={() => onSelect(cell.iso)}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
@@ -125,7 +126,13 @@ export function CalendarDay({
           }
         }}
       >
-        {cell.day}
+        {cell.isToday ? (
+          <span className="flex size-6 items-center justify-center rounded-full bg-(--accent) text-(--on-accent)">
+            {cell.day}
+          </span>
+        ) : (
+          <span className="text-(--text)">{cell.day}</span>
+        )}
       </div>
       {narrow ? (
         allRows.length === 0 ? null : (

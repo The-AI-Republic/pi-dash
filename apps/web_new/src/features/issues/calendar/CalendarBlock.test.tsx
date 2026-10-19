@@ -162,7 +162,25 @@ describe("CalendarBlock", () => {
     expect(handlers.onDelete).toHaveBeenCalledOnce();
   });
 
-  it("starts a pointer drag after movement and marks a highlighted temp row", () => {
+  it("renders a temp block as an inert pulsing row", async () => {
+    const issue = row({ id: "temp-abc", name: "Draft" });
+    const handlers = renderBlock(issue);
+    const link = screen.getByRole("link", { name: "Draft, saving" });
+    expect(link).toHaveAttribute("data-temprow", "true");
+    expect(link).toHaveAttribute("href", "/acme/browse/WEB-42");
+    expect(link).toHaveAttribute("aria-disabled", "true");
+    expect(screen.queryByRole("button", { name: "Quick actions" })).not.toBeInTheDocument();
+    fireEvent.pointerDown(link, { clientX: 10, clientY: 10 });
+    fireEvent(document, pointerEvent("pointermove", 40, 40));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+    fireEvent.pointerEnter(link);
+    fireEvent.focus(link);
+    fireEvent.click(link);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    expect(handlers.onOpen).not.toHaveBeenCalled();
+  });
+
+  it("marks a highlighted temp row and refuses to drag it", () => {
     const issue = row({ id: "temp-abc", name: "Draft" });
     const handlers = renderBlock(issue, true);
     const link = screen.getByRole("link", { name: "Draft, saving" });
@@ -171,7 +189,7 @@ describe("CalendarBlock", () => {
     expect(link.querySelector(".animate-pulse")).not.toBeNull();
     fireEvent(link, pointerEvent("pointerdown", 10, 10));
     fireEvent(link, pointerEvent("pointermove", 10 + CALENDAR_DRAG_THRESHOLD_PX, 10));
-    expect(handlers.onDragStart).toHaveBeenCalledWith(issue, expect.anything());
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
   });
 
   it("keeps tracking a drag after the pointer leaves the block", () => {

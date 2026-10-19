@@ -174,13 +174,14 @@ export function CalendarBlock({
       ref={anchorRef}
       id={rowDomId(issue.id)}
       href={`/${workspaceSlug}/browse/${identifier}`}
+      aria-disabled={temp ? "true" : undefined}
       draggable={false}
       aria-label={temp ? `${issue.name}, saving` : identifier}
       data-highlight={highlighted ? "true" : undefined}
       data-temprow={temp ? "true" : undefined}
-      className={`relative flex min-w-0 items-center gap-(--space-1) rounded-(--radius-control) border border-transparent bg-(--bg) px-(--space-1) py-(--space-1) text-left hover:border-(--border) ${highlighted ? "bg-(--accent-subtle) highlight" : ""}`}
+      className={`relative flex min-w-0 items-center gap-(--space-1) rounded-(--radius-control) border border-transparent bg-(--bg) px-(--space-1) py-(--space-1) text-left hover:border-(--border) ${highlighted ? "bg-(--accent-subtle) highlight" : ""} ${temp ? "cursor-default" : ""}`}
       onPointerDown={(event) => {
-        if (!draggable) return;
+        if (!draggable || temp) return;
         draggedRef.current = false;
         pressRef.current = { x: event.clientX, y: event.clientY };
         trackPointer();
@@ -208,9 +209,11 @@ export function CalendarBlock({
           draggedRef.current = false;
           return;
         }
+        if (temp) return;
         onOpen(issue);
       }}
       onPointerEnter={() => {
+        if (temp) return;
         clearHoverTimer();
         hoverTimer.current = setTimeout(openPreview, CALENDAR_BLOCK_PREVIEW_DELAY_MS);
       }}
@@ -218,7 +221,9 @@ export function CalendarBlock({
         clearHoverTimer();
         setPreviewOpen(false);
       }}
-      onFocus={openPreview}
+      onFocus={() => {
+        if (!temp) openPreview();
+      }}
       onBlur={() => setPreviewOpen(false)}
     >
       <span
@@ -233,7 +238,7 @@ export function CalendarBlock({
         {temp ? "…" : identifier}
       </span>
       <div className="min-w-0 flex-1 truncate text-13 text-[13px] text-(--text)">{issue.name}</div>
-      {quickActions ? (
+      {quickActions && !temp ? (
         <div
           className="shrink-0"
           onClick={(event) => event.stopPropagation()}
