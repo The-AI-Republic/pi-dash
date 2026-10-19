@@ -20,7 +20,9 @@ import { resetProfileSettingsPages } from "../../../features/settings/lib/regist
 import { useProfileSettingsSessionGuard } from "../../../features/settings/pageEntries.js";
 import { resetProfileRouteHarness, renderProfileSettingsRoute } from "../-routeHarness.js";
 import { createAppClient } from "../../../core/api/client.js";
+import { useSessionStore } from "../../../core/session/store.js";
 import { loadProfileSettingsLayout } from "../../../features/settings/loadProfileSettings.js";
+import { Route as TokensRoute } from "./api-tokens.js";
 import { Route, tabFromPathname } from "./route.js";
 
 const Layout = Route.options.component;
@@ -65,6 +67,9 @@ function transport(): Parameters<typeof renderProfileSettingsRoute>[0]["transpor
     const headers = { get: () => null };
     if (url.endsWith("/auth/get-csrf-token/")) {
       return { status: 200, url, headers, text: async () => JSON.stringify({ csrf_token: "csrf" }) };
+    }
+    if (url.endsWith("/api/users/api-tokens/")) {
+      return { status: 200, url, headers, text: async () => JSON.stringify([]) };
     }
     if (url.endsWith("/api/users/me/")) {
       return {
@@ -129,6 +134,9 @@ afterEach(() => {
   cleanup();
   resetProfileSettingsPages();
   resetProfileRouteHarness();
+  // The visitor-gate test's 401 leaves the session expired; the tokens tab
+  // (and the layout guard) react to it, so each test starts signed in.
+  useSessionStore.setState({ status: "unknown", returnUrl: null });
   document.title = "";
 });
 
@@ -210,7 +218,20 @@ describe("profile settings layout", () => {
     );
     // The shell hands a plain href to the layout, which routes it without a
     // document load (the memory history normalizes the link's slash away).
-    expect(router.state.location.pathname).toBe("/settings/profile/api-tokens");
+    await waitFor(() => expect(router.state.location.pathname).toBe("/settings/profile/api-tokens"));
+  });
+
+  it("mounts the tokens leaf inside the shell through the route tree", async () => {
+    renderProfileSettingsRoute({
+      layoutComponent: LayoutComponent,
+      leafComponent: TokensRoute.options.component as RouteComponent,
+      leafPath: "api-tokens",
+      initialPath: "/settings/profile/api-tokens",
+      transport: transport(),
+    });
+    expect(await screen.findByTestId("profile-settings-shell")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Personal Access Tokens" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Personal Access Tokens" })).toHaveAttribute("aria-current", "page");
   });
 
   it("runs the session-expiry guard outside the app shell", async () => {
