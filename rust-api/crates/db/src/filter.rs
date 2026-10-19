@@ -159,6 +159,19 @@ impl FilterTree {
         Self::from_json(&value)
     }
 
+    /// Parse the `filters` query parameter the way `filter_queryset` reads
+    /// it end to end: a decoded value Python treats as falsy (`{}`, `[]`,
+    /// `null`, `""`, `0`, `false`) hits `_apply_json_filter`'s
+    /// `if not filter_data: return queryset` and filters nothing, so it is
+    /// `None` here. The web app sends `filters={}` on every list load.
+    pub fn parse_param_opt(raw: &str) -> Result<Option<Self>, FilterError> {
+        let value: Value = serde_json::from_str(raw).map_err(|_| FilterError::InvalidJson)?;
+        if !python_truthy(&value) {
+            return Ok(None);
+        }
+        Self::from_json(&value).map(Some)
+    }
+
     pub fn from_json(value: &Value) -> Result<Self, FilterError> {
         Self::from_json_with_depth(value, DEFAULT_MAX_DEPTH)
     }
@@ -175,6 +188,18 @@ impl FilterTree {
             return Err(FilterError::FilteringNotEnabled);
         }
         build_condition(self, allowed)
+    }
+}
+
+/// Python truthiness of a decoded JSON value.
+fn python_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
     }
 }
 
@@ -503,6 +528,32 @@ mod tests {
     fn empty_filter_string_is_invalid_json() {
         assert_eq!(
             FilterTree::parse_param("not json{{").unwrap_err(),
+            FilterError::InvalidJson
+        );
+    }
+
+    #[test]
+    fn falsy_filters_param_filters_nothing() {
+        for raw in ["{}", "[]", "null", "\"\"", "0", "0.0", "false"] {
+            assert_eq!(FilterTree::parse_param_opt(raw).unwrap(), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn truthy_filters_param_still_validates() {
+        assert!(FilterTree::parse_param_opt(r#"{"priority": "high"}"#)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            FilterTree::parse_param_opt("[1]").unwrap_err(),
+            FilterError::InvalidNode
+        );
+        assert_eq!(
+            FilterTree::parse_param_opt(r#"{"or": [{}]}"#).unwrap_err(),
+            FilterError::EmptyNode
+        );
+        assert_eq!(
+            FilterTree::parse_param_opt("not json{{").unwrap_err(),
             FilterError::InvalidJson
         );
     }
