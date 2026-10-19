@@ -30,7 +30,6 @@ import {
   type WorkItemCreateProject,
 } from "../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
-import { GanttTimeline } from "../../../../../../features/issues/gantt/GanttTimeline.js";
 import {
   ResolvedAnalyticsEntry,
   ResolvedIssueList,
@@ -41,6 +40,15 @@ import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
 const LazyIssueFilters = React.lazy(() => import("../../../../../../features/issues/filters/rich/IssueFilters.js"));
+
+// The timeline boundary (and the chart code behind it) only matters when
+// the timeline layout is chosen, so the route chunk carries neither
+// (Quality gates, NEWFRONT-677): the skeleton shows while its chunk lands.
+const LazyGanttTimeline = React.lazy(() =>
+  import("../../../../../../features/issues/gantt/GanttTimeline.js").then((module) => ({
+    default: module.GanttTimeline,
+  }))
+);
 
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
@@ -250,14 +258,16 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
           const active = resolveActiveLayout(layout, offered);
           if (active === "gantt_chart") {
             return (
-              <GanttTimeline
-                workspaceSlug={params.ws}
-                projectId={params.projectId}
-                projectIdentifier={project.identifier}
-                issues={issues.results}
-                totalCount={issues.total_count}
-                prefs={prefs}
-              />
+              <React.Suspense fallback={<ListSkeleton />}>
+                <LazyGanttTimeline
+                  workspaceSlug={params.ws}
+                  projectId={params.projectId}
+                  projectIdentifier={project.identifier}
+                  issues={issues.results}
+                  totalCount={issues.total_count}
+                  prefs={prefs}
+                />
+              </React.Suspense>
             );
           }
           if (active === "spreadsheet") {
