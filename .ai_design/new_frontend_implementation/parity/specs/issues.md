@@ -586,9 +586,10 @@ Persisted through user-properties (workspace scope where the surface
 is workspace-level). The shared chrome all these sections use —
 title plus chevron collapse, checkbox versus radio options with
 optional icon or pulse, applied count, shared search box, view-all
-past five, empty placeholder (ISS-094) — has no live surface on any
-main issues page; §22 decides its disposition. Oracle:
-`filters-dimensions.spec.ts`.
+past five, empty placeholder (ISS-094) — has no legacy per-dimension
+surface on the main issues page. In the new frontend it is the section
+control behind the condition-row builder's value popovers and the
+display dropdown (§22). Oracle: `filters-dimensions.spec.ts`.
 
 Above secondary lists, one applied-filter chip renders per active
 value (ISS-095): a marker (icon, avatar, color swatch) plus its label,
@@ -1519,13 +1520,32 @@ until the slice lands and turns built with it.
 Implementation note (NEWFRONT-629): the slice built the chrome as the
 shared section control under the issues filters and adopted it in the
 two surfaces that exist today — the condition-row builder's rich value
-lists and the display dropdown. The sub-issue widget does not exist in
-the new frontend yet; its filter dropdown adopts the same control when
-that widget is built (NEWFRONT-647), which is the only outstanding
-place ISS-094 renders. ISS-093 is registered the same way: the
-personal work-items catalogue offers the `subscriber_id` dimension,
-and the my-work-items page that renders the catalogue belongs to the
-profile pages (NEWFRONT-573).
+lists and the display dropdown. Both read title, applied count, chevron
+collapse, the search box, the five-row cap with view all/less, the
+no-matches placeholder, and icon and pulse marks from the one control.
+
+Two refusals are deliberate rather than gaps. The display dropdown
+keeps `aria-pressed` rows over checkbox/radio semantics and does not
+cap its fixed, short option sets; both are recorded here so a later
+pass does not read them as the chrome going unused. The date
+dimensions offer only positive lookups — "is" a day/preset, "between"
+two days — because the legacy date parameters the list endpoint
+resolves relative to today have no negated form; a negated date leaf
+stored by another client stays in the JSON tree instead of being
+rewritten as a positive bound. A single exact day, or a custom pair,
+stays in the JSON tree as `__exact`/`__range` so its exactness
+survives; only relative presets travel as the bare `start_date` /
+`target_date` parameters. Completed cycles list with the completed
+glyph, and a date section's Custom row opens and focuses the calendar
+when ticked with no custom day stored.
+
+The sub-issue widget does not exist in the new frontend yet; its
+filter dropdown adopts the same control when that widget is built
+(NEWFRONT-647), which is the only outstanding place ISS-094 renders.
+ISS-093 is registered the same way: the personal work-items
+catalogue offers the `subscriber_id` dimension, and the my-work-items
+page that renders the catalogue belongs to the profile pages
+(NEWFRONT-573).
 
 ISS-165 carries the same StrictMode note (nested peek unreachable on
 the dev stack) and is covered by the main#533 target below.

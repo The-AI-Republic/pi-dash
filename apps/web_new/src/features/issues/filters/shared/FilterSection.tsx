@@ -58,6 +58,8 @@ export interface FilterSectionProps {
   /** Placeholder while the rows load; the placeholder wins over empty search. */
   loading?: boolean | undefined;
   loadingText?: string | undefined;
+  /** Failure text; renders an alert in place of the rows. */
+  errorText?: string | undefined;
   /** Untranslated technical id exposed for the parity gate. */
   testId?: string | undefined;
   /** Rows carry their own separator before section content. */
@@ -144,6 +146,7 @@ export function FilterSection({
   onOpenChange,
   loading = false,
   loadingText = "Loading values",
+  errorText,
   testId,
   className,
   groupLabel,
@@ -165,7 +168,7 @@ export function FilterSection({
   const count = countOverride ?? applied.length;
   const countLabel = count > 0 ? `${title} (${count})` : title;
   return (
-    <section data-testid={testId} data-section-title={title} className={className}>
+    <section data-testid={testId} data-section-title={title} aria-label={title} className={className}>
       <div className="flex items-center justify-between gap-(--space-2)">
         <h3 className="text-caption text-(--text-muted)">{countLabel}</h3>
         <button
@@ -203,7 +206,11 @@ export function FilterSection({
                   className="text-body w-full bg-transparent py-(--space-1) text-(--text) outline-none placeholder:text-(--text-placeholder)"
                 />
               </label>
-              {loading ? (
+              {errorText !== undefined ? (
+                <p role="alert" className="text-caption px-(--space-3) py-(--space-2) text-(--danger)">
+                  {errorText}
+                </p>
+              ) : loading ? (
                 <p className="text-caption px-(--space-3) py-(--space-2) text-(--text-muted)">{loadingText}</p>
               ) : visible.length === 0 ? (
                 <p className="text-caption px-(--space-3) py-(--space-2) text-(--text-muted) italic">

@@ -10,14 +10,11 @@ import {
   customEndEntry,
   customStartEntry,
   cycleLifecycle,
-  dateValueCount,
   dateValueLabel,
   dateValueParts,
   hasCustomDate,
   isCustomDateEntry,
   isDatePreset,
-  isRunningCycle,
-  setCustomRange,
   toggleDatePreset,
 } from "./legacyDimensions.js";
 
@@ -35,13 +32,6 @@ describe("cycleLifecycle", () => {
     ["", "draft"],
   ] as const)("reads %s as %s", (status, lifecycle) => {
     expect(cycleLifecycle(status)).toBe(lifecycle);
-  });
-
-  it("pulses only the running cycle", () => {
-    expect(isRunningCycle("CURRENT")).toBe(true);
-    expect(isRunningCycle("ACTIVE")).toBe(true);
-    expect(isRunningCycle("UPCOMING")).toBe(false);
-    expect(isRunningCycle(undefined)).toBe(false);
   });
 });
 
@@ -98,20 +88,8 @@ describe("date presets", () => {
     expect(toggleDatePreset("1_weeks;after;fromnow", "1_weeks;after;fromnow")).toBeNull();
   });
 
-  it("sets a custom range beside presets and clears only custom entries", () => {
+  it("clears custom entries without touching presets", () => {
     const preset = "1_weeks;after;fromnow";
-    expect(setCustomRange(preset, "2026-01-01", "2026-01-31")).toEqual([
-      preset,
-      "2026-01-01;after",
-      "2026-01-31;before",
-    ]);
-    expect(setCustomRange(preset, "2026-01-01", null)).toEqual([preset, "2026-01-01;after"]);
-    expect(setCustomRange(preset, null, "2026-01-31")).toEqual([preset, "2026-01-31;before"]);
-    expect(setCustomRange(preset, null, null)).toBe(preset);
-    expect(setCustomRange(["2026-01-01;after", "2026-01-31;before"], "2026-02-01", "2026-02-28")).toEqual([
-      "2026-02-01;after",
-      "2026-02-28;before",
-    ]);
     expect(clearCustomDate([preset, "2026-01-01;after"])).toBe(preset);
     expect(clearCustomDate("2026-01-01;after")).toBeNull();
   });
@@ -123,13 +101,10 @@ describe("date presets", () => {
     expect(customRange("garbage;after")).toEqual({ start: null, end: null });
   });
 
-  it("counts applied entries and detects a custom half", () => {
-    expect(dateValueCount(null)).toBe(0);
-    expect(dateValueCount("1_weeks;after;fromnow")).toBe(1);
-    expect(dateValueCount(["1_weeks;after;fromnow", "2_weeks;after;fromnow"])).toBe(2);
-    expect(dateValueCount(["1_weeks;after;fromnow", "2026-01-01;after", "2026-01-31;before"])).toBe(3);
+  it("detects a custom half", () => {
     expect(hasCustomDate("1_weeks;after;fromnow")).toBe(false);
     expect(hasCustomDate("2026-01-01;after")).toBe(true);
+    expect(hasCustomDate(["1_weeks;after;fromnow", "2026-01-01;after"])).toBe(true);
   });
 
   it("labels presets by name and the custom half as a range", () => {

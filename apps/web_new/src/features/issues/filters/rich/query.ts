@@ -8,13 +8,17 @@
 //
 // Start and target dates are the exception. A relative window only means
 // something to the endpoint's bare `start_date` / `target_date` parameters,
-// which resolve it against today, so a date condition travels there in the
-// legacy date grammar (entries joined with commas). The JSON tree keeps
-// every other leaf, so nothing is applied twice.
+// which resolve it against today, so a preset travels there in the legacy
+// date grammar (entries joined with commas). Custom days keep their JSON
+// leaf — an exact day stays `__exact`, a two-end range stays `__range` — so
+// they are neither widened to an open bound nor applied twice. A date leaf
+// that a stored record keeps under a negation stays where it is: the bare
+// parameters have no negated form, and silently reading one as its opposite
+// would flip the condition.
 
 import type { IssueListQuery } from "@pidash/api-client";
 
-import { customEndEntry, customStartEntry, dateEntries } from "./legacyDimensions.js";
+import { customRange, dateValueParts, isDatePreset } from "./legacyDimensions.js";
 import type { RichExpression } from "./expression.js";
 
 /** Date fields forwarded as bare list parameters rather than JSON leaves. */
@@ -25,30 +29,22 @@ export function richFiltersParam(expression: RichExpression): string | null {
   return Object.keys(expression).length === 0 ? null : JSON.stringify(expression);
 }
 
-/** An entry that is a bare ISO day with no direction yet. */
-const BARE_DAY = /^\d{4}-\d{2}-\d{2}$/;
-
-/**
- * The stored date entries for one condition value, in the server's legacy
- * grammar. Presets already carry it, and this slice stores custom days with
- * their direction. A bare `"start,end"` pair (how a stored range used to be
- * written) takes lower and upper bounds by position so the condition keeps
- * both ends.
- */
-export function legacyDateEntries(value: unknown): string[] {
-  let bare = 0;
-  return dateEntries(value).map((entry) => {
-    if (!BARE_DAY.test(entry)) return entry;
-    const directed = bare === 0 ? customStartEntry(entry) : customEndEntry(entry);
-    bare += 1;
-    return directed;
-  });
-}
-
 /** Whether a leaf is one the date bridge takes out of the JSON tree. */
 function isLegacyDateKey(key: string): boolean {
   const stem = key.split("__")[0];
   return LEGACY_DATE_FIELDS.includes(stem as (typeof LEGACY_DATE_FIELDS)[number]);
+}
+
+/**
+ * The JSON leaf a mixed date value keeps after its presets leave: the custom
+ * days, as an exact day or a two-end range. Both ends present is a range,
+ * one end is that day, and no end leaves nothing behind.
+ */
+function customDateLeaf(stem: string, value: unknown): RichExpression | null {
+  const { start, end } = customRange(value);
+  if (start !== null && end !== null) return { [`${stem}__range`]: `${start},${end}` };
+  const day = start ?? end;
+  return day === null ? null : { [`${stem}__exact`]: day };
 }
 
 /**
@@ -62,12 +58,6 @@ export function splitDateConditions(expression: RichExpression): {
   dates: Record<string, string[]>;
 } {
   const dates: Record<string, string[]> = {};
-  const collect = (field: string, value: unknown): void => {
-    for (const entry of legacyDateEntries(value)) {
-      const bucket = (dates[field] ??= []);
-      if (!bucket.includes(entry)) bucket.push(entry);
-    }
-  };
   const prune = (node: unknown): unknown => {
     if (typeof node !== "object" || node === null || Array.isArray(node)) return node;
     const record = node as Record<string, unknown>;
@@ -77,16 +67,19 @@ export function splitDateConditions(expression: RichExpression): {
       if (children.length === 1) return children[0];
       return { and: children };
     }
-    if ("not" in record) {
-      const child = prune(record["not"]);
-      return child === null ? null : { not: child };
-    }
+    // A negated date leaf is not rewritten: the bare parameters only express
+    // positive bounds, so the tree keeps the negation it was given.
+    if ("not" in record) return record;
     const entries = Object.entries(record);
     if (entries.length !== 1) return node;
     const [key, value] = entries[0]!;
     if (!isLegacyDateKey(key)) return node;
-    collect(key.split("__")[0]!, value);
-    return null;
+    const stem = key.split("__")[0]!;
+    const presets = dateValueParts(value).presets.filter((entry) => isDatePreset(entry));
+    if (presets.length === 0) return node;
+    const bucket = (dates[stem] ??= []);
+    for (const preset of presets) if (!bucket.includes(preset)) bucket.push(preset);
+    return customDateLeaf(stem, value);
   };
   const pruned = prune(expression);
   return {

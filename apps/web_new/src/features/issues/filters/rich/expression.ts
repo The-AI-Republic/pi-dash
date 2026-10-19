@@ -608,6 +608,9 @@ function catalogField(input: {
  * one bounded date (target date, no clear control, offered as both a single
  * day and a two-end range like the old filter) and a bounded date range
  * (start date, which also offers the plain is lookup the oracle drives).
+ * Both date fields are positive-only at the operator menu: the list
+ * endpoint's bare date parameters resolve relative windows but have no
+ * negated form, so a negated date would read as its opposite (ISS-092).
  * Stems are the filter set's field names; entity-backed fields resolve
  * their labels from the shared pickers, so reads stay lazy on open.
  */
@@ -616,8 +619,23 @@ export function valueInputFields(surface: RichFilterSurface = "project"): RichFi
     catalogField({ stem: "project_id", label: "Project", kind: "multi", source: "projects" }),
     catalogField({ stem: "cycle_id", label: "Cycle", kind: "multi", source: "cycles" }),
     catalogField({ stem: "module_id", label: "Module", kind: "multi", source: "modules" }),
-    catalogField({ stem: "target_date", label: "Target date", kind: "date", operators: ["exact", "range"] }),
-    catalogField({ stem: "start_date", label: "Start date", kind: "date_range", operators: ["exact", "range"] }),
+    // Date conditions travel to the list endpoint as the presets' bare date
+    // parameters, which only express positive bounds (ISS-092), so both date
+    // fields offer the plain forms and keep their operator control locked.
+    catalogField({
+      stem: "target_date",
+      label: "Target date",
+      kind: "date",
+      operators: ["exact", "range"],
+      allowNegative: false,
+    }),
+    catalogField({
+      stem: "start_date",
+      label: "Start date",
+      kind: "date_range",
+      operators: ["exact", "range"],
+      allowNegative: false,
+    }),
   ];
   if (surface === "my_issues") {
     fields.push({

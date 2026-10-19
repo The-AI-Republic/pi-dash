@@ -9,9 +9,7 @@
 // closes, arrows move the highlight. The search field takes focus on
 // open except on coarse-pointer devices. Outside-click closes through
 // the Base popover. Disabled blocks opening and renders the trigger
-// with a not-allowed cursor, so no clear action is reachable. A caller
-// may cap the rows it shows at once (filter sections keep five) and
-// offer View all / View less below the list.
+// with a not-allowed cursor, so no clear action is reachable.
 import { Popover as BasePopover } from "@base-ui-components/react/popover";
 import { Check } from "lucide-react";
 import * as React from "react";
@@ -71,12 +69,6 @@ export interface ComboboxProps {
   onOpenChange?: ((open: boolean) => void) | undefined;
   /** Extra popup classes (callers widen it for long labels). */
   className?: string | undefined;
-  /**
-   * Show this many rows before a View all control. Absent shows every
-   * row. Search, highlights and the empty state still read the whole
-   * filtered list.
-   */
-  visibleCap?: number | undefined;
 }
 
 const popupClasses = "w-64 rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-2) shadow-popover";
@@ -118,12 +110,10 @@ export function Combobox({
   open: controlledOpen,
   onOpenChange,
   className,
-  visibleCap,
 }: ComboboxProps): React.ReactElement {
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [activePosition, setActivePosition] = React.useState(0);
-  const [expanded, setExpanded] = React.useState(false);
   const searchRef = React.useRef<HTMLInputElement>(null);
   const listRef = React.useRef<HTMLUListElement>(null);
   const baseId = React.useId();
@@ -154,17 +144,12 @@ export function Combobox({
     if (!multiple) requestOpen(false);
   }
 
-  // A closing popup forgets its query and its expanded list; a fresh
-  // query re-highlights the first enabled match and reads back at the cap.
+  // A closing popup forgets its query; a fresh query re-highlights the
+  // first enabled match so Enter always has a target.
   React.useEffect(() => {
     if (!open) setQuery("");
-    setExpanded(false);
     setActivePosition(0);
   }, [open, query, options]);
-
-  const cap = visibleCap ?? Number.POSITIVE_INFINITY;
-  const shown = expanded ? filtered : filtered.slice(0, Math.max(cap, 0));
-  const hasMore = filtered.length > cap;
 
   // Base moves focus on open; point it at the search field (or the bare
   // list when search is off). Coarse pointers keep focus on the trigger
@@ -202,13 +187,7 @@ export function Combobox({
   }, [open, activeIndex, listId]);
 
   function moveHighlight(delta: -1 | 1): void {
-    setActivePosition((position) => {
-      const next = Math.min(Math.max(position + delta, 0), Math.max(enabledIds.length - 1, 0));
-      // Reveal the row the highlight lands on past the cap, so the active
-      // descendant always names a rendered option.
-      if (visibleCap !== undefined && next >= (expanded ? 0 : visibleCap)) setExpanded(true);
-      return next;
-    });
+    setActivePosition((position) => Math.min(Math.max(position + delta, 0), Math.max(enabledIds.length - 1, 0)));
   }
 
   function onPopupKeyDown(event: React.KeyboardEvent): void {
@@ -293,63 +272,52 @@ export function Combobox({
                 {emptyText}
               </p>
             ) : (
-              <div className={cn(searchEnabled && "mt-(--space-2)")}>
-                <ul
-                  ref={focusList}
-                  id={listId}
-                  role="listbox"
-                  aria-label={listLabel}
-                  aria-activedescendant={activeIndex < 0 ? undefined : `${listId}-option-${activeIndex}`}
-                  tabIndex={searchEnabled ? undefined : -1}
-                  className="max-h-64 overflow-y-auto outline-none"
-                >
-                  {shown.map((option, index) => {
-                    const selected = isSelected(option.id);
-                    return (
-                      <li key={option.id}>
-                        <button
-                          type="button"
-                          role="option"
-                          id={`${listId}-option-${index}`}
-                          aria-selected={selected}
-                          disabled={option.disabled ?? false}
-                          data-active={option.id === activeId || undefined}
-                          onClick={() => {
-                            choose(option.id);
-                          }}
-                          className={optionClasses}
-                        >
-                          {option.icon === undefined ? null : (
-                            <span aria-hidden="true" className="inline-flex shrink-0 items-center">
-                              {option.icon}
-                            </span>
-                          )}
-                          <span className="min-w-0 flex-1 truncate">{option.content ?? option.label}</span>
-                          {selected ? (
-                            <span aria-hidden="true" className="inline-flex shrink-0 items-center text-(--accent)">
-                              <Check size={16} strokeWidth={1.5} />
-                            </span>
-                          ) : null}
-                          {option.trailing === undefined ? null : (
-                            <span aria-hidden="true" className="inline-flex shrink-0 items-center">
-                              {option.trailing}
-                            </span>
-                          )}
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-                {hasMore ? (
-                  <button
-                    type="button"
-                    onClick={() => setExpanded(!expanded)}
-                    className="text-caption w-full px-(--space-3) py-(--space-1) text-left font-medium text-(--accent)"
-                  >
-                    {expanded ? "View less" : "View all"}
-                  </button>
-                ) : null}
-              </div>
+              <ul
+                ref={focusList}
+                id={listId}
+                role="listbox"
+                aria-label={listLabel}
+                aria-activedescendant={activeIndex < 0 ? undefined : `${listId}-option-${activeIndex}`}
+                tabIndex={searchEnabled ? undefined : -1}
+                className={cn("max-h-64 overflow-y-auto outline-none", searchEnabled && "mt-(--space-2)")}
+              >
+                {filtered.map((option, index) => {
+                  const selected = isSelected(option.id);
+                  return (
+                    <li key={option.id}>
+                      <button
+                        type="button"
+                        role="option"
+                        id={`${listId}-option-${index}`}
+                        aria-selected={selected}
+                        disabled={option.disabled ?? false}
+                        data-active={option.id === activeId || undefined}
+                        onClick={() => {
+                          choose(option.id);
+                        }}
+                        className={optionClasses}
+                      >
+                        {option.icon === undefined ? null : (
+                          <span aria-hidden="true" className="inline-flex shrink-0 items-center">
+                            {option.icon}
+                          </span>
+                        )}
+                        <span className="min-w-0 flex-1 truncate">{option.content ?? option.label}</span>
+                        {selected ? (
+                          <span aria-hidden="true" className="inline-flex shrink-0 items-center text-(--accent)">
+                            <Check size={16} strokeWidth={1.5} />
+                          </span>
+                        ) : null}
+                        {option.trailing === undefined ? null : (
+                          <span aria-hidden="true" className="inline-flex shrink-0 items-center">
+                            {option.trailing}
+                          </span>
+                        )}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
             )}
           </BasePopover.Popup>
         </BasePopover.Positioner>

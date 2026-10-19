@@ -237,8 +237,8 @@ describe("ValueSlot", () => {
       )
     );
     // No trigger click: an empty slot already shows its list.
-    const list = await screen.findByRole("listbox", { name: "State values" });
-    await user.click(within(list).getByRole("option", { name: "Todo" }));
+    const list = await screen.findByRole("region", { name: "State" });
+    await user.click(within(list).getByRole("checkbox", { name: "Todo" }));
     expect(onChange).toHaveBeenCalledWith([STATE_ID]);
   });
 
@@ -250,7 +250,7 @@ describe("ValueSlot", () => {
       )
     );
     expect(screen.getByRole("button", { name: /Urgent/ })).toBeInTheDocument();
-    expect(screen.queryByRole("listbox", { name: "Priority values" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Priority" })).not.toBeInTheDocument();
   });
 
   it("adds a second pick to a stored one-pick exact without dropping the first", async () => {
@@ -263,7 +263,7 @@ describe("ValueSlot", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /Urgent/ }));
-    await user.click(await screen.findByRole("option", { name: "High" }));
+    await user.click(await screen.findByRole("checkbox", { name: "High" }));
     expect(onChange).toHaveBeenLastCalledWith(["urgent", "high"]);
   });
 
@@ -280,7 +280,7 @@ describe("ValueSlot", () => {
       )
     );
     expect(screen.getByRole("button", { name: /Urgent/ })).toBeInTheDocument();
-    expect(screen.queryByRole("listbox", { name: "Priority values" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Priority" })).not.toBeInTheDocument();
   });
 
   it("shows the placeholder and picks a static multi value", async () => {
@@ -300,9 +300,9 @@ describe("ValueSlot", () => {
     expect(screen.getByRole("button", { name: /^--$/ })).toBeInTheDocument();
     // An empty pick lists its options without another click; clicking the
     // trigger again would collapse it.
-    const list = await screen.findByRole("listbox", { name: "Priority values" });
-    expect(within(list).getAllByRole("option")).toHaveLength(5);
-    await user.click(within(list).getByRole("option", { name: "Urgent" }));
+    const list = await screen.findByRole("region", { name: "Priority" });
+    expect(within(list).getAllByRole("checkbox")).toHaveLength(5);
+    await user.click(within(list).getByRole("checkbox", { name: "Urgent" }));
     expect(onChange).toHaveBeenCalledWith(["urgent"]);
   });
 
@@ -321,7 +321,7 @@ describe("ValueSlot", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /Urgent/ }));
-    await user.click(await screen.findByRole("option", { name: "High" }));
+    await user.click(await screen.findByRole("checkbox", { name: "High" }));
     expect(onChange).toHaveBeenLastCalledWith(["urgent", "high"]);
   });
 
@@ -340,7 +340,7 @@ describe("ValueSlot", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /Urgent/ }));
-    await user.click(await screen.findByRole("option", { name: /Urgent/ }));
+    await user.click(await screen.findByRole("checkbox", { name: /Urgent/ }));
     expect(onChange).toHaveBeenLastCalledWith(null);
   });
 
@@ -356,8 +356,8 @@ describe("ValueSlot", () => {
         />
       )
     );
-    const list = await screen.findByRole("listbox", { name: "State Group values" });
-    const options = within(list).getAllByRole("option");
+    const list = await screen.findByRole("region", { name: "State Group" });
+    const options = within(list).getAllByRole("checkbox");
     expect(options).toHaveLength(5);
     for (const option of options) expect(option.querySelector("svg")).not.toBeNull();
   });
@@ -382,7 +382,7 @@ describe("ValueSlot", () => {
         />
       )
     );
-    expect(await screen.findByText("No matching values")).toBeInTheDocument();
+    expect(await screen.findByText("No matches found")).toBeInTheDocument();
   });
 
   it("leaves a static value with no icon unshaped", async () => {
@@ -406,9 +406,9 @@ describe("ValueSlot", () => {
         />
       )
     );
-    const list = await screen.findByRole("listbox", { name: "Custom values" });
-    expect(within(list).getAllByRole("option")).toHaveLength(1);
-    expect(within(list).getByRole("option", { name: "One" }).querySelector("svg")).toBeNull();
+    const list = await screen.findByRole("region", { name: "Custom" });
+    expect(within(list).getAllByRole("checkbox")).toHaveLength(1);
+    expect(within(list).getByRole("checkbox", { name: "One" }).querySelector("svg")).toBeNull();
   });
 
   it("shows the first two picks plus the overflow count", () => {
@@ -443,7 +443,7 @@ describe("ValueSlot", () => {
     );
     expect(screen.getByRole("button", { name: /Todo/ })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Todo/ }));
-    expect(await screen.findByRole("option", { name: "Todo" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("checkbox", { name: "Todo" })).toHaveAttribute("aria-checked", "true");
   });
 });
 
@@ -477,8 +477,11 @@ describe("ValueSlot single select", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /One/ }));
-    await user.click(await screen.findByRole("option", { name: "Two" }));
+    const group = await screen.findByRole("radiogroup", { name: "Custom values" });
+    await user.click(within(group).getByRole("radio", { name: "Two" }));
     expect(onChange).toHaveBeenLastCalledWith("two");
+    // One pick completes a single-choice slot, so its list closes.
+    expect(screen.queryByRole("radiogroup", { name: "Custom values" })).not.toBeInTheDocument();
   });
 
   it("clears when the current value is picked again", async () => {
@@ -496,7 +499,7 @@ describe("ValueSlot single select", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /One/ }));
-    await user.click(await screen.findByRole("option", { name: /One/ }));
+    await user.click(await screen.findByRole("radio", { name: /One/ }));
     expect(onChange).toHaveBeenLastCalledWith(null);
   });
 
@@ -632,13 +635,13 @@ describe("ValueSlot member and label sources", () => {
         />
       )
     );
-    const list = await screen.findByRole("listbox", { name: "Assignees values" });
+    const list = await screen.findByRole("region", { name: "Assignees" });
     expect(
       within(list)
-        .getAllByRole("option")
+        .getAllByRole("checkbox")
         .map((option) => option.textContent)
     ).toEqual([expect.stringMatching(/You$/), expect.stringMatching(/Ana$/), expect.stringMatching(/Zoe$/)]);
-    await user.click(within(list).getByRole("option", { name: /Ana/ }));
+    await user.click(within(list).getByRole("checkbox", { name: /Ana/ }));
     expect(onChange).toHaveBeenCalledWith([ANA]);
   });
 
@@ -656,10 +659,10 @@ describe("ValueSlot member and label sources", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /Zoe/ }));
-    const list = await screen.findByRole("listbox", { name: "Created by values" });
+    const list = await screen.findByRole("region", { name: "Created by" });
     expect(
       within(list)
-        .getAllByRole("option")
+        .getAllByRole("checkbox")
         .map((option) => option.textContent)
     ).toEqual([expect.stringMatching(/Zoe$/), expect.stringMatching(/You$/), expect.stringMatching(/Ana$/)]);
   });
@@ -679,13 +682,13 @@ describe("ValueSlot member and label sources", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /Zeta/ }));
-    const list = await screen.findByRole("listbox", { name: "Label values" });
+    const list = await screen.findByRole("region", { name: "Label" });
     expect(
       within(list)
-        .getAllByRole("option")
+        .getAllByRole("checkbox")
         .map((option) => option.textContent)
     ).toEqual(["Zeta", "Alpha"]);
-    await user.click(within(list).getByRole("option", { name: /Alpha/ }));
+    await user.click(within(list).getByRole("checkbox", { name: /Alpha/ }));
     expect(onChange).toHaveBeenCalledWith(["label-z", "label-a"]);
   });
 
@@ -736,7 +739,7 @@ describe("ValueSlot member and label sources", () => {
         }
       )
     );
-    const option = await screen.findByRole("option", { name: /Ana/ });
+    const option = await screen.findByRole("checkbox", { name: /Ana/ });
     expect(option.querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
   });
 
@@ -828,8 +831,8 @@ describe("ValueSlot project, cycle and module sources", () => {
     );
     // Lazy: the empty slot opens by itself and only then reads.
     expect(screen.getByRole("button", { name: /^--$/ })).toBeInTheDocument();
-    expect(await screen.findByRole("option", { name })).toBeInTheDocument();
-    await user.click(screen.getByRole("option", { name }));
+    expect(await screen.findByRole("checkbox", { name })).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name }));
     expect(onChange).toHaveBeenCalledWith([id]);
   });
 
@@ -926,7 +929,7 @@ describe("ValueSlot failure and suspended rows", () => {
         }
       )
     );
-    const suspended = await screen.findByRole("option", { name: /Zoe/ });
+    const suspended = await screen.findByRole("checkbox", { name: /Zoe/ });
     expect(suspended).toBeDisabled();
     await user.click(suspended);
     expect(onChange).not.toHaveBeenCalled();
@@ -1224,7 +1227,7 @@ describe("ValueSlot cycle lifecycle and ordering", () => {
     );
   }
 
-  it("drops completed cycles and marks each lifecycle, pulsing only the running one", async () => {
+  it("lists completed cycles with their glyph and pulses only the running one", async () => {
     renderCycles(
       <ValueSlot
         workspaceSlug="acme"
@@ -1236,8 +1239,9 @@ describe("ValueSlot cycle lifecycle and ordering", () => {
     );
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: /c23e4567-e89b-12d3-a456-42661417400e/ }));
-    expect(screen.queryByRole("option", { name: "Gone" })).not.toBeInTheDocument();
-    const running = screen.getByRole("option", { name: "alpha" });
+    const completed = screen.getByRole("checkbox", { name: "Gone" });
+    expect(completed.querySelector('[data-testid="cycle-glyph-completed"]')).toHaveAttribute("data-running", "false");
+    const running = screen.getByRole("checkbox", { name: "alpha" });
     expect(running.querySelector('[data-testid="cycle-glyph-current"]')).toHaveAttribute("data-running", "true");
     expect(screen.getByTestId("cycle-glyph-upcoming")).toHaveAttribute("data-running", "false");
     expect(screen.getByTestId("cycle-glyph-draft")).toHaveAttribute("data-running", "false");
@@ -1255,9 +1259,10 @@ describe("ValueSlot cycle lifecycle and ordering", () => {
     );
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: /c23e4567-e89b-12d3-a456-42661417400e/ }));
-    expect(screen.getAllByRole("option").map((option) => option.textContent?.trim())).toEqual([
+    expect(screen.getAllByRole("checkbox").map((option) => option.textContent?.trim())).toEqual([
       "alpha",
       "Beta",
+      "Gone",
       "Zulu",
     ]);
   });
@@ -1314,7 +1319,7 @@ describe("ValueSlot project and module ordering", () => {
     );
     await user.click(await screen.findByRole("button", { name: /223e4567-e89b-12d3-a456-426614174002/ }));
     // Each row leads with its logo mark: the identifier's initial here.
-    expect(screen.getAllByRole("option").map((option) => option.textContent?.trim())).toEqual([
+    expect(screen.getAllByRole("checkbox").map((option) => option.textContent?.trim())).toEqual([
       "OOrion",
       "AApollo",
       "Zzephyr",
@@ -1347,11 +1352,77 @@ describe("ValueSlot project and module ordering", () => {
       )
     );
     await user.click(await screen.findByRole("button", { name: /d23e4567-e89b-12d3-a456-42661417400e/ }));
-    expect(screen.getAllByRole("option").map((option) => option.textContent?.trim())).toEqual([
+    expect(screen.getAllByRole("checkbox").map((option) => option.textContent?.trim())).toEqual([
       "Billing",
       "Analytics",
       "zebra",
     ]);
+  });
+});
+
+describe("ValueSlot shared section chrome", () => {
+  it("shows the field title with its applied count and reads rows as checkboxes", async () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={PRIORITY}
+          condition={condition(["urgent", "high"])}
+          onChange={() => {}}
+        />
+      )
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Urgent, High/ }));
+    const section = await screen.findByRole("region", { name: "Priority" });
+    expect(within(section).getByRole("heading", { name: "Priority (2)" })).toBeInTheDocument();
+    expect(within(section).getByRole("checkbox", { name: "Urgent" })).toHaveAttribute("aria-checked", "true");
+    expect(within(section).getByRole("checkbox", { name: "High" })).toHaveAttribute("aria-checked", "true");
+    expect(within(section).getByRole("checkbox", { name: "Low" })).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("searches the section by its own box and shows the no-matches placeholder", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={PRIORITY}
+          condition={condition()}
+          onChange={() => {}}
+        />
+      )
+    );
+    const section = await screen.findByRole("region", { name: "Priority" });
+    const search = within(section).getByRole("searchbox", { name: "Search Priority" });
+    await user.type(search, "med");
+    expect(within(section).getAllByRole("checkbox")).toHaveLength(1);
+    expect(within(section).getByRole("checkbox", { name: "Medium" })).toBeInTheDocument();
+    await user.clear(search);
+    await user.type(search, "zzz");
+    expect(within(section).queryAllByRole("checkbox")).toHaveLength(0);
+    expect(within(section).getByText("No matches found")).toBeInTheDocument();
+  });
+
+  it("collapses and reopens the section through its chevron", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={PRIORITY}
+          condition={condition()}
+          onChange={() => {}}
+        />
+      )
+    );
+    const section = await screen.findByRole("region", { name: "Priority" });
+    await user.click(within(section).getByRole("button", { name: "Collapse Priority section" }));
+    expect(within(section).queryAllByRole("checkbox")).toHaveLength(0);
+    await user.click(within(section).getByRole("button", { name: "Expand Priority section" }));
+    expect(within(section).getAllByRole("checkbox")).toHaveLength(5);
   });
 });
 
@@ -1381,15 +1452,38 @@ describe("ValueSlot section cap", () => {
       )
     );
     // An empty slot opens by itself, reading at the shared cap.
-    await screen.findAllByRole("option");
-    expect(screen.getAllByRole("option")).toHaveLength(5);
+    await screen.findAllByRole("checkbox");
+    expect(screen.getAllByRole("checkbox")).toHaveLength(5);
     await user.click(screen.getByRole("button", { name: "View all" }));
-    expect(screen.getAllByRole("option")).toHaveLength(7);
+    expect(screen.getAllByRole("checkbox")).toHaveLength(7);
     expect(screen.getByRole("button", { name: "View less" })).toBeInTheDocument();
   });
 });
 
 describe("ValueSlot date presets and custom range", () => {
+  it("ticking Custom opens the calendar and focuses its first day", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("2_weeks;after;fromnow"), property: "target_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /2 weeks from now/ }));
+    await user.click(screen.getByRole("checkbox", { name: "Custom" }));
+    await waitFor(() => {
+      const focused = document.activeElement;
+      expect(focused).not.toBeNull();
+      expect(focused).toHaveAttribute("data-day");
+      expect(screen.getByTestId("rich-date-calendar").contains(focused)).toBe(true);
+    });
+  });
+
   it("toggles a relative window and keeps the custom day", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();

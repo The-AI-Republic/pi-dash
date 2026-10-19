@@ -37,11 +37,6 @@ export function cycleLifecycle(status: string | undefined): CycleLifecycle {
   }
 }
 
-/** Only the running cycle animates; every other lifecycle is static. */
-export function isRunningCycle(status: string | undefined): boolean {
-  return cycleLifecycle(status) === "current";
-}
-
 /** One relative window a date dimension offers. */
 export interface DatePreset {
   /** Token the list endpoint resolves relative to today. */
@@ -109,11 +104,6 @@ export function dateValueParts(value: unknown): { presets: string[]; custom: str
   return parts;
 }
 
-/** Applied-row count a date dimension reports. */
-export function dateValueCount(value: unknown): number {
-  return dateEntries(value).length;
-}
-
 /** Whether a custom day is set (used to tick the Custom row). */
 export function hasCustomDate(value: unknown): boolean {
   return customDays(value).length > 0;
@@ -130,20 +120,6 @@ export function toggleDatePreset(value: unknown, preset: string): unknown {
   const entries = dateEntries(value);
   if (entries.includes(preset)) return joinDateValue(entries.filter((entry) => entry !== preset));
   return joinDateValue([...entries, preset]);
-}
-
-/**
- * Set the custom half. A range adds its two bounds; a single day adds the
- * lower bound only, so an unfinished range still reads back as one entry.
- * Replacing the custom half never touches the presets, and clearing it
- * ("untick Custom") removes only the custom entries.
- */
-export function setCustomRange(value: unknown, start: string | null, end: string | null): unknown {
-  const presets = dateValueParts(value).presets;
-  const custom: string[] = [];
-  if (start !== null && start !== "") custom.push(customStartEntry(start));
-  if (end !== null && end !== "") custom.push(customEndEntry(end));
-  return joinDateValue([...presets, ...custom]);
 }
 
 /** Remove every custom entry, leaving presets untouched. */
@@ -166,27 +142,6 @@ export function customDays(value: unknown): string[] {
  */
 export function composeDateValue(presets: readonly string[], days: readonly string[]): unknown {
   return joinDateValue([...presets, ...days]);
-}
-
-/** Presets of a value, for editors that keep them across operator changes. */
-export function datePresetsOf(value: unknown): string[] {
-  return dateValueParts(value).presets;
-}
-
-/**
- * Carry a date value from one lookup to another. Presets mean the same
- * under every lookup, so they stay. The custom half narrows to its first
- * day for a single-day lookup and starts an open pair for a range.
- */
-export function valueForDateOperator(previousOperator: string, nextOperator: string, value: unknown): unknown {
-  if (previousOperator === nextOperator) return value;
-  const presets = datePresetsOf(value);
-  const days = customDays(value);
-  if (nextOperator === "range") {
-    if (days.length === 0) return composeDateValue(presets, []);
-    return composeDateValue(presets, days.length >= 2 ? [days[0]!, days[1]!] : [days[0]!, ""]);
-  }
-  return composeDateValue(presets, days.length === 0 ? [] : [days[0]!]);
 }
 
 /** Both custom ends, read back for the calendar. */

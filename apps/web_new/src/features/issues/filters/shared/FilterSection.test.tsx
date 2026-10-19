@@ -2,7 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CircleDot } from "lucide-react";
 import * as React from "react";
@@ -198,6 +198,22 @@ describe("FilterSection", () => {
     expect(screen.getByText("Loading cycles")).toBeInTheDocument();
     expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
     expect(screen.queryByText("No matches found")).not.toBeInTheDocument();
+  });
+
+  it("replaces the rows with an alert when the host reports a failure", () => {
+    renderSection({ errorText: "Couldn't load cycle values.", loading: true });
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't load cycle values.");
+    expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
+    expect(screen.queryByText("Loading values")).not.toBeInTheDocument();
+  });
+
+  it("keeps one radio group around a single-choice section", async () => {
+    const user = userEvent.setup();
+    renderSection({ kind: "single", groupLabel: "Cycle values", applied: ["b"] });
+    const group = screen.getByRole("radiogroup", { name: "Cycle values" });
+    expect(within(group).getAllByRole("radio")).toHaveLength(FILTER_SECTION_CAP);
+    await user.click(within(group).getByRole("radio", { name: "Bravo" }));
+    expect(within(group).getByRole("radio", { name: "Bravo" })).toHaveAttribute("aria-checked", "true");
   });
 
   it("lets a host body keep the title and collapse without a search box", async () => {

@@ -12,7 +12,7 @@
 // shared five-row cap with View all, and every section's rows share the
 // same applied-first ordering (ISS-089–091, ISS-094).
 
-import { Avatar, Button, Combobox, Popover, type ComboboxOption } from "@pidash/kit";
+import { Avatar, Button, Popover } from "@pidash/kit";
 import { CalendarDays, Check, ChevronDown, Circle, CircleCheck, CircleDashed, CircleDot, Package } from "lucide-react";
 import * as React from "react";
 
@@ -21,7 +21,6 @@ import {
   PRIORITY_ICONS,
   StateGlyph,
   STATE_GROUP_ICONS,
-  selectCycleOptions,
   selectMemberOptions,
   selectModuleOptions,
   selectProjectMark,
@@ -55,8 +54,14 @@ import {
   toggleDatePreset,
   type CycleLifecycle,
 } from "./legacyDimensions.js";
-import { orderAppliedByName, orderLabelOptions, orderMemberOptions, selectedIds } from "./filterValues.js";
-import { FILTER_SECTION_CAP } from "../shared/FilterSection.js";
+import {
+  cycleFilterRows,
+  orderAppliedByName,
+  orderLabelOptions,
+  orderMemberOptions,
+  selectedIds,
+} from "./filterValues.js";
+import { FilterSection, type FilterSectionOption } from "../shared/FilterSection.js";
 import {
   EMPTY_SLOT_LABEL,
   isRangeIncomplete,
@@ -137,9 +142,20 @@ function PresetRow({
  * The relative windows a date dimension offers above its calendar
  * (ISS-092). A preset toggles on and off without touching the custom day;
  * a preset alone completes the condition, and the calendar below still
- * takes a custom day when the user wants one.
+ * takes a custom day when the user wants one. Ticking Custom while no
+ * custom day is stored opens the calendar for the first day; unticking it
+ * clears only the custom half and leaves the presets.
  */
-function PresetList({ value, onChange }: { value: unknown; onChange: (value: unknown) => void }): React.ReactElement {
+function PresetList({
+  value,
+  onChange,
+  onCustom,
+}: {
+  value: unknown;
+  onChange: (value: unknown) => void;
+  onCustom: () => void;
+}): React.ReactElement {
+  const custom = hasCustomDate(value);
   return (
     <div className="flex w-56 flex-col gap-(--space-1) border-b border-(--border) p-(--space-2) pb-(--space-3)">
       <span className="text-caption px-(--space-3) text-(--text-muted)">Relative</span>
@@ -152,7 +168,11 @@ function PresetList({ value, onChange }: { value: unknown; onChange: (value: unk
         />
       ))}
       <span className="text-caption px-(--space-3) pt-(--space-1) text-(--text-muted)">Custom</span>
-      <PresetRow label="Custom" checked={hasCustomDate(value)} onToggle={() => onChange(clearCustomDate(value))} />
+      <PresetRow
+        label="Custom"
+        checked={custom}
+        onToggle={() => (custom ? onChange(clearCustomDate(value)) : onCustom())}
+      />
     </div>
   );
 }
@@ -224,12 +244,10 @@ function PickSlot({
     [field.source, labels.data, selected]
   );
 
-  // Server order with applied rows first for projects and modules; the
-  // cycle list drops completed cycles and the No-cycle clear row, which
-  // has no id to filter on.
-  // Applied picks lead, then names alphabetically (ISS-089–091). The
-  // cycle list drops completed cycles and the No-cycle clear row, which
-  // has no id to filter on.
+  // Applied picks lead, then names alphabetically (ISS-089–091). The cycle
+  // list keeps every project cycle, completed ones included, so each
+  // lifecycle glyph is reachable; it has no No-cycle clear row, which has
+  // no id to filter on.
   const projectOptions = React.useMemo(
     () =>
       field.source === "projects"
@@ -238,10 +256,7 @@ function PickSlot({
     [field.source, projects.data, selected]
   );
   const cycleOptions = React.useMemo(
-    () =>
-      field.source === "cycles"
-        ? orderAppliedByName(selectCycleOptions({ cycles: cycles.data ?? [], allowClear: false }), selected)
-        : [],
+    () => (field.source === "cycles" ? orderAppliedByName(cycleFilterRows(cycles.data ?? []), selected) : []),
     [cycles.data, field.source, selected]
   );
   const moduleOptions = React.useMemo(
@@ -274,7 +289,7 @@ function PickSlot({
     return map;
   }, [cycleOptions, field.staticValues, labelOptions, memberOptions, moduleOptions, projectOptions, stateOptions]);
 
-  const options: ComboboxOption[] = React.useMemo(() => {
+  const options: FilterSectionOption[] = React.useMemo(() => {
     if (field.source === "states") {
       return stateOptions.map((option) => ({
         id: option.id,
@@ -395,27 +410,34 @@ function PickSlot({
   const errorText = failed ? `Couldn't load ${field.label.toLowerCase()} values.` : undefined;
 
   return (
-    <Combobox
+    <Popover
+      open={open}
+      onOpenChange={setOpen}
       trigger={
         <Button variant="ghost" size="small" data-testid="rich-value-trigger" data-empty={selected.length === 0}>
           <span className="max-w-48 truncate">{chosenLabel(selected, labelsById)}</span>
           <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
         </Button>
       }
-      options={options}
-      value={field.kind === "single" ? (selected[0] ?? null) : selected}
-      multiple={field.kind !== "single"}
-      onSelect={togglePick}
-      listLabel={`${field.label} values`}
-      searchLabel={`Search ${field.label.toLowerCase()} values`}
-      emptyText="No matching values"
-      loading={loading}
-      loadingText="Loading values"
-      errorText={errorText}
-      open={open}
-      onOpenChange={setOpen}
-      visibleCap={FILTER_SECTION_CAP}
-    />
+      className="max-h-[24rem] w-80 overflow-y-auto"
+    >
+      <FilterSection
+        title={field.label}
+        kind={field.kind === "single" ? "single" : "multi"}
+        applied={selected}
+        options={options}
+        onToggle={(id) => {
+          togglePick(id);
+          // A single-choice slot is complete after one pick, so it closes;
+          // a multi slot stays open for the next value.
+          if (field.kind === "single") setOpen(false);
+        }}
+        loading={loading}
+        errorText={errorText}
+        testId={`rich-section-${field.stem}`}
+        groupLabel={`${field.label} values`}
+      />
+    </Popover>
   );
 }
 
@@ -453,6 +475,7 @@ function DateSlot({
   autoOpen: boolean;
 }): React.ReactElement {
   const [open, setOpen] = React.useState(autoOpen);
+  const customRef = React.useRef<HTMLDivElement>(null);
   const weekStart = useWeekStart();
   const presets = dateValueParts(value).presets;
   const days = customDays(value);
@@ -463,18 +486,31 @@ function DateSlot({
       onOpenChange={setOpen}
       trigger={<CalendarTrigger label={label} empty={dateEntries(value).length === 0} />}
     >
-      <PresetList value={value} onChange={onChange} />
-      <DateCalendar
-        value={days[0] ?? null}
-        min={field.min ?? null}
-        max={field.max ?? null}
-        weekStart={weekStart}
-        testId="rich-date-calendar"
-        onSelect={(iso) => {
-          onChange(composeDateValue(presets, [iso]));
-          setOpen(false);
+      <PresetList
+        value={value}
+        onChange={onChange}
+        onCustom={() => {
+          setOpen(true);
+          // The calendar sits below the presets; bring the first day into
+          // view and focus it once the popup has mounted.
+          window.requestAnimationFrame(() => {
+            customRef.current?.querySelector<HTMLButtonElement>("[data-day]")?.focus();
+          });
         }}
       />
+      <div ref={customRef}>
+        <DateCalendar
+          value={days[0] ?? null}
+          min={field.min ?? null}
+          max={field.max ?? null}
+          weekStart={weekStart}
+          testId="rich-date-calendar"
+          onSelect={(iso) => {
+            onChange(composeDateValue(presets, [iso]));
+            setOpen(false);
+          }}
+        />
+      </div>
     </Popover>
   );
 }
@@ -496,6 +532,7 @@ function RangeSlot({
   autoOpen: boolean;
 }): React.ReactElement {
   const [open, setOpen] = React.useState(autoOpen);
+  const customRef = React.useRef<HTMLDivElement>(null);
   const weekStart = useWeekStart();
   const [pending, setPending] = React.useState<RangeValue | null>(null);
   const presets = dateValueParts(value).presets;
@@ -517,25 +554,36 @@ function RangeSlot({
         </span>
       }
     >
-      <PresetList value={value} onChange={onChange} />
-      <DateRangeCalendar
-        value={ends}
-        min={field.min ?? null}
-        max={field.max ?? null}
-        weekStart={weekStart}
-        testId="rich-range-calendar"
-        onChange={(next) => {
-          const complete = next.start !== null && next.end !== null;
-          if (complete) {
-            setPending(null);
-            onChange(composeDateValue(presets, [next.start!, next.end!]));
-            setOpen(false);
-            return;
-          }
-          setPending(next);
+      <PresetList
+        value={value}
+        onChange={onChange}
+        onCustom={() => {
           setOpen(true);
+          window.requestAnimationFrame(() => {
+            customRef.current?.querySelector<HTMLButtonElement>("[data-day]")?.focus();
+          });
         }}
       />
+      <div ref={customRef}>
+        <DateRangeCalendar
+          value={ends}
+          min={field.min ?? null}
+          max={field.max ?? null}
+          weekStart={weekStart}
+          testId="rich-range-calendar"
+          onChange={(next) => {
+            const complete = next.start !== null && next.end !== null;
+            if (complete) {
+              setPending(null);
+              onChange(composeDateValue(presets, [next.start!, next.end!]));
+              setOpen(false);
+              return;
+            }
+            setPending(next);
+            setOpen(true);
+          }}
+        />
+      </div>
     </Popover>
   );
 }

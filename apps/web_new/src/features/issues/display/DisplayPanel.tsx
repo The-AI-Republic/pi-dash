@@ -57,35 +57,6 @@ export interface DisplayPanelProps {
 /** The stored grouping id for a dimension row; `null` is the ungrouped row. */
 const NONE_ROW = "\u0000none";
 
-function CheckOption({
-  label,
-  checked,
-  onSelect,
-}: {
-  label: string;
-  checked: boolean;
-  onSelect: () => void;
-}): React.ReactElement {
-  return (
-    <button
-      type="button"
-      aria-pressed={checked}
-      onClick={onSelect}
-      className="flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-3) py-(--space-2) hover:bg-(--subtle)"
-    >
-      <span
-        aria-hidden="true"
-        className={`grid size-3.5 shrink-0 place-items-center rounded-full border ${
-          checked ? "border-(--accent) bg-(--accent) text-(--on-accent)" : "border-(--border)"
-        }`}
-      >
-        {checked ? <Check size={10} strokeWidth={3} /> : null}
-      </span>
-      <span className="text-body truncate text-(--text)">{label}</span>
-    </button>
-  );
-}
-
 function SwitchOption({
   switchKey,
   on,
@@ -272,5 +243,3 @@ export function DisplayPanel({
     </div>
   );
 }
-
-export { CheckOption };

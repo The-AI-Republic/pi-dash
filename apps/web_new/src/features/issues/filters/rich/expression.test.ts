@@ -427,17 +427,26 @@ describe("operators", () => {
     ]);
   });
 
-  it("offers the negation pair and leaves the operator menu unlocked", () => {
+  it("offers the negation pair and leaves a collection operator menu unlocked", () => {
     expect(isOperatorLocked(PRIORITY)).toBe(false);
     expect(isOperatorLocked(START)).toBe(false);
-    expect(operatorOptions(START).map((option) => option.label)).toEqual(["is", "is not", "between", "not between"]);
   });
 
   it("offers a target date both as one day and as a range", () => {
     const target = findField(richFilterFields(), "target_date")!;
     expect(target.defaultOperator).toBe("exact");
     expect(target.operators).toEqual(["exact", "range"]);
-    expect(operatorOptions(target).map((option) => option.label)).toEqual(["is", "is not", "between", "not between"]);
+    expect(operatorOptions(target).map((option) => option.label)).toEqual(["is", "between"]);
+  });
+
+  it("keeps both date fields positive-only so the bare date parameters stay truthful", () => {
+    const start = findField(richFilterFields(), "start_date")!;
+    const target = findField(richFilterFields(), "target_date")!;
+    expect(operatorOptions(start).map((option) => option.label)).toEqual(["is", "between"]);
+    expect(operatorOptions(start).every((option) => !option.negated)).toBe(true);
+    expect(operatorOptions(target).every((option) => !option.negated)).toBe(true);
+    expect(start.allowNegative).toBe(false);
+    expect(target.allowNegative).toBe(false);
   });
 
   it("locks a field that declares no negated form", () => {

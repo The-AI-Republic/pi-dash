@@ -58,6 +58,17 @@ export function orderAppliedByName<T extends NamedRow>(rows: readonly T[], chose
   });
 }
 
+/**
+ * The cycle filter's rows (ISS-089): every project cycle the server lists,
+ * finished ones included, because the dimension marks each lifecycle and
+ * the completed glyph has to be reachable. This differs from the shared
+ * cycle picker, which hides completed cycles, so callers build the rows
+ * here rather than through `selectCycleOptions`.
+ */
+export function cycleFilterRows(cycles: readonly { id: string; name: string }[]): { id: string; name: string }[] {
+  return cycles.map((cycle) => ({ id: cycle.id, name: cycle.name }));
+}
+
 /** Applied labels first, then alphabetical by name. */
 export function orderLabelOptions(labels: readonly Label[], chosen: readonly string[]): Label[] {
   const chosenSet = new Set(chosen);
