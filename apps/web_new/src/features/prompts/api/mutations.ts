@@ -3,7 +3,8 @@
 // See the LICENSE file for details.
 // Prompt section writes (parity/specs/agents.md §6, AGT-024, AGT-025,
 // AGT-027). Upserts persist the draft at one scope, reverts deactivate
-// the override there; both toast and refresh the sections subtree. Save
+// the override there; both toast and refresh the sections subtree and
+// the compiled receipts that assemble it (AGT-028-029). Save
 // failures surface the server's detail inline; revert failures report
 // only the generic message, dropping the server detail.
 
@@ -21,7 +22,7 @@ import {
 import { getAppClient } from "../../../core/api/client.js";
 import { notifySuccess } from "../../../shared/shell/index.js";
 import type { PromptEditorScope, PromptKind } from "../lib/sections.js";
-import { promptSectionKeys } from "./keys.js";
+import { promptReceiptKeys, promptSectionKeys } from "./keys.js";
 
 /** Success title after the workspace default lands. */
 export const WORKSPACE_SAVED_TITLE = "Workspace default saved";
@@ -85,6 +86,7 @@ export function useUpsertPromptSection(workspaceSlug: string) {
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: promptSectionKeys.all(workspaceSlug) });
+      void queryClient.invalidateQueries({ queryKey: promptReceiptKeys.all(workspaceSlug) });
     },
   });
 }
@@ -107,6 +109,7 @@ export function useRevertPromptSection(workspaceSlug: string) {
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: promptSectionKeys.all(workspaceSlug) });
+      void queryClient.invalidateQueries({ queryKey: promptReceiptKeys.all(workspaceSlug) });
     },
   });
 }

@@ -8226,7 +8226,8 @@ export class WebNewDriver implements ParityDriver {
   async promptsOpenTab(tab: "Sections" | "Receipt"): Promise<void> {
     const destination = tab === "Sections" ? this.promptsSectionsNav() : this.promptsReceiptNavigation();
     if (await this.isShown(destination)) return;
-    await this.page.getByRole("button", { name: tab, exact: true }).click();
+    // The tabs carry role=tab, not button; the button role never matches.
+    await this.page.getByRole("tab", { name: tab, exact: true }).click();
     await destination.waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async promptsSectionCards(): Promise<PromptSectionCard[]> {
@@ -8548,7 +8549,8 @@ export class WebNewDriver implements ParityDriver {
 
   async promptsSavedPreviewSubmit(kind: string, target: string): Promise<void> {
     const card = this.promptsReceiptCard(kind);
-    await card.getByRole("textbox").fill(target);
+    // Scope to the preview form so the read never depends on card order.
+    await card.locator("form").getByRole("textbox").fill(target);
     await card.getByRole("button", { name: "Preview", exact: true }).click();
   }
 
@@ -8591,7 +8593,9 @@ export class WebNewDriver implements ParityDriver {
 
   async promptsDraftPreviewSubmit(target: string): Promise<void> {
     const root = this.promptsOpenEditorRoot().first();
-    await root.getByRole("textbox").fill(target);
+    // The open editor also holds the section textarea; the target is the
+    // one textbox inside the preview form.
+    await root.locator("form").getByRole("textbox").fill(target);
     await root.getByRole("button", { name: "Preview draft", exact: true }).click();
   }
 

@@ -13,7 +13,7 @@ import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/index
 import { sessionKeys } from "../../../core/session/queries.js";
 
 const { contractMocks } = vi.hoisted(() => ({
-  contractMocks: { listPromptSections: vi.fn(), getCompiledPrompt: vi.fn() },
+  contractMocks: { listPromptSections: vi.fn(), getCompiledPrompt: vi.fn(), upsertPromptSection: vi.fn() },
 }));
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
@@ -245,6 +245,27 @@ describe("PromptsView", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sections" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "Autonomy" })).toBeInTheDocument());
     expect(screen.queryByLabelText("Prompt section text")).not.toBeInTheDocument();
+  });
+
+  it("re-reads the receipt assemblies after a section save", async () => {
+    mockKinds(
+      () => [row()],
+      () => [row()]
+    );
+    contractMocks.upsertPromptSection.mockResolvedValue({ section_key: "autonomy" });
+    renderView(ROLE_ADMIN);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Autonomy" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("tab", { name: "Receipt" }));
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(3));
+    const compiledCalls = contractMocks.getCompiledPrompt.mock.calls.length;
+    fireEvent.click(screen.getByRole("tab", { name: "Sections" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Autonomy" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Customize for me" }));
+    fireEvent.change(screen.getByLabelText("Prompt section text"), { target: { value: "edited body" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(contractMocks.upsertPromptSection).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("tab", { name: "Receipt" }));
+    await waitFor(() => expect(contractMocks.getCompiledPrompt.mock.calls.length).toBeGreaterThan(compiledCalls));
   });
 
   it("keeps the tabs while the receipt tab loads or fails", async () => {

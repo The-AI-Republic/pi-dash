@@ -24,7 +24,7 @@ vi.mock("../../../shared/shell/index.js", () => ({
 }));
 
 import { notifySuccess } from "../../../shared/shell/index.js";
-import { promptSectionKeys } from "./keys.js";
+import { promptReceiptKeys, promptSectionKeys } from "./keys.js";
 import {
   PERSONAL_SAVED_TITLE,
   REVERT_FAILED_MESSAGE,
@@ -131,6 +131,7 @@ describe("useUpsertPromptSection", () => {
     });
     expect(notifySuccess).toHaveBeenCalledWith(WORKSPACE_SAVED_TITLE, expect.any(String));
     expect(invalidate).toHaveBeenCalledWith({ queryKey: promptSectionKeys.all(SLUG) });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: promptReceiptKeys.all(SLUG) });
   });
 
   it("toasts the personal title at user scope", async () => {
@@ -157,6 +158,7 @@ describe("useRevertPromptSection", () => {
     expect(contractMocks.revertPromptSection).toHaveBeenCalledWith(expect.anything(), SLUG, "autonomy", "workspace");
     expect(notifySuccess).toHaveBeenCalledWith(SECTION_REVERTED_TITLE, expect.stringContaining("workspace"));
     expect(invalidate).toHaveBeenCalledWith({ queryKey: promptSectionKeys.all(SLUG) });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: promptReceiptKeys.all(SLUG) });
   });
 
   it("toasts the personal body at user scope", async () => {

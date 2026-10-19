@@ -168,7 +168,8 @@ function navigationPage(options?: {
       if (role === "heading" && roleOptions?.name === "Prompts") return heading;
       if (role === "navigation" && roleOptions?.name === "Prompt sections") return sections;
       if (role === "navigation" && roleOptions?.name === "Prompt receipt") return receipt;
-      if (role === "button") {
+      // The prompts tabs carry role=tab; a button-role lookup finds nothing.
+      if (role === "button" || role === "tab") {
         const name = String(roleOptions?.name);
         const button = buttons.get(name) ?? new FakeLocator();
         buttons.set(name, button);
@@ -241,6 +242,7 @@ describe("WebNewDriver prompt navigation and cards", () => {
     const driver = new WebNewDriver(switching.page);
     await driver.promptsOpenTab("Receipt");
     expect(switching.buttons.get("Receipt")?.click).toHaveBeenCalledTimes(1);
+    expect(switching.page.getByRole).toHaveBeenCalledWith("tab", { name: "Receipt", exact: true });
     expect(switching.receipt.waitFor).toHaveBeenCalledWith({ timeout: 30_000 });
   });
 
@@ -725,7 +727,13 @@ function receiptCard(options: ReceiptCardOptions): ReceiptCardDouble {
   const card = new FakeLocator({
     attributes: { id: `prompt-receipt-${options.kind}` },
     testIdLocator: (testId) => testIds.get(testId) ?? absent(),
-    locator: (selector) => (selector === "ol > li" ? new FakeLocator({ items }) : absent()),
+    locator: (selector) => {
+      if (selector === "ol > li") return new FakeLocator({ items });
+      if (selector === "form") {
+        return new FakeLocator({ role: (role) => (role === "textbox" ? textbox : absent()) });
+      }
+      return absent();
+    },
     role: (role, roleOptions) => {
       if (role === "button" && roleOptions?.name instanceof RegExp) return header;
       if (role === "button" && roleOptions?.name === "Preview") return submit;
@@ -922,7 +930,13 @@ describe("WebNewDriver draft preview", () => {
     }
     const textarea = new FakeLocator();
     const root = new FakeLocator({
-      locator: (selector) => (selector === "textarea" ? textarea : absent()),
+      locator: (selector) => {
+        if (selector === "textarea") return textarea;
+        if (selector === "form") {
+          return new FakeLocator({ role: (role) => (role === "textbox" ? textbox : absent()) });
+        }
+        return absent();
+      },
       testIdLocator: (testId) => testIds.get(testId) ?? absent(),
       role: (role, roleOptions) => {
         if (role === "textbox") return textbox;
