@@ -99,10 +99,17 @@ const WORKSPACE_MEMBER = {
 };
 const ESTIMATE = {
   id: UUID,
+  workspace: UUID2,
+  project: UUID2,
   name: "Points",
+  description: "",
   type: "points",
   last_used: true,
-  points: [{ id: UUID2, key: 1, value: "1" }],
+  points: [{ id: UUID2, key: 1, value: "1", description: "" }],
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+  created_by: null,
+  updated_by: null,
 };
 const CYCLE = { id: UUID, project_id: UUID2, name: "Sprint 1", is_favorite: false };
 const MODULE = { id: UUID, project_id: UUID2, name: "Auth", status: "backlog", is_favorite: false };
