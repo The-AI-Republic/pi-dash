@@ -113,7 +113,8 @@ describe("the catalogue emits only filter names IssueFilterSet declares", () => 
 });
 
 function sampleValue(field: RichFilterField, operator: string): unknown {
-  if (field.kind === "date_range") return operator === "range" ? ["2026-01-01", "2026-01-31"] : "2026-01-01";
+  if (operator === "range") return ["2026-01-01", "2026-01-31"];
+  if (field.kind === "date_range") return "2026-01-01";
   if (field.kind === "date") return "2026-01-01";
   return field.staticValues?.[0]?.value ?? [UUID];
 }

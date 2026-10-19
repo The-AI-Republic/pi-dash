@@ -158,6 +158,11 @@ describe("parseRichExpression", () => {
     expect(serializeRichExpression(parseRichExpression(stored))).toEqual(stored);
   });
 
+  it("round-trips a target-date range through serialize and parse", () => {
+    const stored = { target_date__range: "2026-01-01,2026-01-31" };
+    expect(serializeRichExpression(parseRichExpression(stored))).toEqual(stored);
+  });
+
   it("round-trips a multi pick through serialize and parse", () => {
     const condition: RichCondition = {
       key: "a",
@@ -411,6 +416,13 @@ describe("operators", () => {
     expect(isOperatorLocked(PRIORITY)).toBe(false);
     expect(isOperatorLocked(START)).toBe(false);
     expect(operatorOptions(START).map((option) => option.label)).toEqual(["is", "is not", "between", "not between"]);
+  });
+
+  it("offers a target date both as one day and as a range", () => {
+    const target = findField(richFilterFields(), "target_date")!;
+    expect(target.defaultOperator).toBe("exact");
+    expect(target.operators).toEqual(["exact", "range"]);
+    expect(operatorOptions(target).map((option) => option.label)).toEqual(["is", "is not", "between", "not between"]);
   });
 
   it("locks a field that declares no negated form", () => {

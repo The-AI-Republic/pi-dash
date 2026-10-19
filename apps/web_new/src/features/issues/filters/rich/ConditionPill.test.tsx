@@ -78,6 +78,15 @@ describe("ConditionPill", () => {
     expect(onChange).toHaveBeenCalledWith({ ...seed(), negated: true });
   });
 
+  it("switches a target date from one day to a range", async () => {
+    const user = userEvent.setup();
+    const target = seed({ property: "target_date", operator: "exact", value: "2026-02-10" });
+    const { onChange } = renderPill(target);
+    await user.click(screen.getByRole("button", { name: /is$/ }));
+    await user.click(await screen.findByRole("option", { name: "between" }));
+    expect(onChange).toHaveBeenCalledWith({ ...target, operator: "range", value: ["2026-02-10", null] });
+  });
+
   it("re-picks the property and resets operator and value to the field default", async () => {
     const user = userEvent.setup();
     const { onChange } = renderPill(seed());

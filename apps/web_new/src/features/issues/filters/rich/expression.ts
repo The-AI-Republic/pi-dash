@@ -586,7 +586,8 @@ function catalogField(input: {
  * Value-input fields (parity/specs/issues.md §9, ISS-100–103). Each entry
  * carries the kind its value slot renders: searchable multi picks over the
  * project (assignee, creator, mentions, labels, project, cycle, module),
- * one bounded date (target date, no clear control) and a bounded date range
+ * one bounded date (target date, no clear control, offered as both a single
+ * day and a two-end range like the old filter) and a bounded date range
  * (start date, which also offers the plain is lookup the oracle drives).
  * Stems are the filter set's field names; entity-backed fields resolve
  * their labels from the shared pickers, so reads stay lazy on open.
@@ -596,7 +597,7 @@ export function valueInputFields(): RichFilterField[] {
     catalogField({ stem: "project_id", label: "Project", kind: "multi", source: "projects" }),
     catalogField({ stem: "cycle_id", label: "Cycle", kind: "multi", source: "cycles" }),
     catalogField({ stem: "module_id", label: "Module", kind: "multi", source: "modules" }),
-    catalogField({ stem: "target_date", label: "Target date", kind: "date", operators: ["exact"] }),
+    catalogField({ stem: "target_date", label: "Target date", kind: "date", operators: ["exact", "range"] }),
     catalogField({ stem: "start_date", label: "Start date", kind: "date_range", operators: ["exact", "range"] }),
   ];
 }

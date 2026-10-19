@@ -1170,4 +1170,17 @@ describe("ValueSlot date editors", () => {
     expect(screen.getByTestId("rich-value-trigger").parentElement).not.toHaveAttribute("data-incomplete", "true");
     expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument();
   });
+
+  it("reopens a stored target-date range as both ends", () => {
+    const [stored] = parseRichExpression({ target_date__range: "2026-02-10,2026-02-12" });
+    expect(stored).toMatchObject({ property: "target_date", operator: "range", value: ["2026-02-10", "2026-02-12"] });
+    render(
+      wrap(
+        <ValueSlot workspaceSlug="acme" projectId={PROJECT} field={TARGET} condition={stored!} onChange={() => {}} />
+      )
+    );
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10 → 2026-02-12");
+    expect(screen.getByTestId("rich-value-trigger").parentElement).not.toHaveAttribute("data-incomplete", "true");
+    expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument();
+  });
 });
