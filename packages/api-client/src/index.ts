@@ -454,6 +454,63 @@ export { OpenhubAppSettings, Profile, agentToolsEnabled, getProfile, updateProfi
 export type { ProfilePatch } from "./contracts/profile.js";
 export { MeTimezone, TimezoneEntry, TimezoneList, listTimezones, updateMyTimezone } from "./contracts/locale.js";
 export {
+  ProfileCycleRef,
+  ProfilePriorityBucket,
+  ProfileStateBucket,
+  UserActivityPage,
+  UserProfileIdentity,
+  UserProfileProject,
+  UserProfileSegregation,
+  UserProfileStats,
+  exportUserProfileActivity,
+  getUserProfileActivity,
+  getUserProfileSegregation,
+  getUserProfileStats,
+  listGroupedUserProfileIssues,
+  listMyActivities,
+  listUserProfileIssues,
+} from "./contracts/profile-activity.js";
+export type {
+  ActivityExport,
+  ActivityQuery,
+  ProfileIssuesQuery,
+  ProfileOwnership,
+} from "./contracts/profile-activity.js";
+export {
+  EmailCodeResult,
+  PasswordChangeResult,
+  changeEmail,
+  changePassword,
+  generateEmailChangeCode,
+} from "./contracts/account-settings.js";
+export type { PasswordChangeInput } from "./contracts/account-settings.js";
+export {
+  ApiToken,
+  ApiTokenList,
+  CreatedApiToken,
+  createApiToken,
+  deleteApiToken,
+  getApiToken,
+  listApiTokens,
+} from "./contracts/api-tokens.js";
+export type { ApiTokenInput } from "./contracts/api-tokens.js";
+export {
+  UpkeepJob,
+  UpkeepSettings,
+  getUpkeepSettings,
+  setUpkeepEnabled,
+  setUpkeepJobEnabled,
+} from "./contracts/upkeep.js";
+export {
+  GithubAppInstallStart,
+  GithubAppInstallation,
+  GithubAppStatus,
+  GithubAppWorkspace,
+  getGithubAppStatus,
+  refreshGithubAppInstallation,
+  startGithubAppInstall,
+} from "./contracts/integrations.js";
+export {
   ASSISTANT_CONNECTION_KINDS,
   CREDENTIAL_LANES,
   OPENAI_LOGIN_STATUSES,
