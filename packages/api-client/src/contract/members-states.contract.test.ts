@@ -32,9 +32,9 @@ async function seededProjectId(client: ApiClient): Promise<string> {
 }
 
 /**
- * Resolve the fixture user id through the workspace directory. The member
- * list read answers user ids, not membership ids, so resolve the roster
- * membership separately for the remove call.
+ * Resolve the fixture user id through the workspace directory. The project
+ * member list answers user ids too, so the remove path looks the fixture's
+ * membership id up in that list right before deleting.
  */
 async function fixtureMemberId(client: ApiClient): Promise<{ userId: string }> {
   const roster = await listWorkspaceRoster(client, CONTRACT_WORKSPACE);
