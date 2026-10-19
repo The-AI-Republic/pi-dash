@@ -207,13 +207,16 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
     if (page.data !== undefined) dispatch({ type: "page", rows: page.data });
   }, [page.data]);
 
-  const markTurn = React.useCallback((next: "started" | "terminal", turnId?: string) => {
-    setTerminalSeen(next === "terminal");
-    if (next === "started") {
-      turnRef.current = turnId ?? null;
-      setStartedAt(Date.now());
-    }
-    setBusy(next === "started");
+  const markStarted = React.useCallback((turnId: string) => {
+    setTerminalSeen(false);
+    turnRef.current = turnId;
+    setStartedAt(Date.now());
+    setBusy(true);
+  }, []);
+
+  const markTerminal = React.useCallback(() => {
+    setTerminalSeen(true);
+    setBusy(false);
   }, []);
 
   // Lifecycle events carry the turn they describe. The channel replays from
@@ -231,7 +234,7 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
 
   React.useEffect(() => {
     const subscription = subscribeAssistantEvents(workspaceSlug, threadId, 0, {
-      onEvent: (event) => {
+      onEvent: (event: AssistantEvent) => {
         switch (event.kind) {
           case "turn_started": {
             const turnId = (event.payload as { turn_id: string }).turn_id;
@@ -243,7 +246,7 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
             const foreign = turnRef.current !== null && turnId !== turnRef.current && busy;
             if (replay || foreign) break;
             startSeqRef.current = event.seq;
-            markTurn("started", turnId);
+            markStarted(turnId);
             break;
           }
           case "assistant_delta":
@@ -258,14 +261,14 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
           case "turn_failed":
             if (!followsTurn(event)) break;
             setError(failureDetail(event));
-            markTurn("terminal");
+            markTerminal();
             refresh();
             break;
           case "turn_completed":
           case "turn_cancelled":
             if (!followsTurn(event)) break;
             setError(null);
-            markTurn("terminal");
+            markTerminal();
             refresh();
             break;
           default:
@@ -274,7 +277,7 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
       },
     });
     return () => subscription.close();
-  }, [followsTurn, markTurn, refresh, threadId, workspaceSlug]);
+  }, [followsTurn, markStarted, markTerminal, refresh, threadId, workspaceSlug]);
 
   const sendMutation = useSendMessage();
   const stopMutation = useStopTurn();
@@ -290,7 +293,7 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
         {
           onSuccess: (answer) => {
             dispatch({ type: "message", message: answer.message });
-            markTurn("started", answer.turn.id);
+            markStarted(answer.turn.id);
             refresh();
           },
           onError: (failure) => {
@@ -300,9 +303,11 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
         }
       );
     },
-    [markTurn, refresh, sendMutation, threadId, workspaceSlug]
+    [markStarted, refresh, sendMutation, threadId, workspaceSlug]
   );
 
+  // The typed send has nowhere to report a failure; the inline error line
+  // already carries it, so the callback is simply absent.
   const send = React.useCallback((content: string) => deliver(content), [deliver]);
   const sendHandoff = React.useCallback(
     (content: string, onError: (failure: unknown) => void) => deliver(content, onError),

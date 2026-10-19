@@ -56,6 +56,8 @@ interface SetupOptions {
   active?: boolean;
   /** Hold each list read until the test resolves it. */
   holdListReads?: boolean;
+  /** Fail every send with this code instead of queueing a turn. */
+  sendFailure?: string;
 }
 
 function threadList(active: boolean) {
@@ -102,6 +104,14 @@ function setup(initial: AssistantMessage[], options: SetupOptions = {}) {
     }
     if (path.endsWith("/messages/") && init.method === "POST") {
       sends += 1;
+      if (options.sendFailure !== undefined) {
+        return {
+          status: 409,
+          url,
+          headers: { get: () => "application/json" },
+          text: async () => JSON.stringify({ error: options.sendFailure }),
+        };
+      }
       return {
         status: 202,
         url,
@@ -278,6 +288,68 @@ describe("useAssistantChat", () => {
       })
     );
     await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.running).toBe(true);
+  });
+
+  it("ignores a replayed start at a sequence already seen", async () => {
+    const { result } = setup([row({ id: "a", role: "assistant", seq: 2, content: "done" })]);
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 30,
+        thread: THREAD_ID,
+        message: null,
+        seq: 30,
+        kind: "turn_started",
+        payload: { turn_id: "turn" },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await waitFor(() => expect(result.current.running).toBe(true));
+    // Reconnect: the same start frame is served again.
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 30,
+        thread: THREAD_ID,
+        message: null,
+        seq: 30,
+        kind: "turn_started",
+        payload: { turn_id: "turn" },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.running).toBe(true);
+  });
+
+  it("ignores a failure event that names another turn", async () => {
+    const { result } = setup([row({ id: "u", role: "user", seq: 1 })], { active: true });
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 31,
+        thread: THREAD_ID,
+        message: null,
+        seq: 31,
+        kind: "turn_started",
+        payload: { turn_id: "35000000-0000-4000-8000-000000000000" },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 32,
+        thread: THREAD_ID,
+        message: null,
+        seq: 32,
+        kind: "turn_failed",
+        payload: { turn_id: "older-turn", error_code: "provider_error", detail: "Old failure." },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.error).toBeNull();
     expect(result.current.running).toBe(true);
   });
 
@@ -559,6 +631,37 @@ describe("useAssistantChat", () => {
     result.current.send("   ");
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(sends()).toBe(0);
+  });
+
+  it("reports a handoff failure to its caller while the inline line stays", async () => {
+    const { result, sends } = setup([row({ id: "a", role: "assistant", seq: 2, content: "done" })], {
+      sendFailure: "turn_active",
+    });
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    const onError = vi.fn();
+    act(() => result.current.sendHandoff("hello", onError));
+    await waitFor(() => expect(sends()).toBe(1));
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(result.current.error).toBe("turn_active");
+  });
+
+  it("marks the transcript loaded even when the page read fails", async () => {
+    createAppClient("https://api.test", (async (url: string) => ({
+      status: 500,
+      url,
+      headers: { get: () => "application/json" },
+      text: async () => JSON.stringify({ error: "boom" }),
+    })) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useAssistantChat("acme", THREAD_ID), {
+      wrapper: ({ children }: { children: React.ReactNode }) => (
+        <QueryClientProvider client={queryClient}>
+          <React.Fragment>{children}</React.Fragment>
+        </QueryClientProvider>
+      ),
+    });
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    expect(result.current.messages).toEqual([]);
   });
 
   it("polls the transcript every second while a turn is in flight", async () => {
