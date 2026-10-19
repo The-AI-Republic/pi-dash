@@ -1,64 +1,52 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Saved project view (parity/specs/issues.md §21, ISS-104). This is the
-// minimal issues-owned list a saved view opens into: it reads the view
-// record, applies its stored expression to the project list, renders the
-// layouts the issues screen offers (driven by the view's own stored display
-// settings, not the personal ones) and hands the record to the filter row
-// so Save as and Update view act on it. The views area owns the full views
-// surface and replaces this host when it lands.
+// Saved project view route (parity/specs/issues.md §21, ISS-104). Thin so
+// the router's eager import of this file stays cheap: the search schema is
+// shared with the issues screen, the record and list reads run on visit in
+// the preload module, and the screen itself, its stored-expression modules
+// and the filter row ride a lazy chunk (Quality gates: initial JS). The
+// views area owns the full views surface and replaces this host when it
+// lands.
 
-import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Button } from "@pidash/kit";
 import * as React from "react";
 
 import { isProjectGateError } from "../../../../../../../features/auth/index.js";
-import {
-  DisplayControl,
-  IssuesLayoutRoot,
-  ListSkeleton,
-  issuesQueryOptions,
-  parseIssueSearch,
-  parseDisplayPrefs,
-  mergeDisplayPrefs,
-  type LayoutKind,
-} from "../../../../../../../features/issues/index.js";
-import type { RichFilterBuilderParts } from "../../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
-import { GanttTimeline } from "../../../../../../../features/issues/gantt/GanttTimeline.js";
-import {
-  ResolvedAnalyticsEntry,
-  ResolvedIssueList,
-  loadIssueListLeaves,
-  primeIssueListLeaves,
-} from "../../../../../../../features/issues/components/lazyLeaves.js";
-import { orderByFromDisplayFilters } from "../../../../../../../features/issues/prefs/prefsQuery.js";
-import { projectViewQueryOptions } from "../../../../../../../features/issues/filters/rich/savedViewQuery.js";
-import { viewExpression } from "../../../../../../../features/issues/filters/rich/views.js";
+import { ListSkeleton, parseIssueSearch } from "../../../../../../../features/issues/index.js";
+import type { SavedViewReadInput } from "../../../../../../../features/issues/filters/rich/savedViewPreload.js";
 import { projectsQueryOptions } from "../../../../../../../features/projects/index.js";
 
-// Start the leaf chunk with the route module, so the warm start does not
-// serialize a round trip behind the data reads; `beforeLoad` awaits it.
-primeIssueListLeaves();
+type ScreenModule = typeof import("./SavedViewScreen.js");
 
-const LazyIssueFilters = React.lazy(() => import("../../../../../../../features/issues/filters/rich/IssueFilters.js"));
+let request: Promise<ScreenModule> | null = null;
 
-function ViewIssuesEmptyState(): React.ReactElement {
-  return (
-    <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
-      <h2 className="text-h3 text-(--text)">No issues yet</h2>
-      <p className="text-body text-(--text-muted)">New issues in this project will appear here.</p>
-    </section>
-  );
+// Start the screen chunk with the route module: `beforeLoad` awaits the
+// same request beside the view's reads, so the visit does not serialize a
+// round trip behind them. A failure is left for `beforeLoad` to report,
+// which turns it into the route's load error.
+function startSavedView(): Promise<ScreenModule> {
+  request ??= import("./SavedViewScreen.js");
+  return request;
 }
 
-function ViewIssuesNoMatchState(): React.ReactElement {
+void startSavedView().catch(() => undefined);
+
+// The body still goes through a lazy boundary: it is the same cached
+// request, so a visit that ran `beforeLoad` resolves without a second
+// fetch, and a direct render (tests, an unexpected entry) shows the route
+// skeleton instead of a blank shell.
+const LazySavedViewScreen = React.lazy(() => startSavedView().then((module) => ({ default: module.SavedViewScreen })));
+
+function SavedViewRouteComponent(): React.ReactElement {
+  const params = Route.useParams() as SavedViewReadInput;
+  const search = Route.useSearch();
+  const context = Route.useRouteContext();
   return (
-    <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
-      <h2 className="text-h3 text-(--text)">No matching issues</h2>
-      <p className="text-body text-(--text-muted)">No issues match the current filters.</p>
-    </section>
+    <React.Suspense fallback={<ListSkeleton />}>
+      <LazySavedViewScreen params={params} search={search} context={context} />
+    </React.Suspense>
   );
 }
 
@@ -66,24 +54,10 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
   beforeLoad: async ({ context, params, search }) => {
     try {
-      const view = await context.queryClient.ensureQueryData(
-        projectViewQueryOptions(context.apiClient, params.ws, params.projectId, params.viewId)
-      );
-      // The view carries its own order, so the list query never reads the
-      // personal preferences for this screen.
-      await context.queryClient.ensureQueryData(
-        issuesQueryOptions(
-          context.apiClient,
-          params.ws,
-          params.projectId,
-          search,
-          viewExpression(view),
-          orderByFromDisplayFilters(view.display_filters)
-        )
-      );
-      // The list and analytics leaves ride their own chunk (Quality gates);
-      // await it with the data so the first commit is the screen itself.
-      await loadIssueListLeaves();
+      // The screen chunk also carries the view's reads, so the first
+      // commit is the screen with its data.
+      const { prefetchSavedView } = await startSavedView();
+      await prefetchSavedView(context.queryClient, context.apiClient, params, search);
     } catch (error) {
       if (!isProjectGateError(error)) throw error;
     }
@@ -107,125 +81,5 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
       </section>
     );
   },
-  component: function SavedViewScreen() {
-    const params = Route.useParams();
-    const search = Route.useSearch();
-    const context = Route.useRouteContext();
-
-    const { data: view } = useSuspenseQuery(
-      projectViewQueryOptions(context.apiClient, params.ws, params.projectId, params.viewId)
-    );
-    const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, params.ws));
-    const project = projects.find((entry) => entry.id === params.projectId) ?? null;
-    // The layout root renders from these settings rather than the personal
-    // record, so the view opens in the layout it was saved with. Display
-    // switches edit this copy; Update view persists it.
-    const storedDisplay = React.useMemo(
-      () => parseDisplayPrefs(view.display_filters, view.display_properties),
-      [view.display_filters, view.display_properties]
-    );
-    const [viewDisplay, setViewDisplay] = React.useState(storedDisplay);
-    React.useEffect(() => {
-      setViewDisplay(storedDisplay);
-    }, [storedDisplay]);
-    const { data: issues } = useSuspenseQuery(
-      issuesQueryOptions(
-        context.apiClient,
-        params.ws,
-        params.projectId,
-        search,
-        viewExpression(view),
-        viewDisplay.orderBy
-      )
-    );
-
-    if (project === null) {
-      return (
-        <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
-          <h2 className="text-h3 text-(--text)">Project not found</h2>
-          <p className="text-body text-(--text-muted)">Pick another project from the sidebar.</p>
-        </section>
-      );
-    }
-
-    const offered: readonly LayoutKind[] = ["list", "gantt_chart"];
-    const displayControl = (
-      <DisplayControl
-        workspaceSlug={params.ws}
-        entity={{ scope: "project", projectId: params.projectId }}
-        offered={offered}
-        hideCycle={!project.cycle_view}
-        hideModule={!project.module_view}
-        display={viewDisplay}
-        onDisplayChange={setViewDisplay}
-      />
-    );
-    const analytics = (
-      <ResolvedAnalyticsEntry
-        workspaceSlug={params.ws}
-        projectId={params.projectId}
-        projectName={project.name}
-        rows={issues.results}
-        totalCount={issues.total_count}
-      />
-    );
-    const renderWithFilters = (richFilter: RichFilterBuilderParts | null): React.ReactElement => (
-      <IssuesLayoutRoot
-        workspaceSlug={params.ws}
-        entity={{ scope: "project", projectId: params.projectId }}
-        title={view.name}
-        totalCount={issues.total_count}
-        resultCount={issues.results.length}
-        offered={offered}
-        display={viewDisplay}
-        onDisplayChange={(layout) => setViewDisplay((current) => mergeDisplayPrefs(current, { layout }))}
-        renderLayout={(layout, prefs) =>
-          layout === "gantt_chart" ? (
-            <GanttTimeline
-              workspaceSlug={params.ws}
-              projectId={params.projectId}
-              projectIdentifier={project.identifier}
-              issues={issues.results}
-              totalCount={issues.total_count}
-              prefs={prefs}
-            />
-          ) : (
-            <ResolvedIssueList
-              issues={issues.results}
-              projectIdentifier={project.identifier}
-              layout={search.layout ?? "list"}
-            />
-          )
-        }
-        emptyState={<ViewIssuesEmptyState />}
-        noMatchState={<ViewIssuesNoMatchState />}
-        headerActions={displayControl}
-        displayControl={displayControl}
-        filterControl={richFilter?.control}
-        filterRow={richFilter?.row}
-        analyticsControl={analytics}
-      />
-    );
-    return (
-      <React.Suspense fallback={renderWithFilters(null)}>
-        <LazyIssueFilters
-          workspaceSlug={params.ws}
-          projectId={params.projectId}
-          hideCycle={!project.cycle_view}
-          hideModule={!project.module_view}
-          viewsEnabled={project.issue_views_view}
-          view={view}
-          viewDisplay={viewDisplay}
-          onViewUpdated={(stored) => {
-            context.queryClient.setQueryData(
-              projectViewQueryOptions(context.apiClient, params.ws, params.projectId, params.viewId).queryKey,
-              stored
-            );
-          }}
-        >
-          {renderWithFilters}
-        </LazyIssueFilters>
-      </React.Suspense>
-    );
-  },
+  component: SavedViewRouteComponent,
 });

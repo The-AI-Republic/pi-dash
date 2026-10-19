@@ -4,7 +4,9 @@
 // Timeline for issues lists that render outside the project timeline route
 // (e.g. a saved view opened on the timeline layout). The chart math, header,
 // sidebar and full-screen portal are a heavy leaf, so the route chunk only
-// carries this lazy boundary and the skeleton fallback.
+// carries this lazy boundary and the skeleton fallback. The boundary itself
+// stays out of the eager route chain: both issue routes request it through
+// the lazy leaves module, and the skeleton shows while its chunk lands.
 
 import type { IssueListItem } from "@pidash/api-client";
 import * as React from "react";
