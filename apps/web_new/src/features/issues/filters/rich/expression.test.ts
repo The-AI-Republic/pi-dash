@@ -544,6 +544,12 @@ describe("value completeness and labels", () => {
     expect(valueLabel({ ...dateField, kind: "date" }, "2026-01-01")).toBe("2026-01-01");
     expect(valueLabel({ ...START, kind: "date_range" }, ["2026-01-01", "2026-01-02"])).toBe("2026-01-01 → 2026-01-02");
     expect(valueLabel({ ...START, kind: "date_range" }, "2026-01-01")).toBeNull();
+    // A custom day carries its direction, and a custom pair reads either
+    // from a plain comma string or from the array the slot writes.
+    expect(valueLabel(START, "2026-01-01;after")).toBe("After 2026-01-01");
+    expect(valueLabel(START, "2026-01-31;before")).toBe("Before 2026-01-31");
+    expect(valueLabel(START, ["2026-01-01", "2026-01-31"])).toBe("2026-01-01 → 2026-01-31");
+    expect(valueLabel(START, "2026-01-01,2026-01-31")).toBe("2026-01-01 → 2026-01-31");
   });
 });
 

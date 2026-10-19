@@ -50,12 +50,19 @@ export interface NamedRow {
  */
 export function orderAppliedByName<T extends NamedRow>(rows: readonly T[], chosen: readonly string[]): T[] {
   const chosenSet = new Set(chosen);
-  return [...rows].sort((left, right) => {
-    const leftApplied = chosenSet.has(left.id);
-    const rightApplied = chosenSet.has(right.id);
-    if (leftApplied !== rightApplied) return leftApplied ? -1 : 1;
-    return left.name.toLowerCase().localeCompare(right.name.toLowerCase());
-  });
+  // Each name lowers once and compares once. Lowering both sides of every
+  // comparison makes the comparator contradictory for names that fold to
+  // the same key (both directions read as "greater"), which leaves the
+  // order engine-dependent.
+  const keyed = rows.map((row) => ({ row, key: row.name.toLocaleLowerCase() }));
+  return keyed
+    .sort((left, right) => {
+      const leftApplied = chosenSet.has(left.row.id);
+      const rightApplied = chosenSet.has(right.row.id);
+      if (leftApplied !== rightApplied) return leftApplied ? -1 : 1;
+      return left.key.localeCompare(right.key);
+    })
+    .map(({ row }) => row);
 }
 
 /**

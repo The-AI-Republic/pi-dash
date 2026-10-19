@@ -565,8 +565,14 @@ export function isValueCompleteForOperator(field: RichFilterField, operator: str
 
 /** Human label for one stored value, or null when the entity no longer resolves. */
 export function valueLabel(field: RichFilterField, value: unknown): string | null {
-  // A relative window has no calendar form; presets spell their own name.
-  if (dateEntries(value).some((entry) => isDatePreset(entry))) return dateValueLabel(value);
+  // Relative windows and directed custom days spell their own names, and a
+  // custom pair keeps the arrow between its ends. A lone bare day under a
+  // range field stays unresolvable rather than reading as a complete range.
+  if (field.kind === "date" || field.kind === "date_range") {
+    const entries = dateEntries(value);
+    const directed = entries.some((entry) => entry.includes(";") && !isDatePreset(entry));
+    if (entries.some((entry) => isDatePreset(entry)) || directed || entries.length > 1) return dateValueLabel(value);
+  }
   if (field.kind === "date_range") {
     return Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && typeof value[1] === "string"
       ? `${value[0]} → ${value[1]}`

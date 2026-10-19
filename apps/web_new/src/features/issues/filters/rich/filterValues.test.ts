@@ -96,6 +96,7 @@ describe("orderAppliedByName", () => {
       { id: "a", name: "same" },
     ];
     expect(orderAppliedByName(rows, []).map((row) => row.id)).toEqual(["b", "a"]);
+    expect(orderAppliedByName(rows, ["a"]).map((row) => row.id)).toEqual(["a", "b"]);
     expect(rows.map((row) => row.id)).toEqual(["b", "a"]);
   });
 
