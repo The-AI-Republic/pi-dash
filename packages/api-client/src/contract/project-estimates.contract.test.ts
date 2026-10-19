@@ -8,7 +8,8 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../errors.js";
 import { createEstimate, deleteEstimate, listProjectEstimates, selectActiveEstimate } from "../contracts/estimates.js";
-import { listProjects } from "../contracts/projects.js";
+import { getProject, listProjects } from "../contracts/projects.js";
+import { updateProject } from "../contracts/project-management.js";
 import { CONTRACT_PROJECT_IDENTIFIER, CONTRACT_WORKSPACE, contractEnabled, sharedSignedIn } from "./setup.js";
 import type { ApiClient } from "../client.js";
 
@@ -77,6 +78,24 @@ describe.skipIf(!contractEnabled)("project estimate write contract", () => {
       expect(created.type).toBe("categories");
       expect(created.points).toEqual([]);
     } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("sets and clears the project's active estimate through the project update", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const name = `Contract switch ${Date.now().toString(36)}`;
+    const created = await createEstimate(client, CONTRACT_WORKSPACE, projectId, { name, type: "points" });
+    try {
+      const enabled = await updateProject(client, CONTRACT_WORKSPACE, projectId, { estimate: created.id });
+      expect(enabled.estimate).toBe(created.id);
+      const readBack = await getProject(client, CONTRACT_WORKSPACE, projectId);
+      expect(readBack.estimate).toBe(created.id);
+      const cleared = await updateProject(client, CONTRACT_WORKSPACE, projectId, { estimate: null });
+      expect(cleared.estimate).toBeNull();
+    } finally {
+      await updateProject(client, CONTRACT_WORKSPACE, projectId, { estimate: null }).catch(() => 0);
       await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
     }
   });

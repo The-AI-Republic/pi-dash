@@ -2243,6 +2243,22 @@ describe("project lifecycle contracts", () => {
     expect(patchCall?.init.body).toBe(JSON.stringify({ archive_in: 1, close_in: 2, default_state: UUID }));
   });
 
+  it("patches the active-estimate reference the enable switch owns", async () => {
+    const transport = stubbedApi(() => ({ status: 200, body: { ...details, estimate: UUID } }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const enabled = await updateProject(client, "acme", UUID2, { estimate: UUID });
+    expect(enabled.estimate).toBe(UUID);
+    const enableCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(enableCall?.init.body).toBe(JSON.stringify({ estimate: UUID }));
+
+    const clearTransport = stubbedApi(() => ({ status: 200, body: { ...details, estimate: null } }));
+    const clearClient = createClient({ baseUrl: "https://api.test", transport: clearTransport });
+    const cleared = await updateProject(clearClient, "acme", UUID2, { estimate: null });
+    expect(cleared.estimate).toBeNull();
+    const clearCall = clearTransport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(clearCall?.init.body).toBe(JSON.stringify({ estimate: null }));
+  });
+
   it("checks identifier availability and parses matches", async () => {
     const check = { exists: 1, identifiers: [{ id: 7, name: "CT", project: UUID2 }] };
     const transport = stubbedApi(() => ({ status: 200, body: check }));

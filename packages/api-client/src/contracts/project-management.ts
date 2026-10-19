@@ -63,6 +63,11 @@ export interface ProjectUpdateInput {
   close_in?: number;
   /** Cancelled-state target for idle closes; a state of this project. */
   default_state?: string | null;
+  /**
+   * The project's active estimate system (PSET-049's enable switch): an
+   * estimate id of this project turns estimation on, null turns it off.
+   */
+  estimate?: string | null;
 }
 
 /**
