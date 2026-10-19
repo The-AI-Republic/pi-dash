@@ -89,6 +89,9 @@ export function SidebarProperties({
     enabled: issue.created_by !== null || issue.assignee_ids.length > 0,
   });
   const creator = selectCreator(directory.data, issue.created_by);
+  // The directory read names the creator; until it lands, the row shows a
+  // neutral placeholder rather than an "unknown" verdict.
+  const creatorPending = issue.created_by !== null && directory.isPending;
   const selection = selectExecutionSelection(issue, project);
 
   return (
@@ -135,7 +138,7 @@ export function SidebarProperties({
           onChange={(level) => update.mutate({ priority: level })}
         />
       </SidebarRow>
-      <CreatedByRow creator={creator} />
+      <CreatedByRow creator={creator} pending={creatorPending} />
     </div>
   );
 }

@@ -7,7 +7,7 @@
 
 export { CreatedByRow } from "./CreatedByRow.js";
 export type { CreatedByRowProps } from "./CreatedByRow.js";
-export { PRODUCT_CREATOR_NAME, UNKNOWN_CREATOR_NAME, selectCreator } from "./creator.js";
+export { PRODUCT_CREATOR_NAME, UNKNOWN_CREATOR_NAME, isIntakeBot, selectCreator } from "./creator.js";
 export type { CreatorDisplay } from "./creator.js";
 export { IssuePropertiesSidebar, PROPERTIES_LOAD_FAILED } from "./IssuePropertiesSidebar.js";
 export type { IssuePropertiesSidebarProps, SidebarProject } from "./IssuePropertiesSidebar.js";

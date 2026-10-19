@@ -18,7 +18,7 @@ import { workspaceMembersQueryOptions } from "../../../projects/index.js";
 import { issueKeys } from "../../api/keys.js";
 import { issueDetailQueryOptions } from "../../api/queries.js";
 import { CreatedByRow } from "./CreatedByRow.js";
-import { PRODUCT_CREATOR_NAME, UNKNOWN_CREATOR_NAME, selectCreator } from "./creator.js";
+import { PRODUCT_CREATOR_NAME, UNKNOWN_CREATOR_NAME, isIntakeBot, selectCreator } from "./creator.js";
 import { IssuePropertiesSidebar, PROPERTIES_LOAD_FAILED } from "./IssuePropertiesSidebar.js";
 import { SidebarProperties, SidebarPropertiesSkeleton, selectExecutionSelection } from "./SidebarProperties.js";
 import { SidebarRow } from "./SidebarRow.js";
@@ -34,6 +34,7 @@ const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
 const OTHER_ISSUE = "923e4567-e89b-12d3-a456-426614174009";
 const ADA = "323e4567-e89b-12d3-a456-426614174002";
 const BOT = "423e4567-e89b-12d3-a456-426614174003";
+const AGENT_BOT = "433e4567-e89b-12d3-a456-426614174003";
 const STARRED = "523e4567-e89b-12d3-a456-426614174004";
 const DONE_STATE = "623e4567-e89b-12d3-a456-426614174005";
 const STARTED_STATE = "723e4567-e89b-12d3-a456-426614174006";
@@ -181,8 +182,22 @@ const DIRECTORY = [
       first_name: "Intake",
       last_name: "",
       avatar: "",
+      avatar_url: "https://cdn.test/agent.png",
+      display_name: "acme-intake",
+      is_bot: true,
+    },
+    role: 15,
+    is_active: true,
+  },
+  {
+    id: "c43e4567-e89b-12d3-a456-42661417400b",
+    member: {
+      id: AGENT_BOT,
+      first_name: "Agent",
+      last_name: "Runner",
+      avatar: "",
       avatar_url: null,
-      display_name: "Intake Bot",
+      display_name: "Agent Runner",
       is_bot: true,
     },
     role: 15,
@@ -237,6 +252,8 @@ interface HarnessOptions {
   directory?: unknown;
   /** Keeps the issue PATCH open until the returned release runs. */
   holdPatch?: boolean;
+  /** Keeps the workspace directory read open until the returned release runs. */
+  holdDirectory?: boolean;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -246,6 +263,12 @@ function harness(options: HarnessOptions = {}) {
   const patchGate = options.holdPatch
     ? new Promise<void>((resolve) => {
         releasePatch = resolve;
+      })
+    : null;
+  let releaseDirectory: (() => void) | null = null;
+  const directoryGate = options.holdDirectory
+    ? new Promise<void>((resolve) => {
+        releaseDirectory = resolve;
       })
     : null;
   const conversation = async (url: string, init: TransportInit) => {
@@ -314,6 +337,7 @@ function harness(options: HarnessOptions = {}) {
       };
     }
     if (url.endsWith(`/workspaces/${SLUG}/members/`)) {
+      if (directoryGate !== null) await directoryGate;
       return {
         status: 200,
         url,
@@ -327,7 +351,14 @@ function harness(options: HarnessOptions = {}) {
   setSessionClient(client);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(["session", "me"], ME_PAYLOAD);
-  return { client, queryClient, writes, reads, releasePatch: () => releasePatch?.() };
+  return {
+    client,
+    queryClient,
+    writes,
+    reads,
+    releasePatch: () => releasePatch?.(),
+    releaseDirectory: () => releaseDirectory?.(),
+  };
 }
 
 function wrap(node: React.ReactElement, queryClient: QueryClient) {
@@ -363,6 +394,17 @@ describe("creator display", () => {
     expect(selectCreator(DIRECTORY, BOT)).toEqual({ name: PRODUCT_CREATOR_NAME, avatarUrl: null, masked: true });
   });
 
+  it("keeps a non-intake bot's own name and avatar", () => {
+    expect(selectCreator(DIRECTORY, AGENT_BOT)).toEqual({ name: "Agent Runner", avatarUrl: null, masked: false });
+  });
+
+  it("recognises the intake bot by its display-name marker only", () => {
+    expect(isIntakeBot({ display_name: "acme-intake" })).toBe(true);
+    expect(isIntakeBot({ display_name: "Acme-Intake" })).toBe(true);
+    expect(isIntakeBot({ display_name: "Intake Bot" })).toBe(false);
+    expect(isIntakeBot({ display_name: "Agent Runner" })).toBe(false);
+  });
+
   it("falls back for a creator outside the directory and stays empty without one", () => {
     expect(selectCreator(DIRECTORY, STARRED)).toEqual({ name: UNKNOWN_CREATOR_NAME, avatarUrl: null, masked: false });
     expect(selectCreator(undefined, ADA)).toEqual({ name: UNKNOWN_CREATOR_NAME, avatarUrl: null, masked: false });
@@ -380,6 +422,18 @@ describe("creator display", () => {
       )
     );
     expect(within(row("Created by")).getByRole("img", { name: "Ada L" })).toHaveTextContent("AL");
+  });
+
+  it("renders a neutral placeholder while pending and the name once settled", () => {
+    const creator = { name: "Ada L", avatarUrl: "https://cdn.test/ada.png", masked: false };
+    const { rerender } = wrap(<CreatedByRow creator={creator} pending />, new QueryClient());
+    expect(row("Created by")).toBeInTheDocument();
+    expect(row("Created by")).not.toHaveTextContent("Ada L");
+    expect(within(row("Created by")).queryByRole("img")).not.toBeInTheDocument();
+    rerender(
+      React.createElement(QueryClientProvider, { client: new QueryClient() }, <CreatedByRow creator={creator} />)
+    );
+    expect(row("Created by")).toHaveTextContent("Ada L");
   });
 
   it("renders the creator read-only with no control", () => {
@@ -618,7 +672,45 @@ describe("SidebarProperties", () => {
       queryClient
     );
     await waitFor(() => expect(row("Created by")).toHaveTextContent(PRODUCT_CREATOR_NAME));
-    expect(row("Created by")).not.toHaveTextContent("Intake Bot");
+    expect(row("Created by")).not.toHaveTextContent("acme-intake");
+  });
+
+  it("names a non-intake bot creator as itself", async () => {
+    const { queryClient } = harness();
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture({ created_by: AGENT_BOT })}
+        project={projectFixture()}
+        editable
+      />,
+      queryClient
+    );
+    await waitFor(() => expect(row("Created by")).toHaveTextContent("Agent Runner"));
+    expect(row("Created by")).not.toHaveTextContent(PRODUCT_CREATOR_NAME);
+  });
+
+  it("holds a placeholder while the creator directory is pending", async () => {
+    const { queryClient, releaseDirectory } = harness({ holdDirectory: true });
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture({ created_by: ADA })}
+        project={projectFixture()}
+        editable
+      />,
+      queryClient
+    );
+    await waitFor(() => expect(row("Created by")).toBeInTheDocument());
+    expect(row("Created by")).not.toHaveTextContent(UNKNOWN_CREATOR_NAME);
+    expect(row("Created by")).not.toHaveTextContent("Ada L");
+    expect(within(row("Created by")).queryByRole("img")).not.toBeInTheDocument();
+    await act(async () => {
+      releaseDirectory();
+    });
+    await waitFor(() => expect(row("Created by")).toHaveTextContent("Ada L"));
   });
 
   it("labels the execution row Pod when the project offers no cloud agent", async () => {
