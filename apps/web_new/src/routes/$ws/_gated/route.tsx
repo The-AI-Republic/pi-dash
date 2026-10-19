@@ -72,6 +72,7 @@ import {
   type RailDockItem,
   type SwitcherWorkspace,
 } from "../../../shared/shell/index.js";
+import { isWorkspaceSettingsPath } from "../../../features/workspace-settings/index.js";
 import { resolveSearchTarget } from "./searchTarget.js";
 
 // Deferred below the initial shell chain (Quality gates budget): the
@@ -176,6 +177,16 @@ export const Route = createFileRoute("/$ws/_gated")({
     const matches = useRouterState({ select: (state) => state.matches });
     const pathname = useRouterState({ select: (state) => state.location.pathname });
     const signOut = useSignOut();
+    // Workspace settings replace the ordinary workspace chrome with their
+    // own frame (WSET-001/002): the layout still runs its auth gate, then
+    // hands the whole window to the settings shell or its denial view.
+    if (isWorkspaceSettingsPath(pathname)) {
+      return (
+        <React.Suspense fallback={null}>
+          <Outlet />
+        </React.Suspense>
+      );
+    }
 
     return (
       <>

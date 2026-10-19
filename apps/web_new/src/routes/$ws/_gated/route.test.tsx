@@ -1006,6 +1006,16 @@ describe("gated layout shell wiring", () => {
     });
   });
 
+  it("hands the whole window to workspace settings instead of the workspace chrome", () => {
+    harness.routerState = {
+      matches: [{ params: {} }],
+      location: { pathname: "/acme/settings/members/" },
+    };
+    renderShell();
+    expect(harness.topBar).toBeNull();
+    expect(harness.sidebar).toBeNull();
+  });
+
   it("names the active project section from the route match", () => {
     harness.routerState = {
       matches: [{ params: { projectId: "p1" } }],
