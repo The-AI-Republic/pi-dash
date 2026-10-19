@@ -220,6 +220,10 @@ export function buildDraftInput(form: CreateFormState): DraftIssueCreateInput {
     name: trimmed === "" ? UNTITLED_DRAFT_NAME : trimmed,
     description_html: visibleDescriptionHtml(form.descriptionHtml),
   };
+  // The draft belongs to the project the form was filing under; the
+  // server links it from the request body and validates the other
+  // fields against it (ISS-120, ISS-138/ISS-139).
+  if (form.projectId !== null) draft.project_id = form.projectId;
   if (form.stateId !== null) draft.state_id = form.stateId;
   if (form.priority !== "none") draft.priority = form.priority as NonNullable<DraftIssueCreateInput["priority"]>;
   if (form.assigneeIds.length > 0) draft.assignee_ids = [...form.assigneeIds];

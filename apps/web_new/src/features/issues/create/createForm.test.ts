@@ -211,6 +211,7 @@ describe("buildDraftInput", () => {
     );
     expect(draft).toEqual({
       name: "Draft me",
+      project_id: PROJECT,
       description_html: "",
       priority: "high",
       assignee_ids: ["member"],
@@ -223,7 +224,7 @@ describe("buildDraftInput", () => {
 
   it("sends the state and omits a none priority", () => {
     const draft = buildDraftInput(form({ stateId: "state", priority: "none" }));
-    expect(draft).toEqual({ name: UNTITLED_DRAFT_NAME, description_html: "", state_id: "state" });
+    expect(draft).toEqual({ name: UNTITLED_DRAFT_NAME, project_id: PROJECT, description_html: "", state_id: "state" });
   });
 });
 

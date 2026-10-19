@@ -497,21 +497,28 @@ function stubTransport(options: StubOptions = {}) {
   return { calls, sent };
 }
 
-function setup(options: StubOptions = {}, props: Partial<React.ComponentProps<typeof WorkItemCreateDialog>> = {}) {
+function setup(
+  options: StubOptions = {},
+  props: Partial<React.ComponentProps<typeof WorkItemCreateDialog>> = {},
+  testOptions: { seedPicker?: boolean } = {}
+) {
   const stub = stubTransport(options);
   const onOpenChange = vi.fn();
   const onCreated = vi.fn();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   // The project picker reads its own joined-project list; seed it from
-  // the same rows the dialog filters so its trigger renders a name.
-  queryClient.setQueryData(pickerKeys.projects(SLUG), [
-    ...PROJECTS.map((project) =>
-      projectRow(project.id, project.name, project.identifier ?? project.name.slice(0, 3), project.memberRole ?? null)
-    ),
-    projectRow("923e4567-e89b-12d3-a456-426614174009", "Archived Atlas", "ARC", 15, {
-      archived_at: "2026-01-01T00:00:00Z",
-    }),
-  ]);
+  // the same rows the dialog filters. A cold-cache case skips this so
+  // the trigger must name the project from the dialog's own rows.
+  if (testOptions.seedPicker !== false) {
+    queryClient.setQueryData(pickerKeys.projects(SLUG), [
+      ...PROJECTS.map((project) =>
+        projectRow(project.id, project.name, project.identifier ?? project.name.slice(0, 3), project.memberRole ?? null)
+      ),
+      projectRow("923e4567-e89b-12d3-a456-426614174009", "Archived Atlas", "ARC", 15, {
+        archived_at: "2026-01-01T00:00:00Z",
+      }),
+    ]);
+  }
   const view = render(
     <QueryClientProvider client={queryClient}>
       <WorkItemCreateDialog
@@ -993,7 +1000,9 @@ describe("WorkItemCreateDialog discard guard (ISS-120)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Discard" }));
     expect(await screen.findByText("Save this draft?")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Save to Drafts" }));
-    await waitFor(() => expect(posts(h.sent)[0]).toEqual({ name: "Draft me", description_html: "" }));
+    await waitFor(() =>
+      expect(posts(h.sent)[0]).toEqual({ name: "Draft me", project_id: PROJECT_ATLAS, description_html: "" })
+    );
     await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
   });
 
@@ -1055,13 +1064,33 @@ describe("WorkItemCreateDialog discard guard (ISS-120)", () => {
     expect(screen.getByText("Save this draft?")).toBeInTheDocument();
   });
 
+  it("links a state-bound draft to the project so it can be promoted", async () => {
+    // The server validates the state and parent against the project in
+    // the request body and stores it on the draft; without it a draft
+    // holding a state fails to save (ISS-120, ISS-138/ISS-139).
+    const user = userEvent.setup();
+    const h = setup({}, { initialProjectId: PROJECT_BEACON });
+    await user.type(titleField(), "State draft");
+    await user.click(screen.getByRole("button", { name: "Select state" }));
+    await user.click(await screen.findByRole("option", { name: "Todo" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Todo" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Save to Drafts" }));
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toEqual({
+      name: "State draft",
+      project_id: PROJECT_BEACON,
+      description_html: "",
+      state_id: STATE_ID,
+    });
+  });
+
   it("saves a draft inline from the footer", async () => {
     const user = userEvent.setup();
     const h = setup();
     await user.type(titleField(), "Draft inline");
     await user.click(screen.getByRole("button", { name: "Save to Drafts" }));
     await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
-    expect(posts(h.sent)[0]).toEqual({ name: "Draft inline", description_html: "" });
+    expect(posts(h.sent)[0]).toEqual({ name: "Draft inline", project_id: PROJECT_ATLAS, description_html: "" });
   });
 
   it("toasts when the inline draft fails and keeps the form", async () => {
@@ -1176,6 +1205,16 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     await waitFor(() => expect(screen.getByText("Cycle")).toBeInTheDocument());
     expect(screen.getByText("Modules")).toBeInTheDocument();
     expect(screen.getByText("Estimate")).toBeInTheDocument();
+  });
+
+  it("names the picked project before the picker's own read resolves", async () => {
+    // A cold visit never seeds the picker cache; the dialog already
+    // knows the create-permission rows, so the trigger must read the
+    // project name rather than "Select project" (ISS-117/ISS-123).
+    const h = setup({}, { initialProjectId: PROJECT_BEACON }, { seedPicker: false });
+    expect(screen.getByRole("button", { name: "Beacon" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Select project" })).not.toBeInTheDocument();
+    expect(h.calls.some((call) => call.url.endsWith("/projects/"))).toBe(false);
   });
 
   it("hides them for a project without the features", async () => {

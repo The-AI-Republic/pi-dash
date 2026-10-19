@@ -9,7 +9,7 @@
 // title, its rows and the interim empty states; layouts themselves belong
 // to the issues area.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ApiError, createClient } from "@pidash/api-client";
 import type { IssueListItem, IssueListResponse, Project } from "@pidash/api-client";
 import * as React from "react";
@@ -543,22 +543,13 @@ describe("project issues screen", () => {
     expect(screen.queryByTestId("layout-switcher-segmented")).not.toBeInTheDocument();
   });
 
-  it("registers a New work item command on the ni sequence", async () => {
+  it("leaves the New work item command to the shell", () => {
+    // The `ni` sequence belongs to the workspace shell so it works from
+    // cycle, module, view and drafts pages too (ISS-117, SHELL-086);
+    // the list screen only owns its refresh command.
     renderScreen({}, 1, [issueRow()]);
-    const command = listCommands().find((entry) => entry.id === "issues.create-work-item");
-    expect(command?.title).toBe("New work item");
-    expect(command?.sequence).toBe("ni");
-    expect(command?.section).toBe("Create");
-    expect(command?.hint).toBe("Website");
-  });
-
-  it("opens the create dialog from the New work item command", async () => {
-    renderScreen({}, 1, [issueRow()]);
-    const command = listCommands().find((entry) => entry.id === "issues.create-work-item");
-    await act(async () => {
-      await command?.run();
-    });
-    expect(await screen.findByPlaceholderText("Title")).toBeInTheDocument();
+    expect(listCommands().find((entry) => entry.id === "issues.create-work-item")).toBeUndefined();
+    expect(listCommands().find((entry) => entry.id === "issues.refresh-list")).toBeDefined();
   });
 
   it("offers Add work item in the header and opens the dialog", async () => {
@@ -568,13 +559,12 @@ describe("project issues screen", () => {
     expect(await screen.findByPlaceholderText("Title")).toBeInTheDocument();
   });
 
-  it("keeps the creation entries out of reach for a guest on every project", () => {
+  it("keeps the header entry out of reach for a guest on every project", () => {
     renderScreen({}, 1, [issueRow()], { role: 20, project: { member_role: 5 } });
     expect(screen.queryByRole("button", { name: "Add work item" })).not.toBeInTheDocument();
-    expect(listCommands().find((entry) => entry.id === "issues.create-work-item")).toBeUndefined();
   });
 
-  it("offers the creation entries when one project grants create rights", () => {
+  it("offers the header entry when one project grants create rights", () => {
     const other = projectSeed();
     renderScreen({}, 1, [issueRow()], {
       role: 20,
@@ -585,7 +575,6 @@ describe("project issues screen", () => {
       ],
     });
     expect(screen.getByRole("button", { name: "Add work item" })).toBeInTheDocument();
-    expect(listCommands().find((entry) => entry.id === "issues.create-work-item")).toBeDefined();
   });
 
   it("registers a refresh command that invalidates the workspace", async () => {
@@ -633,9 +622,9 @@ describe("project issues screen", () => {
     expect(await screen.findByRole("table")).toBeInTheDocument();
     expect(screen.getByText("Work items")).toBeInTheDocument();
     // The sheet carries its own quick-add row; the header entry sits beside it.
-    expect(screen.getAllByRole("button", { name: "Add work item" }).some((entry) => !entry.hasAttribute("disabled"))).toBe(
-      true
-    );
+    expect(
+      screen.getAllByRole("button", { name: "Add work item" }).some((entry) => !entry.hasAttribute("disabled"))
+    ).toBe(true);
   });
 
   it("hides the spreadsheet estimate column when the project has no estimate system", async () => {

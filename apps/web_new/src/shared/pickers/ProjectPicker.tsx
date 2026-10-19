@@ -31,6 +31,12 @@ interface ProjectPickerBase {
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
   placeholder?: string;
+  /**
+   * Extra display rows for the default trigger, e.g. the caller's own
+   * project list before the lazy read resolves. They only label the
+   * picked project; the option list still comes from the read.
+   */
+  knownProjects?: readonly ProjectOption[] | undefined;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -64,6 +70,7 @@ export function ProjectPicker(props: ProjectPickerProps): React.ReactElement {
     iconOnly = false,
     trigger,
     placeholder,
+    knownProjects,
     open: controlledOpen,
     onOpenChange,
   } = props;
@@ -101,7 +108,11 @@ export function ProjectPicker(props: ProjectPickerProps): React.ReactElement {
   function defaultTrigger(): React.ReactElement<Record<string, unknown>> {
     const prompt = placeholder ?? (multiple ? "Select projects" : "Select project");
     if (!props.multiple) {
-      const current = props.value === null ? undefined : options.find((option) => option.id === props.value);
+      const current =
+        props.value === null
+          ? undefined
+          : (options.find((option) => option.id === props.value) ??
+            knownProjects?.find((option) => option.id === props.value));
       const text = current?.name ?? prompt;
       if (iconOnly) {
         return (

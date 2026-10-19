@@ -20,6 +20,7 @@ import { edition } from "../../../core/edition/index.js";
 import { RichTextEditor } from "../../../shared/editor/index.js";
 import {
   CyclePicker,
+  toProjectOption,
   usePickerEstimates,
   EstimatePicker,
   MemberPicker,
@@ -224,6 +225,21 @@ export function WorkItemCreateDialog({
   // leave the window before that read resolves open to guest projects,
   // so the form names what it may offer instead of what it may not.
   const creatableIds = React.useMemo(() => creatable.map((project) => project.id), [creatable]);
+  // The picker's option list resolves lazily on open, but its trigger
+  // must name the picked project right away: the dialog already holds
+  // the create-permission rows, so hand them over as display labels
+  // instead of waiting for the picker's own read (ISS-117/ISS-123).
+  const projectLabels = React.useMemo(
+    () =>
+      creatable.map((project) =>
+        toProjectOption({
+          id: project.id,
+          name: project.name,
+          identifier: project.identifier,
+        })
+      ),
+    [creatable]
+  );
   const busy = create.isPending || generating || saveDraft.isPending;
 
   function patch(next: Partial<CreateFormState>): void {
@@ -439,6 +455,7 @@ export function WorkItemCreateDialog({
               value={form.projectId}
               onChange={pickProject}
               includeProjectIds={creatableIds}
+              knownProjects={projectLabels}
               disabled={busy}
             />
             <DuplicatePanel matches={duplicates.matches} />

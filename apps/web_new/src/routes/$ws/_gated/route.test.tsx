@@ -70,6 +70,12 @@ const harness = vi.hoisted(() => ({
     onUserSettings: () => void;
   },
   updateControl: undefined as React.ReactNode,
+  createEntry: null as null | {
+    workspaceSlug: string;
+    projects: Array<{ id: string; name: string; memberRole: number | null; archived: boolean }>;
+    canCreate: boolean;
+    initialProjectId: string | null;
+  },
   personalizeDialog: null as null | {
     open: boolean;
     workspaceSlug: string;
@@ -168,6 +174,18 @@ vi.mock("../../../features/sidebar/components/PersonalizeDialog.js", async () =>
   };
 });
 
+// Workspace create-entry stand-in: capture the props the shell hands it;
+// the entry's own suite owns registration and dialog behavior.
+vi.mock("../../../features/issues/components/WorkItemCreateEntry.js", async () => {
+  const React = await import("react");
+  return {
+    WorkItemCreateEntry: (props: Record<string, unknown>) => {
+      harness.createEntry = props as (typeof harness)["createEntry"];
+      return React.createElement("div", { "data-testid": "create-entry" });
+    },
+    CREATE_WORK_ITEM_COMMAND_ID: "issues.create-work-item",
+  };
+});
 // Runtime-supervisor stand-in: the supervisor's own suite owns its
 // behavior (and it needs router context this suite does not provide).
 vi.mock("../../../features/runners/index.js", () => ({
@@ -646,6 +664,7 @@ describe("gated layout shell wiring", () => {
     harness.topBar = null;
     harness.sidebar = null;
     harness.personalizeDialog = null;
+    harness.createEntry = null;
     harness.updatesDialog = null;
     harness.rail = undefined;
     harness.routerState = {
@@ -1217,6 +1236,37 @@ describe("gated layout shell wiring", () => {
     const more = harness.sidebar?.moreGroup as React.ReactElement<{ role: number | null }>;
     expect(more.props.role).toBe(5);
     expect(harness.sidebar?.favoritesGroup).toBeUndefined();
+  });
+
+  it("mounts the workspace create entry with the shell's projects and standing", () => {
+    harness.routerState = {
+      matches: [{ params: { projectId: "p1" } }],
+      location: { pathname: "/acme/projects/p1/issues" },
+    };
+    renderShell();
+    expect(harness.createEntry).toEqual({
+      workspaceSlug: "acme",
+      projects: [{ id: "p1", name: "Atlas", memberRole: 20, archived: false }],
+      canCreate: true,
+      initialProjectId: "p1",
+    });
+  });
+
+  it("gives the workspace create entry no page project outside a project route", () => {
+    harness.routerState = { matches: [{ params: {} }], location: { pathname: "/acme/drafts" } };
+    renderShell();
+    expect(harness.createEntry?.initialProjectId).toBeNull();
+    expect(harness.createEntry?.canCreate).toBe(true);
+  });
+
+  it("keeps the workspace create entry off for guests even beside a project", () => {
+    harness.role = 5;
+    harness.routerState = {
+      matches: [{ params: { projectId: "p1" } }],
+      location: { pathname: "/acme/projects/p1/issues" },
+    };
+    renderShell();
+    expect(harness.createEntry?.canCreate).toBe(false);
   });
 
   it("passes the quick-create slot its picker and standing (SHELL-047)", () => {

@@ -39,7 +39,7 @@ import {
   workspacesQueryOptions,
 } from "../../../core/session/index.js";
 import { runSignOutAction, signOutCommand, useSignOut, useUpdateProfile } from "../../../features/auth/index.js";
-import { QuickCreateButton } from "../../../features/issues/index.js";
+import { QuickCreateButton, WorkItemCreateEntry } from "../../../features/issues/index.js";
 import { unreadNotificationsQueryOptions } from "../../../features/notifications/index.js";
 import { projectsQueryOptions, selectSidebarProjects, SidebarProjectsGroup } from "../../../features/projects/index.js";
 import {
@@ -575,6 +575,21 @@ function WorkspaceShell({
           />
         ) : null}
       </React.Suspense>
+      {/* The `ni` command lives with the shell, not the issues list, so
+          it works from cycle, module, view and drafts pages too
+          (ISS-117, SHELL-086). It opens on the current project when one
+          is in view. */}
+      <WorkItemCreateEntry
+        workspaceSlug={workspaceSlug}
+        projects={joinedProjects.map((project) => ({
+          id: project.id,
+          name: project.name,
+          memberRole: project.member_role,
+          archived: project.archived_at !== null,
+        }))}
+        canCreate={canEdit}
+        initialProjectId={activeProject?.id ?? null}
+      />
       <Outlet />
     </AppShell>
   );

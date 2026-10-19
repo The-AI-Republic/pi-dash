@@ -172,21 +172,6 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
     React.useEffect(
       () =>
         registerCommands([
-          ...(canCreate
-            ? [
-                {
-                  id: "issues.create-work-item",
-                  title: "New work item",
-                  hint: project?.name ?? params.projectId,
-                  section: "Create",
-                  sequence: "ni",
-                  keywords: ["create", "add", "new", "issue"],
-                  run: () => {
-                    setCreateOpen(true);
-                  },
-                },
-              ]
-            : []),
           {
             id: "issues.refresh-list",
             title: "Refresh issue list",
@@ -199,7 +184,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
             },
           },
         ]),
-      [queryClient, params.ws, params.projectId, project?.name, canCreate]
+      [queryClient, params.ws, params.projectId, project?.name]
     );
 
     if (!project) {
