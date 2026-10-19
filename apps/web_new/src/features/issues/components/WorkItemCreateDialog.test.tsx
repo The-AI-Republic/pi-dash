@@ -618,6 +618,26 @@ describe("WorkItemCreateDialog core form", () => {
     expect(h.onOpenChange).not.toHaveBeenCalled();
   });
 
+  it("keeps the typed title when the parent re-renders with a fresh projects array", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    await user.type(titleField(), "Untouched");
+    // The shell rebuilds the project list on every poll; a new array
+    // identity re-runs the visit effect without starting a new visit.
+    h.view.rerender(
+      <QueryClientProvider client={h.queryClient}>
+        <WorkItemCreateDialog
+          open
+          workspaceSlug={SLUG}
+          projects={PROJECTS.map((project) => ({ ...project }))}
+          onOpenChange={h.onOpenChange}
+        />
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Untouched"));
+    expect(screen.getByRole("dialog", { name: "Create new work item" })).toBeInTheDocument();
+  });
+
   it("hides the form again when the parent closes the dialog", () => {
     const h = setup();
     expect(screen.getByPlaceholderText("Title")).toBeInTheDocument();
@@ -683,6 +703,19 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
     await waitFor(() => expect(notifyError).toHaveBeenCalled());
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(2));
+  });
+
+  it("re-arms submit after an inline title refusal", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    // A blank title is refused without writing; typing a title and
+    // submitting again must go through (the in-flight guard resets).
+    save();
+    expect(await screen.findByText("Give the work item a title.")).toBeInTheDocument();
+    await user.type(titleField(), "Second try");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toEqual({ name: "Second try" });
   });
 
   it("keeps the form open and toasts when the create fails", async () => {
