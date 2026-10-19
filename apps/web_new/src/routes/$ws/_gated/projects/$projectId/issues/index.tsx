@@ -48,6 +48,9 @@ const LazyGanttTimeline = React.lazy(() =>
   }))
 );
 
+// The list layout is a separate chunk so the route stays inside the
+// initial-JS budget (Quality gates). `beforeLoad` awaits it with the data,
+// so the component mounts once instead of suspending after commit.
 // Start the filter chunk with the layout chunk, so the first render does not
 // suspend and mount the layout twice.
 import { LazyIssueFilters, preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
@@ -196,6 +199,10 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         orderByOf(preferences)
       )
     );
+    // The stored rich filters (ISS-095–099) scope the list's first page and
+    // every later page; without conditions this is the plain flat read. The
+    // list layout owns that page (its own chunk) and reads it itself, so the
+    // route only needs the flat totals for the layout root.
     React.useEffect(
       () =>
         registerCommands([

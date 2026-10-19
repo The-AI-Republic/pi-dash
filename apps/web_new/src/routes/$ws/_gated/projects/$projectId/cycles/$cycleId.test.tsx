@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -60,7 +60,9 @@ function cycle(status = "current") {
 function renderRoute(search: Record<string, unknown> = {}, rows: Array<ReturnType<typeof cycle>> = [cycle()]) {
   vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme", projectId: PROJECT, cycleId: CYCLE } as never);
   vi.spyOn(Route, "useSearch").mockReturnValue(search as never);
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
   queryClient.setQueryData(mocks.cyclesKey, rows);
   return render(
     <QueryClientProvider client={queryClient}>
@@ -93,41 +95,42 @@ beforeEach(() => {
 });
 
 describe("cycle issues route", () => {
-  it("mounts the shared list for the cycle with its name", () => {
+  it("mounts the shared list for the cycle with its name", async () => {
     renderRoute();
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-title", "Sprint 1");
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-cycle", CYCLE);
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-completed", "false");
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-peek", "");
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-compact", "false");
+    const node = await screen.findByTestId("entity-screen");
+    await waitFor(() => expect(node).toHaveAttribute("data-title", "Sprint 1"));
+    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-cycle", CYCLE);
+    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-completed", "false");
+    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-peek", "");
+    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-compact", "false");
   });
 
-  it("falls back to the generic title while cycles load", () => {
+  it("falls back to the generic title while cycles load", async () => {
     renderRoute({}, []);
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-title", "Cycle");
+    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-title", "Cycle");
   });
 
-  it("marks a completed cycle read-only", () => {
+  it("marks a completed cycle read-only", async () => {
     renderRoute({}, [cycle("completed")]);
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-completed", "true");
+    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-completed", "true");
   });
 
-  it("passes peek and compact from the search state", () => {
+  it("passes peek and compact from the search state", async () => {
     renderRoute({ peekIssueId: "WEB-7", layout: "compact" });
-    const screenNode = screen.getByTestId("entity-screen");
+    const screenNode = await screen.findByTestId("entity-screen");
     expect(screenNode).toHaveAttribute("data-peek", "WEB-7");
     expect(screenNode).toHaveAttribute("data-compact", "true");
   });
 
-  it("writes and clears the peek param with replace", () => {
+  it("writes and clears the peek param with replace", async () => {
     renderRoute({ peekIssueId: "WEB-7", layout: "compact" });
-    screen.getByRole("button", { name: "open" }).click();
+    fireEvent.click(await screen.findByRole("button", { name: "open" }));
     expect(mocks.navigate).toHaveBeenLastCalledWith({
       to: ".",
       search: { peekIssueId: "WEB-1", layout: "compact" },
       replace: true,
     });
-    screen.getByRole("button", { name: "close" }).click();
+    fireEvent.click(await screen.findByRole("button", { name: "close" }));
     expect(mocks.navigate).toHaveBeenLastCalledWith({
       to: ".",
       search: { layout: "compact" },
@@ -138,7 +141,9 @@ describe("cycle issues route", () => {
   it("prefetches the cycle list page and preferences with the cycle entity", async () => {
     const beforeLoad = Route.options.beforeLoad;
     if (!beforeLoad) throw new Error("missing beforeLoad");
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+    });
     await beforeLoad({
       context: { queryClient, apiClient: { stub: true } },
       params: { ws: "acme", projectId: PROJECT, cycleId: CYCLE },

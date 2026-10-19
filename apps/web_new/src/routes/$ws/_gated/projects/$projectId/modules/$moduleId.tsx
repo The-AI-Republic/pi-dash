@@ -12,14 +12,22 @@ import * as React from "react";
 
 import { getAppClient } from "../../../../../../core/api/client.js";
 import { ListSkeleton, parseIssueSearch, prefsQueryOptions } from "../../../../../../features/issues/index.js";
-import { EntityListScreen } from "../../../../../../features/issues/list/EntityListScreen.js";
 import { loadListLayout } from "../../../../../../features/issues/list/lazy.js";
-import { listPageQueryOptions } from "../../../../../../features/issues/list/pages.js";
 import { pickerModulesQueryOptions } from "../../../../../../shared/pickers/index.js";
+
+// The list host and its paging module are part of the list layout chunk;
+// importing them statically would pull them into the entry chunk through
+// the generated route tree (Quality gates).
+const LazyEntityListScreen = React.lazy(() =>
+  import("../../../../../../features/issues/list/EntityListScreen.js").then((module) => ({
+    default: module.EntityListScreen,
+  }))
+);
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$moduleId")({
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
   beforeLoad: async ({ context, params }) => {
+    const { listPageQueryOptions } = await import("../../../../../../features/issues/list/pages.js");
     const entity = { scope: "module", projectId: params.projectId, moduleId: params.moduleId } as const;
     await Promise.all([
       loadListLayout(),
@@ -40,21 +48,23 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$m
     const module = modules?.find((row) => row.id === params.moduleId) ?? null;
     const entity = { scope: "module", projectId: params.projectId, moduleId: params.moduleId } as const;
     return (
-      <EntityListScreen
-        workspaceSlug={params.ws}
-        entity={entity}
-        projectId={params.projectId}
-        title={module?.name ?? "Module"}
-        moduleId={params.moduleId}
-        peekKey={search.peekIssueId ?? null}
-        onPeekChange={(key) => {
-          const next = { ...search };
-          if (key === null) delete next.peekIssueId;
-          else next.peekIssueId = key;
-          void navigate({ to: ".", search: next, replace: true } as never);
-        }}
-        compact={search.layout === "compact"}
-      />
+      <React.Suspense fallback={<ListSkeleton />}>
+        <LazyEntityListScreen
+          workspaceSlug={params.ws}
+          entity={entity}
+          projectId={params.projectId}
+          title={module?.name ?? "Module"}
+          moduleId={params.moduleId}
+          peekKey={search.peekIssueId ?? null}
+          onPeekChange={(key) => {
+            const next = { ...search };
+            if (key === null) delete next.peekIssueId;
+            else next.peekIssueId = key;
+            void navigate({ to: ".", search: next, replace: true } as never);
+          }}
+          compact={search.layout === "compact"}
+        />
+      </React.Suspense>
     );
   },
 });

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -60,7 +60,9 @@ function module() {
 function renderRoute(search: Record<string, unknown> = {}, rows: Array<ReturnType<typeof module>> = [module()]) {
   vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme", projectId: PROJECT, moduleId: MODULE } as never);
   vi.spyOn(Route, "useSearch").mockReturnValue(search as never);
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
   queryClient.setQueryData(mocks.modulesKey, rows);
   return render(
     <QueryClientProvider client={queryClient}>
@@ -93,41 +95,42 @@ beforeEach(() => {
 });
 
 describe("module issues route", () => {
-  it("mounts the shared list for the module with its name", () => {
+  it("mounts the shared list for the module with its name", async () => {
     renderRoute();
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-title", "Auth");
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-module", MODULE);
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-completed", "false");
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-peek", "");
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-compact", "false");
+    const node = await screen.findByTestId("entity-screen");
+    await waitFor(() => expect(node).toHaveAttribute("data-title", "Auth"));
+    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-module", MODULE);
+    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-completed", "false");
+    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-peek", "");
+    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-compact", "false");
   });
 
-  it("falls back to the generic title while modules load", () => {
+  it("falls back to the generic title while modules load", async () => {
     renderRoute({}, []);
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-title", "Module");
+    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-title", "Module");
   });
 
-  it("renders the module without a completed flag", () => {
+  it("renders the module without a completed flag", async () => {
     renderRoute();
-    expect(screen.getByTestId("entity-screen")).toHaveAttribute("data-completed", "false");
+    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-completed", "false");
   });
 
-  it("passes peek and compact from the search state", () => {
+  it("passes peek and compact from the search state", async () => {
     renderRoute({ peekIssueId: "WEB-7", layout: "compact" });
-    const screenNode = screen.getByTestId("entity-screen");
+    const screenNode = await screen.findByTestId("entity-screen");
     expect(screenNode).toHaveAttribute("data-peek", "WEB-7");
     expect(screenNode).toHaveAttribute("data-compact", "true");
   });
 
-  it("writes and clears the peek param with replace", () => {
+  it("writes and clears the peek param with replace", async () => {
     renderRoute({ peekIssueId: "WEB-7", layout: "compact" });
-    screen.getByRole("button", { name: "open" }).click();
+    fireEvent.click(await screen.findByRole("button", { name: "open" }));
     expect(mocks.navigate).toHaveBeenLastCalledWith({
       to: ".",
       search: { peekIssueId: "WEB-1", layout: "compact" },
       replace: true,
     });
-    screen.getByRole("button", { name: "close" }).click();
+    fireEvent.click(await screen.findByRole("button", { name: "close" }));
     expect(mocks.navigate).toHaveBeenLastCalledWith({
       to: ".",
       search: { layout: "compact" },
@@ -138,7 +141,9 @@ describe("module issues route", () => {
   it("prefetches the module list page and preferences with the module entity", async () => {
     const beforeLoad = Route.options.beforeLoad;
     if (!beforeLoad) throw new Error("missing beforeLoad");
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+    });
     await beforeLoad({
       context: { queryClient, apiClient: { stub: true } },
       params: { ws: "acme", projectId: PROJECT, moduleId: MODULE },
