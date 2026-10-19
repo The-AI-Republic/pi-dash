@@ -5,6 +5,7 @@
 // imported here; the no-Tauri bundle check enforces that.
 
 import { createPersistentStore } from "./storage.js";
+import { isWebAddress } from "./urls.js";
 import type { EventStream, Platform, StreamInit, StreamMessage, Unsubscribe } from "./types.js";
 
 function parseEventBlock(block: string): StreamMessage | undefined {
@@ -99,6 +100,9 @@ export const platform: Platform = {
   fetch: (...args) => globalThis.fetch(...args),
   stream: (url, init) => browserStream(url, init),
   openExternal: (url) => {
+    if (!isWebAddress(url)) {
+      return Promise.reject(new Error("refusing to open a non-web address"));
+    }
     globalThis.window.open(url, "_blank", "noopener");
     return Promise.resolve();
   },

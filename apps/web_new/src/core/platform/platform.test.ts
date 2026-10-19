@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { platform } from "./index.js";
 import { createMemoryStore } from "./storage.js";
@@ -34,6 +34,10 @@ describe("platform selection", () => {
   it("implements the agent-runtime and session-teardown seams (RUN-044, RUN-047)", () => {
     expect(desktopPlatform.agentRuntime).toBeDefined();
     expect(desktopPlatform.sessionTeardown).toBeDefined();
+  });
+
+  it("exposes the deep-link subscription on the desktop platform", () => {
+    expect(typeof desktopPlatform.deepLinks?.onOpenUrl).toBe("function");
   });
 
   it("resolves the session wipe without the native bridge", async () => {
@@ -95,6 +99,53 @@ describe("desktop openExternal without the shell", () => {
     await expect(desktopPlatform.openExternal("https://example.test/")).rejects.toThrow(
       "openExternal needs the native bridge"
     );
+  });
+});
+
+describe("external open address guard", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("refuses a non-web address on the web platform before opening a window", async () => {
+    const open = vi.fn();
+    vi.stubGlobal("window", { open });
+    await expect(webPlatform.openExternal("javascript:alert(1)")).rejects.toThrow("non-web address");
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("refuses a non-web address on the desktop platform before invoking native code", async () => {
+    const invoke = vi.fn();
+    vi.stubGlobal("window", {
+      __PIDASH_NATIVE_HTTP__: "https://api.test",
+      __TAURI__: { core: { invoke, Channel: class {} } },
+    });
+    await expect(desktopPlatform.openExternal("file:///etc/passwd")).rejects.toThrow("non-web address");
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("opens a web address through the native command", async () => {
+    const invoke = vi.fn(async () => undefined);
+    vi.stubGlobal("window", {
+      __PIDASH_NATIVE_HTTP__: "https://api.test",
+      __TAURI__: { core: { invoke, Channel: class {} } },
+    });
+    await desktopPlatform.openExternal("https://app.example.test/");
+    expect(invoke).toHaveBeenCalledWith("plugin:opener|open_url", { url: "https://app.example.test/" });
+  });
+
+  it("uses the browser fallback when the native open rejects", async () => {
+    const open = vi.fn();
+    const invoke = vi.fn(async () => {
+      throw new Error("opener unavailable");
+    });
+    vi.stubGlobal("window", {
+      open,
+      __PIDASH_NATIVE_HTTP__: "https://api.test",
+      __TAURI__: { core: { invoke, Channel: class {} } },
+    });
+    await desktopPlatform.openExternal("https://app.example.test/");
+    expect(open).toHaveBeenCalledWith("https://app.example.test/", "_blank", "noopener");
   });
 });
 
