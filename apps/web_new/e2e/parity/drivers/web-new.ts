@@ -293,6 +293,8 @@ export class WebNewDriver implements ParityDriver {
   private runnerChatRunnerDetailDelayPattern: string | null = null;
   private runnerChatStreamFrames = new Map<string, RunnerChatStreamFrame[]>();
   private runnerChatStreamUrls = new Map<string, string[]>();
+  private runnerChatMessageListHoldMs = 0;
+  private runnerChatMessageListHoldArmed = false;
   private runnerChatSpyCounts = {
     warm: 0,
     sessionCreate: 0,
@@ -8914,12 +8916,28 @@ export class WebNewDriver implements ParityDriver {
       .then((count) => count > 0);
   }
 
-  async runnerChatHoldMessageList(_ms: number): Promise<void> {
-    return todo("runnerChatHoldMessageList");
+  async runnerChatHoldMessageList(ms: number): Promise<void> {
+    // A stubbed feed ends as soon as it has served its frames, and the
+    // page re-reads the saved transcript when the channel drops. Holding
+    // that read keeps the streamed bubble on screen long enough for the
+    // scenario to assert it. Arm once per page; re-arming only changes the
+    // delay the handler uses.
+    this.runnerChatMessageListHoldMs = ms;
+    if (this.runnerChatMessageListHoldArmed) return;
+    this.runnerChatMessageListHoldArmed = true;
+    await this.page.route("**/api/runners/chat/sessions/*/messages**", async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      if (request.method() === "GET" && pathname.endsWith("/messages/") && this.runnerChatMessageListHoldArmed) {
+        await new Promise((resolve) => setTimeout(resolve, this.runnerChatMessageListHoldMs));
+      }
+      await route.fallback();
+    });
   }
 
   async runnerChatReleaseMessageList(): Promise<void> {
-    return todo("runnerChatReleaseMessageList");
+    this.runnerChatMessageListHoldArmed = false;
+    await this.page.unroute("**/api/runners/chat/sessions/*/messages**");
   }
 
   // --- Prompts + project automations (NEWFRONT-186, AGT-023–037) ---

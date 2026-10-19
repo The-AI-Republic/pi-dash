@@ -16,12 +16,16 @@ import type { ChatSession } from "@pidash/api-client";
 
 const contracts = vi.hoisted(() => ({
   createChatSession: vi.fn(),
+  getSttConfig: vi.fn(),
   warmChatSession: vi.fn(),
   getRunner: vi.fn(),
   listChatSessions: vi.fn(),
   getChatSession: vi.fn(),
   listChatMessages: vi.fn(),
 }));
+
+const active = vi.hoisted(() => ({ transport: null as unknown }));
+vi.mock("./transport.js", () => ({ getChatTransport: () => active.transport }));
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
   const original = await importOriginal<typeof import("@pidash/api-client")>();
@@ -51,6 +55,18 @@ function Shell({ client, children }: { client: ReturnType<typeof testClient>; ch
 
 beforeEach(() => {
   createAppClient("https://api.test", {} as never);
+  contracts.getSttConfig.mockResolvedValue({
+    base_url: "",
+    model_name: "",
+    has_api_key: false,
+    last_verified_at: null,
+  });
+  active.transport = {
+    subscribeChatEvents: vi.fn(() => () => undefined),
+    sendChatMessage: vi.fn(),
+    cancelChat: vi.fn(),
+    closeChat: vi.fn(),
+  };
   contracts.getRunner.mockResolvedValue(makeRunner());
   contracts.listChatSessions.mockResolvedValue([]);
   contracts.listChatMessages.mockResolvedValue([]);
@@ -59,6 +75,7 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const stub of Object.values(contracts)) stub.mockReset();
+  active.transport = null;
   resetAppClient();
 });
 
