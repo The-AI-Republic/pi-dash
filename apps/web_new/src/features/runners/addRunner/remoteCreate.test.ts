@@ -163,4 +163,37 @@ describe("runRemoteCreate", () => {
     )) as RemoteState;
     expect(unreachableState.error).toContain("Could not reach the cloud");
   });
+
+  it("falls back to the built-in poll cadence and deadline when none is given", async () => {
+    let clock = 0;
+    const slept: number[] = [];
+    const d = deps({
+      now: () => clock,
+      sleep: vi.fn(async (ms: number) => {
+        slept.push(ms);
+        clock += ms;
+      }),
+    });
+    delete d.timeoutMs;
+    delete d.pollMs;
+    expect(await runRemoteCreate({ machineId: "m1", machineLabel: "L" }, d)).toEqual({
+      phase: "timeout",
+      machineLabel: "L",
+    });
+    expect(slept.length).toBeGreaterThan(0);
+    expect(slept.every((ms) => ms === 2_000)).toBe(true);
+  });
+
+  it("returns null when cancellation lands as the deadline passes", async () => {
+    let clock = 0;
+    const d = deps({
+      now: () => clock,
+      isCancelled: () => clock >= 10,
+      sleep: vi.fn(async () => {
+        clock += 2;
+      }),
+    });
+    expect(await runRemoteCreate({ machineId: "m1", machineLabel: "L" }, d)).toBeNull();
+    expect(d.update).not.toHaveBeenCalledWith({ phase: "timeout", machineLabel: "L" });
+  });
 });
