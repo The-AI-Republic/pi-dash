@@ -94,6 +94,7 @@ describe("ProjectSettingsScreen", () => {
 
   it("gates the body for the role", () => {
     harness.role = 15;
+    harness.workspaceRole = 15;
     renderScreen({ tabKey: "estimates" });
     expect(screen.getByTestId("project-settings-denied")).toBeInTheDocument();
   });

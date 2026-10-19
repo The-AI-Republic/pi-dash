@@ -28,6 +28,7 @@ import { ProjectSettingsNotAuthorized, ProjectSettingsRestriction } from "./Proj
 import { ProjectSettingsSidebar } from "./ProjectSettingsSidebar.js";
 import {
   decidePageGate,
+  effectiveProjectRole,
   findTabByKey,
   findTabBySuffix,
   type ProjectRole,
@@ -44,9 +45,12 @@ export interface ProjectSettingsProjectFacts {
 export interface ProjectSettingsContextValue {
   workspaceSlug: string;
   projectId: string;
-  /** The caller's role in this project; null outside a membership. */
+  /**
+   * The caller's role in this project with workspace-admin escalation
+   * applied (PSET-004); null outside a membership.
+   */
   role: ProjectRole;
-  /** Whether the caller is a workspace admin (Members page only). */
+  /** Whether the caller is a workspace admin (denial variants only). */
   workspaceAdmin: boolean;
   /** Header facts; null before the shell resolves the project. */
   project: ProjectSettingsProjectFacts | null;
@@ -112,9 +116,13 @@ export function ProjectSettingsShell({
   // Standing resolves only when both role feeds answer; a failed read keeps
   // the rail hidden rather than guessing a role.
   const rolePending = roles.isPending || membership.isPending;
-  const role = rolePending || !roles.isSuccess ? null : (roles.data?.[projectId] ?? null);
+  const rawRole = rolePending || !roles.isSuccess ? null : (roles.data?.[projectId] ?? null);
   const workspaceRole = membership.data?.role ?? null;
   const workspaceAdmin = workspaceRole !== null && workspaceRole >= ROLE_ADMIN;
+  // A workspace admin holds project-admin standing regardless of the raw
+  // project row, so the rail, the role caption and every page gate agree
+  // with the old pages' resolution.
+  const role = effectiveProjectRole(rawRole, workspaceRole);
 
   // The drawer belongs to one address: every navigation closes it so a
   // deep link (or a link followed inside the drawer) starts closed.

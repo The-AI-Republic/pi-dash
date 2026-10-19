@@ -20,7 +20,7 @@ export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/l
 function LabelsRouteComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
   return (
-    <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="labels" pageHeader={false}>
+    <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="labels">
       <LabelsSettings workspaceSlug={ws} projectId={projectId} />
     </ProjectSettingsScreen>
   );

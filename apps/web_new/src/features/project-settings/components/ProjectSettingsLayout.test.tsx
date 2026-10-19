@@ -176,6 +176,14 @@ describe("ProjectSettingsShell", () => {
     expect(screen.getByText("Admin")).toBeInTheDocument();
   });
 
+  it("shows a workspace admin the admin rail and caption over their project row", () => {
+    seed({ role: ROLE_MEMBER, workspaceRole: ROLE_ADMIN });
+    renderShell();
+    expect(screen.getByText("Admin")).toBeInTheDocument();
+    expect(screen.getByTestId("project-settings-tab-schedulers")).toBeInTheDocument();
+    expect(screen.getByTestId("project-settings-group-execution")).toBeInTheDocument();
+  });
+
   it("hides the rail entries for a viewer without a role but still renders the body", () => {
     seed({ role: null, workspaceRole: ROLE_MEMBER });
     renderShell();
@@ -310,11 +318,11 @@ describe("ProjectSettingsTabGate", () => {
     expect(screen.queryByText("tab body")).not.toBeInTheDocument();
   });
 
-  it("keeps the members page refused for a project guest who administers the workspace", () => {
+  it("admits the members page to a project guest who administers the workspace", () => {
     seed({ role: ROLE_GUEST, workspaceRole: ROLE_ADMIN });
     renderGate();
-    expect(screen.getByTestId("project-settings-denied")).toBeInTheDocument();
-    expect(screen.queryByText("tab body")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("project-settings-denied")).not.toBeInTheDocument();
+    expect(screen.getByText("tab body")).toBeInTheDocument();
   });
 
   it("denies the wider repository page to guests and admits members", () => {

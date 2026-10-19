@@ -82,6 +82,18 @@ export function isAdminStanding(role: ProjectRole): boolean {
   return role !== null && role >= ROLE_ADMIN;
 }
 
+/**
+ * The role the settings area acts on (PSET-004): a workspace admin holds
+ * project-admin standing even where the project role map says guest or
+ * member, and an unresolved role stays unresolved. The old settings pages
+ * resolve the same way before every check.
+ */
+export function effectiveProjectRole(projectRole: ProjectRole, workspaceRole: number | null): ProjectRole {
+  if (projectRole === null) return null;
+  if (workspaceRole !== null && workspaceRole >= ROLE_ADMIN) return ROLE_ADMIN;
+  return projectRole;
+}
+
 /** Whether the standing admits an entry registered for `visibleTo`. */
 export function admitsStanding(role: ProjectRole, visibleTo: ProjectSettingsStanding): boolean {
   if (visibleTo === "everyone") return role !== null && role >= ROLE_GUEST;

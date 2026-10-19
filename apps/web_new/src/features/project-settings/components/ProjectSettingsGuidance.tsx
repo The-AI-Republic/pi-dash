@@ -7,13 +7,16 @@
 // shared project dialog owned by its lifecycle slice.
 
 import { Button } from "@pidash/kit";
-import { FolderPlus } from "lucide-react";
+import { ArrowUpRight, FolderPlus } from "lucide-react";
 import * as React from "react";
+
+import { DOCS_URL } from "../../../shared/shell/externalLinks.js";
 
 export const NO_PROJECTS_HEADING = "No projects yet";
 export const NO_PROJECTS_BODY =
   "Projects hold the work items, cycles and agents for one effort. Create the first one to open its settings.";
 export const START_FIRST_PROJECT_LABEL = "Start your first project";
+export const PROJECTS_GUIDE_LABEL = "Read about projects";
 
 export interface ProjectSettingsGuidanceProps {
   onCreate: () => void;
@@ -31,9 +34,20 @@ export function ProjectSettingsGuidance({ onCreate }: ProjectSettingsGuidancePro
       </span>
       <h1 className="text-h3 text-(--text)">{NO_PROJECTS_HEADING}</h1>
       <p className="text-body max-w-md text-(--text-muted)">{NO_PROJECTS_BODY}</p>
-      <Button variant="primary" onClick={onCreate}>
-        {START_FIRST_PROJECT_LABEL}
-      </Button>
+      <div className="flex flex-wrap items-center justify-center gap-(--space-2)">
+        <a
+          href={DOCS_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-body inline-flex items-center gap-(--space-1) rounded-(--radius-control) px-(--space-3) py-(--space-2) text-(--text-muted) hover:text-(--text)"
+        >
+          {PROJECTS_GUIDE_LABEL}
+          <ArrowUpRight size={14} aria-hidden="true" />
+        </a>
+        <Button variant="primary" onClick={onCreate}>
+          {START_FIRST_PROJECT_LABEL}
+        </Button>
+      </div>
     </section>
   );
 }

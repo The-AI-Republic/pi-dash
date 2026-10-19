@@ -20,10 +20,8 @@ export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/a
 function AutomationsRouteComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
   return (
-    <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="automations" pageHeader={false}>
-      <div className="mx-auto w-full max-w-3xl px-(--space-6) py-(--space-8)">
-        <AutomationsSettings workspaceSlug={ws} projectId={projectId} />
-      </div>
+    <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="automations">
+      <AutomationsSettings workspaceSlug={ws} projectId={projectId} />
     </ProjectSettingsScreen>
   );
 }

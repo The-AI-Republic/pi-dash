@@ -240,7 +240,11 @@ export const Route = createFileRoute("/$ws/_gated")({
  * the palette is shell navigation rather than a settings shortcut.
  */
 export function isSettingsPagePath(pathname: string): boolean {
-  return pathname.includes("/settings/projects/");
+  // Both slash forms count, including the bare collection and the
+  // General address without its trailing slash: the settings area stops
+  // owning page chords as soon as its second segment is `projects`.
+  const segments = pathname.split("/").filter(Boolean);
+  return segments.length >= 2 && segments[1] === "settings" && segments[2] === "projects";
 }
 
 function lastParam(matches: Array<{ params: Record<string, unknown> }>, name: string): string | null {
