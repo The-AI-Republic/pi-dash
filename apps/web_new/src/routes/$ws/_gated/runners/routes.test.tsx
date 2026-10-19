@@ -50,11 +50,19 @@ vi.mock("../../../../features/runners/components/RunnersOverviewScreen.js", () =
     return <div data-testid="overview-screen" />;
   },
 }));
+const runsProps: Array<Record<string, unknown>> = [];
+vi.mock("../../../../features/runners/runs/RunsScreen.js", () => ({
+  RunsScreen: (props: Record<string, unknown>) => {
+    runsProps.push(props);
+    return <h1>Runs</h1>;
+  },
+}));
 
 const { sessionKeys, setSessionClient } = await import("../../../../core/session/index.js");
 const { Route: LayoutRoute } = await import("./route.js");
 const { Route: IndexRoute } = await import("./index.js");
 const { Route: RunsRoute } = await import("./runs.js");
+const { Route: RunDetailRoute } = await import("./runs_.$runId.js");
 const { Route: ApprovalsRoute } = await import("./approvals.js");
 const { Route: DetailRoute } = await import("./detail/$runnerId.js");
 const { Route: ChatRoute } = await import("./chat/$runnerId.js");
@@ -86,8 +94,12 @@ beforeEach(() => {
   params.value = { ws: "acme" };
   chatProps.length = 0;
   chatNavigate.mockReset();
+  runsProps.length = 0;
   vi.spyOn(LayoutRoute, "useParams").mockReturnValue(params.value);
   vi.spyOn(IndexRoute, "useParams").mockReturnValue(params.value);
+  vi.spyOn(RunsRoute, "useSearch").mockReturnValue({ page: 2 });
+  vi.spyOn(RunDetailRoute, "useSearch").mockReturnValue({ page: 3 });
+  vi.spyOn(RunDetailRoute, "useParams").mockReturnValue({ ws: "acme", runId: "run-1" });
   setSessionClient({} as never);
 });
 
@@ -128,6 +140,22 @@ describe("workspace runners section routes", () => {
   ])("mounts the %s section", (heading, route) => {
     mount(route.options.component);
     expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+  });
+
+  it("passes the URL page and no selection to the runs screen", () => {
+    mount(RunsRoute.options.component);
+    expect(runsProps[0]).toEqual({ page: 2, selectedRunId: null });
+  });
+
+  it("normalizes the runs search to a page-one address", () => {
+    const validate = RunsRoute.options.validateSearch as (search: Record<string, unknown>) => Record<string, unknown>;
+    expect(validate({ page: "3" })).toEqual({ page: 3 });
+    expect(validate({ page: "nope" })).toEqual({});
+  });
+
+  it("passes the run id from the address to the same screen", () => {
+    mount(RunDetailRoute.options.component);
+    expect(runsProps.at(-1)).toEqual({ page: 3, selectedRunId: "run-1" });
   });
 
   it("mounts the chat page with the runner from the address", () => {

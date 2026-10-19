@@ -1,19 +1,22 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Runs tab mount point (NEWFRONT-540, RUN-003). The runs list and detail land
-// with NEWFRONT-545; this route keeps the tab URL-driven and deep-linkable in
-// both scopes until then, mirroring the shell's area mounts.
+// Runs tab, workspace scope (NEWFRONT-545, RUN-016–022). The page number
+// lives in `?page=`; the detail pane opens through the sibling route so a
+// run is directly linkable.
 
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { RunnersAreaSectionMount } from "../../../../features/runners/components/RunnersAreaSectionMount.js";
+import { RunsScreen } from "../../../../features/runners/runs/RunsScreen.js";
+import { parseRunsPage, runsPageSearch } from "../../../../features/runners/runs/runsModel.js";
 
 export const Route = createFileRoute("/$ws/_gated/runners/runs")({
-  component: RunsMountRoute,
+  validateSearch: (search: Record<string, unknown>) => runsPageSearch(parseRunsPage(search)),
+  component: RunsRouteComponent,
 });
 
-function RunsMountRoute(): React.ReactElement {
-  return <RunnersAreaSectionMount title="Runs" />;
+function RunsRouteComponent(): React.ReactElement {
+  const page = Route.useSearch().page ?? 1;
+  return <RunsScreen page={page} selectedRunId={null} />;
 }
