@@ -70,12 +70,17 @@ function driverWithRowStates(script: ScriptedPage, states: RowState[]): WebDrive
   return driver;
 }
 
-/** A driver whose row flips to `want` once `flipAfterMs` has elapsed. */
-function driverWithTimedFlip(script: ScriptedPage, initial: RowState, want: RowState, flipAfterMs: number): WebDriver {
-  const started = Date.now();
+/**
+ * A driver whose row flips to `want` once the `flipOnClick`-th click has
+ * landed, modeling a swallowed click. Keying the flip to the click
+ * count instead of a wall-clock delay keeps the first drive's poll on
+ * `initial` however many reads the poll makes before its budget runs
+ * out, and the second drive's poll on `want`, on any machine speed.
+ */
+function driverWithClickFlip(script: ScriptedPage, initial: RowState, want: RowState, flipOnClick: number): WebDriver {
   const driver = new WebDriver(script.page);
   const scripted = driver as unknown as { cyclesRowFavoriteState: (name: string) => Promise<RowState> };
-  scripted.cyclesRowFavoriteState = async () => (Date.now() - started >= flipAfterMs ? want : initial);
+  scripted.cyclesRowFavoriteState = async () => (script.clicks >= flipOnClick ? want : initial);
   return driver;
 }
 
@@ -123,7 +128,7 @@ describe("cyclesRowFavoriteToggleConverge", () => {
   it("re-drives after a swallowed click and converges", async () => {
     const script = scriptedPage();
     // The first 30ms poll never sees the flip; the second drive lands it.
-    const driver = driverWithTimedFlip(script, "unstarred", "starred", 45);
+    const driver = driverWithClickFlip(script, "unstarred", "starred", 2);
     const server = scriptedServer(false);
     await driver.cyclesRowFavoriteToggleConverge("Cycle", "starred", server.isServerFavorite, 30);
     expect(script.clicks).toBe(2);

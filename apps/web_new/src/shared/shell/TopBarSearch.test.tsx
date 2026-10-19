@@ -80,7 +80,14 @@ afterEach(() => {
   useTopSearchFocus.setState({ request: 0 });
 });
 
-describe("TopBarSearch (SHELL-081)", () => {
+// The search rows live in a lazily imported panel; the first import can
+// take seconds while the whole suite competes for the CPU.
+const LAZY_ROW_TIMEOUT = { timeout: 10_000 };
+// The finds above outlast vitest's 5 s default test timeout, which
+// would stop the test before their own budget could report.
+const SEARCH_TEST_TIMEOUT = 30_000;
+
+describe("TopBarSearch (SHELL-081)", { timeout: SEARCH_TEST_TIMEOUT }, () => {
   it("focuses and opens the panel on a focus request (SHELL-089)", () => {
     renderBox({ scope: null });
     const field = screen.getByLabelText("Search commands");
@@ -125,8 +132,11 @@ describe("TopBarSearch (SHELL-081)", () => {
     await user.click(input);
     expect(screen.getByRole("listbox", { name: "Top bar search results" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(await screen.findByRole("option", { name: "Sign out" })).toBeInTheDocument();
-    expect(await screen.findByRole("option", { name: "Go to workspace home" })).toBeInTheDocument();
+    // The rows live in a lazily imported panel; under a full-suite run
+    // that chunk lands well after the 1 s default find budget.
+    await vi.dynamicImportSettled();
+    expect(await screen.findByRole("option", { name: "Sign out" }, LAZY_ROW_TIMEOUT)).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "Go to workspace home" }, LAZY_ROW_TIMEOUT)).toBeInTheDocument();
   });
 
   it("filters commands as the term types", async () => {
@@ -266,15 +276,15 @@ describe("TopBarSearch (SHELL-081)", () => {
   });
 });
 
-describe("TopBarSearch server results (SHELL-081/084/085/093)", () => {
+describe("TopBarSearch server results (SHELL-081/084/085/093)", { timeout: SEARCH_TEST_TIMEOUT }, () => {
   it("shows grouped hits for a typed term, project-scoped", async () => {
     const user = userEvent.setup();
     registerCommands([{ id: "shell.sign-out", title: "Sign out", run: () => undefined }]);
     const { calls } = renderBox({ search: () => ISSUE_RESULTS });
     await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
     await user.type(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER), "Parity");
-    expect(await screen.findByText(/Search results for/, undefined, { timeout: 5000 })).toBeInTheDocument();
-    expect(await screen.findByRole("option", { name: /Fix login/ }, { timeout: 5000 })).toBeInTheDocument();
+    expect(await screen.findByText(/Search results for/, undefined, LAZY_ROW_TIMEOUT)).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: /Fix login/ }, LAZY_ROW_TIMEOUT)).toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 700));
     expect(calls).toHaveLength(1);
     expect(searchParams(calls[0]!)).toEqual({ search: "Parity", project_id: PROJECT_ID, workspace_search: "false" });
@@ -290,12 +300,12 @@ describe("TopBarSearch server results (SHELL-081/084/085/093)", () => {
     renderBox({ search: () => gate.then(() => ISSUE_RESULTS) });
     await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
     await user.type(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER), "Parity");
-    const heading = await screen.findByText(/Search results for/, undefined, { timeout: 5000 });
+    const heading = await screen.findByText(/Search results for/, undefined, LAZY_ROW_TIMEOUT);
     expect(heading.className).toContain("animate-pulse");
     expect(screen.getByLabelText("Server results")).toHaveAttribute("aria-busy", "true");
     expect(screen.getByText("Searching")).toBeInTheDocument();
     release();
-    expect(await screen.findByRole("option", { name: /Fix login/ }, { timeout: 5000 })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: /Fix login/ }, LAZY_ROW_TIMEOUT)).toBeInTheDocument();
     expect(heading.className).not.toContain("animate-pulse");
   });
 
@@ -319,16 +329,17 @@ describe("TopBarSearch server results (SHELL-081/084/085/093)", () => {
     const input = screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER);
     await user.click(input);
     await user.type(input, "Par");
-    await screen.findByRole("option", { name: /Fix login/ }, { timeout: 5000 });
+    await screen.findByRole("option", { name: /Fix login/ }, LAZY_ROW_TIMEOUT);
     await user.type(input, "ity");
     await new Promise((resolve) => setTimeout(resolve, 700));
     expect(screen.getByText(/Search results for/).className).toContain("animate-pulse");
     expect(screen.getByRole("option", { name: /Fix login/ })).toBeInTheDocument();
     expect(screen.queryByText("Searching")).not.toBeInTheDocument();
     release();
-    await waitFor(() => expect(screen.getByText(/Search results for/).className).not.toContain("animate-pulse"), {
-      timeout: 5000,
-    });
+    await waitFor(
+      () => expect(screen.getByText(/Search results for/).className).not.toContain("animate-pulse"),
+      LAZY_ROW_TIMEOUT
+    );
     expect(calls).toBe(2);
   });
 
@@ -361,7 +372,7 @@ describe("TopBarSearch server results (SHELL-081/084/085/093)", () => {
     renderBox({ search: () => ISSUE_RESULTS, onSelectSearchResult });
     await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
     await user.type(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER), "Parity");
-    await user.click(await screen.findByRole("option", { name: /Fix login/ }, { timeout: 5000 }));
+    await user.click(await screen.findByRole("option", { name: /Fix login/ }, LAZY_ROW_TIMEOUT));
     expect(onSelectSearchResult).toHaveBeenCalledOnce();
     expect(onSelectSearchResult).toHaveBeenCalledWith(expect.objectContaining({ entity: "issue", title: "Fix login" }));
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
@@ -374,7 +385,7 @@ describe("TopBarSearch server results (SHELL-081/084/085/093)", () => {
     const input = screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER) as HTMLInputElement;
     await user.click(input);
     await user.type(input, "zzzqqxnomatch");
-    expect(await screen.findByText("No results found", undefined, { timeout: 5000 })).toBeInTheDocument();
+    expect(await screen.findByText("No results found", undefined, LAZY_ROW_TIMEOUT)).toBeInTheDocument();
     await user.click(screen.getByRole("option", { name: /No results found/ }));
     expect(input.value).toBe("");
     expect(screen.getByRole("option", { name: "Sign out" })).toBeInTheDocument();
@@ -391,7 +402,7 @@ describe("TopBarSearch server results (SHELL-081/084/085/093)", () => {
     });
     await user.click(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER));
     await user.type(screen.getByPlaceholderText(TOPBAR_SEARCH_PLACEHOLDER), "Parity");
-    expect(await screen.findByText("No results found", undefined, { timeout: 5000 })).toBeInTheDocument();
+    expect(await screen.findByText("No results found", undefined, LAZY_ROW_TIMEOUT)).toBeInTheDocument();
     expect(screen.queryByText(/error|failed|unreachable/i)).not.toBeInTheDocument();
   });
 });
