@@ -2,9 +2,10 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Built-in tab registration (parity/specs/profile.md §5/§9): the general,
-// security, token and notifications bodies are present on a direct visit,
-// and unmounting them leaves the seam to the sibling slices. The layout's
+// Built-in tab registration (parity/specs/profile.md §5/§7/§9): the
+// general, preferences, security, token, notifications and activity bodies
+// are present on a direct visit, and unmounting them leaves the seam to
+// the sibling slices. The layout's
 // session guard is shared with the app shell (AUTH-020).
 import { render } from "@testing-library/react";
 import * as React from "react";
@@ -22,21 +23,24 @@ import { useSessionExpiredRedirect } from "../../shared/shell/expiredRedirect.js
 afterEach(() => resetProfileSettingsPages());
 
 describe("built-in settings tabs", () => {
-  it("registers the general, security, token and notifications bodies", () => {
+  it("registers the general, preferences, security, token, notifications and activity bodies", () => {
     expect(getProfileSettingsPage("general")).not.toBeNull();
+    expect(getProfileSettingsPage("preferences")).not.toBeNull();
     expect(getProfileSettingsPage("security")).not.toBeNull();
     expect(getProfileSettingsPage("api-tokens")).not.toBeNull();
     expect(getProfileSettingsPage("notifications")).not.toBeNull();
-    expect(getProfileSettingsPage("activity")).toBeNull();
+    expect(getProfileSettingsPage("activity")).not.toBeNull();
   });
 
-  it("unregisters all four on demand", () => {
+  it("unregisters every body on demand", () => {
     const unregister = registerBuiltInSettingsTabs();
     unregister();
     expect(getProfileSettingsPage("general")).toBeNull();
+    expect(getProfileSettingsPage("preferences")).toBeNull();
     expect(getProfileSettingsPage("security")).toBeNull();
     expect(getProfileSettingsPage("api-tokens")).toBeNull();
     expect(getProfileSettingsPage("notifications")).toBeNull();
+    expect(getProfileSettingsPage("activity")).toBeNull();
   });
 
   it("routes the settings layout through the session-expiry redirect", () => {

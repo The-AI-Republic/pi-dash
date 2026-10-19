@@ -11,6 +11,34 @@ import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 import { UserLite } from "./users.js";
 
 /**
+ * The issue a history row points at, flattened as the history endpoints
+ * carry it. Absent when the issue was deleted (the row keeps its id but
+ * there is nothing to link or name).
+ */
+export const ActivityIssueRef = z.object({
+  id: uuid(),
+  name: z.string(),
+  sequence_id: z.number(),
+});
+export type ActivityIssueRef = z.infer<typeof ActivityIssueRef>;
+
+/** The project a history row points at, flattened for its identifier. */
+export const ActivityProjectRef = z.object({
+  id: uuid(),
+  identifier: z.string(),
+  name: z.string(),
+});
+export type ActivityProjectRef = z.infer<typeof ActivityProjectRef>;
+
+/** The workspace a row belongs to; the own-history feed spans workspaces. */
+export const ActivityWorkspaceRef = z.object({
+  id: uuid(),
+  name: z.string(),
+  slug: z.string(),
+});
+export type ActivityWorkspaceRef = z.infer<typeof ActivityWorkspaceRef>;
+
+/**
  * One property-change activity row. The feed paraphrases field plus
  * old/new values into a sentence; every field the server sends renders.
  */
@@ -37,6 +65,10 @@ export const IssueActivity = z.object({
   created_by: z.nullable(z.string()),
   updated_by: z.nullable(z.string()),
   deleted_at: nullableDateTime(),
+  /** Flattened link targets; the profile feeds need them to name rows. */
+  issue_detail: z.nullable(ActivityIssueRef),
+  project_detail: z.nullable(ActivityProjectRef),
+  workspace_detail: z.nullable(ActivityWorkspaceRef),
 });
 export type IssueActivity = z.infer<typeof IssueActivity>;
 

@@ -78,6 +78,13 @@ export function readStoredTheme(): ThemeValue {
   }
 }
 
+/** Custom palette carried beside the value in the profile theme bag. */
+export interface CustomPalette {
+  primary: string;
+  background: string;
+  darkPalette: boolean;
+}
+
 /** Persist the choice locally; private modes silently keep the default. */
 export function writeStoredTheme(value: ThemeValue): void {
   try {
@@ -87,11 +94,37 @@ export function writeStoredTheme(value: ThemeValue): void {
   }
 }
 
-/** Custom palette carried beside the value in the profile theme bag. */
-export interface CustomPalette {
-  primary: string;
-  background: string;
-  darkPalette: boolean;
+/**
+ * The saved custom palette carried beside the local choice. Without it a
+ * reload that lands on the custom value would paint the fallback colors
+ * until the profile read arrives, so the picker stores it with the value.
+ */
+export const THEME_PALETTE_STORAGE_KEY = "theme-palette";
+
+/** The locally stored custom palette, or undefined when missing or unreadable. */
+export function readStoredPalette(): CustomPalette | undefined {
+  try {
+    const raw = storage()?.getItem(THEME_PALETTE_STORAGE_KEY);
+    if (raw === null || raw === undefined) return undefined;
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const record = parsed as Record<string, unknown>;
+    const primary = record["primary"];
+    const background = record["background"];
+    if (typeof primary !== "string" || typeof background !== "string") return undefined;
+    return { primary, background, darkPalette: record["darkPalette"] === true };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Persist the custom palette locally; private modes keep the server copy. */
+export function writeStoredPalette(palette: CustomPalette): void {
+  try {
+    storage()?.setItem(THEME_PALETTE_STORAGE_KEY, JSON.stringify(palette));
+  } catch {
+    // Dismissed: the profile read still carries the saved colors.
+  }
 }
 
 /** The profile theme bag narrowed to what the shell reads and writes. */
@@ -100,11 +133,14 @@ export interface ThemeBag {
   custom?: CustomPalette | undefined;
 }
 
-/** Read the shell's slice of the profile theme bag (never throws). */
+/**
+ * Read the shell's slice of the profile theme bag (never throws). The
+ * saved custom colors ride alongside any chosen value: switching to a
+ * stock theme keeps them, so picking custom again can re-apply them.
+ */
 export function readThemeBag(bag: Record<string, unknown> | null | undefined): ThemeBag {
   if (bag === null || bag === undefined) return { value: "system" };
   const value = parseThemeValue(bag["theme"]);
-  if (value !== "custom") return { value };
   const primary = bag["primary"];
   const background = bag["background"];
   if (typeof primary !== "string" || typeof background !== "string") return { value };

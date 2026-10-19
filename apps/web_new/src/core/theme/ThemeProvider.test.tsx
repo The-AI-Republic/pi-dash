@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../api/client.js";
 import { readDocumentScheme, ThemeProvider, useResolvedScheme, useTheme } from "./ThemeProvider.js";
-import { THEME_STORAGE_KEY } from "./theme.js";
+import { THEME_PALETTE_STORAGE_KEY, THEME_STORAGE_KEY, writeStoredPalette, writeStoredTheme } from "./theme.js";
 
 const PROFILE_ID = "123e4567-e89b-12d3-a456-426614174000";
 const USER_ID = "223e4567-e89b-12d3-a456-426614174001";
@@ -99,6 +99,9 @@ function ValueProbe(): React.ReactElement {
         onClick={() => theme.setTheme("custom", { primary: "#112233", background: "#445566", darkPalette: true })}
       >
         pick custom
+      </button>
+      <button type="button" onClick={() => theme.setTheme("custom")}>
+        re-pick custom
       </button>
     </div>
   );
@@ -298,7 +301,7 @@ describe("ThemeProvider", () => {
     );
   });
 
-  it("toasts failed writes and keeps the local choice", async () => {
+  it("rolls the switcher and the document back when the write fails", async () => {
     const user = userEvent.setup();
     matchMediaStub(false);
     const transport = async (url: string, init: { method: string }) => {
@@ -338,7 +341,72 @@ describe("ThemeProvider", () => {
     await waitFor(() => expect(screen.getByTestId("value")).toHaveTextContent("dark"));
     await user.click(screen.getByRole("button", { name: "pick light" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't update the theme", expect.any(String)));
-    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
-    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("light");
+    // NEWFRONT-434 target: the document rolls back with the switcher.
+    await waitFor(() => expect(screen.getByTestId("value")).toHaveTextContent("dark"));
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
+  });
+
+  it("re-applies the saved custom palette when custom is picked again", async () => {
+    const user = userEvent.setup();
+    matchMediaStub(false);
+    const { queryClient, patches } = harness({
+      profile: { theme: "custom", primary: "#102030", background: "#405060", darkPalette: true },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider notifyError={() => undefined}>
+          <ValueProbe />
+        </ThemeProvider>
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(screen.getByTestId("value")).toHaveTextContent("custom"));
+    await user.click(screen.getByRole("button", { name: "pick light" }));
+    expect(document.documentElement.style.getPropertyValue("--theme-custom-primary")).toBe("");
+    await user.click(screen.getByRole("button", { name: "re-pick custom" }));
+    expect(document.documentElement.getAttribute("data-theme")).toBe("custom");
+    expect(document.documentElement.style.getPropertyValue("--theme-custom-primary")).toBe("#102030");
+    expect(document.documentElement.style.getPropertyValue("--theme-custom-background")).toBe("#405060");
+    await waitFor(() =>
+      expect(patches).toEqual([
+        { theme: "light", primary: "#102030", background: "#405060", darkPalette: true },
+        { theme: "custom", primary: "#102030", background: "#405060", darkPalette: true },
+      ])
+    );
+  });
+
+  it("stores the picked palette beside the choice", async () => {
+    const user = userEvent.setup();
+    matchMediaStub(false);
+    const { queryClient } = harness({ profile: { theme: "light" } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider notifyError={() => undefined}>
+          <ValueProbe />
+        </ThemeProvider>
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(screen.getByTestId("value")).toHaveTextContent("light"));
+    await user.click(screen.getByRole("button", { name: "pick custom" }));
+    expect(window.localStorage.getItem(THEME_PALETTE_STORAGE_KEY)).toBe(
+      JSON.stringify({ primary: "#112233", background: "#445566", darkPalette: true })
+    );
+  });
+
+  it("boots the stored custom palette before the profile lands", async () => {
+    matchMediaStub(false);
+    writeStoredTheme("custom");
+    writeStoredPalette({ primary: "#0a0b0c", background: "#fefefe", darkPalette: false });
+    const { queryClient } = harness({ profile: { theme: "custom", primary: "#0a0b0c", background: "#fefefe" } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider notifyError={() => undefined}>
+          <ValueProbe />
+        </ThemeProvider>
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("value")).toHaveTextContent("custom");
+    expect(document.documentElement.style.getPropertyValue("--theme-custom-primary")).toBe("#0a0b0c");
+    await waitFor(() => expect(screen.getByTestId("resolved")).toHaveTextContent("custom"));
   });
 });

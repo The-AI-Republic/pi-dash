@@ -68,14 +68,35 @@ export interface CustomThemeDesignerProps {
   saving?: boolean;
   /** Persist the palette (apply + profile write live with the caller). */
   onSave: (palette: CustomPalette) => void;
+  /**
+   * Applied while the form is valid, before any save, so a color typed
+   * here previews on a swatch beside its field. Omit where there is no
+   * preview surface (config round-trip callers).
+   */
+  onPreview?: ((palette: CustomPalette) => void) | undefined;
 }
 
-export function CustomThemeDesigner({ initial, saving = false, onSave }: CustomThemeDesignerProps): React.ReactElement {
+export function CustomThemeDesigner({
+  initial,
+  saving = false,
+  onSave,
+  onPreview,
+}: CustomThemeDesignerProps): React.ReactElement {
   const [primary, setPrimary] = React.useState(initial.primary);
   const [background, setBackground] = React.useState(initial.background);
   const [darkPalette, setDarkPalette] = React.useState(initial.darkPalette);
   const [problem, setProblem] = React.useState<string | null>(null);
   const fileInput = React.useRef<HTMLInputElement>(null);
+
+  // A valid pair previews live; an incomplete one leaves the last preview
+  // in place instead of flashing a black swatch mid-typing.
+  const primaryPreview = normalizeHexColor(primary);
+  const backgroundPreview = normalizeHexColor(background);
+  React.useEffect(() => {
+    if (onPreview === undefined) return;
+    if (primaryPreview === null || backgroundPreview === null) return;
+    onPreview({ primary: primaryPreview, background: backgroundPreview, darkPalette });
+  }, [onPreview, primaryPreview, backgroundPreview, darkPalette]);
 
   function save(event: React.FormEvent): void {
     event.preventDefault();
@@ -131,34 +152,45 @@ export function CustomThemeDesigner({ initial, saving = false, onSave }: CustomT
       className="flex flex-col gap-(--space-4) rounded-(--radius-card) border border-(--border) bg-(--surface) p-(--space-4)"
     >
       <h3 className="text-emphasis text-(--text)">Customize your theme</h3>
-      <div role="group" aria-label="Color base" className="flex gap-(--space-2)">
-        {(
-          [
-            { label: "Light base", dark: false },
-            { label: "Dark base", dark: true },
-          ] as const
-        ).map((option) => (
-          <Button
-            key={option.label}
-            type="button"
-            variant={darkPalette === option.dark ? "primary" : "secondary"}
-            aria-pressed={darkPalette === option.dark}
-            onClick={() => setDarkPalette(option.dark)}
-          >
-            {option.label}
-          </Button>
-        ))}
-      </div>
+      <fieldset className="flex flex-col gap-(--space-2)">
+        <legend className="text-meta font-medium text-(--text)">Color base</legend>
+        <div className="flex gap-(--space-4)">
+          {(
+            [
+              { label: "Light mode", dark: false },
+              { label: "Dark mode", dark: true },
+            ] as const
+          ).map((option) => (
+            <label key={option.label} className="text-body flex items-center gap-(--space-2) text-(--text)">
+              <input
+                type="radio"
+                name="palette-base"
+                value={option.dark ? "dark" : "light"}
+                checked={darkPalette === option.dark}
+                onChange={() => setDarkPalette(option.dark)}
+                className="accent-(--accent)"
+              />
+              {option.label}
+            </label>
+          ))}
+        </div>
+      </fieldset>
       <div className="flex flex-col gap-(--space-3)">
         <div className="flex items-center gap-(--space-3)">
           <input
             type="color"
-            aria-label="Brand color picker"
+            aria-label="Primary color picker"
             value={normalizeHexColor(primary) ?? "#000000"}
             onChange={(event) => setPrimary(event.target.value)}
             className="h-8 w-12 shrink-0 cursor-pointer rounded-(--radius-control) border border-(--border) bg-(--bg)"
           />
-          <Input label="Brand color" value={primary} onChange={(event) => setPrimary(event.target.value)} />
+          <Input
+            label="Primary color"
+            name="primary"
+            value={primary}
+            style={primaryPreview === null ? undefined : { backgroundColor: primaryPreview }}
+            onChange={(event) => setPrimary(event.target.value)}
+          />
         </div>
         <div className="flex items-center gap-(--space-3)">
           <input
@@ -168,7 +200,13 @@ export function CustomThemeDesigner({ initial, saving = false, onSave }: CustomT
             onChange={(event) => setBackground(event.target.value)}
             className="h-8 w-12 shrink-0 cursor-pointer rounded-(--radius-control) border border-(--border) bg-(--bg)"
           />
-          <Input label="Background color" value={background} onChange={(event) => setBackground(event.target.value)} />
+          <Input
+            label="Background color"
+            name="background"
+            value={background}
+            style={backgroundPreview === null ? undefined : { backgroundColor: backgroundPreview }}
+            onChange={(event) => setBackground(event.target.value)}
+          />
         </div>
       </div>
       {problem !== null ? (
