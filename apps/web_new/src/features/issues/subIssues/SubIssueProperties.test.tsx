@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { defaultDisplayProperties, type SubIssueDisplayProperties } from "./rules.js";
-import { shortDay, SubIssuePropertyControls, SubIssueTime } from "./SubIssueProperties.js";
+import { SubIssuePropertyControls } from "./SubIssueProperties.js";
 import type { SubIssueRowActions } from "./types.js";
 
 const WS = "acme";
@@ -195,39 +195,4 @@ describe("SubIssuePropertyControls", () => {
 
 afterEach(() => {
   resetAppClient();
-});
-
-describe("SubIssueTime", () => {
-  it("labels a merged range and marks a due day as overdue", () => {
-    render(
-      <SubIssueTime row={row({ start_date: "2026-10-01", target_date: "2026-10-10" })} today={new Date(2026, 9, 12)} />
-    );
-    const cell = screen.getByTestId("sub-issue-time");
-    expect(cell).toHaveTextContent("Oct 1 - 10, 2026");
-    expect(cell.className).toContain("text-(--danger)");
-  });
-
-  it("keeps a future range neutral and does not mark a completed child", () => {
-    render(
-      <SubIssueTime row={row({ start_date: "2026-11-01", target_date: "2026-11-10" })} today={new Date(2026, 9, 12)} />
-    );
-    expect(screen.getByTestId("sub-issue-time").className).toContain("text-(--text-muted)");
-    render(
-      <SubIssueTime
-        row={row({ start_date: "2026-10-01", target_date: "2026-10-10", state_group: "completed" })}
-        today={new Date(2026, 9, 12)}
-      />
-    );
-    expect(screen.getAllByTestId("sub-issue-time")[1]?.className).toContain("text-(--text-muted)");
-  });
-
-  it("shows one end when the other is unset", () => {
-    render(<SubIssueTime row={row({ target_date: "2026-10-10" })} today={new Date(2026, 9, 1)} />);
-    expect(screen.getByTestId("sub-issue-time")).toHaveTextContent("Oct 10, 2026");
-  });
-
-  it("formats a short day key", () => {
-    expect(shortDay("2026-10-10")).toBe("Oct 10, 2026");
-    expect(shortDay(null)).toBeNull();
-  });
 });

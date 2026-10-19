@@ -166,10 +166,10 @@ function BrowseIssueDetail({
       editable={editable}
       projectIdentifier={projectIdentifier(project, issueKey)}
       canWrite={editable}
-      onOpen={(row) =>
+      onOpen={(row, identifier) =>
         void navigate({
           to: "/$ws/browse/$issueKey",
-          params: { ws: workspaceSlug, issueKey: `${projectIdentifier(project, issueKey)}-${row.sequence_id}` },
+          params: { ws: workspaceSlug, issueKey: identifier },
         })
       }
       createProjects={

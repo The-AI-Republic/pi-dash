@@ -94,7 +94,7 @@ function renderRow(
     isEpic?: boolean;
     properties?: ReturnType<typeof defaultDisplayProperties>;
     menu?: Partial<SubIssueRowMenuActions>;
-    onOpen?: (row: SubIssueItem) => void;
+    onOpen?: (row: SubIssueItem, identifier: string) => void;
     projectCodeFor?: (child: SubIssueItem) => string;
     memberIdentities?: Record<string, { label: string; avatarUrl: string | null }>;
   } = {}
@@ -156,7 +156,7 @@ describe("row rendering", () => {
     renderRow({ onOpen });
     const link = screen.getByRole("link", { name: /Child one/ });
     await user.click(link);
-    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: CHILD }));
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: CHILD }), "ATL-7");
     onOpen.mockClear();
     await user.keyboard("{Meta>}");
     link.dispatchEvent(new MouseEvent("click", { bubbles: true, metaKey: true, button: 0 }));
@@ -174,19 +174,34 @@ describe("row rendering", () => {
     expect(screen.getByText("Saving sub-work item")).toBeInTheDocument();
   });
 
-  it("draws the merged range when both ends and both columns are set", () => {
+  it("draws the merged range only when both ends and both columns are set", () => {
     renderRow({ row: row({ start_date: "2026-10-01", target_date: "2026-10-10" }) });
     expect(screen.getByTestId("sub-issue-date-range")).toBeInTheDocument();
-    expect(screen.queryByTestId("sub-issue-time")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sub-issue-start-date")).not.toBeInTheDocument();
   });
 
-  it("draws a separate time cell when only one column is shown", () => {
-    renderRow({
+  it("draws one date picker per visible column and no fallback date cell", () => {
+    const { unmount } = renderRow({
       row: row({ start_date: "2026-10-01", target_date: "2026-10-10" }),
       properties: { ...defaultDisplayProperties(), due_date: false },
     });
     expect(screen.queryByTestId("sub-issue-date-range")).not.toBeInTheDocument();
-    expect(screen.getByTestId("sub-issue-time")).toBeInTheDocument();
+    expect(screen.getByTestId("sub-issue-start-date")).toBeInTheDocument();
+    expect(screen.queryByTestId("sub-issue-due-date")).not.toBeInTheDocument();
+    // The start picker is the only place the single visible day appears.
+    expect(screen.getAllByText("Oct 1, 2026")).toHaveLength(1);
+    unmount();
+  });
+
+  it("draws no dates at all when both date columns are off", () => {
+    renderRow({
+      row: row({ start_date: "2026-10-01", target_date: "2026-10-10" }),
+      properties: { ...defaultDisplayProperties(), start_date: false, due_date: false },
+    });
+    expect(screen.queryByTestId("sub-issue-date-range")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sub-issue-start-date")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sub-issue-due-date")).not.toBeInTheDocument();
+    expect(screen.queryByText("Oct 1, 2026")).not.toBeInTheDocument();
   });
 
   it("gives no chevron to a row without children", () => {
@@ -203,10 +218,10 @@ describe("row rendering", () => {
 });
 
 describe("row menu", () => {
-  it("offers copy to everyone, the writes only to members", () => {
+  it("offers the menu to members only", () => {
     const actions = { copyLink: vi.fn(), remove: vi.fn(), delete: vi.fn() };
     const guest = rowMenuItems(row(), false, false, actions);
-    expect(guest.map((entry) => ("label" in entry ? entry.label : "separator"))).toEqual(["Copy link"]);
+    expect(guest).toEqual([]);
     const member = rowMenuItems(row(), true, false, actions);
     expect(member.map((entry) => ("label" in entry ? entry.label : "separator"))).toEqual([
       "Copy link",
@@ -214,6 +229,12 @@ describe("row menu", () => {
       "Remove sub-work item",
       "Delete",
     ]);
+  });
+
+  it("draws no menu trigger for a guest row", () => {
+    renderRow({ editable: false });
+    expect(screen.queryByTestId("sub-issue-row-menu")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Actions for/ })).not.toBeInTheDocument();
   });
 
   it("runs the chosen entry through the section's actions", async () => {

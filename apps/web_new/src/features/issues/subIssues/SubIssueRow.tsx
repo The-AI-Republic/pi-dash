@@ -17,7 +17,7 @@ import * as React from "react";
 import { useSubIssues } from "./queries.js";
 import { isPropertyVisible, isSubIssueOverdue, showsMergedDateRange, type SubIssueDisplayProperties } from "./rules.js";
 import type { SubIssueMemberIdentity, SubIssueRowActions } from "./types.js";
-import { SubIssuePropertyControls, SubIssueTime } from "./SubIssueProperties.js";
+import { SubIssuePropertyControls } from "./SubIssueProperties.js";
 
 export interface SubIssueRowProps {
   row: SubIssueItem;
@@ -36,7 +36,8 @@ export interface SubIssueRowProps {
   /** Labels follow the parent's kind (epics read as work items). */
   isEpic: boolean;
   actions: SubIssueRowActions;
-  onOpen: (row: SubIssueItem) => void;
+  /** Opens the row; the identifier carries the row's own project code. */
+  onOpen: (row: SubIssueItem, identifier: string) => void;
   menuActions: SubIssueRowMenuActions;
 }
 
@@ -49,11 +50,6 @@ function browseHref(workspaceSlug: string, identifier: string): string {
 }
 
 /** A small state dot in the row's time slot, for a quick scan. */
-function TimeCell({ row, today }: { row: SubIssueItem; today: Date }): React.ReactElement | null {
-  if (row.start_date === null && row.target_date === null) return null;
-  return <SubIssueTime row={row} today={today} />;
-}
-
 function Assignees({
   ids,
   identities,
@@ -101,10 +97,12 @@ export function rowMenuItems(
   isEpic: boolean,
   actions: SubIssueRowMenuActions
 ): MenuEntry[] {
+  // Guests read the rows only; the menu (link copy included) is a
+  // member affordance, so there is nothing to draw for them.
+  if (!editable) return [];
   const items: MenuEntry[] = [
     { label: "Copy link", onSelect: () => actions.copyLink(row), icon: <Copy size={14} aria-hidden="true" /> },
   ];
-  if (!editable) return items;
   items.push({ separator: true });
   items.push({
     label: isEpic ? "Remove work item" : "Remove sub-work item",
@@ -128,12 +126,11 @@ export function SubIssueRow(props: SubIssueRowProps): React.ReactElement {
   const { row, workspaceSlug, projectIdentifier, properties, editable, depth, ancestors, isEpic } = props;
   const [expanded, setExpanded] = React.useState(false);
   const [menuOpen, setMenuOpen] = React.useState(false);
-  const today = React.useMemo(() => new Date(), []);
   const identifier = identifierFor(row, projectIdentifier);
   const href = browseHref(workspaceSlug, identifier);
   const repeated = ancestors.includes(row.id);
   const hasChildren = (row.sub_issues_count ?? 0) > 0 && !repeated;
-  const overdue = isSubIssueOverdue(row, today);
+  const overdue = isSubIssueOverdue(row, new Date());
   const merged = showsMergedDateRange(row, properties);
   const busy = props.actions.isBusy(row.id);
   const paddingLeft = 12 + depth * 20;
@@ -178,7 +175,7 @@ export function SubIssueRow(props: SubIssueRowProps): React.ReactElement {
             onClick={(event) => {
               if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
               event.preventDefault();
-              props.onOpen(row);
+              props.onOpen(row, identifier);
             }}
           >
             {isPropertyVisible(properties, "key") ? (
@@ -207,23 +204,24 @@ export function SubIssueRow(props: SubIssueRowProps): React.ReactElement {
                 actions={props.actions}
               />
             ) : null}
-            {merged ? null : <TimeCell row={row} today={today} />}
           </div>
-          <Menu
-            open={menuOpen}
-            onOpenChange={setMenuOpen}
-            trigger={
-              <IconButton
-                label={`Actions for ${identifier}`}
-                size="small"
-                variant="ghost"
-                data-testid="sub-issue-row-menu"
-              >
-                <MoreHorizontal size={14} strokeWidth={2} aria-hidden="true" />
-              </IconButton>
-            }
-            items={items}
-          />
+          {items.length === 0 ? null : (
+            <Menu
+              open={menuOpen}
+              onOpenChange={setMenuOpen}
+              trigger={
+                <IconButton
+                  label={`Actions for ${identifier}`}
+                  size="small"
+                  variant="ghost"
+                  data-testid="sub-issue-row-menu"
+                >
+                  <MoreHorizontal size={14} strokeWidth={2} aria-hidden="true" />
+                </IconButton>
+              }
+              items={items}
+            />
+          )}
         </div>
       </div>
       {repeated ? (

@@ -12,7 +12,7 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
@@ -26,7 +26,7 @@ import {
   findPalettePage,
   listCommands,
 } from "../../../../shared/commands/index.js";
-import { Route } from "./$issueKey.js";
+import { projectIdentifier, Route } from "./$issueKey.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 const ISSUE_ID = "323e4567-e89b-12d3-a456-426614174002";
@@ -40,6 +40,9 @@ const STRIP_TIMEOUT = { timeout: 5000 };
 function findStrip(): Promise<HTMLElement> {
   return screen.findByTestId("project-tab-strip", undefined, STRIP_TIMEOUT);
 }
+
+const CHILD_ID = "523e4567-e89b-12d3-a456-426614174005";
+const OTHER_PROJECT_ID = "623e4567-e89b-12d3-a456-426614174006";
 
 function projectRow() {
   return {
@@ -229,6 +232,8 @@ interface BrowseExtras {
   intake?: boolean;
   liteStatus?: number;
   published?: boolean;
+  child?: boolean;
+  foreignChild?: boolean;
 }
 
 function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {}) {
@@ -269,7 +274,12 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
       body = JSON.stringify(userPropertiesPayload());
     } else if (url.endsWith("/projects/")) {
       status = 200;
-      body = JSON.stringify([projectRow()]);
+      body = JSON.stringify([
+        projectRow(),
+        ...(extras.foreignChild === true
+          ? [{ ...projectRow(), id: OTHER_PROJECT_ID, name: "Betel", identifier: "BET", is_default: false }]
+          : []),
+      ]);
     } else if (url.includes("/history/")) {
       if (url.includes("activity_type=issue-property")) {
         body = JSON.stringify([]);
@@ -323,7 +333,7 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
       status = 200;
       body = JSON.stringify({
         sub_issues:
-          extras.child === true
+          extras.child === true || extras.foreignChild === true
             ? [
                 {
                   ...issueRow(),
@@ -331,12 +341,13 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
                   name: "Every inspector",
                   sequence_id: 2,
                   parent_id: ISSUE_ID,
+                  ...(extras.foreignChild === true ? { project_id: OTHER_PROJECT_ID, sequence_id: 9 } : {}),
                   state_group: "completed",
                 },
               ]
             : [],
-        state_distribution: extras.child === true ? { completed: [CHILD_ID] } : {},
-        total_count: extras.child === true ? 1 : 0,
+        state_distribution: extras.child === true || extras.foreignChild === true ? { completed: [CHILD_ID] } : {},
+        total_count: extras.child === true || extras.foreignChild === true ? 1 : 0,
       });
     } else if (url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 200;
@@ -631,6 +642,15 @@ describe("browse widgets", () => {
     await screen.findByTestId("project-tab-strip");
     await userEvent.setup().click(await screen.findByRole("link", { name: /Every inspector/ }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/acme/browse/WEB-2"));
+  });
+
+  it("opens a child from another project under that project's key", async () => {
+    const { router } = renderBrowse(true, undefined, { details: "member", me: true, foreignChild: true });
+    await screen.findByTestId("project-tab-strip");
+    const link = await screen.findByRole("link", { name: /Every inspector/ });
+    expect(link).toHaveAttribute("href", "/acme/browse/BET-9");
+    await userEvent.setup().click(link);
+    await waitFor(() => expect(router.state.location.pathname).toBe("/acme/browse/BET-9"));
   });
 
   it("keeps the add entry shut for a guest", async () => {

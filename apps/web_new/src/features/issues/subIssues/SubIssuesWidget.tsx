@@ -62,7 +62,8 @@ export interface SubIssuesWidgetProps {
   editable: boolean;
   projectIdentifier: string;
   canWrite: boolean;
-  onOpen: (row: SubIssueItem) => void;
+  /** Opens a child at the browse key built from its own project code. */
+  onOpen: (row: SubIssueItem, identifier: string) => void;
   createProjects: WorkItemCreateProject[];
   /** Sections relations/links/attachments slices mount here. */
   extraSections?: readonly WidgetSectionSlot[] | undefined;

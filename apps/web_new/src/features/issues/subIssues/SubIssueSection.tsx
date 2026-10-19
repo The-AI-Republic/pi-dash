@@ -156,7 +156,8 @@ export interface SubIssueSectionProps {
   /** Guest standing removes the write entries from the row menus. */
   canWrite: boolean;
   /** Opens a child (peek lands with NEWFRONT-646). */
-  onOpen: (row: SubIssueItem) => void;
+  /** Opens a child at the browse key built from its own project code. */
+  onOpen: (row: SubIssueItem, identifier: string) => void;
   /** Project rows the create dialog may file under. */
   createProjects: WorkItemCreateProject[];
   /** Title override; the root widget passes the kind's label. */

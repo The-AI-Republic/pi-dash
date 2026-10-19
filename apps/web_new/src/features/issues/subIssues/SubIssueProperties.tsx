@@ -13,7 +13,6 @@ import type { SubIssueItem } from "@pidash/api-client";
 import { Flag, Minus } from "lucide-react";
 import * as React from "react";
 
-import { formatDay, formatMergedRange, todayIsoDay } from "../dropdowns/calendar.js";
 import { DatePicker } from "../dropdowns/DatePicker.js";
 import { DateRangePicker } from "../dropdowns/DateRangePicker.js";
 import { useWeekStart } from "../dropdowns/weekStart.js";
@@ -37,35 +36,6 @@ export interface SubIssuePropertyControlsProps {
   merged: boolean;
   overdue: boolean;
   actions: SubIssueRowActions;
-}
-
-/** A date label short enough for a dense row. */
-export function shortDay(iso: string | null | undefined): string | null {
-  return iso === null || iso === undefined ? null : formatDay(iso);
-}
-
-/** The row's time cell when the merged control is not in use. */
-export function SubIssueTime({ row, today }: { row: SubIssueItem; today: Date }): React.ReactElement {
-  const start = shortDay(row.start_date);
-  const end = shortDay(row.target_date);
-  const target = row.target_date ?? null;
-  const overdue =
-    target !== null &&
-    row.state_group !== "completed" &&
-    row.state_group !== "cancelled" &&
-    target <= todayIsoDay(today);
-  const label =
-    start !== null && end !== null
-      ? formatMergedRange(row.start_date as string, row.target_date as string)
-      : (start ?? end ?? "");
-  return (
-    <span
-      data-testid="sub-issue-time"
-      className={overdue ? "text-caption shrink-0 text-(--danger)" : "text-caption shrink-0 text-(--text-muted)"}
-    >
-      {label}
-    </span>
-  );
 }
 
 /** A priority glyph with its tone, reused as the row trigger. */

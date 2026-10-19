@@ -623,18 +623,33 @@ describe("SubIssueSection writes", () => {
     const { onOpen } = renderSection();
     await screen.findByText("Child one");
     await user.click(screen.getByRole("link", { name: /Child one/ }));
-    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: CHILD }));
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: CHILD }), "ATL-7");
+  });
+
+  it("opens a foreign child under its own project code", async () => {
+    stubApi({
+      pages: [
+        page({
+          sub_issues: [row({ id: THIRD, name: "Gamma", sequence_id: 9, project_id: OTHER_PROJECT })],
+          state_distribution: { started: [THIRD] },
+          total_count: 1,
+        }),
+      ],
+    });
+    const user = userEvent.setup();
+    const { onOpen } = renderSection();
+    await screen.findByText("Gamma");
+    await user.click(screen.getByRole("link", { name: /Gamma/ }));
+    await waitFor(() => expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: THIRD }), "BET-9"));
   });
 
   it("gives guests the rows but no add control or write entries", async () => {
     stubApi();
-    const user = userEvent.setup();
     renderSection({ editable: false, canWrite: false });
     await screen.findByText("Child one");
     expect(screen.queryByRole("button", { name: "Add a sub-work item" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Actions for ATL-7" }));
-    expect(await screen.findByRole("menuitem", { name: "Copy link" })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: "Remove sub-work item" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Actions for ATL-7" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sub-issue-row-menu")).not.toBeInTheDocument();
   });
 });
 
