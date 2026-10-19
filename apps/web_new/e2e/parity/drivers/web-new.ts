@@ -17180,12 +17180,15 @@ export class WebNewDriver implements ParityDriver {
       .trim();
   }
 
-  /** The paid-plan upgrade dialog, which the new app never renders (§31). */
+  /**
+   * Any visible dialog (§31). The target is "no paid-plan upgrade dialog
+   * exists anywhere", so the reader must not key on the old modal's copy:
+   * a redesigned pricing pop-up would carry different words. Reporting
+   * every dialog here makes a plan pop-up fail the row instead of slipping
+   * past the reader.
+   */
   private upgradeDialog(): Locator {
-    return this.page
-      .getByRole("dialog")
-      .filter({ hasText: /upgrade to a paid plan/i })
-      .first();
+    return this.page.getByRole("dialog").first();
   }
 
   async wsSettingsUpgradeModalVisible(): Promise<boolean> {
@@ -17197,14 +17200,14 @@ export class WebNewDriver implements ParityDriver {
     return this.billingText(this.upgradeDialog().getByRole("heading"));
   }
 
-  async wsSettingsUserMenuOpenCommunity(_workspaceSlug: string): Promise<void> {
-    // The shell removed the community entry (WSET-031 target): the user
-    // menu opens as usual and simply has no entry to activate.
-    if (!(await this.isShown(this.page.locator('[data-testid="sidebar-user-menu"]')))) {
-      await this.page.locator('[data-testid="sidebar-user-menu"]').first().waitFor({ timeout: WebNewDriver.WAIT_MS });
-    }
-    await this.page.locator('[data-testid="sidebar-user-menu"]').first().click({ timeout: WebNewDriver.WAIT_MS });
-    await this.userMenuTexts();
+  async wsSettingsUserMenuOpenCommunity(workspaceSlug: string): Promise<void> {
+    // The account menu lives on the workspace-home sidebar; settings
+    // addresses replace the app chrome and mount only the settings shell
+    // (§1), so open the home first (the oracle's pattern). The target
+    // removed the community entry (§31): the menu opens as usual and
+    // simply has no entry to activate.
+    await this.openWorkspaceHome(workspaceSlug);
+    await this.openUserMenu();
   }
 
   async wsSettingsActiveCyclesOpen(workspaceSlug: string): Promise<void> {

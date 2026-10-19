@@ -285,7 +285,7 @@ describe("billing driver", () => {
     expect(await driver.wsSettingsBillingPlanButtonPopupUrl("Pro")).toBeNull();
   });
 
-  it("reports no upgrade dialog and no dialog title on any page", async () => {
+  it("reports no dialog and no dialog title on any page", async () => {
     const empty = locator({ count: async () => 0 });
     const page = pageOf({ getByRole: vi.fn(() => empty) });
     const driver = new WebNewDriver(page);
@@ -294,7 +294,8 @@ describe("billing driver", () => {
     await driver.wsSettingsUpgradeModalClose();
   });
 
-  it("opens the user menu without a community entry", async () => {
+  it("opens the workspace home and its user menu without a community entry", async () => {
+    const goto = vi.fn(async () => null);
     const trigger = locator({ count: async () => 1, isVisible: async () => true, click: vi.fn(async () => undefined) });
     const menu = locator({
       count: async () => 1,
@@ -302,11 +303,15 @@ describe("billing driver", () => {
       allTextContents: async () => ["Sign out"],
     });
     const page = pageOf({
+      goto,
       locator: vi.fn((selector: string) => (selector.includes("sidebar-user-menu") ? trigger : menu)),
       getByRole: vi.fn((role: string) => (role === "menu" ? menu : locator({ count: async () => 0 }))),
     });
     const driver = new WebNewDriver(page);
     await driver.wsSettingsUserMenuOpenCommunity("acme");
+    // Settings addresses replace the app chrome (§1), so the menu comes
+    // from the workspace home, exactly as the oracle reaches it.
+    expect(goto).toHaveBeenCalledWith("/acme/");
     expect(trigger.click).toHaveBeenCalledTimes(1);
     expect(await driver.userMenuTexts()).toEqual(["Sign out", "Sign out"]);
   });
@@ -444,8 +449,8 @@ describe("billing driver", () => {
     }
   });
 
-  it("reads a surrounding plan and its title from an upgrade dialog", async () => {
-    const heading = locator({ count: async () => 1, innerText: async () => "Upgrade to a paid plan" });
+  it("reads any dialog, not just the old modal copy, and its title", async () => {
+    const heading = locator({ count: async () => 1, innerText: async () => "Pick a plan" });
     const dialog = locator({
       count: async () => 1,
       isVisible: async () => true,
@@ -455,7 +460,7 @@ describe("billing driver", () => {
     const page = pageOf({ getByRole: vi.fn(() => dialog), keyboard: { press: vi.fn(async () => undefined) } });
     const driver = new WebNewDriver(page);
     expect(await driver.wsSettingsUpgradeModalVisible()).toBe(true);
-    expect(await driver.wsSettingsUpgradeModalTitle()).toBe("Upgrade to a paid plan");
+    expect(await driver.wsSettingsUpgradeModalTitle()).toBe("Pick a plan");
   });
 
   it("sends Escape to a stray dialog and tolerates it staying", async () => {
@@ -474,23 +479,22 @@ describe("billing driver", () => {
     expect(press).toHaveBeenCalledWith("Escape");
   });
 
-  it("waits for the user-menu trigger before clicking it", async () => {
-    const trigger = locator({
-      count: async () => 0,
-      isVisible: async () => false,
-      click: vi.fn(async () => undefined),
-      waitFor: vi.fn(async () => undefined),
-    });
+  it("fails loudly when the account menu never opens", async () => {
+    const trigger = locator({ click: vi.fn(async () => undefined) });
     const menu = locator({ count: async () => 0 });
     const page = pageOf({
       locator: vi.fn((selector: string) => (selector.includes("sidebar-user-menu") ? trigger : menu)),
       getByRole: vi.fn(() => menu),
     });
     const driver = new WebNewDriver(page);
-    await driver.wsSettingsUserMenuOpenCommunity("acme");
-    expect(trigger.waitFor).toHaveBeenCalledTimes(1);
+    // First read sets the deadline, the poll then sees it passed.
+    const now = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(60_000);
+    try {
+      await expect(driver.wsSettingsUserMenuOpenCommunity("acme")).rejects.toThrow(/user menu never opened/);
+    } finally {
+      now.mockRestore();
+    }
     expect(trigger.click).toHaveBeenCalledTimes(1);
-    expect(await driver.userMenuTexts()).toEqual([]);
   });
 
   it("does nothing when there is no pro pill to click", async () => {

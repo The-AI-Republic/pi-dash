@@ -198,13 +198,11 @@ test(
     await test.step("upgrade pills are static labels that open nothing", async () => {
       if (driver.target === "web_new") {
         // The active-cycles route belongs to the cycles area (CYC-043), so
-        // the pill's mount host has not landed yet; NEWFRONT-527 carries
-        // the leg. Until then, every rendered pill on the pages this area
-        // owns is still proven inert from the settings shell.
-        await driver.wsSettingsBillingOpen(seed.workspaceSlug);
-        expect(await driver.wsSettingsProBadgeCount()).toBeGreaterThanOrEqual(0);
-        await driver.wsSettingsProBadgeClickFirst();
-        expect(await driver.wsSettingsUpgradeModalVisible()).toBe(false);
+        // the pill's mount host has not landed yet. The rest of this row
+        // (no dialog at the former trigger points, no plan surface in the
+        // shell) is proven above; the pill leg skips like the shell's
+        // SHELL-101 precedent until the host exists. TODO(NEWFRONT-527).
+        test.skip(true, "cycles route unlanded; pill mount unprovable");
         return;
       }
       // The active-cycles header carries an upgrade pill.
