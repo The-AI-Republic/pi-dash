@@ -20,11 +20,15 @@ describe("RunnerStatusBadge", () => {
     }
   });
 
+  it("exposes the label through a stable test hook", () => {
+    const { container } = render(<RunnerStatusBadge status="busy" />);
+    expect(container.querySelector("[data-testid='runner-status-badge']")).toHaveTextContent("busy");
+  });
+
   it("paints each state in its own tone through the kit badge", () => {
     const tones = RUNNER_STATUSES.map((status) => {
       const { container, unmount } = render(<RunnerStatusBadge status={status} />);
-      const badge = container.firstElementChild as HTMLElement;
-      const dot = badge.querySelector("span[aria-hidden='true']") as HTMLElement;
+      const dot = container.querySelector("span[aria-hidden='true']") as HTMLElement;
       const classes = dot.className;
       unmount();
       return classes;

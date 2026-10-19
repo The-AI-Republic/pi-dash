@@ -15,11 +15,29 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const params = { value: { ws: "acme" } as Record<string, string> };
 const shellProps: Array<Record<string, unknown>> = [];
 const screenProps: Array<Record<string, unknown>> = [];
+const chatProps: Array<Record<string, unknown>> = [];
+const chatNavigate = vi.fn();
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
   return { ...original, Outlet: () => <div data-testid="outlet" /> };
 });
+vi.mock("../../../../features/runners/area.js", () => ({
+  useRunnersArea: () => ({
+    scope: { workspaceSlug: "acme" },
+    workspaceId: "ws-id",
+    access: "allowed",
+    allowed: true,
+    base: "/acme/runners",
+    path: (child?: string) => (child === undefined ? "/acme/runners" : `/acme/runners/${child}`),
+  }),
+}));
+vi.mock("../../../../features/runners/chat/RunnerChatPage.js", () => ({
+  RunnerChatPage: (props: Record<string, unknown>) => {
+    chatProps.push(props);
+    return <div data-testid="runner-chat-page" />;
+  },
+}));
 vi.mock("../../../../features/runners/index.js", () => ({
   RunnersWorkspaceShell: (props: Record<string, unknown>) => {
     shellProps.push(props);
@@ -66,6 +84,8 @@ beforeEach(() => {
   shellProps.length = 0;
   screenProps.length = 0;
   params.value = { ws: "acme" };
+  chatProps.length = 0;
+  chatNavigate.mockReset();
   vi.spyOn(LayoutRoute, "useParams").mockReturnValue(params.value);
   vi.spyOn(IndexRoute, "useParams").mockReturnValue(params.value);
   setSessionClient({} as never);
@@ -105,9 +125,55 @@ describe("workspace runners section routes", () => {
     ["Runs", RunsRoute],
     ["Approvals", ApprovalsRoute],
     ["Runner details", DetailRoute],
-    ["Runner chat", ChatRoute],
   ])("mounts the %s section", (heading, route) => {
     mount(route.options.component);
     expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+  });
+
+  it("mounts the chat page with the runner from the address", () => {
+    vi.spyOn(ChatRoute, "useParams").mockReturnValue({ ws: "acme", runnerId: "r-1" });
+    vi.spyOn(ChatRoute, "useSearch").mockReturnValue({});
+    vi.spyOn(ChatRoute, "useNavigate").mockReturnValue(chatNavigate as never);
+    mount(ChatRoute.options.component);
+    expect(chatProps[0]).toMatchObject({ workspaceSlug: "acme", runnerId: "r-1", requestedSessionId: null });
+  });
+
+  it("passes an explicit session deep link through", () => {
+    vi.spyOn(ChatRoute, "useParams").mockReturnValue({ ws: "acme", runnerId: "r-1" });
+    vi.spyOn(ChatRoute, "useSearch").mockReturnValue({ sessionId: "s-9" });
+    vi.spyOn(ChatRoute, "useNavigate").mockReturnValue(chatNavigate as never);
+    mount(ChatRoute.options.component);
+    expect(chatProps[0]).toMatchObject({ requestedSessionId: "s-9" });
+  });
+
+  it("treats a missing session parameter as no deep link", () => {
+    vi.spyOn(ChatRoute, "useParams").mockReturnValue({ ws: "acme", runnerId: "r-1" });
+    vi.spyOn(ChatRoute, "useSearch").mockReturnValue({ sessionId: undefined });
+    vi.spyOn(ChatRoute, "useNavigate").mockReturnValue(chatNavigate as never);
+    mount(ChatRoute.options.component);
+    expect(chatProps[0]).toMatchObject({ requestedSessionId: null });
+  });
+
+  it("rewrites the address when an entry is selected", () => {
+    vi.spyOn(ChatRoute, "useParams").mockReturnValue({ ws: "acme", runnerId: "r-1" });
+    vi.spyOn(ChatRoute, "useSearch").mockReturnValue({});
+    vi.spyOn(ChatRoute, "useNavigate").mockReturnValue(chatNavigate as never);
+    mount(ChatRoute.options.component);
+    const selectSession = chatProps[0]?.["onSelectSession"] as ((id: string) => void) | undefined;
+    selectSession?.("s-2");
+    expect(chatNavigate).toHaveBeenCalledWith({
+      to: "/$ws/runners/chat/$runnerId",
+      params: { ws: "acme", runnerId: "r-1" },
+      search: { sessionId: "s-2" },
+      replace: true,
+    });
+  });
+
+  it("validates the session search parameter", () => {
+    const validate = ChatRoute.options.validateSearch as (input: Record<string, unknown>) => unknown;
+    expect(validate({ sessionId: "s-1" })).toEqual({ sessionId: "s-1" });
+    expect(validate({ sessionId: "" })).toEqual({});
+    expect(validate({ sessionId: 9 })).toEqual({});
+    expect(validate({})).toEqual({});
   });
 });

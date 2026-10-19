@@ -1,0 +1,152 @@
+// @vitest-environment jsdom
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// New chat (NEWFRONT-549, RUN-026): creates, publishes then selects,
+// reports the working state, and toasts with the server's reason on
+// failure while leaving the history untouched.
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const contracts = vi.hoisted(() => ({ createChatSession: vi.fn(), warmChatSession: vi.fn() }));
+const toasts = vi.hoisted(() => ({ notifyError: vi.fn() }));
+vi.mock("@pidash/api-client", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@pidash/api-client")>();
+  return { ...original, ...contracts };
+});
+vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
+  return { ...original, ...toasts };
+});
+
+const { ApiError } = await import("@pidash/api-client");
+const { createAppClient, resetAppClient } = await import("../../../core/api/client.js");
+const { chatKeys } = await import("./keys.js");
+const { makeSession, testClient, wrapper } = await import("./harness.js");
+const { chatFailureReason, NEW_CHAT_FAILED_BODY, NEW_CHAT_FAILED_TITLE, useNewChat } = await import("./useNewChat.js");
+
+beforeEach(() => {
+  createAppClient("https://api.test", {} as never);
+  contracts.warmChatSession.mockResolvedValue({ ok: true });
+});
+
+afterEach(() => {
+  contracts.createChatSession.mockReset();
+  contracts.warmChatSession.mockReset();
+  toasts.notifyError.mockReset();
+  resetAppClient();
+});
+
+function props(overrides: Record<string, unknown> = {}) {
+  return {
+    workspaceSlug: "acme",
+    workspaceId: "ws-id",
+    runnerId: "r-1",
+    onSelect: vi.fn(),
+    onCreated: vi.fn(),
+    busy: false,
+    ...overrides,
+  };
+}
+
+describe("chatFailureReason", () => {
+  it("prefers the transport's message and falls back to the generic line", () => {
+    expect(chatFailureReason(new Error("Runner is not reachable"))).toBe("Runner is not reachable");
+    expect(chatFailureReason(new Error(""))).toBe(NEW_CHAT_FAILED_BODY);
+    expect(chatFailureReason("nope")).toBe(NEW_CHAT_FAILED_BODY);
+  });
+});
+
+describe("useNewChat", () => {
+  it("creates, publishes, selects, then warms in the background", async () => {
+    const created = makeSession({ id: "fresh", last_message_at: null });
+    contracts.createChatSession.mockResolvedValue(created);
+    const client = testClient();
+    client.setQueryData(chatKeys.sessions("acme", "r-1"), [makeSession({ id: "old" })]);
+    const input = props();
+    const { result } = renderHook(() => useNewChat(input), { wrapper: wrapper(client) });
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(contracts.createChatSession).toHaveBeenCalledWith(expect.anything(), { workspace: "ws-id", runner: "r-1" });
+    expect(input.onCreated).toHaveBeenCalledWith(created);
+    expect(input.onSelect).toHaveBeenCalledWith("fresh");
+    expect(client.getQueryData(chatKeys.sessions("acme", "r-1"))).toEqual([
+      expect.objectContaining({ id: "fresh" }),
+      expect.objectContaining({ id: "old" }),
+    ]);
+    await waitFor(() => expect(contracts.warmChatSession).toHaveBeenCalledWith(expect.anything(), "fresh"));
+    expect(result.current.busy).toBe(false);
+  });
+
+  it("does not duplicate a session the list already holds", async () => {
+    const created = makeSession({ id: "fresh" });
+    contracts.createChatSession.mockResolvedValue(created);
+    const client = testClient();
+    client.setQueryData(chatKeys.sessions("acme", "r-1"), [created]);
+    const { result } = renderHook(() => useNewChat(props()), { wrapper: wrapper(client) });
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(client.getQueryData(chatKeys.sessions("acme", "r-1"))).toHaveLength(1);
+  });
+
+  it("ignores a warm-up failure", async () => {
+    contracts.createChatSession.mockResolvedValue(makeSession({ id: "fresh" }));
+    contracts.warmChatSession.mockRejectedValueOnce(new Error("cold"));
+    const { result } = renderHook(() => useNewChat(props()), { wrapper: wrapper(testClient()) });
+    await act(async () => {
+      await result.current.start();
+    });
+    await waitFor(() => expect(contracts.warmChatSession).toHaveBeenCalled());
+    expect(toasts.notifyError).not.toHaveBeenCalled();
+  });
+
+  it("shows the working state and refuses overlapping creates", async () => {
+    let resolveCreate: (value: ReturnType<typeof makeSession>) => void = () => undefined;
+    contracts.createChatSession.mockImplementation(() => new Promise((resolve) => (resolveCreate = resolve as never)));
+    const input = props();
+    const { result } = renderHook(() => useNewChat(input), { wrapper: wrapper(testClient()) });
+    let first: Promise<void> = Promise.resolve();
+    act(() => {
+      first = result.current.start();
+    });
+    await waitFor(() => expect(result.current.busy).toBe(true));
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(contracts.createChatSession).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveCreate(makeSession({ id: "fresh" }));
+      await first;
+    });
+    expect(result.current.busy).toBe(false);
+  });
+
+  it("does nothing while the caller says a create is already running", async () => {
+    const { result } = renderHook(() => useNewChat(props({ busy: true })), { wrapper: wrapper(testClient()) });
+    expect(result.current.busy).toBe(true);
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(contracts.createChatSession).not.toHaveBeenCalled();
+  });
+
+  it("toasts the server's reason and keeps history unchanged on failure", async () => {
+    contracts.createChatSession.mockRejectedValue(
+      new ApiError({ status: 500, code: "http", message: "parity session-create failure" })
+    );
+    const client = testClient();
+    const existing = [makeSession({ id: "old" })];
+    client.setQueryData(chatKeys.sessions("acme", "r-1"), existing);
+    const input = props();
+    const { result } = renderHook(() => useNewChat(input), { wrapper: wrapper(client) });
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(toasts.notifyError).toHaveBeenCalledWith(NEW_CHAT_FAILED_TITLE, "parity session-create failure");
+    expect(input.onSelect).not.toHaveBeenCalled();
+    expect(client.getQueryData(chatKeys.sessions("acme", "r-1"))).toEqual(existing);
+    expect(result.current.busy).toBe(false);
+  });
+});

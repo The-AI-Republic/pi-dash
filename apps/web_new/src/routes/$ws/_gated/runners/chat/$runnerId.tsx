@@ -1,19 +1,43 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Runner chat mount point (NEWFRONT-540, RUN-004). Every rail contact links
-// here, so the address resolves in both scopes; the chat page lands with
-// NEWFRONT-549.
+// Runner chat, workspace scope (NEWFRONT-549, RUN-025/026). The runner id
+// is the address, so every rail contact deep-links here; `?sessionId=`
+// names a conversation. Selecting an entry rewrites that parameter
+// without adding history, matching the old surface.
 
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { RunnersAreaSectionMount } from "../../../../../features/runners/components/RunnersAreaSectionMount.js";
+import { RunnerChatPage } from "../../../../../features/runners/chat/RunnerChatPage.js";
 
-export const Route = createFileRoute("/$ws/_gated/runners/chat/$runnerId")({
-  component: RunnerChatMountRoute,
+const Route = createFileRoute("/$ws/_gated/runners/chat/$runnerId")({
+  validateSearch: (search: Record<string, unknown>): { sessionId?: string } => {
+    const sessionId = search["sessionId"];
+    return typeof sessionId === "string" && sessionId !== "" ? { sessionId } : {};
+  },
+  component: RunnerChatRouteComponent,
 });
 
-function RunnerChatMountRoute(): React.ReactElement {
-  return <RunnersAreaSectionMount title="Runner chat" />;
+function RunnerChatRouteComponent(): React.ReactElement {
+  const { ws, runnerId } = Route.useParams();
+  const search = Route.useSearch();
+  const navigate = Route.useNavigate();
+  return (
+    <RunnerChatPage
+      workspaceSlug={ws}
+      runnerId={runnerId}
+      requestedSessionId={search.sessionId ?? null}
+      onSelectSession={(sessionId) =>
+        void navigate({
+          to: "/$ws/runners/chat/$runnerId",
+          params: { ws, runnerId },
+          search: { sessionId },
+          replace: true,
+        })
+      }
+    />
+  );
 }
+
+export { Route };

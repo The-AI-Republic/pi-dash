@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const shellProps: Array<Record<string, unknown>> = [];
 const screenProps: Array<Record<string, unknown>> = [];
+const chatProps: Array<Record<string, unknown>> = [];
+const chatNavigate = vi.fn();
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
@@ -22,6 +24,12 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
     useLocation: () => ({ pathname: "/acme/projects/p-1/runners" }),
   };
 });
+vi.mock("../../../../../../features/runners/chat/RunnerChatPage.js", () => ({
+  RunnerChatPage: (props: Record<string, unknown>) => {
+    chatProps.push(props);
+    return <div data-testid="runner-chat-page" />;
+  },
+}));
 vi.mock("../../../../../../features/runners/index.js", () => ({
   RunnersProjectShell: (props: Record<string, unknown>) => {
     shellProps.push(props);
@@ -121,9 +129,31 @@ describe("project runners section routes", () => {
     ["Runs", RunsRoute],
     ["Approvals", ApprovalsRoute],
     ["Runner details", DetailRoute],
-    ["Runner chat", ChatRoute],
   ])("mounts the %s section", (heading, route) => {
     mount(route.options.component);
     expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+  });
+
+  it("mounts the chat page inside the project scope", () => {
+    vi.spyOn(ChatRoute, "useParams").mockReturnValue({ ws: "acme", projectId: "p-1", runnerId: "r-1" });
+    vi.spyOn(ChatRoute, "useSearch").mockReturnValue({ sessionId: "s-7" });
+    vi.spyOn(ChatRoute, "useNavigate").mockReturnValue(chatNavigate as never);
+    mount(ChatRoute.options.component);
+    expect(chatProps[0]).toMatchObject({ workspaceSlug: "acme", runnerId: "r-1", requestedSessionId: "s-7" });
+    const selectSession = chatProps[0]?.["onSelectSession"] as ((id: string) => void) | undefined;
+    selectSession?.("s-2");
+    expect(chatNavigate).toHaveBeenCalledWith({
+      to: "/$ws/projects/$projectId/runners/chat/$runnerId",
+      params: { ws: "acme", projectId: "p-1", runnerId: "r-1" },
+      search: { sessionId: "s-2" },
+      replace: true,
+    });
+  });
+
+  it("validates the session search parameter", () => {
+    const validate = ChatRoute.options.validateSearch as (input: Record<string, unknown>) => unknown;
+    expect(validate({ sessionId: "s-1" })).toEqual({ sessionId: "s-1" });
+    expect(validate({ sessionId: 7 })).toEqual({});
+    expect(validate({ sessionId: "" })).toEqual({});
   });
 });
