@@ -39,15 +39,6 @@ import { loadListLayout, resolvedListLayout } from "../../../../../../features/i
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
-// The timeline boundary (and the chart code behind it) only matters when
-// the timeline layout is chosen, so the route chunk carries neither
-// (Quality gates, NEWFRONT-677): the skeleton shows while its chunk lands.
-const LazyGanttTimeline = React.lazy(() =>
-  import("../../../../../../features/issues/gantt/GanttTimeline.js").then((module) => ({
-    default: module.GanttTimeline,
-  }))
-);
-
 // The list layout is a separate chunk so the route stays inside the
 // initial-JS budget (Quality gates). `beforeLoad` awaits it with the data,
 // so the component mounts once instead of suspending after commit.
