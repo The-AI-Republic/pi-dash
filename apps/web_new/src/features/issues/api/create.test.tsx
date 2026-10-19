@@ -111,7 +111,7 @@ describe("useCreateWorkItem", () => {
 
   it("posts the title and announces the new row", async () => {
     const h = renderHandle(201);
-    h.save({ projectId: PROJECT_ID, name: "Fresh report" });
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(WORK_ITEM_CREATED_TITLE, expect.any(String)));
     const post = h.calls.find((call) => call.method === "POST");
     expect(post?.url).toBe(`https://api.test/api/workspaces/acme/projects/${PROJECT_ID}/issues/`);
@@ -122,7 +122,7 @@ describe("useCreateWorkItem", () => {
 
   it("announces the failure without creating", async () => {
     const h = renderHandle(400);
-    h.save({ projectId: PROJECT_ID, name: "Fresh report" });
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(WORK_ITEM_CREATE_FAILED_TITLE, expect.any(String)));
     expect(notifySuccess).not.toHaveBeenCalled();
     expect(screen.getByText("create:error")).toBeInTheDocument();
@@ -224,7 +224,7 @@ describe("useCreateWorkItem temp rows", () => {
     const holdPost: { release: () => void } = { release: () => {} };
     const h = renderTempHandle(201, holdPost);
     await waitFor(() => expect(h.cached()?.results).toHaveLength(1));
-    h.save({ projectId: PROJECT_ID, name: "Fresh report" });
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
     await waitFor(() => expect(h.cached().results).toHaveLength(2));
     expect(h.cached().results[0]?.id).toMatch(/^temp-/);
     expect(h.cached().results[0]?.name).toBe("Fresh report");
@@ -241,7 +241,7 @@ describe("useCreateWorkItem temp rows", () => {
   it("removes the temp row again when the post fails", async () => {
     const h = renderTempHandle(400);
     await waitFor(() => expect(h.cached()?.results).toHaveLength(1));
-    h.save({ projectId: PROJECT_ID, name: "Fresh report" });
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(WORK_ITEM_CREATE_FAILED_TITLE, expect.any(String)));
     expect(h.cached().results.map((entry) => entry.id)).toEqual(["123e4567-e89b-12d3-a456-426614174000"]);
     expect(h.cached().total_count).toBe(1);

@@ -463,6 +463,7 @@ function WorkspaceShell({
                 workspaceSlug={workspaceSlug}
                 projects={joinedProjects.map((project) => ({ id: project.id, name: project.name }))}
                 canCreate={canEdit}
+                memberRole={role}
               />
             }
             projectsGroup={

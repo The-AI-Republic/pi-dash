@@ -73,6 +73,8 @@ export type { WorkItemDraft } from "./lib/createDraft.js";
 export { QuickCreateButton } from "./components/QuickCreateButton.js";
 export type { QuickCreateButtonProps } from "./components/QuickCreateButton.js";
 export { WorkItemCreateDialog } from "./components/WorkItemCreateDialog.js";
+export { selectCreatableProjects, TITLE_MAX_LENGTH as CREATE_TITLE_MAX_LENGTH } from "./create/createForm.js";
+export type { CreateFormState, CreateProjectOption } from "./create/createForm.js";
 export type { WorkItemCreateDialogProps, WorkItemCreateProject } from "./components/WorkItemCreateDialog.js";
 export { liteIssueQueryOptions, loadLiteIssue, parseBrowseKey, resolveShortLink } from "./api/browse.js";
 export type { LiteResolution } from "./api/browse.js";

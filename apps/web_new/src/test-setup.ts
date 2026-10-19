@@ -30,6 +30,21 @@ if (typeof globalThis.Range !== "undefined") {
   }
 }
 
+// jsdom has no hit testing. ProseMirror asks for the element under the
+// pointer while handling typed transactions; without a stub every editor
+// keystroke throws and the document never changes. Suites that need a
+// real target install `elementFromPointInEditor`.
+declare global {
+  interface Document {
+    /** Optional hit-test target for editor typing under jsdom. */
+    elementFromPointInEditor?: ((x: number, y: number) => Element | null) | undefined;
+  }
+}
+
+if (typeof document !== "undefined" && typeof document.elementFromPoint !== "function") {
+  document.elementFromPoint = (x: number, y: number) => document.elementFromPointInEditor?.(x, y) ?? document.body;
+}
+
 afterEach(() => {
   // Node-env suites never mount; only jsdom suites have a DOM to clean.
   if (typeof globalThis.document !== "undefined") {

@@ -9,7 +9,7 @@
 // title, its rows and the interim empty states; layouts themselves belong
 // to the issues area.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ApiError, createClient } from "@pidash/api-client";
 import type { IssueListItem, IssueListResponse, Project } from "@pidash/api-client";
 import * as React from "react";
@@ -541,6 +541,31 @@ describe("project issues screen", () => {
     expect(screen.getByRole("heading", { name: "Project not found" })).toBeInTheDocument();
     expect(screen.getByText("Pick another project from the sidebar.")).toBeInTheDocument();
     expect(screen.queryByTestId("layout-switcher-segmented")).not.toBeInTheDocument();
+  });
+
+  it("registers a New work item command on the ni sequence", async () => {
+    renderScreen({}, 1, [issueRow()]);
+    const command = listCommands().find((entry) => entry.id === "issues.create-work-item");
+    expect(command?.title).toBe("New work item");
+    expect(command?.sequence).toBe("ni");
+    expect(command?.section).toBe("Create");
+    expect(command?.hint).toBe("Website");
+  });
+
+  it("opens the create dialog from the New work item command", async () => {
+    renderScreen({}, 1, [issueRow()]);
+    const command = listCommands().find((entry) => entry.id === "issues.create-work-item");
+    await act(async () => {
+      await command?.run();
+    });
+    expect(await screen.findByPlaceholderText("Title")).toBeInTheDocument();
+  });
+
+  it("offers Add work item in the header and opens the dialog", async () => {
+    renderScreen({}, 1, [issueRow()]);
+    const add = screen.getByRole("button", { name: "Add work item" });
+    fireEvent.click(add);
+    expect(await screen.findByPlaceholderText("Title")).toBeInTheDocument();
   });
 
   it("registers a refresh command that invalidates the workspace", async () => {

@@ -1307,6 +1307,41 @@ describe("issue contracts", () => {
     expect(postCall?.init.body).toBe(JSON.stringify({ name: "Fresh report" }));
   });
 
+  it("sends the execution-target fields on create", async () => {
+    const created = { ...issue, sequence_id: 44, deleted_at: null };
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 201, body: JSON.stringify(created) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await createIssue(client, "acme", UUID2, {
+      name: "Runs on a pod",
+      assigned_pod_id: UUID,
+      agent_executor: "local_runner",
+      parent_id: UUID,
+    });
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.init.body).toBe(
+      JSON.stringify({ name: "Runs on a pod", assigned_pod_id: UUID, agent_executor: "local_runner", parent_id: UUID })
+    );
+  });
+
+  it("allows an executor override with a null pod", async () => {
+    const created = { ...issue, sequence_id: 45, deleted_at: null };
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 201, body: JSON.stringify(created) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await createIssue(client, "acme", UUID2, { name: "Cloud", assigned_pod_id: null, agent_executor: "cloud_agent" });
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.init.body).toBe(
+      JSON.stringify({ name: "Cloud", assigned_pod_id: null, agent_executor: "cloud_agent" })
+    );
+  });
+
   it("rejects a created row without an id", async () => {
     const transport = recordingTransport((call) =>
       call.url.endsWith("/auth/get-csrf-token/")

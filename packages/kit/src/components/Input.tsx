@@ -12,9 +12,20 @@ export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> 
   error?: string;
   /** Control pinned to the input's right edge, e.g. a clear or show/hide button. */
   trailing?: React.ReactNode;
+  /** Handle on the underlying input for callers that focus it directly. */
+  inputRef?: React.Ref<HTMLInputElement> | undefined;
 }
 
-export function Input({ label, hint, error, id, className, trailing, ...rest }: InputProps): React.ReactElement {
+export function Input({
+  label,
+  hint,
+  error,
+  id,
+  className,
+  trailing,
+  inputRef,
+  ...rest
+}: InputProps): React.ReactElement {
   const generatedId = React.useId();
   const fieldId = id ?? generatedId;
   return (
@@ -24,6 +35,7 @@ export function Input({ label, hint, error, id, className, trailing, ...rest }: 
         // the field never remounts (and loses focus) when one appears.
         <div className="relative">
           <input
+            ref={inputRef}
             id={fieldId}
             aria-invalid={error ? true : undefined}
             aria-describedby={describedBy}

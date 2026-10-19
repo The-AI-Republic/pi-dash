@@ -86,3 +86,4 @@ export { normalizeQuickLinkAddress, quickLinkDisplayName, validateQuickLinkForm 
 export type { NormalizedQuickLink, QuickLinkForm, QuickLinkValidation } from "./lib/quicklinks.js";
 export { orderWidgetPrefs, visibleWidgetPrefs, widgetSectionKind } from "./lib/widgets.js";
 export type { WidgetSectionKind } from "./lib/widgets.js";
+export { assistantLandingHref, isAssistantConfigured } from "./lib/assistant.js";

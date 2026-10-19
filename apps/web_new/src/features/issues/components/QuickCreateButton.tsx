@@ -23,9 +23,16 @@ export interface QuickCreateButtonProps {
   projects: WorkItemCreateProject[];
   /** Workspace admin/member standing; guests read false. */
   canCreate: boolean;
+  /** The caller's workspace role, carried onto the dialog's project rows. */
+  memberRole: number | null;
 }
 
-export function QuickCreateButton({ workspaceSlug, projects, canCreate }: QuickCreateButtonProps): React.ReactElement {
+export function QuickCreateButton({
+  workspaceSlug,
+  projects,
+  canCreate,
+  memberRole,
+}: QuickCreateButtonProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   return (
     <>
@@ -45,7 +52,8 @@ export function QuickCreateButton({ workspaceSlug, projects, canCreate }: QuickC
             open={open}
             onOpenChange={setOpen}
             workspaceSlug={workspaceSlug}
-            projects={projects}
+            projects={projects.map((project) => ({ ...project, memberRole }))}
+            canCreate={canCreate}
           />
         </React.Suspense>
       ) : null}

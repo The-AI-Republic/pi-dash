@@ -82,6 +82,14 @@ export interface IssueCreateInput {
   target_date?: string | null;
   parent_id?: string | null;
   git_work_branch?: string;
+  /**
+   * Execution target picked in the create dialog (ISS-117/ISS-218): a
+   * pod pin plus the executor, or an executor override with a null pod.
+   * The serializer accepts both on create; absent means the project
+   * default.
+   */
+  assigned_pod_id?: string | null;
+  agent_executor?: string | null;
 }
 
 /**
