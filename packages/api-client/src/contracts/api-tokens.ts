@@ -156,3 +156,4 @@ export async function createPersonalApiToken(
 export async function deletePersonalApiToken(client: ApiClient, tokenId: string): Promise<number> {
   const response = await client.delete(`/api/users/api-tokens/${tokenId}`);
   return response.status;
+}
