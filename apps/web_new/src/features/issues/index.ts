@@ -370,3 +370,8 @@ export {
 } from "./spreadsheet/data.js";
 export { isEditableColumn } from "./spreadsheet/cells.js";
 export { SHEET_SUB_ISSUE_LIMIT, sheetSubIssuesQueryOptions } from "./spreadsheet/subIssues.js";
+export { SubIssuesWidget, WIDGET_ACTION_LABELS } from "./subIssues/SubIssuesWidget.js";
+export type { WidgetActionLabel, WidgetSectionSlot, SubIssuesWidgetProps } from "./subIssues/SubIssuesWidget.js";
+export { SubIssueSection } from "./subIssues/SubIssueSection.js";
+export type { SubIssueSectionHandle, SubIssueSectionProps } from "./subIssues/SubIssueSection.js";
+export type { CreateParentPreset } from "./components/WorkItemCreateDialog.js";

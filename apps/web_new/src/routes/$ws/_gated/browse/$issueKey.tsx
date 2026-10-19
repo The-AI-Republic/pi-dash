@@ -22,6 +22,7 @@ import {
   DetailMissingState,
   DetailSkeleton,
   IssueDetailRoot,
+  SubIssuesWidget,
   issueDetailQueryOptions,
   issueKeys,
   liteIssueQueryOptions,
@@ -30,6 +31,11 @@ import { projectDetailsQueryOptions, ProjectTabStrip } from "../../../../feature
 import { canEditInProject, useWorkItemPaletteContext } from "../../../../shared/shell/contextual/index.js";
 import { CopyWorkItemLinkButton } from "../../../../shared/shell/CopyWorkItemLinkButton.js";
 import { useDocumentHead } from "../../../../shared/shell/index.js";
+
+/** The project's code; the browse key's own prefix until the row joins. */
+export function projectIdentifier(project: { identifier: string } | undefined, issueKey: string): string {
+  return project?.identifier ?? issueKey.slice(0, Math.max(0, issueKey.lastIndexOf("-")));
+}
 
 export const Route = createFileRoute("/$ws/_gated/browse/$issueKey")({
   loader: async ({ context, params }) => {
@@ -152,6 +158,35 @@ function BrowseIssueDetail({
     refresh: async () => context.queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) }),
     onDeleted: () => void navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: workspaceSlug, projectId } }),
   });
+  const workbench = (
+    <SubIssuesWidget
+      workspaceSlug={workspaceSlug}
+      issue={issue}
+      project={project}
+      editable={editable}
+      projectIdentifier={projectIdentifier(project, issueKey)}
+      canWrite={editable}
+      onOpen={(row) =>
+        void navigate({
+          to: "/$ws/browse/$issueKey",
+          params: { ws: workspaceSlug, issueKey: `${projectIdentifier(project, issueKey)}-${row.sequence_id}` },
+        })
+      }
+      createProjects={
+        project === undefined
+          ? []
+          : [
+              {
+                id: project.id,
+                name: project.name,
+                identifier: project.identifier,
+                memberRole: project.member_role,
+                archived: project.archived_at !== null,
+              },
+            ]
+      }
+    />
+  );
   return (
     <>
       <ProjectTabStrip
@@ -171,13 +206,16 @@ function BrowseIssueDetail({
           </div>
         }
         activity={
-          <CommentThread
-            workspaceSlug={workspaceSlug}
-            projectId={projectId}
-            issueId={issue.id}
-            archived={issue.archived_at !== null}
-            published={project?.anchor != null}
-          />
+          <div className="flex flex-col gap-(--space-6)">
+            {workbench}
+            <CommentThread
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              issueId={issue.id}
+              archived={issue.archived_at !== null}
+              published={project?.anchor != null}
+            />
+          </div>
         }
       />
       {palette.deleteDialog}
