@@ -8,8 +8,13 @@ import { QueryClientProvider } from "@tanstack/react-query";
 
 import { createAppClient } from "./core/api/index.js";
 import { platform } from "./core/platform/index.js";
-import { createCachePersistor, createQueryClient, persistReferenceOnly } from "./core/query/index.js";
-import { InstanceAppGate } from "./features/instance/index.js";
+import {
+  createCachePersistor,
+  createQueryClient,
+  persistEverything,
+  persistReferenceOnly,
+} from "./core/query/index.js";
+import { InstanceAppGate, persistAppCache } from "./features/instance/index.js";
 import { routeTree } from "./routeTree.gen";
 import { PIDASH_TARGET } from "./target";
 import "./styles/app.css";
@@ -19,7 +24,10 @@ import "./styles/app.css";
 const apiClient = createAppClient();
 const queryClient = createQueryClient();
 const persistor = createCachePersistor(queryClient, platform.storage, {
-  shouldPersist: PIDASH_TARGET === "desktop" ? () => true : persistReferenceOnly,
+  // The startup answer is read once per launch: restoring it would skip the
+  // read and could strand the app on a stale setup/maintenance branch.
+  shouldPersist:
+    PIDASH_TARGET === "desktop" ? (queryKey) => persistEverything() && persistAppCache(queryKey) : persistReferenceOnly,
 });
 await persistor.restore().catch(() => undefined);
 

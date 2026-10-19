@@ -13,6 +13,9 @@ import * as React from "react";
 import { useWorkspaceExportsGuide } from "../lib/exportsGuide.js";
 
 export const EXPORTS_PAGE_TITLE = "Exports";
+// Pinned by EXP-001 (and quoted in the area spec §33): the exports
+// oracle asserts this exact explanation, so it is behavior rather than a
+// copied sentence from the old frontend.
 export const EXPORTS_PAGE_DESCRIPTION =
   "Export your project data in various formats and access your export history with download links.";
 export const EXPORTS_GUIDE_PENDING_TITLE = "Export guide unavailable";

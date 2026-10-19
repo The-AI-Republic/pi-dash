@@ -14,6 +14,7 @@ import {
   generateMagicCode,
   getCsrfToken,
   getInstanceBootstrap,
+  getInstanceBootstrapForStartup,
   parseAuthRedirectResult,
   requestPasswordReset,
   resetPassword,
@@ -3314,6 +3315,45 @@ describe("instance bootstrap contracts", () => {
       transport: json({ config: BOOTSTRAP_CONFIG }),
     });
     const error = await getInstanceBootstrap(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("reads the unprovisioned startup envelope as setup unfinished", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ is_activated: false, is_setup_done: false }),
+    });
+    await expect(getInstanceBootstrapForStartup(client)).resolves.toEqual({ setupDone: false, bootstrap: null });
+  });
+
+  it("reads the oracle's partial not-ready instance as setup unfinished", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ config: {}, instance: { is_activated: false, is_setup_done: false } }),
+    });
+    await expect(getInstanceBootstrapForStartup(client)).resolves.toEqual({ setupDone: false, bootstrap: null });
+  });
+
+  it("validates a running startup answer against the full bootstrap", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        config: BOOTSTRAP_CONFIG,
+        instance: { ...INSTANCE_ROW, is_setup_done: true, workspaces_exist: true },
+      }),
+    });
+    const state = await getInstanceBootstrapForStartup(client);
+    expect(state.setupDone).toBe(true);
+    expect(state.bootstrap?.instance.instance_name).toBe("Acme");
+  });
+
+  it("rejects a running startup answer that lacks the instance row", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ config: BOOTSTRAP_CONFIG, is_setup_done: true }),
+    });
+    const error = await getInstanceBootstrapForStartup(client).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).code).toBe("contract");
   });

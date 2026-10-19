@@ -16,7 +16,7 @@ export {
   maintenanceIllustration,
 } from "./MaintenanceScreen.js";
 export { NOT_READY_BODY, NOT_READY_HEADING, NotReadyScreen } from "./NotReadyScreen.js";
-export { appInstanceQueryOptions, instanceAppKeys, useAppInstanceBootstrap } from "./queries.js";
+export { appInstanceQueryOptions, instanceAppKeys, persistAppCache, useAppInstanceBootstrap } from "./queries.js";
 export type { AppInstanceBootstrap } from "./queries.js";
 export { decideAppInstanceGate } from "./status.js";
 export type { AppInstanceBranch, AppInstanceGateInput } from "./status.js";

@@ -8,20 +8,20 @@
 // a pending read as maintenance, and a response carrying data wins over
 // an error status — the spec requires both.
 
-import type { InstanceBootstrap } from "@pidash/api-client";
+import type { InstanceBootstrapState } from "@pidash/api-client";
 
 export type AppInstanceBranch = "loading" | "maintenance" | "not-ready" | "ready";
 
 export interface AppInstanceGateInput {
   readonly isPending: boolean;
   readonly isError: boolean;
-  readonly data: InstanceBootstrap | undefined;
+  readonly data: InstanceBootstrapState | undefined;
 }
 
 /** Exactly one startup branch for the single instance-info read. */
 export function decideAppInstanceGate(input: AppInstanceGateInput): AppInstanceBranch {
   if (input.data !== undefined) {
-    return input.data.instance.is_setup_done ? "ready" : "not-ready";
+    return input.data.setupDone ? "ready" : "not-ready";
   }
   if (input.isError) return "maintenance";
   if (input.isPending) return "loading";

@@ -18,6 +18,9 @@ export function SettingsPageFrame({ title, description, children }: SettingsPage
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <header className="border-b border-(--border) px-(--space-6) py-(--space-4)">
+        <nav aria-label="Breadcrumb" className="mb-(--space-1) hidden md:block">
+          <div className="text-meta relative line-clamp-1 text-(--text-muted)">{title}</div>
+        </nav>
         <h1 className="text-h2 text-(--text)">{title}</h1>
         {description ? <p className="text-body mt-(--space-1) text-(--text-muted)">{description}</p> : null}
       </header>

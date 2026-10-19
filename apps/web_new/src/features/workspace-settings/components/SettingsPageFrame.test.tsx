@@ -17,6 +17,7 @@ describe("SettingsPageFrame", () => {
       </SettingsPageFrame>
     );
     expect(screen.getByRole("heading", { level: 1, name: "Members" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Breadcrumb" })).toHaveTextContent("Members");
     expect(screen.getByText("roster")).toBeInTheDocument();
     expect(screen.queryByText("Who belongs here.")).not.toBeInTheDocument();
   });

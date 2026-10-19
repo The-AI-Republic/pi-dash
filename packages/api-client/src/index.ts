@@ -47,6 +47,7 @@ export {
   generateMagicCode,
   getCsrfToken,
   getInstanceBootstrap,
+  getInstanceBootstrapForStartup,
   parseAuthRedirectResult,
   requestPasswordReset,
   resetPassword,
@@ -56,6 +57,7 @@ export {
   signUp,
   signUpWithMagicCode,
 } from "./contracts/auth-entry.js";
+export type { InstanceBootstrapState } from "./contracts/auth-entry.js";
 export type {
   MagicSignInInput,
   MagicSignUpInput,

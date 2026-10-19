@@ -1,13 +1,13 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import type { InstanceBootstrap } from "@pidash/api-client";
+import type { InstanceBootstrapState } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import { decideAppInstanceGate } from "./status.js";
 
-const READY = { instance: { is_setup_done: true } } as InstanceBootstrap;
-const NOT_READY = { instance: { is_setup_done: false } } as InstanceBootstrap;
+const READY: InstanceBootstrapState = { setupDone: true, bootstrap: null };
+const NOT_READY: InstanceBootstrapState = { setupDone: false, bootstrap: null };
 
 describe("decideAppInstanceGate", () => {
   it("holds the loader while the read is unresolved", () => {

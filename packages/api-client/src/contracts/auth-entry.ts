@@ -296,3 +296,35 @@ export async function getInstanceBootstrap(client: ApiClient): Promise<InstanceB
   const body = await client.getJson<unknown>("/api/instances/");
   return client.parse(InstanceBootstrap, body, "GET /api/instances/");
 }
+
+/**
+ * Startup variant of the instance read. A fresh install has no instance
+ * row yet, and the backend then answers only `is_activated: false` plus
+ * `is_setup_done: false`; the parity driver serves the same flags in a
+ * partial `instance` object. Both are a settled "setup unfinished"
+ * answer, not a broken read, so the startup screens can branch on them.
+ * A positive setup flag is still validated through the full contract.
+ */
+export interface InstanceBootstrapState {
+  readonly setupDone: boolean;
+  readonly bootstrap: InstanceBootstrap | null;
+}
+
+function setupFlag(value: unknown): boolean | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const nested = record["instance"];
+  if (typeof nested === "object" && nested !== null) {
+    const flag = (nested as Record<string, unknown>)["is_setup_done"];
+    if (typeof flag === "boolean") return flag;
+  }
+  const flag = record["is_setup_done"];
+  return typeof flag === "boolean" ? flag : null;
+}
+
+export async function getInstanceBootstrapForStartup(client: ApiClient): Promise<InstanceBootstrapState> {
+  const body = await client.getJson<unknown>("/api/instances/");
+  if (setupFlag(body) === false) return { setupDone: false, bootstrap: null };
+  const bootstrap = client.parse(InstanceBootstrap, body, "GET /api/instances/");
+  return { setupDone: bootstrap.instance.is_setup_done, bootstrap };
+}

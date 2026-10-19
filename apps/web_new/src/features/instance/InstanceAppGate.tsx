@@ -4,9 +4,11 @@
 // Root startup gate (parity/specs/workspace-settings.md §34-35,
 // WSET-034/035). Every route — member pages, god-mode, spaces and auth —
 // renders beneath this one decision, so maintenance and unfinished setup
-// replace the whole app and never leak workspace chrome. The loader is a
-// full-screen spinner until the single read settles; the gate then hands
-// control to the router and does not remount on navigation.
+// replace the whole app and never leak workspace chrome. The administrator
+// entry subtree is the one exception: it must stay reachable while setup is
+// unfinished or the read fails, because it owns the recovery forms. The
+// loader is a full-screen spinner until the single read settles; the gate
+// then hands control to the router and does not remount on navigation.
 
 import { Spinner } from "@pidash/kit";
 import * as React from "react";
@@ -16,6 +18,15 @@ import { NotReadyScreen } from "./NotReadyScreen.js";
 import { useAppInstanceBootstrap } from "./queries.js";
 import { decideAppInstanceGate } from "./status.js";
 import { markInstanceBootScheme } from "./theme.js";
+
+/** The administrator entry subtree, including setup and sign-in. */
+export function isAdminEntryPath(pathname: string): boolean {
+  return pathname === "/god-mode" || pathname === "/god-mode/" || pathname.startsWith("/god-mode/");
+}
+
+function currentPathname(): string {
+  return typeof globalThis.window === "undefined" ? "" : globalThis.window.location.pathname;
+}
 
 export interface InstanceAppGateProps {
   children: React.ReactNode;
@@ -45,7 +56,8 @@ export function InstanceAppGate({ children }: InstanceAppGateProps): React.React
     data: bootstrap.data,
   });
   if (branch === "loading") return <BootLoader />;
-  if (branch === "maintenance") return <MaintenanceScreen />;
-  if (branch === "not-ready") return <NotReadyScreen />;
+  if (branch !== "ready" && !isAdminEntryPath(currentPathname())) {
+    return branch === "maintenance" ? <MaintenanceScreen /> : <NotReadyScreen />;
+  }
   return <>{children}</>;
 }

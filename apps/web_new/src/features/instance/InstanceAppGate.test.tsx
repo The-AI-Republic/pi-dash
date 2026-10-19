@@ -69,7 +69,7 @@ function renderGate(transport: Transport, queryClient = new QueryClient()): void
   render(
     <QueryClientProvider client={queryClient}>
       <InstanceAppGate>
-        <p>workspace content</p>
+        <p>{globalThis.window.location.pathname === "/god-mode/" ? "admin entry" : "workspace content"}</p>
       </InstanceAppGate>
     </QueryClientProvider>
   );
@@ -77,6 +77,7 @@ function renderGate(transport: Transport, queryClient = new QueryClient()): void
 
 afterEach(() => {
   resetAppClient();
+  globalThis.window.history.replaceState(null, "", "/");
 });
 
 describe("InstanceAppGate", () => {
@@ -120,8 +121,51 @@ describe("InstanceAppGate", () => {
 
   it("prefers a cached data-bearing answer over an error branch", () => {
     const queryClient = new QueryClient();
-    queryClient.setQueryData(instanceAppKeys.bootstrap, envelope(true));
+    queryClient.setQueryData(instanceAppKeys.bootstrap, { setupDone: true, bootstrap: envelope(true) });
     renderGate(() => Promise.reject(new Error("must not refetch")), queryClient);
     expect(screen.getByText("workspace content")).toBeInTheDocument();
+  });
+
+  it("accepts the backend's bare unprovisioned envelope as not-ready", async () => {
+    renderGate(() =>
+      Promise.resolve(response("https://api.test/api/instances/", { is_activated: false, is_setup_done: false }))
+    );
+    await waitFor(() => expect(screen.getByTestId("instance-not-ready")).toBeInTheDocument());
+    expect(screen.queryByTestId("instance-maintenance")).not.toBeInTheDocument();
+  });
+
+  it("accepts the oracle driver's partial not-ready object", async () => {
+    renderGate(() =>
+      Promise.resolve(
+        response("https://api.test/api/instances/", {
+          config: {},
+          instance: { is_activated: false, is_setup_done: false },
+        })
+      )
+    );
+    await waitFor(() => expect(screen.getByTestId("instance-not-ready")).toBeInTheDocument());
+  });
+
+  it("lets the administrator entry through while setup is unfinished", async () => {
+    globalThis.window.history.replaceState(null, "", "/god-mode/");
+    renderGate(() =>
+      Promise.resolve(response("https://api.test/api/instances/", { is_activated: false, is_setup_done: false }))
+    );
+    expect(await screen.findByText("admin entry")).toBeInTheDocument();
+    expect(screen.queryByTestId("instance-not-ready")).not.toBeInTheDocument();
+  });
+
+  it("lets the administrator entry through on a failed read", async () => {
+    globalThis.window.history.replaceState(null, "", "/god-mode/");
+    renderGate(() =>
+      Promise.resolve({
+        status: 500,
+        url: "https://api.test/api/instances/",
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify({ detail: "down" })),
+      })
+    );
+    expect(await screen.findByText("admin entry")).toBeInTheDocument();
+    expect(screen.queryByTestId("instance-maintenance")).not.toBeInTheDocument();
   });
 });

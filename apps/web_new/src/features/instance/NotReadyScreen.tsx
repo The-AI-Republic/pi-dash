@@ -13,7 +13,7 @@ import { ADMIN_ENTRY_HREF, PRODUCT_MARK_SRC, PRODUCT_NAME } from "./brand.js";
 
 export const NOT_READY_HEADING = "Welcome to Pi Dash";
 export const NOT_READY_BODY =
-  "Set up your instance and create your first workspace to begin managing projects and work.";
+  "This instance is online but still needs its first administrator and workspace. Open the administrator console to finish setup.";
 
 export function NotReadyScreen(): React.ReactElement {
   useDocumentHead({ title: `${PRODUCT_NAME} - Setup`, robots: "noindex, nofollow" });
