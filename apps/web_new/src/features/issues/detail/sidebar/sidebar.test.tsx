@@ -14,7 +14,6 @@ import { setSessionClient } from "../../../../core/session/queries.js";
 import { pickerKeys } from "../../../../shared/pickers/index.js";
 import { notifyError } from "../../../../shared/shell/index.js";
 import { pickerStatesQueryOptions } from "../../../../shared/pickers/reference.js";
-import { workspaceMembersQueryOptions } from "../../../projects/index.js";
 import { issueKeys } from "../../api/keys.js";
 import { issueDetailQueryOptions } from "../../api/queries.js";
 import { CreatedByRow } from "./CreatedByRow.js";
@@ -756,6 +755,26 @@ describe("SidebarProperties", () => {
     }
   });
 
+  it("names the set values on disabled rows", async () => {
+    const { queryClient } = harness();
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture({ assignee_ids: [ADA] })}
+        project={projectFixture()}
+        editable={false}
+      />,
+      queryClient
+    );
+    await waitFor(() => expect(within(row("State")).getByRole("button")).toHaveTextContent("Done"));
+    await waitFor(() => expect(within(row("Assignees")).getByRole("button")).toHaveTextContent("Ada L"));
+    await waitFor(() => expect(within(row("Runs on")).getByRole("button")).toHaveTextContent("WEB_pod_a"));
+    for (const label of ["State", "Assignees", "Runs on", "Priority"]) {
+      expect(within(row(label)).getByRole("button")).toBeDisabled();
+    }
+  });
+
   it("patches state with the picked id", async () => {
     const { queryClient, writes } = harness();
     wrap(
@@ -775,7 +794,7 @@ describe("SidebarProperties", () => {
     expect(writes[0]!.body).toEqual({ state_id: STARTED_STATE });
   });
 
-  it("names the assignee from the workspace directory", async () => {
+  it("names a single assignee before the picker opens", async () => {
     const { queryClient } = harness();
     wrap(
       <SidebarProperties
@@ -787,9 +806,10 @@ describe("SidebarProperties", () => {
       />,
       queryClient
     );
-    // The multi picker keeps its own avatar stack (ISS-208); the row only
-    // supplies the value and the add prompt.
-    await waitFor(() => expect(within(row("Assignees")).getByRole("button")).toHaveTextContent("1 member"));
+    // The multi picker keeps its own avatar stack (ISS-208); one assignee
+    // still reads as their name, not a count.
+    await waitFor(() => expect(within(row("Assignees")).getByRole("button")).toHaveTextContent("Ada L"));
+    expect(within(row("Assignees")).queryByRole("listbox")).not.toBeInTheDocument();
   });
 
   it("patches the assignee ids from the multi-select", async () => {
@@ -843,11 +863,9 @@ describe("SidebarProperties", () => {
       />,
       queryClient
     );
-    fireEvent.click(within(row("Runs on")).getByRole("button"));
-    await screen.findByRole("option", { name: /Pi Dash Cloud Agent/ });
     // The trigger names the inherited agent, not the pod the issue
     // happens to carry.
-    expect(within(row("Runs on")).getByText("Pi Dash Cloud Agent")).toBeInTheDocument();
+    await waitFor(() => expect(within(row("Runs on")).getByRole("button")).toHaveTextContent("Pi Dash Cloud Agent"));
     expect(within(row("Runs on")).queryByText("WEB_pod_a")).not.toBeInTheDocument();
   });
 
@@ -867,9 +885,60 @@ describe("SidebarProperties", () => {
       />,
       queryClient
     );
-    fireEvent.click(within(row("Pod")).getByRole("button"));
-    await screen.findByRole("option", { name: /Pi Dash Agent/ });
-    expect(within(row("Pod")).getByText("Pi Dash Agent (desktop)")).toBeInTheDocument();
+    await waitFor(() => expect(within(row("Pod")).getByRole("button")).toHaveTextContent("Pi Dash Agent (desktop)"));
+  });
+
+  it("names the current state before the picker opens", async () => {
+    const { queryClient } = harness();
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture()}
+        project={projectFixture()}
+        editable
+      />,
+      queryClient
+    );
+    await waitFor(() => expect(within(row("State")).getByRole("button")).toHaveTextContent("Done"));
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("prompts for an issue with no state, assignees or target", async () => {
+    const { queryClient } = harness();
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture({ state_id: null, assignee_ids: [], assigned_pod_id: null })}
+        project={projectFixture()}
+        editable
+      />,
+      queryClient
+    );
+    expect(within(row("State")).getByRole("button")).toHaveTextContent("Set state");
+    expect(within(row("Assignees")).getByRole("button")).toHaveTextContent("Add assignees");
+    expect(within(row("Runs on")).getByRole("button")).toHaveTextContent("Select target");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(queryClient.getQueryData(pickerKeys.states(SLUG, PROJECT))).toBeUndefined();
+    expect(queryClient.getQueryData(pickerKeys.pods(SLUG, PROJECT))).toBeUndefined();
+  });
+
+  it("names a pinned pod before the picker opens", async () => {
+    const { queryClient } = harness();
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture()}
+        project={projectFixture()}
+        editable
+      />,
+      queryClient
+    );
+    await waitFor(() => expect(within(row("Runs on")).getByRole("button")).toHaveTextContent("WEB_pod_a"));
+    expect(within(row("Runs on")).getByRole("button").querySelector("svg")).not.toBeNull();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
   it("patches a pod pick to the pod plus the local executor", async () => {
@@ -1025,7 +1094,6 @@ describe("IssuePropertiesSidebar", () => {
     const { client, queryClient } = harness();
     void pickerKeys;
     void pickerStatesQueryOptions;
-    void workspaceMembersQueryOptions;
     wrap(
       <IssuePropertiesSidebar
         workspaceSlug={SLUG}
@@ -1038,5 +1106,6 @@ describe("IssuePropertiesSidebar", () => {
     );
     await screen.findByRole("group", { name: "Runs on" });
     await waitFor(() => expect(queryClient.getQueryData(pickerKeys.project(SLUG, PROJECT))).toBeDefined());
+    await waitFor(() => expect(queryClient.getQueryData(pickerKeys.workspaceMembers(SLUG))).toBeDefined());
   });
 });

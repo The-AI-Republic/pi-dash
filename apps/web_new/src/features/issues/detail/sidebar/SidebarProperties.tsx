@@ -6,15 +6,15 @@
 // editable row writes one property with an optimistic PATCH; guests,
 // archived items and synced items render the same rows with every
 // control disabled (the archived pattern from §17, ISS-220). The
-// pickers read lazily on open; the workspace directory loads eagerly
-// when a creator or an assignee has to be named.
+// pickers read lazily on open, except that a row already carrying a
+// value preloads the list that names it so the first paint is accurate.
+// The workspace directory loads eagerly when a creator or an assignee
+// has to be named.
 
 import { Skeleton, type ButtonVariant } from "@pidash/kit";
 import type { Issue } from "@pidash/api-client";
-import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
 
-import { getAppClient } from "../../../../core/api/client.js";
 import {
   MemberPicker,
   PodPicker,
@@ -22,10 +22,10 @@ import {
   StatePicker,
   executionTargetLabel,
   executionTargetPatch,
+  usePickerWorkspaceMembers,
   type ExecutionSelection,
   type PriorityLevel,
 } from "../../../../shared/pickers/index.js";
-import { workspaceMembersQueryOptions } from "../../../projects/index.js";
 import { useUpdateExecutionTarget } from "../../api/executionTarget.js";
 import { useUpdateIssue } from "../../api/mutations.js";
 import { CreatedByRow } from "./CreatedByRow.js";
@@ -84,10 +84,10 @@ export function SidebarProperties({
     failureTitle: PROPERTY_SAVE_FAILED_TITLE,
   });
   const targetUpdate = useUpdateExecutionTarget(workspaceSlug, projectId, issue.id);
-  const directory = useQuery({
-    ...workspaceMembersQueryOptions(getAppClient(), workspaceSlug),
-    enabled: issue.created_by !== null || issue.assignee_ids.length > 0,
-  });
+  const directory = usePickerWorkspaceMembers(
+    workspaceSlug,
+    issue.created_by !== null || issue.assignee_ids.length > 0
+  );
   const creator = selectCreator(directory.data, issue.created_by);
   // The directory read names the creator; until it lands, the row shows a
   // neutral placeholder rather than an "unknown" verdict.
@@ -104,6 +104,7 @@ export function SidebarProperties({
           disabled={disabled}
           variant={ROW_VARIANT}
           placeholder="Set state"
+          preload={issue.state_id !== null}
           onChange={(stateId) => update.mutate({ state_id: stateId })}
         />
       </SidebarRow>
@@ -116,6 +117,7 @@ export function SidebarProperties({
           disabled={disabled}
           variant={ROW_VARIANT}
           placeholder="Add assignees"
+          preload={issue.assignee_ids.length > 0}
           onChange={(ids) => update.mutate({ assignee_ids: ids })}
         />
       </SidebarRow>
@@ -127,6 +129,7 @@ export function SidebarProperties({
           disabled={disabled}
           variant={ROW_VARIANT}
           placeholder="Select target"
+          preload={selection !== null}
           onChange={(picked) => targetUpdate.updateExecutionTarget(executionTargetPatch(picked))}
         />
       </SidebarRow>
