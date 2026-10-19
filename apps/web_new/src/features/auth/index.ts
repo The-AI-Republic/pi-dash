@@ -208,6 +208,10 @@ export {
 } from "./cloudLogin.js";
 export type { CloudLoginSearch, StartCloudHandoffArgs } from "./cloudLogin.js";
 export { AuthBanner, isValidEmail, SignInCard } from "./components/SignInCard.js";
+export { EntryScreen } from "./components/EntryScreen.js";
+export { parseLoginSearch } from "./components/LoginSearch.js";
+export type { LoginSearch } from "./components/LoginSearch.js";
+export type { EntryScreenProps } from "./components/EntryScreen.js";
 export type { AuthBannerProps, SignInCardProps } from "./components/SignInCard.js";
 export { SignUpCard } from "./components/SignUpCard.js";
 export type { SignUpCardProps } from "./components/SignUpCard.js";

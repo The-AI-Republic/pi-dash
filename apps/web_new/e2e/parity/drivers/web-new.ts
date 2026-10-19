@@ -25032,35 +25032,107 @@ export class WebNewDriver implements ParityDriver {
     return todo("spaceCommentEmbedReactions");
   }
 
-  // --- Cloud marketing + public surface (NEWFRONT-437, CLOUD-003/004/006–010).
-  // --- Stubs: the cloud marketing area has not landed in apps/web_new yet.
+  // --- Cloud marketing + public surface (NEWFRONT-645, CLOUD-001–005).
+  // The frame, home and public entry landed in NEWFRONT-645; the docs,
+  // downloads and pricing bodies remain NEWFRONT-648 stubs.
 
-  async cloudHomeHeroActionHrefs(): Promise<string[]> {
-    return todo("cloudHomeHeroActionHrefs");
+  private cloudMain(): Locator {
+    return this.page.locator("main").first();
   }
 
-  async cloudHomeClickHeroAction(_href: string): Promise<void> {
-    return todo("cloudHomeClickHeroAction");
+  private async cloudLinkFacts(scope: Locator): Promise<CloudNavLinkFacts[]> {
+    const links = scope.locator("a");
+    const count = await links.count();
+    const out: CloudNavLinkFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const link = links.nth(index);
+      const facts = await link.evaluate((root) => ({
+        label: (root.getAttribute("aria-label") ?? root.textContent ?? "").replace(/\s+/g, " ").trim(),
+        href: root.getAttribute("href") ?? "",
+        external: root.getAttribute("target") === "_blank",
+      }));
+      out.push({ ...facts, visible: await link.isVisible() });
+    }
+    return out;
+  }
+
+  private async cloudScopeLinksFocusVisible(scope: Locator): Promise<boolean> {
+    const links = scope.locator("a");
+    const count = await links.count();
+    for (let index = 0; index < count; index++) {
+      const link = links.nth(index);
+      if (!(await link.isVisible())) continue;
+      await link.focus();
+      const ringed = await link.evaluate((root) => {
+        const style = getComputedStyle(root);
+        return style.boxShadow !== "none" || (style.outlineStyle !== "none" && style.outlineWidth !== "0px");
+      });
+      if (!ringed) return false;
+    }
+    return true;
+  }
+
+  async cloudHomeHeroActionHrefs(): Promise<string[]> {
+    const hero = this.cloudMain().locator("section").first();
+    await hero.waitFor({ timeout: 60_000 });
+    const links = hero.getByRole("link");
+    const count = await links.count();
+    const hrefs: string[] = [];
+    for (let index = 0; index < count; index++) {
+      hrefs.push((await links.nth(index).getAttribute("href")) ?? "");
+    }
+    return hrefs;
+  }
+
+  async cloudHomeClickHeroAction(href: string): Promise<void> {
+    const hero = this.cloudMain().locator("section").first();
+    const target = hero.locator(`a[href="${href}"]`).first();
+    await target.waitFor({ timeout: 60_000 });
+    await target.click();
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.cloudMain().waitFor({ timeout: 60_000 });
   }
 
   async cloudHomeSections(): Promise<CloudHomeSectionFacts> {
-    return todo("cloudHomeSections");
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const sections = main.locator("section");
+    const strip = sections.nth(1);
+    const stripItems = await strip.locator(":scope > div > div").count();
+    const workflowSteps = await main.locator("ol > li").count();
+    const capabilityCards = await main.locator("article").count();
+    const repo = main.locator('a[href*="github.com/The-AI-Republic/pi-dash"]').first();
+    const repoHref = (await repo.count()) > 0 ? ((await repo.getAttribute("href")) ?? null) : null;
+    const repoExternal = (await repo.count()) > 0 && (await repo.getAttribute("target")) === "_blank";
+    const sectionCount = await sections.count();
+    const closing = sections.nth(sectionCount - 1);
+    const closingCta = closing.getByRole("link").first();
+    const closingCtaHref = (await closingCta.count()) > 0 ? ((await closingCta.getAttribute("href")) ?? null) : null;
+    return { stripItems, workflowSteps, capabilityCards, repoHref, repoExternal, closingCtaHref };
   }
 
   async cloudHeaderLinks(): Promise<CloudNavLinkFacts[]> {
-    return todo("cloudHeaderLinks");
+    const header = this.page.locator("header").first();
+    await header.waitFor({ timeout: 60_000 });
+    return this.cloudLinkFacts(header);
   }
 
   async cloudFooterLinks(): Promise<CloudNavLinkFacts[]> {
-    return todo("cloudFooterLinks");
+    const footer = this.page.locator("footer").first();
+    await footer.waitFor({ timeout: 60_000 });
+    return this.cloudLinkFacts(footer);
   }
 
   async cloudHeaderLinksFocusVisible(): Promise<boolean> {
-    return todo("cloudHeaderLinksFocusVisible");
+    const header = this.page.locator("header").first();
+    await header.waitFor({ timeout: 60_000 });
+    return this.cloudScopeLinksFocusVisible(header);
   }
 
   async cloudFooterLinksFocusVisible(): Promise<boolean> {
-    return todo("cloudFooterLinksFocusVisible");
+    const footer = this.page.locator("footer").first();
+    await footer.waitFor({ timeout: 60_000 });
+    return this.cloudScopeLinksFocusVisible(footer);
   }
 
   async cloudDocsFacts(): Promise<CloudDocsFacts> {

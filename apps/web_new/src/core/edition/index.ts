@@ -24,9 +24,19 @@ export { APP_RAIL_FLAG, ISSUE_DEDUPE_FLAG, SIDEBAR_TOGGLE_FLAG } from "./types.j
 export { isAppRailEnabled, isSidebarToggleEnabled } from "./flags.js";
 export {
   APPS_CATALOG_ROUTE_PATH,
+  PUBLIC_MARKETING_PATHS,
+  ROOT_ROUTE_PATH,
+  SITEMAP_MARKETING_PATHS,
   findEditionSettingsSection,
+  isEditionMarketingPath,
+  isEditionProviderFreePath,
+  isEditionPublicRouteEnabled,
+  isEditionRootEnabled,
   isEditionRouteEnabled,
   isEditionSettingsSectionEnabled,
+  isTopLevelRoute,
+  publicMarketingPathOf,
   resolveEditionSidebarHref,
+  type PublicMarketingPath,
 } from "./routes.js";
 export { edition } from "@pidash/edition";

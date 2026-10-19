@@ -18,8 +18,23 @@ export const FULL_SCREEN_PORTAL_ID = "full-screen-portal";
 
 export type OverlayRootId = typeof MENU_PORTAL_ID | typeof EDITOR_PORTAL_ID | typeof FULL_SCREEN_PORTAL_ID;
 
-/** Served marketing tags the hydrated route pair replaces (title + robots). */
-const SERVED_MARKETING_SELECTOR = 'meta[name="description"], meta[property^="og:"], meta[name^="twitter:"]';
+/**
+ * Served marketing tags the hydrated route pair replaces (title + robots):
+ * description, social preview data and the prerendered canonical. The
+ * route re-creates all of them from its own claim, so leaving the served
+ * copy behind would report two canonical addresses for one page.
+ */
+const SERVED_MARKETING_SELECTOR =
+  'meta[name="description"], meta[property^="og:"], meta[name^="twitter:"], link[rel="canonical"]';
+
+/** Tags a marketing route (re)creates alongside title + robots. */
+const MANAGED_TAG_ATTRIBUTE = "data-route-head";
+
+/** One head tag a crawlable route adds alongside title and robots. */
+export interface HeadTag {
+  tag: "meta" | "link";
+  attributes: Readonly<Record<string, string>>;
+}
 
 function stripServedMarketingTags(): void {
   for (const tag of [...document.querySelectorAll(SERVED_MARKETING_SELECTOR)]) {
@@ -32,6 +47,10 @@ export interface DocumentHead {
   title: string;
   /** Crawler directives while the route shows. */
   robots: string;
+  /** Canonical address; present only on crawlable marketing pages. */
+  canonical?: string;
+  /** Extra crawl/social tags; present only on crawlable marketing pages. */
+  tags?: readonly HeadTag[];
   /**
    * Fallback owners (the app root's product default) lose to every
    * route-level owner no matter the effect order. Parent effects run
@@ -46,6 +65,7 @@ interface HeadClaim {
   fallback: boolean;
   title: string;
   robots: string;
+  tags: readonly HeadTag[] | undefined;
 }
 
 let nextClaimId = 0;
@@ -76,8 +96,31 @@ function topClaim(): HeadClaim | undefined {
   return top;
 }
 
+function removeManagedTags(): void {
+  for (const tag of [...document.querySelectorAll(`[${MANAGED_TAG_ATTRIBUTE}]`)]) {
+    tag.remove();
+  }
+}
+
+function appendManagedTag(
+  tagName: "meta" | "link",
+  attributes: Readonly<Record<string, string>>
+): HTMLMetaElement | HTMLLinkElement {
+  const tag = document.createElement(tagName);
+  for (const [name, value] of Object.entries(attributes)) tag.setAttribute(name, value);
+  tag.setAttribute(MANAGED_TAG_ATTRIBUTE, "");
+  document.head.appendChild(tag);
+  return tag;
+}
+
+/** The owning route's crawl/social tags, layered on its title and robots. */
+function applyManagedTags(claim: HeadClaim): void {
+  for (const tag of claim.tags ?? []) appendManagedTag(tag.tag, tag.attributes);
+}
+
 function applyHeadClaim(claim: HeadClaim | undefined): void {
   stripServedMarketingTags();
+  removeManagedTags();
   if (claim === undefined) {
     document.title = bootTitle;
     const tag = document.querySelector<HTMLMetaElement>('meta[name="robots"]');
@@ -100,6 +143,7 @@ function applyHeadClaim(claim: HeadClaim | undefined): void {
     document.head.appendChild(tag);
   }
   tag.setAttribute("content", claim.robots);
+  applyManagedTags(claim);
 }
 
 /**
@@ -109,11 +153,11 @@ function applyHeadClaim(claim: HeadClaim | undefined): void {
  * application also swaps the served product metadata out so hydrated
  * routes never double-report it.
  */
-export function useDocumentHead({ title, robots, fallback = false }: DocumentHead): void {
+export function useDocumentHead({ title, robots, fallback = false, tags }: DocumentHead): void {
   const claimRef = React.useRef<HeadClaim | null>(null);
   if (claimRef.current === null) {
     nextClaimId += 1;
-    claimRef.current = { id: nextClaimId, fallback, title, robots };
+    claimRef.current = { id: nextClaimId, fallback, title, robots, tags };
   }
   React.useEffect(() => {
     const claim = claimRef.current;
@@ -124,13 +168,14 @@ export function useDocumentHead({ title, robots, fallback = false }: DocumentHea
     claim.title = title;
     claim.robots = robots;
     claim.fallback = fallback;
+    claim.tags = tags;
     if (!claims.includes(claim)) claims.push(claim);
     applyHeadClaim(topClaim());
     return () => {
       claims = claims.filter((entry) => entry !== claim);
       applyHeadClaim(topClaim());
     };
-  }, [title, robots, fallback]);
+  }, [title, robots, fallback, tags]);
 }
 
 /**

@@ -19,8 +19,10 @@ import {
   ONBOARDING_PATH,
   parseReturnPath,
 } from "../core/session/index.js";
+import { edition, isEditionRootEnabled } from "../core/edition/index.js";
 import { platform } from "../core/platform/index.js";
-import { DesktopSignInScreen, SignInCard } from "../features/auth/index.js";
+import { DesktopSignInScreen, EntryScreen } from "../features/auth/index.js";
+import { signedOutRootTarget } from "../features/marketing/routes.js";
 
 export interface EntrySearch {
   next?: string | undefined;
@@ -72,6 +74,13 @@ export const Route = createFileRoute("/")({
   validateSearch: parseEntrySearch,
   beforeLoad: async ({ context, search, location }) => {
     const { me, profile } = await loadGateInputs(context.queryClient, context.apiClient);
+    // Cloud public root (CLOUD-001): a signed-out visitor is forwarded to
+    // the marketing surface, carrying a safe deep target to the login
+    // page's own `next_path`. Signed-in handling stays with the auth
+    // wrappers below, and the OSS edition keeps the entry card in place.
+    if (me === null && isEditionRootEnabled(edition)) {
+      throw redirect({ href: signedOutRootTarget(search.next) });
+    }
     const decision = decidePageGate({
       page: "signed-out-only",
       signedIn: me !== null,
@@ -105,31 +114,7 @@ export const Route = createFileRoute("/")({
   },
 });
 
-export function EntryScreen({
-  next,
-  unsafeNext,
-  email,
-  errorCode,
-  invitationId,
-  invitationSlug,
-}: {
-  next?: string | undefined;
-  unsafeNext?: string | undefined;
-  email?: string | undefined;
-  errorCode?: string | undefined;
-  invitationId?: string | undefined;
-  invitationSlug?: string | undefined;
-}): React.ReactElement {
-  return (
-    <main className="flex min-h-screen items-center justify-center bg-(--bg) p-(--space-8)">
-      <SignInCard
-        next={next}
-        unsafeNext={unsafeNext}
-        initialEmail={email ?? ""}
-        initialErrorCode={errorCode ?? null}
-        invitationId={invitationId}
-        invitationSlug={invitationSlug}
-      />
-    </main>
-  );
-}
+// Kept as a route-level export for the entry tests; the frame itself lives
+// in the auth feature so another route can render it without importing a
+// route module (which merges the router's component splits).
+export { EntryScreen } from "../features/auth/index.js";
