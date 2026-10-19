@@ -19,17 +19,19 @@ import type { AssistantThread } from "@pidash/api-client";
 import { usePermissions } from "../../../core/session/index.js";
 import { CrossAppLink } from "../../../shared/coexistence/index.js";
 import { notifyError } from "../../../shared/shell/index.js";
-import { startFailureDetail, useStartConversation } from "../../assistant/api/mutations.js";
 import { useAssistantConfig, useAssistantThreads } from "../api/queries.js";
 import {
   ASSISTANT_CARD_SUGGESTIONS,
   API_KEY_REMINDER,
   API_KEY_REQUIRED_TITLE,
+  assistantLandingHref,
+  assistantThreadHref,
+  conversationLabel,
+  isAssistantConfigured,
+  startFailureDetail,
   START_FAILED_TITLE,
-} from "../../assistant/lib/copy.js";
-import { isAssistantConfigured } from "../../assistant/lib/gate.js";
-import { assistantLandingHref, assistantThreadHref } from "../../assistant/lib/navigation.js";
-import { conversationLabel } from "../../assistant/lib/labels.js";
+  useStartConversation,
+} from "../../assistant/index.js";
 
 /** How many conversations the card lists. */
 export const ASSISTANT_CARD_RECENT_LIMIT = 5;
