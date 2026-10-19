@@ -65,7 +65,9 @@ export function eventSelectionFor(row: WorkspaceWebhook): { mode: WebhookEventMo
     issue: row.issue,
     issue_comment: row.issue_comment,
   };
-  return { mode: usesAllEvents(flags) ? "all" : "individual", flags };
+  // All-events is exactly the five stored flags on (§21); no extra state.
+  const all = row.project && row.cycle && row.module && row.issue && row.issue_comment;
+  return { mode: all ? "all" : "individual", flags };
 }
 
 export function usesAllEvents(flags: WebhookEventFlags): boolean {

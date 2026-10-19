@@ -310,6 +310,11 @@ export class WebNewDriver implements ParityDriver {
   /** Every wait below is explicitly bounded; a bare wait would hang to the test timeout. */
   private static readonly WAIT_MS = 30_000;
 
+  /** Reads a downloaded file; a seam for tests, and for very large backups. */
+  private readDownload(path: string): string {
+    return readFileSync(path, "utf8");
+  }
+
   private authEmailField() {
     return this.page.getByPlaceholder("name@company.com").first();
   }
@@ -2349,9 +2354,7 @@ export class WebNewDriver implements ParityDriver {
     return todo("copyIssueLink");
   }
   async lastToast(): Promise<string | null> {
-    const toasts = this.page.locator(
-      'xpath=//*[@aria-label="Notifications"]//*[@role="dialog" or @role="alertdialog"]'
-    );
+    const toasts = this.webhookToasts();
     if ((await toasts.count()) > 0) {
       const text = (
         (await toasts
@@ -2380,6 +2383,11 @@ export class WebNewDriver implements ParityDriver {
         .catch(() => "")) ?? ""
     ).trim();
     return text === "" ? null : text;
+  }
+
+  /** Toast dialogs inside the notifications region, newest first. */
+  private webhookToasts(): Locator {
+    return this.page.locator('xpath=//*[@aria-label="Notifications"]//*[@role="dialog" or @role="alertdialog"]');
   }
   async readClipboard(): Promise<string> {
     return this.page.evaluate(() => navigator.clipboard.readText());
@@ -16889,25 +16897,38 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsOpenWebhookDetail(
     workspaceSlug: string,
     webhookId: string,
-    _cookies?: ParityBrowserCookie[]
+    cookies?: ParityBrowserCookie[]
   ): Promise<void> {
+    if (cookies !== undefined) {
+      // Cookie-authenticated navigation for the scenarios that impersonate
+      // a member; the denial view or the form settles the page.
+      await this.openAuthenticated(this.webhookDetailUrl(workspaceSlug, webhookId), cookies);
+      const start = Date.now();
+      for (;;) {
+        if ((await this.wsSettingsWebhookDetailState()) !== "loading") return;
+        if (Date.now() - start > WebNewDriver.WAIT_MS) return;
+        await this.page.waitForTimeout(500);
+      }
+    }
     await this.page.goto(this.webhookDetailUrl(workspaceSlug, webhookId));
     await this.page.waitForLoadState("domcontentloaded");
-    await this.page
-      .getByText(WEBHOOK_DETAIL_HEADING, { exact: true })
-      .first()
-      .waitFor({ timeout: WebNewDriver.WAIT_MS })
-      .catch(() => undefined);
-    await this.page
-      .getByTestId("workspace-settings-not-authorized")
-      .first()
-      .waitFor({ timeout: 1_000 })
-      .catch(() => undefined);
-    await this.page
-      .getByTestId("workspace-settings-webhook-missing")
-      .first()
-      .waitFor({ timeout: 1_000 })
-      .catch(() => undefined);
+    await Promise.race([
+      this.page
+        .getByText(WEBHOOK_DETAIL_HEADING, { exact: true })
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+      this.page
+        .getByTestId("workspace-settings-not-authorized")
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+      this.page
+        .getByTestId("workspace-settings-webhook-missing")
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+    ]);
   }
   async wsSettingsWebhookDetailState(): Promise<"form" | "denied" | "loading"> {
     if ((await this.page.getByTestId("workspace-settings-not-authorized").count()) > 0) return "denied";
@@ -17567,7 +17588,10 @@ export class WebNewDriver implements ParityDriver {
 
   /** A list row link, matched by the target URL it shows. */
   private webhookRowLink(url: string): Locator {
-    return this.page.getByRole("link", { name: url, exact: true });
+    // The row switch sits beside the link, so the link's name is the URL
+    // alone; match the address itself so whitespace in the name cannot
+    // break the match.
+    return this.page.locator('a[href*="/settings/webhooks/"]').filter({ hasText: url });
   }
 
   async wsSettingsOpenWebhooks(workspaceSlug: string): Promise<void> {
@@ -17803,7 +17827,7 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByText("Key created", { exact: true }).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
     const path = await download.path();
     if (!path) throw new Error("[parity] webhook backup download landed without a path.");
-    return { fileName: download.suggestedFilename(), content: readFileSync(path, "utf8") };
+    return { fileName: download.suggestedFilename(), content: this.readDownload(path) };
   }
 
   async wsSettingsWebhookCancel(): Promise<void> {
@@ -18045,7 +18069,7 @@ export class WebNewDriver implements ParityDriver {
     if (!path) throw new Error("[parity] regenerate backup download landed without a path.");
     return {
       fileName: (download as import("@playwright/test").Download).suggestedFilename(),
-      content: readFileSync(path, "utf8"),
+      content: this.readDownload(path),
     };
   }
 
@@ -18104,13 +18128,15 @@ export class WebNewDriver implements ParityDriver {
       .click({ timeout: WebNewDriver.WAIT_MS });
     await gone;
     // Settle on the outcome: the list's Add control (success) or a toast.
-    const add = this.webhooksAddButton();
-    const deadline = Date.now() + WebNewDriver.WAIT_MS;
-    while (Date.now() < deadline) {
-      if ((await add.count()) > 0) break;
-      if ((await this.lastToast()) !== null) break;
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
+    await Promise.race([
+      this.webhooksAddButton()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+      this.webhookToasts()
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+    ]);
   }
 
   async wsSettingsWebhookDeleteCancel(): Promise<void> {

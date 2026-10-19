@@ -14,7 +14,7 @@ import { Button, Dialog, Input, Spinner, Switch } from "@pidash/kit";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
-import type { CreatedWorkspaceWebhook, WorkspaceWebhook } from "@pidash/api-client";
+import type { WorkspaceWebhook } from "@pidash/api-client";
 
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { nextWorkspaceSettingsDialogOpen } from "../lib/dialog.js";
@@ -41,7 +41,7 @@ export const DETAIL_URL_ERROR = WEBHOOK_URL_REQUIRED;
 export const UPDATE_LABEL = "Update";
 export const UPDATING_LABEL = "Updating";
 export const WEBHOOK_UPDATED_NOTICE = "Webhook updated";
-export const WEBHOOK_UPDATE_FAILED_NOTICE = "Error";
+export const WEBHOOK_UPDATE_FAILED_NOTICE = "Webhook not updated";
 export const WEBHOOK_UPDATE_FAILED_BODY = "The webhook could not be updated. Check the target address and try again.";
 export const SECRET_BLOCK_TITLE = "Secret key";
 export const SECRET_BLOCK_BODY =
@@ -49,7 +49,7 @@ export const SECRET_BLOCK_BODY =
 export const REGENERATE_LABEL = "Re-generate key";
 export const REGENERATING_LABEL = "Re-generating…";
 export const WEBHOOK_REGENERATED_NOTICE = "Webhook secret regenerated";
-export const WEBHOOK_REGENERATE_FAILED_NOTICE = "Error";
+export const WEBHOOK_REGENERATE_FAILED_NOTICE = "Secret key not regenerated";
 export const WEBHOOK_REGENERATE_FAILED_BODY = "The secret key could not be regenerated.";
 export const DANGER_ZONE_TITLE = "Danger zone";
 export const DANGER_ZONE_BODY =
@@ -127,7 +127,14 @@ interface WebhookDetailFormProps {
 function WebhookDetailForm({ workspaceSlug, webhook }: WebhookDetailFormProps): React.ReactElement {
   const navigate = useNavigate();
   const update = useUpdateWebhook(workspaceSlug);
-  const regenerate = useRegenerateWebhookSecret(workspaceSlug);
+  // The rotated answer arrives through this callback, outside the mutation
+  // cache; only the key itself is kept, in component state.
+  const regenerate = useRegenerateWebhookSecret(workspaceSlug, (issued) => {
+    notifySuccess(WEBHOOK_REGENERATED_NOTICE);
+    // A fresh backup with the new key on every success (NEWFRONT-419).
+    downloadWebhookBackup(webhookBackup(issued, workspaceSlug, issued.secret_key, Date.now()));
+    setSecret(issued.secret_key);
+  });
   const remove = useDeleteWebhook(workspaceSlug);
 
   const [url, setUrl] = React.useState(webhook.url);
@@ -153,6 +160,9 @@ function WebhookDetailForm({ workspaceSlug, webhook }: WebhookDetailFormProps): 
       return;
     }
     setUrlError(null);
+    // The stored row is about to replace the draft: a key issued earlier in
+    // this session no longer belongs to the form being saved (§22).
+    setSecret(null);
     update.mutate(
       { webhookId: webhook.id, input: { url: address, is_active: active, ...submittedFlags(selection) } },
       {
@@ -166,17 +176,9 @@ function WebhookDetailForm({ workspaceSlug, webhook }: WebhookDetailFormProps): 
     );
   };
 
-  const rotate = (): void => {
-    regenerate.mutate(webhook.id, {
-      onSuccess: (issued: CreatedWorkspaceWebhook) => {
-        notifySuccess(WEBHOOK_REGENERATED_NOTICE);
-        // A fresh backup with the new key on every success (NEWFRONT-419).
-        downloadWebhookBackup(webhookBackup(issued, workspaceSlug, issued.secret_key, Date.now()));
-        setSecret(issued.secret_key);
-      },
-      onError: () => {
-        notifyError(WEBHOOK_REGENERATE_FAILED_NOTICE, WEBHOOK_REGENERATE_FAILED_BODY);
-      },
+  const regenerateSecret = (): void => {
+    void regenerate.mutateAsync(webhook.id).catch(() => {
+      notifyError(WEBHOOK_REGENERATE_FAILED_NOTICE, WEBHOOK_REGENERATE_FAILED_BODY);
     });
   };
 
@@ -238,7 +240,7 @@ function WebhookDetailForm({ workspaceSlug, webhook }: WebhookDetailFormProps): 
         </div>
         {secret === null ? null : <SecretKey secret={secret} />}
         <div className="flex justify-end">
-          <Button onClick={rotate} loading={regenerate.isPending}>
+          <Button onClick={regenerateSecret} loading={regenerate.isPending}>
             {regenerate.isPending ? REGENERATING_LABEL : REGENERATE_LABEL}
           </Button>
         </div>

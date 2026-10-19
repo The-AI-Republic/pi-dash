@@ -43,16 +43,25 @@ export function CreateWebhookDialog({
   onOpenChange,
   onCreated,
 }: CreateWebhookDialogProps): React.ReactElement {
-  const create = useCreateWebhook(workspaceSlug);
+  const [issued, setIssued] = React.useState<{ webhook: CreatedWorkspaceWebhook; secret: string } | null>(null);
+  // The hook hands the whole answer over before it resolves; the key is
+  // kept here, outside the mutation cache, so closing is the only place
+  // that can clear it (§20).
+  const create = useCreateWebhook(workspaceSlug, (created) => {
+    notifySuccess(WEBHOOK_CREATED_NOTICE);
+    downloadWebhookBackup(webhookBackup(created, workspaceSlug, created.secret_key, Date.now()));
+    setIssued({ webhook: created, secret: created.secret_key });
+    onCreated?.(created);
+  });
   const [url, setUrl] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
   const [selection, setSelection] = React.useState<WebhookEventSelection>(initialEventSelection);
-  const [issued, setIssued] = React.useState<{ webhook: CreatedWorkspaceWebhook; secret: string } | null>(null);
   const reveal = issued !== null;
 
   React.useEffect(() => {
     if (open) return;
-    // Closing forgets everything: typed address, errors and the key.
+    // Closing forgets everything: typed address, errors and the key, so no
+    // later render can bring the key back (§20).
     setUrl("");
     setError(null);
     setSelection(initialEventSelection());
@@ -73,20 +82,9 @@ export function CreateWebhookDialog({
     }
     setError(null);
     const flags = submittedFlags(selection);
-    create.mutate(
-      { url: address, ...flags },
-      {
-        onSuccess: (created) => {
-          notifySuccess(WEBHOOK_CREATED_NOTICE);
-          downloadWebhookBackup(webhookBackup(created, workspaceSlug, created.secret_key, Date.now()));
-          setIssued({ webhook: created, secret: created.secret_key });
-          onCreated?.(created);
-        },
-        onError: () => {
-          notifyError(WEBHOOK_NOT_CREATED_NOTICE, WEBHOOK_NOT_CREATED_BODY);
-        },
-      }
-    );
+    void create.mutateAsync({ url: address, ...flags }).catch(() => {
+      notifyError(WEBHOOK_NOT_CREATED_NOTICE, WEBHOOK_NOT_CREATED_BODY);
+    });
   };
 
   if (reveal && issued !== null) {

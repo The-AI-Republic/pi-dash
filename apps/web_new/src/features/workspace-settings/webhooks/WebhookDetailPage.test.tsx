@@ -24,10 +24,14 @@ import {
   WEBHOOK_DELETED_NOTICE,
   WEBHOOK_DELETE_FAILED_NOTICE,
   WEBHOOK_REGENERATED_NOTICE,
+  WEBHOOK_REGENERATE_FAILED_BODY,
+  WEBHOOK_REGENERATE_FAILED_NOTICE,
   WEBHOOK_UPDATED_NOTICE,
+  WEBHOOK_UPDATE_FAILED_BODY,
   WEBHOOK_UPDATE_FAILED_NOTICE,
   WebhookDetailPage,
 } from "./WebhookDetailPage.js";
+import { webhookKeys } from "./api.js";
 
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
@@ -73,7 +77,12 @@ interface Call {
   body: unknown;
 }
 
-function renderPage(handler: (call: Call) => { status: number; body?: unknown } | "hold") {
+const EXISTING = "223e4567-e89b-12d3-a456-426614174009";
+
+function renderPage(
+  handler: (call: Call) => { status: number; body?: unknown } | "hold",
+  options: { seedList?: boolean } = {}
+) {
   const calls: Call[] = [];
   const transport: Transport = async (url, init) => {
     const call: Call = {
@@ -96,12 +105,15 @@ function renderPage(handler: (call: Call) => { status: number; body?: unknown } 
   };
   createAppClient("https://api.test", transport);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  if (options.seedList === true) {
+    queryClient.setQueryData(webhookKeys.list(SLUG), [row({ id: EXISTING, url: "https://example.com/other" })]);
+  }
   const view = render(
     <QueryClientProvider client={queryClient}>
       <WebhookDetailPage workspaceSlug={SLUG} webhookId={ID} />
     </QueryClientProvider>
   );
-  return { ...view, calls };
+  return { ...view, calls, queryClient };
 }
 
 afterEach(() => {
@@ -196,6 +208,104 @@ describe("WebhookDetailPage", () => {
       issue: false,
       issue_comment: false,
     });
+  });
+
+  it("keeps an uncached list uncached after a save and a toggle", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderPage((call) =>
+      call.method === "GET" ? { status: 200, body: row() } : { status: 200, body: row({ is_active: false }) }
+    );
+    await screen.findByText(DETAIL_HEADING);
+    await user.click(screen.getByRole("button", { name: UPDATE_LABEL }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(WEBHOOK_UPDATED_NOTICE));
+    await waitFor(() => expect(queryClient.getQueryState(webhookKeys.list(SLUG))).toBeUndefined());
+    expect(queryClient.getQueryData(webhookKeys.detail(SLUG, ID))).toEqual(row({ is_active: false }));
+  });
+
+  it("updates the row in place when the list is already cached", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderPage(
+      (call) =>
+        call.method === "GET" ? { status: 200, body: row() } : { status: 200, body: row({ is_active: false }) },
+      { seedList: true }
+    );
+    await screen.findByText(DETAIL_HEADING);
+    await user.click(screen.getByRole("button", { name: UPDATE_LABEL }));
+    await waitFor(() =>
+      expect(
+        (queryClient.getQueryData<Array<{ id: string; is_active: boolean }>>(webhookKeys.list(SLUG)) ?? []).map(
+          (entry) => [entry.id, entry.is_active]
+        )
+      ).toEqual([
+        [ID, false],
+        [EXISTING, true],
+      ])
+    );
+  });
+
+  it("keeps an uncached list uncached after a rotation", async () => {
+    const user = userEvent.setup();
+    const rotated = row({ secret_key: "whsec_fixture_rotated_1234567890abcdef" });
+    const { queryClient } = renderPage((call) =>
+      call.method === "POST" ? { status: 200, body: rotated } : { status: 200, body: row() }
+    );
+    await screen.findByText(DETAIL_HEADING);
+    await user.click(screen.getByRole("button", { name: REGENERATE_LABEL }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(WEBHOOK_REGENERATED_NOTICE));
+    expect(queryClient.getQueryState(webhookKeys.list(SLUG))).toBeUndefined();
+  });
+
+  it("leaves no issued key in the mutation cache and forgets it on the next save", async () => {
+    const user = userEvent.setup();
+    const rotated = row({ secret_key: "whsec_fixture_rotated_1234567890abcdef" });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const calls: Call[] = [];
+    const transport: Transport = async (url, init) => {
+      const call: Call = {
+        method: init?.method ?? "GET",
+        url,
+        body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+      };
+      calls.push(call);
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
+      }
+      const body = call.method === "POST" ? rotated : row();
+      return { status: 200, url, headers: { get: () => null }, text: async () => JSON.stringify(body) };
+    };
+    createAppClient("https://api.test", transport);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <WebhookDetailPage workspaceSlug={SLUG} webhookId={ID} />
+      </QueryClientProvider>
+    );
+    await screen.findByText(DETAIL_HEADING);
+    await user.click(screen.getByRole("button", { name: REGENERATE_LABEL }));
+    expect(await screen.findByRole("button", { name: "Show secret key" })).toBeInTheDocument();
+    const cached = queryClient
+      .getMutationCache()
+      .getAll()
+      .map((mutation) => JSON.stringify(mutation.state.data ?? null));
+    expect(cached.some((entry) => entry.includes("whsec_fixture_rotated"))).toBe(false);
+    await user.click(screen.getByRole("button", { name: UPDATE_LABEL }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(WEBHOOK_UPDATED_NOTICE));
+    expect(screen.queryByRole("button", { name: "Show secret key" })).not.toBeInTheDocument();
+  });
+
+  it("names the save and rotation failures in their notices", async () => {
+    const user = userEvent.setup();
+    renderPage((call) => (call.method === "GET" ? { status: 200, body: row() } : { status: 409 }));
+    await screen.findByText(DETAIL_HEADING);
+    await user.click(screen.getByRole("button", { name: UPDATE_LABEL }));
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(WEBHOOK_UPDATE_FAILED_NOTICE, WEBHOOK_UPDATE_FAILED_BODY)
+    );
+    expect(WEBHOOK_UPDATE_FAILED_NOTICE).toBe("Webhook not updated");
+    await user.click(screen.getByRole("button", { name: REGENERATE_LABEL }));
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(WEBHOOK_REGENERATE_FAILED_NOTICE, WEBHOOK_REGENERATE_FAILED_BODY)
+    );
+    expect(WEBHOOK_REGENERATE_FAILED_NOTICE).toBe("Secret key not regenerated");
   });
 
   it("shows the Updating label while the save is in flight", async () => {

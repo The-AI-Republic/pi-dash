@@ -100,7 +100,7 @@ function renderDialog(handler: (call: Call) => { status: number; body?: unknown 
       <Harness />
     </QueryClientProvider>
   );
-  return { ...view, calls, onOpenChange, onCreated };
+  return { ...view, calls, onOpenChange, onCreated, queryClient };
 }
 
 afterEach(() => {
@@ -218,6 +218,25 @@ describe("CreateWebhookDialog", () => {
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
     await user.click(screen.getByRole("button", { name: "Close" }));
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("leaves no key in the mutation cache after creation or close", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderDialog(() => ({ status: 201, body: issued() }));
+    await user.type(screen.getByLabelText("Target URL"), "https://example.com/post");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    await screen.findByText(KEY_CREATED_TITLE);
+    const cached = () =>
+      JSON.stringify(
+        queryClient
+          .getMutationCache()
+          .getAll()
+          .map((mutation) => mutation.state.data)
+      );
+    expect(cached()).not.toContain("whsec_fixture_abcdefghijklmnopqrstuvwxyz");
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByText(KEY_CREATED_TITLE)).not.toBeInTheDocument();
+    expect(cached()).not.toContain("whsec_fixture_abcdefghijklmnopqrstuvwxyz");
   });
 
   it("resets the form, the error and the key when reopened", async () => {

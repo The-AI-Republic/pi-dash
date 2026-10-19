@@ -80,6 +80,22 @@ export function upsertListRow(rows: WorkspaceWebhookList, row: WorkspaceWebhook)
   return next;
 }
 
+/**
+ * Keep a write's row in the list cache only when that list already holds
+ * every row. Seeding an unread list with the one row a detail read knows
+ * about would hide every other webhook until the query refetches, so an
+ * uncached list stays uncached and the next visit fetches it whole.
+ */
+function keepListRow(
+  queryClient: ReturnType<typeof useQueryClient>,
+  workspaceSlug: string,
+  row: WorkspaceWebhook
+): void {
+  queryClient.setQueryData<WorkspaceWebhookList>(webhookKeys.list(workspaceSlug), (rows) =>
+    rows === undefined ? rows : upsertListRow(rows, row)
+  );
+}
+
 /** The stored half of a create/regenerate answer: everything but the key. */
 export function webhookRowOf(issued: CreatedWorkspaceWebhook): WorkspaceWebhook {
   return {
@@ -96,15 +112,38 @@ export function webhookRowOf(issued: CreatedWorkspaceWebhook): WorkspaceWebhook 
   };
 }
 
-export function useCreateWebhook(workspaceSlug: string) {
+/**
+ * A create or regenerate answer as the hooks hand it back. The one-time
+ * key deliberately does not ride on this value: TanStack keeps a
+ * mutation's result in its cache for the gc window, so a key there would
+ * outlive the reveal. `mutationFn` passes the whole answer to the
+ * caller's callback first, then resolves with the stored row only
+ * (§20/§22).
+ */
+export interface IssuedWebhook {
+  row: WorkspaceWebhook;
+}
+
+/**
+ * Hand the full answer (key included) to the caller's callback, then
+ * resolve with the stored row. The callback runs before the mutation
+ * result exists, so the key is never part of that result.
+ */
+function issueWebhook(
+  issued: CreatedWorkspaceWebhook,
+  onIssued: (issued: CreatedWorkspaceWebhook) => void
+): IssuedWebhook {
+  onIssued(issued);
+  return { row: webhookRowOf(issued) };
+}
+
+export function useCreateWebhook(workspaceSlug: string, onIssued: (issued: CreatedWorkspaceWebhook) => void) {
   const queryClient = useQueryClient();
   const client = getAppClient();
-  return useMutation<CreatedWorkspaceWebhook, unknown, CreateWorkspaceWebhookInput>({
-    mutationFn: (input) => createWorkspaceWebhook(client, workspaceSlug, input),
-    onSuccess: (created) => {
-      queryClient.setQueryData<WorkspaceWebhookList>(webhookKeys.list(workspaceSlug), (rows) =>
-        upsertListRow(rows ?? [], webhookRowOf(created))
-      );
+  return useMutation<IssuedWebhook, unknown, CreateWorkspaceWebhookInput>({
+    mutationFn: async (input) => issueWebhook(await createWorkspaceWebhook(client, workspaceSlug, input), onIssued),
+    onSuccess: (issued) => {
+      keepListRow(queryClient, workspaceSlug, issued.row);
     },
   });
 }
@@ -121,9 +160,7 @@ export function useUpdateWebhook(workspaceSlug: string) {
     mutationFn: ({ webhookId, input }) => updateWorkspaceWebhook(client, workspaceSlug, webhookId, input),
     onSuccess: (saved, { webhookId }) => {
       queryClient.setQueryData(webhookKeys.detail(workspaceSlug, webhookId), saved);
-      queryClient.setQueryData<WorkspaceWebhookList>(webhookKeys.list(workspaceSlug), (rows) =>
-        upsertListRow(rows ?? [], saved)
-      );
+      keepListRow(queryClient, workspaceSlug, saved);
     },
   });
 }
@@ -147,18 +184,15 @@ export function useDeleteWebhook(workspaceSlug: string) {
   });
 }
 
-export function useRegenerateWebhookSecret(workspaceSlug: string) {
+export function useRegenerateWebhookSecret(workspaceSlug: string, onIssued: (issued: CreatedWorkspaceWebhook) => void) {
   const queryClient = useQueryClient();
   const client = getAppClient();
-  return useMutation<CreatedWorkspaceWebhook, unknown, string>({
-    mutationFn: (webhookId) => regenerateWorkspaceWebhookSecret(client, workspaceSlug, webhookId),
-    onSuccess: (rotated, webhookId) => {
-      // The answer carries the row without its secret plus the new key.
-      const row = webhookRowOf(rotated);
-      queryClient.setQueryData(webhookKeys.detail(workspaceSlug, webhookId), row);
-      queryClient.setQueryData<WorkspaceWebhookList>(webhookKeys.list(workspaceSlug), (rows) =>
-        upsertListRow(rows ?? [], row)
-      );
+  return useMutation<IssuedWebhook, unknown, string>({
+    mutationFn: async (webhookId) =>
+      issueWebhook(await regenerateWorkspaceWebhookSecret(client, workspaceSlug, webhookId), onIssued),
+    onSuccess: (issued, webhookId) => {
+      queryClient.setQueryData(webhookKeys.detail(workspaceSlug, webhookId), issued.row);
+      keepListRow(queryClient, workspaceSlug, issued.row);
     },
   });
 }

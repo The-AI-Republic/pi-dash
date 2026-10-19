@@ -119,27 +119,18 @@ function WebhookRow({ workspaceSlug, webhook }: WebhookRowProps): React.ReactEle
       <Link
         to="/$ws/settings/webhooks/$webhookId"
         params={{ ws: workspaceSlug, webhookId: webhook.id }}
-        className="text-body flex min-w-0 flex-1 items-center justify-between gap-(--space-4) rounded-(--radius-control) text-(--text) hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-(--focus-ring-color) focus-visible:outline-solid"
+        className="text-body min-w-0 flex-1 truncate rounded-(--radius-control) text-(--text) hover:text-(--accent) focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-(--focus-ring-color) focus-visible:outline-solid"
       >
-        <span className="truncate">{webhook.url}</span>
-        <span
-          onClick={(event) => {
-            // The switch sits inside the row link: stop the bubble before
-            // the link navigates. The switch itself still toggles (its own
-            // click handler runs first, on the switch element).
-            event.stopPropagation();
-          }}
-        >
-          <Switch
-            aria-label={WEBHOOKS_ROW_SWITCH_LABEL}
-            checked={webhook.is_active}
-            disabled={setActive.isPending}
-            onCheckedChange={(checked) => {
-              setActive.mutate({ webhookId: webhook.id, input: { is_active: checked } });
-            }}
-          />
-        </span>
+        {webhook.url}
       </Link>
+      <Switch
+        aria-label={WEBHOOKS_ROW_SWITCH_LABEL}
+        checked={webhook.is_active}
+        disabled={setActive.isPending}
+        onCheckedChange={(checked) => {
+          setActive.mutate({ webhookId: webhook.id, input: { is_active: checked } });
+        }}
+      />
     </li>
   );
 }

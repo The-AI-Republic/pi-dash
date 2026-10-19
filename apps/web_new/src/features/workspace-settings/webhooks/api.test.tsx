@@ -169,7 +169,8 @@ describe("webhook hooks", () => {
     }));
     const { queryClient, wrapper } = harness(stub.transport);
     queryClient.setQueryData(webhookKeys.list(SLUG), [row()]);
-    const create = renderHook(() => useCreateWebhook(SLUG), { wrapper });
+    const keys: string[] = [];
+    const create = renderHook(() => useCreateWebhook(SLUG, (answer) => keys.push(answer.secret_key)), { wrapper });
     await act(async () => {
       await create.result.current.mutateAsync({
         url: "https://example.com/new",
@@ -195,6 +196,16 @@ describe("webhook hooks", () => {
     const cached = queryClient.getQueryData<Array<{ id: string; secret_key?: string }>>(webhookKeys.list(SLUG));
     expect(cached?.map((entry) => entry.id)).toEqual([OTHER, ID]);
     expect(cached?.some((entry) => entry.secret_key !== undefined)).toBe(false);
+    // The key reaches the caller out of band and never enters the cache.
+    expect(keys).toEqual(["whsec_fixture_new"]);
+    expect(
+      JSON.stringify(
+        queryClient
+          .getMutationCache()
+          .getAll()
+          .map((m) => m.state.data)
+      )
+    ).not.toContain("whsec_fixture_new");
   });
 
   it("saves a detail edit into both caches", async () => {
@@ -244,7 +255,7 @@ describe("webhook hooks", () => {
     ).toEqual([OTHER]);
   });
 
-  it("leaves an uncached list alone after a delete and a rotate", async () => {
+  it("keeps an uncached list uncached after a delete and a rotate", async () => {
     const stub = transport((call) => ({
       status: call.method === "DELETE" ? 204 : 200,
       ...(call.method === "DELETE" ? {} : { body: row({ secret_key: "fresh" }) }),
@@ -256,17 +267,29 @@ describe("webhook hooks", () => {
     });
     expect(queryClient.getQueryData(webhookKeys.list(SLUG))).toBeUndefined();
 
-    const rotate = renderHook(() => useRegenerateWebhookSecret(SLUG), { wrapper });
-    let issued: { secret_key: string } | undefined;
+    const keys: string[] = [];
+    const rotate = renderHook(() => useRegenerateWebhookSecret(SLUG, (answer) => keys.push(answer.secret_key)), {
+      wrapper,
+    });
+    let issued: { row: { id: string } } | undefined;
     await act(async () => {
       issued = await rotate.result.current.mutateAsync(ID);
     });
-    expect(issued?.secret_key).toBe("fresh");
+    expect(keys).toEqual(["fresh"]);
+    expect(issued?.row.id).toBe(ID);
+    expect(
+      JSON.stringify(
+        queryClient
+          .getMutationCache()
+          .getAll()
+          .map((m) => m.state.data)
+      )
+    ).not.toContain("fresh");
     expect(stub.calls.at(-1)).toMatchObject({
       method: "POST",
       url: `https://api.test/api/workspaces/${SLUG}/webhooks/${ID}/regenerate/`,
     });
     expect(queryClient.getQueryData(webhookKeys.detail(SLUG, ID))).toEqual(row());
-    expect(queryClient.getQueryData(webhookKeys.list(SLUG))).toEqual([row()]);
+    expect(queryClient.getQueryState(webhookKeys.list(SLUG))).toBeUndefined();
   });
 });
