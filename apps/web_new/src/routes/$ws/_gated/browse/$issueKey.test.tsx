@@ -602,6 +602,46 @@ describe("browse route", () => {
   });
 });
 
+describe("browse widgets", () => {
+  it("falls back to the key's prefix until the project row arrives", () => {
+    expect(projectIdentifier(undefined, "WEB-12")).toBe("WEB");
+    expect(projectIdentifier({ identifier: "ATL" }, "WEB-12")).toBe("ATL");
+    expect(projectIdentifier(undefined, "NOKEY")).toBe("");
+  });
+
+  it("mounts the widget under the description with the project locked", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, child: true });
+    await screen.findByTestId("project-tab-strip");
+    expect(await screen.findByText("Every inspector")).toBeInTheDocument();
+    // The detail sidebar also carries a sub-work-item action; the widget's
+    // own row is the one inside the widgets root.
+    const widget = screen.getByTestId("issue-detail-widgets");
+    const add = within(widget).getByRole("button", { name: "Add sub-work item" });
+    expect(add).toBeEnabled();
+    const user = userEvent.setup();
+    await user.click(add);
+    await user.click(await screen.findByRole("menuitem", { name: "Create new" }));
+    expect(await screen.findByRole("dialog", { name: "Create new work item" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Web" })).toBeDisabled();
+    expect(screen.getByTestId("parent-tag")).toHaveTextContent("Fix login");
+  });
+
+  it("opens a child row at its own browse key", async () => {
+    const { router } = renderBrowse(true, undefined, { details: "member", me: true, child: true });
+    await screen.findByTestId("project-tab-strip");
+    await userEvent.setup().click(await screen.findByRole("link", { name: /Every inspector/ }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/acme/browse/WEB-2"));
+  });
+
+  it("keeps the add entry shut for a guest", async () => {
+    renderBrowse(true, undefined, { child: true });
+    await screen.findByTestId("project-tab-strip");
+    expect(await screen.findByText("Every inspector")).toBeInTheDocument();
+    const widget = await screen.findByTestId("issue-detail-widgets");
+    expect(within(widget).getByRole("button", { name: "Add sub-work item" })).toBeDisabled();
+  });
+});
+
 describe("browse loader", () => {
   function loaderClient(stub: { liteStatus?: number; intake?: boolean }) {
     const calls: string[] = [];
