@@ -8796,71 +8796,178 @@ export class WebNewDriver implements ParityDriver {
     return todo("addRunnerLastToast");
   }
 
+  // --- Assistant entry surfaces (NEWFRONT-603): landing, setup card,
+  // --- composer gates, conversation rail and the dashboard card.
+
+  /** Spy counters and one-shot stubs for the assistant scenarios. */
+  private assistantSpyCounts: AssistantApiCounts = {
+    threadCreate: 0,
+    send: 0,
+    cancel: 0,
+    threadList: 0,
+    messageList: 0,
+  };
+  private assistantThreadCreateFailRemaining = 0;
+  private assistantThreadCreateDelayMs = 0;
+  private assistantThreadCreateDelayRemaining = 0;
+
+  /** The shared composer textarea (landing and conversation share it). */
+  private assistantComposerBox() {
+    return this.page.locator('textarea[placeholder*="Ask Pi Dash to do something"]');
+  }
+
+  /** The composer's send action (icon-only, so it is labelled). */
+  private assistantSendButton() {
+    return this.page.locator('button[aria-label="Send message"]').first();
+  }
+
+  /** The assistant rail beside the landing and conversation routes. */
+  private assistantSidebar() {
+    return this.page.locator('[data-testid="assistant-rail"]').first();
+  }
+
+  /**
+   * Wait for one assistant surface that starts on a config read: present,
+   * then past its pending branch. The cold open paints the column before
+   * the read resolves, so waiting for the column alone lets a scenario
+   * read "no greeting / no setup card" off the spinner (AGT-038–041).
+   */
+  private async assistantWaitSettled(selector: string): Promise<void> {
+    const surface = this.page.locator(selector).first();
+    await surface.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.locator(`${selector}[data-settled="true"]`).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** The dashboard card's single-line entry input. */
+  private assistantHomeCardInput() {
+    return this.page.locator('input[placeholder*="Ask Pi Dash to do something"]');
+  }
+
+  /** The dashboard card root: the card shell around the entry input. */
+  private assistantHomeCard() {
+    return this.page.locator("#home-assistant-card").first();
+  }
+
   // --- Assistant chat core (NEWFRONT-187). Throwing stubs per the shared
   // --- driver contract; the assistant area fills these in when it lands.
 
-  async assistantOpenLanding(_workspaceSlug: string): Promise<void> {
-    return todo("assistantOpenLanding");
+  async assistantOpenLanding(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/assistant`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // The greeting/setup swap rides on the config read, so settle on the
+    // landing column; scenarios poll for the stable branch.
+    await this.assistantWaitSettled('[data-testid="assistant-landing"]');
   }
-  async assistantOpenThread(_workspaceSlug: string, _threadId: string): Promise<void> {
-    return todo("assistantOpenThread");
+  async assistantOpenThread(workspaceSlug: string, threadId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/assistant/${threadId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.assistantWaitSettled('[data-testid="assistant-thread"]');
   }
-  async assistantOpenHome(_workspaceSlug: string): Promise<void> {
-    return todo("assistantOpenHome");
+  async assistantOpenHome(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByRole("main").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async assistantCurrentPath(): Promise<string> {
-    return todo("assistantCurrentPath");
+    return new URL(this.page.url()).pathname;
   }
   async assistantGoBack(): Promise<void> {
-    return todo("assistantGoBack");
+    await this.page.goBack();
+    await this.page.waitForLoadState("domcontentloaded");
   }
   async assistantLandingGreeting(): Promise<AssistantLandingGreeting | null> {
-    return todo("assistantLandingGreeting");
+    const column = this.page.locator('[data-testid="assistant-landing"]').first();
+    const headline = column.locator("h1").first();
+    if ((await headline.count()) === 0) return null;
+    const caption = column.locator("p").first();
+    return {
+      headline: (await headline.innerText()).trim(),
+      caption: (await caption.count()) === 0 ? "" : (await caption.innerText()).trim(),
+    };
   }
   async assistantLandingComposerVisible(): Promise<boolean> {
-    return todo("assistantLandingComposerVisible");
+    return this.isShown(
+      this.page.locator('[data-testid="assistant-landing"] textarea[placeholder*="Ask Pi Dash to do something"]')
+    );
   }
   async assistantSetupCard(): Promise<{ title: string; body: string; button: string } | null> {
-    return todo("assistantSetupCard");
+    const title = this.page.getByText("Set up your AI assistant", { exact: true }).first();
+    if ((await title.count()) === 0) return null;
+    const card = this.page.locator('[data-testid="assistant-setup-card"]').first();
+    const root = (await card.count()) > 0 ? card : title.locator("xpath=..");
+    return {
+      title: (await title.innerText()).trim(),
+      body: (
+        (await root
+          .locator("p")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+      button: (
+        await root
+          .getByRole("button", { name: "Configure provider", exact: true })
+          .first()
+          .innerText()
+          .catch(() => "")
+      ).trim(),
+    };
   }
   async assistantSetupCardClick(): Promise<void> {
-    return todo("assistantSetupCardClick");
+    await this.page
+      .locator('[data-testid="assistant-setup-card"]')
+      .first()
+      .getByRole("button", { name: "Configure provider", exact: true })
+      .click();
   }
-  async assistantFillDraft(_text: string): Promise<void> {
-    return todo("assistantFillDraft");
+  async assistantFillDraft(text: string): Promise<void> {
+    await this.assistantComposerBox().first().fill(text);
   }
   async assistantDraftValue(): Promise<string> {
-    return todo("assistantDraftValue");
+    return this.assistantComposerBox().first().inputValue();
   }
   async assistantPressEnter(): Promise<void> {
-    return todo("assistantPressEnter");
+    await this.assistantComposerBox().first().press("Enter");
   }
   async assistantPressShiftEnter(): Promise<void> {
-    return todo("assistantPressShiftEnter");
+    await this.assistantComposerBox().first().press("Shift+Enter");
   }
   async assistantPressControlEnter(): Promise<void> {
-    return todo("assistantPressControlEnter");
+    await this.assistantComposerBox().first().press("Control+Enter");
   }
   async assistantSendVisible(): Promise<boolean> {
-    return todo("assistantSendVisible");
+    return this.isShown(this.assistantSendButton());
   }
   async assistantSendEnabled(): Promise<boolean> {
-    return todo("assistantSendEnabled");
+    return this.assistantSendButton()
+      .isEnabled()
+      .then(
+        (enabled) => enabled,
+        () => false
+      );
   }
   async assistantClickSend(): Promise<void> {
-    return todo("assistantClickSend");
+    await this.assistantSendButton().click();
   }
   async assistantStopVisible(): Promise<boolean> {
-    return todo("assistantStopVisible");
+    return this.isShown(this.page.locator('button[aria-label="Stop response"]'));
   }
   async assistantClickStop(): Promise<void> {
     return todo("assistantClickStop");
   }
   async assistantComposerReason(): Promise<string | null> {
-    return todo("assistantComposerReason");
+    const reason = this.page.locator('[data-testid="assistant-composer-reason"]').first();
+    if ((await reason.count()) === 0) return null;
+    const text = (await reason.innerText()).trim();
+    return text === "" ? null : text;
   }
   async assistantTextareaDisabled(): Promise<boolean> {
-    return todo("assistantTextareaDisabled");
+    return this.assistantComposerBox()
+      .isDisabled()
+      .then(
+        (disabled) => disabled,
+        () => false
+      );
   }
   async assistantErrorLine(): Promise<string | null> {
     return todo("assistantErrorLine");
@@ -8896,46 +9003,80 @@ export class WebNewDriver implements ParityDriver {
     return todo("assistantClickToolLink");
   }
   async assistantSidebarThreads(): Promise<AssistantSidebarThread[]> {
-    return todo("assistantSidebarThreads");
+    const links = this.assistantSidebar().locator("nav a");
+    const total = await links.count();
+    const out: AssistantSidebarThread[] = [];
+    for (let i = 0; i < total; i++) {
+      const link = links.nth(i);
+      out.push({
+        title: (await link.innerText()).trim(),
+        href: (await link.getAttribute("href")) ?? "",
+        active: (await link.getAttribute("aria-current")) === "page",
+      });
+    }
+    return out;
   }
   async assistantSidebarEmptyVisible(): Promise<boolean> {
-    return todo("assistantSidebarEmptyVisible");
+    return this.page
+      .locator('[data-testid="assistant-rail"]')
+      .getByText("No conversations yet.", { exact: true })
+      .first()
+      .isVisible()
+      .then(
+        (visible) => visible,
+        () => false
+      );
   }
   async assistantClickNewChat(): Promise<void> {
-    return todo("assistantClickNewChat");
+    await this.assistantSidebar().getByRole("link", { name: "New chat" }).click();
   }
-  async assistantClickSidebarThread(_index: number): Promise<void> {
-    return todo("assistantClickSidebarThread");
+  async assistantClickSidebarThread(index: number): Promise<void> {
+    await this.assistantSidebar().locator("nav a").nth(index).click();
   }
   async assistantCardVisible(): Promise<boolean> {
-    return todo("assistantCardVisible");
+    return (await this.assistantHomeCardInput().count()) > 0;
   }
-  async assistantCardFillDraft(_text: string): Promise<void> {
-    return todo("assistantCardFillDraft");
+  async assistantCardFillDraft(text: string): Promise<void> {
+    await this.assistantHomeCardInput().first().fill(text);
   }
   async assistantCardDraftValue(): Promise<string> {
-    return todo("assistantCardDraftValue");
+    return this.assistantHomeCardInput().first().inputValue();
   }
   async assistantCardPressEnter(): Promise<void> {
-    return todo("assistantCardPressEnter");
+    await this.assistantHomeCardInput().first().press("Enter");
   }
   async assistantCardAskDisabled(): Promise<boolean> {
-    return todo("assistantCardAskDisabled");
+    return this.assistantHomeCard().getByRole("button", { name: "Ask", exact: true }).first().isDisabled();
   }
   async assistantCardClickAsk(): Promise<void> {
-    return todo("assistantCardClickAsk");
+    await this.assistantHomeCard().getByRole("button", { name: "Ask", exact: true }).first().click();
   }
-  async assistantCardClickSuggestion(_text: string): Promise<void> {
-    return todo("assistantCardClickSuggestion");
+  async assistantCardClickSuggestion(text: string): Promise<void> {
+    await this.assistantHomeCard().getByRole("button", { name: text, exact: true }).first().click();
   }
   async assistantCardSuggestions(): Promise<string[]> {
-    return todo("assistantCardSuggestions");
+    if (!(await this.assistantCardVisible())) return [];
+    const texts = await this.assistantHomeCard().locator("[data-suggestion]").allTextContents();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
   async assistantCardRecents(): Promise<{ title: string; href: string }[]> {
-    return todo("assistantCardRecents");
+    if (!(await this.assistantCardVisible())) return [];
+    // Only the recents list counts: the keyless setup reminder is also an
+    // anchor inside the card and must not displace the newest thread.
+    const links = this.assistantHomeCard().locator("ul a");
+    const total = await links.count();
+    const out: { title: string; href: string }[] = [];
+    for (let i = 0; i < total; i++) {
+      const link = links.nth(i);
+      out.push({
+        title: (await link.innerText()).trim(),
+        href: (await link.getAttribute("href")) ?? "",
+      });
+    }
+    return out;
   }
-  async assistantCardClickRecent(_index: number): Promise<void> {
-    return todo("assistantCardClickRecent");
+  async assistantCardClickRecent(index: number): Promise<void> {
+    await this.assistantHomeCard().locator("ul a").nth(index).click();
   }
   async assistantStubStream(_threadId: string, _frames: AssistantStreamFrame[]): Promise<void> {
     return todo("assistantStubStream");
@@ -8953,22 +9094,63 @@ export class WebNewDriver implements ParityDriver {
     return todo("assistantClearStreamBlock");
   }
   async assistantStartApiSpy(): Promise<void> {
-    return todo("assistantStartApiSpy");
+    this.assistantSpyCounts = { threadCreate: 0, send: 0, cancel: 0, threadList: 0, messageList: 0 };
+    await this.page.route("**/api/workspaces/*/ai-assistant/**", async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      const method = request.method();
+      const counts = this.assistantSpyCounts;
+      if (method === "POST" && pathname.endsWith("/ai-assistant/threads/")) counts.threadCreate += 1;
+      else if (method === "POST" && pathname.endsWith("/messages/")) counts.send += 1;
+      else if (method === "POST" && pathname.endsWith("/cancel/")) counts.cancel += 1;
+      else if (method === "GET" && pathname.endsWith("/ai-assistant/threads/")) counts.threadList += 1;
+      else if (method === "GET" && pathname.endsWith("/messages/")) counts.messageList += 1;
+      await route.fallback();
+    });
   }
   async assistantApiCounts(): Promise<AssistantApiCounts> {
-    return todo("assistantApiCounts");
+    return { ...this.assistantSpyCounts };
   }
   async assistantStopApiSpy(): Promise<void> {
-    return todo("assistantStopApiSpy");
+    await this.page.unroute("**/api/workspaces/*/ai-assistant/**");
   }
   async assistantFailThreadCreateOnce(): Promise<void> {
-    return todo("assistantFailThreadCreateOnce");
+    this.assistantThreadCreateFailRemaining = 1;
+    await this.page.route("**/api/workspaces/*/ai-assistant/threads/", async (route) => {
+      const request = route.request();
+      if (request.method() === "POST" && this.assistantThreadCreateFailRemaining > 0) {
+        this.assistantThreadCreateFailRemaining -= 1;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity thread-create failure" }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
   }
-  async assistantDelayThreadCreate(_ms: number): Promise<void> {
-    return todo("assistantDelayThreadCreate");
+  async assistantDelayThreadCreate(ms: number): Promise<void> {
+    this.assistantThreadCreateDelayMs = ms;
+    this.assistantThreadCreateDelayRemaining = 1;
+    await this.page.route("**/api/workspaces/*/ai-assistant/threads/", async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      if (
+        request.method() === "POST" &&
+        pathname.endsWith("/ai-assistant/threads/") &&
+        this.assistantThreadCreateDelayRemaining > 0
+      ) {
+        this.assistantThreadCreateDelayRemaining -= 1;
+        await new Promise((resolve) => setTimeout(resolve, this.assistantThreadCreateDelayMs));
+      }
+      await route.fallback();
+    });
   }
   async assistantClearThreadCreateStubs(): Promise<void> {
-    return todo("assistantClearThreadCreateStubs");
+    this.assistantThreadCreateFailRemaining = 0;
+    this.assistantThreadCreateDelayRemaining = 0;
+    await this.page.unroute("**/api/workspaces/*/ai-assistant/threads/");
   }
   async assistantDelaySend(_ms: number): Promise<void> {
     return todo("assistantDelaySend");
@@ -8977,7 +9159,15 @@ export class WebNewDriver implements ParityDriver {
     return todo("assistantClearSendDelay");
   }
   async assistantLastToast(): Promise<{ title: string; message: string } | null> {
-    return todo("assistantLastToast");
+    const candidates = this.page.locator('[data-testid="toast-notification"]');
+    const count = await candidates.count();
+    if (count === 0) return null;
+    const lines = ((await candidates.last().innerText()).trim() || "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (lines.length === 0) return null;
+    return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
   }
   async assistantCurrentHash(): Promise<string> {
     return todo("assistantCurrentHash");

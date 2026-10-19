@@ -83,7 +83,8 @@ vi.mock("../../../features/home/index.js", async (importOriginal) => {
   };
 });
 
-import { homeKeys, widgetPrefsKeys } from "../../../features/home/index.js";
+import { assistantKeys } from "../../../features/assistant/index.js";
+import { widgetPrefsKeys } from "../../../features/home/index.js";
 import { projectKeys } from "../../../features/projects/index.js";
 import { Route } from "./index.js";
 
@@ -197,8 +198,8 @@ describe("workspace home route", () => {
     const loader = Route.options.loader;
     if (typeof loader !== "function") throw new Error("missing loader");
     await loader({ context: { queryClient, apiClient }, params: { ws: "acme" } } as never);
-    expect(queryClient.getQueryData(homeKeys.threads("acme"))).toEqual([THREAD]);
-    expect(queryClient.getQueryData(homeKeys.assistantConfig("acme"))).toEqual(CONFIG);
+    expect(queryClient.getQueryData(assistantKeys.threads("acme"))).toEqual([THREAD]);
+    expect(queryClient.getQueryData(assistantKeys.config("acme"))).toEqual(CONFIG);
   });
 
   it("tolerates failed assistant reads in its loader", async () => {
@@ -209,8 +210,8 @@ describe("workspace home route", () => {
     const loader = Route.options.loader;
     if (typeof loader !== "function") throw new Error("missing loader");
     await expect(loader({ context: { queryClient, apiClient }, params: { ws: "acme" } } as never)).resolves.toEqual({});
-    expect(queryClient.getQueryData(homeKeys.threads("acme"))).toBeUndefined();
-    expect(queryClient.getQueryData(homeKeys.assistantConfig("acme"))).toBeUndefined();
+    expect(queryClient.getQueryData(assistantKeys.threads("acme"))).toBeUndefined();
+    expect(queryClient.getQueryData(assistantKeys.config("acme"))).toBeUndefined();
   });
 
   it("leaves the widget-map read off the loader so first paint shows the skeleton", async () => {

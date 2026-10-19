@@ -6,21 +6,19 @@
 // Guests are disabled at the call site, so the card fetches nothing for
 // roles that never see it.
 
-import { queryOptions, useQuery } from "@tanstack/react-query";
-import { getLlmConfig, listAssistantThreads, type ApiClient } from "@pidash/api-client";
+import { useQuery } from "@tanstack/react-query";
+import type { ApiClient } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { LIST_STALE_TIME_MS, REFERENCE_STALE_TIME_MS } from "../../../core/query/client.js";
-import { homeKeys } from "./keys.js";
+import { assistantConfigQueryOptions, assistantThreadsQueryOptions } from "../../assistant/index.js";
 
-/** Recent assistant threads for one workspace (SHELL-007). */
+/**
+ * Recent assistant threads for one workspace (SHELL-007). The read and
+ * its cache key belong to the assistant feature so the dashboard card and
+ * the assistant surfaces share one entry.
+ */
 export function homeThreadsQueryOptions(client: ApiClient, workspaceSlug: string, enabled: boolean) {
-  return queryOptions({
-    queryKey: homeKeys.threads(workspaceSlug),
-    queryFn: () => listAssistantThreads(client, workspaceSlug),
-    staleTime: LIST_STALE_TIME_MS,
-    enabled,
-  });
+  return assistantThreadsQueryOptions(client, workspaceSlug, enabled);
 }
 
 /** Recent assistant threads for one workspace. */
@@ -29,16 +27,15 @@ export function useAssistantThreads(workspaceSlug: string, enabled: boolean) {
 }
 
 /** The user's model configuration behind the setup reminder (SHELL-007). */
-export function homeAssistantConfigQueryOptions(client: ApiClient, workspaceSlug: string, enabled: boolean) {
-  return queryOptions({
-    queryKey: homeKeys.assistantConfig(workspaceSlug),
-    queryFn: () => getLlmConfig(client),
-    staleTime: REFERENCE_STALE_TIME_MS,
-    enabled,
-  });
+export function homeAssistantConfigQueryOptions(client: ApiClient, workspaceSlug: string) {
+  return assistantConfigQueryOptions(client, workspaceSlug);
 }
 
 /** The user's model configuration behind the setup reminder. */
 export function useAssistantConfig(workspaceSlug: string, enabled: boolean) {
-  return useQuery(homeAssistantConfigQueryOptions(getAppClient(), workspaceSlug, enabled));
+  // Disabled callers (guests) still mount the hook; the query stays idle.
+  return useQuery({
+    ...homeAssistantConfigQueryOptions(getAppClient(), workspaceSlug),
+    enabled,
+  });
 }
