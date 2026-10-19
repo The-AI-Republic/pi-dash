@@ -134,6 +134,10 @@ describe("CloudAssistantTab", () => {
     expect(add.length).toBeGreaterThan(1);
     await user.click(add[0]!);
     expect(screen.getByRole("form", { name: "Add connection" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Back to connections" }));
+    expect(screen.getByText("No AI provider connected yet.")).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: "Add connection" })[1]!);
+    expect(screen.getByRole("form", { name: "Add connection" })).toBeInTheDocument();
   });
 
   it("reports a connections read failure", async () => {
