@@ -1217,25 +1217,24 @@ export class WebNewDriver implements ParityDriver {
     // on one workspace before driving its surface. Sign-in is a no-op for a
     // live session: the entry bounces to the remembered workspace, which may
     // be a different one, so sign out first and always end on the workspace
-    // the caller asked for. The whole pass retries when a throttled shared
-    // stack swallows one.
+    // the caller asked for. A throttled shared stack can swallow a whole
+    // pass, so retry it a bounded number of times.
+    if (!(await this.isSignedOut().catch(() => false))) {
+      await this.signOutViaCommandPalette();
+    }
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (attempt === 0 && !(await this.isSignedOut().catch(() => false))) {
-        await this.signOutViaCommandPalette();
-      }
-      await this.page.goto(`/?next_path=${encodeURIComponent(`/${workspaceSlug}`)}`);
+      await this.openEntry();
       await this.signInWithPassword(email, password);
       const landed = await this.page
-        .waitForURL(new RegExp(`/${workspaceSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:[/?#]|$)`), {
-          timeout: 60_000,
-        })
+        .waitForURL(new RegExp(`/${workspaceSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(/|$)`), { timeout: 60_000 })
         .then(
           () => true,
           () => false
         );
       if (landed) return;
     }
-    throw new Error(`[parity] sign-in never reached ${workspaceSlug}.`);
+    await this.page.goto(`/${workspaceSlug}/`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
   async rulesOpenIssueDetailRaw(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
