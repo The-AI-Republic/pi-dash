@@ -32,6 +32,8 @@ export { Input } from "./components/Input";
 export type { InputProps } from "./components/Input";
 export { Kbd } from "./components/Kbd";
 export type { KbdProps } from "./components/Kbd";
+export { Markdown, MarkdownSpans } from "./components/Markdown";
+export type { MarkdownProps } from "./components/Markdown";
 export { Menu, isMenuCustom, isMenuSeparator } from "./components/Menu";
 export type { MenuAction, MenuCustom, MenuEntry, MenuProps, MenuSeparator } from "./components/Menu";
 export { Popover } from "./components/Popover";
@@ -53,5 +55,7 @@ export type { UpgradePillProps, UpgradePillSize } from "./components/UpgradePill
 export { VirtualList } from "./components/VirtualList";
 export type { VirtualListProps } from "./components/VirtualList";
 export { cn } from "./lib/cn";
+export { markdownText, parseInline, parseMarkdown, safeHref } from "./lib/markdown";
+export type { MarkdownBlock, MarkdownListItem, MarkdownSpan } from "./lib/markdown";
 export { applyDensity, applyTheme, resolveTheme, watchSystemTheme } from "./theme";
 export type { Density, ThemeMode } from "./theme";

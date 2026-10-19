@@ -9,7 +9,7 @@ import type { ApiClient, ChatEvent } from "@pidash/api-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { platform, type EventStream, type StreamInit, type StreamMessage } from "../../../core/platform/index.js";
-import { createCloudChatTransport, getChatTransport, setChatTransport } from "./transport.js";
+import { createCloudChatTransport, getChatTransport, setChatTransport, type ChatTransport } from "./transport.js";
 
 const client = { baseUrl: "https://api.test" } as ApiClient;
 
@@ -51,13 +51,13 @@ function harness(messages: StreamMessage[] | (() => AsyncIterable<StreamMessage>
 }
 
 function transportWith(harnessValue: Harness): { transport: ReturnType<typeof createCloudChatTransport> } {
-  const transport = createCloudChatTransport(
-    () => client,
-    (url, init) => {
+  const transport = createCloudChatTransport({
+    getClient: () => client,
+    openStream: (url, init) => {
       harnessValue.opened.push({ url, init });
       return harnessValue.feed as unknown as EventStream;
-    }
-  );
+    },
+  });
   return { transport };
 }
 
@@ -122,6 +122,35 @@ describe("createCloudChatTransport", () => {
     expect(h.feed.close).toHaveBeenCalledTimes(1);
   });
 
+  it("stays quiet when the channel fails after it was closed", async () => {
+    const h = harness(async function* (): AsyncIterable<StreamMessage> {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      throw new Error("late");
+      yield { event: "chat.event", data: "" };
+    });
+    const { transport } = transportWith(h);
+    const onError = vi.fn();
+    const onEnd = vi.fn();
+    const unsubscribe = transport.subscribeChatEvents("s-8", 0, { onEvent: vi.fn(), onError, onEnd });
+    unsubscribe();
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    expect(onError).not.toHaveBeenCalled();
+    expect(onEnd).not.toHaveBeenCalled();
+  });
+
+  it("reports a non-Event rejection and still signals the feed ended", async () => {
+    const h = harness(async function* (): AsyncIterable<StreamMessage> {
+      yield { event: "message", data: "" };
+      throw new TypeError("socket reset");
+    });
+    const { transport } = transportWith(h);
+    const onError = vi.fn();
+    const onEnd = vi.fn();
+    transport.subscribeChatEvents("s-7", 0, { onEvent: vi.fn(), onError, onEnd });
+    await vi.waitFor(() => expect(onEnd).toHaveBeenCalledTimes(1));
+    expect(onError).toHaveBeenCalledWith(expect.any(TypeError));
+  });
+
   it("works without an error handler", async () => {
     const h = harness([{ event: "chat.event", data: "broken" }]);
     const { transport } = transportWith(h);
@@ -135,7 +164,7 @@ describe("createCloudChatTransport", () => {
 describe("active transport", () => {
   it("defaults to the cloud transport and restores it when cleared", () => {
     const initial = getChatTransport();
-    const custom = { subscribeChatEvents: vi.fn(() => () => undefined) };
+    const custom = { subscribeChatEvents: vi.fn(() => () => undefined) } as unknown as ChatTransport;
     setChatTransport(custom);
     expect(getChatTransport()).toBe(custom);
     setChatTransport(null);
@@ -193,6 +222,43 @@ describe("createCloudChatTransport resilience", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(onEvent).not.toHaveBeenCalled();
   });
+  it("does not reopen a channel that ends after unsubscribe", async () => {
+    let started: () => void = () => undefined;
+    let close: () => void = () => undefined;
+    const begun = new Promise<void>((resolve) => (started = resolve));
+    const h = harness(async function* (): AsyncIterable<StreamMessage> {
+      started();
+      yield { event: "chat.event", data: JSON.stringify(event(16)) };
+      await new Promise<void>((resolve) => (close = resolve));
+      return;
+    });
+    const { transport } = transportWith(h);
+    const onEvent = vi.fn();
+    const onEnd = vi.fn();
+    const unsubscribe = transport.subscribeChatEvents("s-9", 0, { onEvent, onEnd });
+    await begun;
+    // Let the drain take the first frame and park on the generator before
+    // the unsubscribe, so the channel really ends after it was closed.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    unsubscribe();
+    close();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(onEnd).not.toHaveBeenCalled();
+  });
+
+  it("ends a channel that has no end handler", async () => {
+    const h = harness(async function* (): AsyncIterable<StreamMessage> {
+      yield { event: "chat.event", data: JSON.stringify(event(17)) };
+    });
+    const { transport } = transportWith(h);
+    const onEvent = vi.fn();
+    transport.subscribeChatEvents("s-10", 0, { onEvent });
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+
   it("finishes quietly when the channel closes on its own", async () => {
     const h = harness(async function* (): AsyncIterable<StreamMessage> {
       yield { event: "chat.event", data: JSON.stringify(event(15)) };
@@ -213,7 +279,7 @@ describe("createCloudChatTransport resilience", () => {
         yield { event: "chat.event", data: JSON.stringify(event(21)) };
       },
     });
-    const transport = createCloudChatTransport(() => client);
+    const transport = createCloudChatTransport({ getClient: () => client });
     const onEvent = vi.fn();
     transport.subscribeChatEvents("s-11", 0, { onEvent });
     await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1));
@@ -221,5 +287,45 @@ describe("createCloudChatTransport resilience", () => {
       headers: { Accept: "text/event-stream" },
     });
     stream.mockRestore();
+  });
+
+  it("sends, cancels and closes through the session's own verbs", async () => {
+    const calls: Array<{ method: string; path: string; json?: unknown }> = [];
+    const rows = {
+      sendJson: async (method: string, path: string, init: { json?: unknown }) => {
+        calls.push({ method, path, json: init.json });
+        return { data: {} };
+      },
+      parse: (_schema: unknown, _body: unknown, label: string) => ({ label }),
+    } as unknown as ApiClient;
+    const transport = createCloudChatTransport({ getClient: () => rows });
+    await expect(transport.sendChatMessage("s-20", "hello")).resolves.toEqual({
+      label: "POST /api/runners/chat/sessions/s-20/messages/",
+    });
+    await transport.cancelChat("s-20", "user_switched_model");
+    await transport.closeChat("s-20");
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/api/runners/chat/sessions/s-20/messages/",
+        json: { content: "hello", content_parts: [] },
+      },
+      { method: "POST", path: "/api/runners/chat/sessions/s-20/cancel/", json: { reason: "user_switched_model" } },
+      { method: "POST", path: "/api/runners/chat/sessions/s-20/close/", json: {} },
+    ]);
+  });
+
+  it("defaults a cancel with no reason to the user's own marker", async () => {
+    const calls: unknown[] = [];
+    const rows = {
+      sendJson: async (_method: string, _path: string, init: { json?: unknown }) => {
+        calls.push(init.json);
+        return { data: {} };
+      },
+      parse: () => ({ ok: true }),
+    } as unknown as ApiClient;
+    const transport = createCloudChatTransport({ getClient: () => rows });
+    await transport.cancelChat("s-21");
+    expect(calls).toEqual([{ reason: "user_cancelled" }]);
   });
 });

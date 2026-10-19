@@ -1,16 +1,18 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Runner chat page (NEWFRONT-549, RUN-025/026/028/032). Composition only:
-// the runner comes from the address, the history column lists the
-// runner's conversations and picks one, opening the runner prepares a
-// session, and the header/composer reflect the live state. Messaging
-// (send, stream, stop, close) lands on top of this page in NEWFRONT-551.
+// Runner chat page (NEWFRONT-549 RUN-025/026/028/032, messaging
+// NEWFRONT-551 RUN-027/029/030/031). Composition: the runner comes from
+// the address, the history column lists the runner's conversations and
+// picks one, opening the runner prepares a session, the live feed streams
+// the reply and derives the activity strip, and the composer/header carry
+// send, stop and close with the state the transport reports.
 
 import * as React from "react";
 
 import type { ChatSession } from "@pidash/api-client";
 
+import { useDictationConfig, dictationOffered } from "../../../shared/dictation/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { useRunnersArea } from "../area.js";
 import {
@@ -25,6 +27,8 @@ import { ChatHeader } from "./ChatHeader.js";
 import { ChatHistory } from "./ChatHistory.js";
 import { ChatTranscript } from "./ChatTranscript.js";
 import { useChatMessages, useChatRunner, useChatSessions } from "./queries.js";
+import { useChatActions } from "./useChatActions.js";
+import { useChatStream } from "./useChatStream.js";
 import { useNewChat } from "./useNewChat.js";
 import { useWarmUp } from "./useWarmUp.js";
 
@@ -144,15 +148,84 @@ export function RunnerChatPage({
     [session?.id, sessions.data]
   );
 
+  const [draft, setDraft] = React.useState("");
+  // A different contact starts with an empty draft; a failed draft is
+  // restored later on the same contact only.
+  React.useEffect(() => {
+    setDraft("");
+  }, [runnerId]);
+
+  const refetchSessions = React.useCallback(() => {
+    void sessions.refetch();
+  }, [sessions]);
+  const refetchMessages = React.useCallback(() => {
+    void messages.refetch();
+  }, [messages]);
+
+  const stream = useChatStream(session?.id ?? null, messages.data ?? [], {
+    onHistoryRefresh: () => {
+      refetchSessions();
+      refetchMessages();
+    },
+    onApprovalCleared: () => undefined,
+  });
+
+  const actions = useChatActions({
+    workspaceSlug,
+    workspaceId: area.workspaceId,
+    runnerId,
+    session,
+    onSelectSession: select,
+    onCreated,
+  });
+
+  const speech = useDictationConfig(area.allowed);
+  const dictationAvailable = dictationOffered(speech.data);
+
   useDocumentHead({ title: runnerChatDocumentTitle(runner.data?.name), robots: "noindex, nofollow" });
 
   return (
     <section aria-label="Runner chat" data-testid="runner-chat" className="flex h-full min-h-0 w-full">
       <ChatHistory entries={entries} onSelect={select} onNewChat={() => void newChat.start()} busy={newChat.busy} />
       <div className="flex min-w-0 flex-1 flex-col px-(--space-4) pb-(--space-4)">
-        <ChatHeader summary={summary} />
-        <ChatTranscript messages={messages.data ?? []} loading={messages.isPending && session !== null} />
-        <ChatComposer blockedReason={blockedReason} turnInFlight={turnInFlight} />
+        <ChatHeader summary={summary} {...(session === null ? {} : { onClose: () => void actions.close() })} />
+        <ChatTranscript
+          messages={stream.messages}
+          loading={messages.isPending && session !== null}
+          activity={stream.activity}
+        />
+        {stream.error === null && actions.sendError === null ? null : (
+          <div
+            role="alert"
+            className="text-meta mb-(--space-2) flex items-start justify-between gap-(--space-2) rounded-(--radius-control) border border-(--danger) bg-(--surface) px-(--space-3) py-(--space-2) text-(--danger)"
+          >
+            <span className="min-w-0">{stream.error ?? actions.sendError}</span>
+            <button
+              type="button"
+              className="shrink-0 underline"
+              onClick={() => {
+                stream.dismissError();
+                actions.dismissSendError();
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+        <ChatComposer
+          blockedReason={blockedReason}
+          draft={draft}
+          onDraftChange={setDraft}
+          onSend={(value) => {
+            // The draft clears at once; a refusal puts it back verbatim.
+            setDraft("");
+            void actions.send(value, setDraft);
+          }}
+          turnInFlight={turnInFlight}
+          onStop={() => void actions.stop()}
+          sending={actions.sending}
+          dictationAvailable={dictationAvailable}
+        />
       </div>
     </section>
   );

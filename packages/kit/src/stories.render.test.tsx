@@ -14,6 +14,7 @@ import * as buttonStories from "./components/Button.stories";
 import * as comboboxStories from "./components/Combobox.stories";
 import * as fieldsStories from "./components/fields.stories";
 import * as iconButtonStories from "./components/IconButton.stories";
+import * as markdownStories from "./components/Markdown.stories";
 import * as menuStories from "./components/Menu.stories";
 import * as dialogStories from "./components/Dialog.stories";
 import * as emptyStateStories from "./components/EmptyState.stories";
@@ -28,6 +29,7 @@ const modules: Record<string, Record<string, unknown>> = {
   "Combobox.stories": comboboxStories,
   "fields.stories": fieldsStories,
   "IconButton.stories": iconButtonStories,
+  "Markdown.stories": markdownStories,
   "Menu.stories": menuStories,
   "Dialog.stories": dialogStories,
   "EmptyState.stories": emptyStateStories,

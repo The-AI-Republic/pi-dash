@@ -18,6 +18,9 @@ const hooks = vi.hoisted(() => ({
   useNewChat: vi.fn(),
   useWarmUp: vi.fn(),
   useDocumentHead: vi.fn(),
+  useChatStream: vi.fn(),
+  useChatActions: vi.fn(),
+  useDictationConfig: vi.fn(),
 }));
 const area = vi.hoisted(() => ({ value: { workspaceId: "ws-id", allowed: true, access: "allowed" } }));
 
@@ -30,14 +33,69 @@ vi.mock("./queries.js", () => ({
 }));
 vi.mock("./useWarmUp.js", () => ({ useWarmUp: hooks.useWarmUp }));
 vi.mock("./useNewChat.js", () => ({ useNewChat: hooks.useNewChat }));
+vi.mock("./useChatStream.js", () => ({ useChatStream: hooks.useChatStream }));
+vi.mock("./useChatActions.js", () => ({ useChatActions: hooks.useChatActions }));
+vi.mock("../../../shared/dictation/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../shared/dictation/index.js")>();
+  return { ...original, useDictationConfig: hooks.useDictationConfig };
+});
 
-import { makeRunner, makeSession } from "./harness.js";
+import { makeRunner, makeSession, testClient, wrapper } from "./harness.js";
 import { RUNNER_CHAT_PAGE_TITLE, RunnerChatPage, runnerChatDocumentTitle } from "./RunnerChatPage.js";
 
 const runner = makeRunner();
 const openSession = makeSession({ id: "open", last_message_at: "2026-10-18T11:00:00Z" });
 const closedSession = makeSession({ id: "closed", status: "closed", last_message_at: "2026-10-18T12:00:00Z" });
 const newChatStart = vi.fn(async () => undefined);
+const send = vi.fn(async () => undefined);
+const stop = vi.fn(async () => undefined);
+const close = vi.fn(async () => undefined);
+const dismissSendError = vi.fn();
+const dismissStreamError = vi.fn();
+const refetchSessions = vi.fn(async () => undefined);
+const refetchMessages = vi.fn(async () => undefined);
+const stream = {
+  messages: [] as unknown[],
+  activity: [] as { seq: number; label: string }[],
+  error: null as string | null,
+  dismissError: dismissStreamError,
+};
+const actions = {
+  sending: false,
+  sendError: null as string | null,
+  dismissSendError,
+  send,
+  stop,
+  close,
+};
+
+function renderPage(props: Partial<React.ComponentProps<typeof RunnerChatPage>> = {}) {
+  return render(
+    <RunnerChatPage
+      workspaceSlug="acme"
+      runnerId="r-1"
+      requestedSessionId={null}
+      onSelectSession={vi.fn()}
+      {...props}
+    />,
+    { wrapper: wrapper(testClient()) }
+  );
+}
+
+function rerenderPage(
+  view: ReturnType<typeof render>,
+  props: Partial<React.ComponentProps<typeof RunnerChatPage>> = {}
+): void {
+  view.rerender(
+    <RunnerChatPage
+      workspaceSlug="acme"
+      runnerId="r-1"
+      requestedSessionId={null}
+      onSelectSession={vi.fn()}
+      {...props}
+    />
+  );
+}
 
 beforeEach(() => {
   area.value = { workspaceId: "ws-id", allowed: true, access: "allowed" };
@@ -60,10 +118,31 @@ beforeEach(() => {
       },
     ],
     isPending: false,
+    refetch: refetchMessages,
+  });
+  hooks.useChatSessions.mockReturnValue({
+    data: [openSession, closedSession],
+    isPending: false,
+    refetch: refetchSessions,
   });
   hooks.useWarmUp.mockReturnValue(false);
   hooks.useNewChat.mockReturnValue({ busy: false, start: newChatStart });
   newChatStart.mockClear();
+  send.mockClear();
+  stop.mockClear();
+  close.mockClear();
+  dismissSendError.mockClear();
+  dismissStreamError.mockClear();
+  refetchSessions.mockClear();
+  refetchMessages.mockClear();
+  stream.messages = hooks.useChatMessages().data;
+  stream.activity = [];
+  stream.error = null;
+  actions.sending = false;
+  actions.sendError = null;
+  hooks.useChatStream.mockReturnValue(stream);
+  hooks.useChatActions.mockReturnValue(actions);
+  hooks.useDictationConfig.mockReturnValue({ data: undefined, isPending: false });
 });
 
 describe("runnerChatDocumentTitle", () => {
@@ -148,7 +227,7 @@ describe("RunnerChatPage", () => {
     hooks.useChatSessions.mockReturnValue({ data: [busyTurn], isPending: false });
     render(<RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />);
     expect(screen.getByTestId("runner-chat-block-reason")).toHaveTextContent("Response in progress");
-    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Stop response" })).toBeInTheDocument();
   });
 
   it("keeps reads off until the area admits the viewer", () => {
@@ -226,7 +305,8 @@ describe("RunnerChatPage", () => {
   });
 
   it("waits on the transcript of the session already on screen", () => {
-    hooks.useChatMessages.mockReturnValue({ data: undefined, isPending: true });
+    hooks.useChatMessages.mockReturnValue({ data: undefined, isPending: true, refetch: refetchMessages });
+    stream.messages = [];
     render(<RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />);
     expect(screen.getByTestId("runner-chat-transcript-empty")).toHaveTextContent("Waiting for the first message…");
   });
@@ -319,5 +399,119 @@ describe("RunnerChatPage creation ordering (RUN-026)", () => {
       )
     );
     expect(screen.getByTestId("runner-chat-block-reason")).toHaveTextContent("Session closed");
+  });
+});
+
+describe("RunnerChatPage messaging (RUN-027/029/030/031)", () => {
+  const box = () => screen.getByPlaceholderText("Message this runner…");
+
+  it("clears the draft as it sends and puts it back when the send is refused", async () => {
+    renderPage();
+    await userEvent.type(box(), "ship it");
+    expect(box()).toHaveValue("ship it");
+    await userEvent.keyboard("{Enter}");
+    expect(send).toHaveBeenCalledWith("ship it", expect.any(Function));
+    expect(box()).toHaveValue("");
+
+    const [firstCall] = send.mock.calls as unknown[][];
+    const restore = firstCall?.[1] as ((draft: string) => void) | undefined;
+    React.act(() => restore?.("ship it"));
+    expect(box()).toHaveValue("ship it");
+  });
+
+  it("subscribes to the resolved conversation and renders its live rows", () => {
+    hooks.useChatStream.mockReturnValue(stream);
+    renderPage();
+    expect(hooks.useChatStream).toHaveBeenLastCalledWith("open", expect.any(Array), expect.any(Object));
+    expect(hooks.useChatActions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ runnerId: "r-1", session: openSession })
+    );
+  });
+
+  it("shows streamed markdown and the activity strip in the transcript", () => {
+    stream.messages = [
+      {
+        id: "live-1",
+        session: "open",
+        role: "assistant",
+        content: "**streamed** answer",
+        content_parts: [],
+        status: "streaming",
+        local_item_id: "",
+        local_turn_id: "",
+        seq: 9,
+        created_at: "2026-10-18T11:00:01Z",
+        completed_at: null,
+      },
+    ];
+    stream.activity = [{ seq: 8, label: "Ran: ls" }];
+    renderPage();
+    expect(document.querySelector('[data-role="assistant"] strong')).toHaveTextContent("streamed");
+    expect(screen.getByTestId("runner-chat-activity")).toHaveTextContent("Ran: ls");
+  });
+
+  it("stops the running turn from the composer", async () => {
+    hooks.useChatSessions.mockReturnValue({
+      data: [makeSession({ id: "open", active_turn_id: "t-1" })],
+      isPending: false,
+      refetch: refetchSessions,
+    });
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Stop response" }));
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the conversation from the header and hides close while none is resolved", async () => {
+    const view = renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Close chat" }));
+    expect(close).toHaveBeenCalledTimes(1);
+
+    hooks.useChatRunner.mockReturnValue({ data: undefined, isPending: true });
+    hooks.useChatSessions.mockReturnValue({ data: [], isPending: true, refetch: refetchSessions });
+    rerenderPage(view);
+    expect(screen.queryByRole("button", { name: "Close chat" })).toBeNull();
+  });
+
+  it("names a stream failure and dismisses the banner through both channels", async () => {
+    stream.error = "Chat frame did not match its contract";
+    renderPage();
+    const banner = screen.getByRole("alert");
+    expect(banner).toHaveTextContent("Chat frame did not match its contract");
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(dismissStreamError).toHaveBeenCalledTimes(1);
+    expect(dismissSendError).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the send error when the stream is quiet", () => {
+    actions.sendError = "Message not sent";
+    renderPage();
+    expect(screen.getByRole("alert")).toHaveTextContent("Message not sent");
+    expect(dismissStreamError).not.toHaveBeenCalled();
+  });
+
+  it("shows nothing above the composer while both channels are quiet", () => {
+    renderPage();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("offers dictation only when the speech read is on and has a key", () => {
+    hooks.useDictationConfig.mockReturnValue({ data: { enabled: true, has_api_key: true }, isPending: false });
+    const { unmount } = renderPage();
+    expect(hooks.useDictationConfig).toHaveBeenLastCalledWith(true);
+    unmount();
+    hooks.useDictationConfig.mockReturnValue({ data: { enabled: true, has_api_key: false }, isPending: false });
+    renderPage();
+    expect(hooks.useDictationConfig).toHaveBeenLastCalledWith(true);
+  });
+
+  it("refreshes history and transcript from the stream's own refresh signal", () => {
+    renderPage();
+    const callbacks = (hooks.useChatStream.mock.calls.at(-1) as unknown[] | undefined)?.[2] as
+      | { onHistoryRefresh: () => void; onApprovalCleared: () => void }
+      | undefined;
+    React.act(() => callbacks?.onHistoryRefresh());
+    expect(refetchSessions).toHaveBeenCalledTimes(1);
+    expect(refetchMessages).toHaveBeenCalledTimes(1);
+    expect(callbacks?.onApprovalCleared()).toBeUndefined();
   });
 });
