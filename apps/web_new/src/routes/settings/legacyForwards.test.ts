@@ -37,20 +37,18 @@ describe("legacy settings forwards", () => {
       forwardOf(() =>
         SettingsIndex.options.beforeLoad?.({ location: { pathname: "/settings/", searchStr: "" } } as never)
       )
-    ).toBe("/settings/profile/general/");
+    ).toBe("/settings/profile/general");
   });
 
   it("takes bare profile and account addresses to the general tab", () => {
     expect(
-      forwardOf(() =>
-        Profile.options.beforeLoad?.({ location: { pathname: "/profile/", searchStr: "?a=1" } } as never)
-      )
-    ).toBe("/settings/profile/general/?a=1");
+      forwardOf(() => Profile.options.beforeLoad?.({ location: { pathname: "/profile/", searchStr: "?a=1" } } as never))
+    ).toBe("/settings/profile/general?a=1");
     expect(
       forwardOf(() =>
         Account.options.beforeLoad?.({ location: { pathname: "/acme/settings/account/", searchStr: "" } } as never)
       )
-    ).toBe("/settings/profile/general/");
+    ).toBe("/settings/profile/general");
   });
 
   it("maps legacy tab segments to the matching tab", () => {
@@ -58,14 +56,14 @@ describe("legacy settings forwards", () => {
       forwardOf(() =>
         Profile.options.beforeLoad?.({ location: { pathname: "/profile/security/", searchStr: "" } } as never)
       )
-    ).toBe("/settings/profile/security/");
+    ).toBe("/settings/profile/security");
     expect(
       forwardOf(() =>
         Account.options.beforeLoad?.({
           location: { pathname: "/acme/settings/account/notifications/", searchStr: "?x=1" },
         } as never)
       )
-    ).toBe("/settings/profile/notifications/?x=1");
+    ).toBe("/settings/profile/notifications?x=1");
   });
 
   it("defaults an unknown legacy tab to the general tab", () => {
@@ -75,7 +73,7 @@ describe("legacy settings forwards", () => {
           location: { pathname: "/acme/settings/account/bogus/", searchStr: "" },
         } as never)
       )
-    ).toBe("/settings/profile/general/");
+    ).toBe("/settings/profile/general");
   });
 
   it("answers a deeper address with the not-found page", () => {

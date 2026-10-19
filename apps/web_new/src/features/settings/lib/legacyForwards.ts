@@ -7,29 +7,27 @@
 // tab. The workspace api-tokens forward keeps its parameters like the
 // others (the target for NEWFRONT-431).
 
-import {
-  DEFAULT_PROFILE_SETTINGS_TAB,
-  isProfileSettingsTab,
-  queryWithoutMark,
-  type ProfileSettingsTabId,
-} from "./tabNavigation.js";
+import { DEFAULT_PROFILE_SETTINGS_TAB, isProfileSettingsTab, queryWithoutMark } from "./tabNavigation.js";
 
 /** The forward target, split so routes can hand it to the router. */
 export interface LegacyForward {
-  tab: ProfileSettingsTabId;
   /** The query string without its leading `?` (empty when absent). */
   query: string;
-  /** Address the browser ends on, trailing slash included. */
+  /**
+   * Address the browser ends on. Forwards land without a trailing slash
+   * except the tokens forward, whose old target kept one (the oracle pins
+   * both forms); in-app tab links always carry it.
+   */
   href: string;
 }
 
 function forward(rawTab: string | undefined, search: string): LegacyForward {
   const tab = rawTab !== undefined && isProfileSettingsTab(rawTab) ? rawTab : DEFAULT_PROFILE_SETTINGS_TAB;
   const query = queryWithoutMark(search);
+  const suffix = tab === "api-tokens" ? "/" : "";
   return {
-    tab,
     query,
-    href: `/settings/profile/${tab}/${query === "" ? "" : `?${query}`}`,
+    href: `/settings/profile/${tab}${suffix}${query === "" ? "" : `?${query}`}`,
   };
 }
 

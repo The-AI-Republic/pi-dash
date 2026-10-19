@@ -3,7 +3,10 @@
 // See the LICENSE file for details.
 // Tab body outlet (parity/specs/profile.md §5, PROF-009/010). Asks the
 // registry for the active tab's page; until a slice registers one, the
-// outlet shows a quiet loading state rather than a fake page.
+// outlet shows a quiet loading state rather than a fake page. The body is
+// rendered as a component, not called as a function: a tab's hooks must
+// live on its own fiber so two tabs never share (or re-seed from) one
+// another's state.
 
 import { Skeleton } from "@pidash/kit";
 import * as React from "react";
@@ -26,5 +29,6 @@ export function SettingsTabOutlet({ tab }: SettingsTabOutletProps): React.ReactE
       </div>
     );
   }
-  return <>{Page()}</>;
+  const Body = Page;
+  return <Body />;
 }

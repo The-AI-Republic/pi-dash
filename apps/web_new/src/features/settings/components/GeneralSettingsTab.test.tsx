@@ -201,6 +201,28 @@ describe("GeneralSettingsTab", () => {
     await waitFor(() => expect(screen.getByText("Try a different file.")).toBeInTheDocument());
   });
 
+  it("clears the dialog's refusal line when it closes", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await user.click(screen.getByRole("button", { name: "Change profile photo" }));
+    const dialog = screen.getByRole("dialog", { name: "Upload Image" });
+    await user.upload(
+      within(dialog).getByTestId("avatar-file-input"),
+      new File(["x"], "photo.png", { type: "image/png" })
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Upload & Save" }));
+    const uploadOptions = harness.upload.mutate.mock.calls[0]?.[1] as { onSuccess: (url: string) => void };
+    harness.storeAvatar.mutate.mockImplementation((_url: string, options: { onError: () => void }) => {
+      options.onError();
+    });
+    uploadOptions.onSuccess("/api/assets/v2/static/new/");
+    await waitFor(() => expect(screen.getByText("Try a different file.")).toBeInTheDocument());
+
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog", { name: "Upload Image" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Try a different file.")).not.toBeInTheDocument();
+  });
+
   it("removes the stored photo through the asset route", async () => {
     const user = userEvent.setup();
     renderTab();

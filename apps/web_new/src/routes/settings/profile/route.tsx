@@ -12,6 +12,7 @@ import { createFileRoute, Outlet, useRouterState } from "@tanstack/react-router"
 import * as React from "react";
 
 import { workspacesQueryOptions } from "../../../core/session/index.js";
+import { useProfileSettingsSessionGuard } from "../../../features/settings/pageEntries.js";
 import { ProfileSettingsShell } from "../../../features/settings/components/ProfileSettingsShell.js";
 import {
   DEFAULT_PROFILE_SETTINGS_TAB,
@@ -43,6 +44,7 @@ export const Route = createFileRoute("/settings/profile")({
 });
 
 function ProfileSettingsLayout(): React.ReactElement {
+  useProfileSettingsSessionGuard();
   const navigate = Route.useNavigate();
   const context = Route.useRouteContext();
   const pathname = useRouterState({ select: (state) => state.location.pathname });

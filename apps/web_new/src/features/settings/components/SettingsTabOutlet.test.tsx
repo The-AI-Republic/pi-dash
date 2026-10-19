@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 // Tab outlet (parity/specs/profile.md §5, PROF-009/010): the registered
 // body for the active tab, a quiet loading frame until a slice registers.
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -38,5 +38,36 @@ describe("SettingsTabOutlet", () => {
     expect(screen.getByText("activity body")).toBeInTheDocument();
     act(() => unregister());
     expect(screen.getByTestId("profile-settings-tab-loading")).toBeInTheDocument();
+  });
+
+  it("never carries one tab's hook state into the next", () => {
+    function Counter({ label }: { label: string }): React.ReactElement {
+      const [count, setCount] = React.useState(0);
+      return (
+        <button type="button" onClick={() => setCount((value) => value + 1)}>
+          {`${label} ${count}`}
+        </button>
+      );
+    }
+    act(() => {
+      registerProfileSettingsPage("preferences", () => <Counter label="preferences" />);
+      registerProfileSettingsPage("integrations", () => <Counter label="integrations" />);
+    });
+    const { rerender } = render(<SettingsTabOutlet tab="preferences" />);
+    fireEvent.click(screen.getByRole("button", { name: "preferences 0" }));
+    fireEvent.click(screen.getByRole("button", { name: "preferences 1" }));
+    expect(screen.getByRole("button", { name: "preferences 2" })).toBeInTheDocument();
+
+    rerender(<SettingsTabOutlet tab="integrations" />);
+    expect(screen.getByRole("button", { name: "integrations 0" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "integrations 0" }));
+    expect(screen.getByRole("button", { name: "integrations 1" })).toBeInTheDocument();
+
+    // Back on preferences: a freshly mounted body starts at its own zero
+    // instead of inheriting the count from the tab that was just shown
+    // (the outlet used to call the page as a function, so both shared the
+    // outlet's hook slots).
+    rerender(<SettingsTabOutlet tab="preferences" />);
+    expect(screen.getByRole("button", { name: "preferences 0" })).toBeInTheDocument();
   });
 });

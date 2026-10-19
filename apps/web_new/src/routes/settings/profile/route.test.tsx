@@ -9,9 +9,15 @@ import { QueryClient } from "@tanstack/react-query";
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { isRedirect, type RouteComponent } from "@tanstack/react-router";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../../../features/settings/pageEntries.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../features/settings/pageEntries.js")>();
+  return { ...actual, useProfileSettingsSessionGuard: vi.fn() };
+});
 
 import { resetProfileSettingsPages } from "../../../features/settings/lib/registry.js";
+import { useProfileSettingsSessionGuard } from "../../../features/settings/pageEntries.js";
 import { resetProfileRouteHarness, renderProfileSettingsRoute } from "../-routeHarness.js";
 import { createAppClient } from "../../../core/api/client.js";
 import { loadProfileSettingsLayout } from "../../../features/settings/loadProfileSettings.js";
@@ -196,12 +202,21 @@ describe("profile settings layout", () => {
   });
 
   it("navigates in-app to a tab link", async () => {
-    renderAt("/settings/profile/general/", "general");
+    const { router } = renderAt("/settings/profile/general/", "general");
     await screen.findByTestId("profile-settings-shell");
     fireEvent.click(screen.getByRole("link", { name: "Personal Access Tokens" }));
     await waitFor(() =>
       expect(screen.getByRole("link", { name: "Personal Access Tokens" })).toHaveAttribute("aria-current", "page")
     );
+    // The shell hands a plain href to the layout, which routes it without a
+    // document load (the memory history normalizes the link's slash away).
+    expect(router.state.location.pathname).toBe("/settings/profile/api-tokens");
+  });
+
+  it("runs the session-expiry guard outside the app shell", async () => {
+    renderAt("/settings/profile/general/", "general");
+    await screen.findByTestId("profile-settings-shell");
+    expect(useProfileSettingsSessionGuard).toHaveBeenCalled();
   });
 });
 

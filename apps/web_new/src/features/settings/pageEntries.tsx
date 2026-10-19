@@ -5,10 +5,14 @@
 // §5). Every tab the product owns outside a sibling feature registers
 // here: the shell imports this module so the general and security bodies
 // are present on a direct visit; sibling slices register their own tabs
-// from their lazy route modules.
+// from their lazy route modules. The settings layout also calls
+// `useSessionExpiredRedirect` from this entry module, because settings is
+// rendered outside the app shell and the gated workspace tree, so nothing
+// else would notice an expired session here.
 
 import * as React from "react";
 
+import { useSessionExpiredRedirect } from "../../shared/shell/expiredRedirect.js";
 import { GeneralSettingsTab } from "./components/GeneralSettingsTab.js";
 import { NotificationsTab } from "./components/NotificationsTab.js";
 import { SecuritySettingsTab } from "./components/SecuritySettingsTab.js";
@@ -23,6 +27,11 @@ export function registerBuiltInSettingsTabs(): () => void {
     unregisterSecurity();
     unregisterNotifications();
   };
+}
+
+/** Keeps the settings page on the session-expiry path like the app shell. */
+export function useProfileSettingsSessionGuard(): void {
+  useSessionExpiredRedirect();
 }
 
 registerBuiltInSettingsTabs();
