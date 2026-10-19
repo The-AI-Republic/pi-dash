@@ -8,6 +8,8 @@
 
 import type { LlmConfig } from "@pidash/api-client";
 
+import { resolveLaneState } from "./lane.js";
+
 /** True when the user has a model name and a key to run it with. */
 export function isAssistantConfigured(
   config: Pick<LlmConfig, "model_name" | "has_api_key"> | null | undefined
@@ -24,4 +26,16 @@ export function isAssistantConfigured(
 export function needsSetup(config: Pick<LlmConfig, "model_name" | "has_api_key"> | undefined): boolean {
   if (config === undefined) return false;
   return !isAssistantConfigured(config);
+}
+
+/**
+ * Setup gating across credential lanes (CLOUD-037, from
+ * parity/specs/cloud.md §7). The assistant entries ask this instead of the
+ * self-supplied check alone, so a hosted or provider-account lane that
+ * carries its credential is ready even with no self-supplied key. Older
+ * backends without lane fields read as the self-supplied lane, and an
+ * unresolved config never reports setup.
+ */
+export function needsLaneSetup(config: LlmConfig | null | undefined): boolean {
+  return resolveLaneState(config).setupNeeded;
 }

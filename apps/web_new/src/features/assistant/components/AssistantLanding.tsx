@@ -19,7 +19,7 @@ import * as React from "react";
 import { startFailureDetail, useStartConversation } from "../api/mutations.js";
 import { useAssistantConfig } from "../api/queries.js";
 import { ASSISTANT_CAPTION, ASSISTANT_HEADLINE, START_FAILED_TITLE } from "../lib/copy.js";
-import { needsSetup } from "../lib/gate.js";
+import { needsLaneSetup } from "../lib/gate.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { Composer } from "./Composer.js";
 import { SetupCard } from "./SetupCard.js";
@@ -65,7 +65,7 @@ export function AssistantLanding({ workspaceSlug }: AssistantLandingProps): Reac
       >
         {config.isPending ? (
           <Spinner label="Loading assistant" />
-        ) : needsSetup(config.data) ? (
+        ) : needsLaneSetup(config.data) ? (
           <SetupCard />
         ) : (
           <>
