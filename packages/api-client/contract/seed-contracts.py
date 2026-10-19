@@ -1174,7 +1174,6 @@ def seed():
     note("gitlab-account", str(gitlab_account.pk), gitlab_account_created)
 
     return {
-
         "email": user.email,
         "workspace_slug": workspace.slug,
         "project_id": str(project.pk),
