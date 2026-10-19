@@ -25,6 +25,12 @@ export interface DialogProps {
   ignoreEscapeKey?: boolean | undefined;
   /** When true, Escape and the backdrop no longer dismiss. */
   nonDismissable?: boolean | undefined;
+  /**
+   * When false, the header's close control is left out so the dialog can
+   * order its own first action (callers still provide a Close control in
+   * the body or footer, or combine it with nonDismissable).
+   */
+  closeButton?: boolean | undefined;
   className?: string | undefined;
   /** Body wrapper classes; the default spacing sits below the title block. */
   bodyClassName?: string | undefined;
@@ -40,6 +46,7 @@ export function Dialog({
   onOpenChange,
   ignoreEscapeKey = false,
   nonDismissable = false,
+  closeButton = true,
   className,
   bodyClassName = "mt-(--space-8)",
   children,
@@ -66,7 +73,7 @@ export function Dialog({
                 <BaseDialog.Description className="text-body text-(--text-muted)">{description}</BaseDialog.Description>
               ) : null}
             </div>
-            {nonDismissable ? null : (
+            {nonDismissable || !closeButton ? null : (
               <BaseDialog.Close
                 render={
                   <IconButton label="Close dialog">
