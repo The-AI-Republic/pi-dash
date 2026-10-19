@@ -96,9 +96,7 @@ read, §44). No other API traffic belongs to the shell.
 
 Each settings page titles the browser tab with the workspace name
 followed by the section name: `{workspace} - General settings`,
-`{workspace} - Members`, `{workspace} - Billing & Plans`, `{workspace}
-
-- Exports`, `{workspace} - Webhooks`, `{workspace} - Integrations`.
+`{workspace} - Members`, `{workspace} - Billing & Plans`, `{workspace} - Exports`, `{workspace} - Webhooks`, `{workspace} - Integrations`.
 The webhook detail page uses `{workspace} - Webhook`. Navigating
 between sections updates the title; refused sections leave it empty.
 Oracle: `shell-general.spec.ts`.
@@ -1011,11 +1009,13 @@ proves the observed behavior unless a bug from the list above says
 otherwise):
 
 - WSET-008: column-header sorting (§7) is implemented behavior no row
-  names; add a row if judged uncovered.
+  named; NEWFRONT-537 added WSET-042 for it (menu labels, clear entry,
+  ordering inside the active-first rule).
 - WSET-010: the Who column promises member viewing; the group is
   admin-only (§11). Amend to admin-only.
 - WSET-011: the acceptance promises an activity control; none
-  renders (§8). Amend the line.
+  renders (§8). NEWFRONT-537 amended the line to say no activity
+  control or member-activity view renders in this checkout.
 - WSET-013: the acceptance promises a workspace-picker redirect on
   self-leave; the app lands on a not-authorized gate (§13). File a
   bug with intended behavior or amend the line before the gate.

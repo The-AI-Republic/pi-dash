@@ -16430,59 +16430,215 @@ export class WebNewDriver implements ParityDriver {
     return todo("projectGithubTabText");
   }
 
-  // --- Workspace-settings members + invitations oracle (NEWFRONT-411,
-  // --- WSET-008..015). Throwing stubs per the shared driver contract; the
-  // --- new app implements them later.
-  async wsSettingsMembersOpen(_workspaceSlug: string): Promise<void> {
-    return todo("wsSettingsMembersOpen");
+  // --- Workspace-settings members roster (NEWFRONT-537, WSET-008/011/014).
+  // --- The invitations, role and removal methods below stay stubs until
+  // --- NEWFRONT-538 lands; this block implements what the roster owns.
+
+  /** One member row by its rendered email. */
+  private wsSettingsMemberRow(email: string): Locator {
+    return this.page.locator(`[data-testid="member-row"][data-email="${email}"]`).first();
   }
+
+  /** The open role-filter panel. */
+  private wsSettingsMembersFilterPanel() {
+    return this.page.locator('[data-testid="members-filters-panel"]').first();
+  }
+
+  /**
+   * Wait until the roster settles: member rows, the no-match note, or the
+   * failed-load notice. The skeleton must be gone first so a scenario can
+   * never read rows off the loading state (WSET-014).
+   */
+  private async wsSettingsAwaitRosterSettled(): Promise<void> {
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      const rows = await this.page.locator('[data-testid="member-row"]').count();
+      if (rows > 0) return;
+      if (await this.isShown(this.page.locator('[data-testid="members-no-match"]'))) return;
+      if (await this.isShown(this.page.locator('[data-testid="members-load-failed"]'))) return;
+      if (Date.now() > deadline) throw new Error("[parity] members roster never settled.");
+      await this.page.waitForTimeout(100);
+    }
+  }
+
+  async wsSettingsMembersOpen(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/members`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page
+      .getByRole("heading", { name: /^Members/ })
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsAwaitRosterSettled();
+  }
+
   async wsSettingsMembersCountChip(): Promise<number | null> {
-    return todo("wsSettingsMembersCountChip");
+    const chip = this.page.locator('[data-testid="members-count"]').first();
+    if (!(await this.isShown(chip))) return null;
+    const text = ((await chip.innerText().catch(() => "")) ?? "").trim();
+    const digits = /(\d+)/.exec(text)?.[1];
+    return digits === undefined ? null : Number(digits);
   }
-  async wsSettingsMembersSearch(_query: string): Promise<void> {
-    return todo("wsSettingsMembersSearch");
+
+  async wsSettingsMembersSearch(query: string): Promise<void> {
+    await this.page.getByPlaceholder("Search...", { exact: true }).fill(query);
+    await this.wsSettingsAwaitRosterSettled();
   }
+
   async wsSettingsMembersSearchValue(): Promise<string> {
-    return todo("wsSettingsMembersSearchValue");
+    return this.page.getByPlaceholder("Search...", { exact: true }).inputValue();
   }
+
   async wsSettingsMembersVisibleEmails(): Promise<string[]> {
-    return todo("wsSettingsMembersVisibleEmails");
+    return this.page
+      .locator('[data-testid="member-row"]')
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-email") ?? "").filter((email) => email !== ""));
   }
+
   async wsSettingsMembersVisibleRoles(): Promise<{ email: string; role: string }[]> {
-    return todo("wsSettingsMembersVisibleRoles");
+    return this.page.locator('[data-testid="member-row"]').evaluateAll((rows) =>
+      rows.map((row) => ({
+        email: row.getAttribute("data-email") ?? "",
+        role: ((row.querySelectorAll("td")[3] as HTMLElement | undefined)?.innerText ?? "").trim(),
+      }))
+    );
   }
+
   async wsSettingsMembersSuspendedEmails(): Promise<string[]> {
-    return todo("wsSettingsMembersSuspendedEmails");
+    return this.page
+      .locator('[data-testid="member-row"][data-active="false"]')
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-email") ?? "").filter((email) => email !== ""));
   }
+
   async wsSettingsMembersOpenFilters(): Promise<void> {
-    return todo("wsSettingsMembersOpenFilters");
+    await this.page.getByRole("button", { name: "Filters", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsMembersFilterPanel().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsMembersFilterOptions(): Promise<string[]> {
-    return todo("wsSettingsMembersFilterOptions");
+    await this.wsSettingsMembersFilterPanel().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return this.wsSettingsMembersFilterPanel()
+      .getByRole("button")
+      .evaluateAll((buttons) => buttons.map((button) => ((button as HTMLElement).innerText ?? "").trim()));
   }
-  async wsSettingsMembersToggleFilter(_label: string): Promise<void> {
-    return todo("wsSettingsMembersToggleFilter");
+
+  async wsSettingsMembersToggleFilter(label: string): Promise<void> {
+    await this.wsSettingsMembersFilterPanel()
+      .getByRole("button", { name: label, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsAwaitRosterSettled();
   }
+
   async wsSettingsMembersCloseFilters(): Promise<void> {
-    return todo("wsSettingsMembersCloseFilters");
+    await this.page.keyboard.press("Escape");
+    await this.wsSettingsMembersFilterPanel().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsMembersFilterBadge(): Promise<boolean> {
-    return todo("wsSettingsMembersFilterBadge");
+    return this.isShown(this.page.locator('[data-testid="members-filter-active"]'));
   }
+
   async wsSettingsMembersNoMatchVisible(): Promise<boolean> {
-    return todo("wsSettingsMembersNoMatchVisible");
+    return this.isShown(this.page.locator('[data-testid="members-no-match"]'));
   }
+
   async wsSettingsMembersNoMatchText(): Promise<string | null> {
-    return todo("wsSettingsMembersNoMatchText");
+    const note = this.page.locator('[data-testid="members-no-match"]');
+    if (!(await this.isShown(note))) return null;
+    const text = ((await note.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
   }
+
   async wsSettingsMembersLoaderVisible(): Promise<boolean> {
-    return todo("wsSettingsMembersLoaderVisible");
+    // The skeleton is the section's loading surface; a painted row means
+    // the roster already resolved even if the placeholder lingers.
+    if (!(await this.isShown(this.page.locator('[data-testid="members-skeleton"]')))) return false;
+    return (await this.page.locator('[data-testid="member-row"]').count()) === 0;
   }
-  async wsSettingsMembersDelayNextList(_ms: number): Promise<void> {
-    return todo("wsSettingsMembersDelayNextList");
+
+  async wsSettingsMembersDelayNextList(ms: number): Promise<void> {
+    let heldMembers = false;
+    let heldInvitations = false;
+    await this.page.route("**/api/workspaces/*/members/", async (route) => {
+      if (!heldMembers && route.request().method() === "GET") {
+        heldMembers = true;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      await route.continue();
+    });
+    await this.page.route("**/api/workspaces/*/invitations/", async (route) => {
+      if (!heldInvitations && route.request().method() === "GET") {
+        heldInvitations = true;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      await route.continue();
+    });
   }
+
   async wsSettingsMembersAddVisible(): Promise<boolean> {
-    return todo("wsSettingsMembersAddVisible");
+    return this.isShown(this.page.getByRole("button", { name: "Add member", exact: true }));
+  }
+
+  async wsSettingsMemberRowFacts(email: string): Promise<WsSettingsMemberRowFacts> {
+    const row = this.wsSettingsMemberRow(email);
+    await row.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const cells = row.locator("td");
+    const nameCell = cells.nth(0);
+    const fullName = (
+      (await nameCell
+        .locator('[data-testid="member-full-name"]')
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const displayName = (
+      (await cells
+        .nth(1)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const shownEmail = (
+      (await cells
+        .nth(2)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const role = (
+      (await cells
+        .nth(3)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const authRaw = (
+      (await cells
+        .nth(4)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const joiningRaw = (
+      (await cells
+        .nth(5)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const suspended = role === "Suspended";
+    const avatar = nameCell.locator("[data-avatar-kind]").first();
+    const avatarKind = suspended
+      ? "suspended"
+      : (await avatar.getAttribute("data-avatar-kind").catch(() => null)) === "image"
+        ? "image"
+        : "initial";
+    const link = nameCell.locator("a").first();
+    const profileHref = (await link.count()) > 0 ? await link.getAttribute("href").catch(() => null) : null;
+    return {
+      fullName,
+      displayName,
+      email: shownEmail,
+      role,
+      auth: authRaw === "" ? null : authRaw,
+      joiningDate: joiningRaw === "" ? null : joiningRaw,
+      avatarKind,
+      profileHref,
+    };
   }
   async wsSettingsInviteOpen(): Promise<void> {
     return todo("wsSettingsInviteOpen");
@@ -16571,9 +16727,6 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsRemoveDialogCancel(): Promise<void> {
     return todo("wsSettingsRemoveDialogCancel");
   }
-  async wsSettingsMemberRowFacts(_email: string): Promise<WsSettingsMemberRowFacts> {
-    return todo("wsSettingsMemberRowFacts");
-  }
   async wsSettingsMemberRoleEditable(_email: string): Promise<boolean> {
     return todo("wsSettingsMemberRoleEditable");
   }
@@ -16590,10 +16743,13 @@ export class WebNewDriver implements ParityDriver {
     return todo("wsSettingsMemberOpenRemove");
   }
   async wsSettingsMembersActivityVisible(): Promise<boolean> {
-    return todo("wsSettingsMembersActivityVisible");
+    // No member-activity entry renders in this checkout (spec §8, WSET-011):
+    // the members header carries only search and the role filter here.
+    return this.isShown(this.page.locator('[data-testid="members-activity"]'));
   }
   async wsSettingsMembersBillingVisible(): Promise<boolean> {
-    return todo("wsSettingsMembersBillingVisible");
+    // The billing entry belongs to NEWFRONT-538; nothing renders yet.
+    return this.isShown(this.page.locator('[data-testid="members-billing"]'));
   }
 
   // --- Project members tab (NEWFRONT-391, PSET-018–027). Throwing stubs per
@@ -17084,8 +17240,19 @@ export class WebNewDriver implements ParityDriver {
     return todo("wsSettingsPressKeys");
   }
 
-  async wsSettingsMembersSearchEscapeProbe(_query: string): Promise<{ value: string; visible: boolean }> {
-    return todo("wsSettingsMembersSearchEscapeProbe");
+  async wsSettingsMembersSearchEscapeProbe(query: string): Promise<{ value: string; visible: boolean }> {
+    // The roster search is a persistent text field (WSET-037): Escape
+    // must leave both its value and its presence alone. The top bar's
+    // command search ("Search commands...") belongs to the shell.
+    const field = this.page.getByPlaceholder("Search...", { exact: true });
+    await field.fill(query, { timeout: WebNewDriver.WAIT_MS });
+    await field.focus();
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForTimeout(250);
+    return {
+      value: await field.inputValue().catch(() => "<gone>"),
+      visible: await field.isVisible().catch(() => false),
+    };
   }
 
   async wsSettingsWatchListRequests(): Promise<void> {

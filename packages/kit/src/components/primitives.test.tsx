@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Avatar } from "./Avatar";
 import { Badge } from "./Badge";
@@ -70,5 +70,28 @@ describe("Avatar", () => {
   it("shows the image when one loads", () => {
     render(<Avatar name="Ada Lovelace" src="https://example.test/ada.png" />);
     expect(screen.getByRole("img", { name: "Ada Lovelace" }).querySelector("img")).not.toBeNull();
+  });
+
+  it("draws the caller's single initial when one is given", () => {
+    render(<Avatar name="Ada Lovelace" initial="a" />);
+    expect(screen.getByRole("img", { name: "Ada Lovelace" })).toHaveTextContent(/^A$/);
+  });
+
+  it("keeps derived initials for a blank single initial", () => {
+    render(<Avatar name="Ada Lovelace" initial="  " />);
+    expect(screen.getByRole("img", { name: "Ada Lovelace" })).toHaveTextContent("AL");
+  });
+
+  it("falls back to its initial when the image fails to load", () => {
+    render(<Avatar name="Ada Lovelace" initial="a" src="https://example.test/missing.png" />);
+    const avatar = screen.getByRole("img", { name: "Ada Lovelace" });
+    fireEvent.error(avatar.querySelector("img")!);
+    expect(avatar.querySelector("img")).toBeNull();
+    expect(avatar).toHaveTextContent(/^A$/);
+  });
+
+  it("derives two letters from a single-word name", () => {
+    render(<Avatar name="ada" />);
+    expect(screen.getByRole("img", { name: "ada" })).toHaveTextContent("AD");
   });
 });

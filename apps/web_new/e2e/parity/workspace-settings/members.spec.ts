@@ -679,16 +679,26 @@ test(
     // Intended: a skeleton loader shows until members and invitations
     // resolve. Observed: the roster area stays empty until the rows land
     // (the loader guard can never pass). The new frontend implements the
-    // intended skeleton, not the observed gap.
+    // intended skeleton, not the observed gap (gate-aligned target
+    // behavior, NEWFRONT-537).
     await driver.wsSettingsMembersDelayNextList(8_000);
     const opened = driver.wsSettingsMembersOpen(seed.workspaceSlug);
     await driver.page.waitForTimeout(4_000);
-    expect(await driver.wsSettingsMembersLoaderVisible()).toBe(false);
-    expect(await driver.wsSettingsMembersVisibleEmails()).toEqual([]);
-    expect(await driver.wsSettingsMembersNoMatchVisible()).toBe(false);
-    await opened;
-    expect(await driver.wsSettingsMembersLoaderVisible()).toBe(false);
-    expect((await driver.wsSettingsMembersVisibleEmails()).length).toBeGreaterThan(0);
+    if (driver.target === "web_new") {
+      expect(await driver.wsSettingsMembersLoaderVisible()).toBe(true);
+      expect(await driver.wsSettingsMembersVisibleEmails()).toEqual([]);
+      expect(await driver.wsSettingsMembersNoMatchVisible()).toBe(false);
+      await opened;
+      expect(await driver.wsSettingsMembersLoaderVisible()).toBe(false);
+      expect((await driver.wsSettingsMembersVisibleEmails()).length).toBeGreaterThan(0);
+    } else {
+      expect(await driver.wsSettingsMembersLoaderVisible()).toBe(false);
+      expect(await driver.wsSettingsMembersVisibleEmails()).toEqual([]);
+      expect(await driver.wsSettingsMembersNoMatchVisible()).toBe(false);
+      await opened;
+      expect(await driver.wsSettingsMembersLoaderVisible()).toBe(false);
+      expect((await driver.wsSettingsMembersVisibleEmails()).length).toBeGreaterThan(0);
+    }
     const server = await serverWorkspaceMembersFull(seed.workspaceSlug, session);
     expect(server.length).toBeGreaterThan(0);
   }

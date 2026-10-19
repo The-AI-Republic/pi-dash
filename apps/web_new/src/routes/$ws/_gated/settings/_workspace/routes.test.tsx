@@ -6,17 +6,20 @@
 // thin outlet that asks the page registry for their section body; the
 // webhooks half (NEWFRONT-541) mounts its own list and detail pages in the
 // same shell, with the workspace slug and the webhook id, and the billing
-// half (NEWFRONT-546) likewise mounts its own page.
+// half (NEWFRONT-546) likewise mounts its own page. The members roster
+// (NEWFRONT-537) registers its body from its own chunk, so the registry
+// loop covers it after the chunk registers.
 import { act, cleanup, render, screen } from "@testing-library/react";
 import * as React from "react";
 import type { RouteComponent } from "@tanstack/react-router";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   registerWorkspaceSettingsPage,
   resetWorkspaceSettingsPages,
   type WorkspaceSettingsSectionKey,
 } from "../../../../../features/workspace-settings/index.js";
+import { registerMembersSettingsPage } from "../../../../../features/workspace-settings/members/index.js";
 import { Route as BillingRoute } from "./billing/index.js";
 import { Route as ExportsRoute } from "./exports/index.js";
 import { Route as GeneralRoute } from "./index.js";
@@ -40,6 +43,12 @@ const SECTIONS: Array<[WorkspaceSettingsSectionKey, string, RouteComponent]> = [
   ["exports", "exports", ExportsRoute.options.component as RouteComponent],
   ["integrations", "integrations", IntegrationsRoute.options.component as RouteComponent],
 ];
+
+// The roster chunk registers its body when the route loads it; the test
+// import does the same, and every test starts from that registration.
+beforeEach(() => {
+  registerMembersSettingsPage();
+});
 
 afterEach(() => {
   cleanup();
@@ -74,6 +83,7 @@ describe("workspace settings section routes", () => {
     });
 
     it(`leaves the ${section} frame quiet while its body is unregistered`, async () => {
+      resetWorkspaceSettingsPages();
       renderSettingsRoute({
         layoutComponent: LayoutComponent,
         component,
@@ -113,6 +123,25 @@ describe("workspace settings section routes", () => {
     expect(screen.queryByTestId("workspace-settings-billing")).not.toBeInTheDocument();
     expect(screen.queryByTestId("workspace-settings-shell")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "All plans" })).not.toBeInTheDocument();
+  });
+
+  // The members chunk registers its body when its route imports it, as the
+  // browser loads it; the test import does the same, and each test starts
+  // from that registration. The reads answer 404 here, so the failed state
+  // proves the real roster mounted with the workspace slug.
+  it("mounts the roster body the members chunk registers", async () => {
+    const requested: string[] = [];
+    renderSettingsRoute({
+      layoutComponent: LayoutComponent,
+      component: MembersRoute.options.component as RouteComponent,
+      leafPath: "members",
+      transport: settingsTransport({ role: 20, onRequest: (url) => requested.push(url) }),
+    });
+    expect(await screen.findByTestId("workspace-settings-shell")).toBeInTheDocument();
+    expect(await screen.findByTestId("workspace-settings-members")).toBeInTheDocument();
+    expect(await screen.findByTestId("members-load-failed")).toBeInTheDocument();
+    expect(requested.some((url) => url.endsWith("/api/workspaces/acme/members/"))).toBe(true);
+    expect(requested.some((url) => url.endsWith("/api/workspaces/acme/invitations/"))).toBe(true);
   });
 
   it("mounts the webhooks list page for its own address", async () => {
