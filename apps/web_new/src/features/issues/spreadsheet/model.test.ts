@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   activeSheetSort,
@@ -9,6 +9,7 @@ import {
   isSheetRowReadOnly,
   moveSheetFocus,
   parseStoredSheetSort,
+  readStoredSheetSort,
   resolveSheetSort,
   serializeSheetSort,
   SHEET_COLUMNS,
@@ -16,7 +17,9 @@ import {
   sheetFirstCellId,
   sheetSortOrder,
   sheetSortState,
+  SHEET_SORT_STORAGE_KEY,
   visibleSheetColumns,
+  writeStoredSheetSort,
 } from "./model.js";
 import { isEditableColumn } from "./cells.js";
 
@@ -160,6 +163,80 @@ describe("spreadsheet model", () => {
     expect(parseStoredSheetSort("5")).toBeNull();
     expect(parseStoredSheetSort(JSON.stringify({ column: "state", direction: "up", orderBy: "x" }))).toBeNull();
     expect(parseStoredSheetSort(JSON.stringify({ column: 1, direction: "ascending", orderBy: "x" }))).toBeNull();
+  });
+
+  describe("persisted sort storage", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    function store(entries: Map<string, string>): Storage {
+      return {
+        length: entries.size,
+        clear: () => entries.clear(),
+        getItem: (key: string) => entries.get(key) ?? null,
+        key: (index: number) => [...entries.keys()][index] ?? null,
+        removeItem: (key: string) => {
+          entries.delete(key);
+        },
+        setItem: (key: string, value: string) => {
+          entries.set(key, value);
+        },
+      };
+    }
+
+    it("round-trips the remembered sort through the browser store", () => {
+      const entries = new Map<string, string>();
+      vi.stubGlobal("localStorage", store(entries));
+      const state = { column: "state", direction: "descending" as const, orderBy: "-state__name" };
+
+      writeStoredSheetSort(state);
+      expect(entries.get(SHEET_SORT_STORAGE_KEY)).toBe(serializeSheetSort(state));
+      expect(readStoredSheetSort()).toEqual(state);
+
+      writeStoredSheetSort(null);
+      expect(entries.get(SHEET_SORT_STORAGE_KEY)).toBe("");
+      expect(readStoredSheetSort()).toBeNull();
+    });
+
+    it("reads null and drops writes when the host has no storage", () => {
+      vi.stubGlobal("localStorage", undefined);
+      const state = { column: "state", direction: "ascending" as const, orderBy: "state__name" };
+
+      expect(readStoredSheetSort()).toBeNull();
+      expect(() => writeStoredSheetSort(state)).not.toThrow();
+    });
+
+    it("reads null and drops writes when the storage getter itself throws", () => {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+      Object.defineProperty(globalThis, "localStorage", {
+        configurable: true,
+        get() {
+          throw new Error("localStorage needs --localstorage-file");
+        },
+      });
+      try {
+        expect(readStoredSheetSort()).toBeNull();
+        expect(() => writeStoredSheetSort(null)).not.toThrow();
+      } finally {
+        if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor);
+        else delete (globalThis as { localStorage?: unknown }).localStorage;
+      }
+    });
+
+    it("survives a store that refuses reads and writes", () => {
+      vi.stubGlobal("localStorage", {
+        ...store(new Map()),
+        getItem: () => {
+          throw new Error("denied");
+        },
+        setItem: () => {
+          throw new Error("quota");
+        },
+      });
+      expect(readStoredSheetSort()).toBeNull();
+      expect(() => writeStoredSheetSort(null)).not.toThrow();
+    });
   });
 
   it("clamps arrow movement at the grid edges", () => {

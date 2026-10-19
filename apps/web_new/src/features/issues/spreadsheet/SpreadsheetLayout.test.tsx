@@ -232,6 +232,27 @@ function renderSheet(
   return { ...result, queryClient, router };
 }
 
+/**
+ * An in-memory Storage for the sort persistence cases. Runners where the
+ * host has no localStorage (Node without a file backend) still get a
+ * real store to assert against; jsdom's own store is untouched.
+ */
+function sortStore(): Storage {
+  const entries = new Map<string, string>();
+  return {
+    length: entries.size,
+    clear: () => entries.clear(),
+    getItem: (key: string) => entries.get(key) ?? null,
+    key: (index: number) => [...entries.keys()][index] ?? null,
+    removeItem: (key: string) => {
+      entries.delete(key);
+    },
+    setItem: (key: string, value: string) => {
+      entries.set(key, value);
+    },
+  };
+}
+
 function setViewport(width: number, height: number): void {
   Object.defineProperty(HTMLElement.prototype, "clientHeight", {
     configurable: true,
@@ -248,12 +269,15 @@ function setViewport(width: number, height: number): void {
 
 beforeEach(() => {
   document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div><div id="menu-portal"></div>`;
-  window.localStorage.clear();
+  // Runners without a storage backend (Node's bare localStorage global)
+  // still mount the sheet; the sort persistence cases opt into jsdom's.
+  globalThis.localStorage?.clear();
   setViewport(800, 400);
 });
 
 afterEach(() => {
   resetAppClient();
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
@@ -329,6 +353,8 @@ describe("SpreadsheetLayout", () => {
   });
 
   it("offers ascending, descending and clear on a sorted header, then writes order_by", async () => {
+    const store = sortStore();
+    vi.stubGlobal("localStorage", store);
     const state = stub();
     renderSheet();
     await screen.findByRole("table");
@@ -338,7 +364,7 @@ describe("SpreadsheetLayout", () => {
     expect(items.map((item) => item.textContent)).toEqual(["Ascending", "Descending"]);
     fireEvent.click(screen.getByRole("menuitem", { name: "Ascending" }));
     await waitFor(() => expect(state.calls.some((call) => call.method === "PATCH")).toBe(true));
-    expect(window.localStorage.getItem("web_new.spreadsheet.sort")).toContain("state__name");
+    expect(store.getItem("web_new.spreadsheet.sort")).toContain("state__name");
   });
 
   it("writes a descending order from the header menu", async () => {
@@ -353,6 +379,8 @@ describe("SpreadsheetLayout", () => {
   });
 
   it("adds Clear sorting once sorted and clears to creation order", async () => {
+    const store = sortStore();
+    vi.stubGlobal("localStorage", store);
     const state = stub();
     renderSheet({ prefs: prefs({ orderBy: "state__name" }) });
     await screen.findByRole("table");
@@ -363,10 +391,12 @@ describe("SpreadsheetLayout", () => {
     await waitFor(() =>
       expect(state.calls.some((call) => call.method === "PATCH" && call.body.includes("-created_at"))).toBe(true)
     );
-    expect(window.localStorage.getItem("web_new.spreadsheet.sort")).toBe("");
+    expect(store.getItem("web_new.spreadsheet.sort")).toBe("");
   });
 
   it("marks a server sort that has no stored local pair and re-picking it refreshes only the pair", async () => {
+    const store = sortStore();
+    vi.stubGlobal("localStorage", store);
     const state = stub();
     renderSheet({ prefs: prefs({ orderBy: "state__name" }) });
     await screen.findByRole("table");
@@ -375,7 +405,7 @@ describe("SpreadsheetLayout", () => {
     fireEvent.click(within(stateHeader).getByRole("button"));
     expect(screen.getByRole("menuitem", { name: /Clear sorting/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("menuitem", { name: "Ascending" }));
-    expect(window.localStorage.getItem("web_new.spreadsheet.sort")).toContain("state__name");
+    expect(store.getItem("web_new.spreadsheet.sort")).toContain("state__name");
     expect(state.calls.some((call) => call.method === "PATCH")).toBe(false);
   });
 
@@ -404,10 +434,12 @@ describe("SpreadsheetLayout", () => {
   });
 
   it("restores a remembered created-on ascending sort after reload", async () => {
-    window.localStorage.setItem(
+    const store = sortStore();
+    store.setItem(
       "web_new.spreadsheet.sort",
       JSON.stringify({ column: "created_on", direction: "ascending", orderBy: "-created_at" })
     );
+    vi.stubGlobal("localStorage", store);
     stub();
     renderSheet();
     await screen.findByRole("table");
