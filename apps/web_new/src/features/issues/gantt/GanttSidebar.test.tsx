@@ -236,6 +236,21 @@ describe("GanttSidebar reorder (ISS-050)", () => {
     expect(onReorder).not.toHaveBeenCalled();
   });
 
+  it("cancels a travelled drag on Escape without reordering", () => {
+    const onReorder = vi.fn();
+    renderSidebar({ reorder: { onReorder } });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
+    second.getBoundingClientRect = () => ({ top: 44, height: 44, bottom: 88 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(second, { clientY: 80 });
+    expect(screen.getByTestId("gantt-drop-indicator")).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.mouseUp(second);
+    expect(onReorder).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("gantt-drop-indicator")).not.toBeInTheDocument();
+  });
+
   it("ignores a drop back onto the dragged row", () => {
     const onReorder = vi.fn();
     renderSidebar({ reorder: { onReorder } });
