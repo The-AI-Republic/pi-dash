@@ -216,6 +216,66 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     expect(editable.textContent).toBe("alphaassistant omega");
   });
 
+  it("adds a mention at the caret when no @query is open", async () => {
+    const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <IssueDescriptionEditor
+          initialHtml="<p>Thanks</p>"
+          label="Description"
+          onChange={() => {}}
+          onReady={(ready) => {
+            handles.push(ready);
+          }}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("Description");
+    const text = editable.querySelector("p")?.firstChild;
+    if (text === null || text === undefined) throw new Error("the paragraph has no text node");
+    const caret = document.createRange();
+    caret.setStart(text, "Thanks".length);
+    caret.collapse(true);
+    editable.focus();
+    const selection = document.getSelection();
+    if (selection === null) throw new Error("jsdom exposes no selection");
+    selection.removeAllRanges();
+    selection.addRange(caret);
+    fireEvent(document, new Event("selectionchange"));
+    const handle = handles[handles.length - 1];
+    if (handle === undefined) throw new Error("the editor announced no handle");
+    expect(handle.textBeforeCaret()).toBe("Thanks");
+    handle.insertMention({ id: "u-2", name: "Grace" });
+    await vi.waitFor(() => expect(editable.querySelector("mention-component")).not.toBeNull());
+    expect(editable.textContent).toBe("Thanks");
+    expect(editable.querySelector("mention-component")?.getAttribute("entity_identifier")).toBe("u-2");
+  });
+
+  it("ignores an empty HTML insert", async () => {
+    const onChange = vi.fn();
+    const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <IssueDescriptionEditor
+          initialHtml="<p>steady</p>"
+          label="Description"
+          onChange={onChange}
+          onReady={(ready) => {
+            handles.push(ready);
+          }}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("Description");
+    onChange.mockClear();
+    const handle = handles[handles.length - 1];
+    if (handle === undefined) throw new Error("the editor announced no handle");
+    handle.insertHtml("");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(onChange).not.toHaveBeenCalled();
+    expect(editable.textContent).toBe("steady");
+  });
+
   it("mounts without a ready handler", async () => {
     render(
       <React.Suspense fallback={<p>loading</p>}>
