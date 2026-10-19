@@ -8,7 +8,13 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import * as React from "react";
 
-import { decidePageGate, loadGateInputs, loadLandingTarget, ONBOARDING_PATH } from "../core/session/index.js";
+import {
+  decidePageGate,
+  isOnboardedProfile,
+  loadGateInputs,
+  loadLandingTarget,
+  ONBOARDING_PATH,
+} from "../core/session/index.js";
 import { DesktopSignInScreen, parseDesktopEntrySearch } from "../features/auth/index.js";
 import { platform } from "../core/platform/index.js";
 
@@ -25,7 +31,7 @@ export const Route = createFileRoute("/signin")({
     const decision = decidePageGate({
       page: "signed-out-only",
       signedIn: me !== null,
-      onboarded: profile?.is_onboarded ?? false,
+      onboarded: isOnboardedProfile(profile),
       hasPassword: me?.is_password_autoset === false,
       currentPath: location.href,
     });

@@ -30,7 +30,7 @@ vi.mock("../core/platform/index.js", () => ({
   },
 }));
 
-import { meQueryOptions, profileQueryOptions } from "../core/session/queries.js";
+import { meQueryOptions, profileQueryOptions, sessionKeys } from "../core/session/queries.js";
 import { redirectRetiredSignIn, Route } from "./login.js";
 
 interface ThrownRedirect extends Response {
@@ -127,6 +127,29 @@ describe("login guard", () => {
     const outcome = await load(client, apiClient, {});
     expect("thrown" in outcome && isRedirect(outcome.thrown)).toBe(true);
     expect((outcome as { thrown: ThrownRedirect }).thrown.options).toMatchObject({ href: "/onboarding" });
+  });
+
+  it("lands members whose onboarding flags are all set even without the marker", async () => {
+    platformHarness.kind = "desktop";
+    const client = queryClient();
+    const apiClient = unauthorizedClient();
+    client.setQueryData(meQueryOptions(apiClient).queryKey, { id: "u1" } as never);
+    client.setQueryData(profileQueryOptions(apiClient).queryKey, {
+      is_onboarded: false,
+      onboarding_step: {
+        profile_complete: true,
+        workspace_create: true,
+        workspace_invite: true,
+        workspace_join: true,
+      },
+    } as never);
+    client.setQueryData(sessionKeys.settings, {
+      workspace: { last_workspace_slug: "acme", fallback_workspace_slug: null },
+    });
+    client.setQueryData(sessionKeys.workspaces, [{ slug: "acme" }]);
+    const outcome = await load(client, apiClient, {});
+    expect("thrown" in outcome && isRedirect(outcome.thrown)).toBe(true);
+    expect((outcome as { thrown: ThrownRedirect }).thrown.options).toMatchObject({ href: "/acme" });
   });
 });
 
