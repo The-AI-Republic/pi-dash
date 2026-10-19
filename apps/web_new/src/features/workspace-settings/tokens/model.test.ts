@@ -51,14 +51,17 @@ describe("expiry resolution", () => {
   });
 
   it("counts each preset forward from now", () => {
-    expect(resolveExpiry(draft({ choice: "week" }), NOW)).toBe("2026-10-26T21:05:30.250Z");
+    const week = new Date(NOW.getTime() + 7 * 24 * 60 * 60 * 1000);
+    expect(resolveExpiry(draft({ choice: "week" }), NOW)).toBe(week.toISOString());
     const month = new Date(NOW.getTime());
     month.setMonth(month.getMonth() + 1);
     expect(resolveExpiry(draft({ choice: "month" }), NOW)).toBe(month.toISOString());
     const quarter = new Date(NOW.getTime());
     quarter.setMonth(quarter.getMonth() + 3);
     expect(resolveExpiry(draft({ choice: "quarter" }), NOW)).toBe(quarter.toISOString());
-    expect(resolveExpiry(draft({ choice: "year" }), NOW)).toBe("2027-10-19T21:05:30.250Z");
+    const year = new Date(NOW.getTime());
+    year.setFullYear(year.getFullYear() + 1);
+    expect(resolveExpiry(draft({ choice: "year" }), NOW)).toBe(year.toISOString());
   });
 
   it("requires a custom day once Custom is picked", () => {
