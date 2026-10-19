@@ -201,33 +201,32 @@ fn json_response(status: StatusCode, body: Value) -> Response {
 }
 
 // ---------------------------------------------------------------------------
-// auth (InstanceAdminPermission; same SQL as the license console handlers)
+// auth (InstanceAdminPermission; same session semantics as loop/user.rs)
 // ---------------------------------------------------------------------------
 
-/// `request.user` from the Django session. No session, no key, or a
-/// non-UUID id means anonymous — and on `instances` paths the middleware
-/// reads the `admin-session-id` cookie, so an app-cookie caller is
-/// anonymous here (pinned by `test_app_cookie_is_anonymous_on_admin_routes`).
-fn actor_user_id(extension: &Option<Extension<SessionHandle>>) -> Option<Uuid> {
-    let handle = extension.as_ref().map(|ext| ext.0.clone())?;
-    let mut session = handle.snapshot();
-    session.get("_auth_user_id")?.as_str()?.parse::<Uuid>().ok()
-}
-
-/// Authenticated actor or 401. A session whose user row is gone is 401,
-/// not 403 (Django's `SessionAuthentication.get_user` yields `None`,
-/// which the permission layer turns into `NotAuthenticated`).
+/// Authenticated actor or 401, with full DRF session semantics. Delegates to
+/// [`crate::license::resolve_actor`] (the shared license plumbing), which
+/// mirrors `django.contrib.auth.get_user` + DRF `SessionAuthentication`:
+/// the session must carry a UUID `_auth_user_id` for the `ModelBackend`
+/// with a matching `_auth_user_hash`, and the user row must exist and be
+/// active. Anything else is anonymous (401), not 403 — and on `instances`
+/// paths the middleware reads the `admin-session-id` cookie, so an
+/// app-cookie caller is anonymous here (pinned by
+/// `test_app_cookie_is_anonymous_on_admin_routes`).
 async fn authed_user(
+    state: &AppState,
     pool: &PgPool,
-    extension: &Option<Extension<SessionHandle>>,
+    extension: Option<Extension<SessionHandle>>,
 ) -> Result<Uuid, Denial> {
-    let actor = actor_user_id(extension).ok_or(Denial::Unauthorized)?;
-    let row: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE id = $1")
-        .bind(actor)
-        .fetch_optional(pool)
+    // `resolve_actor` only ever errs with the license-layer 500, so the
+    // mapping is exact (mirrors `loop/user.rs`'s `actor`).
+    match crate::license::resolve_actor(pool, state.settings().secret_key.as_bytes(), extension)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::Unauthorized)
+    {
+        Ok(Some(actor)) => Ok(actor.id),
+        Ok(None) => Err(Denial::Unauthorized),
+        Err(_) => Err(Denial::ServerError),
+    }
 }
 
 /// `Instance.objects.first()`: `Meta.ordering = ("-created_at",)` over the
@@ -710,7 +709,7 @@ async fn list_jobs(
     extension: Option<Extension<SessionHandle>>,
 ) -> Result<Response, Denial> {
     let pool = pools(&state)?;
-    let actor = authed_user(pool, &extension).await?;
+    let actor = authed_user(&state, pool, extension).await?;
     require_instance_admin(pool, &actor).await?;
 
     let rows: Vec<JobRow> = sqlx::query_as(&format!(
@@ -736,7 +735,7 @@ async fn create_job(
     body: axum::body::Bytes,
 ) -> Result<Response, Denial> {
     let pool = pools(&state)?;
-    let actor = authed_user(pool, &extension).await?;
+    let actor = authed_user(&state, pool, extension).await?;
     require_instance_admin(pool, &actor).await?;
 
     let data = parse_json_body(&body)?;
@@ -814,7 +813,7 @@ async fn detail_job(
         return proxy_pass(state, method, uri, headers, &[]).await;
     };
     let pool = pools(&state)?;
-    let actor = authed_user(pool, &extension).await?;
+    let actor = authed_user(&state, pool, extension).await?;
     require_instance_admin(pool, &actor).await?;
 
     let Some(row) = fetch_job(pool, &job_id).await? else {
@@ -849,7 +848,7 @@ async fn patch_job(
         return proxy_pass(state, method, uri, headers, &body).await;
     };
     let pool = pools(&state)?;
-    let actor = authed_user(pool, &extension).await?;
+    let actor = authed_user(&state, pool, extension).await?;
     require_instance_admin(pool, &actor).await?;
 
     let Some(current) = fetch_job(pool, &job_id).await? else {
@@ -974,7 +973,7 @@ async fn delete_job(
         return proxy_pass(state, method, uri, headers, &[]).await;
     };
     let pool = pools(&state)?;
-    let actor = authed_user(pool, &extension).await?;
+    let actor = authed_user(&state, pool, extension).await?;
     require_instance_admin(pool, &actor).await?;
 
     // `job.delete()`: stamp the job row (`save()` moves `updated_at`
@@ -1022,7 +1021,7 @@ async fn job_targets(
         return proxy_pass(state, method, uri, headers, &[]).await;
     };
     let pool = pools(&state)?;
-    let actor = authed_user(pool, &extension).await?;
+    let actor = authed_user(&state, pool, extension).await?;
     require_instance_admin(pool, &actor).await?;
 
     if fetch_job(pool, &job_id).await?.is_none() {
