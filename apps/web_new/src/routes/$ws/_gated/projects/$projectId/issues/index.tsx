@@ -17,7 +17,6 @@ import * as React from "react";
 import { invalidateWorkspace } from "../../../../../../core/query/optimistic.js";
 import { isProjectGateError } from "../../../../../../features/auth/index.js";
 import {
-  CalendarEntry,
   DisplayControl,
   IssuesLayoutRoot,
   ListSkeleton,
@@ -37,6 +36,13 @@ import {
   primeIssueListLeaves,
 } from "../../../../../../features/issues/components/lazyLeaves.js";
 import { loadListLayout, resolvedListLayout } from "../../../../../../features/issues/list/lazy.js";
+// Keep the calendar off the issues route chunk: its entry carries the
+// calendar skeleton, and first paint should stay inside the size gate.
+const LazyCalendarEntry = React.lazy(() =>
+  import("../../../../../../features/issues/calendar/CalendarEntry.js").then((module) => ({
+    default: module.CalendarEntry,
+  }))
+);
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
@@ -311,13 +317,15 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
           }
           if (active === "calendar") {
             return (
-              <CalendarEntry
-                workspaceSlug={params.ws}
-                projectId={params.projectId}
-                projectIdentifier={project.identifier}
-                entity={{ scope: "project", projectId: params.projectId }}
-                canEdit={canEdit}
-              />
+              <React.Suspense fallback={<ListSkeleton />}>
+                <LazyCalendarEntry
+                  workspaceSlug={params.ws}
+                  projectId={params.projectId}
+                  projectIdentifier={project.identifier}
+                  entity={{ scope: "project", projectId: params.projectId }}
+                  canEdit={canEdit}
+                />
+              </React.Suspense>
             );
           }
           const ResolvedListLayout = resolvedListLayout();
