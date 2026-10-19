@@ -29,6 +29,9 @@ export const issueKeys = {
    * collide with the scope tags.
    */
   lists: (workspaceSlug: string, ...part: string[]) => [...issueKeys.all(workspaceSlug), "list", ...part] as const,
+  /** The issue's comment list, read through the history endpoint (ISS-197–202). */
+  comments: (workspaceSlug: string, projectId: string, issueId: string) =>
+    [...issueKeys.all(workspaceSlug), "comments", projectId, issueId] as const,
   /** Per-entity display preferences (ISS-002). */
   prefs: (workspaceSlug: string, ...part: string[]) => [...issueKeys.all(workspaceSlug), "prefs", ...part] as const,
 };

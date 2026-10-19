@@ -24,3 +24,17 @@ export function storedTextContent(html: string): string {
 export function isStoredHtmlEmpty(html: string): boolean {
   return storedTextContent(html).trim().length === 0;
 }
+
+/**
+ * True when stored HTML carries neither visible text nor any of the
+ * `allowedTags` (lower-case names) the surface treats as content. Comment
+ * bodies count images and mentions as words: a picture with no caption is
+ * still a comment.
+ */
+export function isStoredHtmlEmptyIgnoring(html: string, allowedTags: readonly string[]): boolean {
+  if (storedTextContent(html).trim().length !== 0) return false;
+  if (typeof globalThis.DOMParser === "undefined") return true;
+  const document = new DOMParser().parseFromString(html, "text/html");
+  const names = new Set(allowedTags.map((tag) => tag.toLowerCase()));
+  return !Array.from(document.body.querySelectorAll("*")).some((element) => names.has(element.tagName.toLowerCase()));
+}

@@ -11,7 +11,7 @@
 import type { AnyExtension } from "@tiptap/core";
 import { describe, expect, it } from "vitest";
 
-import { loadDescriptionExtensions } from "./extensions.js";
+import { loadCommentExtensions, loadDescriptionExtensions } from "./extensions.js";
 
 interface Fixture {
   name: string;
@@ -83,4 +83,25 @@ describe("stored description round-trip", () => {
       }
     }
   );
+});
+
+describe("comment editor extensions", () => {
+  it("adds inline images to the description set without changing its round trip", async () => {
+    const description = (await loadDescriptionExtensions()) as unknown as AnyExtension[];
+    const comment = (await loadCommentExtensions()) as unknown as AnyExtension[];
+    expect(comment).toHaveLength(description.length + 1);
+
+    const { Editor } = await import("@tiptap/core");
+    const editor = new Editor({
+      extensions: comment,
+      content: '<h2>Shot</h2><p>Look</p><img src="https://cdn.test/shot.png">',
+    });
+    try {
+      const serialized = editor.getHTML();
+      expect(serialized).toContain('<img src="https://cdn.test/shot.png">');
+      expect(textOf(serialized)).toBe("ShotLook");
+    } finally {
+      editor.destroy();
+    }
+  });
 });

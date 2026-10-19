@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 // Contract unit tests: each contract parses a representative payload through
 // a stub transport. Live-server proof lives in contract/*.contract.test.ts.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "./errors.js";
 import { createClient } from "./client.js";
 import { deactivateAccount, getInstanceConfig, signOut } from "./contracts/auth.js";
@@ -23,6 +23,7 @@ import {
   signUpWithMagicCode,
 } from "./contracts/auth-entry.js";
 import { getMe, getMeSettings } from "./contracts/users.js";
+import { attachCommentImages, uploadCommentImage } from "./contracts/comment-assets.js";
 import { markOnboarded, updateMe } from "./contracts/user-writes.js";
 import {
   exportUserProfileActivity,
@@ -4501,6 +4502,103 @@ describe("issue comment contracts", () => {
   it("rejects a comment without an id", async () => {
     const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...comment, id: "nope" }]) });
     const error = await listIssueComments(client, "acme", UUID2, UUID).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
+describe("comment image asset contract", () => {
+  const grant = {
+    asset_id: UUID,
+    asset_url: `/api/assets/v2/workspaces/acme/projects/${UUID2}/${UUID}/`,
+    upload_data: { url: "https://s3.test/upload", fields: { key: "acme/file", policy: "p" } },
+  };
+
+  function uploadTransport(status = 200) {
+    return recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.url === "https://s3.test/upload") return fakeResponse({ status });
+      if (call.init.method === "POST") return fakeResponse({ body: JSON.stringify(grant) });
+      return fakeResponse({ status: 204, body: "" });
+    });
+  }
+
+  it("uploads through grant, bytes and confirm, then attaches by comment id", async () => {
+    const transport = uploadTransport();
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const file = new File(["bytes"], "shot.png", { type: "image/png" });
+    const uploadBytes = vi.fn(async () => ({ ok: true, status: 204 }));
+    const uploaded = await uploadCommentImage(client, "acme", UUID2, file, uploadBytes);
+    expect(uploaded).toEqual({
+      assetId: UUID,
+      assetUrl: `/api/assets/v2/workspaces/acme/projects/${UUID2}/${UUID}/`,
+    });
+
+    const grantCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(grantCall?.url).toBe(`https://api.test/api/assets/v2/workspaces/acme/projects/${UUID2}/`);
+    expect(JSON.parse(grantCall?.init.body ?? "{}")).toEqual({
+      entity_identifier: "",
+      entity_type: "COMMENT_DESCRIPTION",
+      name: "shot.png",
+      size: 5,
+      type: "image/png",
+    });
+    const confirmCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(confirmCall?.url).toBe(`https://api.test/api/assets/v2/workspaces/acme/projects/${UUID2}/${UUID}/`);
+    expect(uploadBytes).toHaveBeenCalledOnce();
+    const form = uploadBytes.mock.calls[0] as unknown as [string, FormData];
+    expect(form[0]).toBe("https://s3.test/upload");
+    expect(form[1].get("key")).toBe("acme/file");
+    expect(form[1].get("file")).toBeInstanceOf(File);
+
+    await attachCommentImages(client, "acme", UUID2, UUID, [UUID, UUID2]);
+    const bulk = transport.calls.find((call) => call.url.includes("/bulk/"));
+    expect(bulk?.url).toBe(`https://api.test/api/assets/v2/workspaces/acme/projects/${UUID2}/${UUID}/bulk/`);
+    expect(bulk?.init.body).toBe(JSON.stringify({ asset_ids: [UUID, UUID2] }));
+  });
+
+  it("rejects when the signed byte leg is refused", async () => {
+    const transport = uploadTransport();
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const file = new File(["bytes"], "shot.png", { type: "image/png" });
+    const error = await uploadCommentImage(client, "acme", UUID2, file, async () => ({ ok: false, status: 413 })).catch(
+      (e: unknown) => e
+    );
+    expect((error as ApiError).code).toBe("http");
+    expect(transport.calls.some((call) => call.init.method === "PATCH")).toBe(false);
+  });
+
+  it("skips the bulk write for an empty asset list", async () => {
+    const transport = uploadTransport();
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await attachCommentImages(client, "acme", UUID2, UUID, []);
+    expect(transport.calls).toHaveLength(0);
+  });
+
+  it("falls back to an empty address when the grant carries none", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "POST") {
+        return fakeResponse({ body: JSON.stringify({ ...grant, asset_url: null }) });
+      }
+      return fakeResponse({ status: 204, body: "" });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const file = new File(["bytes"], "shot.png", { type: "image/png" });
+    const uploaded = await uploadCommentImage(client, "acme", UUID2, file, async () => ({ ok: true, status: 204 }));
+    expect(uploaded).toEqual({ assetId: UUID, assetUrl: "" });
+  });
+
+  it("rejects a grant without an upload url", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ asset_id: UUID, asset_url: null, upload_data: { fields: {} } }),
+    });
+    const file = new File(["bytes"], "shot.png", { type: "image/png" });
+    const error = await uploadCommentImage(client, "acme", UUID2, file).catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("contract");
   });
 });

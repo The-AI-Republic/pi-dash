@@ -31,6 +31,15 @@ import { Route } from "./$issueKey.js";
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 const ISSUE_ID = "323e4567-e89b-12d3-a456-426614174002";
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
+// The strip appears after the router's loader and two query waves. Under a
+// full run those share workers with the Tiptap chunk, and the default
+// one-second wait is too tight; the strip itself is only ever late, never
+// absent, in the cases that expect it.
+const STRIP_TIMEOUT = { timeout: 5000 };
+
+function findStrip(): Promise<HTMLElement> {
+  return screen.findByTestId("project-tab-strip", undefined, STRIP_TIMEOUT);
+}
 
 function projectRow() {
   return {
@@ -219,6 +228,7 @@ interface BrowseExtras {
   estimate?: string | null;
   intake?: boolean;
   liteStatus?: number;
+  published?: boolean;
 }
 
 function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {}) {
@@ -260,6 +270,47 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
     } else if (url.endsWith("/projects/")) {
       status = 200;
       body = JSON.stringify([projectRow()]);
+    } else if (url.includes("/history/")) {
+      status = 200;
+      body = JSON.stringify([
+        {
+          id: "423e4567-e89b-12d3-a456-426614174003",
+          issue: ISSUE_ID,
+          project: PROJECT_ID,
+          workspace: UUID,
+          actor: UUID,
+          actor_detail: {
+            id: UUID,
+            first_name: "Ada",
+            last_name: "L",
+            avatar: "",
+            avatar_url: null,
+            display_name: "Ada L",
+            is_bot: false,
+          },
+          comment_html: "<p>Detail thread</p>",
+          comment_stripped: "Detail thread",
+          comment_json: {},
+          attachments: [],
+          labels: [],
+          access: "INTERNAL",
+          edited_at: null,
+          comment_reactions: [],
+          speaker_type: "human",
+          speaker_label: "",
+          speaker_agent_run_id: null,
+          parent: null,
+          external_source: null,
+          external_id: null,
+          is_synced: false,
+          description: null,
+          created_at: "2024-02-03T04:05:06Z",
+          updated_at: "2024-02-03T04:05:06Z",
+          created_by: UUID,
+          updated_by: null,
+          deleted_at: null,
+        },
+      ]);
     } else if (url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 200;
       const row = isEpic === undefined ? issueRow() : { ...issueRow(), is_epic: isEpic };
@@ -270,6 +321,7 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
         const overrides: Record<string, unknown> =
           extras.details === "archived" ? { archived_at: "2024-03-04T05:06:07Z" } : {};
         if (extras.estimate !== undefined) overrides["estimate"] = extras.estimate;
+        if (extras.published === true) overrides["anchor"] = "board";
         body = JSON.stringify([detailsRow(overrides)]);
       } else {
         body = "[]";
@@ -345,7 +397,7 @@ afterEach(() => {
 describe("browse route", () => {
   it("renders the detail under the project strip with tracking highlighted", async () => {
     renderBrowse(true);
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     expect(screen.getByTestId("project-switcher-trigger")).toHaveTextContent("Web");
     expect(screen.getByRole("link", { name: "Work Items" })).toHaveAttribute("aria-current", "page");
     // No project details resolve, so the title reads as a heading.
@@ -357,6 +409,25 @@ describe("browse route", () => {
     renderBrowse(true, undefined, { details: "member", me: true });
     const box = await screen.findByRole("textbox", { name: "Title" });
     expect(box).toHaveValue("Fix login");
+  });
+
+  it("mounts the comment thread under the description with the composer", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    expect(await screen.findByRole("heading", { name: "Comments" })).toBeInTheDocument();
+    expect(await screen.findByText("Detail thread")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Add comment" })).toBeInTheDocument();
+    expect(screen.queryByRole("radiogroup", { name: "Comment visibility" })).not.toBeInTheDocument();
+  });
+
+  it("shows the comment access switch on a published project", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, published: true });
+    expect(await screen.findByRole("radiogroup", { name: "Comment visibility" })).toBeInTheDocument();
+  });
+
+  it("drops the comment composer on an archived issue but keeps its cards", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, archivedIssue: true });
+    expect(await screen.findByText("Detail thread")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Add comment" })).not.toBeInTheDocument();
   });
 
   it("shows the history line read-only for archived issues", async () => {
@@ -385,7 +456,7 @@ describe("browse route", () => {
 
   it("highlights nothing for an epic while no epic tab renders", async () => {
     renderBrowse(true, true);
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     expect(screen.getByRole("heading", { name: "Fix login" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Work Items" })).not.toHaveAttribute("aria-current");
     expect(document.querySelectorAll('[aria-current="page"]')).toHaveLength(0);
@@ -393,7 +464,7 @@ describe("browse route", () => {
 
   it("registers the work-item contextual group for the resolved issue", async () => {
     renderBrowse(true);
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     // The stub answers no project details, so only the copy entries show.
     await waitFor(() => expect(findCommand(`context.work-item.${ISSUE_ID}.copy-id`)).toBeDefined());
     const titles = listCommands().map((command) => command.title);
@@ -407,7 +478,7 @@ describe("browse route", () => {
 
   it("offers the editing entries once the project details resolve", async () => {
     renderBrowse(true, undefined, { details: "member", me: true });
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     await waitFor(() => expect(findCommand(`context.work-item.${ISSUE_ID}.state`)).toBeDefined());
     const titles = listCommands().map((command) => command.title);
     expect(titles).toContain("Change state");
@@ -424,7 +495,7 @@ describe("browse route", () => {
 
   it("hides only the estimate picker when the project sets no estimate system", async () => {
     renderBrowse(true, undefined, { details: "member", me: true, estimate: null });
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     await waitFor(() => expect(findCommand(`context.work-item.${ISSUE_ID}.state`)).toBeDefined());
     const titles = listCommands().map((command) => command.title);
     expect(titles).toContain("Change state");
@@ -435,7 +506,7 @@ describe("browse route", () => {
 
   it("hides editing entries for archived issues", async () => {
     renderBrowse(true, undefined, { details: "member", me: true, archivedIssue: true });
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     await waitFor(() => expect(findCommand(`context.work-item.${ISSUE_ID}.copy-id`)).toBeDefined());
     const titles = listCommands().map((command) => command.title);
     expect(titles).toContain("Copy ID");
@@ -449,7 +520,7 @@ describe("browse route", () => {
 
   it("hides editing entries for archived projects", async () => {
     renderBrowse(true, undefined, { details: "archived", me: true });
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     await waitFor(() => expect(findCommand(`context.work-item.${ISSUE_ID}.copy-id`)).toBeDefined());
     const titles = listCommands().map((command) => command.title);
     expect(titles).toContain("Copy ID");
@@ -461,7 +532,7 @@ describe("browse route", () => {
 
   it("refreshes the detail after a state pick", async () => {
     const { calls } = renderBrowse(true, undefined, { details: "member", me: true });
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     await waitFor(() => expect(findPalettePage(`context.work-item.${ISSUE_ID}.state`)).toBeDefined());
     await waitFor(() =>
       expect(findPalettePage(`context.work-item.${ISSUE_ID}.state`)!.usePageState("").options).toHaveLength(1)
@@ -479,7 +550,7 @@ describe("browse route", () => {
   it("leaves for the issue list after a confirmed delete", async () => {
     const user = userEvent.setup();
     const { router } = renderBrowse(true, undefined, { details: "member", me: true });
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     await waitFor(() => expect(findCommand(`context.work-item.${ISSUE_ID}.delete`)).toBeDefined());
     await act(async () => {
       await findCommand(`context.work-item.${ISSUE_ID}.delete`)!.run();

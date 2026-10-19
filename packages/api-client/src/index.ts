@@ -343,6 +343,19 @@ export type {
   IssueCommentPatch,
   IssueCommentQuery,
 } from "./contracts/issue-comments.js";
+export {
+  COMMENT_IMAGE_ENTITY_TYPE,
+  CommentImageGrant,
+  attachCommentImages,
+  completeCommentImageUpload,
+  requestCommentImageUpload,
+  uploadCommentImage,
+} from "./contracts/comment-assets.js";
+export type {
+  CommentImageByteUpload,
+  CommentImageUploadResponse,
+  UploadedCommentImage,
+} from "./contracts/comment-assets.js";
 export { IssueActivity, IssueActivityList, listIssueActivities } from "./contracts/issue-activity.js";
 export type { IssueActivityQuery } from "./contracts/issue-activity.js";
 export {

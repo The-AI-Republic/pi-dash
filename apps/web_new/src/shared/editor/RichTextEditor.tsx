@@ -7,13 +7,24 @@
 // caller renders it inside Suspense, typically when the user starts
 // editing a RichTextView. The extension set covers the description
 // core (StarterKit paragraphs, headings, lists, code blocks plus
-// links); mentions, images, task lists and highlighting arrive with
-// the slices that own those rows (ISS-127, ISS-197).
+// links) and, for the comment composer, inline images; mentions, task
+// lists and highlighting arrive with the slices that own those rows
+// (ISS-127).
 
 import * as React from "react";
 
-import { loadDescriptionExtensions } from "./extensions.js";
+import { loadCommentExtensions, loadDescriptionExtensions } from "./extensions.js";
 import { isStoredHtmlEmpty } from "./sanitize.js";
+
+/** One Tiptap extension instance, derived from the loader's own type. */
+type EditorExtension =
+  | Awaited<ReturnType<typeof loadDescriptionExtensions>>[number]
+  | Awaited<ReturnType<typeof loadCommentExtensions>>[number];
+
+/** The slice of the Tiptap editor the composer needs (image inserts). */
+export interface RichTextEditorHandle {
+  insertImage: (src: string) => void;
+}
 
 export interface RichTextEditorProps {
   /** Stored HTML the editor opens with. */
@@ -29,15 +40,42 @@ export interface RichTextEditorProps {
   /** Focus the end of the document once the editor mounts. */
   autoFocus?: boolean | undefined;
   className?: string | undefined;
+  /** Receives an insert handle once the editor exists. */
+  onReady?: ((handle: RichTextEditorHandle) => void) | undefined;
 }
 
-async function loadEditor(): Promise<{ default: React.ComponentType<RichTextEditorProps> }> {
-  const [{ EditorContent, useEditor }, extensions] = await Promise.all([
-    import("@tiptap/react"),
-    loadDescriptionExtensions(),
-  ]);
+interface TiptapChain {
+  focus: () => { setImage: (options: { src: string }) => { run: () => void } };
+}
 
-  function TiptapEditor({
+interface EditorLike {
+  chain: () => TiptapChain;
+}
+
+function insertImage(editor: EditorLike, src: string): void {
+  editor.chain().focus().setImage({ src }).run();
+}
+
+function toHandle(editor: EditorLike): RichTextEditorHandle {
+  return { insertImage: (src: string) => insertImage(editor, src) };
+}
+
+/**
+ * Load one editor variant: the Tiptap chunk and its extension set resolve
+ * together, so each surface suspends exactly once before it mounts.
+ */
+async function loadEditor(
+  loadExtensions: () => Promise<EditorExtension[]>
+): Promise<{ default: React.ComponentType<RichTextEditorProps> }> {
+  const [{ EditorContent, useEditor }, extensions] = await Promise.all([import("@tiptap/react"), loadExtensions()]);
+
+  interface BodyProps extends Omit<RichTextEditorProps, "onReady"> {
+    extensions: EditorExtension[];
+    /** Set by the loader below once an editor instance exists. */
+    onEditorReady?: ((editor: EditorLike) => void) | undefined;
+  }
+
+  function EditorBody({
     initialHtml,
     onChange,
     editable = true,
@@ -45,10 +83,14 @@ async function loadEditor(): Promise<{ default: React.ComponentType<RichTextEdit
     label,
     autoFocus = false,
     className,
-  }: RichTextEditorProps): React.ReactElement {
+    extensions,
+    onEditorReady,
+  }: BodyProps): React.ReactElement {
     const [empty, setEmpty] = React.useState(() => isStoredHtmlEmpty(initialHtml));
     const onChangeRef = React.useRef(onChange);
     onChangeRef.current = onChange;
+    const readyRef = React.useRef(onEditorReady);
+    readyRef.current = onEditorReady;
     const editor = useEditor(
       {
         extensions,
@@ -69,11 +111,14 @@ async function loadEditor(): Promise<{ default: React.ComponentType<RichTextEdit
           onChangeRef.current(current.getHTML());
         },
       },
-      []
+      [extensions]
     );
     React.useEffect(() => {
       editor?.setEditable(editable);
     }, [editor, editable]);
+    React.useEffect(() => {
+      if (editor !== null) readyRef.current?.(editor as unknown as EditorLike);
+    }, [editor]);
     const frame = className === undefined ? "relative" : `relative ${className}`;
     // One commit without an instance: useEditor publishes it from an
     // effect, so the first render holds layout and the editor follows.
@@ -90,6 +135,17 @@ async function loadEditor(): Promise<{ default: React.ComponentType<RichTextEdit
     );
   }
 
+  function TiptapEditor({ onReady, ...rest }: RichTextEditorProps): React.ReactElement {
+    const handleRef = React.useRef(onReady);
+    handleRef.current = onReady;
+    // Callers keep the newest handle: an editor instance can be replaced
+    // before the body settles, and the live one is the last announced.
+    const onEditorReady = React.useCallback((editor: EditorLike) => {
+      handleRef.current?.(toHandle(editor));
+    }, []);
+    return <EditorBody {...rest} extensions={extensions} onEditorReady={onEditorReady} />;
+  }
+
   return { default: TiptapEditor };
 }
 
@@ -100,4 +156,11 @@ async function loadEditor(): Promise<{ default: React.ComponentType<RichTextEdit
  * the annotation the bundler keeps it (plus the sanitizer) in every
  * chunk that touches the barrel, including the initial chain.
  */
-export const RichTextEditor = /* #__PURE__ */ React.lazy(loadEditor);
+export const RichTextEditor = /* #__PURE__ */ React.lazy(() => loadEditor(loadDescriptionExtensions));
+
+/**
+ * The comment editor: the same lazy surface with inline images (ISS-197).
+ * Each editor piece owns its own loader, so a surface never suspends a
+ * second time for an extension set after its chunk arrives.
+ */
+export const CommentRichTextEditor = /* #__PURE__ */ React.lazy(() => loadEditor(loadCommentExtensions));

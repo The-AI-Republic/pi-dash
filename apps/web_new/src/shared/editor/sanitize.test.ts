@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { isStoredHtmlEmpty, sanitizeHtml, storedTextContent } from "./sanitize.js";
+import { isStoredHtmlEmpty, isStoredHtmlEmptyIgnoring, sanitizeHtml, storedTextContent } from "./sanitize.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -64,5 +64,24 @@ describe("isStoredHtmlEmpty", () => {
 
   it("treats markup with text as non-empty", () => {
     expect(isStoredHtmlEmpty("<p>hi</p>")).toBe(false);
+  });
+});
+
+describe("isStoredHtmlEmptyIgnoring", () => {
+  it("keeps the word rule", () => {
+    expect(isStoredHtmlEmptyIgnoring("<p></p>", ["img"])).toBe(true);
+    expect(isStoredHtmlEmptyIgnoring("<p>hi</p>", ["img"])).toBe(false);
+  });
+
+  it("treats an allowed tag as content, in any letter case", () => {
+    expect(isStoredHtmlEmptyIgnoring('<p><img src="/a.png"></p>', ["img"])).toBe(false);
+    expect(isStoredHtmlEmptyIgnoring('<p><IMG src="/a.png"></p>', ["IMG"])).toBe(false);
+    expect(isStoredHtmlEmptyIgnoring("<p><span> </span></p>", ["img"])).toBe(true);
+    expect(isStoredHtmlEmptyIgnoring('<p><img src="/a.png"></p>', [])).toBe(true);
+  });
+
+  it("reports empty where no DOM parser exists", () => {
+    vi.stubGlobal("DOMParser", undefined);
+    expect(isStoredHtmlEmptyIgnoring('<p><img src="/a.png"></p>', ["img"])).toBe(true);
   });
 });

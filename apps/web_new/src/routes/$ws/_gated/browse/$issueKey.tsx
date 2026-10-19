@@ -18,6 +18,7 @@ import * as React from "react";
 
 import { useMe } from "../../../../core/session/index.js";
 import {
+  CommentThread,
   DetailMissingState,
   DetailSkeleton,
   IssueDetailRoot,
@@ -157,7 +158,21 @@ function BrowseIssueDetail({
         projectId={projectId}
         workItem={{ id: issue.id, projectId, isEpic: issue.is_epic ?? false }}
       />
-      <IssueDetailRoot workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} editable={editable} />
+      <IssueDetailRoot
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        issue={issue}
+        editable={editable}
+        belowDescription={
+          <CommentThread
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            issueId={issue.id}
+            archived={issue.archived_at !== null}
+            published={project?.anchor != null}
+          />
+        }
+      />
       {palette.deleteDialog}
     </>
   );
