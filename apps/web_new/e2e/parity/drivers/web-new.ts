@@ -10080,142 +10080,427 @@ export class WebNewDriver implements ParityDriver {
     return todo("automationsHasExtensionRows");
   }
 
-  // --- Add-runner modal + creation (NEWFRONT-179, RUN-006–009) ---
+  // --- Add-runner modal + creation (NEWFRONT-543, RUN-006–009, RUN-049).
+  // The new modal is a kit dialog with five combobox pickers whose triggers
+  // carry the field name as their accessible name; the command panel lives
+  // in a `pre` and the remote phases are plain text inside the dialog.
 
-  async addRunnerOpenFromRunners(_workspaceSlug: string, _projectId?: string): Promise<void> {
-    return todo("addRunnerOpenFromRunners");
+  /** The dialogs this modal can render (kit Dialog mounts one at a time). */
+  private addRunnerDialog(): Locator {
+    return this.page.getByRole("dialog").last();
   }
-  async addRunnerOpenFromMachines(_workspaceSlug: string): Promise<void> {
-    return todo("addRunnerOpenFromMachines");
+
+  private async addRunnerOpenModal(): Promise<void> {
+    const open = this.page.getByRole("button", { name: "Add runner", exact: true }).first();
+    await open.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await open.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("button", { name: "Generate Runner", exact: true })
+      .or(this.addRunnerDialog().getByText("Add runner", { exact: false }).first())
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  async addRunnerOpenFromRunners(workspaceSlug: string, projectId?: string): Promise<void> {
+    const base =
+      projectId === undefined ? `/${workspaceSlug}/runners` : `/${workspaceSlug}/projects/${projectId}/runners`;
+    await this.page.goto(base, { timeout: 60_000 });
+    await this.addRunnerOpenModal();
+  }
+
+  async addRunnerOpenFromMachines(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/ai-dev-machines`, { timeout: 60_000 });
+    await this.addRunnerOpenModal();
+  }
+
   async addRunnerVisible(): Promise<boolean> {
-    return todo("addRunnerVisible");
+    const dialog = this.addRunnerDialog();
+    if ((await dialog.count()) === 0) return false;
+    const title = dialog.getByRole("heading", { name: /^(Add runner|Runner created)$/ }).first();
+    return (await this.isShown(title)) || (await this.isShown(dialog.getByRole("button", { name: "Generate Runner" })));
   }
+
   async addRunnerLayout(): Promise<"form" | "remote" | "command"> {
-    return todo("addRunnerLayout");
+    const dialog = this.addRunnerDialog();
+    if ((await dialog.getByRole("button", { name: "Generate Runner", exact: true }).count()) > 0) return "form";
+    if ((await dialog.locator("pre").count()) > 0) return "command";
+    return "remote";
   }
+
+  /** The trigger button for a named picker (its accessible name is the field label). */
+  private addRunnerPickerButton(label: string): Locator {
+    return this.addRunnerDialog().getByRole("button", { name: label, exact: true }).first();
+  }
+
+  /** Shut the picker's popup without closing the dialog. */
+  private async addRunnerShutPicker(): Promise<void> {
+    if ((await this.page.getByRole("option").count()) === 0) return;
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("option")
+      .first()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .catch(() => undefined);
+  }
+
+  /** Open a picker and wait for its option list to render. */
+  private async addRunnerOpenPicker(label: string): Promise<void> {
+    const button = this.addRunnerPickerButton(label);
+    await this.addRunnerShutPicker();
+    await button.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private async addRunnerReadOptions(label: string): Promise<string[]> {
+    await this.addRunnerOpenPicker(label);
+    const labels = await this.page.getByRole("option").allInnerTexts();
+    await this.addRunnerShutPicker();
+    return labels.map((entry) => entry.trim());
+  }
+
+  private async addRunnerPickOption(label: string, optionName: string): Promise<void> {
+    await this.addRunnerOpenPicker(label);
+    const option = this.page.getByRole("option", { name: optionName, exact: true });
+    await option.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await option.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.addRunnerShutPicker();
+  }
+
   async addRunnerForm(): Promise<AddRunnerFormState> {
-    return todo("addRunnerForm");
+    const dialog = this.addRunnerDialog();
+    const triggerText = async (label: string): Promise<string> =>
+      (
+        (await this.addRunnerPickerButton(label)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+    const projectButton = this.addRunnerPickerButton("Project");
+    // The project picker is disabled both while the projects list loads and
+    // when the route locks it; settle the first case before reading.
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const text = await triggerText("Project");
+      const disabled = await projectButton.isDisabled().catch(() => false);
+      if (!disabled || text !== "Select a project" || Date.now() >= deadline) break;
+      await this.page.waitForTimeout(250);
+    }
+    return {
+      machine: await triggerText("Dev machine"),
+      project: await triggerText("Project"),
+      projectLocked: await projectButton.isDisabled().catch(() => false),
+      pod: await triggerText("Pod (optional)"),
+      name: await dialog.locator("#add-runner-name").inputValue({ timeout: WebNewDriver.WAIT_MS }),
+      workingDir: await dialog.locator("#add-runner-working-dir").inputValue({ timeout: WebNewDriver.WAIT_MS }),
+      agent: await triggerText("Agent"),
+      model: await triggerText("Model (optional)"),
+    };
   }
+
   async addRunnerMachineOptions(): Promise<string[]> {
-    return todo("addRunnerMachineOptions");
+    return this.addRunnerReadOptions("Dev machine");
   }
+
   async addRunnerProjectOptions(): Promise<string[]> {
-    return todo("addRunnerProjectOptions");
+    return this.addRunnerReadOptions("Project");
   }
+
   async addRunnerPodOptions(): Promise<string[]> {
-    return todo("addRunnerPodOptions");
+    return this.addRunnerReadOptions("Pod (optional)");
   }
+
   async addRunnerAgentOptions(): Promise<string[]> {
-    return todo("addRunnerAgentOptions");
+    return this.addRunnerReadOptions("Agent");
   }
+
   async addRunnerModelOptions(): Promise<string[]> {
-    return todo("addRunnerModelOptions");
+    return this.addRunnerReadOptions("Model (optional)");
   }
+
   async addRunnerProjectError(): Promise<string | null> {
-    return todo("addRunnerProjectError");
+    const error = this.addRunnerDialog().getByRole("alert").filter({ hasText: "Pick a project." });
+    if ((await error.count()) === 0) return null;
+    return ((
+      (await error
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim() || null) as string | null;
   }
+
   async addRunnerNameError(): Promise<string | null> {
-    return todo("addRunnerNameError");
+    const error = this.addRunnerDialog().getByText("Runner name cannot contain spaces.", { exact: false });
+    if ((await error.count()) === 0) return null;
+    return ((
+      (await error
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim() || null) as string | null;
   }
-  async addRunnerPickMachine(_label: string): Promise<void> {
-    return todo("addRunnerPickMachine");
+
+  async addRunnerPickMachine(label: string): Promise<void> {
+    const current = (
+      (await this.addRunnerPickerButton("Dev machine")
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    if (current === label) return;
+    await this.addRunnerPickOption("Dev machine", label);
   }
+
   async addRunnerPickManual(): Promise<void> {
-    return todo("addRunnerPickManual");
+    await this.addRunnerPickOption("Dev machine", "Run `pidash runner add` manually");
   }
-  async addRunnerPickProject(_name: string): Promise<void> {
-    return todo("addRunnerPickProject");
+
+  async addRunnerPickProject(name: string): Promise<void> {
+    await this.addRunnerPickOption("Project", name);
   }
-  async addRunnerPickPod(_name: string): Promise<void> {
-    return todo("addRunnerPickPod");
+
+  async addRunnerPickPod(name: string): Promise<void> {
+    if (name === "") {
+      await this.addRunnerPickOption("Pod (optional)", "(default pod)");
+      return;
+    }
+    // Pod labels carry their project identifier in parentheses.
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    await this.addRunnerOpenPicker("Pod (optional)");
+    const option = this.page.getByRole("option", { name: new RegExp(`^${escaped}( \\([^)]*\\))?$`) }).first();
+    await option.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await option.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.addRunnerShutPicker();
   }
-  async addRunnerSetName(_name: string): Promise<void> {
-    return todo("addRunnerSetName");
+
+  async addRunnerSetName(name: string): Promise<void> {
+    await this.addRunnerDialog().locator("#add-runner-name").fill(name, { timeout: WebNewDriver.WAIT_MS });
   }
-  async addRunnerSetWorkingDir(_dir: string): Promise<void> {
-    return todo("addRunnerSetWorkingDir");
+
+  async addRunnerSetWorkingDir(dir: string): Promise<void> {
+    await this.addRunnerDialog().locator("#add-runner-working-dir").fill(dir, { timeout: WebNewDriver.WAIT_MS });
   }
-  async addRunnerPickAgent(_label: string): Promise<void> {
-    return todo("addRunnerPickAgent");
+
+  async addRunnerPickAgent(label: string): Promise<void> {
+    await this.addRunnerPickOption("Agent", label);
   }
-  async addRunnerPickModel(_label: string): Promise<void> {
-    return todo("addRunnerPickModel");
+
+  async addRunnerPickModel(label: string): Promise<void> {
+    await this.addRunnerPickOption("Model (optional)", label);
   }
+
   async addRunnerSubmit(): Promise<void> {
-    return todo("addRunnerSubmit");
+    await this.addRunnerDialog()
+      .getByRole("button", { name: "Generate Runner", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async addRunnerClose(): Promise<void> {
-    return todo("addRunnerClose");
+    const dialog = this.addRunnerDialog();
+    const phase = await this.addRunnerRemotePhase().catch(() => null);
+    if (phase === "error" || phase === "timeout") {
+      await dialog.getByRole("button", { name: "Back", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+      await dialog.getByRole("button", { name: "Generate Runner", exact: true }).waitFor({
+        timeout: WebNewDriver.WAIT_MS,
+      });
+    }
+    for (const name of ["Cancel", "Done", "Close", "Close dialog"]) {
+      const control = dialog.getByRole("button", { name, exact: true });
+      if ((await control.count()) > 0) {
+        await control.first().click({ timeout: WebNewDriver.WAIT_MS });
+        return;
+      }
+    }
+    throw new Error("[parity] add-runner modal shows no dismiss control.");
   }
+
   async addRunnerRemotePhase(): Promise<AddRunnerRemotePhase | null> {
-    return todo("addRunnerRemotePhase");
+    if ((await this.addRunnerLayout()) !== "remote") return null;
+    const body = (
+      (await this.addRunnerDialog()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    if (body.includes("Runner created")) return "ok";
+    if (body.includes("Runner creation failed")) return "error";
+    if (body.includes("did not report back in time")) return "timeout";
+    return "creating";
   }
+
   async addRunnerRemoteText(): Promise<string | null> {
-    return todo("addRunnerRemoteText");
+    if ((await this.addRunnerLayout()) !== "remote") return null;
+    return ((
+      (await this.addRunnerDialog()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim() || null) as string | null;
   }
+
   async addRunnerRemoteRunnerName(): Promise<string | null> {
-    return todo("addRunnerRemoteRunnerName");
+    if ((await this.addRunnerLayout()) !== "remote") return null;
+    const code = this.addRunnerDialog().locator("code").first();
+    if ((await code.count()) === 0) return null;
+    return (((await code.innerText().catch(() => "")) ?? "").trim() || null) as string | null;
   }
+
   async addRunnerRemoteBack(): Promise<void> {
-    return todo("addRunnerRemoteBack");
+    await this.addRunnerDialog()
+      .getByRole("button", { name: "Back", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async addRunnerRemoteManual(): Promise<void> {
-    return todo("addRunnerRemoteManual");
+    await this.addRunnerDialog()
+      .getByRole("button", { name: "Show manual command", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  // One route handler feeds both spies: separate handlers on the same pattern
+  // starve each other, so create and status halves multiplex here.
+  private static readonly ADD_RUNNER_PATTERN = "**/api/runners/dev-machines/**";
+  private addRunnerSpyCreateBodies: string[] | null = null;
+  private addRunnerSpyStatusUrls: string[] | null = null;
+  private addRunnerSpyInstalled = false;
+
+  private async addRunnerSpyEnsure(): Promise<void> {
+    if (this.addRunnerSpyInstalled) return;
+    this.addRunnerSpyInstalled = true;
+    await this.page.route(WebNewDriver.ADD_RUNNER_PATTERN, async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      if (request.method() === "POST" && pathname.endsWith("/create-runner/")) {
+        this.addRunnerSpyCreateBodies?.push(request.postData() ?? "");
+      }
+      if (request.method() === "GET" && pathname.includes("/create-runner/") && !pathname.endsWith("/create-runner/")) {
+        this.addRunnerSpyStatusUrls?.push(request.url());
+      }
+      await route.continue();
+    });
+  }
+
+  private async addRunnerSpyMaybeUninstall(): Promise<void> {
+    if (this.addRunnerSpyCreateBodies !== null || this.addRunnerSpyStatusUrls !== null) return;
+    this.addRunnerSpyInstalled = false;
+    await this.page.unroute(WebNewDriver.ADD_RUNNER_PATTERN).catch(() => undefined);
+  }
+
   async addRunnerCreateSpyStart(): Promise<void> {
-    return todo("addRunnerCreateSpyStart");
+    this.addRunnerSpyCreateBodies = [];
+    await this.addRunnerSpyEnsure();
   }
+
   async addRunnerCreateSpyBodies(): Promise<string[]> {
-    return todo("addRunnerCreateSpyBodies");
+    return [...(this.addRunnerSpyCreateBodies ?? [])];
   }
+
   async addRunnerCreateSpyStop(): Promise<void> {
-    return todo("addRunnerCreateSpyStop");
+    this.addRunnerSpyCreateBodies = null;
+    await this.addRunnerSpyMaybeUninstall();
   }
+
   async addRunnerStatusSpyStart(): Promise<void> {
-    return todo("addRunnerStatusSpyStart");
+    this.addRunnerSpyStatusUrls = [];
+    await this.addRunnerSpyEnsure();
   }
+
   async addRunnerStatusSpyUrls(): Promise<string[]> {
-    return todo("addRunnerStatusSpyUrls");
+    return [...(this.addRunnerSpyStatusUrls ?? [])];
   }
+
   async addRunnerStatusSpyStop(): Promise<void> {
-    return todo("addRunnerStatusSpyStop");
+    this.addRunnerSpyStatusUrls = null;
+    await this.addRunnerSpyMaybeUninstall();
   }
+
   async addRunnerCommandText(): Promise<string | null> {
-    return todo("addRunnerCommandText");
+    if ((await this.addRunnerLayout()) !== "command") return null;
+    const pre = this.addRunnerDialog().locator("pre").first();
+    if ((await pre.count()) === 0) return null;
+    return ((await pre.textContent().catch(() => "")) ?? "") as string | null;
   }
+
   async addRunnerCommandHeader(): Promise<string | null> {
-    return todo("addRunnerCommandHeader");
+    if ((await this.addRunnerLayout()) !== "command") return null;
+    const header = this.addRunnerDialog().getByText("Project:", { exact: false }).first();
+    if ((await header.count()) === 0) return null;
+    return (((await header.innerText().catch(() => "")) ?? "").trim() || null) as string | null;
   }
+
+  /** The shell selector's buttons (`aria-pressed` marks the active one). */
+  private addRunnerShellStrip(): Locator {
+    return this.addRunnerDialog().getByRole("group", { name: "Shell", exact: true }).getByRole("button");
+  }
+
   async addRunnerShellOptions(): Promise<string[]> {
-    return todo("addRunnerShellOptions");
+    const labels = await this.addRunnerShellStrip().allInnerTexts();
+    return labels.map((label) => label.trim());
   }
+
   async addRunnerActiveShell(): Promise<string | null> {
-    return todo("addRunnerActiveShell");
+    const pressed = this.addRunnerShellStrip().locator('button[aria-pressed="true"]').first();
+    if ((await pressed.count()) === 0) return null;
+    return (((await pressed.innerText().catch(() => "")) ?? "").trim() || null) as string | null;
   }
-  async addRunnerPickShell(_label: string): Promise<void> {
-    return todo("addRunnerPickShell");
+
+  async addRunnerPickShell(label: string): Promise<void> {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    await this.addRunnerShellStrip()
+      .filter({ hasText: new RegExp(`^${escaped}$`) })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  private addRunnerCopyButton(): Locator {
+    return this.addRunnerDialog().getByRole("button", { name: /^(Copy command|Copied!)$/ });
+  }
+
   async addRunnerCopy(): Promise<void> {
-    return todo("addRunnerCopy");
+    // The async clipboard API is denied without an explicit grant in headless.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.addRunnerCopyButton().first().click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async addRunnerCopyState(): Promise<string | null> {
-    return todo("addRunnerCopyState");
+    const button = this.addRunnerCopyButton().first();
+    if ((await button.count()) === 0) return null;
+    return (((await button.innerText().catch(() => "")) ?? "").trim() || null) as string | null;
   }
+
   async addRunnerReadClipboard(): Promise<string> {
-    return todo("addRunnerReadClipboard");
+    return this.readClipboard();
   }
+
   async addRunnerBreakClipboard(): Promise<void> {
-    return todo("addRunnerBreakClipboard");
+    await this.page.evaluate(() => {
+      window.Clipboard.prototype.writeText = () => Promise.reject(new Error("parity: clipboard blocked"));
+    });
   }
+
   async addRunnerOriginNote(): Promise<string | null> {
-    return todo("addRunnerOriginNote");
+    const note = this.addRunnerDialog().getByText("Using the current browser origin", { exact: false });
+    if ((await note.count()) === 0) return null;
+    return ((
+      (await note
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim() || null) as string | null;
   }
+
   async addRunnerCommandBack(): Promise<void> {
-    return todo("addRunnerCommandBack");
+    await this.addRunnerDialog()
+      .getByRole("button", { name: "Back", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async addRunnerLastToast(): Promise<string | null> {
-    return todo("addRunnerLastToast");
+    const stack = this.page.locator('[data-testid="toast-stack"]');
+    if ((await stack.count()) === 0) return null;
+    const text = (
+      (await stack
+        .first()
+        .textContent()
+        .catch(() => "")) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
+    return text === "" ? null : text;
   }
 
   // --- Assistant entry surfaces (NEWFRONT-603): landing, setup card,
