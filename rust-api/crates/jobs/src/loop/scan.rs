@@ -46,7 +46,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::queue::{enqueue, JobRow, NewJob};
 use crate::schedule::{beat_schedule, BeatEntry};
 use crate::tasks_ticker::rrule::next_fire_from_rrule;
@@ -274,9 +274,9 @@ fn fire_job(id: &Uuid) -> NewJob {
 /// [`crate::worker::dispatch`]'s forward path arm for arm (that function
 /// is the runtime source of truth; this one exists so tests and the
 /// PIDASHCONV-157 fire port can assert the wire contract broker-free).
-pub fn fire_message(id: &Uuid) -> CeleryTaskMessage {
+pub fn fire_message(id: &Uuid) -> TaskMessage {
     let (args, kwargs) = fire_job(id).into_message_parts();
-    CeleryTaskMessage::new(FIRE_LOOP_TARGET_TASK, args, kwargs)
+    TaskMessage::new(FIRE_LOOP_TARGET_TASK, args, kwargs)
 }
 
 /// Cap the dispatch slice in Python (`bgtasks/loop.py:166`, `ids =
@@ -874,7 +874,7 @@ mod tests {
             .expect("lazy pool needs no server");
         let mut registry = Registry::new();
         for name in TASK_NAMES {
-            assert_eq!(route_for(&registry, name), Route::PythonOwned);
+            assert_eq!(route_for(&registry, name), Route::Unknown);
         }
         register_scanner(&mut registry, pool);
         assert!(registry.owns(SCAN_DUE_TARGETS_TASK));
@@ -882,7 +882,7 @@ mod tests {
         assert!(!registry.owns(FIRE_LOOP_TARGET_TASK));
         assert_eq!(
             route_for(&registry, FIRE_LOOP_TARGET_TASK),
-            Route::PythonOwned
+            Route::Unknown
         );
     }
 

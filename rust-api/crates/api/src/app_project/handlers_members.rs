@@ -561,7 +561,7 @@ fn current_site(state: &AppState) -> Result<String, Denial> {
 /// precedent): enqueue failures never change the response.
 async fn enqueue_email(pool: &sqlx::PgPool, emit: &tasks::ProjectAddUserEmailEmit) {
     let message =
-        pidash_jobs::celery::CeleryTaskMessage::new(emit.task_name(), emit.args(), emit.kwargs());
+        pidash_jobs::TaskMessage::new(emit.task_name(), emit.args(), emit.kwargs());
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),

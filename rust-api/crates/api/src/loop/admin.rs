@@ -945,10 +945,10 @@ async fn patch_job(
 /// call sends it with `using=None`. `LoopJob` lives in the `db` app
 /// (`db/models/loop.py`), so the label is `"db"` and the model is
 /// `"loopjob"`.
-fn soft_delete_message(pk: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn soft_delete_message(pk: &Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),

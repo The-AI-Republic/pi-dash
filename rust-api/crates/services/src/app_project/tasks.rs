@@ -22,12 +22,12 @@
 //! there is no queue override.
 //!
 //! Crate-graph note: `pidash-jobs` depends on `pidash-services`, so this
-//! module cannot name `jobs::celery::CeleryTaskMessage` (that would be a
+//! module cannot name `jobs::celery::TaskMessage` (that would be a
 //! dependency cycle). It publishes the Celery-format body parts instead —
 //! `task_name()` + `kwargs()` / `args()` per emit, exactly like
 //! `app_intake::tasks` — and the handlers (L9–L12, in the `api` crate
 //! which already depends on `pidash-jobs`) wrap them with
-//! `CeleryTaskMessage::new(task, args, kwargs)` plus `queue::enqueue`.
+//! `TaskMessage::new(task, args, kwargs)` plus `queue::enqueue`.
 //! No worker `Registry` handler is registered for these names: all five
 //! tasks are Python-owned, so the worker forwards them to RabbitMQ in
 //! Celery protocol v2.

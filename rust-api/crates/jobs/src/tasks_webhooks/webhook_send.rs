@@ -50,7 +50,7 @@
 //!   error propagation.
 //! * QUIRK-1 (`:107-118`): every log slot is wrapped in `str()` except
 //!   `retry_count`, so dicts land as Python `repr`, *not* JSON.
-//!   [`build_log_doc`] stringifies via [`crate::celery::py_repr`].
+//!   [`build_log_doc`] stringifies via [`crate::pyformat::py_repr`].
 //!
 //! Evidence: `rust-api/fixtures/tasks_webhooks/fx-web-01-save-webhook-log.json`
 //! (FX-WEB-01) and `rust-api/fixtures/tasks_webhooks/fx-web-03-webhook-send-task.json`
@@ -58,7 +58,8 @@
 
 use serde_json::{Map, Value};
 
-use crate::celery::{py_repr, CeleryTaskMessage};
+use crate::pyformat::py_repr;
+use crate::task_message::TaskMessage;
 
 /// `webhook_send_task` (`:260`): full Celery name.
 pub const WEBHOOK_SEND_TASK_NAME: &str = "pi_dash.bgtasks.webhook_task.webhook_send_task";
@@ -209,7 +210,7 @@ fn render_number(number: &serde_json::Number, out: &mut String) {
     } else if let Some(signed) = number.as_i64() {
         out.push_str(&signed.to_string());
     } else if let Some(float) = number.as_f64() {
-        out.push_str(&crate::celery::py_float_repr(float));
+        out.push_str(&crate::pyformat::py_float_repr(float));
     } else {
         out.push_str(&number.to_string());
     }
@@ -502,8 +503,8 @@ pub fn webhook_send_task_message(
     action: &str,
     current_site: &str,
     activity: Value,
-) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+) -> TaskMessage {
+    TaskMessage::new(
         WEBHOOK_SEND_TASK_NAME,
         Vec::new(),
         webhook_send_task_kwargs(
@@ -524,8 +525,8 @@ pub fn deactivation_email_message(
     created_by_id: &str,
     reason: &str,
     current_site: &str,
-) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+) -> TaskMessage {
+    TaskMessage::new(
         DEACTIVATION_EMAIL_TASK_NAME,
         Vec::new(),
         deactivation_email_kwargs(webhook_id, created_by_id, reason, current_site),
@@ -583,7 +584,7 @@ pub fn py_json_str(value: &Value) -> String {
         Value::Bool(false) => "False".to_owned(),
         Value::Number(n) => {
             if n.is_f64() {
-                crate::celery::py_float_repr(n.as_f64().unwrap_or(0.0))
+                crate::pyformat::py_float_repr(n.as_f64().unwrap_or(0.0))
             } else {
                 n.to_string()
             }

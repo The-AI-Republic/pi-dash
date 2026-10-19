@@ -42,12 +42,12 @@
 //! [`USER_ACTIVATION_EMAIL_TASK`] and there is no queue override.
 //!
 //! Crate-graph note: `pidash-jobs` depends on `pidash-services`, so this
-//! module cannot name `jobs::celery::CeleryTaskMessage` (that would be a
+//! module cannot name `jobs::celery::TaskMessage` (that would be a
 //! dependency cycle). It publishes the Celery-format body parts instead —
 //! [`MagicLinkEmit::task_name`] + [`MagicLinkEmit::args`] (and the two
 //! twins; kwargs are always empty) — and the handlers (PIDASHCONV-422/431/
 //! 434, in the `api` crate which already depends on `pidash-jobs`) wrap
-//! them with `CeleryTaskMessage::new(task, args, Map::new())` plus
+//! them with `TaskMessage::new(task, args, Map::new())` plus
 //! `queue::enqueue`, exactly like the intake/view handlers do
 //! (`api/src/space/intake.rs`). `user.id` reaches `.delay()` as the raw
 //! UUID object, which kombu's JSON encoder renders as a string, so the
@@ -388,7 +388,7 @@ fn json_quoted(s: &str) -> String {
     out
 }
 
-/// Empty kwargs object for `CeleryTaskMessage::new`: all three publishes
+/// Empty kwargs object for `TaskMessage::new`: all three publishes
 /// are positional-only (`body_kwargs {}` in FX-AUTH-09).
 pub fn empty_kwargs() -> Map<String, Value> {
     Map::new()

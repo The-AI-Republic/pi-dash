@@ -3204,7 +3204,7 @@ pub async fn partial_update(
             );
             enqueue_message(
                 pool,
-                pidash_jobs::celery::CeleryTaskMessage::new(
+                pidash_jobs::TaskMessage::new(
                     activity.task_name(),
                     vec![],
                     activity.kwargs(),
@@ -3218,7 +3218,7 @@ pub async fn partial_update(
             );
             enqueue_message(
                 pool,
-                pidash_jobs::celery::CeleryTaskMessage::new(
+                pidash_jobs::TaskMessage::new(
                     version.task_name(),
                     vec![],
                     version.kwargs(),
@@ -3250,7 +3250,7 @@ pub async fn partial_update(
         );
         enqueue_message(
             pool,
-            pidash_jobs::celery::CeleryTaskMessage::new(
+            pidash_jobs::TaskMessage::new(
                 activity.task_name(),
                 vec![],
                 activity.kwargs(),
@@ -4589,7 +4589,7 @@ pub async fn collection_create(
     );
     enqueue_message(
         pool,
-        pidash_jobs::celery::CeleryTaskMessage::new(
+        pidash_jobs::TaskMessage::new(
             activity.task_name(),
             vec![],
             activity.kwargs(),
@@ -4607,7 +4607,7 @@ pub async fn collection_create(
     );
     enqueue_message(
         pool,
-        pidash_jobs::celery::CeleryTaskMessage::new(version.task_name(), vec![], version.kwargs()),
+        pidash_jobs::TaskMessage::new(version.task_name(), vec![], version.kwargs()),
     )
     .await;
     // Re-fetch with the label/assignee annotates (`:293-322`) and render

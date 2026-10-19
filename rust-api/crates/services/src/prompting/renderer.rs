@@ -177,7 +177,7 @@ fn serde_number_text(value: &minijinja::value::Value) -> Option<String> {
 }
 
 /// Python `repr` of a string: single-quoted with backslash escapes.
-/// Mirrors `jobs::celery::py_str`, which services cannot import (the
+/// Mirrors `jobs::pyformat::py_str`, which services cannot import (the
 /// crate edge runs the other way).
 fn py_quote(s: &str) -> String {
     let mut quoted = String::with_capacity(s.len() + 2);

@@ -102,7 +102,7 @@ use pidash_types::dispatch::{
     UsageLimitExceeded,
 };
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::dispatch::{
     append_event, dispatch_waiting, RUNNING_CLOUD_COUNT_SQL, RUN_CLOUD_AGENT_TASK,
     WORKSPACE_LOCK_SQL,
@@ -123,22 +123,22 @@ pub const SWEEP_STALE_RUNS_TASK: &str = "cloud_agent.sweep_stale_runs";
 pub const EXPIRE_WAITING_RUNS_TASK: &str = "managed_runner.expire_waiting_runs";
 
 /// The `.delay()` message for a no-arg task: empty args, empty kwargs.
-fn bare_message(task: &str) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(task, Vec::new(), Map::new())
+fn bare_message(task: &str) -> TaskMessage {
+    TaskMessage::new(task, Vec::new(), Map::new())
 }
 
 /// The `.delay()` message for the queue scan.
-pub fn scan_queued_runs_message() -> CeleryTaskMessage {
+pub fn scan_queued_runs_message() -> TaskMessage {
     bare_message(SCAN_QUEUED_RUNS_TASK)
 }
 
 /// The `.delay()` message for the stale sweep.
-pub fn sweep_stale_runs_message() -> CeleryTaskMessage {
+pub fn sweep_stale_runs_message() -> TaskMessage {
     bare_message(SWEEP_STALE_RUNS_TASK)
 }
 
 /// The `.delay()` message for the managed wait expiry.
-pub fn expire_waiting_runs_message() -> CeleryTaskMessage {
+pub fn expire_waiting_runs_message() -> TaskMessage {
     bare_message(EXPIRE_WAITING_RUNS_TASK)
 }
 
@@ -2587,17 +2587,11 @@ mod tests {
             EXPIRE_WAITING_RUNS_TASK,
         ] {
             assert!(registry.owns(task), "{task} routes local once registered");
-            assert_eq!(
-                crate::worker::route_for(&registry, task),
-                crate::worker::Route::Local
-            );
         }
-        // Everything else stays Python-owned (the reconcile entry's task
-        // is the runner domain's — never registered here).
-        assert_eq!(
-            crate::worker::route_for(&registry, "runner.reconcile_agent_run_terminal_effects"),
-            crate::worker::Route::PythonOwned
-        );
+        // Everything else is unowned here, so an unknown name parks as
+        // failed (the reconcile entry's task is the runner domain's —
+        // never registered here).
+        assert!(!registry.owns("runner.reconcile_agent_run_terminal_effects"));
     }
 
     fn job_with_args(args: Value) -> JobRow {

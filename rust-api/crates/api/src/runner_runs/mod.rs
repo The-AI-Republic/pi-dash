@@ -1329,6 +1329,7 @@ impl RunnerPorts for LivePorts {
 
     async fn emit_terminal_effects(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
         emit_celery(
+            &self.pool,
             TERMINAL_EFFECTS_TASK,
             vec![Value::String(run_id.to_string())],
         )
@@ -1337,8 +1338,12 @@ impl RunnerPorts for LivePorts {
     }
 
     async fn emit_fire_tick(&self, ticker_id: uuid::Uuid) -> Result<(), PortError> {
-        emit_celery(FIRE_TICK_TASK, vec![Value::String(ticker_id.to_string())])
-            .await
+        emit_celery(
+            &self.pool,
+            FIRE_TICK_TASK,
+            vec![Value::String(ticker_id.to_string())],
+        )
+        .await
             .map_err(PortError::Transport)
     }
 
@@ -1364,19 +1369,25 @@ fn unusable_password() -> String {
     format!("!{}", uuid::Uuid::new_v4().as_simple())
 }
 
-/// Publish one Celery message through the F-09 AMQP publisher (the
-/// `auth_session::email` `publish_message` precedent: connect, publish,
-/// close per message). Broker errors propagate to the caller, which
-/// logs them — every emit site is isolated in Python.
-async fn emit_celery(task: &str, args: Vec<Value>) -> Result<(), String> {
-    let config = pidash_jobs::AmqpConfig::from_env().map_err(|error| error.to_string())?;
-    let publisher = pidash_jobs::Publisher::connect(&config)
+/// Enqueue one task message onto the Postgres-backed queue (`rust_job_queue`),
+/// the `auth_session::email` `publish_message` shape without the broker.
+/// Enqueue errors propagate to the caller, which logs them — every emit site
+/// is isolated in Python.
+async fn emit_celery(
+    pool: &sqlx::PgPool,
+    task: &str,
+    args: Vec<Value>,
+) -> Result<(), String> {
+    let message = pidash_jobs::TaskMessage::new(task, args, Map::new());
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        Value::Array(message.args.clone()),
+        Value::Object(message.kwargs.clone()),
+    );
+    pidash_jobs::queue::enqueue(pool, &job)
         .await
-        .map_err(|error| error.to_string())?;
-    let message = pidash_jobs::CeleryTaskMessage::new(task, args, Map::new());
-    let outcome = publisher.publish(&message).await;
-    let _ = publisher.close().await;
-    outcome.map_err(|error| error.to_string())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Live enqueue: `_ensure_group` (`outbox.py:139-148`, BUSYGROUP

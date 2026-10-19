@@ -50,7 +50,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 
 /// Celery wire name for `issue_activity` (bare `@shared_task` default).
 pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
@@ -92,7 +92,7 @@ impl IssueActivityPublish {
     /// Build the `.delay()` message: first attempt, `args = []`, kwargs in
     /// the call-site order `type, requested_data, actor_id, issue_id,
     /// project_id, current_instance, epoch`.
-    pub fn message(&self) -> CeleryTaskMessage {
+    pub fn message(&self) -> TaskMessage {
         let mut kwargs = Map::new();
         kwargs.insert("type".to_owned(), Value::String(self.activity_type.clone()));
         kwargs.insert("requested_data".to_owned(), opt_str(&self.requested_data));
@@ -107,7 +107,7 @@ impl IssueActivityPublish {
             opt_str(&self.current_instance),
         );
         kwargs.insert("epoch".to_owned(), Value::Number(self.epoch.into()));
-        CeleryTaskMessage::new(ISSUE_ACTIVITY_TASK, Vec::new(), kwargs)
+        TaskMessage::new(ISSUE_ACTIVITY_TASK, Vec::new(), kwargs)
     }
 }
 
@@ -362,8 +362,8 @@ pub fn intake_updated(
 /// `not asset.storage_metadata` (`:147`), after `is_uploaded = True` is
 /// set but before `save(update_fields=["attributes", "is_uploaded"])`
 /// (`:145-153`). No kwargs.
-pub fn asset_metadata_message(asset_id: &str) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+pub fn asset_metadata_message(asset_id: &str) -> TaskMessage {
+    TaskMessage::new(
         GET_ASSET_OBJECT_METADATA_TASK,
         vec![Value::String(asset_id.to_owned())],
         Map::new(),
@@ -408,7 +408,7 @@ mod tests {
     /// present, `task`/`lang` match, and the body carries exactly the
     /// published args/kwargs.
     fn assert_wire(
-        message: &CeleryTaskMessage,
+        message: &TaskMessage,
         task: &str,
         args: Value,
         kwargs: &Map<String, Value>,
@@ -439,7 +439,7 @@ mod tests {
         assert_eq!(&body_kwargs, kwargs);
     }
 
-    fn kwargs_keys(message: &CeleryTaskMessage) -> Vec<String> {
+    fn kwargs_keys(message: &TaskMessage) -> Vec<String> {
         message.body()[1]
             .as_object()
             .expect("kwargs object")

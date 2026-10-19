@@ -111,7 +111,8 @@ use uuid::Uuid;
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_db::app_pages::strip::sync_description_stripped;
-use pidash_jobs::celery::CeleryTaskMessage;
+use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
+use pidash_jobs::TaskMessage;
 use pidash_jobs::queue::{self, NewJob};
 use pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_services::app_issues::serializers_create::{
@@ -5920,7 +5921,7 @@ async fn draft_retrieve(
 async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &Uuid) {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    let message = CeleryTaskMessage::new(
+    let message = TaskMessage::new(
         SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
@@ -6816,7 +6817,7 @@ fn request_origin(state: &AppState) -> Result<String, Denial> {
 /// Enqueue failures log and the response stands (Django's broker publish
 /// is equally fire-and-forget from the view's perspective).
 async fn enqueue_activity_emit(pool: &sqlx::PgPool, emit: &wtask::WorkspaceIssueActivityEmit) {
-    let message = CeleryTaskMessage::new(emit.task_name(), vec![], emit.kwargs());
+    let message = TaskMessage::new(emit.task_name(), vec![], emit.kwargs());
     let job = NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),

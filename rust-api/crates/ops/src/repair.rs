@@ -162,22 +162,23 @@ pub async fn run_fix(args: FixArgs) {
 }
 
 async fn run_sync(kind: pidash_services::ops::repair::SyncKind) {
-    use pidash_jobs::celery::CeleryTaskMessage;
+    use pidash_jobs::TaskMessage;
     use pidash_services::ops::repair as decisions;
 
     let batch_size = read_input(BATCH_SIZE_PROMPT);
     let countdown_raw = read_input(BATCH_COUNTDOWN_PROMPT);
     let message = decisions::sync_message(kind, &batch_size, &countdown_raw)
         .unwrap_or_else(|message| fail(message));
-    let config = pidash_jobs::AmqpConfig::from_env().unwrap_or_else(|e| fail(e));
-    let publisher = pidash_jobs::Publisher::connect(&config)
-        .await
-        .unwrap_or_else(|e| fail(e));
-    let wire = CeleryTaskMessage::new(message.task, vec![], message.kwargs);
-    publisher.publish(&wire).await.unwrap_or_else(|e| fail(e));
-    // The message has landed; Django never reports connection teardown
-    // (interpreter shutdown swallows it), so neither do we.
-    let _ = publisher.close().await;
+    let pools = connect_primary().await;
+    let wire = TaskMessage::new(message.task, vec![], message.kwargs);
+    let job = pidash_jobs::queue::NewJob::new(
+        wire.task.clone(),
+        serde_json::Value::Array(wire.args.clone()),
+        serde_json::Value::Object(wire.kwargs.clone()),
+    );
+    if let Err(error) = pidash_jobs::queue::enqueue(pools.primary(), &job).await {
+        fail(error.to_string());
+    }
     println!("{}", kind.done_line());
 }
 

@@ -717,7 +717,7 @@ pub async fn guest_view_all(pool: &PgPool, project_id: &Uuid) -> Result<bool, De
 /// without a queue table the response still stands — Django would have
 /// answered 500 only when its own broker write failed, and the proxy
 /// contract tests never run a worker.
-pub async fn enqueue_message(pool: &PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+pub async fn enqueue_message(pool: &PgPool, message: pidash_jobs::TaskMessage) {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),
@@ -736,10 +736,10 @@ fn soft_delete_message(
     app_label: &str,
     model_name: &str,
     pk: &Uuid,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     let mut kwargs = serde_json::Map::new();
     kwargs.insert("using".to_owned(), serde_json::Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             serde_json::Value::String(app_label.to_string()),

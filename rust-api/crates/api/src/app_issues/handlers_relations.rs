@@ -810,7 +810,7 @@ const CRAWL_LINK_TASK: &str = "pi_dash.bgtasks.work_item_link_task.crawl_work_it
 /// Enqueue a worker message for the worker to forward to the broker
 /// (Python-owned task). Best-effort: without a queue the response still
 /// stands (the intake-handler precedent).
-async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage) {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),
@@ -823,14 +823,14 @@ async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::Cele
 
 /// Best-effort kwargs-only publish (every `.delay(...)` call below).
 async fn enqueue_kwargs(pool: &sqlx::PgPool, task: &str, kwargs: Map<String, Value>) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(task, vec![], kwargs);
+    let message = pidash_jobs::TaskMessage::new(task, vec![], kwargs);
     enqueue_message(pool, message).await;
 }
 
 /// Best-effort positional-args publish (`crawl_work_item_link_title`
 /// takes `(id, url)` positionally, `link.py:52,79`).
 async fn enqueue_args(pool: &sqlx::PgPool, task: &str, args: Vec<Value>) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(task, args, Map::new());
+    let message = pidash_jobs::TaskMessage::new(task, args, Map::new());
     enqueue_message(pool, message).await;
 }
 
@@ -840,7 +840,7 @@ async fn enqueue_args(pool: &sqlx::PgPool, task: &str, args: Vec<Value>) {
 async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &uuid::Uuid) {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+    let message = pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
@@ -5807,7 +5807,7 @@ async fn pr_destroy(
     // The recorded fan-out, verbatim and in Python order.
     for task in outcome.enqueues {
         let message =
-            pidash_jobs::celery::CeleryTaskMessage::new(task.task, task.args, task.kwargs);
+            pidash_jobs::TaskMessage::new(task.task, task.args, task.kwargs);
         enqueue_message(&ctx.pool, message).await;
     }
     empty_response(StatusCode::NO_CONTENT)

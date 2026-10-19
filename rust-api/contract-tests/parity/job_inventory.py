@@ -74,6 +74,8 @@ def dump_django_jobs(api_dir: str, settings_module: str) -> dict:
     }
     tasks = []
     for name in sorted(registered | set(defined.keys())):
+        if name in NON_PI_DASH_TASKS:
+            continue
         spec = defined.get(name)
         tasks.append(
             {
@@ -249,32 +251,23 @@ WIRE_GAPS = (
     ("runner.", "W-runner"),
 )
 
-# Registered but never published (zero references beyond the
-# definition and its own log line, verified by hand): forwarding
-# preserves their non-execution, so there is nothing to wire.
-DORMANT_TASKS = {
-    "runner.sweep_run_message_dedupe",
-    "runner.sweep_stale_runners",
-    "runner.sweep_idle_sessions",
-    "runner.sweep_old_streams",
-}
-
-# Hybrid worker: registered and live, but Rust has no live execution path
-# for the body, so the Python worker stays the owner post-switchover and
-# forwarding preserves the full Python execution. Verified by hand per
-# task; each entry carries its own detail (and revisit) below.
-# Empty: each hybrid task has since been flipped to a live Rust
-# execution path. `assistant.run_turn` was the last one (PIDASHCONV-857
-# hybrid decision; PIDASHCONV-863 shipped the live `TurnSeam`/agent
-# runtime and `register_turn_handler`), after `delete_old_s3_link`
-# (PIDASHCONV-858, live S3 delete).
-HYBRID_WORKER_TASKS: set[str] = set()
-
-# Live-check detail per hybrid task (byte-matched against EXPECTED.md).
-HYBRID_WORKER_DETAILS: dict[str, str] = {}
-
-# Defined but never referenced anywhere (dead tasks).
-DEAD_TASKS = {
+# Names excluded from the parity comparison on BOTH sides: not Pi Dash
+# tasks (Celery canvas builtins; Pi Dash uses no canvas) or dead Python
+# code (defined, never referenced). PIDASHCONV-1108 drops them from the
+# Rust inventory table and from this dump alike, so they never appear in
+# the diff.
+NON_PI_DASH_TASKS = {
+    # Celery canvas builtins — no canvas usage anywhere in the codebase.
+    "celery.accumulate",
+    "celery.backend_cleanup",
+    "celery.chain",
+    "celery.chord",
+    "celery.chord_unlock",
+    "celery.chunks",
+    "celery.group",
+    "celery.map",
+    "celery.starmap",
+    # Dead: defined in `analytic_plot_export` but never referenced.
     "pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email",
 }
 
@@ -426,6 +419,11 @@ def diff_jobs(django: dict, rust: dict) -> dict:
 
 def _diff_task(name: str, task: dict, own: str) -> dict:
     base = {"task": name, "registered": task["registered"], "owner": own}
+    # Every Rust-table row is Rust-owned (the standalone rule,
+    # PIDASHCONV-1108): the Python plane and the AMQP hand-off are gone,
+    # so a Django task either appears here (OWNED) or is absent from the
+    # table (MISSING, resolved in `diff_jobs`). The Celery builtins and
+    # dead code never reach here (`NON_PI_DASH_TASKS`).
     if own == "rust":
         if task["registered"]:
             return base | {"disposition": "OWNED", "detail": "owned-registered", "gap": "-"}
@@ -434,68 +432,19 @@ def _diff_task(name: str, task: dict, own: str) -> dict:
             "detail": "owned-unregistered (superset; django-side PDASHOSS01-292)",
             "gap": "-",
         }
-    if task["builtin"]:
-        return base | {
-            "disposition": "PROXIED",
-            "detail": "celery-builtin; no canvas usage",
-            "gap": "-",
-        }
-    if task["registered"]:
-        if name in DORMANT_TASKS:
-            return base | {
-                "disposition": "PROXIED",
-                "detail": "dormant (never published; forward preserves non-execution)",
-                "gap": "-",
-            }
-        if name in HYBRID_WORKER_TASKS:
-            return base | {
-                "disposition": "PROXIED",
-                "detail": HYBRID_WORKER_DETAILS[name],
-                "gap": "-",
-            }
-        if not task["called"] and not task["scheduled"]:
+    # Unreachable today (no row is Python-owned). Kept as a loud guard so a
+    # reintroduced non-Rust owner fails the check instead of passing
+    # silently; the W-* gap ids stay reserved in `WIRE_GAPS`.
+    for prefix, gap in WIRE_GAPS:
+        if name.startswith(prefix):
             return base | {
                 "disposition": "MISSING",
-                "detail": "live-registered but no publishers found",
-                "gap": "W0",
+                "detail": "must-wire (lost without python worker)",
+                "gap": gap,
             }
-        for prefix, gap in WIRE_GAPS:
-            if name.startswith(prefix):
-                return base | {
-                    "disposition": "MISSING",
-                    "detail": "must-wire (lost without python worker)",
-                    "gap": gap,
-                }
-        return base | {
-            "disposition": "MISSING",
-            "detail": "must-wire (no gap rule)",
-            "gap": "W0",
-        }
-    if name in DEAD_TASKS:
-        return base | {
-            "disposition": "PROXIED",
-            "detail": "dead (defined, never referenced)",
-            "gap": "-",
-        }
-    if name == "managed_runner.expire_waiting_runs":
-        return base | {
-            "disposition": "PROXIED",
-            "detail": "cloud-only app; oss beat fires into the void on both sides",
-            "gap": "-",
-        }
-    # NOTE (PIDASHCONV-1104): the project_invitation special-case lived
-    # here ("task never invoked") until Django d656243d fixed the invite.py
-    # call site; the task is Rust-owned now and classifies via the
-    # `own == "rust"` arm above.
-    if task["called"] or task["scheduled"]:
-        return base | {
-            "disposition": "PROXIED",
-            "detail": "django-drops-too (PDASHOSS01-292)",
-            "gap": "-",
-        }
     return base | {
-        "disposition": "PROXIED",
-        "detail": "unregistered-uncalled (review)",
+        "disposition": "MISSING",
+        "detail": "non-rust owner in the Rust table",
         "gap": "W0",
     }
 

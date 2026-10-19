@@ -21,7 +21,7 @@ Counts (2026-10-17, `pi_dash.settings.test`):
 
 - Routes: 528 Django rows — 521 OWNED, 7 MISSING (all listed below),
   9 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
-- Jobs: 87 tasks — 76 OWNED, 11 proxied by design, 0 MISSING;
+- Jobs: 77 tasks — 77 OWNED, 0 PROXIED, 0 MISSING;
   beat 28/28 OWNED (same task, same cadence on both sides).
 
 ## Routes
@@ -142,10 +142,11 @@ New Rust-only surface fails the check until a justification is added to
 
 ## Jobs
 
-Task dispositions: OWNED (Rust runs it), PROXIED (Rust forwards to the
-Python worker and Django's outcome is preserved — each row says why),
-MISSING (live registered task Rust forwards that would be lost at
-switchover — one fix issue per register fn).
+Task dispositions: OWNED (the Rust worker runs it) or MISSING (a live
+Django task absent from the Rust registry). There is no PROXIED
+disposition any more: PIDASHCONV-1108 removed the AMQP hand-off, so the
+worker never forwards to a Python plane — an unknown name parks as
+failed (`unknown task <name>`).
 
 Note: 23 OWNED tasks are Rust-superset executions — called in Django
 but unregistered there (dropped; PDASHOSS01-292), while the Rust
@@ -229,24 +230,20 @@ The row reclassified to OWNED (signature deleted).
 ```expected-jobs
 ```
 
-### Proxied by design (10 rows)
+### Non-Pi-Dash tasks (0 rows; dropped by PIDASHCONV-1108)
 
-No fix issue: forwarding preserves Django's outcome on every row.
+Ten names that are not PI Dash tasks are excluded from the comparison on
+both sides (`job_inventory.py` `NON_PI_DASH_TASKS` and the Rust
+inventory table), so they no longer appear as PROXIED rows:
 
-- `celery.*` (9): Celery canvas builtins; no canvas usage in the codebase.
-- `export_analytics_to_csv_email`: dead (defined, never referenced).
+- `celery.*` (9): Celery canvas builtins — `celery.accumulate`,
+  `celery.backend_cleanup`, `celery.chain`, `celery.chord`,
+  `celery.chord_unlock`, `celery.chunks`, `celery.group`, `celery.map`,
+  `celery.starmap`. Pi Dash uses no canvas.
+- `pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email`:
+  dead — defined but never referenced.
 
 ```expected-jobs
-PROXIED :: celery.accumulate :: celery-builtin; no canvas usage
-PROXIED :: celery.backend_cleanup :: celery-builtin; no canvas usage
-PROXIED :: celery.chain :: celery-builtin; no canvas usage
-PROXIED :: celery.chord :: celery-builtin; no canvas usage
-PROXIED :: celery.chord_unlock :: celery-builtin; no canvas usage
-PROXIED :: celery.chunks :: celery-builtin; no canvas usage
-PROXIED :: celery.group :: celery-builtin; no canvas usage
-PROXIED :: celery.map :: celery-builtin; no canvas usage
-PROXIED :: celery.starmap :: celery-builtin; no canvas usage
-PROXIED :: pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email :: dead (defined, never referenced)
 ```
 
 ## Beat

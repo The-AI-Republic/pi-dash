@@ -1990,10 +1990,10 @@ async fn patch_view(
 pub(crate) fn soft_delete_message(
     model: &str,
     pk: &uuid::Uuid,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),

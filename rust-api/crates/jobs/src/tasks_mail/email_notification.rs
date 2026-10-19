@@ -11,7 +11,7 @@ use std::sync::Arc;
 use chrono::{DateTime, NaiveDateTime};
 use serde_json::{Map, Value};
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
 
 /// Value stored under every mail lock (`acquire_lock` passes the literal
@@ -718,7 +718,7 @@ pub fn stack_delay_message(
     notification_data: Map<String, Value>,
     receiver_id: &str,
     email_notification_ids: &[String],
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert(
         "issue_id".to_owned(),
@@ -744,7 +744,7 @@ pub fn stack_delay_message(
                 .collect(),
         ),
     );
-    CeleryTaskMessage::new(super::SEND_EMAIL_NOTIFICATION_TASK, Vec::new(), kwargs)
+    TaskMessage::new(super::SEND_EMAIL_NOTIFICATION_TASK, Vec::new(), kwargs)
 }
 
 /// Every way the stack task can fail. Python (`:46-84`) has NO
@@ -780,14 +780,13 @@ pub trait StackStore: Send + Sync {
 }
 
 /// The stack task's fan-out surface: `send_email_notification.delay(…)`
-/// (`:75-81`). [`AmqpStackOutbox`] publishes over AMQP (coexistence: the
-/// Python workers execute the sends); [`super::live::QueueStackOutbox`]
-/// enqueues into `rust_job_queue` (post-switchover: the Rust worker
-/// executes them); tests use a recording fake.
+/// (`:75-81`). [`super::live::QueueStackOutbox`] enqueues into
+/// `rust_job_queue` (the Rust worker executes them); tests use a
+/// recording fake.
 pub trait StackOutbox: Send + Sync {
     fn delay_send(
         &self,
-        message: CeleryTaskMessage,
+        message: TaskMessage,
     ) -> impl std::future::Future<Output = Result<(), StackError>> + Send;
 }
 
@@ -871,29 +870,6 @@ impl StackStore for SqlStackStore {
             .await
             .map_err(|e| StackError::Store(e.to_string()))?;
         Ok(())
-    }
-}
-
-/// Live [`StackOutbox`] over the AMQP publisher: the coexistence path
-/// that carries the fanned-out sends to the Python workers until the
-/// domain gate flips ownership.
-pub struct AmqpStackOutbox<'a> {
-    publisher: &'a crate::amqp::Publisher,
-}
-
-impl<'a> AmqpStackOutbox<'a> {
-    /// Borrow the worker's publisher.
-    pub fn new(publisher: &'a crate::amqp::Publisher) -> Self {
-        Self { publisher }
-    }
-}
-
-impl StackOutbox for AmqpStackOutbox<'_> {
-    async fn delay_send(&self, message: CeleryTaskMessage) -> Result<(), StackError> {
-        self.publisher
-            .publish(&message)
-            .await
-            .map_err(|e| StackError::Outbox(e.to_string()))
     }
 }
 
@@ -1812,7 +1788,7 @@ pub fn parse_send_call(args: &Value, kwargs: &Value) -> Result<SendCall, CallErr
 
 /// `.delay()` equivalent for the send (`:75-81`): same kwargs the
 /// stack fan-out passes, same insertion order.
-pub fn send_delay_message(call: &SendCall) -> CeleryTaskMessage {
+pub fn send_delay_message(call: &SendCall) -> TaskMessage {
     stack_delay_message(
         call.issue_id.as_deref(),
         call.notification_data.clone(),
@@ -2595,11 +2571,11 @@ mod part2_tests {
     }
 
     struct FakeStackOutbox {
-        sent: Mutex<Vec<CeleryTaskMessage>>,
+        sent: Mutex<Vec<TaskMessage>>,
     }
 
     impl StackOutbox for FakeStackOutbox {
-        async fn delay_send(&self, message: CeleryTaskMessage) -> Result<(), StackError> {
+        async fn delay_send(&self, message: TaskMessage) -> Result<(), StackError> {
             self.sent.lock().expect("lock").push(message);
             Ok(())
         }

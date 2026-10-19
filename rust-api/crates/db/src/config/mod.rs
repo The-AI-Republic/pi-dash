@@ -29,7 +29,7 @@ pub use registry::{
 };
 pub use settings::{
     is_valid_region_name, AssistantSettings, CloudAgentSettings, DatabaseSettings, LoopSettings,
-    ManagedRunnerSettings, NoOverlay, Profile, RabbitSettings, RedisSettings, ReplicaSettings,
+    ManagedRunnerSettings, NoOverlay, Profile, RedisSettings, ReplicaSettings,
     RunnerSettings, SessionSettings, Settings, SettingsOverlay, StorageSettings, UrlSettings,
 };
 pub use value::ConfigValue;

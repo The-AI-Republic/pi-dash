@@ -9,9 +9,8 @@
 //!
 //! [`TASK_NAMES`] pins the two Celery wire names; [`register_assistant_tasks`]
 //! builds the handler table for the worker [`Registry`][crate::worker::Registry].
-//! Like the mail tasks, registration does not flip the live worker — the
-//! domain gate flips ownership after the proxy pass, so until then both names
-//! still route to `PythonOwned` (see [`crate::worker::route_for`]).
+//! Both names are registered in `worker()` (the standalone rule): an
+//! unregistered name parks as failed, never forwarded to Python.
 
 pub mod run_turn;
 pub mod sweep;
@@ -44,7 +43,6 @@ pub fn register_assistant_tasks<S: TurnSeam + 'static>(
 mod tests {
     use super::run_turn::{AgentError, ModelError, ToolsetHandle};
     use super::*;
-    use crate::worker::{route_for, Route};
     use serde_json::Value;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -159,7 +157,7 @@ mod tests {
     async fn registered_tasks_route_local() {
         let mut registry = crate::worker::Registry::new();
         for name in TASK_NAMES {
-            assert_eq!(route_for(&registry, name), Route::PythonOwned);
+            assert!(!registry.owns(name), "{name} unregistered before boot");
         }
         // `connect_lazy` opens no connection: registration is pure table
         // work, so this runs with no database.
@@ -167,11 +165,7 @@ mod tests {
             .expect("lazy pool");
         register_assistant_tasks(&mut registry, pool, Arc::new(NoopSeam));
         for name in TASK_NAMES {
-            assert_eq!(
-                route_for(&registry, name),
-                Route::Local,
-                "{name} must run locally"
-            );
+            assert!(registry.owns(name), "{name} must run locally");
         }
     }
 }

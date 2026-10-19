@@ -100,7 +100,7 @@ use pidash_services::dispatch::{
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason, ManagedRunnerUnavailable};
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::queue::{enqueue_exec, NewJob};
 
 // ---------------------------------------------------------------------------
@@ -117,8 +117,8 @@ pub const RUN_CLOUD_AGENT_TASK: &str = "cloud_agent.run_agent_run";
 /// hyphenated run id (`dispatch.py:45` appends `str(run.pk)`) — and no kwargs.
 /// The worker forward path rebuilds this exact v2 body from the queue row,
 /// whichever plane serves the task.
-pub fn run_cloud_agent_message(run_id: &str) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+pub fn run_cloud_agent_message(run_id: &str) -> TaskMessage {
+    TaskMessage::new(
         RUN_CLOUD_AGENT_TASK,
         vec![Value::String(run_id.to_owned())],
         Map::new(),

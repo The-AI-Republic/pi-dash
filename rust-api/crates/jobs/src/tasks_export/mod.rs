@@ -41,7 +41,7 @@ pub use issue::register_issue_export_task;
 use pidash_services::tasks_cleanup::exports as cleanup;
 use pidash_types::tasks_cleanup::exports_dto as dto;
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 
 /// `issue_export_task` (`export_task.py:127-128`, bare `@shared_task`).
 pub use dto::ISSUE_EXPORT_TASK_NAME as ISSUE_EXPORT_TASK;
@@ -172,7 +172,7 @@ pub fn bind_export_task_call(args: &Value, kwargs: &Value) -> Result<ExportTaskC
 
 /// `issue_export_task.delay(...)` exactly as the exporter view calls it
 /// (`app/views/exporter/base.py:49-56`): kwargs in signature order.
-pub fn issue_export_task_message(call: &ExportTaskCall) -> CeleryTaskMessage {
+pub fn issue_export_task_message(call: &ExportTaskCall) -> TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("provider".to_owned(), Value::String(call.provider.clone()));
     kwargs.insert(
@@ -192,7 +192,7 @@ pub fn issue_export_task_message(call: &ExportTaskCall) -> CeleryTaskMessage {
     kwargs.insert("token_id".to_owned(), Value::String(call.token_id.clone()));
     kwargs.insert("multiple".to_owned(), Value::Bool(call.multiple));
     kwargs.insert("slug".to_owned(), Value::String(call.slug.clone()));
-    CeleryTaskMessage::new(ISSUE_EXPORT_TASK, Vec::new(), kwargs)
+    TaskMessage::new(ISSUE_EXPORT_TASK, Vec::new(), kwargs)
 }
 
 /// `upload_to_s3` object key (`export_task.py:46`):

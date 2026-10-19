@@ -1005,7 +1005,7 @@ async fn enqueue_best_effort(
     args: Vec<Value>,
     kwargs: Map<String, Value>,
 ) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(task, args, kwargs);
+    let message = pidash_jobs::TaskMessage::new(task, args, kwargs);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),
@@ -1028,10 +1028,10 @@ async fn enqueue_invitation(pool: &PgPool, emit: &tasks::WorkspaceInvitationEmit
 /// using=None)` (`db/mixins.py:77-78`): three positional args, `using`
 /// stays a null kwarg — exactly as Python's `.delay(label, name, pk,
 /// using=using)` call sends it with `using=None`.
-fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),

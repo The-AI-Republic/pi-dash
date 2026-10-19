@@ -325,7 +325,7 @@ pub(crate) fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
 /// Best-effort deferred publish of a `.delay(...)` call (handlers
 /// precedent): enqueue failures never change the response.
 pub(crate) async fn enqueue_task(pool: &sqlx::PgPool, task: &str, kwargs: Map<String, Value>) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(task, vec![], kwargs);
+    let message = pidash_jobs::TaskMessage::new(task, vec![], kwargs);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),
@@ -344,10 +344,10 @@ pub(crate) async fn enqueue_task(pool: &sqlx::PgPool, task: &str, kwargs: Map<St
 pub(crate) fn soft_delete_message(
     model: &str,
     pk: &uuid::Uuid,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),

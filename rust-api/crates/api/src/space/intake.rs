@@ -1257,7 +1257,7 @@ async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, sqlx::Error>
 /// Enqueue a worker message for the worker to forward to the broker
 /// (Python-owned task). Best-effort after commit: without it the response
 /// still stands (see the module docs).
-async fn enqueue_message(pool: &PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+async fn enqueue_message(pool: &PgPool, message: pidash_jobs::TaskMessage) {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),
@@ -1272,10 +1272,10 @@ async fn enqueue_message(pool: &PgPool, message: pidash_jobs::celery::CeleryTask
 /// (`db/mixins.py:78`): three positional args, `using` stays a null
 /// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
 /// call sends it.
-fn soft_delete_message(intake_issue_id: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn soft_delete_message(intake_issue_id: &Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = serde_json::Map::new();
     kwargs.insert("using".to_owned(), serde_json::Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             serde_json::Value::String("db".to_string()),

@@ -81,7 +81,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::queue::NewJob;
 use crate::tasks_webhooks::activity_dispatch::django_dumps;
 /// The activity task name, owned by D-08
@@ -113,7 +113,7 @@ fn opt_string(value: Option<&str>) -> Value {
 /// body whichever plane serves the task. Retry policy is the
 /// [`NewJob::new`] default (`max_retries = 3`, 180s delay), matching the
 /// plain `@shared_task` on both Python tasks.
-fn job_from_message(message: CeleryTaskMessage) -> NewJob {
+fn job_from_message(message: TaskMessage) -> NewJob {
     // Moved, never cloned (see `model_activity_kwargs`).
     NewJob::new(
         message.task,
@@ -169,8 +169,8 @@ pub fn model_created_message(
     actor_id: &str,
     slug: &str,
     origin: &str,
-) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+) -> TaskMessage {
+    TaskMessage::new(
         MODEL_ACTIVITY_TASK_NAME,
         Vec::new(),
         model_activity_kwargs(
@@ -218,8 +218,8 @@ pub fn model_updated_message(
     actor_id: &str,
     slug: &str,
     origin: &str,
-) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+) -> TaskMessage {
+    TaskMessage::new(
         MODEL_ACTIVITY_TASK_NAME,
         Vec::new(),
         model_activity_kwargs(
@@ -312,8 +312,8 @@ fn issue_activity_message(
     epoch: i64,
     notification: Option<bool>,
     origin: Option<&str>,
-) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+) -> TaskMessage {
+    TaskMessage::new(
         ISSUE_ACTIVITY_TASK,
         Vec::new(),
         issue_activity_kwargs(
@@ -387,7 +387,7 @@ pub fn cycle_deleted_message(
     actor_id: &str,
     project_id: &str,
     epoch: i64,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     let requested_data =
         delete_requested_data("cycle_id", cycle_id, "cycle_name", cycle_name, issues);
     issue_activity_message(
@@ -429,7 +429,7 @@ pub fn cycle_issue_added_message(
     current_instance: &str,
     epoch: i64,
     origin: &str,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     issue_activity_message(
         CYCLE_CREATED,
         requested_data,
@@ -473,7 +473,7 @@ pub fn cycle_issue_removed_message(
     actor_id: &str,
     project_id: &str,
     epoch: i64,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     let requested_data = remove_requested_data("cycle_id", cycle_id, issue_id);
     issue_activity_message(
         CYCLE_DELETED,
@@ -512,7 +512,7 @@ pub fn module_deleted_message(
     project_id: &str,
     epoch: i64,
     origin: &str,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     let requested_data =
         delete_requested_data("module_id", module_id, "module_name", module_name, issues);
     let current_instance = module_name_instance(module_name);
@@ -563,7 +563,7 @@ pub fn module_issue_added_message(
     current_instance: &str,
     epoch: i64,
     origin: &str,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     issue_activity_message(
         MODULE_CREATED,
         requested_data,
@@ -607,7 +607,7 @@ pub fn module_issue_removed_message(
     actor_id: &str,
     project_id: &str,
     epoch: i64,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     let requested_data = remove_requested_data("module_id", module_id, issue_id);
     let current_instance = module_name_instance(module_name);
     issue_activity_message(
@@ -673,7 +673,7 @@ pub fn cycle_issues_transferred_message(
     moves: &[CycleMove],
     epoch: i64,
     origin: &str,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     let mut requested = Map::with_capacity(1);
     requested.insert("cycles_list".to_owned(), Value::Array(Vec::new()));
     let mut current = Map::with_capacity(2);
@@ -743,7 +743,7 @@ mod tests {
     /// protocol-v2 header keys are present, `task`/`lang` match, and the
     /// body carries exactly the published args/kwargs.
     fn assert_wire(
-        message: &CeleryTaskMessage,
+        message: &TaskMessage,
         task: &str,
         args: Value,
         kwargs: &Map<String, Value>,
@@ -772,7 +772,7 @@ mod tests {
         assert_eq!(body[1].as_object().expect("kwargs object"), kwargs);
     }
 
-    fn kwargs_keys(message: &CeleryTaskMessage) -> Vec<String> {
+    fn kwargs_keys(message: &TaskMessage) -> Vec<String> {
         message.kwargs.keys().cloned().collect()
     }
 
@@ -780,7 +780,7 @@ mod tests {
     /// (task-oracle style: the wire this module publishes must bind cleanly
     /// where the worker runs it).
     fn bind_issue(
-        message: &CeleryTaskMessage,
+        message: &TaskMessage,
     ) -> crate::tasks_webhooks::activity_dispatch::IssueActivityCall {
         bind_issue_activity(
             &Value::Array(message.args.clone()),
@@ -791,7 +791,7 @@ mod tests {
 
     /// Bind a published model message the way the D-08 fan-out binds it.
     fn bind_model(
-        message: &CeleryTaskMessage,
+        message: &TaskMessage,
     ) -> crate::tasks_webhooks::webhook_fanout::ModelActivityCall {
         bind_model_activity(
             &Value::Array(message.args.clone()),

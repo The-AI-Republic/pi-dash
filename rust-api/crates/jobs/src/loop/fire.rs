@@ -527,7 +527,7 @@ mod tests {
         let mut registry = Registry::new();
         assert_eq!(
             route_for(&registry, FIRE_LOOP_TARGET_TASK),
-            Route::PythonOwned
+            Route::Unknown
         );
         register_fire(&mut registry, pool);
         assert!(registry.owns(FIRE_LOOP_TARGET_TASK));

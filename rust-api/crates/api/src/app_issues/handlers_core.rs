@@ -105,7 +105,7 @@ use pidash_db::app_pages::strip::sync_description_stripped;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,
 };
-use pidash_jobs::celery::CeleryTaskMessage;
+use pidash_jobs::TaskMessage;
 use pidash_jobs::queue::{self, NewJob};
 use pidash_services::app_issues::serializers_create::{
     assignee_member_filter_sql, issue_create_to_representation, issue_create_validate,
@@ -3717,7 +3717,7 @@ async fn enqueue_task(
     args: Vec<Value>,
     kwargs: Map<String, Value>,
 ) {
-    let message = CeleryTaskMessage::new(task, args, kwargs);
+    let message = TaskMessage::new(task, args, kwargs);
     let job = NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),

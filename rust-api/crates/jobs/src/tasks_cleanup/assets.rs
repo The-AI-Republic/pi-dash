@@ -39,7 +39,7 @@ use uuid::Uuid;
 use pidash_services::tasks_cleanup::assets as logic;
 use pidash_services::tasks_cleanup::assets::{AssetIdPair, CopyEntity, HeadMeta};
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
 
 /// `pi_dash.bgtasks.file_asset_task.delete_unuploaded_file_asset`
@@ -643,16 +643,16 @@ impl AssetStore for PgAssetStore {
 
 /// The `.delay()` equivalent for the sweep: no args, exactly what beat
 /// publishes (`celery.py:50-53` carries no args or kwargs).
-pub fn delay_sweep() -> CeleryTaskMessage {
-    CeleryTaskMessage::new(TASK_DELETE_UNUPLOADED, Vec::new(), Map::new())
+pub fn delay_sweep() -> TaskMessage {
+    TaskMessage::new(TASK_DELETE_UNUPLOADED, Vec::new(), Map::new())
 }
 
 /// `get_asset_object_metadata.delay(asset_id=...)` (the kwarg form used
 /// by `api/views/asset.py` and `app/views/asset/v2.py`).
-pub fn delay_metadata(asset_id: &str) -> CeleryTaskMessage {
+pub fn delay_metadata(asset_id: &str) -> TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("asset_id".to_string(), Value::String(asset_id.to_string()));
-    CeleryTaskMessage::new(TASK_GET_METADATA, Vec::new(), kwargs)
+    TaskMessage::new(TASK_GET_METADATA, Vec::new(), kwargs)
 }
 
 /// `copy_s3_objects_of_description_and_assets.delay(entity_name=...,
@@ -664,7 +664,7 @@ pub fn delay_copy(
     project_id: Option<&str>,
     slug: &str,
     user_id: &str,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert(
         "entity_name".to_string(),
@@ -682,7 +682,7 @@ pub fn delay_copy(
     );
     kwargs.insert("slug".to_string(), Value::String(slug.to_string()));
     kwargs.insert("user_id".to_string(), Value::String(user_id.to_string()));
-    CeleryTaskMessage::new(TASK_COPY_S3_OBJECTS, Vec::new(), kwargs)
+    TaskMessage::new(TASK_COPY_S3_OBJECTS, Vec::new(), kwargs)
 }
 
 /// Install the three worker handlers owning the asset task names.

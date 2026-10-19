@@ -53,7 +53,7 @@ use pidash_db::config::registry::{ConfigRegistry, ConfigSource};
 use pidash_db::config::{ConfigValue, Keyring};
 
 use super::tasks::delay_message;
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 
 /// What the command layer reports as failure. Messages mirror Django's
 /// `CommandError` strings exactly.
@@ -820,7 +820,7 @@ pub struct RegisterReport {
     pub current_version: String,
     pub latest_version: String,
     pub stdout: Vec<String>,
-    pub delay: CeleryTaskMessage,
+    pub delay: TaskMessage,
 }
 
 /// Check-then-register, exactly like the management command.

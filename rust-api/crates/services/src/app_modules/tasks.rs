@@ -49,13 +49,13 @@
 //! [`RECENT_VISITED_TASK`] and there is no queue override.
 //!
 //! Crate-graph note: `pidash-jobs` depends on `pidash-services`, so this
-//! module cannot name `jobs::celery::CeleryTaskMessage` (that would be a
+//! module cannot name `jobs::celery::TaskMessage` (that would be a
 //! dependency cycle). It publishes the Celery-format body parts instead —
 //! task name + [`ModelActivityEmit::kwargs`] /
 //! [`ModuleIssueActivityEmit::kwargs`] / [`RecentVisitedEmit::kwargs`] —
 //! and the handlers (PIDASHCONV-391, in the `api` crate which already
 //! depends on `pidash-jobs`) wrap them with
-//! `CeleryTaskMessage::new(task, vec![], kwargs)` plus `queue::enqueue`
+//! `TaskMessage::new(task, vec![], kwargs)` plus `queue::enqueue`
 //! (the D-02 `space::intake` precedent), transactionally post-commit.
 //! The dump *text* (`requested_data`, `current_instance`, `origin`) is the
 //! caller's job: `json.dumps(..., cls=DjangoJSONEncoder)` in Python, i.e.

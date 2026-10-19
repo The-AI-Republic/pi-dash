@@ -1383,7 +1383,7 @@ mod tests {
         }
         let pool = bad_pool();
         let mut registry = Registry::new();
-        assert_eq!(route_for(&registry, FIRE_TICK_TASK), Route::PythonOwned);
+        assert_eq!(route_for(&registry, FIRE_TICK_TASK), Route::Unknown);
         register_fire_tick(&mut registry, pool, Arc::new(NoSeam));
         assert!(registry.owns(FIRE_TICK_TASK));
         assert_eq!(route_for(&registry, FIRE_TICK_TASK), Route::Local);

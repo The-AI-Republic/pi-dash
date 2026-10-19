@@ -484,7 +484,7 @@ pub fn parse_id(raw: &str) -> Result<Uuid, Response> {
 /// without a queue table the response still stands — Django would have
 /// answered 500 only when its own broker write failed, and the proxy
 /// contract tests never run a worker.
-pub async fn enqueue_message(pool: &PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+pub async fn enqueue_message(pool: &PgPool, message: pidash_jobs::TaskMessage) {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),
@@ -1146,7 +1146,7 @@ pub async fn run_transfer(
     kwargs.insert("origin".to_owned(), Value::String(origin));
     enqueue_message(
         pool,
-        pidash_jobs::celery::CeleryTaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs),
+        pidash_jobs::TaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs),
     )
     .await;
     Ok(())

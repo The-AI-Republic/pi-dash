@@ -67,7 +67,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::queue::NewJob;
 /// Activity `type` strings for the three intake call sites. The
 /// `issue.activity.*` pair is shared with the space publishers
@@ -192,8 +192,8 @@ pub fn intake_issue_created_message(
     requested_data: &str,
     ids: &IntakeActivityIds,
     epoch: i64,
-) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+) -> TaskMessage {
+    TaskMessage::new(
         ISSUE_ACTIVITY_TASK,
         Vec::new(),
         intake_activity_kwargs(ISSUE_CREATED, requested_data, ids, None, epoch),
@@ -226,8 +226,8 @@ pub fn intake_issue_updated_message(
     ids: &IntakeActivityIds,
     current_instance: &str,
     epoch: i64,
-) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+) -> TaskMessage {
+    TaskMessage::new(
         ISSUE_ACTIVITY_TASK,
         Vec::new(),
         intake_activity_kwargs(
@@ -270,7 +270,7 @@ pub fn intake_status_changed_message(
     current_instance: &str,
     epoch: i64,
     origin: &str,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     let mut kwargs = intake_activity_kwargs(
         INTAKE_CREATED,
         requested_data,
@@ -284,7 +284,7 @@ pub fn intake_status_changed_message(
     kwargs.insert("notification".to_owned(), Value::Bool(false));
     kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
     kwargs.insert("intake".to_owned(), intake);
-    CeleryTaskMessage::new(ISSUE_ACTIVITY_TASK, Vec::new(), kwargs)
+    TaskMessage::new(ISSUE_ACTIVITY_TASK, Vec::new(), kwargs)
 }
 
 /// The intake-patch status-change enqueue as a queue job (same payload
@@ -324,7 +324,7 @@ mod tests {
     /// header keys are present, `task`/`lang` match, and the body carries
     /// exactly the published args/kwargs.
     fn assert_wire(
-        message: &CeleryTaskMessage,
+        message: &TaskMessage,
         task: &str,
         args: Value,
         kwargs: &Map<String, Value>,
@@ -357,7 +357,7 @@ mod tests {
         IntakeActivityIds::new("u1", "i9", "p1", "k1")
     }
 
-    fn kwargs_keys(message: &CeleryTaskMessage) -> Vec<String> {
+    fn kwargs_keys(message: &TaskMessage) -> Vec<String> {
         message.body()[1]
             .as_object()
             .expect("kwargs object")
@@ -370,7 +370,7 @@ mod tests {
     /// (task-oracle style: the wire this module publishes must bind
     /// cleanly where the worker runs it).
     fn bind_message(
-        message: &CeleryTaskMessage,
+        message: &TaskMessage,
     ) -> crate::tasks_webhooks::activity_dispatch::IssueActivityCall {
         bind_issue_activity(
             &Value::Array(message.args.clone()),

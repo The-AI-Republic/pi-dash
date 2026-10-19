@@ -35,7 +35,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::queue::{enqueue, JobRow, NewJob};
 use crate::schedule::{beat_schedule, BeatEntry};
 use crate::worker::{HandlerError, Registry, Verdict};
@@ -207,9 +207,9 @@ fn fire_job(task: &str, id: &Uuid) -> NewJob {
 /// [`crate::worker::dispatch`]'s forward path arm for arm (that function is
 /// the runtime source of truth; this one exists so tests and the fire-task
 /// ports in PIDASHCONV-208/209 can assert the wire contract without a broker).
-pub fn fire_message(task: &str, id: &Uuid) -> CeleryTaskMessage {
+pub fn fire_message(task: &str, id: &Uuid) -> TaskMessage {
     let (args, kwargs) = fire_job(task, id).into_message_parts();
-    CeleryTaskMessage::new(task, args, kwargs)
+    TaskMessage::new(task, args, kwargs)
 }
 
 /// Run one scanner end to end: select the due ids, enqueue one fire job per
@@ -652,7 +652,7 @@ mod tests {
             .expect("lazy pool needs no server");
         let mut registry = Registry::new();
         for name in TASK_NAMES {
-            assert_eq!(route_for(&registry, name), Route::PythonOwned);
+            assert_eq!(route_for(&registry, name), Route::Unknown);
         }
         register_scanners(&mut registry, pool);
         assert!(registry.owns(SCAN_DUE_TICKERS_TASK));
@@ -661,10 +661,10 @@ mod tests {
         assert_eq!(route_for(&registry, SCAN_DUE_BINDINGS_TASK), Route::Local);
         assert!(!registry.owns(FIRE_TICK_TASK));
         assert!(!registry.owns(FIRE_SCHEDULER_BINDING_TASK));
-        assert_eq!(route_for(&registry, FIRE_TICK_TASK), Route::PythonOwned);
+        assert_eq!(route_for(&registry, FIRE_TICK_TASK), Route::Unknown);
         assert_eq!(
             route_for(&registry, FIRE_SCHEDULER_BINDING_TASK),
-            Route::PythonOwned
+            Route::Unknown
         );
     }
 }

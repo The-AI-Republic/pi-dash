@@ -299,13 +299,6 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("MINIO_ENDPOINT_SSL", V::Null),
         ("SIGNED_URL_EXPIRATION", V::from("3600")),
         ("WEB_URL", V::Null),
-        // RabbitMQ / Celery.
-        ("RABBITMQ_HOST", V::from("localhost")),
-        ("RABBITMQ_PORT", V::from("5672")),
-        ("RABBITMQ_USER", V::from("guest")),
-        ("RABBITMQ_PASSWORD", V::from("guest")),
-        ("RABBITMQ_VHOST", V::from("/")),
-        ("AMQP_URL", V::Null),
         // Misc product config.
         ("FILE_SIZE_LIMIT", V::from(5242880)),
         ("GITHUB_ACCESS_TOKEN", V::from(false)),

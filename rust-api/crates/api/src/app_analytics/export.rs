@@ -709,7 +709,7 @@ async fn create_inner(
     kwargs.insert("token_id".to_owned(), Value::String(token));
     kwargs.insert("multiple".to_owned(), Value::Bool(multiple));
     kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+    let message = pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_export::ISSUE_EXPORT_TASK,
         Vec::new(),
         kwargs,

@@ -1569,19 +1569,21 @@ impl delete_svc::RunnerDeleteStore for DeleteStore<'_, '_> {
 // Post-commit drain (Python's per-site `on_commit` isolation)
 // ---------------------------------------------------------------------------
 
-/// Publish one Celery message through the F-09 AMQP publisher (the
-/// run_endpoints `emit_celery` precedent: connect, publish, close per
-/// message). Broker errors propagate to the caller, which logs them —
-/// every emit site is isolated in Python.
-async fn emit_celery(task: &str, args: Vec<Value>) -> Result<(), String> {
-    let config = pidash_jobs::AmqpConfig::from_env().map_err(|error| error.to_string())?;
-    let publisher = pidash_jobs::Publisher::connect(&config)
+/// Enqueue one task message onto the Postgres-backed queue (`rust_job_queue`),
+/// the `run_endpoints` `emit_celery` shape without the broker. Enqueue errors
+/// propagate to the caller, which logs them — every emit site is isolated in
+/// Python.
+async fn emit_celery(pool: &PgPool, task: &str, args: Vec<Value>) -> Result<(), String> {
+    let message = pidash_jobs::TaskMessage::new(task, args, Map::new());
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        Value::Array(message.args.clone()),
+        Value::Object(message.kwargs.clone()),
+    );
+    pidash_jobs::queue::enqueue(pool, &job)
         .await
-        .map_err(|error| error.to_string())?;
-    let message = pidash_jobs::CeleryTaskMessage::new(task, args, Map::new());
-    let outcome = publisher.publish(&message).await;
-    let _ = publisher.close().await;
-    outcome.map_err(|error| error.to_string())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Drain collected [`DeleteEffect`]s after commit, in registration
@@ -1601,6 +1603,7 @@ async fn drain_delete_effects(
         match effect {
             DeleteEffect::PublishTerminalEffects { run_id } => {
                 if let Err(error) = emit_celery(
+                    pool,
                     finalize_kernel::TERMINAL_EFFECTS_TASK,
                     vec![Value::String(run_id.to_string())],
                 )

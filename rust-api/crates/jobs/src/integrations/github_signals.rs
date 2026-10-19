@@ -463,11 +463,11 @@ mod tests {
         let registry = Registry::new();
         assert_eq!(
             route_for(&registry, GIT_POST_COMMENT_TASK),
-            Route::PythonOwned
+            Route::Unknown
         );
         assert_eq!(
             route_for(&registry, GITHUB_POST_COMMENT_TASK),
-            Route::PythonOwned
+            Route::Unknown
         );
     }
 }

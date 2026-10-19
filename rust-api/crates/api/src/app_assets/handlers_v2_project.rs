@@ -1034,26 +1034,22 @@ async fn patch_project_asset(
     // the publish carries the URL kwarg `pk`, not a re-read.
     if !python_truthy(&asset.storage_metadata) {
         let kwargs = pidash_services::app_assets::tasks::metadata_delay_kwargs(&pk.to_string());
-        let message = pidash_jobs::celery::CeleryTaskMessage::new(
+        let message = pidash_jobs::TaskMessage::new(
             pidash_jobs::space::GET_ASSET_OBJECT_METADATA_TASK,
             Vec::new(),
             kwargs,
         );
-        let published = match pidash_jobs::AmqpConfig::from_env() {
-            Ok(config) => match pidash_jobs::Publisher::connect(&config).await {
-                Ok(publisher) => {
-                    let result = publisher.publish(&message).await;
-                    let _ = publisher.close().await;
-                    result
-                }
-                Err(error) => Err(error),
-            },
-            Err(error) => Err(error),
-        };
-        // `.delay()` raising on an unreachable broker answers the 500
-        // fallback in Django; same here (before the save, like Django).
-        if published.is_err() {
-            return server_error();
+        // Best-effort through the Postgres-backed queue, the same shape
+        // as the sibling `publish_metadata` in
+        // `handlers_v2_user_workspace.rs`: a failed enqueue warns and the
+        // response stands.
+        let job = pidash_jobs::queue::NewJob::new(
+            message.task.clone(),
+            Value::Array(message.args.clone()),
+            Value::Object(message.kwargs.clone()),
+        );
+        if let Err(error) = pidash_jobs::queue::enqueue(&pool, &job).await {
+            tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
         }
     }
     let Some(data) = parse_data(content_type(&headers).as_deref(), &body) else {

@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(route_for(&registry, SOFT_DELETE_TASK), Route::Local);
         assert_eq!(route_for(&registry, HARD_DELETE_TASK), Route::Local);
         // BUG-DEL-2 pin: nothing ever registers the restore name.
-        assert_eq!(route_for(&registry, RESTORE_TASK_NAME), Route::PythonOwned);
+        assert_eq!(route_for(&registry, RESTORE_TASK_NAME), Route::Unknown);
         assert!(!registry.owns(RESTORE_TASK_NAME));
     }
 

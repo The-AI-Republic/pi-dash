@@ -64,7 +64,7 @@ use sha2::{Digest, Sha256};
 use pidash_db::context::RequestContext;
 use pidash_services::tasks_cleanup::workspace_seed as logic;
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
 
 /// Celery wire name: the default `<module>.<function>` name Celery derives
@@ -2057,8 +2057,8 @@ fn ctx_actor(ctx: &RequestContext) -> Result<uuid::Uuid, String> {
 /// The `.delay()` equivalent: a first-attempt Celery protocol v2 message
 /// for `workspace_seed.delay(workspace_id)`, exactly what the call sites
 /// publish.
-pub fn delay_message(workspace_id: uuid::Uuid) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+pub fn delay_message(workspace_id: uuid::Uuid) -> TaskMessage {
+    TaskMessage::new(
         TASK_NAME,
         vec![Value::String(workspace_id.to_string())],
         Map::new(),

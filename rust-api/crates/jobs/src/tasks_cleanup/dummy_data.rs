@@ -41,7 +41,7 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use serde_json::Map;
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::queue::JobRow;
 use crate::worker::{Handler, Registry, Verdict};
 
@@ -54,8 +54,8 @@ const NO_USER: &str = "User matching query does not exist.";
 
 /// The `.delay()` equivalent: a first-attempt Celery protocol v2 message
 /// with the eight positional args in signature order.
-pub fn delay_message(args: &plan::CreateDummyDataArgs) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(TASK_NAME, args.wire_args(), Map::new())
+pub fn delay_message(args: &plan::CreateDummyDataArgs) -> TaskMessage {
+    TaskMessage::new(TASK_NAME, args.wire_args(), Map::new())
 }
 
 /// Install the worker handler owning [`TASK_NAME`]. Malformed payloads fail

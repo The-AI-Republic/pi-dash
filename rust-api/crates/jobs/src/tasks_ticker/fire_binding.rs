@@ -139,7 +139,7 @@ pub fn py_datetime_repr(dt: &DateTime<Utc>) -> String {
 /// The bad-RRULE disable row's `last_error`
 /// (`scheduler.py:188-190`): `invalid rrule: dtstart=<repr> rrule=<repr>`,
 /// truncated to [`LAST_ERROR_MAX_LEN`]. The rrule half reuses the crate's
-/// CPython string repr ([`crate::celery::py_repr`]).
+/// CPython string repr ([`crate::pyformat::py_repr`]).
 pub fn bad_rrule_error(dtstart: &DateTime<Utc>, rrule: &str) -> String {
     truncate_last_error(&format!(
         "invalid rrule: dtstart={} rrule={}",
@@ -1137,7 +1137,7 @@ mod tests {
         let mut registry = Registry::new();
         assert_eq!(
             route_for(&registry, FIRE_SCHEDULER_BINDING_TASK),
-            Route::PythonOwned
+            Route::Unknown
         );
         register_fire_binding(&mut registry, pool, dispatch);
         assert!(registry.owns(FIRE_SCHEDULER_BINDING_TASK));

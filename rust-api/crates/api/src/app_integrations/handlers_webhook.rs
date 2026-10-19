@@ -1054,10 +1054,10 @@ fn render_webhook_log(row: &WebhookLog, zone: &chrono_tz::Tz) -> Value {
 /// (`db/mixins.py:78`): three positional args, `using` stays a null
 /// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
 /// call sends it.
-fn soft_delete_message(webhook_id: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn soft_delete_message(webhook_id: &Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),

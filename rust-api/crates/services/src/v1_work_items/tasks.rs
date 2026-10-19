@@ -20,7 +20,7 @@
 //! Wire contract (Porting guide Jobs plane): every publisher here returns
 //! the Celery triple — task name, positional args, kwargs in call-site
 //! order — and the handlers (in the `api` crate, which already depends on
-//! `pidash-jobs`) wrap it with `CeleryTaskMessage::new(task, args, kwargs)`
+//! `pidash-jobs`) wrap it with `TaskMessage::new(task, args, kwargs)`
 //! plus `queue::enqueue_in` inside the request transaction. This crate
 //! cannot name `pidash-jobs` (it depends on `pidash-services`), so the
 //! triples are plain `String`/`Vec<Value>`/`Map<String, Value>` — the same

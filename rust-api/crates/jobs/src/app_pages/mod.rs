@@ -43,7 +43,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::queue::NewJob;
 use crate::tasks_cleanup::assets;
 use crate::tasks_cleanup::versions;
@@ -91,7 +91,7 @@ pub fn existing_instance_json(old_description_html: Option<&str>) -> String {
 /// Lift a constructed message into its queue row: `args=[]` with the same
 /// kwargs, so the worker forward path rebuilds the identical Celery v2
 /// body whichever plane serves the task.
-fn job_from_message(message: &CeleryTaskMessage) -> NewJob {
+fn job_from_message(message: &TaskMessage) -> NewJob {
     NewJob::new(
         message.task.clone(),
         Value::Array(Vec::new()),
@@ -108,7 +108,7 @@ fn job_from_message(message: &CeleryTaskMessage) -> NewJob {
 pub fn page_transaction_create_message(
     new_page_id: &str,
     request_html: Option<&str>,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     visit_page::page_transaction_message(Some(default_new_html(request_html)), None, new_page_id)
 }
 
@@ -126,7 +126,7 @@ pub fn page_transaction_save_message(
     page_id: &str,
     old_snapshot_html: Option<&str>,
     request_html: Option<&str>,
-) -> Option<CeleryTaskMessage> {
+) -> Option<TaskMessage> {
     if !publish_on_html_present(request_html) {
         return None;
     }
@@ -153,7 +153,7 @@ pub fn page_transaction_save_job(
 pub fn page_transaction_duplicate_message(
     new_copy_id: &str,
     copied_html: Option<&str>,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     visit_page::page_transaction_message(copied_html, None, new_copy_id)
 }
 
@@ -179,7 +179,7 @@ pub fn track_page_version_message(
     page_id: &str,
     existing_instance: &str,
     user_id: &str,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("page_id".to_owned(), Value::String(page_id.to_owned()));
     kwargs.insert(
@@ -187,7 +187,7 @@ pub fn track_page_version_message(
         Value::String(existing_instance.to_owned()),
     );
     kwargs.insert("user_id".to_owned(), Value::String(user_id.to_owned()));
-    CeleryTaskMessage::new(versions::TASK_TRACK_PAGE_VERSION, Vec::new(), kwargs)
+    TaskMessage::new(versions::TASK_TRACK_PAGE_VERSION, Vec::new(), kwargs)
 }
 
 /// [`track_page_version_message`] as its queue row.
@@ -212,7 +212,7 @@ pub fn recent_visited_message(
     page_id: &str,
     user_id: &str,
     project_id: Option<&str>,
-) -> Option<CeleryTaskMessage> {
+) -> Option<TaskMessage> {
     if !track_visit_enabled(track_visit) {
         return None;
     }
@@ -251,7 +251,7 @@ pub fn copy_s3_duplicate_message(
     effective_project_id: &str,
     slug: &str,
     user_id: &str,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     assets::delay_copy(
         "PAGE",
         new_copy_id,
@@ -286,7 +286,7 @@ mod tests {
     const USER_ID: &str = "33333333-3333-4333-8333-333333333333";
     const SLUG: &str = "acme";
 
-    fn kwargs_of(message: &CeleryTaskMessage) -> Value {
+    fn kwargs_of(message: &TaskMessage) -> Value {
         Value::Object(message.kwargs.clone())
     }
 

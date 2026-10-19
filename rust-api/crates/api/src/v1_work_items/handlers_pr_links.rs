@@ -2125,7 +2125,7 @@ impl GitStore for ReviewStore {
 
 /// Best-effort publish of a Celery message: without a queue table the
 /// response still stands (the D-19/D-26 precedent).
-async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage) {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),
@@ -2142,7 +2142,7 @@ async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::Cele
 async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &uuid::Uuid) {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+    let message = pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
@@ -3259,7 +3259,7 @@ pub async fn pr_destroy_inner(
     // The recorded fan-out, verbatim and in Python order.
     for task in outcome.enqueues {
         let message =
-            pidash_jobs::celery::CeleryTaskMessage::new(task.task, task.args, task.kwargs);
+            pidash_jobs::TaskMessage::new(task.task, task.args, task.kwargs);
         enqueue_message(&pre.pool, message).await;
     }
     Ok(no_content())

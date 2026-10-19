@@ -54,7 +54,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::tasks_webhooks::webhook_send::{webhook_send_task_kwargs, WEBHOOK_SEND_TASK_NAME};
 
 /// `webhook_activity` (`:376`): full Celery name. A plain
@@ -339,8 +339,8 @@ pub fn webhook_activity_kwargs(call: &WebhookActivityCall) -> Map<String, Value>
 
 /// First-attempt Celery message for `webhook_activity` (as
 /// `model_activity` dispatches it, `:467-480` / `:492-503`).
-pub fn webhook_activity_message(call: &WebhookActivityCall) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+pub fn webhook_activity_message(call: &WebhookActivityCall) -> TaskMessage {
+    TaskMessage::new(
         WEBHOOK_ACTIVITY_TASK_NAME,
         Vec::new(),
         webhook_activity_kwargs(call),
@@ -476,7 +476,7 @@ pub fn fan_out_messages(
     actor: Value,
     live_event_data: Value,
     current_site: &str,
-) -> Vec<CeleryTaskMessage> {
+) -> Vec<TaskMessage> {
     let event_data = event_data_for(&call.verb, &call.event_id, live_event_data);
     let activity = build_activity(
         call.field.as_deref(),
@@ -489,7 +489,7 @@ pub fn fan_out_messages(
     webhook_ids
         .iter()
         .map(|webhook_id| {
-            CeleryTaskMessage::new(
+            TaskMessage::new(
                 WEBHOOK_SEND_TASK_NAME,
                 Vec::new(),
                 webhook_send_task_kwargs(
@@ -1327,11 +1327,11 @@ mod tests {
         assert!(!registry.owns(MODEL_ACTIVITY_TASK_NAME));
         assert_eq!(
             route_for(&registry, WEBHOOK_ACTIVITY_TASK_NAME),
-            Route::PythonOwned
+            Route::Unknown
         );
         assert_eq!(
             route_for(&registry, MODEL_ACTIVITY_TASK_NAME),
-            Route::PythonOwned
+            Route::Unknown
         );
     }
 

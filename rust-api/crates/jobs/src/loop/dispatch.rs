@@ -135,9 +135,9 @@ pub fn run_turn_job(turn_id: &Uuid) -> NewJob {
 /// [`crate::worker::dispatch`]'s forward path arm for arm (that function
 /// is the runtime source of truth; this one exists so tests and the fire
 /// port can assert the wire contract broker-free).
-pub fn run_turn_message(turn_id: &Uuid) -> crate::celery::CeleryTaskMessage {
+pub fn run_turn_message(turn_id: &Uuid) -> crate::task_message::TaskMessage {
     let (args, kwargs) = run_turn_job(turn_id).into_message_parts();
-    crate::celery::CeleryTaskMessage::new(RUN_ASSISTANT_TURN_TASK, args, kwargs)
+    crate::task_message::TaskMessage::new(RUN_ASSISTANT_TURN_TASK, args, kwargs)
 }
 
 // ---------------------------------------------------------------------------

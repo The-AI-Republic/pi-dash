@@ -582,7 +582,7 @@ mod tests {
             crate::assistant::RUN_TURN_TASK,
         ] {
             assert!(!registry.owns(name), "{name} must stay Python-owned");
-            assert_eq!(route_for(&registry, name), Route::PythonOwned);
+            assert_eq!(route_for(&registry, name), Route::Unknown);
         }
         // Three of the four export names stay Python-owned;
         // `delete_old_s3_link` flipped to Rust (PIDASHCONV-858).
@@ -596,7 +596,7 @@ mod tests {
                 assert_eq!(route_for(&registry, name), Route::Local);
             } else {
                 assert!(!registry.owns(name), "{name} must stay Python-owned");
-                assert_eq!(route_for(&registry, name), Route::PythonOwned);
+                assert_eq!(route_for(&registry, name), Route::Unknown);
             }
         }
     }

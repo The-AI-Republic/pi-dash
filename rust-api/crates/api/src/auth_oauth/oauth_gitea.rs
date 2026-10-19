@@ -936,7 +936,7 @@ pub async fn enqueue_activation_email(
     current_site: &str,
     user_id: uuid::Uuid,
 ) -> Result<(), sqlx::Error> {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+    let message = pidash_jobs::TaskMessage::new(
         "pi_dash.bgtasks.user_activation_email_task.user_activation_email",
         vec![
             serde_json::Value::String(current_site.to_owned()),
@@ -1532,7 +1532,7 @@ pub async fn enqueue_join_event(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
     let joined_at = now.to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+    let message = pidash_jobs::TaskMessage::new(
         "pi_dash.bgtasks.event_tracking_task.track_event",
         vec![
             serde_json::Value::String(user_id.to_string()),

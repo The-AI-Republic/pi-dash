@@ -558,7 +558,7 @@ fn request_origin(state: &AppState) -> Option<String> {
 
 /// Best-effort deferred publish (the space intake precedent): without the
 /// queue the response still stands.
-async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage) {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),
@@ -580,7 +580,7 @@ fn bulk_dates_activity_message(
     actor_id: &uuid::Uuid,
     project_id: &uuid::Uuid,
     epoch: i64,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     // `json.dumps` default separators (`", "`, `": "`), not serde compact.
     let requested_data = format!(
         "{{\"{field}\": {}}}",
@@ -604,7 +604,7 @@ fn bulk_dates_activity_message(
         Value::String(project_id.to_string()),
     );
     kwargs.insert("epoch".to_owned(), Value::from(epoch));
-    pidash_jobs::celery::CeleryTaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs)
+    pidash_jobs::TaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs)
 }
 
 /// One sub-issue link `issue_activity.delay(...)` (`sub_issue.py:224-237`):
@@ -618,7 +618,7 @@ fn sub_issue_activity_message(
     project_id: &uuid::Uuid,
     epoch: i64,
     origin: &str,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::with_capacity(9);
     kwargs.insert(
         "type".to_owned(),
@@ -644,7 +644,7 @@ fn sub_issue_activity_message(
     kwargs.insert("epoch".to_owned(), Value::from(epoch));
     kwargs.insert("notification".to_owned(), Value::Bool(true));
     kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
-    pidash_jobs::celery::CeleryTaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs)
+    pidash_jobs::TaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs)
 }
 
 /// The identifier `recent_visited_task.delay(...)` (`base.py:1476-1482`):
@@ -654,7 +654,7 @@ fn identifier_visited_message(
     issue_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
     project_id: &uuid::Uuid,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::with_capacity(5);
     kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
     kwargs.insert("entity_name".to_owned(), Value::String("issue".to_owned()));
@@ -667,7 +667,7 @@ fn identifier_visited_message(
         "project_id".to_owned(),
         Value::String(project_id.to_string()),
     );
-    pidash_jobs::celery::CeleryTaskMessage::new(RECENT_VISITED_TASK, vec![], kwargs)
+    pidash_jobs::TaskMessage::new(RECENT_VISITED_TASK, vec![], kwargs)
 }
 
 // ---------------------------------------------------------------------------

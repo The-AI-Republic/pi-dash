@@ -35,7 +35,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Value};
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use pidash_types::tasks_cleanup::exports_dto::{
     ANALYTIC_EXPORT_TASK_NAME, DELETE_OLD_S3_LINK_TASK_NAME, EXPIRY_DAYS,
     EXPORT_ANALYTICS_CSV_TASK_NAME, ISSUE_EXPORT_TASK_NAME,
@@ -74,8 +74,8 @@ pub fn issue_export_task_message(
     token_id: &str,
     multiple: bool,
     slug: &str,
-) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+) -> TaskMessage {
+    TaskMessage::new(
         ISSUE_EXPORT_TASK_NAME,
         vec![
             Value::String(provider.to_owned()),
@@ -91,8 +91,8 @@ pub fn issue_export_task_message(
 
 /// `delete_old_s3_link.delay()` (`exporter_expired_task.py:22-23`): no
 /// arguments.
-pub fn delete_old_s3_link_message() -> CeleryTaskMessage {
-    CeleryTaskMessage::new(DELETE_OLD_S3_LINK_TASK_NAME, Vec::new(), Map::new())
+pub fn delete_old_s3_link_message() -> TaskMessage {
+    TaskMessage::new(DELETE_OLD_S3_LINK_TASK_NAME, Vec::new(), Map::new())
 }
 
 /// `analytic_export_task.delay(email, data, slug)`
@@ -102,8 +102,8 @@ pub fn analytic_export_task_message(
     email: &str,
     data: Map<String, Value>,
     slug: &str,
-) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+) -> TaskMessage {
+    TaskMessage::new(
         ANALYTIC_EXPORT_TASK_NAME,
         vec![
             Value::String(email.to_owned()),
@@ -122,8 +122,8 @@ pub fn export_analytics_csv_message(
     keys: &[String],
     email: &str,
     slug: &str,
-) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+) -> TaskMessage {
+    TaskMessage::new(
         EXPORT_ANALYTICS_CSV_TASK_NAME,
         vec![
             Value::Array(data.into_iter().map(Value::Object).collect()),

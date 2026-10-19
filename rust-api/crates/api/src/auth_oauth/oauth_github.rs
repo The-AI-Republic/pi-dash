@@ -1189,7 +1189,7 @@ async fn enqueue_activation_email(
         current_site: site.to_owned(),
         user_id: user_id.to_string(),
     };
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+    let message = pidash_jobs::TaskMessage::new(
         emit.task_name(),
         emit.args(),
         Default::default(),
@@ -1247,7 +1247,7 @@ async fn enqueue_join_event(
         joined_at,
     );
     let kwargs = call.as_object().cloned().unwrap_or_default();
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+    let message = pidash_jobs::TaskMessage::new(
         "pi_dash.bgtasks.event_tracking_task.track_event",
         Vec::new(),
         kwargs,
