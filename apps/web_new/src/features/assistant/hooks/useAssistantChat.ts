@@ -207,12 +207,6 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
     if (lastRow.seq > startedAfter.current) setBusy(false);
   }, [busy, messages]);
 
-  // Clear the local in-flight flag once the server confirms the turn ended,
-  // so the next tick starts from the stored transcript alone.
-  React.useEffect(() => {
-    if (busy && serverSettled) setBusy(false);
-  }, [busy, serverSettled]);
-
   const markTurn = React.useCallback((next: "started" | "terminal") => {
     setTerminalSeen(next === "terminal");
     if (next === "started") {

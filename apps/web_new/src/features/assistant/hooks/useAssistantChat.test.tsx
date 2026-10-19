@@ -52,8 +52,10 @@ function row(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 }
 
 interface SetupOptions {
-  /** The thread list's `has_active_turn`; the default follows `active`. */
+  /** The thread list's `has_active_turn`. */
   active?: boolean;
+  /** Hold each list read until the test resolves it. */
+  holdListReads?: boolean;
 }
 
 function threadList(active: boolean) {
@@ -77,10 +79,16 @@ function setup(initial: AssistantMessage[], options: SetupOptions = {}) {
   // `active` is what the server answers about the running turn; tests flip
   // it to prove the settle path does not need a new transcript row.
   const server = { active: options.active ?? true };
+  const held: Array<() => void> = [];
   createAppClient("https://api.test", (async (url: string, init: { method?: string }) => {
     const path = new URL(url).pathname;
     if (path.endsWith("/ai-assistant/threads/") && init.method !== "POST") {
       listReads += 1;
+      if (options.holdListReads === true) {
+        const answer = JSON.stringify(threadList(server.active));
+        await new Promise<void>((resolve) => held.push(resolve));
+        return { status: 200, url, headers: { get: () => "application/json" }, text: async () => answer };
+      }
       return {
         status: 200,
         url,
@@ -133,6 +141,10 @@ function setup(initial: AssistantMessage[], options: SetupOptions = {}) {
     reads: () => reads,
     cancels: () => cancels,
     listReads: () => listReads,
+    /** Release every held list read, newest answer included. */
+    releaseListReads: () => {
+      for (const resolve of held.splice(0)) resolve();
+    },
   };
 }
 
@@ -348,6 +360,70 @@ describe("useAssistantChat", () => {
       queryClient.setQueryData(assistantKeys.threads("acme"), threadList(false), { updatedAt: 1 });
     });
     expect(result.current.running).toBe(true);
+  });
+
+  it("does not settle a newer turn with a read that answered for an older one", async () => {
+    const { result, releaseListReads } = setup([row({ id: "a", role: "assistant", seq: 2, content: "done" })], {
+      active: false,
+      holdListReads: true,
+    });
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 12,
+        thread: THREAD_ID,
+        message: null,
+        seq: 12,
+        kind: "turn_started",
+        payload: { turn_id: "turn" },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 13,
+        thread: THREAD_ID,
+        message: null,
+        seq: 13,
+        kind: "turn_started",
+        payload: { turn_id: "later" },
+        created_at: "2026-01-01T00:00:01Z",
+      })
+    );
+    // The read was asked for when the first turn started; the answer is
+    // "idle", but it says nothing about the turn that started after it.
+    act(() => releaseListReads());
+    await new Promise((resolve) => setTimeout(resolve, TURN_POLL_MS));
+    expect(result.current.running).toBe(true);
+  });
+
+  it("settles a sent turn from the list when no reply row ever arrives", async () => {
+    const { result, server, sends, queryClient } = setup([]);
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    act(() => result.current.send("ask"));
+    await waitFor(() => expect(sends()).toBe(1));
+    act(() => {
+      queryClient.setQueryData(transcriptKey("acme", THREAD_ID), [row({ id: "u2", content: "ask", seq: 2 })]);
+    });
+    await waitFor(() => expect(result.current.running).toBe(true));
+    // The turn ends before any assistant or error row exists; only the
+    // list's `has_active_turn` can say so.
+    act(() => {
+      server.active = false;
+    });
+    await waitFor(() => expect(result.current.running).toBe(false), { timeout: TURN_POLL_MS * 3 });
+    expect(result.current.messages.map((message) => message.id)).toEqual(["u2"]);
+  });
+
+  it("ignores a list read that answers after the view is gone", async () => {
+    // A cold load with a trailing user row starts a list read right away.
+    const { result, releaseListReads, unmount } = setup([row()], { active: false, holdListReads: true });
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    await waitFor(() => expect(result.current.running).toBe(true));
+    unmount();
+    act(() => releaseListReads());
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
   it("does not send blank content", async () => {
