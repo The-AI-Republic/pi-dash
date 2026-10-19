@@ -165,7 +165,9 @@ describe("useCreateWorkItem temp rows", () => {
 
   function renderTempHandle(status: number, holdPost: { release: () => void } | null = null) {
     const serverRows: Record<string, unknown>[] = seededRows();
+    const calls: Array<{ url: string; method: string; body: string }> = [];
     createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+      calls.push({ url, method: init.method ?? "GET", body: init.body ?? "" });
       if (url.endsWith("/auth/get-csrf-token/")) {
         return {
           status: 200,
@@ -208,6 +210,7 @@ describe("useCreateWorkItem temp rows", () => {
     );
     return {
       queryClient,
+      calls,
       cached: () =>
         queryClient.getQueryData(LISTS_KEY) as { results: Array<{ id: string; name: string }>; total_count: number },
       save: (input: WorkItemCreateInput) => save?.(input),
@@ -238,6 +241,41 @@ describe("useCreateWorkItem temp rows", () => {
     await waitFor(() => expect(h.cached().results.some((entry) => entry.id.startsWith("temp-"))).toBe(false));
     expect(h.cached().results.map((entry) => entry.name)).toEqual(["Seeded row", "Fresh report"]);
     expect(h.cached().total_count).toBe(2);
+  });
+
+  it("seeds the temp bar's dates and posts them on the create (ISS-055)", async () => {
+    const holdPost: { release: () => void } = { release: () => {} };
+    const h = renderTempHandle(201, holdPost);
+    await waitFor(() => expect(h.cached()?.results).toHaveLength(1));
+    h.save({
+      projectId: PROJECT_ID,
+      name: "Fresh report",
+      startDate: "2026-10-18",
+      targetDate: "2026-10-19",
+    });
+    await waitFor(() => expect(h.cached().results).toHaveLength(2));
+    // The optimistic row carries the seeded dates, so its bar can draw
+    // before the server answers.
+    expect(h.cached().results[0]).toMatchObject({
+      start_date: "2026-10-18",
+      target_date: "2026-10-19",
+    });
+    const post = h.calls.find((call) => call.method === "POST");
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({
+      name: "Fresh report",
+      start_date: "2026-10-18",
+      target_date: "2026-10-19",
+    });
+    holdPost.release();
+  });
+
+  it("leaves the dates out of the body when the caller did not seed them", async () => {
+    const h = renderTempHandle(201);
+    await waitFor(() => expect(h.cached()?.results).toHaveLength(1));
+    h.save({ projectId: PROJECT_ID, name: "Fresh report" });
+    await waitFor(() => expect(h.calls.some((call) => call.method === "POST")).toBe(true));
+    const post = h.calls.find((call) => call.method === "POST");
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({ name: "Fresh report" });
   });
 
   it("removes the temp row again when the post fails", async () => {

@@ -181,6 +181,7 @@ function Bar({
   openable,
   onOpen,
   onBeginDrag,
+  suppressClick,
   range,
   zoom,
 }: {
@@ -193,6 +194,8 @@ function Bar({
   openable: boolean;
   onOpen: () => void;
   onBeginDrag: (event: React.MouseEvent, side: "move" | "left" | "right") => void;
+  /** True for the click that ends a bar gesture, which must not open (ISS-051–053). */
+  suppressClick: () => boolean;
   range: Parameters<typeof dayColumns>[0];
   zoom: GanttZoom;
 }): React.ReactElement {
@@ -229,6 +232,9 @@ function Bar({
         backgroundColor: colors?.[row.id] ?? "var(--accent)",
       }}
       onClick={() => {
+        // A handle press or a move still dispatches a click after mouseup;
+        // it belongs to the gesture, not to the row (ISS-051–053).
+        if (suppressClick()) return;
         if (drag === null && openable) onOpen();
       }}
       onKeyDown={(event) => {
@@ -371,10 +377,15 @@ function GanttLanes({
 }): React.ReactElement {
   const visible = rows.slice(windowStart, windowEnd);
   const [drag, setDrag] = React.useState<BarDrag | null>(null);
+  const suppressed = React.useRef(false);
+  const suppressClick = React.useCallback(() => suppressed.current, []);
   const dayWidth = DAY_WIDTHS[zoom];
 
   const beginDrag = (event: React.MouseEvent, row: GanttRow, side: "move" | "left" | "right") => {
-    if (!canEdit || row.unconfirmed) return;
+    if (!canEdit || row.unconfirmed || event.button !== 0) return;
+    // The browser fires a click after mouseup even if the pointer moved;
+    // mark the upcoming click as part of this gesture (ISS-051–053).
+    suppressed.current = true;
     event.preventDefault();
     event.stopPropagation();
     const origin = { startDate: row.startIso, targetDate: row.targetIso };
@@ -399,13 +410,21 @@ function GanttLanes({
     const onUp = () => {
       const current = drag;
       setDrag(null);
+      // The click that ends the gesture dispatches before the next task;
+      // clear the guard after it so the following plain click opens.
+      globalThis.setTimeout(() => {
+        suppressed.current = false;
+      }, 0);
       const changed =
         current.write.startDate !== current.origin.startDate || current.write.targetDate !== current.origin.targetDate;
       if (changed)
         onDatesChange(current.issueId, { startDate: current.write.startDate, endDate: current.write.targetDate });
     };
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setDrag(null);
+      if (event.key === "Escape") {
+        setDrag(null);
+        suppressed.current = false;
+      }
     };
     globalThis.addEventListener("mousemove", onMove);
     globalThis.addEventListener("mouseup", onUp);
@@ -464,6 +483,7 @@ function GanttLanes({
                 openable={!row.unconfirmed}
                 onOpen={() => onOpenRow(row)}
                 onBeginDrag={(event, side) => beginDrag(event, row, side)}
+                suppressClick={suppressClick}
                 range={range}
                 zoom={zoom}
               />

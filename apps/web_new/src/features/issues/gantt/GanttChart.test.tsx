@@ -613,6 +613,56 @@ describe("GanttChart bar gestures (ISS-051–053)", () => {
     fireEvent.click(barOf("row-1"));
     expect(h.onOpenRow).toHaveBeenCalledWith(expect.objectContaining({ id: "row-1" }));
   });
+
+  it("does not open the row when a resize handle is pressed and released", () => {
+    const h = renderChart({ canEdit: true, onDatesChange: vi.fn() });
+    const handle = document.querySelector<HTMLElement>('[data-lane="row-1"] [data-testid="gantt-resize-left"]');
+    if (handle === null) throw new Error("no left handle");
+    fireEvent.mouseDown(handle, { button: 0, clientX: 100 });
+    fireEvent.mouseUp(document);
+    // The browser dispatches the click on the handle's bar after mouseup.
+    fireEvent.click(handle);
+    expect(h.onOpenRow).not.toHaveBeenCalled();
+  });
+
+  it("does not open the row when a drag ends over the bar", () => {
+    const h = renderChart({ canEdit: true, onDatesChange: vi.fn() });
+    const bar = barOf("row-1");
+    fireEvent.mouseDown(bar, { button: 0, clientX: 100 });
+    fireEvent.mouseMove(document, { clientX: 180 });
+    fireEvent.mouseUp(document);
+    fireEvent.click(bar);
+    expect(h.onOpenRow).not.toHaveBeenCalled();
+  });
+
+  it("opens again on the click after a gesture's own click", () => {
+    const h = renderChart({ canEdit: true, onDatesChange: vi.fn() });
+    const bar = barOf("row-1");
+    fireEvent.mouseDown(bar, { button: 0, clientX: 100 });
+    fireEvent.mouseUp(document);
+    fireEvent.click(bar);
+    expect(h.onOpenRow).not.toHaveBeenCalled();
+    // The guard clears on the next task, so an ordinary click still opens.
+    return new Promise<void>((resolve) => {
+      setTimeout(() => {
+        fireEvent.click(bar);
+        expect(h.onOpenRow).toHaveBeenCalledWith(expect.objectContaining({ id: "row-1" }));
+        resolve();
+      }, 0);
+    });
+  });
+
+  it("ignores gestures that do not start with the primary button", () => {
+    const onDatesChange = vi.fn();
+    const h = renderChart({ canEdit: true, onDatesChange });
+    fireEvent.mouseDown(barOf("row-1"), { button: 2, clientX: 100 });
+    fireEvent.mouseMove(document, { clientX: 220 });
+    fireEvent.mouseUp(document);
+    expect(onDatesChange).not.toHaveBeenCalled();
+    // A right-click is not a gesture, so its click still opens normally.
+    fireEvent.click(barOf("row-1"));
+    expect(h.onOpenRow).toHaveBeenCalledWith(expect.objectContaining({ id: "row-1" }));
+  });
 });
 
 describe("GanttChart add-block (ISS-054)", () => {

@@ -7,7 +7,7 @@
 // from the project's states, and docks the shared peek for a clicked row
 // while the chart keeps its own scroll state.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { IssueListItem } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -18,8 +18,10 @@ import { authKeys } from "../../auth/queries.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { issueKeys } from "../api/keys.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
+import { todayIsoDay } from "../dropdowns/calendar.js";
 import { GanttLayout, barColorsFor, orderedRows } from "./GanttLayout.js";
 import { buildRows } from "./rows.js";
+import { addDays } from "./scale.js";
 import { ganttStatesKey } from "./useGanttData.js";
 
 vi.mock("@tanstack/react-router", () => ({
@@ -87,6 +89,7 @@ function renderLayout(
     projectRole?: number | null;
     workspaceRole?: number;
     completedCycle?: boolean;
+    transport?: (url: string, init: { method?: string; body?: string }) => Promise<unknown>;
   } = {}
 ) {
   document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
@@ -95,9 +98,13 @@ function renderLayout(
     addEventListener: () => undefined,
     removeEventListener: () => undefined,
   }));
-  createAppClient("https://api.test", (() => {
-    throw new Error("unexpected fetch in a seeded render");
-  }) as never);
+  createAppClient(
+    "https://api.test",
+    (options.transport ??
+      (() => {
+        throw new Error("unexpected fetch in a seeded render");
+      })) as never
+  );
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(ganttStatesKey(SLUG, PROJECT), [
     {
@@ -289,5 +296,128 @@ describe("GanttLayout edit standing (ISS-050–055)", () => {
   it("hides the quick-add in a completed cycle", () => {
     renderLayout({ projectRole: 15, completedCycle: true });
     expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
+  });
+});
+
+describe("GanttLayout write wiring (ISS-050–055)", () => {
+  interface Call {
+    url: string;
+    method: string;
+    body: string;
+  }
+
+  function recordingTransport(status = 200) {
+    const calls: Call[] = [];
+    const transport = async (url: string, init: { method?: string; body?: string }) => {
+      const method = init.method ?? "GET";
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ csrf_token: "csrf" }),
+        };
+      }
+      calls.push({ url, method, body: init.body ?? "" });
+      return {
+        status,
+        url,
+        headers: { get: () => null },
+        text: async () =>
+          method === "POST" && url.endsWith("/issues/")
+            ? JSON.stringify({
+                ...issue({ id: "623e4567-e89b-12d3-a456-426614174030", name: "New timeline item" }),
+                start_date: null,
+                target_date: null,
+                deleted_at: null,
+              })
+            : JSON.stringify({ message: "ok" }),
+      };
+    };
+    return { calls, transport: transport as never };
+  }
+
+  const DATED = issue({
+    id: "123e4567-e89b-12d3-a456-426614174000",
+    name: "First",
+    start_date: "2026-10-01",
+    target_date: "2026-10-05",
+  });
+
+  it("reorders through the single-issue PATCH with the neighbour-derived rank (ISS-050)", async () => {
+    const { calls, transport } = recordingTransport(204);
+    renderLayout({ projectRole: 15, issues: [DATED, ...ISSUES.slice(1)], transport });
+
+    const rows = screen.getAllByTestId("gantt-sidebar-row");
+    rows.forEach((row, index) => {
+      row.getBoundingClientRect = () =>
+        ({ left: 0, top: index * 44, width: 300, height: 44, right: 300, bottom: index * 44 + 44 }) as DOMRect;
+    });
+    fireEvent.mouseDown(rows[0]!, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(rows[2]!, { clientY: 100 });
+    fireEvent.mouseUp(rows[2]!);
+
+    await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
+    const patch = calls.find((call) => call.method === "PATCH");
+    expect(patch?.url).toBe(`https://api.test/api/workspaces/${SLUG}/projects/${PROJECT}/issues/${DATED.id}/`);
+    // Rank 1 lands between rank 2 and rank 3, so it takes the midpoint.
+    expect(JSON.parse(patch?.body ?? "{}")).toEqual({ sort_order: 2.5 });
+  });
+
+  it("posts the quick-add with today and tomorrow seeded (ISS-055)", async () => {
+    const { calls, transport } = recordingTransport(201);
+    renderLayout({ projectRole: 15, transport });
+
+    fireEvent.click(screen.getByRole("button", { name: /new work item/i }));
+    fireEvent.change(screen.getByLabelText("Work item title"), { target: { value: "New timeline item" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith("/issues/"))).toBe(true));
+    const post = calls.find((call) => call.method === "POST" && call.url.endsWith("/issues/"));
+    expect(post?.url).toBe(`https://api.test/api/workspaces/${SLUG}/projects/${PROJECT}/issues/`);
+    const today = todayIsoDay();
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({
+      name: "New timeline item",
+      start_date: today,
+      target_date: addDays(today, 1),
+    });
+  });
+
+  it("persists a moved bar through the batch issue-dates call (ISS-051)", async () => {
+    const { calls, transport } = recordingTransport();
+    renderLayout({ projectRole: 15, issues: [DATED, ...ISSUES.slice(1)], transport });
+
+    const lane = document.querySelector<HTMLElement>(`[data-lane="${DATED.id}"]`);
+    const bar = lane?.querySelector<HTMLElement>('[data-testid="gantt-bar"]');
+    if (bar === null || bar === undefined) throw new Error("no bar");
+    fireEvent.mouseDown(bar, { button: 0, clientX: 100 });
+    fireEvent.mouseMove(document, { clientX: 180 });
+    fireEvent.mouseUp(document);
+
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith("/issue-dates/"))).toBe(true));
+    const post = calls.find((call) => call.url.endsWith("/issue-dates/"));
+    expect(post?.method).toBe("POST");
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({
+      updates: [{ id: DATED.id, start_date: "2026-10-03", target_date: "2026-10-07" }],
+    });
+  });
+
+  it("plants a block through the single-issue PATCH (ISS-054)", async () => {
+    const { calls, transport } = recordingTransport(204);
+    renderLayout({ projectRole: 15, issues: [DATED, ...ISSUES.slice(1)], transport });
+
+    const lane = screen.getAllByTestId("gantt-undated-lane")[0];
+    if (lane === undefined) throw new Error("no undated lane");
+    lane.getBoundingClientRect = () => ({ left: 0, top: 0, width: 800, height: 44, right: 800, bottom: 44 }) as DOMRect;
+    fireEvent.mouseMove(lane, { clientX: 2 * 40 });
+    fireEvent.click(screen.getByTestId("gantt-add-block"));
+
+    await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
+    const patch = calls.find((call) => call.method === "PATCH");
+    expect(patch?.url).toBe(`https://api.test/api/workspaces/${SLUG}/projects/${PROJECT}/issues/${ISSUES[1]!.id}/`);
+    expect(JSON.parse(patch?.body ?? "{}")).toEqual({
+      start_date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      target_date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+    });
   });
 });
