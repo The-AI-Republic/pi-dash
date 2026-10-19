@@ -11,7 +11,7 @@ import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { findBillingPlan } from "./model.js";
+import { findBillingPlan, type PlanDefinition } from "./model.js";
 import { PlanCard } from "./PlanCard.js";
 
 function renderCard(id: "pro" | "business" | "enterprise", frequency: "month" | "year" = "month") {
@@ -54,6 +54,18 @@ describe("PlanCard", () => {
     rerender("year");
     expect(screen.getByTestId("billing-price-pro")).toHaveTextContent("$6");
     expect(screen.getByRole("button", { name: "Yearly" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("shows no discount badge when a priced plan's yearly price does not undercut", () => {
+    // Spec §29: the badge appears only where yearly undercuts monthly. No
+    // catalog entry is priced without a discount today, so exercise the
+    // rule through a priced variant that has none.
+    const priced = findBillingPlan("pro");
+    const undiscounted: PlanDefinition = { ...priced, price: { ...priced.price, discount: null } };
+    render(<PlanCard plan={undiscounted} frequency="year" onFrequencyChange={vi.fn()} />);
+    expect(screen.getByTestId("billing-price-pro")).toHaveTextContent("$6");
+    expect(screen.getByText("per user / month")).toBeInTheDocument();
+    expect(screen.queryByTestId("billing-discount-pro")).not.toBeInTheDocument();
   });
 
   it("keeps the discount badge on the priced plan only", () => {
