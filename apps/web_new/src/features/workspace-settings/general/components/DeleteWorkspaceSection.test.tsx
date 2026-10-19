@@ -20,7 +20,7 @@ vi.mock("../../../../shared/shell/index.js", () => ({
   notifySuccess: vi.fn(),
 }));
 
-import { notifyError } from "../../../../shared/shell/index.js";
+import { notifyError, notifySuccess } from "../../../../shared/shell/index.js";
 
 const DETAILS_PATH = "/api/workspaces/acme/";
 
@@ -120,6 +120,7 @@ describe("DeleteWorkspaceSection", () => {
     await openDialog();
     expect(screen.getByLabelText(/Type the workspace name/)).toHaveValue("");
     expect(screen.getByLabelText(/For final confirmation/)).toHaveValue("");
+    expect(notifySuccess).not.toHaveBeenCalled();
   });
 
   it("dismissing with Escape resets the inputs without a write", async () => {
@@ -153,6 +154,7 @@ describe("DeleteWorkspaceSection", () => {
       expect(onNavigate).toHaveBeenCalledWith("/beta/");
     });
     expect(deletes).toEqual(["https://api.test/api/workspaces/acme/"]);
+    expect(notifySuccess).toHaveBeenCalledWith("Workspace deleted.");
   });
 
   it("deletes from the dialog form's submit as well as the Confirm button", async () => {
@@ -169,6 +171,7 @@ describe("DeleteWorkspaceSection", () => {
       expect(onNavigate).toHaveBeenCalledWith("/beta/");
     });
     expect(deletes).toEqual(["https://api.test/api/workspaces/acme/"]);
+    expect(notifySuccess).toHaveBeenCalledWith("Workspace deleted.");
   });
 
   it("ignores a confirm while the delete is already in flight", async () => {
@@ -205,6 +208,7 @@ describe("DeleteWorkspaceSection", () => {
     await waitFor(() => {
       expect(notifyError).toHaveBeenCalledWith("That didn't work.", expect.any(String));
     });
+    expect(notifySuccess).not.toHaveBeenCalled();
     expect(onNavigate).not.toHaveBeenCalled();
     expect(screen.getByLabelText(/Type the workspace name/)).toHaveValue("Acme Name");
     expect(deletes).toHaveLength(1);

@@ -12,7 +12,8 @@ import { Button, Dialog, Input } from "@pidash/kit";
 import { AlertTriangle } from "lucide-react";
 import * as React from "react";
 
-import { useDeleteWorkspace } from "../api/mutations.js";
+import { notifySuccess } from "../../../../shared/shell/index.js";
+import { useDeleteWorkspace, WORKSPACE_DELETED_TITLE } from "../api/mutations.js";
 import { canConfirmWorkspaceDelete, DELETE_CONFIRM_PHRASE } from "../rules.js";
 
 export const DELETE_SECTION_TITLE = "Delete this workspace";
@@ -59,6 +60,7 @@ export function DeleteWorkspaceSection({
       onSuccess: () => {
         setOpen(false);
         reset();
+        notifySuccess(WORKSPACE_DELETED_TITLE);
         onNavigate(destination);
       },
       onSettled: () => {

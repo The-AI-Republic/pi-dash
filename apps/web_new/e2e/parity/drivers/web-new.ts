@@ -17484,10 +17484,12 @@ export class WebNewDriver implements ParityDriver {
     }
     // Close on the name field: the new picker reopens immediately after
     // Escape too (NEWFRONT-420 target), but an outside click keeps the
-    // probe independent of that fix.
+    // probe independent of that fix. The click must be real: the picker
+    // closes on the outside press, and a trial click dispatches nothing
+    // (so the popup would stay open and swallow the next trigger press).
     // A page whose name field is missing already has its picker closed.
     if ((await this.page.locator("#name").count()) > 0) {
-      await this.page.locator("#name").first().click({ timeout: 15_000, trial: true });
+      await this.page.locator("#name").first().click({ timeout: 15_000 });
     }
     return labels.filter((label) => label.length > 0);
   }

@@ -601,7 +601,7 @@ describe("remaining probe branches", () => {
     });
     const driver = new WebNewDriver(page);
     await expect(driver.wsSettingsSizeOptions()).resolves.toEqual(["201-500"]);
-    expect(close).toHaveBeenCalledWith({ timeout: 15_000, trial: true });
+    expect(close).toHaveBeenCalledWith({ timeout: 15_000 });
   });
 });
 
