@@ -111,9 +111,16 @@ export function toggleBulkTarget(selection: BulkSelection, projectId: string): B
   return { ...selection, picked };
 }
 
-/** Select every unlocked target, or clear when all of them are picked. */
+/**
+ * Select every unlocked target in `projectIds`, or deselect those targets
+ * when all of them are already picked. Only the ids passed in are touched,
+ * so a filtered picker never reaches projects hidden by its search.
+ */
 export function toggleAllBulkTargets(selection: BulkSelection, projectIds: readonly string[]): BulkSelection {
   const unlocked = projectIds.filter((id) => !selection.installed.includes(id));
   const allPicked = unlocked.length > 0 && unlocked.every((id) => selection.picked.includes(id));
-  return { ...selection, picked: allPicked ? [] : unlocked };
+  const picked = allPicked
+    ? selection.picked.filter((id) => !unlocked.includes(id))
+    : [...selection.picked, ...unlocked.filter((id) => !selection.picked.includes(id))];
+  return { ...selection, picked };
 }

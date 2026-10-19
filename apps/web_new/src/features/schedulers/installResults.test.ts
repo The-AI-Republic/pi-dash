@@ -133,4 +133,12 @@ describe("bulk selection", () => {
     expect(toggleAllBulkTargets(all, ["a", "b", "c"]).picked).toEqual([]);
     expect(toggleAllBulkTargets(base, ["b"]).picked).toEqual([]);
   });
+
+  it("only touches the targets it is given, so a search-scoped select stays visible", () => {
+    const base = { picked: ["hidden"], installed: ["locked"] };
+    expect(toggleAllBulkTargets(base, ["shown", "locked"]).picked).toEqual(["hidden", "shown"]);
+    const scoped = { picked: ["hidden", "one", "two"], installed: [] };
+    expect(toggleAllBulkTargets(scoped, ["one", "two"]).picked).toEqual(["hidden"]);
+    expect(toggleAllBulkTargets({ picked: [], installed: [] }, [])).toEqual({ picked: [], installed: [] });
+  });
 });

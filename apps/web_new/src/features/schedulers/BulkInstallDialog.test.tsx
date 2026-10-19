@@ -255,6 +255,57 @@ describe("BulkInstallDialog", () => {
     expect(within(listbox).getByLabelText(/Beta/)).not.toBeChecked();
   });
 
+  it("counts only picked targets in the summary, never the locked ones", async () => {
+    contracts.listProjectDetails.mockResolvedValue([
+      project({ id: ALPHA, name: "Alpha" }),
+      project({ id: BETA, name: "Beta" }),
+    ]);
+    contracts.listSchedulerBindings.mockImplementation((_client: unknown, _slug: string, projectId: string) =>
+      Promise.resolve(projectId === BETA ? [binding(BETA)] : [])
+    );
+    const { user } = renderDialog();
+    const listbox = await openPicker(user);
+    await waitFor(() => expect(within(listbox).getByLabelText(/Beta/)).toBeDisabled());
+    const trigger = screen.getByRole("button", { name: /project/ });
+
+    expect(trigger).toHaveTextContent("Select projects");
+    await user.click(within(listbox).getByLabelText(/Alpha/));
+    expect(trigger).toHaveTextContent("1 project selected");
+    await user.click(within(listbox).getByLabelText(/Alpha/));
+    expect(trigger).toHaveTextContent("Select projects");
+  });
+
+  it("scopes select-all and its label to the search-filtered targets", async () => {
+    contracts.listProjectDetails.mockResolvedValue([
+      project({ id: ALPHA, name: "Alpha" }),
+      project({ id: BETA, name: "Beta" }),
+    ]);
+    const { user } = renderDialog();
+    const listbox = await openPicker(user);
+    await within(listbox).findByLabelText(/Alpha/);
+
+    await user.type(screen.getByLabelText("Search projects"), "alpha");
+    expect(screen.getByRole("button", { name: "Select all" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Select all" }));
+    expect(screen.getByRole("button", { name: "Clear selection" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /project/ })).toHaveTextContent("1 project selected");
+
+    await user.clear(screen.getByLabelText("Search projects"));
+    expect(within(listbox).getByLabelText(/Alpha/)).toBeChecked();
+    expect(within(listbox).getByLabelText(/Beta/)).not.toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "Select all" }));
+    expect(within(listbox).getByLabelText(/Beta/)).toBeChecked();
+    expect(screen.getByRole("button", { name: /project/ })).toHaveTextContent("2 projects selected");
+
+    await user.type(screen.getByLabelText("Search projects"), "alpha");
+    await user.click(screen.getByRole("button", { name: "Clear selection" }));
+    expect(screen.getByRole("button", { name: /project/ })).toHaveTextContent("1 project selected");
+    await user.clear(screen.getByLabelText("Search projects"));
+    expect(within(listbox).getByLabelText(/Alpha/)).not.toBeChecked();
+    expect(within(listbox).getByLabelText(/Beta/)).toBeChecked();
+  });
+
   it("refuses to submit without a target", async () => {
     contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
     const { user, onClose } = renderDialog();
@@ -382,9 +433,11 @@ describe("BulkInstallDialog", () => {
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("1 project failed", "Beta — Bad rule"));
     expect(notifySuccess).toHaveBeenCalledWith("Installed on 1 project", expect.any(String));
     expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /project/ })).toHaveTextContent("1 project selected");
     const reopened = await openPicker(user);
     await waitFor(() => expect(within(reopened).getByLabelText(/Beta/)).toBeChecked());
     expect(within(reopened).getByLabelText(/Alpha/)).toBeDisabled();
+    expect(screen.getByRole("button", { name: /project/ })).toHaveTextContent("1 project selected");
 
     contracts.createSchedulerBinding.mockReset();
     contracts.createSchedulerBinding.mockResolvedValue(binding(BETA));

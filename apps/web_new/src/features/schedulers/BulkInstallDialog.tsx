@@ -99,10 +99,9 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
   const [query, setQuery] = React.useState("");
   const rootRef = React.useRef<HTMLDivElement>(null);
   const visible = React.useMemo(() => filterProjects(projects, query), [projects, query]);
-  const ids = projects.map((project) => project.id);
-  const allPicked =
-    ids.length > 0 &&
-    ids.filter((id) => !selection.installed.includes(id)).every((id) => selection.picked.includes(id));
+  const visibleIds = visible.map((project) => project.id);
+  const visibleEligible = visibleIds.filter((id) => !selection.installed.includes(id));
+  const allPicked = visibleEligible.length > 0 && visibleEligible.every((id) => selection.picked.includes(id));
 
   React.useEffect(() => {
     if (!open) return;
@@ -112,8 +111,6 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
     document.addEventListener("mousedown", onPointer);
     return () => document.removeEventListener("mousedown", onPointer);
   }, [open]);
-
-  const chosen = new Set([...selection.picked, ...selection.installed]);
 
   return (
     <div ref={rootRef} className="relative flex flex-col gap-(--space-2)">
@@ -125,7 +122,7 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
         className="text-body flex h-(--control-height) w-full items-center justify-between rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) text-(--text)"
         onClick={() => setOpen((current) => !current)}
       >
-        <span>{bulkSelectionSummary(chosen.size)}</span>
+        <span>{bulkSelectionSummary(selection.picked.length)}</span>
       </button>
       {open ? (
         <div
@@ -144,7 +141,7 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
               size="small"
               variant="ghost"
               disabled={loading}
-              onClick={() => onChange(toggleAllBulkTargets(selection, ids))}
+              onClick={() => onChange(toggleAllBulkTargets(selection, visibleIds))}
             >
               {allPicked ? "Clear selection" : "Select all"}
             </Button>
