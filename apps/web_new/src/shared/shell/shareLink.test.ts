@@ -8,12 +8,17 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("./toaster.js", () => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
+
 import { platform } from "../../core/platform/index.js";
-import { copyLinkWithToast, copyShareAddress, shareableAddress, workItemPath } from "./shareLink.js";
+import { copyLinkWithToast, copyShareAddress, copyWorkItemLink, shareableAddress, workItemPath } from "./shareLink.js";
+import { notifyError, notifySuccess } from "./toaster.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.mocked(notifySuccess).mockClear();
+  vi.mocked(notifyError).mockClear();
 });
 
 describe("share link helper", () => {
@@ -56,6 +61,25 @@ describe("share link helper", () => {
     });
     await expect(copyLinkWithToast("/acme/", { copied: "Copied", failed: "Failed" }, notify)).resolves.toBe(false);
     expect(notify.error).toHaveBeenCalledWith("Failed", "A hosted web origin is required to create a shareable link.");
+  });
+
+  it("reports a copy through the app toasts", async () => {
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.spyOn(platform, "shareableUrl").mockReturnValue("https://app.example.test/acme/");
+    const messages = { copied: "Copied", copiedBody: "Body", failed: "Failed", failedBody: "Try again" };
+    await expect(copyWorkItemLink("/acme/", messages)).resolves.toBe(true);
+    expect(notifySuccess).toHaveBeenCalledWith("Copied", "Body");
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("reports a refused copy through the app toasts", async () => {
+    vi.stubGlobal("navigator", {});
+    vi.spyOn(platform, "shareableUrl").mockReturnValue("https://app.example.test/acme/");
+    const messages = { copied: "Copied", failed: "Failed", failedBody: "Try again" };
+    await expect(copyWorkItemLink("/acme/", messages)).resolves.toBe(false);
+    expect(notifyError).toHaveBeenCalledWith("Failed", "Try again");
+    expect(notifySuccess).not.toHaveBeenCalled();
   });
 
   it("reports a non-Error refusal without inventing a body", async () => {
