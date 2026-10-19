@@ -7510,6 +7510,32 @@ describe("profile area contracts", () => {
     expect(mineUrl?.pathname).toBe("/api/users/me/activities/");
   });
 
+  it("parses the feed's flat issue and project projections when present", async () => {
+    const projected = {
+      ...activityPage,
+      results: [
+        {
+          ...activity,
+          issue_detail: { id: UUID2, name: "Brand audit", sequence_id: 7 },
+          project_detail: { id: UUID, identifier: "CT", name: "Contract" },
+        },
+      ],
+    };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(projected) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const feed = await getUserProfileActivity(client, "acme", UUID2, { perPage: 100 });
+    expect(feed.results[0]?.issue_detail).toEqual({ id: UUID2, name: "Brand audit", sequence_id: 7 });
+    expect(feed.results[0]?.project_detail?.identifier).toBe("CT");
+  });
+
+  it("parses an issue-detail feed row that carries no flat projections", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(activityPage) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const feed = await getUserProfileActivity(client, "acme", UUID2, { perPage: 100 });
+    expect(feed.results[0]?.issue_detail).toBeUndefined();
+    expect(feed.results[0]?.project_detail).toBeUndefined();
+  });
+
   it("posts the local date and reads the CSV export headers", async () => {
     const transport = csrfAware((call) =>
       call.url.endsWith("/export/")

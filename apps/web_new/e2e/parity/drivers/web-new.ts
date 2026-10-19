@@ -276,6 +276,11 @@ const WEBHOOKS_LOAD_FAILED = "Couldn't load the webhooks.";
 /** Bounded waits for the layouts/scenario surfaces (the oracle uses 300 s). */
 const WEB_NEW_LAYOUTS_WAIT_MS = 300_000;
 
+/** Literal text for a RegExp built around a caller-provided label. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function todo(target: string): never {
   throw new Error(`[parity] drivers/web_new has no ${target} yet; the area that owns it has not landed.`);
 }
@@ -18649,28 +18654,68 @@ export class WebNewDriver implements ParityDriver {
     return todo("analyticsExportYieldsNoDownload");
   }
 
-  async profileActivityOpen(_workspaceSlug: string, _userId: string, _cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("profileActivityOpen");
+  async profileActivityOpen(workspaceSlug: string, userId: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(this.profilePath(workspaceSlug, userId, "activity"), cookies);
+    await this.page.getByTestId("profile-page").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("profile-activity").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .locator('[data-profile-activity-row], [data-testid="profile-activity-load-more"]')
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
 
   async profileActivityDownloadVisible(): Promise<boolean> {
-    return todo("profileActivityDownloadVisible");
+    return this.isShown(this.page.getByTestId("profile-activity-download"));
   }
 
   async profileActivityDownloadLabel(): Promise<string | null> {
-    return todo("profileActivityDownloadLabel");
+    const button = this.page.getByTestId("profile-activity-download");
+    if ((await button.count()) === 0 || !(await button.first().isVisible())) return null;
+    return (await button.first().innerText()).trim();
   }
 
+  private profileExportStall: { pattern: string; handler: (route: Route) => Promise<void>; held: Route | null } | null =
+    null;
+
   async profileActivityStallExport(): Promise<void> {
-    return todo("profileActivityStallExport");
+    if (this.profileExportStall !== null) return;
+    const pattern = "**/api/workspaces/*/user-activity/*/export/**";
+    const stall = { pattern, handler: async (_route: Route): Promise<void> => undefined, held: null as Route | null };
+    stall.handler = async (route: Route): Promise<void> => {
+      stall.held = route;
+    };
+    this.profileExportStall = stall;
+    await this.page.route(pattern, stall.handler);
   }
 
   async profileActivityReleaseExport(): Promise<void> {
-    return todo("profileActivityReleaseExport");
+    const stall = this.profileExportStall;
+    if (stall === null) return;
+    this.profileExportStall = null;
+    await this.page.unroute(stall.pattern, stall.handler);
+    await stall.held?.continue();
   }
 
   async profileActivityDownload(): Promise<{ file: LocalFileDownload; requestBody: { date: string } }> {
-    return todo("profileActivityDownload");
+    const request = this.page.waitForRequest(
+      (candidate) => candidate.method() === "POST" && /\/user-activity\/[^/]+\/export\//.test(candidate.url()),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: 60_000 }),
+      this.page.getByTestId("profile-activity-download").click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const posted = await request;
+    const body = posted.postDataJSON() as { date?: string } | null;
+    const stream = await download.createReadStream();
+    if (!stream) throw new Error("[parity] profile activity download produced no bytes.");
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    return {
+      file: { fileName: download.suggestedFilename(), content: Buffer.concat(chunks).toString("utf8") },
+      requestBody: { date: body?.date ?? "" },
+    };
   }
 
   // --- Reactions oracle (NEWFRONT-116, CMT-022/023/024). Throwing stubs per
@@ -22880,144 +22925,417 @@ export class WebNewDriver implements ParityDriver {
   // untouched per the shared contract.
   // ---------------------------------------------------------------------------
 
-  async profileOpen(_workspaceSlug: string, _userId: string, _cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("profileOpen");
+  /** Path of the profile page for one member. */
+  private profilePath(workspaceSlug: string, userId: string, tab?: string): string {
+    const base = `/${workspaceSlug}/profile/${userId}/`;
+    return tab === undefined || tab === "" ? base : `${base}${tab}/`;
   }
+
+  /** The profile frame's content column (the outlet's mount point). */
+  private profileContent() {
+    return this.page.getByTestId("profile-page");
+  }
+
+  /** Descendant locator scoped to the profile frame when it is mounted. */
+  private profileScope(selector: string) {
+    return this.page.locator(`[data-testid="profile-page"] ${selector}`);
+  }
+
+  private async profileSettle(tab?: string): Promise<void> {
+    await this.page.getByTestId("profile-page").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (tab === "assigned" || tab === "created" || tab === "subscribed") {
+      // The list, board or inline denial is the tab's settled state.
+      await this.page
+        .locator('[data-testid="profile-list"], [data-testid="profile-board"], [data-testid="profile-access-denied"]')
+        .first()
+        .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    } else if (tab === "activity") {
+      await this.page.getByTestId("profile-activity").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    } else if (tab === undefined || tab === "") {
+      await this.page.getByTestId("profile-overview").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    }
+  }
+
+  async profileOpen(workspaceSlug: string, userId: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(this.profilePath(workspaceSlug, userId), cookies);
+    await this.profileSettle("");
+  }
+
   async profileBreadcrumbLabel(): Promise<string> {
-    return todo("profileBreadcrumbLabel");
+    const crumbs = this.page.getByRole("navigation", { name: "Profile breadcrumb" }).locator("li");
+    const last = crumbs.last();
+    await last.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return (await last.innerText()).trim();
   }
+
   async profileVisibleTabs(): Promise<string[]> {
-    return todo("profileVisibleTabs");
+    const links = this.page.getByTestId("profile-tabs").locator("[data-profile-tab]");
+    await links.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return (await links.allInnerTexts()).map((text) => text.trim());
   }
-  async profileTabHref(_tab: string): Promise<string | null> {
-    return todo("profileTabHref");
+
+  async profileTabHref(tab: string): Promise<string | null> {
+    const link = this.page.getByTestId("profile-tabs").getByRole("link", { name: tab, exact: true });
+    if ((await link.count()) === 0) return null;
+    return link.first().getAttribute("href");
   }
+
   async profileOpenTab(
-    _workspaceSlug: string,
-    _userId: string,
-    _tab: string,
-    _cookies: ParityBrowserCookie[]
+    workspaceSlug: string,
+    userId: string,
+    tab: string,
+    cookies: ParityBrowserCookie[]
   ): Promise<void> {
-    return todo("profileOpenTab");
+    await this.openAuthenticated(this.profilePath(workspaceSlug, userId, tab), cookies);
+    await this.page.getByTestId("profile-page").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // Unknown tab ids render no body; give either outcome a bounded moment.
+    await this.page
+      .locator(
+        '[data-testid="profile-list"], [data-testid="profile-board"], [data-testid="profile-access-denied"], [data-testid="profile-activity"], [data-testid="profile-overview"]'
+      )
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
+
   async profileAccessDenied(): Promise<boolean> {
-    return todo("profileAccessDenied");
+    return this.isShown(this.page.getByTestId("profile-access-denied"));
   }
+
   async profileMobileTabPickerLabel(): Promise<string | null> {
-    return todo("profileMobileTabPickerLabel");
+    const label = this.page.getByTestId("profile-tab-picker-label");
+    if ((await label.count()) === 0) return null;
+    return (await label.first().innerText()).trim();
   }
+
   async profileMobileTabPickerOptions(): Promise<string[]> {
-    return todo("profileMobileTabPickerOptions");
+    const trigger = this.page.getByTestId("profile-tab-picker-trigger");
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const items = this.page.getByRole("menuitem");
+    await items.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const labels = (await items.allInnerTexts()).map((text) => text.trim());
+    await this.page.keyboard.press("Escape");
+    return labels;
   }
+
   async profileOverviewCards(): Promise<Array<{ title: string; value: string; href: string | null }>> {
-    return todo("profileOverviewCards");
+    const cards = this.page.locator("[data-profile-card]");
+    await cards.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const count = await cards.count();
+    const out: Array<{ title: string; value: string; href: string | null }> = [];
+    for (let index = 0; index < count; index += 1) {
+      const card = cards.nth(index);
+      const tab = await card.getAttribute("data-profile-card");
+      const title = ((await card.locator("span").first().innerText()) || "").trim();
+      const value = ((await card.locator(`[data-profile-card-value="${tab ?? ""}"]`).innerText()) || "").trim();
+      out.push({ title, value, href: await card.getAttribute("href") });
+    }
+    return out;
   }
-  async profileOverviewOpenCard(_route: string): Promise<void> {
-    return todo("profileOverviewOpenCard");
+
+  async profileOverviewOpenCard(route: string): Promise<void> {
+    await this.page.locator(`[data-profile-card="${route}"]`).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("profile-page").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .locator('[data-testid="profile-list"], [data-testid="profile-board"]')
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
+
   async profileOverviewStatsLoading(): Promise<boolean> {
-    return todo("profileOverviewStatsLoading");
+    return (await this.page.getByTestId("profile-card-placeholder").count()) > 0;
   }
+
+  private profileStatsStall: { pattern: string; handler: (route: Route) => Promise<void> } | null = null;
+
   async profileOverviewStallStats(): Promise<void> {
-    return todo("profileOverviewStallStats");
+    if (this.profileStatsStall !== null) return;
+    const pattern = "**/api/workspaces/*/user-stats/*/";
+    const handler = async (_route: Route): Promise<void> => undefined;
+    this.profileStatsStall = { pattern, handler };
+    await this.page.route(pattern, handler);
   }
+
   async profileOverviewReleaseStats(): Promise<void> {
-    return todo("profileOverviewReleaseStats");
+    const stall = this.profileStatsStall;
+    if (stall === null) return;
+    this.profileStatsStall = null;
+    await this.page.unroute(stall.pattern, stall.handler);
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    await this.page.getByTestId("profile-overview").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
+
   async profileWorkloadGroups(): Promise<Array<{ label: string; count: string }>> {
-    return todo("profileWorkloadGroups");
+    const cards = this.page.locator("[data-profile-workload-group]");
+    await cards.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const count = await cards.count();
+    const out: Array<{ label: string; count: string }> = [];
+    for (let index = 0; index < count; index += 1) {
+      const spans = cards.nth(index).locator("span");
+      out.push({ label: (await spans.nth(0).innerText()).trim(), count: (await spans.nth(1).innerText()).trim() });
+    }
+    return out;
   }
+
   async profilePriorityChartCategories(): Promise<string[]> {
-    return todo("profilePriorityChartCategories");
+    const rows = this.page.locator("[data-profile-priority]");
+    if ((await rows.count()) === 0) return [];
+    return (
+      await rows.evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute("data-profile-priority") ?? "")
+      )
+    )
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
   }
+
   async profileStateChartLegend(): Promise<Array<{ label: string; count: string }>> {
-    return todo("profileStateChartLegend");
+    const rows = this.page.locator("[data-profile-state-legend]");
+    if ((await rows.count()) === 0) return [];
+    const count = await rows.count();
+    const out: Array<{ label: string; count: string }> = [];
+    for (let index = 0; index < count; index += 1) {
+      const spans = rows.nth(index).locator("span");
+      out.push({ label: (await spans.nth(0).innerText()).trim(), count: (await spans.nth(1).innerText()).trim() });
+    }
+    return out;
   }
+
   async profileChartsEmptyCount(): Promise<number> {
-    return todo("profileChartsEmptyCount");
+    return this.page.getByTestId("profile-chart-empty").count();
   }
+
   async profileOverviewActivityEntries(): Promise<string[]> {
-    return todo("profileOverviewActivityEntries");
+    const rows = this.page.locator('[data-testid="profile-overview-activity"] [data-profile-activity-row]');
+    if ((await rows.count()) === 0) return [];
+    return (await rows.allInnerTexts()).map((text) => text.trim().replace(/\s+/g, " "));
   }
+
   async profileOverviewActivityEntryHrefs(): Promise<string[]> {
-    return todo("profileOverviewActivityEntryHrefs");
+    const links = this.page.locator('[data-testid="profile-overview-activity"] a[href*="/browse/"]');
+    const count = await links.count();
+    const out: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const href = await links.nth(index).getAttribute("href");
+      if (href !== null) out.push(href);
+    }
+    return out;
   }
+
   async profileOverviewActivityEmpty(): Promise<boolean> {
-    return todo("profileOverviewActivityEmpty");
+    return this.isShown(this.page.getByTestId("profile-overview-activity-empty"));
   }
+
+  /** Open the visible layout menu and read its choices. */
+  private async profileLayoutChoices(): Promise<Array<"list" | "kanban">> {
+    const triggers = this.page.locator('[aria-label^="Issue layout, current"]');
+    const visible = triggers.filter({ visible: true }).first();
+    await visible.click({ timeout: WebNewDriver.WAIT_MS });
+    const choices = this.page.locator("[data-profile-layout-choice]");
+    await choices.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const values = await choices.evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-profile-layout-choice") ?? "")
+    );
+    await this.page.keyboard.press("Escape");
+    return values.filter((value): value is "list" | "kanban" => value === "list" || value === "kanban");
+  }
+
   async profileIssuesOfferedLayouts(): Promise<Array<"list" | "kanban">> {
-    return todo("profileIssuesOfferedLayouts");
+    return this.profileLayoutChoices();
   }
+
   async profileMobileOfferedLayouts(): Promise<Array<"list" | "kanban">> {
-    return todo("profileMobileOfferedLayouts");
+    return this.profileLayoutChoices();
   }
-  async profileMobileSwitchTo(_layout: "list" | "kanban"): Promise<void> {
-    return todo("profileMobileSwitchTo");
+
+  async profileMobileSwitchTo(layout: "list" | "kanban"): Promise<void> {
+    const triggers = this.page.locator('[aria-label^="Issue layout, current"]');
+    await triggers.filter({ visible: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.locator(`[data-profile-layout-choice="${layout}"]`).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .locator(layout === "kanban" ? '[data-testid="profile-board"]' : '[data-testid="profile-list"]')
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
+
   async profileMobileKanbanVisible(): Promise<boolean> {
-    return todo("profileMobileKanbanVisible");
+    return this.isShown(this.page.getByTestId("profile-board"));
   }
+
   async profileMobileActiveLayout(): Promise<"list" | "kanban"> {
-    return todo("profileMobileActiveLayout");
+    if (await this.isShown(this.page.getByTestId("profile-board"))) return "kanban";
+    if (await this.isShown(this.page.getByTestId("profile-list"))) return "list";
+    throw new Error("[parity] no profile layout container rendered.");
   }
+
   async profileMobileReloadIssues(): Promise<void> {
-    return todo("profileMobileReloadIssues");
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    await this.page
+      .locator('[data-testid="profile-list"], [data-testid="profile-board"]')
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
+
   async profileTabRendersNothing(): Promise<boolean> {
-    return todo("profileTabRendersNothing");
+    const frame = this.page.getByTestId("profile-page");
+    if (!(await this.isShown(frame))) return false;
+    for (const testId of [
+      "profile-access-denied",
+      "profile-list",
+      "profile-board",
+      "profile-activity",
+      "profile-overview",
+    ]) {
+      if (await this.isShown(this.page.getByTestId(testId))) return false;
+    }
+    return true;
   }
+
   async profileActivityEntries(): Promise<string[]> {
-    return todo("profileActivityEntries");
+    const rows = this.page.locator('[data-testid="profile-activity-list"] [data-profile-activity-row]');
+    if ((await rows.count()) === 0) return [];
+    return (await rows.allInnerTexts()).map((text) => text.trim().replace(/\s+/g, " "));
   }
+
   async profileActivityEntryHrefs(): Promise<string[]> {
-    return todo("profileActivityEntryHrefs");
+    const links = this.page.locator('[data-testid="profile-activity-list"] a[href*="/browse/"]');
+    const count = await links.count();
+    const out: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const href = await links.nth(index).getAttribute("href");
+      if (href !== null) out.push(href);
+    }
+    return out;
   }
+
   async profileActivityLoadMoreVisible(): Promise<boolean> {
-    return todo("profileActivityLoadMoreVisible");
+    return this.isShown(this.page.getByTestId("profile-activity-load-more"));
   }
+
   async profileActivityLoadMore(): Promise<void> {
-    return todo("profileActivityLoadMore");
+    const button = this.page.getByTestId("profile-activity-load-more");
+    const before = await this.page.locator("[data-profile-activity-row]").count();
+    await button.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => this.page.locator("[data-profile-activity-row]").count(), { timeout: WebNewDriver.WAIT_MS })
+      .toBeGreaterThan(before);
   }
+
   async profileSidebarVisible(): Promise<boolean> {
-    return todo("profileSidebarVisible");
+    return this.isShown(this.page.getByTestId("profile-sidebar"));
   }
+
   async profileSidebarCoverVisible(): Promise<boolean> {
-    return todo("profileSidebarCoverVisible");
+    // The target removes cover art from the identity panel entirely.
+    if (!(await this.profileSidebarVisible())) return false;
+    return (
+      (await this.page
+        .getByTestId("profile-sidebar")
+        .locator('[data-profile-cover], [aria-label*="cover" i], img[alt*="cover" i]')
+        .count()) > 0
+    );
   }
+
   async profileSidebarAvatar(): Promise<{ kind: "image"; src: string } | { kind: "initial"; initial: string }> {
-    return todo("profileSidebarAvatar");
+    const sidebar = this.page.getByTestId("profile-sidebar");
+    const initial = sidebar.locator('[data-profile-avatar="initial"]');
+    if ((await initial.count()) > 0) {
+      return { kind: "initial", initial: (await initial.first().innerText()).trim() };
+    }
+    const image = sidebar.getByRole("img").first().locator("img");
+    const src = await image.getAttribute("src");
+    if (src === null) throw new Error("[parity] profile sidebar rendered neither an avatar image nor an initial.");
+    return { kind: "image", src };
   }
+
   async profileSidebarName(): Promise<{ full: string; display: string }> {
-    return todo("profileSidebarName");
+    const sidebar = this.page.getByTestId("profile-sidebar");
+    const full = (await sidebar.locator('[data-profile-name="full"]').first().innerText()).trim();
+    const displayNode = sidebar.locator('[data-profile-name="display"]');
+    const display = (await displayNode.count()) === 0 ? "" : (await displayNode.first().innerText()).trim();
+    return { full, display };
   }
+
   async profileSidebarJoinDate(): Promise<string> {
-    return todo("profileSidebarJoinDate");
+    return (await this.page.locator("[data-profile-join-date]").first().innerText()).trim();
   }
+
   async profileSidebarClock(): Promise<string> {
-    return todo("profileSidebarClock");
+    return (await this.page.locator("[data-profile-clock]").first().innerText()).trim();
   }
+
   async profileSidebarProjectRows(): Promise<Array<{ name: string; completion: string | null }>> {
-    return todo("profileSidebarProjectRows");
+    const rows = this.page.locator("[data-profile-project-row]");
+    await rows.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const count = await rows.count();
+    const out: Array<{ name: string; completion: string | null }> = [];
+    for (let index = 0; index < count; index += 1) {
+      const row = rows.nth(index);
+      const id = (await row.getAttribute("data-profile-project-row")) ?? "";
+      const label = (await row.locator("button").first().getAttribute("aria-label")) ?? "";
+      const name = label.includes(",") ? label.slice(0, label.indexOf(",")).trim() : label.trim();
+      const completionNode = row.locator(`[data-profile-project-completion="${id}"]`);
+      const completion =
+        (await completionNode.count()) === 0 ? null : (await completionNode.first().innerText()).trim();
+      out.push({ name, completion });
+    }
+    return out;
   }
-  async profileSidebarExpandProject(_name: string): Promise<void> {
-    return todo("profileSidebarExpandProject");
+
+  async profileSidebarExpandProject(name: string): Promise<void> {
+    const button = this.page
+      .getByTestId("profile-sidebar")
+      .getByRole("button", { name: new RegExp(`^${escapeRegExp(name)},`) });
+    await button.first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .locator("[data-profile-project-counts]")
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
-  async profileSidebarProjectCounts(_name: string): Promise<{
+
+  async profileSidebarProjectCounts(name: string): Promise<{
     created: string;
     assigned: string;
     due: string;
     completed: string;
   }> {
-    return todo("profileSidebarProjectCounts");
+    const row = this.page
+      .locator("[data-profile-project-row]")
+      .filter({ has: this.page.getByRole("button", { name: new RegExp(`^${escapeRegExp(name)},`) }) })
+      .first();
+    const counts = row.locator("[data-profile-project-counts]");
+    await counts.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const terms = counts.locator("dt");
+    const values = counts.locator("dd");
+    const byLabel: Record<string, string> = {};
+    const count = await terms.count();
+    for (let index = 0; index < count; index += 1) {
+      const label = (await terms.nth(index).innerText()).trim().toLowerCase();
+      byLabel[label] = (await values.nth(index).innerText()).trim();
+    }
+    return {
+      created: byLabel["created"] ?? "",
+      assigned: byLabel["assigned"] ?? "",
+      due: byLabel["due"] ?? "",
+      completed: byLabel["completed"] ?? "",
+    };
   }
+
   async profileSidebarEditPencilVisible(): Promise<boolean> {
-    return todo("profileSidebarEditPencilVisible");
+    return this.isShown(this.page.getByTestId("profile-edit-pencil"));
   }
+
   async profileSidebarClickEditPencil(): Promise<void> {
-    return todo("profileSidebarClickEditPencil");
+    await this.page.getByTestId("profile-edit-pencil").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => undefined);
   }
+
   async profileSidebarToggle(): Promise<void> {
-    return todo("profileSidebarToggle");
+    const wasOpen = await this.profileSidebarVisible();
+    const control = wasOpen
+      ? this.page.getByRole("button", { name: "Hide profile details" })
+      : this.page.getByTestId("profile-sidebar-toggle");
+    await control.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.profileSidebarVisible(), { timeout: WebNewDriver.WAIT_MS }).toBe(!wasOpen);
   }
 
   // --- Desktop updater web-observable sides (NEWFRONT-209, DESK-016–018).

@@ -49,6 +49,14 @@ export const IssueActivity = z.object({
   workspace: uuid(),
   actor: nullableUuid(),
   actor_detail: z.nullable(UserLite),
+  /**
+   * Flat work-item projection the workspace user-activity feed serialises
+   * beside the row (id, name and sequence id). The issue-detail feed omits
+   * it, so readers treat absence as "no key to link".
+   */
+  issue_detail: z.optional(z.nullable(z.object({ id: uuid(), name: z.string(), sequence_id: z.number() }))),
+  /** Project projection carrying the identifier the browse key needs. */
+  project_detail: z.optional(z.nullable(z.object({ id: uuid(), identifier: z.string(), name: z.string() }))),
   verb: z.string(),
   field: z.nullable(z.string()),
   old_value: z.nullable(z.string()),
