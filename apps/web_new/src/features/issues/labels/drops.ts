@@ -29,6 +29,37 @@ export interface LabelDropSpan {
   right: number;
   /** Top-level rows accept nesting; child rows resolve to siblings. */
   nestable: boolean;
+  /** Parent link of a child row; null for top-level rows. */
+  parentId: string | null;
+}
+
+/** Attribute marking one measured row, carrying its id and parent. */
+export const LABEL_SLOT_ATTRIBUTE = "data-label-slot";
+
+/**
+ * Measure the rows under a list root for drop resolution. Rows without
+ * an id (still mounting) are skipped; a missing root measures nothing.
+ */
+export function readLabelDropSpans(root: Element | null | undefined): LabelDropSpan[] {
+  const nodes =
+    root === null || root === undefined ? [] : Array.from(root.querySelectorAll(`[${LABEL_SLOT_ATTRIBUTE}]`));
+  const spans: LabelDropSpan[] = [];
+  for (const node of nodes) {
+    const element = node as HTMLElement;
+    const id = element.dataset["labelId"] ?? "";
+    if (id === "") continue;
+    const rect = element.getBoundingClientRect();
+    spans.push({
+      id,
+      top: rect.top,
+      bottom: rect.bottom,
+      left: rect.left,
+      right: rect.right,
+      nestable: element.dataset["nestable"] === "true",
+      parentId: element.dataset["labelParent"] ?? null,
+    });
+  }
+  return spans;
 }
 
 /** Live drop preview: a sibling slot, a nesting target, or nothing. */
@@ -96,18 +127,25 @@ export function resolveLabelInto(
 }
 
 /**
- * Child row whose middle band holds the pointer, or null. Drops onto
- * a child land as its sibling, so the band previews the slot above
- * it; only child rows match, never the dragged row itself.
+ * Sibling slot for a drop over a child row: the whole row previews a
+ * slot above it, and the last child's lower half previews a slot
+ * below. Children never accept nesting, so the pointer never falls
+ * through to the top-level rows behind them. The dragged row itself
+ * resolves to no slot.
  */
-export function resolveLabelChildBand(
+export function resolveLabelChildSlot(
   spans: readonly LabelDropSpan[],
   x: number,
   y: number,
   sourceId: string
-): string | null {
-  for (const span of spans) {
-    if (!span.nestable && span.id !== sourceId && inMiddleBand(span, x, y)) return span.id;
+): LabelDropSlot | null {
+  for (let index = 0; index < spans.length; index += 1) {
+    const span = spans[index];
+    if (span === undefined || span.nestable || span.id === sourceId) continue;
+    if (x < span.left || x > span.right || y < span.top || y > span.bottom) continue;
+    const isLastChild = !spans.slice(index + 1).some((later) => later.parentId === span.parentId);
+    const below = isLastChild && y > (span.top + span.bottom) / 2;
+    return { id: span.id, after: below };
   }
   return null;
 }

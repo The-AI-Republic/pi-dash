@@ -10,10 +10,12 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { MENU_PORTAL_ID } from "../../../shared/shell/document.js";
 
-vi.mock("../../../shared/shell/index.js", () => ({
-  notifyError: vi.fn(),
-}));
+vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../shared/shell/index.js")>();
+  return { ...actual, notifyError: vi.fn() };
+});
 
 import { notifyError } from "../../../shared/shell/index.js";
 import {
@@ -148,13 +150,18 @@ function setup(options: LabelsStubOptions = {}) {
 
 /** Names in render order across groups and children. */
 function visibleNames(): string[] {
-  return screen.getAllByTestId("label-row-name").map((name) => name.textContent ?? "");
+  return screen
+    .getAllByTestId("label-row-name")
+    .filter((name) => name.closest('[data-testid="label-drag-chip"]') === null)
+    .map((name) => name.textContent ?? "");
 }
 
 function rowByName(name: string): HTMLElement {
-  const row = screen.getByText(name, { exact: true }).closest('[data-testid="label-row"]');
-  if (!(row instanceof HTMLElement)) throw new Error(`no row for ${name}`);
-  return row;
+  for (const span of screen.getAllByTestId("label-row-name")) {
+    const row = span.closest('[data-testid="label-row"]');
+    if (span.textContent === name && row instanceof HTMLElement) return row;
+  }
+  throw new Error(`no row for ${name}`);
 }
 
 function stubSlotRects(spans: Record<string, { top: number; bottom: number }>): void {
@@ -196,11 +203,15 @@ function pointerCancel(): void {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  const host = document.createElement("div");
+  host.id = MENU_PORTAL_ID;
+  document.body.appendChild(host);
 });
 
 afterEach(() => {
   resetAppClient();
   vi.restoreAllMocks();
+  document.getElementById(MENU_PORTAL_ID)?.remove();
 });
 
 describe("LabelsSettings standing", () => {
@@ -618,6 +629,36 @@ describe("LabelsSettings drag", () => {
     pointerUp();
     expect(await patchBody(calls)).toEqual({ parent: null, sort_order: 30000 });
     await waitFor(() => expect(visibleNames()).toEqual(["Alpha", "Beta"]));
+  });
+
+  it("follows the pointer with a preview chip while dragging", async () => {
+    setup({ labels: flat });
+    await waitFor(() => expect(screen.getByText("Gamma")).toBeInTheDocument());
+    stubSlotRects({ [AID]: { top: 0, bottom: 40 }, [BID]: { top: 40, bottom: 80 }, [CID]: { top: 80, bottom: 120 } });
+    fireEvent.pointerDown(gripByName("Gamma"));
+    expect(screen.queryByTestId("label-drag-chip")).not.toBeInTheDocument();
+    pointerMove(200, 50);
+    const chip = screen.getByTestId("label-drag-chip");
+    expect(chip).toHaveTextContent("Gamma");
+    expect(chip).toHaveAttribute("aria-hidden", "true");
+    expect(chip.style.transform).toBe("translate3d(212px, 62px, 0)");
+    pointerMove(310, 90);
+    expect(screen.getByTestId("label-drag-chip").style.transform).toBe("translate3d(322px, 102px, 0)");
+    pointerUp();
+    expect(screen.queryByTestId("label-drag-chip")).not.toBeInTheDocument();
+  });
+
+  it("drops a top-level row below the last child's lower half", async () => {
+    const { calls } = setup({ labels: [flat[0]!, flat[1]!, labelRow(KID, "Kid", 12000, AID)] });
+    await waitFor(() => expect(screen.getByText("Kid")).toBeInTheDocument());
+    stubSlotRects({ [AID]: { top: 0, bottom: 40 }, [KID]: { top: 40, bottom: 80 }, [BID]: { top: 80, bottom: 120 } });
+    fireEvent.pointerDown(gripByName("Beta"));
+    pointerMove(200, 75);
+    const line = screen.getByTestId("label-drop-line");
+    expect(line).toHaveAttribute("data-position", "below");
+    expect(line.closest('[data-testid="label-row"]')).toBe(rowByName("Kid"));
+    pointerUp();
+    expect(await patchBody(calls)).toEqual({ parent: AID, sort_order: 22000 });
   });
 
   it("refuses self drops silently", async () => {

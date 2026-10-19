@@ -15,7 +15,7 @@ import * as React from "react";
 import { ROLE_ADMIN } from "../../../core/session/permissions.js";
 import { useProjectRoles, useWorkspaceMembership } from "../../auth/index.js";
 import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
-import { notifyError } from "../../../shared/shell/index.js";
+import { MENU_PORTAL_ID, OverlayPortal, notifyError } from "../../../shared/shell/index.js";
 import {
   LABELS_LOAD_FAILED_TITLE,
   useCreateLabel,
@@ -29,12 +29,12 @@ import { LabelForm, type LabelFormValue } from "./LabelForm.js";
 import {
   effectiveLabelChildren,
   EMPTY_LABEL_DROP,
-  resolveLabelChildBand,
+  readLabelDropSpans,
+  resolveLabelChildSlot,
   resolveLabelDrop,
   resolveLabelInto,
   resolveLabelSlot,
   type LabelDropPreview,
-  type LabelDropSpan,
 } from "./drops.js";
 import { selectLabelTree, type LabelGroup } from "./tree.js";
 
@@ -47,6 +47,12 @@ type LabelFormState = { mode: "create" } | { mode: "edit"; labelId: string };
 
 /** Drop marker for one row: a sibling line, a nesting ring, or nothing. */
 type LabelDropMarker = "above" | "below" | "into" | null;
+
+/** Where the drag chip follows the pointer. */
+interface PointerPosition {
+  x: number;
+  y: number;
+}
 
 function dropMarkerFor(preview: LabelDropPreview, rowId: string): LabelDropMarker {
   if (preview.into === rowId) return "into";
@@ -63,35 +69,26 @@ function dropMarkerFor(preview: LabelDropPreview, rowId: string): LabelDropMarke
 function useLabelReorder(args: { labels: readonly Label[]; commit: (input: LabelMoveInput) => void }): {
   listRef: React.RefObject<HTMLUListElement | null>;
   sourceId: string | null;
+  pointer: PointerPosition | null;
   preview: LabelDropPreview;
   onGripDown: (labelId: string) => void;
 } {
   const { labels, commit } = args;
   const [sourceId, setSourceId] = React.useState<string | null>(null);
+  const [pointer, setPointer] = React.useState<PointerPosition | null>(null);
   const [preview, setPreview] = React.useState<LabelDropPreview>(EMPTY_LABEL_DROP);
   const listRef = React.useRef<HTMLUListElement>(null);
   const dropRef = React.useRef<LabelDropPreview>(EMPTY_LABEL_DROP);
 
   React.useEffect(() => {
     if (sourceId === null) return;
-    const spans = (): LabelDropSpan[] =>
-      Array.from(listRef.current?.querySelectorAll("[data-label-slot]") ?? [], (node) => {
-        const element = node as HTMLElement;
-        const rect = element.getBoundingClientRect();
-        return {
-          id: element.dataset.labelId ?? "",
-          top: rect.top,
-          bottom: rect.bottom,
-          left: rect.left,
-          right: rect.right,
-          nestable: element.dataset.nestable === "true",
-        };
-      });
+    const spans = () => readLabelDropSpans(listRef.current);
     const report = (next: LabelDropPreview): void => {
       dropRef.current = next;
       setPreview(next);
     };
     const move = (event: PointerEvent): void => {
+      setPointer({ x: event.clientX, y: event.clientY });
       const own = spans();
       const into = resolveLabelInto(own, event.clientX, event.clientY, sourceId);
       if (into !== null) {
@@ -102,9 +99,9 @@ function useLabelReorder(args: { labels: readonly Label[]; commit: (input: Label
         }
         return;
       }
-      const child = resolveLabelChildBand(own, event.clientX, event.clientY, sourceId);
+      const child = resolveLabelChildSlot(own, event.clientX, event.clientY, sourceId);
       if (child !== null) {
-        report({ slot: { id: child, after: false }, into: null });
+        report({ slot: child, into: null });
         return;
       }
       report({ slot: resolveLabelSlot(own, event.clientY, sourceId), into: null });
@@ -113,6 +110,7 @@ function useLabelReorder(args: { labels: readonly Label[]; commit: (input: Label
       const drop = dropRef.current;
       dropRef.current = EMPTY_LABEL_DROP;
       setPreview(EMPTY_LABEL_DROP);
+      setPointer(null);
       setSourceId(null);
       if (!commitDrop) return;
       const resolved = resolveLabelDrop({ labels, sourceId, slot: drop.slot, into: drop.into });
@@ -137,7 +135,29 @@ function useLabelReorder(args: { labels: readonly Label[]; commit: (input: Label
     };
   }, [sourceId, labels, commit]);
 
-  return { listRef, sourceId, preview, onGripDown: setSourceId };
+  return { listRef, sourceId, pointer, preview, onGripDown: setSourceId };
+}
+
+/**
+ * The chip that follows the pointer during a drag: the dragged label's
+ * swatch and name, taken out of pointer events so it never becomes a
+ * drop target itself.
+ */
+function LabelDragChip({ label, pointer }: { label: Label; pointer: PointerPosition }): React.ReactNode {
+  const color = label.color;
+  return (
+    <OverlayPortal rootId={MENU_PORTAL_ID}>
+      <div
+        aria-hidden="true"
+        data-testid="label-drag-chip"
+        style={{ transform: `translate3d(${pointer.x + 12}px, ${pointer.y + 12}px, 0)` }}
+        className="shadow-lg pointer-events-none fixed top-0 left-0 z-50 flex items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--surface) px-(--space-2) py-(--space-1)"
+      >
+        <span aria-hidden="true" style={{ backgroundColor: color }} className="size-2.5 shrink-0 rounded-full" />
+        <span className="text-body max-w-56 truncate text-(--text)">{label.name}</span>
+      </div>
+    </OverlayPortal>
+  );
 }
 
 /** Four-row loading skeleton for the label list. */
@@ -195,6 +215,7 @@ function LabelRowChrome({
       <div
         data-label-slot
         data-label-id={row.id}
+        data-label-parent={row.parent ?? undefined}
         data-nestable={indented ? "false" : "true"}
         data-drop-into={marker === "into" ? "true" : undefined}
         className={cn(
@@ -382,6 +403,7 @@ export function LabelsSettings({ workspaceSlug, projectId }: LabelsSettingsProps
           </ul>
         </div>
       ) : null}
+      <DraggedLabelChip rows={rows} sourceId={drag.sourceId} pointer={drag.pointer} />
       <LabelDeleteDialog
         workspaceSlug={workspaceSlug}
         projectId={projectId}
@@ -390,6 +412,21 @@ export function LabelsSettings({ workspaceSlug, projectId }: LabelsSettingsProps
       />
     </section>
   );
+}
+
+/** Render the chip only while a known row is dragged under the pointer. */
+function DraggedLabelChip({
+  rows,
+  sourceId,
+  pointer,
+}: {
+  rows: readonly Label[];
+  sourceId: string | null;
+  pointer: PointerPosition | null;
+}): React.ReactNode {
+  const label = sourceId === null ? undefined : rows.find((row) => row.id === sourceId);
+  if (label === undefined || pointer === null) return null;
+  return <LabelDragChip label={label} pointer={pointer} />;
 }
 
 interface LabelGroupCardProps {
@@ -511,6 +548,7 @@ function LabelGroupCard({
         <div
           data-label-slot
           data-label-id={label.id}
+          data-label-parent={label.parent ?? undefined}
           data-nestable="true"
           data-drop-into={marker === "into" ? "true" : undefined}
           className={cn(
