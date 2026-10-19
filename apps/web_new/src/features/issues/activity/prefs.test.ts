@@ -17,8 +17,21 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   window.localStorage.clear();
 });
+
+/**
+ * jsdom keeps `getItem`/`setItem` off `Storage.prototype`, so spying on
+ * the prototype silently leaves the real storage in place and the
+ * refusal branches never run. Replace the whole object instead.
+ */
+function stubStorage(overrides: Partial<Storage>): void {
+  vi.spyOn(window, "localStorage", "get").mockReturnValue({
+    ...window.localStorage,
+    ...overrides,
+  } as unknown as Storage);
+}
 
 describe("useFeedPrefs", () => {
   it("starts from every category on and oldest first", () => {
@@ -50,8 +63,10 @@ describe("useFeedPrefs", () => {
   });
 
   it("keeps the choice in this tab when storage refuses the write", () => {
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("QuotaExceededError");
+    stubStorage({
+      setItem: () => {
+        throw new Error("QuotaExceededError");
+      },
     });
     const { result } = renderHook(() => useFeedPrefs());
     act(() => {
@@ -65,8 +80,10 @@ describe("useFeedPrefs", () => {
   });
 
   it("falls back to defaults when storage refuses the read", () => {
-    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
-      throw new Error("SecurityError");
+    stubStorage({
+      getItem: () => {
+        throw new Error("SecurityError");
+      },
     });
     const { result } = renderHook(() => useFeedPrefs());
     expect(result.current.filters).toEqual([...DEFAULT_FILTERS]);
