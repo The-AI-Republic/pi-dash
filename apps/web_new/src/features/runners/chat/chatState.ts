@@ -117,30 +117,42 @@ export interface SelectionInput {
   pendingId: string | null;
   /** `?sessionId=`. */
   requestedId: string | null;
-  /** A session this page just created, not yet in the list. */
+  /**
+   * A session this page just created automatically (RUN-028), not yet in
+   * the list. Unlike `pendingId` it is a fallback: a click or a link that
+   * arrives while the create runs still wins.
+   */
   precreated: ChatSession | null;
 }
 
 /**
  * The conversation to show (RUN-026). An explicit choice wins whenever it
  * resolves — even for a closed session, so history stays readable. A
- * stale or foreign id falls through to the automatic pick: the most
- * recent open session that has turns, else any open session, else none.
+ * session this page auto-created is only a fallback: it may be decided
+ * before the viewer clicks an entry or follows a link. A stale or foreign
+ * id falls through to the automatic pick: the most recent open session
+ * that has turns, else any open session, else none.
  */
 export function selectSession({ sessions, pendingId, requestedId, precreated }: SelectionInput): ChatSession | null {
   const available = sessions ?? [];
-  const requested = pendingId ?? requestedId;
-  if (requested !== null) {
-    const match = available.find((session) => session.id === requested);
+  const explicit = pendingId ?? requestedId;
+  if (explicit !== null) {
+    const match = available.find((session) => session.id === explicit);
     if (match) return match;
-    if (precreated?.id === requested) return precreated;
+    if (precreated?.id === explicit) return precreated;
   }
   // The server lists newest-first, but a locally prepended row is not in
   // that order yet; sort before picking so "most recent" is explicit.
   const ordered = sortSessionsByActivity(available);
   const withTurns = ordered.find((session) => session.status === "open" && session.last_message_at !== null);
   if (withTurns) return withTurns;
-  return ordered.find((session) => session.status === "open") ?? null;
+  const open = ordered.find((session) => session.status === "open");
+  if (open) return open;
+  if (precreated !== null) {
+    // A list read may already know this session with a newer status.
+    return available.find((session) => session.id === precreated.id) ?? precreated;
+  }
+  return null;
 }
 
 /** An address or click names a session the page is deliberately viewing. */
@@ -161,8 +173,8 @@ export type WarmUpStep =
 /**
  * What opening the runner should do (RUN-028). Online and busy runners
  * prepare a session so the first turn streams without a cold start;
- * offline and revoked ones never do. A history session the viewer picked
- * is only warmed when open — a closed one is never replaced by a fresh
+ * offline and revoked ones never do. A history session the viewer picked is
+ * only warmed when open — a closed one is never replaced by a fresh
  * conversation behind their back. A stale id is not "picked", so
  * auto-create still runs.
  */

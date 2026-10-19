@@ -253,8 +253,22 @@ describe("selectSession", () => {
     ).toBe("with-turns");
   });
 
+  it("treats an auto-created session as a fallback, never overriding a pick or a link", () => {
+    const created = session({ id: "created", last_message_at: null });
+    expect(
+      selectSession({ sessions: [withTurns, closed], pendingId: null, requestedId: null, precreated: created })?.id
+    ).toBe("with-turns");
+    expect(
+      selectSession({ sessions: [withTurns, closed], pendingId: null, requestedId: "closed", precreated: created })?.id
+    ).toBe("closed");
+    expect(
+      selectSession({ sessions: [withTurns, closed], pendingId: "closed", requestedId: null, precreated: created })?.id
+    ).toBe("closed");
+  });
+
   it("resolves a just-created session before the list catches up", () => {
     const created = session({ id: "new", last_message_at: null });
+    expect(selectSession({ sessions: [], pendingId: null, requestedId: null, precreated: created })?.id).toBe("new");
     expect(selectSession({ sessions: [], pendingId: "new", requestedId: null, precreated: created })?.id).toBe("new");
     expect(selectSession({ sessions: [withTurns], pendingId: null, requestedId: "new", precreated: created })?.id).toBe(
       "new"

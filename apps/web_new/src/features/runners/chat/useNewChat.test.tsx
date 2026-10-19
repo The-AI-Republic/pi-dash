@@ -2,13 +2,14 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// New chat (NEWFRONT-549, RUN-026): creates, publishes then selects,
+// New chat (NEWFRONT-549, RUN-026/028): creates, publishes then selects,
 // reports the working state, and toasts with the server's reason on
-// failure while leaving the history untouched.
+// failure while leaving the history untouched. The page's warm-up is the
+// only thing that prepares the created session.
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const contracts = vi.hoisted(() => ({ createChatSession: vi.fn(), warmChatSession: vi.fn() }));
+const contracts = vi.hoisted(() => ({ createChatSession: vi.fn() }));
 const toasts = vi.hoisted(() => ({ notifyError: vi.fn() }));
 vi.mock("@pidash/api-client", async (importOriginal) => {
   const original = await importOriginal<typeof import("@pidash/api-client")>();
@@ -27,12 +28,10 @@ const { chatFailureReason, NEW_CHAT_FAILED_BODY, NEW_CHAT_FAILED_TITLE, useNewCh
 
 beforeEach(() => {
   createAppClient("https://api.test", {} as never);
-  contracts.warmChatSession.mockResolvedValue({ ok: true });
 });
 
 afterEach(() => {
   contracts.createChatSession.mockReset();
-  contracts.warmChatSession.mockReset();
   toasts.notifyError.mockReset();
   resetAppClient();
 });
@@ -58,7 +57,7 @@ describe("chatFailureReason", () => {
 });
 
 describe("useNewChat", () => {
-  it("creates, publishes, selects, then warms in the background", async () => {
+  it("creates, publishes and selects without warming", async () => {
     const created = makeSession({ id: "fresh", last_message_at: null });
     contracts.createChatSession.mockResolvedValue(created);
     const client = testClient();
@@ -75,7 +74,6 @@ describe("useNewChat", () => {
       expect.objectContaining({ id: "fresh" }),
       expect.objectContaining({ id: "old" }),
     ]);
-    await waitFor(() => expect(contracts.warmChatSession).toHaveBeenCalledWith(expect.anything(), "fresh"));
     expect(result.current.busy).toBe(false);
   });
 
@@ -89,17 +87,6 @@ describe("useNewChat", () => {
       await result.current.start();
     });
     expect(client.getQueryData(chatKeys.sessions("acme", "r-1"))).toHaveLength(1);
-  });
-
-  it("ignores a warm-up failure", async () => {
-    contracts.createChatSession.mockResolvedValue(makeSession({ id: "fresh" }));
-    contracts.warmChatSession.mockRejectedValueOnce(new Error("cold"));
-    const { result } = renderHook(() => useNewChat(props()), { wrapper: wrapper(testClient()) });
-    await act(async () => {
-      await result.current.start();
-    });
-    await waitFor(() => expect(contracts.warmChatSession).toHaveBeenCalled());
-    expect(toasts.notifyError).not.toHaveBeenCalled();
   });
 
   it("shows the working state and refuses overlapping creates", async () => {

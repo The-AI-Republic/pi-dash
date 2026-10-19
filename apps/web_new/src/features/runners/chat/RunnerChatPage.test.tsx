@@ -174,12 +174,13 @@ describe("RunnerChatPage", () => {
     );
   });
 
-  it("prefers a session created on this page before the list catches up", async () => {
+  it("shows a session created on this page when nothing else is open", async () => {
     let onCreated: ((session: ReturnType<typeof makeSession>) => void) | undefined;
     hooks.useWarmUp.mockImplementation((input: { onCreated: typeof onCreated }) => {
       onCreated = input.onCreated;
       return false;
     });
+    hooks.useChatSessions.mockReturnValue({ data: [], isPending: false });
     const created = makeSession({ id: "created", last_message_at: null });
     render(<RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />);
     React.act(() => onCreated?.(created));
@@ -188,7 +189,7 @@ describe("RunnerChatPage", () => {
     );
   });
 
-  it("drops a locally created session once the list reports it closed", async () => {
+  it("keeps a locally created session listed as closed once a later read says so", async () => {
     let onCreated: ((session: ReturnType<typeof makeSession>) => void) | undefined;
     hooks.useWarmUp.mockImplementation((input: { onCreated: typeof onCreated }) => {
       onCreated = input.onCreated;
@@ -257,5 +258,66 @@ describe("RunnerChatPage", () => {
         expect.objectContaining({ pendingId: "closed", requestedId: "open" })
       )
     );
+  });
+});
+
+describe("RunnerChatPage creation ordering (RUN-026)", () => {
+  function captureCreated(): { current: ((session: ReturnType<typeof makeSession>) => void) | undefined } {
+    const ref: { current: ((session: ReturnType<typeof makeSession>) => void) | undefined } = { current: undefined };
+    hooks.useWarmUp.mockImplementation((input: { onCreated: typeof ref.current }) => {
+      ref.current = input.onCreated;
+      return false;
+    });
+    return ref;
+  }
+
+  it("shows an automatically created session as a fallback, not a pick", async () => {
+    const createdRef = captureCreated();
+    hooks.useChatSessions.mockReturnValue({ data: [], isPending: false });
+    render(<RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />);
+    React.act(() => createdRef.current?.(makeSession({ id: "created", last_message_at: null })));
+    await waitFor(() =>
+      expect(hooks.useWarmUp).toHaveBeenLastCalledWith(
+        expect.objectContaining({ session: expect.objectContaining({ id: "created" }), pendingId: null })
+      )
+    );
+  });
+
+  it("keeps a click made while the create was running", async () => {
+    const createdRef = captureCreated();
+    render(<RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />);
+    const history = screen.getByTestId("runner-chat-history");
+    await userEvent.click(history.querySelector('nav button[type="button"]') as HTMLElement);
+    React.act(() => createdRef.current?.(makeSession({ id: "created", last_message_at: null })));
+    await waitFor(() =>
+      expect(hooks.useWarmUp).toHaveBeenLastCalledWith(
+        expect.objectContaining({ session: closedSession, pendingId: "closed" })
+      )
+    );
+    expect(screen.getByTestId("runner-chat-block-reason")).toHaveTextContent("Session closed");
+  });
+
+  it("keeps a deep link that arrives after the create resolved", async () => {
+    const createdRef = captureCreated();
+    hooks.useChatSessions.mockReturnValue({ data: [], isPending: false });
+    const view = render(
+      <RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />
+    );
+    React.act(() => createdRef.current?.(makeSession({ id: "created", last_message_at: null })));
+    await waitFor(() =>
+      expect(hooks.useWarmUp).toHaveBeenLastCalledWith(
+        expect.objectContaining({ session: expect.objectContaining({ id: "created" }) })
+      )
+    );
+    hooks.useChatSessions.mockReturnValue({ data: [openSession, closedSession], isPending: false });
+    view.rerender(
+      <RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId="closed" onSelectSession={vi.fn()} />
+    );
+    await waitFor(() =>
+      expect(hooks.useWarmUp).toHaveBeenLastCalledWith(
+        expect.objectContaining({ session: closedSession, requestedId: "closed" })
+      )
+    );
+    expect(screen.getByTestId("runner-chat-block-reason")).toHaveTextContent("Session closed");
   });
 });

@@ -87,12 +87,12 @@ export function RunnerChatPage({
     [pendingId, precreated, requestedSessionId, sessions.data]
   );
 
-  // A created-but-unlisted session is dropped once a *later* list read has
-  // answered and either lost it or reports it closed.
+  // A created session is dropped once a *later* list read has answered and
+  // no longer knows it. If the read lists it closed, the list copy is what
+  // the page shows, so the composer can say why it is shut.
   React.useEffect(() => {
     if (precreated === null || sessions.data === undefined || sessions.data === listAtCreateRef.current) return;
-    const current = sessions.data.find((item) => item.id === precreated.id);
-    if (current === undefined || current.status !== "open") setPrecreated(null);
+    if (!sessions.data.some((item) => item.id === precreated.id)) setPrecreated(null);
   }, [precreated, sessions.data]);
 
   const select = React.useCallback(
@@ -105,12 +105,12 @@ export function RunnerChatPage({
 
   const listSnapshotRef = React.useRef(sessions.data);
   listSnapshotRef.current = sessions.data;
+  // A session created here is held in memory only. It is displayed as a
+  // fallback, so a click or a deep link that lands while the create runs
+  // still wins; New chat adds an explicit pick itself through `select`.
   const onCreated = React.useCallback((created: ChatSession) => {
     listAtCreateRef.current = listSnapshotRef.current;
     setPrecreated(created);
-    // Warm-up only creates when nothing was showing, so the new session is
-    // the one to display; it is held in memory, not written to the address.
-    setPendingId(created.id);
   }, []);
 
   const autoCreating = useWarmUp({

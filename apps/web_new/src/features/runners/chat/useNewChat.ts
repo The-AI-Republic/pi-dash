@@ -3,13 +3,14 @@
 // See the LICENSE file for details.
 // "New chat" (NEWFRONT-549, RUN-026). Creation shows a working state,
 // selects the session before the history list is updated so no render can
-// resolve (and re-warm) the previous conversation, and leaves the list
-// untouched when the server refuses. Failures surface a toast; the caller
-// carries the selection into the address.
+// resolve the previous conversation, and leaves the list untouched when
+// the server refuses. Failures surface a toast; the caller carries the
+// selection into the address. The page's warm-up owns preparing the
+// created session, so this hook never warms one itself (RUN-028).
 
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { createChatSession, warmChatSession, type ChatSession } from "@pidash/api-client";
+import { createChatSession, type ChatSession } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError } from "../../../shared/shell/index.js";
@@ -66,8 +67,6 @@ export function useNewChat({
         return existing.some((item) => item.id === created.id) ? existing : [created, ...existing];
       });
       onSelect(created.id);
-      // Warming can lag behind the selection; the session is usable now.
-      void warmChatSession(getAppClient(), created.id).catch(() => undefined);
     } catch (error) {
       notifyError(NEW_CHAT_FAILED_TITLE, chatFailureReason(error));
     } finally {
