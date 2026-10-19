@@ -14,12 +14,12 @@ import type { AgentRun } from "@pidash/api-client";
 import { useRunnersArea } from "../area.js";
 import { useCancelRun, useRun, useRuns } from "../api/runs.js";
 import { RUN_CANCEL_FAILED, RUN_CANCEL_FAILED_TITLE, RunDetail } from "./RunDetail.js";
-import { runsPageSearch } from "./runsModel.js";
+import { parseRunsPage, runsHref } from "./runsPage.js";
 import { RunsList } from "./RunsList.js";
 import { notifyError } from "../../../shared/shell/index.js";
 
 export interface RunsScreenProps {
-  page: number;
+  search: Record<string, unknown>;
   selectedRunId: string | null;
 }
 
@@ -30,7 +30,8 @@ export function schedulerBindingHref(run: AgentRun): string | null {
   return `/projects/${binding.project}/schedulers/${run.scheduler_binding}`;
 }
 
-export function RunsScreen({ page, selectedRunId }: RunsScreenProps): React.ReactElement {
+export function RunsScreen({ search, selectedRunId }: RunsScreenProps): React.ReactElement {
+  const page = parseRunsPage(search);
   const area = useRunnersArea();
   const navigate = useNavigate();
   const list = useRuns(area.scope.workspaceSlug, area.workspaceId, area.scope.projectId ?? null, page);
@@ -38,19 +39,11 @@ export function RunsScreen({ page, selectedRunId }: RunsScreenProps): React.Reac
   const cancel = useCancelRun(area.scope.workspaceSlug);
 
   function goToPage(next: number): void {
-    void navigate({
-      to: `${area.base}/runs`,
-      search: runsPageSearch(next),
-      replace: true,
-    });
+    void navigate({ href: runsHref(area.base, next), replace: true });
   }
 
   function selectRun(runId: string): void {
-    void navigate({
-      to: `${area.base}/runs/${runId}`,
-      search: runsPageSearch(page),
-      replace: true,
-    });
+    void navigate({ href: runsHref(area.base, page, runId), replace: true });
   }
 
   function cancelRun(run: AgentRun): void {

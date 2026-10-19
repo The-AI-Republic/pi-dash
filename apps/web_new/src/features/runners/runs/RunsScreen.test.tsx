@@ -57,7 +57,7 @@ function stubQueries(
 function renderScreen(page = 2, selectedRunId: string | null = null) {
   render(
     <QueryClientProvider client={new QueryClient()}>
-      <RunsScreen page={page} selectedRunId={selectedRunId} />
+      <RunsScreen search={{ page }} selectedRunId={selectedRunId} />
     </QueryClientProvider>
   );
 }
@@ -102,14 +102,14 @@ describe("page navigation", () => {
     const next = screen.getByRole("button", { name: "Next" });
     await waitFor(() => expect(next).toBeEnabled());
     next.click();
-    expect(navigate).toHaveBeenCalledWith({ to: "/acme/runners/runs", search: { page: 3 }, replace: true });
+    expect(navigate).toHaveBeenCalledWith({ href: "/acme/runners/runs?page=3", replace: true });
   });
 
   it("drops the query on page one", () => {
     stubQueries({ list: { data: { results: [PAGE_RESULT], total_count: 31, total_pages: 2, page: 2 } } });
     renderScreen(2);
     screen.getByRole("button", { name: "Previous" }).click();
-    expect(navigate).toHaveBeenCalledWith({ to: "/acme/runners/runs", search: {}, replace: true });
+    expect(navigate).toHaveBeenCalledWith({ href: "/acme/runners/runs", replace: true });
   });
 });
 
@@ -128,7 +128,7 @@ describe("selection", () => {
     });
     renderScreen(2);
     screen.getByText("hello").click();
-    expect(navigate).toHaveBeenCalledWith({ to: "/acme/runners/runs/run-1", search: { page: 2 }, replace: true });
+    expect(navigate).toHaveBeenCalledWith({ href: "/acme/runners/runs/run-1?page=2", replace: true });
   });
 
   it("omits the query when selecting from page one", () => {
@@ -145,7 +145,7 @@ describe("selection", () => {
     });
     renderScreen(1);
     screen.getByText("hello").click();
-    expect(navigate).toHaveBeenCalledWith({ to: "/acme/runners/runs/run-1", search: {}, replace: true });
+    expect(navigate).toHaveBeenCalledWith({ href: "/acme/runners/runs/run-1", replace: true });
   });
 });
 

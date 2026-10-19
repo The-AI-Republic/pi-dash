@@ -61,8 +61,7 @@ vi.mock("../../../../features/runners/runs/RunsScreen.js", () => ({
 const { sessionKeys, setSessionClient } = await import("../../../../core/session/index.js");
 const { Route: LayoutRoute } = await import("./route.js");
 const { Route: IndexRoute } = await import("./index.js");
-const { Route: RunsRoute } = await import("./runs.js");
-const { Route: RunDetailRoute } = await import("./runs_.$runId.js");
+const { Route: RunsRoute } = await import("./runs.{-$runId}.js");
 const { Route: ApprovalsRoute } = await import("./approvals.js");
 const { Route: DetailRoute } = await import("./detail/$runnerId.js");
 const { Route: ChatRoute } = await import("./chat/$runnerId.js");
@@ -98,8 +97,7 @@ beforeEach(() => {
   vi.spyOn(LayoutRoute, "useParams").mockReturnValue(params.value);
   vi.spyOn(IndexRoute, "useParams").mockReturnValue(params.value);
   vi.spyOn(RunsRoute, "useSearch").mockReturnValue({ page: 2 });
-  vi.spyOn(RunDetailRoute, "useSearch").mockReturnValue({ page: 3 });
-  vi.spyOn(RunDetailRoute, "useParams").mockReturnValue({ ws: "acme", runId: "run-1" });
+  vi.spyOn(RunsRoute, "useParams").mockReturnValue({ ws: "acme" });
   setSessionClient({} as never);
 });
 
@@ -144,18 +142,22 @@ describe("workspace runners section routes", () => {
 
   it("passes the URL page and no selection to the runs screen", () => {
     mount(RunsRoute.options.component);
-    expect(runsProps[0]).toEqual({ page: 2, selectedRunId: null });
+    expect(runsProps[0]).toEqual({ search: { page: 2 }, selectedRunId: null });
   });
 
-  it("normalizes the runs search to a page-one address", () => {
-    const validate = RunsRoute.options.validateSearch as (search: Record<string, unknown>) => Record<string, unknown>;
-    expect(validate({ page: "3" })).toEqual({ page: 3 });
-    expect(validate({ page: "nope" })).toEqual({});
+  it("normalizes the runs page from the address", () => {
+    vi.spyOn(RunsRoute, "useSearch").mockReturnValue({ page: "3" });
+    mount(RunsRoute.options.component);
+    expect(runsProps.at(-1)).toEqual({ search: { page: "3" }, selectedRunId: null });
+    vi.spyOn(RunsRoute, "useSearch").mockReturnValue({ page: "nope" });
+    mount(RunsRoute.options.component);
+    expect(runsProps.at(-1)).toEqual({ search: { page: "nope" }, selectedRunId: null });
   });
 
   it("passes the run id from the address to the same screen", () => {
-    mount(RunDetailRoute.options.component);
-    expect(runsProps.at(-1)).toEqual({ page: 3, selectedRunId: "run-1" });
+    vi.spyOn(RunsRoute, "useParams").mockReturnValue({ ws: "acme", runId: "run-1" });
+    mount(RunsRoute.options.component);
+    expect(runsProps.at(-1)).toEqual({ search: { page: 2 }, selectedRunId: "run-1" });
   });
 
   it("mounts the chat page with the runner from the address", () => {

@@ -19,6 +19,7 @@ import {
   parseRunsPage,
   resultJson,
   resultSummary,
+  runsHref,
   runsPageSearch,
   startedLabel,
 } from "./runsModel.js";
@@ -61,6 +62,13 @@ describe("runsPageSearch", () => {
 
   it("labels the footer", () => {
     expect(pageLabel(2, 5)).toBe("Page 2 of 5");
+  });
+
+  it("builds list and run addresses with the page query only after page one", () => {
+    expect(runsHref("/acme/runners", 1)).toBe("/acme/runners/runs");
+    expect(runsHref("/acme/runners", 3)).toBe("/acme/runners/runs?page=3");
+    expect(runsHref("/acme/runners", 1, "run-1")).toBe("/acme/runners/runs/run-1");
+    expect(runsHref("/acme/runners", 2, "run 1")).toBe("/acme/runners/runs/run%201?page=2");
   });
 });
 

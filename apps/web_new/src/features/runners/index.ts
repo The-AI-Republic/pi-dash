@@ -121,6 +121,7 @@ export {
   parseRunsPage,
   resultJson,
   resultSummary,
+  runsHref,
   runsPageSearch,
   startedLabel,
 } from "./runs/runsModel.js";

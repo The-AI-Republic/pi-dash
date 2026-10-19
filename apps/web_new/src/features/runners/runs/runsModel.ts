@@ -6,19 +6,9 @@
 // narration and page parsing one tested definition each.
 
 import type { BadgeTone } from "@pidash/kit";
+
+export { parseRunsPage, runsHref, runsPageSearch } from "./runsPage.js";
 import type { AgentRun, RunErrorDiagnostic, RunEvent } from "@pidash/api-client";
-
-/** Reads `?page=`; absent, malformed and page-one values all mean page 1. */
-export function parseRunsPage(search: Record<string, unknown>): number {
-  const raw = search["page"];
-  const candidate = typeof raw === "number" ? raw : typeof raw === "string" ? Number.parseInt(raw, 10) : Number.NaN;
-  return Number.isFinite(candidate) && candidate > 1 ? Math.trunc(candidate) : 1;
-}
-
-/** Search object for a page; page 1 leaves the query out of the address. */
-export function runsPageSearch(page: number): { page?: number } {
-  return page <= 1 ? {} : { page };
-}
 
 /** Footer text; only shown while the scope has runs. */
 export function pageLabel(page: number, totalPages: number): string {
