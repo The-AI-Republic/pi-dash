@@ -64,6 +64,7 @@ pub mod orchestration;
 /// [`register_oss_handlers`][oss_worker::register_oss_handlers] helper
 /// plus the live seam providers both binaries share.
 pub mod oss_worker;
+pub mod pyformat;
 pub mod queue;
 /// Runner task executors (D-15 L6, PIDASHCONV-539/540): the executing
 /// half of `runner/tasks.py` over the L4/L5 planners — approval expiry
@@ -73,7 +74,6 @@ pub mod runner_runs;
 pub mod schedule;
 pub mod scheduler;
 pub mod space;
-pub mod pyformat;
 pub mod task_message;
 pub mod tasks_cleanup;
 /// Issue-export task wire (D-35, PIDASHCONV-381): Celery name, arg
@@ -90,18 +90,16 @@ pub mod v1_assets;
 pub mod v1_cycles_modules;
 pub mod worker;
 
-pub use pyformat::{format_eta, py_repr};
-pub use task_message::TaskMessage;
 pub use oss_worker::{register_oss_handlers, OssWorkerCtx};
+pub use pyformat::{format_eta, py_repr};
 pub use queue::{
     JobRow, JobStatus, NewJob, DEFAULT_MAX_RETRIES, DEFAULT_QUEUE, DEFAULT_RETRY_DELAY_SECS,
     QUEUE_TABLE,
 };
 pub use schedule::{beat_schedule, BeatEntry, Cadence, Crontab, ScheduleError};
 pub use scheduler::{default_schedule, BEAT_LOCK_KEY, BEAT_TICK, FAILED_RETENTION_SECS};
-pub use worker::{
-    DispatchOutcome, Handler, HandlerError, Registry, Route, Verdict, WorkerConfig,
-};
+pub use task_message::TaskMessage;
+pub use worker::{DispatchOutcome, Handler, HandlerError, Registry, Route, Verdict, WorkerConfig};
 
 /// Every failure the jobs plane reports.
 #[derive(Debug, thiserror::Error)]

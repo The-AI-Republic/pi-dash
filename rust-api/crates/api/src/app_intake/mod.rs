@@ -732,11 +732,7 @@ pub async fn enqueue_message(pool: &PgPool, message: pidash_jobs::TaskMessage) {
 /// (`db/mixins.py:78`): three positional args, `using` stays a null
 /// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
 /// call sends it. The app views call `.delete()` with no `using`.
-fn soft_delete_message(
-    app_label: &str,
-    model_name: &str,
-    pk: &Uuid,
-) -> pidash_jobs::TaskMessage {
+fn soft_delete_message(app_label: &str, model_name: &str, pk: &Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = serde_json::Map::new();
     kwargs.insert("using".to_owned(), serde_json::Value::Null);
     pidash_jobs::TaskMessage::new(

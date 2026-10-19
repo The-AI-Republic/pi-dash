@@ -1189,11 +1189,7 @@ async fn enqueue_activation_email(
         current_site: site.to_owned(),
         user_id: user_id.to_string(),
     };
-    let message = pidash_jobs::TaskMessage::new(
-        emit.task_name(),
-        emit.args(),
-        Default::default(),
-    );
+    let message = pidash_jobs::TaskMessage::new(emit.task_name(), emit.args(), Default::default());
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),

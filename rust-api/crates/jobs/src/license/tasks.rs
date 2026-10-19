@@ -917,7 +917,5 @@ mod tests {
         assert_eq!(message.task, TASK_NAME);
         assert!(message.args.is_empty());
         assert!(message.kwargs.is_empty());
-        assert_eq!(message.retries, 0);
-        assert_eq!(message.effective_root_id(), message.id);
     }
 }

@@ -65,8 +65,8 @@ use super::email_notification::{
     StackError, StackOutbox,
 };
 use super::mail_send::{self, OutgoingMail, SmtpSend};
-use crate::task_message::TaskMessage;
 use crate::queue::{self, NewJob};
+use crate::task_message::TaskMessage;
 use pidash_db::config::ConfigValue;
 
 /// Run an async operation from a sync seam method. The worker runs on the
@@ -1477,8 +1477,7 @@ mod tests {
     fn delay_job_carries_wire_parts_verbatim() {
         let mut kwargs = Map::new();
         kwargs.insert("issue_id".to_owned(), Value::Null);
-        let message =
-            TaskMessage::new("task.name", vec![Value::String("a".to_owned())], kwargs);
+        let message = TaskMessage::new("task.name", vec![Value::String("a".to_owned())], kwargs);
         let job = delay_job(&message);
         assert_eq!(job.task, "task.name");
         assert_eq!(job.args, json!(["a"]));

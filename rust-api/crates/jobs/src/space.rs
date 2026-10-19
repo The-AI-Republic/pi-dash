@@ -403,49 +403,19 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Mirror of `contract-tests/_harness/celery_wire.py::assert_wire_message`
-    /// plus the F-09 superset rule: the nine protocol-v2 header keys are
-    /// present, `task`/`lang` match, and the body carries exactly the
-    /// published args/kwargs.
-    fn assert_wire(
-        message: &TaskMessage,
-        task: &str,
-        args: Value,
-        kwargs: &Map<String, Value>,
-    ) {
-        let headers = message.headers();
-        for key in [
-            "lang",
-            "task",
-            "id",
-            "eta",
-            "expires",
-            "retries",
-            "timelimit",
-            "root_id",
-            "parent_id",
-        ] {
-            assert!(headers.contains_key(key), "wire headers missing {key}");
-        }
-        assert_eq!(headers["task"], Value::String(task.to_owned()));
-        assert_eq!(headers["lang"], Value::String("py".to_owned()));
+    /// The enqueue contract a ported call site must satisfy: the message it
+    /// builds carries exactly the task name, positional args and keyword
+    /// kwargs of the Python `.delay(*args, **kwargs)` call it mirrors (the
+    /// worker runs that name off the Postgres queue; the Celery wire
+    /// headers/body are gone, PIDASHCONV-1108).
+    fn assert_message(message: &TaskMessage, task: &str, args: Value, kwargs: &Map<String, Value>) {
         assert_eq!(message.task, task);
-        assert_eq!(message.retries, 0);
-        assert_eq!(message.effective_root_id(), message.id);
-        let body = message.body();
-        let body_args = body[0].clone();
-        let body_kwargs = body[1].as_object().expect("kwargs object").clone();
-        assert_eq!(body_args, args);
-        assert_eq!(&body_kwargs, kwargs);
+        assert_eq!(Value::Array(message.args.clone()), args);
+        assert_eq!(&message.kwargs, kwargs);
     }
 
     fn kwargs_keys(message: &TaskMessage) -> Vec<String> {
-        message.body()[1]
-            .as_object()
-            .expect("kwargs object")
-            .keys()
-            .cloned()
-            .collect()
+        message.kwargs.keys().cloned().collect()
     }
 
     const KWARG_ORDER: [&str; 7] = [
@@ -481,7 +451,7 @@ mod tests {
         )
         .message();
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("comment.activity.created"));
         assert_eq!(kwargs["requested_data"], json!("{\"id\": \"c1\"}"));
         assert_eq!(kwargs["actor_id"], json!("u1"));
@@ -490,11 +460,11 @@ mod tests {
         assert_eq!(kwargs["current_instance"], Value::Null);
         assert_eq!(kwargs["epoch"], json!(1727));
         assert_eq!(kwargs_keys(&message), KWARG_ORDER);
-        let headers = message.headers();
-        assert!(headers["kwargsrepr"]
-            .as_str()
-            .expect("kwargsrepr")
-            .contains("'type': 'comment.activity.created'"));
+        // The kwargs still render the way Python's `repr` would (`pyformat`).
+        assert!(
+            crate::pyformat::py_repr(&Value::Object(message.kwargs.clone()))
+                .contains("'type': 'comment.activity.created'")
+        );
     }
 
     #[test]
@@ -509,7 +479,7 @@ mod tests {
         )
         .message();
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("comment.activity.updated"));
         assert_eq!(
             kwargs["requested_data"],
@@ -534,7 +504,7 @@ mod tests {
         )
         .message();
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("comment.activity.deleted"));
         assert_eq!(kwargs["requested_data"], json!("{\"comment_id\": \"c9\"}"));
         assert_eq!(kwargs_keys(&message), KWARG_ORDER);
@@ -551,7 +521,7 @@ mod tests {
         )
         .message();
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("issue_reaction.activity.created"));
         assert_eq!(kwargs["current_instance"], Value::Null);
         assert_eq!(kwargs_keys(&message), KWARG_ORDER);
@@ -568,7 +538,7 @@ mod tests {
         )
         .message();
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("issue_reaction.activity.deleted"));
         assert_eq!(kwargs["requested_data"], Value::Null);
         assert_eq!(
@@ -590,7 +560,7 @@ mod tests {
         )
         .message();
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("comment_reaction.activity.created"));
         assert_eq!(kwargs["issue_id"], Value::Null);
         assert_eq!(kwargs["project_id"], json!("None"));
@@ -608,7 +578,7 @@ mod tests {
         )
         .message();
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("comment_reaction.activity.deleted"));
         assert_eq!(kwargs["requested_data"], Value::Null);
         assert_eq!(kwargs["issue_id"], Value::Null);
@@ -627,7 +597,7 @@ mod tests {
         )
         .message();
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("issue_vote.activity.created"));
         assert_eq!(kwargs["current_instance"], Value::Null);
         assert_eq!(kwargs_keys(&message), KWARG_ORDER);
@@ -644,7 +614,7 @@ mod tests {
         )
         .message();
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("issue_vote.activity.deleted"));
         assert_eq!(kwargs["requested_data"], Value::Null);
         assert_eq!(kwargs_keys(&message), KWARG_ORDER);
@@ -661,7 +631,7 @@ mod tests {
         )
         .message();
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("issue.activity.created"));
         assert_eq!(kwargs["issue_id"], json!("i9"));
         assert_eq!(kwargs["current_instance"], Value::Null);
@@ -680,7 +650,7 @@ mod tests {
         )
         .message();
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("issue.activity.updated"));
         assert_eq!(kwargs_keys(&message), KWARG_ORDER);
     }
@@ -690,17 +660,12 @@ mod tests {
         let message = asset_metadata_message("a1");
         let kwargs = message.kwargs.clone();
         assert!(kwargs.is_empty());
-        assert_wire(
+        assert_message(
             &message,
             GET_ASSET_OBJECT_METADATA_TASK,
             json!(["a1"]),
             &kwargs,
         );
-        let headers = message.headers();
-        assert!(headers["argsrepr"]
-            .as_str()
-            .expect("argsrepr")
-            .contains("'a1'"));
     }
 
     fn parse_postgres(sql: &str) {

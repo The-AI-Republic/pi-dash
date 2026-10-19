@@ -3258,8 +3258,7 @@ pub async fn pr_destroy_inner(
     };
     // The recorded fan-out, verbatim and in Python order.
     for task in outcome.enqueues {
-        let message =
-            pidash_jobs::TaskMessage::new(task.task, task.args, task.kwargs);
+        let message = pidash_jobs::TaskMessage::new(task.task, task.args, task.kwargs);
         enqueue_message(&pre.pool, message).await;
     }
     Ok(no_content())

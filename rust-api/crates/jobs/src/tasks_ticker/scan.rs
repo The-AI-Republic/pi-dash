@@ -35,9 +35,9 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::task_message::TaskMessage;
 use crate::queue::{enqueue, JobRow, NewJob};
 use crate::schedule::{beat_schedule, BeatEntry};
+use crate::task_message::TaskMessage;
 use crate::worker::{HandlerError, Registry, Verdict};
 use crate::Error;
 
@@ -612,19 +612,6 @@ mod tests {
             assert_eq!(message.task, task);
             assert_eq!(message.args, vec![json!(id.to_string())]);
             assert!(message.kwargs.is_empty());
-            assert_eq!(message.retries, 0);
-            assert_eq!(
-                message.body(),
-                json!([
-                    [id.to_string()],
-                    {},
-                    {"callbacks": null, "errbacks": null, "chain": null, "chord": null}
-                ])
-            );
-            let headers = message.headers();
-            assert_eq!(headers["task"], task);
-            assert_eq!(headers["id"], message.id);
-            assert_eq!(headers["retries"], 0);
         }
         assert_eq!(FIRE_TICK_TASK, "pi_dash.bgtasks.agent_ticker.fire_tick");
         assert_eq!(

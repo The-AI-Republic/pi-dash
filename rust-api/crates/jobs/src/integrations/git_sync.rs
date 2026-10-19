@@ -92,9 +92,9 @@ use pidash_types::integrations::{
 
 use super::super::tasks_mail::mail_send::{django_escape, strip_tags};
 use crate::pyformat::format_eta;
-use crate::task_message::TaskMessage;
 use crate::queue::{enqueue, JobRow, NewJob};
 use crate::schedule::{beat_schedule, BeatEntry};
+use crate::task_message::TaskMessage;
 use crate::worker::{HandlerError, Registry, Verdict};
 
 // ---------------------------------------------------------------------------
@@ -3035,15 +3035,6 @@ mod tests {
             vec![json!("12345678-1234-5678-1234-567812345678")]
         );
         assert!(message.kwargs.is_empty());
-        assert_eq!(message.retries, 0);
-        assert!(message.eta.is_none());
-        let body = message.body();
-        assert_eq!(body[0], json!(["12345678-1234-5678-1234-567812345678"]));
-        assert_eq!(body[1], json!({}));
-        // And the forward-path mapping the worker applies to such a row.
-        let headers = message.headers();
-        assert_eq!(headers["task"], SYNC_ONE_BINDING_TASK);
-        assert_eq!(headers["lang"], "py");
     }
 
     // Arity: exactly `args=[<id>]`, `kwargs={}`; anything else is a

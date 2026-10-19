@@ -43,8 +43,8 @@
 
 use serde_json::{Map, Value};
 
-use crate::task_message::TaskMessage;
 use crate::queue::NewJob;
+use crate::task_message::TaskMessage;
 use crate::tasks_cleanup::assets;
 use crate::tasks_cleanup::versions;
 use crate::tasks_webhooks::{django_dumps, visit_page};

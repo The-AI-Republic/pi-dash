@@ -1284,18 +1284,6 @@ mod tests {
         assert_eq!(message.task, FIRE_TICK_TASK);
         assert_eq!(message.args, vec![json!(id.to_string())]);
         assert!(message.kwargs.is_empty());
-        assert_eq!(message.retries, 0);
-        assert_eq!(
-            message.body(),
-            json!([
-                [id.to_string()],
-                {},
-                {"callbacks": null, "errbacks": null, "chain": null, "chord": null}
-            ])
-        );
-        let headers = message.headers();
-        assert_eq!(headers["task"], FIRE_TICK_TASK);
-        assert_eq!(headers["id"], message.id);
     }
 
     fn bad_pool() -> PgPool {

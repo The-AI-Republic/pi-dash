@@ -970,7 +970,7 @@ fn track_event_message(
 async fn publish_message(
     pool: &sqlx::PgPool,
     message: &pidash_jobs::TaskMessage,
-) -> Result<(), ()> {
+) -> Result<(), sqlx::Error> {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),

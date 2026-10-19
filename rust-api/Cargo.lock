@@ -61,31 +61,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "amqp_serde"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5f450f572a1ec4cdb4af7af09cbd0c7c3e1b9da2bfc7414c059a780993a8e16"
-dependencies = [
- "bytes",
- "serde",
- "serde_bytes",
-]
-
-[[package]]
-name = "amqprs"
-version = "2.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b768f791c4e8b038dc883cb0f1b533a498a9e59a7ddb352ed2ea9cb0a728dbf4"
-dependencies = [
- "amqp_serde",
- "async-trait",
- "bytes",
- "serde",
- "serde_bytes",
- "tokio",
-]
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2979,7 +2954,6 @@ name = "pidash-jobs"
 version = "0.1.0"
 dependencies = [
  "ammonia",
- "amqprs",
  "axum",
  "base64 0.22.1",
  "bson",

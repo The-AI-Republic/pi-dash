@@ -611,19 +611,6 @@ mod tests {
         assert_eq!(message.task, RUN_ASSISTANT_TURN_TASK);
         assert_eq!(message.args, vec![json!(turn.to_string())]);
         assert!(message.kwargs.is_empty());
-        assert_eq!(message.retries, 0);
-        assert_eq!(
-            message.body(),
-            json!([
-                [turn.to_string()],
-                {},
-                {"callbacks": null, "errbacks": null, "chain": null, "chord": null}
-            ])
-        );
-        let headers = message.headers();
-        assert_eq!(headers["task"], RUN_ASSISTANT_TURN_TASK);
-        assert_eq!(headers["id"], message.id);
-        assert_eq!(headers["retries"], 0);
         assert_fire_contract();
     }
 

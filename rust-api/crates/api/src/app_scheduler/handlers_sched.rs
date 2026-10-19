@@ -974,10 +974,7 @@ pub async fn scheduler_patch(
 /// call sends it with `using=None`. Fires on every instance `.delete()`
 /// in these views (`Scheduler` lives in the `db` app,
 /// `db/models/scheduler.py:107`).
-pub(crate) fn soft_delete_message(
-    model: &str,
-    pk: &uuid::Uuid,
-) -> pidash_jobs::TaskMessage {
+pub(crate) fn soft_delete_message(model: &str, pk: &uuid::Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
     pidash_jobs::TaskMessage::new(

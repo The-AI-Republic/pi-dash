@@ -341,10 +341,7 @@ pub(crate) async fn enqueue_task(pool: &sqlx::PgPool, task: &str, kwargs: Map<St
 /// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
 /// call sends it with `using=None`. Fires on every instance `.delete()`
 /// in these views.
-pub(crate) fn soft_delete_message(
-    model: &str,
-    pk: &uuid::Uuid,
-) -> pidash_jobs::TaskMessage {
+pub(crate) fn soft_delete_message(model: &str, pk: &uuid::Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
     pidash_jobs::TaskMessage::new(

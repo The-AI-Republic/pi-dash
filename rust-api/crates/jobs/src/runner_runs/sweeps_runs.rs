@@ -98,8 +98,8 @@ use pidash_services::runner_runs::finalization::{
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, ApprovalStatus, TERMINAL_RUN_STATUSES};
 
-use crate::task_message::TaskMessage;
 use crate::queue::{self, JobRow, NewJob};
+use crate::task_message::TaskMessage;
 use crate::worker::{Handler, HandlerError, Registry, Verdict};
 
 // ---------------------------------------------------------------------------

@@ -3145,8 +3145,7 @@ async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, id: &uuid::Uuid) 
 /// Enqueue one `issue_activity.delay(…)` emit from point destroy (same
 /// best-effort shape: the emit never changes the response).
 async fn enqueue_issue_activity(pool: &sqlx::PgPool, emit: &t::IssueActivityEmit) {
-    let message =
-        pidash_jobs::TaskMessage::new(emit.task_name(), vec![], emit.kwargs());
+    let message = pidash_jobs::TaskMessage::new(emit.task_name(), vec![], emit.kwargs());
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),

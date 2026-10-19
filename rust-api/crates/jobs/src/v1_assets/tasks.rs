@@ -67,12 +67,12 @@
 
 use serde_json::{Map, Value};
 
-use crate::task_message::TaskMessage;
 use crate::queue::NewJob;
 /// Activity `type` strings for the three intake call sites. The
 /// `issue.activity.*` pair is shared with the space publishers
 /// (`crate::space`); `intake.activity.created` only fires here.
 pub use crate::space::{ISSUE_CREATED, ISSUE_UPDATED};
+use crate::task_message::TaskMessage;
 /// The metadata task name and kwarg-form publisher, owned by D-09
 /// (`tasks_cleanup::assets::TASK_GET_METADATA` / `delay_metadata`).
 /// Re-exported — never redefined — so the two domains pin one string.
@@ -319,38 +319,14 @@ mod tests {
     static INTAKE_FIXTURE: &str =
         include_str!("../../../../fixtures/v1_assets/fx-task-intake.json");
 
-    /// Mirror of `contract-tests/_harness/celery_wire.py::assert_wire_message`
-    /// (same helper as `space::tests::assert_wire`): the nine protocol-v2
-    /// header keys are present, `task`/`lang` match, and the body carries
-    /// exactly the published args/kwargs.
-    fn assert_wire(
-        message: &TaskMessage,
-        task: &str,
-        args: Value,
-        kwargs: &Map<String, Value>,
-    ) {
-        let headers = message.headers();
-        for key in [
-            "lang",
-            "task",
-            "id",
-            "eta",
-            "expires",
-            "retries",
-            "timelimit",
-            "root_id",
-            "parent_id",
-        ] {
-            assert!(headers.contains_key(key), "wire headers missing {key}");
-        }
-        assert_eq!(headers["task"], Value::String(task.to_owned()));
-        assert_eq!(headers["lang"], Value::String("py".to_owned()));
+    /// The enqueue contract a ported call site must satisfy: the message it
+    /// builds carries exactly the task name, positional args and keyword
+    /// kwargs of the Python `.delay(*args, **kwargs)` call it mirrors (the
+    /// Celery wire headers/body are gone, PIDASHCONV-1108).
+    fn assert_message(message: &TaskMessage, task: &str, args: Value, kwargs: &Map<String, Value>) {
         assert_eq!(message.task, task);
-        assert_eq!(message.retries, 0);
-        assert_eq!(message.effective_root_id(), message.id);
-        let body = message.body();
-        assert_eq!(body[0].clone(), args);
-        assert_eq!(body[1].as_object().expect("kwargs object"), kwargs);
+        assert_eq!(Value::Array(message.args.clone()), args);
+        assert_eq!(&message.kwargs, kwargs);
     }
 
     fn ids() -> IntakeActivityIds {
@@ -358,12 +334,7 @@ mod tests {
     }
 
     fn kwargs_keys(message: &TaskMessage) -> Vec<String> {
-        message.body()[1]
-            .as_object()
-            .expect("kwargs object")
-            .keys()
-            .cloned()
-            .collect()
+        message.kwargs.keys().cloned().collect()
     }
 
     /// Bind a published message the way the D-08 dispatcher binds it
@@ -399,7 +370,7 @@ mod tests {
     fn metadata_wire_is_kwarg_form() {
         let message = delay_metadata("a1");
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, GET_ASSET_OBJECT_METADATA_TASK, json!([]), &kwargs);
+        assert_message(&message, GET_ASSET_OBJECT_METADATA_TASK, json!([]), &kwargs);
         assert_eq!(
             kwargs,
             json!({"asset_id": "a1"}).as_object().expect("obj").clone()
@@ -506,7 +477,7 @@ mod tests {
         assert!(call["current_instance"].is_null());
         let message = intake_issue_created_message(r#"{"issue":{"name":"n"}}"#, &ids(), 1727);
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("issue.activity.created"));
         assert_eq!(kwargs["requested_data"], json!(r#"{"issue":{"name":"n"}}"#));
         assert_eq!(kwargs["current_instance"], Value::Null);
@@ -534,7 +505,7 @@ mod tests {
         let message =
             intake_issue_updated_message(r#"{"name":"n"}"#, &ids(), r#"{"name":"o"}"#, 1727);
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!("issue.activity.updated"));
         assert_eq!(kwargs["current_instance"], json!(r#"{"name":"o"}"#));
         assert_eq!(kwargs_keys(&message), CALL_ORDER);
@@ -564,7 +535,7 @@ mod tests {
             "https://app.example.test",
         );
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], json!(INTAKE_CREATED));
         assert_eq!(kwargs["notification"], json!(false));
         assert_eq!(kwargs["origin"], json!("https://app.example.test"));

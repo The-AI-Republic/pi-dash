@@ -346,8 +346,8 @@ mod tests {
                 "slug"
             ]
         );
-        // The v2 body carries the same pair as `[args, kwargs, embed]`.
-        assert_eq!(msg.body()[1], Value::Object(msg.kwargs.clone()));
+        // The message carries the same task/args/kwargs the call site binds.
+        assert_eq!(msg.task, ISSUE_EXPORT_TASK);
         let bound = bind_export_task_call(
             &Value::Array(msg.args.clone()),
             &Value::Object(msg.kwargs.clone()),

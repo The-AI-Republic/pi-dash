@@ -525,10 +525,7 @@ mod tests {
             .connect_lazy("postgres://127.0.0.1:1/none")
             .expect("lazy pool needs no server");
         let mut registry = Registry::new();
-        assert_eq!(
-            route_for(&registry, FIRE_LOOP_TARGET_TASK),
-            Route::Unknown
-        );
+        assert_eq!(route_for(&registry, FIRE_LOOP_TARGET_TASK), Route::Unknown);
         register_fire(&mut registry, pool);
         assert!(registry.owns(FIRE_LOOP_TARGET_TASK));
         assert_eq!(route_for(&registry, FIRE_LOOP_TARGET_TASK), Route::Local);

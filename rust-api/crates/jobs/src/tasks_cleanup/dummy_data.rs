@@ -41,8 +41,8 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use serde_json::Map;
 
-use crate::task_message::TaskMessage;
 use crate::queue::JobRow;
+use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
 
 /// Celery wire name, exactly as `.delay()` calls it.

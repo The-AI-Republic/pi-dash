@@ -817,8 +817,7 @@ async fn enqueue_magic_link(pool: &sqlx::PgPool, email: &str, key: &str, token: 
         key: key.to_owned(),
         token: token.to_owned(),
     };
-    let message =
-        pidash_jobs::TaskMessage::new(emit.task_name(), emit.args(), empty_kwargs());
+    let message = pidash_jobs::TaskMessage::new(emit.task_name(), emit.args(), empty_kwargs());
     match enqueue_message(pool, message).await {
         Ok(()) => ok_key(key),
         Err(_) => server_error(),
@@ -1067,11 +1066,7 @@ async fn save_user_data(
             current_site: base_plain.to_owned(),
             user_id: user.id.to_string(),
         };
-        let message = pidash_jobs::TaskMessage::new(
-            emit.task_name(),
-            emit.args(),
-            empty_kwargs(),
-        );
+        let message = pidash_jobs::TaskMessage::new(emit.task_name(), emit.args(), empty_kwargs());
         if enqueue_message(pool, message).await.is_err() {
             return Err(server_error());
         }

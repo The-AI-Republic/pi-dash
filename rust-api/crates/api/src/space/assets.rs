@@ -786,7 +786,7 @@ async fn patch_asset(
             Value::Array(message.args.clone()),
             Value::Object(message.kwargs.clone()),
         );
-        if let Err(error) = pidash_jobs::queue::enqueue(&pool, &job).await {
+        if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
             tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
         }
     }

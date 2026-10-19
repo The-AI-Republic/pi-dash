@@ -1987,10 +1987,7 @@ async fn patch_view(
 /// call sends it with `using=None`. Fires on every instance `.delete()`
 /// in these views (`AnalyticView` lives in the `db` app,
 /// `db/models/analytic.py:11`).
-pub(crate) fn soft_delete_message(
-    model: &str,
-    pk: &uuid::Uuid,
-) -> pidash_jobs::TaskMessage {
+pub(crate) fn soft_delete_message(model: &str, pk: &uuid::Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
     pidash_jobs::TaskMessage::new(

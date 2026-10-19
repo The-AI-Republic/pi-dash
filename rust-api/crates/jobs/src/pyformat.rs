@@ -99,20 +99,6 @@ pub fn dict_repr(map: &Map<String, Value>) -> String {
     format!("{{{inner}}}")
 }
 
-/// Python `repr` of the positional args tuple: `()`, `(one,)` or `(a, b)`.
-/// Kombu always passes a tuple (`.delay(*args)`), so the empty case is
-/// `()` even though the body carries a JSON list.
-fn tuple_repr(args: &[Value]) -> String {
-    match args {
-        [] => "()".to_owned(),
-        [single] => format!("({},)", py_repr(single)),
-        _ => {
-            let inner = args.iter().map(py_repr).collect::<Vec<_>>().join(", ");
-            format!("({inner})")
-        }
-    }
-}
-
 /// Code points Python's `repr` escapes outside the C0 controls, DEL
 /// and C1 (all `char::is_control`): Cf format controls, Zl/Zp
 /// separators, Zs spaces other than U+0020, and Co private-use — as
@@ -204,8 +190,8 @@ mod tests {
     fn eta_keeps_six_fraction_digits_like_cpython() {
         // Python `isoformat` renders exact-millisecond times with six
         // digits (`.173000`); chrono's `AutoSi` would trim to `.173`.
-        let eta = Utc.with_ymd_and_hms(2026, 9, 26, 19, 55, 30).unwrap()
-            + Duration::milliseconds(173);
+        let eta =
+            Utc.with_ymd_and_hms(2026, 9, 26, 19, 55, 30).unwrap() + Duration::milliseconds(173);
         assert_eq!(format_eta(eta), "2026-09-26T19:55:30.173000+00:00");
         let whole = Utc.with_ymd_and_hms(2026, 9, 26, 19, 55, 30).unwrap();
         assert_eq!(format_eta(whole), "2026-09-26T19:55:30+00:00");
@@ -230,9 +216,6 @@ mod tests {
         assert_eq!(py_repr(&json!("a\nb")), "'a\\nb'");
         assert_eq!(py_repr(&json!([1, "x"])), "[1, 'x']");
         assert_eq!(py_repr(&json!({"a": 2})), "{'a': 2}");
-        assert_eq!(tuple_repr(&[]), "()");
-        assert_eq!(tuple_repr(&[json!(1)]), "(1,)");
-        assert_eq!(tuple_repr(&[json!(1), json!("x")]), "(1, 'x')");
     }
 
     #[test]

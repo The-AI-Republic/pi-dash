@@ -161,8 +161,8 @@ use super::git_sync::{
     truncate_chars, GITHUB_API_BASE, PROVIDER_TIMEOUT_SECS,
 };
 use crate::pyformat::format_eta;
-use crate::task_message::TaskMessage;
 use crate::queue::{enqueue, JobRow, NewJob};
+use crate::task_message::TaskMessage;
 use crate::worker::{HandlerError, Registry, Verdict};
 
 // ---------------------------------------------------------------------------
@@ -2268,14 +2268,6 @@ mod tests {
             vec![json!("12345678-1234-5678-1234-567812345678")]
         );
         assert!(message.kwargs.is_empty());
-        assert_eq!(message.retries, 0);
-        assert!(message.eta.is_none());
-        let body = message.body();
-        assert_eq!(body[0], json!(["12345678-1234-5678-1234-567812345678"]));
-        assert_eq!(body[1], json!({}));
-        let headers = message.headers();
-        assert_eq!(headers["task"], SYNC_ONE_REPO_TASK);
-        assert_eq!(headers["lang"], "py");
 
         let comment = completion_job(&id);
         assert_eq!(comment.task, POST_COMPLETION_COMMENT_TASK);

@@ -102,12 +102,12 @@ use pidash_types::dispatch::{
     UsageLimitExceeded,
 };
 
-use crate::task_message::TaskMessage;
 use crate::dispatch::{
     append_event, dispatch_waiting, RUNNING_CLOUD_COUNT_SQL, RUN_CLOUD_AGENT_TASK,
     WORKSPACE_LOCK_SQL,
 };
 use crate::queue::{JobRow, NewJob};
+use crate::task_message::TaskMessage;
 use crate::worker::{HandlerError, Registry, Verdict};
 
 // ---------------------------------------------------------------------------
@@ -2468,13 +2468,6 @@ mod tests {
             assert_eq!(message.task, task);
             assert!(message.args.is_empty());
             assert!(message.kwargs.is_empty());
-            assert_eq!(message.retries, 0);
-            // Protocol v2 body: `[args, kwargs, embed]`.
-            assert_eq!(
-                message.body(),
-                json!([[], {}, {"callbacks": null, "errbacks": null, "chain": null, "chord": null}])
-            );
-            assert_eq!(message.headers()["task"], json!(task));
         }
         // Queue rows rebuild the identical v2 body on the forward path.
         for (job, task) in [

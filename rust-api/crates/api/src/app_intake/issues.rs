@@ -3204,11 +3204,7 @@ pub async fn partial_update(
             );
             enqueue_message(
                 pool,
-                pidash_jobs::TaskMessage::new(
-                    activity.task_name(),
-                    vec![],
-                    activity.kwargs(),
-                ),
+                pidash_jobs::TaskMessage::new(activity.task_name(), vec![], activity.kwargs()),
             )
             .await;
             let version = intake_tasks::intake_update_description_version(
@@ -3218,11 +3214,7 @@ pub async fn partial_update(
             );
             enqueue_message(
                 pool,
-                pidash_jobs::TaskMessage::new(
-                    version.task_name(),
-                    vec![],
-                    version.kwargs(),
-                ),
+                pidash_jobs::TaskMessage::new(version.task_name(), vec![], version.kwargs()),
             )
             .await;
         }
@@ -3250,11 +3242,7 @@ pub async fn partial_update(
         );
         enqueue_message(
             pool,
-            pidash_jobs::TaskMessage::new(
-                activity.task_name(),
-                vec![],
-                activity.kwargs(),
-            ),
+            pidash_jobs::TaskMessage::new(activity.task_name(), vec![], activity.kwargs()),
         )
         .await;
     }
@@ -4589,11 +4577,7 @@ pub async fn collection_create(
     );
     enqueue_message(
         pool,
-        pidash_jobs::TaskMessage::new(
-            activity.task_name(),
-            vec![],
-            activity.kwargs(),
-        ),
+        pidash_jobs::TaskMessage::new(activity.task_name(), vec![], activity.kwargs()),
     )
     .await;
     // v1 description version (`:287-292`): enqueue only, like Django.

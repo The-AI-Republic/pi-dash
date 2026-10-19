@@ -46,9 +46,9 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::task_message::TaskMessage;
 use crate::queue::{enqueue, JobRow, NewJob};
 use crate::schedule::{beat_schedule, BeatEntry};
+use crate::task_message::TaskMessage;
 use crate::tasks_ticker::rrule::next_fire_from_rrule;
 use crate::worker::{HandlerError, Registry, Verdict};
 use crate::Error;
@@ -840,19 +840,6 @@ mod tests {
         assert_eq!(message.task, FIRE_LOOP_TARGET_TASK);
         assert_eq!(message.args, vec![json!(id.to_string())]);
         assert!(message.kwargs.is_empty());
-        assert_eq!(message.retries, 0);
-        assert_eq!(
-            message.body(),
-            json!([
-                [id.to_string()],
-                {},
-                {"callbacks": null, "errbacks": null, "chain": null, "chord": null}
-            ])
-        );
-        let headers = message.headers();
-        assert_eq!(headers["task"], FIRE_LOOP_TARGET_TASK);
-        assert_eq!(headers["id"], message.id);
-        assert_eq!(headers["retries"], 0);
         assert_eq!(
             FIRE_LOOP_TARGET_TASK,
             "pi_dash.bgtasks.loop.fire_loop_target"
@@ -880,10 +867,7 @@ mod tests {
         assert!(registry.owns(SCAN_DUE_TARGETS_TASK));
         assert_eq!(route_for(&registry, SCAN_DUE_TARGETS_TASK), Route::Local);
         assert!(!registry.owns(FIRE_LOOP_TARGET_TASK));
-        assert_eq!(
-            route_for(&registry, FIRE_LOOP_TARGET_TASK),
-            Route::Unknown
-        );
+        assert_eq!(route_for(&registry, FIRE_LOOP_TARGET_TASK), Route::Unknown);
     }
 
     // The kill switch short-circuits before any database touch: with the

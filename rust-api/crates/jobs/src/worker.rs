@@ -169,7 +169,10 @@ pub async fn dispatch(
 ) -> Result<DispatchOutcome, sqlx::Error> {
     let Some(handler) = registry.get(&job.task) else {
         let error = format!("unknown task {}", job.task);
-        tracing::error!(task = job.task.as_str(), "unknown task; parking job as failed");
+        tracing::error!(
+            task = job.task.as_str(),
+            "unknown task; parking job as failed"
+        );
         queue::fail(pool, job.id, &error).await?;
         return Ok(DispatchOutcome::Parked);
     };

@@ -1344,7 +1344,7 @@ impl RunnerPorts for LivePorts {
             vec![Value::String(ticker_id.to_string())],
         )
         .await
-            .map_err(PortError::Transport)
+        .map_err(PortError::Transport)
     }
 
     fn redis_client(&self) -> Option<&redis::Client> {
@@ -1373,11 +1373,7 @@ fn unusable_password() -> String {
 /// the `auth_session::email` `publish_message` shape without the broker.
 /// Enqueue errors propagate to the caller, which logs them — every emit site
 /// is isolated in Python.
-async fn emit_celery(
-    pool: &sqlx::PgPool,
-    task: &str,
-    args: Vec<Value>,
-) -> Result<(), String> {
+async fn emit_celery(pool: &sqlx::PgPool, task: &str, args: Vec<Value>) -> Result<(), String> {
     let message = pidash_jobs::TaskMessage::new(task, args, Map::new());
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),

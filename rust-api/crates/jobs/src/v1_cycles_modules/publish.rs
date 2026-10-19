@@ -81,8 +81,8 @@
 
 use serde_json::{Map, Value};
 
-use crate::task_message::TaskMessage;
 use crate::queue::NewJob;
+use crate::task_message::TaskMessage;
 use crate::tasks_webhooks::activity_dispatch::django_dumps;
 /// The activity task name, owned by D-08
 /// (`tasks_webhooks::activity_dispatch::ISSUE_ACTIVITY_TASK`).
@@ -738,38 +738,14 @@ mod tests {
     static FIXTURE: &str =
         include_str!("../../../../fixtures/v1_cycles_modules/tasks/enqueue.golden.json");
 
-    /// Mirror of `contract-tests/_harness/celery_wire.py::assert_wire_message`
-    /// (same helper as `v1_assets::tasks::tests::assert_wire`): the nine
-    /// protocol-v2 header keys are present, `task`/`lang` match, and the
-    /// body carries exactly the published args/kwargs.
-    fn assert_wire(
-        message: &TaskMessage,
-        task: &str,
-        args: Value,
-        kwargs: &Map<String, Value>,
-    ) {
-        let headers = message.headers();
-        for key in [
-            "lang",
-            "task",
-            "id",
-            "eta",
-            "expires",
-            "retries",
-            "timelimit",
-            "root_id",
-            "parent_id",
-        ] {
-            assert!(headers.contains_key(key), "wire headers missing {key}");
-        }
-        assert_eq!(headers["task"], Value::String(task.to_owned()));
-        assert_eq!(headers["lang"], Value::String("py".to_owned()));
+    /// The enqueue contract a ported call site must satisfy: the message it
+    /// builds carries exactly the task name, positional args and keyword
+    /// kwargs of the Python `.delay(*args, **kwargs)` call it mirrors (the
+    /// Celery wire headers/body are gone, PIDASHCONV-1108).
+    fn assert_message(message: &TaskMessage, task: &str, args: Value, kwargs: &Map<String, Value>) {
         assert_eq!(message.task, task);
-        assert_eq!(message.retries, 0);
-        assert_eq!(message.effective_root_id(), message.id);
-        let body = message.body();
-        assert_eq!(body[0].clone(), args);
-        assert_eq!(body[1].as_object().expect("kwargs object"), kwargs);
+        assert_eq!(Value::Array(message.args.clone()), args);
+        assert_eq!(&message.kwargs, kwargs);
     }
 
     fn kwargs_keys(message: &TaskMessage) -> Vec<String> {
@@ -897,7 +873,7 @@ mod tests {
                 ]
             );
             let kwargs = message.kwargs.clone();
-            assert_wire(&message, MODEL_ACTIVITY_TASK_NAME, json!([]), &kwargs);
+            assert_message(&message, MODEL_ACTIVITY_TASK_NAME, json!([]), &kwargs);
             assert_eq!(kwargs["requested_data"], Value::Object(data.clone()));
             assert_eq!(kwargs["current_instance"], Value::Null);
             let bound = bind_model(&message);
@@ -988,7 +964,7 @@ mod tests {
             ]
         );
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], Value::String(CYCLE_DELETED.to_owned()));
         // Python `json.dumps` separators (", " / ": ") — byte-identical.
         assert_eq!(
@@ -1033,7 +1009,7 @@ mod tests {
             ]
         );
         let kwargs = message.kwargs.clone();
-        assert_wire(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
+        assert_message(&message, ISSUE_ACTIVITY_TASK, json!([]), &kwargs);
         assert_eq!(kwargs["type"], Value::String(CYCLE_CREATED.to_owned()));
         assert_eq!(
             kwargs["requested_data"],
