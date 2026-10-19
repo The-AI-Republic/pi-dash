@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { ROLE_ADMIN } from "../../../core/session/index.js";
 import { sessionKeys, setSessionClient } from "../../../core/session/queries.js";
-import { homeKeys } from "../api/keys.js";
+import { assistantKeys } from "../../assistant/index.js";
 import { HomeDashboard } from "./HomeDashboard.js";
 
 function renderDashboard(options: {
@@ -61,8 +61,8 @@ function renderDashboard(options: {
       is_tour_completed: true,
     });
     for (const slug of ["acme", "beta"]) {
-      queryClient.setQueryData(homeKeys.threads(slug), []);
-      queryClient.setQueryData(homeKeys.assistantConfig(slug), {
+      queryClient.setQueryData(assistantKeys.threads(slug), []);
+      queryClient.setQueryData(assistantKeys.config(slug), {
         provider_kind: "openai",
         base_url: "https://api.test",
         model_name: "",

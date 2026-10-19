@@ -1,25 +1,43 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Home assistant card (SHELL-007; written from parity/specs/shell.md §2
-// and the §10 seam). Members see suggested prompts plus recent threads
-// when a model is configured, or a setup reminder when it is not; guests
-// see no card at all. Threads link into the assistant view by id while
-// chips and the reminder lead to its landing — the assistant area owns
-// everything past those links.
+// Home assistant card (SHELL-007 card shell + NEWFRONT-603 quick entry,
+// parity/specs/agents.md §9 AGT-048 and §13). Members see a single-line
+// draft with an Ask action, suggestion chips that fill the draft without
+// sending, and up to five recent conversations newest-first. A keyless
+// Ask is refused with a notice and starts nothing; without a provider key
+// the card also carries the setup reminder. Guests never see the card.
+// Recents link into the assistant view by id; asks start there.
 
 import { Bot } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
+
+import { Button, cn } from "@pidash/kit";
+import type { AssistantThread } from "@pidash/api-client";
 
 import { usePermissions } from "../../../core/session/index.js";
 import { CrossAppLink } from "../../../shared/coexistence/index.js";
+import { notifyError } from "../../../shared/shell/index.js";
+import { startFailureDetail, useStartConversation } from "../../assistant/api/mutations.js";
 import { useAssistantConfig, useAssistantThreads } from "../api/queries.js";
 import {
-  ASSISTANT_SUGGESTIONS,
-  assistantLandingHref,
-  assistantThreadHref,
-  isAssistantConfigured,
-} from "../lib/assistant.js";
+  ASSISTANT_CARD_SUGGESTIONS,
+  API_KEY_REMINDER,
+  API_KEY_REQUIRED_TITLE,
+  START_FAILED_TITLE,
+} from "../../assistant/lib/copy.js";
+import { isAssistantConfigured } from "../../assistant/lib/gate.js";
+import { assistantLandingHref, assistantThreadHref } from "../../assistant/lib/navigation.js";
+import { conversationLabel } from "../../assistant/lib/labels.js";
+
+/** How many conversations the card lists. */
+export const ASSISTANT_CARD_RECENT_LIMIT = 5;
+
+/** The newest unarchived conversations, capped for the card. */
+export function recentConversations(threads: readonly AssistantThread[] | undefined): AssistantThread[] {
+  return (threads ?? []).filter((thread) => !thread.is_archived).slice(0, ASSISTANT_CARD_RECENT_LIMIT);
+}
 
 export interface HomeAssistantCardProps {
   workspaceSlug: string;
@@ -30,10 +48,38 @@ export function HomeAssistantCard({ workspaceSlug }: HomeAssistantCardProps): Re
   const canView = !permissions.isLoading && permissions.canEdit;
   const threads = useAssistantThreads(workspaceSlug, canView);
   const config = useAssistantConfig(workspaceSlug, canView);
+  const start = useStartConversation();
+  const navigate = useNavigate();
+  const [draft, setDraft] = React.useState("");
+
   if (!canView) return null;
   if (threads.data === undefined || config.data === undefined) return null;
   const configured = isAssistantConfigured(config.data);
-  const recent = threads.data.filter((thread) => !thread.is_archived);
+  const recent = recentConversations(threads.data);
+
+  const ask = (): void => {
+    const content = draft.trim();
+    if (content === "" || start.isPending) return;
+    if (!configured) {
+      notifyError(API_KEY_REQUIRED_TITLE, API_KEY_REMINDER);
+      return;
+    }
+    start.mutate(
+      { workspaceSlug },
+      {
+        onSuccess: (thread) => {
+          setDraft("");
+          void navigate({
+            to: "/$ws/assistant/$threadId",
+            params: { ws: workspaceSlug, threadId: thread.id },
+            state: { pendingMessage: content },
+          });
+        },
+        onError: (error) => notifyError(START_FAILED_TITLE, startFailureDetail(error)),
+      }
+    );
+  };
+
   return (
     <section
       aria-label="Assistant"
@@ -45,49 +91,75 @@ export function HomeAssistantCard({ workspaceSlug }: HomeAssistantCardProps): Re
         <Bot size={18} aria-hidden="true" />
         Assistant
       </h2>
-      {configured ? (
-        <>
-          <div className="flex flex-wrap gap-(--space-2)">
-            {ASSISTANT_SUGGESTIONS.map((suggestion) => (
-              <CrossAppLink
-                key={suggestion}
-                to={assistantLandingHref(workspaceSlug)}
-                data-suggestion
-                className="text-body rounded-full border border-(--border) bg-(--bg) px-(--space-4) py-(--space-2) text-(--text) hover:bg-(--subtle)"
-              >
-                {suggestion}
-              </CrossAppLink>
-            ))}
-          </div>
-          {recent.length > 0 ? (
-            <div className="flex flex-col gap-(--space-2)">
-              <h3 className="text-emphasis text-(--text-muted)">Recent conversations</h3>
-              <ul className="flex flex-col gap-(--space-1)">
-                {recent.map((thread) => (
-                  <li key={thread.id}>
-                    <CrossAppLink
-                      to={assistantThreadHref(workspaceSlug, thread.id)}
-                      className="text-body text-(--text) hover:underline"
-                    >
-                      {thread.title === "" ? "Untitled conversation" : thread.title}
-                    </CrossAppLink>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-        </>
-      ) : (
-        <>
-          <p className="text-body text-(--text-muted)">Connect a model to start delegating work to the assistant.</p>
+      {configured ? null : (
+        <div className="flex flex-wrap items-center gap-(--space-2)">
+          <p className="text-body flex-1 text-(--text-muted)">
+            Connect a model to start delegating work to the assistant.
+          </p>
           <CrossAppLink
             to={assistantLandingHref(workspaceSlug)}
             className="text-body font-medium text-(--accent) hover:underline"
           >
             Set up the assistant
           </CrossAppLink>
-        </>
+        </div>
       )}
+      <div data-testid="assistant-card-entry" className="flex items-end gap-(--space-2)">
+        <input
+          aria-label="Ask the assistant"
+          placeholder="Ask Pi Dash to do something…"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              ask();
+            }
+          }}
+          className={cn(
+            "text-body h-(--control-height) min-w-0 flex-1 rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4)",
+            "text-(--text) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
+          )}
+        />
+        <Button
+          variant="primary"
+          onClick={ask}
+          disabled={draft.trim() === "" || start.isPending}
+          loading={start.isPending}
+        >
+          Ask
+        </Button>
+      </div>
+      <div className="flex flex-wrap gap-(--space-2)">
+        {ASSISTANT_CARD_SUGGESTIONS.map((suggestion) => (
+          <button
+            key={suggestion}
+            type="button"
+            data-suggestion
+            onClick={() => setDraft(suggestion)}
+            className="text-body cursor-pointer rounded-full border border-(--border) bg-(--bg) px-(--space-4) py-(--space-1) text-(--text) hover:bg-(--subtle)"
+          >
+            {suggestion}
+          </button>
+        ))}
+      </div>
+      {recent.length > 0 ? (
+        <div className="flex flex-col gap-(--space-2)">
+          <h3 className="text-emphasis text-(--text-muted)">Recent conversations</h3>
+          <ul className="flex flex-col gap-(--space-1)">
+            {recent.map((thread) => (
+              <li key={thread.id}>
+                <CrossAppLink
+                  to={assistantThreadHref(workspaceSlug, thread.id)}
+                  className="text-body block truncate text-(--text) hover:underline"
+                >
+                  {conversationLabel(thread)}
+                </CrossAppLink>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -46,7 +46,7 @@ export const Route = createFileRoute("/$ws/_gated/")({
         .ensureQueryData(homeThreadsQueryOptions(context.apiClient, params.ws, true))
         .catch(() => undefined),
       context.queryClient
-        .ensureQueryData(homeAssistantConfigQueryOptions(context.apiClient, params.ws, true))
+        .ensureQueryData(homeAssistantConfigQueryOptions(context.apiClient, params.ws))
         .catch(() => undefined),
     ]);
     return {};

@@ -8,6 +8,4 @@ import { workspaceScope } from "../../../core/query/client.js";
 
 export const homeKeys = {
   all: (workspaceSlug: string) => [...workspaceScope(workspaceSlug), "home"] as const,
-  threads: (workspaceSlug: string) => [...homeKeys.all(workspaceSlug), "assistant-threads"] as const,
-  assistantConfig: (workspaceSlug: string) => [...homeKeys.all(workspaceSlug), "assistant-config"] as const,
 };

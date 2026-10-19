@@ -2,33 +2,51 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
+// Dashboard assistant card (NEWFRONT-603, parity/specs/agents.md §9
+// AGT-048): quick entry with suggestions and recent conversations, the
+// keyless refusal notice, and the guest absence.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import {
+  createMemoryHistory,
+  createRootRouteWithContext,
+  createRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { AssistantThread, LlmConfig } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/index.js";
+import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/index.js";
+import { assistantKeys } from "../../assistant/index.js";
 import { sessionKeys, setSessionClient } from "../../../core/session/queries.js";
-import { homeKeys } from "../api/keys.js";
-import { HomeAssistantCard } from "./HomeAssistantCard.js";
+import { HomeAssistantCard, recentConversations } from "./HomeAssistantCard.js";
 
-const THREAD_1: AssistantThread = {
-  id: "11111111-1111-4111-8111-111111111111",
-  title: "Sprint summary",
-  is_archived: false,
-  has_active_turn: false,
-  created_at: "2026-10-01T00:00:00Z",
-  updated_at: "2026-10-02T00:00:00Z",
-};
+const notified = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn() }));
+vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../shared/shell/index.js")>();
+  return { ...actual, notifyError: notified.error, notifySuccess: notified.success };
+});
 
-const ARCHIVED_THREAD: AssistantThread = {
-  ...THREAD_1,
+function makeThread(overrides: Partial<AssistantThread> & Pick<AssistantThread, "id">): AssistantThread {
+  return {
+    title: `Conversation ${overrides.id}`,
+    is_archived: false,
+    has_active_turn: false,
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-02T00:00:00Z",
+    ...overrides,
+  };
+}
+
+const THREAD_1 = makeThread({ id: "11111111-1111-4111-8111-111111111111", title: "Sprint summary" });
+const ARCHIVED_THREAD = makeThread({
   id: "22222222-2222-4222-8222-222222222222",
   title: "Old planning",
   is_archived: true,
-};
+});
 
 const CONFIGURED: LlmConfig = {
   provider_kind: "openai",
@@ -51,7 +69,14 @@ function workspaceRow(role: number): Record<string, unknown> {
   };
 }
 
-const requestedUrls: string[] = [];
+interface CreateCall {
+  url: string;
+  method: string;
+}
+
+const calls: CreateCall[] = [];
+let threadCreateStatus = 201;
+let threadCreateBody: unknown = makeThread({ id: "44444444-4444-4444-8444-444444444444" });
 
 function renderCard(options: {
   role?: number;
@@ -63,77 +88,182 @@ function renderCard(options: {
     getJson: () => new Promise<never>(() => {}),
     parse: (_schema: unknown, data: unknown) => data,
   } as never);
-  requestedUrls.length = 0;
-  createAppClient("https://api.test", (async (url: string) => {
-    requestedUrls.push(url);
-    return {
-      status: 500,
-      url,
-      headers: { get: () => null },
-      text: async () => JSON.stringify({ error: "boom" }),
-    };
+  calls.length = 0;
+  createAppClient("https://api.test", (async (url: string, init: { method?: string }) => {
+    calls.push({ url, method: init.method ?? "GET" });
+    if (url.endsWith("/ai-assistant/threads/") && init.method === "POST") {
+      return {
+        status: threadCreateStatus,
+        url,
+        headers: { get: () => "application/json" },
+        text: async () => JSON.stringify(threadCreateBody),
+      };
+    }
+    return { status: 500, url, headers: { get: () => null }, text: async () => JSON.stringify({ error: "boom" }) };
   }) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   if (options.seedWorkspaces !== false) {
     queryClient.setQueryData(sessionKeys.workspaces, [workspaceRow(options.role ?? ROLE_MEMBER)]);
   }
-  if (options.threads !== undefined) queryClient.setQueryData(homeKeys.threads("acme"), options.threads);
-  if (options.config !== undefined) queryClient.setQueryData(homeKeys.assistantConfig("acme"), options.config);
+  if (options.threads !== undefined) queryClient.setQueryData(assistantKeys.threads("acme"), options.threads);
+  if (options.config !== undefined) queryClient.setQueryData(assistantKeys.config("acme"), options.config);
+  // The card navigates into a started conversation, so it mounts under a
+  // minimal router with that address registered.
+  const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()();
+  const homeRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/$ws",
+    component: () => (
+      <div data-testid="card-host">
+        <HomeAssistantCard workspaceSlug="acme" />
+      </div>
+    ),
+  });
+  const assistantRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/$ws/assistant/$threadId",
+    component: () => <div data-testid="conversation" />,
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([homeRoute, assistantRoute]),
+    context: { queryClient },
+    history: createMemoryHistory({ initialEntries: ["/acme"] }),
+  });
+  routerRef = router;
   render(
     <QueryClientProvider client={queryClient}>
-      <HomeAssistantCard workspaceSlug="acme" />
+      <RouterProvider router={router} />
     </QueryClientProvider>
   );
 }
 
+let routerRef: { state: { location: { pathname: string } } } | null = null;
+
 afterEach(() => {
+  routerRef = null;
+});
+
+afterEach(() => {
+  notified.error.mockReset();
+  notified.success.mockReset();
+  threadCreateStatus = 201;
+  threadCreateBody = makeThread({ id: "44444444-4444-4444-8444-444444444444" });
   resetAppClient();
 });
 
+describe("recentConversations", () => {
+  it("drops archived rows and caps the list at five", () => {
+    const rows = Array.from({ length: 7 }, (_, index) => makeThread({ id: `t-${index}` }));
+    const archived = makeThread({ id: "gone", is_archived: true });
+    expect(recentConversations([archived, ...rows]).map((row) => row.id)).toEqual(["t-0", "t-1", "t-2", "t-3", "t-4"]);
+    expect(recentConversations(undefined)).toEqual([]);
+  });
+});
+
 describe("HomeAssistantCard", () => {
-  it("shows prompts and recent threads to configured members", async () => {
-    renderCard({ threads: [THREAD_1, ARCHIVED_THREAD], config: CONFIGURED });
+  it("offers the entry, the pinned chips and up to five recents for members", async () => {
+    const threads = Array.from({ length: 6 }, (_, index) =>
+      makeThread({ id: `thread-${index}`, title: `Recent ${index}` })
+    );
+    renderCard({ threads: [ARCHIVED_THREAD, ...threads], config: CONFIGURED });
     const card = await screen.findByRole("region", { name: "Assistant" });
     expect(card).toHaveAttribute("data-assistant-state", "ready");
-    expect(screen.getByRole("link", { name: "Summarize my open work" })).toHaveAttribute("href", "/acme/assistant");
-    for (const suggestion of [
-      "Summarize my open work",
-      "Draft this week's status update",
-      "What should I pick up next?",
-      "Help me plan the week",
-    ]) {
-      expect(screen.getByRole("link", { name: suggestion })).toBeInTheDocument();
+    const input = screen.getByRole("textbox", { name: "Ask the assistant" });
+    expect(input).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Ask" })).toBeDisabled();
+    for (const chip of ["What's assigned to me?", "Create an issue in…", "Summarize open issues in…"]) {
+      expect(screen.getByRole("button", { name: chip })).toBeInTheDocument();
     }
-    const threadLink = screen.getByRole("link", { name: "Sprint summary" });
-    expect(threadLink).toHaveAttribute("href", `/acme/assistant/${THREAD_1.id}`);
+    const recents = screen.getAllByRole("link").filter((link) => link.getAttribute("href")?.includes("/assistant/"));
+    expect(recents).toHaveLength(5);
+    expect(recents.map((link) => link.textContent)).toEqual([
+      "Recent 0",
+      "Recent 1",
+      "Recent 2",
+      "Recent 3",
+      "Recent 4",
+    ]);
+    expect(recents[0]).toHaveAttribute("href", "/acme/assistant/thread-0");
     expect(screen.queryByRole("link", { name: "Old planning" })).not.toBeInTheDocument();
   });
 
-  it("falls back to an untitled label for blank thread titles", async () => {
-    renderCard({ threads: [{ ...THREAD_1, title: "" }], config: CONFIGURED });
-    expect(await screen.findByRole("link", { name: "Untitled conversation" })).toBeInTheDocument();
-  });
-
-  it("shows prompts alone when no threads are recent", async () => {
+  it("fills the draft from a chip without sending and enables Ask", async () => {
     renderCard({ threads: [], config: CONFIGURED });
-    const card = await screen.findByRole("region", { name: "Assistant" });
-    expect(card).toHaveAttribute("data-assistant-state", "ready");
-    expect(screen.queryByRole("heading", { name: "Recent conversations" })).not.toBeInTheDocument();
+    await screen.findByRole("region", { name: "Assistant" });
+    fireEvent.click(screen.getByRole("button", { name: "Create an issue in…" }));
+    expect(screen.getByRole("textbox", { name: "Ask the assistant" })).toHaveValue("Create an issue in…");
+    expect(screen.getByRole("button", { name: "Ask" })).toBeEnabled();
+    expect(calls.filter((call) => call.method === "POST")).toEqual([]);
   });
 
-  it("shows the setup reminder when no model is configured", async () => {
-    renderCard({ threads: [], config: UNCONFIGURED });
+  it("falls back to the untitled label and shows the setup reminder without a key", async () => {
+    renderCard({ threads: [makeThread({ id: "blank", title: "   " })], config: UNCONFIGURED });
     const card = await screen.findByRole("region", { name: "Assistant" });
     expect(card).toHaveAttribute("data-assistant-state", "setup");
     expect(screen.getByText(/connect a model/i)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Set up the assistant" })).toHaveAttribute("href", "/acme/assistant");
-    expect(screen.queryByRole("link", { name: "Summarize my open work" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Untitled conversation" })).toBeInTheDocument();
+    // Chips stay available: a keyless pick fills the draft and the ask refuses with the notice.
+    expect(screen.getByRole("button", { name: "What's assigned to me?" })).toBeInTheDocument();
+  });
+
+  it("refuses a keyless ask with the reminder and starts nothing", async () => {
+    renderCard({ threads: [], config: UNCONFIGURED });
+    await screen.findByRole("region", { name: "Assistant" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Ask the assistant" }), { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(notified.error).toHaveBeenCalledWith(
+      "API key required",
+      "Please set your API key in Settings first to start using AI Assistant."
+    );
+    expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+  });
+
+  it("tells members connecting a model is needed without sending", async () => {
+    renderCard({ threads: [], config: UNCONFIGURED });
+    await screen.findByRole("region", { name: "Assistant" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Ask the assistant" }), { target: { value: "   " } });
+    expect(screen.getByRole("button", { name: "Ask" })).toBeDisabled();
+  });
+
+  it("starts a conversation and hands the draft on for a configured member", async () => {
+    renderCard({ threads: [], config: CONFIGURED });
+    await screen.findByRole("region", { name: "Assistant" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Ask the assistant" }), {
+      target: { value: " plan my week " },
+    });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Ask the assistant" }), { key: "Enter" });
+    await waitFor(() => {
+      expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    });
+    // The card hands the draft to the new conversation and leaves the page.
+    expect(await screen.findByTestId("conversation")).toBeInTheDocument();
+    expect(routerRef?.state.location.pathname).toBe("/acme/assistant/44444444-4444-4444-8444-444444444444");
+  });
+
+  it("shows the start failure detail in the notice", async () => {
+    threadCreateStatus = 403;
+    threadCreateBody = { error: "role_not_allowed", detail: "The assistant is available to workspace members." };
+    renderCard({ threads: [], config: CONFIGURED });
+    await screen.findByRole("region", { name: "Assistant" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Ask the assistant" }), { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() => {
+      expect(notified.error).toHaveBeenCalledWith(
+        "Unable to start chat",
+        "The assistant is available to workspace members."
+      );
+    });
+  });
+
+  it("renders the same card for admins", async () => {
+    renderCard({ role: ROLE_ADMIN, threads: [THREAD_1], config: CONFIGURED });
+    expect(await screen.findByRole("region", { name: "Assistant" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Ask the assistant" })).toBeInTheDocument();
   });
 
   it("hides the card from guests without fetching", async () => {
-    renderCard({ role: ROLE_GUEST, threads: [THREAD_1], config: CONFIGURED });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(requestedUrls).toEqual([]);
+    governGuestRender();
     expect(screen.queryByRole("region", { name: "Assistant" })).not.toBeInTheDocument();
   });
 
@@ -141,20 +271,24 @@ describe("HomeAssistantCard", () => {
     renderCard({ seedWorkspaces: false });
     expect(screen.queryByRole("region", { name: "Assistant" })).not.toBeInTheDocument();
   });
-
-  it("renders nothing when the threads read fails", async () => {
-    renderCard({ config: CONFIGURED });
-    await waitFor(() => {
-      expect(requestedUrls.some((url) => url.includes("/ai-assistant/threads/"))).toBe(true);
-    });
-    expect(screen.queryByRole("region", { name: "Assistant" })).not.toBeInTheDocument();
-  });
-
-  it("renders nothing when the config read fails", async () => {
-    renderCard({ threads: [THREAD_1] });
-    await waitFor(() => {
-      expect(requestedUrls.some((url) => url.includes("/ai-assistant/config/"))).toBe(true);
-    });
-    expect(screen.queryByRole("region", { name: "Assistant" })).not.toBeInTheDocument();
-  });
 });
+
+function governGuestRender(): void {
+  const urls: string[] = [];
+  setSessionClient({
+    getJson: () => new Promise<never>(() => {}),
+    parse: (_schema: unknown, data: unknown) => data,
+  } as never);
+  createAppClient("https://api.test", (async (url: string) => {
+    urls.push(url);
+    return { status: 403, url, headers: { get: () => null }, text: async () => JSON.stringify({ error: "no" }) };
+  }) as never);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(sessionKeys.workspaces, [workspaceRow(ROLE_GUEST)]);
+  render(
+    <QueryClientProvider client={queryClient}>
+      <HomeAssistantCard workspaceSlug="acme" />
+    </QueryClientProvider>
+  );
+  expect(urls).toEqual([]);
+}
