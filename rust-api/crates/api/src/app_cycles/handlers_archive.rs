@@ -1503,14 +1503,9 @@ async fn archived_retrieve(
                 .await?;
         let mut chart = String::from("{}");
         if let (Some(start), Some(end)) = (start, end) {
-            let points = fetch_burndown_points(
-                &pool,
-                &slug,
-                &project_id,
-                &pk,
-                resolved.timezone.name(),
-            )
-            .await?;
+            let points =
+                fetch_burndown_points(&pool, &slug, &project_id, &pk, resolved.timezone.name())
+                    .await?;
             // Python `sum(issue_estimates)` starts at int 0 and adds in
             // queryset order — the fold below is that sum, typed.
             let total = points
@@ -1544,14 +1539,8 @@ async fn archived_retrieve(
     let labels = fetch_label_counts(&pool, &slug, &project_id, &pk).await?;
     let mut chart = String::from("{}");
     if let (Some(start), Some(end)) = (start, end) {
-        let issues = fetch_burndown_issues(
-            &pool,
-            &slug,
-            &project_id,
-            &pk,
-            resolved.timezone.name(),
-        )
-        .await?;
+        let issues =
+            fetch_burndown_issues(&pool, &slug, &project_id, &pk, resolved.timezone.name()).await?;
         chart = burndown_chart(
             ChartValue::Int(total_issues),
             &issues,
