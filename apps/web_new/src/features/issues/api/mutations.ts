@@ -136,6 +136,10 @@ export function useUpdateIssue(scope: UpdateIssueScope) {
         queryClient.invalidateQueries({ queryKey: issueKeys.detail(scope.workspaceSlug, scope.issueId) }),
         queryClient.invalidateQueries({ queryKey: [...issueKeys.all(scope.workspaceSlug), "browse"] }),
         queryClient.invalidateQueries({ queryKey: [...issueKeys.all(scope.workspaceSlug), "list"] }),
+        // A property write lands as its own feed row (ISS-194).
+        queryClient.invalidateQueries({
+          queryKey: issueKeys.activity(scope.workspaceSlug, scope.projectId, scope.issueId),
+        }),
       ];
       if (patch.description_html !== undefined) {
         settled.push(

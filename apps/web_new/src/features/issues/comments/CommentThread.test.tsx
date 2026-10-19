@@ -108,7 +108,13 @@ function stubTransport(handler: (call: Recorded) => { status: number; body: unkn
     if (url.endsWith("/auth/get-csrf-token/")) {
       return { status: 200, url, headers: { get: () => null }, text: async () => JSON.stringify({ csrf_token: "x" }) };
     }
-    const answer = handler(call);
+    // The thread now shares its endpoint family with the activity feed
+    // and the reaction clusters; those reads answer empty unless a test
+    // cares about them.
+    const answer =
+      url.includes("activity_type=issue-property") || url.includes("/reactions/")
+        ? { status: 200, body: [] }
+        : handler(call);
     return {
       status: answer.status,
       url,
@@ -184,7 +190,7 @@ describe("CommentThread", () => {
   it("shows the composer, heading and cards once the history arrives", async () => {
     stubTransport(() => ({ status: 200, body: [comment()] }));
     renderThread();
-    expect(screen.getByRole("heading", { name: "Comments" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Activity" })).toBeInTheDocument();
     expect(await screen.findByText("Thread words", undefined, { timeout: 5000 })).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Add comment" })).toBeInTheDocument();
     expect(screen.queryByRole("radiogroup", { name: "Comment visibility" })).not.toBeInTheDocument();
@@ -200,6 +206,11 @@ describe("CommentThread", () => {
           headers: { get: () => null },
           text: async () => JSON.stringify({ csrf_token: "x" }),
         };
+      }
+      // Only the comment history is held open; the feed's other reads
+      // answer at once so the skeleton belongs to one source.
+      if (!url.includes("activity_type=issue-comment")) {
+        return { status: 200, url, headers: { get: () => null }, text: async () => "[]" };
       }
       const result = await new Promise<{ status: number; body: unknown }>((resolve) => {
         answer = resolve;
@@ -220,7 +231,7 @@ describe("CommentThread", () => {
   it("shows the read failure copy when the history is refused", async () => {
     stubTransport(() => ({ status: 500, body: { error: "boom" } }));
     renderThread();
-    expect(await screen.findByText("Couldn't load the comments.")).toBeInTheDocument();
+    expect(await screen.findByText("Couldn't load the activity.")).toBeInTheDocument();
   });
 
   it("keeps cards but drops the composer and menus on an archived issue", async () => {

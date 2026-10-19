@@ -92,6 +92,7 @@ function pageOf(
     },
     getByRole: (role: string, options?: { name?: string | RegExp }) => {
       if (role === "group") return parts.composer ?? locator();
+      if (role === "region") return locator({ locator: (selector: string) => parts.locator?.(selector) ?? locator() });
       if (role === "menuitem") {
         return parts.menuitem?.(String(options?.name)) ?? locator();
       }
@@ -127,7 +128,7 @@ describe("web_new comment driver", () => {
       return null;
     }) as Page["goto"];
     page.page.getByRole = ((role: string, options?: { name?: string }) => {
-      if (role === "heading" && options?.name === "Comments") {
+      if (role === "heading" && options?.name === "Activity") {
         return locator({ waitFor: async () => void visited.push("comments") });
       }
       return locator();
@@ -152,7 +153,7 @@ describe("web_new comment driver", () => {
       return null;
     }) as Page["waitForURL"];
     page.page.getByRole = ((role: string, options?: { name?: string }) => {
-      if (role === "heading" && options?.name === "Comments") {
+      if (role === "heading" && options?.name === "Activity") {
         return locator({ waitFor: async () => void visited.push("comments") });
       }
       return locator();
@@ -174,7 +175,7 @@ describe("web_new comment driver", () => {
       return null;
     }) as Page["waitForURL"];
     page.page.getByRole = ((role: string, options?: { name?: string }) => {
-      if (role === "heading" && options?.name === "Comments") {
+      if (role === "heading" && options?.name === "Activity") {
         return locator({ waitFor: async () => void visited.push("comments") });
       }
       return locator();
@@ -196,7 +197,7 @@ describe("web_new comment driver", () => {
     const page = pageOf({
       composer,
       locator: (selector) =>
-        selector === '[id^="comment-"]'
+        selector === '[data-feed-row="true"]'
           ? locator({ first: () => locator({ boundingBox: async () => ({ x: 0, y: 40, width: 1, height: 1 }) }) })
           : locator(),
     });

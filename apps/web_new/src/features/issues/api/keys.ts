@@ -32,6 +32,15 @@ export const issueKeys = {
   /** The issue's comment list, read through the history endpoint (ISS-197–202). */
   comments: (workspaceSlug: string, projectId: string, issueId: string) =>
     [...issueKeys.all(workspaceSlug), "comments", projectId, issueId] as const,
+  /** Reactions on the issue itself (ISS-204). */
+  reactions: (workspaceSlug: string, projectId: string, issueId: string) =>
+    [...issueKeys.all(workspaceSlug), "reactions", projectId, issueId] as const,
+  /** Reactions on one comment (ISS-203). */
+  commentReactions: (workspaceSlug: string, projectId: string, commentId: string) =>
+    [...issueKeys.all(workspaceSlug), "comment-reactions", projectId, commentId] as const,
+  /** The issue's property activities, the feed's other source (ISS-194). */
+  activity: (workspaceSlug: string, projectId: string, issueId: string) =>
+    [...issueKeys.all(workspaceSlug), "activity", projectId, issueId] as const,
   /** Per-entity display preferences (ISS-002). */
   prefs: (workspaceSlug: string, ...part: string[]) => [...issueKeys.all(workspaceSlug), "prefs", ...part] as const,
 };

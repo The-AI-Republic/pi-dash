@@ -6,14 +6,15 @@
 // indicator beside it, and the restore handshake between the version
 // history and the description field: a restore shows the version at
 // once and clears once the server confirms it (or immediately, back to
-// the server value, when the write is refused). Later slices plug the
-// header row (NEWFRONT-644) and the under-description row (NEWFRONT-654)
-// into the slots.
+// the server value, when the write is refused). The under-description row
+// carries the issue reaction cluster (ISS-204) beside the history line;
+// the header row (NEWFRONT-644) plugs into its own slot.
 
 import type { Issue } from "@pidash/api-client";
 import * as React from "react";
 
 import { DESCRIPTION_SAVE_FAILED_TITLE, TITLE_SAVE_FAILED_TITLE, useUpdateIssue } from "../api/mutations.js";
+import { IssueReactions } from "../reactions/IssueReactions.js";
 import { DescriptionHistory } from "./DescriptionHistory.js";
 import { IssueDescriptionField, type RestoredDescription } from "./IssueDescriptionField.js";
 import { IssueTitleField } from "./IssueTitleField.js";
@@ -85,7 +86,10 @@ export function DetailMainColumn({
         restored={restored}
       />
       <div className="flex items-start justify-between gap-(--space-4)">
-        <div className="min-w-0 flex-1">{belowDescription}</div>
+        <div className="flex min-w-0 flex-1 flex-wrap items-start gap-(--space-4)">
+          {belowDescription}
+          <IssueReactions workspaceSlug={workspaceSlug} projectId={projectId} issueId={issue.id} disabled={readOnly} />
+        </div>
         {editable ? (
           <DescriptionHistory
             workspaceSlug={workspaceSlug}
