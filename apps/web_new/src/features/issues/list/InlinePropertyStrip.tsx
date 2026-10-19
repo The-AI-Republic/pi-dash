@@ -88,7 +88,6 @@ export function todayIsoInZone(now: Date = new Date(), timeZone?: string | null)
 
 /** Properties in the strip's render order; the display set filters this. */
 export const INLINE_PROPERTY_ORDER: readonly string[] = [
-  "key",
   "state",
   "priority",
   "start_date",
@@ -102,17 +101,6 @@ export const INLINE_PROPERTY_ORDER: readonly string[] = [
   "link",
   "labels",
 ];
-
-function Identifier({
-  projectIdentifier,
-  issue,
-}: {
-  projectIdentifier: string;
-  issue: IssueListItem;
-}): React.ReactElement {
-  const text = issue.sequence_id === 0 ? "…" : `${projectIdentifier}-${issue.sequence_id}`;
-  return <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">{text}</span>;
-}
 
 /**
  * Mounts a picker on first interaction when `defer` is set. The trigger is
@@ -166,7 +154,6 @@ function DeferredPicker({
 function InlinePropertyStripImpl({
   workspaceSlug,
   projectId,
-  projectIdentifier,
   issue,
   properties,
   flags,
@@ -228,7 +215,6 @@ function InlinePropertyStripImpl({
   return (
     <div data-testid="inline-property-strip" className="flex min-w-0 flex-wrap items-center gap-(--space-2)">
       {keys.map((key) => {
-        if (key === "key") return <Identifier key={key} projectIdentifier={projectIdentifier} issue={issue} />;
         if (key === "state") {
           const stateTrigger = (
             <button type="button" disabled={disabled} className={chipClasses(true)}>

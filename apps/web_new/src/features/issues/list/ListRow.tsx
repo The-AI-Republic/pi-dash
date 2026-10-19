@@ -109,35 +109,28 @@ export function rowBlockId(issueId: string): string {
   return `issue_${issueId}`;
 }
 
-/** Chevron + lazy children for one parent row. */
-function SubIssueExpander({
-  workspaceSlug,
-  projectId,
+/** Chevron toggle for one parent row; the children render under the row. */
+function SubIssueToggle({
   issue,
+  expanded,
+  fetching,
   depth,
   projectIdentifier,
+  onToggle,
   onOpenPeek,
   showSubIssues,
-  renderChild,
 }: {
-  workspaceSlug: string;
-  projectId: string;
   issue: IssueListItem;
+  expanded: boolean;
+  fetching: boolean;
   depth: number;
   projectIdentifier: string;
+  onToggle: () => void;
   onOpenPeek: (issueKey: string, title: string) => void;
   showSubIssues: boolean;
-  renderChild: (child: IssueListItem, depth: number) => React.ReactNode;
-}): React.ReactElement | null {
-  const [expanded, setExpanded] = React.useState(false);
+}): React.ReactElement {
   const atCap = depth >= MAX_INLINE_DEPTH;
   const canExpand = (issue.sub_issues_count ?? 0) > 0 && !issue.is_epic;
-  const query = useQuery({
-    ...subIssuesQueryOptions(getAppClient(), workspaceSlug, projectId, issue.id),
-    // Hiding the expander must also stop any in-flight child read, so the
-    // display flag gates the query and the render together.
-    enabled: showSubIssues && expanded && !atCap && canExpand,
-  });
 
   // Both a hidden toggle and a leaf keep the same gutter, so titles align.
   if (!showSubIssues || !canExpand) return <span className="grid size-4 shrink-0" aria-hidden="true" />;
@@ -155,29 +148,23 @@ function SubIssueExpander({
       </span>
     );
   }
-  const children = query.data?.sub_issues ?? [];
   return (
-    <span className="flex min-w-0 flex-col">
-      <span className="grid size-4 shrink-0 place-items-center">
-        <button
-          type="button"
-          aria-label={expanded ? `Collapse sub-work items of ${issue.name}` : `Expand sub-work items of ${issue.name}`}
-          aria-expanded={expanded}
-          onClick={() => setExpanded((open) => !open)}
-          className="grid size-4 place-items-center rounded-(--radius-control) text-(--text-muted) hover:bg-(--subtle)"
-        >
-          {query.isFetching ? (
-            <Loader2 size={12} strokeWidth={2} className="animate-spin" aria-hidden="true" />
-          ) : expanded ? (
-            <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
-          ) : (
-            <ChevronRight size={12} strokeWidth={2} aria-hidden="true" />
-          )}
-        </button>
-      </span>
-      {expanded && children.length > 0 ? (
-        <span className="flex flex-col">{children.map((child) => renderChild(child, depth + 1))}</span>
-      ) : null}
+    <span className="grid size-4 shrink-0 place-items-center">
+      <button
+        type="button"
+        aria-label={expanded ? `Collapse sub-work items of ${issue.name}` : `Expand sub-work items of ${issue.name}`}
+        aria-expanded={expanded}
+        onClick={onToggle}
+        className="grid size-4 place-items-center rounded-(--radius-control) text-(--text-muted) hover:bg-(--subtle)"
+      >
+        {fetching ? (
+          <Loader2 size={12} strokeWidth={2} className="animate-spin" aria-hidden="true" />
+        ) : expanded ? (
+          <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
+        ) : (
+          <ChevronRight size={12} strokeWidth={2} aria-hidden="true" />
+        )}
+      </button>
     </span>
   );
 }
@@ -198,10 +185,16 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
   const highlighted = isRowHighlighted(issue, highlightedId);
   const key = issueKey(projectIdentifier, issue);
   const href = hrefFor(issue);
-
-  function renderChild(child: IssueListItem, childDepth: number): React.ReactNode {
-    return <ListRow {...props} key={child.id} issue={child} depth={childDepth} />;
-  }
+  const [expanded, setExpanded] = React.useState(false);
+  const atCap = depth >= MAX_INLINE_DEPTH;
+  const canExpand = (issue.sub_issues_count ?? 0) > 0 && !issue.is_epic;
+  const query = useQuery({
+    ...subIssuesQueryOptions(getAppClient(), props.workspaceSlug, props.projectId, issue.id),
+    // Hiding the expander must also stop any in-flight child read, so the
+    // display flag gates the query and the render together.
+    enabled: showSubIssues && expanded && !atCap && canExpand,
+  });
+  const children = query.data?.sub_issues ?? [];
 
   return (
     <article id={rowBlockId(issue.id)} data-temprow={temp ? "true" : undefined} className="flex flex-col">
@@ -214,15 +207,15 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
           highlighted ? "bg-(--accent-subtle)" : "",
         ].join(" ")}
       >
-        <SubIssueExpander
-          workspaceSlug={props.workspaceSlug}
-          projectId={props.projectId}
+        <SubIssueToggle
           issue={issue}
+          expanded={expanded}
+          fetching={query.isFetching}
           depth={depth}
           projectIdentifier={projectIdentifier}
+          onToggle={() => setExpanded((open) => !open)}
           onOpenPeek={onOpenPeek}
           showSubIssues={showSubIssues}
-          renderChild={renderChild}
         />
         <a
           id={rowLinkId(issue.id)}
@@ -236,9 +229,11 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
             if (!temp) onOpenPeek(key, issue.name);
           }}
         >
-          <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">
-            {temp ? "…" : key}
-          </span>
+          {props.properties["key"] === false ? null : (
+            <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">
+              {temp ? "…" : key}
+            </span>
+          )}
           <p title={issue.name} className="text-body min-w-0 flex-1 truncate text-(--text)">
             {issue.name}
           </p>
@@ -265,6 +260,13 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
           />
         )}
       </div>
+      {expanded && children.length > 0 ? (
+        <div data-testid="list-row-children" className="flex flex-col pl-(--space-4)">
+          {children.map((child) => (
+            <ListRow {...props} key={child.id} issue={child} depth={depth + 1} />
+          ))}
+        </div>
+      ) : null}
     </article>
   );
 }

@@ -234,11 +234,12 @@ describe("InlinePropertyStrip", () => {
   it("renders display-enabled properties in the spec order", () => {
     render(<InlinePropertyStrip {...props()} />);
     expect(screen.getByTestId("inline-property-strip")).toBeInTheDocument();
-    expect(screen.getByText("WEB-42")).toBeInTheDocument();
+    // The row anchor owns the identifier; the strip must not repeat it.
+    expect(screen.queryByText("WEB-42")).not.toBeInTheDocument();
     expect(screen.getByText("Todo")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Priority: high" })).toBeInTheDocument();
     expect(screen.getByTestId("state-picker")).toBeInTheDocument();
-    expect(INLINE_PROPERTY_ORDER.slice(0, 3)).toEqual(["key", "state", "priority"]);
+    expect(INLINE_PROPERTY_ORDER.slice(0, 3)).toEqual(["state", "priority", "start_date"]);
   });
 
   it("flags a due-today item using the project timezone on a US-Pacific evening", () => {

@@ -37,7 +37,6 @@ import {
 } from "../../../../../../features/issues/components/lazyLeaves.js";
 import { loadListLayout, resolvedListLayout } from "../../../../../../features/issues/list/lazy.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
-import { selectDisplayPrefs } from "../../../../../../features/issues/prefs/displayPrefs.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
 // The timeline boundary (and the chart code behind it) only matters when
@@ -52,9 +51,9 @@ const LazyGanttTimeline = React.lazy(() =>
 // The list layout is a separate chunk so the route stays inside the
 // initial-JS budget (Quality gates). `beforeLoad` awaits it with the data,
 // so the component mounts once instead of suspending after commit.
-// Start the filter chunk with the layout chunk, so the first render does not
-// suspend and mount the layout twice.
 import { LazyIssueFilters, preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
+// Start the filter chunk with the route module so the first layout render
+// does not suspend and mount the layout twice (NEWFRONT-619).
 preloadIssueFilters();
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";

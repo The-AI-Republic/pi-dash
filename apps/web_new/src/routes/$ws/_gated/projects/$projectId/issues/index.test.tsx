@@ -13,7 +13,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ApiError, createClient } from "@pidash/api-client";
 import type { IssueListItem, IssueListResponse, Project } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../../../../core/api/client.js";
 import {
@@ -23,6 +23,7 @@ import {
   type PrefsRecord,
 } from "../../../../../../features/issues/index.js";
 import { listPageQueryOptions } from "../../../../../../features/issues/list/pages.js";
+import { loadListLayout } from "../../../../../../features/issues/list/lazy.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { clearCommands, listCommands } from "../../../../../../shared/commands/index.js";
@@ -487,6 +488,12 @@ afterEach(() => {
 });
 
 describe("project issues screen", () => {
+  // The route awaits the list layout chunk in beforeLoad; these tests render
+  // the component directly, so resolve the same chunk first.
+  beforeAll(async () => {
+    await loadListLayout();
+  });
+
   it("composes the layout root with the project title and its rows", async () => {
     const now = new Date().toISOString();
     renderScreen({}, 1, [issueRow({ created_at: now, updated_at: now })]);

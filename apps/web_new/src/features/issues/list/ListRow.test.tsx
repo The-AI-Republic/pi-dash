@@ -98,6 +98,13 @@ describe("ListRow", () => {
     expect(await screen.findByTestId("strip")).toBeInTheDocument();
   });
 
+  it("hides the identifier when the display ID property is off", () => {
+    render(<ListRow {...props({ properties: { key: false } })} />);
+    const anchor = screen.getByLabelText("WEB-42");
+    expect(anchor).toHaveTextContent("Fix login");
+    expect(anchor).not.toHaveTextContent("WEB-42");
+  });
+
   it("opens peek on a plain click and keeps modified clicks as links", () => {
     const onOpenPeek = vi.fn();
     render(<ListRow {...props({ onOpenPeek })} />);
@@ -144,6 +151,18 @@ describe("ListRow", () => {
       "aria-expanded",
       "true"
     );
+  });
+
+  it("renders expanded children outside the fixed-height row so rows stack", () => {
+    const child = issue({ id: "child-1", name: "Child", sequence_id: 43, parent_id: ISSUE, sub_issues_count: null });
+    queryMock.useQuery.mockReturnValue({ data: { sub_issues: [child] }, isFetching: false });
+    render(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }) })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Expand sub-work items of Fix login" }));
+    const [parentRow] = screen.getAllByTestId("list-row");
+    const childBlock = document.getElementById(rowBlockId("child-1"));
+    expect(childBlock).not.toBeNull();
+    expect(parentRow?.contains(childBlock)).toBe(false);
+    expect(screen.getByTestId("list-row-children")).toContainElement(childBlock);
   });
 
   it("shows a spinner while the children request runs", () => {
