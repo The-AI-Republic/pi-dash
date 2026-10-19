@@ -48,8 +48,16 @@ test(
     }
 
     await test.step("restore the preference to the saved value", async () => {
-      await driver.notificationsEmailPreferencesToggle(PREF);
-      await expect.poll(() => driver.toastText(), { timeout: 15_000 }).toMatch(/updated successfully/i);
+      // A toggle always flips from what the screen shows. The old app left
+      // the failed flip on screen, so one press writes the saved value
+      // back; web_new already sprang back, so the same single press would
+      // write the flipped value and need a second. Drive from the screen,
+      // and stop once the server holds the original.
+      for (let press = 0; press < 2; press += 1) {
+        if ((await serverEmailPreferences(ownerSession))[PREF] === before) break;
+        await driver.notificationsEmailPreferencesToggle(PREF);
+        await expect.poll(() => driver.toastText(), { timeout: 15_000 }).toMatch(/updated successfully/i);
+      }
       expect((await serverEmailPreferences(ownerSession))[PREF]).toBe(before);
       expect((await driver.notificationsEmailPreferences())[PREF]).toBe(before);
     });

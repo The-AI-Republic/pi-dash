@@ -54,3 +54,34 @@ export function pickPastWeekdayISO(todayISO: string, daysBack: number): string {
   while (isWeekendISO(iso)) iso = isoDayOffset(iso, -1);
   return iso;
 }
+
+/** A local `yyyy-MM-dd` for the browser's own today. */
+export function localTodayISO(now: Date = new Date()): string {
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+/**
+ * The calendar tile's accessible name for an ISO day, in a fixed
+ * month-name vocabulary (the grid labels each tile "Month D, YYYY"
+ * regardless of locale).
+ */
+export function calendarDayLabel(iso: string): string {
+  const names = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+  ];
+  const [year, month, day] = iso.split("-").map((part) => Number(part));
+  return `${names[(month ?? 1) - 1]} ${day}, ${year}`;
+}

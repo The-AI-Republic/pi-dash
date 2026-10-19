@@ -80,14 +80,25 @@ test(
       await expect.poll(() => driver.toastText(), { timeout: 15_000 }).toMatch(/failed to update/i);
       // Server kept the prior value...
       expect((await serverEmailPreferences(ownerSession)).comment).toBe(before);
-      // ...while the toggle shows the value that never saved.
-      expect((await driver.notificationsEmailPreferences()).comment).toBe(!before);
+      // ...and the toggle must show that same persisted value. The old app
+      // leaves the flipped, unsaved value on screen (NEWFRONT-211); web_new
+      // implements the intended spring-back (spec §10), so this leg asserts
+      // the target there and the pinned defect on the oracle.
+      expect((await driver.notificationsEmailPreferences()).comment).toBe(
+        driver.target === "web_new" ? before : !before
+      );
     } finally {
       await driver.notificationsClearEmailPreferenceSaveFailure();
     }
 
     await test.step("restore the toggle to the saved value", async () => {
-      await driver.notificationsEmailPreferencesToggle("comment");
+      // The press flips whatever the screen shows: once on the old app
+      // (its failed flip stuck), twice on web_new (it already sprang back).
+      for (let press = 0; press < 2; press += 1) {
+        if ((await serverEmailPreferences(ownerSession)).comment === before) break;
+        await driver.notificationsEmailPreferencesToggle("comment");
+        await expect.poll(() => driver.toastText(), { timeout: 15_000 }).toMatch(/success/i);
+      }
       expect((await serverEmailPreferences(ownerSession)).comment).toBe(before);
       expect((await driver.notificationsEmailPreferences()).comment).toBe(before);
     });

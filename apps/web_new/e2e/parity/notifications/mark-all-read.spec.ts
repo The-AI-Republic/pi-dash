@@ -313,12 +313,19 @@ test(
         const scope = JSON.parse(held.scopeBody ?? "{}") as Record<string, unknown>;
         expect(scope["type"]).toBe("subscribed");
 
-        // Intended: the other two origins stay unread. Observed: the bulk
-        // endpoint matches no branch for "subscribed" and reads them too.
-        const unread = await unreadByIssue();
-        expect(unread.get(fixture.subscribedId)).toBe(false);
-        expect(unread.get(fixture.assignedId)).toBe(false);
-        expect(unread.get(fixture.createdId)).toBe(false);
+        // Intended: the other two origins stay unread. Observed on both
+        // apps: the bulk endpoint matches no branch for "subscribed" and
+        // reads them too (NEWFRONT-665). The inbox posts the list value
+        // unchanged and the fix belongs to the server (spec 7a).
+        await expect
+          .poll(
+            async () => {
+              const unread = await unreadByIssue();
+              return [unread.get(fixture.subscribedId), unread.get(fixture.assignedId), unread.get(fixture.createdId)];
+            },
+            { timeout: 30_000 }
+          )
+          .toEqual([false, false, false]);
         expect(await driver.notificationsTabBadge("all")).toBeNull();
       });
 
@@ -365,8 +372,9 @@ test(
         const scope = JSON.parse(held.scopeBody ?? "{}") as Record<string, unknown>;
         expect(scope["type"]).toBe("assigned,created");
 
-        // Intended: the subscribed-only item stays unread. Observed: the
-        // joined value matches no branch and the bulk read widens.
+        // Intended: the subscribed-only item stays unread. Observed on both
+        // apps: the joined value matches no branch and the bulk read widens
+        // (NEWFRONT-665).
         await expect
           .poll(
             async () => {

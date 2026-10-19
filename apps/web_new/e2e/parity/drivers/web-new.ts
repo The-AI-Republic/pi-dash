@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 
 import { expect, type Locator, type Page, type Route } from "@playwright/test";
 
+import { calendarDayLabel, localTodayISO } from "../helpers/calendar-dates.js";
 import { descriptionAfterHeading } from "./modal-copy.js";
 import type {
   AdminAbsenceFacts,
@@ -10436,6 +10437,15 @@ export class WebNewDriver implements ParityDriver {
     }
   }
 
+  // Route predicates for the failure seams. Playwright removes a route only
+  // when the same predicate instance comes back to unroute (it compares
+  // function identity), so each predicate lives here once instead of being
+  // rebuilt at the call site.
+  private static readonly notificationsItemWriteRoute = (url: URL): boolean =>
+    /\/users\/notifications\/[^/]+\/?$/.test(url.pathname);
+  private static readonly notificationsListReadRoute = (url: URL): boolean =>
+    WebNewDriver.notificationsIsListRead(url.toString());
+
   private static notificationsQuery(url: string): NotificationsListQuery {
     const params = new URL(url).searchParams;
     return {
@@ -10741,20 +10751,17 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async notificationsFailItemWrites(status: number): Promise<void> {
-    await this.page.route(
-      (url) => /\/users\/notifications\/[^/]+\/?$/.test(new URL(url.toString()).pathname),
-      async (route) => {
-        if (route.request().method() === "PATCH") {
-          await route.fulfill({ status, body: JSON.stringify({ detail: "parity snooze failure" }) });
-          return;
-        }
-        await route.continue();
+    await this.page.route(WebNewDriver.notificationsItemWriteRoute, async (route) => {
+      if (route.request().method() === "PATCH") {
+        await route.fulfill({ status, body: JSON.stringify({ detail: "parity snooze failure" }) });
+        return;
       }
-    );
+      await route.continue();
+    });
   }
 
   async notificationsClearItemWriteFailure(): Promise<void> {
-    await this.page.unroute((url) => /\/users\/notifications\/[^/]+\/?$/.test(new URL(url.toString()).pathname));
+    await this.page.unroute(WebNewDriver.notificationsItemWriteRoute);
   }
 
   async notificationsOpenCustomSnooze(index: number): Promise<void> {
@@ -10771,14 +10778,18 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByTestId("snooze-date-picker").click({ timeout: WebNewDriver.WAIT_MS });
     const calendar = this.page.getByTestId("snooze-date-calendar");
     await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // Every tile is named by its long date, and the grid opens on the
+    // selected (or today's) month: a day spilling into the next month
+    // needs one "Next month" press before its tile exists.
     const day = new Date();
     day.setDate(day.getDate() + offsetDays);
-    await calendar
-      .getByRole("button", { name: String(day.getDate()), exact: true })
-      .first()
-      .click({
-        timeout: WebNewDriver.WAIT_MS,
-      });
+    const iso = localTodayISO(day);
+    const label = calendarDayLabel(iso);
+    const tile = calendar.getByRole("button", { name: label, exact: true });
+    if ((await tile.count()) === 0) {
+      await calendar.getByRole("button", { name: "Next month" }).click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await calendar.getByRole("button", { name: label, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
     await calendar.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
 
@@ -10829,6 +10840,13 @@ export class WebNewDriver implements ParityDriver {
   // --- Notifications email preferences (NEWFRONT-575, NTF-024/025/031).
 
   /** Accessible names of the email toggles, keyed by preference. */
+  private emailPrefSwitch(pref: NotificationsEmailPref): Locator {
+    return this.page
+      .getByTestId("email-prefs-form")
+      .first()
+      .getByRole("switch", { name: WebNewDriver.emailPrefNames[pref], exact: true });
+  }
+
   private static readonly emailPrefNames: Record<NotificationsEmailPref, string> = {
     property_change: "Property changes",
     state_change: "State changes",
@@ -10894,6 +10912,17 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async notificationsEmailPreferencesToggle(pref: NotificationsEmailPref): Promise<void> {
+    // Toasts stack bottom-right over the page and take pointer events; a
+    // leftover toast from the previous step would swallow the click, so
+    // Esc closes the visible cards first (the kit toast closes on Esc).
+    const visibleToasts = this.page.locator('[data-testid="toast-notification"]');
+    for (let guard = 0; guard < 5 && (await visibleToasts.count()) > 0; guard += 1) {
+      await this.page.keyboard.press("Escape");
+      await visibleToasts
+        .first()
+        .waitFor({ state: "detached", timeout: 2_000 })
+        .catch(() => undefined);
+    }
     const saveWait = this.page.waitForResponse(
       (response) =>
         response.request().method() === "PATCH" && response.url().includes("/users/me/notification-preferences/"),
@@ -12218,16 +12247,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async notificationsFailListFetches(status: number): Promise<void> {
-    await this.page.route(
-      (url) => WebNewDriver.notificationsIsListRead(url.toString()),
-      async (route) => {
-        await route.fulfill({ status, body: JSON.stringify({ detail: "parity list failure" }) });
-      }
-    );
+    await this.page.route(WebNewDriver.notificationsListReadRoute, async (route) => {
+      await route.fulfill({ status, body: JSON.stringify({ detail: "parity list failure" }) });
+    });
   }
 
   async notificationsClearListFetchFailure(): Promise<void> {
-    await this.page.unroute((url) => WebNewDriver.notificationsIsListRead(url.toString()));
+    await this.page.unroute(WebNewDriver.notificationsListReadRoute);
   }
 
   async notificationsRetryControlVisible(): Promise<boolean> {
@@ -12237,9 +12263,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async notificationsPressKey(key: string): Promise<void> {
-    // Keyboard input reaches the page as it would for a user: focus the
-    // list pane first so the probe is not swallowed by the address bar.
-    await this.notificationsListPane().click({ timeout: WebNewDriver.WAIT_MS });
+    // The probe asks what the keys do with nothing focused in particular.
+    // Clicking the pane would land on whichever card sits under the point,
+    // which is a real selection, not a shortcut; so the read clears focus
+    // first and lets the key reach the page's own default target.
+    await this.notificationsListPane().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await this.page.keyboard.press(key);
   }
 

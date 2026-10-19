@@ -130,8 +130,21 @@ test(
         { timeout: 90_000 }
       )
       .toBe(1);
-    // Intended: no queued email while the topic is off. Observed: it queues.
-    await expect.poll(() => serverEmailLogCount(seed.email, issueId), { timeout: 90_000 }).toBeGreaterThanOrEqual(1);
+    // Intended: no queued email while the topic is off. Observed on the
+    // old app: it queues (NEWFRONT-215); web_new gates each topic on its
+    // own, so the count stays where the disabled topic left it.
+    const beforeComment = await serverEmailLogCount(seed.email, issueId);
+    if (driver.target === "web_new") {
+      // Nothing new may arrive after the fan-out settled; the inbox row
+      // above already proved the fan-out ran. Give a late worker the same
+      // grace the oracle leg waits out, then require the count unchanged.
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+      expect(await serverEmailLogCount(seed.email, issueId)).toBe(beforeComment);
+    } else {
+      await expect
+        .poll(() => serverEmailLogCount(seed.email, issueId), { timeout: 90_000 })
+        .toBeGreaterThan(beforeComment);
+    }
 
     await test.step("restore the comment topic", async () => {
       await driver.notificationsEmailPreferencesToggle("comment");

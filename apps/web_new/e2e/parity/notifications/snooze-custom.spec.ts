@@ -250,13 +250,15 @@ test(
     await driver.notificationsCustomSnoozeSubmit();
     await expect.poll(() => driver.notificationsCustomSnoozeVisible(), { timeout: 30_000 }).toBe(false);
 
-    const buggy = new Date();
-    buggy.setDate(buggy.getDate() + 2);
-    buggy.setHours(0, 30, 0, 0);
+    // Intended: 12 PM is noon. The old app swaps noon and midnight and
+    // stores 00:30 (NEWFRONT-213); web_new composes the intended noon.
+    const expected = new Date();
+    expected.setDate(expected.getDate() + 2);
+    expected.setHours(driver.target === "web_new" ? 12 : 0, 30, 0, 0);
     const rows = await serverNotificationsList(seed.workspaceSlug, ownerSession);
     const snoozedTill = rows.find((entry) => entry.id === row.id)?.snoozedTill;
     expect(snoozedTill).not.toBeNull();
     // Instant comparison: the API omits the millis the client sent.
-    expect(new Date(snoozedTill!).getTime()).toBe(buggy.getTime());
+    expect(new Date(snoozedTill!).getTime()).toBe(expected.getTime());
   }
 );
