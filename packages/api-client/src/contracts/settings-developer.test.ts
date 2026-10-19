@@ -149,6 +149,17 @@ describe("github integration contract", () => {
     expect(isVerified(status)).toBe(false);
   });
 
+  it("treats a connected provider as unverified until it carries a verification time", async () => {
+    // Each remaining arm of isVerified: connected but no stamp, a null
+    // stamp, and an empty stamp all count as unverified.
+    expect(isVerified({ connected: true })).toBe(false);
+    expect(isVerified({ connected: true, github_user_login: "octo", verified_at: null })).toBe(false);
+    expect(isVerified({ connected: true, github_user_login: "octo", verified_at: "" })).toBe(false);
+    expect(isVerified({ connected: true, github_user_login: "octo", verified_at: "2026-01-02T03:04:05+00:00" })).toBe(
+      true
+    );
+  });
+
   it("connects with the token in the canonical body", async () => {
     const { client, calls } = recorder(GITHUB_STATUS);
     const status = await connectGithubIntegration(client, "acme", { token: "ghp_x" });
@@ -282,6 +293,10 @@ describe("workspace webhook contract", () => {
       webhookUsesAllEvents({ ...base, project: true, issue: true, cycle: true, module: true, issue_comment: true })
     ).toBe(true);
     expect(webhookUsesAllEvents(base)).toBe(false);
+    // Any one flag switched off leaves all-events mode.
+    for (const flag of ["project", "issue", "cycle", "module", "issue_comment"] as const) {
+      expect(webhookUsesAllEvents({ ...base, ...allWebhookEvents(), [flag]: false })).toBe(false);
+    }
     expect(allWebhookEvents()).toEqual({ project: true, issue: true, cycle: true, module: true, issue_comment: true });
   });
 });
