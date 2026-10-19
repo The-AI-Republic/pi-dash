@@ -279,6 +279,23 @@ describe("PreferencesTab", () => {
     expect(trigger("Language")).toHaveTextContent("de");
   });
 
+  it("names the stored profile language over the engine's local tag", () => {
+    // The engine can boot from a stored local tag that outranks the server
+    // value; the row still reports what the profile holds.
+    harness.locale.tag = "en";
+    harness.profile = { ...PROFILE, language: "fr" };
+    render(<PreferencesTab />);
+    expect(trigger("Language")).toHaveTextContent("fr");
+    expect(trigger("Language")).not.toHaveTextContent("English");
+  });
+
+  it("falls back to the engine tag until the profile lands", () => {
+    harness.locale.tag = "en";
+    harness.profile = undefined;
+    render(<PreferencesTab />);
+    expect(trigger("Language")).toHaveTextContent("English");
+  });
+
   it("names an unset language and an unset timezone", () => {
     harness.locale.tag = "";
     harness.me = { user_timezone: "" };

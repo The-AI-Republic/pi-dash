@@ -76,6 +76,11 @@ export function PreferencesTab(): React.ReactElement {
   const designerPalette = customPaletteOrDefault(savedPalette);
   const weekStart = normalizeWeekStart(profile.data?.start_of_the_week);
   const timezone = me.data?.user_timezone ?? "";
+  // The profile owns the stored language. The engine tag seeds from local
+  // storage and deliberately lets that beat the server value, so it can
+  // disagree with the profile until a pick lands here; label the stored one.
+  const storedLanguage = profile.data?.language;
+  const language = storedLanguage === undefined || storedLanguage === "" ? locale.tag : storedLanguage;
 
   const zones = React.useMemo(
     () => timezoneChoices(zonesQuery.data?.timezones ?? [], timezone),
@@ -172,8 +177,8 @@ export function PreferencesTab(): React.ReactElement {
             control={
               <PreferencePicker
                 label={LANGUAGE_ROW_TITLE}
-                valueLabel={locale.tag === "" ? "Not set" : languageLabel(locale.tag, locale.supported)}
-                value={locale.tag}
+                valueLabel={language === "" ? "Not set" : languageLabel(language, locale.supported)}
+                value={language}
                 options={locale.supported.map((option) => ({ value: option.tag, label: option.label }))}
                 onSelect={pickLanguage}
                 disabled={locale.isSaving}
