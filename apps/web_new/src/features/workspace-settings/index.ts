@@ -5,6 +5,7 @@
 // Routes import the shell and layout wiring here; later slices register
 // their page bodies through the registry exports.
 
+export { WorkspaceGeneralPage } from "./general/index.js";
 export { SettingsIdentity } from "./components/SettingsIdentity.js";
 export type { SettingsIdentityProps } from "./components/SettingsIdentity.js";
 export { SettingsMobileNav } from "./components/SettingsMobileNav.js";

@@ -1,20 +1,29 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Workspace settings section route (WSET-001/036). Thin: the shell owns
-// the frame and the gate, and the general page slice registers its body in the
-// shared page registry.
+// General workspace settings (parity/specs/workspace-settings.md §3–§6,
+// WSET-003–006). Thin: the shell owns the frame and the gate; the general
+// feature renders the page. Navigation is client-side so the delete flow
+// lands through the router, not a reload.
 
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { SettingsSectionOutlet } from "../../../../../features/workspace-settings/index.js";
+import { WorkspaceGeneralPage } from "../../../../../features/workspace-settings/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/_workspace/")({
-  component: WorkspaceSettingsSectionPage,
+  component: WorkspaceGeneralRoute,
 });
 
-function WorkspaceSettingsSectionPage(): React.ReactElement {
+function WorkspaceGeneralRoute(): React.ReactElement {
   const { ws } = Route.useParams();
-  return <SettingsSectionOutlet workspaceSlug={ws} section="general" />;
+  const navigate = Route.useNavigate();
+  return (
+    <WorkspaceGeneralPage
+      workspaceSlug={ws}
+      onNavigate={(path) => {
+        void navigate({ href: path });
+      }}
+    />
+  );
 }

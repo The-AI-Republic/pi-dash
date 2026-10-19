@@ -1071,15 +1071,49 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async rulesLastToast(): Promise<{ title: string; message: string } | null> {
-    return todo("rulesLastToast");
+    // The kit renders newest-first inside the Notifications viewport and
+    // auto-dismisses, so only a currently visible card with text counts.
+    const cards = this.page.locator('[data-testid="toast-notification"]');
+    const total = await cards.count();
+    for (let i = 0; i < total; i++) {
+      const card = cards.nth(i);
+      if (!(await card.isVisible().catch(() => false))) continue;
+      // A card mid-dismiss reads as blank, and a detached one throws:
+      // both mean "not currently showing".
+      const text = (await card.innerText().catch(() => "")).trim();
+      if (text === "") continue;
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      // A card always paints a title, so the first line exists.
+      const title = lines[0] as string;
+      return { title, message: lines.slice(1).join(" ") };
+    }
+    return null;
   }
 
   async rulesReload(): Promise<void> {
     return todo("rulesReload");
   }
 
-  async rulesEnsureSignedIn(_email: string, _password: string, _workspaceSlug: string): Promise<void> {
-    return todo("rulesEnsureSignedIn");
+  async rulesEnsureSignedIn(email: string, password: string, workspaceSlug: string): Promise<void> {
+    // Sign-in is a no-op for a live session: the entry bounces to the
+    // remembered workspace, which may be a different one, so the caller
+    // always ends on the workspace it asked for.
+    if (!(await this.isSignedOut().catch(() => false))) {
+      await this.signOutViaCommandPalette();
+    }
+    await this.openEntry();
+    await this.signInWithPassword(email, password);
+    const target = this.page
+      .waitForURL(new RegExp(`/${workspaceSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(/|$)`), { timeout: 60_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!(await target)) {
+      await this.page.goto(`/${workspaceSlug}/`, { timeout: 60_000 });
+      await this.page.waitForLoadState("domcontentloaded");
+    }
   }
 
   async rulesOpenIssueDetailRaw(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
@@ -17331,9 +17365,30 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Workspace-settings shell + general (NEWFRONT-410, WSET-001..007). ---
+  // The shell probes (groups, items, highlight, drawer, title, denial) land
+  // with NEWFRONT-534's own driver pass. The general rows below need only
+  // opening an address and reading the path, so those two live here.
 
-  async wsSettingsOpen(_workspaceSlug: string, _section: string): Promise<void> {
-    return todo("wsSettingsOpen");
+  async wsSettingsOpen(workspaceSlug: string, section: string): Promise<void> {
+    const suffix = section === "" ? "" : `/${section}`;
+    await this.page.goto(`/${workspaceSlug}/settings${suffix}/`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settle on whichever surface the address resolves to: the page body,
+    // the shell frame with a registered body, or the denial view.
+    await this.page
+      .waitForFunction(
+        () =>
+          document.title !== "" ||
+          document.querySelector("[data-testid='workspace-settings-section-placeholder']") !== null ||
+          [...document.querySelectorAll("*")].some(
+            (node) =>
+              node.children.length === 0 &&
+              (node.textContent ?? "").includes("not authorized") &&
+              (node as HTMLElement).getBoundingClientRect().width > 0
+          ),
+        { timeout: 60_000 }
+      )
+      .catch(() => undefined);
   }
   async wsSettingsGroups(): Promise<string[]> {
     return todo("wsSettingsGroups");
@@ -17348,7 +17403,7 @@ export class WebNewDriver implements ParityDriver {
     return todo("wsSettingsFollowItem");
   }
   async wsSettingsPath(): Promise<string> {
-    return todo("wsSettingsPath");
+    return new URL(this.page.url()).pathname;
   }
   async wsSettingsTitle(): Promise<string> {
     return todo("wsSettingsTitle");
@@ -17372,112 +17427,300 @@ export class WebNewDriver implements ParityDriver {
     return todo("wsSettingsWideViewport");
   }
   async wsSettingsGeneralVisible(): Promise<boolean> {
-    return todo("wsSettingsGeneralVisible");
+    const form = this.page.getByTestId("workspace-general-form").first();
+    if ((await form.count()) === 0) return false;
+    return form.isVisible().catch(() => false);
   }
   async wsSettingsNameValue(): Promise<string> {
-    return todo("wsSettingsNameValue");
+    return this.page.locator("#name").first().inputValue({ timeout: 15_000 });
   }
-  async wsSettingsFillName(_name: string): Promise<void> {
-    return todo("wsSettingsFillName");
+  async wsSettingsFillName(name: string): Promise<void> {
+    await this.page.locator("#name").first().fill(name, { timeout: 15_000 });
   }
   async wsSettingsNameDisabled(): Promise<boolean> {
-    return todo("wsSettingsNameDisabled");
+    return this.page.locator("#name").first().isDisabled({ timeout: 15_000 });
   }
   async wsSettingsNameError(): Promise<string | null> {
-    return todo("wsSettingsNameError");
+    const error = this.page.locator("#name-error").first();
+    if ((await error.count()) === 0) return null;
+    if (!(await error.isVisible().catch(() => false))) return null;
+    return (await error.innerText().catch(() => "")).replace(/\s+/g, " ").trim() || null;
+  }
+  /** Organization-size control: the button showing the current label. */
+  private wsSettingsSizeButton() {
+    return this.page
+      .getByRole("button", { name: /select organization size|just myself|2-10|11-50|51-200|201-500|500\+/i })
+      .first();
   }
   async wsSettingsSizeLabel(): Promise<string> {
-    return todo("wsSettingsSizeLabel");
+    return (
+      (await this.wsSettingsSizeButton()
+        .innerText({ timeout: 15_000 })
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
   async wsSettingsSizeOptions(): Promise<string[]> {
-    return todo("wsSettingsSizeOptions");
+    await this.wsSettingsSizeButton().click({ timeout: 15_000 });
+    const options = this.page.locator("[role='option']");
+    await options
+      .first()
+      .waitFor({ state: "visible", timeout: 15_000 })
+      .catch(() => undefined);
+    const total = await options.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i++) {
+      labels.push(
+        (
+          await options
+            .nth(i)
+            .innerText()
+            .catch(() => "")
+        )
+          .replace(/\s+/g, " ")
+          .trim()
+      );
+    }
+    // Close on the name field: the new picker reopens immediately after
+    // Escape too (NEWFRONT-420 target), but an outside click keeps the
+    // probe independent of that fix. The click must be real: the picker
+    // closes on the outside press, and a trial click dispatches nothing
+    // (so the popup would stay open and swallow the next trigger press).
+    // A page whose name field is missing already has its picker closed.
+    if ((await this.page.locator("#name").count()) > 0) {
+      await this.page.locator("#name").first().click({ timeout: 15_000 });
+    }
+    return labels.filter((label) => label.length > 0);
   }
-  async wsSettingsSelectSize(_label: string): Promise<void> {
-    return todo("wsSettingsSelectSize");
+  async wsSettingsSelectSize(label: string): Promise<void> {
+    await this.wsSettingsSizeButton().click({ timeout: 15_000 });
+    await this.page.locator("[role='option']").filter({ hasText: label }).first().click({ timeout: 15_000 });
+  }
+  /** Timezone control: the first button after the "Workspace Timezone" heading. */
+  private wsSettingsTimezoneButton() {
+    return this.page.locator("h4", { hasText: "Workspace Timezone" }).locator("xpath=following::button[1]");
   }
   async wsSettingsTimezoneLabel(): Promise<string> {
-    return todo("wsSettingsTimezoneLabel");
+    return (
+      await this.wsSettingsTimezoneButton()
+        .innerText({ timeout: 15_000 })
+        .catch(() => "")
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
-  async wsSettingsSelectTimezone(_query: string, _option: string): Promise<void> {
-    return todo("wsSettingsSelectTimezone");
+  async wsSettingsSelectTimezone(query: string, option: string): Promise<void> {
+    await this.wsSettingsTimezoneButton().click({ timeout: 15_000 });
+    const search = this.page.getByRole("combobox", { name: "Search timezones" }).first();
+    await search.fill(query, { timeout: 15_000 });
+    await this.page.locator("[role='option']").filter({ hasText: option }).first().click({ timeout: 15_000 });
   }
   async wsSettingsUrlValue(): Promise<string> {
-    return todo("wsSettingsUrlValue");
+    return this.page.locator("#url").first().inputValue({ timeout: 15_000 });
+  }
+  /** Save control in either state (idle label vs saving label). */
+  private wsSettingsSaveButton() {
+    return this.page.getByRole("button", { name: /update workspace|updating/i }).first();
   }
   async wsSettingsSaveVisible(): Promise<boolean> {
-    return todo("wsSettingsSaveVisible");
+    return (await this.wsSettingsSaveButton().count()) > 0;
   }
   async wsSettingsSaveLabel(): Promise<string | null> {
-    return todo("wsSettingsSaveLabel");
+    if ((await this.wsSettingsSaveButton().count()) === 0) return null;
+    return (
+      (
+        await this.wsSettingsSaveButton()
+          .innerText()
+          .catch(() => "")
+      )
+        .replace(/\s+/g, " ")
+        .trim() || null
+    );
   }
   async wsSettingsSave(): Promise<void> {
-    return todo("wsSettingsSave");
+    await this.wsSettingsSaveButton().click({ timeout: 15_000 });
+    // The control flips to its saving label while the PATCH is in flight,
+    // then back; invalid input never leaves the idle label.
+    await this.page.waitForTimeout(300);
+    await this.page
+      .waitForFunction(
+        () =>
+          [...document.querySelectorAll("button")].some((node) =>
+            ((node as HTMLElement).innerText ?? "").trim().toLowerCase().includes("update workspace")
+          ),
+        { timeout: 60_000 }
+      )
+      .catch(() => undefined);
   }
-  async wsSettingsDelaySave(_ms: number): Promise<void> {
-    return todo("wsSettingsDelaySave");
+  /** Whether this route is the workspace-detail PATCH the save issues. */
+  private wsSettingsIsSavePatch(route: Route, slug: string): boolean {
+    if (route.request().method() !== "PATCH") return false;
+    try {
+      return new URL(route.request().url()).pathname === `/api/workspaces/${slug}/`;
+    } catch {
+      return false;
+    }
+  }
+  async wsSettingsDelaySave(ms: number): Promise<void> {
+    const slug = await this.wsSettingsSlugFromPath();
+    const hold = async (route: Route) => {
+      if (!this.wsSettingsIsSavePatch(route, slug)) {
+        await route.fallback().catch(() => undefined);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    await this.page.route("**/api/workspaces/**", hold);
   }
   async wsSettingsFailSave(): Promise<void> {
-    return todo("wsSettingsFailSave");
+    const slug = await this.wsSettingsSlugFromPath();
+    const fail = async (route: Route) => {
+      if (!this.wsSettingsIsSavePatch(route, slug)) {
+        await route.fallback().catch(() => undefined);
+        return;
+      }
+      await route.fulfill({ status: 500, contentType: "application/json", body: "{}" }).catch(() => undefined);
+    };
+    await this.page.route("**/api/workspaces/**", fail);
   }
   async wsSettingsClearSaveRoutes(): Promise<void> {
-    return todo("wsSettingsClearSaveRoutes");
+    await this.page.unrouteAll({ behavior: "wait" }).catch(() => undefined);
+  }
+  private wsSettingsLogoImg() {
+    return this.page.locator("img[alt='Workspace Logo']").first();
   }
   async wsSettingsLogoState(): Promise<"fallback" | "image"> {
-    return todo("wsSettingsLogoState");
+    if ((await this.wsSettingsLogoImg().count()) > 0) return "image";
+    // No image yet: wait for the avatar block so a page still painting
+    // the skeleton is not mistaken for a rendered fallback.
+    const block = this.page.getByTestId("workspace-general-logo").first();
+    if ((await block.count()) > 0) await block.waitFor({ state: "visible", timeout: 15_000 });
+    return "fallback";
   }
   async wsSettingsLogoSrc(): Promise<string | null> {
-    return todo("wsSettingsLogoSrc");
+    if ((await this.wsSettingsLogoImg().count()) === 0) return null;
+    return this.wsSettingsLogoImg().getAttribute("src");
   }
   async wsSettingsLogoAction(): Promise<"upload" | "edit" | "none"> {
-    return todo("wsSettingsLogoAction");
+    if ((await this.page.getByRole("button", { name: "Upload logo", exact: true }).count()) > 0) return "upload";
+    if ((await this.page.getByRole("button", { name: "Edit logo", exact: true }).count()) > 0) return "edit";
+    return "none";
   }
   async wsSettingsOpenLogoDialog(): Promise<void> {
-    return todo("wsSettingsOpenLogoDialog");
+    const action = await this.wsSettingsLogoAction();
+    if (action === "none") throw new Error("[parity] no logo action is offered.");
+    const label = action === "upload" ? "Upload logo" : "Edit logo";
+    await this.page.getByRole("button", { name: label, exact: true }).click({ timeout: 15_000 });
+    await this.page.locator("input[type='file']").first().waitFor({ state: "attached", timeout: 15_000 });
   }
   async wsSettingsLogoDialogVisible(): Promise<boolean> {
-    return todo("wsSettingsLogoDialogVisible");
+    return this.page.locator("input[type='file']").first().isVisible();
   }
-  async wsSettingsUploadLogo(_filePath: string): Promise<void> {
-    return todo("wsSettingsUploadLogo");
+  async wsSettingsUploadLogo(filePath: string): Promise<void> {
+    await this.page.locator("input[type='file']").first().setInputFiles(filePath, { timeout: 15_000 });
+    await this.page.getByRole("button", { name: /upload & save/i }).click({ timeout: 15_000 });
+    await this.page
+      .locator("input[type='file']")
+      .first()
+      .waitFor({ state: "hidden", timeout: 60_000 })
+      .catch(() => undefined);
   }
   async wsSettingsRemoveLogo(): Promise<void> {
-    return todo("wsSettingsRemoveLogo");
+    const slug = await this.wsSettingsSlugFromPath();
+    const settled = this.page
+      .waitForResponse(
+        (response) => {
+          if (response.request().method() !== "PATCH") return false;
+          try {
+            return new URL(response.request().url()).pathname === `/api/workspaces/${slug}/`;
+          } catch {
+            return false;
+          }
+        },
+        { timeout: 60_000 }
+      )
+      .catch(() => undefined);
+    await this.page.getByRole("button", { name: "Remove", exact: true }).click({ timeout: 15_000 });
+    await settled;
+    await this.page
+      .locator("input[type='file']")
+      .first()
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
   }
   async wsSettingsCloseLogoDialog(): Promise<void> {
-    return todo("wsSettingsCloseLogoDialog");
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 15_000 });
+    await this.page
+      .locator("input[type='file']")
+      .first()
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
+  }
+  /** Workspace slug from the current settings address. */
+  private async wsSettingsSlugFromPath(): Promise<string> {
+    const slug = /^\/([^/]+)\//.exec(new URL(this.page.url()).pathname)?.[1];
+    if (slug === undefined) throw new Error("[parity] not on a workspace address.");
+    return slug;
   }
   async wsSettingsCopyUrl(): Promise<void> {
-    return todo("wsSettingsCopyUrl");
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const slug = await this.wsSettingsSlugFromPath();
+    const escaped = slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    await this.page
+      .getByRole("button", { name: new RegExp(escaped) })
+      .first()
+      .click({ timeout: 15_000 });
   }
   async wsSettingsReadClipboard(): Promise<string> {
-    return todo("wsSettingsReadClipboard");
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
   async wsSettingsDeleteSectionVisible(): Promise<boolean> {
-    return todo("wsSettingsDeleteSectionVisible");
+    const marker = this.page.getByText("Delete this workspace", { exact: true }).first();
+    if ((await marker.count()) === 0) return false;
+    return marker.isVisible().catch(() => false);
   }
   async wsSettingsOpenDeleteDialog(): Promise<void> {
-    return todo("wsSettingsOpenDeleteDialog");
+    await this.page.getByRole("button", { name: "Delete", exact: true }).click({ timeout: 15_000 });
+    await this.page.locator("#workspaceName").first().waitFor({ state: "visible", timeout: 15_000 });
   }
   async wsSettingsDeleteDialogVisible(): Promise<boolean> {
-    return todo("wsSettingsDeleteDialogVisible");
+    return this.page.locator("#workspaceName").first().isVisible();
   }
   async wsSettingsDeleteDialogText(): Promise<string> {
-    return todo("wsSettingsDeleteDialogText");
+    // The dialog nests the copy and both fields in one form; its text is
+    // the dialog's own content. An absent form only happens when the
+    // dialog never opened, and then there is nothing to report.
+    const form = this.page
+      .locator("form")
+      .filter({ has: this.page.locator("#workspaceName") })
+      .first();
+    return (await form.innerText()).replace(/\s+/g, " ").trim();
   }
-  async wsSettingsFillDeleteName(_name: string): Promise<void> {
-    return todo("wsSettingsFillDeleteName");
+  async wsSettingsFillDeleteName(name: string): Promise<void> {
+    await this.page.locator("#workspaceName").first().fill(name, { timeout: 15_000 });
   }
-  async wsSettingsFillDeletePhrase(_text: string): Promise<void> {
-    return todo("wsSettingsFillDeletePhrase");
+  async wsSettingsFillDeletePhrase(text: string): Promise<void> {
+    await this.page.locator("#confirmDelete").first().fill(text, { timeout: 15_000 });
   }
   async wsSettingsConfirmDeleteEnabled(): Promise<boolean> {
-    return todo("wsSettingsConfirmDeleteEnabled");
+    return this.page.getByRole("button", { name: "Confirm", exact: true }).isEnabled({ timeout: 15_000 });
   }
   async wsSettingsConfirmDelete(): Promise<void> {
-    return todo("wsSettingsConfirmDelete");
+    await this.page.getByRole("button", { name: "Confirm", exact: true }).click({ timeout: 15_000 });
+    await this.page
+      .waitForFunction(() => !window.location.pathname.includes("/settings"), { timeout: 60_000 })
+      .catch(() => undefined);
   }
   async wsSettingsCancelDelete(): Promise<void> {
-    return todo("wsSettingsCancelDelete");
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 15_000 });
+    await this.page
+      .locator("#workspaceName")
+      .first()
+      .waitFor({ state: "hidden", timeout: 15_000 })
+      .catch(() => undefined);
   }
 
   // --- Workspace-settings developer oracle (NEWFRONT-412, WSET-016..024,

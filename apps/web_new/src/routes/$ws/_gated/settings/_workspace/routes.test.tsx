@@ -33,8 +33,9 @@ const Layout = LayoutRoute.options.component;
 if (Layout === undefined) throw new Error("missing settings layout component");
 const LayoutComponent: RouteComponent = Layout;
 
+// The general section ships its own page (NEWFRONT-535); every other
+// section still resolves through the shell's registration seam.
 const SECTIONS: Array<[WorkspaceSettingsSectionKey, string, RouteComponent]> = [
-  ["general", "/", GeneralRoute.options.component as RouteComponent],
   ["members", "members", MembersRoute.options.component as RouteComponent],
   ["exports", "exports", ExportsRoute.options.component as RouteComponent],
   ["integrations", "integrations", IntegrationsRoute.options.component as RouteComponent],
@@ -48,6 +49,16 @@ afterEach(() => {
 });
 
 describe("workspace settings section routes", () => {
+  it("renders the general page from its own route", async () => {
+    renderSettingsRoute({
+      layoutComponent: LayoutComponent,
+      component: GeneralRoute.options.component as RouteComponent,
+      leafPath: "/",
+      transport: settingsTransport({ role: 20 }),
+    });
+    expect(await screen.findByTestId("workspace-general-identity")).toBeInTheDocument();
+  });
+
   for (const [section, leafPath, component] of SECTIONS) {
     it(`renders the registered ${section} body for its own address`, async () => {
       await act(async () => {
