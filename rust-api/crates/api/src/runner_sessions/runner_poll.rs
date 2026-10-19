@@ -1485,6 +1485,7 @@ async fn read_with_eviction_awareness(
             0,
             POLL_READ_COUNT,
             true,
+            state.settings().redis.socket_timeout_secs,
         )
         .await
         {
@@ -1501,6 +1502,7 @@ async fn read_with_eviction_awareness(
             plan.block_ms,
             POLL_READ_COUNT,
             plan.use_zero,
+            state.settings().redis.socket_timeout_secs,
         )
         .await
         {
@@ -1526,6 +1528,7 @@ async fn read_with_eviction_awareness(
             slice_ms as i64,
             POLL_READ_COUNT,
             use_zero,
+            state.settings().redis.socket_timeout_secs,
         )
         .await
         {
