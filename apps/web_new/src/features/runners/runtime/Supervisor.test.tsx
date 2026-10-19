@@ -220,6 +220,24 @@ describe("RuntimeSupervisor", () => {
     await screen.findByText("daemon refused");
   });
 
+  it("explains a server refusal in plain language", async () => {
+    const { ApiError } = await import("@pidash/api-client");
+    harness.connect.mockRejectedValue(
+      new ApiError({ status: 409, code: "http", message: "Conflict", body: { error: "llm_config_missing" } })
+    );
+    renderSupervisor();
+    expect(await screen.findByText(/^No model is configured for the built-in agent/)).toBeVisible();
+  });
+
+  it("explains a failed availability poll through the same vocabulary", async () => {
+    const { ApiError } = await import("@pidash/api-client");
+    harness.getProject.mockRejectedValue(
+      new ApiError({ status: 503, code: "http", message: "Down", body: { error: "gateway_unavailable" } })
+    );
+    renderSupervisor();
+    expect(await screen.findByText(/model gateway cannot be reached/)).toBeVisible();
+  });
+
   it("clears a transient enrollment failure when focus reconnects", async () => {
     harness.connect.mockRejectedValueOnce(new Error("daemon refused")).mockResolvedValue(undefined);
     renderSupervisor();

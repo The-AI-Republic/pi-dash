@@ -407,23 +407,34 @@ describe("connectProject", () => {
       vi.mocked(runtime.checkHost).mockResolvedValue({ ...missing, hostLabel: "h" });
       resume(runtime);
       await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toThrow(
-        "missing pieces"
+        "Reinstall"
       );
     }
   );
 
-  it("stops the daemon and reports the reason when the server refuses the agent", async () => {
+  it("stops the daemon and reports the plain-language reason when the server refuses the agent", async () => {
     const runtime = fakeRuntime();
-    vi.mocked(getAgentProfile).mockResolvedValue(profile({ available: false, reason_code: "feature_off" }));
+    vi.mocked(getAgentProfile).mockResolvedValue(profile({ available: false, reason_code: "managed_runner_disabled" }));
     resume(runtime);
     const failure = await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime }).catch(
       (error: unknown) => error
     );
     expect(failure).toBeInstanceOf(EngineUnavailableError);
-    expect((failure as EngineUnavailableError).code).toBe("feature_off");
-    expect((failure as Error).message).toContain("feature_off");
+    expect((failure as EngineUnavailableError).code).toBe("managed_runner_disabled");
+    expect((failure as Error).message).toContain("switched off");
+    expect((failure as Error).message).not.toContain("managed_runner_disabled");
     expect(runtime.stopDaemon).toHaveBeenCalledWith();
     expect(runtime.writeModelToken).not.toHaveBeenCalled();
+  });
+
+  it("surfaces an unmapped refusal code unchanged", async () => {
+    const runtime = fakeRuntime();
+    vi.mocked(getAgentProfile).mockResolvedValue(profile({ available: false, reason_code: "future_refusal" }));
+    resume(runtime);
+    const failure = await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime }).catch(
+      (error: unknown) => error
+    );
+    expect((failure as Error).message).toBe("future_refusal");
   });
 
   it.each([
