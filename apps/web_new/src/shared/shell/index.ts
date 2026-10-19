@@ -17,6 +17,11 @@ export {
 export type { DocumentHead, OverlayPortalProps, OverlayRootId } from "./document.js";
 export { FAVORITES_SECTION_OPEN_KEY, isFavoritesSectionOpen, setFavoritesSectionOpen } from "./favorites.js";
 export { NOT_FOUND_ART, NOT_FOUND_ROBOTS, NOT_FOUND_TITLE, NotFoundPage } from "./NotFoundPage.js";
+export {
+  COPY_WORK_ITEM_LINK_LABEL,
+  CopyWorkItemLinkButton,
+  type CopyWorkItemLinkButtonProps,
+} from "./CopyWorkItemLinkButton.js";
 export { PeekPanel } from "./PeekPanel.js";
 export type { PeekPanelProps } from "./PeekPanel.js";
 export { REPOSITORY_URL, RepoStar, starIconSrc } from "./RepoStar.js";
@@ -52,6 +57,13 @@ export type { RailDensity } from "./railState.js";
 export { isDockItemActive, isSettingsEntryActive, WorkspaceRail } from "./WorkspaceRail.js";
 export type { RailDockItem, WorkspaceRailProps } from "./WorkspaceRail.js";
 export { getToastManager, notifyError, notifyInfo, notifySuccess } from "./toaster.js";
+export {
+  copyLinkWithToast,
+  copyShareAddress,
+  shareableAddress,
+  workItemPath,
+  type CopyLinkMessages,
+} from "./shareLink.js";
 export { loadPreference, preferenceStorage, removePreference, storePreference } from "./preferenceStorage.js";
 export type { PreferenceStorage } from "./preferenceStorage.js";
 export { buildAccountCommands, DOCS_URL, FORUM_URL, REPORT_BUG_URL } from "./entries/account.js";

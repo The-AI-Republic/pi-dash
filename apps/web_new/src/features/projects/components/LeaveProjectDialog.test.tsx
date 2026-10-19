@@ -11,10 +11,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { LEAVE_CONFIRM_PHRASE, LeaveProjectDialog } from "./LeaveProjectDialog.js";
 
-vi.mock("../../../shared/shell/index.js", () => ({
-  notifyError: vi.fn(),
-  notifySuccess: vi.fn(),
-}));
+vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
+  const original = await importOriginal<Record<string, unknown>>();
+  return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
+});
 
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 

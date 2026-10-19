@@ -9,7 +9,7 @@ import { IconButton, Menu } from "@pidash/kit";
 import { Ellipsis } from "lucide-react";
 import * as React from "react";
 
-import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { copyLinkWithToast, notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { selectCopyPath, selectQuickActions, type QuickActionId } from "../tabs.js";
 import { LeaveProjectEntry } from "./LeaveProjectEntry.js";
 import { PublishProjectEntry } from "./PublishProjectEntry.js";
@@ -42,15 +42,11 @@ export function ProjectQuickActions({
   const [leaveOpen, setLeaveOpen] = React.useState(false);
 
   async function copyLocation(): Promise<void> {
-    const path = selectCopyPath({ activeHref, workspaceSlug, projectId });
-    try {
-      const clipboard = globalThis.navigator.clipboard;
-      if (clipboard === undefined) throw new Error("clipboard unavailable");
-      await clipboard.writeText(`${globalThis.window.location.origin}${path}`);
-      notifySuccess(COPIED_TITLE, COPIED_BODY);
-    } catch {
-      notifyError(COPY_FAILED_TITLE, COPY_FAILED_BODY);
-    }
+    await copyLinkWithToast(
+      selectCopyPath({ activeHref, workspaceSlug, projectId }),
+      { copied: COPIED_TITLE, copiedBody: COPIED_BODY, failed: COPY_FAILED_TITLE, failedBody: COPY_FAILED_BODY },
+      { success: notifySuccess, error: notifyError }
+    );
   }
 
   function runAction(id: QuickActionId): void {

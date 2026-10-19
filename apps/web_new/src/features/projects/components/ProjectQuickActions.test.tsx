@@ -9,10 +9,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProjectQuickActions } from "./ProjectQuickActions.js";
 
-vi.mock("../../../shared/shell/index.js", () => ({
-  notifyError: vi.fn(),
-  notifySuccess: vi.fn(),
-}));
+vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
+  const original = await importOriginal<Record<string, unknown>>();
+  return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
+});
 
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 

@@ -37,6 +37,12 @@ export interface StreamMessage {
 export interface EventStream {
   messages(): AsyncIterable<StreamMessage>;
   close(): void;
+  /**
+   * Why the stream stopped for good, when it did: a non-success status or a
+   * response that is not an event stream. Endings a reconnect can recover
+   * from (end of body, transport drop) never set it.
+   */
+  readonly error: Error | undefined;
 }
 
 /** Custom title bar (desktop only). */
@@ -149,6 +155,40 @@ export interface PendingUpdate {
   installing: boolean;
 }
 
+/** What the bundled command-line tool reports about itself. */
+export interface CliStatus {
+  installed: boolean;
+  /** Absolute path of the binary when found. */
+  path: string | null;
+  /** Version the binary reported; null when the probe failed. */
+  version: string | null;
+}
+
+/** One plain-text line of the installer's output. */
+export interface CliInstallProgress {
+  /** Raw line as the installer wrote it; render as text, never as HTML. */
+  line: string;
+}
+
+/**
+ * The bundled command-line tool (desktop only). Detection and installation
+ * run natively; login completes through the same device-grant exchange the
+ * tool owns, so the credential never passes through the page.
+ */
+export interface CliSetupApi {
+  /** Probe for the tool without touching the machine. */
+  detect(): Promise<CliStatus>;
+  /**
+   * Install from the app's bundle (or the pinned installer). Rejects when
+   * another install is already running. Progress arrives on `onInstallLog`.
+   */
+  install(): Promise<CliStatus>;
+  /** Subscribe to installer output; render each line verbatim, in order. */
+  onInstallLog(callback: (progress: CliInstallProgress) => void): Unsubscribe;
+  /** Hand an approved device code to the tool, which owns the credential. */
+  login(input: { deviceCode: string; cloudUrl: string; workspace: string }): Promise<void>;
+}
+
 /**
  * Desktop auto-updater (desktop only). The launch prompt and the daily
  * check live in the shell; the page asks what waits, installs it on
@@ -169,14 +209,39 @@ export interface UpdaterApi {
   onAvailable(callback: (update: PendingUpdate) => void): Unsubscribe;
 }
 
+/**
+ * Request init for the platform transport. The desktop layer enforces
+ * `timeoutMs` itself; browser fetch ignores what it does not know, so a
+ * caller that sets only the deadline behaves the same on both platforms.
+ */
+export interface FetchInit extends RequestInit {
+  timeoutMs?: number | undefined;
+}
+
+/** Fetch-compatible function; the desktop implementation adds the deadline. */
+export type PlatformFetch = (input: RequestInfo | URL, init?: FetchInit) => Promise<Response>;
+
 export interface Platform {
   kind: "web" | "desktop";
+  /**
+   * Origin the API answers on. The web bundle serves app and API from one
+   * origin, so this is the page origin; the desktop bundle advertises the
+   * API origin through the shell, because its own origin is private.
+   */
+  readonly apiOrigin: string | undefined;
   /** HTTP transport. Desktop routes API calls through the Rust layer. */
-  fetch: typeof fetch;
+  fetch: PlatformFetch;
   /** Server-sent events. Desktop relays through its streaming command. */
   stream(url: string, init?: StreamInit): EventStream;
   /** Open a URL in the system browser (OAuth, downloads, external docs). */
   openExternal(url: string): Promise<void>;
+  /**
+   * Absolute address a copied in-app link should carry (DESK-019). The
+   * desktop bundle runs on a private origin, so its platform resolves
+   * paths against the configured hosted app instead and refuses when
+   * there is none; the web platform keeps the page origin.
+   */
+  shareableUrl(path: string): string;
   /** Query cache persistence and UI preferences. */
   storage: KeyValueStore;
   /** Window focus, for refetch timing and presence. */
@@ -185,6 +250,7 @@ export interface Platform {
   menu?: MenuApi;
   deepLinks?: DeepLinkApi;
   agentRuntime?: AgentRuntimeApi;
+  cliSetup?: CliSetupApi;
   updates?: UpdaterApi;
   sessionTeardown?: SessionTeardownApi;
 }

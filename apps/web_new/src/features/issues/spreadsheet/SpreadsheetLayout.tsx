@@ -16,7 +16,7 @@ import * as React from "react";
 import type { IssueListItem } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { PeekPanel } from "../../../shared/shell/index.js";
+import { CopyWorkItemLinkButton, PeekPanel } from "../../../shared/shell/index.js";
 import { useUpdateDisplayPrefs, type DisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { usePickerCycles } from "../../../shared/pickers/reference.js";
@@ -315,6 +315,12 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
           title={peekIssue.name}
           titleLabel="Work item title"
           onClose={() => setPeekIssue(null)}
+          actions={
+            <CopyWorkItemLinkButton
+              workspaceSlug={workspaceSlug}
+              issueKey={`${projectIdentifier}-${peekIssue.sequence_id}`}
+            />
+          }
         >
           <Link
             to="/$ws/browse/$issueKey"

@@ -20,7 +20,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { CrossAppLink } from "../../../shared/coexistence/index.js";
-import { isClientSideClick, notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { copyLinkWithToast, isClientSideClick, notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { projectPropertiesQueryOptions } from "../api/tabPreferences.js";
 import {
   isProjectAdmin,
@@ -126,15 +126,16 @@ export function SidebarProjectRow({
   }
 
   async function copyLink(): Promise<void> {
-    const path = `/${workspaceSlug}/projects/${project.id}/issues`;
-    try {
-      const clipboard = globalThis.navigator.clipboard;
-      if (clipboard === undefined) throw new Error("clipboard unavailable");
-      await clipboard.writeText(`${globalThis.window.location.origin}${path}`);
-      notifySuccess(ROW_LINK_COPIED_TITLE, ROW_LINK_COPIED_BODY);
-    } catch {
-      notifyError(ROW_COPY_FAILED_TITLE, ROW_COPY_FAILED_BODY);
-    }
+    await copyLinkWithToast(
+      `/${workspaceSlug}/projects/${project.id}/issues`,
+      {
+        copied: ROW_LINK_COPIED_TITLE,
+        copiedBody: ROW_LINK_COPIED_BODY,
+        failed: ROW_COPY_FAILED_TITLE,
+        failedBody: ROW_COPY_FAILED_BODY,
+      },
+      { success: notifySuccess, error: notifyError }
+    );
   }
 
   function runAction(id: QuickActionId): void {

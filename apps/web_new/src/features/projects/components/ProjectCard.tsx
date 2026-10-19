@@ -17,7 +17,7 @@ import { Check, Ellipsis, Lock, Settings, Star } from "lucide-react";
 import * as React from "react";
 
 import { platform } from "../../../core/platform/index.js";
-import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { copyLinkWithToast, notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { isProjectAdmin, isProjectAuthorized } from "../tabs.js";
 import { projectIssuesPath, projectSettingsPath, selectCardMenuEntries } from "./cardMenu.js";
 import { JoinProjectDialog } from "./JoinProjectDialog.js";
@@ -144,14 +144,11 @@ export function ProjectCard({
   const showStar = !archived && canStar && onToggleFavorite !== undefined;
 
   async function copyLink(): Promise<void> {
-    try {
-      const clipboard = globalThis.navigator.clipboard;
-      if (clipboard === undefined) throw new Error("clipboard unavailable");
-      await clipboard.writeText(`${globalThis.window.location.origin}${issuesPath}`);
-      notifySuccess(COPIED_TITLE, COPIED_BODY);
-    } catch {
-      notifyError(COPY_FAILED_TITLE, COPY_FAILED_BODY);
-    }
+    await copyLinkWithToast(
+      issuesPath,
+      { copied: COPIED_TITLE, copiedBody: COPIED_BODY, failed: COPY_FAILED_TITLE, failedBody: COPY_FAILED_BODY },
+      { success: notifySuccess, error: notifyError }
+    );
   }
 
   const archiveAction = onArchive === undefined ? null : () => onArchive(project);
@@ -169,7 +166,7 @@ export function ProjectCard({
     {
       onSettings: () => globalThis.window.location.assign(settingsPath),
       onJoin: () => setJoinOpen(true),
-      onOpenInNewTab: () => void platform.openExternal(`${globalThis.window.location.origin}${issuesPath}`),
+      onOpenInNewTab: () => void platform.openExternal(platform.shareableUrl(issuesPath)),
       onCopyLink: () => void copyLink(),
       onRestore: restoreAction,
       onDelete: deleteAction,
