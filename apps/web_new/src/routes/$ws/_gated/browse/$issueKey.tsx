@@ -27,6 +27,13 @@ import {
   issueKeys,
   liteIssueQueryOptions,
 } from "../../../../features/issues/index.js";
+import {
+  LinkActionButton,
+  LinksWidget,
+  RelationActionMenu,
+  RelationsWidget,
+  WidgetActionsProvider,
+} from "../../../../features/issues/widgets/index.js";
 import { projectDetailsQueryOptions, ProjectTabStrip } from "../../../../features/projects/index.js";
 import { canEditInProject, useWorkItemPaletteContext } from "../../../../shared/shell/contextual/index.js";
 import { CopyWorkItemLinkButton } from "../../../../shared/shell/CopyWorkItemLinkButton.js";
@@ -158,34 +165,58 @@ function BrowseIssueDetail({
     refresh: async () => context.queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) }),
     onDeleted: () => void navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: workspaceSlug, projectId } }),
   });
+  const writable = editable && issue.archived_at === null && !issue.is_synced;
+  const widgetSections = [
+    {
+      label: "Relations" as const,
+      action: <RelationActionMenu canEdit={writable} />,
+      node: (
+        <RelationsWidget
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          issueId={issue.id}
+          projectIdentifier={projectIdentifier(project, issueKey)}
+          canEdit={writable}
+        />
+      ),
+    },
+    {
+      label: "Links" as const,
+      action: <LinkActionButton canEdit={writable} />,
+      node: <LinksWidget workspaceSlug={workspaceSlug} projectId={projectId} issueId={issue.id} canEdit={writable} />,
+    },
+  ];
   const workbench = (
-    <SubIssuesWidget
-      workspaceSlug={workspaceSlug}
-      issue={issue}
-      project={project}
-      editable={editable}
-      projectIdentifier={projectIdentifier(project, issueKey)}
-      canWrite={editable}
-      onOpen={(row, identifier) =>
-        void navigate({
-          to: "/$ws/browse/$issueKey",
-          params: { ws: workspaceSlug, issueKey: identifier },
-        })
-      }
-      createProjects={
-        project === undefined
-          ? []
-          : [
-              {
-                id: project.id,
-                name: project.name,
-                identifier: project.identifier,
-                memberRole: project.member_role,
-                archived: project.archived_at !== null,
-              },
-            ]
-      }
-    />
+    <WidgetActionsProvider>
+      <SubIssuesWidget
+        workspaceSlug={workspaceSlug}
+        issue={issue}
+        project={project}
+        editable={editable}
+        projectIdentifier={projectIdentifier(project, issueKey)}
+        canWrite={editable}
+        onOpen={(row, identifier) =>
+          void navigate({
+            to: "/$ws/browse/$issueKey",
+            params: { ws: workspaceSlug, issueKey: identifier },
+          })
+        }
+        extraSections={widgetSections}
+        createProjects={
+          project === undefined
+            ? []
+            : [
+                {
+                  id: project.id,
+                  name: project.name,
+                  identifier: project.identifier,
+                  memberRole: project.member_role,
+                  archived: project.archived_at !== null,
+                },
+              ]
+        }
+      />
+    </WidgetActionsProvider>
   );
   return (
     <>

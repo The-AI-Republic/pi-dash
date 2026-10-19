@@ -349,6 +349,21 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
         state_distribution: extras.child === true || extras.foreignChild === true ? { completed: [CHILD_ID] } : {},
         total_count: extras.child === true || extras.foreignChild === true ? 1 : 0,
       });
+    } else if (url.includes("/issue-relation/")) {
+      status = 200;
+      body = JSON.stringify({
+        blocking: [],
+        blocked_by: [],
+        duplicate: [],
+        relates_to: [],
+        start_after: [],
+        start_before: [],
+        finish_after: [],
+        finish_before: [],
+      });
+    } else if (url.includes("/issue-links/")) {
+      status = 200;
+      body = JSON.stringify([]);
     } else if (url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 200;
       const row = isEpic === undefined ? issueRow() : { ...issueRow(), is_epic: isEpic };
