@@ -15,6 +15,7 @@ import { MaintenanceScreen } from "./MaintenanceScreen.js";
 import { NotReadyScreen } from "./NotReadyScreen.js";
 import { useAppInstanceBootstrap } from "./queries.js";
 import { decideAppInstanceGate } from "./status.js";
+import { markInstanceBootScheme } from "./theme.js";
 
 export interface InstanceAppGateProps {
   children: React.ReactNode;
@@ -34,6 +35,9 @@ function BootLoader(): React.ReactElement {
 }
 
 export function InstanceAppGate({ children }: InstanceAppGateProps): React.ReactElement {
+  React.useLayoutEffect(() => {
+    markInstanceBootScheme();
+  }, []);
   const bootstrap = useAppInstanceBootstrap();
   const branch = decideAppInstanceGate({
     isPending: bootstrap.isPending,

@@ -20,3 +20,4 @@ export { appInstanceQueryOptions, instanceAppKeys, useAppInstanceBootstrap } fro
 export type { AppInstanceBootstrap } from "./queries.js";
 export { decideAppInstanceGate } from "./status.js";
 export type { AppInstanceBranch, AppInstanceGateInput } from "./status.js";
+export { markInstanceBootScheme } from "./theme.js";
