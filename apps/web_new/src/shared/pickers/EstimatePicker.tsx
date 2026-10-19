@@ -72,7 +72,7 @@ export function EstimatePicker({
     onOpenChange?.(next);
   }
 
-  const estimates = usePickerEstimates(workspaceSlug, projectId, (open || preload) && !disabled);
+  const estimates = usePickerEstimates(workspaceSlug, projectId, open || preload);
   const options = React.useMemo(
     () => selectEstimateOptions(estimates.data === undefined ? undefined : selectActiveEstimate(estimates.data)),
     [estimates.data]

@@ -185,6 +185,17 @@ describe("EstimatePicker", () => {
     expect(await screen.findByRole("button", { name: "3" })).toBeInTheDocument();
   });
 
+  it("names a read-only row's value when preloaded", async () => {
+    const { queryClient } = harness(POINTS_SYSTEM);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <EstimatePicker workspaceSlug="acme" projectId={PROJECT} value={POINT_3} preload disabled onChange={() => {}} />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("button", { name: "3" })).toBeDisabled();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
   it("supports icon-only and custom triggers", () => {
     const { queryClient } = harness(POINTS_SYSTEM);
     const { rerender } = render(

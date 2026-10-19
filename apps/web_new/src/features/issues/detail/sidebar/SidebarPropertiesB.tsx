@@ -117,6 +117,7 @@ export function DueDateRow({
           min={bounds.dueMin}
           weekStart={weekStart}
           disabled={disabled}
+          overdue={overdue}
           testId="sidebar-due-picker"
           onChange={(iso) => update.mutate({ target_date: iso })}
         />

@@ -80,7 +80,7 @@ export function CyclePicker({
     onOpenChange?.(next);
   }
 
-  const cycles = usePickerCycles(workspaceSlug, projectId, (open || preload) && !disabled);
+  const cycles = usePickerCycles(workspaceSlug, projectId, open || preload);
   const options = React.useMemo(
     () => selectCycleOptions({ cycles: cycles.data ?? [], excludeIds: excludeCycleIds, allowClear }),
     [cycles.data, excludeCycleIds, allowClear]

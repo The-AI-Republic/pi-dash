@@ -336,6 +336,9 @@ describe("SidebarPropertiesB rows", () => {
     const row = screen.getByRole("group", { name: "Due date" });
     expect(within(row).getByTestId("sidebar-due-date")).toHaveAttribute("data-overdue", "true");
     expect(within(row).getByTestId("sidebar-due-date").className).toContain("text-(--danger)");
+    // The date text itself carries the tone; the wrapper alone would be
+    // hidden behind the trigger's own text color.
+    expect(within(row).getByRole("button", { name: "Due date" })).toHaveClass("text-(--danger)");
   });
 
   it("never flags a closed or future due date", () => {
@@ -354,6 +357,23 @@ describe("SidebarPropertiesB rows", () => {
     fireEvent.click(await screen.findByRole("option", { name: "3" }));
     await waitFor(() => expect(writes).toHaveLength(1));
     expect(writes[0]!.body).toEqual({ estimate_point: expect.any(String) });
+  });
+
+  it("names the assigned estimate and cycle on a read-only row", async () => {
+    const { client, queryClient } = harness();
+    renderRows(client, queryClient, {
+      editable: false,
+      issue: issueFixture({
+        estimate_point: "f33e4567-e89b-12d3-a456-42661417400e",
+        cycle_id: CYCLE,
+      }),
+    });
+    const estimate = screen.getByRole("group", { name: "Estimate" });
+    await waitFor(() => expect(within(estimate).getByRole("button")).toHaveTextContent("3"));
+    expect(within(estimate).getByRole("button")).toBeDisabled();
+    const cycleRow = screen.getByRole("group", { name: "Cycle" });
+    await waitFor(() => expect(within(cycleRow).getByRole("button")).toHaveTextContent("Cycle 1"));
+    expect(within(cycleRow).getByRole("button")).toBeDisabled();
   });
 
   it("names the assigned estimate in the row", async () => {
