@@ -331,11 +331,14 @@ function PageProbe({ page, query }: { page: PalettePage; query: string }) {
 
 describe("isSettingsPagePath", () => {
   it("recognizes project settings addresses and nothing else", () => {
+    expect(isSettingsPagePath("/acme/settings/projects")).toBe(true);
     expect(isSettingsPagePath("/acme/settings/projects/")).toBe(true);
     expect(isSettingsPagePath("/acme/settings/projects/p1")).toBe(true);
     expect(isSettingsPagePath("/acme/settings/projects/p1/features/cycles/")).toBe(true);
     expect(isSettingsPagePath("/acme/settings/profile")).toBe(false);
     expect(isSettingsPagePath("/acme/projects/p1/issues")).toBe(false);
+    expect(isSettingsPagePath("/acme/projects/p1/settings")).toBe(false);
+    expect(isSettingsPagePath("/")).toBe(false);
   });
 });
 
@@ -744,6 +747,18 @@ describe("gated layout shell wiring", () => {
     renderShell();
     expect(harness.suppressPageShortcuts).toBe(true);
   });
+
+  it.each(["/acme/settings/projects", "/acme/settings/projects/p1"])(
+    "pins key handling off on the no-slash settings address %s",
+    (pathname) => {
+      harness.routerState = {
+        matches: [{ params: {}, routeId: "/$ws/_gated" }],
+        location: { pathname },
+      };
+      renderShell();
+      expect(harness.suppressPageShortcuts).toBe(true);
+    }
+  );
 
   it("registers the shell sign-out command naming the signed-in user", () => {
     renderShell();

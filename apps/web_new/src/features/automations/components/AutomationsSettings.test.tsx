@@ -151,7 +151,25 @@ function stubTransport(options: StubOptions = {}) {
     }
     if (url.includes("/workspace-members/me/")) {
       if (options.membershipStatus !== undefined) return json(options.membershipStatus, {});
-      return json(200, { role: options.memberRole ?? 20 });
+      return json(200, {
+        id: "423e4567-e89b-12d3-a456-426614174003",
+        workspace: WORKSPACE,
+        member: "523e4567-e89b-12d3-a456-426614174004",
+        role: options.memberRole ?? 20,
+        company_role: null,
+        view_props: {},
+        default_props: {},
+        issue_props: {},
+        is_active: true,
+        getting_started_checklist: {},
+        tips: {},
+        explored_features: {},
+        draft_issue_count: 0,
+        created_by: null,
+        updated_by: null,
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      });
     }
     if (url.endsWith(`/api/workspaces/${SLUG}/projects/details/`)) {
       if (options.hangProjects) return new Promise<never>(() => undefined);
@@ -228,6 +246,12 @@ describe("AutomationsSettings gate", () => {
     expect(
       await screen.findByRole("heading", { name: "Oops! You are not authorized to view this page" })
     ).toBeInTheDocument();
+  });
+
+  it("admits a workspace admin whose project role is only guest", async () => {
+    setup({ roles: { [PROJECT]: 5 }, memberRole: 20, states: [stateRow(DROPPED, "Dropped", "cancelled")] });
+    expect(await screen.findByRole("heading", { level: 4, name: ARCHIVE_ROW_TITLE })).toBeInTheDocument();
+    expect(screen.queryByTestId("automations-not-authorized")).not.toBeInTheDocument();
   });
 
   it("refuses a known member when the membership read fails", async () => {

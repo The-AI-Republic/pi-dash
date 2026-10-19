@@ -58,7 +58,8 @@ describe("labels route", () => {
         {renderInRouter(`/acme/settings/projects/${PARAMS.projectId}/`, <Component />)}
       </QueryClientProvider>
     );
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Labels" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "Labels" })).toBeInTheDocument());
+    expect(screen.getByTestId("project-settings-page")).toBeInTheDocument();
     expect(screen.getByText("No labels yet")).toBeInTheDocument();
     expect(screen.getByTestId("label-add")).toBeInTheDocument();
   });

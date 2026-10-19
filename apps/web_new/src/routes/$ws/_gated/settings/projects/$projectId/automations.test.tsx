@@ -60,7 +60,8 @@ describe("automations route", () => {
         {renderInRouter(`/acme/settings/projects/${PARAMS.projectId}/`, <Component />)}
       </QueryClientProvider>
     );
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Automations" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "Automations" })).toBeInTheDocument());
+    expect(screen.getByTestId("project-settings-page")).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 4, name: "Auto-archive closed work items" })).toBeInTheDocument();
     expect(screen.getByTestId("automations-extension")).toBeEmptyDOMElement();
   });

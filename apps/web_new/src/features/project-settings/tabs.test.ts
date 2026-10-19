@@ -11,6 +11,7 @@ import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER } from "../../core/session/permissi
 import {
   admitsStanding,
   decidePageGate,
+  effectiveProjectRole,
   findTabByKey,
   findTabBySuffix,
   findVisibleTab,
@@ -23,6 +24,24 @@ import {
   resolveSettingsAddress,
   selectSettingsNav,
 } from "./tabs.js";
+
+describe("effectiveProjectRole", () => {
+  it("lifts a workspace admin to project admin standing", () => {
+    expect(effectiveProjectRole(ROLE_GUEST, ROLE_ADMIN)).toBe(ROLE_ADMIN);
+    expect(effectiveProjectRole(ROLE_MEMBER, ROLE_ADMIN)).toBe(ROLE_ADMIN);
+    expect(effectiveProjectRole(ROLE_ADMIN, ROLE_MEMBER)).toBe(ROLE_ADMIN);
+  });
+
+  it("keeps the project role without a workspace admin", () => {
+    expect(effectiveProjectRole(ROLE_GUEST, ROLE_GUEST)).toBe(ROLE_GUEST);
+    expect(effectiveProjectRole(ROLE_MEMBER, null)).toBe(ROLE_MEMBER);
+  });
+
+  it("stays unresolved without a project role", () => {
+    expect(effectiveProjectRole(null, ROLE_ADMIN)).toBeNull();
+    expect(effectiveProjectRole(null, null)).toBeNull();
+  });
+});
 
 const WS = "acme";
 const PID = "223e4567-e89b-12d3-a456-426614174001";

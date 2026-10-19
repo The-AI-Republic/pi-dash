@@ -76,6 +76,7 @@ describe("general settings route", () => {
 
   it("keeps the page open for a guest while the rail narrows to general and members", async () => {
     harness.role = 5;
+    harness.workspaceRole = 5;
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("project-settings-general")).toBeInTheDocument());
     expect(screen.queryByTestId("project-settings-denied")).not.toBeInTheDocument();

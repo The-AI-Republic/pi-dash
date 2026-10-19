@@ -7,6 +7,7 @@
 export {
   admitsStanding,
   decidePageGate,
+  effectiveProjectRole,
   findTabByKey,
   findTabBySuffix,
   findVisibleTab,

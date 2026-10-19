@@ -73,6 +73,7 @@ describe("modules settings route", () => {
 
   it("refuses a role the page does not admit, keeping the rail", async () => {
     harness.role = 5;
+    harness.workspaceRole = 5;
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("project-settings-denied")).toBeInTheDocument());
     expect(screen.getByTestId("project-settings-sidebar")).toBeInTheDocument();
