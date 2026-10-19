@@ -10,12 +10,18 @@
 
 import type { DraftIssueCreateInput, IssueCreateInput } from "@pidash/api-client";
 
-import { ROLE_MEMBER } from "../../../core/session/permissions.js";
 import { isStoredHtmlEmpty, storedTextContent } from "../../../shared/editor/index.js";
 import { executionTargetPatch, type ExecutionSelection } from "../../../shared/pickers/index.js";
+import { TITLE_MAX_LENGTH, type CreateProjectOption } from "./createProjects.js";
 
-/** Longest title the API and the dialog accept (ISS-118). */
-export const TITLE_MAX_LENGTH = 255;
+export { TITLE_MAX_LENGTH } from "./createProjects.js";
+export type { CreateProjectLike, CreateProjectOption } from "./createProjects.js";
+export {
+  selectCreatableProjects,
+  selectCreatableWorkItemProjects,
+  toCreateProjectOption,
+} from "./createProjects.js";
+
 /** How long the assistant title helper may run before the dialog gives up. */
 export const TITLE_GENERATION_TIMEOUT_MS = 30_000;
 /** Draft title when the guard saves a form that never got one. */
@@ -62,51 +68,6 @@ export function emptyCreateForm(projectId: string | null, descriptionHtml = ""):
 /** The form after a successful create while Create more is on (ISS-119). */
 export function resetForCreateMore(form: CreateFormState, descriptionDefault = ""): CreateFormState {
   return emptyCreateForm(form.projectId, descriptionDefault);
-}
-
-/** A project row reduced to the fields the dialog needs. */
-export interface CreateProjectOption {
-  id: string;
-  name: string;
-  identifier: string;
-  memberRole: number | null;
-  archived: boolean;
-}
-
-/** A caller's project row, before the optional fields are filled in. */
-export interface CreateProjectLike {
-  id: string;
-  name: string;
-  identifier?: string | undefined;
-  memberRole?: number | null | undefined;
-  archived?: boolean | undefined;
-}
-
-/** Fill in a caller's project row (ISS-117/ISS-123). */
-export function toCreateProjectOption(project: CreateProjectLike): CreateProjectOption {
-  return {
-    id: project.id,
-    name: project.name,
-    identifier: project.identifier ?? project.name.slice(0, 3).toUpperCase(),
-    memberRole: project.memberRole ?? null,
-    archived: project.archived ?? false,
-  };
-}
-
-/** Projects the entry points may offer, from a caller's own rows. */
-export function selectCreatableWorkItemProjects(projects: readonly CreateProjectLike[]): CreateProjectOption[] {
-  return selectCreatableProjects(projects.map(toCreateProjectOption));
-}
-
-/**
- * Projects that may receive a new work item (ISS-117/ISS-123): joined
- * member-or-admin projects, minus archived ones. A guest membership never
- * appears; the dialog refuses to render when the list is empty.
- */
-export function selectCreatableProjects(projects: readonly CreateProjectOption[]): CreateProjectOption[] {
-  return projects.filter(
-    (project) => !project.archived && project.memberRole !== null && project.memberRole >= ROLE_MEMBER
-  );
 }
 
 /** Whether the dialog may file under a project id (ISS-123). */

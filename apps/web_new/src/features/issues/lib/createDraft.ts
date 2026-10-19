@@ -6,7 +6,7 @@
 // workspace; a successful submit clears it. Corrupt or foreign
 // payloads read as no draft.
 
-import { loadPreference, removePreference, storePreference } from "../../../shared/shell/index.js";
+import { loadPreference, removePreference, storePreference } from "../../../shared/shell/preferenceStorage.js";
 
 /** Unfinished quick-create form: the title plus the picked project. */
 export interface WorkItemDraft {

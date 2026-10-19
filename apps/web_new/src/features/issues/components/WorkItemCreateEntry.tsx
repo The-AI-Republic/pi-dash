@@ -12,7 +12,7 @@
 import * as React from "react";
 
 import { registerCommands } from "../../../shared/commands/index.js";
-import { selectCreatableWorkItemProjects } from "../create/createForm.js";
+import { selectCreatableWorkItemProjects } from "../create/createProjects.js";
 import type { WorkItemCreateProject } from "./WorkItemCreateDialog.js";
 
 const LazyWorkItemCreateDialog = React.lazy(() =>
