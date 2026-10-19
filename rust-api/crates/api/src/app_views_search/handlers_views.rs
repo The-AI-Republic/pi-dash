@@ -3064,14 +3064,18 @@ async fn view_issues_list(
     binder.bind(sea_query::Value::String(Some(Box::new(slug.clone()))));
     binder.bind(sea_query::Value::Uuid(Some(Box::new(user_id))));
     let filters_raw = crate::app_issues::query_last(&query, "filters").unwrap_or_default();
-    let complex_where = if filters_raw.is_empty() {
+    let tree = if filters_raw.is_empty() {
         None
     } else {
-        let tree =
-            pidash_db::filter::FilterTree::parse_param(&filters_raw).map_err(filter_denial)?;
-        let condition = crate::app_issues::compile_filter_tree(&tree).map_err(filter_denial)?;
-        let (fragment, values) = crate::app_issues::render_condition(&condition);
-        Some(binder.splice(&fragment, values))
+        pidash_db::filter::FilterTree::parse_param_opt(&filters_raw).map_err(filter_denial)?
+    };
+    let complex_where = match tree {
+        None => None,
+        Some(tree) => {
+            let condition = crate::app_issues::compile_filter_tree(&tree).map_err(filter_denial)?;
+            let (fragment, values) = crate::app_issues::render_condition(&condition);
+            Some(binder.splice(&fragment, values))
+        }
     };
     let flat: HashMap<String, String> = query
         .keys()

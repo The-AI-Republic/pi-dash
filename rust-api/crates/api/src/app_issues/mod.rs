@@ -880,8 +880,10 @@ pub fn complex_filter(query: &QueryMap) -> Result<Option<Condition>, Denial> {
     if raw.is_empty() {
         return Ok(None);
     }
-    let tree = pidash_db::filter::FilterTree::parse_param(&raw).map_err(filter_denial)?;
-    compile_filter_tree(&tree).map(Some).map_err(filter_denial)
+    match pidash_db::filter::FilterTree::parse_param_opt(&raw).map_err(filter_denial)? {
+        Some(tree) => compile_filter_tree(&tree).map(Some).map_err(filter_denial),
+        None => Ok(None),
+    }
 }
 
 // ---- legacy predicates --------------------------------------------------------
