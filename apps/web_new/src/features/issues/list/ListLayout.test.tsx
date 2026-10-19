@@ -17,7 +17,6 @@ const mocks = vi.hoisted(() => ({
   addExisting: vi.fn(),
   addToCycle: vi.fn(),
   addToModule: vi.fn(),
-  createMutation: vi.fn(),
   notifySuccess: vi.fn(),
   notifyError: vi.fn(),
   permissions: { canEdit: true },
@@ -29,7 +28,29 @@ vi.mock("./collapse.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./collapse.js")>()),
   useToggleCollapsedGroup: () => ({ toggleCollapsedGroup: mocks.toggle }),
 }));
-vi.mock("../api/create.js", () => ({ useCreateWorkItem: () => ({ mutateAsync: mocks.createMutation }) }));
+vi.mock("../components/WorkItemCreateDialog.js", () => ({
+  WorkItemCreateDialog: (props: {
+    open: boolean;
+    workspaceSlug: string;
+    projects: Array<{ id: string; name: string }>;
+    initialProjectId?: string;
+    initialValues?: Record<string, unknown>;
+    onCreated?: (id: string) => void;
+  }) =>
+    props.open ? (
+      <div
+        data-testid="create-dialog"
+        role="dialog"
+        aria-label="Create new work item"
+        data-project={props.initialProjectId ?? ""}
+        data-values={JSON.stringify(props.initialValues ?? {})}
+      >
+        <button type="button" onClick={() => props.onCreated?.("created-1")}>
+          create
+        </button>
+      </div>
+    ) : null,
+}));
 vi.mock("./QuickAdd.js", () => ({
   QuickAdd: (props: {
     disabled: boolean;
@@ -326,7 +347,6 @@ beforeEach(() => {
   mocks.permissions = { canEdit: true };
   mocks.pages.mockReturnValue(pageState());
   mocks.refs.mockReturnValue(refs());
-  mocks.createMutation.mockResolvedValue({ id: ISSUE });
   mocks.addToCycle.mockResolvedValue(undefined);
   mocks.addToModule.mockResolvedValue(undefined);
   class TestIntersectionObserver {
@@ -413,20 +433,16 @@ describe("ListLayout", () => {
     expect(screen.queryByRole("button", { name: "Add to All work items" })).not.toBeInTheDocument();
   });
 
-  it("opens the create dialog and submits prefilled fields", async () => {
+  it("opens the shared create dialog with the section's prefill", async () => {
     const user = userEvent.setup();
     renderLayout({ cycleId: CYCLE, moduleId: MODULE });
     fireEvent.click(screen.getByRole("button", { name: "Add to All work items" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Create work item" }));
-    await user.type(await screen.findByRole("textbox", { name: "Title" }), "New item");
-    await user.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(mocks.createMutation).toHaveBeenCalled());
-    expect(mocks.createMutation).toHaveBeenCalledWith({
-      projectId: PROJECT,
-      payload: { name: "New item", state_id: STATE },
-    });
-    expect(mocks.addToCycle).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, CYCLE, ISSUE);
-    expect(mocks.addToModule).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, MODULE, [ISSUE]);
+    const dialog = await screen.findByTestId("create-dialog");
+    expect(dialog).toHaveAttribute("data-project", PROJECT);
+    expect(JSON.parse(dialog.getAttribute("data-values") ?? "{}")).toEqual({});
+    await user.click(screen.getByRole("button", { name: "create" }));
+    await waitFor(() => expect(screen.queryByTestId("create-dialog")).not.toBeInTheDocument());
   });
 
   it("offers add-existing in cycle/module context and attaches to the entity", async () => {
@@ -453,16 +469,9 @@ describe("ListLayout", () => {
     renderLayout({ prefs: prefs({ groupBy: "cycle", showEmptyGroups: true }) });
     expect(screen.queryByRole("menuitem")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Add to Sprint" }));
-    expect(screen.getByRole("dialog", { name: "Create new work item" })).toBeInTheDocument();
-    await user.type(await screen.findByRole("textbox", { name: "Title" }), "Bucket item");
-    await user.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() =>
-      expect(mocks.createMutation).toHaveBeenCalledWith({
-        projectId: PROJECT,
-        payload: { name: "Bucket item", state_id: STATE },
-      })
-    );
-    expect(mocks.addToCycle).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, CYCLE, ISSUE);
+    const dialog = await screen.findByTestId("create-dialog");
+    expect(dialog).toHaveAttribute("data-project", PROJECT);
+    expect(JSON.parse(dialog.getAttribute("data-values") ?? "{}")).toEqual({ cycleId: CYCLE });
   });
 
   it("excludes current cycle members from the add-existing search", async () => {

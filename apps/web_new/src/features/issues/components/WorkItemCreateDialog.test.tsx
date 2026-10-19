@@ -1412,6 +1412,26 @@ describe("WorkItemCreateDialog parent picker (ISS-122)", () => {
 });
 
 describe("WorkItemCreateDialog project selector (ISS-123)", () => {
+  it("applies the listing prefill, including the section's cycle membership", async () => {
+    const user = userEvent.setup();
+    const h = setup(
+      {
+        projects: {
+          [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true }),
+        },
+      },
+      { initialValues: { priority: "high", cycleId: PARENT_ID } }
+    );
+    await waitFor(() => expect(screen.getByText("Cycle")).toBeInTheDocument());
+    await user.type(titleField(), "From the section");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ name: "From the section", priority: "high" });
+    await waitFor(() =>
+      expect(h.calls.some((call) => call.url.endsWith(`/cycles/${PARENT_ID}/cycle-issues/`))).toBe(true)
+    );
+  });
+
   it("lists cycles, modules and estimate only when the project enables them", async () => {
     const setupWith = (overrides: Record<string, unknown>) =>
       setup({

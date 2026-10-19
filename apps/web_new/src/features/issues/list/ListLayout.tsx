@@ -32,7 +32,7 @@ import { addIssuesToModule, addIssueToCycle } from "@pidash/api-client";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import type { RichExpression } from "../filters/rich/expression.js";
 import type { DisplayFeatureFlags } from "../display/matrix.js";
-import { useCreateWorkItem } from "../api/create.js";
+import type { CreateFormInitialValues } from "../create/createForm.js";
 
 // Overlays load on first use: the list route itself must stay inside the
 // initial-JS budget (Quality gates).
@@ -41,7 +41,7 @@ const LazyAddExistingModal = React.lazy(() =>
 );
 const LazyListPeek = React.lazy(() => import("./ListPeek.js").then((module) => ({ default: module.ListPeek })));
 const LazyCreateDialog = React.lazy(() =>
-  import("./CreateDialog.js").then((module) => ({ default: module.CreateDialog }))
+  import("../components/WorkItemCreateDialog.js").then((module) => ({ default: module.WorkItemCreateDialog }))
 );
 const LazyQuickAdd = React.lazy(() => import("./QuickAdd.js").then((module) => ({ default: module.QuickAdd })));
 
@@ -138,7 +138,19 @@ function FlatRows({
 /** Create-modal state owned by the layout. */
 interface CreateModalState {
   open: boolean;
-  prefill: Record<string, string | string[]>;
+  initialValues: CreateFormInitialValues;
+}
+
+/** Section grouping value → the shared create form's initial fields. */
+function createInitialValues(prefill: Record<string, string | string[]>): CreateFormInitialValues {
+  return {
+    ...(typeof prefill["state_id"] === "string" ? { stateId: prefill["state_id"] } : {}),
+    ...(typeof prefill["priority"] === "string" ? { priority: prefill["priority"] } : {}),
+    ...(Array.isArray(prefill["assignee_ids"]) ? { assigneeIds: prefill["assignee_ids"] } : {}),
+    ...(Array.isArray(prefill["label_ids"]) ? { labelIds: prefill["label_ids"] } : {}),
+    ...(typeof prefill["cycle_id"] === "string" ? { cycleId: prefill["cycle_id"] } : {}),
+    ...(Array.isArray(prefill["module_ids"]) ? { moduleIds: prefill["module_ids"] } : {}),
+  };
 }
 
 export function ListLayout({
@@ -188,8 +200,6 @@ export function ListLayout({
   const [peekTitleHint, setPeekTitleHint] = React.useState<string | null>(null);
   const [createState, setCreateState] = React.useState<CreateModalState | null>(null);
   const [addExistingOpen, setAddExistingOpen] = React.useState(false);
-  const create = useCreateWorkItem(workspaceSlug);
-
   const editAllowed = permissions.canEdit && (canEdit ?? true);
   const readOnly = !editAllowed || completedCycle;
   const flags: DisplayFeatureFlags = {
@@ -229,43 +239,11 @@ export function ListLayout({
   const menu = cycleId !== undefined || moduleId !== undefined;
 
   function openCreate(prefill: Record<string, string | string[]>): void {
-    setCreateState({ open: true, prefill });
+    setCreateState({ open: true, initialValues: createInitialValues(prefill) });
   }
 
-  async function submitCreate(name: string, prefill: Record<string, string | string[]>): Promise<void> {
-    try {
-      // A cycle/module grouping value is a membership, not a create field:
-      // the create endpoint ignores it, so it goes through the bridge after
-      // the row lands. Route context wins over the section value.
-      const groupedCycle = typeof prefill["cycle_id"] === "string" ? prefill["cycle_id"] : undefined;
-      const groupedModules = Array.isArray(prefill["module_ids"]) ? prefill["module_ids"] : undefined;
-      const fields = { ...prefill };
-      delete fields["cycle_id"];
-      delete fields["module_ids"];
-      const targetCycle = cycleId ?? groupedCycle;
-      const targetModule = moduleId ?? groupedModules?.[0];
-      const created = await create.mutateAsync({
-        projectId,
-        payload: {
-          name,
-          ...fields,
-          ...(fields["state_id"] === undefined &&
-          projectDetails?.default_state !== null &&
-          projectDetails?.default_state !== undefined
-            ? { state_id: projectDetails.default_state }
-            : {}),
-        },
-      });
-      if (targetCycle !== undefined) {
-        await addIssueToCycle(client, workspaceSlug, projectId, targetCycle, created.id).catch(() => undefined);
-      }
-      if (targetModule !== undefined) {
-        await addIssuesToModule(client, workspaceSlug, projectId, targetModule, [created.id]).catch(() => undefined);
-      }
-      setCreateState(null);
-    } catch {
-      // The create path already toasted the failure.
-    }
+  function closeCreate(): void {
+    setCreateState(null);
   }
 
   async function attachExisting(ids: string[]): Promise<void> {
@@ -430,9 +408,13 @@ export function ListLayout({
           <LazyCreateDialog
             open={createState.open}
             onOpenChange={(open) => {
-              if (!open) setCreateState(null);
+              if (!open) closeCreate();
             }}
-            onSave={(name) => void submitCreate(name, createState.prefill)}
+            workspaceSlug={workspaceSlug}
+            projects={project === null ? [] : [project]}
+            initialProjectId={projectId}
+            initialValues={createState.initialValues}
+            onCreated={closeCreate}
           />
         </React.Suspense>
       )}

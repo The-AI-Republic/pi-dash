@@ -10,11 +10,10 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 // Direct module imports: this route definition is eager, and the feature
-// barrel would pull the analytics entry and picker barst into the initial
+// barrel would pull the analytics entry and picker parts into the initial
 // bundle (NEWFRONT-619, size gate).
 import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
 import { ListSkeleton } from "../../../../../../features/issues/loaders/ListSkeleton.js";
-import { prefsQueryOptions } from "../../../../../../features/issues/prefs/prefsQuery.js";
 
 // The list host and its paging module are part of the list layout chunk;
 // importing them statically would pull them into the entry chunk through
@@ -28,23 +27,9 @@ const LazyEntityListScreen = React.lazy(() =>
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/cycles/$cycleId")({
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
   beforeLoad: async ({ context, params }) => {
-    const { loadListLayout } = await import("../../../../../../features/issues/list/lazy.js");
-    const { listPageQueryOptions } = await import("../../../../../../features/issues/list/pages.js");
-    const { selectDisplayPrefs } = await import("../../../../../../features/issues/prefs/displayPrefs.js");
+    const { prefetchEntityList } = await import("../../../../../../features/issues/list/prefetch.js");
     const entity = { scope: "cycle", projectId: params.projectId, cycleId: params.cycleId } as const;
-    const record = await context.queryClient.ensureQueryData(prefsQueryOptions(context.apiClient, params.ws, entity));
-    const showSubIssues = selectDisplayPrefs(record).showSubIssues;
-    await Promise.all([
-      loadListLayout(),
-      context.queryClient.ensureQueryData(
-        listPageQueryOptions(context.apiClient, params.ws, {
-          entity,
-          groupBy: null,
-          orderBy: "sort_order",
-          showSubIssues,
-        })
-      ),
-    ]);
+    await prefetchEntityList(context, params.ws, entity);
   },
   pendingComponent: function CycleIssuesPending() {
     return <ListSkeleton />;
