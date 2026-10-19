@@ -95,9 +95,9 @@ export function selectDisplayPrefs(record: PrefsRecord): DisplayPrefs {
   return parseDisplayPrefs(record.display_filters, record.display_properties);
 }
 
-/** One entity's raw preference record. */
-export function useEntityPrefs(workspaceSlug: string, entity: IssuesEntity) {
-  return useQuery(prefsQueryOptions(getAppClient(), workspaceSlug, entity));
+/** One entity's raw preference record; temporary rows disable the read. */
+export function useEntityPrefs(workspaceSlug: string, entity: IssuesEntity, enabled = true) {
+  return useQuery({ ...prefsQueryOptions(getAppClient(), workspaceSlug, entity), enabled });
 }
 
 function mergeCalendar(
@@ -105,6 +105,11 @@ function mergeCalendar(
   partial: Partial<DisplayCalendarPrefs> | undefined
 ): DisplayCalendarPrefs {
   return { ...current, ...partial };
+}
+
+/** One display settings object with a partial change applied. */
+export function mergeDisplayPrefs(current: DisplayPrefs, partial: Partial<DisplayPrefs>): DisplayPrefs {
+  return { ...current, ...partial, calendar: mergeCalendar(current.calendar, partial.calendar) };
 }
 
 /**
@@ -115,7 +120,7 @@ function mergeCalendar(
  */
 export function buildPrefsPatch(record: PrefsRecord, partial: Partial<DisplayPrefs>): PrefsPatch {
   const current = selectDisplayPrefs(record);
-  const next: DisplayPrefs = { ...current, ...partial, calendar: mergeCalendar(current.calendar, partial.calendar) };
+  const next = mergeDisplayPrefs(current, partial);
   const storedCalendar =
     typeof record.display_filters["calendar"] === "object" && record.display_filters["calendar"] !== null
       ? (record.display_filters["calendar"] as Record<string, unknown>)

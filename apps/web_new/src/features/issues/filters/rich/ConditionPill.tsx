@@ -18,12 +18,14 @@ import {
   isUnresolvableCondition,
   operatorLabel,
   operatorOptions,
+  payloadOperator,
   replaceConditionProperty,
   type OperatorOption,
   type RichCondition,
   type RichFilterField,
 } from "./expression.js";
 import { FieldPicker } from "./FieldPicker.js";
+import { valueForOperator } from "./slotModel.js";
 import { ValueSlot } from "./ValueSlot.js";
 
 export interface ConditionPillProps {
@@ -82,7 +84,14 @@ export function ConditionPill({
   const locked = isOperatorLocked(resolved);
 
   function changeOperator(option: OperatorOption): void {
-    onChange({ ...condition, operator: option.base, negated: option.negated });
+    onChange({
+      ...condition,
+      operator: option.base,
+      negated: option.negated,
+      // A one-day lookup and a two-end lookup do not share a value shape;
+      // keep what carries over and drop what cannot.
+      value: valueForOperator(condition.operator, option.base, condition.value),
+    });
   }
 
   const operatorComboboxOptions: ComboboxOption[] = operatorChoices.map((option) => ({
@@ -118,7 +127,7 @@ export function ConditionPill({
       <Combobox
         trigger={
           <Button variant="ghost" size="small" disabled={locked}>
-            {operatorLabel(condition.operator, condition.negated)}
+            {operatorLabel(payloadOperator(condition.operator, condition.value), condition.negated)}
             <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
           </Button>
         }
@@ -134,6 +143,7 @@ export function ConditionPill({
         disabled={locked}
       />
       <ValueSlot
+        key={resolved.stem}
         workspaceSlug={workspaceSlug}
         projectId={projectId}
         field={resolved}

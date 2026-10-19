@@ -10,6 +10,8 @@ import {
   createWorkspaceView,
   deleteProjectView,
   deleteWorkspaceView,
+  getProjectView,
+  getWorkspaceView,
   updateProjectView,
   updateWorkspaceView,
 } from "../contracts/issue-views.js";
@@ -68,6 +70,9 @@ describe.skipIf(!contractEnabled)("project view contract", () => {
     });
     expect(updated.name).toBe(`${VIEW_PROBE} edited`);
     expect(updated.filters).toEqual({ priority: ["urgent"] });
+    const fetched = await getProjectView(client, CONTRACT_WORKSPACE, projectId, created.id);
+    expect(fetched.id).toBe(created.id);
+    expect(fetched.filters).toEqual({ priority: ["urgent"] });
     await deleteProjectView(client, CONTRACT_WORKSPACE, projectId, created.id);
     // Delete blanks the row in place (retrieve still 200s), so
     // deletion is proven by exclusion from the list.
@@ -96,6 +101,9 @@ describe.skipIf(!contractEnabled)("workspace view contract", () => {
       display_filters: { layout: "calendar" },
     });
     expect(updated.display_filters).toEqual({ layout: "calendar" });
+    const fetched = await getWorkspaceView(client, CONTRACT_WORKSPACE, created.id);
+    expect(fetched.id).toBe(created.id);
+    expect(fetched.project).toBeNull();
     await deleteWorkspaceView(client, CONTRACT_WORKSPACE, created.id);
     const remaining = (await client.getJson<unknown>(`/api/workspaces/${CONTRACT_WORKSPACE}/views/`)) as {
       id?: unknown;

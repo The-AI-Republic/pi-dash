@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -17,7 +17,7 @@ import {
 } from "../../../../shared/pickers/index.js";
 import { meQueryOptions } from "../../../../core/session/queries.js";
 import { labelsQueryOptions } from "../../labels/api.js";
-import { findField, richFilterFields, type RichCondition } from "./expression.js";
+import { findField, parseRichExpression, richFilterFields, type RichCondition } from "./expression.js";
 import { ValueSlot, selectedValues } from "./ValueSlot.js";
 
 afterEach(() => {
@@ -27,6 +27,8 @@ afterEach(() => {
 const FIELDS = richFilterFields();
 const PRIORITY = findField(FIELDS, "priority")!;
 const STATE = findField(FIELDS, "state_id")!;
+const TARGET = findField(FIELDS, "target_date")!;
+const START = findField(FIELDS, "start_date")!;
 const PROJECT = "123e4567-e89b-12d3-a456-426614174000";
 const STATE_ID = "323e4567-e89b-12d3-a456-426614174002";
 const ME_ID = "11111111-1111-4111-8111-111111111111";
@@ -219,6 +221,68 @@ describe("ValueSlot stored values without an open popup", () => {
 });
 
 describe("ValueSlot", () => {
+  it("opens a pick slot that holds no value and commits the first pick from it", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={STATE}
+          condition={{ key: "a", property: "state_id", operator: "in", negated: false, value: null }}
+          onChange={onChange}
+        />,
+        true
+      )
+    );
+    // No trigger click: an empty slot already shows its list.
+    const list = await screen.findByRole("listbox", { name: "State values" });
+    await user.click(within(list).getByRole("option", { name: "Todo" }));
+    expect(onChange).toHaveBeenCalledWith([STATE_ID]);
+  });
+
+  it("reopens a stored one-pick exact as a complete, closed pick", () => {
+    const [stored] = parseRichExpression({ priority__exact: "urgent" });
+    render(
+      wrap(
+        <ValueSlot workspaceSlug="acme" projectId={PROJECT} field={PRIORITY} condition={stored!} onChange={() => {}} />
+      )
+    );
+    expect(screen.getByRole("button", { name: /Urgent/ })).toBeInTheDocument();
+    expect(screen.queryByRole("listbox", { name: "Priority values" })).not.toBeInTheDocument();
+  });
+
+  it("adds a second pick to a stored one-pick exact without dropping the first", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const [stored] = parseRichExpression({ priority__exact: "urgent" });
+    render(
+      wrap(
+        <ValueSlot workspaceSlug="acme" projectId={PROJECT} field={PRIORITY} condition={stored!} onChange={onChange} />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /Urgent/ }));
+    await user.click(await screen.findByRole("option", { name: "High" }));
+    expect(onChange).toHaveBeenLastCalledWith(["urgent", "high"]);
+  });
+
+  it("keeps a pick slot with a stored value closed until its trigger is used", () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={PRIORITY}
+          condition={condition(["urgent"])}
+          onChange={() => {}}
+        />
+      )
+    );
+    expect(screen.getByRole("button", { name: /Urgent/ })).toBeInTheDocument();
+    expect(screen.queryByRole("listbox", { name: "Priority values" })).not.toBeInTheDocument();
+  });
+
   it("shows the placeholder and picks a static multi value", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
@@ -233,8 +297,9 @@ describe("ValueSlot", () => {
         />
       )
     );
-    expect(screen.getByRole("button", { name: /Select value/ })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
+    expect(screen.getByRole("button", { name: /^--$/ })).toBeInTheDocument();
+    // An empty pick lists its options without another click; clicking the
+    // trigger again would collapse it.
     const list = await screen.findByRole("listbox", { name: "Priority values" });
     expect(within(list).getAllByRole("option")).toHaveLength(5);
     await user.click(within(list).getByRole("option", { name: "Urgent" }));
@@ -280,7 +345,6 @@ describe("ValueSlot", () => {
   });
 
   it("renders the fixed state-group set with icons", async () => {
-    const user = userEvent.setup();
     render(
       wrap(
         <ValueSlot
@@ -292,7 +356,6 @@ describe("ValueSlot", () => {
         />
       )
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
     const list = await screen.findByRole("listbox", { name: "State Group values" });
     const options = within(list).getAllByRole("option");
     expect(options).toHaveLength(5);
@@ -300,7 +363,6 @@ describe("ValueSlot", () => {
   });
 
   it("shows an empty list for a field with no source and no static values", async () => {
-    const user = userEvent.setup();
     render(
       wrap(
         <ValueSlot
@@ -320,12 +382,10 @@ describe("ValueSlot", () => {
         />
       )
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
     expect(await screen.findByText("No matching values")).toBeInTheDocument();
   });
 
   it("leaves a static value with no icon unshaped", async () => {
-    const user = userEvent.setup();
     render(
       wrap(
         <ValueSlot
@@ -346,13 +406,12 @@ describe("ValueSlot", () => {
         />
       )
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
     const list = await screen.findByRole("listbox", { name: "Custom values" });
     expect(within(list).getAllByRole("option")).toHaveLength(1);
     expect(within(list).getByRole("option", { name: "One" }).querySelector("svg")).toBeNull();
   });
 
-  it("counts more than two picks", () => {
+  it("shows the first two picks plus the overflow count", () => {
     render(
       wrap(
         <ValueSlot
@@ -364,7 +423,7 @@ describe("ValueSlot", () => {
         />
       )
     );
-    expect(screen.getByRole("button", { name: /3 selected/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Urgent, High +1 more" })).toBeInTheDocument();
   });
 
   it("lazy-loads workflow states and labels a resolved id", async () => {
@@ -385,6 +444,91 @@ describe("ValueSlot", () => {
     expect(screen.getByRole("button", { name: /Todo/ })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Todo/ }));
     expect(await screen.findByRole("option", { name: "Todo" })).toHaveAttribute("aria-selected", "true");
+  });
+});
+
+const SINGLE_FIELD = {
+  stem: "custom",
+  label: "Custom",
+  kind: "single" as const,
+  defaultOperator: "exact",
+  defaultNegated: false,
+  operators: ["exact"],
+  allowNegative: true,
+  staticValues: [
+    { value: "one", label: "One" },
+    { value: "two", label: "Two" },
+  ],
+};
+
+describe("ValueSlot single select", () => {
+  it("replaces the value on a new pick instead of adding a second", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={SINGLE_FIELD}
+          condition={{ key: "a", property: "custom", operator: "exact", negated: false, value: "one" }}
+          onChange={onChange}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /One/ }));
+    await user.click(await screen.findByRole("option", { name: "Two" }));
+    expect(onChange).toHaveBeenLastCalledWith("two");
+  });
+
+  it("clears when the current value is picked again", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={SINGLE_FIELD}
+          condition={{ key: "a", property: "custom", operator: "exact", negated: false, value: "one" }}
+          onChange={onChange}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /One/ }));
+    await user.click(await screen.findByRole("option", { name: /One/ }));
+    expect(onChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("shows the placeholder when no single value is set", () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={SINGLE_FIELD}
+          condition={{ key: "a", property: "custom", operator: "exact", negated: false, value: null }}
+          onChange={() => {}}
+        />
+      )
+    );
+    expect(screen.getByRole("button", { name: /^--/ })).toHaveAttribute("data-empty", "true");
+  });
+
+  it("shows one name rather than a list plus overflow", () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={SINGLE_FIELD}
+          condition={{ key: "a", property: "custom", operator: "exact", negated: false, value: "one" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    expect(screen.getByRole("button", { name: /One/ })).toBeInTheDocument();
+    expect(screen.queryByText(/more/)).not.toBeInTheDocument();
   });
 });
 
@@ -488,7 +632,6 @@ describe("ValueSlot member and label sources", () => {
         />
       )
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
     const list = await screen.findByRole("listbox", { name: "Assignees values" });
     expect(
       within(list)
@@ -547,7 +690,6 @@ describe("ValueSlot member and label sources", () => {
   });
 
   it("renders a member avatar image when the directory has one", async () => {
-    const user = userEvent.setup();
     const AVATAR = "https://cdn.test/ana.png";
     render(
       coldWrap(
@@ -594,13 +736,11 @@ describe("ValueSlot member and label sources", () => {
         }
       )
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
     const option = await screen.findByRole("option", { name: /Ana/ });
     expect(option.querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
   });
 
   it("shows the loading row while the member directory resolves", async () => {
-    const user = userEvent.setup();
     createAppClient("https://api.test", (async (url: string) => {
       if (url.endsWith("/auth/get-csrf-token/")) {
         return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
@@ -619,14 +759,103 @@ describe("ValueSlot member and label sources", () => {
         />
       </QueryClientProvider>
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
     expect((await screen.findAllByText("Loading values")).length).toBeGreaterThan(0);
+  });
+});
+
+describe("ValueSlot project, cycle and module sources", () => {
+  const CYCLE = "c23e4567-e89b-12d3-a456-42661417400c";
+  const MODULE = "d23e4567-e89b-12d3-a456-42661417400d";
+
+  function projectRow(id: string, name: string, identifier: string) {
+    return {
+      id,
+      name,
+      identifier,
+      sort_order: null,
+      logo_props: { in_use: "emoji", emoji: { value: "🌱" } },
+      member_role: 15,
+      intake_count: 0,
+      archived_at: null,
+      workspace: PROJECT,
+      cycle_view: true,
+      issue_views_view: true,
+      module_view: true,
+      page_view: false,
+      inbox_view: false,
+      is_default: false,
+      guest_view_all_features: false,
+      project_lead: null,
+      network: 0,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      created_by: null,
+      updated_by: null,
+    };
+  }
+
+  const ROUTES: Record<string, unknown> = {
+    "/projects/": [projectRow(PROJECT, "Apollo", "APO")],
+    "/cycles/": [{ id: CYCLE, project_id: PROJECT, name: "Sprint 4", is_favorite: false, status: "ACTIVE" }],
+    "/modules/": [{ id: MODULE, project_id: PROJECT, name: "Billing", status: "planned", is_favorite: false }],
+  };
+
+  function route(url: string): unknown | null {
+    for (const [suffix, body] of Object.entries(ROUTES)) {
+      if (url.endsWith(suffix)) return body;
+    }
+    return null;
+  }
+
+  it.each([
+    ["project_id", PROJECT, "Apollo"],
+    ["cycle_id", CYCLE, "Sprint 4"],
+    ["module_id", MODULE, "Billing"],
+  ] as const)("lists %s options only once opened", async (stem, id, name) => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, stem)!}
+          condition={{ key: "a", property: stem, operator: "in", negated: false, value: null }}
+          onChange={onChange}
+        />,
+        route
+      )
+    );
+    // Lazy: the empty slot opens by itself and only then reads.
+    expect(screen.getByRole("button", { name: /^--$/ })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name })).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name }));
+    expect(onChange).toHaveBeenCalledWith([id]);
+  });
+
+  it.each([
+    ["project_id", PROJECT, "Apollo"],
+    ["cycle_id", CYCLE, "Sprint 4"],
+    ["module_id", MODULE, "Billing"],
+  ] as const)("resolves a stored %s id to its name", async (stem, id, name) => {
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, stem)!}
+          condition={{ key: "a", property: stem, operator: "in", negated: false, value: [id] }}
+          onChange={() => {}}
+        />,
+        route
+      )
+    );
+    expect(await screen.findByRole("button", { name: new RegExp(name) })).toBeInTheDocument();
   });
 });
 
 describe("ValueSlot failure and suspended rows", () => {
   it("reports a failed member read instead of an empty list", async () => {
-    const user = userEvent.setup();
     createAppClient("https://api.test", (async (url: string) => {
       if (url.endsWith("/auth/get-csrf-token/")) {
         return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
@@ -645,7 +874,6 @@ describe("ValueSlot failure and suspended rows", () => {
         />
       </QueryClientProvider>
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load assignees values.");
   });
 
@@ -698,10 +926,276 @@ describe("ValueSlot failure and suspended rows", () => {
         }
       )
     );
-    await user.click(screen.getByRole("button", { name: /Select value/ }));
     const suspended = await screen.findByRole("option", { name: /Zoe/ });
     expect(suspended).toBeDisabled();
     await user.click(suspended);
     expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("ValueSlot date editors", () => {
+  it("opens the empty date slot by itself and closes after a day is picked", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition(null), property: "target_date", operator: "exact" }}
+          onChange={onChange}
+        />
+      )
+    );
+    const calendar = await screen.findByTestId("rich-date-calendar");
+    const firstDay = within(calendar).getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ })[0]!;
+    await user.click(firstDay);
+    expect(onChange).toHaveBeenCalledWith(firstDay.getAttribute("data-day"));
+    await waitFor(() => expect(screen.queryByTestId("rich-date-calendar")).not.toBeInTheDocument());
+  });
+
+  it("labels a set date and offers no clear control", async () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("2026-02-10"), property: "target_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    const trigger = screen.getByRole("button", { name: /2026-02-10/ });
+    expect(trigger).toHaveAttribute("data-empty", "false");
+    fireEvent.click(trigger);
+    const calendar = await screen.findByTestId("rich-date-calendar");
+    expect(within(calendar).queryByRole("button", { name: /clear/i })).not.toBeInTheDocument();
+  });
+
+  it("disables days outside the field's bounds", async () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={{ ...TARGET, min: "2026-02-05", max: "2026-02-20" }}
+          condition={{ ...condition("2026-02-10"), property: "target_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
+    const calendar = await screen.findByTestId("rich-date-calendar");
+    expect(within(calendar).getByRole("button", { name: "February 5, 2026" })).toBeEnabled();
+    expect(within(calendar).getByRole("button", { name: "February 4, 2026" })).toBeDisabled();
+    expect(within(calendar).getByRole("button", { name: "February 20, 2026" })).toBeEnabled();
+    expect(within(calendar).getByRole("button", { name: "February 21, 2026" })).toBeDisabled();
+  });
+
+  it("bounds the range calendar as well", async () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={{ ...START, min: "2026-02-05", max: "2026-02-20" }}
+          condition={{ ...condition(["2026-02-10", "2026-02-12"]), property: "start_date", operator: "range" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    expect(within(calendar).getByRole("button", { name: "February 4, 2026" })).toBeDisabled();
+    expect(within(calendar).getByRole("button", { name: "February 21, 2026" })).toBeDisabled();
+  });
+
+  it("opens an incomplete range, warns, and commits only once both ends land", async () => {
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(["2026-02-10", "2026-02-12"]), property: "start_date", operator: "range" }}
+          onChange={onChange}
+        />
+      )
+    );
+    expect(screen.getByTestId("rich-value-trigger").parentElement).toHaveAttribute("data-incomplete", "false");
+    fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    expect(within(calendar).getByRole("button", { name: "February 10, 2026" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("keeps the first end in the slot and commits nothing", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(null), property: "start_date", operator: "range" }}
+          onChange={onChange}
+        />
+      )
+    );
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    const day = within(calendar).getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ })[0]!;
+    await user.click(day);
+    // The host value is untouched until both ends exist.
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getByTestId("rich-range-calendar")).toBeInTheDocument();
+    expect(screen.getByTestId("rich-value-trigger").parentElement).toHaveAttribute("data-incomplete", "true");
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent(`${day.getAttribute("data-day")} → …`);
+  });
+
+  it("commits both ends when the pending range completes", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(null), property: "start_date", operator: "range" }}
+          onChange={onChange}
+        />
+      )
+    );
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    const days = within(calendar).getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ });
+    const first = days[5]!;
+    const last = days[9]!;
+    await user.click(first);
+    await user.click(last);
+    expect(onChange).toHaveBeenCalledWith([first.getAttribute("data-day"), last.getAttribute("data-day")]);
+    await waitFor(() => expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument());
+  });
+
+  it("labels a start-only range with the open end", () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(["2026-02-10", null]), property: "start_date", operator: "range" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10 → …");
+    expect(screen.getByTestId("rich-value-trigger").parentElement).toHaveAttribute("data-incomplete", "true");
+  });
+
+  it("labels a complete range with both ends", () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(["2026-02-10", "2026-02-12"]), property: "start_date", operator: "range" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10 → 2026-02-12");
+    expect(screen.getByRole("button", { name: /2026-02-10/ })).toHaveAttribute("data-empty", "false");
+  });
+
+  it("edits one day for a start date under its exact lookup", async () => {
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition("2026-02-10"), property: "start_date", operator: "exact" }}
+          onChange={onChange}
+        />
+      )
+    );
+    expect(screen.getByRole("button", { name: /2026-02-10/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
+    // The one-day editor opens a single calendar, not the range grid.
+    const calendar = await screen.findByTestId("rich-date-calendar");
+    expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument();
+    await userEvent.setup().click(within(calendar).getByRole("button", { name: "February 12, 2026" }));
+    expect(onChange).toHaveBeenCalledWith("2026-02-12");
+  });
+
+  it("opens the single-day calendar by itself for an empty exact start date", async () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(null), property: "start_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    expect(await screen.findByTestId("rich-date-calendar")).toBeInTheDocument();
+  });
+
+  it("renders a stored scalar start date under exact", () => {
+    const [stored] = parseRichExpression({ start_date__exact: "2026-02-10" });
+    render(
+      wrap(<ValueSlot workspaceSlug="acme" projectId={PROJECT} field={START} condition={stored!} onChange={() => {}} />)
+    );
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10");
+    expect(screen.getByTestId("rich-value-trigger").parentElement).not.toHaveAttribute("data-incomplete", "true");
+    expect(screen.queryByTestId("rich-date-calendar")).not.toBeInTheDocument();
+  });
+
+  it("bounds the single-day calendar for an exact start date", async () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={{ ...START, min: "2026-02-05", max: "2026-02-20" }}
+          condition={{ ...condition("2026-02-10"), property: "start_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
+    const calendar = await screen.findByTestId("rich-date-calendar");
+    expect(within(calendar).getByRole("button", { name: "February 4, 2026" })).toBeDisabled();
+    expect(within(calendar).getByRole("button", { name: "February 21, 2026" })).toBeDisabled();
+  });
+
+  it("renders both ends of a range read back from its stored string", () => {
+    const [stored] = parseRichExpression({ start_date__range: "2026-02-10,2026-02-12" });
+    render(
+      wrap(<ValueSlot workspaceSlug="acme" projectId={PROJECT} field={START} condition={stored!} onChange={() => {}} />)
+    );
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10 → 2026-02-12");
+    expect(screen.getByTestId("rich-value-trigger").parentElement).not.toHaveAttribute("data-incomplete", "true");
+    expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument();
+  });
+
+  it("reopens a stored target-date range as both ends", () => {
+    const [stored] = parseRichExpression({ target_date__range: "2026-02-10,2026-02-12" });
+    expect(stored).toMatchObject({ property: "target_date", operator: "range", value: ["2026-02-10", "2026-02-12"] });
+    render(
+      wrap(
+        <ValueSlot workspaceSlug="acme" projectId={PROJECT} field={TARGET} condition={stored!} onChange={() => {}} />
+      )
+    );
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10 → 2026-02-12");
+    expect(screen.getByTestId("rich-value-trigger").parentElement).not.toHaveAttribute("data-incomplete", "true");
+    expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument();
   });
 });

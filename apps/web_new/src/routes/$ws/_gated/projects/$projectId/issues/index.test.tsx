@@ -26,6 +26,8 @@ import { projectsQueryOptions } from "../../../../../../features/projects/index.
 import { clearCommands, listCommands } from "../../../../../../shared/commands/index.js";
 import * as queryModule from "../../../../../../core/query/optimistic.js";
 import * as shellModule from "../../../../../../shared/shell/index.js";
+import { authKeys } from "../../../../../../features/auth/queries.js";
+import { sessionKeys } from "../../../../../../core/session/queries.js";
 import { Route } from "./index.js";
 
 const PARAMS = { ws: "acme", projectId: "223e4567-e89b-12d3-a456-426614174001" };
@@ -259,8 +261,13 @@ function renderScreen(
   search: IssueSearch,
   totalCount: number,
   rows: IssueListItem[],
-  displayFilters: Record<string, unknown> = { layout: "list", group_by: null, order_by: "sort_order" },
-  projects: Project[] = [projectSeed()]
+  options: {
+    richFilters?: Record<string, unknown>;
+    project?: Partial<Project>;
+    role?: number | null;
+    displayFilters?: Record<string, unknown>;
+    projects?: Project[];
+  } = {}
 ): void {
   vi.spyOn(Route, "useParams").mockReturnValue({ ws: PARAMS.ws, projectId: PARAMS.projectId });
   vi.spyOn(Route, "useSearch").mockReturnValue(search);
@@ -269,22 +276,42 @@ function renderScreen(
   }) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.spyOn(Route, "useRouteContext").mockReturnValue({ queryClient, apiClient } as never);
-  queryClient.setQueryData(projectsQueryOptions(apiClient, PARAMS.ws).queryKey, projects);
-  queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, search).queryKey, {
-    grouped_by: null,
-    sub_grouped_by: null,
-    total_count: totalCount,
-    next_cursor: "",
-    prev_cursor: "",
-    next_page_results: false,
-    prev_page_results: false,
-    count: rows.length,
-    total_results: totalCount,
-    results: rows,
-  } satisfies IssueListResponse);
+  queryClient.setQueryData(
+    projectsQueryOptions(apiClient, PARAMS.ws).queryKey,
+    options.projects ?? [{ ...projectSeed(), ...options.project }]
+  );
+  if (options.role !== null) {
+    queryClient.setQueryData(sessionKeys.workspaces, [
+      {
+        id: ISSUE_UUID,
+        name: "Acme",
+        slug: PARAMS.ws,
+        logo_url: null,
+        total_members: 1,
+        role: options.role ?? 20,
+      },
+    ]);
+    queryClient.setQueryData(authKeys.projectRoles(PARAMS.ws), { [PARAMS.projectId]: options.role ?? 20 });
+  }
+  queryClient.setQueryData(
+    issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, search, options.richFilters).queryKey,
+    {
+      grouped_by: null,
+      sub_grouped_by: null,
+      total_count: totalCount,
+      next_cursor: "",
+      prev_cursor: "",
+      next_page_results: false,
+      prev_page_results: false,
+      count: rows.length,
+      total_results: totalCount,
+      results: rows,
+    } satisfies IssueListResponse
+  );
   queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, {
     ...prefsSeed(),
-    display_filters: displayFilters,
+    display_filters: options.displayFilters ?? { layout: "list", group_by: null, order_by: "sort_order" },
+    rich_filters: options.richFilters ?? {},
   });
   const Component = Route.options.component;
   if (!Component) throw new Error("issues route has no component");
@@ -368,6 +395,37 @@ describe("project issues screen", () => {
     expect(screen.getByTestId("rich-condition")).toHaveTextContent("Urgent");
   });
 
+  it("mounts the analytics entry in the desktop and mobile headers", async () => {
+    renderScreen({}, 1, [issueRow()], { role: 20 });
+
+    const entries = await screen.findAllByTestId("issues-analytics-entry");
+    expect(entries).toHaveLength(2);
+    for (const entry of entries) expect(entry).toHaveAccessibleName(/Analytics/);
+  });
+
+  it("hides the analytics entry from guests", async () => {
+    const rich = { priority__in: "urgent" };
+    renderScreen({}, 1, [issueRow()], { role: 5, richFilters: rich });
+
+    // The row still renders, so the absence is the role gate, not a
+    // missing render.
+    expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
+    expect(screen.queryByTestId("issues-analytics-entry")).not.toBeInTheDocument();
+  });
+
+  it("offers Save view only when the project enables views", async () => {
+    const rich = { priority__in: "urgent" };
+    renderScreen({}, 1, [issueRow()], { role: 20, richFilters: rich, project: { issue_views_view: true } });
+    expect(await screen.findByTestId("rich-save-view")).toBeInTheDocument();
+  });
+
+  it("hides Save view when the project disables views", async () => {
+    const rich = { priority__in: "urgent" };
+    renderScreen({}, 1, [issueRow()], { role: 20, richFilters: rich, project: { issue_views_view: false } });
+    expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
+    expect(screen.queryByTestId("rich-save-view")).not.toBeInTheDocument();
+  });
+
   it("mounts the Display control in the desktop and mobile headers", () => {
     renderScreen({}, 1, [issueRow()]);
 
@@ -396,9 +454,7 @@ describe("project issues screen", () => {
 
   it("renders the timeline when it is the stored layout", async () => {
     renderScreen({}, 1, [issueRow()], {
-      layout: "gantt_chart",
-      group_by: null,
-      order_by: "sort_order",
+      displayFilters: { layout: "gantt_chart", group_by: null, order_by: "sort_order" },
     });
 
     // The timeline is a lazy leaf; the route chunk shows the list skeleton
@@ -410,7 +466,7 @@ describe("project issues screen", () => {
   });
 
   it("explains a project that is not in the visible list", () => {
-    renderScreen({}, 1, [issueRow()], undefined, [{ ...projectSeed(), id: ISSUE_UUID }]);
+    renderScreen({}, 1, [issueRow()], { projects: [{ ...projectSeed(), id: ISSUE_UUID }] });
 
     expect(screen.getByRole("heading", { name: "Project not found" })).toBeInTheDocument();
     expect(screen.getByText("Pick another project from the sidebar.")).toBeInTheDocument();

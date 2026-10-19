@@ -38,6 +38,16 @@ export interface IssuesLayoutRootProps {
   resultCount: number;
   /** Registered layouts; archived contexts pass list only. */
   offered: readonly LayoutKind[];
+  /**
+   * Display settings the root renders from. A saved view passes its own
+   * stored record; every other list reads the entity's user-properties.
+   */
+  display?: DisplayPrefs | undefined;
+  /**
+   * Where a header switch goes. Absent persists to the entity record; a
+   * saved view passes a callback so the switch edits the view locally.
+   */
+  onDisplayChange?: ((next: LayoutKind) => void) | undefined;
   renderLayout: LayoutRenderer;
   /** Zero-total empty state (context copy arrives with ISS-068). */
   emptyState: React.ReactNode;
@@ -72,6 +82,8 @@ function IssuesLayoutRootInner({
   totalCount,
   resultCount,
   offered,
+  display,
+  onDisplayChange,
   renderLayout,
   emptyState,
   noMatchState,
@@ -82,12 +94,13 @@ function IssuesLayoutRootInner({
   analyticsControl,
 }: IssuesLayoutRootProps): React.ReactElement {
   const { data: record } = useSuspenseQuery(prefsQueryOptions(getAppClient(), workspaceSlug, entity));
-  const prefs = selectDisplayPrefs(record);
+  const prefs = display ?? selectDisplayPrefs(record);
   const active = resolveActiveLayout(prefs.layout, offered);
   const { updateDisplayPrefs } = useUpdateDisplayPrefs(workspaceSlug, entity);
   const { isMutationLoading } = useIssuesLoader();
   const handleSwitch = (kind: LayoutKind): void => {
-    updateDisplayPrefs({ layout: kind });
+    if (onDisplayChange !== undefined) onDisplayChange(kind);
+    else updateDisplayPrefs({ layout: kind });
   };
   return (
     <div className="flex h-full flex-col">
@@ -100,6 +113,7 @@ function IssuesLayoutRootInner({
         actions={
           <>
             {filterControl}
+            {analyticsControl}
             {headerActions}
           </>
         }

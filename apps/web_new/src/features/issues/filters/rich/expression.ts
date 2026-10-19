@@ -49,6 +49,45 @@ function singleLeaf(value: Record<string, unknown>): { field: string; operator: 
   return { field: key.slice(0, split), operator: key.slice(split + 2), value: leafValue };
 }
 
+/**
+ * Read one stored leaf value back into the editor's shape. Collection
+ * lookups persist as one comma-separated string (the FilterSet's widget
+ * reads CSV), so a multi pick reopens as its list of ids rather than as
+ * one id containing commas — otherwise the next edit serializes the
+ * joined string again as a single value and the pick loses every other
+ * member. A date range persists as `"start,end"` and reopens as its two
+ * ends so the slot can render and re-save it. A single value keeps its
+ * scalar form.
+ */
+export function parseLeafValue(operator: string, value: unknown): unknown {
+  if (typeof value !== "string" || !value.includes(",")) return value;
+  if (operator === "range") {
+    const ends = value.split(",").map((entry) => entry.trim());
+    return ends.length === 2 && ends.every((entry) => entry !== "") ? ends : value;
+  }
+  if (operator !== "in") return value;
+  const entries = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+  return entries.length === 0 ? value : entries;
+}
+
+/**
+ * Read a stored lookup back as the operator the editor offers for that
+ * field. A collection field's stored `__exact` came from another surface
+ * (the FilterSet accepts it for one value); the builder edits it under
+ * its collection lookup so a second pick keeps the same form.
+ */
+function parseLeafOperator(property: string, operator: string): string {
+  return operator === "exact" && collectionField(property) ? "in" : operator;
+}
+
+/** A leaf's value read under the operator the editor will show. */
+function parseLeafStoredValue(property: string, operator: string, value: unknown): unknown {
+  return parseLeafValue(parseLeafOperator(property, operator), value);
+}
+
 function parseLeaf(node: Record<string, unknown>, key: string): RichCondition[] {
   const leaf = singleLeaf(node);
   if (leaf === null) return [invalidCondition(key, node)];
@@ -56,9 +95,9 @@ function parseLeaf(node: Record<string, unknown>, key: string): RichCondition[] 
     {
       key,
       property: leaf.field,
-      operator: leaf.operator,
+      operator: parseLeafOperator(leaf.field, leaf.operator),
       negated: false,
-      value: leaf.value,
+      value: parseLeafStoredValue(leaf.field, leaf.operator, leaf.value),
     },
   ];
 }
@@ -89,15 +128,23 @@ export function parseRichExpression(expression: unknown): RichCondition[] {
       {
         key: "not-0",
         property: leaf.field,
-        operator: leaf.operator,
+        operator: parseLeafOperator(leaf.field, leaf.operator),
         negated: true,
-        value: leaf.value,
+        value: parseLeafStoredValue(leaf.field, leaf.operator, leaf.value),
       },
     ];
   }
   const leaf = singleLeaf(expression);
   if (leaf === null) return [invalidCondition(conditionKey(), expression)];
-  return [{ key: "leaf-0", property: leaf.field, operator: leaf.operator, negated: false, value: leaf.value }];
+  return [
+    {
+      key: "leaf-0",
+      property: leaf.field,
+      operator: parseLeafOperator(leaf.field, leaf.operator),
+      negated: false,
+      value: parseLeafStoredValue(leaf.field, leaf.operator, leaf.value),
+    },
+  ];
 }
 
 /** Parse one `and` child, including the `not` wrapper. */
@@ -108,14 +155,69 @@ function parseExpressionChild(child: unknown, key: string): RichCondition[] {
     if (!isRecord(inner)) return [invalidCondition(key, child)];
     const leaf = singleLeaf(inner);
     if (leaf === null) return [invalidCondition(key, child)];
-    return [{ key, property: leaf.field, operator: leaf.operator, negated: true, value: leaf.value }];
+    return [
+      {
+        key,
+        property: leaf.field,
+        operator: parseLeafOperator(leaf.field, leaf.operator),
+        negated: true,
+        value: parseLeafStoredValue(leaf.field, leaf.operator, leaf.value),
+      },
+    ];
   }
   return parseLeaf(child, key);
 }
 
+/**
+ * The stored lookup for a base operator and value. A collection pick keeps
+ * its collection lookup for any number of picks — the FilterSet's `__in`
+ * widgets accept one value as well as many, while `__exact` reads a single
+ * value and rejects a joined list. A stored scalar under `exact` stays
+ * scalar; the moment it grows into a list (a second pick), it moves to the
+ * collection lookup so the next write is accepted.
+ */
+export function payloadOperator(operator: string, value: unknown): string {
+  if (operator === "exact" && Array.isArray(value)) return "in";
+  return operator;
+}
+
+/**
+ * The list endpoint's filter leaves carry scalar strings. Multi picks
+ * become one comma-separated value under `__in` (the FilterSet's
+ * collection widgets parse CSV), and a date range becomes `"start,end"`
+ * under `__range`.
+ */
+function payloadValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const entries = value.filter((entry) => typeof entry === "string" && entry !== "");
+    return entries.length === 1 ? entries[0] : entries.join(",");
+  }
+  return value;
+}
+
+/**
+ * Stems whose catalogue entry is a collection pick. Every one is a
+ * collection lookup only: the FilterSet's `__in` widget takes one value
+ * or many, while the scalar lookup rejects a joined list. A record
+ * written by another surface can still carry `__exact`, so serialization
+ * reads those back under the collection lookup.
+ */
+let collectionStems: ReadonlySet<string> | null = null;
+
+function collectionField(stem: string): boolean {
+  collectionStems ??= new Set(
+    richFilterFields()
+      .filter((field) => field.kind === "multi" || field.kind === "single")
+      .map((field) => field.stem)
+  );
+  return collectionStems.has(stem);
+}
+
 /** Serialize one leaf; the caller wraps negation when needed. */
 function serializeLeaf(condition: RichCondition): Record<string, unknown> {
-  return { [`${condition.property}__${condition.operator}`]: condition.value };
+  const base = condition.operator === "exact" && collectionField(condition.property) ? "in" : condition.operator;
+  const operator = payloadOperator(base, condition.value);
+  return { [`${condition.property}__${operator}`]: payloadValue(condition.value) };
 }
 
 /**
@@ -131,6 +233,16 @@ export function serializeRichExpression(conditions: readonly RichCondition[]): R
   return {
     and: valid.map((condition) => (condition.negated ? { not: serializeLeaf(condition) } : serializeLeaf(condition))),
   };
+}
+
+/**
+ * A stored expression in the shape this builder writes. The server and the
+ * old app can hold a one-leaf `and` that means the same thing as the bare
+ * leaf, so comparisons read both through the parser and serializer rather
+ * than comparing raw trees.
+ */
+export function normalizeRichExpression(expression: unknown): RichExpression {
+  return serializeRichExpression(parseRichExpression(expression));
 }
 
 /** Whether a condition has a property, operator and a usable value. */
@@ -218,10 +330,14 @@ export interface RichFilterField {
   operators: readonly string[];
   /** Whether the field offers the negated form of each lookup. */
   allowNegative: boolean;
+  /** Earliest selectable day for a date kind, ISO (`YYYY-MM-DD`). */
+  min?: string | undefined;
+  /** Latest selectable day for a date kind, ISO (`YYYY-MM-DD`). */
+  max?: string | undefined;
   /** Static values for single/multi fields, when the field needs no read. */
   staticValues?: readonly { value: string; label: string }[];
   /** Where the value list comes from; absent means the static values. */
-  source?: "states" | "members" | "labels";
+  source?: "states" | "members" | "labels" | "projects" | "cycles" | "modules";
 }
 
 const DEFAULT_FIELDS: readonly RichFilterField[] = [
@@ -318,11 +434,14 @@ export function hideRichFilterFields(
   });
 }
 
-/** The field catalogue for one project surface. */
+/**
+ * The field catalogue for one project surface: the core choice fields
+ * plus the value-input fields this slice edits (ISS-100–103). Cycle and
+ * module disappear when their project features are off.
+ */
 export function richFilterFields(input?: { hideCycle?: boolean; hideModule?: boolean }): RichFilterField[] {
-  // Cycle, module, project and date dimensions register their fields as
-  // their slices land (ISS-089–094, ISS-100–103).
-  return hideRichFilterFields(DEFAULT_FIELDS, input ?? {});
+  const fields = withValueInputFields(DEFAULT_FIELDS);
+  return hideRichFilterFields(fields, input ?? {});
 }
 
 /** Find a field by its stored stem. */
@@ -396,6 +515,24 @@ export function isValueComplete(kind: RichFilterKind, value: unknown): boolean {
   return value !== null && value !== undefined && value !== "";
 }
 
+/**
+ * Completeness for one operator's value shape. A date field's `exact`
+ * lookup holds one day while its `range` lookup holds both ends, so the
+ * kind alone cannot decide whether the editor is finished.
+ */
+export function isValueCompleteForOperator(field: RichFilterField, operator: string, value: unknown): boolean {
+  if (operator === "range") return isValueComplete("date_range", value);
+  if (operator === "exact" && field.kind === "date_range") return isValueComplete("date", value);
+  // A stored collection filter may arrive under `exact` with one scalar
+  // value (the filter set accepts both forms); it is still a complete
+  // pick, so the slot neither warns nor reopens on load.
+  if (field.kind === "multi") {
+    if (typeof value === "string") return value.length > 0;
+    return isValueComplete("multi", value);
+  }
+  return isValueComplete(field.kind, value);
+}
+
 /** Human label for one stored value, or null when the entity no longer resolves. */
 export function valueLabel(field: RichFilterField, value: unknown): string | null {
   if (field.kind === "date_range") {
@@ -417,4 +554,52 @@ export function valueLabel(field: RichFilterField, value: unknown): string | nul
     }
   }
   return labels.length === 0 ? null : labels.join(", ");
+}
+
+/** Build a catalogue entry with the common defaults spelled once. */
+function catalogField(input: {
+  stem: string;
+  label: string;
+  kind: RichFilterKind;
+  operators?: readonly string[];
+  allowNegative?: boolean;
+  source?: RichFilterField["source"];
+}): RichFilterField {
+  const operators = input.operators ?? ["in"];
+  return {
+    stem: input.stem,
+    label: input.label,
+    kind: input.kind,
+    defaultOperator: operators[0]!,
+    defaultNegated: false,
+    operators,
+    allowNegative: input.allowNegative ?? true,
+    ...(input.source === undefined ? {} : { source: input.source }),
+  };
+}
+
+/**
+ * Value-input fields (parity/specs/issues.md §9, ISS-100–103). Each entry
+ * carries the kind its value slot renders: searchable multi picks over the
+ * project (assignee, creator, mentions, labels, project, cycle, module),
+ * one bounded date (target date, no clear control, offered as both a single
+ * day and a two-end range like the old filter) and a bounded date range
+ * (start date, which also offers the plain is lookup the oracle drives).
+ * Stems are the filter set's field names; entity-backed fields resolve
+ * their labels from the shared pickers, so reads stay lazy on open.
+ */
+export function valueInputFields(): RichFilterField[] {
+  return [
+    catalogField({ stem: "project_id", label: "Project", kind: "multi", source: "projects" }),
+    catalogField({ stem: "cycle_id", label: "Cycle", kind: "multi", source: "cycles" }),
+    catalogField({ stem: "module_id", label: "Module", kind: "multi", source: "modules" }),
+    catalogField({ stem: "target_date", label: "Target date", kind: "date", operators: ["exact", "range"] }),
+    catalogField({ stem: "start_date", label: "Start date", kind: "date_range", operators: ["exact", "range"] }),
+  ];
+}
+
+/** Merge the value-input fields into the base catalogue without duplicates. */
+export function withValueInputFields(fields: readonly RichFilterField[]): RichFilterField[] {
+  const known = new Set(fields.map((field) => field.stem));
+  return [...fields, ...valueInputFields().filter((field) => !known.has(field.stem))];
 }

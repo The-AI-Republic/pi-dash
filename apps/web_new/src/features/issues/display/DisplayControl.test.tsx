@@ -13,6 +13,7 @@ import { IssuesLoaderProvider } from "../loaders/loaderContext.js";
 import type { LayoutKind } from "../layouts/kinds.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { prefsQueryOptions } from "../prefs/prefsQuery.js";
+import { parseDisplayPrefs, type DisplayPrefs } from "../prefs/displayPrefs.js";
 import { DisplayControl } from "./DisplayControl.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
@@ -217,5 +218,34 @@ describe("DisplayControl", () => {
     await user.click(within(panel).getByRole("button", { name: "Assignee" }));
     await waitFor(() => expect(patches).toHaveLength(2));
     expect(window.location.href).toBe(before);
+  });
+
+  it("edits a supplied saved-view display locally without reading or writing personal preferences", async () => {
+    const user = userEvent.setup();
+    const changes: DisplayPrefs[] = [];
+    // No prefs record is seeded: the personal read stays disabled, so any
+    // fetch would hit the throwing transport.
+    createAppClient("https://api.test", (() => {
+      throw new Error("unexpected network fetch for a saved view's display");
+    }) as never);
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <IssuesLoaderProvider>
+          <DisplayControl
+            workspaceSlug="acme"
+            entity={PROJECT_ENTITY}
+            offered={OFFERED}
+            hideCycle={false}
+            hideModule={false}
+            display={parseDisplayPrefs({ layout: "list", order_by: "sort_order" }, {})}
+            onDisplayChange={(next) => changes.push(next)}
+          />
+        </IssuesLoaderProvider>
+      </QueryClientProvider>
+    );
+    const panel = await openPanel(user);
+    await user.click(within(panel).getByRole("button", { name: "States" }));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ groupBy: "state", layout: "list", orderBy: "sort_order" });
   });
 });

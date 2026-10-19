@@ -23,6 +23,7 @@ export type { IssuesEntity, PrefsRecord } from "./prefs/entities.js";
 export { entityPrefsKeyPart, prefsQueryOptions, readEntityPrefs } from "./prefs/prefsQuery.js";
 export {
   buildPrefsPatch,
+  mergeDisplayPrefs,
   parseDisplayPrefs,
   selectDisplayPrefs,
   useEntityPrefs,
@@ -201,3 +202,5 @@ export {
 export type { GanttDay, GanttRange, GanttSegment, GanttZoom } from "./gantt/scale.js";
 export { useGanttViewport, clampScroll, FALLBACK_VIEWPORT_WIDTH } from "./gantt/useGanttViewport.js";
 export type { GanttViewport } from "./gantt/useGanttViewport.js";
+export { AnalyticsEntry, groupCounts } from "./analytics/AnalyticsEntry.js";
+export type { AnalyticsEntryProps } from "./analytics/AnalyticsEntry.js";

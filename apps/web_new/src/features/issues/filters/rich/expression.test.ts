@@ -12,9 +12,13 @@ import {
   isOperatorLocked,
   isUnresolvableCondition,
   isValueComplete,
+  isValueCompleteForOperator,
+  normalizeRichExpression,
   operatorLabel,
   operatorOptions,
+  parseLeafValue,
   parseRichExpression,
+  payloadOperator,
   removeCondition,
   replaceConditionProperty,
   richFilterFields,
@@ -65,6 +69,16 @@ describe("parseRichExpression", () => {
     ]);
   });
 
+  it("normalizes a stored expression to the shape the builder writes", () => {
+    expect(normalizeRichExpression({ and: [{ priority__in: "urgent" }] })).toEqual({ priority__in: "urgent" });
+    expect(normalizeRichExpression({ state_id__in: "a,b" })).toEqual({ state_id__in: "a,b" });
+    expect(normalizeRichExpression({ start_date__range: "2026-01-01,2026-01-31" })).toEqual({
+      start_date__range: "2026-01-01,2026-01-31",
+    });
+    expect(normalizeRichExpression({ or: [] })).toEqual({});
+    expect(normalizeRichExpression({})).toEqual({});
+  });
+
   it("keeps keys stable across parses of the same expression", () => {
     const expression = { and: [{ priority__in: "urgent" }, { state_id__in: ["a"] }] };
     expect(parseRichExpression(expression).map((row) => row.key)).toEqual(
@@ -108,6 +122,79 @@ describe("parseRichExpression", () => {
     expect(parseRichExpression({ and: [{ not: "nope" }] })).toMatchObject([{ key: "and-0", property: "" }]);
   });
 
+  it("splits a stored CSV collection back into its picks", () => {
+    expect(parseRichExpression({ assignee_id__in: "a,b,c" })[0]?.value).toEqual(["a", "b", "c"]);
+    expect(parseRichExpression({ and: [{ label_id__in: "a, b" }, { priority__in: "urgent" }] })).toMatchObject([
+      { property: "label_id", value: ["a", "b"] },
+      { property: "priority", value: "urgent" },
+    ]);
+    expect(parseRichExpression({ not: { state_id__in: "a,b" } })[0]).toMatchObject({
+      negated: true,
+      value: ["a", "b"],
+    });
+  });
+
+  it("leaves a scalar and a single exact value alone", () => {
+    expect(parseRichExpression({ state_group__in: "started" })[0]?.value).toBe("started");
+    expect(parseRichExpression({ priority__in: "urgent" })[0]?.value).toBe("urgent");
+    expect(parseRichExpression({ assignee_id__exact: "a,b" })[0]?.value).toEqual(["a", "b"]);
+    // A separator-only string has no entries to read back.
+    expect(parseRichExpression({ assignee_id__in: "," })[0]?.value).toBe(",");
+  });
+
+  it("splits a stored date range back into its two ends", () => {
+    expect(parseRichExpression({ start_date__range: "2026-01-01,2026-01-31" })[0]?.value).toEqual([
+      "2026-01-01",
+      "2026-01-31",
+    ]);
+    expect(parseRichExpression({ and: [{ not: { start_date__range: "2026-01-01,2026-01-31" } }] })[0]).toMatchObject({
+      negated: true,
+      value: ["2026-01-01", "2026-01-31"],
+    });
+    // A half-filled stored range keeps its raw string rather than becoming a pair.
+    expect(parseRichExpression({ start_date__range: "2026-01-01," })[0]?.value).toBe("2026-01-01,");
+  });
+
+  it("round-trips a date range through serialize and parse", () => {
+    const stored = { start_date__range: "2026-01-01,2026-01-31" };
+    expect(serializeRichExpression(parseRichExpression(stored))).toEqual(stored);
+  });
+
+  it("round-trips a target-date range through serialize and parse", () => {
+    const stored = { target_date__range: "2026-01-01,2026-01-31" };
+    expect(serializeRichExpression(parseRichExpression(stored))).toEqual(stored);
+  });
+
+  it("round-trips a multi pick through serialize and parse", () => {
+    const condition: RichCondition = {
+      key: "a",
+      property: "assignee_id",
+      operator: "in",
+      negated: false,
+      value: ["a", "b", "c"],
+    };
+    const stored = serializeRichExpression([condition]);
+    expect(stored).toEqual({ assignee_id__in: "a,b,c" });
+    const parsed = parseRichExpression(stored);
+    expect(parsed[0]?.value).toEqual(["a", "b", "c"]);
+    expect(serializeRichExpression(parsed)).toEqual(stored);
+  });
+
+  it("reads a stored collection exact back under its collection lookup", () => {
+    const [pick] = parseRichExpression({ state_id__exact: "todo" });
+    expect(pick).toMatchObject({ property: "state_id", operator: "in", value: "todo" });
+    // A one-item list from another surface reads as the same single pick.
+    expect(parseRichExpression({ state_id__in: ["todo"] })[0]).toMatchObject({
+      property: "state_id",
+      operator: "in",
+      value: ["todo"],
+    });
+    const [several] = parseRichExpression({ priority__exact: "urgent,high" });
+    expect(several).toMatchObject({ property: "priority", operator: "in", value: ["urgent", "high"] });
+    // A date field's exact lookup is a single day, not a collection pick.
+    expect(parseRichExpression({ start_date__exact: "2026-02-10" })[0]?.operator).toBe("exact");
+  });
+
   it("does not merge two operators on one leaf", () => {
     expect(parseRichExpression({ priority__in: "urgent", state__in: "todo" })).toMatchObject([{ property: "" }]);
   });
@@ -138,12 +225,49 @@ describe("serializeRichExpression", () => {
         condition({ key: "a", property: "priority", value: "urgent" }),
         condition({ key: "b", property: "state_id", value: ["todo"], negated: true }),
       ])
-    ).toEqual({ and: [{ priority__in: "urgent" }, { not: { state_id__in: ["todo"] } }] });
+    ).toEqual({ and: [{ priority__in: "urgent" }, { not: { state_id__in: "todo" } }] });
   });
 
   it("round-trips the shapes the parser accepts", () => {
     const expression = { and: [{ priority__in: "urgent" }, { not: { state_id__in: ["todo"] } }] };
-    expect(serializeRichExpression(parseRichExpression(expression))).toEqual(expression);
+    expect(serializeRichExpression(parseRichExpression(expression))).toEqual({
+      and: [{ priority__in: "urgent" }, { not: { state_id__in: "todo" } }],
+    });
+  });
+
+  it("sends collection picks as one comma-separated value", () => {
+    expect(
+      serializeRichExpression([condition({ property: "assignee_id", operator: "in", value: ["a", "b", "c"] })])
+    ).toEqual({ assignee_id__in: "a,b,c" });
+  });
+
+  it("round-trips one pick and several through the collection lookup", () => {
+    const one = { state_id__in: "todo" };
+    expect(serializeRichExpression(parseRichExpression(one))).toEqual(one);
+    const many = { state_id__in: "todo,in-progress" };
+    expect(serializeRichExpression(parseRichExpression(many))).toEqual(many);
+    // A stored one-pick exact reads back as a collection pick and re-saves
+    // under `__in`, which accepts one id as well as many.
+    const exact = { state_id__exact: "todo" };
+    expect(serializeRichExpression(parseRichExpression(exact))).toEqual(one);
+    // Growing a one-pick exact to two picks keeps a collection lookup.
+    expect(
+      serializeRichExpression([condition({ property: "priority", operator: "in", value: ["urgent", "high"] })])
+    ).toEqual({ priority__in: "urgent,high" });
+  });
+
+  it("moves a scalar exact to the collection lookup once it holds a list", () => {
+    expect(
+      serializeRichExpression([condition({ property: "priority", operator: "exact", value: ["urgent", "high"] })])
+    ).toEqual({ priority__in: "urgent,high" });
+  });
+
+  it("sends a date range as its two ends in order", () => {
+    expect(
+      serializeRichExpression([
+        condition({ property: "start_date", operator: "range", value: ["2026-01-01", "2026-01-31"] }),
+      ])
+    ).toEqual({ start_date__range: "2026-01-01,2026-01-31" });
   });
 });
 
@@ -191,7 +315,7 @@ describe("condition operations", () => {
 });
 
 describe("field catalogue", () => {
-  it("offers the core fields this slice can edit", () => {
+  it("offers the core fields plus the value-input fields this slice edits", () => {
     expect(richFilterFields().map((field) => field.stem)).toEqual([
       "state_id",
       "state_group",
@@ -200,13 +324,50 @@ describe("field catalogue", () => {
       "created_by_id",
       "mention_id",
       "label_id",
+      "project_id",
+      "cycle_id",
+      "module_id",
+      "target_date",
+      "start_date",
     ]);
   });
 
   it("filters cycle and module when the flags hide them", () => {
-    expect(richFilterFields({ hideCycle: true, hideModule: true })).toHaveLength(7);
-    expect(richFilterFields({ hideCycle: false, hideModule: false })).toHaveLength(7);
-    expect(richFilterFields()).toHaveLength(7);
+    const all = richFilterFields();
+    expect(richFilterFields({ hideCycle: true, hideModule: true })).toHaveLength(all.length - 2);
+    expect(richFilterFields({ hideCycle: false, hideModule: false })).toHaveLength(all.length);
+    expect(richFilterFields()).toHaveLength(all.length);
+  });
+
+  it("uses the field kinds the old filter set offers", () => {
+    // Every id/static dimension is a multi pick (one pick still stores
+    // under exact); the dates are a single day plus a range.
+    for (const stem of [
+      "state_id",
+      "state_group",
+      "priority",
+      "assignee_id",
+      "created_by_id",
+      "mention_id",
+      "label_id",
+      "project_id",
+      "cycle_id",
+      "module_id",
+    ]) {
+      expect(findField(richFilterFields(), stem)?.kind, stem).toBe("multi");
+    }
+    expect(findField(richFilterFields(), "target_date")?.kind).toBe("date");
+    expect(findField(richFilterFields(), "start_date")?.kind).toBe("date_range");
+  });
+
+  it("carries optional bounds for the date kinds", () => {
+    const bounded: RichFilterField = {
+      ...(findField(richFilterFields(), "target_date") as RichFilterField),
+      min: "2026-01-01",
+      max: "2026-12-31",
+    };
+    expect(bounded.min).toBe("2026-01-01");
+    expect(bounded.max).toBe("2026-12-31");
   });
 
   it("drops exactly the dimension the surface hides", () => {
@@ -217,8 +378,10 @@ describe("field catalogue", () => {
     expect(hideRichFilterFields(withDimensions, { hideModule: true }).map((field) => field.stem)).not.toContain(
       "module_id"
     );
-    expect(hideRichFilterFields(withDimensions, {})).toHaveLength(9);
-    expect(hideRichFilterFields(withDimensions, { hideCycle: false, hideModule: false })).toHaveLength(9);
+    expect(hideRichFilterFields(withDimensions, {})).toHaveLength(withDimensions.length);
+    expect(hideRichFilterFields(withDimensions, { hideCycle: false, hideModule: false })).toHaveLength(
+      withDimensions.length
+    );
   });
 
   it("labels the state group picker entry and names each value source", () => {
@@ -257,6 +420,13 @@ describe("operators", () => {
     expect(operatorOptions(START).map((option) => option.label)).toEqual(["is", "is not", "between", "not between"]);
   });
 
+  it("offers a target date both as one day and as a range", () => {
+    const target = findField(richFilterFields(), "target_date")!;
+    expect(target.defaultOperator).toBe("exact");
+    expect(target.operators).toEqual(["exact", "range"]);
+    expect(operatorOptions(target).map((option) => option.label)).toEqual(["is", "is not", "between", "not between"]);
+  });
+
   it("locks a field that declares no negated form", () => {
     const locked = { ...PRIORITY, allowNegative: false };
     expect(operatorOptions(locked)).toEqual([{ base: "in", negated: false, label: "is" }]);
@@ -288,6 +458,27 @@ describe("value completeness and labels", () => {
     expect(isValueComplete("date_range", ["", "2026-01-02"])).toBe(false);
   });
 
+  it("judges a date field by its operator's value shape", () => {
+    const start = findField(richFilterFields(), "start_date")!;
+    const target = findField(richFilterFields(), "target_date")!;
+    expect(isValueCompleteForOperator(start, "exact", "2026-01-01")).toBe(true);
+    expect(isValueCompleteForOperator(start, "exact", null)).toBe(false);
+    expect(isValueCompleteForOperator(start, "exact", ["2026-01-01", "2026-01-02"])).toBe(false);
+    expect(isValueCompleteForOperator(start, "range", ["2026-01-01", "2026-01-02"])).toBe(true);
+    expect(isValueCompleteForOperator(start, "range", "2026-01-01,2026-01-02")).toBe(false);
+    expect(isValueCompleteForOperator(start, "range", ["2026-01-01"])).toBe(false);
+    expect(isValueCompleteForOperator(target, "exact", "2026-01-01")).toBe(true);
+    expect(isValueCompleteForOperator(target, "range", ["2026-01-01", "2026-01-02"])).toBe(true);
+  });
+
+  it("falls back to the kind for lookups that do not change the shape", () => {
+    const priority = findField(richFilterFields(), "priority")!;
+    const start = findField(richFilterFields(), "start_date")!;
+    expect(isValueCompleteForOperator(priority, "in", ["urgent"])).toBe(true);
+    expect(isValueCompleteForOperator(priority, "in", [])).toBe(false);
+    expect(isValueCompleteForOperator(start, "in", ["2026-01-01", "2026-01-02"])).toBe(true);
+  });
+
   it("requires one or more values for multi and a value for date/single", () => {
     expect(isValueComplete("multi", [])).toBe(false);
     expect(isValueComplete("multi", ["a"])).toBe(true);
@@ -314,5 +505,23 @@ describe("value completeness and labels", () => {
     expect(valueLabel({ ...dateField, kind: "date" }, "2026-01-01")).toBe("2026-01-01");
     expect(valueLabel({ ...START, kind: "date_range" }, ["2026-01-01", "2026-01-02"])).toBe("2026-01-01 → 2026-01-02");
     expect(valueLabel({ ...START, kind: "date_range" }, "2026-01-01")).toBeNull();
+  });
+});
+
+describe("payload shaping", () => {
+  it("reads a stored comma string under its own operator", () => {
+    // A single-day lookup keeps its stored string; a comma-separated
+    // collection splits into its picks; a lone comma stays as stored.
+    expect(parseLeafValue("exact", "2026-02-10")).toBe("2026-02-10");
+    expect(parseLeafValue("exact", "2026-02-10,2026-02-12")).toBe("2026-02-10,2026-02-12");
+    expect(parseLeafValue("in", "a, b ,")).toEqual(["a", "b"]);
+    expect(parseLeafValue("in", " , ")).toBe(" , ");
+  });
+
+  it("keeps the collection lookup for one pick and lifts a list off exact", () => {
+    expect(payloadOperator("in", ["a"])).toBe("in");
+    expect(payloadOperator("exact", "a")).toBe("exact");
+    expect(payloadOperator("exact", ["a"])).toBe("in");
+    expect(payloadOperator("range", ["2026-01-01", "2026-01-05"])).toBe("range");
   });
 });

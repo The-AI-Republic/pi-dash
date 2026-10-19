@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { issueKeys } from "../api/keys.js";
+import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { IssuesLayoutRoot } from "./IssuesLayoutRoot.js";
 import { LAYOUT_ORDER, type LayoutKind } from "./kinds.js";
@@ -51,6 +52,8 @@ function renderRoot(
     stub?: StubOptions;
     seed?: Record<string, unknown> | null;
     offered?: readonly LayoutKind[];
+    display?: DisplayPrefs;
+    onDisplayChange?: (next: LayoutKind) => void;
     totalCount?: number;
     resultCount?: number;
     slots?: {
@@ -113,6 +116,8 @@ function renderRoot(
           totalCount={options.totalCount ?? 3}
           resultCount={options.resultCount ?? 3}
           offered={options.offered ?? LAYOUT_ORDER}
+          display={options.display}
+          onDisplayChange={options.onDisplayChange}
           renderLayout={(layout, prefs) => {
             rendered.push({ layout, orderBy: prefs.orderBy });
             return <p>{`layout:${layout}`}</p>;
@@ -167,6 +172,24 @@ describe("IssuesLayoutRoot", () => {
     expect(within(screen.getByTestId("layout-switcher-segmented")).getAllByRole("button")).toHaveLength(1);
   });
 
+  it("renders a supplied display (a saved view's record) over the personal one", async () => {
+    const h = renderRoot({
+      display: {
+        layout: "calendar",
+        groupBy: null,
+        subGroupBy: null,
+        orderBy: "-updated_at",
+        showEmptyGroups: true,
+        showSubIssues: true,
+        calendar: { mode: "month", showWeekends: true },
+        properties: {},
+      },
+    });
+    expect(await screen.findByText("layout:calendar")).toBeInTheDocument();
+    expect(h.segment("Calendar layout")).toHaveAttribute("data-active", "true");
+    expect(h.rendered[h.rendered.length - 1]).toEqual({ layout: "calendar", orderBy: "-updated_at" });
+  });
+
   it("persists a header switch and re-renders the new layout", async () => {
     const h = renderRoot();
     expect(await screen.findByText("layout:kanban")).toBeInTheDocument();
@@ -176,6 +199,29 @@ describe("IssuesLayoutRoot", () => {
     expect(patch?.url).toContain(`/api/workspaces/acme/projects/${UUID2}/user-properties/`);
     expect(JSON.parse(patch?.body ?? "{}").display_filters.layout).toBe("calendar");
     expect(h.segment("Calendar layout")).toHaveAttribute("data-active", "true");
+  });
+
+  it("hands a header switch to a supplied callback instead of writing preferences", async () => {
+    const switches: LayoutKind[] = [];
+    const h = renderRoot({
+      display: {
+        layout: "list",
+        groupBy: null,
+        subGroupBy: null,
+        orderBy: "sort_order",
+        showEmptyGroups: true,
+        showSubIssues: true,
+        calendar: { mode: "month", showWeekends: true },
+        properties: {},
+      },
+      onDisplayChange: (next) => switches.push(next),
+    });
+    expect(await screen.findByText("layout:list")).toBeInTheDocument();
+    fireEvent.click(h.segment("Calendar layout"));
+    expect(switches).toEqual(["calendar"]);
+    expect(h.calls.some((call) => call.method === "PATCH")).toBe(false);
+    // The root keeps rendering the supplied settings until its host updates them.
+    expect(screen.getByText("layout:list")).toBeInTheDocument();
   });
 
   it("persists a mobile menu switch", async () => {
@@ -246,6 +292,7 @@ describe("IssuesLayoutRoot", () => {
     expect(await screen.findByText("layout:kanban")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Filters" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Display" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Analytics" })).toBeInTheDocument();
+    // Desktop header and the compact mobile bar both host the entry.
+    expect(screen.getAllByRole("button", { name: "Analytics" })).toHaveLength(2);
   });
 });

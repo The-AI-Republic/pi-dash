@@ -81,6 +81,7 @@ import { Route as WsGatedSettingsProjectsProjectIdAutomationsRouteImport } from 
 import { Route as WsGatedSettingsProjectsProjectIdLabelsRouteImport } from './routes/$ws/_gated/settings/projects/$projectId/labels'
 import { Route as WsGatedProjectsProjectIdRunnersChatRunnerIdRouteImport } from './routes/$ws/_gated/projects/$projectId/runners/chat/$runnerId'
 import { Route as WsGatedProjectsProjectIdRunnersDetailRunnerIdRouteImport } from './routes/$ws/_gated/projects/$projectId/runners/detail/$runnerId'
+import { Route as WsGatedProjectsProjectIdViewsViewIdIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/views/$viewId/index'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -476,6 +477,12 @@ const WsGatedProjectsProjectIdRunnersDetailRunnerIdRoute =
     path: '/detail/$runnerId',
     getParentRoute: () => WsGatedProjectsProjectIdRunnersRouteRoute,
   } as any)
+const WsGatedProjectsProjectIdViewsViewIdIndexRoute =
+  WsGatedProjectsProjectIdViewsViewIdIndexRouteImport.update({
+    id: '/views/$viewId/',
+    path: '/views/$viewId/',
+    getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -548,6 +555,7 @@ export interface FileRoutesByFullPath {
   '/$ws/projects/$projectId/views/': typeof WsGatedProjectsProjectIdViewsIndexRoute
   '/$ws/projects/$projectId/runners/chat/$runnerId': typeof WsGatedProjectsProjectIdRunnersChatRunnerIdRoute
   '/$ws/projects/$projectId/runners/detail/$runnerId': typeof WsGatedProjectsProjectIdRunnersDetailRunnerIdRoute
+  '/$ws/projects/$projectId/views/$viewId/': typeof WsGatedProjectsProjectIdViewsViewIdIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -612,6 +620,7 @@ export interface FileRoutesByTo {
   '/$ws/projects/$projectId/views': typeof WsGatedProjectsProjectIdViewsIndexRoute
   '/$ws/projects/$projectId/runners/chat/$runnerId': typeof WsGatedProjectsProjectIdRunnersChatRunnerIdRoute
   '/$ws/projects/$projectId/runners/detail/$runnerId': typeof WsGatedProjectsProjectIdRunnersDetailRunnerIdRoute
+  '/$ws/projects/$projectId/views/$viewId': typeof WsGatedProjectsProjectIdViewsViewIdIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -687,6 +696,7 @@ export interface FileRoutesById {
   '/$ws/_gated/projects/$projectId/views/': typeof WsGatedProjectsProjectIdViewsIndexRoute
   '/$ws/_gated/projects/$projectId/runners/chat/$runnerId': typeof WsGatedProjectsProjectIdRunnersChatRunnerIdRoute
   '/$ws/_gated/projects/$projectId/runners/detail/$runnerId': typeof WsGatedProjectsProjectIdRunnersDetailRunnerIdRoute
+  '/$ws/_gated/projects/$projectId/views/$viewId/': typeof WsGatedProjectsProjectIdViewsViewIdIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -761,6 +771,7 @@ export interface FileRouteTypes {
     | '/$ws/projects/$projectId/views/'
     | '/$ws/projects/$projectId/runners/chat/$runnerId'
     | '/$ws/projects/$projectId/runners/detail/$runnerId'
+    | '/$ws/projects/$projectId/views/$viewId/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -825,6 +836,7 @@ export interface FileRouteTypes {
     | '/$ws/projects/$projectId/views'
     | '/$ws/projects/$projectId/runners/chat/$runnerId'
     | '/$ws/projects/$projectId/runners/detail/$runnerId'
+    | '/$ws/projects/$projectId/views/$viewId'
   id:
     | '__root__'
     | '/'
@@ -899,6 +911,7 @@ export interface FileRouteTypes {
     | '/$ws/_gated/projects/$projectId/views/'
     | '/$ws/_gated/projects/$projectId/runners/chat/$runnerId'
     | '/$ws/_gated/projects/$projectId/runners/detail/$runnerId'
+    | '/$ws/_gated/projects/$projectId/views/$viewId/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -1428,6 +1441,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedProjectsProjectIdRunnersDetailRunnerIdRouteImport
       parentRoute: typeof WsGatedProjectsProjectIdRunnersRouteRoute
     }
+    '/$ws/_gated/projects/$projectId/views/$viewId/': {
+      id: '/$ws/_gated/projects/$projectId/views/$viewId/'
+      path: '/views/$viewId'
+      fullPath: '/$ws/projects/$projectId/views/$viewId/'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdViewsViewIdIndexRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
+    }
   }
 }
 
@@ -1502,6 +1522,7 @@ interface WsGatedProjectsProjectIdRouteRouteChildren {
   WsGatedProjectsProjectIdPagesIndexRoute: typeof WsGatedProjectsProjectIdPagesIndexRoute
   WsGatedProjectsProjectIdSchedulersIndexRoute: typeof WsGatedProjectsProjectIdSchedulersIndexRoute
   WsGatedProjectsProjectIdViewsIndexRoute: typeof WsGatedProjectsProjectIdViewsIndexRoute
+  WsGatedProjectsProjectIdViewsViewIdIndexRoute: typeof WsGatedProjectsProjectIdViewsViewIdIndexRoute
 }
 
 const WsGatedProjectsProjectIdRouteRouteChildren: WsGatedProjectsProjectIdRouteRouteChildren =
@@ -1525,6 +1546,8 @@ const WsGatedProjectsProjectIdRouteRouteChildren: WsGatedProjectsProjectIdRouteR
       WsGatedProjectsProjectIdSchedulersIndexRoute,
     WsGatedProjectsProjectIdViewsIndexRoute:
       WsGatedProjectsProjectIdViewsIndexRoute,
+    WsGatedProjectsProjectIdViewsViewIdIndexRoute:
+      WsGatedProjectsProjectIdViewsViewIdIndexRoute,
   }
 
 const WsGatedProjectsProjectIdRouteRouteWithChildren =

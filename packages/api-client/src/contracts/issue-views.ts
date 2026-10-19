@@ -3,8 +3,9 @@
 // See the LICENSE file for details.
 // Saved views, thin slice for the issues area (ISS-104): the filter row's
 // save/update entries create and patch view records carrying the filter
-// expression plus display settings. Full view ownership (routes, lists,
-// dialog chrome) stays in the views area NEWFRONT-78.
+// expression plus display settings, and a list rendered from a saved view
+// reads that record back. Full view ownership (routes, lists, dialog
+// chrome) stays in the views area NEWFRONT-78.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
@@ -54,6 +55,25 @@ export interface SavedViewPatch {
   display_filters?: Record<string, unknown>;
   display_properties?: Record<string, unknown>;
   rich_filters?: Record<string, unknown>;
+}
+
+/** GET .../projects/<id>/views/<viewId>/ — one project view (200). */
+export async function getProjectView(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  viewId: string
+): Promise<SavedView> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/views/${viewId}/`;
+  const body = await client.getJson<unknown>(path);
+  return client.parse(SavedView, body, `GET ${path}`);
+}
+
+/** GET /api/workspaces/<slug>/views/<viewId>/ — one workspace view (200). */
+export async function getWorkspaceView(client: ApiClient, slug: string, viewId: string): Promise<SavedView> {
+  const path = `/api/workspaces/${slug}/views/${viewId}/`;
+  const body = await client.getJson<unknown>(path);
+  return client.parse(SavedView, body, `GET ${path}`);
 }
 
 /** POST /api/workspaces/<slug>/views/ — create a workspace view (201). */

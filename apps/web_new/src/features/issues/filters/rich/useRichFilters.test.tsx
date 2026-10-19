@@ -145,7 +145,7 @@ describe("useUpdateRichFilters", () => {
 
     const patch = calls.find((call) => call.method === "PATCH")!;
     expect(patch.url).toBe(`https://api.test/api/workspaces/acme/projects/${PROJECT}/user-properties/`);
-    expect(patch.body).toEqual({ rich_filters: { priority__in: ["urgent"] } });
+    expect(patch.body).toEqual({ rich_filters: { priority__in: "urgent" } });
     await waitFor(() =>
       expect(invalidate).toHaveBeenCalledWith({
         queryKey: issueKeys.lists("acme", ...entityListsKeyPart(ENTITY)),
@@ -194,5 +194,15 @@ describe("useUpdateRichFilters", () => {
     const cached = queryClient.getQueryData<PrefsRecord>(issueKeys.prefs("acme", "project", PROJECT));
     expect(cached?.rich_filters).toEqual({});
     expect(notifyError).toHaveBeenCalledWith("Couldn't save filters", expect.any(String));
+  });
+});
+
+describe("disabled rich-filter writes", () => {
+  it("no-ops for a disabled builder, such as a saved-view or temporary row", async () => {
+    const { calls, wrapper } = harness();
+    const { result } = renderHook(() => useUpdateRichFilters("acme", ENTITY, false), { wrapper });
+    act(() => result.current.updateRichFilters([row()]));
+    expect(result.current.isSaving).toBe(false);
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
   });
 });
