@@ -289,6 +289,19 @@ describe("CommentCard", () => {
     expect(screen.getByText("This comment has no text.")).toBeInTheDocument();
   });
 
+  it("renders a body that is only an image", () => {
+    const { view } = renderCard({
+      comment: comment({
+        comment_html: '<p><img src="/api/assets/v2/workspaces/acme/projects/p-1/asset-1/" alt=""></p>',
+        comment_stripped: "",
+      }),
+    });
+    expect(screen.queryByText("This comment has no text.")).not.toBeInTheDocument();
+    expect(
+      view.container.querySelector('img[src="/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"]')
+    ).not.toBeNull();
+  });
+
   it("is read-only on an archived issue: no menu and no editor", () => {
     renderCard({ readOnly: true });
     expect(screen.queryByRole("button", { name: "Comment actions" })).not.toBeInTheDocument();

@@ -9,7 +9,14 @@
 
 import { COMMENT_FOLD_LABEL, type IssueComment } from "@pidash/api-client";
 
-import { isStoredHtmlEmpty } from "../../../shared/editor/index.js";
+import { isStoredHtmlEmptyIgnoring } from "../../../shared/editor/index.js";
+
+/**
+ * Tags that count as a comment's content even without words (§16,
+ * ISS-197): an image-only note is still a post, and mentions stand in for
+ * the name they carry.
+ */
+export const COMMENT_CONTENT_TAGS = ["img", "image-component", "mention-component"] as const;
 
 /** Card header name. Agent messages carry their own speaker label. */
 export const AGENT_SPEAKER_FALLBACK = "AI Agent";
@@ -97,9 +104,9 @@ export function commentDeepLink(issueUrl: string, commentId: string): string {
   return `${issueUrl}#comment-${commentId}`;
 }
 
-/** True for stored HTML that holds no visible words. */
+/** True when a comment body has neither words nor image/mention markup. */
 export function isCommentBodyEmpty(html: string): boolean {
-  return isStoredHtmlEmpty(html);
+  return isStoredHtmlEmptyIgnoring(html, COMMENT_CONTENT_TAGS);
 }
 
 /** A change the card made to the comment, as the cache paints it. */

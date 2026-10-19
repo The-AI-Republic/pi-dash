@@ -40,12 +40,18 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
   }) {
     const images = React.useRef<string[]>([]);
     const [, rerender] = React.useReducer((value: number) => value + 1, 0);
+    const text = React.useRef("");
+    const emit = (): void => {
+      const markup = images.current.map((src) => `<img src="${src}">`).join("");
+      onChange(text.current.trim() === "" && markup === "" ? "<p></p>" : `<p>${text.current}${markup}</p>`);
+    };
     React.useEffect(
       () =>
         onReady?.({
           insertImage: (src) => {
             images.current.push(src);
             rerender();
+            emit();
           },
         }),
       [onReady]
@@ -58,7 +64,10 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
         <textarea
           aria-label={label}
           defaultValue={initialHtml.replace(/<[^>]*>/g, "").trim()}
-          onInput={(event) => onChange(`<p>${event.currentTarget.value}</p>`)}
+          onInput={(event) => {
+            text.current = event.currentTarget.value;
+            emit();
+          }}
         />
       </div>
     );
@@ -283,6 +292,42 @@ describe("CommentComposer", () => {
     expect(calls).toHaveLength(0);
     fireEvent.change(input, { target: { files: [new File(["x"], "bad.svg", { type: "image/svg+xml" })] } });
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't upload the image", "Invalid file type."));
+  });
+
+  it("posts an image-only body once the upload lands", async () => {
+    const { onCreate } = renderComposer({}, (url, init) => {
+      if (init.method === "POST" && url.includes("/projects/p-1/") && !url.includes("/bulk/")) {
+        return {
+          status: 200,
+          body: {
+            asset_id: "asset-1",
+            asset_url: "/api/assets/v2/workspaces/acme/projects/p-1/asset-1/",
+            upload_data: { url: "https://s3.test/upload", fields: {} },
+          },
+        };
+      }
+      return { status: 204, body: "" };
+    });
+    await editor();
+    expect(screen.getByRole("button", { name: "Comment" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Add an image to the comment"), {
+      target: { files: [new File(["img"], "shot.png", { type: "image/png" })] },
+    });
+    await waitFor(() =>
+      expect(document.querySelector("img")?.getAttribute("src")).toBe(
+        "/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"
+      )
+    );
+    const submit = screen.getByRole("button", { name: "Comment" });
+    await waitFor(() => expect(submit).not.toBeDisabled());
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenCalledWith({
+        html: '<p><img src="/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"></p>',
+        access: "INTERNAL",
+        assetIds: ["asset-1"],
+      })
+    );
   });
 
   it("keeps the uploaded asset when the editor is gone", async () => {

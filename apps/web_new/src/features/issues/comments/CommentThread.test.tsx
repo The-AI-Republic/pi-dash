@@ -151,6 +151,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
   resetAppClient();
   delete (navigator as { clipboard?: unknown }).clipboard;
 });

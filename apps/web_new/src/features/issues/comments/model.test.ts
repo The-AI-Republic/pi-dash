@@ -159,6 +159,18 @@ describe("comment link and empty check", () => {
     expect(isCommentBodyEmpty("<p>   </p>")).toBe(true);
     expect(isCommentBodyEmpty("<p>words</p>")).toBe(false);
   });
+
+  it("counts an image or a mention as content even with no words", () => {
+    expect(isCommentBodyEmpty('<p><img src="/api/assets/a-1/" alt=""></p>')).toBe(false);
+    expect(isCommentBodyEmpty('<p><image-component src="/a-1/"></image-component></p>')).toBe(false);
+    expect(isCommentBodyEmpty('<p><mention-component id="u-1"></mention-component></p>')).toBe(false);
+    expect(isCommentBodyEmpty('<p><img src="/a-1/"></p><p></p>')).toBe(false);
+  });
+
+  it("leaves other markup-only bodies empty", () => {
+    expect(isCommentBodyEmpty("<p><strong> </strong></p>")).toBe(true);
+    expect(isCommentBodyEmpty("<p><br></p>")).toBe(true);
+  });
 });
 
 describe("comment cache patches", () => {

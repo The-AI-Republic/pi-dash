@@ -9,4 +9,4 @@ export { CommentRichTextEditor, RichTextEditor } from "./RichTextEditor.js";
 export type { RichTextEditorHandle, RichTextEditorProps } from "./RichTextEditor.js";
 export { RichTextView } from "./RichTextView.js";
 export type { RichTextViewProps } from "./RichTextView.js";
-export { isStoredHtmlEmpty, sanitizeHtml, storedTextContent } from "./sanitize.js";
+export { isStoredHtmlEmpty, isStoredHtmlEmptyIgnoring, sanitizeHtml, storedTextContent } from "./sanitize.js";
