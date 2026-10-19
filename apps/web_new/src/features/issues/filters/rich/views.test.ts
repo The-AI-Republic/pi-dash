@@ -219,7 +219,7 @@ describe("viewDisplaySnapshot", () => {
       orderBy: "-created_at",
       showEmptyGroups: true,
       showSubIssues: false,
-      calendar: { mode: "month", showWeekends: false },
+      calendar: { mode: "month", showWeekends: true },
       properties: { priority: false },
     });
     // Keys the record stores are patched; absent keys appear only when the
@@ -230,7 +230,7 @@ describe("viewDisplaySnapshot", () => {
       order_by: "-created_at",
       show_empty_groups: true,
       sub_issue: false,
-      calendar: { layout: "month", show_weekends: false },
+      calendar: { layout: "month", show_weekends: true },
       custom_key: "kept",
     });
     expect(snapshot.displayProperties).toEqual({ priority: false, custom: false });
@@ -267,7 +267,7 @@ describe("viewDisplaySnapshot", () => {
     const display_filters = { layout: "list" };
     const prefs = {
       ...parseDisplayPrefs(display_filters, {}),
-      calendar: { mode: "week" as const, showWeekends: true },
+      calendar: { mode: "week" as const, showWeekends: false },
     };
     const snapshot = viewDisplaySnapshot({ display_filters, display_properties: {} }, prefs);
     expect(snapshot.displayFilters).toEqual({ layout: "list", calendar: { layout: "week" } });
