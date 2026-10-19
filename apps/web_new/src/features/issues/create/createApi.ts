@@ -10,20 +10,32 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   addIssueToCycle,
+  attachDescriptionAssets,
   createDraftIssue,
   generateAssistantTitle,
+  promoteDraftIssue,
+  removeIssueFromCycle,
+  runProjectEditorTask,
   searchIssues,
+  searchMentionPeople,
   setIssueModules,
+  updateDraftIssue,
+  updateIssue,
+  uploadDescriptionAsset,
   type ApiClient,
+  type DescriptionAssetScope,
   type DraftIssue,
   type DraftIssueCreateInput,
+  type IssuePatch,
   type IssueSearchHit,
   type IssueSearchResults,
+  type PromotedIssue,
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../../core/query/client.js";
 import { TITLE_GENERATION_TIMEOUT_MS, type CreateMembership } from "./createForm.js";
+import type { EditMembership } from "./editForm.js";
 
 /** Toast copy after an inline draft save. */
 export const DRAFT_SAVED_INLINE_TITLE = "Draft saved";
@@ -159,4 +171,221 @@ export function hitIdentifier(hit: IssueSearchHit): string {
 /** Recent (or matching) candidates: the picker never repeats the current parent. */
 export function selectParentCandidates(hits: readonly IssueSearchHit[], currentId: string | null): IssueSearchHit[] {
   return hits.filter((hit) => hit.id !== currentId);
+}
+
+/** The address of the row an edit targets: a live issue or a draft. */
+export type EditTarget = { kind: "issue"; projectId: string; issueId: string } | { kind: "draft"; draftId: string };
+
+/** Everything one edit write needs beyond its PATCH (ISS-126). */
+export interface EditWriteInput {
+  target: EditTarget;
+  patch: IssuePatch;
+  membership: EditMembership;
+}
+
+/**
+ * Sequence an edit's bridge writes after its PATCH (ISS-124/ISS-126):
+ * the old cycle bridge is detached first, the new one attached second,
+ * and modules follow, each awaited. A failure stops the chain.
+ */
+export async function applyEditMembership(
+  client: ApiClient,
+  workspaceSlug: string,
+  target: EditTarget,
+  membership: EditMembership
+): Promise<void> {
+  // Drafts carry no bridges: their memberships promote with them.
+  if (target.kind === "draft") return;
+  const { projectId, issueId } = target;
+  if (membership.removedCycleId !== null) {
+    await removeIssueFromCycle(client, workspaceSlug, projectId, membership.removedCycleId, issueId);
+  }
+  if (membership.addedCycleId !== null) {
+    await addIssueToCycle(client, workspaceSlug, projectId, membership.addedCycleId, issueId);
+  }
+  if (membership.addedModuleIds.length > 0 || membership.removedModuleIds.length > 0) {
+    await setIssueModules(client, workspaceSlug, projectId, issueId, {
+      modules: membership.addedModuleIds,
+      ...(membership.removedModuleIds.length === 0 ? {} : { removed_modules: membership.removedModuleIds }),
+    });
+  }
+}
+
+/** Patch a live issue or a draft, then reconcile its memberships. */
+export async function writeIssueEdit(client: ApiClient, workspaceSlug: string, input: EditWriteInput): Promise<void> {
+  const { target } = input;
+  if (target.kind === "draft") {
+    // The draft contract carries the description but not the cycle or
+    // module picks: those belong to the project the draft promotes into.
+    if (Object.keys(input.patch).length > 0) {
+      await updateDraftIssue(client, workspaceSlug, target.draftId, draftInputFromPatch(input.patch));
+    }
+    return;
+  }
+  if (Object.keys(input.patch).length > 0) {
+    await updateIssue(client, workspaceSlug, target.projectId, target.issueId, input.patch);
+  }
+  await applyEditMembership(client, workspaceSlug, target, input.membership);
+}
+
+export function useWriteIssueEdit(workspaceSlug: string) {
+  return useMutation<void, Error, EditWriteInput>({
+    mutationFn: (input) => writeIssueEdit(getAppClient(), workspaceSlug, input),
+  });
+}
+
+/**
+ * The draft contract's slice of an issue patch: drafts hold the fields
+ * the detail form shows, not the bridges, branch or execution target.
+ */
+export function draftInputFromPatch(patch: IssuePatch): DraftIssueCreateInput {
+  const draft: DraftIssueCreateInput = {};
+  if (patch.name !== undefined) draft.name = patch.name;
+  if (patch.description_html !== undefined) draft.description_html = patch.description_html;
+  if (patch.state_id !== undefined) draft.state_id = patch.state_id;
+  if (patch.priority !== undefined) draft.priority = patch.priority;
+  if (patch.parent_id !== undefined) draft.parent_id = patch.parent_id;
+  if (patch.assignee_ids !== undefined) draft.assignee_ids = patch.assignee_ids;
+  if (patch.label_ids !== undefined) draft.label_ids = patch.label_ids;
+  if (patch.start_date !== undefined) draft.start_date = patch.start_date;
+  if (patch.target_date !== undefined) draft.target_date = patch.target_date;
+  return draft;
+}
+
+/** Publish a draft: persist its stored values, then move it into a project (ISS-130). */
+export async function publishDraft(
+  client: ApiClient,
+  workspaceSlug: string,
+  draftId: string,
+  input: DraftIssueCreateInput
+): Promise<PromotedIssue> {
+  return promoteDraftIssue(client, workspaceSlug, draftId, input);
+}
+
+export function usePublishDraft(workspaceSlug: string) {
+  return useMutation<PromotedIssue, Error, { draftId: string; input: DraftIssueCreateInput }>({
+    mutationFn: ({ draftId, input }) => publishDraft(getAppClient(), workspaceSlug, draftId, input),
+  });
+}
+
+/** Description editor task that drafts a body from the title (ISS-127). */
+export const DESCRIBE_TASK = "Generate a proper description for this work item.";
+/** Toast when the title is too thin to describe. */
+export const DESCRIBE_EMPTY_TITLE = "Couldn't write a description";
+export const DESCRIBE_EMPTY_TITLE_BODY = "The title needs a little more detail before the assistant can describe it.";
+/** Toast when the assistant refuses, answers nothing or times out. */
+export const DESCRIBE_FAILED_TITLE = "Couldn't write a description";
+export const DESCRIBE_FAILED_BODY = "Try again in a moment, or write the description yourself.";
+/** Maximum assistant description requests per member per month. */
+export const DESCRIBE_MONTHLY_LIMIT = 50;
+export const DESCRIBE_RATE_LIMITED_BODY = `${DESCRIBE_MONTHLY_LIMIT} descriptions per month is the limit on this plan.`;
+
+/** Generate a description body from the item's title. */
+export async function requestDescription(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  title: string
+): Promise<string> {
+  const answer = await withTimeout(
+    runProjectEditorTask(client, workspaceSlug, projectId, { task: DESCRIBE_TASK, prompt: title }),
+    TITLE_GENERATION_TIMEOUT_MS
+  );
+  return answer.response_html.trim();
+}
+
+/** Run an assistant writing prompt and keep the markup it answers. */
+export async function requestEditorAnswer(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  prompt: string
+): Promise<string> {
+  const answer = await withTimeout(
+    runProjectEditorTask(client, workspaceSlug, projectId, { task: prompt }),
+    TITLE_GENERATION_TIMEOUT_MS
+  );
+  return answer.response_html.trim();
+}
+
+export function useDescribeFromTitle(workspaceSlug: string) {
+  return useMutation<string, Error, { projectId: string; title: string }>({
+    mutationFn: ({ projectId, title }) => requestDescription(getAppClient(), workspaceSlug, projectId, title),
+  });
+}
+
+export function useEditorAnswer(workspaceSlug: string) {
+  return useMutation<string, Error, { projectId: string; prompt: string }>({
+    mutationFn: ({ projectId, prompt }) => requestEditorAnswer(getAppClient(), workspaceSlug, projectId, prompt),
+  });
+}
+
+/** How many people one mention search may offer. */
+export const MENTION_RESULT_LIMIT = 5;
+
+/** One mention suggestion row the editor's @ popup renders. */
+export interface MentionSearchResults {
+  people: { id: string; name: string }[];
+}
+
+/** Mention lookup for the description editor (ISS-127). */
+export function mentionSearchKey(workspaceSlug: string, projectId: string, text: string) {
+  return [...workspaceScope(workspaceSlug), "issues", "create", "mention-search", projectId, text] as const;
+}
+
+/** People matching the text typed after an @; none without a project. */
+export async function requestMentions(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  query: string
+): Promise<MentionSearchResults> {
+  if (projectId === "") return { people: [] };
+  const people = await searchMentionPeople(client, workspaceSlug, {
+    query,
+    projectId,
+    count: MENTION_RESULT_LIMIT,
+  });
+  return { people: people.map((person) => ({ id: person.member__id, name: person.member__display_name })) };
+}
+
+export function useMentionSearch(workspaceSlug: string, projectId: string, query: string, enabled: boolean) {
+  return useQuery({
+    queryKey: mentionSearchKey(workspaceSlug, projectId, query),
+    queryFn: () => requestMentions(getAppClient(), workspaceSlug, projectId, query),
+    staleTime: REFERENCE_STALE_TIME_MS,
+    enabled: enabled && projectId !== "",
+  });
+}
+
+/** One description image upload: the parked asset and its shown src. */
+export interface DescriptionUploadInput {
+  projectId: string;
+  scope: DescriptionAssetScope;
+  file: File;
+}
+
+export function useUploadDescriptionAsset(workspaceSlug: string) {
+  return useMutation({
+    mutationFn: (input: DescriptionUploadInput) =>
+      uploadDescriptionAsset(getAppClient(), workspaceSlug, input.projectId, input.scope, input.file),
+  });
+}
+
+/** Link parked description images to the row they were uploaded for. */
+export async function applyDescriptionAssets(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  assetIds: readonly string[]
+): Promise<void> {
+  await attachDescriptionAssets(client, workspaceSlug, projectId, issueId, assetIds);
+}
+
+export function useAttachDescriptionAssets(workspaceSlug: string) {
+  return useMutation<void, Error, { projectId: string; issueId: string; assetIds: string[] }>({
+    mutationFn: ({ projectId, issueId, assetIds }) =>
+      applyDescriptionAssets(getAppClient(), workspaceSlug, projectId, issueId, assetIds),
+  });
 }

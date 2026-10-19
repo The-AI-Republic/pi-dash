@@ -474,6 +474,24 @@ export {
 } from "./contracts/issue-versions.js";
 export { IssueSearchHit, IssueSearchResults, searchIssues } from "./contracts/issue-search.js";
 export type { IssueSearchQuery } from "./contracts/issue-search.js";
+export { MentionPerson, MentionSearchResponse, searchMentionPeople } from "./contracts/entity-search.js";
+export type { MentionSearchQuery } from "./contracts/entity-search.js";
+export {
+  DRAFT_DESCRIPTION_ENTITY_TYPE,
+  ISSUE_DESCRIPTION_ENTITY_TYPE,
+  DescriptionAssetGrant,
+  attachDescriptionAssets,
+  completeDescriptionAsset,
+  requestDescriptionAsset,
+  uploadDescriptionAsset,
+} from "./contracts/issue-description-assets.js";
+export type {
+  DescriptionAssetEntityType,
+  DescriptionAssetScope,
+  DescriptionByteUpload,
+  DescriptionByteUploadResponse,
+  UploadedDescriptionAsset,
+} from "./contracts/issue-description-assets.js";
 export { AgentLiveState, AgentRunSummary, AgentStatus, AgentTicker } from "./contracts/issue-agent.js";
 export {
   Favorite,

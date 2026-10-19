@@ -163,6 +163,8 @@ export interface DatePickerProps {
   /** Hover clear resetting to null. Defaults to true. */
   clearable?: boolean | undefined;
   testId?: string | undefined;
+  /** Explicit keyboard position inside a dialog's tab order. */
+  tabIndex?: number | undefined;
 }
 
 /** Single-date dropdown: trigger plus the portalled month calendar. */
@@ -177,13 +179,18 @@ export function DatePicker({
   disabled = false,
   clearable = true,
   testId = "date-picker",
+  tabIndex,
 }: DatePickerProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   const normalizedStart = normalizeWeekStart(weekStart);
   const showClear = clearable && value !== null && !disabled;
 
   return (
-    <div data-testid={testId} className="group inline-flex items-center gap-(--space-1)">
+    <div
+      data-testid={testId}
+      {...(tabIndex === undefined ? {} : { tabIndex })}
+      className="group inline-flex items-center gap-(--space-1)"
+    >
       <Popover
         open={open}
         onOpenChange={setOpen}

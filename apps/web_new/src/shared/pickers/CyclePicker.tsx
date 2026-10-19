@@ -31,6 +31,10 @@ export interface CyclePickerProps {
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
   placeholder?: string;
+  /** Explicit keyboard position inside a dialog's tab order. */
+  tabIndex?: number | undefined;
+  /** Stable id for the trigger, so dialogs can name the field. */
+  triggerId?: string | undefined;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -59,6 +63,8 @@ export function CyclePicker({
   iconOnly = false,
   trigger,
   placeholder = "No cycle",
+  tabIndex,
+  triggerId,
   open: controlledOpen,
   onOpenChange,
 }: CyclePickerProps): React.ReactElement {
@@ -93,7 +99,11 @@ export function CyclePicker({
       );
     }
     return (
-      <Button variant={variant}>
+      <Button
+        variant={variant}
+        {...(triggerId === undefined ? {} : { id: triggerId })}
+        {...(tabIndex === undefined ? {} : { tabIndex })}
+      >
         <CycleGlyph />
         <span className="truncate">{text}</span>
       </Button>

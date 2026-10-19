@@ -26,6 +26,8 @@ export interface PriorityPickerProps {
   iconOnly?: boolean;
   /** Fully custom trigger; overrides the default value button. */
   trigger?: React.ReactElement<Record<string, unknown>>;
+  /** Explicit keyboard position inside a dialog's tab order. */
+  tabIndex?: number | undefined;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -54,6 +56,7 @@ export function PriorityPicker({
   variant = "secondary",
   iconOnly = false,
   trigger,
+  tabIndex,
   open: controlledOpen,
   onOpenChange,
 }: PriorityPickerProps): React.ReactElement {
@@ -78,7 +81,7 @@ export function PriorityPicker({
       );
     }
     return (
-      <Button variant={variant}>
+      <Button variant={variant} {...(tabIndex === undefined ? {} : { tabIndex })}>
         <span aria-hidden="true" className="inline-flex shrink-0 items-center">
           <PriorityGlyph option={current} />
         </span>

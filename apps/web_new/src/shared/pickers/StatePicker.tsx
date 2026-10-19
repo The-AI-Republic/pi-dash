@@ -26,6 +26,8 @@ export interface StatePickerProps {
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
   placeholder?: string;
+  /** Explicit keyboard position inside a dialog's tab order. */
+  tabIndex?: number | undefined;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -55,6 +57,7 @@ export function StatePicker({
   iconOnly = false,
   trigger,
   placeholder = "Select state",
+  tabIndex,
   open: controlledOpen,
   onOpenChange,
 }: StatePickerProps): React.ReactElement {
@@ -82,7 +85,7 @@ export function StatePicker({
       );
     }
     return (
-      <Button variant={variant}>
+      <Button variant={variant} {...(tabIndex === undefined ? {} : { tabIndex })}>
         {current === undefined ? null : (
           <span aria-hidden="true" className="inline-flex shrink-0 items-center">
             <StateGlyph option={current} />

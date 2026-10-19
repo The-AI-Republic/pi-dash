@@ -27,6 +27,10 @@ interface ModulePickerBase {
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
   placeholder?: string;
+  /** Explicit keyboard position inside a dialog's tab order. */
+  tabIndex?: number | undefined;
+  /** Stable id for the trigger, so dialogs can name the field. */
+  triggerId?: string | undefined;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -94,6 +98,8 @@ export function ModulePicker(props: ModulePickerProps): React.ReactElement {
     iconOnly = false,
     trigger,
     placeholder = "No module",
+    tabIndex,
+    triggerId,
     open: controlledOpen,
     onOpenChange,
   } = props;
@@ -140,7 +146,11 @@ export function ModulePicker(props: ModulePickerProps): React.ReactElement {
         );
       }
       return (
-        <Button variant={variant}>
+        <Button
+          variant={variant}
+          {...(triggerId === undefined ? {} : { id: triggerId })}
+          {...(tabIndex === undefined ? {} : { tabIndex })}
+        >
           <ModuleGlyph />
           <span className="truncate">{text}</span>
         </Button>
@@ -164,7 +174,11 @@ export function ModulePicker(props: ModulePickerProps): React.ReactElement {
       );
     }
     return (
-      <Button variant={variant}>
+      <Button
+        variant={variant}
+        {...(triggerId === undefined ? {} : { id: triggerId })}
+        {...(tabIndex === undefined ? {} : { tabIndex })}
+      >
         <ModuleGlyph />
         <span className="truncate">{text}</span>
       </Button>

@@ -21,6 +21,11 @@ import { edition } from "../../../core/edition/index.js";
 import { pickerKeys } from "../../../shared/pickers/reference.js";
 import { withTimeout } from "../create/createApi.js";
 import { ISSUE_DEDUPE_FLAG } from "../create/dedupe.js";
+import {
+  registerIssueTypeExtension,
+  resetIssueTypeExtension,
+  type IssueTypeExtensionProps,
+} from "../create/issueTypeSeam.js";
 import { loadWorkItemDraft } from "../lib/createDraft.js";
 import { WorkItemCreateDialog, type WorkItemCreateProject } from "./WorkItemCreateDialog.js";
 
@@ -32,7 +37,8 @@ vi.setConfig({ testTimeout: 30_000 });
 
 // The real editor is a lazy tiptap surface with its own suite. The dialog
 // only composes it, so a textarea stands in and reports HTML through the
-// same change callback; the sanitizer helpers stay real.
+// same callbacks; the sanitizer helpers stay real. Both editor variants
+// share the stand-in because the modal swaps to the mention-aware one.
 vi.mock("../../../shared/editor/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/editor/index.js")>();
   // Mirrors the real editor: the starting HTML is read once, at mount,
@@ -41,24 +47,53 @@ vi.mock("../../../shared/editor/index.js", async (importOriginal) => {
     onChange,
     label,
     initialHtml,
+    onReady,
+    onMentionQuery,
+    handleKeyDown,
+    tabIndex,
   }: {
     onChange: (html: string) => void;
     label: string;
     initialHtml: string;
+    onReady?: ((handle: unknown) => void) | undefined;
+    onMentionQuery?: ((query: string | null) => void) | undefined;
+    handleKeyDown?: ((event: KeyboardEvent) => boolean) | undefined;
+    tabIndex?: number | undefined;
   }) {
     const [value, setValue] = React.useState(() => initialHtml.replace(/^<p>/, "").replace(/<\/p>$/, ""));
+    const valueRef = React.useRef(value);
+    valueRef.current = value;
+    React.useEffect(() => {
+      onReady?.({
+        insertImage: (src: string) => {
+          setValue((current) => `${current}<img src="${src}">`);
+        },
+        insertMention: (target: { id: string; name: string }) => {
+          setValue((current) => `${current}@${target.name}`);
+        },
+        textBeforeCaret: () => valueRef.current,
+      });
+    }, [onReady]);
     return (
       <textarea
         aria-label={label}
+        {...(tabIndex === undefined ? {} : { tabIndex })}
         value={value}
         onChange={(event) => {
-          setValue(event.target.value);
-          onChange(event.target.value === "" ? "" : `<p>${event.target.value}</p>`);
+          const next = event.target.value;
+          setValue(next);
+          onChange(next === "" ? "" : `<p>${next}</p>`);
+          const at = next.lastIndexOf("@");
+          const tail = at === -1 ? "" : next.slice(at + 1);
+          onMentionQuery?.(at !== -1 && !/\s/.test(tail) ? tail : null);
+        }}
+        onKeyDown={(event) => {
+          if (handleKeyDown?.(event.nativeEvent) === true) event.preventDefault();
         }}
       />
     );
   }
-  return { ...original, RichTextEditor: StandInEditor };
+  return { ...original, RichTextEditor: StandInEditor, IssueDescriptionEditor: StandInEditor };
 });
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
@@ -159,6 +194,28 @@ function projectDetail(id: string, name: string, overrides: Record<string, unkno
   };
 }
 
+/** A thin project cycle row the picker lists. */
+function cycleRow(id: string, name: string) {
+  return {
+    id,
+    name,
+    project_id: PROJECT_ATLAS,
+    is_favorite: false,
+    status: "ACTIVE",
+  };
+}
+
+/** A thin project module row the picker lists. */
+function moduleRow(id: string, name: string) {
+  return {
+    id,
+    name,
+    project_id: PROJECT_ATLAS,
+    status: "in-progress",
+    is_favorite: false,
+  };
+}
+
 function createdRow(projectId: string, name: string): Record<string, unknown> {
   return {
     id: CREATED_ID,
@@ -190,9 +247,29 @@ function createdRow(projectId: string, name: string): Record<string, unknown> {
   };
 }
 
+/** The create serializer's row, as the promote endpoint answers it. */
+function promotedRow(projectId: string, name: string): Record<string, unknown> {
+  return {
+    id: CREATED_ID,
+    name,
+    project_id: projectId,
+    sequence_id: 8,
+    state_id: null,
+    priority: "none",
+    sort_order: 65535,
+    parent_id: null,
+    description_html: "",
+    created_at: "2024-01-02T03:04:05Z",
+    updated_at: "2024-02-03T04:05:06Z",
+    deleted_at: null,
+  };
+}
+
 interface StubOptions {
   createStatus?: number;
   createDelayMs?: number;
+  editStatus?: number;
+  publishStatus?: number;
   assistant?: { model_name: string; has_api_key: boolean };
   generate?: { status: number; body: unknown; delayMs?: number };
   draftStatus?: number;
@@ -449,12 +526,12 @@ function stubTransport(options: StubOptions = {}) {
         },
       ]);
     }
-    if (url.endsWith("/cycles/")) {
+    if (url.endsWith("/cycles/") && method === "GET") {
       return json(200, [
         { id: PARENT_ID, project_id: PROJECT_ATLAS, name: "Sprint 4", is_favorite: false, status: "ACTIVE" },
       ]);
     }
-    if (url.endsWith("/modules/")) {
+    if (url.endsWith("/modules/") && method === "GET") {
       return json(200, [
         { id: PARENT_ID, project_id: PROJECT_ATLAS, name: "Checkout", status: "in-progress", is_favorite: false },
       ]);
@@ -487,6 +564,21 @@ function stubTransport(options: StubOptions = {}) {
       const row = details[detailMatch[1] ?? ""];
       return row === undefined ? json(404, {}) : json(200, row);
     }
+    if (url.endsWith("/projects/") && method === "GET") {
+      // A cold picker cache reads the joined list; serve the same rows the
+      // dialog filters so choosing a project after an edit still works.
+      return json(
+        200,
+        PROJECTS.map((project) =>
+          projectRow(
+            project.id,
+            project.name,
+            project.identifier ?? project.name.slice(0, 3),
+            project.memberRole ?? null
+          )
+        )
+      );
+    }
     if (url.endsWith("/issues/") && method === "POST") {
       sent.push(body);
       const projectMatch = /\/projects\/([^/]+)\/issues\/$/.exec(url);
@@ -501,9 +593,42 @@ function stubTransport(options: StubOptions = {}) {
       const status = options.membershipStatus ?? 201;
       return json(status, status === 201 ? { message: "ok" } : {});
     }
+    if (url.includes("/cycle-issues/") && method === "DELETE") {
+      return json(204, {});
+    }
+    if (/\/issues\/[^/]+\/$/.test(url) && method === "PATCH") {
+      sent.push(body);
+      const status = options.editStatus ?? 200;
+      return json(status, status === 200 ? createdRow(PROJECT_ATLAS, "Edited") : {});
+    }
+    if (/\/draft-issues\/[^/]+\/$/.test(url) && method === "PATCH") {
+      sent.push(body);
+      const status = options.editStatus ?? 200;
+      return json(status, { id: "draft-1", name: "Draft" });
+    }
+    if (/\/draft-to-issue\/[^/]+\/$/.test(url) && method === "POST") {
+      const status = options.publishStatus ?? 200;
+      return json(status, status === 200 ? promotedRow(PROJECT_ATLAS, "Published") : {});
+    }
+    if (url.includes("/api/assets/v2/") && method === "POST") {
+      return json(200, {
+        asset_id: "asset-1",
+        asset_url: "https://cdn.test/asset-1.png",
+        upload_data: { url: "https://s3.test/upload", fields: {} },
+      });
+    }
+    if (url.includes("/api/assets/v2/")) {
+      return json(204, {});
+    }
     if (/\/issues\/[^/]+\/modules\/$/.test(url) && method === "POST") {
       const status = options.membershipStatus ?? 201;
       return json(status, status === 201 ? { message: "ok" } : {});
+    }
+    if (url.endsWith(`/projects/${PROJECT_ATLAS}/cycles/`)) {
+      return json(200, [cycleRow(PARENT_ID, "Sprint 4")]);
+    }
+    if (url.endsWith(`/projects/${PROJECT_ATLAS}/modules/`)) {
+      return json(200, [moduleRow(PARENT_ID, "Checkout")]);
     }
     return json(200, {});
   }) as never);
@@ -532,6 +657,10 @@ function setup(
       }),
     ]);
   }
+  // The cycle and module pickers list the seeded rows; their triggers name
+  // the rows a stored edit holds, so the cached lists must carry them.
+  queryClient.setQueryData(pickerKeys.cycles(SLUG, PROJECT_ATLAS), [cycleRow(PARENT_ID, "Sprint 4")]);
+  queryClient.setQueryData(pickerKeys.modules(SLUG, PROJECT_ATLAS), [moduleRow(PARENT_ID, "Checkout")]);
   const view = render(
     <QueryClientProvider client={queryClient}>
       <WorkItemCreateDialog
@@ -585,9 +714,14 @@ describe("WorkItemCreateDialog core form", () => {
     setup();
     await waitFor(() => expect(titleField()).toHaveFocus());
     expect(screen.getByRole("dialog", { name: "Create new work item" })).toBeInTheDocument();
-    for (const field of ["State", "Runs on", "Priority", "Assignees", "Labels", "Start date", "Due date", "Parent"]) {
+    for (const field of ["State", "Runs on", "Priority", "Assignees", "Parent"]) {
       expect(screen.getByText(field)).toBeInTheDocument();
     }
+    // Labels and the dates name themselves on their own controls, as the
+    // old form did, so no caption repeats them.
+    expect(screen.getByRole("group", { name: "Labels" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start date" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Due date" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add parent" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add parent" })).toBeInTheDocument();
   });
@@ -799,7 +933,7 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
         [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
       },
     });
-    await waitFor(() => expect(screen.getByText("Cycle")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cycle" })).toBeInTheDocument());
     await waitFor(() => expect(screen.getByText("Estimate")).toBeInTheDocument());
     await user.type(titleField(), "Everything at once");
 
@@ -834,11 +968,11 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     const dueIso = dueDay.dataset.day as string;
     await user.click(dueDay);
 
-    await user.click(screen.getByRole("button", { name: "No cycle" }));
-    await user.click(await screen.findByRole("option", { name: "Sprint 4" }));
+    await user.click(screen.getByRole("button", { name: "Cycle" }));
+    await user.click((await screen.findAllByRole("option", { name: "Sprint 4" }))[0]!);
 
-    await user.click(screen.getByRole("button", { name: "No module" }));
-    await user.click(await screen.findByRole("option", { name: "Checkout" }));
+    await user.click(screen.getByRole("button", { name: "Modules" }));
+    await user.click((await screen.findAllByRole("option", { name: "Checkout" }))[0]!);
 
     const estimateSlot = within(screen.getByText("Estimate").parentElement as HTMLElement);
     await user.click(estimateSlot.getByRole("button", { name: "None" }));
@@ -881,10 +1015,10 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
         [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
       },
     });
-    await waitFor(() => expect(screen.getByText("Cycle")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cycle" })).toBeInTheDocument());
     await user.type(titleField(), "Placed later");
-    await user.click(screen.getByRole("button", { name: "No cycle" }));
-    await user.click(await screen.findByRole("option", { name: "Sprint 4" }));
+    await user.click(screen.getByRole("button", { name: "Cycle" }));
+    await user.click((await screen.findAllByRole("option", { name: "Sprint 4" }))[0]!);
     save();
     await waitFor(() =>
       expect(notifyError).toHaveBeenCalledWith("Work item created, but not placed", expect.any(String))
@@ -1215,8 +1349,8 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
         },
       });
     setupWith({ cycle_view: true, module_view: true, estimate: STATE_ID });
-    await waitFor(() => expect(screen.getByText("Cycle")).toBeInTheDocument());
-    expect(screen.getByText("Modules")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cycle" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Modules" })).toBeInTheDocument();
     expect(screen.getByText("Estimate")).toBeInTheDocument();
   });
 
@@ -1363,5 +1497,457 @@ describe("WorkItemCreateDialog preset parent (ISS-175)", () => {
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(2));
     expect(posts(h.sent)[1]).toEqual({ name: "Two" });
+  });
+});
+
+const EDIT_ID = "a23e4567-e89b-12d3-a456-42661417400a";
+const CYCLE_ID = "b23e4567-e89b-12d3-a456-42661417400b";
+const MODULE_ID = "c23e4567-e89b-12d3-a456-42661417400c";
+
+/** A stored row the modal may open for editing. */
+function editRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: EDIT_ID,
+    name: "Existing work",
+    description_html: "<p>stored words</p>",
+    state_id: STATE_ID,
+    priority: "medium",
+    assignee_ids: [],
+    label_ids: [],
+    start_date: null,
+    target_date: null,
+    cycle_id: PARENT_ID,
+    module_ids: [PARENT_ID],
+    estimate_point: null,
+    parent_id: null,
+    ...overrides,
+  };
+}
+
+function editProps(overrides: Record<string, unknown> = {}) {
+  const onChanged = vi.fn();
+  return {
+    onChanged,
+    props: {
+      edit: {
+        kind: "issue" as const,
+        id: EDIT_ID,
+        projectId: PROJECT_ATLAS,
+        snapshot: editRow(overrides),
+        onChanged,
+      },
+    },
+  };
+}
+
+/** The PATCH bodies this run sent, in order. */
+function patches(calls: Array<{ url: string; method: string; body: unknown }>): unknown[] {
+  return calls.filter((call) => call.method === "PATCH").map((call) => call.body);
+}
+
+describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
+  it("opens the stored row with a fixed project and the update heading", async () => {
+    const { props } = editProps();
+    setup({}, props);
+    expect(screen.getByRole("dialog", { name: "Update work item" })).toBeInTheDocument();
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("stored words");
+    expect(screen.getByRole("button", { name: "Atlas" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Save to Drafts" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Create more" })).not.toBeInTheDocument();
+  });
+
+  it("sends only the fields that changed", async () => {
+    const user = userEvent.setup();
+    const { onChanged, props } = editProps();
+    const h = setup({}, props);
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await user.clear(titleField());
+    await user.type(titleField(), "Renamed work");
+    save();
+    await waitFor(() => expect(patches(h.calls)).toHaveLength(1));
+    expect(patches(h.calls)[0]).toEqual({ name: "Renamed work" });
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(onChanged).toHaveBeenCalled();
+    expect(notifySuccess).toHaveBeenCalledWith("Work item updated successfully");
+  });
+
+  it("sends nothing for an untouched form but still closes", async () => {
+    const { props } = editProps();
+    const h = setup({}, props);
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    save();
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(patches(h.calls)).toEqual([]);
+  });
+
+  it("reconciles a swapped cycle and added module after the write", async () => {
+    const user = userEvent.setup();
+    const { props } = editProps({ cycle_id: null, module_ids: [] });
+    const h = setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      props
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cycle" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Cycle" }));
+    await user.click((await screen.findAllByRole("option", { name: "Sprint 4" }))[0]!);
+    await user.click(screen.getByRole("button", { name: "Modules" }));
+    await user.click((await screen.findAllByRole("option", { name: "Checkout" }))[0]!);
+    await user.clear(titleField());
+    await user.type(titleField(), "Moved bridges");
+    save();
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(patches(h.calls)).toEqual([{ name: "Moved bridges" }]);
+    expect(h.calls.some((call) => call.method === "POST" && call.url.includes("/cycle-issues/"))).toBe(true);
+    const modules = h.calls.find((call) => call.method === "POST" && call.url.includes(`/issues/${EDIT_ID}/modules/`));
+    expect((modules?.body as { modules?: string[] } | undefined)?.modules).toHaveLength(1);
+  });
+
+  it("detaches the old cycle and module when they are cleared", async () => {
+    const user = userEvent.setup();
+    const { props } = editProps();
+    const h = setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      props
+    );
+    // The pickers name the stored rows from their cached lists.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sprint 4" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Sprint 4" }));
+    await user.click(await screen.findByRole("option", { name: "No cycle" }));
+    await user.click(screen.getByRole("button", { name: "Checkout" }));
+    await user.click((await screen.findAllByRole("option", { name: "Checkout" }))[0]!);
+    save();
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(h.calls.some((call) => call.method === "DELETE" && call.url.includes("/cycle-issues/"))).toBe(true);
+    // The module clear travels through the same one-call diff: an empty
+    // attach list plus the stored id to detach (ISS-124).
+    const modules = h.calls.find((call) => call.method === "POST" && call.url.includes(`/issues/${EDIT_ID}/modules/`));
+    expect(modules?.body).toEqual({ modules: [], removed_modules: [PARENT_ID] });
+  });
+
+  it("closes an edit without the discard prompt", async () => {
+    const user = userEvent.setup();
+    const { props } = editProps();
+    const h = setup({}, props);
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await user.type(titleField(), " plus words");
+    await user.click(screen.getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(screen.queryByText("Save this draft?")).not.toBeInTheDocument();
+  });
+
+  it("keeps the modal open and toasts when the update fails", async () => {
+    const user = userEvent.setup();
+    const { onChanged, props } = editProps();
+    const h = setup({ editStatus: 500 }, props);
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await user.type(titleField(), "!");
+    save();
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't update the work item", expect.any(String)));
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("opens a draft edit without a project and PATCHes the draft", async () => {
+    const user = userEvent.setup();
+    const onChanged = vi.fn();
+    const h = setup(
+      {},
+      {
+        edit: {
+          kind: "draft",
+          id: "draft-1",
+          projectId: PROJECT_ATLAS,
+          snapshot: editRow({ name: "Draft title", description_html: "" }),
+          onChanged,
+        },
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Draft title"));
+    await user.clear(titleField());
+    await user.type(titleField(), "Draft renamed");
+    save();
+    await waitFor(() => expect(patches(h.calls)).toHaveLength(1));
+    expect(patches(h.calls)[0]).toEqual({ name: "Draft renamed" });
+    expect(h.calls.some((call) => call.url.includes("/draft-issues/draft-1/"))).toBe(true);
+    expect(h.calls.some((call) => call.url.includes("/cycle-issues/"))).toBe(false);
+  });
+});
+
+describe("WorkItemCreateDialog context prefill (ISS-124)", () => {
+  it("seeds the cycle from the route and links it after create", async () => {
+    const user = userEvent.setup();
+    const h = setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      { context: { cycleId: CYCLE_ID } }
+    );
+    await user.type(titleField(), "From a cycle");
+    // The context surface keeps the membership pickers out of the form.
+    expect(screen.queryByText("Cycle")).not.toBeInTheDocument();
+    expect(screen.queryByText("Modules")).not.toBeInTheDocument();
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toEqual({ name: "From a cycle" });
+    await waitFor(() =>
+      expect(h.calls.some((call) => call.url.includes(`/cycles/${CYCLE_ID}/cycle-issues/`))).toBe(true)
+    );
+    expect(h.calls.some((call) => call.url.includes("/modules/"))).toBe(false);
+  });
+
+  it("seeds the module from the route and links it after create", async () => {
+    const user = userEvent.setup();
+    const h = setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      { context: { moduleId: MODULE_ID } }
+    );
+    await user.type(titleField(), "From a module");
+    save();
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    const modules = h.calls.find((call) => call.url.includes(`/issues/${CREATED_ID}/modules/`));
+    expect(modules?.body).toEqual({ modules: [MODULE_ID] });
+    expect(h.calls.some((call) => call.url.includes("/cycle-issues/"))).toBe(false);
+  });
+
+  it("reopens the project form without context", async () => {
+    setup({}, { context: {} });
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Description" })).toBeInTheDocument());
+    expect(screen.queryByText("Cycle")).not.toBeInTheDocument();
+  });
+});
+
+describe("WorkItemCreateDialog advanced git branch (ISS-128)", () => {
+  it("starts collapsed and opens on request", async () => {
+    const user = userEvent.setup();
+    setup();
+    expect(screen.queryByLabelText("Work branch")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Advanced — git" }));
+    expect(screen.getByLabelText("Work branch")).toBeInTheDocument();
+  });
+
+  it("rejects an illegal branch and keeps the form open", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    await user.type(titleField(), "Branch guard");
+    await user.click(screen.getByRole("button", { name: "Advanced — git" }));
+    fireEvent.change(screen.getByLabelText("Work branch"), { target: { value: "bad branch!" } });
+    expect(screen.getByText(/Use only letters, numbers/)).toBeInTheDocument();
+    save();
+    expect(screen.getByText(/Use only letters, numbers/)).toBeInTheDocument();
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+    expect(posts(h.sent)).toHaveLength(0);
+  });
+
+  it("rejects a branch longer than the cap", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    await user.type(titleField(), "Too long");
+    await user.click(screen.getByRole("button", { name: "Advanced — git" }));
+    fireEvent.change(screen.getByLabelText("Work branch"), { target: { value: "b".repeat(129) } });
+    expect(screen.getByText(/128 characters/)).toBeInTheDocument();
+    save();
+    expect(posts(h.sent)).toHaveLength(0);
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("sends a valid branch with the create", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    await user.type(titleField(), "Branch here");
+    await user.click(screen.getByRole("button", { name: "Advanced — git" }));
+    fireEvent.change(screen.getByLabelText("Work branch"), { target: { value: "  team/feature-1  " } });
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toEqual({ name: "Branch here", git_work_branch: "team/feature-1" });
+  });
+
+  it("counts a branch as draft-worthy work", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole("button", { name: "Advanced — git" }));
+    fireEvent.change(screen.getByLabelText("Work branch"), { target: { value: "team/x" } });
+    await user.click(screen.getByRole("button", { name: "Discard" }));
+    expect(await screen.findByText("Save this draft?")).toBeInTheDocument();
+  });
+});
+
+describe("WorkItemCreateDialog type seam (ISS-129)", () => {
+  afterEach(() => {
+    resetIssueTypeExtension();
+  });
+
+  it("renders no type, template or extra-property slots in this build", () => {
+    setup();
+    expect(screen.queryByText("Issue type")).not.toBeInTheDocument();
+    expect(screen.queryByText("Template")).not.toBeInTheDocument();
+    expect(screen.queryByText("Additional properties")).not.toBeInTheDocument();
+  });
+
+  it("renders the registered slots and applies a template prefill", async () => {
+    const user = userEvent.setup();
+    registerIssueTypeExtension({
+      typePicker: () => <span data-testid="cloud-type">Type picker</span>,
+      templatePicker: () => <span data-testid="cloud-template">Template picker</span>,
+      additionalProperties: () => <span>Additional properties</span>,
+    });
+    setup();
+    expect(screen.getByTestId("cloud-type")).toBeInTheDocument();
+    expect(screen.getByTestId("cloud-template")).toBeInTheDocument();
+    expect(screen.getByText("Additional properties")).toBeInTheDocument();
+    void user;
+  });
+
+  it("applies a template's prefill to the form and the editor", async () => {
+    function TemplatePicker(props: IssueTypeExtensionProps) {
+      return (
+        <button
+          type="button"
+          onClick={() =>
+            props.onTemplateApply({
+              name: "From template",
+              descriptionHtml: "<p>template body</p>",
+              priority: "high",
+            })
+          }
+        >
+          Template
+        </button>
+      );
+    }
+    registerIssueTypeExtension({ templatePicker: TemplatePicker });
+    const user = userEvent.setup();
+    const h = setup();
+    await user.click(screen.getByRole("button", { name: "Template" }));
+    await waitFor(() => expect(titleField()).toHaveValue("From template"));
+    expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("template body");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ name: "From template", priority: "high" });
+  });
+});
+
+describe("WorkItemCreateDialog publish (ISS-130)", () => {
+  it("publishes a stored draft into its project", async () => {
+    const user = userEvent.setup();
+    const h = setup(
+      {},
+      {
+        draftId: "draft-1",
+        edit: {
+          kind: "draft",
+          id: "draft-1",
+          projectId: PROJECT_ATLAS,
+          snapshot: editRow({ name: "Draft to publish" }),
+        },
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Draft to publish"));
+    await user.click(screen.getByRole("button", { name: "Publish issue" }));
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(notifySuccess).toHaveBeenCalledWith("Draft published to project.", expect.any(String));
+    const promote = h.calls.find((call) => call.url.includes("/draft-to-issue/draft-1/"));
+    expect(promote?.body).toMatchObject({ name: "Draft to publish", project_id: PROJECT_ATLAS });
+  });
+
+  it("refuses to publish a draft with no project", async () => {
+    const user = userEvent.setup();
+    const onChanged = vi.fn();
+    const h = setup(
+      {},
+      {
+        draftId: "draft-1",
+        edit: { kind: "draft", id: "draft-1", projectId: null, snapshot: editRow({ name: "Loose draft" }), onChanged },
+      },
+      { seedPicker: false }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Loose draft"));
+    await user.click(screen.getByRole("button", { name: "Publish issue" }));
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(
+        "Couldn't publish the draft",
+        "Select a project before publishing this draft."
+      )
+    );
+    expect(h.calls.some((call) => call.url.includes("/draft-to-issue/"))).toBe(false);
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed promote and keeps the form", async () => {
+    const user = userEvent.setup();
+    const h = setup(
+      { publishStatus: 400 },
+      {
+        draftId: "draft-1",
+        edit: { kind: "draft", id: "draft-1", projectId: PROJECT_ATLAS, snapshot: editRow({ name: "Retry" }) },
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Retry"));
+    await user.click(screen.getByRole("button", { name: "Publish issue" }));
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(
+        "Couldn't publish the draft",
+        "Pick a project this draft can move into, then try again."
+      )
+    );
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("lets a project-less draft pick a project before publishing", async () => {
+    const user = userEvent.setup();
+    const h = setup(
+      {},
+      {
+        draftId: "draft-1",
+        edit: { kind: "draft", id: "draft-1", projectId: null, snapshot: editRow({ name: "Needs project" }) },
+      },
+      { seedPicker: false }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Needs project"));
+    await user.click(screen.getByRole("button", { name: "Select project" }));
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 200));
+    await user.click(await screen.findByRole("option", { name: /Beacon/ }));
+    await user.click(screen.getByRole("button", { name: "Publish issue" }));
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    const promote = h.calls.find((call) => call.url.includes("/draft-to-issue/draft-1/"));
+    expect(promote?.body).toMatchObject({ name: "Needs project", project_id: PROJECT_BEACON });
+  });
+});
+
+describe("WorkItemCreateDialog tab order (ISS-125)", () => {
+  /** The oracle's reading: every [tabindex] in the modal, in DOM order. */
+  function modalTabOrder(): string[] {
+    const scope = screen.getByRole("dialog", { name: /work item/ });
+    return Array.from(scope.querySelectorAll("[tabindex]")).map((element) => {
+      const labelled = element.getAttribute("placeholder") ?? element.getAttribute("id") ?? element.textContent ?? "";
+      return `${element.tagName.toLowerCase()}#${element.getAttribute("tabindex")}:${labelled.replace(/\s+/g, " ").trim().slice(0, 40)}`;
+    });
+  }
+
+  it("numbers the title, description, strip and footer in the old order", async () => {
+    setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      {}
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cycle" })).toBeInTheDocument());
+    expect(screen.getByRole("textbox", { name: "Description" })).toHaveAttribute("tabindex", "2");
+    const order = modalTabOrder();
+    expect(order).toContain("input#1:Title");
+    expect(order.some((entry) => entry.startsWith("button#4:"))).toBe(true);
+    expect(order.some((entry) => entry.startsWith("button#5:"))).toBe(true);
+    expect(order.some((entry) => entry.startsWith("button#6:"))).toBe(true);
+    expect(order).toContain("div#7:Labels");
+    expect(order).toContain("div#8:Start date");
+    expect(order).toContain("div#9:Due date");
+    expect(order).toContain("button#10:Cycle");
+    expect(order).toContain("button#11:Modules");
+    expect(order).toContain("div#15:Discard");
+    expect(order).toContain("div#16:Save");
+  });
+
+  it("hides the cycle and module stops on a project without those views", async () => {
+    setup();
+    await waitFor(() => expect(screen.getByText("State")).toBeInTheDocument());
+    const order = modalTabOrder();
+    expect(order.some((entry) => entry.includes("#10:"))).toBe(false);
+    expect(order.some((entry) => entry.includes("#11:"))).toBe(false);
   });
 });

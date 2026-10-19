@@ -13,7 +13,8 @@
 
 import * as React from "react";
 
-import { loadCommentExtensions, loadDescriptionExtensions } from "./extensions.js";
+import { loadCommentExtensions, loadDescriptionExtensions, loadIssueDescriptionExtensions } from "./extensions.js";
+import { mentionQueryAt } from "./mention.js";
 import { isStoredHtmlEmpty } from "./sanitize.js";
 
 /** One Tiptap extension instance, derived from the loader's own type. */
@@ -21,9 +22,13 @@ type EditorExtension =
   | Awaited<ReturnType<typeof loadDescriptionExtensions>>[number]
   | Awaited<ReturnType<typeof loadCommentExtensions>>[number];
 
-/** The slice of the Tiptap editor the composer needs (image inserts). */
+/** The slice of the Tiptap editor the composer needs. */
 export interface RichTextEditorHandle {
   insertImage: (src: string) => void;
+  /** Insert a person mention at the caret (ISS-127). */
+  insertMention: (target: { id: string; name: string }) => void;
+  /** Text between the paragraph start and the caret, for @-queries. */
+  textBeforeCaret: () => string;
 }
 
 export interface RichTextEditorProps {
@@ -42,22 +47,67 @@ export interface RichTextEditorProps {
   className?: string | undefined;
   /** Receives an insert handle once the editor exists. */
   onReady?: ((handle: RichTextEditorHandle) => void) | undefined;
+  /** Fires with the @-query under the caret on every edit (ISS-127). */
+  onMentionQuery?: ((query: string | null) => void) | undefined;
+  /** Key handling; returning true means the editor consumed the key. */
+  handleKeyDown?: ((event: KeyboardEvent) => boolean) | undefined;
+  /** Explicit keyboard position inside a dialog's tab order (ISS-125). */
+  tabIndex?: number | undefined;
 }
 
 interface TiptapChain {
-  focus: () => { setImage: (options: { src: string }) => { run: () => void } };
+  focus: () => TiptapChain;
+  setImage: (options: { src: string }) => { run: () => void };
+  insertContent: (value: EditorContent) => { run: () => void };
+}
+
+/** Anything Tiptap's insertContent accepts; the mention node is plain JSON. */
+type EditorContent = { type: string; attrs: Record<string, string> } | string;
+
+interface EditorSelectionLike {
+  $from: {
+    parentOffset: number;
+    parent: { textBetween: (from: number, to: number, block?: string, leaf?: string) => string };
+  };
 }
 
 interface EditorLike {
   chain: () => TiptapChain;
+  state: { selection: EditorSelectionLike };
 }
 
 function insertImage(editor: EditorLike, src: string): void {
   editor.chain().focus().setImage({ src }).run();
 }
 
+function insertMention(editor: EditorLike, target: { id: string; name: string }): void {
+  editor
+    .chain()
+    .focus()
+    .insertContent({
+      type: "mention",
+      attrs: { id: target.id, entity_identifier: target.id, entity_name: "user_mention" },
+    })
+    .run();
+}
+
+/** The @-query under the caret, or null (ISS-127). */
+function readQuery(editor: EditorLike): string | null {
+  const query = mentionQueryAt(textBeforeCaret(editor));
+  return query === null ? null : query.text;
+}
+
+function textBeforeCaret(editor: EditorLike): string {
+  const { $from } = editor.state.selection;
+  return $from.parent.textBetween(0, $from.parentOffset, undefined, "\ufffc");
+}
+
 function toHandle(editor: EditorLike): RichTextEditorHandle {
-  return { insertImage: (src: string) => insertImage(editor, src) };
+  return {
+    insertImage: (src: string) => insertImage(editor, src),
+    insertMention: (target: { id: string; name: string }) => insertMention(editor, target),
+    textBeforeCaret: () => textBeforeCaret(editor),
+  };
 }
 
 /**
@@ -85,12 +135,19 @@ async function loadEditor(
     className,
     extensions,
     onEditorReady,
+    onMentionQuery,
+    handleKeyDown,
+    tabIndex,
   }: BodyProps): React.ReactElement {
     const [empty, setEmpty] = React.useState(() => isStoredHtmlEmpty(initialHtml));
     const onChangeRef = React.useRef(onChange);
     onChangeRef.current = onChange;
     const readyRef = React.useRef(onEditorReady);
     readyRef.current = onEditorReady;
+    const mentionRef = React.useRef(onMentionQuery);
+    mentionRef.current = onMentionQuery;
+    const keyRef = React.useRef(handleKeyDown);
+    keyRef.current = handleKeyDown;
     const editor = useEditor(
       {
         extensions,
@@ -104,11 +161,18 @@ async function loadEditor(
         immediatelyRender: false,
         autofocus: autoFocus ? "end" : false,
         editorProps: {
-          attributes: { "aria-label": label, class: "rich-text-content min-h-24 outline-none" },
+          attributes: {
+            "aria-label": label,
+            ...(tabIndex === undefined ? {} : { tabindex: String(tabIndex) }),
+            class: "rich-text-content min-h-24 outline-none",
+          },
+          handleKeyDown: (_view, event) => keyRef.current?.(event) ?? false,
         },
         onUpdate: ({ editor: current }) => {
           setEmpty(current.isEmpty);
           onChangeRef.current(current.getHTML());
+          const finder = mentionRef.current;
+          if (finder !== undefined) finder(readQuery(current));
         },
       },
       [extensions]
@@ -135,7 +199,13 @@ async function loadEditor(
     );
   }
 
-  function TiptapEditor({ onReady, ...rest }: RichTextEditorProps): React.ReactElement {
+  function TiptapEditor({
+    onReady,
+    onMentionQuery,
+    handleKeyDown,
+    tabIndex,
+    ...rest
+  }: RichTextEditorProps): React.ReactElement {
     const handleRef = React.useRef(onReady);
     handleRef.current = onReady;
     // Callers keep the newest handle: an editor instance can be replaced
@@ -143,7 +213,16 @@ async function loadEditor(
     const onEditorReady = React.useCallback((editor: EditorLike) => {
       handleRef.current?.(toHandle(editor));
     }, []);
-    return <EditorBody {...rest} extensions={extensions} onEditorReady={onEditorReady} />;
+    return (
+      <EditorBody
+        {...rest}
+        extensions={extensions}
+        onEditorReady={onEditorReady}
+        onMentionQuery={onMentionQuery}
+        handleKeyDown={handleKeyDown}
+        tabIndex={tabIndex}
+      />
+    );
   }
 
   return { default: TiptapEditor };
@@ -157,6 +236,9 @@ async function loadEditor(
  * chunk that touches the barrel, including the initial chain.
  */
 export const RichTextEditor = /* #__PURE__ */ React.lazy(() => loadEditor(loadDescriptionExtensions));
+
+/** Work-item description editor: images and mentions (ISS-127). */
+export const IssueDescriptionEditor = /* #__PURE__ */ React.lazy(() => loadEditor(loadIssueDescriptionExtensions));
 
 /**
  * The comment editor: the same lazy surface with inline images (ISS-197).

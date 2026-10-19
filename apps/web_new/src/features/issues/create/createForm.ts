@@ -16,11 +16,7 @@ import { TITLE_MAX_LENGTH, type CreateProjectOption } from "./createProjects.js"
 
 export { TITLE_MAX_LENGTH } from "./createProjects.js";
 export type { CreateProjectLike, CreateProjectOption } from "./createProjects.js";
-export {
-  selectCreatableProjects,
-  selectCreatableWorkItemProjects,
-  toCreateProjectOption,
-} from "./createProjects.js";
+export { selectCreatableProjects, selectCreatableWorkItemProjects, toCreateProjectOption } from "./createProjects.js";
 
 /** How long the assistant title helper may run before the dialog gives up. */
 export const TITLE_GENERATION_TIMEOUT_MS = 30_000;
@@ -43,6 +39,8 @@ export interface CreateFormState {
   estimatePoint: string | null;
   execution: ExecutionSelection | null;
   parentId: string | null;
+  /** Optional remote branch the item pins to (ISS-128). */
+  gitWorkBranch: string;
 }
 
 /** A blank form. `descriptionHtml` seeds the editor's default content. */
@@ -62,6 +60,7 @@ export function emptyCreateForm(projectId: string | null, descriptionHtml = ""):
     estimatePoint: null,
     execution: null,
     parentId: null,
+    gitWorkBranch: "",
   };
 }
 
@@ -89,6 +88,22 @@ export function resolveProjectId(projects: readonly CreateProjectOption[], prefe
  */
 export function targetProjectId(projectId: string | null, available: readonly CreateProjectOption[]): string {
   return projectId ?? available[0]?.id ?? "";
+}
+
+/** Longest git branch name the API accepts (ISS-128). */
+export const GIT_BRANCH_MAX_LENGTH = 128;
+/** Characters a branch name may carry; empty means "create a new branch". */
+const GIT_BRANCH_PATTERN = /^[A-Za-z0-9._/-]*$/;
+
+/**
+ * Inline message for the advanced branch field, or null when it may be
+ * sent (ISS-128). Empty is valid: the run creates a branch of its own.
+ */
+export function gitBranchError(branch: string): string | null {
+  if (branch.length > GIT_BRANCH_MAX_LENGTH)
+    return `Keep the branch name to ${GIT_BRANCH_MAX_LENGTH} characters or fewer.`;
+  if (!GIT_BRANCH_PATTERN.test(branch)) return "Use only letters, numbers, '.', '_', '/' and '-'.";
+  return null;
 }
 
 /** Trimmed title, or empty when the field holds only whitespace. */
@@ -153,6 +168,8 @@ export function buildCreatePayload(form: CreateFormState): IssueCreateInput {
     payload.assigned_pod_id = target.assigned_pod_id;
     payload.agent_executor = target.agent_executor;
   }
+  const branch = form.gitWorkBranch.trim();
+  if (branch !== "") payload.git_work_branch = branch;
   return payload;
 }
 
@@ -213,5 +230,6 @@ export function hasDraftWorthKeeping(form: CreateFormState): boolean {
   if (form.estimatePoint !== null) return true;
   if (form.execution !== null) return true;
   if (form.parentId !== null) return true;
+  if (form.gitWorkBranch.trim() !== "") return true;
   return false;
 }

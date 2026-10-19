@@ -4,8 +4,10 @@
 // Public API of the shared editor: the read surface, the lazy editing
 // surface, and the HTML helpers around stored rich text.
 
-export { loadCommentExtensions, loadDescriptionExtensions } from "./extensions.js";
-export { CommentRichTextEditor, RichTextEditor } from "./RichTextEditor.js";
+export { loadCommentExtensions, loadDescriptionExtensions, loadIssueDescriptionExtensions } from "./extensions.js";
+export { CommentRichTextEditor, IssueDescriptionEditor, RichTextEditor } from "./RichTextEditor.js";
+export { MENTION_CONTENT_TAGS, MENTION_ENTITY, MENTION_TAG, mentionAttributes, mentionQueryAt } from "./mention.js";
+export type { MentionQuery, MentionTarget } from "./mention.js";
 export type { RichTextEditorHandle, RichTextEditorProps } from "./RichTextEditor.js";
 export { RichTextView } from "./RichTextView.js";
 export type { RichTextViewProps } from "./RichTextView.js";
