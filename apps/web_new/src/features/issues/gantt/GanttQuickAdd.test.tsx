@@ -54,5 +54,25 @@ describe("GanttQuickAdd", () => {
     fireEvent.submit(screen.getByTestId("gantt-quick-add-form"));
     await waitFor(() => expect(onCreate).toHaveBeenCalled());
     expect(screen.getByTestId("gantt-quick-add-form")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Work item title")).toHaveValue("Bar");
+  });
+
+  it("clears the title only after a successful create", async () => {
+    let resolve: (() => void) | null = null;
+    const onCreate = vi.fn(
+      () =>
+        new Promise<void>((done) => {
+          resolve = done;
+        })
+    );
+    render(<GanttQuickAdd enabled onCreate={onCreate} />);
+    fireEvent.click(screen.getByText("New work item"));
+    const field = screen.getByPlaceholderText("Work item title");
+    fireEvent.change(field, { target: { value: "Bar" } });
+    fireEvent.submit(screen.getByTestId("gantt-quick-add-form"));
+    await waitFor(() => expect(onCreate).toHaveBeenCalled());
+    expect(field).toHaveValue("Bar");
+    resolve!();
+    await waitFor(() => expect(screen.queryByTestId("gantt-quick-add-form")).not.toBeInTheDocument());
   });
 });

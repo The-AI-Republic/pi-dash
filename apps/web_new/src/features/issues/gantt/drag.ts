@@ -139,21 +139,43 @@ export function movedDates(row: GestureDates, dayDelta: number): GestureDates | 
   };
 }
 
+/** A resize gesture: the full window to draw, and only the ends to write. */
+export interface ResizeResult {
+  /** Both ends of the drawn window, filling a missing end for display. */
+  window: GestureDates;
+  /**
+   * The ends the gesture persists. A start-only row dragged by the left
+   * handle writes its start and leaves the target absent; a target-only
+   * row dragged by the right handle writes its target and leaves the
+   * start absent. The non-dragged end is never invented.
+   */
+  write: GestureDates;
+}
+
 /**
  * Resize one end by a day offset (ISS-052/053). The dragged end snaps to
  * whole days and never crosses the fixed end, so the window keeps at
- * least one day; a half-dated row gains the missing end at its base
- * window before the offset applies.
+ * least one day. A half-dated row gains the missing end for the preview,
+ * and that end is persisted only when it is the one being dragged (the
+ * old app's `shouldUpdateHalfBlock` rule).
  */
-export function resizedDates(row: GestureDates, side: "left" | "right", dayDelta: number): GestureDates | null {
+export function resizedDates(row: GestureDates, side: "left" | "right", dayDelta: number): ResizeResult | null {
   const base = baseWindow(row);
   if (base === null || base.startDate === null || base.targetDate === null) return null;
   if (side === "left") {
     const startDate = addDays(base.startDate, dayDelta);
-    return { startDate: startDate > base.targetDate ? base.targetDate : startDate, targetDate: base.targetDate };
+    const clamped = startDate > base.targetDate ? base.targetDate : startDate;
+    return {
+      window: { startDate: clamped, targetDate: base.targetDate },
+      write: { startDate: clamped, targetDate: row.targetDate },
+    };
   }
   const targetDate = addDays(base.targetDate, dayDelta);
-  return { startDate: base.startDate, targetDate: targetDate < base.startDate ? base.startDate : targetDate };
+  const clamped = targetDate < base.startDate ? base.startDate : targetDate;
+  return {
+    window: { startDate: base.startDate, targetDate: clamped },
+    write: { startDate: row.startDate, targetDate: clamped },
+  };
 }
 
 /** Date under one resize handle, for the floating preview (ISS-052). */

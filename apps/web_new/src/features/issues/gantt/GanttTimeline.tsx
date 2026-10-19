@@ -24,6 +24,12 @@ export interface GanttTimelineProps {
   issues: readonly IssueListItem[];
   totalCount: number;
   prefs: DisplayPrefs;
+  /**
+   * True when the timeline belongs to a completed cycle; the quick-add
+   * stays hidden (ISS-055). Project and saved-view mounts leave it false,
+   * and the cycle route passes the cycle's status when it lands.
+   */
+  completedCycle?: boolean;
 }
 
 /** The timeline reads the profile's week start; the layout root owns prefs. */
@@ -34,6 +40,7 @@ export function GanttTimeline({
   issues,
   totalCount,
   prefs,
+  completedCycle = false,
 }: GanttTimelineProps): React.ReactElement {
   const weekStart = useWeekStart();
   return (
@@ -46,6 +53,7 @@ export function GanttTimeline({
         totalCount={totalCount}
         prefs={prefs}
         weekStart={weekStart}
+        completedCycle={completedCycle}
       />
     </React.Suspense>
   );

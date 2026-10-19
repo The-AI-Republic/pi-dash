@@ -12,7 +12,6 @@
 import type { IssueListItem } from "@pidash/api-client";
 import * as React from "react";
 
-import { usePermissions } from "../../../core/session/index.js";
 import { useCreateWorkItem } from "../api/create.js";
 import { todayIsoDay } from "../dropdowns/calendar.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
@@ -26,9 +25,14 @@ import { addDays } from "./scale.js";
 import { stateColorOf, useGanttPeek, useGanttStates, useProjectMemberRole } from "./useGanttData.js";
 import { useGanttMutations } from "./useGanttMutations.js";
 
-/** Orders that make the sidebar reorder meaningful (ISS-050). */
+/**
+ * Orders that make the sidebar reorder meaningful (ISS-050). Only the
+ * ascending manual rank enables drag: a descending `-sort_order` list
+ * would insert a rank that the server's ascending sort cannot reproduce,
+ * so the gesture is inert there.
+ */
 export function isManualOrder(orderBy: string | null | undefined): boolean {
-  return orderBy === "sort_order" || orderBy === "-sort_order";
+  return orderBy === "sort_order";
 }
 
 export interface GanttLayoutProps {
@@ -87,12 +91,10 @@ export function GanttLayout({
   const states = useGanttStates(workspaceSlug, projectId);
   const barColors = React.useMemo(() => barColorsFor(rows, states), [rows, states]);
   const { peek, openRow, closePeek } = useGanttPeek(workspaceSlug);
-  const permissions = usePermissions(workspaceSlug);
   const projectRole = useProjectMemberRole(workspaceSlug, projectId);
   const mutations = useGanttMutations(workspaceSlug, projectId);
   const create = useCreateWorkItem(workspaceSlug);
   const canEdit = canEditTimeline({
-    workspaceRole: permissions.role,
     projectRole,
     archived: false,
   });

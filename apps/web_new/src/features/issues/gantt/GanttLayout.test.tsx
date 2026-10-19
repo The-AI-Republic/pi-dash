@@ -85,6 +85,7 @@ function renderLayout(
     totalCount?: number;
     issues?: IssueListItem[];
     projectRole?: number | null;
+    workspaceRole?: number;
     completedCycle?: boolean;
   } = {}
 ) {
@@ -113,7 +114,7 @@ function renderLayout(
   ]);
   queryClient.setQueryData(issueKeys.detail(SLUG, ISSUES[0]!.id), { ...issue(), id: ISSUES[0]!.id });
   queryClient.setQueryData(sessionKeys.workspaces, [
-    { id: "ws-1", name: "Acme", slug: SLUG, logo_url: null, total_members: 3, role: 15 },
+    { id: "ws-1", name: "Acme", slug: SLUG, logo_url: null, total_members: 3, role: options.workspaceRole ?? 15 },
   ]);
   queryClient.setQueryData(
     authKeys.projectRoles(SLUG),
@@ -266,6 +267,23 @@ describe("GanttLayout edit standing (ISS-050–055)", () => {
     expect(screen.getByTestId("gantt-sidebar")).not.toHaveAttribute("data-reorder");
     // Bars still move and lanes still plant outside manual order.
     expect(screen.getAllByTestId("gantt-resize-left")).toHaveLength(1);
+  });
+
+  it("treats a descending manual sort as non-manual for reorder (ISS-050)", () => {
+    renderLayout({
+      projectRole: 15,
+      orderBy: "-sort_order",
+      issues: [issue({ start_date: "2026-10-01", target_date: "2026-10-05" }), ...ISSUES.slice(1)],
+    });
+    expect(screen.getByTestId("gantt-sidebar")).not.toHaveAttribute("data-reorder");
+  });
+
+  it("gives a workspace admin with no project membership no edit affordance (ISS-058)", () => {
+    renderLayout({ workspaceRole: 20, projectRole: null });
+    expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("gantt-resize-left")).toHaveLength(0);
+    expect(screen.queryAllByTestId("gantt-undated-lane")).toHaveLength(0);
+    expect(screen.getByTestId("gantt-sidebar")).not.toHaveAttribute("data-reorder");
   });
 
   it("hides the quick-add in a completed cycle", () => {

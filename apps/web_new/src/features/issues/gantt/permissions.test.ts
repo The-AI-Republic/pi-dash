@@ -8,7 +8,7 @@ import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/permi
 import { canEditTimeline, type TimelineStanding } from "./permissions.js";
 
 function standing(overrides: Partial<TimelineStanding> = {}): TimelineStanding {
-  return { workspaceRole: ROLE_GUEST, projectRole: ROLE_GUEST, archived: false, ...overrides };
+  return { projectRole: ROLE_GUEST, archived: false, ...overrides };
 }
 
 describe("canEditTimeline", () => {
@@ -17,14 +17,13 @@ describe("canEditTimeline", () => {
     expect(canEditTimeline(standing({ projectRole: ROLE_ADMIN }))).toBe(true);
   });
 
-  it("allows a workspace admin without a project row", () => {
-    expect(canEditTimeline(standing({ workspaceRole: ROLE_ADMIN, projectRole: null }))).toBe(true);
-  });
-
   it("denies guests and non-members", () => {
     expect(canEditTimeline(standing())).toBe(false);
     expect(canEditTimeline(standing({ projectRole: null }))).toBe(false);
-    expect(canEditTimeline(standing({ workspaceRole: null, projectRole: null }))).toBe(false);
+  });
+
+  it("denies a project member whose role is below member", () => {
+    expect(canEditTimeline(standing({ projectRole: ROLE_GUEST }))).toBe(false);
   });
 
   it("denies everything on an archived project", () => {

@@ -41,9 +41,9 @@ export function GanttQuickAdd({
     const name = title.trim();
     if (name === "" || saving) return;
     setSaving(true);
-    setTitle("");
     try {
       await onCreate(name);
+      setTitle("");
       setOpen(false);
     } catch {
       // The create seam toasts its own failure; the field stays open so

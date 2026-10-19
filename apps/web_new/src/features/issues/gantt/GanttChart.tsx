@@ -98,7 +98,10 @@ interface BarDrag {
   side: "move" | "left" | "right";
   startX: number;
   origin: GestureDates;
+  /** The window drawn under the pointer, including a filled missing end. */
   dates: GestureDates;
+  /** The ends to persist; the non-dragged end may stay missing. */
+  write: GestureDates;
 }
 
 function SegmentRow({
@@ -175,6 +178,7 @@ function Bar({
   drag,
   colors,
   canEdit,
+  openable,
   onOpen,
   onBeginDrag,
   range,
@@ -185,6 +189,8 @@ function Bar({
   drag: BarDrag | null;
   colors: Readonly<Record<string, string>> | undefined;
   canEdit: boolean;
+  /** False for an unconfirmed create: the bar draws but never opens (ISS-055). */
+  openable: boolean;
   onOpen: () => void;
   onBeginDrag: (event: React.MouseEvent, side: "move" | "left" | "right") => void;
   range: Parameters<typeof dayColumns>[0];
@@ -215,7 +221,6 @@ function Bar({
       id={`gantt-block-${row.id}`}
       data-testid="gantt-bar"
       role="button"
-      tabIndex={0}
       aria-label={row.name}
       title={row.name}
       style={{
@@ -224,13 +229,18 @@ function Bar({
         backgroundColor: colors?.[row.id] ?? "var(--accent)",
       }}
       onClick={() => {
-        if (drag === null) onOpen();
+        if (drag === null && openable) onOpen();
       }}
       onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") onOpen();
+        if (openable && (event.key === "Enter" || event.key === " ")) onOpen();
       }}
       onMouseDown={(event) => onBeginDrag(event, "move")}
-      className="group/bar absolute top-1/2 h-6 -translate-y-1/2 cursor-pointer overflow-visible rounded-(--radius-control) opacity-90 hover:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent)"
+      aria-disabled={openable ? undefined : true}
+      tabIndex={openable ? 0 : -1}
+      className={cn(
+        "group/bar absolute top-1/2 h-6 -translate-y-1/2 overflow-visible rounded-(--radius-control) opacity-90 hover:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent)",
+        openable ? "cursor-pointer" : "cursor-default"
+      )}
     >
       <span className="text-caption block truncate px-(--space-2) leading-6 text-(--on-accent)">{row.name}</span>
       {canEdit ? (
@@ -368,23 +378,31 @@ function GanttLanes({
     event.preventDefault();
     event.stopPropagation();
     const origin = { startDate: row.startIso, targetDate: row.targetIso };
-    setDrag({ issueId: row.id, side, startX: event.clientX, origin, dates: origin });
+    setDrag({ issueId: row.id, side, startX: event.clientX, origin, dates: origin, write: origin });
   };
 
   React.useEffect(() => {
     if (drag === null) return;
     const onMove = (event: MouseEvent) => {
       const delta = snappedDayDelta(event.clientX - drag.startX, dayWidth);
-      const dates = drag.side === "move" ? movedDates(drag.origin, delta) : resizedDates(drag.origin, drag.side, delta);
-      if (dates !== null) setDrag((current) => (current === null ? current : { ...current, dates }));
+      if (drag.side === "move") {
+        const dates = movedDates(drag.origin, delta);
+        if (dates !== null) setDrag((current) => (current === null ? current : { ...current, dates, write: dates }));
+        return;
+      }
+      const resized = resizedDates(drag.origin, drag.side, delta);
+      if (resized !== null)
+        setDrag((current) =>
+          current === null ? current : { ...current, dates: resized.window, write: resized.write }
+        );
     };
     const onUp = () => {
       const current = drag;
       setDrag(null);
       const changed =
-        current.dates.startDate !== current.origin.startDate || current.dates.targetDate !== current.origin.targetDate;
+        current.write.startDate !== current.origin.startDate || current.write.targetDate !== current.origin.targetDate;
       if (changed)
-        onDatesChange(current.issueId, { startDate: current.dates.startDate, endDate: current.dates.targetDate });
+        onDatesChange(current.issueId, { startDate: current.write.startDate, endDate: current.write.targetDate });
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") setDrag(null);
@@ -419,9 +437,9 @@ function GanttLanes({
               peekedId === row.id && "bg-(--accent-subtle)/50"
             )}
           >
-            {row.unconfirmed ? (
-              // An unconfirmed create is not a real issue yet: its lane
-              // pulses instead of offering dates or a bar (ISS-006/049).
+            {row.unconfirmed && box === null ? (
+              // An unconfirmed create with no dates is not a real issue
+              // yet: its lane pulses instead of offering dates (ISS-006/049).
               <span
                 aria-hidden="true"
                 data-testid="gantt-lane-unconfirmed"
@@ -440,7 +458,10 @@ function GanttLanes({
                 box={box}
                 drag={drag?.issueId === row.id ? drag : null}
                 colors={barColors}
-                canEdit={canEdit}
+                // A quick-add bar shows immediately but stays inert until
+                // the server confirms the row (ISS-055).
+                canEdit={canEdit && !row.unconfirmed}
+                openable={!row.unconfirmed}
                 onOpen={() => onOpenRow(row)}
                 onBeginDrag={(event, side) => beginDrag(event, row, side)}
                 range={range}

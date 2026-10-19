@@ -123,8 +123,9 @@ describe("barBox", () => {
     expect(barBox({ ...row, startIso: null, targetIso: null }, RANGE, "week")).toBeNull();
   });
 
-  it("never draws a bar for an unconfirmed row", () => {
-    expect(hasBar({ ...row, unconfirmed: true })).toBe(false);
+  it("draws an unconfirmed quick-add's seeded bar immediately (ISS-055)", () => {
+    expect(hasBar({ ...row, unconfirmed: true })).toBe(true);
+    expect(hasBar({ ...row, unconfirmed: true, startIso: null, targetIso: null })).toBe(false);
   });
 
   it("decides visibility against the visible slice", () => {

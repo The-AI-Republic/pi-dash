@@ -156,29 +156,55 @@ describe("resizedDates (ISS-052/053)", () => {
   const row = { startDate: "2026-10-01", targetDate: "2026-10-05" };
 
   it("moves the left end and keeps the target", () => {
-    expect(resizedDates(row, "left", 2)).toEqual({ startDate: "2026-10-03", targetDate: "2026-10-05" });
-  });
-
-  it("moves the right end and keeps the start", () => {
-    expect(resizedDates(row, "right", 3)).toEqual({ startDate: "2026-10-01", targetDate: "2026-10-08" });
-  });
-
-  it("never narrows below one day", () => {
-    expect(resizedDates(row, "left", 99)).toEqual({ startDate: "2026-10-05", targetDate: "2026-10-05" });
-    expect(resizedDates(row, "right", -99)).toEqual({ startDate: "2026-10-01", targetDate: "2026-10-01" });
-  });
-
-  it("fills a missing start when resizing left", () => {
-    expect(resizedDates({ startDate: null, targetDate: "2026-10-05" }, "left", -1)).toEqual({
-      startDate: "2026-10-03",
-      targetDate: "2026-10-05",
+    expect(resizedDates(row, "left", 2)).toEqual({
+      window: { startDate: "2026-10-03", targetDate: "2026-10-05" },
+      write: { startDate: "2026-10-03", targetDate: "2026-10-05" },
     });
   });
 
-  it("fills a missing target when resizing right", () => {
+  it("moves the right end and keeps the start", () => {
+    expect(resizedDates(row, "right", 3)).toEqual({
+      window: { startDate: "2026-10-01", targetDate: "2026-10-08" },
+      write: { startDate: "2026-10-01", targetDate: "2026-10-08" },
+    });
+  });
+
+  it("never narrows below one day", () => {
+    expect(resizedDates(row, "left", 99)?.window).toEqual({ startDate: "2026-10-05", targetDate: "2026-10-05" });
+    expect(resizedDates(row, "right", -99)?.window).toEqual({ startDate: "2026-10-01", targetDate: "2026-10-01" });
+  });
+
+  it("fills a missing start when the left handle drags it", () => {
+    expect(resizedDates({ startDate: null, targetDate: "2026-10-05" }, "left", -1)).toEqual({
+      window: { startDate: "2026-10-03", targetDate: "2026-10-05" },
+      write: { startDate: "2026-10-03", targetDate: "2026-10-05" },
+    });
+  });
+
+  it("fills a missing target when the right handle drags it", () => {
     expect(resizedDates({ startDate: "2026-10-01", targetDate: null }, "right", 2)).toEqual({
-      startDate: "2026-10-01",
-      targetDate: "2026-10-04",
+      window: { startDate: "2026-10-01", targetDate: "2026-10-04" },
+      write: { startDate: "2026-10-01", targetDate: "2026-10-04" },
+    });
+  });
+
+  it("does not invent the other end when the left handle fills a start", () => {
+    // A start-only row dragged by its left handle keeps the missing target
+    // missing, even though the preview draws a one-day window (ISS-052).
+    expect(resizedDates({ startDate: null, targetDate: "2026-10-05" }, "left", -1)?.write.targetDate).toBe(
+      "2026-10-05"
+    );
+    expect(resizedDates({ startDate: "2026-10-01", targetDate: null }, "left", 2)).toEqual({
+      window: { startDate: "2026-10-02", targetDate: "2026-10-02" },
+      write: { startDate: "2026-10-02", targetDate: null },
+    });
+  });
+
+  it("does not invent the other end when the right handle fills a target", () => {
+    expect(resizedDates({ startDate: "2026-10-01", targetDate: null }, "right", 2)?.write.startDate).toBe("2026-10-01");
+    expect(resizedDates({ startDate: null, targetDate: "2026-10-05" }, "right", -2)).toEqual({
+      window: { startDate: "2026-10-04", targetDate: "2026-10-04" },
+      write: { startDate: null, targetDate: "2026-10-04" },
     });
   });
 
