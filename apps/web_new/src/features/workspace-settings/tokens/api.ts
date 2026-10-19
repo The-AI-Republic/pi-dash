@@ -30,6 +30,7 @@ import { TOKEN_CREATE_FAILED_TITLE, TOKEN_DELETE_FAILED_TITLE, TOKEN_DELETED_NOT
 export const personalTokenKeys = {
   all: ["personal-api-tokens"] as const,
   list: ["personal-api-tokens", "list"] as const,
+  create: ["personal-api-tokens", "create"] as const,
 };
 
 /** The caller's own non-service tokens, newest first. */
@@ -45,14 +46,19 @@ export function usePersonalTokens() {
   return useQuery(personalTokensQueryOptions(getAppClient()));
 }
 
-/** Append the server's answered row unless an identical row is already cached. */
+/**
+ * Append the server's answered row unless an identical row is already
+ * cached. The one-time secret is dropped: the reveal holds it, and the list
+ * cache must only ever carry metadata (WSET-027).
+ */
 export function appendPersonalToken(
   previous: PersonalApiTokenList | undefined,
   created: PersonalApiToken
 ): PersonalApiTokenList {
-  if (previous === undefined) return [created];
-  if (previous.some((row) => row.id === created.id)) return previous;
-  return [created, ...previous];
+  const { token: _secret, ...row } = created as PersonalApiToken & { token?: string | undefined };
+  if (previous === undefined) return [row];
+  if (previous.some((existing) => existing.id === row.id)) return previous;
+  return [row, ...previous];
 }
 
 /** Remove one row from a cached list. */
@@ -73,6 +79,7 @@ export function tokenFailureDetail(error: unknown): string | undefined {
 export function useCreatePersonalToken() {
   const queryClient = useQueryClient();
   return useMutation<CreatedPersonalApiToken, Error, CreatePersonalApiTokenInput>({
+    mutationKey: personalTokenKeys.create,
     mutationFn: (input) => createPersonalApiToken(getAppClient(), input),
     onSuccess: (created) => {
       queryClient.setQueryData(personalTokenKeys.list, (previous: PersonalApiTokenList | undefined) =>

@@ -292,6 +292,56 @@ describe("CreateTokenDialog create and reveal", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it("keeps the reveal open when the backdrop is pressed", async () => {
+    const created = createdToken();
+    const onClose = vi.fn();
+    const { wrapper } = harness((url) => json(url, JSON.stringify(created), 201));
+    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:backdrop"), revokeObjectURL: vi.fn() });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const user = userEvent.setup();
+    render(<CreateTokenDialog open onClose={onClose} now={NOW} />, { wrapper });
+    await user.type(screen.getByPlaceholderText("Title"), "Deploy bot");
+    await user.click(screen.getByRole("switch", { name: "Never expires" }));
+    await user.click(screen.getByRole("button", { name: "Generate token" }));
+    await screen.findByRole("heading", { name: "Key created" });
+    const backdrop = document.querySelector("[data-base-ui-backdrop]") ?? document.body;
+    fireEvent.pointerDown(backdrop as Element);
+    fireEvent.click(backdrop as Element);
+    expect(screen.getByRole("heading", { name: "Key created" })).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("drops the secret from the mutation cache once the reveal closes", async () => {
+    const created = createdToken();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) return json(url, '{"csrf_token":"csrf"}');
+      return json(url, JSON.stringify(created), 201);
+    }) as never);
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={queryClient}>
+        <React.Fragment>{children}</React.Fragment>
+        <ToastHost manager={getToastManager()} />
+      </QueryClientProvider>
+    );
+    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:cache"), revokeObjectURL: vi.fn() });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const user = userEvent.setup();
+    render(<CreateTokenDialog open onClose={() => undefined} now={NOW} />, { wrapper });
+    await user.type(screen.getByPlaceholderText("Title"), "Deploy bot");
+    await user.click(screen.getByRole("switch", { name: "Never expires" }));
+    await user.click(screen.getByRole("button", { name: "Generate token" }));
+    await screen.findByRole("heading", { name: "Key created" });
+    expect(screen.getByTestId("token-secret")).toHaveTextContent("pi_dash_api_abc123");
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Key created" })).toBeNull());
+    const mutations = queryClient
+      .getMutationCache()
+      .getAll()
+      .map((mutation) => mutation.state.data);
+    expect(mutations.some((data) => JSON.stringify(data ?? null).includes("pi_dash_api_abc123"))).toBe(false);
+  });
+
   it("rejects a submit while the request is in flight and ignores pre-reveal dismissal", async () => {
     let release: (() => void) | undefined;
     const gate = new Promise<void>((resolve) => {

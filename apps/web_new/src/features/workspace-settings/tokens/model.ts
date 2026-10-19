@@ -87,7 +87,13 @@ export function earliestCustomDay(now: Date = new Date()): string {
 
 function addMonths(date: Date, months: number): Date {
   const result = new Date(date.getTime());
+  // A preset adds calendar months and clamps to the last day of the
+  // target month, the way month arithmetic reads: Jan 31 plus one month
+  // is Feb 28/29, never Mar 2/3 (parity: the old app adds months, it
+  // does not roll into the following month).
+  const day = result.getDate();
   result.setMonth(result.getMonth() + months);
+  if (result.getDate() !== day) result.setDate(0);
   return result;
 }
 

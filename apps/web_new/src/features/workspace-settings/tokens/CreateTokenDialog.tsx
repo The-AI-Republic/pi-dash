@@ -8,12 +8,13 @@
 // backup; closing that step discards the secret from memory.
 
 import type { CreatedPersonalApiToken } from "@pidash/api-client";
+import { useQueryClient } from "@tanstack/react-query";
 import { Button, Dialog, IconButton, Input, Textarea } from "@pidash/kit";
 import { Check, Copy } from "lucide-react";
 import * as React from "react";
 
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
-import { useCreatePersonalToken } from "./api.js";
+import { personalTokenKeys, useCreatePersonalToken } from "./api.js";
 import { downloadTokenBackup } from "./download.js";
 import {
   backupFileName,
@@ -50,6 +51,7 @@ async function writeClipboard(text: string): Promise<void> {
 
 export function CreateTokenDialog({ open, onClose, now }: CreateTokenDialogProps): React.ReactElement {
   const create = useCreatePersonalToken();
+  const queryClient = useQueryClient();
   const [draft, setDraft] = React.useState<TokenDraft>(emptyTokenDraft);
   const [submitted, setSubmitted] = React.useState(false);
   const [phase, setPhase] = React.useState<DialogPhase>({ kind: "form" });
@@ -58,6 +60,13 @@ export function CreateTokenDialog({ open, onClose, now }: CreateTokenDialogProps
     setDraft(emptyTokenDraft());
     setSubmitted(false);
     setPhase({ kind: "form" });
+    // The mutation cache keeps the create answer, including its one-time
+    // secret; closing the reveal discards it from memory without touching
+    // any other in-flight mutation.
+    queryClient
+      .getMutationCache()
+      .findAll({ mutationKey: personalTokenKeys.create })
+      .forEach((mutation) => queryClient.getMutationCache().remove(mutation));
   };
 
   const close = (): void => {
@@ -179,9 +188,9 @@ function RevealTokenDialog({ created, onClose }: RevealTokenDialogProps): React.
       description="Store this secret somewhere safe. It is shown only once and cannot be retrieved later."
       open
       ignoreEscapeKey
-      onOpenChange={(next) => {
-        if (!next) onClose();
-      }}
+      // The reveal requires its explicit Close: Escape and a backdrop press
+      // both leave it open (workspace-settings spec §27 and §37).
+      onOpenChange={() => undefined}
       closeButton={false}
       actions={
         <Button variant="primary" onClick={onClose}>

@@ -81,10 +81,11 @@ afterEach(() => {
 
 describe("cache helpers", () => {
   it("prepends a created row and avoids duplicating an existing one", () => {
-    const created = token();
-    expect(appendPersonalToken(undefined, created)).toEqual([created]);
-    expect(appendPersonalToken([created], created)).toEqual([created]);
-    expect(appendPersonalToken(undefined, created)[0]).toBe(created);
+    const created = { ...token(), token: "pi_dash_api_abc" };
+    const expected = token();
+    expect(appendPersonalToken(undefined, created)).toEqual([expected]);
+    expect(appendPersonalToken([expected], created)).toEqual([expected]);
+    expect(JSON.stringify(appendPersonalToken(undefined, created))).not.toContain("pi_dash_api_abc");
   });
 
   it("removes a row and tolerates a missing cache", () => {
@@ -104,6 +105,13 @@ describe("cache helpers", () => {
     const next = appendPersonalToken(previous, created);
     expect(next).toEqual([created, ...previous]);
     expect(next).not.toBe(previous);
+  });
+
+  it("never lets the one-time secret into the list cache", () => {
+    const created = { ...token(), token: "pi_dash_api_abc" };
+    const [row] = appendPersonalToken(undefined, created);
+    expect(row).not.toHaveProperty("token");
+    expect(JSON.stringify(row)).not.toContain("pi_dash_api_abc");
   });
 });
 
@@ -142,7 +150,8 @@ describe("useCreatePersonalToken", () => {
       description: "Nightly deploy",
       expired_at: null,
     });
-    expect(queryClient.getQueryData(personalTokenKeys.list)).toEqual([created]);
+    const { token: _secret, ...metadata } = created;
+    expect(queryClient.getQueryData(personalTokenKeys.list)).toEqual([metadata]);
   });
 
   it("reports a failed create and leaves the cache untouched", async () => {

@@ -65,6 +65,21 @@ describe("expiry resolution", () => {
     expect(resolveExpiry(draft({ choice: "custom" }), NOW)).toBeUndefined();
   });
 
+  it("clamps month presets to the last day of a shorter target month", () => {
+    const jan31 = new Date(2026, 0, 31, 9, 15);
+    const oneMonth = new Date(2026, 0, 31, 9, 15);
+    oneMonth.setMonth(oneMonth.getMonth() + 1);
+    oneMonth.setDate(0);
+    expect(resolveExpiry(draft({ choice: "month" }), jan31)).toBe(oneMonth.toISOString());
+
+    const may31 = new Date(2026, 4, 31, 9, 15);
+    expect(resolveExpiry(draft({ choice: "month" }), may31)).toBe(new Date(2026, 5, 30, 9, 15).toISOString());
+    expect(resolveExpiry(draft({ choice: "quarter" }), may31)).toBe(new Date(2026, 7, 31, 9, 15).toISOString());
+
+    const nov30 = new Date(2026, 10, 30, 9, 15);
+    expect(resolveExpiry(draft({ choice: "quarter" }), nov30)).toBe(new Date(2027, 1, 28, 9, 15).toISOString());
+  });
+
   it("keeps the current time of day for a custom day", () => {
     const expected = new Date(2026, 10, 15, NOW.getHours(), NOW.getMinutes(), NOW.getSeconds(), NOW.getMilliseconds());
     expect(resolveExpiry(draft({ choice: "custom", customDay: "2026-11-15" }), NOW)).toBe(expected.toISOString());
