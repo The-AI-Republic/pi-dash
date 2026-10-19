@@ -122,9 +122,15 @@ mod tests {
     #[test]
     fn refused_server_surfaces_as_error() {
         // A refused connection is `Err` (the caller aborts), never a panic
-        // or a hang: nothing listens on 6399 (same precedent as
-        // pidash-db's redis test), so this fails fast without a server.
-        let client = redis::Client::open("redis://127.0.0.1:6399/").expect("url parses");
+        // or a hang: nothing listens on the chosen port, so this fails fast
+        // without a server. The port is picked at test time because a fixed
+        // port cannot be assumed unused on a shared runner (PIDASHCONV-1283,
+        // same precedent as pidash-db's redis test).
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+            listener.local_addr().expect("local_addr").port()
+        };
+        let client = redis::Client::open(format!("redis://127.0.0.1:{port}/")).expect("url parses");
         let redis = OriginRedis {
             client: Some(client),
         };
