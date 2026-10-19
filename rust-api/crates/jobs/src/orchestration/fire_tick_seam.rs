@@ -1012,16 +1012,15 @@ where
 
 /// The jobs-side [`FireTickSeam`] implementation over L1 (ticking
 /// state, tick interval) + L2 (active/prior runs) + this unit
-/// (dispatch). Sync trait methods resolve the State row through
-/// `states` (cutover wiring provides a cached resolver); async methods
-/// read live SQL. `new_deps` builds a fresh [`StoreDeps`] per dispatch
-/// (caches are call-scoped, like the L6 drivers); `matcher` is the D-14
-/// seam (scripted in tests, implemented by D-14 later).
+/// (dispatch). Sync trait methods take the state row the caller
+/// resolved live in the claim transaction (PIDASHCONV-1218); async
+/// methods read live SQL. `new_deps` builds a fresh [`StoreDeps`] per
+/// dispatch (caches are call-scoped, like the L6 drivers); `matcher` is
+/// the D-14 seam (scripted in tests, implemented by D-14 later).
 pub struct FireTickShim<C, H, P> {
     pool: PgPool,
     new_deps: Arc<dyn Fn() -> StoreDeps<C, H, P> + Send + Sync>,
     matcher: Arc<dyn PodRunnerMatcher>,
-    states: Arc<dyn Fn(Option<Uuid>) -> Option<StateView> + Send + Sync>,
 }
 
 /// The minimal state view the sync shim methods resolve.
@@ -1037,13 +1036,11 @@ impl<C, H, P> FireTickShim<C, H, P> {
         pool: PgPool,
         new_deps: Arc<dyn Fn() -> StoreDeps<C, H, P> + Send + Sync>,
         matcher: Arc<dyn PodRunnerMatcher>,
-        states: Arc<dyn Fn(Option<Uuid>) -> Option<StateView> + Send + Sync>,
     ) -> Self {
         FireTickShim {
             pool,
             new_deps,
             matcher,
-            states,
         }
     }
 }
@@ -1083,14 +1080,12 @@ where
     H: Fn(Uuid) -> bool + Clone + Send + Sync + 'static,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync + 'static,
 {
-    fn is_ticking_state(&self, state_id: Option<Uuid>) -> bool {
-        let state = (self.states)(state_id);
-        shim_is_ticking_state(state.as_ref())
+    fn is_ticking_state(&self, state: Option<&StateView>) -> bool {
+        shim_is_ticking_state(state)
     }
 
-    fn tick_interval_seconds(&self, state_id: Option<Uuid>, project: &ProjectTickCols) -> i64 {
-        let state = (self.states)(state_id);
-        shim_tick_interval_seconds(state.as_ref(), project)
+    fn tick_interval_seconds(&self, state: Option<&StateView>, project: &ProjectTickCols) -> i64 {
+        shim_tick_interval_seconds(state, project)
     }
 
     fn has_active_run(
@@ -2972,36 +2967,29 @@ mod tests {
             now() - chrono::Duration::hours(1),
         )
         .await;
-        let states: HashMap<Uuid, StateView> = [
-            ("In Progress", "started"),
-            ("In Review", "review"),
-            ("Done", "completed"),
-        ]
-        .into_iter()
-        .map(|(name, group)| {
-            (
-                graph.states[name],
-                StateView {
-                    id: graph.states[name],
-                    name: name.to_owned(),
-                    group: group.to_owned(),
-                },
-            )
-        })
-        .collect();
-        let states = Arc::new(states);
         let shim = FireTickShim::new(
             pool.clone(),
             Arc::new(deps),
             Arc::new(FakeMatcher { answer: true }),
-            {
-                let states = states.clone();
-                Arc::new(move |id: Option<Uuid>| id.and_then(|id| states.get(&id).cloned()))
-            },
         );
         use crate::tasks_ticker::fire_tick::FireTickSeam as _;
-        assert!(shim.is_ticking_state(Some(graph.states["In Progress"])));
-        assert!(!shim.is_ticking_state(Some(graph.states["Done"])));
+        let in_progress = StateView {
+            id: graph.states["In Progress"],
+            name: "In Progress".to_owned(),
+            group: "started".to_owned(),
+        };
+        let done = StateView {
+            id: graph.states["Done"],
+            name: "Done".to_owned(),
+            group: "completed".to_owned(),
+        };
+        let in_review = StateView {
+            id: graph.states["In Review"],
+            name: "In Review".to_owned(),
+            group: "review".to_owned(),
+        };
+        assert!(shim.is_ticking_state(Some(&in_progress)));
+        assert!(!shim.is_ticking_state(Some(&done)));
         assert!(!shim.is_ticking_state(None));
         let project = crate::tasks_ticker::fire_tick::ProjectTickCols {
             pool: Some(10),
@@ -3010,10 +2998,7 @@ mod tests {
             interval_review: Some(7200),
             interval_test: Some(3600),
         };
-        assert_eq!(
-            shim.tick_interval_seconds(Some(graph.states["In Review"]), &project),
-            7200
-        );
+        assert_eq!(shim.tick_interval_seconds(Some(&in_review), &project), 7200);
         assert!(!shim.has_active_run(graph.issue).await.expect("active"));
         assert!(shim.has_prior_run(graph.issue).await.expect("prior"));
         let run = shim
@@ -3051,32 +3036,10 @@ mod tests {
         )
         .await;
         let ticker = seed_ticker(&pool, graph.issue, &TickerSeed::default()).await;
-        let states: HashMap<Uuid, StateView> = [
-            ("In Progress", "started"),
-            ("In Review", "review"),
-            ("Done", "completed"),
-        ]
-        .into_iter()
-        .map(|(name, group)| {
-            (
-                graph.states[name],
-                StateView {
-                    id: graph.states[name],
-                    name: name.to_owned(),
-                    group: group.to_owned(),
-                },
-            )
-        })
-        .collect();
-        let states = Arc::new(states);
         let shim = FireTickShim::new(
             pool.clone(),
             Arc::new(deps),
             Arc::new(FakeMatcher { answer: true }),
-            {
-                let states = states.clone();
-                Arc::new(move |id: Option<Uuid>| id.and_then(|id| states.get(&id).cloned()))
-            },
         );
         let seam: Arc<dyn FireTickSeam> = Arc::new(shim);
         use rand08::SeedableRng as _;
@@ -3139,32 +3102,10 @@ mod tests {
             now() - chrono::Duration::hours(1),
         )
         .await;
-        let states: HashMap<Uuid, StateView> = [
-            ("In Progress", "started"),
-            ("In Review", "review"),
-            ("Done", "completed"),
-        ]
-        .into_iter()
-        .map(|(name, group)| {
-            (
-                graph.states[name],
-                StateView {
-                    id: graph.states[name],
-                    name: name.to_owned(),
-                    group: group.to_owned(),
-                },
-            )
-        })
-        .collect();
-        let states = Arc::new(states);
         let shim = FireTickShim::new(
             pool.clone(),
             Arc::new(deps),
             Arc::new(FakeMatcher { answer: true }),
-            {
-                let states = states.clone();
-                Arc::new(move |id: Option<Uuid>| id.and_then(|id| states.get(&id).cloned()))
-            },
         );
         use crate::tasks_ticker::fire_tick::FireTickSeam as _;
         let run = shim

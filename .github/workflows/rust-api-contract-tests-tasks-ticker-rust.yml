@@ -1,0 +1,137 @@
+name: rust-api-contract-tests-tasks-ticker-rust
+
+# PIDASHCONV-1218: Rust-side replay of the tasks_ticker live-state oracle.
+# Mirrors the worker-plane job in rust-api-contract-tests.yml, except the
+# Django worker (and beat) stay STOPPED and the Rust worker
+# (`pidash-api worker`) serves rust_job_queue instead. The replay suite
+# (tasks_ticker/test_rust_replay.py) seeds rust_job_queue with the exact
+# Celery v2 payloads and asserts that fire_tick resolves the issue's state
+# live: a project + In Progress state created *after* the worker booted must
+# still be claimed. On rust-dev before the fix the boot-loaded state map does
+# not know that state, so fire_tick returns without writing and the test
+# fails.
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-tasks-ticker-rust.yml"
+  pull_request:
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-tasks-ticker-rust.yml"
+
+jobs:
+  tasks-ticker-rust-replay:
+    name: tasks_ticker oracle vs Rust worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:15.7-alpine
+        env:
+          POSTGRES_USER: pi_dash
+          POSTGRES_PASSWORD: pi_dash
+          POSTGRES_DB: pi_dash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.local
+      POSTGRES_USER: pi_dash
+      POSTGRES_PASSWORD: pi_dash
+      POSTGRES_DB: pi_dash
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://localhost:6379/
+      WEB_URL: http://localhost
+      APP_BASE_URL: http://localhost
+      EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
+      EMAIL_HOST: localhost
+      EMAIL_PORT: "1025"
+      EMAIL_USE_TLS: "0"
+      EMAIL_USE_SSL: "0"
+      EMAIL_FROM: Pi Dash Contract <contract@example.com>
+      BASE_URL: http://localhost:8000
+      DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
+      CELERY_BROKER_URL: redis://localhost:6379/
+      CONTRACT_REDIS_URL: redis://localhost:6379/0
+      CONTRACT_TASK_TIMEOUT: "60"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.x"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements/base.txt
+            apps/api/requirements/test.txt
+            rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/test.txt
+          pip install "django-debug-toolbar==4.3.0"
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --no-input
+
+      - name: Build Rust worker
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Start Rust worker (Django worker stays stopped)
+        working-directory: rust-api
+        run: |
+          nohup ./target/debug/pidash-api worker \
+            > /tmp/contract-rust-worker.log 2>&1 &
+          for i in $(seq 1 30); do
+            grep -q "worker + scheduler loops started" /tmp/contract-rust-worker.log && break
+            sleep 2
+          done
+          grep -q "worker + scheduler loops started" /tmp/contract-rust-worker.log
+
+      - name: Run tasks_ticker Rust replay
+        working-directory: rust-api/contract-tests
+        # Same plugin dodge as the Django oracle job: the API install puts
+        # pytest-django in this interpreter; the replay never touches Django.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_ticker/test_rust_replay.py -v
+
+      - name: Upload worker log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-rust-worker-log
+          path: /tmp/contract-rust-worker.log

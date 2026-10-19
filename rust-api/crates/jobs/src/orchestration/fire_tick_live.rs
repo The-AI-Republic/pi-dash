@@ -8,11 +8,12 @@
 //! per fire. [`LiveFireTickSeam`] instead prefetches the creator
 //! universe asynchronously on every dispatch (the HTTP path's
 //! `dispatch_deps` shape), builds fresh [`StoreDeps`] over a
-//! per-call cache, and runs the jobs continuation driver. Sync
-//! methods resolve through the boot-loaded state map;
-//! `has_active_run` / `has_prior_run` read live SQL.
+//! per-call cache, and runs the jobs continuation driver. The sync
+//! state methods take the state row the caller resolved live in the
+//! claim transaction (PIDASHCONV-1218 — a boot-time cache cannot see
+//! a project/state created after start); `has_active_run` /
+//! `has_prior_run` read live SQL.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -35,15 +36,15 @@ use super::live_inputs::{
 };
 use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 
-/// Live [`FireTickSeam`]: pool + dispatch settings + the boot-loaded
-/// state map + the injected toolsets and assistant seams. One value
-/// serves every fire; per-fire inputs (presence, llm-gate verdicts,
-/// cache, `now`) are built inside the async methods.
+/// Live [`FireTickSeam`]: pool + dispatch settings + the injected
+/// toolsets and assistant seams. One value serves every fire; per-fire
+/// inputs (presence, llm-gate verdicts, cache, `now`) are built inside
+/// the async methods, and the ticking state is passed in from the
+/// claim read (live, never cached).
 pub struct LiveFireTickSeam {
     pool: PgPool,
     cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
-    states: Arc<HashMap<Uuid, StateView>>,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 }
@@ -53,7 +54,6 @@ impl LiveFireTickSeam {
         pool: PgPool,
         cloud: CloudAgentSettings,
         managed: ManagedRunnerSettings,
-        states: HashMap<Uuid, StateView>,
         toolsets: Arc<dyn CloudAgentToolsetsSeam>,
         assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
@@ -61,26 +61,18 @@ impl LiveFireTickSeam {
             pool,
             cloud,
             managed,
-            states: Arc::new(states),
             toolsets,
             assistant_seam,
         }
     }
-
-    /// Load the boot-time state cache.
-    pub async fn load_states(pool: &PgPool) -> Result<HashMap<Uuid, StateView>, sqlx::Error> {
-        super::live_inputs::load_states(pool).await
-    }
 }
 
 impl FireTickSeam for LiveFireTickSeam {
-    fn is_ticking_state(&self, state_id: Option<Uuid>) -> bool {
-        let state = state_id.and_then(|id| self.states.get(&id));
+    fn is_ticking_state(&self, state: Option<&StateView>) -> bool {
         shim_is_ticking_state(state)
     }
 
-    fn tick_interval_seconds(&self, state_id: Option<Uuid>, project: &ProjectTickCols) -> i64 {
-        let state = state_id.and_then(|id| self.states.get(&id));
+    fn tick_interval_seconds(&self, state: Option<&StateView>, project: &ProjectTickCols) -> i64 {
         shim_tick_interval_seconds(state, project)
     }
 
@@ -196,32 +188,27 @@ mod tests {
 
     fn seam() -> LiveFireTickSeam {
         let pool = PgPool::connect_lazy("postgres://localhost:1/unused").expect("lazy pool builds");
-        let states = [
-            state(1, "In Progress", "started"),
-            state(2, "In Review", "review"),
-            state(3, "Done", "completed"),
-        ]
-        .into_iter()
-        .map(|state| (state.id, state))
-        .collect();
         let settings = pidash_db::config::Settings::test_defaults();
         LiveFireTickSeam::new(
             pool,
             settings.cloud_agent,
             settings.managed_runner,
-            states,
             Arc::new(NoExtraToolsets),
             Arc::new(DefaultSeam),
         )
     }
 
     #[tokio::test]
-    async fn sync_methods_resolve_through_cached_states() {
+    async fn sync_methods_resolve_the_passed_state() {
         let seam = seam();
-        assert!(seam.is_ticking_state(Some(Uuid::from_u128(1))));
-        assert!(seam.is_ticking_state(Some(Uuid::from_u128(2))));
-        assert!(!seam.is_ticking_state(Some(Uuid::from_u128(3))));
-        assert!(!seam.is_ticking_state(Some(Uuid::from_u128(9))));
+        let started = state(1, "In Progress", "started");
+        let review = state(2, "In Review", "review");
+        let done = state(3, "Done", "completed");
+        let unknown = state(9, "Renamed", "started");
+        assert!(seam.is_ticking_state(Some(&started)));
+        assert!(seam.is_ticking_state(Some(&review)));
+        assert!(!seam.is_ticking_state(Some(&done)));
+        assert!(!seam.is_ticking_state(Some(&unknown)));
         assert!(!seam.is_ticking_state(None));
         let project = ProjectTickCols {
             pool: Some(10),
@@ -230,18 +217,9 @@ mod tests {
             interval_review: Some(7200),
             interval_test: Some(3600),
         };
-        assert_eq!(
-            seam.tick_interval_seconds(Some(Uuid::from_u128(1)), &project),
-            10800
-        );
-        assert_eq!(
-            seam.tick_interval_seconds(Some(Uuid::from_u128(2)), &project),
-            7200
-        );
-        assert_eq!(
-            seam.tick_interval_seconds(Some(Uuid::from_u128(9)), &project),
-            10800
-        );
+        assert_eq!(seam.tick_interval_seconds(Some(&started), &project), 10800);
+        assert_eq!(seam.tick_interval_seconds(Some(&review), &project), 7200);
+        assert_eq!(seam.tick_interval_seconds(Some(&unknown), &project), 10800);
     }
 
     #[test]
