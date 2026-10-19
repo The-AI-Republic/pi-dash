@@ -1061,6 +1061,10 @@ async fn patch_project_asset(
         .get("attributes")
         .cloned()
         .unwrap_or_else(|| asset.attributes.clone().unwrap_or(Value::Null));
+    // `attributes = None` violates the NOT NULL column → IntegrityError → 400.
+    if attributes.is_null() {
+        return raw(StatusCode::BAD_REQUEST, PAYLOAD_NOT_VALID_BODY);
+    }
     // `save(update_fields=["is_uploaded", "attributes"])` (`:592`):
     // exactly these two columns, no `updated_at` bump.
     if sqlx::query(q::PROJECT_PATCH_SAVE_SQL)

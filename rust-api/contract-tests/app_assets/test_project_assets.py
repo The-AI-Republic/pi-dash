@@ -142,6 +142,38 @@ def test_patch_get_delete_round_trip(org):
     assert seed_a.fetch(org.conn, asset_id)["is_deleted"] is True
 
 
+def test_patch_attributes_null_400_row_unchanged(org):
+    # Django (`v2.py:590-592`): an explicit `{"attributes": null}` sets
+    # `attributes = None`, the save writes SQL NULL into the NOT NULL
+    # `file_assets.attributes` column, the IntegrityError maps to 400 and
+    # the row is untouched. Rust must reject it too — not 204 with a jsonb
+    # null that flips `is_uploaded`.
+    asset = seed_a.create_asset(
+        org.conn,
+        workspace_id=org.workspace["id"],
+        created_by_id=org.admin["id"],
+        name="nullattr.png",
+        project_id=org.project["id"],
+        uploaded=False,
+    )
+    before = seed_a.fetch(org.conn, asset["id"])
+    assert before["is_uploaded"] is False
+
+    r = org.request(
+        "PATCH", proj_detail(org, asset["id"]), "admin",
+        json={"attributes": None},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"error": "The payload is not valid"}
+
+    after = seed_a.fetch(org.conn, asset["id"])
+    assert after["attributes"] == before["attributes"]
+    assert after["attributes"] == {
+        "name": "nullattr.png", "type": "image/png", "size": 100,
+    }
+    assert after["is_uploaded"] is False
+
+
 def test_detail_denied_roles(org):
     asset_id = org.request("POST", proj_base(org), "admin", json=proj_payload()).json()["asset_id"]
     denied = {"error": "You don't have the required permissions."}
