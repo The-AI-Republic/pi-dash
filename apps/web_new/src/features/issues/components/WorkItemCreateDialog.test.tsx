@@ -277,6 +277,10 @@ interface StubOptions {
   projects?: Record<string, Record<string, unknown>>;
   role?: number;
   estimateSystem?: boolean;
+  /** The detail row an issue edit reads; absent answers 404. */
+  issueDetail?: Record<string, unknown>;
+  /** Hold a description image upload so the editor's busy state shows. */
+  uploadDelayMs?: number;
 }
 
 interface Call {
@@ -601,6 +605,10 @@ function stubTransport(options: StubOptions = {}) {
       const status = options.editStatus ?? 200;
       return json(status, status === 200 ? createdRow(PROJECT_ATLAS, "Edited") : {});
     }
+    if (/\/issues\/[^/]+\/$/.test(url) && method === "GET") {
+      const row = options.issueDetail;
+      return row === undefined ? json(404, {}) : json(200, row);
+    }
     if (/\/draft-issues\/[^/]+\/$/.test(url) && method === "PATCH") {
       sent.push(body);
       const status = options.editStatus ?? 200;
@@ -611,6 +619,9 @@ function stubTransport(options: StubOptions = {}) {
       return json(status, status === 200 ? promotedRow(PROJECT_ATLAS, "Published") : {});
     }
     if (url.includes("/api/assets/v2/") && method === "POST") {
+      if (options.uploadDelayMs !== undefined) {
+        await new Promise((resolve) => globalThis.setTimeout(resolve, options.uploadDelayMs));
+      }
       return json(200, {
         asset_id: "asset-1",
         asset_url: "https://cdn.test/asset-1.png",
@@ -1189,6 +1200,41 @@ describe("WorkItemCreateDialog discard guard (ISS-120)", () => {
     expect(loadWorkItemDraft(SLUG)).toBeNull();
   });
 
+  it("refuses to close while a description upload is still running", async () => {
+    const user = userEvent.setup();
+    const h = setup({ uploadDelayMs: 300 });
+    await user.type(titleField(), "Busy body");
+    fireEvent.change(screen.getByLabelText("Attach an image to the description"), {
+      target: { files: [new File(["b"], "shot.png", { type: "image/png" })] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    // The panel's own upload sits outside the dialog's write state; the
+    // close is refused and nothing is dropped (ISS-125).
+    expect(notifyError).toHaveBeenCalledWith("Couldn't close the form", expect.stringMatching(/still processing/));
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+    expect(screen.queryByText("Save this draft?")).not.toBeInTheDocument();
+    // Once the upload settles the same click closes as usual.
+    await waitFor(() => expect(screen.getByLabelText("Attach an image to the description")).not.toBeDisabled(), {
+      timeout: 3000,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(await screen.findByText("Save this draft?")).toBeInTheDocument();
+  });
+
+  it("refuses Escape too while a description upload is still running", async () => {
+    const user = userEvent.setup();
+    const h = setup({ uploadDelayMs: 300 });
+    await user.type(titleField(), "Busy escape");
+    fireEvent.change(screen.getByLabelText("Attach an image to the description"), {
+      target: { files: [new File(["b"], "shot.png", { type: "image/png" })] },
+    });
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(notifyError).toHaveBeenCalledWith("Couldn't close the form", expect.any(String));
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+    expect(screen.queryByText("Save this draft?")).not.toBeInTheDocument();
+    expect(await screen.findByRole("textbox", { name: "Description" })).toBeInTheDocument();
+  });
+
   it("returns to the form on Cancel and keeps the values", async () => {
     const user = userEvent.setup();
     const h = setup();
@@ -1540,6 +1586,35 @@ function editProps(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** The detail endpoint's full row for an edit (ISS-126). */
+function detailRow(descriptionHtml: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...editRow({ description_html: descriptionHtml }),
+    sort_order: 1,
+    completed_at: null,
+    sequence_id: 9,
+    project_id: PROJECT_ATLAS,
+    sub_issues_count: null,
+    attachment_count: null,
+    link_count: null,
+    created_at: "2024-01-02T03:04:05Z",
+    updated_at: "2024-02-03T04:05:06Z",
+    created_by: null,
+    updated_by: null,
+    is_draft: false,
+    archived_at: null,
+    complexity_score: 0,
+    agent_executor: null,
+    is_synced: false,
+    is_subscribed: false,
+    agent_ticker: null,
+    agent_status: null,
+    relations_summary: { blocked_by: [], blocking: [] },
+    has_open_blockers: false,
+    ...overrides,
+  };
+}
+
 /** The PATCH bodies this run sent, in order. */
 function patches(calls: Array<{ url: string; method: string; body: unknown }>): unknown[] {
   return calls.filter((call) => call.method === "PATCH").map((call) => call.body);
@@ -1547,11 +1622,18 @@ function patches(calls: Array<{ url: string; method: string; body: unknown }>): 
 
 describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
   it("opens the stored row with a fixed project and the update heading", async () => {
-    const { props } = editProps();
-    setup({}, props);
+    const { props } = editProps({ description_html: "" });
+    setup(
+      {
+        issueDetail: detailRow("<p>stored words</p>"),
+      },
+      props
+    );
     expect(screen.getByRole("dialog", { name: "Update work item" })).toBeInTheDocument();
     await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
-    expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("stored words");
+    // The list snapshot carries no body; the editor shows the detail read,
+    // which a title-only save must treat as unchanged (ISS-126).
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("stored words"));
     expect(screen.getByRole("button", { name: "Atlas" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Save to Drafts" })).not.toBeInTheDocument();
     expect(screen.queryByRole("group", { name: "Create more" })).not.toBeInTheDocument();
@@ -1559,13 +1641,15 @@ describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
 
   it("sends only the fields that changed", async () => {
     const user = userEvent.setup();
-    const { onChanged, props } = editProps();
-    const h = setup({}, props);
+    const { onChanged, props } = editProps({ description_html: "" });
+    const h = setup({ issueDetail: detailRow("<p>stored words</p>") }, props);
     await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("stored words"));
     await user.clear(titleField());
     await user.type(titleField(), "Renamed work");
     save();
     await waitFor(() => expect(patches(h.calls)).toHaveLength(1));
+    // The fetched body is not an edit: only the title travels.
     expect(patches(h.calls)[0]).toEqual({ name: "Renamed work" });
     await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
     expect(onChanged).toHaveBeenCalled();
@@ -1907,8 +1991,39 @@ describe("WorkItemCreateDialog publish (ISS-130)", () => {
     await user.click(await screen.findByRole("option", { name: /Beacon/ }));
     await user.click(screen.getByRole("button", { name: "Publish issue" }));
     await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    // The promote endpoint files under the draft's stored project, so the
+    // picked one must be written to the draft first (ISS-130).
+    const stored = h.calls.find((call) => call.method === "PATCH" && call.url.includes("/draft-issues/draft-1/"));
+    expect(stored?.body).toEqual({ project_id: PROJECT_BEACON });
+    const storedIndex = h.calls.indexOf(stored!);
     const promote = h.calls.find((call) => call.url.includes("/draft-to-issue/draft-1/"));
     expect(promote?.body).toMatchObject({ name: "Needs project", project_id: PROJECT_BEACON });
+    expect(h.calls.indexOf(promote!)).toBeGreaterThan(storedIndex);
+    expect(notifySuccess).toHaveBeenCalledWith("Draft published to project.", expect.any(String));
+  });
+
+  it("keeps the form and explains when the draft's project cannot be stored", async () => {
+    const user = userEvent.setup();
+    const h = setup(
+      { editStatus: 500 },
+      {
+        draftId: "draft-1",
+        edit: { kind: "draft", id: "draft-1", projectId: null, snapshot: editRow({ name: "Needs project" }) },
+      },
+      { seedPicker: false }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Needs project"));
+    await user.click(screen.getByRole("button", { name: "Select project" }));
+    await user.click(await screen.findByRole("option", { name: /Beacon/ }));
+    await user.click(screen.getByRole("button", { name: "Publish issue" }));
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(
+        "Couldn't publish the draft",
+        "Pick a project this draft can move into, then try again."
+      )
+    );
+    expect(h.calls.some((call) => call.url.includes("/draft-to-issue/"))).toBe(false);
+    expect(h.onOpenChange).not.toHaveBeenCalled();
   });
 });
 

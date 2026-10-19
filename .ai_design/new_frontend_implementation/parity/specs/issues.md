@@ -762,8 +762,10 @@ then explicitly added to the cycle or module; edits reconcile
 diff-wise with the add and remove calls run sequentially to avoid
 store races. Enter in the editor submits; Escape and the Discard
 button close only when the editor reports ready-to-discard, otherwise
-the close is refused with an error toast (ISS-125). Fields carry an
-explicit tab order. Oracle: `create-modal.spec.ts`.
+the close is refused with an error toast (ISS-125). Enter in the title
+submits; Enter in the description belongs to the editor and starts a
+new line, leaving the form open. Fields carry an explicit tab order.
+Oracle: `create-modal.spec.ts`.
 
 Editing an existing work item (ISS-126) sends only changed fields
 (plus identity, project, type, and description) via `PATCH

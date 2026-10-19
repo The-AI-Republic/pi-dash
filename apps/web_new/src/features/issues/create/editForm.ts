@@ -163,6 +163,17 @@ export function baselineFor(form: CreateFormState): EditBaseline {
 }
 
 /**
+ * Fold the detail read into the starting form (ISS-126). The snapshot a
+ * caller holds may carry no description at all; the stored row is the
+ * authority for the body, so the editor opens with it and the diff
+ * treats it as unchanged until the user types.
+ */
+export function withStoredDescription(form: CreateFormState, storedHtml: string | undefined): CreateFormState {
+  if (storedHtml === undefined) return form;
+  return { ...form, descriptionHtml: storedHtml };
+}
+
+/**
  * The PATCH an edit sends (ISS-126): only fields whose value changed.
  * Identity and project never ride along — the caller already knows the
  * address — and the description travels whenever its text changed,

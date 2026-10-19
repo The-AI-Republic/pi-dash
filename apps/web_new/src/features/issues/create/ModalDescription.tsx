@@ -6,8 +6,10 @@
 // surface with person mentions and image upload, plus the assistant
 // footer. "I'm feeling lucky" drafts a body from the title; the AI
 // popover answers a prompt and inserts the reply at the caret. The
-// panel also owns the keyboard contract: Enter submits through the
-// form, Escape defers to the dialog (which asks before discarding).
+// panel leaves Enter to the editor (it starts a new line) and Escape to
+// the dialog, which asks before discarding. A panel-side upload is not
+// the dialog's write state, so the panel reports when it is still
+// processing and the dialog refuses to close until it settles (ISS-125).
 
 import { Button, Popover, cn } from "@pidash/kit";
 import { Sparkle } from "lucide-react";
@@ -67,8 +69,8 @@ export interface ModalDescriptionProps {
   onAssetUploaded: (assetId: string) => void;
   /** Remount key: the editor reads its content once at mount. */
   generation: number;
-  /** Enter in the editor submits the form (ISS-125). */
-  onSubmit: () => void;
+  /** Tells the dialog whether Escape/Discard may close right now (ISS-125). */
+  onReadinessChange?: ((ready: boolean) => void) | undefined;
   /** Inserting text at the caret, e.g. a picked mention. */
   registerHandle?: (handle: RichTextEditorHandle | null) => void;
   /** Explicit keyboard position of the editing surface (ISS-125). */
@@ -86,7 +88,7 @@ export function ModalDescription({
   assetScope,
   onAssetUploaded,
   generation,
-  onSubmit,
+  onReadinessChange,
   registerHandle,
   tabIndex,
 }: ModalDescriptionProps): React.ReactElement {
@@ -99,6 +101,26 @@ export function ModalDescription({
   const upload = useUploadDescriptionAsset(workspaceSlug);
   const mentions = useMentionSearch(workspaceSlug, projectId, mentionQuery ?? "", mentionQuery !== null);
   const fileRef = React.useRef<HTMLInputElement>(null);
+  // The panel's own work (an upload, a draft, an answer) never reaches
+  // the dialog's write state, so readiness is counted here and reported
+  // as it changes: closing mid-upload would strand the parked asset.
+  const inFlight = React.useRef(0);
+  const disabledRef = React.useRef(disabled);
+  disabledRef.current = disabled;
+  const reportReadiness = React.useCallback(() => {
+    onReadinessChange?.(!disabledRef.current && inFlight.current === 0);
+  }, [onReadinessChange]);
+
+  async function withPanelWork<T>(work: () => Promise<T>): Promise<T> {
+    inFlight.current += 1;
+    reportReadiness();
+    try {
+      return await work();
+    } finally {
+      inFlight.current -= 1;
+      reportReadiness();
+    }
+  }
 
   // The editor may be replaced once the lazy chunk settles; the parent
   // only ever sees the newest handle.
@@ -117,7 +139,7 @@ export function ModalDescription({
       return;
     }
     try {
-      const html = await describe.mutateAsync({ projectId, title: trimmed });
+      const html = await withPanelWork(() => describe.mutateAsync({ projectId, title: trimmed }));
       if (html === "") {
         notifyError(DESCRIBE_EMPTY_TITLE, DESCRIBE_EMPTY_TITLE_BODY);
         return;
@@ -136,7 +158,7 @@ export function ModalDescription({
     const prompt = aiPrompt.trim();
     if (prompt === "") return;
     try {
-      const html = await answer.mutateAsync({ projectId, prompt });
+      const html = await withPanelWork(() => answer.mutateAsync({ projectId, prompt }));
       if (html === "") {
         notifyError(DESCRIBE_FAILED_TITLE, DESCRIBE_FAILED_BODY);
         return;
@@ -154,7 +176,7 @@ export function ModalDescription({
 
   async function uploadImage(file: File): Promise<void> {
     try {
-      const uploaded = await upload.mutateAsync({ projectId, scope: assetScope, file });
+      const uploaded = await withPanelWork(() => upload.mutateAsync({ projectId, scope: assetScope, file }));
       onAssetUploaded(uploaded.assetId);
       handleRef.current?.insertImage(uploaded.assetUrl);
     } catch {
@@ -169,6 +191,9 @@ export function ModalDescription({
 
   const [remount, setRemount] = React.useState(0);
   const busy = disabled || describe.isPending || answer.isPending || upload.isPending;
+  React.useEffect(() => {
+    reportReadiness();
+  }, [disabled, reportReadiness]);
 
   return (
     <div className="flex flex-col gap-(--space-2)">
@@ -184,16 +209,6 @@ export function ModalDescription({
             onReady={handleEditorReady}
             onMentionQuery={setMentionQuery}
             {...(tabIndex === undefined ? {} : { tabIndex })}
-            handleKeyDown={(event) => {
-              // Enter submits from the description too (ISS-125); Shift
-              // keeps the newline.
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                onSubmit();
-                return true;
-              }
-              return false;
-            }}
           />
         </React.Suspense>
       </div>

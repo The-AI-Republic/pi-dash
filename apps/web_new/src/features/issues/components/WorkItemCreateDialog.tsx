@@ -513,6 +513,26 @@ export function WorkItemCreateDialog({
     );
   }, [storedDescription, open, edit?.kind, form.descriptionHtml]);
 
+  // The detail read answers after the first paint: adopt its description
+  // unless the user already started typing, and make it the baseline the
+  // submit diffs against either way.
+  const storedDescription = edit?.kind === "issue" ? detailEdit.data?.description_html : undefined;
+  React.useEffect(() => {
+    if (storedDescription === undefined || !open || edit?.kind !== "issue") return;
+    if (adoptedDescription.current === storedDescription) return;
+    const untouched = openedDescription.current === null || form.descriptionHtml === openedDescription.current;
+    openedDescription.current = storedDescription;
+    adoptedDescription.current = storedDescription;
+    if (untouched) {
+      setForm((current) => withStoredDescription(current, storedDescription));
+      setEditorGeneration((current) => current + 1);
+    }
+    const normalized = visibleDescriptionHtml(storedDescription);
+    setBaseline((current) =>
+      current === null ? current : { ...current, form: { ...current.form, descriptionHtml: normalized } }
+    );
+  }, [storedDescription, open, edit?.kind, form.descriptionHtml]);
+
   // The title owns initial focus. Base UI moves focus into the dialog on
   // a later task (its close button claims it first), so claim the field
   // twice: immediately for tests that query focus synchronously, and

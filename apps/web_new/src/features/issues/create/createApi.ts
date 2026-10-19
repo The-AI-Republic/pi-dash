@@ -13,6 +13,7 @@ import {
   attachDescriptionAssets,
   createDraftIssue,
   generateAssistantTitle,
+  getIssue,
   promoteDraftIssue,
   removeIssueFromCycle,
   runProjectEditorTask,
@@ -26,6 +27,7 @@ import {
   type DescriptionAssetScope,
   type DraftIssue,
   type DraftIssueCreateInput,
+  type Issue,
   type IssuePatch,
   type IssueSearchHit,
   type IssueSearchResults,
@@ -109,6 +111,31 @@ export function useGenerateTitle(workspaceSlug: string) {
 export function useSaveDraft(workspaceSlug: string) {
   return useMutation<DraftIssue, Error, DraftIssueCreateInput>({
     mutationFn: (input) => createDraftIssue(getAppClient(), workspaceSlug, input),
+  });
+}
+
+/** Query key for the detail read an issue edit opens with (ISS-126). */
+export function editDetailKey(workspaceSlug: string, projectId: string, issueId: string) {
+  return [...workspaceScope(workspaceSlug), "issues", "create", "edit-detail", projectId, issueId] as const;
+}
+
+/**
+ * The stored issue an edit opens, read so the form carries the real
+ * description: list snapshots do not. A failed read leaves the snapshot
+ * in place rather than blocking the edit.
+ */
+export function useEditIssueDetail(
+  workspaceSlug: string,
+  projectId: string | null,
+  issueId: string | null,
+  enabled: boolean
+) {
+  return useQuery<Issue>({
+    queryKey: editDetailKey(workspaceSlug, projectId ?? "", issueId ?? ""),
+    queryFn: () => getIssue(getAppClient(), workspaceSlug, projectId ?? "", issueId ?? ""),
+    enabled: enabled && projectId !== null && issueId !== null,
+    staleTime: REFERENCE_STALE_TIME_MS,
+    retry: false,
   });
 }
 
@@ -252,19 +279,34 @@ export function draftInputFromPatch(patch: IssuePatch): DraftIssueCreateInput {
   return draft;
 }
 
-/** Publish a draft: persist its stored values, then move it into a project (ISS-130). */
+/**
+ * Publish a draft (ISS-130). The promote endpoint files the issue under
+ * the project stored on the draft, not the one in its body, so a draft
+ * that only just picked a project is patched first. Without that write
+ * the server refuses a project-less draft even though the form names one.
+ */
 export async function publishDraft(
   client: ApiClient,
   workspaceSlug: string,
   draftId: string,
-  input: DraftIssueCreateInput
+  input: DraftIssueCreateInput,
+  storedProjectId: string | null
 ): Promise<PromotedIssue> {
+  const projectId = input.project_id ?? null;
+  if (projectId !== null && projectId !== storedProjectId) {
+    await updateDraftIssue(client, workspaceSlug, draftId, { project_id: projectId });
+  }
   return promoteDraftIssue(client, workspaceSlug, draftId, input);
 }
 
 export function usePublishDraft(workspaceSlug: string) {
-  return useMutation<PromotedIssue, Error, { draftId: string; input: DraftIssueCreateInput }>({
-    mutationFn: ({ draftId, input }) => publishDraft(getAppClient(), workspaceSlug, draftId, input),
+  return useMutation<
+    PromotedIssue,
+    Error,
+    { draftId: string; input: DraftIssueCreateInput; storedProjectId: string | null }
+  >({
+    mutationFn: ({ draftId, input, storedProjectId }) =>
+      publishDraft(getAppClient(), workspaceSlug, draftId, input, storedProjectId),
   });
 }
 

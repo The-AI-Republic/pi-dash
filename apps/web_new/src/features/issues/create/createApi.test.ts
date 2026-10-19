@@ -414,8 +414,35 @@ describe("publishDraft", () => {
   it("posts the draft into its project through the promote endpoint", async () => {
     const promoted = { id: ISSUE, project_id: PROJECT };
     const { calls, client } = recorder(promoted);
-    await expect(publishDraft(client, "acme", "d-1", { name: "Publish", project_id: PROJECT })).resolves.toBe(promoted);
+    await expect(publishDraft(client, "acme", "d-1", { name: "Publish", project_id: PROJECT }, PROJECT)).resolves.toBe(
+      promoted
+    );
     expect(calls[0]?.method).toBe("POST");
+    expect(calls[0]?.path).toContain("/draft-to-issue/d-1/");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("stores a newly picked project on the draft before promoting it", async () => {
+    // The promote reads the draft's stored project, so a draft that only
+    // just picked one must be patched first (ISS-130).
+    const promoted = { id: ISSUE, project_id: PROJECT };
+    const { calls, client } = recorder(promoted);
+    await expect(publishDraft(client, "acme", "d-1", { name: "Publish", project_id: PROJECT }, null)).resolves.toBe(
+      promoted
+    );
+    expect(calls[0]?.method).toBe("PATCH");
+    expect(calls[0]?.path).toContain("/draft-issues/d-1/");
+    expect(calls[0]?.body).toEqual({ project_id: PROJECT });
+    expect(calls[1]?.method).toBe("POST");
+    expect(calls[1]?.path).toContain("/draft-to-issue/d-1/");
+  });
+
+  it("leaves a draft whose stored project already matches alone", async () => {
+    const { calls, client } = recorder({ id: ISSUE, project_id: PROJECT });
+    // A client that records nothing would hide a stray write: PATCH is
+    // recorded even when the body is thin, so count the calls.
+    await publishDraft(client, "acme", "d-1", { name: "Publish", project_id: PROJECT }, PROJECT);
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
     expect(calls[0]?.path).toContain("/draft-to-issue/d-1/");
   });
 });

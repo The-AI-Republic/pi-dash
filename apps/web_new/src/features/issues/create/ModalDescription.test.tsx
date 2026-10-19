@@ -100,6 +100,8 @@ interface StubOptions {
   describeDelayMs?: number;
   answerStatus?: number;
   uploadStatus?: number;
+  /** Hold the upload so the panel's busy state is observable. */
+  uploadDelayMs?: number;
   mentions?: Array<{ member__id: string; member__display_name: string; member__avatar_url: string | null }>;
 }
 
@@ -127,6 +129,9 @@ function stubTransport(options: StubOptions = {}) {
       return json(status, status < 400 ? (options.describeBody ?? editorAnswer("<p>assistant words</p>")) : {});
     }
     if (url.includes("/api/assets/v2/") && method === "POST") {
+      if (options.uploadDelayMs !== undefined) {
+        await new Promise((resolve) => globalThis.setTimeout(resolve, options.uploadDelayMs));
+      }
       const status = options.uploadStatus ?? 200;
       return json(status, {
         asset_id: "asset-1",
@@ -143,7 +148,6 @@ function setup(options: StubOptions = {}, props: Partial<ModalDescriptionProps> 
   const stub = stubTransport(options);
   const onChange = vi.fn();
   const onAssetUploaded = vi.fn();
-  const onSubmit = vi.fn();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -158,12 +162,11 @@ function setup(options: StubOptions = {}, props: Partial<ModalDescriptionProps> 
         assetScope={{ entityType: "ISSUE_DESCRIPTION", entityId: "" }}
         onAssetUploaded={onAssetUploaded}
         generation={0}
-        onSubmit={onSubmit}
         {...props}
       />
     </QueryClientProvider>
   );
-  return { ...stub, onChange, onAssetUploaded, onSubmit, queryClient, view };
+  return { ...stub, onChange, onAssetUploaded, queryClient, view };
 }
 
 function lastProbe(): EditorProbe {
@@ -288,20 +291,44 @@ describe("ModalDescription assistant (ISS-127)", () => {
 });
 
 describe("ModalDescription keyboard (ISS-125)", () => {
-  it("submits on Enter and leaves Shift+Enter to the editor", () => {
-    const h = setup();
+  it("leaves Enter to the editor so it starts a new line", () => {
+    setup();
+    // The panel installs no key handler: the editor's own Enter inserts a
+    // paragraph break, and neither Enter nor Shift+Enter reaches the form.
+    expect(lastProbe().handleKeyDown).toBeUndefined();
     const enter = new KeyboardEvent("keydown", { key: "Enter" });
-    expect(lastProbe().handleKeyDown?.(enter)).toBe(true);
-    expect(h.onSubmit).toHaveBeenCalledTimes(1);
-    const shift = new KeyboardEvent("keydown", { key: "Enter", shiftKey: true });
-    expect(lastProbe().handleKeyDown?.(shift)).toBe(false);
-    expect(h.onSubmit).toHaveBeenCalledTimes(1);
+    expect(enter.defaultPrevented).toBe(false);
   });
 
-  it("leaves other keys alone", () => {
-    const h = setup();
-    expect(lastProbe().handleKeyDown?.(new KeyboardEvent("keydown", { key: "a" }))).toBe(false);
-    expect(h.onSubmit).not.toHaveBeenCalled();
+  it("reports itself ready while it is idle", () => {
+    const onReadinessChange = vi.fn();
+    setup({}, { onReadinessChange });
+    expect(onReadinessChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it("reports itself busy while an upload is in flight", async () => {
+    const onReadinessChange = vi.fn();
+    setup({ uploadDelayMs: 200 }, { onReadinessChange });
+    fireEvent.change(screen.getByLabelText("Attach an image to the description"), {
+      target: { files: [new File(["b"], "shot.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(onReadinessChange).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(onReadinessChange).toHaveBeenLastCalledWith(true));
+  });
+
+  it("reports itself busy while a draft or an answer is in flight", async () => {
+    const user = userEvent.setup();
+    const onReadinessChange = vi.fn();
+    setup({ describeDelayMs: 200 }, { onReadinessChange });
+    await user.click(screen.getByRole("button", { name: DESCRIBE_BUTTON_LABEL }));
+    await waitFor(() => expect(onReadinessChange).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(onReadinessChange).toHaveBeenLastCalledWith(true));
+  });
+
+  it("stays unready while the dialog itself is busy", () => {
+    const onReadinessChange = vi.fn();
+    setup({}, { onReadinessChange, disabled: true });
+    expect(onReadinessChange).toHaveBeenLastCalledWith(false);
   });
 
   it("reports edits back as HTML", () => {
