@@ -35,7 +35,7 @@ export const Route = createFileRoute("/settings/profile/api-tokens")({
   component: PersonalAccessTokensRouteComponent,
 });
 
-export function PersonalAccessTokensRouteComponent(): React.ReactElement {
+function PersonalAccessTokensRouteComponent(): React.ReactElement {
   useSessionExpiredRedirect();
   return (
     <main className="min-h-screen bg-(--bg)">

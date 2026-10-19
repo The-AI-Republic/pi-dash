@@ -23,7 +23,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { meQueryOptions, profileQueryOptions } from "../../../core/session/queries.js";
-import { PersonalAccessTokensRouteComponent, Route } from "./api-tokens.js";
+import { Route } from "./api-tokens.js";
 
 function throwingClient(): ApiClient {
   return createClient({
@@ -131,9 +131,11 @@ describe("PersonalAccessTokensRouteComponent", () => {
       }
       return { status: 200, url, headers: { get: () => null }, text: async () => "[]" };
     }) as never);
+    const Component = Route.options.component;
+    if (!Component) throw new Error("api-tokens route has no component");
     render(
       <QueryClientProvider client={queryClient()}>
-        <PersonalAccessTokensRouteComponent />
+        <Component />
       </QueryClientProvider>
     );
     expect(await screen.findByRole("heading", { name: "Personal Access Tokens" })).toBeInTheDocument();
