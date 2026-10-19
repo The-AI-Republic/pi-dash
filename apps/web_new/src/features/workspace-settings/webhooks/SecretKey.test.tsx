@@ -85,6 +85,33 @@ describe("SecretKey", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("whsec_fixture_native"));
   });
 
+  it("announces a missing Clipboard API instead of throwing", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    render(<SecretKey secret="whsec_fixture_native" />);
+    await user.click(screen.getByRole("button", { name: SECRET_COPY_LABEL }));
+    await waitFor(() =>
+      expect(shellNotifyError).toHaveBeenCalledWith("Couldn't copy the secret key", expect.any(String))
+    );
+  });
+
+  it("announces a clipboard that throws synchronously", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: () => {
+          throw new Error("blocked");
+        },
+      },
+    });
+    render(<SecretKey secret="whsec_fixture_native" />);
+    await user.click(screen.getByRole("button", { name: SECRET_COPY_LABEL }));
+    await waitFor(() =>
+      expect(shellNotifyError).toHaveBeenCalledWith("Couldn't copy the secret key", expect.any(String))
+    );
+  });
+
   it("announces a native clipboard refusal through the shell notice", async () => {
     const user = userEvent.setup();
     Object.defineProperty(navigator, "clipboard", {

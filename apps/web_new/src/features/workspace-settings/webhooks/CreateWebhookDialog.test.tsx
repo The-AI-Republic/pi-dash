@@ -57,7 +57,10 @@ interface Call {
   body: unknown;
 }
 
-function renderDialog(handler: (call: Call) => { status: number; body?: unknown }) {
+function renderDialog(
+  handler: (call: Call) => { status: number; body?: unknown },
+  whenCreate?: (call: Call) => Promise<{ status: number; body?: unknown }>
+) {
   const calls: Call[] = [];
   const transport: Transport = async (url, init) => {
     const call: Call = {
@@ -69,7 +72,7 @@ function renderDialog(handler: (call: Call) => { status: number; body?: unknown 
     if (url.endsWith("/auth/get-csrf-token/")) {
       return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
     }
-    const answer = handler(call);
+    const answer = whenCreate !== undefined && call.method === "POST" ? await whenCreate(call) : handler(call);
     return {
       status: answer.status,
       url,
@@ -237,6 +240,59 @@ describe("CreateWebhookDialog", () => {
     await user.click(screen.getByRole("button", { name: "Close" }));
     expect(screen.queryByText(KEY_CREATED_TITLE)).not.toBeInTheDocument();
     expect(cached()).not.toContain("whsec_fixture_abcdefghijklmnopqrstuvwxyz");
+  });
+
+  it("ignores a create answer that lands after Cancel and never reveals the key", async () => {
+    const user = userEvent.setup();
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { calls, onCreated, queryClient } = renderDialog(
+      () => ({ status: 500 }),
+      async () => {
+        await held;
+        return { status: 201, body: issued() };
+      }
+    );
+    await user.type(screen.getByLabelText("Target URL"), "https://example.com/post");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    expect(calls.find((call) => call.method === "POST")).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByText(CREATE_WEBHOOK_TITLE)).not.toBeInTheDocument();
+    release();
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryCache().findAll({ queryKey: ["acme", "workspace-settings", "webhooks", "list"] })
+      ).toBeDefined()
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText(KEY_CREATED_TITLE)).not.toBeInTheDocument();
+    expect(screen.queryByText(/whsec_fixture/)).not.toBeInTheDocument();
+    expect(notifySuccess).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+  });
+
+  it("ignores a failed create that lands after Escape", async () => {
+    const user = userEvent.setup();
+    let reject = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      reject = resolve;
+    });
+    renderDialog(
+      () => ({ status: 500 }),
+      async () => {
+        await held;
+        return { status: 409 };
+      }
+    );
+    await user.type(screen.getByLabelText("Target URL"), "https://example.com/dup");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    await user.keyboard("{Escape}");
+    reject();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(notifyError).not.toHaveBeenCalled();
   });
 
   it("resets the form, the error and the key when reopened", async () => {

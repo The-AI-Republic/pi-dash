@@ -44,10 +44,17 @@ export function CreateWebhookDialog({
   onCreated,
 }: CreateWebhookDialogProps): React.ReactElement {
   const [issued, setIssued] = React.useState<{ webhook: CreatedWorkspaceWebhook; secret: string } | null>(null);
+  // Every close starts a new session. A write is bound to the session it
+  // was submitted in, so an answer that lands after Cancel or Escape is
+  // stale: it must not reveal a key, notify, or download a backup (§19/§20).
+  const session = React.useRef(0);
+  const writeSession = React.useRef<number | null>(null);
   // The hook hands the whole answer over before it resolves; the key is
   // kept here, outside the mutation cache, so closing is the only place
   // that can clear it (§20).
   const create = useCreateWebhook(workspaceSlug, (created) => {
+    if (writeSession.current === null || writeSession.current !== session.current) return;
+    writeSession.current = null;
     notifySuccess(WEBHOOK_CREATED_NOTICE);
     downloadWebhookBackup(webhookBackup(created, workspaceSlug, created.secret_key, Date.now()));
     setIssued({ webhook: created, secret: created.secret_key });
@@ -60,8 +67,11 @@ export function CreateWebhookDialog({
 
   React.useEffect(() => {
     if (open) return;
-    // Closing forgets everything: typed address, errors and the key, so no
-    // later render can bring the key back (§20).
+    // Closing forgets everything: typed address, errors, the key and the
+    // session a write was sent in, so no later render can bring the key
+    // back and no in-flight answer can surface one (§20).
+    session.current += 1;
+    writeSession.current = null;
     setUrl("");
     setError(null);
     setSelection(initialEventSelection());
@@ -82,8 +92,13 @@ export function CreateWebhookDialog({
     }
     setError(null);
     const flags = submittedFlags(selection);
+    const submittedIn = session.current;
+    writeSession.current = submittedIn;
     void create.mutateAsync({ url: address, ...flags }).catch(() => {
-      notifyError(WEBHOOK_NOT_CREATED_NOTICE, WEBHOOK_NOT_CREATED_BODY);
+      if (writeSession.current === submittedIn && session.current === submittedIn) {
+        writeSession.current = null;
+        notifyError(WEBHOOK_NOT_CREATED_NOTICE, WEBHOOK_NOT_CREATED_BODY);
+      }
     });
   };
 

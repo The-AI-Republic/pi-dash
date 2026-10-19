@@ -30,7 +30,16 @@ export interface CopySecretDeps {
 
 function defaultCopyDeps(): CopySecretDeps {
   return {
-    writeText: (value) => navigator.clipboard.writeText(value),
+    // An unavailable Clipboard API (a non-secure context, an older
+    // browser) or a synchronous throw must reach the caller as a rejected
+    // promise, so the copy failure notice still appears (§20).
+    writeText: async (value) => {
+      const clipboard = navigator.clipboard;
+      if (clipboard === undefined || typeof clipboard.writeText !== "function") {
+        throw new Error("Clipboard API unavailable");
+      }
+      await clipboard.writeText(value);
+    },
     notifySuccess: (title) => {
       notifySuccess(title);
     },
