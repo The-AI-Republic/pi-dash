@@ -50,6 +50,23 @@ describe("desktop deep links", () => {
     expect(opened).toEqual(["pidash://auth/callback?code=a", "pidash://auth/callback?code=b"]);
   });
 
+  it("ignores empty and missing payloads", async () => {
+    let listener: Listener | undefined;
+    installEventApi(async (_event, handler) => {
+      listener = handler;
+      return () => undefined;
+    });
+    const opened = vi.fn();
+
+    platform.deepLinks?.onOpenUrl(opened);
+    await Promise.resolve();
+    listener?.({ payload: "" });
+    listener?.({ payload: [] });
+    listener?.({ payload: 7 });
+
+    expect(opened).not.toHaveBeenCalled();
+  });
+
   it("ignores unrelated payload shapes", async () => {
     let listener: Listener | undefined;
     installEventApi(async (_event, handler) => {
