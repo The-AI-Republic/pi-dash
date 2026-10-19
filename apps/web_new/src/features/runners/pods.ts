@@ -94,7 +94,7 @@ export function podUpdatePatch(seed: PodEditSeed, draft: PodEditSeed): PodPatch 
 /** Why the server refused a pod deletion, in the words a person can act on. */
 export const POD_DELETE_GUARDS: Readonly<Record<string, string>> = {
   pod_has_runners: "This pod's runners must be moved or revoked before it can be deleted.",
-  pod_has_active_runs: "This pod has runs in flight. Cancel them or wait for them to finish before deleting it.",
+  pod_has_active_runs: "This pod has active runs. Cancel them or wait for them to finish before deleting it.",
   default_pod_undeletable: "This is the project's default pod. Make another pod the default first.",
 };
 

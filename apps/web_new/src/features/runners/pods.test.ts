@@ -141,7 +141,7 @@ describe("podDeleteErrorMessage", () => {
       podDeleteErrorMessage(new ApiError({ status: 409, code: "default_pod_undeletable", message: "" }))
     ).toContain("default pod");
     expect(podDeleteErrorMessage(new ApiError({ status: 409, code: "pod_has_active_runs", message: "" }))).toContain(
-      "runs in flight"
+      "active runs"
     );
   });
 

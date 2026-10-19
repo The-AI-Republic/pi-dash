@@ -115,7 +115,7 @@ describe("DeletePodDialog", () => {
 
   it.each([
     ["pod_has_runners", "pod's runners"],
-    ["pod_has_active_runs", "runs in flight"],
+    ["pod_has_active_runs", "active runs"],
     ["default_pod_undeletable", "default pod"],
   ])("translates the %s refusal and keeps the dialog", async (code, fragment) => {
     const { onCancel, onDeleted } = setup(TARGET);
