@@ -500,6 +500,21 @@ describe("ValueSlot single select", () => {
     expect(onChange).toHaveBeenLastCalledWith(null);
   });
 
+  it("shows the placeholder when no single value is set", () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={SINGLE_FIELD}
+          condition={{ key: "a", property: "custom", operator: "exact", negated: false, value: null }}
+          onChange={() => {}}
+        />
+      )
+    );
+    expect(screen.getByRole("button", { name: /^--/ })).toHaveAttribute("data-empty", "true");
+  });
+
   it("shows one name rather than a list plus overflow", () => {
     render(
       wrap(

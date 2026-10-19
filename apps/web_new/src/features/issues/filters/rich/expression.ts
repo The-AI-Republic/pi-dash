@@ -564,8 +564,6 @@ function catalogField(input: {
   operators?: readonly string[];
   allowNegative?: boolean;
   source?: RichFilterField["source"];
-  min?: string;
-  max?: string;
 }): RichFilterField {
   const operators = input.operators ?? ["in"];
   return {
@@ -577,8 +575,6 @@ function catalogField(input: {
     operators,
     allowNegative: input.allowNegative ?? true,
     ...(input.source === undefined ? {} : { source: input.source }),
-    ...(input.min === undefined ? {} : { min: input.min }),
-    ...(input.max === undefined ? {} : { max: input.max }),
   };
 }
 

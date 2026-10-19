@@ -12,6 +12,7 @@ import {
   TEMPORARY_PREFIX,
   isTemporaryId,
   temporaryInstanceId,
+  temporaryRegistry,
   useTemporaryFieldConfigs,
 } from "./temporary.js";
 
@@ -100,5 +101,15 @@ describe("useTemporaryFieldConfigs", () => {
     unmount();
     // It only removes what this instance held.
     expect(registry.activeProperties()).toEqual(["label"]);
+  });
+});
+
+describe("default session registry", () => {
+  it("holds a temporary instance's fields only while it is mounted", () => {
+    expect(temporaryRegistry.activeProperties()).toEqual([]);
+    const { unmount } = render(<Probe conditions={[condition("label")]} registry={temporaryRegistry} />);
+    expect(temporaryRegistry.activeProperties()).toEqual(["label"]);
+    unmount();
+    expect(temporaryRegistry.activeProperties()).toEqual([]);
   });
 });

@@ -164,7 +164,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         hideModule={!project.module_view}
       />
     );
-    const analytics = project ? (
+    const analytics = (
       <AnalyticsEntry
         workspaceSlug={params.ws}
         projectId={params.projectId}
@@ -172,7 +172,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         rows={issues.results}
         totalCount={issues.total_count}
       />
-    ) : null;
+    );
     const renderWithFilters = (richFilter: RichFilterBuilderParts | null): React.ReactElement => (
       <IssuesLayoutRoot
         workspaceSlug={params.ws}

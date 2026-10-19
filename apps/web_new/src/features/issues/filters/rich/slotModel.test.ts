@@ -173,3 +173,21 @@ describe("pickTriggerLabel", () => {
     expect(pickTriggerLabel(["a", "b", "c", "d"])).toBe("a, b +2 more");
   });
 });
+
+describe("operator-aware value shapes", () => {
+  it("keeps a stored day only when it is a non-empty string", () => {
+    expect(valueForOperator("range", "exact", ["2026-01-01", null])).toBe("2026-01-01");
+    expect(valueForOperator("range", "exact", ["", null])).toBeNull();
+    expect(valueForOperator("in", "exact", "")).toBeNull();
+  });
+
+  it("keeps a half-filled pair when both lookups are ranges", () => {
+    // Both lookups share the range editor, so the pending first end stays.
+    expect(valueForOperator("range", "range", ["2026-01-01", null])).toEqual(["2026-01-01", null]);
+    expect(valueForOperator("range", "range", [null, null])).toEqual([null, null]);
+  });
+
+  it("drops an undefined range end rather than rendering it", () => {
+    expect(rangeEndsFromString("")).toEqual({ start: null, end: null });
+  });
+});

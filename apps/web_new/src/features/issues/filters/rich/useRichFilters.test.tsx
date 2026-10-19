@@ -196,3 +196,13 @@ describe("useUpdateRichFilters", () => {
     expect(notifyError).toHaveBeenCalledWith("Couldn't save filters", expect.any(String));
   });
 });
+
+describe("disabled rich-filter writes", () => {
+  it("no-ops for a disabled builder, such as a saved-view or temporary row", async () => {
+    const { calls, wrapper } = harness();
+    const { result } = renderHook(() => useUpdateRichFilters("acme", ENTITY, false), { wrapper });
+    act(() => result.current.updateRichFilters([row()]));
+    expect(result.current.isSaving).toBe(false);
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+});

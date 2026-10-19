@@ -16,7 +16,9 @@ import {
   normalizeRichExpression,
   operatorLabel,
   operatorOptions,
+  parseLeafValue,
   parseRichExpression,
+  payloadOperator,
   removeCondition,
   replaceConditionProperty,
   richFilterFields,
@@ -503,5 +505,23 @@ describe("value completeness and labels", () => {
     expect(valueLabel({ ...dateField, kind: "date" }, "2026-01-01")).toBe("2026-01-01");
     expect(valueLabel({ ...START, kind: "date_range" }, ["2026-01-01", "2026-01-02"])).toBe("2026-01-01 → 2026-01-02");
     expect(valueLabel({ ...START, kind: "date_range" }, "2026-01-01")).toBeNull();
+  });
+});
+
+describe("payload shaping", () => {
+  it("reads a stored comma string under its own operator", () => {
+    // A single-day lookup keeps its stored string; a comma-separated
+    // collection splits into its picks; a lone comma stays as stored.
+    expect(parseLeafValue("exact", "2026-02-10")).toBe("2026-02-10");
+    expect(parseLeafValue("exact", "2026-02-10,2026-02-12")).toBe("2026-02-10,2026-02-12");
+    expect(parseLeafValue("in", "a, b ,")).toEqual(["a", "b"]);
+    expect(parseLeafValue("in", " , ")).toBe(" , ");
+  });
+
+  it("keeps the collection lookup for one pick and lifts a list off exact", () => {
+    expect(payloadOperator("in", ["a"])).toBe("in");
+    expect(payloadOperator("exact", "a")).toBe("exact");
+    expect(payloadOperator("exact", ["a"])).toBe("in");
+    expect(payloadOperator("range", ["2026-01-01", "2026-01-05"])).toBe("range");
   });
 });

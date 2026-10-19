@@ -435,6 +435,18 @@ describe("view row wiring", () => {
     return { patches, onViewUpdated };
   }
 
+  describe("a view record without a stored expression", () => {
+    it("starts a view with no stored expression at its Add control", async () => {
+      setupView(
+        {},
+        // A record that predates rich filters carries no key at all.
+        { view: { ...VIEW_RECORD, rich_filters: undefined } as never, isDefault: false }
+      );
+      expect(await screen.findByTestId("rich-filter-add")).toBeInTheDocument();
+      expect(screen.queryByTestId("rich-condition")).not.toBeInTheDocument();
+    });
+  });
+
   it("offers Update view for a changed owned view and reports the patch payload", async () => {
     const user = userEvent.setup();
     const { patches, onViewUpdated } = setupView(
@@ -699,6 +711,48 @@ describe("temporary builder instances", () => {
     // Clear all stays available in memory; save and update do not, since a
     // temp instance has no record to write.
     expect(screen.getByTestId("rich-clear-all")).toBeInTheDocument();
+    expect(screen.queryByTestId("rich-save-view")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
+  });
+});
+
+describe("temporary rows never write views", () => {
+  it("shows no view actions even when the layout switch dirties an empty row", async () => {
+    const user = userEvent.setup();
+    const registry = new FieldConfigRegistry();
+    // An empty temporary row still exposes Add filter and Clear all, and
+    // its update mutation is disabled: no view or preference action shows.
+    createAppClient("https://api.test", (() => {
+      throw new Error("temporary instances must not read the server");
+    }) as never);
+    function TemporaryHarness(): React.ReactElement {
+      const { control, row } = useRichFilterBuilder({
+        workspaceSlug: "acme",
+        projectId: PROJECT,
+        entity: ENTITY,
+        hideCycle: false,
+        hideModule: false,
+        temporary: true,
+        temporaryRegistry: registry,
+        viewsEnabled: true,
+      } satisfies RichFilterBuilderProps);
+      return (
+        <div>
+          <div data-testid="control-slot">{control}</div>
+          {row}
+        </div>
+      );
+    }
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <IssuesLoaderProvider>
+          <TemporaryHarness />
+        </IssuesLoaderProvider>
+      </QueryClientProvider>
+    );
+    await user.click(screen.getByTestId("rich-filter-add"));
+    await user.click(await screen.findByRole("option", { name: "Priority" }));
+    expect(await screen.findByTestId("rich-condition")).toBeInTheDocument();
     expect(screen.queryByTestId("rich-save-view")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
   });

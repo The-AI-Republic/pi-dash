@@ -162,7 +162,9 @@ function renderScreen(
   role: number | null = 20,
   view: ReturnType<typeof viewRecord> = viewRecord(),
   rows = 0,
-  transport?: (url: string, init: { method?: string; body?: string }) => Promise<unknown>
+  transport?: (url: string, init: { method?: string; body?: string }) => Promise<unknown>,
+  projects: Project[] = [projectSeed()],
+  totalCount = rows
 ): void {
   vi.spyOn(Route, "useParams").mockReturnValue(PARAMS);
   vi.spyOn(Route, "useSearch").mockReturnValue({});
@@ -179,7 +181,7 @@ function renderScreen(
     projectViewQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, PARAMS.viewId).queryKey,
     view
   );
-  queryClient.setQueryData(projectsQueryOptions(apiClient, PARAMS.ws).queryKey, [projectSeed()]);
+  queryClient.setQueryData(projectsQueryOptions(apiClient, PARAMS.ws).queryKey, projects);
   queryClient.setQueryData(
     issuesQueryOptions(
       apiClient,
@@ -189,7 +191,7 @@ function renderScreen(
       EXPRESSION,
       typeof view.display_filters["order_by"] === "string" ? view.display_filters["order_by"] : "sort_order"
     ).queryKey,
-    issueResponse(rows)
+    { ...issueResponse(rows), total_count: totalCount, total_results: totalCount }
   );
   // Display writes still target the personal record; the render itself
   // uses the view's stored settings.
@@ -352,5 +354,65 @@ describe("saved view screen", () => {
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0]?.["display_filters"]).toMatchObject({ layout: "gantt_chart" });
     expect(Object.keys(patches[0] ?? {}).sort()).toEqual(["display_filters", "display_properties", "rich_filters"]);
+  });
+});
+
+describe("saved view loader and route states", () => {
+  it("prefetches the workspace project list the header reads", async () => {
+    const apiClient = createAppClient("https://api.test", (async (url: string) => ({
+      status: 200,
+      url,
+      headers: { get: () => null },
+      text: async () => JSON.stringify([projectSeed()]),
+    })) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const loader = Route.options.loader as unknown as (input: unknown) => Promise<unknown>;
+    if (!loader) throw new Error("missing loader");
+    await expect(loader({ context: { queryClient, apiClient }, params: PARAMS } as never)).resolves.toBeUndefined();
+    expect(queryClient.getQueryData(projectsQueryOptions(apiClient, PARAMS.ws).queryKey)).toHaveLength(1);
+  });
+
+  it("validates the search the same way the issues screen does", () => {
+    const validateSearch = Route.options.validateSearch as unknown as (input: Record<string, unknown>) => unknown;
+    expect(validateSearch({ layout: "compact" })).toMatchObject({ layout: "compact" });
+    expect(validateSearch({ layout: "grid" })).toEqual({});
+  });
+
+  it("shows the list skeleton while the view loads", () => {
+    const pending = Route.options.pendingComponent;
+    if (!pending) throw new Error("missing pendingComponent");
+    render(React.createElement(pending));
+    expect(screen.getByTestId("issues-skeleton-list")).toBeInTheDocument();
+  });
+
+  it("reports the load failure and retries from its error state", () => {
+    const errorComponent = Route.options.errorComponent;
+    if (!errorComponent) throw new Error("missing errorComponent");
+    const reset = vi.fn();
+    render(React.createElement(errorComponent, { error: new Error("Boom"), reset }));
+    expect(screen.getByText("Boom")).toBeInTheDocument();
+    screen.getByRole("button", { name: "Try again" }).click();
+    expect(reset).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to fixed copy when the error is not an Error", () => {
+    const errorComponent = Route.options.errorComponent;
+    if (!errorComponent) throw new Error("missing errorComponent");
+    render(React.createElement(errorComponent, { error: "nope", reset: () => {} }));
+    expect(screen.getByText("Something went wrong.")).toBeInTheDocument();
+  });
+
+  it("asks for another project when the record points at one outside the list", async () => {
+    renderScreen(20, viewRecord(), 0, undefined, [{ ...projectSeed(), id: USER }]);
+    expect(await screen.findByRole("heading", { name: "Project not found" })).toBeInTheDocument();
+    expect(screen.getByText("Pick another project from the sidebar.")).toBeInTheDocument();
+    expect(screen.queryByTestId("layout-switcher-segmented")).not.toBeInTheDocument();
+  });
+
+  it("shows the no-match state when the view's filters exclude every row", async () => {
+    renderScreen(20, viewRecord(), 0, undefined, undefined, 3);
+    expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No matching issues" })).toBeInTheDocument();
+    expect(screen.getByText("No issues match the current filters.")).toBeInTheDocument();
   });
 });

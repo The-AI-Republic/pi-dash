@@ -12,6 +12,8 @@ import {
   offersSaveAs,
   offersSaveView,
   offersUpdateView,
+  projectViewHref,
+  savedViewKeys,
   stableJson,
   viewContextFromRecord,
   viewDisplaySnapshot,
@@ -19,6 +21,7 @@ import {
   type ViewSnapshot,
 } from "./views.js";
 import { parseDisplayPrefs } from "../../prefs/displayPrefs.js";
+import { issueKeys } from "../../api/keys.js";
 
 const VIEW_ID = "123e4567-e89b-12d3-a456-426614174000";
 const OWNER = "223e4567-e89b-12d3-a456-426614174001";
@@ -310,5 +313,22 @@ describe("a default view record", () => {
       ...viewDisplaySnapshot({ display_filters, display_properties }, prefs),
     };
     expect(offersUpdateView(context, snapshot, OWNER)).toBe(false);
+  });
+});
+
+describe("saved-view addresses", () => {
+  it("links a created view to its project screen", () => {
+    expect(projectViewHref("acme", PROJECT, VIEW_ID)).toBe(`/acme/projects/${PROJECT}/views/${VIEW_ID}`);
+  });
+
+  it("keeps project and workspace view keys apart but under the workspace", () => {
+    const project = savedViewKeys.project("acme", PROJECT, VIEW_ID);
+    const workspace = savedViewKeys.workspace("acme", VIEW_ID);
+    expect(project).toEqual([...issueKeys.all("acme"), "saved-view", PROJECT, VIEW_ID]);
+    expect(workspace).toEqual([...issueKeys.all("acme"), "saved-view", "workspace", VIEW_ID]);
+    expect(project).not.toEqual(workspace);
+    // Signing out of another workspace clears neither.
+    expect(project.slice(0, issueKeys.all("acme").length)).toEqual([...issueKeys.all("acme")]);
+    expect(project.slice(0, issueKeys.all("other").length)).not.toEqual([...issueKeys.all("other")]);
   });
 });
