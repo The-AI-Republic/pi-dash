@@ -286,13 +286,15 @@ fn runner_refresh_sql() -> String {
 /// Lazy `runner.pod` load for the revoke response (`serializers.py`
 /// `pod_detail`).
 ///
-/// `Pod.objects.get(pk)`: `PodManager` scope (`deleted_at IS NULL`),
-/// no ordering, `LIMIT 1`. `$1` = pod id.
+/// The serializer reads `runner.pod` as a forward-FK attribute, so Django
+/// resolves it through `Pod._base_manager` (a plain `models.Manager`), NOT
+/// through `PodManager`: a tombstoned pod still renders. No scope, no
+/// ordering, `LIMIT 1`. `$1` = pod id.
 ///
 /// Probe: `/tmp/592_probe.py` P4a.
 fn pod_lazy_sql() -> String {
     format!(
-        "SELECT {} FROM \"pod\" WHERE (\"pod\".\"deleted_at\" IS NULL AND \"pod\".\"id\" = $1) LIMIT 1",
+        "SELECT {} FROM \"pod\" WHERE \"pod\".\"id\" = $1 LIMIT 1",
         qualified(pod_cols::TABLE, pod_cols::COLUMNS),
     )
 }
@@ -1782,9 +1784,12 @@ async fn render_revoked_runner(pool: &PgPool, runner_id: Uuid) -> Result<String,
         });
     }
     // Lazy `pod.project.identifier` (the `catalog_reads` full-row read —
-    // the builder's `ORDER BY` is unobservable on a PK lookup).
+    // the builder's `ORDER BY` is unobservable on a PK lookup). This is a
+    // forward-FK attribute read, so Django uses `Project._base_manager`
+    // (`SoftDeletionManager` does not apply) and a tombstoned project still
+    // renders its identifier: the base variant drops the `deleted_at` scope.
     let project_row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(&catalog_reads::project_by_id_sql())
+        sqlx::query(&catalog_reads::project_by_id_base_sql())
             .bind(project_id)
             .fetch_optional(pool)
             .await
@@ -2971,10 +2976,17 @@ mod tests {
             "{reread}"
         );
         assert!(!reread.contains("ORDER BY"), "{reread}");
-        // Lazy loads carry their manager scope.
+        // Lazy loads: the pod load is a forward-FK dereference, so it
+        // resolves through `_base_manager` and carries NO soft-delete
+        // scope (a tombstoned pod still renders — PIDASHCONV-1210); the
+        // machine load is on a plain (unscoped) manager either way.
         assert!(
-            normalize_sql(&pod_lazy_sql()).contains(r#""deleted_at" IS NULL"#),
-            "PodManager scope"
+            !normalize_sql(&pod_lazy_sql()).contains(r#""deleted_at" IS NULL"#),
+            "pod lazy load must not filter tombstones"
+        );
+        assert!(
+            normalize_sql(&pod_lazy_sql()).contains(r#"FROM "pod" WHERE "pod"."id" = $1 LIMIT 1"#),
+            "pod lazy load shape"
         );
         assert!(
             normalize_sql(&machine_lazy_sql()).contains(r#"FROM "dev_machine""#),

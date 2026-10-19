@@ -684,8 +684,19 @@ struct ProjectFacts {
     identifier: String,
 }
 
-/// [`catalog_reads::project_by_id_sql`] decoded to the two facts (by
-/// name — the single-table row has no duplicate columns).
+/// Decode a `projects` row into the two facts (by name — the
+/// single-table row has no duplicate columns).
+fn decode_project_facts(row: &sqlx::postgres::PgRow) -> Result<ProjectFacts, Response> {
+    Ok(ProjectFacts {
+        workspace_id: row.try_get("workspace_id").map_err(|_| server_error())?,
+        identifier: row.try_get("identifier").map_err(|_| server_error())?,
+    })
+}
+
+/// [`catalog_reads::project_by_id_sql`] decoded to the two facts. Used by
+/// the *direct* `Project.objects.filter(pk=…)` reads
+/// (`pods.py:56-58,99-101`), where `SoftDeletionManager` scopes the read
+/// and a tombstoned project reads as absent (404).
 async fn fetch_project_facts(
     pool: &PgPool,
     project_id: Uuid,
@@ -698,22 +709,44 @@ async fn fetch_project_facts(
     let Some(row) = row else {
         return Ok(None);
     };
-    Ok(Some(ProjectFacts {
-        workspace_id: row.try_get("workspace_id").map_err(|_| server_error())?,
-        identifier: row.try_get("identifier").map_err(|_| server_error())?,
-    }))
+    decode_project_facts(&row).map(Some)
 }
 
-/// [`catalog_reads::project_by_id_sql`] inside a transaction: the
-/// `Pod.save()` denorm read (`QUIRK-denorm-read`). The value is only
-/// ever compared, never rendered — the mismatch arm is unreachable on
-/// these paths (neither `workspace_id` nor `project_id` changes), so
-/// only the read itself is ported.
+/// [`catalog_reads::project_by_id_base_sql`] decoded to the two facts:
+/// the forward-FK `pod.project` read (`PodMiniSerializer`
+/// `project_identifier`, the rename branch's `pod.project.identifier`, and
+/// the `Pod.save()` denorm check). Django resolves a forward FK through
+/// `Project._base_manager` (a plain `models.Manager`), so
+/// `SoftDeletionManager` does NOT scope it and a tombstoned project still
+/// renders (PIDASHCONV-1210).
+async fn fetch_project_facts_base(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Option<ProjectFacts>, Response> {
+    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&catalog_reads::project_by_id_base_sql())
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| server_error())?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    decode_project_facts(&row).map(Some)
+}
+
+/// [`catalog_reads::project_by_id_base_sql`] inside a transaction: the
+/// `Pod.save()` denorm read (`QUIRK-denorm-read`). `save()` reads
+/// `self.project` — a forward-FK attribute — so Django resolves it
+/// through `Project._base_manager` and `SoftDeletionManager` does NOT
+/// scope it; a tombstoned project still returns its row (PIDASHCONV-1210).
+/// The value is only ever compared, never rendered — the mismatch arm is
+/// unreachable on these paths (neither `workspace_id` nor `project_id`
+/// changes), so only the read itself is ported.
 async fn denorm_project_read(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     project_id: Uuid,
 ) -> Result<(), Response> {
-    sqlx::query(&catalog_reads::project_by_id_sql())
+    sqlx::query(&catalog_reads::project_by_id_base_sql())
         .bind(project_id)
         .fetch_optional(&mut **tx)
         .await
@@ -790,7 +823,7 @@ async fn render_pod(
         .map_err(|_| server_error())?;
     let identifier = match project_identifier {
         Some(identifier) => identifier,
-        None => fetch_project_facts(pool, pod.project_id)
+        None => fetch_project_facts_base(pool, pod.project_id)
             .await?
             .map(|facts| facts.identifier)
             .ok_or_else(server_error)?,
@@ -1453,7 +1486,7 @@ pub async fn runner_patch(
     // mini stays cached; the live state re-reads.
     let (pod, pod_identifier, dev_machine_detail) = match new_pod {
         Some(target) => {
-            let identifier = match fetch_project_facts(&pool, target.project_id).await {
+            let identifier = match fetch_project_facts_base(&pool, target.project_id).await {
                 Ok(Some(facts)) => facts.identifier,
                 Ok(None) | Err(_) => return server_error(),
             };
@@ -1797,7 +1830,7 @@ pub async fn pod_patch(
             if stripped.is_empty() {
                 return bad_request(NAME_CANNOT_BE_EMPTY_BODY);
             }
-            let facts = match fetch_project_facts(&pool, pod.project_id).await {
+            let facts = match fetch_project_facts_base(&pool, pod.project_id).await {
                 Ok(Some(facts)) => facts,
                 Ok(None) | Err(_) => return server_error(),
             };
@@ -1870,7 +1903,7 @@ pub async fn pod_patch(
         if project_identifier.is_none() {
             // `Pod.save()` denorm check (`QUIRK-denorm-read`): the
             // project read the rename branch would have cached.
-            let facts = match fetch_project_facts(&pool, pod.project_id).await {
+            let facts = match fetch_project_facts_base(&pool, pod.project_id).await {
                 Ok(Some(facts)) => facts,
                 Ok(None) | Err(_) => return server_error(),
             };
