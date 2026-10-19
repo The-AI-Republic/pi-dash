@@ -205,7 +205,8 @@ describe("ThreadView transcript", () => {
       messages: [row({ id: "e", role: "error", content: "Could not reach the model.", status: "failed" })],
     });
     const bubble = await screen.findByText("Could not reach the model.");
-    expect(bubble).toHaveClass("text-danger");
+    // Tinted with the app's own danger token, not the old app's class name.
+    expect(bubble).toHaveClass("text-(--danger)");
   });
 
   it("falls back to a sentence for an empty error row", async () => {
@@ -294,6 +295,28 @@ describe("ThreadView composer", () => {
     await waitFor(() => expect(cancels).toHaveLength(1));
     // Still locked until the server confirms the end of the turn.
     expect(screen.getByRole("button", { name: "Stop response" })).toBeInTheDocument();
+  });
+
+  it("still posts a plain Enter while a turn runs and shows the server's refusal", async () => {
+    // The box stays editable during a turn and the old surface lets Enter
+    // post; the server owns the race and answers `turn_active`, which lands
+    // inline instead of the key being swallowed (AGT-049).
+    const { sent } = renderThread({
+      messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })],
+      active: true,
+      send: async () => ({
+        status: 409,
+        url: "https://api.test",
+        headers: { get: () => "application/json" },
+        text: async () => JSON.stringify({ error: "turn_active" }),
+      }),
+    });
+    await screen.findByRole("button", { name: "Stop response" });
+    const box = screen.getByRole("textbox", { name: "Message the assistant" });
+    fireEvent.change(box, { target: { value: "second" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(sent).toEqual([{ content: "second" }]));
+    expect(await screen.findByTestId("assistant-error-line")).toHaveTextContent("turn_active");
   });
 
   it("unlocks after stop when the server reports the turn ended without a new row", async () => {

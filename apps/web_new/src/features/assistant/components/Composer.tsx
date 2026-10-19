@@ -53,9 +53,12 @@ export function Composer({
   bordered = true,
   className,
 }: ComposerProps): React.ReactElement {
-  const canSend = configured && !starting && !posting && !running && draft.trim() !== "";
-  // A running turn keeps the draft editable, so the next message can be typed
-  // while stop is showing; submitting is what waits for the turn to end.
+  // A running turn does not disable the box: the draft stays editable and an
+  // unmodified Enter still posts, exactly as the old surface does. The server
+  // owns the race and answers `turn_active`, which the thread shows inline;
+  // the visible action is what swaps to stop, so no second send can come from
+  // a button while the turn runs (AGT-042/AGT-043/AGT-049).
+  const canSend = configured && !starting && !posting && draft.trim() !== "";
   const boxLocked = !configured || starting || posting;
 
   const submit = (event: React.FormEvent<HTMLFormElement>): void => {
@@ -92,6 +95,8 @@ export function Composer({
             // Only an unmodified Enter submits: Shift+Enter keeps the newline
             // the browser inserts natively, and every other modifier is left
             // to the browser so a chord never fires a send (AGT-049 intended).
+            // A running turn is not a client-side gate; the send still posts
+            // and the server's `turn_active` reply lands inline.
             if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
               event.preventDefault();
               if (canSend) onSubmit(draft.trim());

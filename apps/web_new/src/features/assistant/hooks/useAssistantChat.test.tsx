@@ -52,6 +52,8 @@ function row(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 }
 
 interface SetupOptions {
+  /** Render the hook under StrictMode, as the dev app does. */
+  strict?: boolean;
   /** The thread list's `has_active_turn`. */
   active?: boolean;
   /** Hold each list read until the test resolves it. */
@@ -139,7 +141,7 @@ function setup(initial: AssistantMessage[], options: SetupOptions = {}) {
   const hook = renderHook(() => useAssistantChat("acme", THREAD_ID), {
     wrapper: ({ children }: { children: React.ReactNode }) => (
       <QueryClientProvider client={queryClient}>
-        <React.Fragment>{children}</React.Fragment>
+        {options.strict === true ? <React.StrictMode>{children}</React.StrictMode> : children}
       </QueryClientProvider>
     ),
   });
@@ -164,6 +166,47 @@ afterEach(() => {
 });
 
 describe("useAssistantChat", () => {
+  it("appends a streamed delta under StrictMode", async () => {
+    // main.tsx renders the app in StrictMode, and the parity stack runs the
+    // dev server, so React replays every reducer. Dedupe kept in a mutable
+    // ref made the replay skip the first chunk and commit an empty bubble.
+    const { result } = setup([row({ id: "a", seq: 2, role: "assistant", status: "streaming", content: "" })], {
+      strict: true,
+    });
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 40,
+        thread: THREAD_ID,
+        message: "a",
+        seq: 40,
+        kind: "assistant_delta",
+        payload: { turn_id: "turn", params: { delta: "Hello" } },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await waitFor(() => expect(result.current.messages[0]?.content).toBe("Hello"));
+  });
+
+  it("applies a replayed connect's chunks exactly once", async () => {
+    const { result } = setup([row({ id: "a", seq: 2, role: "assistant", status: "streaming", content: "" })], {
+      strict: true,
+    });
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    const chunk = {
+      id: 41,
+      thread: THREAD_ID,
+      message: "a",
+      seq: 41,
+      kind: "assistant_delta",
+      payload: { turn_id: "turn", params: { delta: "Hi" } },
+      created_at: "2026-01-01T00:00:00Z",
+    };
+    act(() => stream.subscriptions.at(-1)?.onEvent(chunk));
+    act(() => stream.subscriptions.at(-1)?.onEvent(chunk));
+    await waitFor(() => expect(result.current.messages[0]?.content).toBe("Hi"));
+  });
+
   it("exposes the stored rows oldest first and is not running", async () => {
     const { result } = setup([
       row({ id: "a", seq: 2, role: "assistant", content: "answer" }),

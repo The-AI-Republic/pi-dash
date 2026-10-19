@@ -23,6 +23,10 @@ import { DUMMY_PROVIDER, expectBubbles, expectSidebarTitles } from "./support";
 
 const ROWS = ["AGT-045"];
 
+// The event contract types these as UUIDs (the server only ever emits UUIDs).
+const STUB_TURN = "45000000-0000-4000-8000-000000000001";
+const STUB_TOOL = "45000000-0000-4000-8000-000000000002";
+
 test(
   specTitle(ROWS, "thread links load transcripts, tool links land on threads"),
   { tag: specTags(ROWS) },
@@ -68,16 +72,16 @@ test(
       const tool: AssistantStreamFrame = {
         seq: 201,
         kind: "tool_result",
-        message: "stub-tool1",
+        message: STUB_TOOL,
         payload: {
-          turn_id: "stub-turn",
+          turn_id: STUB_TURN,
           message: {
-            id: "stub-tool1",
+            id: STUB_TOOL,
             role: "tool_result",
             content: `Looked up ${tag}`,
             status: "completed",
             seq: 1,
-            turn_id: "stub-turn",
+            turn_id: STUB_TURN,
             payload: {
               links: [{ url_path: `/${workspaceSlug}/assistant/${first.id}`, label: "Open thread" }],
             },

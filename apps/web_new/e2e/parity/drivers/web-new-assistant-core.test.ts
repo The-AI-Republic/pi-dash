@@ -129,7 +129,7 @@ describe("transcript reads", () => {
   it("reads one bubble's rendered HTML by index", async () => {
     const evaluate = vi.fn(async (fn: (node: Element) => unknown) =>
       fn({
-        outerHTML: '<div data-role="assistant" class="text-danger"><h1>Styled</h1></div>',
+        outerHTML: '<div data-role="assistant" class="text-(--danger)"><h1>Styled</h1></div>',
       } as unknown as Element)
     );
     const page = pageOf({
@@ -140,9 +140,27 @@ describe("transcript reads", () => {
     });
     const driver = new WebNewDriver(page);
     const html = await driver.assistantBubbleHtml(0);
-    expect(html).toBe('<div data-role="assistant" class="text-danger"><h1>Styled</h1></div>');
-    // The error tint lives on the bubble element, so the read must carry it.
-    expect(html).toContain("text-danger");
+    expect(html).toBe('<div data-role="assistant" class="text-(--danger)"><h1>Styled</h1></div>');
+    // The tint lives on the bubble element, so the read must carry it.
+    expect(html).toContain("text-(--danger)");
+  });
+
+  it("reads an error row's rendered colour, not its class name", async () => {
+    // The two apps spell the danger token differently, so the probe reads
+    // what the reader sees; a class name would lock in one app's spelling.
+    const evaluate = vi.fn(async (fn: (node: Element) => unknown) =>
+      fn({
+        ownerDocument: { defaultView: { getComputedStyle: () => ({ color: "rgb(220, 38, 38)" }) } },
+      } as unknown as Element)
+    );
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="assistant-transcript"]'
+          ? locator({ locator: () => locator({ locator: () => locator({ evaluate }) }) })
+          : locator(),
+    });
+    await expect(new WebNewDriver(page).assistantErrorTint(0)).resolves.toBe("rgb(220, 38, 38)");
+    expect(evaluate).toHaveBeenCalledTimes(1);
   });
 
   it("reads the empty state from the thread body and null once rows render", async () => {

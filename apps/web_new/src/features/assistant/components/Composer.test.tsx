@@ -75,7 +75,10 @@ describe("Composer", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("swaps send for stop while a turn runs and never submits", () => {
+  it("swaps send for stop while a turn runs, and a plain Enter still posts", () => {
+    // The old surface keeps the box editable and posts during a turn; the
+    // server owns the race and answers `turn_active`. Swallowing Enter here
+    // stranded the draft with no way to tell why (AGT-049).
     const onStop = vi.fn();
     const { onSubmit } = renderComposer({ draft: "hello", running: true, onStop });
     const box = screen.getByRole("textbox", { name: "Message the assistant" });
@@ -83,6 +86,21 @@ describe("Composer", () => {
     expect(screen.queryByRole("button", { name: "Send message" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Stop response" }));
     expect(onStop).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledWith("hello");
+  });
+
+  it("keeps modified Enter and Shift+Enter out of the send path while a turn runs", () => {
+    const { onSubmit } = renderComposer({ draft: "hello", running: true });
+    const box = screen.getByRole("textbox", { name: "Message the assistant" });
+    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("never sends a blank draft while a turn runs", () => {
+    const { onSubmit } = renderComposer({ draft: "   ", running: true });
+    const box = screen.getByRole("textbox", { name: "Message the assistant" });
     fireEvent.keyDown(box, { key: "Enter" });
     fireEvent.submit(box.closest("form") as HTMLFormElement);
     expect(onSubmit).not.toHaveBeenCalled();

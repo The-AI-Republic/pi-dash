@@ -79,7 +79,6 @@ export interface AssistantChat {
 
 export function useAssistantChat(workspaceSlug: string, threadId: string): AssistantChat {
   const queryClient = useQueryClient();
-  const seen = React.useRef<Set<number>>(new Set());
   const reduce = React.useCallback((current: TranscriptState, action: Action): TranscriptState => {
     switch (action.type) {
       case "reset":
@@ -89,7 +88,7 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
       case "message":
         return mergeMessage(current, action.message);
       case "event":
-        return applyAssistantEvent(current, action.event, seen.current);
+        return applyAssistantEvent(current, action.event);
     }
   }, []);
   const [state, dispatch] = React.useReducer(reduce, EMPTY_TRANSCRIPT);
@@ -194,7 +193,6 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
 
   React.useEffect(() => {
     dispatch({ type: "reset" });
-    seen.current = new Set();
     setTerminalSeen(false);
     turnRef.current = null;
     startSeqRef.current = 0;

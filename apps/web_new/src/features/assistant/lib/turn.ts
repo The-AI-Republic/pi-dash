@@ -17,9 +17,17 @@ const REAL_ROLES = new Set(["user", "assistant", "error", "tool_call", "tool_res
 /** Rows by id; the render order always comes from the sequence number. */
 export interface TranscriptState {
   readonly rows: Readonly<Record<string, AssistantMessage>>;
+  /**
+   * Highest delta sequence already appended. The channel replays from zero
+   * on every reconnect, so a chunk at or below this was served before. It
+   * lives in the state (not a ref) because the reducer must stay pure:
+   * React replays a reducer to detect impurity, and a set mutated in place
+   * made the replay skip the first delta and commit nothing.
+   */
+  readonly appliedDelta: number;
 }
 
-export const EMPTY_TRANSCRIPT: TranscriptState = { rows: {} };
+export const EMPTY_TRANSCRIPT: TranscriptState = { rows: {}, appliedDelta: 0 };
 
 /**
  * Whether `incoming` may replace `current`. A terminal row always wins;
@@ -58,23 +66,25 @@ export function mergeTranscript(state: TranscriptState, page: readonly Assistant
       changed = true;
     }
   }
-  return changed ? { rows } : state;
+  return changed ? { ...state, rows } : state;
 }
 
 /** Merge a single row (the send's echoed user message, an event payload). */
 export function mergeMessage(state: TranscriptState, message: AssistantMessage): TranscriptState {
   const current = state.rows[message.id];
   if (!wins(message, current)) return state;
-  return { rows: { ...state.rows, [message.id]: carryText(message, current) } };
+  return { ...state, rows: { ...state.rows, [message.id]: carryText(message, current) } };
 }
 
 /**
- * Apply one parsed stream event. `seen` collects applied delta sequences so
- * a reconnect (which replays from the beginning) appends each chunk once.
- * Unknown kinds and events with no row are ignored; the caller never needs
- * to special-case a future server kind.
+ * Apply one parsed stream event. Two rules keep a reconnect (which replays
+ * the thread from the beginning) from doubling text: a delta at or below
+ * the last applied sequence was already served, and a delta never appends
+ * to a row that has already stopped streaming, because its stored content
+ * is the whole answer. Unknown kinds and events with no row are ignored;
+ * the caller never needs to special-case a future server kind.
  */
-export function applyAssistantEvent(state: TranscriptState, event: AssistantEvent, seen: Set<number>): TranscriptState {
+export function applyAssistantEvent(state: TranscriptState, event: AssistantEvent): TranscriptState {
   switch (event.kind) {
     case "message_created":
     case "message_completed":
@@ -84,14 +94,14 @@ export function applyAssistantEvent(state: TranscriptState, event: AssistantEven
       return message === undefined ? state : mergeMessage(state, message);
     }
     case "assistant_delta": {
-      if (seen.has(event.seq)) return state;
+      if (event.seq <= state.appliedDelta) return state;
       const target = event.message;
       const delta = (event.payload as { params?: { delta?: unknown } }).params?.delta;
       if (target === null || typeof delta !== "string" || delta === "") return state;
       const current = state.rows[target];
-      if (current === undefined) return state;
-      seen.add(event.seq);
+      if (current === undefined || current.status !== "streaming") return state;
       return {
+        appliedDelta: event.seq,
         rows: { ...state.rows, [target]: { ...current, content: current.content + delta } },
       };
     }

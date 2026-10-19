@@ -10461,6 +10461,16 @@ export class WebNewDriver implements ParityDriver {
     const bubble = this.assistantTranscriptRow(index).locator("[data-role]").first();
     return bubble.evaluate((node) => node.outerHTML);
   }
+  async assistantErrorTint(index: number): Promise<string> {
+    // Read the rendered colour rather than a class name: the two apps spell
+    // their danger token differently, and the tint the reader sees is what
+    // the oracle asserts (AGT-047).
+    const bubble = this.assistantTranscriptRow(index).locator('[data-role="error"]').first();
+    return bubble.evaluate((node) => {
+      const view = (node as Element).ownerDocument.defaultView;
+      return view === null ? "" : view.getComputedStyle(node as Element).color;
+    });
+  }
   async assistantToolActivities(): Promise<AssistantToolActivity[]> {
     return todo("assistantToolActivities");
   }

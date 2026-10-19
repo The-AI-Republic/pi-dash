@@ -105,24 +105,25 @@ describe("mergeMessage", () => {
 
 describe("applyAssistantEvent", () => {
   it("appends deltas in arrival order and skips a replayed sequence", () => {
-    const seen = new Set<number>();
     let state = mergeMessage(EMPTY_TRANSCRIPT, message());
-    state = applyAssistantEvent(state, delta("m1", 2, "Hel"), seen);
-    state = applyAssistantEvent(state, delta("m1", 2, "Hel"), seen);
-    state = applyAssistantEvent(state, delta("m1", 3, "lo"), seen);
+    state = applyAssistantEvent(state, delta("m1", 2, "Hel"));
+    state = applyAssistantEvent(state, delta("m1", 2, "Hel"));
+    state = applyAssistantEvent(state, delta("m1", 3, "lo"));
     expect(state.rows.m1?.content).toBe("Hello");
   });
 
   it("ignores a delta for a row it has not seen yet", () => {
-    const seen = new Set<number>();
-    expect(applyAssistantEvent(EMPTY_TRANSCRIPT, delta("missing", 4, "x"), seen)).toBe(EMPTY_TRANSCRIPT);
-    expect(seen.size).toBe(0);
+    const state = applyAssistantEvent(EMPTY_TRANSCRIPT, delta("missing", 4, "x"));
+    expect(state).toBe(EMPTY_TRANSCRIPT);
+    // The sequence stays unconsumed, so the replay can serve it once the
+    // created row lands instead of losing the chunk for good.
+    expect(state.appliedDelta).toBe(0);
   });
 
   it("ignores a non-string or empty delta", () => {
     const state = mergeMessage(EMPTY_TRANSCRIPT, message());
     const blank = { ...delta("m1", 5, ""), payload: { turn_id: "turn", params: {} } } as AssistantEvent;
-    expect(applyAssistantEvent(state, blank, new Set())).toBe(state);
+    expect(applyAssistantEvent(state, blank)).toBe(state);
   });
 
   it("merges created, completed and tool rows", () => {
@@ -135,19 +136,18 @@ describe("applyAssistantEvent", () => {
       payload: { turn_id: "turn", message: message({ content: "" }) },
       created_at: "2026-01-01T00:00:00Z",
     } as AssistantEvent;
-    let state = applyAssistantEvent(EMPTY_TRANSCRIPT, created, new Set());
+    let state = applyAssistantEvent(EMPTY_TRANSCRIPT, created);
     expect(state.rows.m1?.status).toBe("streaming");
     const tool = {
       ...created,
       kind: "tool_call",
       payload: { turn_id: "turn", message: message({ id: "m2", role: "tool_call", content: "Search", seq: 2 }) },
     } as AssistantEvent;
-    state = applyAssistantEvent(state, tool, new Set());
+    state = applyAssistantEvent(state, tool);
     expect(Object.keys(state.rows).sort()).toEqual(["m1", "m2"]);
   });
 
   it("keeps streamed text when a reconnect replays message_created", () => {
-    const seen = new Set<number>();
     const created = {
       id: 10,
       thread: "t1",
@@ -157,25 +157,54 @@ describe("applyAssistantEvent", () => {
       payload: { turn_id: "turn", message: message({ content: "" }) },
       created_at: "2026-01-01T00:00:00Z",
     } as AssistantEvent;
-    let state = applyAssistantEvent(EMPTY_TRANSCRIPT, created, seen);
-    state = applyAssistantEvent(state, delta("m1", 101, "Hello "), seen);
-    state = applyAssistantEvent(state, delta("m1", 102, "world"), seen);
+    let state = applyAssistantEvent(EMPTY_TRANSCRIPT, created);
+    state = applyAssistantEvent(state, delta("m1", 101, "Hello "));
+    state = applyAssistantEvent(state, delta("m1", 102, "world"));
     // Reconnect: the server replays from zero, starting with the created row
     // exactly as it looked then, followed by the same deltas.
-    state = applyAssistantEvent(state, created, seen);
-    state = applyAssistantEvent(state, delta("m1", 101, "Hello "), seen);
-    state = applyAssistantEvent(state, delta("m1", 102, "world"), seen);
+    state = applyAssistantEvent(state, created);
+    state = applyAssistantEvent(state, delta("m1", 101, "Hello "));
+    state = applyAssistantEvent(state, delta("m1", 102, "world"));
     expect(state.rows.m1?.content).toBe("Hello world");
   });
 
   it("keeps a terminal reply when an older replay re-sends its created row", () => {
-    const seen = new Set<number>();
     let state = mergeMessage(EMPTY_TRANSCRIPT, message({ content: "", status: "streaming" }));
     state = mergeMessage(state, message({ content: "answer", status: "completed" }));
     const replay = { ...delta("m1", 20, ""), kind: "message_created" } as AssistantEvent;
-    state = applyAssistantEvent(state, replay, seen);
+    state = applyAssistantEvent(state, replay);
     expect(state.rows.m1?.status).toBe("completed");
     expect(state.rows.m1?.content).toBe("answer");
+  });
+
+  it("never appends a replay's deltas over a row that already stopped streaming", () => {
+    // A cold load has no memory of the last applied sequence; the stored row
+    // is the whole answer, so a replay from zero must not stack on it.
+    const loaded = mergeMessage(
+      EMPTY_TRANSCRIPT,
+      message({ content: "Hello world", status: "completed", completed_at: "2026-01-01T00:00:01Z" })
+    );
+    let state = applyAssistantEvent(loaded, delta("m1", 101, "Hello "));
+    state = applyAssistantEvent(state, delta("m1", 102, "world"));
+    expect(state.rows.m1?.content).toBe("Hello world");
+  });
+
+  it("resumes appending after a cold load when the turn is still streaming", () => {
+    const loaded = mergeMessage(EMPTY_TRANSCRIPT, message({ content: "Hello ", status: "streaming" }));
+    const state = applyAssistantEvent(loaded, delta("m1", 9, "world"));
+    expect(state.rows.m1?.content).toBe("Hello world");
+  });
+
+  it("is pure: applying the same delta to the same input twice agrees", () => {
+    // React replays a reducer under StrictMode; a reducer that mutated a
+    // shared set skipped its first chunk on the replay and committed nothing.
+    const start = mergeMessage(EMPTY_TRANSCRIPT, message());
+    const chunk = delta("m1", 41, "Hello");
+    const first = applyAssistantEvent(start, chunk);
+    const second = applyAssistantEvent(start, chunk);
+    expect(second).toEqual(first);
+    expect(first.rows.m1?.content).toBe("Hello");
+    expect(start.rows.m1?.content).toBe("");
   });
 
   it("skips envelope-only events and message events without a row", () => {
@@ -188,9 +217,9 @@ describe("applyAssistantEvent", () => {
       payload: { turn_id: "turn", usage: {} },
       created_at: "2026-01-01T00:00:00Z",
     } as AssistantEvent;
-    expect(applyAssistantEvent(EMPTY_TRANSCRIPT, turn, new Set())).toBe(EMPTY_TRANSCRIPT);
+    expect(applyAssistantEvent(EMPTY_TRANSCRIPT, turn)).toBe(EMPTY_TRANSCRIPT);
     const noRow = { ...turn, kind: "message_created", payload: { turn_id: "turn" } } as AssistantEvent;
-    expect(applyAssistantEvent(EMPTY_TRANSCRIPT, noRow, new Set())).toBe(EMPTY_TRANSCRIPT);
+    expect(applyAssistantEvent(EMPTY_TRANSCRIPT, noRow)).toBe(EMPTY_TRANSCRIPT);
   });
 });
 

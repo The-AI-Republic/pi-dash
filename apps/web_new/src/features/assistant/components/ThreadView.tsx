@@ -34,8 +34,12 @@ export interface ThreadViewProps {
   configured: boolean;
 }
 
-/** Why a bubble carries `text-danger` (the parity error-tint probe). */
-const ERROR_BUBBLE_CLASS = "text-danger";
+/**
+ * Error surfaces carry the app's danger token, the same tint the rest of
+ * web_new uses for inline failures; the parity probe reads the computed
+ * colour, not a class name (AGT-047).
+ */
+const ERROR_TEXT_CLASS = "text-(--danger)";
 
 export function ThreadView({ workspaceSlug, threadId, state, configured }: ThreadViewProps): React.ReactElement {
   const chat = useAssistantChat(workspaceSlug, threadId);
@@ -110,11 +114,7 @@ export function ThreadView({ workspaceSlug, threadId, state, configured }: Threa
       </div>
       <div className="mx-auto w-full max-w-3xl shrink-0 px-(--space-6) pb-(--space-4)">
         {chat.error === null ? null : (
-          <p
-            role="alert"
-            data-testid="assistant-error-line"
-            className={`text-meta mb-(--space-2) ${ERROR_BUBBLE_CLASS}`}
-          >
+          <p role="alert" data-testid="assistant-error-line" className={`text-meta mb-(--space-2) ${ERROR_TEXT_CLASS}`}>
             {chat.error}
           </p>
         )}
@@ -187,7 +187,7 @@ function MessageBubble({ message }: { message: AssistantMessage }): React.ReactE
     return (
       <div
         data-role="error"
-        className={`text-meta max-w-[80%] rounded-(--radius-popover) border border-(--danger) bg-(--surface) px-(--space-3) py-(--space-2) ${ERROR_BUBBLE_CLASS}`}
+        className={`text-meta max-w-[80%] rounded-(--radius-popover) border border-(--danger) bg-(--surface) px-(--space-3) py-(--space-2) ${ERROR_TEXT_CLASS}`}
       >
         {message.content.trim() === "" ? "The assistant hit an error." : message.content}
       </div>

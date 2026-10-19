@@ -29,6 +29,10 @@ import { DUMMY_PROVIDER, PROVIDER_UNREACHABLE, expectBubbles } from "./support";
 
 const ROWS = ["AGT-042"];
 
+// The event contract types these as UUIDs (the server only ever emits UUIDs).
+const STUB_TURN = "42000000-0000-4000-8000-000000000001";
+const STUB_STREAM = "42000000-0000-4000-8000-000000000002";
+
 function stubMessage(id: string, content: string, status: string): Record<string, unknown> {
   return {
     id,
@@ -36,7 +40,7 @@ function stubMessage(id: string, content: string, status: string): Record<string
     content,
     status,
     seq: 1,
-    turn_id: "stub-turn",
+    turn_id: STUB_TURN,
     payload: {},
     created_at: "2026-01-01T00:00:00Z",
     completed_at: null,
@@ -110,22 +114,22 @@ test(
       const created: AssistantStreamFrame = {
         seq: 101,
         kind: "message_created",
-        message: "stub-m1",
-        payload: { turn_id: "stub-turn", message: stubMessage("stub-m1", "", "streaming") },
+        message: STUB_STREAM,
+        payload: { turn_id: STUB_TURN, message: stubMessage(STUB_STREAM, "", "streaming") },
       };
       const deltaOne: AssistantStreamFrame = {
         seq: 102,
         kind: "assistant_delta",
-        message: "stub-m1",
-        payload: { turn_id: "stub-turn", params: { delta: "Hello " } },
+        message: STUB_STREAM,
+        payload: { turn_id: STUB_TURN, params: { delta: "Hello " } },
       };
       // Same event seq served twice: the replay dedupe must skip it.
       const deltaOneDup: AssistantStreamFrame = { ...deltaOne };
       const deltaTwo: AssistantStreamFrame = {
         seq: 103,
         kind: "assistant_delta",
-        message: "stub-m1",
-        payload: { turn_id: "stub-turn", params: { delta: "world" } },
+        message: STUB_STREAM,
+        payload: { turn_id: STUB_TURN, params: { delta: "world" } },
       };
       await driver.assistantStubStream(stubbed.id, [created, deltaOne, deltaOneDup, deltaTwo]);
       await driver.assistantOpenThread(workspaceSlug, stubbed.id);
@@ -134,16 +138,16 @@ test(
       const completed: AssistantStreamFrame = {
         seq: 104,
         kind: "message_completed",
-        message: "stub-m1",
+        message: STUB_STREAM,
         payload: {
-          turn_id: "stub-turn",
-          message: stubMessage("stub-m1", "Hello world", "completed"),
+          turn_id: STUB_TURN,
+          message: stubMessage(STUB_STREAM, "Hello world", "completed"),
         },
       };
       const done: AssistantStreamFrame = {
         seq: 105,
         kind: "turn_completed",
-        payload: { turn_id: "stub-turn", usage: {} },
+        payload: { turn_id: STUB_TURN, usage: {} },
       };
       // Re-served without `created` (the row exists by now): replays skip
       // the duplicate deltas and re-apply the completion, so the text is
