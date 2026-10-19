@@ -12,7 +12,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { transcriptKey } from "../api/keys.js";
+import { transcriptKey } from "../api/threadKeys.js";
 import { TURN_POLL_MS, useAssistantChat } from "./useAssistantChat.js";
 
 const stream = vi.hoisted(() => ({ subscriptions: [] as { onEvent: (event: unknown) => void }[] }));

@@ -3,32 +3,33 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
+import { AssistantLanding } from "./components/AssistantLanding.js";
+import { AssistantLayout } from "./components/AssistantLayout.js";
+import { Composer } from "./components/Composer.js";
+import { ConversationGate } from "./components/ConversationGate.js";
+import { ConversationRail } from "./components/ConversationRail.js";
+import { SetupCard } from "./components/SetupCard.js";
 import {
   API_KEY_REMINDER,
   assistantConfigQueryOptions,
+  assistantKeys,
   assistantLandingHref,
   assistantThreadHref,
-  AssistantLanding,
-  AssistantLayout,
-  Composer,
-  ConversationGate,
-  ConversationRail,
   HANDOFF_FAILED_TITLE,
   needsLaneSetup,
   SETUP_CARD_ACTION,
   SETUP_CARD_TITLE,
-  SetupCard,
 } from "./index.js";
 
 describe("assistant feature public API", () => {
-  it("exports the entry surfaces, data reads and pinned copy", () => {
+  it("exports the routes' surfaces, and the barrel carries only the shared reads and copy", () => {
     expect(AssistantLanding).toBeTypeOf("function");
     expect(AssistantLayout).toBeTypeOf("function");
-    expect(AssistantLanding).toBeTypeOf("function");
     expect(Composer).toBeTypeOf("function");
     expect(ConversationGate).toBeTypeOf("function");
     expect(ConversationRail).toBeTypeOf("function");
     expect(SetupCard).toBeTypeOf("function");
+    expect(assistantKeys.all("acme")).toEqual(["ws", "acme", "assistant"]);
     expect(assistantConfigQueryOptions).toBeTypeOf("function");
     expect(assistantLandingHref("acme")).toBe("/acme/assistant");
     expect(assistantThreadHref("acme", "t1")).toBe("/acme/assistant/t1");

@@ -21,13 +21,9 @@ import type { RouterContext } from "../../../__root.js";
 import { assistantKeys } from "../../../../features/assistant/index.js";
 import { Route } from "./route.js";
 
-vi.mock("../../../../features/assistant/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../../features/assistant/index.js")>();
-  return {
-    ...actual,
-    AssistantLayout: (props: { workspaceSlug: string }) => <div data-testid="layout-slot">{props.workspaceSlug}</div>,
-  };
-});
+vi.mock("../../../../features/assistant/components/AssistantLayout.js", () => ({
+  AssistantLayout: (props: { workspaceSlug: string }) => <div data-testid="layout-slot">{props.workspaceSlug}</div>,
+}));
 
 const THREAD = {
   id: "11111111-1111-4111-8111-111111111111",

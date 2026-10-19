@@ -15,8 +15,8 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { subscribeAssistantEvents } from "../api/events.js";
-import { transcriptKey } from "../api/keys.js";
-import { assistantTranscriptQueryOptions } from "../api/queries.js";
+import { transcriptKey } from "../api/threadKeys.js";
+import { assistantTranscriptQueryOptions } from "../api/transcript.js";
 import { sendFailureLine, useSendMessage, useStopTurn } from "../api/threadMutations.js";
 import {
   EMPTY_TRANSCRIPT,

@@ -17,6 +17,7 @@ import {
 
 import { getAppClient } from "../../../core/api/client.js";
 import { assistantKeys } from "./keys.js";
+import { threadKey } from "./threadKeys.js";
 
 /** Shown when a send fails without an assistant-shaped refusal. */
 export const SEND_FAILED_FALLBACK = "Unable to send message";
@@ -69,7 +70,7 @@ export function useStopTurn() {
   return useMutation<void, Error, StopTurnVars>({
     mutationFn: ({ workspaceSlug, threadId }) => cancelAssistantTurn(getAppClient(), workspaceSlug, threadId),
     onSuccess: (_data, { workspaceSlug, threadId }) => {
-      void queryClient.invalidateQueries({ queryKey: assistantKeys.thread(workspaceSlug, threadId) });
+      void queryClient.invalidateQueries({ queryKey: threadKey(workspaceSlug, threadId) });
     },
   });
 }

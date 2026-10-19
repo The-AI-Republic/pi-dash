@@ -19,7 +19,8 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { assistantKeys, transcriptKey } from "../api/keys.js";
+import { assistantKeys } from "../api/keys.js";
+import { transcriptKey } from "../api/threadKeys.js";
 import { ThreadView, followTail } from "./ThreadView.js";
 
 const stream = vi.hoisted(() => ({
@@ -161,7 +162,7 @@ describe("ThreadView transcript", () => {
     expect(items[0]).toHaveClass("justify-end");
     expect(items[1]).toHaveClass("justify-start");
     expect(screen.getByText("question")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Answer" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Answer" })).toBeInTheDocument();
     expect(screen.getByText("bold").tagName).toBe("STRONG");
   });
 

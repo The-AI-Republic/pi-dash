@@ -1,38 +1,23 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Public API of the assistant feature (NEWFRONT-603). Other features and
-// routes import only from here.
+// Public API of the assistant feature (NEWFRONT-603). Other features import
+// only from here; routes mount this feature's surfaces and take those
+// directly from their modules, so a surface's dependencies never join the
+// eager chunk of a feature that only needs the shared reads.
 
-export { assistantKeys, transcriptKey } from "./api/keys.js";
-export {
-  START_FAILED_FALLBACK,
-  startFailureDetail,
-  useDeliverFirstMessage,
-  useStartConversation,
-} from "./api/mutations.js";
-export { SEND_FAILED_FALLBACK, sendFailureLine, useSendMessage, useStopTurn } from "./api/threadMutations.js";
+// The thread slice's modules (transport, transcript reads, send/stop
+// writes, turn rules) are internal to this feature: the routes reach the
+// conversation only through the gate, and keeping them off the barrel keeps
+// them out of every eager importer's chunk.
+export { assistantKeys } from "./api/keys.js";
+export { START_FAILED_FALLBACK, startFailureDetail, useStartConversation } from "./api/mutations.js";
 export {
   assistantConfigQueryOptions,
   assistantThreadsQueryOptions,
-  assistantTranscriptQueryOptions,
   useAssistantConfig,
   useAssistantThreads,
 } from "./api/queries.js";
-export { AssistantLanding } from "./components/AssistantLanding.js";
-export type { AssistantLandingProps } from "./components/AssistantLanding.js";
-export { AssistantLayout } from "./components/AssistantLayout.js";
-export type { AssistantLayoutProps } from "./components/AssistantLayout.js";
-export { Composer } from "./components/Composer.js";
-export type { ComposerProps } from "./components/Composer.js";
-export { ConversationGate } from "./components/ConversationGate.js";
-export type { ConversationGateProps } from "./components/ConversationGate.js";
-export { ConversationRail } from "./components/ConversationRail.js";
-export type { ConversationRailProps } from "./components/ConversationRail.js";
-export { SetupCard } from "./components/SetupCard.js";
-export { ThreadView } from "./components/ThreadView.js";
-export type { ThreadViewProps } from "./components/ThreadView.js";
-export type { SetupCardProps } from "./components/SetupCard.js";
 export {
   API_KEY_REMINDER,
   API_KEY_REQUIRED_TITLE,
@@ -61,7 +46,3 @@ export type { LaneState } from "./lib/lane.js";
 export { conversationLabel, visibleConversations } from "./lib/labels.js";
 export { assistantLandingHref, assistantThreadHref, readPendingMessage } from "./lib/navigation.js";
 export type { PendingMessageState } from "./lib/navigation.js";
-export { ASSISTANT_EVENT_NAME, readAssistantEvents, subscribeAssistantEvents } from "./api/events.js";
-export type { AssistantEventHandlers, AssistantStreamSubscription } from "./api/events.js";
-export { EMPTY_TRANSCRIPT, applyAssistantEvent, mergeTranscript, replySettled, transcriptRows } from "./lib/turn.js";
-export type { TranscriptState } from "./lib/turn.js";

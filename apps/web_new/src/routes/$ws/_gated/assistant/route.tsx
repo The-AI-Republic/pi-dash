@@ -10,7 +10,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { assistantThreadsQueryOptions, AssistantLayout } from "../../../../features/assistant/index.js";
+import { assistantThreadsQueryOptions } from "../../../../features/assistant/index.js";
+import { AssistantLayout } from "../../../../features/assistant/components/AssistantLayout.js";
 
 export const Route = createFileRoute("/$ws/_gated/assistant")({
   loader: ({ context, params }) =>

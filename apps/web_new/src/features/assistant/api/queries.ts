@@ -9,11 +9,11 @@
 // the rail to stay empty without a placeholder (AGT-041).
 
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import { getLlmConfig, listAssistantMessages, listAssistantThreads, type ApiClient } from "@pidash/api-client";
+import { getLlmConfig, listAssistantThreads, type ApiClient } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { LIST_STALE_TIME_MS, REFERENCE_STALE_TIME_MS } from "../../../core/query/client.js";
-import { assistantKeys, transcriptKey } from "./keys.js";
+import { assistantKeys } from "./keys.js";
 
 /** The workspace's conversations, newest first (archived rows excluded server-side). */
 export function assistantThreadsQueryOptions(client: ApiClient, workspaceSlug: string, enabled = true) {
@@ -40,18 +40,4 @@ export function assistantConfigQueryOptions(client: ApiClient, workspaceSlug: st
 
 export function useAssistantConfig(workspaceSlug: string) {
   return useQuery(assistantConfigQueryOptions(getAppClient(), workspaceSlug));
-}
-
-/** One page of the stored transcript, oldest first. */
-export function assistantTranscriptQueryOptions(
-  client: ApiClient,
-  workspaceSlug: string,
-  threadId: string,
-  limit: number
-) {
-  return queryOptions({
-    queryKey: transcriptKey(workspaceSlug, threadId),
-    queryFn: () => listAssistantMessages(client, workspaceSlug, threadId, { limit }),
-    staleTime: 0,
-  });
 }

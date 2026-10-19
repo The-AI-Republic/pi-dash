@@ -10,7 +10,7 @@
 import { createFileRoute, useRouterState } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ConversationGate } from "../../../../features/assistant/index.js";
+import { ConversationGate } from "../../../../features/assistant/components/ConversationGate.js";
 
 export const Route = createFileRoute("/$ws/_gated/assistant/$threadId")({
   component: ConversationComponent,

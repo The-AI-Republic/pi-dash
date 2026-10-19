@@ -143,11 +143,35 @@ export function followTail(body: HTMLElement | null, tail: HTMLElement | null): 
   body.scrollTop = body.scrollHeight;
 }
 
+/**
+ * Assistant text as safe HTML. The renderer loads on demand, so a reply
+ * arriving before it is ready renders once the promise lands; an empty or
+ * non-assistant row never asks for it at all.
+ */
+function useMarkdownHtml(message: AssistantMessage): string | null {
+  const wanted = message.role === "assistant" && message.content.trim() !== "";
+  const [html, setHtml] = React.useState<string | null>(null);
+  const source = message.content;
+
+  React.useEffect(() => {
+    if (!wanted) {
+      setHtml(null);
+      return;
+    }
+    let active = true;
+    void markdownHtml(source).then((rendered) => {
+      if (active) setHtml(rendered);
+    });
+    return () => {
+      active = false;
+    };
+  }, [source, wanted]);
+
+  return wanted ? html : null;
+}
+
 function MessageBubble({ message }: { message: AssistantMessage }): React.ReactElement {
-  const html = React.useMemo(
-    () => (message.role === "assistant" && message.content.trim() !== "" ? markdownHtml(message.content) : null),
-    [message.content, message.role]
-  );
+  const html = useMarkdownHtml(message);
 
   if (message.role === "user") {
     return (

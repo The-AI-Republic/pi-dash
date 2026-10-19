@@ -7,7 +7,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { AssistantLanding } from "../../../../features/assistant/index.js";
+import { AssistantLanding } from "../../../../features/assistant/components/AssistantLanding.js";
 
 export const Route = createFileRoute("/$ws/_gated/assistant/")({
   component: AssistantLandingComponent,

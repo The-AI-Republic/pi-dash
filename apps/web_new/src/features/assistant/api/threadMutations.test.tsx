@@ -14,6 +14,7 @@ import { ApiError } from "@pidash/api-client";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { assistantKeys } from "./keys.js";
+import { threadKey } from "./threadKeys.js";
 import { SEND_FAILED_FALLBACK, sendFailureLine, useSendMessage, useStopTurn } from "./threadMutations.js";
 
 function wrapper(queryClient: QueryClient) {
@@ -105,6 +106,6 @@ describe("useStopTurn", () => {
       url: "https://api.test/api/workspaces/acme/ai-assistant/threads/t1/cancel/",
       method: "POST",
     });
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: assistantKeys.thread("acme", "t1") });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: threadKey("acme", "t1") });
   });
 });
