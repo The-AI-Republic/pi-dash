@@ -18,12 +18,10 @@ import { invalidateWorkspace } from "../../../../../../core/query/optimistic.js"
 import { isProjectGateError } from "../../../../../../features/auth/index.js";
 import {
   DisplayControl,
-  IssueList,
   IssuesLayoutRoot,
   ListSkeleton,
   issuesQueryOptions,
   parseIssueSearch,
-  AnalyticsEntry,
   prefsQueryOptions,
   resolveActiveLayout,
   useWeekStart,
@@ -31,13 +29,24 @@ import {
 } from "../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import { GanttTimeline } from "../../../../../../features/issues/gantt/GanttTimeline.js";
+import {
+  ResolvedAnalyticsEntry,
+  ResolvedIssueList,
+  loadIssueListLeaves,
+  primeIssueListLeaves,
+} from "../../../../../../features/issues/components/lazyLeaves.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
 const LazyIssueFilters = React.lazy(() => import("../../../../../../features/issues/filters/rich/IssueFilters.js"));
+
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
 import { notifyError } from "../../../../../../shared/shell/index.js";
+
+// Start the leaf chunk with the route module, so the warm start does not
+// serialize a round trip behind the data reads; `beforeLoad` awaits it.
+primeIssueListLeaves();
 
 // The sheet is a heavy leaf (picker cells, sort menus, virtualizer). Keep
 // it out of the initial route chunk; the stored layout decides when to
@@ -85,6 +94,9 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
           orderByOf(record)
         )
       );
+      // The list and analytics leaves ride their own chunk (Quality gates);
+      // await it with the data so the first commit is the screen itself.
+      await loadIssueListLeaves();
     } catch (error) {
       // Denial statuses belong to the project gate (AUTH-024): let them
       // through so the gate renders the denial screen instead of the load
@@ -178,7 +190,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
       />
     );
     const analytics = (
-      <AnalyticsEntry
+      <ResolvedAnalyticsEntry
         workspaceSlug={params.ws}
         projectId={params.projectId}
         projectName={project.name}
@@ -228,7 +240,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
             );
           }
           return (
-            <IssueList
+            <ResolvedIssueList
               issues={issues.results}
               projectIdentifier={project.identifier}
               layout={search.layout ?? "list"}
