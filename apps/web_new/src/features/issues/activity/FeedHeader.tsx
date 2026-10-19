@@ -9,7 +9,7 @@
 // wraps the popover.
 
 import { IconButton, Popover, cn } from "@pidash/kit";
-import { ArrowDownWideNarrow, ArrowUpWideNarrow, Check, ListFilter } from "lucide-react";
+import { ArrowDownWideNarrow, Check, ListFilter } from "lucide-react";
 import * as React from "react";
 
 import { FEED_FILTERS, FEED_FILTER_LABELS, isFilterNarrowed, type FeedFilter, type FeedSortOrder } from "./model.js";
@@ -27,7 +27,6 @@ export interface FeedHeaderProps {
 
 export function FeedHeader({ filters, onToggleFilter, order, onToggleSort }: FeedHeaderProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
-  const SortIcon = order === "asc" ? ArrowUpWideNarrow : ArrowDownWideNarrow;
   const narrowed = isFilterNarrowed(filters);
 
   return (
@@ -39,7 +38,13 @@ export function FeedHeader({ filters, onToggleFilter, order, onToggleSort }: Fee
           aria-pressed={order === "desc"}
           onClick={onToggleSort}
         >
-          <SortIcon size={16} strokeWidth={1.5} aria-hidden="true" />
+          {/* One glyph for both orders: the flip reads as "oldest first" versus "newest first". */}
+          <ArrowDownWideNarrow
+            size={16}
+            strokeWidth={1.5}
+            aria-hidden="true"
+            className={order === "asc" ? "rotate-180" : undefined}
+          />
         </IconButton>
         <Popover
           open={open}
@@ -54,9 +59,11 @@ export function FeedHeader({ filters, onToggleFilter, order, onToggleSort }: Fee
             >
               <ListFilter size={16} strokeWidth={1.5} aria-hidden="true" />
               {narrowed ? (
-                <span aria-hidden="true" className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-(--accent)" />
+                <>
+                  <span aria-hidden="true" className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-(--accent)" />
+                  <span className="sr-only">Filters narrowed</span>
+                </>
               ) : null}
-              {narrowed ? <span className="sr-only">Filters narrowed</span> : null}
             </button>
           }
         >

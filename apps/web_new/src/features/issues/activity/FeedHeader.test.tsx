@@ -81,6 +81,17 @@ describe("FeedHeader", () => {
     expect(ascending.onToggleSort).toHaveBeenCalledTimes(1);
   });
 
+  it("flips the one sort glyph between the orders", () => {
+    const { rerender } = render(
+      <FeedHeader filters={DEFAULT_FILTERS} onToggleFilter={vi.fn()} order="asc" onToggleSort={vi.fn()} />
+    );
+    const ascending = screen.getByRole("button", { name: `${SORT_LABEL}: oldest first` }).querySelector("svg");
+    expect(ascending?.getAttribute("class") ?? "").toContain("rotate-180");
+    rerender(<FeedHeader filters={DEFAULT_FILTERS} onToggleFilter={vi.fn()} order="desc" onToggleSort={vi.fn()} />);
+    const descending = screen.getByRole("button", { name: `${SORT_LABEL}: newest first` }).querySelector("svg");
+    expect(descending?.getAttribute("class") ?? "").not.toContain("rotate-180");
+  });
+
   it("marks the descending sort as pressed", () => {
     renderHeader(DEFAULT_FILTERS, "desc");
     const down = screen.getByRole("button", { name: `${SORT_LABEL}: newest first` });
