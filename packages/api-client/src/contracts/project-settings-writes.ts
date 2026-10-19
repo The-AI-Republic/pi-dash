@@ -7,6 +7,7 @@
 // writers already live with the issues area in reference.ts.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
+import { ApiError } from "../errors.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 import { ProjectLite } from "./projects.js";
 import { State } from "./reference.js";
@@ -38,11 +39,11 @@ export const ProjectMemberRoleList = z.array(ProjectMemberRole);
 export type ProjectMemberRoleList = z.infer<typeof ProjectMemberRoleList>;
 
 /**
- * PATCH answers the admin-lens serializer: the membership row with nested
- * user, workspace and project. The audit fields ride along because the
- * serializer exposes the whole model.
+ * PATCH answers `ProjectMemberSerializer`: the membership row with nested
+ * thin user, workspace and project. Unlike the workspace roster, the nested
+ * user is `UserLite` — no email or last-login fields.
  */
-export const ProjectMemberAdmin = z.object({
+export const ProjectMemberDetail = z.object({
   id: uuid(),
   member: UserLite,
   workspace: WorkspaceLite,
@@ -60,7 +61,7 @@ export const ProjectMemberAdmin = z.object({
   updated_by: nullableUuid(),
   deleted_at: nullableDateTime(),
 });
-export type ProjectMemberAdmin = z.infer<typeof ProjectMemberAdmin>;
+export type ProjectMemberDetail = z.infer<typeof ProjectMemberDetail>;
 
 /**
  * POST .../members/ bulk-adds each pair, re-activating an inactive row with
@@ -79,17 +80,17 @@ export async function addProjectMembers(
   return client.parse(ProjectMemberRoleList, envelope.data, `POST ${path}`);
 }
 
-/** PATCH .../members/<id>/ changes the project role; answers the admin row. */
+/** PATCH .../members/<id>/ changes the project role; answers the thin detail row. */
 export async function updateProjectMember(
   client: ApiClient,
   slug: string,
   projectId: string,
   memberId: string,
   role: number
-): Promise<ProjectMemberAdmin> {
+): Promise<ProjectMemberDetail> {
   const path = `/api/workspaces/${slug}/projects/${projectId}/members/${memberId}/`;
   const envelope = await client.sendJson<unknown>("PATCH", path, { json: { role } });
-  return client.parse(ProjectMemberAdmin, envelope.data, `PATCH ${path}`);
+  return client.parse(ProjectMemberDetail, envelope.data, `PATCH ${path}`);
 }
 
 /**
@@ -124,20 +125,36 @@ export interface StateUpdateInput {
   sequence?: number;
 }
 
+/** Result of a state create: the parsed row and the wire status (always 200). */
+export interface StateCreateResult {
+  state: State;
+  status: number;
+}
+
 /**
  * POST .../states/ creates one state and answers 200 with the state row
- * (note: create answers 200 here, not 201). The server refuses the triage
- * group and duplicate names.
+ * (note: create answers 200 here, not 201). Any other status is a contract
+ * violation and rejects, so a server-side change to 201 cannot slip through.
+ * The status rides back for callers that want it. The server refuses the
+ * triage group and duplicate names.
  */
 export async function createState(
   client: ApiClient,
   slug: string,
   projectId: string,
   input: StateCreateInput
-): Promise<State> {
+): Promise<StateCreateResult> {
   const path = `/api/workspaces/${slug}/projects/${projectId}/states/`;
   const envelope = await client.sendJson<unknown>("POST", path, { json: input });
-  return client.parse(State, envelope.data, `POST ${path}`);
+  if (envelope.status !== 200) {
+    throw new ApiError({
+      status: envelope.status,
+      code: "contract",
+      message: `POST ${path} answered ${envelope.status}, expected 200`,
+      body: envelope.data,
+    });
+  }
+  return { state: client.parse(State, envelope.data, `POST ${path}`), status: envelope.status };
 }
 
 /**

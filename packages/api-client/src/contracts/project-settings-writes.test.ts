@@ -50,7 +50,7 @@ const MEMBER_ROLE_ROW = {
   created_at: AT,
 };
 
-const MEMBER_ADMIN_ROW = {
+const MEMBER_DETAIL_ROW = {
   id: UUID,
   member: {
     id: UUID2,
@@ -60,8 +60,6 @@ const MEMBER_ADMIN_ROW = {
     avatar_url: null,
     display_name: "Ada",
     is_bot: false,
-    email: "ada@example.com",
-    last_login_medium: "email",
   },
   workspace: { id: UUID3, name: "Acme", slug: "acme", logo_url: null },
   project: {
@@ -136,12 +134,12 @@ describe("addProjectMembers", () => {
 });
 
 describe("updateProjectMember", () => {
-  it("patches only the role and parses the nested admin row", async () => {
+  it("patches only the role and parses the thin detail row", async () => {
     const calls: { method?: string; url?: string; json?: unknown }[] = [];
     const client = stubClient({
       sendJson: (async (method: string, url: string, options: { json?: unknown }) => {
         calls.push({ method, url, json: options.json });
-        return { data: MEMBER_ADMIN_ROW, status: 200, url };
+        return { data: MEMBER_DETAIL_ROW, status: 200, url };
       }) as ApiClient["sendJson"],
     });
     const row = await updateProjectMember(client, "acme", UUID3, UUID, 15);
@@ -171,7 +169,7 @@ describe("removeProjectMember", () => {
 });
 
 describe("createState", () => {
-  it("posts the form fields and parses the state", async () => {
+  it("posts the form fields and parses the state with its 200 status", async () => {
     const calls: { method?: string; url?: string; json?: unknown }[] = [];
     const client = stubClient({
       sendJson: (async (method: string, url: string, options: { json?: unknown }) => {
@@ -179,18 +177,37 @@ describe("createState", () => {
         return { data: STATE_ROW, status: 200, url };
       }) as ApiClient["sendJson"],
     });
-    const state = await createState(client, "acme", UUID2, {
+    const { state, status } = await createState(client, "acme", UUID2, {
       name: "Blocked",
       color: "#ff0000",
       group: "started",
       description: "Waiting",
     });
+    expect(status).toBe(200);
     expect(calls[0]).toEqual({
       method: "POST",
       url: `/api/workspaces/acme/projects/${UUID2}/states/`,
       json: { name: "Blocked", color: "#ff0000", group: "started", description: "Waiting" },
     });
     expect(state.group).toBe("started");
+  });
+
+  it("rejects a 201 create response", async () => {
+    const client = stubClient({
+      sendJson: (async (_method: string, url: string) => ({
+        data: STATE_ROW,
+        status: 201,
+        url,
+      })) as ApiClient["sendJson"],
+    });
+    const failure = await createState(client, "acme", UUID2, {
+      name: "Blocked",
+      color: "#ff0000",
+      group: "started",
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(201);
+    expect((failure as ApiError).code).toBe("contract");
   });
 });
 

@@ -117,12 +117,13 @@ describe.skipIf(!contractEnabled)("project member writes contract", () => {
 describe.skipIf(!contractEnabled)("workflow state writes contract", () => {
   it("creates, renames, recolors, regroups, reorders, marks default and deletes a state", async () => {
     await clearProbeStates(client, projectId);
-    const created = await createState(client, CONTRACT_WORKSPACE, projectId, {
+    const { state: created, status: createStatus } = await createState(client, CONTRACT_WORKSPACE, projectId, {
       name: PROBE_STATE_NAME,
       color: "#123456",
       group: "started",
       description: "Contract probe state.",
     });
+    expect(createStatus).toBe(200);
     expect(created.name).toBe(PROBE_STATE_NAME);
     expect(created.color).toBe("#123456");
     expect(created.group).toBe("started");
@@ -169,7 +170,7 @@ describe.skipIf(!contractEnabled)("workflow state writes contract", () => {
 
   it("refuses a duplicate state name and the triage group", async () => {
     await clearProbeStates(client, projectId);
-    const duplicate = await createState(client, CONTRACT_WORKSPACE, projectId, {
+    const { state: duplicate } = await createState(client, CONTRACT_WORKSPACE, projectId, {
       name: PROBE_STATE_NAME,
       color: "#123456",
       group: "backlog",
