@@ -7,7 +7,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { isRedirect } from "@tanstack/react-router";
-import type * as React from "react";
+import * as React from "react";
 import { Suspense } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -69,6 +69,7 @@ const harness = vi.hoisted(() => ({
     onYourWork: () => void;
     onUserSettings: () => void;
   },
+  updateControl: undefined as React.ReactNode,
   personalizeDialog: null as null | {
     open: boolean;
     workspaceSlug: string;
@@ -231,6 +232,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       onWorkspaceInvites: () => void;
       onYourWork: () => void;
       onUserSettings: () => void;
+      updateControl: React.ReactNode;
     }) => {
       harness.sidebar = {
         personalEntries: props.personalEntries,
@@ -253,6 +255,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
         onYourWork: props.onYourWork,
         onUserSettings: props.onUserSettings,
       };
+      harness.updateControl = props.updateControl;
       return React.createElement(
         React.Fragment,
         null,
@@ -1092,6 +1095,26 @@ describe("gated layout shell wiring", () => {
   it("passes no edition entries on the OSS edition (CLOUD-021 flag-off)", () => {
     renderShell();
     expect(harness.sidebar?.editionEntries).toEqual([]);
+  });
+
+  it("fills the shell's sidebar slot with the desktop update control (SHELL-102)", () => {
+    renderShell();
+    // The shell only owns the mount point; the desktop area supplies the
+    // control, which renders nothing on web and with nothing waiting.
+    expect(React.isValidElement(harness.updateControl)).toBe(true);
+  });
+
+  it("loads the update control from its own chunk inside the sidebar slot (DESK-018)", async () => {
+    renderShell();
+    const slot = render(<Suspense fallback={<span>loading control</span>}>{harness.updateControl}</Suspense>);
+    try {
+      // Resolving the lazy factory imports the real chunk; on the web
+      // platform it asks for no update and leaves the slot empty.
+      await waitFor(() => expect(screen.queryByText("loading control")).not.toBeInTheDocument());
+      expect(slot.container).toBeEmptyDOMElement();
+    } finally {
+      slot.unmount();
+    }
   });
 
   it("resolves edition sidebar entries against the workspace slug (CLOUD-021)", () => {

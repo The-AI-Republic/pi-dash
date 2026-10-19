@@ -134,9 +134,39 @@ export interface SessionTeardownApi {
   clearLocalSession(): Promise<void>;
 }
 
-/** Desktop auto-updater (desktop only). */
+/**
+ * An update the shell is holding for the sidebar control (DESK-018): either
+ * deferred at launch or found by the daily check. The native side owns both
+ * facts, including whether a download is under way, so a control that
+ * mounts mid-install reads its busy state from here, not from memory.
+ */
+export interface PendingUpdate {
+  /** The release waiting to be installed. */
+  version: string;
+  /** The release the app is running right now. */
+  currentVersion: string;
+  /** True while the shell downloads and installs this release. */
+  installing: boolean;
+}
+
+/**
+ * Desktop auto-updater (desktop only). The launch prompt and the daily
+ * check live in the shell; the page asks what waits, installs it on
+ * request, and follows later announcements (DESK-016/017/018).
+ */
 export interface UpdaterApi {
-  checkNow(): Promise<boolean>;
+  /** The release waiting for the user, or null when the app is current. */
+  pending(): Promise<PendingUpdate | null>;
+  /**
+   * Download and install the waiting release. It resolves only when the
+   * install failed; a successful install restarts the app instead.
+   */
+  install(): Promise<void>;
+  /**
+   * Follow announcements of updates found while the app runs, including
+   * the re-announcement after a failed install. Returns the unsubscribe.
+   */
+  onAvailable(callback: (update: PendingUpdate) => void): Unsubscribe;
 }
 
 export interface Platform {

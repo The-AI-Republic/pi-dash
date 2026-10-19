@@ -15,6 +15,7 @@ export type {
   KeyValueStore,
   MenuApi,
   MenuCommand,
+  PendingUpdate,
   Platform,
   SessionTeardownApi,
   StreamInit,
