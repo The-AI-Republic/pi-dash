@@ -46,13 +46,14 @@ export function RunsScreen({ search, selectedRunId }: RunsScreenProps): React.Re
     void navigate({ href: runsHref(area.base, page, runId), replace: true });
   }
 
-  function cancelRun(run: AgentRun): void {
-    cancel.mutate(
-      { runId: run.id, reason: "user" },
-      {
-        onError: () => notifyError(RUN_CANCEL_FAILED_TITLE, RUN_CANCEL_FAILED),
-      }
-    );
+  async function cancelRun(run: AgentRun): Promise<boolean> {
+    try {
+      await cancel.mutateAsync({ runId: run.id, reason: "user" });
+      return true;
+    } catch {
+      notifyError(RUN_CANCEL_FAILED_TITLE, RUN_CANCEL_FAILED);
+      return false;
+    }
   }
 
   const state =

@@ -30,8 +30,11 @@ describe("runnersActiveTabKey", () => {
     expect(runnersActiveTabKey("/acme/runners", workspace)).toBe("overview");
     expect(runnersActiveTabKey("/acme/runners/", workspace)).toBe("overview");
     expect(runnersActiveTabKey("/acme/runners/runs", workspace)).toBe("runs");
+    expect(runnersActiveTabKey("/acme/runners/runs/a-run", workspace)).toBe("runs");
+    expect(runnersActiveTabKey("/acme/runners/runs/a-run/", workspace)).toBe("runs");
     expect(runnersActiveTabKey("/acme/runners/approvals", workspace)).toBe("approvals");
     expect(runnersActiveTabKey("/acme/projects/p-1/runners/runs", project)).toBe("runs");
+    expect(runnersActiveTabKey("/acme/projects/p-1/runners/runs/a-run", project)).toBe("runs");
   });
 
   it("returns null on child routes and foreign paths", () => {

@@ -17,7 +17,7 @@ export function pageLabel(page: number, totalPages: number): string {
 
 /** Executor badge copy; every non-cloud executor is the local runner. */
 export function executorLabel(kind: AgentRun["executor_kind"]): string {
-  return kind === "cloud_agent" ? "Pi Dash Cloud Agent" : "Local Runner";
+  return kind === "cloud_agent" ? "Cloud executor" : "Local runner";
 }
 
 export function executorTone(kind: AgentRun["executor_kind"]): BadgeTone {
@@ -30,12 +30,12 @@ export function hasFailure(run: Pick<AgentRun, "error">): boolean {
 }
 
 const ERROR_KIND_LABELS: Readonly<Record<string, string>> = {
-  agent_authentication: "Authentication",
-  agent_model_access: "Model access",
-  runner_registration: "Runner registration",
-  runner_lifecycle: "Runner lifecycle",
-  agent_stalled: "Agent stalled",
-  unknown: "Unknown",
+  agent_authentication: "Sign-in failed",
+  agent_model_access: "Model unavailable",
+  runner_registration: "Runner enrollment",
+  runner_lifecycle: "Runner state",
+  agent_stalled: "Agent made no progress",
+  unknown: "Unclassified",
 };
 
 /** Human label for a diagnostic kind; unknown tokens read verbatim. */

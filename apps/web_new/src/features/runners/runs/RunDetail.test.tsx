@@ -6,7 +6,7 @@
 // scheduler rendering, diagnostics with and without structure, results,
 // the cloud-only tool panel, the transcript and the cancel confirmation.
 import type { AgentRun, RunErrorDiagnostic, RunEvent } from "@pidash/api-client";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -52,7 +52,7 @@ const event = (overrides: Partial<RunEvent> = {}): RunEvent =>
   ({ id: 1, seq: 1, kind: "run/started", payload: {}, created_at: "2024-01-01T00:00:00Z", ...overrides }) as RunEvent;
 
 function renderDetail(overrides: Partial<React.ComponentProps<typeof RunDetail>> = {}) {
-  const onCancel = vi.fn();
+  const onCancel = vi.fn(async () => true);
   render(
     <RunDetail
       state="loaded"
@@ -92,7 +92,7 @@ describe("identity", () => {
     renderDetail();
     expect(screen.getByTestId("run-detail-id")).toHaveTextContent("11111111-2222-3333-4444-555555555555");
     expect(screen.getByTestId("run-status")).toHaveTextContent("running");
-    expect(screen.getByTestId("run-executor")).toHaveTextContent("Local Runner");
+    expect(screen.getByTestId("run-executor")).toHaveTextContent("Local runner");
     expect(screen.getByTestId("run-prompt")).toHaveTextContent("do the thing");
   });
 
@@ -101,7 +101,7 @@ describe("identity", () => {
       run: run({ executor_kind: "cloud_agent" }),
       schedulerHref: () => null,
     });
-    expect(screen.getByTestId("run-executor")).toHaveTextContent("Pi Dash Cloud Agent");
+    expect(screen.getByTestId("run-executor")).toHaveTextContent("Cloud executor");
     expect(screen.queryByTestId("run-scheduler-link")).toBeNull();
   });
 
@@ -134,7 +134,7 @@ describe("failure and result", () => {
   it("shows the structured diagnostic above the raw error", () => {
     renderDetail({ run: run({ status: "failed", error: "boom", error_diagnostic: diagnostic() }) });
     expect(screen.getByTestId("run-error-source")).toHaveTextContent("Agent CLI");
-    expect(screen.getByTestId("run-error-kind")).toHaveTextContent("Authentication");
+    expect(screen.getByTestId("run-error-kind")).toHaveTextContent("Sign-in failed");
     expect(screen.getByTestId("run-error-summary")).toHaveTextContent("auth failed");
     expect(screen.getByTestId("run-error-action")).toHaveTextContent("Re-authenticate the agent");
     expect(screen.getByTestId("run-error")).toHaveTextContent("boom");
@@ -293,6 +293,22 @@ describe("cancellation", () => {
     expect(within(dialog).getByTestId("run-cancel-body")).toHaveTextContent(RUN_CANCEL_LOCAL_BODY);
     await userEvent.click(within(dialog).getByTestId("run-cancel-confirm"));
     expect(onCancel).toHaveBeenCalledWith(expect.objectContaining({ id: "11111111-2222-3333-4444-555555555555" }));
+  });
+
+  it("closes once the server accepts the cancel", async () => {
+    renderDetail();
+    await userEvent.click(screen.getByTestId("run-cancel"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByTestId("run-cancel-confirm"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("stays open when the cancel is refused", async () => {
+    const onCancel = vi.fn(async () => false);
+    renderDetail({ onCancel });
+    await userEvent.click(screen.getByTestId("run-cancel"));
+    await userEvent.click(within(screen.getByRole("dialog")).getByTestId("run-cancel-confirm"));
+    await waitFor(() => expect(onCancel).toHaveBeenCalled());
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
   it("closes without cancelling", async () => {

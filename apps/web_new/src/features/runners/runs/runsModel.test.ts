@@ -74,9 +74,9 @@ describe("runsPageSearch", () => {
 
 describe("executor presentation", () => {
   it("separates the cloud agent from every local executor", () => {
-    expect(executorLabel("cloud_agent")).toBe("Pi Dash Cloud Agent");
-    expect(executorLabel("local_runner")).toBe("Local Runner");
-    expect(executorLabel("managed_runner")).toBe("Local Runner");
+    expect(executorLabel("cloud_agent")).toBe("Cloud executor");
+    expect(executorLabel("local_runner")).toBe("Local runner");
+    expect(executorLabel("managed_runner")).toBe("Local runner");
     expect(executorTone("cloud_agent")).toBe("accent");
     expect(executorTone("managed_runner")).toBe("neutral");
   });
@@ -89,12 +89,12 @@ describe("failure helpers", () => {
   });
 
   it("maps known diagnostic kinds and keeps unknown tokens", () => {
-    expect(errorKindLabel("agent_authentication")).toBe("Authentication");
-    expect(errorKindLabel("agent_model_access")).toBe("Model access");
-    expect(errorKindLabel("runner_registration")).toBe("Runner registration");
-    expect(errorKindLabel("runner_lifecycle")).toBe("Runner lifecycle");
-    expect(errorKindLabel("agent_stalled")).toBe("Agent stalled");
-    expect(errorKindLabel("unknown")).toBe("Unknown");
+    expect(errorKindLabel("agent_authentication")).toBe("Sign-in failed");
+    expect(errorKindLabel("agent_model_access")).toBe("Model unavailable");
+    expect(errorKindLabel("runner_registration")).toBe("Runner enrollment");
+    expect(errorKindLabel("runner_lifecycle")).toBe("Runner state");
+    expect(errorKindLabel("agent_stalled")).toBe("Agent made no progress");
+    expect(errorKindLabel("unknown")).toBe("Unclassified");
     expect(errorKindLabel("future_kind")).toBe("future_kind");
   });
 

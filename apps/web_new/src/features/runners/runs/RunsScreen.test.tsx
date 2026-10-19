@@ -51,7 +51,11 @@ function stubQueries(
     ...overrides.list,
   });
   queryMocks.useRun.mockReturnValue({ data: undefined, isError: false, ...overrides.detail });
-  queryMocks.useCancelRun.mockReturnValue({ mutate: vi.fn(), isPending: false, ...overrides.cancel });
+  queryMocks.useCancelRun.mockReturnValue({
+    mutateAsync: vi.fn(async () => ({})),
+    isPending: false,
+    ...overrides.cancel,
+  });
 }
 
 function renderScreen(page = 2, selectedRunId: string | null = null) {
@@ -193,7 +197,9 @@ describe("detail states", () => {
 
 describe("cancel failure", () => {
   it("toasts the failure", async () => {
-    const mutate = vi.fn((_input: unknown, options: { onError: () => void }) => options.onError());
+    const mutateAsync = vi.fn(async () => {
+      throw new Error("nope");
+    });
     stubQueries({
       detail: {
         data: {
@@ -211,16 +217,47 @@ describe("cancel failure", () => {
           scheduler_binding_detail: null,
         },
       },
-      cancel: { mutate, isPending: false },
+      cancel: { mutateAsync, isPending: false },
     });
     renderScreen(1, "11111111-2222-3333-4444-555555555555");
     screen.getByTestId("run-cancel").click();
     const confirm = await screen.findByTestId("run-cancel-confirm");
     confirm.click();
-    expect(mutate).toHaveBeenCalledWith(
-      { runId: "11111111-2222-3333-4444-555555555555", reason: "user" },
-      expect.any(Object)
+    expect(mutateAsync).toHaveBeenCalledWith({ runId: "11111111-2222-3333-4444-555555555555", reason: "user" });
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith("Couldn't cancel run", "The run is still active. Try again.")
     );
-    expect(notifyError).toHaveBeenCalledWith("Error!", "Failed to cancel run");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+});
+
+describe("cancel success", () => {
+  it("closes the confirmation after the server accepts", async () => {
+    const mutateAsync = vi.fn(async () => ({}));
+    stubQueries({
+      detail: {
+        data: {
+          id: "11111111-2222-3333-4444-555555555555",
+          status: "running",
+          executor_kind: "local_runner",
+          prompt: "p",
+          error: "",
+          error_diagnostic: null,
+          done_payload: null,
+          tool_plan: {},
+          tool_calls: [],
+          events: [],
+          scheduler_binding: null,
+          scheduler_binding_detail: null,
+        },
+      },
+      cancel: { mutateAsync, isPending: false },
+    });
+    renderScreen(1, "11111111-2222-3333-4444-555555555555");
+    screen.getByTestId("run-cancel").click();
+    const confirm = await screen.findByTestId("run-cancel-confirm");
+    confirm.click();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(mutateAsync).toHaveBeenCalledWith({ runId: "11111111-2222-3333-4444-555555555555", reason: "user" });
   });
 });

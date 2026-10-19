@@ -30,10 +30,12 @@ export const RUN_DETAIL_LOADING_TEXT = "Loading run details…";
 export const RUN_DETAIL_UNAVAILABLE_TEXT =
   "This run is not available. It may have been deleted or belong to a different workspace.";
 export const RUN_CANCEL_TITLE = "Cancel run?";
-export const RUN_CANCEL_CLOUD_BODY = "The Cloud Agent will stop at the next safe boundary.";
-export const RUN_CANCEL_LOCAL_BODY = "The runner will stop this run as soon as it gets the signal.";
-export const RUN_CANCEL_FAILED_TITLE = "Error!";
-export const RUN_CANCEL_FAILED = "Failed to cancel run";
+export const RUN_CANCEL_CLOUD_BODY =
+  "The cloud agent stops at its next safe interruption point, so it may take a moment to finish.";
+export const RUN_CANCEL_LOCAL_BODY =
+  "The runner receives a stop request and ends the run as soon as it can acknowledge it.";
+export const RUN_CANCEL_FAILED_TITLE = "Couldn't cancel run";
+export const RUN_CANCEL_FAILED = "The run is still active. Try again.";
 
 /** Cancelling makes sense until the run settles or a request already exists. */
 export function canCancelRun(run: Pick<AgentRun, "status">): boolean {
@@ -49,8 +51,8 @@ export interface RunDetailProps {
   state: "none" | "loading" | "loaded" | "unavailable";
   run: AgentRun | null;
   cancelling: boolean;
-  /** Called with the run; the parent owns the mutation and toasts. */
-  onCancel: (run: AgentRun) => void;
+  /** Called with the run; resolves true once the server accepts the cancel. */
+  onCancel: (run: AgentRun) => Promise<boolean>;
   /** Scheduler base path for the back-link; null hides the row. */
   schedulerHref: (run: AgentRun) => string | null;
 }
@@ -179,8 +181,8 @@ export function RunDetail({ state, run, cancelling, onCancel, schedulerHref }: R
         >
           <h2 className="text-emphasis text-(--text)">Cloud execution</h2>
           <p className="text-meta text-(--text-muted)">
-            This stateless runner uses only the tools listed below. It has no development-machine filesystem or shell
-            access.
+            A cloud agent runs without a development machine. It can only use the tools shown here and has no filesystem
+            or shell access.
           </p>
           <div className="flex flex-wrap gap-(--space-1)" data-testid="run-cloud-tools">
             {(run.tool_plan.tools ?? []).map((tool) => (
@@ -280,7 +282,11 @@ export function RunDetail({ state, run, cancelling, onCancel, schedulerHref }: R
               loading={cancelling}
               data-testid="run-cancel-confirm"
               onClick={() => {
-                if (!cancelling) onCancel(run);
+                if (!cancelling) {
+                  void onCancel(run).then((accepted) => {
+                    if (accepted) setCancelOpen(false);
+                  });
+                }
               }}
             >
               Cancel run
