@@ -33,8 +33,6 @@ import type {
 interface TauriInvokeCore {
   invoke<T>(command: string, payload?: unknown): Promise<T>;
   Channel: new <T>() => { onmessage: ((message: T) => void) | null };
-  /** Global event bus (withGlobalTauri); absent on older shells. */
-  listen?: <T>(event: string, handler: (event: { payload: T }) => void) => Promise<() => void>;
 }
 
 interface TauriEventApi {
@@ -742,11 +740,13 @@ const desktopCliSetup: CliSetupApi = {
     }
   },
   onInstallLog: (callback) => {
-    const core = nativeApiOrigin()?.core;
-    if (!core?.listen) return () => undefined;
+    // The shell exposes the event bus as __TAURI__.event (Tauri 2); without
+    // it there is nothing to subscribe to.
+    const events = tauriWindow()?.__TAURI__?.event;
+    if (!events) return () => undefined;
     let cancelled = false;
     let stop: Unsubscribe | undefined;
-    void core
+    void events
       .listen<{ line?: unknown }>(CLI_INSTALL_LOG_EVENT, (event) => {
         if (cancelled) return;
         if (typeof event.payload?.line === "string") callback({ line: event.payload.line });

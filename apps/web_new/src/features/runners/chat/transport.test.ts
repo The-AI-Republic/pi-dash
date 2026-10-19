@@ -27,7 +27,7 @@ function event(seq: number, overrides: Partial<ChatEvent> = {}): ChatEvent {
 }
 
 interface Harness {
-  feed: { close: ReturnType<typeof vi.fn>; messages: () => AsyncIterable<StreamMessage> };
+  feed: { close: ReturnType<typeof vi.fn>; messages: () => AsyncIterable<StreamMessage>; error: undefined };
   opened: Array<{ url: string; init: StreamInit }>;
 }
 
@@ -37,6 +37,7 @@ function harness(messages: StreamMessage[] | (() => AsyncIterable<StreamMessage>
   const gate = new Promise<void>(() => undefined);
   const feed = {
     close: vi.fn(),
+    error: undefined,
     messages: async function* (): AsyncIterable<StreamMessage> {
       if (typeof messages === "function") {
         yield* messages();
@@ -207,6 +208,7 @@ describe("createCloudChatTransport resilience", () => {
   it("opens through the platform stream by default", async () => {
     const stream = vi.spyOn(platform, "stream").mockReturnValue({
       close: vi.fn(),
+      error: undefined,
       messages: async function* (): AsyncIterable<StreamMessage> {
         yield { event: "chat.event", data: JSON.stringify(event(21)) };
       },

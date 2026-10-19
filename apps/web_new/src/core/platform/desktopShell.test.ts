@@ -29,7 +29,10 @@ class FakeChannel<T> {
 function installBridge(invoke: InvokeFn, listen?: (event: string, handler: Listener) => Promise<() => void>): void {
   const win = globalThis.window as unknown as Record<string, unknown>;
   win["__PIDASH_NATIVE_HTTP__"] = NATIVE_ORIGIN;
-  win["__TAURI__"] = { core: { invoke, Channel: FakeChannel, ...(listen === undefined ? {} : { listen }) } };
+  win["__TAURI__"] = {
+    core: { invoke, Channel: FakeChannel },
+    ...(listen === undefined ? {} : { event: { listen } }),
+  };
 }
 
 function removeBridge(): void {
@@ -330,7 +333,7 @@ describe("desktop CLI tool bindings", () => {
     expect(commands.filter((name) => name === "install_pidash_cli")).toHaveLength(1);
   });
 
-  it("surfaces installer output lines and unsubscribes", async () => {
+  it("subscribes to the shell's event bus for installer output", async () => {
     const handlers = new Map<string, Listener>();
     let unlisten = 0;
     installBridge(
@@ -358,6 +361,20 @@ describe("desktop CLI tool bindings", () => {
   it("does not subscribe on a shell without the event bus", () => {
     installBridge(async () => undefined);
     expect(() => tauri.platform.cliSetup!.onInstallLog(() => undefined)()).not.toThrow();
+  });
+
+  it("ignores a listen helper outside the event bus", async () => {
+    const legacyListen = vi.fn(async () => () => undefined);
+    const win = globalThis.window as unknown as Record<string, unknown>;
+    win["__PIDASH_NATIVE_HTTP__"] = NATIVE_ORIGIN;
+    win["__TAURI__"] = {
+      core: { invoke: async () => undefined, Channel: FakeChannel, listen: legacyListen },
+    };
+    const lines: string[] = [];
+    tauri.platform.cliSetup!.onInstallLog((progress) => lines.push(progress.line))();
+    await Promise.resolve();
+    expect(legacyListen).not.toHaveBeenCalled();
+    expect(lines).toEqual([]);
   });
 
   it("hands the approved device code to the tool with its address and workspace", async () => {
