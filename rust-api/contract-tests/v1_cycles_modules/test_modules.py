@@ -288,6 +288,33 @@ class TestModuleIssues:
         assert r.status_code == 400
         assert r.json()["error"] == "Issues are required"
 
+    def test_add_issues_missing_module_404_beats_uuid_400(self, admin_client):
+        # PIDASHCONV-1194: the module 404 wins over the invalid-UUID 400.
+        # Django runs `if not len(issues)` (a length/shape check only), then
+        # Module.objects.get(...) -> 404, and only afterwards does
+        # pk__in validate the UUIDs. A non-empty string/dict passes the gate
+        # and iterates into invalid candidates, but the missing module must
+        # short-circuit to 404 first.
+        url = api.module_issues_url(SLUG, PROJ, UNKNOWN_ID)
+        for body in (
+            {"issues": ["not-a-uuid"]},
+            {"issues": "abc"},
+            {"issues": {"x": 1}},
+        ):
+            r = admin_client.post(url, json=body)
+            assert r.status_code == 404, body
+            assert r.json() == {"error": "The requested resource does not exist."}
+
+    def test_add_invalid_uuid_existing_module_400(self, admin_client):
+        # The arm that survives the reorder: with the module present, the
+        # invalid UUID still answers the DRF ValidationError 400.
+        r = admin_client.post(
+            api.module_issues_url(SLUG, PROJ, db.MODULE_ACTIVE_ID),
+            json={"issues": ["not-a-uuid"]},
+        )
+        assert r.status_code == 400
+        assert r.json() == {"error": "Please provide valid detail"}
+
     def test_detail_get_is_not_routed(self, admin_client):
         # The view defines get() but urls/module.py only routes DELETE on the
         # detail path; an unrouted GET falls through to 405. Documented so

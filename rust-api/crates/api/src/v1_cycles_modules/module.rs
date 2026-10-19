@@ -4716,40 +4716,48 @@ pub enum IssueCandidate {
     Null,
 }
 
-/// Validate the raw `issues` value (`views/module.py:657-678`): missing or
-/// empty (`[]`, `{}`, `""`) answers `"Issues are required."`; null and
-/// non-sized scalars (`int`/`bool`/`float`) raise through `len()` to the
-/// generic 500; anything else iterates into `pk__in` candidates, where an
-/// invalid UUID answers `"Please provide valid detail"`.
-pub fn coerce_issue_list(value: Option<&Value>) -> Result<Vec<IssueCandidate>, Denial> {
+/// The pre-lookup `if not len(issues)` gate (`views/module.py:667-670`):
+/// missing or empty (`[]`, `{}`, `""`) answers `"Issues are required."`;
+/// null and non-sized scalars (`int`/`bool`/`float`) raise through `len()`
+/// to the generic 500. Anything else (a non-empty string, array or object)
+/// passes with **no** per-item validation, so it reaches the module lookup
+/// and 404s when the module is missing — the per-item `pk__in` parse runs
+/// only afterwards (see [`coerce_issue_candidates`]).
+pub fn coerce_issue_shape(value: Option<&Value>) -> Result<(), Denial> {
+    let required = || Denial::BadError("Issues are required".to_owned());
     let Some(value) = value else {
-        return Err(Denial::BadError("Issues are required".to_owned()));
+        return Err(required());
     };
     match value {
         Value::Null | Value::Number(_) | Value::Bool(_) => Err(Denial::ServerError),
-        Value::String(s) => {
-            if s.is_empty() {
-                return Err(Denial::BadError("Issues are required".to_owned()));
-            }
-            // `pk__in` iterates the string into chars; every char fails the
-            // UUID parse.
-            Err(Denial::BadError(INVALID_DETAIL_BODY_TRIMMED.to_owned()))
-        }
-        Value::Array(items) => {
-            if items.is_empty() {
-                return Err(Denial::BadError("Issues are required".to_owned()));
-            }
-            items.iter().map(coerce_issue_candidate).collect()
-        }
-        Value::Object(map) => {
-            if map.is_empty() {
-                return Err(Denial::BadError("Issues are required".to_owned()));
-            }
-            // `pk__in` iterates the dict into its keys.
-            map.keys()
-                .map(|key| coerce_issue_candidate(&Value::String(key.clone())))
-                .collect()
-        }
+        Value::String(text) if text.is_empty() => Err(required()),
+        Value::Array(items) if items.is_empty() => Err(required()),
+        Value::Object(map) if map.is_empty() => Err(required()),
+        _ => Ok(()),
+    }
+}
+
+/// The post-lookup `pk__in` coercion (`views/module.py:673`), run only after
+/// the module 404: a non-empty string iterates into its chars and a dict
+/// into its keys, where an invalid UUID answers `"Please provide valid
+/// detail"`; arrays iterate into per-item candidates (see
+/// [`coerce_issue_candidate`]).
+pub fn coerce_issue_candidates(value: Option<&Value>) -> Result<Vec<IssueCandidate>, Denial> {
+    let Some(value) = value else {
+        // Unreachable after [`coerce_issue_shape`]; defensive empty.
+        return Ok(Vec::new());
+    };
+    match value {
+        Value::Null | Value::Number(_) | Value::Bool(_) => Err(Denial::ServerError),
+        Value::String(text) => text
+            .chars()
+            .map(|unit| coerce_issue_candidate(&Value::String(unit.to_string())))
+            .collect(),
+        Value::Array(items) => items.iter().map(coerce_issue_candidate).collect(),
+        Value::Object(map) => map
+            .keys()
+            .map(|key| coerce_issue_candidate(&Value::String(key.clone())))
+            .collect(),
     }
 }
 
@@ -4883,11 +4891,14 @@ pub async fn add_module_issues_inner(
     // An upload in `issues` is truthy, so it passes the required gate and
     // dies in the UUID filter below (500). The module 404 runs first.
     let issues_file = files.contains_key("issues");
-    let candidates = if issues_file {
-        Vec::new()
-    } else {
-        coerce_issue_list(raw.get("issues"))?
-    };
+    // Django runs `if not len(issues)` BEFORE `Module.objects.get` (404):
+    // the gate is a length/shape check only, so a non-empty string/dict with
+    // a bad UUID still reaches (and hits) the module 404. Per-item UUID
+    // validation is deferred to after the 404. An upload is truthy and
+    // passes the gate here, dying in the filter below (500).
+    if !issues_file {
+        coerce_issue_shape(raw.get("issues"))?;
+    }
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT m."id", m."workspace_id" FROM "modules" m
            INNER JOIN "workspaces" w ON m."workspace_id" = w."id"
@@ -4907,6 +4918,8 @@ pub async fn add_module_issues_inner(
     if issues_file {
         return Err(Denial::ServerError);
     }
+    // The per-item parse (`pk__in`): runs only after the module 404.
+    let candidates = coerce_issue_candidates(raw.get("issues"))?;
     // The re-query (`Issue.objects`: soft-delete scope only, so archived
     // and draft issues can be added): default `-created_at` order, which is
     // also the `str(queryset)` and creation order.
@@ -6359,32 +6372,49 @@ mod tests {
 
     #[test]
     fn issue_list_edges() {
-        // Missing / empty / null.
+        // Pre-lookup shape gate: missing / empty answer "required"; null and
+        // non-sized scalars 500; non-empty payloads pass WITHOUT any UUID
+        // check (PIDASHCONV-1194: the module 404 must run first).
         assert!(matches!(
-            coerce_issue_list(None).expect_err("missing"),
+            coerce_issue_shape(None).expect_err("missing"),
             Denial::BadError(_)
         ));
+        for empty in [
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(""),
+        ] {
+            assert!(matches!(
+                coerce_issue_shape(Some(&empty)).expect_err("empty"),
+                Denial::BadError(_)
+            ));
+        }
         assert!(matches!(
-            coerce_issue_list(Some(&serde_json::json!([]))).expect_err("empty"),
-            Denial::BadError(_)
-        ));
-        assert!(matches!(
-            coerce_issue_list(Some(&Value::Null)).expect_err("null"),
+            coerce_issue_shape(Some(&Value::Null)).expect_err("null"),
             Denial::ServerError
         ));
         assert!(matches!(
-            coerce_issue_list(Some(&serde_json::json!(5))).expect_err("int"),
+            coerce_issue_shape(Some(&serde_json::json!(5))).expect_err("int"),
             Denial::ServerError
         ));
-        // Bad UUIDs 400.
+        assert!(coerce_issue_shape(Some(&serde_json::json!("abc"))).is_ok());
+        assert!(coerce_issue_shape(Some(&serde_json::json!({"x": 1}))).is_ok());
+        assert!(coerce_issue_shape(Some(&serde_json::json!(["nope"]))).is_ok());
+
+        // Post-lookup candidates: bad UUIDs 400; strings iterate chars and
+        // dicts iterate keys; null items pass through.
         assert!(matches!(
-            coerce_issue_list(Some(&serde_json::json!(["nope"]))).expect_err("bad"),
+            coerce_issue_candidates(Some(&serde_json::json!(["nope"]))).expect_err("bad"),
             Denial::BadError(_)
         ));
-        // Null items pass through; dicts iterate keys.
-        let out = coerce_issue_list(Some(&Value::Array(vec![Value::Null]))).expect("null-item");
+        assert!(matches!(
+            coerce_issue_candidates(Some(&serde_json::json!("abc"))).expect_err("bad-str"),
+            Denial::BadError(_)
+        ));
+        let out =
+            coerce_issue_candidates(Some(&Value::Array(vec![Value::Null]))).expect("null-item");
         assert!(matches!(out.as_slice(), [IssueCandidate::Null]));
-        assert!(coerce_issue_list(Some(&serde_json::json!({"nope": 1}))).is_err());
+        assert!(coerce_issue_candidates(Some(&serde_json::json!({"nope": 1}))).is_err());
     }
 
     #[test]
