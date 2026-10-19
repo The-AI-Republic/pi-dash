@@ -266,6 +266,10 @@ Unset `PIDASH_CONTRACT_BASE_URL` returns the package to unit-only mode.
   reads, permissions, disconnect semantics and validation refusals; the
   success shapes of connect/register are pinned by unit stubs. The GitLab
   disconnect test is repeatable (the backend's disconnect is idempotent).
+  The fixtures live in their own `contract-dev` workspace (override with
+  `PIDASH_CONTRACT_DEV_WORKSPACE`), not the shared `contract-acme`, so the
+  project-repository suite's "no provider account" 409 on the seeded
+  workspace keeps holding.
 - The epics-segment contracts (`src/contracts/epics.ts`) are cloud-only:
   the OSS backend serves no `epics/` routes, so they cannot be exercised
   by a live contract suite here. They mirror the issues CRUD surface with

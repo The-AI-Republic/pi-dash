@@ -20,7 +20,7 @@ import {
   registerGitProviderAccount,
 } from "../contracts/integrations.js";
 import { createWorkspace, deleteWorkspace } from "../contracts/workspace-management.js";
-import { CONTRACT_WORKSPACE, contractEnabled, sharedSignedIn } from "./setup.js";
+import { CONTRACT_DEV_WORKSPACE, contractEnabled, sharedSignedIn } from "./setup.js";
 
 function freshSlug(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
@@ -48,7 +48,7 @@ async function refusal(work: Promise<unknown>): Promise<ApiError | null> {
 describe.skipIf(!contractEnabled)("github integration contract", () => {
   it("reads the seeded connected provider with its verified login", async () => {
     const client = await sharedSignedIn();
-    const status = await getGithubIntegration(client, CONTRACT_WORKSPACE);
+    const status = await getGithubIntegration(client, CONTRACT_DEV_WORKSPACE);
     expect(status.connected).toBe(true);
     expect(status.github_user_login).toBe("contract-gh");
     expect(isVerified(status)).toBe(true);
@@ -104,7 +104,7 @@ describe.skipIf(!contractEnabled)("github integration contract", () => {
 describe.skipIf(!contractEnabled)("git provider account contract", () => {
   it("lists the seeded GitHub and GitLab accounts with their capabilities", async () => {
     const client = await sharedSignedIn();
-    const { accounts } = await listGitProviderAccounts(client, CONTRACT_WORKSPACE);
+    const { accounts } = await listGitProviderAccounts(client, CONTRACT_DEV_WORKSPACE);
     const github = accounts.find(
       (account) => account.provider === "github" && account.external_account_login === "contract-gh"
     );
@@ -132,12 +132,12 @@ describe.skipIf(!contractEnabled)("git provider account contract", () => {
     // disconnect is repeatable, so the suite stays green on a second run
     // without re-seeding.
     const client = await sharedSignedIn();
-    const seeded = (await listGitProviderAccounts(client, CONTRACT_WORKSPACE)).accounts;
+    const seeded = (await listGitProviderAccounts(client, CONTRACT_DEV_WORKSPACE)).accounts;
     const gitlab = seeded.find((account) => account.provider === "gitlab");
     expect(gitlab).toBeDefined();
-    const disconnected = await disconnectGitProviderAccount(client, CONTRACT_WORKSPACE, gitlab?.id ?? "");
+    const disconnected = await disconnectGitProviderAccount(client, CONTRACT_DEV_WORKSPACE, gitlab?.id ?? "");
     expect(disconnected).toEqual({ connected: false });
-    const after = (await listGitProviderAccounts(client, CONTRACT_WORKSPACE)).accounts;
+    const after = (await listGitProviderAccounts(client, CONTRACT_DEV_WORKSPACE)).accounts;
     expect(after.find((account) => account.id === gitlab?.id)?.status).toBe("revoked");
     expect(after.find((account) => account.id === gitlab?.id)?.last_check_error).toBe("Provider account disconnected");
   });
@@ -177,7 +177,7 @@ describe.skipIf(!contractEnabled)("git provider account contract", () => {
   it("404s disconnect for an unknown account", async () => {
     const client = await sharedSignedIn();
     const error = await refusal(
-      disconnectGitProviderAccount(client, CONTRACT_WORKSPACE, "00000000-0000-0000-0000-000000000000")
+      disconnectGitProviderAccount(client, CONTRACT_DEV_WORKSPACE, "00000000-0000-0000-0000-000000000000")
     );
     expect(error?.status).toBe(404);
   });

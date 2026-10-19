@@ -27,6 +27,7 @@ SEED_SECONDARY_EMAIL = "contract.probe@example.com"
 SEED_AUTOSET_EMAIL = "contract.autoset@example.com"
 SEED_PASSWORD = os.environ.get("PIDASH_CONTRACT_PASSWORD", "Contract123!")
 SEED_WORKSPACE_SLUG = "contract-acme"
+SEED_DEV_WORKSPACE_SLUG = "contract-dev"
 SEED_PROJECT_IDENTIFIER = "CT"
 SEED_DESKTOP_SESSION_KEY = os.environ.get("PIDASH_CONTRACT_DESKTOP_SESSION_KEY", "contractdesktopsession000001")
 
@@ -1088,7 +1089,21 @@ def seed():
     # before storing anything, so the contract suites cannot create these
     # rows over HTTP. Seed them directly instead: a connected GitHub workspace
     # integration with a PAT account, plus a GitLab PAT account that a suite
-    # disconnects.
+    # disconnects. They live in their own workspace so the shared
+    # contract-acme keeps the "no provider account" shape the project
+    # repository suite (NEWFRONT-569) asserts there.
+    dev_workspace, dev_workspace_created = Workspace.objects.get_or_create(
+        slug=SEED_DEV_WORKSPACE_SLUG,
+        defaults={"name": "Contract Dev", "owner": user},
+    )
+    note("workspace", dev_workspace.slug, dev_workspace_created)
+    _, dev_membership_created = WorkspaceMember.objects.get_or_create(
+        workspace=dev_workspace,
+        member=user,
+        defaults={"role": 20, "is_active": True},
+    )
+    note("workspace-member", f"{dev_workspace.slug}/{user.email}", dev_membership_created)
+
     from pi_dash.db.models import GitProviderAccount, Integration, WorkspaceIntegration
     from pi_dash.license.utils.encryption import encrypt_data
 
@@ -1102,8 +1117,8 @@ def seed():
     )
     shim_token, _ = APIToken.objects.get_or_create(
         user=user,
-        workspace=workspace,
-        label=f"github-integration-shim-{workspace.id}",
+        workspace=dev_workspace,
+        label=f"github-integration-shim-{dev_workspace.id}",
         defaults={
             "user_type": 1,
             "is_active": False,
@@ -1111,7 +1126,7 @@ def seed():
         },
     )
     github_ws, github_ws_created = WorkspaceIntegration.objects.update_or_create(
-        workspace=workspace,
+        workspace=dev_workspace,
         integration=github_integration,
         defaults={
             "actor": user,
@@ -1127,7 +1142,7 @@ def seed():
     note("github-integration", str(github_ws.pk), github_ws_created)
 
     github_account, github_account_created = GitProviderAccount.objects.update_or_create(
-        workspace=workspace,
+        workspace=dev_workspace,
         provider=GitProviderAccount.Provider.GITHUB,
         host_url="https://github.com",
         external_account_login="contract-gh",
@@ -1151,7 +1166,7 @@ def seed():
     note("github-account", str(github_account.pk), github_account_created)
 
     gitlab_account, gitlab_account_created = GitProviderAccount.objects.update_or_create(
-        workspace=workspace,
+        workspace=dev_workspace,
         provider=GitProviderAccount.Provider.GITLAB,
         host_url="https://gitlab.com",
         external_account_login="contract-gitlab",

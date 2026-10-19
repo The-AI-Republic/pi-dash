@@ -12,6 +12,13 @@ export const CONTRACT_BASE_URL = process.env["PIDASH_CONTRACT_BASE_URL"] ?? "";
 export const CONTRACT_EMAIL = process.env["PIDASH_CONTRACT_EMAIL"] ?? "contract.tester@example.com";
 export const CONTRACT_PASSWORD = process.env["PIDASH_CONTRACT_PASSWORD"] ?? "Contract123!";
 export const CONTRACT_WORKSPACE = process.env["PIDASH_CONTRACT_WORKSPACE"] ?? "contract-acme";
+/**
+ * Developer-integration fixtures live in their own workspace (NEWFRONT-533):
+ * the seed plants a connected GitHub integration and provider accounts
+ * there so the shared workspace keeps the "no provider account" shape the
+ * NEWFRONT-569 repository suite asserts.
+ */
+export const CONTRACT_DEV_WORKSPACE = process.env["PIDASH_CONTRACT_DEV_WORKSPACE"] ?? "contract-dev";
 export const CONTRACT_PROJECT_IDENTIFIER = "CT";
 export const CONTRACT_SECONDARY_EMAIL = process.env["PIDASH_CONTRACT_SECONDARY_EMAIL"] ?? "contract.probe@example.com";
 export const CONTRACT_AUTOSET_EMAIL = process.env["PIDASH_CONTRACT_AUTOSET_EMAIL"] ?? "contract.autoset@example.com";
