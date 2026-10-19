@@ -102,10 +102,10 @@ export function InboxView({ workspaceSlug }: { workspaceSlug: string }): React.R
     if (markingReadRef.current) return;
     markingReadRef.current = true;
     bulkRead.mutate(
-      { workspaceSlug, scope: markAllReadScope(origins, modes) },
+      { workspaceSlug, scope: markAllReadScope(origins, modes), tab },
       { onSettled: () => (markingReadRef.current = false) }
     );
-  }, [bulkRead, origins, modes, workspaceSlug]);
+  }, [bulkRead, origins, modes, tab, workspaceSlug]);
 
   const selectTab = React.useCallback((next: NotificationTab) => {
     setTab(next);
