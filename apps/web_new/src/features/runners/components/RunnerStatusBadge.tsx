@@ -25,9 +25,11 @@ export interface RunnerStatusBadgeProps {
 
 export function RunnerStatusBadge({ status }: RunnerStatusBadgeProps): React.ReactElement {
   return (
-    <Badge tone={RUNNER_STATUS_TONES[status]} dot>
-      {RUNNER_STATUS_LABELS[status]}
-    </Badge>
+    <span data-testid="runner-status-badge" className="contents">
+      <Badge tone={RUNNER_STATUS_TONES[status]} dot>
+        {RUNNER_STATUS_LABELS[status]}
+      </Badge>
+    </span>
   );
 }
 

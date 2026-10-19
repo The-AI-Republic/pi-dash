@@ -50,6 +50,8 @@ function stubLocator(overrides: Record<string, unknown> = {}) {
 function pageStub(overrides: Record<string, unknown> = {}): Page {
   return {
     goto: vi.fn(async () => null),
+    getByTestId: vi.fn(() => stubLocator()),
+    getByPlaceholder: vi.fn(() => stubLocator()),
     url: () => "https://app.test/acme/runners",
     title: async () => "Acme - AI Agents",
     waitForResponse: vi.fn(async () => stubResponse("GET", "https://api.test/api/runners/")),
@@ -554,5 +556,217 @@ describe("in-flight confirm gates", () => {
 describe("playwright stub sanity", () => {
   it("polls a sync predicate", async () => {
     await playwrightExpect.poll(() => false).toBe(false);
+  });
+});
+
+describe("runner chat shell (NEWFRONT-549)", () => {
+  it("opens the chat URL with the session cursor and settles on the page", async () => {
+    const page = pageStub();
+    const driver = new WebNewDriver(page);
+    await driver.runnerChatOpen("acme", "r-1", "s-9");
+    expect(page.goto).toHaveBeenCalledWith("/acme/runners/chat/r-1?sessionId=s-9", { timeout: 60_000 });
+    await driver.runnerChatOpen("acme", "r-1");
+    expect(page.goto).toHaveBeenLastCalledWith("/acme/runners/chat/r-1", { timeout: 60_000 });
+  });
+
+  it("lists contacts from the rail", async () => {
+    const link = stubLocator({ innerText: vi.fn(async () => " alpha ") });
+    const page = pageStub({
+      getByTestId: vi.fn(() =>
+        stubLocator({ getByTestId: vi.fn(() => stubLocator({ all: vi.fn(async () => [link]) })) })
+      ),
+    });
+    await expect(new WebNewDriver(page).runnerChatContactNames()).resolves.toEqual(["alpha"]);
+  });
+
+  it("reads the contact dot's state class", async () => {
+    const dot = stubLocator({ getAttribute: vi.fn(async () => "text-(--success)") });
+    const contact = stubLocator({ locator: vi.fn(() => dot) });
+    const page = pageStub({
+      getByTestId: vi.fn(() =>
+        stubLocator({ getByTestId: vi.fn(() => stubLocator({ filter: vi.fn(() => contact) })) })
+      ),
+    });
+    await expect(new WebNewDriver(page).runnerChatContactDotClass("alpha")).resolves.toBe("text-(--success)");
+  });
+
+  it("reads the header name, secondary line and badge", async () => {
+    const header = stubLocator({
+      getByTestId: vi.fn((id: string) => {
+        if (id === "runner-chat-name") return stubLocator({ innerText: vi.fn(async () => " alpha ") });
+        if (id === "runner-chat-secondary") return stubLocator({ innerText: vi.fn(async () => " Default ") });
+        return stubLocator({ innerText: vi.fn(async () => "online") });
+      }),
+    });
+    const page = pageStub({ getByTestId: vi.fn(() => header) });
+    await expect(new WebNewDriver(page).runnerChatHeader()).resolves.toEqual({
+      name: "alpha",
+      secondary: "Default",
+      badge: "online",
+    });
+  });
+
+  it("treats a missing secondary line as empty", async () => {
+    const header = stubLocator({
+      getByTestId: vi.fn((id: string) => {
+        if (id === "runner-chat-name") return stubLocator({ innerText: vi.fn(async () => "Runner") });
+        return stubLocator({
+          innerText: vi.fn(async () => {
+            throw new Error("detached");
+          }),
+        });
+      }),
+    });
+    const driver = new WebNewDriver(pageStub({ getByTestId: vi.fn(() => header) }));
+    await expect(driver.runnerChatHeader()).resolves.toMatchObject({ secondary: "" });
+  });
+
+  it("reports the empty history line", async () => {
+    const empty = stubLocator({ isVisible: vi.fn(async () => true) });
+    const page = pageStub({
+      getByTestId: vi.fn(() => stubLocator({ getByTestId: vi.fn(() => empty) })),
+    });
+    await expect(new WebNewDriver(page).runnerChatHistoryEmptyVisible()).resolves.toBe(true);
+    empty.isVisible.mockRejectedValueOnce(new Error("gone"));
+    await expect(new WebNewDriver(page).runnerChatHistoryEmptyVisible()).resolves.toBe(false);
+  });
+
+  it("reads history entries with their activity labels and active marker", async () => {
+    const entry = stubLocator({
+      locator: vi.fn(() => stubLocator({ allInnerTexts: vi.fn(async () => ["Oct 18, 10:00 AM", "1 hour ago"]) })),
+      getAttribute: vi.fn(async () => "true"),
+    });
+    const page = pageStub({
+      getByTestId: vi.fn(() => stubLocator({ locator: vi.fn(() => stubLocator({ all: vi.fn(async () => [entry]) })) })),
+    });
+    await expect(new WebNewDriver(page).runnerChatHistoryItems()).resolves.toEqual([
+      { title: "Oct 18, 10:00 AM", subtitle: "1 hour ago", active: true },
+    ]);
+  });
+
+  it("reports the composer gate reason and the disabled textarea", async () => {
+    const reason = stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => " Runner offline ") });
+    const box = stubLocator({ isDisabled: vi.fn(async () => true) });
+    const page = pageStub({
+      getByTestId: vi.fn(() =>
+        stubLocator({
+          getByTestId: vi.fn(() => reason),
+        })
+      ),
+      getByPlaceholder: vi.fn(() => box),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.runnerChatComposerReason()).resolves.toBe("Runner offline");
+    await expect(driver.runnerChatTextareaDisabled()).resolves.toBe(true);
+  });
+
+  it("reports no reason when chat can proceed", async () => {
+    const reason = stubLocator({ count: vi.fn(async () => 0) });
+    const page = pageStub({ getByTestId: vi.fn(() => stubLocator({ getByTestId: vi.fn(() => reason) })) });
+    await expect(new WebNewDriver(page).runnerChatComposerReason()).resolves.toBeNull();
+  });
+
+  it("reports the send control's enabled state", async () => {
+    const send = stubLocator({ isEnabled: vi.fn(async () => true) });
+    const page = pageStub({ getByTestId: vi.fn(() => stubLocator({ getByRole: vi.fn(() => send) })) });
+    await expect(new WebNewDriver(page).runnerChatSendEnabled()).resolves.toBe(true);
+    send.isEnabled.mockRejectedValueOnce(new Error("detached"));
+    await expect(new WebNewDriver(page).runnerChatSendEnabled()).resolves.toBe(false);
+  });
+
+  it("reads the transcript bubbles with their roles", async () => {
+    const item = (role: string, text: string) =>
+      stubLocator({
+        innerText: vi.fn(async () => text),
+        locator: vi.fn(() => stubLocator({ getAttribute: vi.fn(async () => role) })),
+      });
+    const list = stubLocator({
+      count: vi.fn(async () => 1),
+      getByRole: vi.fn(() => stubLocator({ all: vi.fn(async () => [item("user", "hi"), item("assistant", "hello")]) })),
+    });
+    const page = pageStub({
+      getByTestId: vi.fn(() => stubLocator({ getByRole: vi.fn(() => list) })),
+    });
+    await expect(new WebNewDriver(page).runnerChatMessageBubbles()).resolves.toEqual([
+      { role: "user", text: "hi" },
+      { role: "assistant", text: "hello" },
+    ]);
+  });
+
+  it("reports an empty transcript when no list is rendered", async () => {
+    const page = pageStub({
+      getByTestId: vi.fn(() => stubLocator({ getByRole: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) })),
+    });
+    await expect(new WebNewDriver(page).runnerChatMessageBubbles()).resolves.toEqual([]);
+  });
+
+  it("reads the newest visible toast", async () => {
+    const toast = stubLocator({ innerText: vi.fn(async () => "Chat failed\nRunner is offline\nDismiss") });
+    const page = pageStub({
+      getByTestId: vi.fn(() => stubLocator({ count: vi.fn(async () => 1), nth: vi.fn(() => toast) })),
+    });
+    await expect(new WebNewDriver(page).runnerChatLastToast()).resolves.toEqual({
+      title: "Chat failed",
+      message: "Runner is offline Dismiss",
+    });
+  });
+
+  it("reports no toast when none is on screen", async () => {
+    const page = pageStub({ getByTestId: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) });
+    await expect(new WebNewDriver(page).runnerChatLastToast()).resolves.toBeNull();
+  });
+
+  it("counts chat API calls through the classifier route", async () => {
+    let handler: ((route: unknown) => Promise<void>) | undefined;
+    const page = pageStub({
+      route: vi.fn(async (_pattern: string, next: unknown) => {
+        handler = next as typeof handler;
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.runnerChatStartApiSpy();
+    expect(handler).toBeDefined();
+    const route = (method: string, path: string) => {
+      const fallback = vi.fn(async () => undefined);
+      return {
+        request: () => ({ method: () => method, url: () => `https://api.test${path}` }),
+        fallback,
+      };
+    };
+    await handler?.(route("POST", "/api/runners/chat/sessions/s-1/warm/"));
+    await handler?.(route("POST", "/api/runners/chat/sessions/"));
+    await handler?.(route("GET", "/api/runners/chat/sessions/"));
+    await handler?.(route("POST", "/api/runners/chat/sessions/s-1/messages/"));
+    expect(await driver.runnerChatApiCounts()).toMatchObject({ warm: 1, sessionCreate: 1, sessionList: 1, send: 1 });
+    await driver.runnerChatStopApiSpy();
+    expect(page.unroute).toHaveBeenCalledWith("**/api/runners/**");
+  });
+
+  it("stubs a session stream and reports the requested URLs", async () => {
+    let handler: ((route: unknown) => Promise<void>) | undefined;
+    const page = pageStub({
+      route: vi.fn(async (_pattern: string, next: unknown) => {
+        handler = next as typeof handler;
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.runnerChatStubStream("s-1", [
+      { seq: 1, kind: "assistant_delta", payload: { params: { delta: "hi" } }, message: "m-1" },
+      { seq: 2, kind: "raw-invalid", payload: {} },
+    ]);
+    // Re-stubbing swaps the frames without adding a second route.
+    await driver.runnerChatStubStream("s-1", []);
+    expect(page.route).toHaveBeenCalledTimes(1);
+    const fulfill = vi.fn(async () => undefined);
+    await handler?.({
+      request: () => ({ url: () => "https://api.test/api/runners/chat/sessions/s-1/events/?after=0" }),
+      fulfill,
+    });
+    expect(fulfill).toHaveBeenCalledTimes(1);
+    await expect(driver.runnerChatStreamRequestUrls("s-1")).resolves.toEqual([
+      "https://api.test/api/runners/chat/sessions/s-1/events/?after=0",
+    ]);
+    await driver.runnerChatClearStreamStub("s-1");
+    expect(page.unroute).toHaveBeenCalledWith("**/chat/sessions/s-1/events**");
   });
 });
