@@ -146,15 +146,14 @@ const FREQUENCY_NOUNS: Record<string, [string, string]> = {
   YEARLY: ["year", "years"],
 };
 
-function weekdaySentence(days: string[]): string | null {
-  const names = days.map((day) => WEEKDAYS[day.toUpperCase()]);
-  if (names.some((name) => name === undefined)) return null;
-  if (days.length === 5 && ["MO", "TU", "WE", "TH", "FR"].every((day) => days.includes(day))) {
-    return "Every weekday";
+function weekdayNames(days: string[]): string[] | null {
+  const names: string[] = [];
+  for (const day of days) {
+    const name = WEEKDAYS[day.toUpperCase()];
+    if (name === undefined) return null;
+    names.push(name);
   }
-  if (names.length === 1) return `Every ${names[0]}`;
-  if (names.length === 2) return `Every ${names[0]} and ${names[1]}`;
-  return `Every ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return names;
 }
 
 function clockSentence(parts: Map<string, string>): string {
@@ -204,16 +203,25 @@ export function describeRrule(rrule: string): string {
 
   const interval = Number(parts.get("INTERVAL") ?? "1");
   if (!Number.isFinite(interval) || interval < 1) return rule;
-  const cadence = interval === 1 ? `Every ${nouns[0]}` : `Every ${interval} ${nouns[1]}`;
+  const cadence = interval === 1 ? `every ${nouns[0]}` : `every ${interval} ${nouns[1]}`;
 
   const days = parts.get("BYDAY");
-  const dayText = days === undefined ? null : weekdaySentence(days.split(","));
-  if (days !== undefined && dayText === null) return rule;
+  const dayNames = days === undefined ? null : weekdayNames(days.split(","));
+  if (days !== undefined && dayNames === null) return rule;
 
   const monthDays = parts.get("BYMONTHDAY");
   if (monthDays !== undefined && !/^-?\d+(,-?\d+)*$/.test(monthDays)) return rule;
 
-  const head = dayText === null ? cadence : interval === 1 ? dayText : `${dayText} every ${interval} ${nouns[1]}`;
+  // Weekly rules name their days the way the API's own renderer does:
+  // "every week on Monday" and "every 2 weeks on Monday, Friday". A full
+  // Monday-to-Friday set keeps the shorter "every weekday".
+  let head = cadence;
+  if (freq === "WEEKLY" && dayNames !== null) {
+    const workweek = dayNames.length === 5 && ["MO", "TU", "WE", "TH", "FR"].every((day) => days?.includes(day));
+    head = workweek && interval === 1 ? "every weekday" : `${cadence} on ${dayNames.join(", ")}`;
+  } else if (dayNames !== null) {
+    head = `${cadence} on ${dayNames.join(", ")}`;
+  }
   const onMonthDay = monthDays === undefined ? "" : ` on day ${monthDays.replace(/,/g, ", ")}`;
   return `${head}${onMonthDay}${clockSentence(parts)}${countSentence(parts)}${untilSentence(parts)}`;
 }

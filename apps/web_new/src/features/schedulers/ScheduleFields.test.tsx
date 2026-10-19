@@ -37,7 +37,7 @@ describe("ScheduleFields", () => {
     expect(screen.getByLabelText("Recurrence (RRULE)")).toHaveValue("FREQ=DAILY");
     expect(screen.getByLabelText("Project context (optional)")).toHaveValue("");
     expect(screen.getByLabelText("Starts at")).toHaveAttribute("id", ids.startsAt);
-    expect(screen.getByText("Every day.")).toBeInTheDocument();
+    expect(screen.getByText("every day.")).toBeInTheDocument();
     expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("switch")).toHaveAccessibleName("Disable this install");
   });

@@ -153,7 +153,7 @@ describe("formatters", () => {
   });
 
   it("renders the readable schedule", () => {
-    expect(scheduleText({ rrule: "FREQ=WEEKLY;BYDAY=MO" })).toBe("Every Monday");
+    expect(scheduleText({ rrule: "FREQ=WEEKLY;BYDAY=MO" })).toBe("every week on Monday");
     expect(scheduleText({ rrule: "" })).toBe("Fires once at the start time");
   });
 });
@@ -171,7 +171,7 @@ describe("InstallsList", () => {
     const tr = row.closest("tr");
     if (tr === null) throw new Error("row missing");
     expect(within(tr).getByText("weekly-review")).toBeInTheDocument();
-    expect(within(tr).getByText("Every Monday")).toBeInTheDocument();
+    expect(within(tr).getByText("every week on Monday")).toBeInTheDocument();
     expect(within(tr).getByTitle("FREQ=WEEKLY;BYDAY=MO")).toBeInTheDocument();
     expect(within(tr).getAllByText("(never)")).toHaveLength(1);
     expect(within(tr).getByText("Enabled")).toBeInTheDocument();

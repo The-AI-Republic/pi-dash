@@ -133,19 +133,19 @@ describe("browserTimeZone", () => {
 describe("describeRrule", () => {
   it("describes single and recurring rules", () => {
     expect(describeRrule("")).toBe("Fires once at the start time");
-    expect(describeRrule("FREQ=DAILY")).toBe("Every day");
-    expect(describeRrule("RRULE:FREQ=WEEKLY;BYDAY=MO")).toBe("Every Monday");
-    expect(describeRrule("FREQ=WEEKLY;BYDAY=MO,WE")).toBe("Every Monday and Wednesday");
-    expect(describeRrule("FREQ=WEEKLY;BYDAY=MO,TU,WE")).toBe("Every Monday, Tuesday and Wednesday");
-    expect(describeRrule("FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR")).toBe("Every weekday");
-    expect(describeRrule("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,FR")).toBe("Every Monday and Friday every 2 weeks");
-    expect(describeRrule("FREQ=DAILY;INTERVAL=2")).toBe("Every 2 days");
-    expect(describeRrule("freq=daily;byhour=9;byminute=5")).toBe("Every day at 09:05");
-    expect(describeRrule("FREQ=MONTHLY;BYMONTHDAY=1,15")).toBe("Every month on day 1, 15");
-    expect(describeRrule("FREQ=HOURLY;COUNT=3")).toBe("Every hour for 3 times");
-    expect(describeRrule("FREQ=YEARLY;COUNT=1")).toBe("Every year for 1 time");
-    expect(describeRrule("FREQ=DAILY;UNTIL=20270101T090000Z")).toBe("Every day until 2027-01-01");
-    expect(describeRrule("FREQ=MINUTELY")).toBe("Every minute");
+    expect(describeRrule("FREQ=DAILY")).toBe("every day");
+    expect(describeRrule("RRULE:FREQ=WEEKLY;BYDAY=MO")).toBe("every week on Monday");
+    expect(describeRrule("FREQ=WEEKLY;BYDAY=MO,WE")).toBe("every week on Monday, Wednesday");
+    expect(describeRrule("FREQ=WEEKLY;BYDAY=MO,TU,WE")).toBe("every week on Monday, Tuesday, Wednesday");
+    expect(describeRrule("FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR")).toBe("every weekday");
+    expect(describeRrule("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,FR")).toBe("every 2 weeks on Monday, Friday");
+    expect(describeRrule("FREQ=DAILY;INTERVAL=2")).toBe("every 2 days");
+    expect(describeRrule("freq=daily;byhour=9;byminute=5")).toBe("every day at 09:05");
+    expect(describeRrule("FREQ=MONTHLY;BYMONTHDAY=1,15")).toBe("every month on day 1, 15");
+    expect(describeRrule("FREQ=HOURLY;COUNT=3")).toBe("every hour for 3 times");
+    expect(describeRrule("FREQ=YEARLY;COUNT=1")).toBe("every year for 1 time");
+    expect(describeRrule("FREQ=DAILY;UNTIL=20270101T090000Z")).toBe("every day until 2027-01-01");
+    expect(describeRrule("FREQ=MINUTELY")).toBe("every minute");
   });
 
   it("reads a negative and a zero interval as unreadable", () => {
@@ -162,8 +162,8 @@ describe("describeRrule", () => {
     expect(describeRrule("FREQ=DAILY;INTERVAL=x")).toBe("FREQ=DAILY;INTERVAL=x");
     expect(describeRrule("FREQ=WEEKLY;BYDAY=XX")).toBe("FREQ=WEEKLY;BYDAY=XX");
     expect(describeRrule("FREQ=MONTHLY;BYMONTHDAY=first")).toBe("FREQ=MONTHLY;BYMONTHDAY=first");
-    expect(describeRrule("FREQ=DAILY;;BYHOUR=9")).toBe("Every day at 09:00");
-    expect(describeRrule("FREQ=DAILY;UNTIL=garbage")).toBe("Every day");
-    expect(describeRrule("FREQ=DAILY;COUNT=0")).toBe("Every day");
+    expect(describeRrule("FREQ=DAILY;;BYHOUR=9")).toBe("every day at 09:00");
+    expect(describeRrule("FREQ=DAILY;UNTIL=garbage")).toBe("every day");
+    expect(describeRrule("FREQ=DAILY;COUNT=0")).toBe("every day");
   });
 });
