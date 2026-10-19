@@ -92,10 +92,61 @@ export async function loadIssueDescriptionExtensions() {
   });
   // Stored bodies written by earlier clients hold images as an
   // `image-component` element; the editor reads both spellings so an
-  // old body opens with its pictures (ISS-127).
+  // old body opens with its pictures (ISS-127). The element keeps its own
+  // name and attributes on the way out, and a stored asset id travels in
+  // `data-stored-src` so an edit never rewrites the stored id to a URL.
   const DescriptionImage = Image.extend({
     parseHTML() {
       return [{ tag: "img" }, { tag: "image-component" }];
+    },
+    addAttributes() {
+      return {
+        ...this.parent?.(),
+        width: { default: null },
+        height: { default: null },
+        alignment: { default: null },
+        "data-stored-src": {
+          default: null,
+          parseHTML: (element: HTMLElement) => element.getAttribute("data-stored-src"),
+          renderHTML: (attributes: Record<string, unknown>) =>
+            attributes["data-stored-src"] === null || attributes["data-stored-src"] === undefined
+              ? {}
+              : { "data-stored-src": String(attributes["data-stored-src"]) },
+        },
+        status: { default: null },
+        id: { default: null },
+      };
+    },
+    renderHTML({ node, HTMLAttributes }) {
+      const stored = node.attrs["data-stored-src"] as string | null;
+      const attrs = { ...HTMLAttributes };
+      delete attrs["data-stored-src"];
+      if (stored !== null) attrs.src = stored;
+      return [stored === null ? "img" : "image-component", attrs];
+    },
+    addNodeView() {
+      // The stored element keeps a legacy asset id; the surface paints the
+      // resolved picture inside it while the node still serializes the
+      // stored id and its own attributes (ISS-127).
+      return ({ node }) => {
+        const attrs = node.attrs as Record<string, unknown>;
+        const stored = attrs["data-stored-src"];
+        const dom = document.createElement("image-component");
+        dom.setAttribute("contenteditable", "false");
+        for (const [name, value] of Object.entries(attrs)) {
+          if (name === "src" || name === "data-stored-src" || typeof value !== "string" || value === "") continue;
+          dom.setAttribute(name, value);
+        }
+        const image = document.createElement("img");
+        image.setAttribute("src", typeof attrs["src"] === "string" ? attrs["src"] : "");
+        for (const name of ["alt", "title", "width", "height"]) {
+          const value = attrs[name];
+          if (typeof value === "string" && value !== "") image.setAttribute(name, value);
+        }
+        dom.append(image);
+        if (typeof stored === "string") dom.setAttribute("data-stored-src", stored);
+        return { dom };
+      };
     },
   }).configure({ inline: false, allowBase64: false });
   return [...base, DescriptionImage, MentionNode];

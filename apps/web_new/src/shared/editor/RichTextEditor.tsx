@@ -15,7 +15,7 @@ import * as React from "react";
 
 import { loadCommentExtensions, loadDescriptionExtensions, loadIssueDescriptionExtensions } from "./extensions.js";
 import { mentionQueryAt } from "./mention.js";
-import { isStoredHtmlEmpty } from "./sanitize.js";
+import { isStoredHtmlEmpty, prepareEditorHtml } from "./sanitize.js";
 
 /** One Tiptap extension instance, derived from the loader's own type. */
 type EditorExtension =
@@ -55,6 +55,8 @@ export interface RichTextEditorProps {
   handleKeyDown?: ((event: KeyboardEvent) => boolean) | undefined;
   /** Explicit keyboard position inside a dialog's tab order (ISS-125). */
   tabIndex?: number | undefined;
+  /** Resolve a stored image asset id to its served source (ISS-127). */
+  resolveAsset?: ((src: string) => string) | undefined;
 }
 
 interface TiptapChain {
@@ -164,8 +166,13 @@ async function loadEditor(
     onMentionQuery,
     handleKeyDown,
     tabIndex,
+    resolveAsset,
   }: BodyProps): React.ReactElement {
-    const [empty, setEmpty] = React.useState(() => isStoredHtmlEmpty(initialHtml));
+    // Legacy bodies keep an asset id where newer ones keep a URL. The
+    // editor paints the resolved source and carries the stored id back
+    // out on save, so opening and saving never rewrites the body (ISS-127).
+    const shownHtml = React.useMemo(() => prepareEditorHtml(initialHtml, resolveAsset), [initialHtml, resolveAsset]);
+    const [empty, setEmpty] = React.useState(() => isStoredHtmlEmpty(shownHtml));
     const onChangeRef = React.useRef(onChange);
     onChangeRef.current = onChange;
     const readyRef = React.useRef(onEditorReady);
@@ -177,7 +184,7 @@ async function loadEditor(
     const editor = useEditor(
       {
         extensions,
-        content: initialHtml,
+        content: shownHtml,
         editable,
         // Create the editor in the mount effect, never during render.
         // Without this the manager builds one instance for the first
@@ -230,6 +237,7 @@ async function loadEditor(
     onMentionQuery,
     handleKeyDown,
     tabIndex,
+    resolveAsset,
     ...rest
   }: RichTextEditorProps): React.ReactElement {
     const handleRef = React.useRef(onReady);
@@ -247,6 +255,7 @@ async function loadEditor(
         onMentionQuery={onMentionQuery}
         handleKeyDown={handleKeyDown}
         tabIndex={tabIndex}
+        resolveAsset={resolveAsset}
       />
     );
   }

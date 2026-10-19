@@ -15,7 +15,9 @@ import { Button, Popover, cn } from "@pidash/kit";
 import { Sparkle } from "lucide-react";
 import * as React from "react";
 
+import { getAppClient } from "../../../core/api/client.js";
 import {
+  descriptionAssetSrc,
   hasStoredDescriptionContent,
   IssueDescriptionEditor,
   type RichTextEditorHandle,
@@ -100,6 +102,12 @@ export function ModalDescription({
   const upload = useUploadDescriptionAsset(workspaceSlug);
   const mentions = useMentionSearch(workspaceSlug, projectId, mentionQuery ?? "", mentionQuery !== null);
   const fileRef = React.useRef<HTMLInputElement>(null);
+  // Legacy bodies keep the asset id in the image source; resolve it
+  // through the row's own project so an existing picture opens (ISS-127).
+  const resolveAsset = React.useCallback(
+    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId, apiBaseUrl: getAppClient().baseUrl }),
+    [workspaceSlug, projectId]
+  );
   // The panel's own work (an upload, a draft, an answer) never reaches
   // the dialog's write state, so readiness is counted here and reported
   // as it changes: closing mid-upload would strand the parked asset.
@@ -215,6 +223,7 @@ export function ModalDescription({
             onReady={handleEditorReady}
             onMentionQuery={setMentionQuery}
             {...(tabIndex === undefined ? {} : { tabIndex })}
+            resolveAsset={resolveAsset}
           />
         </React.Suspense>
       </div>

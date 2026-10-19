@@ -2104,6 +2104,27 @@ describe("WorkItemCreateDialog publish (ISS-130)", () => {
     expect(h.calls.some((call) => call.url.includes("/draft-to-issue/"))).toBe(false);
     expect(h.onOpenChange).not.toHaveBeenCalled();
   });
+
+  it("stores a picked project when a project-less draft is saved, not just published (ISS-126/130)", async () => {
+    const user = userEvent.setup();
+    const h = setup(
+      {},
+      {
+        draftId: "draft-1",
+        edit: { kind: "draft", id: "draft-1", projectId: null, snapshot: editRow({ name: "Needs project" }) },
+      },
+      { seedPicker: false }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Needs project"));
+    await user.click(screen.getByRole("button", { name: "Select project" }));
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 200));
+    await user.click(await screen.findByRole("option", { name: /Beacon/ }));
+    save();
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Work item updated successfully"));
+    const stored = h.calls.find((call) => call.method === "PATCH" && call.url.includes("/draft-issues/draft-1/"));
+    expect(stored?.body).toEqual({ project_id: PROJECT_BEACON });
+    expect(h.onOpenChange).toHaveBeenCalledWith(false);
+  });
 });
 
 describe("WorkItemCreateDialog tab order (ISS-125)", () => {

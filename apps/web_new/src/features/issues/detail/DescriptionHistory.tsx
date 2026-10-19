@@ -14,7 +14,7 @@ import { ChevronLeft, ChevronRight, History } from "lucide-react";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { RichTextView } from "../../../shared/editor/index.js";
+import { descriptionAssetSrc, RichTextView } from "../../../shared/editor/index.js";
 import { timeAgo } from "../../../shared/lib/timeAgo.js";
 import { usePaletteWorkspaceMembers } from "../../../shared/shell/contextual/api.js";
 import { descriptionVersionQueryOptions, descriptionVersionsQueryOptions } from "../api/queries.js";
@@ -68,6 +68,13 @@ export function DescriptionHistory({
     ...descriptionVersionQueryOptions(client, workspaceSlug, projectId, issueId, activeId ?? ""),
     enabled: activeId !== null,
   });
+  // A stored version carries the same legacy image sources as the detail;
+  // resolve them through this issue's project so the preview shows the
+  // picture (ISS-127).
+  const resolveAsset = React.useCallback(
+    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId, apiBaseUrl: getAppClient().baseUrl }),
+    [workspaceSlug, projectId]
+  );
 
   const versions = versionsQuery.data?.results ?? [];
   const latest = versions[0];
@@ -170,7 +177,7 @@ export function DescriptionHistory({
               <Skeleton height="14px" width="70%" />
             </div>
           ) : (
-            <RichTextView html={detail.description_html} label="Version preview" />
+            <RichTextView html={detail.description_html} label="Version preview" resolveAsset={resolveAsset} />
           )}
         </div>
       </Dialog>

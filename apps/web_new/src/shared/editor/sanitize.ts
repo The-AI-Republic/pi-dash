@@ -49,6 +49,57 @@ export function sanitizeHtml(dirty: string): string {
   });
 }
 
+/** Absolute or self-describing sources never need the asset path. */
+const ABSOLUTE_ASSET_SRC = /^(https?:|data:|blob:|\/)/i;
+
+/** Where a stored description image lives, given the row it belongs to. */
+export interface DescriptionAssetScope {
+  workspaceSlug: string;
+  /** Null for a draft that holds no project yet. */
+  projectId: string | null;
+  /** API origin; omitted legs stay app-relative. */
+  apiBaseUrl?: string | undefined;
+}
+
+/**
+ * Resolve a stored `image-component` source (ISS-127). Older clients kept
+ * the asset's id in `src`, not a URL: the API rewrites asset ids in
+ * `copy_s3_object` and serves the bytes at the workspace/project asset
+ * path. Absolute, data, blob and already-rooted legs pass through; a bare
+ * id joins that path. Without a scope the id cannot be resolved and is
+ * returned untouched.
+ */
+export function descriptionAssetSrc(src: string, scope: DescriptionAssetScope | undefined): string {
+  if (src === "" || ABSOLUTE_ASSET_SRC.test(src) || scope === undefined) return src;
+  const project = scope.projectId === null ? "" : `projects/${scope.projectId}/`;
+  const path = `/api/assets/v2/workspaces/${scope.workspaceSlug}/${project}${src}/`;
+  if (scope.apiBaseUrl === undefined || scope.apiBaseUrl === "") return path;
+  return `${scope.apiBaseUrl.replace(/\/+$/, "")}${path}`;
+}
+
+/** The asset source a stored node carries, before display resolution. */
+export function storedImageSrc(element: Element): string {
+  return element.getAttribute("data-stored-src") ?? element.getAttribute("src") ?? "";
+}
+
+/**
+ * Give the editor a paintable source for legacy `image-component` nodes
+ * while keeping the stored id for the round-trip (ISS-127). The node
+ * carries the resolved source in `src` and the stored one in
+ * `data-stored-src`; serialization reads the stored one back.
+ */
+export function prepareEditorHtml(dirty: string, resolve: ((src: string) => string) | undefined): string {
+  if (resolve === undefined || typeof globalThis.DOMParser === "undefined") return dirty;
+  const document = new DOMParser().parseFromString(dirty, "text/html");
+  for (const element of Array.from(document.body.querySelectorAll("image-component"))) {
+    const stored = element.getAttribute("src") ?? "";
+    if (stored === "" || ABSOLUTE_ASSET_SRC.test(stored)) continue;
+    element.setAttribute("src", resolve(stored));
+    element.setAttribute("data-stored-src", stored);
+  }
+  return document.body.innerHTML;
+}
+
 /** The name a stored mention shows: the stored name, else the id. */
 export function mentionDisplayName(mention: StoredMention): string {
   if (mention.name !== null && mention.name.trim() !== "") return mention.name;
@@ -64,7 +115,7 @@ export function mentionDisplayName(mention: StoredMention): string {
  * component as an `<img>`; everything else passes through the sanitizer.
  * The stored body itself is never changed — only this view is.
  */
-export function renderableHtml(dirty: string): string {
+export function renderableHtml(dirty: string, resolveAsset?: ((src: string) => string) | undefined): string {
   const clean = sanitizeHtml(dirty);
   if (typeof globalThis.DOMParser === "undefined") return clean;
   const document = new DOMParser().parseFromString(clean, "text/html");
@@ -81,7 +132,8 @@ export function renderableHtml(dirty: string): string {
     element.replaceWith(chip);
   }
   for (const element of Array.from(document.body.querySelectorAll("image-component"))) {
-    const src = element.getAttribute("src") ?? "";
+    const stored = storedImageSrc(element);
+    const src = resolveAsset === undefined ? stored : resolveAsset(stored);
     if (src === "") {
       element.remove();
       continue;

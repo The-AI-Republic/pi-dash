@@ -12,14 +12,17 @@ export type { RichTextEditorHandle, RichTextEditorProps } from "./RichTextEditor
 export { RichTextView } from "./RichTextView.js";
 export type { RichTextViewProps } from "./RichTextView.js";
 export {
+  descriptionAssetSrc,
   hasStoredDescriptionContent,
   isStoredHtmlEmpty,
   isStoredHtmlEmptyIgnoring,
   mentionDisplayName,
+  prepareEditorHtml,
   renderableHtml,
   sanitizeHtml,
   STORED_CONTENT_TAGS,
+  storedImageSrc,
   storedMentionOf,
   storedTextContent,
 } from "./sanitize.js";
-export type { StoredMention } from "./sanitize.js";
+export type { DescriptionAssetScope, StoredMention } from "./sanitize.js";

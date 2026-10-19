@@ -17,6 +17,7 @@ import {
   buildEditPayload,
   buildPublishInput,
   changedCycleId,
+  changedDraftProject,
   changedModuleIds,
   editableFromDraft,
   editableFromIssue,
@@ -296,8 +297,29 @@ describe("membership diffing", () => {
 });
 
 describe("baselineFor", () => {
-  it("refuses a form with no project", () => {
-    expect(() => baselineFor(emptyCreateForm(null))).toThrow("An edit needs a project");
+  it("keeps a project-less draft's null project so a pick can be stored (ISS-130)", () => {
+    expect(baselineFor(emptyCreateForm(null)).projectId).toBeNull();
+  });
+});
+
+describe("changedDraftProject", () => {
+  it("reports a picked project for a draft with none stored", () => {
+    const form = emptyCreateForm(null);
+    const baseline = baselineFor(form);
+    form.projectId = PROJECT;
+    expect(changedDraftProject(form, baseline)).toBe(PROJECT);
+  });
+
+  it("reports a project moved to a different one", () => {
+    const form = formFromRow(row(), PROJECT);
+    const baseline = baselineFor(form);
+    form.projectId = "22222222-2222-4222-8222-222222222222";
+    expect(changedDraftProject(form, baseline)).toBe("22222222-2222-4222-8222-222222222222");
+  });
+
+  it("reports nothing when the project did not move", () => {
+    const form = formFromRow(row(), PROJECT);
+    expect(changedDraftProject(form, baselineFor(form))).toBeUndefined();
   });
 });
 

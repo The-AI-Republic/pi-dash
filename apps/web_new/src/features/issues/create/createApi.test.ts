@@ -364,6 +364,20 @@ describe("writeIssueEdit", () => {
     expect(calls.map((call) => call.method)).toEqual(["POST"]);
   });
 
+  it("stores a picked project on a project-less draft with no field changes (ISS-126/130)", async () => {
+    const { calls, client } = recorder();
+    await writeIssueEdit(client, "acme", {
+      target: { kind: "draft", draftId: "d-1" },
+      patch: {},
+      membership: NO_MEMBERSHIP,
+      draftProject: PROJECT,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe("PATCH");
+    expect(calls[0]?.path).toContain("/draft-issues/d-1/");
+    expect(calls[0]?.body).toEqual({ project_id: PROJECT });
+  });
+
   it("PATCHes a draft's fields, cycle, modules and estimate, and never its bridges", async () => {
     const { calls, client } = recorder();
     await writeIssueEdit(client, "acme", {
@@ -456,6 +470,11 @@ describe("draftInputFromPatch", () => {
 
   it("maps an empty patch to an empty draft input", () => {
     expect(draftInputFromPatch({})).toEqual({});
+  });
+
+  it("carries a picked project for a project-less draft (ISS-130)", () => {
+    expect(draftInputFromPatch({}, undefined, PROJECT)).toEqual({ project_id: PROJECT });
+    expect(draftInputFromPatch({}, undefined, null)).toEqual({ project_id: null });
   });
 });
 

@@ -208,6 +208,8 @@ export interface EditWriteInput {
   target: EditTarget;
   patch: IssuePatch;
   membership: EditMembership;
+  /** The project a draft now stores; null clears it (ISS-126/130). */
+  draftProject?: string | null | undefined;
 }
 
 /**
@@ -246,7 +248,7 @@ export async function writeIssueEdit(client: ApiClient, workspaceSlug: string, i
     // A draft stores cycle, module and estimate picks on itself; the
     // update serializer replaces both sets, so the complete values ride
     // along with the changed fields (ISS-124/ISS-126).
-    const draft = draftInputFromPatch(input.patch, input.membership);
+    const draft = draftInputFromPatch(input.patch, input.membership, input.draftProject);
     if (Object.keys(draft).length > 0) {
       await updateDraftIssue(client, workspaceSlug, target.draftId, draft);
     }
@@ -268,8 +270,13 @@ export function useWriteIssueEdit(workspaceSlug: string) {
  * The draft contract's slice of an issue patch: drafts hold the fields
  * the detail form shows, not the bridges, branch or execution target.
  */
-export function draftInputFromPatch(patch: IssuePatch, membership?: EditMembership | undefined): DraftIssueCreateInput {
+export function draftInputFromPatch(
+  patch: IssuePatch,
+  membership?: EditMembership | undefined,
+  project?: string | null | undefined
+): DraftIssueCreateInput {
   const draft: DraftIssueCreateInput = {};
+  if (project !== undefined) draft.project_id = project;
   if (patch.name !== undefined) draft.name = patch.name;
   if (patch.description_html !== undefined) draft.description_html = patch.description_html;
   if (patch.state_id !== undefined) draft.state_id = patch.state_id;

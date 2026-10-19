@@ -32,8 +32,8 @@ export interface EditableRow {
 
 /** What the modal opened with, kept for diffing on submit. */
 export interface EditBaseline {
-  /** The row's project, fixed while editing. */
-  projectId: string;
+  /** The project the row was stored under (null for a project-less draft). */
+  projectId: string | null;
   /** Fields as the server answered them, normalized like the form. */
   form: EditFormFields;
 }
@@ -158,7 +158,6 @@ export function editableFromDraft(draft: DraftIssue): EditableRow {
 
 /** The baseline an edit compares against, derived from the same form. */
 export function baselineFor(form: CreateFormState): EditBaseline {
-  if (form.projectId === null) throw new Error("An edit needs a project");
   return {
     projectId: form.projectId,
     form: {
@@ -178,6 +177,17 @@ export function baselineFor(form: CreateFormState): EditBaseline {
       execution: form.execution,
     },
   };
+}
+
+/**
+ * The project a draft stores, when an edit picked a different one
+ * (ISS-126/130). A save has to write the pick: otherwise the dialog
+ * reports success while the draft keeps its old (or no) project. A live
+ * issue never moves project from this form.
+ */
+export function changedDraftProject(form: CreateFormState, baseline: EditBaseline): string | null | undefined {
+  if (form.projectId === baseline.projectId) return undefined;
+  return form.projectId;
 }
 
 /**

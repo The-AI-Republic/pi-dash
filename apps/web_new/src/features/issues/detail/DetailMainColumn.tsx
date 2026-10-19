@@ -14,6 +14,8 @@
 import type { Issue } from "@pidash/api-client";
 import * as React from "react";
 
+import { getAppClient } from "../../../core/api/client.js";
+import { descriptionAssetSrc } from "../../../shared/editor/index.js";
 import { DESCRIPTION_SAVE_FAILED_TITLE, TITLE_SAVE_FAILED_TITLE, useUpdateIssue } from "../api/mutations.js";
 import { IssueReactions } from "../reactions/IssueReactions.js";
 import { DescriptionHistory } from "./DescriptionHistory.js";
@@ -64,6 +66,12 @@ export function DetailMainColumn({
 
   const archived = issue.archived_at !== null;
   const readOnly = !editable || archived || issue.is_synced;
+  // Legacy bodies keep the asset id in the image source; the stored id
+  // resolves through this issue's project asset path (ISS-127).
+  const resolveAsset = React.useCallback(
+    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId, apiBaseUrl: getAppClient().baseUrl }),
+    [workspaceSlug, projectId]
+  );
 
   return (
     <div className="flex min-w-0 flex-1 flex-col gap-(--space-6)">
@@ -85,6 +93,7 @@ export function DetailMainColumn({
         pipeline={pipeline}
         onSave={(html: string) => descriptionUpdate.mutateAsync({ description_html: html })}
         restored={restored}
+        resolveAsset={resolveAsset}
       />
       <div data-slot="description-meta" className="flex flex-wrap items-center justify-between gap-(--space-4)">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-(--space-4)">

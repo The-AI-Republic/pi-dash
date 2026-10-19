@@ -5,13 +5,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  descriptionAssetSrc,
   hasStoredDescriptionContent,
   isStoredHtmlEmpty,
   isStoredHtmlEmptyIgnoring,
   mentionDisplayName,
+  prepareEditorHtml,
   renderableHtml,
   sanitizeHtml,
   STORED_CONTENT_TAGS,
+  storedImageSrc,
   storedMentionOf,
   storedTextContent,
 } from "./sanitize.js";
@@ -149,6 +152,92 @@ describe("renderableHtml", () => {
   it("returns the sanitized markup where no DOM parser exists", () => {
     vi.stubGlobal("DOMParser", undefined);
     expect(renderableHtml("<p>hi</p>")).toBe("<p>hi</p>");
+  });
+
+  it("resolves a stored asset id through the given scope (ISS-127)", () => {
+    const html = renderableHtml(
+      '<image-component src="35e8b958-6ee5-43ce-ae56-fb0e776f421e" status="uploaded"></image-component>',
+      (src) => descriptionAssetSrc(src, { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test" })
+    );
+    expect(html).toContain(
+      'src="https://api.test/api/assets/v2/workspaces/acme/projects/p-1/35e8b958-6ee5-43ce-ae56-fb0e776f421e/"'
+    );
+  });
+});
+
+describe("descriptionAssetSrc", () => {
+  it("joins a bare asset id to the project's asset path", () => {
+    expect(descriptionAssetSrc("asset-1", { workspaceSlug: "acme", projectId: "p-1" })).toBe(
+      "/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"
+    );
+  });
+
+  it("uses the workspace path when the row holds no project", () => {
+    expect(descriptionAssetSrc("asset-1", { workspaceSlug: "acme", projectId: null })).toBe(
+      "/api/assets/v2/workspaces/acme/asset-1/"
+    );
+  });
+
+  it("leaves absolute, data, blob and rooted sources alone", () => {
+    const scope = { workspaceSlug: "acme", projectId: "p-1" };
+    for (const src of ["https://cdn.test/a.png", "data:image/png;base64,AA", "blob:x", "/media/a.png"]) {
+      expect(descriptionAssetSrc(src, scope)).toBe(src);
+    }
+  });
+
+  it("returns the source untouched without a scope or for empty input", () => {
+    expect(descriptionAssetSrc("asset-1", undefined)).toBe("asset-1");
+    expect(descriptionAssetSrc("", { workspaceSlug: "acme", projectId: "p-1" })).toBe("");
+  });
+
+  it("prefixes the API origin when one is given", () => {
+    expect(
+      descriptionAssetSrc("asset-1", { workspaceSlug: "acme", projectId: "p-1", apiBaseUrl: "https://api.test/" })
+    ).toBe("https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/");
+  });
+});
+
+describe("prepareEditorHtml", () => {
+  it("paints the resolved source and keeps the stored id", () => {
+    const html = prepareEditorHtml(
+      '<p><image-component src="asset-1" width="200"></image-component></p>',
+      (src) => `/assets/${src}`
+    );
+    expect(html).toContain('src="/assets/asset-1"');
+    expect(html).toContain('data-stored-src="asset-1"');
+    expect(html).toContain('width="200"');
+  });
+
+  it("leaves absolute sources and other markup alone", () => {
+    const stored = '<p>a</p><image-component src="https://cdn.test/a.png"></image-component>';
+    expect(prepareEditorHtml(stored, (src) => `/assets/${src}`)).toContain('src="https://cdn.test/a.png"');
+    expect(prepareEditorHtml(stored, (src) => `/assets/${src}`)).not.toContain("data-stored-src");
+  });
+
+  it("passes the input through without a resolver or DOM parser", () => {
+    const stored = '<image-component src="asset-1"></image-component>';
+    expect(prepareEditorHtml(stored, undefined)).toBe(stored);
+    vi.stubGlobal("DOMParser", undefined);
+    expect(prepareEditorHtml(stored, (src) => `/assets/${src}`)).toBe(stored);
+  });
+});
+
+describe("storedImageSrc", () => {
+  it("prefers the stored id carried beside a resolved source", () => {
+    const document = new DOMParser().parseFromString(
+      '<image-component src="/resolved" data-stored-src="asset-1"></image-component>',
+      "text/html"
+    );
+    expect(storedImageSrc(document.body.firstElementChild!)).toBe("asset-1");
+  });
+
+  it("falls back to the source and to an empty string", () => {
+    const document = new DOMParser().parseFromString(
+      "<image-component src='a'></image-component><image-component></image-component>",
+      "text/html"
+    );
+    expect(storedImageSrc(document.body.firstElementChild!)).toBe("a");
+    expect(storedImageSrc(document.body.lastElementChild!)).toBe("");
   });
 });
 

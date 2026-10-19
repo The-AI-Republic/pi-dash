@@ -279,6 +279,41 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     expect(editable.textContent).toBe("steady");
   });
 
+  it("opens a legacy image-component with its picture and keeps the stored asset id on save (ISS-127)", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const stored =
+      '<p>hi</p><image-component src="35e8b958-6ee5-43ce-ae56-fb0e776f421e" status="uploaded" width="200"></image-component><p>there</p>';
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <IssueDescriptionEditor
+          initialHtml={stored}
+          label="Description"
+          onChange={onChange}
+          resolveAsset={(src) => `/api/assets/v2/workspaces/acme/projects/p-1/${src}/`}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("Description");
+    const image = editable.querySelector("image-component");
+    expect(image?.querySelector("img")?.getAttribute("src")).toBe(
+      "/api/assets/v2/workspaces/acme/projects/p-1/35e8b958-6ee5-43ce-ae56-fb0e776f421e/"
+    );
+    expect(image?.getAttribute("data-stored-src")).toBe("35e8b958-6ee5-43ce-ae56-fb0e776f421e");
+    // An edit anywhere in the body must not rewrite the stored node into
+    // an <img> pointing at the asset id.
+    editable.focus();
+    await user.keyboard("!");
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalled());
+    const last = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0] as string;
+    expect(last).toContain("<image-component");
+    expect(last).toContain('src="35e8b958-6ee5-43ce-ae56-fb0e776f421e"');
+    expect(last).toContain('status="uploaded"');
+    expect(last).toContain('width="200"');
+    expect(last).not.toContain("data-stored-src");
+    expect(last).not.toContain("<img");
+  });
+
   it("mounts without a ready handler", async () => {
     render(
       <React.Suspense fallback={<p>loading</p>}>
