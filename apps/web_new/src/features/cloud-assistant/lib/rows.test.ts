@@ -172,8 +172,8 @@ describe("toConnectionRow", () => {
     });
     const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
     expect(target.modelControl).toBe("select");
-    expect(target.modelChoices).toEqual([{ value: "moonshotai/kimi-k3", label: "Strong general reasoning" }]);
-    expect(target.markers).toContain("Included with your account");
+    expect(target.modelChoices).toEqual([{ value: "moonshotai/kimi-k3", label: "Balanced hosted model" }]);
+    expect(target.markers).toContain("Included in your plan");
     expect(target.selectable).toBe(true);
   });
 
@@ -200,13 +200,13 @@ describe("toConnectionRow", () => {
     const answer = list({ connections: [row({ kind: "codex", uses_chatgpt_plan: true, is_selected: false })] });
     const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
     expect(target.planBacked).toBe(true);
-    expect(target.markers).toEqual(["ChatGPT plan connected"]);
+    expect(target.markers).toEqual(["ChatGPT plan linked"]);
   });
 
   it("marks a plan-backed row on the active lane separately", () => {
     const answer = list({ connections: [row({ kind: "codex", uses_chatgpt_plan: true, is_selected: true })] });
     const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
-    expect(target.markers).toContain("Using ChatGPT plan");
+    expect(target.markers).toContain("ChatGPT plan in use");
     expect(target.markers).toContain("In use");
   });
 
@@ -216,6 +216,6 @@ describe("toConnectionRow", () => {
       openhub_model_options: ["moonshotai/kimi-k3"],
     });
     const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
-    expect(target.markers).toEqual(["Included with your account"]);
+    expect(target.markers).toEqual(["Included in your plan"]);
   });
 });

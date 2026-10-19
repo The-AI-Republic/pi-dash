@@ -153,7 +153,7 @@ describe("ConnectionsList", () => {
     await user.click(screen.getByRole("button", { name: "Remove" }));
     expect(props.onRemove).not.toHaveBeenCalled();
     const confirm = screen.getByRole("group", { name: "Remove this connection?" });
-    expect(confirm).toHaveTextContent("The assistant stops using it immediately.");
+    expect(confirm).toHaveTextContent("Its key is deleted right away.");
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("group", { name: "Remove this connection?" })).toBeNull();
     expect(props.onRemove).not.toHaveBeenCalled();
@@ -179,7 +179,7 @@ describe("ConnectionsList", () => {
       }),
     ]);
     expect(screen.getByRole("radio", { name: "OpenAI account" })).toBeDisabled();
-    expect(screen.getByText(/Sign in with ChatGPT/)).toBeInTheDocument();
+    expect(screen.getByText(/Connecting an OpenAI account/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Continue with ChatGPT" })).toBeInTheDocument();
     expect(screen.queryByRole("combobox")).toBeNull();
   });
@@ -201,7 +201,7 @@ describe("ConnectionsList", () => {
       ],
       { signInAvailable: false }
     );
-    expect(screen.getByText("ChatGPT sign-in is not available on this deployment.")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI sign-in is switched off for this deployment.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Continue with ChatGPT" })).toBeNull();
   });
 
@@ -233,7 +233,7 @@ describe("ConnectionsList", () => {
         selectable: false,
         stale: true,
         modelControl: "hidden",
-        markers: ["Included with your account"],
+        markers: ["Included in your plan"],
         removable: false,
         disconnectable: false,
       }),
@@ -244,7 +244,7 @@ describe("ConnectionsList", () => {
 
   it("links plan-backed rows to the usage page and shows the verified stamp", () => {
     setup([row({ kind: "codex", title: "OpenAI account", planBacked: true, verifiedAt: "2026-02-03T04:05:06Z" })]);
-    const link = screen.getByRole("link", { name: "Manage usage" });
+    const link = screen.getByRole("link", { name: "Manage plan usage" });
     expect(link).toHaveAttribute("href", "https://chatgpt.com/settings/usage");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
     expect(screen.getByText("Verified", { exact: false }).closest("p")).toHaveTextContent("2026-02-03T04:05:06Z");

@@ -14,7 +14,7 @@ describe("AppsPointer", () => {
     render(<AppsPointer />);
     const pointer = screen.getByTestId("cloud-assistant-apps-pointer");
     expect(pointer).toHaveTextContent("Looking for apps?");
-    expect(pointer).toHaveTextContent("sidebar under Apps");
+    expect(pointer).toHaveTextContent("Apps in the sidebar");
   });
 
   it("carries no controls or links of its own", () => {

@@ -229,7 +229,12 @@ describe("CloudAssistantTab", () => {
     });
     renderTab();
     await user.click(await screen.findByRole("button", { name: "Test" }));
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Connection OK", "Your provider responded."));
+    await waitFor(() =>
+      expect(notifySuccess).toHaveBeenCalledWith(
+        "Connection OK",
+        "The provider accepted a request with this connection."
+      )
+    );
     answer = { ok: false, detail: "401 from provider" };
     await user.click(screen.getByRole("button", { name: "Test" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Connection failed", "401 from provider"));
@@ -317,8 +322,8 @@ describe("CloudAssistantTab", () => {
     await user.click(disconnect);
     await waitFor(() =>
       expect(notifyInfo).toHaveBeenCalledWith(
-        "ChatGPT disconnected",
-        "Pi Dash no longer has access to your ChatGPT account. You can sign in again at any time."
+        "OpenAI account disconnected",
+        "The stored credential was removed. Connect the account again whenever you want to use it."
       )
     );
     fail = true;
@@ -385,7 +390,7 @@ describe("CloudAssistantTab", () => {
       return undefined;
     });
     renderTab();
-    expect(await screen.findByText("ChatGPT sign-in is not available on this deployment.")).toBeInTheDocument();
+    expect(await screen.findByText("OpenAI sign-in is switched off for this deployment.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Continue with ChatGPT" })).toBeNull();
   });
 
@@ -400,7 +405,10 @@ describe("CloudAssistantTab", () => {
     renderTab();
     await user.click(await screen.findByRole("button", { name: "Continue with ChatGPT" }));
     await waitFor(() =>
-      expect(notifyError).toHaveBeenCalledWith("Popup blocked", "Allow popups for this site, then try again.")
+      expect(notifyError).toHaveBeenCalledWith(
+        "Popup blocked",
+        "The sign-in window could not open. Allow pop-ups for this site and try again."
+      )
     );
     expect(open).toHaveBeenCalledTimes(1);
     open.mockRestore();

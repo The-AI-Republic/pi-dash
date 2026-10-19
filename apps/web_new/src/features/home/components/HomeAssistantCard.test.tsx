@@ -302,6 +302,40 @@ describe("HomeAssistantCard", () => {
     });
   });
 
+  it("treats a hosted or account lane as ready without a self-supplied key (CLOUD-037)", async () => {
+    // The cloud card reads the same lane the assistant entries do: a lane
+    // that carries its own credential is ready even with no key stored.
+    const hosted: LlmConfig = {
+      ...UNCONFIGURED,
+      credential_mode: "openhub",
+      has_openhub_access: true,
+      has_byok_api_key: false,
+    };
+    renderCard({ threads: [], config: hosted });
+    const card = await screen.findByRole("region", { name: "Assistant" });
+    expect(card).toHaveAttribute("data-assistant-state", "ready");
+    expect(screen.queryByText(/connect a model/i)).not.toBeInTheDocument();
+
+    renderCard({
+      threads: [],
+      config: { ...UNCONFIGURED, credential_mode: "codex", has_codex_token: true, has_byok_api_key: false },
+    });
+    expect(await screen.findByRole("region", { name: "Assistant" })).toHaveAttribute("data-assistant-state", "ready");
+  });
+
+  it("keeps the setup reminder when the active lane has no credential (CLOUD-037)", async () => {
+    renderCard({
+      threads: [],
+      config: { ...UNCONFIGURED, credential_mode: "openhub", has_openhub_access: false },
+    });
+    const card = await screen.findByRole("region", { name: "Assistant" });
+    expect(card).toHaveAttribute("data-assistant-state", "setup");
+    fireEvent.change(screen.getByRole("textbox", { name: "Ask the assistant" }), { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(notified.error).toHaveBeenCalledWith("API key required", expect.stringContaining("Please set your API key"));
+    expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+  });
+
   it("renders the same card for admins", async () => {
     renderCard({ role: ROLE_ADMIN, threads: [THREAD_1], config: CONFIGURED });
     expect(await screen.findByRole("region", { name: "Assistant" })).toBeInTheDocument();

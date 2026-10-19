@@ -13,14 +13,14 @@ describe("startFailureNotice", () => {
   it("tells a blocked popup how to allow it", () => {
     expect(startFailureNotice({ kind: "blocked" })).toEqual({
       title: "Popup blocked",
-      body: "Allow popups for this site, then try again.",
+      body: "The sign-in window could not open. Allow pop-ups for this site and try again.",
     });
   });
 
-  it("reports a tab closed before authorization as a failed sign-in", () => {
+  it("gives a window closed before authorization its own notice", () => {
     expect(startFailureNotice({ kind: "closed" })).toEqual({
-      title: "OpenAI sign-in failed",
-      body: "The ChatGPT sign-in tab was closed. Try again.",
+      title: "Sign-in window closed",
+      body: "The sign-in window closed before OpenAI answered. Start it again.",
     });
   });
 
@@ -50,7 +50,7 @@ describe("finishNotice", () => {
     expect(finishNotice({ kind: "timeout" })).toMatchObject({ title: "Sign-in timed out" });
     expect(finishNotice({ kind: "failed", detail: undefined })).toEqual({
       title: "OpenAI sign-in failed",
-      body: "The sign-in could not be completed. Try again.",
+      body: "OpenAI reported that the sign-in could not finish. Start it again.",
     });
   });
 

@@ -3,13 +3,15 @@
 // See the LICENSE file for details.
 // Sign-in outcome copy (parity/specs/cloud.md §7, CLOUD-033). Each way the
 // provider flow can end gets its own title and body, so "allow popups" is
-// never shown for a provider-side refusal and a timeout never reads as a
-// failure the provider reported.
+// never shown for a provider-side refusal, a timeout never reads as a
+// failure the provider reported, and a window closed before OpenAI answered
+// is not reported as an OpenAI failure.
 
 import {
   POPUP_BLOCKED_BODY,
   POPUP_BLOCKED_TITLE,
   SIGN_IN_CLOSED_BODY,
+  SIGN_IN_CLOSED_TITLE,
   SIGN_IN_FAILED_BODY,
   SIGN_IN_FAILED_TITLE,
   SIGN_IN_OK_BODY,
@@ -32,7 +34,7 @@ export function startFailureNotice(failure: SignInStartFailure): Notice {
     case "blocked":
       return { title: POPUP_BLOCKED_TITLE, body: POPUP_BLOCKED_BODY };
     case "closed":
-      return { title: SIGN_IN_FAILED_TITLE, body: SIGN_IN_CLOSED_BODY };
+      return { title: SIGN_IN_CLOSED_TITLE, body: SIGN_IN_CLOSED_BODY };
     case "rejected":
       return {
         title: SIGN_IN_START_FAILED_TITLE,

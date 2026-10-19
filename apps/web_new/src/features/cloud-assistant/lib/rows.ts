@@ -22,30 +22,39 @@ import {
   PLAN_SELECTED_MARKER,
 } from "./copy.js";
 
-/** Managed-lane model suggestions when the server sends none (CLOUD-032). */
-export const BUILTIN_CODEX_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"] as const;
+/**
+ * Managed-lane model list used when the server sends none (CLOUD-032). The
+ * choices mirror the models the product's own runner catalog offers, so a
+ * pick saved here is one the assistants can actually run.
+ */
+export const BUILTIN_CODEX_MODELS = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"] as const;
 
-/** One-line descriptions for the built-in managed models. */
+/** Short hints for the built-in managed models, shown beside each choice. */
 export const BUILTIN_CODEX_MODEL_DESCRIPTIONS: Readonly<Record<string, string>> = {
-  "gpt-5.6-sol": "Latest frontier agentic coding model",
-  "gpt-5.6-terra": "Balanced agentic coding model for everyday work",
-  "gpt-5.6-luna": "Fast and affordable agentic coding model",
-  "gpt-5.5": "Previous generation",
+  "gpt-6-astra": "Most capable model",
+  "gpt-5.6-sol": "Deep reasoning for hard problems",
+  "gpt-5.6-terra": "Everyday default",
+  "gpt-5.6-luna": "Quickest answers",
+  "gpt-5.5": "Older generation",
 };
 
-/** One-line descriptions for the hosted-lane models the product knows. */
+/** Hints for the hosted-lane models the product names by default. */
 export const OPENHUB_MODEL_DESCRIPTIONS: Readonly<Record<string, string>> = {
-  "moonshotai/kimi-k3": "Strong general reasoning",
-  "deepseek/deepseek-v4-pro": "Highest quality, higher cost",
-  "deepseek/deepseek-v4-flash": "Fast and economical",
+  "moonshotai/kimi-k3": "Balanced hosted model",
+  "deepseek/deepseek-v4-pro": "Deepest reasoning, costs more",
+  "deepseek/deepseek-v4-flash": "Lowest cost",
 };
 
-/** Suggestions offered in the self-supplied free-text model field. */
+/**
+ * Free-text suggestions for self-supplied keys: one entry per provider
+ * family the product documents, so the field hints at the slug format
+ * without pretending to know the user's catalog.
+ */
 export const BYOK_MODEL_SUGGESTIONS = [
-  "anthropic/claude-sonnet-4-6",
-  "meta-llama/llama-3.3-70b-instruct",
-  "qwen/qwen-2.5-72b-instruct",
-  "deepseek/deepseek-chat",
+  "gpt-5.5",
+  "claude-sonnet-4-6",
+  "deepseek-chat",
+  "qwen-2.5-72b-instruct",
 ] as const;
 
 /** Marker text for the active row. */

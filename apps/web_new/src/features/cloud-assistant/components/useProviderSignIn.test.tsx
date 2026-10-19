@@ -119,7 +119,10 @@ describe("useProviderSignIn", () => {
     await act(async () => {
       await result.current.signIn();
     });
-    expect(notifyError).toHaveBeenCalledWith("Popup blocked", "Allow popups for this site, then try again.");
+    expect(notifyError).toHaveBeenCalledWith(
+      "Popup blocked",
+      "The sign-in window could not open. Allow pop-ups for this site and try again."
+    );
     expect(calls).toEqual([]);
     expect(result.current.pending).toBe(false);
   });
@@ -139,7 +142,10 @@ describe("useProviderSignIn", () => {
     await act(async () => {
       await result.current.signIn();
     });
-    expect(notifyError).toHaveBeenCalledWith("OpenAI sign-in failed", "The ChatGPT sign-in tab was closed. Try again.");
+    expect(notifyError).toHaveBeenCalledWith(
+      "Sign-in window closed",
+      "The sign-in window closed before OpenAI answered. Start it again."
+    );
   });
 
   it("reports a rejected start with the server's detail and closes the empty tab", async () => {
@@ -179,7 +185,7 @@ describe("useProviderSignIn", () => {
     await waitFor(() =>
       expect(notifySuccess).toHaveBeenCalledWith(
         "ChatGPT plan connected",
-        "Pi Dash now uses your ChatGPT plan for AI requests. Usage counts against your plan's limits."
+        "The OpenAI account is connected, and the assistant will draw on its ChatGPT plan allowance."
       )
     );
     expect(calls.some((call) => call.url.includes("state=state-1"))).toBe(true);
@@ -200,7 +206,10 @@ describe("useProviderSignIn", () => {
       await result.current.signIn();
     });
     await time.fire();
-    expect(notifyError).toHaveBeenCalledWith("OpenAI sign-in failed", "The sign-in could not be completed. Try again.");
+    expect(notifyError).toHaveBeenCalledWith(
+      "OpenAI sign-in failed",
+      "OpenAI reported that the sign-in could not finish. Start it again."
+    );
     expect(notifySuccess).not.toHaveBeenCalled();
     await act(async () => undefined);
     expect(result.current.pending).toBe(false);
@@ -218,7 +227,10 @@ describe("useProviderSignIn", () => {
     });
     time.advance(5 * 60_000 + 1);
     await time.fire();
-    expect(notifyError).toHaveBeenCalledWith("Sign-in timed out", "The OpenAI sign-in was not completed. Try again.");
+    expect(notifyError).toHaveBeenCalledWith(
+      "Sign-in timed out",
+      "No answer arrived from OpenAI before the five-minute window ended."
+    );
     await act(async () => undefined);
     expect(result.current.pending).toBe(false);
     expect(time.cleared).toHaveLength(1);

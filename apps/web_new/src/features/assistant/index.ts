@@ -51,7 +51,7 @@ export {
   START_FAILED_TITLE,
   UNTITLED_CONVERSATION,
 } from "./lib/copy.js";
-export { isAssistantConfigured, needsLaneSetup, needsSetup } from "./lib/gate.js";
+export { isAssistantConfigured, needsLaneSetup } from "./lib/gate.js";
 export { laneHasCredential, resolveLaneState } from "./lib/lane.js";
 export type { LaneState } from "./lib/lane.js";
 export { conversationLabel, visibleConversations } from "./lib/labels.js";
