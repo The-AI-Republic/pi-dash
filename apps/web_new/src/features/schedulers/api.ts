@@ -35,8 +35,8 @@ export function schedulersQueryOptions(client: ApiClient, workspaceSlug: string)
   });
 }
 
-export function useSchedulers(workspaceSlug: string) {
-  return useQuery(schedulersQueryOptions(getAppClient(), workspaceSlug));
+export function useSchedulers(workspaceSlug: string, options: { enabled?: boolean } = {}) {
+  return useQuery({ ...schedulersQueryOptions(getAppClient(), workspaceSlug), enabled: options.enabled ?? true });
 }
 
 export function schedulerFailureMessage(error: unknown): string {

@@ -5,7 +5,7 @@
 
 import type { Scheduler } from "@pidash/api-client";
 import { Badge, Button, Skeleton } from "@pidash/kit";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { Download, Pencil, Plus, Trash2 } from "lucide-react";
 import * as React from "react";
 
 import { usePermissions, useWorkspace } from "../../core/session/index.js";
@@ -13,6 +13,7 @@ import { useDocumentHead } from "../../shared/shell/index.js";
 import { useSchedulers } from "./api.js";
 import { SchedulerDefinitionDialog } from "./SchedulerDefinitionDialog.js";
 import { SchedulerDeleteDialog } from "./SchedulerDeleteDialog.js";
+import { BulkInstallDialog } from "./BulkInstallDialog.js";
 
 export interface SchedulerCatalogProps {
   workspaceSlug: string;
@@ -54,6 +55,7 @@ export function SchedulerCatalog({ workspaceSlug }: SchedulerCatalogProps): Reac
   const schedulers = useSchedulers(workspaceSlug);
   const [editor, setEditor] = React.useState<Scheduler | "create" | null>(null);
   const [deleting, setDeleting] = React.useState<Scheduler | null>(null);
+  const [installing, setInstalling] = React.useState<Scheduler | null>(null);
   useDocumentHead({
     title: `${workspace?.name ?? workspaceSlug} · Schedulers`,
     robots: "noindex, nofollow",
@@ -142,6 +144,12 @@ export function SchedulerCatalog({ workspaceSlug }: SchedulerCatalogProps): Reac
                     {permissions.isAdmin ? (
                       <td className="border-b border-(--border) px-(--space-4) py-(--space-4)">
                         <div className="flex justify-end gap-(--space-2)">
+                          {scheduler.is_enabled ? (
+                            <Button size="small" variant="ghost" onClick={() => setInstalling(scheduler)}>
+                              <Download size={14} strokeWidth={1.5} aria-hidden="true" />
+                              Install
+                            </Button>
+                          ) : null}
                           <Button size="small" variant="ghost" onClick={() => setEditor(scheduler)}>
                             <Pencil size={14} strokeWidth={1.5} aria-hidden="true" />
                             Edit
@@ -168,6 +176,7 @@ export function SchedulerCatalog({ workspaceSlug }: SchedulerCatalogProps): Reac
         onClose={() => setEditor(null)}
       />
       <SchedulerDeleteDialog workspaceSlug={workspaceSlug} scheduler={deleting} onClose={() => setDeleting(null)} />
+      <BulkInstallDialog workspaceSlug={workspaceSlug} scheduler={installing} onClose={() => setInstalling(null)} />
     </section>
   );
 }

@@ -96,7 +96,17 @@ describe("SchedulerCatalog", () => {
     expect(within(table).getAllByTestId("scheduler-row")).toHaveLength(2);
     expect(screen.getByRole("button", { name: "New scheduler" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Edit" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Install" })).toHaveLength(1);
     expect(document.title).toBe("Acme Workspace · Schedulers");
+  });
+
+  it("opens the bulk install dialog from an enabled definition", async () => {
+    const user = userEvent.setup();
+    setup(ROLE_ADMIN, [row()]);
+    await screen.findByText("Weekly report");
+    await user.click(screen.getByRole("button", { name: "Install" }));
+    expect(screen.getByRole("dialog", { name: "Install Weekly report" })).toBeInTheDocument();
+    expect(screen.getByText("One schedule applies to every selected project.")).toBeInTheDocument();
   });
 
   it.each([ROLE_MEMBER, ROLE_GUEST])("keeps role %s read-only", async (role) => {
