@@ -32,7 +32,7 @@ export function ActivityEntryRow({ workspaceSlug, activity }: ActivityEntryRowPr
     <div className="text-meta flex items-start gap-(--space-2) text-(--text-muted)">
       <Avatar name={name} {...(avatarUrl === undefined ? {} : { src: avatarUrl })} size="small" className="mt-0.5" />
       <p className="min-w-0 flex-1 leading-relaxed">
-        {actorId === null || !member ? (
+        {!member ? (
           <span className="font-medium text-(--text)">{name}</span>
         ) : (
           // The member profile is a shell route; a plain address keeps

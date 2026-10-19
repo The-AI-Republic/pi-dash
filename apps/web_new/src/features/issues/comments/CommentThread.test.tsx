@@ -38,9 +38,13 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
   return { ...original, RichTextEditor: FakeEditor, CommentRichTextEditor: FakeEditor };
 });
 
+const session = vi.hoisted(() => ({
+  viewer: { data: { id: "523e4567-e89b-12d3-a456-426614174004" } } as { data?: { id: string } | undefined },
+}));
+
 vi.mock("../../../core/session/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../core/session/index.js")>();
-  return { ...original, useMe: () => ({ data: { id: "523e4567-e89b-12d3-a456-426614174004" } }) };
+  return { ...original, useMe: () => session.viewer };
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
@@ -248,6 +252,28 @@ describe("CommentThread", () => {
     expect(screen.getByRole("radiogroup", { name: "Comment visibility" })).toBeInTheDocument();
     expect(await screen.findByLabelText("Private comment", undefined, { timeout: 5000 })).toBeInTheDocument();
   });
+
+  it("falls back to the signed-in viewer when no override is passed", async () => {
+    stubTransport(() => ({ status: 200, body: [comment()] }));
+    renderThread();
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    expect(await screen.findByRole("button", { name: "Comment actions" }, { timeout: 5000 })).toBeInTheDocument();
+  }, 20000);
+
+  it("falls back to a guest when the session has no user yet", async () => {
+    session.viewer = { data: undefined };
+    try {
+      stubTransport(() => ({ status: 200, body: [comment()] }));
+      renderThread();
+      await screen.findByText("Thread words", undefined, { timeout: 5000 });
+      fireEvent.click(await screen.findByRole("button", { name: "Comment actions" }, { timeout: 5000 }));
+      const menu = await screen.findByRole("menu", undefined, { timeout: 5000 });
+      expect(within(menu).queryByRole("menuitem", { name: "Edit" })).not.toBeInTheDocument();
+      expect(within(menu).queryByRole("menuitem", { name: "Delete" })).not.toBeInTheDocument();
+    } finally {
+      session.viewer = { data: { id: "523e4567-e89b-12d3-a456-426614174004" } };
+    }
+  }, 20000);
 
   it("copies the absolute deep link for a comment", async () => {
     const writeText = stubClipboard(async () => undefined);

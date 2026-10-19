@@ -177,7 +177,7 @@ export function activitySentence(
     case "blocked_by":
     case "duplicate":
     case "relates_to":
-      return relationSentence(activity.field, previous, value);
+      return relationSentence(activity.field as RelationField, previous, value);
     case "start_date":
       return value === "" ? "cleared the start date." : `set the start date to ${value}.`;
     case "target_date":
@@ -213,7 +213,10 @@ export function activitySentence(
   }
 }
 
-function relationSentence(field: string, previous: string, value: string): string {
+/** One of the four relation fields, each with its add and drop verbs. */
+type RelationField = "blocking" | "blocked_by" | "duplicate" | "relates_to";
+
+function relationSentence(field: RelationField, previous: string, value: string): string {
   const adding = previous === "";
   const target = adding ? value : previous;
   const verb = {
@@ -222,7 +225,7 @@ function relationSentence(field: string, previous: string, value: string): strin
     duplicate: adding ? "marked the work item as a duplicate of" : "dropped the duplicate link to",
     relates_to: adding ? "linked the work item to" : "unlinked the work item from",
   }[field];
-  return `${verb ?? "relinked the work item to"} ${target}.`;
+  return `${verb} ${target}.`;
 }
 
 function inboxSentence(verb: string): string {

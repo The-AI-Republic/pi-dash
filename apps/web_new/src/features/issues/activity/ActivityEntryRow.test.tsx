@@ -60,6 +60,17 @@ describe("ActivityEntryRow", () => {
     expect(screen.getByText("created the work item.")).toBeInTheDocument();
   });
 
+  it("shows the actor's avatar image when the profile carries one", () => {
+    render(
+      <ActivityEntryRow
+        workspaceSlug="acme"
+        activity={activity({ actor_detail: { ...ADA_DETAIL, avatar_url: "https://img.test/ada.png" } })}
+      />
+    );
+    const avatar = screen.getByRole("img", { name: "Ada L" });
+    expect(avatar.querySelector("img")).toHaveAttribute("src", "https://img.test/ada.png");
+  });
+
   it("shows the age of the row", () => {
     render(<ActivityEntryRow workspaceSlug="acme" activity={activity()} />);
     expect(screen.getByText("5 minutes ago")).toBeInTheDocument();
@@ -82,6 +93,17 @@ describe("ActivityEntryRow", () => {
     expect(screen.queryByRole("link", { name: "Pi Dash" })).not.toBeInTheDocument();
     expect(screen.getByText("Pi Dash")).toBeInTheDocument();
     expect(screen.getByText("started waiting on NEWFRONT-1 (Review).")).toBeInTheDocument();
+  });
+
+  it("keeps the product credit unlinked even when the row names an actor", () => {
+    render(
+      <ActivityEntryRow
+        workspaceSlug="acme"
+        activity={activity({ field: "agent_wake", verb: "updated", old_value: "done", new_value: "NEWFRONT-1" })}
+      />
+    );
+    expect(screen.queryByRole("link", { name: "Pi Dash" })).not.toBeInTheDocument();
+    expect(screen.getByText("Pi Dash")).toBeInTheDocument();
   });
 
   it("falls back for an unknown actor", () => {

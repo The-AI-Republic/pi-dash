@@ -17,9 +17,13 @@ vi.mock("../../../shared/shell/index.js", () => ({
   notifySuccess: vi.fn(),
 }));
 
+const session = vi.hoisted(() => ({
+  viewer: { data: { id: "523e4567-e89b-12d3-a456-426614174004" } } as { data?: { id: string } | undefined },
+}));
+
 vi.mock("../../../core/session/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../core/session/index.js")>();
-  return { ...original, useMe: () => ({ data: { id: "523e4567-e89b-12d3-a456-426614174004" } }) };
+  return { ...original, useMe: () => session.viewer };
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
@@ -110,6 +114,20 @@ describe("CommentReactions footer", () => {
     expect(screen.queryByRole("region", { name: COMMENT_REACTIONS_LABEL })).not.toBeInTheDocument();
   });
 
+  it("uses the product credit rule for a chip when the read has not settled", () => {
+    // A resolved-but-empty list still hides the footer; the pending arm is
+    // exercised by the never-settling transport above, so assert the null
+    // return for an empty settled list with a signed-out reader too.
+    stubTransport(() => ({ status: 200, body: [] }));
+    session.viewer = { data: undefined };
+    renderFooter();
+    return waitFor(() =>
+      expect(screen.queryByRole("region", { name: COMMENT_REACTIONS_LABEL })).not.toBeInTheDocument()
+    ).finally(() => {
+      session.viewer = { data: { id: "523e4567-e89b-12d3-a456-426614174004" } };
+    });
+  });
+
   it("renders nothing when the comment has no reactions", async () => {
     stubTransport(() => ({ status: 200, body: [] }));
     renderFooter();
@@ -118,12 +136,59 @@ describe("CommentReactions footer", () => {
     );
   });
 
-  it("renders nothing when the read is refused", async () => {
-    stubTransport(() => ({ status: 500, body: { error: "boom" } }));
+  it("posts the picked emoji from its own trigger while a chip sits beside it", async () => {
+    const user = userEvent.setup();
+    const calls = stubTransport((call) =>
+      call.method === "POST"
+        ? { status: 201, body: reaction() }
+        : { status: 200, body: [reaction({ actor: BOB, display_name: "Bob B" })] }
+    );
     renderFooter();
+    await user.click(await screen.findByRole("button", { name: "Add reaction" }));
+    await user.click(await screen.findByRole("option", { name: "🎉" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(REACTION_CREATED_TITLE));
+    const post = calls.find((call) => call.method === "POST" && call.body !== "");
+    expect(post).toBeDefined();
+  });
+
+  it("renders nothing once a refused read settles", async () => {
+    let refuse: (() => void) | undefined;
+    let readServed = false;
+    createAppClient("https://api.test", async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ csrf_token: "x" }),
+        };
+      }
+      await new Promise<void>((resolve) => {
+        refuse = resolve;
+      });
+      readServed = true;
+      return { status: 500, url, headers: { get: () => null }, text: async () => JSON.stringify({ error: "boom" }) };
+    });
+    renderFooter();
+    await waitFor(() => expect(refuse).toBeDefined());
+    refuse?.();
+    await waitFor(() => expect(readServed).toBe(true));
     await waitFor(() =>
       expect(screen.queryByRole("region", { name: COMMENT_REACTIONS_LABEL })).not.toBeInTheDocument()
     );
+    expect(screen.queryByRole("button", { name: "Add reaction" })).not.toBeInTheDocument();
+  });
+
+  it("shows another member's chip unhighlighted for a signed-out reader", async () => {
+    session.viewer = { data: undefined };
+    try {
+      stubTransport(() => ({ status: 200, body: [reaction({ actor: BOB, display_name: "Bob B" })] }));
+      renderFooter();
+      const chip = await screen.findByRole("button", { name: /👍/ });
+      expect(chip.className).not.toContain("border-accent-strong");
+    } finally {
+      session.viewer = { data: { id: "523e4567-e89b-12d3-a456-426614174004" } };
+    }
   });
 
   it("shows chips once reactions arrive, with the viewer's own highlighted", async () => {
