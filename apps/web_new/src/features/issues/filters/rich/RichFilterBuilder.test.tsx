@@ -25,6 +25,17 @@ import { useRichFilterBuilder, type RichFilterBuilderProps } from "./RichFilterB
 import { FieldConfigRegistry } from "./temporary.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
+const STATE_ROW = {
+  id: "323e4567-e89b-12d3-a456-426614174002",
+  name: "Todo",
+  group: "unstarted",
+  color: "#fff",
+  project_id: PROJECT,
+  workspace_id: PROJECT,
+  default: false,
+  description: "",
+  sequence: 1,
+};
 const ENTITY: IssuesEntity = { scope: "project", projectId: PROJECT };
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const VIEW_RECORD = {
@@ -69,13 +80,19 @@ function record(richFilters: Record<string, unknown>): PrefsRecord & Record<stri
   };
 }
 
-function setup(richFilters: Record<string, unknown>, options: { hold?: boolean; fail?: boolean } = {}) {
+function setup(
+  richFilters: Record<string, unknown>,
+  options: { hold?: boolean; fail?: boolean; states?: Array<Record<string, unknown>> } = {}
+) {
   const patches: Array<Record<string, unknown>> = [];
   let release = (): void => {};
   const gate = new Promise<void>((resolve) => (release = resolve));
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     if (url.endsWith("/auth/get-csrf-token/")) {
       return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
+    }
+    if (options.states !== undefined && /\/states\/(\?|$)/.test(url)) {
+      return { status: 200, url, headers: { get: () => null }, text: async () => JSON.stringify(options.states) };
     }
     if (init.method === "PATCH") {
       const body = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
@@ -151,6 +168,23 @@ describe("rich filter builder empty state", () => {
     ]);
   });
 
+  it("opens the fixed values of an empty Priority or State Group slot", async () => {
+    const user = userEvent.setup();
+    const { patches } = setup({});
+    await user.click(screen.getByTestId("rich-filter-add"));
+    await user.click(await screen.findByRole("option", { name: "Priority" }));
+    const priority = await screen.findByRole("listbox", { name: "Priority values" });
+    expect(within(priority).getAllByRole("option").length).toBe(5);
+
+    // Switching the same pill to State Group lists that set by itself too.
+    const pill = screen.getByTestId("rich-condition");
+    await user.click(within(pill).getByRole("button", { name: /Priority/ }));
+    await user.click(await screen.findByRole("option", { name: "State Group" }));
+    const groups = await screen.findByRole("listbox", { name: "State Group values" });
+    expect(within(groups).getByRole("option", { name: "Started" })).toBeInTheDocument();
+    expect(patches).toHaveLength(0);
+  });
+
   it("adds a draft condition without patching an unchanged expression", async () => {
     const user = userEvent.setup();
     const { patches } = setup({});
@@ -188,6 +222,29 @@ describe("rich filter builder empty state", () => {
 });
 
 describe("rich filter builder populated state", () => {
+  it("reloads a one-pick filter closed and writes a collection lookup after a second pick", async () => {
+    const user = userEvent.setup();
+    const { patches } = setup(
+      { state_id__exact: "323e4567-e89b-12d3-a456-426614174002" },
+      {
+        states: [
+          { ...STATE_ROW, id: "323e4567-e89b-12d3-a456-426614174002", name: "Todo" },
+          { ...STATE_ROW, id: "423e4567-e89b-12d3-a456-426614174003", name: "In progress" },
+        ],
+      }
+    );
+    // A complete stored pick never pops its list open on mount.
+    await screen.findByRole("button", { name: /Todo/ });
+    expect(screen.queryByRole("listbox", { name: "State values" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Todo/ }));
+    await user.click(await screen.findByRole("option", { name: "In progress" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]).toEqual({
+      rich_filters: { state_id__in: "323e4567-e89b-12d3-a456-426614174002,423e4567-e89b-12d3-a456-426614174003" },
+    });
+  });
+
   it("renders one pill per stored condition and a toggle", () => {
     setup({ and: [{ priority__in: "none" }, { state_group__in: "started" }] });
     expect(screen.getAllByTestId("rich-condition")).toHaveLength(2);
@@ -224,12 +281,11 @@ describe("rich filter builder populated state", () => {
     // Nothing to persist yet: the new condition has no value.
     expect(patches).toHaveLength(0);
 
-    const second = screen.getAllByTestId("rich-condition")[1]!;
-    await user.click(within(second).getByRole("button", { name: /^--$/ }));
+    // The new empty State Group slot lists its fixed values by itself.
     await user.click(await screen.findByRole("option", { name: "Started" }));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0]).toEqual({
-      rich_filters: { and: [{ priority__in: "none" }, { state_group__exact: "started" }] },
+      rich_filters: { and: [{ priority__in: "none" }, { state_group__in: "started" }] },
     });
   });
 
@@ -280,8 +336,6 @@ describe("rich filter builder populated state", () => {
     const { patches, release, hold } = setup({ priority__in: "none" }, { hold: true });
     await user.click(screen.getByRole("button", { name: "Add filter" }));
     await user.click(await screen.findByRole("option", { name: "State Group" }));
-    const second = screen.getAllByTestId("rich-condition")[1]!;
-    await user.click(within(second).getByRole("button", { name: /^--$/ }));
     await user.click(await screen.findByRole("option", { name: "Started" }));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(hold).toBe(true);
@@ -582,8 +636,7 @@ describe("temporary builder instances", () => {
     mountTemporary();
     await user.click(screen.getByTestId("rich-filter-add"));
     await user.click(await screen.findByRole("option", { name: "Priority" }));
-    const pill = await screen.findByTestId("rich-condition");
-    await user.click(within(pill).getByRole("button", { name: /^--$/ }));
+    // An empty static pick lists its values without another click.
     await user.click(await screen.findByRole("option", { name: "Urgent" }));
     expect(screen.getByTestId("rich-condition")).toHaveTextContent("Urgent");
     // A second condition proves the in-memory list keeps accumulating.

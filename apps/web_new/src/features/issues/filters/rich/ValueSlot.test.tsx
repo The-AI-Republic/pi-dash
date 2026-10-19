@@ -242,6 +242,31 @@ describe("ValueSlot", () => {
     expect(onChange).toHaveBeenCalledWith([STATE_ID]);
   });
 
+  it("reopens a stored one-pick exact as a complete, closed pick", () => {
+    const [stored] = parseRichExpression({ priority__exact: "urgent" });
+    render(
+      wrap(
+        <ValueSlot workspaceSlug="acme" projectId={PROJECT} field={PRIORITY} condition={stored!} onChange={() => {}} />
+      )
+    );
+    expect(screen.getByRole("button", { name: /Urgent/ })).toBeInTheDocument();
+    expect(screen.queryByRole("listbox", { name: "Priority values" })).not.toBeInTheDocument();
+  });
+
+  it("adds a second pick to a stored one-pick exact without dropping the first", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const [stored] = parseRichExpression({ priority__exact: "urgent" });
+    render(
+      wrap(
+        <ValueSlot workspaceSlug="acme" projectId={PROJECT} field={PRIORITY} condition={stored!} onChange={onChange} />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /Urgent/ }));
+    await user.click(await screen.findByRole("option", { name: "High" }));
+    expect(onChange).toHaveBeenLastCalledWith(["urgent", "high"]);
+  });
+
   it("keeps a pick slot with a stored value closed until its trigger is used", () => {
     render(
       wrap(
@@ -273,7 +298,8 @@ describe("ValueSlot", () => {
       )
     );
     expect(screen.getByRole("button", { name: /^--$/ })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /^--$/ }));
+    // An empty pick lists its options without another click; clicking the
+    // trigger again would collapse it.
     const list = await screen.findByRole("listbox", { name: "Priority values" });
     expect(within(list).getAllByRole("option")).toHaveLength(5);
     await user.click(within(list).getByRole("option", { name: "Urgent" }));
@@ -319,7 +345,6 @@ describe("ValueSlot", () => {
   });
 
   it("renders the fixed state-group set with icons", async () => {
-    const user = userEvent.setup();
     render(
       wrap(
         <ValueSlot
@@ -331,7 +356,6 @@ describe("ValueSlot", () => {
         />
       )
     );
-    await user.click(screen.getByRole("button", { name: "--" }));
     const list = await screen.findByRole("listbox", { name: "State Group values" });
     const options = within(list).getAllByRole("option");
     expect(options).toHaveLength(5);
@@ -339,7 +363,6 @@ describe("ValueSlot", () => {
   });
 
   it("shows an empty list for a field with no source and no static values", async () => {
-    const user = userEvent.setup();
     render(
       wrap(
         <ValueSlot
@@ -359,12 +382,10 @@ describe("ValueSlot", () => {
         />
       )
     );
-    await user.click(screen.getByRole("button", { name: "--" }));
     expect(await screen.findByText("No matching values")).toBeInTheDocument();
   });
 
   it("leaves a static value with no icon unshaped", async () => {
-    const user = userEvent.setup();
     render(
       wrap(
         <ValueSlot
@@ -385,7 +406,6 @@ describe("ValueSlot", () => {
         />
       )
     );
-    await user.click(screen.getByRole("button", { name: "--" }));
     const list = await screen.findByRole("listbox", { name: "Custom values" });
     expect(within(list).getAllByRole("option")).toHaveLength(1);
     expect(within(list).getByRole("option", { name: "One" }).querySelector("svg")).toBeNull();

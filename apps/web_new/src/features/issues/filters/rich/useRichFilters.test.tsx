@@ -145,7 +145,7 @@ describe("useUpdateRichFilters", () => {
 
     const patch = calls.find((call) => call.method === "PATCH")!;
     expect(patch.url).toBe(`https://api.test/api/workspaces/acme/projects/${PROJECT}/user-properties/`);
-    expect(patch.body).toEqual({ rich_filters: { priority__exact: "urgent" } });
+    expect(patch.body).toEqual({ rich_filters: { priority__in: "urgent" } });
     await waitFor(() =>
       expect(invalidate).toHaveBeenCalledWith({
         queryKey: issueKeys.lists("acme", ...entityListsKeyPart(ENTITY)),

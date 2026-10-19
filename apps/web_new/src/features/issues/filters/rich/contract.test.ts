@@ -8,7 +8,13 @@
 // value shape each lookup's widget reads.
 import { describe, expect, it } from "vitest";
 
-import { findField, richFilterFields, serializeRichExpression, type RichFilterField } from "./expression.js";
+import {
+  findField,
+  parseRichExpression as parseRich,
+  richFilterFields,
+  serializeRichExpression,
+  type RichFilterField,
+} from "./expression.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -74,12 +80,19 @@ function expectsAccepted(expression: Record<string, unknown>): void {
 }
 
 describe("the catalogue emits only filter names IssueFilterSet declares", () => {
-  it("accepts one value under exact and several under in", () => {
+  it("keeps one value and several under the collection lookup", () => {
+    // `UUIDInFilter` accepts a lone id; `assignee_id__exact` is a scalar
+    // lookup that rejects the CSV form, so a pick never stores under it.
     const single = serializeRichExpression([
+      { key: "a", property: "assignee_id", operator: "in", negated: false, value: [UUID] },
+    ]);
+    expect(single).toEqual({ assignee_id__in: UUID });
+    expectsAccepted(single);
+    const exact = serializeRichExpression([
       { key: "a", property: "assignee_id", operator: "exact", negated: false, value: [UUID] },
     ]);
-    expect(single).toEqual({ assignee_id__exact: UUID });
-    expectsAccepted(single);
+    expect(exact).toEqual({ assignee_id__in: UUID });
+    expectsAccepted(exact);
     const several = serializeRichExpression([
       { key: "a", property: "assignee_id", operator: "in", negated: false, value: [UUID, `${UUID}2`] },
     ]);
@@ -115,6 +128,19 @@ describe("the contract mirror itself", () => {
   it("rejects a key the backend does not declare", () => {
     expect(leaves({ assignee__in: "a" }).every((key) => ACCEPTED.has(key))).toBe(false);
     expect(leaves({ priority__between: "a,b" }).every((key) => ACCEPTED.has(key))).toBe(false);
+  });
+
+  it("writes a stored one-pick exact back under the collection lookup", () => {
+    const leavesUnder = (stored: Record<string, unknown>): string[] =>
+      leaves(serializeRichExpression(parseRich(stored)));
+    expect(leavesUnder({ state_id__exact: UUID })).toEqual(["state_id__in"]);
+    expect(leavesUnder({ and: [{ priority__in: "urgent" }, { not: { state_id__exact: UUID } }] })).toEqual([
+      "priority__in",
+      "state_id__in",
+    ]);
+    for (const key of [...leavesUnder({ state_id__exact: UUID }), ...leavesUnder({ priority__exact: "urgent" })]) {
+      expect(ACCEPTED.has(key), `server rejects ${key}`).toBe(true);
+    }
   });
 
   it("still finds the value fields the issues surface offers", () => {

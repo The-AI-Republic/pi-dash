@@ -48,14 +48,14 @@ export function slotEditor(field: RichFilterField, operator: string): SlotEditor
   return slotSource(field) === "static" ? "choice" : "pick";
 }
 
-/** The slot opens by itself whenever it holds no complete value. */
-export function opensWhenIncomplete(
-  field: RichFilterField,
-  operator: string,
-  value: unknown,
-  complete: boolean
-): boolean {
-  return slotEditor(field, operator) !== "choice" && !complete;
+/**
+ * The slot opens by itself whenever it holds no complete value, static
+ * lists included: a fresh Priority or State Group condition is one pick
+ * away rather than a click into an empty trigger. A slot with a complete
+ * value stays closed until its trigger is used.
+ */
+export function opensWhenIncomplete(complete: boolean): boolean {
+  return !complete;
 }
 
 /** Both ends of a range for either an array or the stored `"start,end"` string. */

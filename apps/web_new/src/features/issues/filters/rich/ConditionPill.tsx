@@ -143,6 +143,7 @@ export function ConditionPill({
         disabled={locked}
       />
       <ValueSlot
+        key={resolved.stem}
         workspaceSlug={workspaceSlug}
         projectId={projectId}
         field={resolved}

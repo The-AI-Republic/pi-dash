@@ -135,7 +135,7 @@ describe("parseRichExpression", () => {
   it("leaves a scalar and a single exact value alone", () => {
     expect(parseRichExpression({ state_group__in: "started" })[0]?.value).toBe("started");
     expect(parseRichExpression({ priority__in: "urgent" })[0]?.value).toBe("urgent");
-    expect(parseRichExpression({ assignee_id__exact: "a,b" })[0]?.value).toBe("a,b");
+    expect(parseRichExpression({ assignee_id__exact: "a,b" })[0]?.value).toEqual(["a", "b"]);
     // A separator-only string has no entries to read back.
     expect(parseRichExpression({ assignee_id__in: "," })[0]?.value).toBe(",");
   });
@@ -173,6 +173,21 @@ describe("parseRichExpression", () => {
     expect(serializeRichExpression(parsed)).toEqual(stored);
   });
 
+  it("reads a stored collection exact back under its collection lookup", () => {
+    const [pick] = parseRichExpression({ state_id__exact: "todo" });
+    expect(pick).toMatchObject({ property: "state_id", operator: "in", value: "todo" });
+    // A one-item list from another surface reads as the same single pick.
+    expect(parseRichExpression({ state_id__in: ["todo"] })[0]).toMatchObject({
+      property: "state_id",
+      operator: "in",
+      value: ["todo"],
+    });
+    const [several] = parseRichExpression({ priority__exact: "urgent,high" });
+    expect(several).toMatchObject({ property: "priority", operator: "in", value: ["urgent", "high"] });
+    // A date field's exact lookup is a single day, not a collection pick.
+    expect(parseRichExpression({ start_date__exact: "2026-02-10" })[0]?.operator).toBe("exact");
+  });
+
   it("does not merge two operators on one leaf", () => {
     expect(parseRichExpression({ priority__in: "urgent", state__in: "todo" })).toMatchObject([{ property: "" }]);
   });
@@ -203,13 +218,13 @@ describe("serializeRichExpression", () => {
         condition({ key: "a", property: "priority", value: "urgent" }),
         condition({ key: "b", property: "state_id", value: ["todo"], negated: true }),
       ])
-    ).toEqual({ and: [{ priority__in: "urgent" }, { not: { state_id__exact: "todo" } }] });
+    ).toEqual({ and: [{ priority__in: "urgent" }, { not: { state_id__in: "todo" } }] });
   });
 
   it("round-trips the shapes the parser accepts", () => {
     const expression = { and: [{ priority__in: "urgent" }, { not: { state_id__in: ["todo"] } }] };
     expect(serializeRichExpression(parseRichExpression(expression))).toEqual({
-      and: [{ priority__in: "urgent" }, { not: { state_id__exact: "todo" } }],
+      and: [{ priority__in: "urgent" }, { not: { state_id__in: "todo" } }],
     });
   });
 
@@ -217,6 +232,27 @@ describe("serializeRichExpression", () => {
     expect(
       serializeRichExpression([condition({ property: "assignee_id", operator: "in", value: ["a", "b", "c"] })])
     ).toEqual({ assignee_id__in: "a,b,c" });
+  });
+
+  it("round-trips one pick and several through the collection lookup", () => {
+    const one = { state_id__in: "todo" };
+    expect(serializeRichExpression(parseRichExpression(one))).toEqual(one);
+    const many = { state_id__in: "todo,in-progress" };
+    expect(serializeRichExpression(parseRichExpression(many))).toEqual(many);
+    // A stored one-pick exact reads back as a collection pick and re-saves
+    // under `__in`, which accepts one id as well as many.
+    const exact = { state_id__exact: "todo" };
+    expect(serializeRichExpression(parseRichExpression(exact))).toEqual(one);
+    // Growing a one-pick exact to two picks keeps a collection lookup.
+    expect(
+      serializeRichExpression([condition({ property: "priority", operator: "in", value: ["urgent", "high"] })])
+    ).toEqual({ priority__in: "urgent,high" });
+  });
+
+  it("moves a scalar exact to the collection lookup once it holds a list", () => {
+    expect(
+      serializeRichExpression([condition({ property: "priority", operator: "exact", value: ["urgent", "high"] })])
+    ).toEqual({ priority__in: "urgent,high" });
   });
 
   it("sends a date range as its two ends in order", () => {

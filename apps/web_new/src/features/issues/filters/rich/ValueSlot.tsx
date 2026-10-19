@@ -411,7 +411,7 @@ function RangeSlot({
 export function ValueSlot(props: ValueSlotProps): React.ReactElement {
   const { field, condition, onChange } = props;
   const complete = isValueCompleteForOperator(field, condition.operator, condition.value);
-  const autoOpen = opensWhenIncomplete(field, condition.operator, condition.value, complete);
+  const autoOpen = opensWhenIncomplete(complete);
   switch (slotEditor(field, condition.operator)) {
     case "date":
       return <DateSlot field={field} value={condition.value} onChange={onChange} autoOpen={autoOpen} />;

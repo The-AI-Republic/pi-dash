@@ -73,6 +73,21 @@ export function parseLeafValue(operator: string, value: unknown): unknown {
   return entries.length === 0 ? value : entries;
 }
 
+/**
+ * Read a stored lookup back as the operator the editor offers for that
+ * field. A collection field's stored `__exact` came from another surface
+ * (the FilterSet accepts it for one value); the builder edits it under
+ * its collection lookup so a second pick keeps the same form.
+ */
+function parseLeafOperator(property: string, operator: string): string {
+  return operator === "exact" && collectionField(property) ? "in" : operator;
+}
+
+/** A leaf's value read under the operator the editor will show. */
+function parseLeafStoredValue(property: string, operator: string, value: unknown): unknown {
+  return parseLeafValue(parseLeafOperator(property, operator), value);
+}
+
 function parseLeaf(node: Record<string, unknown>, key: string): RichCondition[] {
   const leaf = singleLeaf(node);
   if (leaf === null) return [invalidCondition(key, node)];
@@ -80,9 +95,9 @@ function parseLeaf(node: Record<string, unknown>, key: string): RichCondition[] 
     {
       key,
       property: leaf.field,
-      operator: leaf.operator,
+      operator: parseLeafOperator(leaf.field, leaf.operator),
       negated: false,
-      value: parseLeafValue(leaf.operator, leaf.value),
+      value: parseLeafStoredValue(leaf.field, leaf.operator, leaf.value),
     },
   ];
 }
@@ -113,9 +128,9 @@ export function parseRichExpression(expression: unknown): RichCondition[] {
       {
         key: "not-0",
         property: leaf.field,
-        operator: leaf.operator,
+        operator: parseLeafOperator(leaf.field, leaf.operator),
         negated: true,
-        value: parseLeafValue(leaf.operator, leaf.value),
+        value: parseLeafStoredValue(leaf.field, leaf.operator, leaf.value),
       },
     ];
   }
@@ -125,9 +140,9 @@ export function parseRichExpression(expression: unknown): RichCondition[] {
     {
       key: "leaf-0",
       property: leaf.field,
-      operator: leaf.operator,
+      operator: parseLeafOperator(leaf.field, leaf.operator),
       negated: false,
-      value: parseLeafValue(leaf.operator, leaf.value),
+      value: parseLeafStoredValue(leaf.field, leaf.operator, leaf.value),
     },
   ];
 }
@@ -144,9 +159,9 @@ function parseExpressionChild(child: unknown, key: string): RichCondition[] {
       {
         key,
         property: leaf.field,
-        operator: leaf.operator,
+        operator: parseLeafOperator(leaf.field, leaf.operator),
         negated: true,
-        value: parseLeafValue(leaf.operator, leaf.value),
+        value: parseLeafStoredValue(leaf.field, leaf.operator, leaf.value),
       },
     ];
   }
@@ -154,13 +169,15 @@ function parseExpressionChild(child: unknown, key: string): RichCondition[] {
 }
 
 /**
- * The stored lookup for a base operator and value. A collection pick with
- * one item stores the scalar lookup under the same field, matching the
- * filter set; two or more keep the collection lookup. The UI operator
- * stays the base one either way.
+ * The stored lookup for a base operator and value. A collection pick keeps
+ * its collection lookup for any number of picks — the FilterSet's `__in`
+ * widgets accept one value as well as many, while `__exact` reads a single
+ * value and rejects a joined list. A stored scalar under `exact` stays
+ * scalar; the moment it grows into a list (a second pick), it moves to the
+ * collection lookup so the next write is accepted.
  */
 export function payloadOperator(operator: string, value: unknown): string {
-  if (operator === "in" && Array.isArray(value) && value.length <= 1) return "exact";
+  if (operator === "exact" && Array.isArray(value)) return "in";
   return operator;
 }
 
@@ -178,9 +195,28 @@ function payloadValue(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Stems whose catalogue entry is a collection pick. Every one is a
+ * collection lookup only: the FilterSet's `__in` widget takes one value
+ * or many, while the scalar lookup rejects a joined list. A record
+ * written by another surface can still carry `__exact`, so serialization
+ * reads those back under the collection lookup.
+ */
+let collectionStems: ReadonlySet<string> | null = null;
+
+function collectionField(stem: string): boolean {
+  collectionStems ??= new Set(
+    richFilterFields()
+      .filter((field) => field.kind === "multi" || field.kind === "single")
+      .map((field) => field.stem)
+  );
+  return collectionStems.has(stem);
+}
+
 /** Serialize one leaf; the caller wraps negation when needed. */
 function serializeLeaf(condition: RichCondition): Record<string, unknown> {
-  const operator = payloadOperator(condition.operator, condition.value);
+  const base = condition.operator === "exact" && collectionField(condition.property) ? "in" : condition.operator;
+  const operator = payloadOperator(base, condition.value);
   return { [`${condition.property}__${operator}`]: payloadValue(condition.value) };
 }
 
@@ -487,6 +523,13 @@ export function isValueComplete(kind: RichFilterKind, value: unknown): boolean {
 export function isValueCompleteForOperator(field: RichFilterField, operator: string, value: unknown): boolean {
   if (operator === "range") return isValueComplete("date_range", value);
   if (operator === "exact" && field.kind === "date_range") return isValueComplete("date", value);
+  // A stored collection filter may arrive under `exact` with one scalar
+  // value (the filter set accepts both forms); it is still a complete
+  // pick, so the slot neither warns nor reopens on load.
+  if (field.kind === "multi") {
+    if (typeof value === "string") return value.length > 0;
+    return isValueComplete("multi", value);
+  }
   return isValueComplete(field.kind, value);
 }
 

@@ -73,22 +73,9 @@ describe("slotEditor", () => {
 });
 
 describe("opensWhenIncomplete", () => {
-  it("never auto-opens a static choice list", () => {
-    expect(opensWhenIncomplete(field("priority"), "in", null, false)).toBe(false);
-  });
-
-  it("opens when a pick or a calendar holds no complete value", () => {
-    expect(opensWhenIncomplete(field("state_id"), "in", null, false)).toBe(true);
-    expect(opensWhenIncomplete(field("state_id"), "in", "todo", true)).toBe(false);
-    expect(opensWhenIncomplete(field("target_date"), "exact", null, false)).toBe(true);
-    expect(opensWhenIncomplete(field("target_date"), "exact", "2026-01-02", true)).toBe(false);
-  });
-
-  it("judges a start date by its lookup: a day under exact, a pair under range", () => {
-    expect(opensWhenIncomplete(field("start_date"), "exact", null, false)).toBe(true);
-    expect(opensWhenIncomplete(field("start_date"), "exact", "2026-01-02", true)).toBe(false);
-    expect(opensWhenIncomplete(field("start_date"), "range", ["2026-01-02", null], false)).toBe(true);
-    expect(opensWhenIncomplete(field("start_date"), "range", ["2026-01-02", "2026-01-03"], true)).toBe(false);
+  it("opens an empty slot, static lists included, and keeps a filled one closed", () => {
+    expect(opensWhenIncomplete(false)).toBe(true);
+    expect(opensWhenIncomplete(true)).toBe(false);
   });
 });
 
