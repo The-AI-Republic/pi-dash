@@ -6,7 +6,7 @@
 // manual re-verification. Every call is scoped to the signed-in admin.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
+import { dateTime, nullableDateTime, uuid } from "./fields.js";
 
 /**
  * One workspace's installation state. Disconnected is the minimal
