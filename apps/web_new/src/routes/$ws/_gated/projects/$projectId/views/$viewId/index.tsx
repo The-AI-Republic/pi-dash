@@ -28,15 +28,19 @@ import {
 import type { RichFilterBuilderParts } from "../../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import { GanttTimeline } from "../../../../../../../features/issues/gantt/GanttTimeline.js";
 import {
-  IssueListFallback,
-  LazyAnalyticsEntry,
-  LazyIssueList,
-  preloadIssueListLeaves,
+  ResolvedAnalyticsEntry,
+  ResolvedIssueList,
+  loadIssueListLeaves,
+  primeIssueListLeaves,
 } from "../../../../../../../features/issues/components/lazyLeaves.js";
 import { orderByFromDisplayFilters } from "../../../../../../../features/issues/prefs/prefsQuery.js";
 import { projectViewQueryOptions } from "../../../../../../../features/issues/filters/rich/savedViewQuery.js";
 import { viewExpression } from "../../../../../../../features/issues/filters/rich/views.js";
 import { projectsQueryOptions } from "../../../../../../../features/projects/index.js";
+
+// Start the leaf chunk with the route module, so the warm start does not
+// serialize a round trip behind the data reads; `beforeLoad` awaits it.
+primeIssueListLeaves();
 
 const LazyIssueFilters = React.lazy(() => import("../../../../../../../features/issues/filters/rich/IssueFilters.js"));
 
@@ -79,7 +83,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
       );
       // The list and analytics leaves ride their own chunk (Quality gates);
       // await it with the data so the first commit is the screen itself.
-      await preloadIssueListLeaves();
+      await loadIssueListLeaves();
     } catch (error) {
       if (!isProjectGateError(error)) throw error;
     }
@@ -157,7 +161,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
       />
     );
     const analytics = (
-      <LazyAnalyticsEntry
+      <ResolvedAnalyticsEntry
         workspaceSlug={params.ws}
         projectId={params.projectId}
         projectName={project.name}
@@ -186,13 +190,11 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
               prefs={prefs}
             />
           ) : (
-            <React.Suspense fallback={<IssueListFallback />}>
-              <LazyIssueList
-                issues={issues.results}
-                projectIdentifier={project.identifier}
-                layout={search.layout ?? "list"}
-              />
-            </React.Suspense>
+            <ResolvedIssueList
+              issues={issues.results}
+              projectIdentifier={project.identifier}
+              layout={search.layout ?? "list"}
+            />
           )
         }
         emptyState={<ViewIssuesEmptyState />}
@@ -201,7 +203,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
         displayControl={displayControl}
         filterControl={richFilter?.control}
         filterRow={richFilter?.row}
-        analyticsControl={<React.Suspense fallback={null}>{analytics}</React.Suspense>}
+        analyticsControl={analytics}
       />
     );
     return (
