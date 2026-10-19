@@ -76,8 +76,8 @@ describe("CustomThemeDesigner", () => {
   it("saves normalized colors with the chosen base", async () => {
     const user = userEvent.setup();
     const save = renderDesigner();
-    await user.click(screen.getByRole("button", { name: "Dark base" }));
-    const brand = screen.getByLabelText("Brand color");
+    await user.click(screen.getByRole("radio", { name: "Dark mode" }));
+    const brand = screen.getByLabelText("Primary color");
     await user.clear(brand);
     await user.type(brand, "#ABC");
     await user.click(screen.getByRole("button", { name: "Set theme" }));
@@ -87,7 +87,7 @@ describe("CustomThemeDesigner", () => {
   it("blocks saves with invalid colors", async () => {
     const user = userEvent.setup();
     const save = renderDesigner();
-    const brand = screen.getByLabelText("Brand color");
+    const brand = screen.getByLabelText("Primary color");
     await user.clear(brand);
     await user.type(brand, "red");
     await user.click(screen.getByRole("button", { name: "Set theme" }));
@@ -111,14 +111,50 @@ describe("CustomThemeDesigner", () => {
     expect(screen.getByRole("button", { name: "Set theme" })).toBeDisabled();
   });
 
+  it("previews every complete color pair with the chosen base", async () => {
+    const user = userEvent.setup();
+    const onPreview = vi.fn();
+    render(
+      <CustomThemeDesigner
+        initial={{ primary: "#3f76ff", background: "#ffffff", darkPalette: false }}
+        onSave={() => undefined}
+        onPreview={onPreview}
+      />
+    );
+    await waitFor(() =>
+      expect(onPreview).toHaveBeenLastCalledWith({ primary: "#3f76ff", background: "#ffffff", darkPalette: false })
+    );
+    await user.click(screen.getByRole("radio", { name: "Dark mode" }));
+    expect(onPreview).toHaveBeenLastCalledWith({ primary: "#3f76ff", background: "#ffffff", darkPalette: true });
+    await user.clear(screen.getByLabelText("Primary color"));
+    await user.type(screen.getByLabelText("Primary color"), "#ABCDEF");
+    expect(onPreview).toHaveBeenLastCalledWith({ primary: "#abcdef", background: "#ffffff", darkPalette: true });
+  });
+
+  it("leaves the last preview in place while a color is incomplete", async () => {
+    const user = userEvent.setup();
+    const onPreview = vi.fn();
+    render(
+      <CustomThemeDesigner
+        initial={{ primary: "#3f76ff", background: "#ffffff", darkPalette: false }}
+        onSave={() => undefined}
+        onPreview={onPreview}
+      />
+    );
+    await waitFor(() => expect(onPreview).toHaveBeenCalledTimes(1));
+    await user.clear(screen.getByLabelText("Background color"));
+    await user.type(screen.getByLabelText("Background color"), "nope");
+    expect(onPreview).toHaveBeenCalledTimes(1);
+  });
+
   it("syncs the color pickers with the text fields", async () => {
     const user = userEvent.setup();
     renderDesigner();
-    const picker = screen.getByLabelText("Brand color picker") as HTMLInputElement;
+    const picker = screen.getByLabelText("Primary color picker") as HTMLInputElement;
     expect(picker.value).toBe("#3f76ff");
-    await user.clear(screen.getByLabelText("Brand color"));
-    await user.type(screen.getByLabelText("Brand color"), "junk");
-    expect((screen.getByLabelText("Brand color picker") as HTMLInputElement).value).toBe("#000000");
+    await user.clear(screen.getByLabelText("Primary color"));
+    await user.type(screen.getByLabelText("Primary color"), "junk");
+    expect((screen.getByLabelText("Primary color picker") as HTMLInputElement).value).toBe("#000000");
   });
 
   it("edits through the background field and both pickers", async () => {
@@ -127,8 +163,8 @@ describe("CustomThemeDesigner", () => {
     await user.clear(screen.getByLabelText("Background color"));
     await user.type(screen.getByLabelText("Background color"), "junk");
     expect((screen.getByLabelText("Background color picker") as HTMLInputElement).value).toBe("#000000");
-    fireEvent.change(screen.getByLabelText("Brand color picker"), { target: { value: "#112233" } });
-    expect(screen.getByLabelText("Brand color")).toHaveValue("#112233");
+    fireEvent.change(screen.getByLabelText("Primary color picker"), { target: { value: "#112233" } });
+    expect(screen.getByLabelText("Primary color")).toHaveValue("#112233");
     fireEvent.change(screen.getByLabelText("Background color picker"), { target: { value: "#445566" } });
     expect(screen.getByLabelText("Background color")).toHaveValue("#445566");
   });
@@ -162,9 +198,9 @@ describe("CustomThemeDesigner", () => {
       { type: "application/json" }
     );
     fireEvent.change(screen.getByLabelText("Import theme config file"), { target: { files: [file] } });
-    await waitFor(() => expect(screen.getByLabelText("Brand color")).toHaveValue("#112233"));
+    await waitFor(() => expect(screen.getByLabelText("Primary color")).toHaveValue("#112233"));
     expect(screen.getByLabelText("Background color")).toHaveValue("#445566");
-    expect(screen.getByRole("button", { name: "Dark base" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("radio", { name: "Dark mode" })).toBeChecked();
   });
 
   it("reports invalid imports inline and ignores empty picks", async () => {
@@ -175,7 +211,7 @@ describe("CustomThemeDesigner", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("That file is not valid JSON.");
     // Choosing no file (dialog dismissed) leaves the form untouched.
     fireEvent.change(input, { target: { files: [] } });
-    expect(screen.getByLabelText("Brand color")).toHaveValue("#3f76ff");
+    expect(screen.getByLabelText("Primary color")).toHaveValue("#3f76ff");
   });
 
   it("reports unreadable files inline", async () => {
@@ -213,5 +249,21 @@ describe("CustomThemeDesigner", () => {
     fireEvent.change(screen.getByLabelText("Import theme config file"), { target: { files: [file] } });
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not read the file.");
     expect(screen.queryByText(/disk gone/)).toBeNull();
+  });
+
+  it("treats a non-text read result as an empty config", async () => {
+    renderDesigner();
+    class BinaryReader {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      result: ArrayBuffer = new ArrayBuffer(8);
+      readAsText(): void {
+        queueMicrotask(() => this.onload?.());
+      }
+    }
+    vi.stubGlobal("FileReader", BinaryReader);
+    const file = new File(["x"], "t.json", { type: "application/json" });
+    fireEvent.change(screen.getByLabelText("Import theme config file"), { target: { files: [file] } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("That file is not valid JSON.");
   });
 });

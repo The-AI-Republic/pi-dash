@@ -12,14 +12,18 @@ export {
 export type { CustomThemeDesignerProps } from "./CustomThemeDesigner.js";
 export {
   buildThemeBag,
+  clearStoredPalette,
   isDarkValue,
   parseThemeValue,
+  readStoredPalette,
   readStoredTheme,
   readThemeBag,
   resolveScheme,
+  THEME_PALETTE_STORAGE_KEY,
   THEME_OPTIONS,
   THEME_STORAGE_KEY,
   THEME_VALUES,
+  writeStoredPalette,
   writeStoredTheme,
 } from "./theme.js";
 export type { CustomPalette, ResolvedScheme, ThemeBag, ThemeValue } from "./theme.js";

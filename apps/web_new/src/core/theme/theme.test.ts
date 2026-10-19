@@ -5,12 +5,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildThemeBag,
+  clearStoredPalette,
   isDarkValue,
   parseThemeValue,
+  readStoredPalette,
   readStoredTheme,
   readThemeBag,
   resolveScheme,
+  THEME_PALETTE_STORAGE_KEY,
   THEME_OPTIONS,
+  writeStoredPalette,
   writeStoredTheme,
 } from "./theme.js";
 
@@ -156,6 +160,79 @@ describe("theme model", () => {
         if (descriptor) Object.defineProperty(globalThis, "localStorage", descriptor);
         else delete (globalThis as Record<string, unknown>)["localStorage"];
       }
+    });
+  });
+
+  describe("stored palette", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("reads a complete palette and drops a base flag that is not true", () => {
+      vi.stubGlobal("localStorage", {
+        getItem: () => JSON.stringify({ primary: "#112233", background: "#445566", darkPalette: true }),
+      });
+      expect(readStoredPalette()).toEqual({ primary: "#112233", background: "#445566", darkPalette: true });
+      vi.stubGlobal("localStorage", {
+        getItem: () => JSON.stringify({ primary: "#112233", background: "#445566", darkPalette: "yes" }),
+      });
+      expect(readStoredPalette()).toEqual({ primary: "#112233", background: "#445566", darkPalette: false });
+    });
+
+    it("rejects missing, unreadable and partial stored palettes", () => {
+      vi.stubGlobal("localStorage", { getItem: () => null });
+      expect(readStoredPalette()).toBeUndefined();
+      vi.stubGlobal("localStorage", { getItem: () => "not json" });
+      expect(readStoredPalette()).toBeUndefined();
+      vi.stubGlobal("localStorage", { getItem: () => "42" });
+      expect(readStoredPalette()).toBeUndefined();
+      vi.stubGlobal("localStorage", { getItem: () => "null" });
+      expect(readStoredPalette()).toBeUndefined();
+      vi.stubGlobal("localStorage", { getItem: () => JSON.stringify({ primary: "#112233" }) });
+      expect(readStoredPalette()).toBeUndefined();
+      vi.stubGlobal("localStorage", { getItem: () => JSON.stringify({ primary: 1, background: "#445566" }) });
+      expect(readStoredPalette()).toBeUndefined();
+    });
+
+    it("survives denied storage in both directions", () => {
+      vi.stubGlobal("localStorage", {
+        getItem: () => {
+          throw new Error("denied");
+        },
+        setItem: () => {
+          throw new Error("denied");
+        },
+      });
+      expect(readStoredPalette()).toBeUndefined();
+      expect(() => writeStoredPalette({ primary: "#112233", background: "#445566", darkPalette: false })).not.toThrow();
+      vi.stubGlobal("localStorage", undefined);
+      expect(readStoredPalette()).toBeUndefined();
+      expect(() => writeStoredPalette({ primary: "#112233", background: "#445566", darkPalette: false })).not.toThrow();
+    });
+
+    it("writes the palette beside the choice", () => {
+      const setItem = vi.fn();
+      vi.stubGlobal("localStorage", { getItem: () => null, setItem });
+      writeStoredPalette({ primary: "#112233", background: "#445566", darkPalette: true });
+      expect(setItem).toHaveBeenCalledWith(
+        THEME_PALETTE_STORAGE_KEY,
+        JSON.stringify({ primary: "#112233", background: "#445566", darkPalette: true })
+      );
+    });
+
+    it("clears the stored palette and survives denied storage", () => {
+      const removeItem = vi.fn();
+      vi.stubGlobal("localStorage", { getItem: () => null, removeItem });
+      clearStoredPalette();
+      expect(removeItem).toHaveBeenCalledWith(THEME_PALETTE_STORAGE_KEY);
+      vi.stubGlobal("localStorage", {
+        removeItem: () => {
+          throw new Error("denied");
+        },
+      });
+      expect(() => clearStoredPalette()).not.toThrow();
+      vi.stubGlobal("localStorage", undefined);
+      expect(() => clearStoredPalette()).not.toThrow();
     });
   });
 });

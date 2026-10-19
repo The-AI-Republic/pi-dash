@@ -89,6 +89,24 @@ function harness(language: string, patchStatus = 200) {
   return { queryClient, notifyError, patches };
 }
 
+function LandingProbe({ landings }: { landings: Array<Promise<boolean>> }): React.ReactElement {
+  const locale = useLocale();
+  return (
+    <button type="button" onClick={() => landings.push(locale.setLanguage("fr"))}>
+      land french
+    </button>
+  );
+}
+
+function UnknownLandingProbe({ landings }: { landings: Array<Promise<boolean>> }): React.ReactElement {
+  const locale = useLocale();
+  return (
+    <button type="button" onClick={() => landings.push(locale.setLanguage("xx"))}>
+      land unknown
+    </button>
+  );
+}
+
 function TagProbe(): React.ReactElement {
   const locale = useLocale();
   return (
@@ -156,6 +174,42 @@ describe("LanguageProvider", () => {
     await user.click(screen.getByRole("button", { name: "pick unknown" }));
     expect(notifyError).toHaveBeenCalledWith("Couldn't update the language", expect.any(String));
     expect(screen.getByTestId("tag")).toHaveTextContent("fr");
+  });
+
+  it("resolves true only once the profile write lands", async () => {
+    const user = userEvent.setup();
+    registerLocale({ tag: "fr", label: "French" });
+    const { queryClient, notifyError } = harness("en");
+    const landings: Array<Promise<boolean>> = [];
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LanguageProvider notifyError={notifyError}>
+          <LandingProbe landings={landings} />
+        </LanguageProvider>
+      </QueryClientProvider>
+    );
+    await user.click(screen.getByRole("button", { name: "land french" }));
+    await expect(landings[0]).resolves.toBe(true);
+  });
+
+  it("resolves false for a failed write and for an unknown tag", async () => {
+    const user = userEvent.setup();
+    const { queryClient, notifyError } = harness("en", 500);
+    const landings: Array<Promise<boolean>> = [];
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LanguageProvider notifyError={notifyError}>
+          <LandingProbe landings={landings} />
+          <UnknownLandingProbe landings={landings} />
+        </LanguageProvider>
+      </QueryClientProvider>
+    );
+    await user.click(screen.getByRole("button", { name: "land unknown" }));
+    await expect(landings[0]).resolves.toBe(false);
+    await user.click(screen.getByRole("button", { name: "land french" }));
+    await waitFor(() => expect(landings).toHaveLength(2));
+    await expect(landings[1]).resolves.toBe(false);
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't update the language", expect.any(String)));
   });
 
   it("toasts failed profile writes", async () => {

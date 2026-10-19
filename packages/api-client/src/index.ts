@@ -378,7 +378,14 @@ export type {
   CommentImageUploadResponse,
   UploadedCommentImage,
 } from "./contracts/comment-assets.js";
-export { IssueActivity, IssueActivityList, listIssueActivities } from "./contracts/issue-activity.js";
+export {
+  ActivityIssueRef,
+  ActivityProjectRef,
+  ActivityWorkspaceRef,
+  IssueActivity,
+  IssueActivityList,
+  listIssueActivities,
+} from "./contracts/issue-activity.js";
 export type { IssueActivityQuery } from "./contracts/issue-activity.js";
 export {
   CommentReaction,

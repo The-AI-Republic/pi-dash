@@ -18,19 +18,25 @@ import { GeneralSettingsTab } from "./components/GeneralSettingsTab.js";
 import { NotificationsTab } from "./components/NotificationsTab.js";
 import { SecuritySettingsTab } from "./components/SecuritySettingsTab.js";
 import { registerProfileSettingsPage } from "./lib/registry.js";
+import { OwnActivityTab } from "./ownActivity/components/OwnActivityTab.js";
+import { PreferencesTab } from "./preferences/components/PreferencesTab.js";
 
 export function registerBuiltInSettingsTabs(): () => void {
   const unregisterGeneral = registerProfileSettingsPage("general", () => <GeneralSettingsTab />);
+  const unregisterPreferences = registerProfileSettingsPage("preferences", () => <PreferencesTab />);
   const unregisterSecurity = registerProfileSettingsPage("security", () => <SecuritySettingsTab />);
   const unregisterNotifications = registerProfileSettingsPage("notifications", () => <NotificationsTab />);
   // The token body only adopts the workspace-settings page (§9, §41); its
   // content stays in the workspace-settings chunk.
   const unregisterApiTokens = registerProfileSettingsPage("api-tokens", () => <ApiTokensTab />);
+  const unregisterActivity = registerProfileSettingsPage("activity", () => <OwnActivityTab />);
   return () => {
     unregisterGeneral();
+    unregisterPreferences();
     unregisterSecurity();
     unregisterNotifications();
     unregisterApiTokens();
+    unregisterActivity();
   };
 }
 

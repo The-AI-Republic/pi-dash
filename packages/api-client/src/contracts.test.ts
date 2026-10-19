@@ -4694,6 +4694,9 @@ describe("issue activity contract", () => {
     created_by: null,
     updated_by: null,
     deleted_at: null,
+    issue_detail: { id: UUID2, name: "Fix the clock", sequence_id: 7 },
+    project_detail: { id: UUID, identifier: "CT", name: "Control" },
+    workspace_detail: { id: UUID2, name: "Acme", slug: "acme" },
   };
 
   it("lists activities with the issue-property type", async () => {
@@ -6889,6 +6892,9 @@ describe("profile area contracts", () => {
     created_by: "audit-1",
     updated_by: null,
     deleted_at: null,
+    issue_detail: { id: UUID2, name: "Fix the clock", sequence_id: 7 },
+    project_detail: { id: UUID, identifier: "CT", name: "Control" },
+    workspace_detail: { id: UUID2, name: "Acme", slug: "acme" },
   };
 
   const activityPage = {
@@ -7063,6 +7069,9 @@ describe("profile area contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport });
     const feed = await getUserProfileActivity(client, "acme", UUID2, { perPage: 100, cursor: "100:1:2" });
     expect(feed.results[0]?.verb).toBe("updated");
+    expect(feed.results[0]?.issue_detail?.name).toBe("Fix the clock");
+    expect(feed.results[0]?.project_detail?.identifier).toBe("CT");
+    expect(feed.results[0]?.workspace_detail?.slug).toBe("acme");
     const mine = await listMyActivities(client, { perPage: 10 });
     expect(mine.total_results).toBe(1);
     const [feedUrl, mineUrl] = transport.calls.map((call) => new URL(call.url));
