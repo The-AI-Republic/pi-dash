@@ -50,6 +50,9 @@ export function SettingsShell({
 }: SettingsShellProps): React.ReactElement {
   const groups = visibleWorkspaceSettingsGroups(workspaceSlug, permissions);
   const current = findWorkspaceSettingsSection(section);
+  // The sidebar names the integrations entry with its provider suffix
+  // (§1); the frame and the tab title use the section name (§2).
+  const frameTitle = section === "integrations" ? current.title : current.label;
 
   useDocumentHead({
     title: workspaceSettingsTitle({ workspaceName, section, webhookDetail }),
@@ -88,7 +91,7 @@ export function SettingsShell({
           activeLabel={webhookDetail ? "Webhook" : current.label}
           onNavigate={onNavigate}
         />
-        <SettingsPageFrame title={webhookDetail ? "Webhook" : current.label}>{body}</SettingsPageFrame>
+        <SettingsPageFrame title={webhookDetail ? "Webhook" : frameTitle}>{body}</SettingsPageFrame>
       </div>
     </div>
   );

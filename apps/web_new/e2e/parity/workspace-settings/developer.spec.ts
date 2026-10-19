@@ -107,6 +107,16 @@ test(
     await driver.wsSettingsGithubTokenFill(bogus);
     expect(await driver.wsSettingsGithubConnectEnabled()).toBe(true);
     await driver.wsSettingsGithubConnect();
+    if (driver.target === "web_new") {
+      // Intended (NEWFRONT-421): the rejection stays inline, the typed
+      // token survives and the card stays disconnected.
+      await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toContain("Connection failed");
+      expect(await driver.wsSettingsGithubTokenValue()).toBe(bogus);
+      expect(await driver.wsSettingsGithubConnected()).toBe(false);
+      expect(await driver.wsSettingsGithubDisconnectVisible()).toBe(false);
+      expect((await serverGithubStatus(seed.workspaceSlug, session)).connected).toBe(false);
+      return;
+    }
     // Settle on the reloaded card: status resolved past Loading with the
     // token field back and empty.
     await expect
@@ -207,6 +217,17 @@ test(
     await driver.wsSettingsGitlabTokenFill(bogus);
     expect(await driver.wsSettingsGitlabConnectEnabled()).toBe(true);
     await driver.wsSettingsGitlabConnect();
+    if (driver.target === "web_new") {
+      // Intended (NEWFRONT-421): inline failure, typed token kept and no
+      // account registered.
+      await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toContain("Connection failed");
+      expect(await driver.wsSettingsGitlabTokenValue()).toBe(bogus);
+      expect(await driver.wsSettingsGitlabConnected()).toBe(false);
+      expect(await driver.wsSettingsGitlabDisconnectVisible()).toBe(false);
+      const registered = await serverGitAccounts(seed.workspaceSlug, session);
+      expect(registered.filter((row) => row.provider === "gitlab" && row.status !== "revoked")).toHaveLength(0);
+      return;
+    }
     // Settle on the reloaded card: status resolved past Loading with the
     // token field back and empty.
     await expect

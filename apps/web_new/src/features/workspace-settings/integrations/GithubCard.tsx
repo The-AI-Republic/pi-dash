@@ -15,7 +15,7 @@ import { canDisconnectGithub, canSubmitToken, githubIdentity } from "./integrati
 import { ProviderCard } from "./ProviderCard.js";
 
 export const GITHUB_EXPLAINER =
-  "Connect a fine-grained personal access token with issue read access. Pi Dash mirrors GitHub issues into your projects.";
+  "Connect a fine-grained PAT (personal access token) with issue read access. Pi Dash mirrors GitHub issues into your projects.";
 export const GITHUB_TOKEN_LABEL = "Personal access token";
 export const GITHUB_TOKEN_PLACEHOLDER = "github_pat_...";
 export const GITHUB_HELP_HREF = "https://github.com/settings/tokens?type=beta";

@@ -148,10 +148,12 @@ describe("integrations page", () => {
   it("shows the banner heading and both provider cards for an admin", async () => {
     createAppClient("https://api.test", backend().transport);
     renderPage();
-    expect(screen.getByRole("heading", { name: INTEGRATIONS_HEADING })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: INTEGRATIONS_HEADING, level: 2 })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: INTEGRATIONS_HEADING, level: 1 })).not.toBeInTheDocument();
     expect(screen.getByText(INTEGRATIONS_BANNER)).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "GitHub" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "GitLab" })).toBeInTheDocument();
+    expect(await screen.findByText(/fine-grained PAT/)).toBeInTheDocument();
   });
 
   it("refuses a member with the shared not-authorized view and no cards", () => {
@@ -174,7 +176,8 @@ describe("integrations page", () => {
     permissions.current = { isLoading: true, isAdmin: false, isMember: false, canEdit: false, role: null };
     createAppClient("https://api.test", backend().transport);
     renderPage();
-    expect(screen.getByRole("heading", { name: INTEGRATIONS_HEADING })).toBeInTheDocument();
+    expect(screen.getByTestId("workspace-settings-integrations-pending")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: INTEGRATIONS_HEADING, level: 2 })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "GitLab" })).not.toBeInTheDocument();
     expect(screen.queryByText(/not authorized/i)).not.toBeInTheDocument();
   });

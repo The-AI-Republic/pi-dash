@@ -63,6 +63,14 @@ describe("SettingsShell", () => {
     expect(screen.getByTestId("workspace-settings-mobile-crumb")).toHaveTextContent("Webhook");
   });
 
+  it("heads the integrations frame with the section name, not the sidebar suffix", () => {
+    renderShell({ section: "integrations" });
+    expect(document.title).toBe("Acme - Integrations");
+    expect(screen.getByRole("heading", { name: "Integrations", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Integrations (github)", level: 1 })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Integrations (github)" })).toHaveAttribute("aria-current", "page");
+  });
+
   it("renders the section body inside the frame", () => {
     renderShell({ body: <p>roster</p> });
     expect(screen.getByText("roster")).toBeInTheDocument();

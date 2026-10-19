@@ -4,9 +4,10 @@
 // Workspace integrations page (parity/specs/workspace-settings.md §15–§17,
 // WSET-016–018). Admin-only: the settings layout already refuses members
 // and guests, and this page repeats the check so it stays correct when
-// mounted on its own. Admins get an informational banner above one card
-// per supported git provider; each card owns its own read, its own writes
-// and its own notices.
+// mounted on its own. The shell owns the section frame; this page renders
+// the informational banner naming the section above one card per
+// supported git provider, and each card owns its own read, its own
+// writes and its own notices.
 
 import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
@@ -15,7 +16,6 @@ import { getAppClient } from "../../../core/api/client.js";
 import { usePermissions } from "../../../core/session/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { SettingsNotAuthorized } from "../components/SettingsNotAuthorized.js";
-import { SettingsPageFrame } from "../components/SettingsPageFrame.js";
 import {
   GITHUB_CONNECTED_NOTICE,
   GITHUB_CONNECTED_NOTICE_BODY,
@@ -70,11 +70,24 @@ export function IntegrationsPage({ workspaceSlug }: IntegrationsPageProps): Reac
 
 function IntegrationsPending(): React.ReactElement {
   return (
-    <SettingsPageFrame title={INTEGRATIONS_HEADING} description={INTEGRATIONS_BANNER}>
-      <div data-testid="workspace-settings-integrations-pending" aria-busy="true">
-        <ProviderCard provider="github" name={GITHUB_PROVIDER_NAME} status={GITHUB_LOADING_STATUS} />
-      </div>
-    </SettingsPageFrame>
+    <div
+      data-testid="workspace-settings-integrations-pending"
+      aria-busy="true"
+      className="flex flex-col gap-(--space-6)"
+    >
+      <IntegrationsBanner />
+      <ProviderCard provider="github" name={GITHUB_PROVIDER_NAME} status={GITHUB_LOADING_STATUS} />
+    </div>
+  );
+}
+
+/** The informational banner: the section heading and what connecting does. */
+function IntegrationsBanner(): React.ReactElement {
+  return (
+    <header className="flex flex-col gap-(--space-1)">
+      <h2 className="text-h3 text-(--text)">{INTEGRATIONS_HEADING}</h2>
+      <p className="text-body max-w-xl text-(--text-muted)">{INTEGRATIONS_BANNER}</p>
+    </header>
   );
 }
 
@@ -143,35 +156,34 @@ export function IntegrationsScreen({ workspaceSlug }: IntegrationsPageProps): Re
   );
 
   return (
-    <SettingsPageFrame title={INTEGRATIONS_HEADING} description={INTEGRATIONS_BANNER}>
-      <div data-testid="workspace-settings-integrations" className="flex max-w-3xl flex-col gap-(--space-6)">
-        <div className="flex flex-col gap-(--space-4)">
-          <GithubCard
-            status={github.data}
-            statusPending={github.isPending}
-            connectPending={connectGithub.isPending}
-            disconnectPending={disconnectGithub.isPending}
-            onConnect={connectGithubToken}
-            onDisconnect={disconnectGithubConnection}
-            readFailed={github.isError}
-            onRetry={() => {
-              void github.refetch();
-            }}
-          />
-          <GitlabCard
-            accounts={accounts.data?.accounts}
-            accountsPending={accounts.isPending}
-            connectPending={registerGitlab.isPending}
-            disconnectPending={disconnectGitlab.isPending}
-            onConnect={connectGitlabAccount}
-            onDisconnect={disconnectGitlabAccount}
-            readFailed={accounts.isError}
-            onRetry={() => {
-              void accounts.refetch();
-            }}
-          />
-        </div>
+    <div data-testid="workspace-settings-integrations" className="flex max-w-3xl flex-col gap-(--space-6)">
+      <IntegrationsBanner />
+      <div className="flex flex-col gap-(--space-4)">
+        <GithubCard
+          status={github.data}
+          statusPending={github.isPending}
+          connectPending={connectGithub.isPending}
+          disconnectPending={disconnectGithub.isPending}
+          onConnect={connectGithubToken}
+          onDisconnect={disconnectGithubConnection}
+          readFailed={github.isError}
+          onRetry={() => {
+            void github.refetch();
+          }}
+        />
+        <GitlabCard
+          accounts={accounts.data?.accounts}
+          accountsPending={accounts.isPending}
+          connectPending={registerGitlab.isPending}
+          disconnectPending={disconnectGitlab.isPending}
+          onConnect={connectGitlabAccount}
+          onDisconnect={disconnectGitlabAccount}
+          readFailed={accounts.isError}
+          onRetry={() => {
+            void accounts.refetch();
+          }}
+        />
       </div>
-    </SettingsPageFrame>
+    </div>
   );
 }
