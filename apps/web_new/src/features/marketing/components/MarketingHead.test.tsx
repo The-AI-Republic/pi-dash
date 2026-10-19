@@ -35,7 +35,7 @@ describe("MarketingHead", () => {
     );
     expect(meta('meta[name="description"]')?.length).toBeGreaterThan(10);
     expect(meta('meta[property="og:url"]')).toBe("https://pidash.airepublic.com/pricing");
-    expect(meta('meta[property="og:image"]')).toBe(SOCIAL_PREVIEW_PATH);
+    expect(meta('meta[property="og:image"]')).toBe(`https://pidash.airepublic.com${SOCIAL_PREVIEW_PATH}`);
     expect(meta('meta[property="og:image:width"]')).toBe("1200");
     expect(meta('meta[property="og:image:height"]')).toBe("630");
     expect(meta('meta[property="og:image:alt"]')?.length).toBeGreaterThan(0);
@@ -54,6 +54,7 @@ describe("MarketingHead", () => {
     const byKey = (key: string): string | undefined =>
       tags.find((tag) => tag.attributes["property"] === key || tag.attributes["name"] === key)?.attributes["content"];
     expect(byKey("og:url")).toBe("https://pidash.airepublic.com/docs");
+    expect(byKey("og:image")).toBe("https://pidash.airepublic.com/social-card.svg");
     expect(byKey("og:title")).toBe(meta.title);
     expect(byKey("description")).toBe(meta.description);
     expect(tags.filter((tag) => tag.attributes["rel"] === "canonical")).toHaveLength(1);
@@ -64,6 +65,15 @@ describe("MarketingHead", () => {
     render(<MarketingHead path="/pricing" />);
     expect(document.querySelector('link[rel="canonical"]')?.getAttribute("href")).toBe("https://example.org/pricing");
     expect(meta('meta[property="og:url"]')).toBe("https://example.org/pricing");
+    expect(meta('meta[property="og:image"]')).toBe("https://example.org/social-card.svg");
+  });
+
+  it("reports one twitter:card and one canonical across a remount", () => {
+    const first = render(<MarketingHead path="/docs" />);
+    first.unmount();
+    render(<MarketingHead path="/docs" />);
+    expect(document.querySelectorAll('meta[name="twitter:card"]')).toHaveLength(1);
+    expect(document.querySelectorAll('link[rel="canonical"]')).toHaveLength(1);
   });
 
   it("strips a trailing slash from the origin when building the canonical address", () => {

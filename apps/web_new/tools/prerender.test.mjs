@@ -84,6 +84,12 @@ describe("head injection", () => {
     expect(html).toContain('<meta name="description" content="A &quot;quoted&quot; &lt;description&gt;" />');
     expect(html.match(/og:title/g)).toHaveLength(1);
     expect(html.match(/name="description"/g)).toHaveLength(1);
+    // The shell ships its own twitter:card; replacing, not appending to it,
+    // keeps the served document identical to what the route head emits
+    // after hydration (CLOUD-005).
+    expect(html.match(/name="twitter:card"/g)).toHaveLength(1);
+    expect(html.match(/name="twitter:site"/g)).toHaveLength(1);
+    expect(html).toContain('<meta property="og:image" content="https://site.test/social-card.svg" />');
   });
 });
 
@@ -199,6 +205,15 @@ describe("site output", () => {
     expect(readFileSync(join(outDir, "__spa-fallback.html"), "utf8")).toContain(
       '<meta name="robots" content="noindex, nofollow" />'
     );
+    // Each emitted document carries one copy of every tag the hydrated
+    // route also writes, so served and client head agree (CLOUD-005).
+    for (const path of ["home/index.html", "docs/index.html", "downloads/index.html", "pricing/index.html"]) {
+      const html = readFileSync(join(outDir, path), "utf8");
+      expect(html.match(/name="twitter:card"/g)).toHaveLength(1);
+      expect(html.match(/name="twitter:site"/g)).toHaveLength(1);
+      expect(html.match(/property="og:image"/g)).toHaveLength(1);
+      expect(html.match(/rel="canonical"/g)).toHaveLength(1);
+    }
   });
 
   it("takes the page canonical from the rendered page and the preview image from the site origin", () => {

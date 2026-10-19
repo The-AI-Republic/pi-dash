@@ -77,6 +77,7 @@ export function injectHead(shell, page, siteOrigin) {
     .replace(/<title>[^<]*<\/title>/, `<title>${escapeHtml(page.meta.title)}</title>`)
     .replace(/\s*<meta name="description"[^>]*>/g, "")
     .replace(/\s*<meta property="og:[^"]+"[^>]*>/g, "")
+    .replace(/\s*<meta name="twitter:[^"]+"[^>]*>/g, "")
     .replace(/\s*<link rel="canonical"[^>]*>/g, "")
     .replace(/(\s*)<\/head>/, `\n    ${tags}$1</head>`);
 }

@@ -10,7 +10,7 @@ export function MarketingBackdrop(): React.ReactElement {
     <svg
       aria-hidden="true"
       data-marketing-backdrop=""
-      className="pointer-events-none fixed inset-0 -z-10 h-full w-full opacity-[0.06]"
+      className="pointer-events-none absolute inset-0 z-0 h-full w-full text-(--text) opacity-[0.06]"
       viewBox="0 0 1200 800"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"

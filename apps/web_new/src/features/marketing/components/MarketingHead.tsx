@@ -25,8 +25,12 @@ export function canonicalUrl(path: string, origin: string = bakedPublicSiteOrigi
 }
 
 /** Crawl, canonical and social tags for one address. */
-export function marketingTags(path: string, meta: MarketingPageMeta): HeadTag[] {
-  const canonical = canonicalUrl(path);
+export function marketingTags(
+  path: string,
+  meta: MarketingPageMeta,
+  origin: string = bakedPublicSiteOrigin()
+): HeadTag[] {
+  const canonical = canonicalUrl(path, origin);
   const metaTag = (attributes: Record<string, string>): HeadTag => ({ tag: "meta", attributes });
   return [
     { tag: "link", attributes: { rel: "canonical", href: canonical } },
@@ -35,7 +39,7 @@ export function marketingTags(path: string, meta: MarketingPageMeta): HeadTag[] 
     metaTag({ property: "og:title", content: meta.title }),
     metaTag({ property: "og:description", content: meta.description }),
     metaTag({ property: "og:url", content: canonical }),
-    metaTag({ property: "og:image", content: SOCIAL_PREVIEW_PATH }),
+    metaTag({ property: "og:image", content: canonicalUrl(SOCIAL_PREVIEW_PATH, origin) }),
     metaTag({ property: "og:image:width", content: "1200" }),
     metaTag({ property: "og:image:height", content: "630" }),
     metaTag({ property: "og:image:alt", content: SOCIAL_PREVIEW_ALT }),

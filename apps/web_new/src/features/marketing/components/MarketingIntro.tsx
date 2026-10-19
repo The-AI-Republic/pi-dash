@@ -25,7 +25,7 @@ export function MarketingIntro({ path }: MarketingIntroProps): React.ReactElemen
       <div className="flex flex-wrap gap-(--space-4)">
         <a
           href={SIGN_IN_PATH}
-          className="text-body inline-flex items-center rounded-(--radius-control) bg-(--accent) px-(--space-6) py-(--space-3) font-medium text-(--accent-contrast) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-2 focus-visible:outline-none"
+          className="text-body inline-flex items-center rounded-(--radius-control) bg-(--accent) px-(--space-6) py-(--space-3) font-medium text-(--on-accent) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-2 focus-visible:outline-none"
         >
           Sign in
         </a>

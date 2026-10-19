@@ -48,7 +48,7 @@ function HeroSection(): React.ReactElement {
               href={action.href}
               className={
                 action.emphasis === "primary"
-                  ? "text-body inline-flex items-center rounded-(--radius-control) bg-(--accent) px-(--space-6) py-(--space-3) font-medium text-(--accent-contrast) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-2 focus-visible:outline-none"
+                  ? "text-body inline-flex items-center rounded-(--radius-control) bg-(--accent) px-(--space-6) py-(--space-3) font-medium text-(--on-accent) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-2 focus-visible:outline-none"
                   : "text-body inline-flex items-center rounded-(--radius-control) border border-(--border) px-(--space-6) py-(--space-3) font-medium text-(--text) hover:bg-(--subtle) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-2 focus-visible:outline-none"
               }
             >
@@ -75,7 +75,7 @@ function RunPanel(): React.ReactElement {
       aria-hidden="false"
       role="img"
       aria-label="Illustration of an agent run driving an issue through validation"
-      className="shadow-sm rounded-(--radius-card) border border-(--border) bg-(--surface) p-(--space-5)"
+      className="shadow-sm rounded-(--radius-card) border border-(--border) bg-(--surface) p-(--space-6)"
     >
       <div className="flex items-center gap-(--space-2) pb-(--space-4)">
         <span aria-hidden="true" className="size-2 rounded-full bg-(--accent)" />
@@ -132,7 +132,7 @@ function StepsSection(): React.ReactElement {
           {DELIVERY_STEPS.map((step, index) => (
             <li
               key={step.title}
-              className="flex flex-col gap-(--space-2) rounded-(--radius-card) border border-(--border) p-(--space-5)"
+              className="flex flex-col gap-(--space-2) rounded-(--radius-card) border border-(--border) p-(--space-6)"
             >
               <span className="text-caption font-medium text-(--accent)">Step {index + 1}</span>
               <span className="text-body font-medium text-(--text)">{step.title}</span>
@@ -181,7 +181,7 @@ function OpenSourceSection(): React.ReactElement {
           href={REPOSITORY_URL}
           target="_blank"
           rel="noreferrer noopener"
-          className="text-body inline-flex shrink-0 items-center rounded-(--radius-control) border border-(--border) px-(--space-5) py-(--space-3) font-medium text-(--text) hover:bg-(--subtle) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-2 focus-visible:outline-none"
+          className="text-body inline-flex shrink-0 items-center rounded-(--radius-control) border border-(--border) px-(--space-6) py-(--space-3) font-medium text-(--text) hover:bg-(--subtle) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-2 focus-visible:outline-none"
         >
           View the repository
         </a>
@@ -193,14 +193,14 @@ function OpenSourceSection(): React.ReactElement {
 function ClosingSection(): React.ReactElement {
   return (
     <section aria-labelledby="closing-heading" className="border-t border-(--border) py-(--space-12)">
-      <div className="flex flex-col items-center gap-(--space-5) text-center">
+      <div className="flex flex-col items-center gap-(--space-6) text-center">
         <SectionHeading>Give the next issue to an agent</SectionHeading>
         <p className="text-body max-w-xl text-(--text-muted)">
           Start with the free tier, connect a runner, and watch the first issue go from scoped to done.
         </p>
         <a
           href={SIGN_IN_PATH}
-          className="text-body inline-flex items-center rounded-(--radius-control) bg-(--accent) px-(--space-6) py-(--space-3) font-medium text-(--accent-contrast) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-2 focus-visible:outline-none"
+          className="text-body inline-flex items-center rounded-(--radius-control) bg-(--accent) px-(--space-6) py-(--space-3) font-medium text-(--on-accent) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-2 focus-visible:outline-none"
         >
           Start with Pi Dash
         </a>

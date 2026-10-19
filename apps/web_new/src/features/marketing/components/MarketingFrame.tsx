@@ -22,10 +22,10 @@ export interface MarketingFrameProps {
 
 export function MarketingFrame({ children }: MarketingFrameProps): React.ReactElement {
   return (
-    <div className="relative flex min-h-screen flex-col bg-(--bg) text-(--text)">
+    <div className="relative isolate flex min-h-screen flex-col bg-(--bg) text-(--text)">
       <MarketingBackdrop />
       <MarketingHeader />
-      <main className="relative mx-auto w-full max-w-6xl flex-1 px-(--space-6) py-(--space-10)">{children}</main>
+      <main className="relative z-10 mx-auto w-full max-w-6xl flex-1 px-(--space-6) py-(--space-10)">{children}</main>
       <MarketingFooter />
     </div>
   );
@@ -33,7 +33,7 @@ export function MarketingFrame({ children }: MarketingFrameProps): React.ReactEl
 
 export function MarketingHeader(): React.ReactElement {
   return (
-    <header className="relative border-b border-(--border) bg-(--bg)/80 backdrop-blur">
+    <header className="relative z-10 border-b border-(--border) bg-(--bg)/80 backdrop-blur">
       <div className="mx-auto flex w-full max-w-6xl items-center gap-(--space-6) px-(--space-6) py-(--space-4)">
         <a
           href="/home"
@@ -42,13 +42,13 @@ export function MarketingHeader(): React.ReactElement {
         >
           <span
             aria-hidden="true"
-            className="text-caption flex size-7 items-center justify-center rounded-full bg-(--accent) font-bold text-(--accent-contrast)"
+            className="text-caption flex size-7 items-center justify-center rounded-full bg-(--accent) font-bold text-(--on-accent)"
           >
             π
           </span>
           Pi Dash
         </a>
-        <nav aria-label="Primary" className="ml-auto flex min-w-0 items-center gap-(--space-5)">
+        <nav aria-label="Primary" className="ml-auto flex min-w-0 items-center gap-(--space-6)">
           {HEADER_LINKS.map((link) => (
             <HeaderLink key={link.label} link={link} />
           ))}
@@ -90,13 +90,13 @@ function HeaderLink({ link }: { link: MarketingLink }): React.ReactElement {
 
 export function MarketingFooter(): React.ReactElement {
   return (
-    <footer className="relative border-t border-(--border) bg-(--bg)">
+    <footer className="relative z-10 border-t border-(--border) bg-(--bg)">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-(--space-6) px-(--space-6) py-(--space-8) sm:flex-row sm:items-start sm:justify-between">
         <div className="flex flex-col gap-(--space-2)">
           <span className="text-body flex items-center gap-(--space-2) font-semibold text-(--text)">
             <span
               aria-hidden="true"
-              className="text-caption flex size-6 items-center justify-center rounded-full bg-(--accent) font-bold text-(--accent-contrast)"
+              className="text-caption flex size-6 items-center justify-center rounded-full bg-(--accent) font-bold text-(--on-accent)"
             >
               π
             </span>
