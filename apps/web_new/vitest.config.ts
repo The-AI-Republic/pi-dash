@@ -5,6 +5,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
+import { FULL_RUN_TEST_TIMEOUT_MS } from "./src/testing/testBudget";
+
 const here = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
@@ -22,6 +24,13 @@ export default defineConfig({
     // `// @vitest-environment jsdom` pragma on their first line.
     environment: "node",
     setupFiles: ["./src/test-setup.ts"],
+    // A full run is ~7 000 tests; on a busy host the tail of the per-test
+    // distribution is queueing time, not test work (measured p99.9 8.4 s at
+    // load 163). Keep the ceiling above that tail but below a minute so a
+    // genuinely hung test still fails. See src/testing/testBudget.ts and
+    // RUNBOOK.md ("Testing").
+    testTimeout: FULL_RUN_TEST_TIMEOUT_MS,
+    hookTimeout: FULL_RUN_TEST_TIMEOUT_MS,
     // Feature tests live under src. Named checks/ files only: other checks
     // carry node:test self-tests (e.g. coexistence-routes, run via
     // test:coexistence) that vitest must not sweep up. The parity helper
