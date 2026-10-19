@@ -113,15 +113,20 @@ describe("ProviderForm", () => {
     expect(props.onChange).toHaveBeenLastCalledWith(expect.objectContaining({ key: "k" }));
   });
 
-  it("keeps save inert until a key is typed, and offers remove only for a stored one", () => {
+  it("keeps save live over a stored key and offers remove only for one", () => {
     renderForm(
       { provider: "openai_compatible", baseUrl: "", model: "m", key: "" },
       { config: config({ has_api_key: true }) }
     );
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Test connection" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
     expect(screen.getByLabelText("API key")).toHaveAttribute("placeholder", SAVED_KEY_PLACEHOLDER);
+  });
+
+  it("refuses a first save without a typed key", () => {
+    renderForm({ provider: "openai_compatible", baseUrl: "u", model: "m", key: "  " });
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 
   it("hides remove and disables test while nothing is stored", () => {

@@ -23,7 +23,7 @@ import {
   useToggleToolServer,
 } from "../api/mutations.js";
 import { useAssistantLlm, useAssistantServers, useAssistantVoice } from "../api/queries.js";
-import { endpointForSave } from "../lib/rules.js";
+import { endpointForSave, keyForSave } from "../lib/rules.js";
 import { AssistantSectionsSkeleton } from "./AssistantSectionsSkeleton.js";
 import { emptyProviderForm, providerFormFrom, ProviderForm, type ProviderFormValues } from "./ProviderForm.js";
 import { emptyToolServerDraft, ToolServersForm, type ToolServerDraft } from "./ToolServersForm.js";
@@ -75,12 +75,13 @@ export function AssistantSettingsPage(): React.ReactElement {
 
   const saveProvider = (): void => {
     const baseUrl = endpointForSave(providerForm.provider, providerForm.baseUrl);
+    const apiKey = keyForSave(providerForm.key);
     saveLlm.mutate(
       {
         provider_kind: providerForm.provider,
         ...(baseUrl === undefined ? {} : { base_url: baseUrl }),
         model_name: providerForm.model.trim(),
-        api_key: providerForm.key.trim(),
+        ...(apiKey === undefined ? {} : { api_key: apiKey }),
       },
       {
         onSuccess: () => setProviderForm((previous) => ({ ...previous, key: "" })),
@@ -89,11 +90,12 @@ export function AssistantSettingsPage(): React.ReactElement {
   };
 
   const saveVoiceConfig = (): void => {
+    const apiKey = keyForSave(voiceForm.key);
     saveVoice.mutate(
       {
         base_url: voiceForm.baseUrl.trim(),
         model_name: voiceForm.model.trim(),
-        api_key: voiceForm.key.trim(),
+        ...(apiKey === undefined ? {} : { api_key: apiKey }),
       },
       {
         onSuccess: () => setVoiceForm((previous) => ({ ...previous, key: "" })),

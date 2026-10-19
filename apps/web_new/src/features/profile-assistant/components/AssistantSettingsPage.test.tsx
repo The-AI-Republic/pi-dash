@@ -140,6 +140,32 @@ describe("AssistantSettingsPage", () => {
     await waitFor(() => expect(key).toHaveValue(""));
   });
 
+  it("keeps the stored key when the field is blank, posting no api_key", async () => {
+    const user = userEvent.setup();
+    render(<AssistantSettingsPage />);
+    await user.clear(screen.getAllByLabelText("Model")[0]!);
+    await user.type(screen.getAllByLabelText("Model")[0]!, "model-b");
+    expect(screen.getAllByRole("button", { name: "Save" })[0]).toBeEnabled();
+    await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
+    await user.click(screen.getAllByRole("button", { name: "Save" })[0]!);
+    expect(harness.saveLlm.mutate.mock.calls[0]![0]).toEqual({
+      provider_kind: "anthropic",
+      model_name: "model-b",
+    });
+    expect(screen.getAllByLabelText("API key")[0]).toHaveValue("");
+  });
+
+  it("keeps the stored voice key when the field is blank, posting no api_key", async () => {
+    const user = userEvent.setup();
+    harness.voice = { data: { ...VOICE, has_api_key: true } };
+    render(<AssistantSettingsPage />);
+    await user.click(screen.getAllByRole("button", { name: "Save" })[1]!);
+    expect(harness.saveVoice.mutate.mock.calls[0]![0]).toEqual({
+      base_url: "https://stt.test/v1",
+      model_name: "whisper-1",
+    });
+  });
+
   it("omits the endpoint for the named provider", async () => {
     const user = userEvent.setup();
     render(<AssistantSettingsPage />);

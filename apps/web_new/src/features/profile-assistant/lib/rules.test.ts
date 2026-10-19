@@ -17,6 +17,7 @@ import {
   endpointForSave,
   endpointVisible,
   keyPlaceholder,
+  keyForSave,
   lastVerifiedLine,
   llmCanSave,
   providerOf,
@@ -43,17 +44,29 @@ describe("provider form rules", () => {
     expect(endpointForSave("anthropic", "http://x")).toBeUndefined();
   });
 
-  it("gates save on a model and a typed key", () => {
-    expect(llmCanSave({ model: " m ", key: " k " })).toBe(true);
-    expect(llmCanSave({ model: "m", key: "  " })).toBe(false);
-    expect(llmCanSave({ model: "", key: "k" })).toBe(false);
+  it("gates the save on a model and a typed or stored key", () => {
+    expect(llmCanSave({ model: " m ", key: " k ", hasKey: false })).toBe(true);
+    expect(llmCanSave({ model: "m", key: "  ", hasKey: false })).toBe(false);
+    expect(llmCanSave({ model: "", key: "k", hasKey: true })).toBe(false);
   });
 
-  it("gates the voice save on endpoint, model and key", () => {
-    expect(sttCanSave({ baseUrl: "u", model: "m", key: "k" })).toBe(true);
-    expect(sttCanSave({ baseUrl: "", model: "m", key: "k" })).toBe(false);
-    expect(sttCanSave({ baseUrl: "u", model: " ", key: "k" })).toBe(false);
-    expect(sttCanSave({ baseUrl: "u", model: "m", key: "" })).toBe(false);
+  it("saves over a stored key with the field blank, keeping the secret", () => {
+    expect(llmCanSave({ model: "m", key: "", hasKey: true })).toBe(true);
+    expect(llmCanSave({ model: "m", key: "  ", hasKey: true })).toBe(true);
+    expect(sttCanSave({ baseUrl: "u", model: "m", key: "", hasKey: true })).toBe(true);
+  });
+
+  it("gates the voice save on endpoint, model and a typed or stored key", () => {
+    expect(sttCanSave({ baseUrl: "u", model: "m", key: "k", hasKey: false })).toBe(true);
+    expect(sttCanSave({ baseUrl: "", model: "m", key: "k", hasKey: true })).toBe(false);
+    expect(sttCanSave({ baseUrl: "u", model: " ", key: "k", hasKey: true })).toBe(false);
+    expect(sttCanSave({ baseUrl: "u", model: "m", key: "", hasKey: false })).toBe(false);
+  });
+
+  it("posts the typed key only, so a blank field keeps the saved one", () => {
+    expect(keyForSave("  secret  ")).toBe("secret");
+    expect(keyForSave("")).toBeUndefined();
+    expect(keyForSave("   ")).toBeUndefined();
   });
 
   it("tests only once a key is stored, and adds only with name and URL", () => {

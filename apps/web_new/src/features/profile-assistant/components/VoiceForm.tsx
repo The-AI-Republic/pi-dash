@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // The voice-dictation form (parity/specs/profile.md §10, PROF-022). It
-// mirrors the model form without a provider selector: the endpoint, the
-// model and the key are all required, a stored key only ever shows its
+// mirrors the model form without a provider selector: the endpoint and
+// model are required along with a credential (typed, or already stored and
+// kept by leaving the field blank), a stored key only ever shows its
 // placeholder, and testing waits for a saved key. When the instance kill
 // switch is off the section narrows: no form at all, and the remove
 // control only while a key is still stored.
@@ -118,7 +119,12 @@ export function VoiceForm({
         />
 
         <ActionRow>
-          <Button variant="primary" loading={saving} disabled={saving || !sttCanSave(values)} onClick={onSave}>
+          <Button
+            variant="primary"
+            loading={saving}
+            disabled={saving || !sttCanSave({ ...values, hasKey })}
+            onClick={onSave}
+          >
             {SAVE_LABEL}
           </Button>
           <Button loading={testing} disabled={testing || !canTest(config)} onClick={onTest}>

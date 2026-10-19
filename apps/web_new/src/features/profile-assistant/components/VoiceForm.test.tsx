@@ -64,15 +64,22 @@ describe("VoiceForm", () => {
     expect(screen.getByPlaceholderText(STT_KEY_PLACEHOLDER_EMPTY)).toBeInTheDocument();
   });
 
-  it("gates save on all three fields and test on a stored key", () => {
+  it("gates save on endpoint, model and a typed or stored key", () => {
     renderForm({ baseUrl: "", model: "whisper-1", key: "k" });
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Test connection" })).toBeDisabled();
     renderForm({ baseUrl: "u", model: "", key: "k" });
     expect(screen.getAllByRole("button", { name: "Save" })[1]).toBeDisabled();
+    renderForm({ baseUrl: "u", model: "m", key: "" });
+    expect(screen.getAllByRole("button", { name: "Save" })[2]).toBeDisabled();
     renderForm({ baseUrl: "u", model: "m", key: "k" }, { config: config({ has_api_key: true }) });
-    expect(screen.getAllByRole("button", { name: "Test connection" })[2]).toBeEnabled();
-    expect(screen.getAllByRole("button", { name: "Save" })[2]).toBeEnabled();
+    expect(screen.getAllByRole("button", { name: "Test connection" })[3]).toBeEnabled();
+    expect(screen.getAllByRole("button", { name: "Save" })[3]).toBeEnabled();
+  });
+
+  it("saves with the key left blank while one is stored", () => {
+    renderForm({ baseUrl: "u", model: "m", key: "" }, { config: config({ has_api_key: true }) });
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
   });
 
   it("swaps the key placeholder once a key is stored and offers removal", () => {

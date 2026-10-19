@@ -35,14 +35,24 @@ export function endpointForSave(provider: string, baseUrl: string): string | und
   return endpointVisible(provider) ? baseUrl.trim() : undefined;
 }
 
-/** The language-model save needs a key typed; an empty model or key refuses too. */
-export function llmCanSave(state: { model: string; key: string }): boolean {
-  return state.model.trim() !== "" && state.key.trim() !== "";
+/**
+ * The language-model save needs a model and a credential to land: a typed
+ * key, or the one already stored (an omitted key keeps it). It never
+ * creates a config without a secret.
+ */
+export function llmCanSave(state: { model: string; key: string; hasKey: boolean }): boolean {
+  return state.model.trim() !== "" && (state.key.trim() !== "" || state.hasKey);
 }
 
-/** The voice save needs the endpoint, the model and the key. */
-export function sttCanSave(state: { baseUrl: string; model: string; key: string }): boolean {
-  return state.baseUrl.trim() !== "" && state.model.trim() !== "" && state.key.trim() !== "";
+/** The voice save mirrors that gate over its endpoint and model. */
+export function sttCanSave(state: { baseUrl: string; model: string; key: string; hasKey: boolean }): boolean {
+  return state.baseUrl.trim() !== "" && state.model.trim() !== "" && (state.key.trim() !== "" || state.hasKey);
+}
+
+/** The key a save posts: the typed value, or nothing to keep the stored one. */
+export function keyForSave(key: string): string | undefined {
+  const typed = key.trim();
+  return typed === "" ? undefined : typed;
 }
 
 /** Test dials the stored key, so it waits for one. */

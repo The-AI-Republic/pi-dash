@@ -5,8 +5,9 @@
 // provider selector switches between a URL-kind endpoint and a named
 // provider that carries its own host, the model accepts any name, and the
 // key field never shows a stored secret — only a placeholder that says a
-// key exists. Save waits for a typed key, so a form can never overwrite a
-// stored credential with nothing.
+// key exists. Save waits for a model plus a credential: a typed key, or a
+// stored one where a blank field simply keeps it, so a save can never
+// create a config without a secret.
 
 import type { LlmConfig } from "@pidash/api-client";
 import { Button } from "@pidash/kit";
@@ -134,7 +135,12 @@ export function ProviderForm({
         />
 
         <ActionRow>
-          <Button variant="primary" loading={saving} disabled={saving || !llmCanSave(values)} onClick={onSave}>
+          <Button
+            variant="primary"
+            loading={saving}
+            disabled={saving || !llmCanSave({ ...values, hasKey })}
+            onClick={onSave}
+          >
             {SAVE_LABEL}
           </Button>
           <Button loading={testing} disabled={testing || !canTest(config)} onClick={onTest}>
