@@ -448,7 +448,9 @@ describe("SidebarProjectsGroup overflow toggle (SHELL-052)", () => {
     await waitFor(() => expect(rowNames()).toEqual(["Atlas"]));
     fireEvent.click(screen.getByTestId("projects-overflow-toggle"));
     expect(screen.getByTestId("projects-overflow-toggle")).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByTestId("projects-overflow-panel")).toBeInTheDocument();
+    // The panel rides its own chunk (size gate): the toggle flips at once
+    // and the slide-over arrives one microtask later.
+    expect(await screen.findByTestId("projects-overflow-panel")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("projects-overflow-toggle"));
     expect(screen.queryByTestId("projects-overflow-panel")).not.toBeInTheDocument();
   });
