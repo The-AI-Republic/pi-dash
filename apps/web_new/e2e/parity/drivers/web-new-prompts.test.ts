@@ -26,6 +26,12 @@ interface FakeLocatorOptions {
   textLocator?: (text: string | RegExp, options?: { exact?: boolean }) => FakeLocator;
   testIdLocator?: (testId: string) => FakeLocator;
   filtered?: FakeLocator;
+  /** Make reads reject, as a detached or removed element would. */
+  failing?: boolean;
+  /** Report the element as present while its reads reject. */
+  counted?: number;
+  /** Make the enabled read reject, as a detached control would. */
+  isEnabledRejects?: boolean;
 }
 
 class FakeLocator {
@@ -41,19 +47,26 @@ class FakeLocator {
   }
 
   count(): Promise<number> {
-    return Promise.resolve(this.options.items?.length ?? this.options.count ?? 1);
+    return Promise.resolve(this.options.items?.length ?? this.options.counted ?? this.options.count ?? 1);
   }
 
   isVisible(): Promise<boolean> {
-    return Promise.resolve(this.options.visible ?? (this.options.count ?? 1) > 0);
+    if (this.options.failing === true && this.options.visible === undefined) {
+      return Promise.reject(new Error("detached"));
+    }
+    return Promise.resolve(this.options.visible ?? (this.options.counted ?? this.options.count ?? 1) > 0);
   }
 
   innerText(): Promise<string> {
-    return Promise.resolve(this.options.text ?? "");
+    return this.options.failing === true
+      ? Promise.reject(new Error("detached"))
+      : Promise.resolve(this.options.text ?? "");
   }
 
   getAttribute(name: string): Promise<string | null> {
-    return Promise.resolve(this.options.attributes?.[name] ?? null);
+    return this.options.failing === true
+      ? Promise.reject(new Error("detached"))
+      : Promise.resolve(this.options.attributes?.[name] ?? null);
   }
 
   hrefKey(): string | null {
@@ -75,6 +88,7 @@ class FakeLocator {
   }
 
   isEnabled(): Promise<boolean> {
+    if (this.options.isEnabledRejects === true) return Promise.reject(new Error("detached"));
     return Promise.resolve(this.options.enabled ?? true);
   }
 
@@ -655,11 +669,13 @@ interface ReceiptCardOptions {
   items?: { num: string; title: string; key: string; badge: string }[];
   previewHeading?: boolean;
   previewEnabled?: boolean;
+  submitFails?: boolean;
   previewError?: string | null;
   previewResult?: string | null;
 }
 
 interface ReceiptCardDouble {
+  kind: string;
   card: FakeLocator;
   header: FakeLocator;
 }
@@ -693,7 +709,10 @@ function receiptCard(options: ReceiptCardOptions): ReceiptCardDouble {
       })
   );
   const textbox = new FakeLocator();
-  const submit = new FakeLocator({ enabled: options.previewEnabled ?? false });
+  const submit = new FakeLocator({
+    enabled: options.previewEnabled ?? false,
+    isEnabledRejects: options.submitFails ?? false,
+  });
   const testIds = new Map<string, FakeLocator>();
   const addTestId = (id: string, text: string | null | undefined) => {
     if (text !== null && text !== undefined) testIds.set(id, new FakeLocator({ text }));
@@ -717,7 +736,7 @@ function receiptCard(options: ReceiptCardOptions): ReceiptCardDouble {
       return absent();
     },
   });
-  return { card, header };
+  return { kind: options.kind, card, header };
 }
 
 function receiptPage(options: { cards: ReceiptCardDouble[]; links?: FakeLocator[]; hash?: string }): {
@@ -725,7 +744,9 @@ function receiptPage(options: { cards: ReceiptCardDouble[]; links?: FakeLocator[
   nav: FakeLocator;
 } {
   const doubles = options.cards;
-  const byId = new Map(doubles.map((double) => [double.card.idValue(), double.card]));
+  // The reads themselves may reject, so key the lookup by the fixture's kind
+  // rather than reading the id back off the double.
+  const byId = new Map(doubles.map((double) => [double.kind, double.card]));
   const nav = new FakeLocator({
     role: (role) => (role === "link" ? new FakeLocator({ items: options.links ?? [] }) : absent()),
     locator: (selector) => {
@@ -745,7 +766,7 @@ function receiptPage(options: { cards: ReceiptCardDouble[]; links?: FakeLocator[
         return new FakeLocator({ items: doubles.map((double) => double.card) });
       }
       const kind = selector.match(/^article\[id="prompt-receipt-(.*)"\]$/)?.[1];
-      return (kind !== undefined ? byId.get(`prompt-receipt-${kind}`) : undefined) ?? absent();
+      return (kind !== undefined ? byId.get(kind) : undefined) ?? absent();
     }),
   };
   return { page: page as unknown as Page, nav };
@@ -765,7 +786,11 @@ describe("WebNewDriver receipt composition", () => {
         { num: "02", title: "Autonomy", key: "autonomy", badge: "Your override" },
       ],
     });
-    const unrelated = { card: new FakeLocator({ attributes: { id: "unrelated" } }), header: new FakeLocator() };
+    const unrelated = {
+      kind: "",
+      card: new FakeLocator({ attributes: { id: "unrelated" } }),
+      header: new FakeLocator(),
+    };
     const { page } = receiptPage({ cards: [coding, unrelated] });
 
     await expect(new WebNewDriver(page).promptsReceiptCards()).resolves.toEqual([
@@ -828,6 +853,20 @@ describe("WebNewDriver receipt composition", () => {
 });
 
 describe("WebNewDriver saved preview", () => {
+  it("reports a detached submit as disarmed", async () => {
+    const admin = receiptCard({
+      kind: "coding-task",
+      expanded: true,
+      template: "t",
+      previewHeading: true,
+      previewEnabled: true,
+      submitFails: true,
+    });
+    await expect(
+      new WebNewDriver(receiptPage({ cards: [admin] }).page).promptsSavedPreviewSubmitEnabled("coding-task")
+    ).resolves.toBe(false);
+  });
+
   it("reports the admin form's presence and disabled empty submit", async () => {
     const admin = receiptCard({ kind: "coding-task", expanded: true, template: "t", previewHeading: true });
     const member = receiptCard({ kind: "coding-task", expanded: true, template: "t" });
@@ -937,5 +976,102 @@ describe("WebNewDriver draft preview", () => {
       prompt: null,
       error: "Draft render failed.",
     });
+  });
+});
+
+describe("WebNewDriver receipt and preview read fallbacks", () => {
+  it("normalizes rejected and nullish receipt reads", async () => {
+    const attributes = { id: "prompt-receipt-review" };
+    const failingCard = new FakeLocator({
+      attributes,
+      counted: 1,
+      failing: true,
+      testIdLocator: (testId) =>
+        testId === "receipt-count" ? new FakeLocator({ counted: 1, failing: true }) : new FakeLocator({ count: 0 }),
+      locator: (selector) =>
+        selector === "ol > li"
+          ? new FakeLocator({
+              items: [
+                new FakeLocator({
+                  failing: true,
+                  locator: (inner) =>
+                    inner === "span"
+                      ? new FakeLocator({ failing: true })
+                      : new FakeLocator({ items: [], failing: true }),
+                }),
+              ],
+            })
+          : absent(),
+      role: () => new FakeLocator({ failing: true }),
+    });
+    // The kind check reads the id once; only later reads are detached.
+    vi.spyOn(failingCard, "getAttribute")
+      .mockResolvedValueOnce("prompt-receipt-review")
+      .mockRejectedValue(new Error("detached"));
+    const doubles = { kind: "review", header: new FakeLocator({ failing: true }), card: failingCard };
+    const { page } = receiptPage({ cards: [doubles] });
+    const driver = new WebNewDriver(page);
+    await expect(driver.promptsReceiptCards()).resolves.toEqual([
+      {
+        kind: "review",
+        countBadge: "",
+        sections: [{ num: "", title: "", key: "", sourceBadge: "" }],
+      },
+    ]);
+    await expect(driver.promptsReceiptExpanded("review")).resolves.toBe(false);
+    await expect(driver.promptsReceiptTemplate("review")).resolves.toBeNull();
+    await expect(driver.promptsReceiptAutomatic("review")).resolves.toBeNull();
+    await expect(driver.promptsSavedPreviewResult("review")).resolves.toEqual({ prompt: null, error: null });
+  });
+
+  it("normalizes rejected nav reads and empty counts", async () => {
+    // The kind comes from the href; a failing text read empties the count.
+    const link = new FakeLocator({ attributes: { href: "#prompt-receipt-review" }, counted: 1, failing: true });
+    vi.spyOn(link, "getAttribute").mockResolvedValue("#prompt-receipt-review");
+    const { page: textFailing } = receiptPage({ cards: [], links: [link] });
+    await expect(new WebNewDriver(textFailing).promptsReceiptNav()).resolves.toEqual([{ kind: "review", count: "" }]);
+    // A null href read must degrade to an empty kind, not throw.
+    const nullHref = new FakeLocator({ attributes: { href: "#prompt-receipt-review" }, counted: 1 });
+    vi.spyOn(nullHref, "getAttribute").mockResolvedValue(null);
+    const { page } = receiptPage({ cards: [], links: [nullHref] });
+    await expect(new WebNewDriver(page).promptsReceiptNav()).resolves.toEqual([{ kind: "", count: "" }]);
+  });
+
+  it("normalizes an href read that rejects", async () => {
+    const link = new FakeLocator({ attributes: { href: "#prompt-receipt-review" }, counted: 1 });
+    vi.spyOn(link, "getAttribute").mockRejectedValue(new Error("detached"));
+    const { page } = receiptPage({ cards: [], links: [link] });
+    await expect(new WebNewDriver(page).promptsReceiptNav()).resolves.toEqual([{ kind: "", count: "" }]);
+  });
+
+  it("reads a blank inline error and result as absent", async () => {
+    const card = receiptCard({
+      kind: "review",
+      expanded: true,
+      previewError: "   \n",
+      previewResult: "  \n",
+    });
+    await expect(
+      new WebNewDriver(receiptPage({ cards: [card] }).page).promptsSavedPreviewResult("review")
+    ).resolves.toEqual({ prompt: null, error: null });
+  });
+
+  it("normalizes rejected draft-preview reads", async () => {
+    const root = new FakeLocator({
+      locator: (selector) => (selector === "textarea" ? new FakeLocator() : absent()),
+      testIdLocator: (testId) =>
+        testId === "draft-preview-kind-coding-task" ? new FakeLocator() : new FakeLocator({ count: 0, visible: false }),
+      role: (role) =>
+        role === "button" ? new FakeLocator({ enabled: undefined, isEnabledRejects: true }) : new FakeLocator(),
+    });
+    const page = {
+      locator: vi.fn((selector: string) =>
+        selector === 'article[id^="prompt-section-"]' ? new FakeLocator({ items: [root] }) : absent()
+      ),
+    };
+    const driver = new WebNewDriver(page as unknown as Page);
+    await expect(driver.promptsDraftPreviewKinds()).resolves.toEqual(["coding-task"]);
+    await expect(driver.promptsDraftPreviewSubmitEnabled()).resolves.toBe(false);
+    await expect(driver.promptsDraftPreviewResult()).resolves.toEqual({ prompt: null, error: null });
   });
 });

@@ -8127,18 +8127,6 @@ export class WebNewDriver implements ParityDriver {
     return this.page.getByRole("navigation", { name: "Prompt receipt", exact: true });
   }
 
-  private promptsKindLabel(kind: string): string {
-    if (kind === "coding-task") return "Coding task";
-    if (kind === "review") return "Review";
-    return "Scheduler";
-  }
-
-  private promptsKindSlug(label: string): string {
-    if (label === "Coding task") return "coding-task";
-    if (label === "Review") return "review";
-    return "scheduler";
-  }
-
   private promptsCards(): Locator {
     return this.page.locator('article[id^="prompt-section-"]');
   }
