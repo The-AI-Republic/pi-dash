@@ -71,6 +71,8 @@ function row(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 interface HarnessOptions {
   messages?: AssistantMessage[];
   state?: unknown;
+  /** The thread list's `has_active_turn`; idle threads default to false. */
+  active?: boolean;
   messageList?: () => Promise<unknown>;
   send?: (body: unknown) => Promise<unknown>;
   cancel?: () => Promise<unknown>;
@@ -81,7 +83,7 @@ let serverHasActiveTurn = true;
 function renderThread(options: HarnessOptions = {}) {
   const sent: unknown[] = [];
   const cancels: string[] = [];
-  serverHasActiveTurn = true;
+  serverHasActiveTurn = options.active ?? false;
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     const path = new URL(url).pathname;
     if (path.endsWith("/ai-assistant/threads/") && init.method !== "POST") {
@@ -112,7 +114,12 @@ function renderThread(options: HarnessOptions = {}) {
         text: async () =>
           JSON.stringify({
             turn: { id: "55555555-5555-4555-8555-555555555555", status: "queued" },
-            message: row({ id: "sent-1", role: "user", content: "hello", seq: 2 }),
+            message: row({
+              id: "66666666-6666-4666-8666-666666666666",
+              role: "user",
+              content: "hello",
+              seq: 2,
+            }),
           }),
       };
     }
@@ -277,7 +284,10 @@ describe("ThreadView composer", () => {
   });
 
   it("swaps send for stop while a turn runs and posts cancel once", async () => {
-    const { cancels } = renderThread({ messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })] });
+    const { cancels } = renderThread({
+      messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })],
+      active: true,
+    });
     const stop = await screen.findByRole("button", { name: "Stop response" });
     expect(screen.queryByRole("button", { name: "Send message" })).not.toBeInTheDocument();
     fireEvent.click(stop);
@@ -288,7 +298,7 @@ describe("ThreadView composer", () => {
 
   it("unlocks after stop when the server reports the turn ended without a new row", async () => {
     const list = [row({ id: "u", role: "user", content: "ask", seq: 1 })];
-    const harness = renderThread({ messages: list });
+    const harness = renderThread({ messages: list, active: true });
     await screen.findByRole("button", { name: "Stop response" });
     fireEvent.click(screen.getByRole("button", { name: "Stop response" }));
     await waitFor(() => expect(harness.cancels).toHaveLength(1));
@@ -299,7 +309,7 @@ describe("ThreadView composer", () => {
   });
 
   it("unlocks when a cancelled event arrives", async () => {
-    renderThread({ messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })] });
+    renderThread({ messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })], active: true });
 
     await screen.findByRole("button", { name: "Stop response" });
     emit({
@@ -315,7 +325,7 @@ describe("ThreadView composer", () => {
   });
 
   it("appends streamed deltas in arrival order and dedupes replays", async () => {
-    renderThread({ messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })] });
+    renderThread({ messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })], active: true });
     await screen.findByRole("button", { name: "Stop response" });
     emit({
       id: 10,
@@ -342,7 +352,7 @@ describe("ThreadView composer", () => {
   });
 
   it("shows a turn failure inline and unlocks", async () => {
-    renderThread({ messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })] });
+    renderThread({ messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })], active: true });
     await screen.findByRole("button", { name: "Stop response" });
     emit({
       id: 20,
@@ -358,7 +368,7 @@ describe("ThreadView composer", () => {
   });
 
   it("falls back to the code and then a sentence for a failure", async () => {
-    renderThread({ messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })] });
+    renderThread({ messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })], active: true });
     await screen.findByRole("button", { name: "Stop response" });
     emit({
       id: 21,

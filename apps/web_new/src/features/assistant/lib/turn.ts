@@ -22,14 +22,25 @@ export interface TranscriptState {
 export const EMPTY_TRANSCRIPT: TranscriptState = { rows: {} };
 
 /**
- * Whether `incoming` may replace `current`: a terminal row always wins,
- * otherwise the longer text wins. A reconnect replays `message_created`
- * with the row as it looked at creation (empty, streaming), so replacing
- * unconditionally would wipe everything the deltas have built since.
+ * Whether `incoming` may replace `current`. A terminal row always wins;
+ * between two streaming copies the longer text wins, because a reconnect
+ * replays `message_created` with the row as it looked at creation (empty).
  */
 function wins(incoming: AssistantMessage, current: AssistantMessage | undefined): boolean {
   if (current === undefined) return true;
-  return incoming.status !== "streaming" || incoming.content.length >= current.content.length;
+  if (incoming.status === "streaming") return incoming.content.length >= current.content.length;
+  return true;
+}
+
+/**
+ * Keep the text already on screen when the incoming row has none. A failed
+ * or cancelled finalize can rebuild the row with its stored content empty
+ * (the soft-time-limit and sweep paths do not rewrite it) while the streamed
+ * partial answer is what the reader saw; the status still moves forward.
+ */
+function carryText(incoming: AssistantMessage, current: AssistantMessage | undefined): AssistantMessage {
+  if (current === undefined || incoming.content !== "" || current.content === "") return incoming;
+  return { ...incoming, content: current.content };
 }
 
 /**
@@ -41,8 +52,9 @@ export function mergeTranscript(state: TranscriptState, page: readonly Assistant
   let changed = false;
   const rows: Record<string, AssistantMessage> = { ...state.rows };
   for (const incoming of page) {
-    if (wins(incoming, rows[incoming.id])) {
-      rows[incoming.id] = incoming;
+    const current = rows[incoming.id];
+    if (wins(incoming, current)) {
+      rows[incoming.id] = carryText(incoming, current);
       changed = true;
     }
   }
@@ -51,8 +63,9 @@ export function mergeTranscript(state: TranscriptState, page: readonly Assistant
 
 /** Merge a single row (the send's echoed user message, an event payload). */
 export function mergeMessage(state: TranscriptState, message: AssistantMessage): TranscriptState {
-  if (!wins(message, state.rows[message.id])) return state;
-  return { rows: { ...state.rows, [message.id]: message } };
+  const current = state.rows[message.id];
+  if (!wins(message, current)) return state;
+  return { rows: { ...state.rows, [message.id]: carryText(message, current) } };
 }
 
 /**

@@ -109,7 +109,7 @@ function setup(initial: AssistantMessage[], options: SetupOptions = {}) {
         text: async () =>
           JSON.stringify({
             turn: { id: "33333333-3333-4333-8333-333333333333", status: "queued" },
-            message: row({ id: "u2", content: "next", seq: 2 }),
+            message: row({ id: "22222222-2222-4222-8222-222222222222", content: "next", seq: 2 }),
           }),
       };
     }
@@ -189,7 +189,9 @@ describe("useAssistantChat", () => {
     await waitFor(() => expect(result.current.running).toBe(false));
   });
 
-  it("marks a turn running from a turn-started event", async () => {
+  it("keeps the turn running after a segment completes mid-turn", async () => {
+    // The worker finalizes every text segment before a tool call as its own
+    // row; only a lifecycle event ends the turn (AGT-042).
     const { result } = setup([row({ id: "a", role: "assistant", seq: 2, content: "done" })]);
     await waitFor(() => expect(result.current.loaded).toBe(true));
     expect(result.current.running).toBe(false);
@@ -212,11 +214,128 @@ describe("useAssistantChat", () => {
         message: null,
         seq: 7,
         kind: "message_completed",
-        payload: { message: row({ id: "b", role: "assistant", seq: 3, content: "answer" }) },
+        payload: {
+          turn_id: "turn",
+          message: row({ id: "b", role: "assistant", seq: 3, content: "Let me look", turn_id: "turn" }),
+        },
         created_at: "2026-01-01T00:00:00Z",
       })
     );
     await waitFor(() => expect(result.current.messages.map((message) => message.id)).toContain("b"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.running).toBe(true);
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 8,
+        thread: THREAD_ID,
+        message: null,
+        seq: 8,
+        kind: "turn_completed",
+        payload: { turn_id: "turn", usage: {} },
+        created_at: "2026-01-01T00:00:01Z",
+      })
+    );
+    await waitFor(() => expect(result.current.running).toBe(false));
+  });
+
+  it("ignores a replayed terminal event for an older turn after a new send", async () => {
+    const { result, sends } = setup([row({ id: "a", role: "assistant", seq: 2, content: "done" })]);
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    act(() => result.current.send("next"));
+    await waitFor(() => expect(sends()).toBe(1));
+    await waitFor(() => expect(result.current.running).toBe(true));
+    // The channel resubscribes from zero and replays the previous turn's end
+    // before this turn's `turn_started` arrives.
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 20,
+        thread: THREAD_ID,
+        message: null,
+        seq: 20,
+        kind: "turn_completed",
+        payload: { turn_id: "older-turn", usage: {} },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.running).toBe(true);
+  });
+
+  it("ignores a replayed start of an earlier turn", async () => {
+    const { result, sends } = setup([row({ id: "a", role: "assistant", seq: 2, content: "done" })]);
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    act(() => result.current.send("next"));
+    await waitFor(() => expect(sends()).toBe(1));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 21,
+        thread: THREAD_ID,
+        message: null,
+        seq: 21,
+        kind: "turn_started",
+        payload: { turn_id: "older-turn" },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.running).toBe(true);
+  });
+
+  it("follows the queued turn's own start after a send", async () => {
+    const { result, sends, server } = setup([row({ id: "a", role: "assistant", seq: 2, content: "done" })]);
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    act(() => result.current.send("next"));
+    await waitFor(() => expect(sends()).toBe(1));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 22,
+        thread: THREAD_ID,
+        message: null,
+        seq: 22,
+        kind: "turn_started",
+        payload: { turn_id: "33333333-3333-4333-8333-333333333333" },
+        created_at: "2026-01-01T00:00:01Z",
+      })
+    );
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 23,
+        thread: THREAD_ID,
+        message: null,
+        seq: 23,
+        kind: "turn_completed",
+        payload: { turn_id: "33333333-3333-4333-8333-333333333333", usage: {} },
+        created_at: "2026-01-01T00:00:02Z",
+      })
+    );
+    await waitFor(() => expect(result.current.running).toBe(false));
+    act(() => {
+      server.active = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.running).toBe(false);
+  });
+
+  it("polls a cold load whose tail is a tool row while the server reports a turn", async () => {
+    const { result, server } = setup(
+      [row({ id: "u", seq: 1 }), row({ id: "t", role: "tool_call", seq: 2, content: "Search" })],
+      { active: true }
+    );
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() => {
+      server.active = false;
+    });
+    await waitFor(() => expect(result.current.running).toBe(false), { timeout: TURN_POLL_MS * 3 });
+  });
+
+  it("does not read a tool tail as running once the server says the turn ended", async () => {
+    const { result } = setup(
+      [row({ id: "u", seq: 1 }), row({ id: "t", role: "tool_result", seq: 2, content: "Found it" })],
+      { active: false }
+    );
+    await waitFor(() => expect(result.current.loaded).toBe(true));
     await waitFor(() => expect(result.current.running).toBe(false));
   });
 
@@ -239,19 +358,22 @@ describe("useAssistantChat", () => {
   });
 
   it("settles from the poll when a terminal reply arrives without an event", async () => {
-    const { result, queryClient } = setup([row({ id: "u", seq: 1 })]);
+    const { result, queryClient, server } = setup([row({ id: "u", seq: 1 })]);
     await waitFor(() => expect(result.current.running).toBe(true));
+    act(() => {
+      server.active = false;
+    });
     act(() =>
       queryClient.setQueryData(transcriptKey("acme", THREAD_ID), [
         row({ id: "u", seq: 1 }),
         row({ id: "a", role: "assistant", seq: 2, content: "answer" }),
       ])
     );
-    await waitFor(() => expect(result.current.running).toBe(false));
+    await waitFor(() => expect(result.current.running).toBe(false), { timeout: TURN_POLL_MS * 3 });
   });
 
   it("clears a started turn when the poll lands its terminal reply", async () => {
-    const { result, queryClient } = setup([row({ id: "u", seq: 1 })]);
+    const { result, queryClient, server } = setup([row({ id: "u", seq: 1 })]);
     await waitFor(() => expect(result.current.loaded).toBe(true));
     act(() =>
       stream.subscriptions.at(-1)?.onEvent({
@@ -265,13 +387,16 @@ describe("useAssistantChat", () => {
       })
     );
     expect(result.current.running).toBe(true);
+    act(() => {
+      server.active = false;
+    });
     act(() =>
       queryClient.setQueryData(transcriptKey("acme", THREAD_ID), [
         row({ id: "u", seq: 1 }),
         row({ id: "a", role: "assistant", seq: 2, content: "answer" }),
       ])
     );
-    await waitFor(() => expect(result.current.running).toBe(false));
+    await waitFor(() => expect(result.current.running).toBe(false), { timeout: TURN_POLL_MS * 3 });
   });
 
   it("does not settle on a reply that predates the turn", async () => {
@@ -404,7 +529,9 @@ describe("useAssistantChat", () => {
     act(() => result.current.send("ask"));
     await waitFor(() => expect(sends()).toBe(1));
     act(() => {
-      queryClient.setQueryData(transcriptKey("acme", THREAD_ID), [row({ id: "u2", content: "ask", seq: 2 })]);
+      queryClient.setQueryData(transcriptKey("acme", THREAD_ID), [
+        row({ id: "22222222-2222-4222-8222-222222222222", content: "ask", seq: 2 }),
+      ]);
     });
     await waitFor(() => expect(result.current.running).toBe(true));
     // The turn ends before any assistant or error row exists; only the
@@ -413,7 +540,7 @@ describe("useAssistantChat", () => {
       server.active = false;
     });
     await waitFor(() => expect(result.current.running).toBe(false), { timeout: TURN_POLL_MS * 3 });
-    expect(result.current.messages.map((message) => message.id)).toEqual(["u2"]);
+    expect(result.current.messages.map((message) => message.id)).toEqual(["22222222-2222-4222-8222-222222222222"]);
   });
 
   it("ignores a list read that answers after the view is gone", async () => {
@@ -435,14 +562,18 @@ describe("useAssistantChat", () => {
   });
 
   it("polls the transcript every second while a turn is in flight", async () => {
-    const running = setup([row()]);
+    // A streaming row is the turn's own proof; a trailing user row waits for
+    // the list's answer, so each case names what it is testing.
+    const running = setup([row({ status: "streaming" })]);
     await waitFor(() => expect(running.result.current.running).toBe(true));
     const before = running.reads();
     await new Promise((resolve) => setTimeout(resolve, TURN_POLL_MS + 400));
     expect(running.reads()).toBeGreaterThan(before);
     running.unmount();
 
-    const settled = setup([row({ id: "a", role: "assistant", seq: 2, content: "done" })]);
+    const settled = setup([row({ id: "u", seq: 1 }), row({ id: "a", role: "assistant", seq: 2, content: "done" })], {
+      active: false,
+    });
     await waitFor(() => expect(settled.result.current.loaded).toBe(true));
     const steady = settled.reads();
     await new Promise((resolve) => setTimeout(resolve, TURN_POLL_MS + 400));

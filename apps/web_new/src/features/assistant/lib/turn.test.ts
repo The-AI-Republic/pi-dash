@@ -62,12 +62,44 @@ describe("mergeTranscript", () => {
     const state = mergeMessage(EMPTY_TRANSCRIPT, message({ content: "longer", status: "completed" }));
     expect(mergeTranscript(state, [message({ content: "short" })])).toBe(state);
   });
+
+  it("keeps streamed text when a terminal page row carries no content", () => {
+    // The soft-time-limit and sweep finalizes close the open row without
+    // rewriting its stored content, so the page can say failed and empty
+    // while the streamed partial answer is what the reader saw.
+    const state = mergeMessage(EMPTY_TRANSCRIPT, message({ content: "Partial answer" }));
+    const merged = mergeTranscript(state, [message({ content: "", status: "failed" })]);
+    expect(merged.rows.m1?.content).toBe("Partial answer");
+    expect(merged.rows.m1?.status).toBe("failed");
+  });
+
+  it("takes an empty terminal row when there is no text to keep", () => {
+    const state = mergeMessage(EMPTY_TRANSCRIPT, message({ content: "" }));
+    const merged = mergeTranscript(state, [message({ content: "", status: "cancelled" })]);
+    expect(merged.rows.m1?.status).toBe("cancelled");
+  });
 });
 
 describe("mergeMessage", () => {
   it("ignores a shorter streaming envelope over built text", () => {
     const state = mergeMessage(EMPTY_TRANSCRIPT, message({ content: "Hello" }));
     expect(mergeMessage(state, message({ content: "" }))).toBe(state);
+  });
+
+  it("carries the visible text across an empty terminal envelope", () => {
+    const state = mergeMessage(EMPTY_TRANSCRIPT, message({ content: "Partial" }));
+    const merged = mergeMessage(
+      state,
+      message({ content: "", status: "failed", completed_at: "2026-01-01T00:00:02Z" })
+    );
+    expect(merged.rows.m1?.content).toBe("Partial");
+    expect(merged.rows.m1?.status).toBe("failed");
+  });
+
+  it("replaces an empty streaming row with a terminal one and its text", () => {
+    const state = mergeMessage(EMPTY_TRANSCRIPT, message({ content: "" }));
+    const merged = mergeMessage(state, message({ content: "Answer", status: "completed" }));
+    expect(merged.rows.m1?.content).toBe("Answer");
   });
 });
 
