@@ -70,6 +70,15 @@ export interface SlotComponents {
    * The name is stable across editions; a rename is a breaking change.
    */
   godModeCloudEntry?: ComponentType;
+  /**
+   * Cloud sign-in card (CLOUD-002/CLOUD-011-014, NEWFRONT-652; Decisions
+   * D22). Editions whose server runs the organizational-account provider
+   * flow fill this with the real sign-in card; `routes/login.tsx` then
+   * serves `/login` in place instead of forwarding it to the root. The
+   * OSS edition leaves it absent and keeps the retired-address redirect.
+   * The name is stable across editions; a rename is a breaking change.
+   */
+  cloudLoginCard?: ComponentType;
 }
 
 export interface Edition {
