@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Value-list shaping for the legacy filter dimensions
-// (parity/specs/issues.md §9, ISS-082–088). Member dimensions keep the
+// (parity/specs/issues.md §9, ISS-082–092). Member dimensions keep the
 // applied rows on top, then the signed-in member, then display-name
-// order; labels keep applied rows on top and sort the rest by name.
+// order; labels, cycles, modules and projects keep applied rows on top
+// and sort the rest by name.
 import type { Label } from "@pidash/api-client";
 
 import type { MemberOption } from "../../../../shared/pickers/index.js";
@@ -33,6 +34,27 @@ export function orderMemberOptions(
     const rightMe = meId !== null && right.userId === meId;
     if (leftMe !== rightMe) return leftMe ? -1 : 1;
     return left.searchText.toLowerCase().localeCompare(right.searchText.toLowerCase());
+  });
+}
+
+/** A row with a stable id and a display name. */
+export interface NamedRow {
+  id: string;
+  name: string;
+}
+
+/**
+ * Applied rows first, then alphabetical by name, case-insensitively.
+ * Ties keep the incoming order, so an already sorted source stays stable.
+ * Cycles, modules and projects all read this way (ISS-089–091).
+ */
+export function orderAppliedByName<T extends NamedRow>(rows: readonly T[], chosen: readonly string[]): T[] {
+  const chosenSet = new Set(chosen);
+  return [...rows].sort((left, right) => {
+    const leftApplied = chosenSet.has(left.id);
+    const rightApplied = chosenSet.has(right.id);
+    if (leftApplied !== rightApplied) return leftApplied ? -1 : 1;
+    return left.name.toLowerCase().localeCompare(right.name.toLowerCase());
   });
 }
 

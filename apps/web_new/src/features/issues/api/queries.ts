@@ -16,7 +16,7 @@ import {
 
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
 import type { RichExpression } from "../filters/rich/expression.js";
-import { richFiltersParam, withRichFilters } from "../filters/rich/query.js";
+import { richFiltersParam, splitDateConditions, withRichFilters } from "../filters/rich/query.js";
 import type { IssueSearch } from "../filters/search.js";
 import { issueKeys } from "./keys.js";
 
@@ -30,7 +30,8 @@ export const DEFAULT_ISSUE_ORDER = "sort_order";
  * preference (manual by default) and rides in the key: the timeline renders
  * rows in server order, so a missing `order_by` would quietly sort them by
  * creation instead (ISS-044/045, ISS-050). Rich filters (ISS-095–099) ride
- * in the key as their serialized form.
+ * in the key as their serialized form; start/target dates ride as the bare
+ * list parameters the server resolves them against today (ISS-092).
  */
 export function issuesQueryOptions(
   client: ApiClient,
@@ -40,9 +41,11 @@ export function issuesQueryOptions(
   richExpression: RichExpression = {},
   orderBy: string = DEFAULT_ISSUE_ORDER
 ) {
-  const filters = richFiltersParam(richExpression);
+  const split = splitDateConditions(richExpression);
+  const filters = richFiltersParam(split.expression);
+  const dates = Object.keys(split.dates).length === 0 ? null : split.dates;
   return queryOptions({
-    queryKey: [...issueKeys.list(workspaceSlug, projectId, search, orderBy), filters],
+    queryKey: [...issueKeys.list(workspaceSlug, projectId, search, orderBy), filters, dates],
     queryFn: () =>
       listIssues(
         client,

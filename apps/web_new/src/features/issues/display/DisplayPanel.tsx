@@ -1,17 +1,19 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Display options panel (parity/specs/issues.md §9, ISS-075–081).
-// Presentational: the five sections in fixed order with only the ones
-// the active layout enables, each collapsible. Single-select options
-// carry a check marker, property pills paint active, and the switches
-// read as toggle buttons; every control exposes its state through
-// aria-pressed so the parity gate can probe it by visible label.
+// Display options panel (parity/specs/issues.md §9, ISS-075–081, ISS-094).
+// The five sections in fixed order with only the ones the active layout
+// enables. Every section reuses the shared filter-section chrome: title,
+// applied count, collapsible body, search box and a five-row cap. Grouping
+// and ordering are single-choice sections and mark their rows as radios;
+// the property pills and switches stay buttons with aria-pressed so the
+// parity gate can probe them by visible label.
 
-import { Check, ChevronDown, ChevronUp } from "lucide-react";
+import { Check } from "lucide-react";
 import * as React from "react";
 
 import type { LayoutKind } from "../layouts/kinds.js";
+import { FilterSection, type FilterSectionOption } from "../filters/shared/FilterSection.js";
 import {
   DISPLAY_SECTION_TITLES,
   DISPLAY_SWITCH_LABELS,
@@ -52,33 +54,8 @@ export interface DisplayPanelProps {
   onToggleProperty: (key: string, shown: boolean) => void;
 }
 
-function DisplaySectionShell({
-  section,
-  children,
-}: {
-  section: DisplaySection;
-  children: React.ReactNode;
-}): React.ReactElement {
-  const [open, setOpen] = React.useState(true);
-  const title = DISPLAY_SECTION_TITLES[section];
-  return (
-    <div data-testid={`display-section-${section}`} className="py-(--space-4)">
-      <div className="flex items-center justify-between gap-(--space-2)">
-        <h3 className="text-caption text-(--text-muted)">{title}</h3>
-        <button
-          type="button"
-          aria-label={`${open ? "Collapse" : "Expand"} ${title} section`}
-          aria-expanded={open}
-          onClick={() => setOpen(!open)}
-          className="grid size-5 shrink-0 place-items-center rounded-(--radius-control) text-(--text-muted) hover:bg-(--subtle)"
-        >
-          {open ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
-        </button>
-      </div>
-      {open ? <div className="mt-(--space-1)">{children}</div> : null}
-    </div>
-  );
-}
+/** The stored grouping id for a dimension row; `null` is the ungrouped row. */
+const NONE_ROW = "\u0000none";
 
 function CheckOption({
   label,
@@ -142,6 +119,49 @@ function switchState(state: DisplayPanelState, key: DisplaySwitchKey): boolean {
   return key === "sub_issue" ? state.showSubIssues : state.showEmptyGroups;
 }
 
+/**
+ * A single-choice section's rows; the panel syncs the stored dimension and
+ * the shared section's radio state reads from that one applied value.
+ */
+function SingleChoiceSection({
+  section,
+  labels,
+  checked,
+  count,
+  onPick,
+}: {
+  section: DisplaySection;
+  labels: readonly { id: string; label: string }[];
+  checked: readonly string[];
+  count: number;
+  onPick: (id: string) => void;
+}): React.ReactElement {
+  const options: FilterSectionOption[] = labels.map((row) => ({ id: row.id, label: row.label }));
+  return (
+    <FilterSection
+      title={DISPLAY_SECTION_TITLES[section]}
+      kind="single"
+      selectionRole="pressed"
+      applied={[]}
+      checked={checked}
+      count={count}
+      options={options}
+      onToggle={onPick}
+      groupLabel={`${DISPLAY_SECTION_TITLES[section]} options`}
+      testId={`display-section-${section}`}
+      className="py-(--space-4)"
+      cap={Number.POSITIVE_INFINITY}
+    />
+  );
+}
+
+function dimensionRows(dimensions: readonly (string | null)[]): { id: string; label: string }[] {
+  return dimensions.map((dimension) => ({
+    id: dimension ?? NONE_ROW,
+    label: groupDimensionLabel(dimension),
+  }));
+}
+
 export function DisplayPanel({
   layout,
   state,
@@ -160,8 +180,17 @@ export function DisplayPanel({
   return (
     <div data-testid="display-options-panel" className="divide-y divide-(--border) px-(--space-2)">
       {matrix.properties.length > 0 ? (
-        <DisplaySectionShell key={`properties:${layout}`} section="properties">
-          <div className="flex flex-wrap items-center gap-(--space-2)">
+        <FilterSection
+          key={`properties:${layout}`}
+          title={DISPLAY_SECTION_TITLES.properties}
+          kind="multi"
+          applied={[]}
+          options={[]}
+          onToggle={() => {}}
+          testId="display-section-properties"
+          className="py-(--space-4)"
+        >
+          <div className="mt-(--space-1) flex flex-wrap items-center gap-(--space-2)">
             {visiblePropertyKeys(matrix.properties, flags).map((key) => {
               const shown = isPropertyShown(state.properties, key);
               return (
@@ -181,55 +210,54 @@ export function DisplayPanel({
               );
             })}
           </div>
-        </DisplaySectionShell>
+        </FilterSection>
       ) : null}
       {matrix.groupBy !== null ? (
-        <DisplaySectionShell key={`group:${layout}`} section="group">
-          <div>
-            {visibleGroupDimensions(matrix.groupBy, layout === "kanban" ? state.subGroupBy : null, flags).map(
-              (dimension) => (
-                <CheckOption
-                  key={dimension ?? "none"}
-                  label={groupDimensionLabel(dimension)}
-                  checked={state.groupBy === dimension}
-                  onSelect={() => onGroupBy(dimension)}
-                />
-              )
-            )}
-          </div>
-        </DisplaySectionShell>
+        <SingleChoiceSection
+          key={`group:${layout}`}
+          section="group"
+          labels={dimensionRows(
+            visibleGroupDimensions(matrix.groupBy, layout === "kanban" ? state.subGroupBy : null, flags)
+          )}
+          checked={[state.groupBy ?? NONE_ROW]}
+          count={state.groupBy === null ? 0 : 1}
+          onPick={(id) => onGroupBy(id === NONE_ROW ? null : id)}
+        />
       ) : null}
       {showSubGroup && matrix.subGroupBy !== null ? (
-        <DisplaySectionShell key={`subGroup:${layout}`} section="subGroup">
-          <div>
-            {visibleGroupDimensions(matrix.subGroupBy, state.groupBy, flags).map((dimension) => (
-              <CheckOption
-                key={dimension ?? "none"}
-                label={groupDimensionLabel(dimension)}
-                checked={state.subGroupBy === dimension}
-                onSelect={() => onSubGroupBy(dimension)}
-              />
-            ))}
-          </div>
-        </DisplaySectionShell>
+        <SingleChoiceSection
+          key={`subGroup:${layout}`}
+          section="subGroup"
+          labels={dimensionRows(visibleGroupDimensions(matrix.subGroupBy, state.groupBy, flags))}
+          checked={[state.subGroupBy ?? NONE_ROW]}
+          count={state.subGroupBy === null ? 0 : 1}
+          onPick={(id) => onSubGroupBy(id === NONE_ROW ? null : id)}
+        />
       ) : null}
       {matrix.orderBy !== null && matrix.orderBy.length > 0 ? (
-        <DisplaySectionShell key={`order:${layout}`} section="order">
-          <div>
-            {matrix.orderBy.map((order) => (
-              <CheckOption
-                key={order}
-                label={ORDER_OPTION_LABELS[order] ?? order}
-                checked={state.orderBy === order}
-                onSelect={() => onOrderBy(order)}
-              />
-            ))}
-          </div>
-        </DisplaySectionShell>
+        <SingleChoiceSection
+          key={`order:${layout}`}
+          section="order"
+          labels={matrix.orderBy.map((order) => ({ id: order, label: ORDER_OPTION_LABELS[order] ?? order }))}
+          // The order always holds a value, so it is not an applied filter;
+          // the active row marks itself, the title carries no count.
+          checked={[state.orderBy]}
+          count={0}
+          onPick={onOrderBy}
+        />
       ) : null}
       {matrix.switches.length > 0 ? (
-        <DisplaySectionShell key={`options:${layout}`} section="options">
-          <div>
+        <FilterSection
+          key={`options:${layout}`}
+          title={DISPLAY_SECTION_TITLES.options}
+          kind="multi"
+          applied={[]}
+          options={[]}
+          onToggle={() => {}}
+          testId="display-section-options"
+          className="py-(--space-4)"
+        >
+          <div className="mt-(--space-1)">
             {matrix.switches.map((switchKey) => (
               <SwitchOption
                 key={switchKey}
@@ -239,8 +267,10 @@ export function DisplayPanel({
               />
             ))}
           </div>
-        </DisplaySectionShell>
+        </FilterSection>
       ) : null}
     </div>
   );
 }
+
+export { CheckOption };

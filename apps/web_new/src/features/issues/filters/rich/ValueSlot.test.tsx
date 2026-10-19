@@ -1199,3 +1199,306 @@ describe("ValueSlot date editors", () => {
     expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument();
   });
 });
+
+describe("ValueSlot cycle lifecycle and ordering", () => {
+  const RUNNING = "c23e4567-e89b-12d3-a456-42661417400e";
+  const UPCOMING = "c23e4567-e89b-12d3-a456-42661417400f";
+
+  function cycleRow(id: string, name: string, status: string | undefined) {
+    return { id, project_id: PROJECT, name, is_favorite: false, ...(status === undefined ? {} : { status }) };
+  }
+
+  function renderCycles(node: React.ReactElement) {
+    return render(
+      coldWrap(node, (url) => {
+        if (url.endsWith("/cycles/")) {
+          return [
+            cycleRow(UPCOMING, "Zulu", "UPCOMING"),
+            cycleRow(RUNNING, "alpha", "ACTIVE"),
+            cycleRow("c23e4567-e89b-12d3-a456-42661417400a", "Beta", "DRAFT"),
+            cycleRow("c23e4567-e89b-12d3-a456-42661417400b", "Gone", "COMPLETED"),
+          ];
+        }
+        return null;
+      })
+    );
+  }
+
+  it("drops completed cycles and marks each lifecycle, pulsing only the running one", async () => {
+    renderCycles(
+      <ValueSlot
+        workspaceSlug="acme"
+        projectId={PROJECT}
+        field={findField(FIELDS, "cycle_id")!}
+        condition={{ key: "a", property: "cycle_id", operator: "in", negated: false, value: [RUNNING] }}
+        onChange={() => {}}
+      />
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /c23e4567-e89b-12d3-a456-42661417400e/ }));
+    expect(screen.queryByRole("option", { name: "Gone" })).not.toBeInTheDocument();
+    const running = screen.getByRole("option", { name: "alpha" });
+    expect(running.querySelector('[data-testid="cycle-glyph-current"]')).toHaveAttribute("data-running", "true");
+    expect(screen.getByTestId("cycle-glyph-upcoming")).toHaveAttribute("data-running", "false");
+    expect(screen.getByTestId("cycle-glyph-draft")).toHaveAttribute("data-running", "false");
+  });
+
+  it("orders the applied cycle first and the rest alphabetically", async () => {
+    renderCycles(
+      <ValueSlot
+        workspaceSlug="acme"
+        projectId={PROJECT}
+        field={findField(FIELDS, "cycle_id")!}
+        condition={{ key: "a", property: "cycle_id", operator: "in", negated: false, value: [RUNNING] }}
+        onChange={() => {}}
+      />
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /c23e4567-e89b-12d3-a456-42661417400e/ }));
+    expect(screen.getAllByRole("option").map((option) => option.textContent?.trim())).toEqual([
+      "alpha",
+      "Beta",
+      "Zulu",
+    ]);
+  });
+});
+
+describe("ValueSlot project and module ordering", () => {
+  it("orders applied projects first, then names alphabetically", async () => {
+    const user = userEvent.setup();
+    const SECOND = "223e4567-e89b-12d3-a456-426614174002";
+    function row(id: string, name: string, identifier: string) {
+      return {
+        id,
+        name,
+        identifier,
+        sort_order: null,
+        logo_props: {},
+        member_role: 15,
+        intake_count: 0,
+        archived_at: null,
+        workspace: PROJECT,
+        cycle_view: true,
+        issue_views_view: true,
+        module_view: true,
+        page_view: false,
+        inbox_view: false,
+        is_default: false,
+        guest_view_all_features: false,
+        project_lead: null,
+        network: 0,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+        created_by: null,
+        updated_by: null,
+      };
+    }
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, "project_id")!}
+          condition={{ key: "a", property: "project_id", operator: "in", negated: false, value: [SECOND] }}
+          onChange={() => {}}
+        />,
+        (url) =>
+          url.endsWith("/projects/")
+            ? [
+                row(PROJECT, "zephyr", "ZEP"),
+                row(SECOND, "Orion", "ORI"),
+                row("323e4567-e89b-12d3-a456-426614174003", "Apollo", "APO"),
+              ]
+            : null
+      )
+    );
+    await user.click(await screen.findByRole("button", { name: /223e4567-e89b-12d3-a456-426614174002/ }));
+    // Each row leads with its logo mark: the identifier's initial here.
+    expect(screen.getAllByRole("option").map((option) => option.textContent?.trim())).toEqual([
+      "OOrion",
+      "AApollo",
+      "Zzephyr",
+    ]);
+  });
+
+  it("orders applied modules first, then names alphabetically", async () => {
+    const user = userEvent.setup();
+    const SECOND = "d23e4567-e89b-12d3-a456-42661417400e";
+    function row(id: string, name: string) {
+      return { id, project_id: PROJECT, name, status: "planned", is_favorite: false };
+    }
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, "module_id")!}
+          condition={{ key: "a", property: "module_id", operator: "in", negated: false, value: [SECOND] }}
+          onChange={() => {}}
+        />,
+        (url) =>
+          url.endsWith("/modules/")
+            ? [
+                row("d23e4567-e89b-12d3-a456-42661417400d", "zebra"),
+                row(SECOND, "Billing"),
+                row("d23e4567-e89b-12d3-a456-42661417400f", "Analytics"),
+              ]
+            : null
+      )
+    );
+    await user.click(await screen.findByRole("button", { name: /d23e4567-e89b-12d3-a456-42661417400e/ }));
+    expect(screen.getAllByRole("option").map((option) => option.textContent?.trim())).toEqual([
+      "Billing",
+      "Analytics",
+      "zebra",
+    ]);
+  });
+});
+
+describe("ValueSlot section cap", () => {
+  it("reads back at five rows and reveals the rest with View all", async () => {
+    const user = userEvent.setup();
+    function row(index: number) {
+      return {
+        id: `d23e4567-e89b-12d3-a456-42661417400${index.toString(16)}`,
+        project_id: PROJECT,
+        name: `Module ${index}`,
+        status: "planned",
+        is_favorite: false,
+      };
+    }
+    const modules = Array.from({ length: 7 }, (_, index) => row(index));
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, "module_id")!}
+          condition={{ key: "a", property: "module_id", operator: "in", negated: false, value: [] }}
+          onChange={() => {}}
+        />,
+        (url) => (url.endsWith("/modules/") ? modules : null)
+      )
+    );
+    // An empty slot opens by itself, reading at the shared cap.
+    await screen.findAllByRole("option");
+    expect(screen.getAllByRole("option")).toHaveLength(5);
+    await user.click(screen.getByRole("button", { name: "View all" }));
+    expect(screen.getAllByRole("option")).toHaveLength(7);
+    expect(screen.getByRole("button", { name: "View less" })).toBeInTheDocument();
+  });
+});
+
+describe("ValueSlot date presets and custom range", () => {
+  it("toggles a relative window and keeps the custom day", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("2026-02-10"), property: "target_date", operator: "exact" }}
+          onChange={onChange}
+        />
+      )
+    );
+    fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
+    await screen.findByTestId("rich-date-calendar");
+    await user.click(screen.getByRole("checkbox", { name: "2 weeks from now" }));
+    expect(onChange).toHaveBeenLastCalledWith(["2026-02-10", "2_weeks;after;fromnow"]);
+  });
+
+  it("removes a relative window when it is ticked off", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("1_weeks;after;fromnow"), property: "target_date", operator: "exact" }}
+          onChange={onChange}
+        />
+      )
+    );
+    expect(screen.getByRole("button", { name: /1 week from now/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /1 week from now/ }));
+    await user.click(screen.getByRole("checkbox", { name: "1 week from now" }));
+    expect(onChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("unticks the Custom row to drop the custom range and keep the presets", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{
+            ...condition(["1_weeks;after;fromnow", "2026-02-01;after", "2026-02-10;before"]),
+            property: "start_date",
+            operator: "range",
+          }}
+          onChange={onChange}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /2026-02-01 → 2026-02-10/ }));
+    const custom = screen.getByRole("checkbox", { name: "Custom" });
+    expect(custom).toHaveAttribute("aria-checked", "true");
+    await user.click(custom);
+    expect(onChange).toHaveBeenLastCalledWith("1_weeks;after;fromnow");
+  });
+
+  it("reads the Custom row as unticked when the value holds only presets", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("2_months;after;fromnow"), property: "target_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /2 months from now/ }));
+    expect(screen.getByRole("checkbox", { name: "Custom" })).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("keeps a relative window and adds a custom range under the between lookup", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{
+            ...condition("1_months;after;fromnow"),
+            property: "start_date",
+            operator: "range",
+          }}
+          onChange={onChange}
+        />
+      )
+    );
+    // A preset alone completes the slot, so it stays closed until opened.
+    const trigger = screen.getByRole("button", { name: /1 month from now/ });
+    expect(trigger).toHaveAttribute("data-empty", "false");
+    await user.click(trigger);
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    const days = within(calendar).getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ });
+    await user.click(days[9]!);
+    await user.click(days[11]!);
+    const [first, second] = [days[9]!.getAttribute("data-day"), days[11]!.getAttribute("data-day")];
+    expect(onChange).toHaveBeenLastCalledWith(["1_months;after;fromnow", first, second]);
+  });
+});

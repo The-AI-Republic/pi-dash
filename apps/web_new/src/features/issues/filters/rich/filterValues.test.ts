@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { MemberOption } from "../../../../shared/pickers/index.js";
-import { orderLabelOptions, orderMemberOptions, selectedIds } from "./filterValues.js";
+import { orderAppliedByName, orderLabelOptions, orderMemberOptions, selectedIds } from "./filterValues.js";
 
 const ME = "11111111-1111-4111-8111-111111111111";
 const ANA = "22222222-2222-4222-8222-222222222222";
@@ -71,5 +71,37 @@ describe("orderLabelOptions", () => {
     const labels = [label("1", "zeta"), label("2", "Alpha"), label("3", "beta")];
     expect(orderLabelOptions(labels, ["1", "2"]).map((entry) => entry.name)).toEqual(["Alpha", "zeta", "beta"]);
     expect(orderLabelOptions(labels, ["3", "1"]).map((entry) => entry.name)).toEqual(["beta", "zeta", "Alpha"]);
+  });
+});
+
+describe("orderAppliedByName", () => {
+  it("puts applied rows first and sorts both halves by name", () => {
+    const rows = [
+      { id: "3", name: "zeta" },
+      { id: "1", name: "Beta" },
+      { id: "2", name: "alpha" },
+    ];
+    expect(orderAppliedByName(rows, ["3", "2"]).map((row) => row.id)).toEqual(["2", "3", "1"]);
+  });
+
+  it("keeps incoming order for equal names and leaves the input untouched", () => {
+    const rows = [
+      { id: "b", name: "Same" },
+      { id: "a", name: "same" },
+    ];
+    expect(orderAppliedByName(rows, []).map((row) => row.id)).toEqual(["b", "a"]);
+    expect(rows.map((row) => row.id)).toEqual(["b", "a"]);
+  });
+
+  it("orders with no selection alphabetically", () => {
+    expect(
+      orderAppliedByName(
+        [
+          { id: "c", name: "Sprint 10" },
+          { id: "m", name: "Billing" },
+        ],
+        []
+      ).map((row) => row.name)
+    ).toEqual(["Billing", "Sprint 10"]);
   });
 });

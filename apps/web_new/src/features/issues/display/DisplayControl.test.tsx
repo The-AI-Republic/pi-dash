@@ -190,7 +190,8 @@ describe("DisplayControl", () => {
     });
     const panel = await openPanel(user);
     expect(within(panel).queryByRole("heading", { name: "Sub-group by" })).not.toBeInTheDocument();
-    expect(within(panel).getByRole("heading", { name: "Group by" })).toBeInTheDocument();
+    // The seeded group is applied, so its title carries the count (ISS-094).
+    expect(within(panel).getByRole("heading", { name: "Group by (1)" })).toBeInTheDocument();
   });
 
   it("shows a loading note while preferences resolve", async () => {

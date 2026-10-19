@@ -99,8 +99,12 @@ describe("issues query", () => {
     const options = issuesQueryOptions(client, "acme", "pid", { layout: "list" }, {}, "-created_at");
     await new QueryClient().fetchQuery(options);
     expect(seen[0]).toBe("https://api.test/api/workspaces/acme/projects/pid/issues/?per_page=100&order_by=-created_at");
-    expect(options.queryKey).toEqual([...issueKeys.list("acme", "pid", { layout: "list" }, "-created_at"), null]);
-    expect(options.queryKey).not.toEqual([...issueKeys.list("acme", "pid", { layout: "list" }, "sort_order"), null]);
+    expect(options.queryKey).toEqual([...issueKeys.list("acme", "pid", { layout: "list" }, "-created_at"), null, null]);
+    expect(options.queryKey).not.toEqual([
+      ...issueKeys.list("acme", "pid", { layout: "list" }, "sort_order"),
+      null,
+      null,
+    ]);
   });
 
   it("sends the stored rich expression as the filters parameter", async () => {
@@ -126,6 +130,7 @@ describe("issues query", () => {
     expect(options.queryKey).toContain(
       JSON.stringify({ and: [{ priority__in: "urgent" }, { not: { state_id__in: ["a"] } }] })
     );
+    expect(options.queryKey.at(-1)).toBeNull();
     await new QueryClient().fetchQuery(options);
     expect(seen[0]).toContain(
       `filters=${encodeURIComponent(JSON.stringify({ and: [{ priority__in: "urgent" }, { not: { state_id__in: ["a"] } }] }))}`
@@ -268,5 +273,30 @@ describe("detail and version queries", () => {
     expect(one.description_html).toBe("<p>restored</p>");
     expect(seen[0]).toContain("/description-versions/");
     expect(seen[1]).toContain("/description-versions/323e4567-e89b-12d3-a456-426614174002/");
+  });
+});
+
+describe("date conditions in the list query", () => {
+  it("sends start and target dates as bare parameters, not JSON leaves", async () => {
+    const seen: string[] = [];
+    const inner = stubTransport(ENVELOPE);
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: async (url, init) => {
+        seen.push(url);
+        return inner(url, init);
+      },
+      validate: true,
+    });
+    const expression = {
+      and: [{ priority__in: "urgent" }, { start_date__exact: "1_weeks;after;fromnow" }],
+    };
+    const options = issuesQueryOptions(client, "acme", "pid", { layout: "list" }, expression);
+    expect(options.queryKey.at(-2)).toBe('{"priority__in":"urgent"}');
+    expect(options.queryKey.at(-1)).toEqual({ start_date: ["1_weeks;after;fromnow"] });
+    await new QueryClient().fetchQuery(options);
+    expect(seen[0]).toContain(`filters=${encodeURIComponent('{"priority__in":"urgent"}')}`);
+    expect(seen[0]).toContain(`start_date=${encodeURIComponent("1_weeks;after;fromnow")}`);
+    expect(seen[0]).not.toContain("start_date__");
   });
 });
