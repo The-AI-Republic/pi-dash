@@ -191,6 +191,28 @@ describe("ProjectSettingsShell", () => {
     expect(screen.getByRole("main", { name: "Settings content" })).toHaveTextContent("tab body");
   });
 
+  it("treats a role map that omits the project as unresolved", () => {
+    seed();
+    harness.roles = { status: "success", data: {}, isPending: false, isSuccess: true, isError: false };
+    renderShell();
+    expect(screen.queryByTestId("project-settings-sidebar")).not.toBeInTheDocument();
+    expect(screen.getByRole("main", { name: "Settings content" })).toHaveTextContent("tab body");
+  });
+
+  it("reports any other fetch failure as not found", () => {
+    seed();
+    harness.row = {
+      status: "error",
+      data: undefined,
+      error: new Error("network"),
+      isPending: false,
+      isSuccess: false,
+      isError: true,
+    };
+    renderShell();
+    expect(screen.getByTestId("project-settings-restriction")).toHaveAttribute("data-restriction", "not-found");
+  });
+
   it("keeps a failed role read from guessing a standing", () => {
     harness.roles = { status: "error", data: undefined, isPending: false, isSuccess: false, isError: true };
     renderShell();
